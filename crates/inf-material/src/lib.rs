@@ -14,6 +14,7 @@ pub mod error;
 pub mod material;
 pub mod texture;
 
+pub use bc::{decode_bc1, decode_bc3};
 pub use error::MaterialError;
 pub use material::MaterialAsset;
 pub use texture::{

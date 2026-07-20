@@ -64,6 +64,18 @@ impl TextureAsset {
     pub fn mip_count(&self) -> usize {
         self.mips.len()
     }
+
+    /// Decode a mip level to RGBA8 regardless of storage format (decompressing
+    /// BC1/BC3 on the CPU). Used by the thumbnailer. Returns `None` for an
+    /// out-of-range level.
+    pub fn level_rgba8(&self, level: usize) -> Option<Vec<u8>> {
+        let mip = self.mips.get(level)?;
+        Some(match self.format {
+            TextureFormat::Rgba8 => mip.data.clone(),
+            TextureFormat::Bc1 => bc::decode_bc1(&mip.data, mip.width, mip.height),
+            TextureFormat::Bc3 => bc::decode_bc3(&mip.data, mip.width, mip.height),
+        })
+    }
 }
 
 impl AssetPayload for TextureAsset {
@@ -268,6 +280,23 @@ mod tests {
             texture_from_rgba8(checker(4, 4, 255), 4, 4, TextureImportSettings::default()).unwrap();
         // 4×4 BC1 = one 8-byte block.
         assert_eq!(tex.mips[0].data.len(), 8);
+    }
+
+    #[test]
+    fn bc_levels_decode_back_to_rgba8() {
+        // Opaque → BC1, decodes to RGBA8 of the right size and opaque alpha.
+        let tex =
+            texture_from_rgba8(checker(8, 8, 255), 8, 8, TextureImportSettings::default()).unwrap();
+        assert_eq!(tex.format, TextureFormat::Bc1);
+        let rgba = tex.level_rgba8(0).unwrap();
+        assert_eq!(rgba.len(), 8 * 8 * 4);
+        assert!(rgba.chunks_exact(4).all(|p| p[3] == 255));
+        // Translucent → BC3, alpha preserved (~128).
+        let tex3 =
+            texture_from_rgba8(checker(8, 8, 128), 8, 8, TextureImportSettings::default()).unwrap();
+        assert_eq!(tex3.format, TextureFormat::Bc3);
+        let a = tex3.level_rgba8(0).unwrap()[3];
+        assert!((a as i32 - 128).abs() <= 20, "alpha ~128, got {a}");
     }
 
     #[test]

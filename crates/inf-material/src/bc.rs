@@ -188,46 +188,121 @@ fn nearest_alpha(palette: &[u8; 8], a: u8) -> usize {
     best
 }
 
+// ── decoders (CPU) — used by the thumbnailer, which can't rely on a GPU to
+//    sample block-compressed data ─────────────────────────────────────────
+
+/// Decode a BC1 image to RGBA8 (opaque). Handles both the 4-color (c0 > c1) and
+/// 3-color+transparent (c0 ≤ c1) block modes.
+pub fn decode_bc1(data: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (width * height * 4) as usize];
+    let mut p = 0;
+    for by in 0..height.div_ceil(4) {
+        for bx in 0..width.div_ceil(4) {
+            if p + 8 > data.len() {
+                return out;
+            }
+            let (colors, _) = decode_color_block(&data[p..p + 8]);
+            p += 8;
+            blit_block(&mut out, width, height, bx, by, &colors, None);
+        }
+    }
+    out
+}
+
+/// Decode a BC3 image to RGBA8 (with alpha).
+pub fn decode_bc3(data: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (width * height * 4) as usize];
+    let mut p = 0;
+    for by in 0..height.div_ceil(4) {
+        for bx in 0..width.div_ceil(4) {
+            if p + 16 > data.len() {
+                return out;
+            }
+            let alpha = decode_alpha_block(&data[p..p + 8]);
+            let (colors, _) = decode_color_block(&data[p + 8..p + 16]);
+            p += 16;
+            blit_block(&mut out, width, height, bx, by, &colors, Some(&alpha));
+        }
+    }
+    out
+}
+
+fn decode_color_block(block: &[u8]) -> ([[u8; 3]; 16], bool) {
+    let c0 = u16::from_le_bytes([block[0], block[1]]);
+    let c1 = u16::from_le_bytes([block[2], block[3]]);
+    let idxs = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+    let e0 = from_565(c0);
+    let e1 = from_565(c1);
+    let pal = if c0 > c1 {
+        [e0, e1, lerp(e0, e1, 1, 3), lerp(e0, e1, 2, 3)]
+    } else {
+        [e0, e1, lerp(e0, e1, 1, 2), [0, 0, 0]]
+    };
+    let mut out = [[0u8; 3]; 16];
+    for (n, o) in out.iter_mut().enumerate() {
+        *o = pal[((idxs >> (2 * n)) & 0x3) as usize];
+    }
+    (out, c0 <= c1)
+}
+
+fn decode_alpha_block(block: &[u8]) -> [u8; 16] {
+    let a0 = block[0];
+    let a1 = block[1];
+    let mut palette = [0u8; 8];
+    palette[0] = a0;
+    palette[1] = a1;
+    if a0 > a1 {
+        for i in 1..7u32 {
+            palette[(i + 1) as usize] = (((7 - i) * a0 as u32 + i * a1 as u32) / 7) as u8;
+        }
+    } else {
+        for i in 1..5u32 {
+            palette[(i + 1) as usize] = (((5 - i) * a0 as u32 + i * a1 as u32) / 5) as u8;
+        }
+        palette[6] = 0;
+        palette[7] = 255;
+    }
+    let mut bits: u64 = 0;
+    for (b, &byte) in block[2..8].iter().enumerate() {
+        bits |= (byte as u64) << (8 * b);
+    }
+    let mut out = [0u8; 16];
+    for (n, o) in out.iter_mut().enumerate() {
+        *o = palette[((bits >> (3 * n)) & 0x7) as usize];
+    }
+    out
+}
+
+fn blit_block(
+    out: &mut [u8],
+    width: u32,
+    height: u32,
+    bx: u32,
+    by: u32,
+    colors: &[[u8; 3]; 16],
+    alpha: Option<&[u8; 16]>,
+) {
+    for j in 0..4u32 {
+        for i in 0..4u32 {
+            let x = bx * 4 + i;
+            let y = by * 4 + j;
+            if x >= width || y >= height {
+                continue;
+            }
+            let n = (j * 4 + i) as usize;
+            let c = colors[n];
+            let o = ((y * width + x) * 4) as usize;
+            out[o] = c[0];
+            out[o + 1] = c[1];
+            out[o + 2] = c[2];
+            out[o + 3] = alpha.map(|a| a[n]).unwrap_or(255);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── minimal decoders, used only to validate the encoder ──────────────
-
-    fn decode_bc1(data: &[u8], width: u32, height: u32) -> Vec<u8> {
-        let mut out = vec![0u8; (width * height * 4) as usize];
-        let bw = width.div_ceil(4);
-        let mut p = 0;
-        for by in 0..height.div_ceil(4) {
-            for bx in 0..bw {
-                let c0 = u16::from_le_bytes([data[p], data[p + 1]]);
-                let c1 = u16::from_le_bytes([data[p + 2], data[p + 3]]);
-                let idxs = u32::from_le_bytes([data[p + 4], data[p + 5], data[p + 6], data[p + 7]]);
-                p += 8;
-                let e0 = from_565(c0);
-                let e1 = from_565(c1);
-                let pal = [e0, e1, lerp(e0, e1, 1, 3), lerp(e0, e1, 2, 3)];
-                for j in 0..4u32 {
-                    for i in 0..4u32 {
-                        let x = bx * 4 + i;
-                        let y = by * 4 + j;
-                        if x >= width || y >= height {
-                            continue;
-                        }
-                        let n = j * 4 + i;
-                        let idx = ((idxs >> (2 * n)) & 0x3) as usize;
-                        let c = pal[idx];
-                        let o = ((y * width + x) * 4) as usize;
-                        out[o] = c[0];
-                        out[o + 1] = c[1];
-                        out[o + 2] = c[2];
-                        out[o + 3] = 255;
-                    }
-                }
-            }
-        }
-        out
-    }
 
     #[test]
     fn bc1_size_is_correct() {

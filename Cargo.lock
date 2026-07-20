@@ -2107,6 +2107,7 @@ name = "inf-editor-core"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "bytemuck",
  "csv",
  "glam 0.33.2",
  "inf-asset",
@@ -2114,7 +2115,10 @@ dependencies = [
  "inf-material",
  "inf-math",
  "inf-mesh",
+ "inf-render",
  "inf-runtime",
+ "png 0.18.1",
+ "pollster",
  "serde",
  "serde_json",
  "tempfile",
@@ -2123,6 +2127,7 @@ dependencies = [
  "tracing",
  "ts-rs",
  "uuid",
+ "wgpu",
 ]
 
 [[package]]

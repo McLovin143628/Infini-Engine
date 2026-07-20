@@ -15,7 +15,12 @@ inf-math = { workspace = true }
 inf-asset = { workspace = true }
 inf-mesh = { workspace = true }
 inf-material = { workspace = true }
+inf-render = { workspace = true }
 glam = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+png = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
