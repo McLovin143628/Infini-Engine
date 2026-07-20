@@ -9,3 +9,11 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+inf-asset = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+image = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

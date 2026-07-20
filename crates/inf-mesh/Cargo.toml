@@ -9,3 +9,14 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+inf-asset = { workspace = true }
+serde = { workspace = true }
+bytemuck = { workspace = true }
+glam = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+gltf = { workspace = true }
+meshopt = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
