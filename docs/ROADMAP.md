@@ -246,6 +246,12 @@ Notation: **P4.2** = phase 4, sub-phase 2; batches are the numbered lists inside
 spikes. **Done when:** CI green (Win/mac/Linux); Spike A triangle demo recorded; Spike B
 proptests green; memos A–D committed.
 
+> **Status: COMPLETE (2026-07-19).** CI green on all three OSes (Rust matrix,
+> cargo-deny, Frontend, bindings-drift jobs); all four spikes GO with memos in
+> `docs/memos/`. Deferred to human/hardware, tracked but non-blocking: the
+> 150/200% + cross-monitor DPI manual pass, a Spike A runtime pass on real
+> macOS hardware (the mac port is compile-verified), and the demo recording.
+
 - **P0.1 Repository & workspace scaffold** *(done)*
   1. Git repo, `.gitignore`, README, this roadmap. *(done)*
   2. Cargo workspace with every Ring 0/1 crate as an empty compiling `lib.rs` + rustfmt/clippy/deny config. *(done)*
