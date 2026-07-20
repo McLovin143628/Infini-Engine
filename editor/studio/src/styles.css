@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* ── Infinity Studio design tokens (Phase 1 will grow this into the theme system) ── */
+/* ── Infinity Engine design tokens (Phase 1 will grow this into the theme system) ── */
 :root {
   --ink-bg-0: #0d0f12; /* deepest: viewport gutter, drawers */
   --ink-bg-1: #14171c; /* panel background */

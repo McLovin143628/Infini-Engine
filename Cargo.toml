@@ -45,6 +45,14 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# default-features off: the dx12 backend currently mixes windows 0.62 (wgpu-hal)
+# with windows 0.61 (unified into tauri's bucket by the resolver) and fails to
+# compile. Vulkan-first on Windows until tauri reaches windows 0.62 — see the
+# Spike A memo.
+wgpu = { version = "30", default-features = false, features = ["vulkan", "metal", "wgsl"] }
+raw-window-handle = "0.6"
+pollster = "0.4"
+windows = "0.62"
 
 # intra-workspace crates
 inf-core = { path = "crates/inf-core" }

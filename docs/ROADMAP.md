@@ -3,7 +3,7 @@
 **Version 1.0 · Supersedes the preliminary blueprint (v4.0)**
 
 Infinity Engine is a commercial-grade, next-generation game engine: a native Rust core with a
-Tauri v2 + React editor, **Infinity Studio**. It targets 2D, 2.5D, and 3D games of every genre,
+built-in Tauri v2 + React editor. It targets 2D, 2.5D, and 3D games of every genre,
 with a professional pipeline from first asset import to shipped, packaged builds. Developers write
 gameplay in **real Rust** (built-in IDE) or in **Infinity Blueprints** (node graphs) —
 interchangeably, because graphs transpile to real Rust source and stay bidirectionally in sync.
@@ -36,7 +36,7 @@ interchangeably, because graphs transpile to real Rust source and stay bidirecti
    asset loading. No OO scene-graph bloat.
 4. **Planetary scale by construction.** 64-bit world coordinates with floating-origin rebasing
    from the first line of renderer code — retrofitting f64 is a rewrite, so it is never deferred.
-5. **The editor is a product.** Infinity Studio must feel like a next-generation refinement of
+5. **The editor is a product.** Infinity Engine must feel like a next-generation refinement of
    UE5 — familiar mental model, modernized execution — from the first milestone.
 6. **Honest engineering.** Research-grade features (virtualized geometry) are sequenced so the
    engine ships without them; known platform constraints (Wayland embedding, console NDAs) are

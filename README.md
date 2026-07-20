@@ -1,7 +1,7 @@
 # Infinity Engine
 
-A next-generation, commercial-grade game engine built in **Rust**, with **Infinity Studio** —
-a Tauri v2 + React editor designed as a modern evolution of the industry-standard editor UX.
+A next-generation, commercial-grade game engine built in **Rust**, with a built-in
+Tauri v2 + React editor designed as a modern evolution of the industry-standard editor UX.
 
 ## What makes it different
 
@@ -22,7 +22,7 @@ a Tauri v2 + React editor designed as a modern evolution of the industry-standar
 ```
 crates/            Engine core (Ring 0) — Tauri-free, console-portable
 editor/crates/     Editor core + native viewport host (Ring 1) — Tauri-free
-editor/studio/     Infinity Studio — Tauri v2 app (React + TypeScript frontend)
+editor/studio/     The Infinity Engine editor — Tauri v2 app (React + TypeScript frontend)
 runtime/           Standalone player + cook/packaging pipeline
 tools/             `inf` CLI
 templates/         Project templates
@@ -42,7 +42,7 @@ Prerequisites: Rust (stable, 1.97+), Node 22+, and the
 # Engine + all crates
 cargo check --workspace
 
-# Infinity Studio (editor)
+# The editor application
 cd editor/studio
 npm install
 npm run tauri dev

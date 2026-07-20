@@ -1,4 +1,4 @@
-//! Infinity Studio backend: Tauri v2 app shell.
+//! Infinity Engine backend: Tauri v2 app shell.
 //!
 //! Convention (adopted engine-wide): every backend capability is a
 //! `#[tauri::command] async fn … -> Result<T, String>` in a per-domain module
@@ -16,11 +16,12 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        .manage(commands::ViewportState::default())
         .invoke_handler(commands::invoke_handler())
         .setup(|_app| {
-            tracing::info!("Infinity Studio starting");
+            tracing::info!("Infinity Engine starting");
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running Infinity Studio");
+        .expect("error while running Infinity Engine");
 }

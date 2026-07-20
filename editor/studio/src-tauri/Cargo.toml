@@ -1,6 +1,6 @@
 [package]
 name = "inf-studio"
-description = "Infinity Studio: the Tauri v2 editor application shell."
+description = "Infinity Engine: the Tauri v2 editor application shell."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -22,3 +22,5 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 inf-core = { workspace = true }
 inf-editor-core = { workspace = true }
+inf-viewport = { workspace = true }
+raw-window-handle = { workspace = true }

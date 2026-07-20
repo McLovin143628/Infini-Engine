@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { app } from "./lib/ipc";
+import ViewportPanel from "./viewport/ViewportPanel";
 
 /**
  * Placeholder shell proving the stack end-to-end (React ⇄ typed IPC ⇄ Rust).
@@ -28,17 +29,14 @@ export default function App() {
             </button>
           ),
         )}
-        <span className="ml-auto text-(--ink-text-dim)">Infinity Studio</span>
+        <span className="ml-auto text-(--ink-text-dim)">Infinity Engine</span>
       </div>
 
       {/* Main area */}
       <div className="flex min-h-0 flex-1">
-        {/* Viewport placeholder (native wgpu child window docks here in Phase 2) */}
-        <div className="m-1 flex flex-1 items-center justify-center rounded border border-(--ink-border) bg-(--ink-bg-0)">
-          <div className="text-center text-(--ink-text-dim)">
-            <div className="mb-2 text-3xl">∞</div>
-            <div>Viewport — native wgpu surface lands here (Phase 2)</div>
-          </div>
+        {/* The native wgpu child window mirrors this element's rectangle. */}
+        <div className="m-1 flex flex-1">
+          <ViewportPanel />
         </div>
 
         {/* Right stack: Outliner over Details */}
@@ -58,7 +56,7 @@ export default function App() {
       <div className="flex h-7 items-center gap-4 border-t border-(--ink-border) bg-(--ink-bg-2) px-3 text-(--ink-text-dim)">
         <button className="hover:text-(--ink-text)">Content Drawer</button>
         <button className="hover:text-(--ink-text)">Output Log</button>
-        <span className="ml-auto">Studio v{version}</span>
+        <span className="ml-auto">Infinity Engine v{version}</span>
       </div>
     </div>
   );
