@@ -1,7 +1,7 @@
 //! The `.inf_mat` material payload.
 //!
 //! Phase 4 ships the material *model* (a PBR metallic-roughness parameter block
-//! + texture references by GUID). The node-graph editor and WGSL codegen are
+//! with texture references by GUID). The node-graph editor and WGSL codegen are
 //! Phase 7 — this is the data those build on, and what an imported glTF material
 //! becomes.
 

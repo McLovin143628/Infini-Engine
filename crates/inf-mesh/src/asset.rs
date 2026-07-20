@@ -49,9 +49,9 @@ impl Aabb {
     }
 
     pub fn grow(&mut self, p: [f32; 3]) {
-        for i in 0..3 {
-            self.min[i] = self.min[i].min(p[i]);
-            self.max[i] = self.max[i].max(p[i]);
+        for ((mn, mx), &pv) in self.min.iter_mut().zip(self.max.iter_mut()).zip(p.iter()) {
+            *mn = mn.min(pv);
+            *mx = mx.max(pv);
         }
     }
 
