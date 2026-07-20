@@ -1,1 +1,39 @@
-//! Asset system: .inf_* schemas, bincode payload + TOML sidecars, GUIDs, asset DB, importers.
+//! Asset system: `.inf_*` schemas, bincode payload + TOML sidecars, GUIDs, the
+//! asset database, and importers.
+//!
+//! This Ring-0 crate is the backbone of Phase 4. It owns:
+//!   * **identity + hashing** — stable [`AssetId`] GUIDs and content-addressed
+//!     [`ContentHash`]es (xxh3-128);
+//!   * **the dual-format rule** — [`payload`] (deterministic bincode) beside
+//!     [`AssetSidecar`] (git-diffable TOML);
+//!   * **the database** — [`AssetDb`], a GUID-keyed registry with a live
+//!     dependency graph (forward *and* reverse edges), a content-hash index,
+//!     directory scanning, and the "who references this?" query behind
+//!     delete-with-references warnings;
+//!   * **change detection** — [`AssetWatcher`], a debounced recursive watcher;
+//!   * **the import cache** — [`ImportCache`], content-addressed so unchanged
+//!     reimports are a hash lookup.
+//!
+//! Concrete payload schemas + importers live in the domain crates (`inf-mesh`,
+//! `inf-material`) and the editor's import orchestrator, which depend on this
+//! crate for identity, the sidecar, and [`AssetPayload`].
+
+pub mod db;
+pub mod error;
+pub mod hash;
+pub mod id;
+pub mod import_cache;
+pub mod kind;
+pub mod payload;
+pub mod sidecar;
+pub mod watch;
+
+pub use db::{AssetDb, AssetEntry};
+pub use error::{AssetError, Result};
+pub use hash::ContentHash;
+pub use id::AssetId;
+pub use import_cache::{ImportCache, ImportKey};
+pub use kind::{importable_source_kind, AssetKind};
+pub use payload::{decode, encode, AssetPayload};
+pub use sidecar::{is_sidecar, sidecar_path, AssetSidecar, SIDECAR_SCHEMA_VERSION};
+pub use watch::{AssetChange, AssetWatcher};

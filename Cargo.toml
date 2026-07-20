@@ -87,6 +87,30 @@ libloading = "0.8"
 bincode = { version = "2", features = ["serde"] }
 # ── asset sidecars / .inf_lvl human-readable metadata (deterministic emit) ──
 toml = "0.9"
+# ── asset system (Phase 4) ──
+# Content-directory watching → debounced `assets://changed` rescans. notify is
+# CC0-1.0; the debouncer is MIT/Apache — both on the deny allow-list.
+notify = "8"
+notify-debouncer-full = "0.5"
+# glTF mesh/scene import (pure Rust). meshopt (meshoptimizer via cc) does vertex-
+# cache + overdraw + fetch optimization on imported meshes.
+gltf = "1"
+meshopt = "0.4"
+# Texture decode/resize for PNG/JPEG/EXR/HDR import + mip generation. Curated
+# feature set (no avif/webp) keeps the license surface on the allow-list and the
+# build free of extra C toolchains. BCn block compression is hand-rolled in
+# inf-material (BC7 via intel_tex_2 is a documented follow-up — its ISPC build
+# is a cross-OS CI risk we decline to take on now).
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "hdr",
+    "exr",
+    "tga",
+    "bmp",
+] }
+# CSV/JSON import for .inf_table data assets (P4.5).
+csv = "1"
 # ── editor↔frontend shared types → committed TS bindings (CI drift-checked) ──
 ts-rs = "12"
 # test-only (dev-dependencies in member crates)
