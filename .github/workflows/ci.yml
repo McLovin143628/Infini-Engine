@@ -9,6 +9,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # The dependency tree (tauri + wgpu + bevy + the Phase 4 gltf/image/meshopt/exr
+  # importers) makes full debuginfo archives large enough to exhaust the
+  # ubuntu runner's disk. Line-tables keep panic locations while cutting the
+  # bulk of the artifact size.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   rust:
@@ -20,6 +25,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # Reclaim ~25 GB of preinstalled toolchains the build never uses, so
+          # the large debug artifacts of the tauri/wgpu/bevy/importer tree fit.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          df -h /
 
       - name: Install Linux system deps (Tauri)
         if: runner.os == 'Linux'
@@ -87,6 +103,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Regenerate bindings from Rust types
