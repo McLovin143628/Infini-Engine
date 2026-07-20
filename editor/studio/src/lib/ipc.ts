@@ -22,4 +22,11 @@ export const viewport = {
    */
   setRect: (x: number, y: number, width: number, height: number): Promise<void> =>
     invoke("viewport_set_rect", { x, y, width, height }),
+  /**
+   * Hand off a drag that ended over the viewport hole. `x`/`y` are PHYSICAL
+   * pixels relative to the viewport hole's top-left corner (HTML drag ghosts
+   * die over the native window — the coordinates cross via IPC instead).
+   */
+  drop: (x: number, y: number, payload: string): Promise<void> =>
+    invoke("viewport_drop", { x, y, payload }),
 };

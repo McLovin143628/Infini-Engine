@@ -53,6 +53,20 @@ wgpu = { version = "30", default-features = false, features = ["vulkan", "metal"
 raw-window-handle = "0.6"
 pollster = "0.4"
 windows = "0.62"
+glam = "0.33"
+# macOS viewport embedding (Spike A) — objc2 framework crates
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow", "NSResponder"] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "CATransaction"] }
+objc2-core-foundation = "0.3"
+# ── blueprint transpiler (Spike B) ──
+syn = { version = "2", features = ["full", "extra-traits", "visit"] }
+quote = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+prettyplease = "0.2"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+proptest = "1"
 
 # intra-workspace crates
 inf-core = { path = "crates/inf-core" }
