@@ -139,6 +139,9 @@ impl EngineRenderer {
         graph.add(passes::grid::GridNode::new(gpu, &view_bgl));
         graph.add(passes::debug::DebugNode::new(gpu, &view_bgl));
         graph.add(passes::resolve::ResolveNode);
+        // The mask feeds the composite's outline dilate; it renders into the
+        // single-sample mask target independently of the MSAA scene resolve.
+        graph.add(passes::mask::MaskNode::new(gpu, &view_bgl));
         graph.add(passes::composite::CompositeNode::new(gpu));
 
         Self {

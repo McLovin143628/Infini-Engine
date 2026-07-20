@@ -5,6 +5,7 @@
 pub mod composite;
 pub mod debug;
 pub mod grid;
+pub mod mask;
 pub mod mesh;
 pub mod resolve;
 pub mod sky;

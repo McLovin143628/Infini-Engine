@@ -31,13 +31,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetCursorPos, SetWindowPos, ShowCursor, ShowWindow, TranslateMessage, HWND_TOP, MSG, PM_REMOVE,
     SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CAPTURECHANGED,
     WM_ERASEBKGND, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD,
-    WS_CLIPSIBLINGS, WS_VISIBLE,
+    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
 use crate::camera::{Bookmarks, EditorCamera, FlyInput, NavInput, NavMode};
 use crate::host::EngineHost;
 use crate::{KeyChord, SurfaceTarget, ViewportEvent, ViewportEventSink, ViewportRect};
+use inf_render::GizmoMode;
 
 enum Cmd {
     SetRect(ViewportRect),
@@ -112,6 +113,7 @@ enum Action {
     Focus,
     StoreBookmark(usize),
     RecallBookmark(usize),
+    SetGizmo(GizmoMode),
 }
 
 /// Input accumulated by `wnd_proc` between frames. Thread-local is safe: the
@@ -125,6 +127,14 @@ struct InputState {
     restore_cursor: POINT,
     actions: Vec<Action>,
     chords: Vec<String>,
+    /// Latest cursor position in viewport-client (physical) pixels.
+    cursor: (i32, i32),
+    cursor_moved: bool,
+    /// Plain-LMB (no Alt) is held: select/gizmo, not orbit.
+    left_down: bool,
+    /// A plain-LMB press this frame: (x, y, ctrl-held) for select/gizmo-begin.
+    left_press: Option<(i32, i32, bool)>,
+    left_release: bool,
 }
 
 thread_local! {
@@ -162,8 +172,9 @@ fn begin_capture(hwnd: HWND, kind: Capture) {
     }
 }
 
-/// End the capture if `kind` owns it, restoring the cursor.
-fn end_capture(kind: Capture) {
+/// End the capture if `kind` owns it, restoring the cursor. Returns true if it
+/// released (i.e. `kind` was the active capture).
+fn end_capture(kind: Capture) -> bool {
     let restore = INPUT.with(|s| {
         let mut s = s.borrow_mut();
         if s.capture == kind {
@@ -179,6 +190,9 @@ fn end_capture(kind: Capture) {
             ShowCursor(true);
             let _ = SetCursorPos(pt.x, pt.y);
         }
+        true
+    } else {
+        false
     }
 }
 
@@ -217,6 +231,24 @@ fn on_key_down(vk: u32) {
     if vk == 0x46 && !ctrl && !alt && !shift {
         INPUT.with(|s| s.borrow_mut().actions.push(Action::Focus));
         return;
+    }
+
+    // W/E/R switch the transform-gizmo mode (UE parity), but only when not
+    // flying — while RMB-captured those are WASD/QE flycam keys.
+    if !ctrl && !alt && !shift {
+        let mode = match vk {
+            0x57 => Some(GizmoMode::Translate), // W
+            0x45 => Some(GizmoMode::Rotate),    // E
+            0x52 => Some(GizmoMode::Scale),     // R
+            _ => None,
+        };
+        if let Some(mode) = mode {
+            let idle = INPUT.with(|s| s.borrow().capture == Capture::None);
+            if idle {
+                INPUT.with(|s| s.borrow_mut().actions.push(Action::SetGizmo(mode)));
+                return;
+            }
+        }
     }
 
     // Forward global-shortcut chords (Ctrl+… or F-keys) to the webview so
@@ -267,15 +299,60 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             LRESULT(0)
         }
 
-        // Alt+LMB orbits. Plain LMB is select/gizmo (P2.4) — no camera capture.
+        // Alt+LMB orbits. Plain LMB selects / drags a gizmo handle.
         WM_LBUTTONDOWN => {
             if modifier(VK_MENU) {
                 begin_capture(hwnd, Capture::Orbit);
+            } else {
+                let x = (lparam.0 & 0xffff) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+                let ctrl = modifier(VK_CONTROL);
+                unsafe {
+                    // Capture so we keep getting moves/up even off-window while
+                    // dragging a gizmo. This is the plain-LMB path (not orbit).
+                    SetCapture(hwnd);
+                    let _ = SetFocus(Some(hwnd));
+                }
+                INPUT.with(|s| {
+                    let mut s = s.borrow_mut();
+                    s.left_down = true;
+                    s.left_press = Some((x, y, ctrl));
+                    s.cursor = (x, y);
+                });
             }
             LRESULT(0)
         }
         WM_LBUTTONUP => {
-            end_capture(Capture::Orbit);
+            if end_capture(Capture::Orbit) {
+                // was an orbit gesture
+            } else {
+                let owns = INPUT.with(|s| {
+                    let mut s = s.borrow_mut();
+                    if s.left_down {
+                        s.left_down = false;
+                        s.left_release = true;
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if owns {
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+
+        WM_MOUSEMOVE => {
+            let x = (lparam.0 & 0xffff) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+            INPUT.with(|s| {
+                let mut s = s.borrow_mut();
+                s.cursor = (x, y);
+                s.cursor_moved = true;
+            });
             LRESULT(0)
         }
 
@@ -289,10 +366,15 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             LRESULT(0)
         }
 
-        // Capture can be stolen (alt-tab, other SetCapture); un-hide cleanly.
+        // Capture can be stolen (alt-tab, other SetCapture); un-hide cleanly
+        // and drop any in-flight gizmo/selection drag.
         WM_CAPTURECHANGED => {
             let was = INPUT.with(|s| {
                 let mut s = s.borrow_mut();
+                if s.left_down {
+                    s.left_down = false;
+                    s.left_release = true;
+                }
                 std::mem::replace(&mut s.capture, Capture::None) != Capture::None
             });
             if was {
@@ -410,6 +492,11 @@ struct FrameInput {
     wheel: i32,
     actions: Vec<Action>,
     chords: Vec<String>,
+    cursor: (i32, i32),
+    cursor_moved: bool,
+    left_down: bool,
+    left_press: Option<(i32, i32, bool)>,
+    left_release: bool,
 }
 
 fn drain_input() -> FrameInput {
@@ -422,6 +509,11 @@ fn drain_input() -> FrameInput {
             wheel: std::mem::take(&mut s.wheel_steps),
             actions: std::mem::take(&mut s.actions),
             chords: std::mem::take(&mut s.chords),
+            cursor: s.cursor,
+            cursor_moved: std::mem::take(&mut s.cursor_moved),
+            left_down: s.left_down,
+            left_press: std::mem::take(&mut s.left_press),
+            left_release: std::mem::take(&mut s.left_release),
         }
     })
 }
@@ -518,13 +610,16 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink) {
             sink(ViewportEvent::Key(KeyChord { chord }));
         }
 
-        // Discrete actions: focus + bookmarks. Any of these interrupts an
-        // in-flight focus animation.
+        // Discrete actions: gizmo mode, focus, bookmarks. Focus/recall
+        // interrupt an in-flight focus animation.
         for action in input.actions {
             match action {
+                Action::SetGizmo(mode) => host.set_gizmo_mode(mode),
                 Action::Focus => {
-                    // Selection lands in P2.4; focus the world origin for now.
-                    focus_goal = Some(camera.focus_goal(glam::DVec3::ZERO, 4.0));
+                    // Frame the selection, or the world origin if none.
+                    let (center, radius) =
+                        host.selection_focus().unwrap_or((glam::DVec3::ZERO, 4.0));
+                    focus_goal = Some(camera.focus_goal(center, radius));
                 }
                 Action::StoreBookmark(n) => {
                     bookmarks.store(n, camera.pose());
@@ -536,6 +631,39 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink) {
                         focus_goal = None;
                     }
                 }
+            }
+        }
+
+        // Selection + gizmo interaction (plain LMB).
+        if let Some((x, y, ctrl)) = input.left_press {
+            let (px, py) = (x.max(0) as u32, y.max(0) as u32);
+            // A handle under the cursor starts a drag; otherwise select.
+            if !host.try_begin_gizmo(&camera, px, py) {
+                host.select_at(&camera, px, py, ctrl);
+            }
+        }
+        if input.left_down && host.is_dragging_gizmo() {
+            let (x, y) = input.cursor;
+            // Shift-drag snaps (1 m / 15° / 0.1 ratio).
+            let snap = if key_down(0x10) {
+                match host.gizmo_mode {
+                    GizmoMode::Translate => 1.0,
+                    GizmoMode::Rotate => 15f32.to_radians(),
+                    GizmoMode::Scale => 0.1,
+                }
+            } else {
+                0.0
+            };
+            host.update_gizmo(&camera, x.max(0) as u32, y.max(0) as u32, snap);
+        }
+        if input.left_release {
+            host.end_gizmo();
+        }
+        // Hover highlight when idle (not dragging, not flying).
+        if input.cursor_moved && !input.left_down && input.capture == Capture::None {
+            let (x, y) = input.cursor;
+            if x >= 0 && y >= 0 {
+                host.set_hover(&camera, x as u32, y as u32);
             }
         }
 

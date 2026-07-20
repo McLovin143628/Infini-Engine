@@ -11,10 +11,12 @@
 
 pub mod camera;
 pub mod debug_draw;
+pub mod gizmo;
 pub mod gpu;
 pub mod graph;
 pub mod headless;
 pub mod passes;
+pub mod pick;
 pub mod pipeline;
 pub mod renderer;
 pub mod scene;
@@ -22,9 +24,11 @@ pub mod surface;
 
 pub use camera::{RenderView, DEPTH_CLEAR, DEPTH_COMPARE, DEPTH_FORMAT};
 pub use debug_draw::{DebugDraw, DebugVertex};
+pub use gizmo::{GizmoAxis, GizmoDelta, GizmoDrag, GizmoMode};
 pub use gpu::{create_instance, GpuContext};
 pub use headless::{HeadlessTarget, HEADLESS_FORMAT};
 pub use passes::composite::BlitMode;
+pub use pick::Picker;
 pub use renderer::{EngineRenderer, MASK_FORMAT, SCENE_FORMAT, SCENE_SAMPLES};
 pub use scene::{MeshInstance, RenderScene, SkyParams, ID_GIZMO_BASE, ID_NONE};
 pub use surface::{SurfaceChain, RECONFIGURE_DEBOUNCE};
