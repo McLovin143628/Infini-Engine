@@ -1,0 +1,28 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "panels",
+  "description": "Detached panel windows (P1.2.4): the main window spawns/positions/destroys `panel:*` WebviewWindows; panel windows drive their own custom chrome (minimize/maximize/close), report geometry, and run the JS-driven titlebar drag (cursor-position + set-position). Cross-window events ride core:default.",
+  "windows": ["main", "panel:*"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-destroy",
+    "core:window:allow-close",
+    "core:window:allow-show",
+    "core:window:allow-minimize",
+    "core:window:allow-unminimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-inner-position",
+    "core:window:allow-outer-position",
+    "core:window:allow-outer-size",
+    "core:window:allow-scale-factor",
+    "core:window:allow-cursor-position",
+    "core:window:allow-current-monitor",
+    "core:window:allow-primary-monitor",
+    "core:window:allow-monitor-from-point",
+    "core:window:allow-available-monitors"
+  ]
+}

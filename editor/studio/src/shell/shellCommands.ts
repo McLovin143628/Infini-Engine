@@ -8,6 +8,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { registerCommands, setCommandHandler, setUnhandledCommandHook } from "../lib/commands";
 import { registerMenuCommands } from "../lib/menus";
+import { useDockLayout } from "../panels/dock/dockLayoutStore";
 import { useShellStore } from "../stores/shellStore";
 
 /** Which phase delivers each stubbed command family (status-toast hint). */
@@ -17,7 +18,7 @@ const PHASE_HINTS: [RegExp, string][] = [
   [/^file\.(newProject|openProject|recentProjects)/, "Phase 5 (project system)"],
   [/^edit\.(cut|copy|paste|duplicate|delete)/, "Phase 3 (scene model)"],
   [/^edit\.(editorPreferences|projectSettings|plugins)/, "Phase 5"],
-  [/^window\.(viewport|worldSettings|placeActors)/, "Phase 2–3"],
+  [/^window\.viewport/, "Phase 2–3"],
   [/^tools\.(newRustSystem|openIde|refreshIdeProject)/, "Phase 5 (IDE integration)"],
   [/^tools\.(findInBlueprints|blueprintDebugger)/, "Phase 6 (Blueprints)"],
   [/^tools\.profiler/, "Phase 15"],
@@ -54,6 +55,34 @@ export function bootstrapShellCommands(): void {
   // Live now: window/application controls.
   setCommandHandler("app.exit", () => {
     void getCurrentWindow().close();
+  });
+
+  // Panel toggles (P1.2): hidden → restore to lastDock; visible → focus.
+  // Detached windows come to the foreground via openPanel's window path.
+  const panelToggle = (type: string) => () => {
+    useDockLayout.getState().openPanel(type);
+  };
+  setCommandHandler("window.outliner", panelToggle("outliner"));
+  setCommandHandler("window.details", panelToggle("details"));
+  setCommandHandler("window.outputLog", panelToggle("outputLog"));
+  setCommandHandler("tools.outputLog", panelToggle("outputLog"));
+  setCommandHandler("window.worldSettings", panelToggle("worldSettings"));
+  setCommandHandler("window.placeActors", panelToggle("placeActors"));
+
+  // Layout persistence (P1.2.5).
+  setCommandHandler("window.layout.default", () => {
+    useDockLayout.getState().resetLayout();
+    useShellStore.getState().pushStatus("Default editor layout restored.");
+  });
+  setCommandHandler("window.layout.reset", () => {
+    useDockLayout.getState().resetLayout();
+    useShellStore.getState().pushStatus("Layout reset to default.");
+  });
+  setCommandHandler("window.layout.save", () => {
+    useShellStore.getState().openLayoutDialog("save");
+  });
+  setCommandHandler("window.layout.load", () => {
+    useShellStore.getState().openLayoutDialog("load");
   });
   setCommandHandler("window.fullscreen", async () => {
     const win = getCurrentWindow();
