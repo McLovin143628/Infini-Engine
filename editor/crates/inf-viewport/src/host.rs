@@ -17,6 +17,9 @@ pub struct EngineHost {
     gpu: GpuContext,
     chain: SurfaceChain,
     renderer: EngineRenderer,
+    // Only the Windows input layer picks today; macOS input lands with its
+    // hardware pass (kept constructed so the field is ready when it does).
+    #[cfg_attr(not(windows), allow(dead_code))]
     picker: Picker,
     pub scene: RenderScene,
     pub origin: FloatingOrigin,
@@ -94,7 +97,14 @@ impl EngineHost {
         }
         (n > 0.0).then(|| sum / n)
     }
+}
 
+/// The pointer-driven interaction API (select, hover, gizmo drag). Currently
+/// only the Windows input layer (`win32.rs`) calls into it; macOS input is not
+/// wired yet (the camera holds its default pose), so on non-Windows these are
+/// legitimately unused until the macOS hardware pass drives them.
+#[cfg_attr(not(windows), allow(dead_code))]
+impl EngineHost {
     /// Set the hovered instance (drives the weak outline). `None` clears it.
     pub fn set_hover(&mut self, camera: &EditorCamera, px: u32, py: u32) {
         // Don't recompute hover mid-drag (keeps the outline stable).
@@ -220,7 +230,9 @@ impl EngineHost {
     pub fn end_gizmo(&mut self) {
         self.gizmo_drag = None;
     }
+}
 
+impl EngineHost {
     /// Render one frame from `camera`'s point of view. Handles floating-origin
     /// rebases and crash-safe device-lost recovery internally; only errors
     /// that survive a full stack rebuild are returned.
