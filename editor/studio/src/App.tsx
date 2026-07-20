@@ -22,11 +22,13 @@ import {
 import { listenTo } from "./lib/events";
 import { startLogListener } from "./stores/logStore";
 import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
+import { initAssetSync, registerAssetCommands } from "./stores/assetStore";
 import { scene as sceneIpc } from "./lib/ipc";
 
 bootstrapShellCommands();
 registerDefaultKeybindings();
 registerSceneCommands();
+registerAssetCommands();
 
 export default function App() {
   useEffect(() => {
@@ -51,6 +53,18 @@ export default function App() {
     let dispose: (() => void) | undefined;
     let disposed = false;
     initSceneSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
+  }, []);
+
+  // Load the asset database + subscribe to content-change / import events
+  // (P4.4). StrictMode-safe.
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    let disposed = false;
+    initAssetSync().then((fn) => (disposed ? fn() : (dispose = fn)));
     return () => {
       disposed = true;
       dispose?.();

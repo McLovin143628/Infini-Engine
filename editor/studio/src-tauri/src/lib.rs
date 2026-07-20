@@ -24,6 +24,9 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // Native file-open dialog for asset import (P4.4). The only plugin;
+        // everything else routes through audited commands.
+        .plugin(tauri_plugin_dialog::init())
         .manage(commands::ViewportState::default())
         .manage(commands::SceneState::default())
         .manage(commands::AssetState::default())

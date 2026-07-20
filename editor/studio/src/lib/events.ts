@@ -11,6 +11,8 @@
  */
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import type { AssetChanged } from "../bindings/AssetChanged";
+import type { ImportEventDto } from "../bindings/ImportEventDto";
 import type { LogLine } from "../bindings/LogLine";
 import type { SceneDelta } from "../bindings/SceneDelta";
 import type { ViewportKey } from "../bindings/ViewportKey";
@@ -25,6 +27,10 @@ export interface EventPayloads {
   "viewport://key": ViewportKey;
   /** Incremental world change after any mutation (P3.2). */
   "world://delta": SceneDelta;
+  /** Content changed (import/delete/rename/watcher) → re-fetch snapshot (P4.4). */
+  "assets://changed": AssetChanged;
+  /** Import-job progress (P4.2.4). */
+  "assets://import": ImportEventDto;
 }
 
 export type EventChannel = keyof EventPayloads;

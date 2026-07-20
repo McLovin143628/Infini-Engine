@@ -10,6 +10,9 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 
+import type { AssetRefDto } from "../bindings/AssetRefDto";
+import type { AssetSnapshot } from "../bindings/AssetSnapshot";
+import type { DeleteResult } from "../bindings/DeleteResult";
 import type { DetailsDto } from "../bindings/DetailsDto";
 import type { LayoutSummary } from "../bindings/LayoutSummary";
 import type { PropValueDto } from "../bindings/PropValueDto";
@@ -18,7 +21,18 @@ import type { SpawnKind } from "../bindings/SpawnKind";
 import type { ViewportDrop } from "../bindings/ViewportDrop";
 import type { ViewportRect } from "../bindings/ViewportRect";
 
-export type { DetailsDto, LayoutSummary, PropValueDto, SceneSnapshot, SpawnKind, ViewportDrop, ViewportRect };
+export type {
+  AssetRefDto,
+  AssetSnapshot,
+  DeleteResult,
+  DetailsDto,
+  LayoutSummary,
+  PropValueDto,
+  SceneSnapshot,
+  SpawnKind,
+  ViewportDrop,
+  ViewportRect,
+};
 
 export const app = {
   /** Editor backend version, shown in the status bar. */
@@ -90,4 +104,35 @@ export const scene = {
   newScene: (): Promise<SceneSnapshot> => invoke<SceneSnapshot>("scene_new"),
   /** Write the crash-recovery file if there are unsaved changes. */
   autosave: (): Promise<void> => invoke("scene_autosave"),
+  /** Spawn a Content-Drawer asset dropped over the viewport (P4.4). */
+  spawnAsset: (assetId: string): Promise<string> =>
+    invoke<string>("scene_spawn_asset", { assetId }),
+};
+
+/**
+ * Asset system / Content Drawer (Phase 4). The asset database lives in the
+ * backend under the project content root; the store loads `assets_snapshot`
+ * and re-fetches on the `assets://changed` event. Thumbnails are lazy PNG
+ * data-URLs. Arg names are camelCase (Tauri maps to snake_case).
+ */
+export const assets = {
+  snapshot: (): Promise<AssetSnapshot> => invoke<AssetSnapshot>("assets_snapshot"),
+  /** Assets that reference `id` (Show References / delete warning). */
+  references: (id: string): Promise<AssetRefDto[]> =>
+    invoke<AssetRefDto[]>("asset_references", { id }),
+  /** A PNG data-URL thumbnail, or null for icon-only kinds / no GPU. */
+  thumbnail: (id: string): Promise<string | null> =>
+    invoke<string | null>("asset_thumbnail", { id }),
+  /** Queue external files for import; progress arrives on `assets://import`. */
+  import: (sources: string[], destFolder: string | null = null): Promise<number[]> =>
+    invoke<number[]>("asset_import", { sources, destFolder }),
+  /** Create a new authored asset (Phase 4.4: "material"). Returns the GUID. */
+  create: (kind: string, folder: string | null = null, name: string | null = null): Promise<string> =>
+    invoke<string>("asset_create", { kind, folder, name }),
+  /** Delete; when still referenced (and not forced) returns the blockers. */
+  delete: (id: string, force = false): Promise<DeleteResult> =>
+    invoke<DeleteResult>("asset_delete", { id, force }),
+  rename: (id: string, name: string): Promise<void> => invoke("asset_rename", { id, name }),
+  duplicate: (id: string): Promise<string> => invoke<string>("asset_duplicate", { id }),
+  setTags: (id: string, tags: string[]): Promise<void> => invoke("asset_set_tags", { id, tags }),
 };

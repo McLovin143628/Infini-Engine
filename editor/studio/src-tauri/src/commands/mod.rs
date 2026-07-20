@@ -26,6 +26,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         scene::scene_snapshot,
         scene::scene_details,
         scene::scene_create,
+        scene::scene_spawn_asset,
         scene::scene_delete,
         scene::scene_rename,
         scene::scene_reparent,

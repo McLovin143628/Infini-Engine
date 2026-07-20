@@ -38,6 +38,15 @@ struct AssetInner {
 }
 
 impl AssetState {
+    /// The display name of an asset (for the drag-to-scene placeholder). Public
+    /// so the scene command can name a dropped-asset entity.
+    pub fn asset_name(&self, id: AssetId) -> Option<String> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        proj.db().get(id).map(|e| e.name.clone())
+    }
+
     fn with_project<R>(
         &self,
         f: impl FnOnce(&mut AssetProject) -> Result<R, String>,

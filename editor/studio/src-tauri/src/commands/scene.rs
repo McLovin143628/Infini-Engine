@@ -132,6 +132,32 @@ pub async fn scene_create(
     Ok(guid.to_string())
 }
 
+/// Spawn a dropped Content-Drawer asset into the scene (drag-to-viewport
+/// handoff, P4.4). A real, selectable, saveable entity named after the asset is
+/// created; it renders as a placeholder primitive today — resolving the mesh
+/// asset to its imported geometry in the interactive viewport is the documented
+/// Phase 4→7 follow-up (the thumbnailer already renders the real geometry).
+#[tauri::command]
+pub async fn scene_spawn_asset(
+    app: AppHandle,
+    state: State<'_, SceneState>,
+    assets: State<'_, super::assets::AssetState>,
+    asset_id: String,
+) -> Result<String, String> {
+    let id = asset_id
+        .parse::<inf_asset::AssetId>()
+        .map_err(|e| e.to_string())?;
+    let name = assets.asset_name(id).unwrap_or_else(|| "Asset".to_string());
+    let guid = {
+        let mut doc = lock(&state.doc)?;
+        let guid = doc.edit_create(SpawnKind::Cube, &name, None);
+        doc.select(&[guid], false);
+        guid
+    };
+    emit_world_delta(&app, &state);
+    Ok(guid.to_string())
+}
+
 #[tauri::command]
 pub async fn scene_delete(
     app: AppHandle,
