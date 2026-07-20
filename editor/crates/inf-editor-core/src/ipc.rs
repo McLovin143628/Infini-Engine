@@ -77,3 +77,137 @@ pub struct LayoutSummary {
     /// Last-modified time, unix epoch milliseconds.
     pub modified_ms: f64,
 }
+
+// ── Scene / world binding (Phase 3) ──────────────────────────────────────
+//
+// The authoritative scene is an ECS world in `inf-editor-core::scene`. The
+// frontend Outliner/Details never see the world directly — they consume these
+// flattened, GUID-keyed DTOs over the `scene_snapshot` command (full state) and
+// the `world://delta` event (incremental changes). GUIDs are stable across a
+// save/reload; bevy `Entity` ids never cross the boundary.
+
+/// One entity as the Outliner sees it. `guid` is the stable string identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct SceneNode {
+    pub guid: String,
+    pub name: String,
+    /// UE-style type column ("Static Mesh", "Point Light", "Folder", …).
+    pub kind: String,
+    /// This entity's own visibility toggle (the eye).
+    pub visible: bool,
+    /// Effective visibility (self AND every ancestor) — drives dimming.
+    pub effective_visible: bool,
+    /// Parent GUID, or `None` for a root.
+    pub parent: Option<String>,
+    /// Ordered child GUIDs.
+    pub children: Vec<String>,
+}
+
+/// A full scene snapshot (`scene_snapshot` command; sent on load + resync).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct SceneSnapshot {
+    /// Monotonic document version — every mutation bumps it. The frontend uses
+    /// it to detect a missed delta and re-fetch.
+    #[ts(type = "number")]
+    pub version: u64,
+    /// Ordered root GUIDs.
+    pub roots: Vec<String>,
+    /// Every node, in no particular order (the frontend builds a map).
+    pub nodes: Vec<SceneNode>,
+    /// Selected GUIDs (single source of truth: viewport ↔ Outliner ↔ Details).
+    pub selection: Vec<String>,
+    /// Unsaved changes present.
+    pub dirty: bool,
+    /// Document title for the tab/status bar ("Untitled", a level name, …).
+    pub title: String,
+    /// Edit-menu state: whether undo/redo are available + their labels
+    /// ("Undo Rename").
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub undo_label: Option<String>,
+    pub redo_label: Option<String>,
+}
+
+/// An incremental world change (`world://delta` event). Structural edits ship
+/// as added/removed/updated node sets; `roots`, `selection`, and the doc meta
+/// are small so they ride along every delta for a trivially-correct reducer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct SceneDelta {
+    #[ts(type = "number")]
+    pub version: u64,
+    pub added: Vec<SceneNode>,
+    pub removed: Vec<String>,
+    pub updated: Vec<SceneNode>,
+    pub roots: Vec<String>,
+    pub selection: Vec<String>,
+    pub dirty: bool,
+    pub title: String,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub undo_label: Option<String>,
+    pub redo_label: Option<String>,
+}
+
+// ── Details panel (reflection-driven, P3.3) ──────────────────────────────
+
+/// A typed property value crossing to the Details panel. The `kind` tag selects
+/// the widget; only the matching payload field is meaningful.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PropValueDto {
+    Bool { value: bool },
+    Number { value: f64 },
+    Text { value: String },
+    Vec3 { value: Vec<f64> },
+    Color { value: Vec<f32> },
+    Enum { value: String, options: Vec<String> },
+}
+
+/// One editable field row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct PropFieldDto {
+    /// Reflect field key (write path).
+    pub name: String,
+    /// Display label.
+    pub label: String,
+    pub value: PropValueDto,
+    /// Whether every selected object shares this value (multi-edit "—").
+    pub same: bool,
+}
+
+/// One component section in the Details grid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ComponentDto {
+    pub type_path: String,
+    pub display: String,
+    pub fields: Vec<PropFieldDto>,
+}
+
+/// The Details panel view of the current selection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct DetailsDto {
+    pub selection: Vec<String>,
+    /// Header label (the object name, or "N selected").
+    pub name: String,
+    /// Header type (single selection only).
+    pub kind: String,
+    /// Component sections shared by every selected object.
+    pub components: Vec<ComponentDto>,
+    pub multi: bool,
+}
+
+/// The kind of entity to create (`scene_create` command).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnKind {
+    Empty,
+    Cube,
+    Sphere,
+    Plane,
+    Cylinder,
+    Cone,
+    DirectionalLight,
+    PointLight,
+    SpotLight,
+    Camera,
+}

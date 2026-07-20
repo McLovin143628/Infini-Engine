@@ -14,6 +14,7 @@
 pub mod components;
 pub mod hierarchy;
 pub mod math;
+pub mod props;
 pub mod registry;
 pub mod transform;
 pub mod world;
@@ -25,5 +26,6 @@ pub use components::{
 };
 pub use hierarchy::{ChildOf, Children};
 pub use math::{Color, Vec3d};
+pub use props::{default_field, ComponentProps, PropField, PropValue};
 pub use registry::{ComponentInfo, ComponentRegistry};
 pub use world::EcsWorld;

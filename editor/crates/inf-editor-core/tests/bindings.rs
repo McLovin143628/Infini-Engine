@@ -7,7 +7,10 @@
 
 use std::path::Path;
 
-use inf_editor_core::ipc::{LayoutSummary, LogLine, ViewportDrop, ViewportKey, ViewportRect};
+use inf_editor_core::ipc::{
+    ComponentDto, DetailsDto, LayoutSummary, LogLine, PropFieldDto, PropValueDto, SceneDelta,
+    SceneNode, SceneSnapshot, SpawnKind, ViewportDrop, ViewportKey, ViewportRect,
+};
 use ts_rs::{Config, TS};
 
 #[test]
@@ -21,4 +24,12 @@ fn export_bindings() {
     ViewportKey::export_all(&cfg).expect("export ViewportKey");
     LogLine::export_all(&cfg).expect("export LogLine");
     LayoutSummary::export_all(&cfg).expect("export LayoutSummary");
+    SceneNode::export_all(&cfg).expect("export SceneNode");
+    SceneSnapshot::export_all(&cfg).expect("export SceneSnapshot");
+    SceneDelta::export_all(&cfg).expect("export SceneDelta");
+    SpawnKind::export_all(&cfg).expect("export SpawnKind");
+    PropValueDto::export_all(&cfg).expect("export PropValueDto");
+    PropFieldDto::export_all(&cfg).expect("export PropFieldDto");
+    ComponentDto::export_all(&cfg).expect("export ComponentDto");
+    DetailsDto::export_all(&cfg).expect("export DetailsDto");
 }

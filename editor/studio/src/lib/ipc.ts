@@ -10,11 +10,15 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 
+import type { DetailsDto } from "../bindings/DetailsDto";
 import type { LayoutSummary } from "../bindings/LayoutSummary";
+import type { PropValueDto } from "../bindings/PropValueDto";
+import type { SceneSnapshot } from "../bindings/SceneSnapshot";
+import type { SpawnKind } from "../bindings/SpawnKind";
 import type { ViewportDrop } from "../bindings/ViewportDrop";
 import type { ViewportRect } from "../bindings/ViewportRect";
 
-export type { LayoutSummary, ViewportDrop, ViewportRect };
+export type { DetailsDto, LayoutSummary, PropValueDto, SceneSnapshot, SpawnKind, ViewportDrop, ViewportRect };
 
 export const app = {
   /** Editor backend version, shown in the status bar. */
@@ -48,4 +52,42 @@ export const viewport = {
    * die over the native window — the drop point crosses via IPC instead).
    */
   drop: (drop: ViewportDrop): Promise<void> => invoke("viewport_drop", { drop }),
+};
+
+/**
+ * Scene / world binding (Phase 3). The authoritative ECS world lives in the
+ * backend; these mutate it and the frontend re-syncs from the returned value or
+ * the `world://delta` event. Arg names are camelCase (Tauri maps to snake_case).
+ */
+export const scene = {
+  snapshot: (): Promise<SceneSnapshot> => invoke<SceneSnapshot>("scene_snapshot"),
+  details: (): Promise<DetailsDto> => invoke<DetailsDto>("scene_details"),
+  create: (kind: SpawnKind, parent: string | null): Promise<string> =>
+    invoke<string>("scene_create", { kind, parent }),
+  delete: (guids: string[]): Promise<void> => invoke("scene_delete", { guids }),
+  rename: (guid: string, name: string): Promise<void> => invoke("scene_rename", { guid, name }),
+  reparent: (guid: string, parent: string | null): Promise<boolean> =>
+    invoke<boolean>("scene_reparent", { guid, parent }),
+  setVisible: (guid: string, visible: boolean): Promise<void> =>
+    invoke("scene_set_visible", { guid, visible }),
+  select: (guids: string[], additive: boolean): Promise<void> =>
+    invoke("scene_select", { guids, additive }),
+  setProperty: (
+    guids: string[],
+    typePath: string,
+    field: string,
+    value: PropValueDto,
+  ): Promise<DetailsDto> =>
+    invoke<DetailsDto>("scene_set_property", { guids, typePath, field, value }),
+  resetProperty: (guids: string[], typePath: string, field: string): Promise<DetailsDto> =>
+    invoke<DetailsDto>("scene_reset_property", { guids, typePath, field }),
+  undo: (): Promise<void> => invoke("scene_undo"),
+  redo: (): Promise<void> => invoke("scene_redo"),
+  /** Save to `path`, or a default quicksave when omitted. */
+  save: (path: string | null = null): Promise<void> => invoke("scene_save", { path }),
+  open: (path: string | null = null): Promise<SceneSnapshot> =>
+    invoke<SceneSnapshot>("scene_open", { path }),
+  newScene: (): Promise<SceneSnapshot> => invoke<SceneSnapshot>("scene_new"),
+  /** Write the crash-recovery file if there are unsaved changes. */
+  autosave: (): Promise<void> => invoke("scene_autosave"),
 };

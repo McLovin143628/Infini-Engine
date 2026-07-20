@@ -1956,11 +1956,18 @@ dependencies = [
 name = "inf-editor-core"
 version = "0.1.0"
 dependencies = [
+ "bincode",
+ "glam 0.33.2",
+ "inf-ecs",
+ "inf-math",
  "inf-runtime",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.19",
+ "toml 0.9.12+spec-1.1.0",
  "ts-rs",
+ "uuid",
 ]
 
 [[package]]
@@ -2083,6 +2090,7 @@ dependencies = [
  "tauri-build",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

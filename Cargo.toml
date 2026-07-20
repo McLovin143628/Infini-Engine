@@ -85,6 +85,8 @@ proptest = "1"
 libloading = "0.8"
 # ── cooked snapshots / PIE protocol (Spike D) ──
 bincode = { version = "2", features = ["serde"] }
+# ── asset sidecars / .inf_lvl human-readable metadata (deterministic emit) ──
+toml = "0.9"
 # ── editor↔frontend shared types → committed TS bindings (CI drift-checked) ──
 ts-rs = "12"
 # test-only (dev-dependencies in member crates)

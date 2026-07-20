@@ -4,8 +4,10 @@
 
 mod app;
 mod layout;
+mod scene;
 mod viewport;
 
+pub use scene::{recover_scene_on_boot, SceneState};
 pub use viewport::ViewportState;
 
 pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
@@ -19,5 +21,21 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         viewport::viewport_set_rect,
         viewport::viewport_set_visible,
         viewport::viewport_drop,
+        scene::scene_snapshot,
+        scene::scene_details,
+        scene::scene_create,
+        scene::scene_delete,
+        scene::scene_rename,
+        scene::scene_reparent,
+        scene::scene_set_visible,
+        scene::scene_select,
+        scene::scene_set_property,
+        scene::scene_reset_property,
+        scene::scene_undo,
+        scene::scene_redo,
+        scene::scene_save,
+        scene::scene_open,
+        scene::scene_new,
+        scene::scene_autosave,
     ]
 }

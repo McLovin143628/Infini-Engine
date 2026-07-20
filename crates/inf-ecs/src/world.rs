@@ -52,6 +52,36 @@ impl EcsWorld {
         &self.registry
     }
 
+    // ── reflection-driven properties (Details, P3.3) ─────────────────────
+
+    /// Editable component properties for `entity` (registry order).
+    pub fn read_props(&self, entity: Entity) -> Vec<crate::props::ComponentProps> {
+        crate::props::read_entity(&self.world, &self.registry, entity)
+    }
+
+    /// Write one component field on `entity`. Returns whether it applied.
+    pub fn write_prop(
+        &mut self,
+        entity: Entity,
+        type_path: &str,
+        field: &str,
+        value: &crate::props::PropValue,
+    ) -> bool {
+        // Disjoint borrow of the two fields (world + registry).
+        let ok = crate::props::write_field(
+            &mut self.world,
+            &self.registry,
+            entity,
+            type_path,
+            field,
+            value,
+        );
+        if ok {
+            self.dirty = true;
+        }
+        ok
+    }
+
     // ── spawn / despawn ──────────────────────────────────────────────────
 
     /// Spawn an empty editor entity (Guid + Name + identity Transform +

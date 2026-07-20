@@ -21,9 +21,12 @@ import {
 } from "./lib/keybindings";
 import { listenTo } from "./lib/events";
 import { startLogListener } from "./stores/logStore";
+import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
+import { scene as sceneIpc } from "./lib/ipc";
 
 bootstrapShellCommands();
 registerDefaultKeybindings();
+registerSceneCommands();
 
 export default function App() {
   useEffect(() => {
@@ -42,6 +45,23 @@ export default function App() {
   // detached windows mirror the log store over the bridge instead).
   useEffect(() => installKeybindingListener(), []);
   useEffect(() => startLogListener(), []);
+
+  // Load the world + subscribe to incremental deltas (P3.2). StrictMode-safe.
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    let disposed = false;
+    initSceneSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
+  }, []);
+
+  // Debounced crash-recovery autosave (P3.5.4): flush unsaved work every 5 s.
+  useEffect(() => {
+    const id = window.setInterval(() => void sceneIpc.autosave(), 5000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // Focus handoff (P2.3.4): the native viewport forwards global-shortcut
   // chords it doesn't consume so the palette/save/etc. keep working while the

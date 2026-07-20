@@ -1,104 +1,263 @@
 /**
- * Placeholder scene state for the Phase 1 Outliner/Details panels: a mock
- * actor tree with selection + visibility. Phase 3 replaces this with the
- * live ECS world binding (diff-based snapshot IPC, selection service) —
- * the component-facing shape here anticipates that so the panels don't
- * need rewriting, only the data source.
+ * Live scene store (Phase 3): the frontend mirror of the backend ECS world.
+ *
+ * The authoritative world lives in Rust (`inf-editor-core::scene::SceneDoc`).
+ * This store is a projection: it loads a full `SceneSnapshot`, then applies
+ * incremental `world://delta` events. Every mutation is a command call — the
+ * store never edits the tree locally except optimistically for selection. The
+ * Outliner and Details panels (and the viewport, via the shared document) read
+ * a single source of truth.
  */
 import { create } from "zustand";
+
+import type { DetailsDto } from "../bindings/DetailsDto";
+import type { PropValueDto } from "../bindings/PropValueDto";
+import type { SceneDelta } from "../bindings/SceneDelta";
+import type { SceneNode } from "../bindings/SceneNode";
+import type { SceneSnapshot } from "../bindings/SceneSnapshot";
+import type { SpawnKind } from "../bindings/SpawnKind";
+import { getCommand, setCommandHandler } from "../lib/commands";
+import { listenTo, type UnlistenFn } from "../lib/events";
+import { scene as sceneIpc } from "../lib/ipc";
 import { registerBridgedStore } from "../panels/window/storeBridge";
 
-export interface MockActor {
-  id: string;
-  name: string;
-  /** UE-style type column text ("Static Mesh Actor", "Point Light", …). */
-  type: string;
-  visible: boolean;
-  children: MockActor[];
-}
-
-function actor(id: string, name: string, type: string, children: MockActor[] = []): MockActor {
-  return { id, name, type, visible: true, children };
-}
-
-const MOCK_WORLD: MockActor[] = [
-  actor("world", "Untitled Level", "World", [
-    actor("floor", "Floor", "Static Mesh Actor"),
-    actor("player-start", "PlayerStart", "Player Start"),
-    actor("lighting", "Lighting", "Folder", [
-      actor("sun", "DirectionalLight", "Directional Light"),
-      actor("sky", "SkyLight", "Sky Light"),
-      actor("fill", "PointLight_Fill", "Point Light"),
-    ]),
-    actor("props", "Props", "Folder", [
-      actor("cube-1", "Cube", "Static Mesh Actor"),
-      actor("cube-2", "Cube2", "Static Mesh Actor"),
-      actor("sphere", "Sphere", "Static Mesh Actor"),
-    ]),
-    actor("camera", "CineCamera", "Cine Camera Actor"),
-  ]),
-];
+export type { SceneNode };
 
 interface SceneState {
-  roots: MockActor[];
-  selectedIds: string[];
-  /** Collapsed outliner rows (ids). Everything starts expanded. */
+  nodes: Record<string, SceneNode>;
+  roots: string[];
+  selection: string[];
+  /** Collapsed Outliner rows (guids). */
   collapsed: string[];
-  select: (ids: string[], additive?: boolean) => void;
-  toggleVisible: (id: string) => void;
-  toggleCollapsed: (id: string) => void;
+  version: number;
+  dirty: boolean;
+  title: string;
+  canUndo: boolean;
+  canRedo: boolean;
+  undoLabel: string | null;
+  redoLabel: string | null;
+  details: DetailsDto | null;
+  /** True once the first snapshot has loaded. */
+  ready: boolean;
+
+  applySnapshot: (s: SceneSnapshot) => void;
+  applyDelta: (d: SceneDelta) => void;
+  toggleCollapsed: (guid: string) => void;
+  refreshDetails: () => Promise<void>;
+
+  select: (guids: string[], additive?: boolean) => void;
+  createEntity: (kind: SpawnKind, parent?: string | null) => Promise<string>;
+  deleteSelected: () => void;
+  rename: (guid: string, name: string) => void;
+  reparent: (guid: string, parent: string | null) => void;
+  toggleVisible: (guid: string) => void;
+  setProperty: (typePath: string, field: string, value: PropValueDto) => Promise<void>;
+  resetProperty: (typePath: string, field: string) => Promise<void>;
+  undo: () => void;
+  redo: () => void;
 }
 
-function mapTree(list: MockActor[], fn: (a: MockActor) => MockActor): MockActor[] {
-  return list.map((a) => fn({ ...a, children: mapTree(a.children, fn) }));
+function nodeMap(nodes: SceneNode[]): Record<string, SceneNode> {
+  const map: Record<string, SceneNode> = {};
+  for (const n of nodes) map[n.guid] = n;
+  return map;
 }
 
-export const useSceneStore = create<SceneState>((set) => ({
-  roots: MOCK_WORLD,
-  selectedIds: [],
+function sameSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const s = new Set(a);
+  return b.every((x) => s.has(x));
+}
+
+export const useSceneStore = create<SceneState>((set, get) => ({
+  nodes: {},
+  roots: [],
+  selection: [],
   collapsed: [],
-  select: (ids, additive = false) =>
+  version: 0,
+  dirty: false,
+  title: "Untitled",
+  canUndo: false,
+  canRedo: false,
+  undoLabel: null,
+  redoLabel: null,
+  details: null,
+  ready: false,
+
+  applySnapshot: (s) => {
+    set({
+      nodes: nodeMap(s.nodes),
+      roots: s.roots,
+      selection: s.selection,
+      version: Number(s.version),
+      dirty: s.dirty,
+      title: s.title,
+      canUndo: s.can_undo,
+      canRedo: s.can_redo,
+      undoLabel: s.undo_label,
+      redoLabel: s.redo_label,
+      ready: true,
+    });
+    void get().refreshDetails();
+  },
+
+  applyDelta: (d) => {
+    const prevSelection = get().selection;
+    set((state) => {
+      const nodes = { ...state.nodes };
+      for (const guid of d.removed) delete nodes[guid];
+      for (const n of d.added) nodes[n.guid] = n;
+      for (const n of d.updated) nodes[n.guid] = n;
+      return {
+        nodes,
+        roots: d.roots,
+        selection: d.selection,
+        version: Number(d.version),
+        dirty: d.dirty,
+        title: d.title,
+        canUndo: d.can_undo,
+        canRedo: d.can_redo,
+        undoLabel: d.undo_label,
+        redoLabel: d.redo_label,
+      };
+    });
+    // Re-fetch Details only when the selection set changed (property edits
+    // update it directly from their command result).
+    if (!sameSet(prevSelection, d.selection)) void get().refreshDetails();
+  },
+
+  toggleCollapsed: (guid) =>
     set((s) => ({
-      selectedIds: additive
-        ? [...new Set([...s.selectedIds, ...ids])]
-        : ids,
+      collapsed: s.collapsed.includes(guid)
+        ? s.collapsed.filter((c) => c !== guid)
+        : [...s.collapsed, guid],
     })),
-  toggleVisible: (id) =>
+
+  refreshDetails: async () => {
+    try {
+      set({ details: await sceneIpc.details() });
+    } catch (e) {
+      console.error("scene.details failed", e);
+    }
+  },
+
+  select: (guids, additive = false) => {
+    // Optimistic local update; the delta reconciles authoritative state.
     set((s) => ({
-      roots: mapTree(s.roots, (a) => (a.id === id ? { ...a, visible: !a.visible } : a)),
-    })),
-  toggleCollapsed: (id) =>
-    set((s) => ({
-      collapsed: s.collapsed.includes(id)
-        ? s.collapsed.filter((c) => c !== id)
-        : [...s.collapsed, id],
-    })),
+      selection: additive
+        ? s.selection.includes(guids[0] ?? "")
+          ? s.selection.filter((g) => !guids.includes(g))
+          : [...new Set([...s.selection, ...guids])]
+        : guids,
+    }));
+    void sceneIpc.select(guids, additive);
+  },
+
+  createEntity: async (kind, parent = null) => sceneIpc.create(kind, parent),
+
+  deleteSelected: () => {
+    const sel = get().selection;
+    if (sel.length) void sceneIpc.delete(sel);
+  },
+
+  rename: (guid, name) => void sceneIpc.rename(guid, name),
+  reparent: (guid, parent) => void sceneIpc.reparent(guid, parent),
+
+  toggleVisible: (guid) => {
+    const node = get().nodes[guid];
+    if (node) void sceneIpc.setVisible(guid, !node.visible);
+  },
+
+  setProperty: async (typePath, field, value) => {
+    const sel = get().selection;
+    if (!sel.length) return;
+    try {
+      const details = await sceneIpc.setProperty(sel, typePath, field, value);
+      set({ details });
+    } catch (e) {
+      console.error("scene.setProperty failed", e);
+    }
+  },
+
+  resetProperty: async (typePath, field) => {
+    const sel = get().selection;
+    if (!sel.length) return;
+    try {
+      const details = await sceneIpc.resetProperty(sel, typePath, field);
+      set({ details });
+    } catch (e) {
+      console.error("scene.resetProperty failed", e);
+    }
+  },
+
+  undo: () => void sceneIpc.undo(),
+  redo: () => void sceneIpc.redo(),
 }));
 
 registerBridgedStore("scene", useSceneStore);
 
-/** Depth-first flatten honoring collapse state; used by the Outliner. */
-export function flattenTree(
-  roots: MockActor[],
+/** A flattened Outliner row. */
+export interface OutlinerRow {
+  node: SceneNode;
+  depth: number;
+}
+
+/** Depth-first flatten of the tree honoring collapse state. */
+export function outlinerRows(
+  nodes: Record<string, SceneNode>,
+  roots: string[],
   collapsed: string[],
-): Array<{ actor: MockActor; depth: number }> {
-  const out: Array<{ actor: MockActor; depth: number }> = [];
-  const walk = (list: MockActor[], depth: number) => {
-    for (const a of list) {
-      out.push({ actor: a, depth });
-      if (!collapsed.includes(a.id)) walk(a.children, depth + 1);
+): OutlinerRow[] {
+  const out: OutlinerRow[] = [];
+  const walk = (guids: string[], depth: number) => {
+    for (const guid of guids) {
+      const node = nodes[guid];
+      if (!node) continue;
+      out.push({ node, depth });
+      if (!collapsed.includes(guid)) walk(node.children, depth + 1);
     }
   };
   walk(roots, 0);
   return out;
 }
 
-/** Find an actor anywhere in the tree. */
-export function findActor(roots: MockActor[], id: string): MockActor | null {
-  for (const a of roots) {
-    if (a.id === id) return a;
-    const hit = findActor(a.children, id);
-    if (hit) return hit;
+/** An entity is dimmed in the Outliner when its effective visibility is off. */
+export function isEffectivelyVisible(nodes: Record<string, SceneNode>, guid: string): boolean {
+  return nodes[guid]?.effective_visible ?? true;
+}
+
+/** Attach scene handlers to the enumerated Edit/File menu commands (P3.4/P3.5). */
+export function registerSceneCommands(): void {
+  const s = () => useSceneStore.getState();
+  const wire = (id: string, run: () => void | Promise<void>) => {
+    if (getCommand(id)) setCommandHandler(id, run);
+  };
+  wire("edit.undo", () => s().undo());
+  wire("edit.redo", () => s().redo());
+  wire("edit.delete", () => s().deleteSelected());
+  wire("file.saveLevel", () => sceneIpc.save());
+  wire("file.saveAll", () => sceneIpc.save());
+  wire("file.newLevel", async () => s().applySnapshot(await sceneIpc.newScene()));
+  wire("file.openLevel", async () => s().applySnapshot(await sceneIpc.open()));
+}
+
+let unlisten: UnlistenFn | null = null;
+
+/**
+ * Load the initial snapshot and subscribe to `world://delta`. Idempotent
+ * (React StrictMode double-mounts); returns a disposer.
+ */
+export async function initSceneSync(): Promise<() => void> {
+  if (unlisten) return () => {};
+  unlisten = await listenTo("world://delta", (delta) => useSceneStore.getState().applyDelta(delta));
+  try {
+    useSceneStore.getState().applySnapshot(await sceneIpc.snapshot());
+  } catch (e) {
+    console.error("scene.snapshot failed", e);
   }
-  return null;
+  const dispose = unlisten;
+  return () => {
+    dispose?.();
+    unlisten = null;
+  };
 }

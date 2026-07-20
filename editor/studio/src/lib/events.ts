@@ -12,6 +12,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { LogLine } from "../bindings/LogLine";
+import type { SceneDelta } from "../bindings/SceneDelta";
 import type { ViewportKey } from "../bindings/ViewportKey";
 
 export type { UnlistenFn };
@@ -22,6 +23,8 @@ export interface EventPayloads {
   "log://line": LogLine;
   /** Global-shortcut chord forwarded from the native viewport (P2.3.4). */
   "viewport://key": ViewportKey;
+  /** Incremental world change after any mutation (P3.2). */
+  "world://delta": SceneDelta;
 }
 
 export type EventChannel = keyof EventPayloads;
