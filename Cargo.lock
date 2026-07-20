@@ -1699,6 +1699,9 @@ version = "0.1.0"
 [[package]]
 name = "inf-math"
 version = "0.1.0"
+dependencies = [
+ "glam",
+]
 
 [[package]]
 name = "inf-mesh"
@@ -1732,6 +1735,15 @@ dependencies = [
 [[package]]
 name = "inf-render"
 version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "inf-math",
+ "png 0.18.1",
+ "pollster",
+ "tracing",
+ "wgpu",
+]
 
 [[package]]
 name = "inf-render-2d"
@@ -1794,12 +1806,13 @@ name = "inf-viewport"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "inf-math",
+ "inf-render",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-foundation",
  "objc2-quartz-core",
- "pollster",
  "raw-window-handle",
  "tracing",
  "wgpu",

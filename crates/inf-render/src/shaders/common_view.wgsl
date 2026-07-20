@@ -1,0 +1,41 @@
+// Shared view uniforms — prepended to every scene shader by pipeline.rs's
+// include mechanism (string concat at compile time via include_str!).
+// Layout must match camera.rs::ViewUniforms.
+
+struct View {
+    view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
+    // xyz = eye position (render-local), w unused.
+    eye: vec4<f32>,
+    // xyz = unit direction toward the sun.
+    sun_dir: vec4<f32>,
+    // xy = render-local position of the world X/Z axes (-origin.xz),
+    // zw = viewport size in physical px.
+    grid_axis_viewport: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> view: View;
+
+// Fullscreen triangle covering NDC.
+fn fullscreen_ndc(i: u32) -> vec2<f32> {
+    var p = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -3.0),
+        vec2<f32>(3.0, 1.0),
+        vec2<f32>(-1.0, 1.0),
+    );
+    return p[i];
+}
+
+// Unproject an NDC point at a given depth to render-local space.
+// NOTE: reverse-infinite projection — depth 0.0 is at infinity, never
+// unproject there (w hits 0). Use two finite depths to build ray directions.
+fn unproject(ndc: vec2<f32>, depth: f32) -> vec3<f32> {
+    let p = view.inv_view_proj * vec4<f32>(ndc, depth, 1.0);
+    return p.xyz / p.w;
+}
+
+// Unit view ray through an NDC point.
+fn view_ray(ndc: vec2<f32>) -> vec3<f32> {
+    let a = unproject(ndc, 0.8);
+    let b = unproject(ndc, 0.4);
+    return normalize(b - a);
+}

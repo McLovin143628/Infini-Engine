@@ -10,12 +10,14 @@ publish = false
 
 [dependencies]
 tracing = { workspace = true }
+# Camera controller is platform-neutral (headless-testable on any OS).
+inf-math = { workspace = true }
+glam = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+inf-render = { workspace = true }
 wgpu = { workspace = true }
 raw-window-handle = { workspace = true }
-pollster = { workspace = true }
-glam = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -26,10 +28,9 @@ windows = { workspace = true, features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+inf-render = { workspace = true }
 wgpu = { workspace = true }
 raw-window-handle = { workspace = true }
-pollster = { workspace = true }
-glam = { workspace = true }
 objc2 = { workspace = true }
 objc2-foundation = { workspace = true }
 objc2-app-kit = { workspace = true }

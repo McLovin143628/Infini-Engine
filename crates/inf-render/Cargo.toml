@@ -9,3 +9,12 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+inf-math = { workspace = true }
+wgpu = { workspace = true }
+glam = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+png = { workspace = true }

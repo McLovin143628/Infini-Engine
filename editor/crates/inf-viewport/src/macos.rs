@@ -24,7 +24,8 @@ use objc2_app_kit::NSView;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
-use crate::render::{Camera, Renderer};
+use crate::camera::EditorCamera;
+use crate::host::EngineHost;
 use crate::{SurfaceTarget, ViewportRect};
 
 enum Cmd {
@@ -140,16 +141,16 @@ fn apply_rect(layer_ptr: isize, scale: f64, r: ViewportRect) {
 
 fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>) {
     let target = SurfaceTarget::MetalLayer { layer: layer_ptr };
-    let mut renderer = match Renderer::new(target, 64, 64) {
-        Ok(r) => r,
+    let mut host = match EngineHost::new(target, 64, 64) {
+        Ok(h) => h,
         Err(e) => {
-            tracing::error!("inf-viewport: wgpu init failed: {e}");
+            tracing::error!("inf-viewport: engine init failed: {e}");
             return;
         }
     };
-    tracing::info!("inf-viewport: CAMetalLayer + wgpu surface up");
+    tracing::info!("inf-viewport: CAMetalLayer + engine renderer up");
 
-    let camera = Camera::default();
+    let camera = EditorCamera::default();
 
     'outer: loop {
         let mut latest_rect: Option<ViewportRect> = None;
@@ -175,11 +176,14 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>) {
         }
         if let Some(r) = latest_rect {
             apply_rect(layer_ptr, scale, r);
-            renderer.resize(r.width.max(1), r.height.max(1));
+            host.resize(r.width.max(1), r.height.max(1));
         }
 
         // FIFO present blocks at vsync and paces the loop.
-        renderer.render(&camera);
+        if let Err(e) = host.render_frame(&camera) {
+            tracing::error!("inf-viewport: unrecoverable render failure: {e}");
+            break;
+        }
     }
 
     // SAFETY: reclaim the +1 retain taken in `spawn`; drop releases it.

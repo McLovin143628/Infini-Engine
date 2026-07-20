@@ -54,6 +54,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wgpu = { version = "30", default-features = false, features = ["vulkan", "metal", "wgsl"] }
 raw-window-handle = "0.6"
 pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
 windows = "0.62"
 glam = "0.33"
 # macOS viewport embedding (Spike A) — objc2 framework crates
@@ -77,6 +78,7 @@ bincode = { version = "2", features = ["serde"] }
 ts-rs = "12"
 # test-only (dev-dependencies in member crates)
 tempfile = "3"
+png = "0.18"
 
 # intra-workspace crates
 inf-core = { path = "crates/inf-core" }

@@ -10,7 +10,6 @@ use std::cell::RefCell;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::time::Instant;
 
-use glam::Vec3;
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -29,7 +28,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
-use crate::render::{Camera, Renderer};
+use crate::camera::{EditorCamera, FlyInput};
+use crate::host::EngineHost;
 use crate::{SurfaceTarget, ViewportRect};
 
 enum Cmd {
@@ -274,17 +274,16 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>) {
         hwnd: hwnd.0 as isize,
         hinstance,
     };
-    let mut renderer = match Renderer::new(target, 64, 64) {
-        Ok(r) => r,
+    let mut host = match EngineHost::new(target, 64, 64) {
+        Ok(h) => h,
         Err(e) => {
-            tracing::error!("inf-viewport: wgpu init failed: {e}");
+            tracing::error!("inf-viewport: engine init failed: {e}");
             return;
         }
     };
-    tracing::info!("inf-viewport: child window + wgpu surface up");
+    tracing::info!("inf-viewport: child window + engine renderer up");
 
-    let mut camera = Camera::default();
-    let mut fly_speed = 4.0f32; // m/s, wheel-scaled while captured
+    let mut camera = EditorCamera::default();
     let mut last_frame = Instant::now();
 
     'outer: loop {
@@ -320,7 +319,7 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>) {
                     SWP_NOACTIVATE | SWP_NOZORDER,
                 );
             }
-            renderer.resize(r.width.max(1), r.height.max(1));
+            host.resize(r.width.max(1), r.height.max(1));
         }
 
         // 2. Pump this thread's window messages.
@@ -344,41 +343,28 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>) {
             out
         });
         if captured {
-            if wheel != 0 {
-                fly_speed = (fly_speed * 1.2f32.powi(wheel)).clamp(0.2, 250.0);
-                tracing::debug!("inf-viewport: fly speed {fly_speed:.1} m/s");
-            }
-            const SENS: f32 = 0.0032; // rad per raw mouse count
-            camera.yaw += dx * SENS;
-            camera.pitch = (camera.pitch - dy * SENS).clamp(-1.55, 1.55);
-
-            let mut mv = Vec3::ZERO;
-            if key_down(0x57) {
-                mv += camera.forward(); // W
-            }
-            if key_down(0x53) {
-                mv -= camera.forward(); // S
-            }
-            if key_down(0x44) {
-                mv += camera.right(); // D
-            }
-            if key_down(0x41) {
-                mv -= camera.right(); // A
-            }
-            if key_down(0x45) {
-                mv += Vec3::Y; // E
-            }
-            if key_down(0x51) {
-                mv -= Vec3::Y; // Q
-            }
-            let boost = if key_down(0x10) { 4.0 } else { 1.0 }; // Shift
-            if mv != Vec3::ZERO {
-                camera.pos += mv.normalize() * fly_speed * boost * dt;
-            }
+            let input = FlyInput {
+                mouse_dx: dx,
+                mouse_dy: dy,
+                wheel_steps: wheel,
+                forward: key_down(0x57), // W
+                back: key_down(0x53),    // S
+                right: key_down(0x44),   // D
+                left: key_down(0x41),    // A
+                up: key_down(0x45),      // E
+                down: key_down(0x51),    // Q
+                boost: key_down(0x10),   // Shift
+            };
+            camera.apply_fly(&input, dt);
         }
 
-        // 4. Render one frame; FIFO present blocks at vsync and paces the loop.
-        renderer.render(&camera);
+        // 4. Render one frame; FIFO present blocks at vsync and paces the
+        //    loop. render_frame recovers from device loss internally — an
+        //    error here means even the rebuild failed (driver truly gone).
+        if let Err(e) = host.render_frame(&camera) {
+            tracing::error!("inf-viewport: unrecoverable render failure: {e}");
+            break 'outer;
+        }
     }
 
     tracing::info!("inf-viewport: shutting down");

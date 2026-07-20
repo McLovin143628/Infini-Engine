@@ -11,8 +11,13 @@
 //! Mac hardware for a runtime pass); Linux (X11 reparent, Wayland streaming
 //! fallback) follows per the roadmap.
 
+pub mod camera;
+
 #[cfg(any(windows, target_os = "macos"))]
-mod render;
+mod host;
+
+#[cfg(any(windows, target_os = "macos"))]
+mod scene_demo;
 
 #[cfg(windows)]
 mod win32;
@@ -33,7 +38,7 @@ pub struct ViewportRect {
 /// Where the renderer should create its swapchain surface. Handles are raw
 /// pointers smuggled as `isize` so the target can cross into the render
 /// thread (the caller guarantees they outlive the viewport).
-/// Gated like [`render`]: on platforms with no embedding backend the enum
+/// Gated like [`host`]: on platforms with no embedding backend the enum
 /// would be empty and dead — Linux CI's clippy rejects that.
 #[cfg(any(windows, target_os = "macos"))]
 #[derive(Debug, Clone, Copy)]
