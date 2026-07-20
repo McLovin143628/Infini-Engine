@@ -10,14 +10,23 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 
+import type { LayoutSummary } from "../bindings/LayoutSummary";
 import type { ViewportDrop } from "../bindings/ViewportDrop";
 import type { ViewportRect } from "../bindings/ViewportRect";
 
-export type { ViewportDrop, ViewportRect };
+export type { LayoutSummary, ViewportDrop, ViewportRect };
 
 export const app = {
   /** Editor backend version, shown in the status bar. */
   version: (): Promise<string> => invoke<string>("app_version"),
+};
+
+/** Named dock-layout presets, persisted in the app config dir (P1.2.5). */
+export const layouts = {
+  save: (name: string, json: string): Promise<void> => invoke("layout_save", { name, json }),
+  load: (name: string): Promise<string | null> => invoke("layout_load", { name }),
+  list: (): Promise<LayoutSummary[]> => invoke("layout_list"),
+  delete: (name: string): Promise<boolean> => invoke("layout_delete", { name }),
 };
 
 export const viewport = {

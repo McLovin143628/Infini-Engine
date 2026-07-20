@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use inf_editor_core::ipc::{ViewportDrop, ViewportRect};
+use inf_editor_core::ipc::{LayoutSummary, LogLine, ViewportDrop, ViewportRect};
 use ts_rs::{Config, TS};
 
 #[test]
@@ -18,4 +18,6 @@ fn export_bindings() {
     // export_all also exports each root's transitive dependencies.
     ViewportRect::export_all(&cfg).expect("export ViewportRect");
     ViewportDrop::export_all(&cfg).expect("export ViewportDrop");
+    LogLine::export_all(&cfg).expect("export LogLine");
+    LayoutSummary::export_all(&cfg).expect("export LayoutSummary");
 }

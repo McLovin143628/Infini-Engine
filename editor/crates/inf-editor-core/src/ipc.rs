@@ -31,3 +31,37 @@ pub struct ViewportDrop {
     /// Opaque payload (Phase 4 makes this an asset reference).
     pub payload: String,
 }
+
+/// Log severity for the Output Log panel. Mirrors `tracing::Level`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+/// One structured line on the `log://line` event channel (Output Log panel).
+/// Produced by the studio's tracing subscriber layer; `seq` is a per-session
+/// monotonic counter so the frontend can detect dropped lines and keep a
+/// stable virtual-list identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct LogLine {
+    pub seq: u64,
+    pub level: LogLevel,
+    /// tracing target (module path), e.g. `inf_render::surface`.
+    pub target: String,
+    pub message: String,
+    /// Unix epoch milliseconds (f64 for lossless JS interop).
+    pub timestamp_ms: f64,
+}
+
+/// A saved dock-layout preset (`layout_list` command).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct LayoutSummary {
+    pub name: String,
+    /// Last-modified time, unix epoch milliseconds.
+    pub modified_ms: f64,
+}

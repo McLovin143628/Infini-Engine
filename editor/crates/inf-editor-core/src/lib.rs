@@ -3,4 +3,5 @@
 //! the shared editor↔frontend IPC types ([`ipc`]).
 
 pub mod ipc;
+pub mod layouts;
 pub mod pie;

@@ -75,6 +75,8 @@ libloading = "0.8"
 bincode = { version = "2", features = ["serde"] }
 # ── editor↔frontend shared types → committed TS bindings (CI drift-checked) ──
 ts-rs = "12"
+# test-only (dev-dependencies in member crates)
+tempfile = "3"
 
 # intra-workspace crates
 inf-core = { path = "crates/inf-core" }

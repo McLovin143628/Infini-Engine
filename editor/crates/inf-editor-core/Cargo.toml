@@ -13,3 +13,6 @@ inf-runtime = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 ts-rs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
