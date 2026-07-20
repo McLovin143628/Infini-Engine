@@ -7,4 +7,15 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Plugins depend on this crate with `default-features = false` (guest + abi
+# only); the editor/runtime keep the default `host` feature for the loader.
+default = ["host"]
+host = ["dep:libloading"]
+
 [dependencies]
+libloading = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+xxhash-rust = { workspace = true }

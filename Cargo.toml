@@ -22,6 +22,8 @@ members = [
     "crates/inf-blueprint",
     "crates/inf-transpile",
     "crates/inf-hotreload",
+    "crates/inf-hotreload/test-plugins/v1",
+    "crates/inf-hotreload/test-plugins/v2",
     "crates/inf-runtime",
     "editor/crates/inf-editor-core",
     "editor/crates/inf-viewport",
@@ -67,6 +69,10 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 prettyplease = "0.2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 proptest = "1"
+# ── hot reload (Spike C) ──
+libloading = "0.8"
+# ── cooked snapshots / PIE protocol (Spike D) ──
+bincode = { version = "2", features = ["serde"] }
 
 # intra-workspace crates
 inf-core = { path = "crates/inf-core" }
@@ -89,7 +95,9 @@ inf-input = { path = "crates/inf-input" }
 inf-graph = { path = "crates/inf-graph" }
 inf-blueprint = { path = "crates/inf-blueprint" }
 inf-transpile = { path = "crates/inf-transpile" }
-inf-hotreload = { path = "crates/inf-hotreload" }
+# default-features off so plugin cdylibs get guest+abi only; host consumers
+# (editor, runtime) add `features = ["host"]`.
+inf-hotreload = { path = "crates/inf-hotreload", default-features = false }
 inf-runtime = { path = "crates/inf-runtime" }
 inf-editor-core = { path = "editor/crates/inf-editor-core" }
 inf-viewport = { path = "editor/crates/inf-viewport" }

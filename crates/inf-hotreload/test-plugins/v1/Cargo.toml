@@ -1,0 +1,16 @@
+[package]
+name = "inf-hotreload-test-plugin-v1"
+description = "Spike C test fixture: version 1 of a hot-reloadable game-logic plugin."
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+inf-hotreload = { workspace = true, default-features = false }
+serde = { workspace = true }

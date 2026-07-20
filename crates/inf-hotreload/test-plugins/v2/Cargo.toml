@@ -1,0 +1,16 @@
+[package]
+name = "inf-hotreload-test-plugin-v2"
+description = "Spike C test fixture: version 2 — migrated counter schema, fixed fragile."
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+inf-hotreload = { workspace = true, default-features = false }
+serde = { workspace = true }

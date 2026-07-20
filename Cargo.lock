@@ -1637,6 +1637,29 @@ version = "0.1.0"
 [[package]]
 name = "inf-hotreload"
 version = "0.1.0"
+dependencies = [
+ "libloading 0.8.9",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "inf-hotreload-test-plugin-v1"
+version = "0.1.0"
+dependencies = [
+ "inf-hotreload",
+ "serde",
+]
+
+[[package]]
+name = "inf-hotreload-test-plugin-v2"
+version = "0.1.0"
+dependencies = [
+ "inf-hotreload",
+ "serde",
+]
 
 [[package]]
 name = "inf-input"
