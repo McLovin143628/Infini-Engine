@@ -1,0 +1,29 @@
+{
+  "id": "infinity-dark",
+  "name": "Infinity Dark",
+  "type": "dark",
+  "colors": {
+    "bg-0": "#0d0f12",
+    "bg-1": "#14171c",
+    "bg-2": "#1b1f26",
+    "bg-3": "#242933",
+    "border": "#2c313b",
+    "border-strong": "#3a404d",
+    "text": "#d5d9e0",
+    "text-dim": "#8a919e",
+    "text-faint": "#5c6370",
+    "text-onaccent": "#ffffff",
+    "accent": "#3d8bff",
+    "accent-hover": "#5c9dff",
+    "accent-muted": "rgba(61, 139, 255, 0.16)",
+    "selection": "rgba(61, 139, 255, 0.22)",
+    "focus": "#3d8bff",
+    "success": "#4cc38a",
+    "warning": "#e5a13c",
+    "error": "#e5534b",
+    "info": "#58a6ff",
+    "shadow": "rgba(0, 0, 0, 0.55)",
+    "scrollbar": "#2c313b",
+    "scrollbar-hover": "#3a404d"
+  }
+}

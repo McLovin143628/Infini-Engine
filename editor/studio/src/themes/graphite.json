@@ -1,0 +1,29 @@
+{
+  "id": "graphite",
+  "name": "Graphite",
+  "type": "dark",
+  "colors": {
+    "bg-0": "#111113",
+    "bg-1": "#18181b",
+    "bg-2": "#1f1f23",
+    "bg-3": "#28282e",
+    "border": "#303036",
+    "border-strong": "#3e3e46",
+    "text": "#d6d6da",
+    "text-dim": "#8f8f98",
+    "text-faint": "#60606a",
+    "text-onaccent": "#ffffff",
+    "accent": "#b0b4ff",
+    "accent-hover": "#c4c7ff",
+    "accent-muted": "rgba(176, 180, 255, 0.14)",
+    "selection": "rgba(176, 180, 255, 0.20)",
+    "focus": "#b0b4ff",
+    "success": "#53ca8d",
+    "warning": "#dfa243",
+    "error": "#e0574f",
+    "info": "#8ab8ff",
+    "shadow": "rgba(0, 0, 0, 0.6)",
+    "scrollbar": "#303036",
+    "scrollbar-hover": "#3e3e46"
+  }
+}

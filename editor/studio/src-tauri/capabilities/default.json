@@ -1,7 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Minimal capability set for the main Studio window. All privileged operations route through audited #[tauri::command] modules, never raw plugin permissions.",
+  "description": "Minimal capability set for the main Studio window. All privileged operations route through audited #[tauri::command] modules, never raw plugin permissions. The core:window allowances exist solely for the custom chrome (decorations off — see P1.1).",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen"
+  ]
 }

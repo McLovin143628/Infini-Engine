@@ -1,0 +1,29 @@
+{
+  "id": "infinity-light",
+  "name": "Infinity Light",
+  "type": "light",
+  "colors": {
+    "bg-0": "#e4e7eb",
+    "bg-1": "#f4f6f8",
+    "bg-2": "#ffffff",
+    "bg-3": "#e9edf2",
+    "border": "#d0d5dd",
+    "border-strong": "#b4bcc8",
+    "text": "#1f242c",
+    "text-dim": "#5c6675",
+    "text-faint": "#8b95a5",
+    "text-onaccent": "#ffffff",
+    "accent": "#1f6fe0",
+    "accent-hover": "#3d84ec",
+    "accent-muted": "rgba(31, 111, 224, 0.12)",
+    "selection": "rgba(31, 111, 224, 0.18)",
+    "focus": "#1f6fe0",
+    "success": "#1a8a56",
+    "warning": "#b87514",
+    "error": "#cc352c",
+    "info": "#1f6fe0",
+    "shadow": "rgba(16, 24, 40, 0.18)",
+    "scrollbar": "#c9cfd8",
+    "scrollbar-hover": "#aeb6c2"
+  }
+}

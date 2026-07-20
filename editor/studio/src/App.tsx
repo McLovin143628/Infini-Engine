@@ -1,138 +1,36 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { app, viewport } from "./lib/ipc";
-import ViewportPanel from "./viewport/ViewportPanel";
-
 /**
- * Placeholder shell proving the stack end-to-end (React ⇄ typed IPC ⇄ Rust).
- * Phase 1 replaces this with the real docking workspace, menu system, and
- * theme engine — see docs/ROADMAP.md §6 P1. The splitter and the draggable
- * outliner chip exist to exercise Spike A exit criteria (resize smoothness,
- * drag-drop coordinate handoff over the native hole).
+ * Infinity Engine shell (Phase 1). Vertical composition per ROADMAP §4:
+ * custom title bar (chrome + UE-parity menus) → main toolbar → workspace
+ * (docking arrives with P1.2) → status bar.
  */
+import { useEffect } from "react";
+import TitleBar from "./shell/TitleBar";
+import MainToolbar from "./shell/MainToolbar";
+import StatusBar from "./shell/StatusBar";
+import PlaceholderWorkspace from "./shell/PlaceholderWorkspace";
+import { bootstrapShellCommands } from "./shell/shellCommands";
+
+bootstrapShellCommands();
+
 export default function App() {
-  const [version, setVersion] = useState<string>("…");
-  const [rightWidth, setRightWidth] = useState(288);
-  const [dragGhost, setDragGhost] = useState<{ x: number; y: number } | null>(null);
-  const splitDrag = useRef(false);
-
   useEffect(() => {
-    app.version().then(setVersion).catch(() => setVersion("dev"));
-  }, []);
-
-  // ── splitter between viewport and the right panel stack ──
-  const onSplitterDown = useCallback((e: React.PointerEvent) => {
-    splitDrag.current = true;
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  }, []);
-  const onSplitterMove = useCallback((e: React.PointerEvent) => {
-    if (!splitDrag.current) return;
-    const width = document.documentElement.clientWidth - e.clientX;
-    setRightWidth(Math.min(640, Math.max(160, width)));
-  }, []);
-  const onSplitterUp = useCallback(() => {
-    splitDrag.current = false;
-  }, []);
-
-  // ── drag-drop handoff stub: drag the chip onto the native viewport ──
-  // The webview keeps mouse capture during a pointer drag, so pointermove
-  // keeps firing even over the native child window; the HTML ghost, however,
-  // is invisible over the hole (airspace rule) — that's expected.
-  const onChipDown = useCallback((e: React.PointerEvent) => {
-    e.preventDefault();
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    setDragGhost({ x: e.clientX, y: e.clientY });
-  }, []);
-  const onChipMove = useCallback((e: React.PointerEvent) => {
-    setDragGhost((g) => (g ? { x: e.clientX, y: e.clientY } : g));
-  }, []);
-  const onChipUp = useCallback((e: React.PointerEvent) => {
-    setDragGhost(null);
-    const hole = document.querySelector("[data-viewport-hole]");
-    if (!hole) return;
-    const r = hole.getBoundingClientRect();
-    if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) {
-      return;
-    }
-    const s = window.devicePixelRatio;
-    viewport
-      .drop({ x: (e.clientX - r.left) * s, y: (e.clientY - r.top) * s, payload: "TestActor" })
-      .catch((err) => console.error("viewport drop failed:", err));
+    // Suppress the browser context menu everywhere except text inputs —
+    // panels provide their own context menus (P1.2+).
+    const onContextMenu = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (t.closest("input, textarea, [contenteditable]")) return;
+      e.preventDefault();
+    };
+    window.addEventListener("contextmenu", onContextMenu);
+    return () => window.removeEventListener("contextmenu", onContextMenu);
   }, []);
 
   return (
     <div className="flex h-full flex-col">
-      {/* Menu bar */}
-      <div className="flex h-8 items-center gap-1 border-b border-(--ink-border) bg-(--ink-bg-2) px-2">
-        <span className="mr-2 font-semibold text-(--ink-accent)">∞</span>
-        {["File", "Edit", "Window", "Tools", "Build", "Platforms", "Select", "Actor", "Help"].map(
-          (m) => (
-            <button
-              key={m}
-              className="rounded px-2 py-0.5 hover:bg-(--ink-bg-3)"
-            >
-              {m}
-            </button>
-          ),
-        )}
-        <span className="ml-auto text-(--ink-text-dim)">Infinity Engine</span>
-      </div>
-
-      {/* Main area */}
-      <div className="flex min-h-0 flex-1">
-        {/* The native wgpu child window mirrors this element's rectangle. */}
-        <div className="m-1 mr-0 flex min-w-0 flex-1">
-          <ViewportPanel />
-        </div>
-
-        {/* Splitter */}
-        <div
-          className="my-1 w-1.5 shrink-0 cursor-col-resize rounded hover:bg-(--ink-accent)"
-          onPointerDown={onSplitterDown}
-          onPointerMove={onSplitterMove}
-          onPointerUp={onSplitterUp}
-        />
-
-        {/* Right stack: Outliner over Details */}
-        <div className="m-1 ml-0 flex shrink-0 flex-col gap-1" style={{ width: rightWidth }}>
-          <div className="flex-1 rounded border border-(--ink-border) bg-(--ink-bg-1)">
-            <div className="border-b border-(--ink-border) bg-(--ink-bg-2) px-2 py-1">Outliner</div>
-            <div className="p-2">
-              <div
-                className="inline-flex cursor-grab touch-none select-none items-center gap-1 rounded border border-(--ink-border) bg-(--ink-bg-2) px-2 py-0.5 hover:border-(--ink-accent)"
-                onPointerDown={onChipDown}
-                onPointerMove={onChipMove}
-                onPointerUp={onChipUp}
-              >
-                <span className="text-(--ink-accent)">⬢</span> TestActor
-              </div>
-              <div className="mt-2 text-(--ink-text-dim)">
-                Drag the actor into the viewport (drop handoff stub)
-              </div>
-            </div>
-          </div>
-          <div className="flex-1 rounded border border-(--ink-border) bg-(--ink-bg-1)">
-            <div className="border-b border-(--ink-border) bg-(--ink-bg-2) px-2 py-1">Details</div>
-            <div className="p-2 text-(--ink-text-dim)">Select an object to view details</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Drag ghost — dies over the native hole by design (airspace rule). */}
-      {dragGhost && (
-        <div
-          className="pointer-events-none fixed z-50 rounded border border-(--ink-accent) bg-(--ink-bg-2) px-2 py-0.5 opacity-80"
-          style={{ left: dragGhost.x + 10, top: dragGhost.y + 6 }}
-        >
-          ⬢ TestActor
-        </div>
-      )}
-
-      {/* Status bar */}
-      <div className="flex h-7 items-center gap-4 border-t border-(--ink-border) bg-(--ink-bg-2) px-3 text-(--ink-text-dim)">
-        <button className="hover:text-(--ink-text)">Content Drawer</button>
-        <button className="hover:text-(--ink-text)">Output Log</button>
-        <span className="ml-auto">Infinity Engine v{version}</span>
-      </div>
+      <TitleBar />
+      <MainToolbar />
+      <PlaceholderWorkspace />
+      <StatusBar />
     </div>
   );
 }

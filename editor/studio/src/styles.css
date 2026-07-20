@@ -1,15 +1,32 @@
 @import "tailwindcss";
 
-/* ── Infinity Engine design tokens (Phase 1 will grow this into the theme system) ── */
+/* ── Infinity Engine design tokens ──────────────────────────────────────
+   These :root values are the compiled-in fallback (= Infinity Dark).
+   The runtime source of truth is lib/theme.ts, which writes every
+   `--ink-*` variable from the active JSON theme (src/themes/*.json). */
 :root {
   --ink-bg-0: #0d0f12; /* deepest: viewport gutter, drawers */
   --ink-bg-1: #14171c; /* panel background */
-  --ink-bg-2: #1b1f26; /* raised: headers, toolbars */
-  --ink-bg-3: #242933; /* hover / active surfaces */
+  --ink-bg-2: #1b1f26; /* raised: headers, toolbars, title bar */
+  --ink-bg-3: #242933; /* hover / active surfaces, inputs */
   --ink-border: #2c313b;
+  --ink-border-strong: #3a404d;
   --ink-text: #d5d9e0;
   --ink-text-dim: #8a919e;
-  --ink-accent: #3d8bff; /* single accent hue */
+  --ink-text-faint: #5c6370;
+  --ink-text-onaccent: #ffffff;
+  --ink-accent: #3d8bff; /* the single accent hue */
+  --ink-accent-hover: #5c9dff;
+  --ink-accent-muted: rgba(61, 139, 255, 0.16);
+  --ink-selection: rgba(61, 139, 255, 0.22);
+  --ink-focus: #3d8bff;
+  --ink-success: #4cc38a;
+  --ink-warning: #e5a13c;
+  --ink-error: #e5534b;
+  --ink-info: #58a6ff;
+  --ink-shadow: rgba(0, 0, 0, 0.55);
+  --ink-scrollbar: #2c313b;
+  --ink-scrollbar-hover: #3a404d;
 }
 
 html,
@@ -23,4 +40,34 @@ body,
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
   font-size: 13px;
   user-select: none;
+}
+
+/* Slim, theme-aware scrollbars everywhere. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ink-scrollbar) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--ink-scrollbar);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-scrollbar-hover);
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Keyboard-visible focus ring; pointer clicks stay chrome-free. */
+:focus-visible {
+  outline: 1.5px solid var(--ink-focus);
+  outline-offset: -1.5px;
+}
+
+::selection {
+  background: var(--ink-selection);
 }
