@@ -287,15 +287,26 @@ proptests green; memos A–D committed.
 **Done when:** dark-theme shell with dockable Outliner/Details/Content-Drawer/Viewport/Output-Log
 placeholder panels, persisted layouts, detachable windows, command palette — demo-recordable.
 
-- **P1.1 Shell chrome** — 1. custom window chrome (decorations off, min/max/close, drag
+> **Status: COMPLETE (2026-07-19).** All four sub-phases shipped and verified
+> live on Windows (screenshots of shell boot, Content Drawer push-up with
+> native-viewport resize, docked Output Log streaming real tracing output,
+> command palette over a hidden viewport, layout persistence across restart).
+> Notable decisions along the way: the Content Drawer *pushes the workspace
+> up* instead of overlaying it, and shell overlays (menus, palette, dialogs,
+> drag ghost) hide the native viewport via a refcounted `viewport_set_visible`
+> guard — both consequences of the airspace rule; P2.1 explores flash-free
+> alternatives (window-region cutouts / last-frame freeze). Human-only
+> remainder: the phase demo recording.
+
+- **P1.1 Shell chrome** *(done)* — 1. custom window chrome (decorations off, min/max/close, drag
   regions); 2. menu bar with full UE-parity menu tree (actions stubbed but enumerated);
   3. main toolbar + status bar; 4. theme system port (JSON themes → CSS variables, dark default).
-- **P1.2 Docking system port** — 1. port GeoCanvas dock core (workspace/group/region/splitter);
+- **P1.2 Docking system port** *(done)* — 1. port GeoCanvas dock core (workspace/group/region/splitter);
   2. drag layer + drop targets + tab strips; 3. floating panels; 4. detachable native windows
   with IPC store bridge; 5. layout persistence + named layout presets.
-- **P1.3 IPC backbone** — 1. typed `ipc.ts` + command registry convention; 2. namespaced event
+- **P1.3 IPC backbone** *(done)* — 1. typed `ipc.ts` + command registry convention; 2. namespaced event
   helpers; 3. zustand store architecture; 4. ts-rs pipeline wired to real shared types.
-- **P1.4 Core panels (placeholder data)** — 1. Outliner tree w/ search + type column; 2. Details
+- **P1.4 Core panels (placeholder data)** *(done)* — 1. Outliner tree w/ search + type column; 2. Details
   panel w/ property-row primitives; 3. Content Drawer slide-up shell (tree + grid + filters);
   4. Output Log (tracing subscriber → `log://` events, severity filters, ANSI); 5. command
   palette + keybinding registry.
