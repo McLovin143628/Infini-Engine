@@ -8,3 +8,13 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+inf-blueprint = { workspace = true }
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+prettyplease = { workspace = true }
+xxhash-rust = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
