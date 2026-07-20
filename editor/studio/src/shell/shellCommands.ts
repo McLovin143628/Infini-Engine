@@ -69,6 +69,14 @@ export function bootstrapShellCommands(): void {
   setCommandHandler("window.worldSettings", panelToggle("worldSettings"));
   setCommandHandler("window.placeActors", panelToggle("placeActors"));
 
+  // Command palette + Content Drawer (P1.4).
+  setCommandHandler("tools.commandPalette", () => {
+    useShellStore.getState().setPaletteOpen(true);
+  });
+  setCommandHandler("window.contentDrawer", () => {
+    useShellStore.getState().toggleDrawer();
+  });
+
   // Layout persistence (P1.2.5).
   setCommandHandler("window.layout.default", () => {
     useDockLayout.getState().resetLayout();

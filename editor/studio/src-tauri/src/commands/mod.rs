@@ -17,6 +17,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         layout::layout_delete,
         viewport::viewport_attach,
         viewport::viewport_set_rect,
+        viewport::viewport_set_visible,
         viewport::viewport_drop,
     ]
 }

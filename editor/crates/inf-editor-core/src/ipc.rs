@@ -49,6 +49,8 @@ pub enum LogLevel {
 /// stable virtual-list identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct LogLine {
+    /// Exported as `number`: session-lifetime counts stay far below 2^53.
+    #[ts(type = "number")]
     pub seq: u64,
     pub level: LogLevel,
     /// tracing target (module path), e.g. `inf_render::surface`.

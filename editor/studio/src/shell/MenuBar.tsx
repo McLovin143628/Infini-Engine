@@ -9,10 +9,14 @@ import { ChevronRight } from "lucide-react";
 import { executeCommand } from "../lib/commands";
 import type { MenuNode, TopMenu } from "../lib/menus";
 import { MENU_BAR } from "../lib/menus";
+import { useViewportOverlay } from "../lib/viewportOverlay";
 
 export default function MenuBar() {
   const [openId, setOpenId] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // Dropdowns extend over the native viewport hole — hide it while open.
+  useViewportOverlay(openId !== null);
 
   const close = useCallback(() => setOpenId(null), []);
 

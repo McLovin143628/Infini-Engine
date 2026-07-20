@@ -38,6 +38,11 @@ export const viewport = {
    */
   setRect: (rect: ViewportRect): Promise<void> => invoke("viewport_set_rect", { rect }),
   /**
+   * Show/hide the native viewport (the shell hides it while an HTML overlay
+   * — menu, palette, dialog, drag ghost — is open; airspace rule).
+   */
+  setVisible: (visible: boolean): Promise<void> => invoke("viewport_set_visible", { visible }),
+  /**
    * Hand off a drag that ended over the viewport hole. Coordinates are
    * PHYSICAL pixels relative to the hole's top-left corner (HTML drag ghosts
    * die over the native window — the drop point crosses via IPC instead).

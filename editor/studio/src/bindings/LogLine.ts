@@ -7,7 +7,11 @@ import type { LogLevel } from "./LogLevel";
  * monotonic counter so the frontend can detect dropped lines and keep a
  * stable virtual-list identity.
  */
-export type LogLine = { seq: bigint, level: LogLevel, 
+export type LogLine = { 
+/**
+ * Exported as `number`: session-lifetime counts stay far below 2^53.
+ */
+seq: number, level: LogLevel, 
 /**
  * tracing target (module path), e.g. `inf_render::surface`.
  */

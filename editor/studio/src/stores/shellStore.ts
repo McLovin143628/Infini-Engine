@@ -14,10 +14,17 @@ interface ShellState {
   statusMessage: string | null;
   /** Which layout dialog is open (Window ▸ Save/Load Layout). */
   layoutDialog: LayoutDialogKind;
+  /** Content Drawer slide-up (P1.4.3). */
+  drawerOpen: boolean;
+  /** Command palette overlay (P1.4.5). */
+  paletteOpen: boolean;
   pushStatus: (message: string, ttlMs?: number) => void;
   clearStatus: () => void;
   openLayoutDialog: (kind: Exclude<LayoutDialogKind, null>) => void;
   closeLayoutDialog: () => void;
+  setDrawerOpen: (open: boolean) => void;
+  toggleDrawer: () => void;
+  setPaletteOpen: (open: boolean) => void;
 }
 
 let statusTimer: ReturnType<typeof setTimeout> | undefined;
@@ -25,6 +32,8 @@ let statusTimer: ReturnType<typeof setTimeout> | undefined;
 export const useShellStore = create<ShellState>((set) => ({
   statusMessage: null,
   layoutDialog: null,
+  drawerOpen: false,
+  paletteOpen: false,
   pushStatus: (message, ttlMs = 4000) => {
     set({ statusMessage: message });
     if (statusTimer !== undefined) clearTimeout(statusTimer);
@@ -36,6 +45,9 @@ export const useShellStore = create<ShellState>((set) => ({
   },
   openLayoutDialog: (kind) => set({ layoutDialog: kind }),
   closeLayoutDialog: () => set({ layoutDialog: null }),
+  setDrawerOpen: (drawerOpen) => set({ drawerOpen }),
+  toggleDrawer: () => set((s) => ({ drawerOpen: !s.drawerOpen })),
+  setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
 }));
 
 registerBridgedStore("shell", useShellStore);

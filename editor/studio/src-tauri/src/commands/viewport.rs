@@ -81,6 +81,22 @@ pub async fn viewport_set_rect(
     Ok(())
 }
 
+/// Show/hide the native viewport. The shell hides it while an HTML overlay
+/// (menu, command palette, dialog, drag ghost) is open — the native child
+/// otherwise draws OVER the webview (airspace rule) and occludes any
+/// overlay crossing the hole. P2.1 explores flash-free alternatives.
+#[tauri::command]
+pub async fn viewport_set_visible(
+    visible: bool,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        handle.set_visible(visible);
+    }
+    Ok(())
+}
+
 /// Hand off a drag that ended over the viewport hole ([`ViewportDrop`]:
 /// physical pixels relative to the hole's top-left corner). HTML drag ghosts
 /// die over the native window (airspace rule), so the drop point crosses via

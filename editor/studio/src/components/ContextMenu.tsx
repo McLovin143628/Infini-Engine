@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "../lib/utils";
+import { useViewportOverlay } from "../lib/viewportOverlay";
 
 /**
  * Minimal right-click context menu (no external UI dependency). Wrap a
@@ -29,6 +30,9 @@ export function ContextMenu({
   const [open, setOpen] = useState<{ x: number; y: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
+  // The menu can open over the native viewport hole — hide it while open.
+  useViewportOverlay(open !== null);
+
   useEffect(() => {
     if (!open) return;
     const close = () => setOpen(null);
@@ -48,13 +52,16 @@ export function ContextMenu({
     };
   }, [open]);
 
-  // Keep the menu inside the viewport (measure after first paint).
+  // Keep the menu inside the viewport (measure after first paint,
+  // imperative style write — no state round-trip).
   useEffect(() => {
-    if (!open || !menuRef.current) return;
-    const r = menuRef.current.getBoundingClientRect();
-    const nx = Math.min(open.x, window.innerWidth - r.width - 4);
-    const ny = Math.min(open.y, window.innerHeight - r.height - 4);
-    if (nx !== open.x || ny !== open.y) setOpen({ x: Math.max(0, nx), y: Math.max(0, ny) });
+    const el = menuRef.current;
+    if (!open || !el) return;
+    const r = el.getBoundingClientRect();
+    const nx = Math.max(0, Math.min(open.x, window.innerWidth - r.width - 4));
+    const ny = Math.max(0, Math.min(open.y, window.innerHeight - r.height - 4));
+    el.style.left = `${nx}px`;
+    el.style.top = `${ny}px`;
   }, [open]);
 
   const resolved = open ? (typeof items === "function" ? items() : items) : [];

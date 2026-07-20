@@ -7,12 +7,16 @@ import { Trash2, X } from "lucide-react";
 import type { LayoutSummary } from "../lib/ipc";
 import { layouts } from "../lib/ipc";
 import { ACTIVE_LAYOUT_NAME, loadLayoutPreset, saveLayoutPreset } from "../panels/dock/dockLayoutStore";
+import { useViewportOverlay } from "../lib/viewportOverlay";
 import { useShellStore } from "../stores/shellStore";
 
 export default function LayoutDialog() {
   const dialog = useShellStore((s) => s.layoutDialog);
   const close = useShellStore((s) => s.closeLayoutDialog);
   const pushStatus = useShellStore((s) => s.pushStatus);
+
+  // Modal dialogs overlay the native viewport hole — hide it while open.
+  useViewportOverlay(dialog !== null);
 
   useEffect(() => {
     if (!dialog) return;

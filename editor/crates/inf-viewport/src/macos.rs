@@ -29,6 +29,7 @@ use crate::{SurfaceTarget, ViewportRect};
 
 enum Cmd {
     SetRect(ViewportRect),
+    SetVisible(bool),
     Drop { x: f32, y: f32, payload: String },
     Destroy,
 }
@@ -43,6 +44,12 @@ impl ViewportHandle {
     /// the parent view — the same contract as Windows).
     pub fn set_rect(&self, rect: ViewportRect) {
         let _ = self.tx.send(Cmd::SetRect(rect));
+    }
+
+    /// Show/hide the layer (see the Windows twin for why: HTML overlays
+    /// crossing the hole are otherwise occluded by the native surface).
+    pub fn set_visible(&self, visible: bool) {
+        let _ = self.tx.send(Cmd::SetVisible(visible));
     }
 
     /// Drag-drop handoff (see the Windows twin for the contract).
@@ -149,6 +156,14 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>) {
         loop {
             match rx.try_recv() {
                 Ok(Cmd::SetRect(r)) => latest_rect = Some(r),
+                Ok(Cmd::SetVisible(v)) => unsafe {
+                    // SAFETY: layer_ptr holds a +1 retain until Destroy.
+                    let layer = &*(layer_ptr as *const CAMetalLayer);
+                    CATransaction::begin();
+                    CATransaction::setDisableActions(true);
+                    layer.setHidden(!v);
+                    CATransaction::commit();
+                },
                 Ok(Cmd::Drop { x, y, payload }) => {
                     tracing::info!(
                         "inf-viewport: drop '{payload}' at viewport-local ({x:.0}, {y:.0}) px"

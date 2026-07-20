@@ -1,4 +1,5 @@
 import { createPortal } from "react-dom";
+import { useViewportOverlay } from "../../lib/viewportOverlay";
 import { panelDefFor, panelTitle } from "../panelRegistry";
 import { useDockDrag } from "./dockDragStore";
 import { useDockLayout } from "./dockLayoutStore";
@@ -13,6 +14,8 @@ import { GHOST_H, GHOST_W } from "./dragController";
 export function DragLayer() {
   const dragging = useDockDrag((s) => s.dragging);
   const panel = useDockLayout((s) => (dragging ? s.layout.panels[dragging.panelId] : undefined));
+  // Ghost + previews cross the native viewport hole — hide it mid-gesture.
+  useViewportOverlay(dragging !== null);
   if (!dragging || !panel) return null;
 
   const def = panelDefFor(dragging.panelId);

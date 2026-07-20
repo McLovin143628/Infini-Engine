@@ -1,6 +1,9 @@
 import { useCallback, useState } from "react";
 import { Globe2, ListTree, PlusSquare, ScrollText, SlidersHorizontal } from "lucide-react";
 import { viewport } from "../lib/ipc";
+import DetailsPanel from "./DetailsPanel";
+import OutlinerPanel from "./OutlinerPanel";
+import OutputLogPanel from "./OutputLogPanel";
 import { registerPanelType } from "./panelRegistry";
 
 /**
@@ -8,9 +11,9 @@ import { registerPanelType } from "./panelRegistry";
  * `DockWorkspace` and `PanelWindowApp` BEFORE the first hydrate
  * (`repairLayout` drops unregistered types).
  *
- * Phase 1 ships placeholder bodies; P1.4 upgrades Outliner / Details /
- * Output Log to their real (still mock-data) implementations, and later
- * phases bind them to the engine.
+ * Outliner/Details/Output Log are the real P1.4 implementations on mock
+ * data; later phases bind them to the engine (P3 world, tracing already
+ * live for the log).
  */
 
 /** The Spike A drop-handoff demo chip, kept alive inside the Outliner
@@ -62,30 +65,14 @@ function TestActorChip() {
   );
 }
 
-function OutlinerPlaceholder() {
+/** Outliner body: the real tree (P1.4.1) + the Spike A demo chip footer. */
+function OutlinerBody() {
   return (
-    <div className="min-h-0 flex-1 overflow-auto p-2">
-      <TestActorChip />
-      <div className="mt-2 text-(--ink-text-dim)">
-        Drag the actor into the viewport (drop handoff stub). The real Outliner tree lands with
-        P1.4 / P3.2.
+    <div className="flex min-h-0 flex-1 flex-col">
+      <OutlinerPanel />
+      <div className="border-t border-(--ink-border) p-1.5">
+        <TestActorChip />
       </div>
-    </div>
-  );
-}
-
-function DetailsPlaceholder() {
-  return (
-    <div className="min-h-0 flex-1 overflow-auto p-2 text-(--ink-text-dim)">
-      Select an object to view details
-    </div>
-  );
-}
-
-function OutputLogPlaceholder() {
-  return (
-    <div className="min-h-0 flex-1 overflow-auto p-2 font-mono text-xs text-(--ink-text-dim)">
-      Output Log — tracing stream lands with P1.4.
     </div>
   );
 }
@@ -110,7 +97,7 @@ registerPanelType({
   type: "outliner",
   title: () => "Outliner",
   icon: ListTree,
-  component: OutlinerPlaceholder,
+  component: OutlinerBody,
   singleton: true,
   defaultLocation: "right",
   defaultSize: { w: 320, h: 420 },
@@ -120,7 +107,7 @@ registerPanelType({
   type: "details",
   title: () => "Details",
   icon: SlidersHorizontal,
-  component: DetailsPlaceholder,
+  component: DetailsPanel,
   singleton: true,
   defaultLocation: "right",
   defaultSize: { w: 320, h: 480 },
@@ -130,7 +117,7 @@ registerPanelType({
   type: "outputLog",
   title: () => "Output Log",
   icon: ScrollText,
-  component: OutputLogPlaceholder,
+  component: OutputLogPanel,
   singleton: true,
   defaultLocation: "bottom",
   defaultSize: { w: 720, h: 260 },

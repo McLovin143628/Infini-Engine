@@ -7,18 +7,27 @@
 //! channels (`log://line`, `viewport://rect`, `assets://changed/{id}`, …).
 
 mod commands;
+mod logging;
+
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    // Console output + the Output Log bridge share one EnvFilter; events
+    // fired before the webview exists buffer inside the bridge layer.
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
+        .with(tracing_subscriber::fmt::layer())
+        .with(logging::LogBridgeLayer)
         .init();
 
     tauri::Builder::default()
         .manage(commands::ViewportState::default())
         .invoke_handler(commands::invoke_handler())
-        .setup(|_app| {
+        .setup(|app| {
+            logging::attach_app(app.handle().clone());
             tracing::info!("Infinity Engine starting");
             Ok(())
         })

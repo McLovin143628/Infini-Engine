@@ -23,9 +23,10 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, PeekMessageW, RegisterClassW,
-    SetCursorPos, SetWindowPos, ShowCursor, TranslateMessage, HWND_TOP, MSG, PM_REMOVE,
-    SWP_NOACTIVATE, SWP_NOZORDER, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_ERASEBKGND, WM_INPUT,
-    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    SetCursorPos, SetWindowPos, ShowCursor, ShowWindow, TranslateMessage, HWND_TOP, MSG, PM_REMOVE,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CAPTURECHANGED,
+    WM_ERASEBKGND, WM_INPUT, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDCLASSW, WS_CHILD,
+    WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
 use crate::render::{Camera, Renderer};
@@ -33,6 +34,7 @@ use crate::{SurfaceTarget, ViewportRect};
 
 enum Cmd {
     SetRect(ViewportRect),
+    SetVisible(bool),
     Drop { x: f32, y: f32, payload: String },
     Destroy,
 }
@@ -46,6 +48,15 @@ impl ViewportHandle {
     /// Move/resize the child window (physical pixels, parent-client-relative).
     pub fn set_rect(&self, rect: ViewportRect) {
         let _ = self.tx.send(Cmd::SetRect(rect));
+    }
+
+    /// Show/hide the child window. The shell hides the viewport while an
+    /// HTML overlay (menu, palette, dialog, drag ghost) is open — the native
+    /// window otherwise draws OVER the webview (airspace rule), occluding
+    /// any overlay that crosses the hole. P2.1 explores flash-free
+    /// alternatives (window-region cutouts / last-frame freeze).
+    pub fn set_visible(&self, visible: bool) {
+        let _ = self.tx.send(Cmd::SetVisible(visible));
     }
 
     /// Hand off a drag-drop that ended over the viewport hole (Spike A stub:
@@ -282,6 +293,10 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>) {
         loop {
             match rx.try_recv() {
                 Ok(Cmd::SetRect(r)) => latest_rect = Some(r),
+                Ok(Cmd::SetVisible(v)) => unsafe {
+                    // SW_SHOWNA: show without stealing focus from the webview.
+                    let _ = ShowWindow(hwnd, if v { SW_SHOWNA } else { SW_HIDE });
+                },
                 Ok(Cmd::Drop { x, y, payload }) => {
                     // Spike A handoff stub: Phase 3 turns this into a pick
                     // ray + actor spawn. Logging proves the coordinate path.
