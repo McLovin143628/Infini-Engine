@@ -37,7 +37,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::camera::{Bookmarks, EditorCamera, FlyInput, NavInput, NavMode};
 use crate::host::EngineHost;
-use crate::{KeyChord, SurfaceTarget, ViewportEvent, ViewportEventSink, ViewportRect};
+use crate::{KeyChord, SharedScene, SurfaceTarget, ViewportEvent, ViewportEventSink, ViewportRect};
 use inf_render::GizmoMode;
 
 enum Cmd {
@@ -87,11 +87,11 @@ impl ViewportHandle {
 /// Spawn the viewport thread: creates a `WS_CHILD` window parented to
 /// `parent_hwnd`, brings up the engine on it, and renders until destroyed.
 /// `sink` receives events the viewport surfaces back (forwarded key chords).
-pub fn spawn(parent_hwnd: isize, sink: ViewportEventSink) -> ViewportHandle {
+pub fn spawn(parent_hwnd: isize, sink: ViewportEventSink, scene: SharedScene) -> ViewportHandle {
     let (tx, rx) = channel();
     std::thread::Builder::new()
         .name("inf-viewport".into())
-        .spawn(move || thread_main(parent_hwnd, rx, sink))
+        .spawn(move || thread_main(parent_hwnd, rx, sink, scene))
         .expect("failed to spawn inf-viewport thread");
     ViewportHandle { tx }
 }
@@ -518,7 +518,7 @@ fn drain_input() -> FrameInput {
     })
 }
 
-fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink) {
+fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, scene: SharedScene) {
     let hwnd = match create_child_window(parent_hwnd) {
         Ok(h) => h,
         Err(e) => {
@@ -634,37 +634,73 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink) {
             }
         }
 
-        // Selection + gizmo interaction (plain LMB).
-        if let Some((x, y, ctrl)) = input.left_press {
-            let (px, py) = (x.max(0) as u32, y.max(0) as u32);
-            // A handle under the cursor starts a drag; otherwise select.
-            if !host.try_begin_gizmo(&camera, px, py) {
-                host.select_at(&camera, px, py, ctrl);
-            }
-        }
-        if input.left_down && host.is_dragging_gizmo() {
-            let (x, y) = input.cursor;
-            // Shift-drag snaps (1 m / 15° / 0.1 ratio).
-            let snap = if key_down(0x10) {
-                match host.gizmo_mode {
-                    GizmoMode::Translate => 1.0,
-                    GizmoMode::Rotate => 15f32.to_radians(),
-                    GizmoMode::Scale => 0.1,
+        // Project the shared world and run pointer interaction against it. The
+        // document is the single source of truth: a pick updates its selection,
+        // a gizmo drag writes transforms back as one undo entry, and both
+        // signal Ring 2 (WorldChanged) so the Outliner/Details re-sync. The
+        // lock is held only for this short section, never across the render.
+        let mut world_changed = false;
+        if let Ok(mut doc) = scene.lock() {
+            host.sync_from_doc(&doc);
+
+            // Plain LMB: a handle under the cursor begins a gizmo drag (one
+            // undo transaction), otherwise it selects the picked entity.
+            if let Some((x, y, ctrl)) = input.left_press {
+                let (px, py) = (x.max(0) as u32, y.max(0) as u32);
+                if host.try_begin_gizmo(&camera, px, py) {
+                    doc.begin_transaction("Move");
+                } else {
+                    match host.pick_guid(&camera, px, py) {
+                        Some(guid) => {
+                            doc.select(&[guid], ctrl);
+                            world_changed = true;
+                        }
+                        None if !ctrl => {
+                            doc.clear_selection();
+                            world_changed = true;
+                        }
+                        None => {}
+                    }
+                    host.sync_from_doc(&doc); // reflect the new selection now
                 }
-            } else {
-                0.0
-            };
-            host.update_gizmo(&camera, x.max(0) as u32, y.max(0) as u32, snap);
-        }
-        if input.left_release {
-            host.end_gizmo();
-        }
-        // Hover highlight when idle (not dragging, not flying).
-        if input.cursor_moved && !input.left_down && input.capture == Capture::None {
-            let (x, y) = input.cursor;
-            if x >= 0 && y >= 0 {
-                host.set_hover(&camera, x as u32, y as u32);
             }
+
+            if input.left_down && host.is_dragging_gizmo() {
+                let (x, y) = input.cursor;
+                // Shift-drag snaps (1 m / 15° / 0.1 ratio).
+                let snap = if key_down(0x10) {
+                    match host.gizmo_mode {
+                        GizmoMode::Translate => 1.0,
+                        GizmoMode::Rotate => 15f32.to_radians(),
+                        GizmoMode::Scale => 0.1,
+                    }
+                } else {
+                    0.0
+                };
+                host.update_gizmo(&camera, x.max(0) as u32, y.max(0) as u32, snap);
+            }
+
+            if input.left_release {
+                if host.is_dragging_gizmo() {
+                    for (guid, transform) in host.selected_world_transforms() {
+                        doc.edit_set_transform(guid, transform);
+                    }
+                    doc.commit_transaction();
+                    world_changed = true;
+                }
+                host.end_gizmo();
+            }
+
+            // Hover highlight when idle (not dragging, not flying).
+            if input.cursor_moved && !input.left_down && input.capture == Capture::None {
+                let (x, y) = input.cursor;
+                if x >= 0 && y >= 0 {
+                    host.set_hover(&camera, x as u32, y as u32);
+                }
+            }
+        }
+        if world_changed {
+            sink(ViewportEvent::WorldChanged);
         }
 
         // A live navigation gesture cancels a focus animation.

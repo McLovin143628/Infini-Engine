@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use inf_editor_core::ipc::{DetailsDto, PropValueDto, SceneSnapshot, SpawnKind};
 use inf_editor_core::scene::{details, diff, serialize, SceneDoc};
-use tauri::{AppHandle, Emitter, Manager, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 /// Shared scene state: the document (also handed to the viewport thread) plus
@@ -61,9 +61,9 @@ fn lock(doc: &Arc<Mutex<SceneDoc>>) -> Result<std::sync::MutexGuard<'_, SceneDoc
 }
 
 /// Recompute the snapshot and emit the delta against the last emitted one.
-/// Called after every mutation (from commands and from the viewport thread via
-/// [`emit_world_delta`]).
-pub fn emit_world_delta(window: &Window, state: &SceneState) {
+/// Emits globally (`app.emit`) so it reaches the main webview whether the caller
+/// is a command or the viewport thread (a pick/gizmo edit, via the event sink).
+pub fn emit_world_delta(app: &AppHandle, state: &SceneState) {
     let next = match lock(&state.doc) {
         Ok(mut doc) => doc.snapshot(),
         Err(_) => return,
@@ -75,7 +75,7 @@ pub fn emit_world_delta(window: &Window, state: &SceneState) {
     };
     *last = Some(next);
     drop(last);
-    if let Err(e) = window.emit("world://delta", delta) {
+    if let Err(e) = app.emit("world://delta", delta) {
         tracing::warn!("world://delta emit failed: {e}");
     }
 }
@@ -116,7 +116,7 @@ pub async fn scene_details(state: State<'_, SceneState>) -> Result<DetailsDto, S
 
 #[tauri::command]
 pub async fn scene_create(
-    window: Window,
+    app: AppHandle,
     state: State<'_, SceneState>,
     kind: SpawnKind,
     parent: Option<String>,
@@ -128,38 +128,38 @@ pub async fn scene_create(
         doc.select(&[guid], false);
         guid
     };
-    emit_world_delta(&window, &state);
+    emit_world_delta(&app, &state);
     Ok(guid.to_string())
 }
 
 #[tauri::command]
 pub async fn scene_delete(
-    window: Window,
+    app: AppHandle,
     state: State<'_, SceneState>,
     guids: Vec<String>,
 ) -> Result<(), String> {
     lock(&state.doc)?.edit_delete(&parse_guids(&guids));
-    emit_world_delta(&window, &state);
+    emit_world_delta(&app, &state);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn scene_rename(
-    window: Window,
+    app: AppHandle,
     state: State<'_, SceneState>,
     guid: String,
     name: String,
 ) -> Result<(), String> {
     if let Ok(g) = Uuid::parse_str(&guid) {
         lock(&state.doc)?.edit_rename(g, &name);
-        emit_world_delta(&window, &state);
+        emit_world_delta(&app, &state);
     }
     Ok(())
 }
 
 #[tauri::command]
 pub async fn scene_reparent(
-    window: Window,
+    app: AppHandle,
     state: State<'_, SceneState>,
     guid: String,
     parent: Option<String>,
@@ -169,33 +169,33 @@ pub async fn scene_reparent(
     };
     let parent = parent.and_then(|s| Uuid::parse_str(&s).ok());
     let ok = lock(&state.doc)?.edit_reparent(g, parent);
-    emit_world_delta(&window, &state);
+    emit_world_delta(&app, &state);
     Ok(ok)
 }
 
 #[tauri::command]
 pub async fn scene_set_visible(
-    window: Window,
+    app: AppHandle,
     state: State<'_, SceneState>,
     guid: String,
     visible: bool,
 ) -> Result<(), String> {
     if let Ok(g) = Uuid::parse_str(&guid) {
         lock(&state.doc)?.edit_set_visible(g, visible);
-        emit_world_delta(&window, &state);
+        emit_world_delta(&app, &state);
     }
     Ok(())
 }
 
 #[tauri::command]
 pub async fn scene_select(
-    window: Window,
+    app: AppHandle,
     state: State<'_, SceneState>,
     guids: Vec<String>,
     additive: bool,
 ) -> Result<(), String> {
     lock(&state.doc)?.select(&parse_guids(&guids), additive);
-    emit_world_delta(&window, &state);
+    emit_world_delta(&app, &state);
     Ok(())
 }
 
@@ -204,7 +204,7 @@ pub async fn scene_select(
 /// Set one field on every selected object in a single undo transaction.
 #[tauri::command]
 pub async fn scene_set_property(
-    window: Window,
+    app: AppHandle,
     state: State<'_, SceneState>,
     guids: Vec<String>,
     type_path: String,
@@ -222,14 +222,14 @@ pub async fn scene_set_property(
         doc.commit_transaction();
         doc.details()
     };
-    emit_world_delta(&window, &state);
+    emit_world_delta(&app, &state);
     Ok(details)
 }
 
 /// Reset one field to its default on every selected object.
 #[tauri::command]
 pub async fn scene_reset_property(
-    window: Window,
+    app: AppHandle,
     state: State<'_, SceneState>,
     guids: Vec<String>,
     type_path: String,
@@ -245,23 +245,23 @@ pub async fn scene_reset_property(
         doc.commit_transaction();
         doc.details()
     };
-    emit_world_delta(&window, &state);
+    emit_world_delta(&app, &state);
     Ok(details)
 }
 
 // ── history ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn scene_undo(window: Window, state: State<'_, SceneState>) -> Result<(), String> {
+pub async fn scene_undo(app: AppHandle, state: State<'_, SceneState>) -> Result<(), String> {
     lock(&state.doc)?.undo();
-    emit_world_delta(&window, &state);
+    emit_world_delta(&app, &state);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn scene_redo(window: Window, state: State<'_, SceneState>) -> Result<(), String> {
+pub async fn scene_redo(app: AppHandle, state: State<'_, SceneState>) -> Result<(), String> {
     lock(&state.doc)?.redo();
-    emit_world_delta(&window, &state);
+    emit_world_delta(&app, &state);
     Ok(())
 }
 
@@ -286,7 +286,6 @@ fn resolve_path(app: &AppHandle, path: Option<String>) -> Result<std::path::Path
 #[tauri::command]
 pub async fn scene_save(
     app: AppHandle,
-    window: Window,
     state: State<'_, SceneState>,
     path: Option<String>,
 ) -> Result<(), String> {
@@ -300,14 +299,13 @@ pub async fn scene_save(
     if let Ok(dir) = data_dir(&app) {
         serialize::clear_recovery(&dir);
     }
-    emit_world_delta(&window, &state);
+    emit_world_delta(&app, &state);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn scene_open(
     app: AppHandle,
-    window: Window,
     state: State<'_, SceneState>,
     path: Option<String>,
 ) -> Result<SceneSnapshot, String> {
@@ -318,7 +316,7 @@ pub async fn scene_open(
         *doc = loaded;
         doc.snapshot()
     };
-    emit_world_delta(&window, &state);
+    emit_world_delta(&app, &state);
     Ok(snap)
 }
 
@@ -336,7 +334,7 @@ pub async fn scene_autosave(app: AppHandle, state: State<'_, SceneState>) -> Res
 
 #[tauri::command]
 pub async fn scene_new(
-    window: Window,
+    app: AppHandle,
     state: State<'_, SceneState>,
 ) -> Result<SceneSnapshot, String> {
     let snap = {
@@ -344,6 +342,6 @@ pub async fn scene_new(
         *doc = SceneDoc::new();
         doc.snapshot()
     };
-    emit_world_delta(&window, &state);
+    emit_world_delta(&app, &state);
     Ok(snap)
 }

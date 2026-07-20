@@ -13,11 +13,17 @@
 
 pub mod camera;
 
-#[cfg(any(windows, target_os = "macos"))]
-mod host;
+use std::sync::{Arc, Mutex};
+
+use inf_editor_core::scene::SceneDoc;
+
+/// The authoritative scene document, shared between the editor (Ring 2) and the
+/// viewport thread. The viewport renders + picks against it and writes gizmo
+/// edits back — one source of truth (P3.2).
+pub type SharedScene = Arc<Mutex<SceneDoc>>;
 
 #[cfg(any(windows, target_os = "macos"))]
-mod scene_demo;
+mod host;
 
 #[cfg(windows)]
 mod win32;
@@ -40,6 +46,9 @@ pub struct KeyChord {
 pub enum ViewportEvent {
     /// A global-shortcut key chord to replay into the webview (focus handoff).
     Key(KeyChord),
+    /// The viewport mutated the shared scene (a pick-select or a gizmo drag);
+    /// Ring 2 responds by emitting a `world://delta` so the panels re-sync.
+    WorldChanged,
 }
 
 /// Sink the host installs to receive [`ViewportEvent`]s. `Arc` so the render
@@ -124,7 +133,7 @@ pub use macos::{spawn, ViewportHandle};
 pub struct ViewportHandle;
 
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn spawn(_parent: isize, _sink: ViewportEventSink) -> ViewportHandle {
+pub fn spawn(_parent: isize, _sink: ViewportEventSink, _scene: SharedScene) -> ViewportHandle {
     tracing::warn!(
         "inf-viewport: native embedding not yet implemented on this OS (see ROADMAP §5 Spike A)"
     );

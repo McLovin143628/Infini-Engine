@@ -13,6 +13,12 @@ tracing = { workspace = true }
 # Camera controller is platform-neutral (headless-testable on any OS).
 inf-math = { workspace = true }
 glam = { workspace = true }
+# The shared scene document (Phase 3): the viewport renders + picks against the
+# same SceneDoc the editor edits — the single source of truth. Crosses the
+# spawn boundary on every platform, so it's a general (not target) dependency.
+inf-editor-core = { workspace = true }
+inf-ecs = { workspace = true }
+uuid = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 inf-render = { workspace = true }

@@ -2,12 +2,18 @@
 //! renderer), the render scene, and the floating origin. The per-OS modules
 //! (win32, macos) own the native window/layer + input and drive this.
 
+use std::collections::HashMap;
+
 use glam::{DVec3, Vec2, Vec3};
+use inf_ecs::components::{ComputedVisibility, GlobalTransform, Material, MeshRef};
+use inf_ecs::{Transform as EcsTransform, Vec3d};
+use inf_editor_core::scene::SceneDoc;
 use inf_math::FloatingOrigin;
 use inf_render::{
-    gizmo, EngineRenderer, GizmoDelta, GizmoDrag, GizmoMode, GpuContext, Picker, RenderScene,
-    RenderView, SurfaceChain,
+    gizmo, EngineRenderer, GizmoDelta, GizmoDrag, GizmoMode, GpuContext, MeshInstance, Picker,
+    RenderScene, RenderView, SurfaceChain,
 };
+use uuid::Uuid;
 
 use crate::camera::EditorCamera;
 use crate::SurfaceTarget;
@@ -27,6 +33,12 @@ pub struct EngineHost {
     pub gizmo_mode: GizmoMode,
     gizmo_drag: Option<GizmoDrag>,
     fov_y: f32,
+    /// Render-instance id → entity GUID, rebuilt each projection (P3.2). Lets a
+    /// pick resolve to a scene entity and a gizmo write back to the document.
+    id_to_guid: HashMap<u32, Uuid>,
+    guid_to_id: HashMap<Uuid, u32>,
+    /// Document version the current projection reflects (skip redundant rebuilds).
+    synced_version: Option<u64>,
 }
 
 impl EngineHost {
@@ -39,11 +51,17 @@ impl EngineHost {
             chain,
             renderer,
             picker,
-            scene: crate::scene_demo::build(),
+            scene: RenderScene {
+                grid_enabled: true,
+                ..Default::default()
+            },
             origin: FloatingOrigin::default(),
             gizmo_mode: GizmoMode::Translate,
             gizmo_drag: None,
             fov_y: 60f32.to_radians(),
+            id_to_guid: HashMap::new(),
+            guid_to_id: HashMap::new(),
+            synced_version: None,
         })
     }
 
@@ -97,6 +115,76 @@ impl EngineHost {
         }
         (n > 0.0).then(|| sum / n)
     }
+
+    /// Rebuild the render projection from the shared document when it changed
+    /// (P3.2). Renderable entities (those with a `MeshRef`) become instances;
+    /// the id↔GUID maps let picks and gizmo writeback cross back to the world.
+    /// Skipped mid-drag so an in-flight gizmo edit isn't clobbered.
+    pub fn sync_from_doc(&mut self, doc: &SceneDoc) {
+        if self.gizmo_drag.is_some() {
+            return;
+        }
+        let version = doc.version();
+        if self.synced_version == Some(version) {
+            return;
+        }
+        self.synced_version = Some(version);
+        self.rebuild_scene(doc);
+    }
+
+    fn rebuild_scene(&mut self, doc: &SceneDoc) {
+        self.scene.instances.clear();
+        self.id_to_guid.clear();
+        self.guid_to_id.clear();
+
+        let world = doc.world();
+        let w = world.world();
+        let mut next_id: u32 = 1;
+        for &guid in doc.order() {
+            let Some(entity) = world.entity_of(guid) else {
+                continue;
+            };
+            if w.get::<MeshRef>(entity).is_none() {
+                continue; // only meshes render (lights/cameras: Phase 4 icons)
+            }
+            let visible = w
+                .get::<ComputedVisibility>(entity)
+                .map(|c| c.0)
+                .unwrap_or(true);
+            if !visible {
+                continue;
+            }
+            let affine = w
+                .get::<GlobalTransform>(entity)
+                .map(|g| g.0)
+                .unwrap_or(glam::DAffine3::IDENTITY);
+            let (scale, rot, translation) = affine.to_scale_rotation_translation();
+            let color = w
+                .get::<Material>(entity)
+                .map(|m| m.base_color.to_array())
+                .unwrap_or([0.8, 0.8, 0.8, 1.0]);
+            let id = next_id;
+            next_id += 1;
+            self.scene.instances.push(MeshInstance {
+                translation,
+                rotation: rot.as_quat(),
+                scale: scale.as_vec3(),
+                color,
+                id,
+            });
+            self.id_to_guid.insert(id, guid);
+            self.guid_to_id.insert(guid, id);
+        }
+
+        // Selection outline mirrors the document's selection.
+        self.scene.selected = doc
+            .selection()
+            .iter()
+            .filter_map(|g| self.guid_to_id.get(g).copied())
+            .collect();
+        self.scene.hovered = None;
+        self.scene.mark_dirty();
+    }
 }
 
 /// The pointer-driven interaction API (select, hover, gizmo drag). Currently
@@ -115,27 +203,31 @@ impl EngineHost {
         self.scene.hovered = self.picker.pick(&self.gpu, &self.scene, &view, px, py);
     }
 
-    /// Click-select: pick the object under the cursor. `additive` extends the
-    /// selection (Ctrl-click); otherwise it replaces. A click on empty space
-    /// clears the selection (non-additive).
-    pub fn select_at(&mut self, camera: &EditorCamera, px: u32, py: u32, additive: bool) {
+    /// Pick the entity GUID under the cursor (`None` = empty space). Selection
+    /// itself lives in the document — the caller applies the pick to it.
+    pub fn pick_guid(&mut self, camera: &EditorCamera, px: u32, py: u32) -> Option<Uuid> {
         let view = self.view_for(camera);
-        let hit = self.picker.pick(&self.gpu, &self.scene, &view, px, py);
-        match hit {
-            Some(id) => {
-                if additive {
-                    if let Some(pos) = self.scene.selected.iter().position(|s| *s == id) {
-                        self.scene.selected.remove(pos);
-                    } else {
-                        self.scene.selected.push(id);
-                    }
-                } else {
-                    self.scene.selected = vec![id];
-                }
-            }
-            None if !additive => self.scene.selected.clear(),
-            None => {}
-        }
+        let id = self.picker.pick(&self.gpu, &self.scene, &view, px, py)?;
+        self.id_to_guid.get(&id).copied()
+    }
+
+    /// World-space transforms of the current selection after a gizmo drag, keyed
+    /// by GUID — the caller writes them back to the document as one undo entry.
+    /// (Local == world for the roots/identity-parent objects the gizmo edits;
+    /// full parent-relative solve lands with nested transforms.)
+    pub fn selected_world_transforms(&self) -> Vec<(Uuid, EcsTransform)> {
+        self.scene
+            .selected
+            .iter()
+            .filter_map(|id| {
+                let guid = self.id_to_guid.get(id)?;
+                let inst = self.scene.instances.iter().find(|i| i.id == *id)?;
+                let mut t = EcsTransform::from_translation(inst.translation);
+                t.set_quat(inst.rotation.as_dquat());
+                t.scale = Vec3d::from_dvec3(inst.scale.as_dvec3());
+                Some((*guid, t))
+            })
+            .collect()
     }
 
     pub fn set_gizmo_mode(&mut self, mode: GizmoMode) {

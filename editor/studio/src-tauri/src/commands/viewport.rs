@@ -10,7 +10,9 @@ use std::sync::Mutex;
 
 use inf_editor_core::ipc::{ViewportDrop, ViewportKey, ViewportRect};
 use inf_viewport::ViewportEvent;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
+
+use super::scene::{emit_world_delta, SceneState};
 
 #[derive(Default)]
 pub struct ViewportState(Mutex<Option<inf_viewport::ViewportHandle>>);
@@ -20,13 +22,14 @@ pub struct ViewportState(Mutex<Option<inf_viewport::ViewportHandle>>);
 pub async fn viewport_attach(
     window: tauri::Window,
     state: tauri::State<'_, ViewportState>,
+    scene: tauri::State<'_, SceneState>,
 ) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     if guard.is_some() {
         return Ok(()); // idempotent: React StrictMode double-mounts
     }
 
-    *guard = Some(attach_native(&window)?);
+    *guard = Some(attach_native(&window, scene.doc.clone())?);
     tracing::info!("viewport attached");
     Ok(())
 }
@@ -34,50 +37,73 @@ pub async fn viewport_attach(
 /// Build the event sink that turns [`ViewportEvent`]s into namespaced webview
 /// events. Forwarded key chords arrive on `viewport://key` so the frontend's
 /// keybinding dispatcher can replay them (focus handoff, P2.3.4).
-fn event_sink(window: &tauri::Window) -> inf_viewport::ViewportEventSink {
-    let window = window.clone();
+fn event_sink(app: tauri::AppHandle) -> inf_viewport::ViewportEventSink {
     Arc::new(move |event: ViewportEvent| match event {
         ViewportEvent::Key(chord) => {
-            if let Err(e) = window.emit("viewport://key", ViewportKey { chord: chord.chord }) {
+            if let Err(e) = app.emit("viewport://key", ViewportKey { chord: chord.chord }) {
                 tracing::warn!("viewport://key emit failed: {e}");
+            }
+        }
+        // A pick-select or gizmo drag on the viewport thread mutated the shared
+        // document; re-emit the world delta so the Outliner/Details re-sync.
+        ViewportEvent::WorldChanged => {
+            if let Some(state) = app.try_state::<SceneState>() {
+                emit_world_delta(&app, &state);
             }
         }
     })
 }
 
 #[cfg(windows)]
-fn attach_native(window: &tauri::Window) -> Result<inf_viewport::ViewportHandle, String> {
+fn attach_native(
+    window: &tauri::Window,
+    scene: inf_viewport::SharedScene,
+) -> Result<inf_viewport::ViewportHandle, String> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     let hwnd = match window.window_handle().map_err(|e| e.to_string())?.as_raw() {
         RawWindowHandle::Win32(h) => h.hwnd.get(),
         _ => return Err("expected a Win32 window handle".into()),
     };
-    Ok(inf_viewport::spawn(hwnd, event_sink(window)))
+    Ok(inf_viewport::spawn(
+        hwnd,
+        event_sink(window.app_handle().clone()),
+        scene,
+    ))
 }
 
 #[cfg(target_os = "macos")]
-fn attach_native(window: &tauri::Window) -> Result<inf_viewport::ViewportHandle, String> {
+fn attach_native(
+    window: &tauri::Window,
+    scene: inf_viewport::SharedScene,
+) -> Result<inf_viewport::ViewportHandle, String> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     let ns_view = match window.window_handle().map_err(|e| e.to_string())?.as_raw() {
         RawWindowHandle::AppKit(h) => h.ns_view.as_ptr() as isize,
         _ => return Err("expected an AppKit window handle".into()),
     };
-    let sink = event_sink(window);
+    let sink = event_sink(window.app_handle().clone());
     // AppKit setup must happen on the main thread; commands run on a worker.
     let (tx, rx) = std::sync::mpsc::channel();
     window
         .run_on_main_thread(move || {
-            let _ = tx.send(inf_viewport::spawn(ns_view, sink));
+            let _ = tx.send(inf_viewport::spawn(ns_view, sink, scene));
         })
         .map_err(|e| e.to_string())?;
     rx.recv().map_err(|e| e.to_string())
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-fn attach_native(window: &tauri::Window) -> Result<inf_viewport::ViewportHandle, String> {
+fn attach_native(
+    window: &tauri::Window,
+    scene: inf_viewport::SharedScene,
+) -> Result<inf_viewport::ViewportHandle, String> {
     // Linux embedding (X11 reparent / Wayland streaming fallback) is a later
     // Spike A batch — see ROADMAP §5.
-    Ok(inf_viewport::spawn(0, event_sink(window)))
+    Ok(inf_viewport::spawn(
+        0,
+        event_sink(window.app_handle().clone()),
+        scene,
+    ))
 }
 
 /// Update the viewport rectangle ([`ViewportRect`]: physical pixels relative

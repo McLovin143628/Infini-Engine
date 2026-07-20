@@ -2120,6 +2120,8 @@ name = "inf-viewport"
 version = "0.1.0"
 dependencies = [
  "glam 0.33.2",
+ "inf-ecs",
+ "inf-editor-core",
  "inf-math",
  "inf-render",
  "objc2",
@@ -2129,6 +2131,7 @@ dependencies = [
  "objc2-quartz-core",
  "raw-window-handle",
  "tracing",
+ "uuid",
  "wgpu",
  "windows 0.62.2",
 ]

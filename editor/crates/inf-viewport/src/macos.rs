@@ -26,7 +26,7 @@ use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
 use crate::camera::EditorCamera;
 use crate::host::EngineHost;
-use crate::{SurfaceTarget, ViewportEventSink, ViewportRect};
+use crate::{SharedScene, SurfaceTarget, ViewportEventSink, ViewportRect};
 
 enum Cmd {
     SetRect(ViewportRect),
@@ -71,7 +71,7 @@ impl ViewportHandle {
 /// Create the CAMetalLayer under `ns_view` (the Tauri contentView) and start
 /// the render thread. MUST be called on the AppKit main thread; the Ring-2
 /// caller dispatches via `run_on_main_thread`.
-pub fn spawn(ns_view: isize, sink: ViewportEventSink) -> ViewportHandle {
+pub fn spawn(ns_view: isize, sink: ViewportEventSink, scene: SharedScene) -> ViewportHandle {
     let (tx, rx) = channel();
 
     if MainThreadMarker::new().is_none() {
@@ -113,7 +113,7 @@ pub fn spawn(ns_view: isize, sink: ViewportEventSink) -> ViewportHandle {
 
     std::thread::Builder::new()
         .name("inf-viewport".into())
-        .spawn(move || thread_main(layer_ptr, scale, rx))
+        .spawn(move || thread_main(layer_ptr, scale, rx, scene))
         .expect("failed to spawn inf-viewport thread");
     ViewportHandle { tx }
 }
@@ -144,7 +144,7 @@ fn apply_rect(layer_ptr: isize, scale: f64, r: ViewportRect) {
     }
 }
 
-fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>) {
+fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedScene) {
     let target = SurfaceTarget::MetalLayer { layer: layer_ptr };
     let mut host = match EngineHost::new(target, 64, 64) {
         Ok(h) => h,
@@ -182,6 +182,12 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>) {
         if let Some(r) = latest_rect {
             apply_rect(layer_ptr, scale, r);
             host.resize(r.width.max(1), r.height.max(1));
+        }
+
+        // Project the shared world (read-only on macOS: no input wired yet, so
+        // no picking/gizmo writeback — the editor still drives the scene).
+        if let Ok(doc) = scene.lock() {
+            host.sync_from_doc(&doc);
         }
 
         // FIFO present blocks at vsync and paces the loop.
