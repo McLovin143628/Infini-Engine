@@ -314,3 +314,33 @@ pub struct AssetChanged {
     #[ts(type = "number")]
     pub version: u64,
 }
+
+// ── Data assets (P4.5): struct / enum / table editors ────────────────────
+
+/// One struct field / table column, flattened for the editor. `ty` is a slug
+/// ("bool"/"int"/"float"/"text"/"vec3"/"color"/"asset_ref"/"enum"); an enum
+/// field also carries the referenced `.inf_enum` GUID + name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct DataFieldDto {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+    pub enum_id: Option<String>,
+    pub enum_name: Option<String>,
+}
+
+/// A struct / enum / table asset, flattened for editing. Only the fields
+/// relevant to `kind` are populated.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct DataAssetDto {
+    pub id: String,
+    /// "struct" | "enum" | "table".
+    pub kind: String,
+    pub name: String,
+    /// Struct fields or table columns.
+    pub fields: Vec<DataFieldDto>,
+    /// Enum variants.
+    pub variants: Vec<String>,
+    /// Table rows (cells as display strings, column-aligned).
+    pub rows: Vec<Vec<String>>,
+}

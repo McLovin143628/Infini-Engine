@@ -10,10 +10,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use inf_asset::{AssetChange, AssetId, AssetKind, AssetWatcher};
-use inf_editor_core::assets::{snapshot, AssetProject, ImportProgress, ImportQueue};
+use inf_asset::{AssetChange, AssetId, AssetWatcher};
+use inf_editor_core::assets::{data, snapshot, AssetProject, ImportProgress, ImportQueue};
 use inf_editor_core::ipc::{
-    AssetChanged, AssetRefDto, AssetSnapshot, DeleteResult, ImportEventDto,
+    AssetChanged, AssetRefDto, AssetSnapshot, DataAssetDto, DeleteResult, ImportEventDto,
 };
 use inf_editor_core::thumbnail::{ThumbnailCache, Thumbnailer};
 use inf_material::MaterialAsset;
@@ -298,8 +298,8 @@ pub async fn asset_import(
     Ok(jobs)
 }
 
-/// Create a new authored asset (Phase 4.4 supports Material; data assets in
-/// P4.5). Returns the new GUID.
+/// Create a new authored asset: "mat" (Material), or a data kind
+/// "struct"/"enum"/"table" (P4.5). Returns the new GUID.
 #[tauri::command]
 pub async fn asset_create(
     app: AppHandle,
@@ -308,19 +308,77 @@ pub async fn asset_create(
     name: Option<String>,
     state: State<'_, AssetState>,
 ) -> Result<String, String> {
-    let sub = folder.unwrap_or_else(|| "Materials".into());
-    let name = name.unwrap_or_else(|| "New Material".into());
+    let default_folder = match kind.as_str() {
+        "mat" => "Materials",
+        _ => "Data",
+    };
+    let sub = folder.unwrap_or_else(|| default_folder.to_string());
+    let name = name.unwrap_or_else(|| match kind.as_str() {
+        "mat" => "New Material".into(),
+        "struct" => "NewStruct".into(),
+        "enum" => "NewEnum".into(),
+        "table" => "NewTable".into(),
+        _ => "New Asset".into(),
+    });
     let id = state.with_project(|p| {
         let dir = p.content_dir(&sub).map_err(|e| e.to_string())?;
-        match AssetKind::from_extension(&format!("inf_{kind}")) {
-            AssetKind::Material => p
+        match kind.as_str() {
+            "mat" => p
                 .write_asset(&dir, &name, &MaterialAsset::default(), None, vec![], None)
                 .map_err(|e| e.to_string()),
-            other => Err(format!("create for {other:?} not supported yet")),
+            "struct" | "enum" | "table" => {
+                data::create_default(p, &kind, &dir, &name).map_err(|e| e.to_string())
+            }
+            other => Err(format!("cannot create asset kind: {other}")),
         }
     })?;
     emit_changed(&app, &state);
     Ok(id.to_string())
+}
+
+/// Load a data asset (struct/enum/table) for editing. `null` if not a data kind.
+#[tauri::command]
+pub async fn asset_data(
+    id: String,
+    state: State<'_, AssetState>,
+) -> Result<Option<DataAssetDto>, String> {
+    let id = parse_id(&id)?;
+    state.with_project(|p| data::to_dto(p, id).map_err(|e| e.to_string()))
+}
+
+/// Save an edited data asset.
+#[tauri::command]
+pub async fn asset_data_save(
+    app: AppHandle,
+    data_asset: DataAssetDto,
+    state: State<'_, AssetState>,
+) -> Result<(), String> {
+    state.with_project(|p| data::save_dto(p, &data_asset).map_err(|e| e.to_string()))?;
+    emit_changed(&app, &state);
+    Ok(())
+}
+
+/// Import a CSV/JSON file into an existing table asset, replacing its contents.
+#[tauri::command]
+pub async fn asset_table_import(
+    app: AppHandle,
+    id: String,
+    source: String,
+    state: State<'_, AssetState>,
+) -> Result<(), String> {
+    let id = parse_id(&id)?;
+    state.with_project(|p| {
+        data::import_table_into(p, id, &PathBuf::from(&source)).map_err(|e| e.to_string())
+    })?;
+    emit_changed(&app, &state);
+    Ok(())
+}
+
+/// The generated Rust source for a struct/enum asset (codegen preview).
+#[tauri::command]
+pub async fn asset_rust_source(id: String, state: State<'_, AssetState>) -> Result<String, String> {
+    let id = parse_id(&id)?;
+    state.with_project(|p| data::rust_source(p, id).map_err(|e| e.to_string()))
 }
 
 /// Delete an asset. When still referenced (and `force` is false) nothing is

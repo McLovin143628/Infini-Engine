@@ -6,9 +6,11 @@
 //! dependency edges the importer discovers, and enforces the
 //! delete-with-references safety check that is the Phase 4 gate.
 
+pub mod data;
 pub mod import;
 pub mod queue;
 pub mod snapshot;
+pub mod table_import;
 
 use std::path::{Path, PathBuf};
 
@@ -212,6 +214,47 @@ impl AssetProject {
     /// The assets that reference `id` (reverse deps) — the warning payload.
     pub fn referenced_by(&self, id: AssetId) -> Vec<AssetId> {
         self.db.referenced_by(id)
+    }
+
+    // ── payload read / rewrite (data-asset editing, P4.5) ─────────────────
+
+    /// Decode an existing asset's payload as `T`.
+    pub fn load_payload<T: AssetPayload>(&self, id: AssetId) -> Result<T> {
+        let entry = self.db.get(id).ok_or(AssetError::UnknownAsset(id))?;
+        let bytes = std::fs::read(&entry.path)?;
+        inf_asset::decode(&bytes)
+    }
+
+    /// Rewrite an existing asset's payload in place (data-asset editors save
+    /// through this), updating the content hash + dependency edges.
+    pub fn rewrite_payload<T: AssetPayload>(
+        &mut self,
+        id: AssetId,
+        payload: &T,
+        dependencies: Vec<AssetId>,
+    ) -> Result<()> {
+        let path = self
+            .db
+            .get(id)
+            .ok_or(AssetError::UnknownAsset(id))?
+            .path
+            .clone();
+        let bytes = inf_asset::encode(payload)?;
+        let hash = ContentHash::of(&bytes);
+        std::fs::write(&path, &bytes)?;
+
+        let name = self.db.get(id).unwrap().name.clone();
+        let mut sidecar = self.db.get(id).unwrap().sidecar.clone();
+        sidecar.content_hash = hash;
+        sidecar.dependencies = dependencies;
+        sidecar.save(&path)?;
+        self.db.insert(AssetEntry {
+            sidecar,
+            path,
+            name,
+        });
+        self.bump();
+        Ok(())
     }
 
     // ── import (delegates to the orchestrator, using the cache) ───────────

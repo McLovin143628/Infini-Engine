@@ -48,6 +48,9 @@ import {
   visibleAssets,
   type AssetDto,
 } from "../stores/assetStore";
+import DataAssetEditor from "./DataAssetEditor";
+
+const DATA_KINDS = new Set(["struct", "enum", "table"]);
 
 const KIND_TINT: Record<string, string> = {
   mesh: "text-(--ink-info)",
@@ -103,12 +106,16 @@ export default function ContentDrawer() {
   const favorites = useAssetStore((s) => s.favorites);
   const imports = useAssetStore((s) => s.imports);
 
+  const editing = useAssetStore((s) => s.editing);
+
   const setFolder = useAssetStore((s) => s.setFolder);
   const setSearch = useAssetStore((s) => s.setSearch);
   const setKindFilter = useAssetStore((s) => s.setKindFilter);
   const setSelected = useAssetStore((s) => s.setSelected);
   const toggleFavorite = useAssetStore((s) => s.toggleFavorite);
-  const createMaterial = useAssetStore((s) => s.createMaterial);
+  const openEditor = useAssetStore((s) => s.openEditor);
+  const closeEditor = useAssetStore((s) => s.closeEditor);
+  const createAsset = useAssetStore((s) => s.createAsset);
 
   const items = useMemo(
     () => visibleAssets(assetsById, folder, kindFilter, search),
@@ -116,6 +123,11 @@ export default function ContentDrawer() {
   );
 
   const [menu, setMenu] = useState<{ x: number; y: number; asset: AssetDto } | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+
+  const onCellOpen = (asset: AssetDto) => {
+    if (DATA_KINDS.has(asset.kind)) openEditor(asset.id);
+  };
 
   // Kinds present, for the filter column.
   const kinds = useMemo(() => {
@@ -131,17 +143,51 @@ export default function ContentDrawer() {
       className="flex shrink-0 flex-col overflow-hidden border-t border-(--ink-border) bg-(--ink-bg-1) transition-[height] duration-150 ease-out"
       style={{ height: open ? 320 : 0 }}
       aria-hidden={!open}
-      onClick={() => setMenu(null)}
+      onClick={() => {
+        setMenu(null);
+        setAddOpen(false);
+      }}
     >
       {/* Top bar */}
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-(--ink-border) bg-(--ink-bg-2) px-2">
-        <button
-          className="flex h-6 items-center gap-1 rounded bg-(--ink-accent) px-2 text-xs text-(--ink-text-onaccent) hover:bg-(--ink-accent-hover)"
-          onClick={() => void createMaterial()}
-          title="Create a new Material"
-        >
-          <Plus size={13} /> Add
-        </button>
+        <div className="relative">
+          <button
+            className="flex h-6 items-center gap-1 rounded bg-(--ink-accent) px-2 text-xs text-(--ink-text-onaccent) hover:bg-(--ink-accent-hover)"
+            onClick={(e) => {
+              e.stopPropagation();
+              setAddOpen((v) => !v);
+            }}
+            title="Create a new asset"
+          >
+            <Plus size={13} /> Add
+          </button>
+          {addOpen && (
+            <div
+              className="absolute left-0 top-7 z-50 min-w-36 overflow-hidden rounded border border-(--ink-border) bg-(--ink-bg-2) py-1 shadow-lg"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {(
+                [
+                  ["mat", "Material"],
+                  ["struct", "Struct"],
+                  ["enum", "Enum"],
+                  ["table", "Data Table"],
+                ] as const
+              ).map(([kind, label]) => (
+                <button
+                  key={kind}
+                  className="block w-full px-2.5 py-1 text-left text-xs hover:bg-(--ink-bg-3)"
+                  onClick={() => {
+                    setAddOpen(false);
+                    void createAsset(kind);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <button
           className="flex h-6 items-center gap-1 rounded px-2 text-xs hover:bg-(--ink-bg-3)"
           onClick={() => void importViaDialog()}
@@ -226,9 +272,11 @@ export default function ContentDrawer() {
           ))}
         </div>
 
-        {/* Virtualized thumbnail grid */}
+        {/* Inline data-asset editor, or the virtualized thumbnail grid */}
         <div className="min-h-0 flex-1">
-          {!ready ? (
+          {editing ? (
+            <DataAssetEditor key={editing} id={editing} onClose={closeEditor} />
+          ) : !ready ? (
             <div className="p-4 text-xs text-(--ink-text-faint)">Loading content…</div>
           ) : items.length === 0 ? (
             <div className="p-4 text-xs text-(--ink-text-faint)">
@@ -239,6 +287,7 @@ export default function ContentDrawer() {
               items={items}
               selected={selected}
               onSelect={setSelected}
+              onOpen={onCellOpen}
               onContext={(x, y, asset) => setMenu({ x, y, asset })}
             />
           )}
@@ -363,11 +412,13 @@ function AssetGrid({
   items,
   selected,
   onSelect,
+  onOpen,
   onContext,
 }: {
   items: AssetDto[];
   selected: string | null;
   onSelect: (id: string) => void;
+  onOpen: (asset: AssetDto) => void;
   onContext: (x: number, y: number, asset: AssetDto) => void;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
@@ -413,6 +464,7 @@ function AssetGrid({
                   asset={a}
                   selected={selected === a.id}
                   onSelect={onSelect}
+                  onOpen={onOpen}
                   onContext={onContext}
                 />
               ))}
@@ -428,11 +480,13 @@ function AssetCell({
   asset,
   selected,
   onSelect,
+  onOpen,
   onContext,
 }: {
   asset: AssetDto;
   selected: boolean;
   onSelect: (id: string) => void;
+  onOpen: (asset: AssetDto) => void;
   onContext: (x: number, y: number, asset: AssetDto) => void;
 }) {
   const thumb = useAssetStore((s) => s.thumbnails[asset.id]);
@@ -490,6 +544,7 @@ function AssetCell({
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onDoubleClick={() => onOpen(asset)}
         onContextMenu={(e) => {
           e.preventDefault();
           onSelect(asset.id);

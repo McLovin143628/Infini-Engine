@@ -42,6 +42,8 @@ interface AssetState {
   search: string;
   kindFilter: string | null;
   selected: string | null;
+  /** Id of the data asset open in the inline editor, or null. */
+  editing: string | null;
   favorites: string[]; // favorited folder paths
   /** Thumbnail data-URLs by asset id ("" = requested/none). */
   thumbnails: Record<string, string>;
@@ -56,11 +58,14 @@ interface AssetState {
   setSearch: (q: string) => void;
   setKindFilter: (kind: string | null) => void;
   setSelected: (id: string | null) => void;
+  openEditor: (id: string) => void;
+  closeEditor: () => void;
   toggleFavorite: (path: string) => void;
 
   loadThumbnail: (id: string) => void;
   importFiles: (sources: string[], dest?: string | null) => Promise<void>;
   createMaterial: () => Promise<void>;
+  createAsset: (kind: "mat" | "struct" | "enum" | "table") => Promise<void>;
   deleteAsset: (id: string, force?: boolean) => Promise<DeleteResult>;
   rename: (id: string, name: string) => Promise<void>;
   duplicate: (id: string) => Promise<void>;
@@ -87,6 +92,7 @@ export const useAssetStore = create<AssetState>((set, get) => ({
   search: "",
   kindFilter: null,
   selected: null,
+  editing: null,
   favorites: [],
   thumbnails: {},
   imports: {},
@@ -131,6 +137,8 @@ export const useAssetStore = create<AssetState>((set, get) => ({
   setSearch: (q) => set({ search: q }),
   setKindFilter: (kind) => set((s) => ({ kindFilter: s.kindFilter === kind ? null : kind })),
   setSelected: (id) => set({ selected: id }),
+  openEditor: (id) => set({ editing: id, selected: id }),
+  closeEditor: () => set({ editing: null }),
 
   toggleFavorite: (path) =>
     set((s) => ({
@@ -163,6 +171,16 @@ export const useAssetStore = create<AssetState>((set, get) => ({
     try {
       const id = await assetsIpc.create("mat", "Materials", "New Material");
       set({ selected: id });
+    } catch (e) {
+      console.error("asset.create failed", e);
+    }
+  },
+
+  createAsset: async (kind) => {
+    try {
+      const id = await assetsIpc.create(kind);
+      // Materials have no editor; data kinds open the inline editor.
+      set(kind === "mat" ? { selected: id } : { selected: id, editing: id });
     } catch (e) {
       console.error("asset.create failed", e);
     }

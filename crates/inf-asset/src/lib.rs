@@ -18,6 +18,7 @@
 //! `inf-material`) and the editor's import orchestrator, which depend on this
 //! crate for identity, the sidecar, and [`AssetPayload`].
 
+pub mod data;
 pub mod db;
 pub mod error;
 pub mod hash;
@@ -28,6 +29,7 @@ pub mod payload;
 pub mod sidecar;
 pub mod watch;
 
+pub use data::{CellValue, EnumAsset, FieldDef, FieldType, StructAsset, TableAsset};
 pub use db::{AssetDb, AssetEntry};
 pub use error::{AssetError, Result};
 pub use hash::ContentHash;

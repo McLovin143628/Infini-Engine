@@ -49,5 +49,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         assets::asset_rename,
         assets::asset_duplicate,
         assets::asset_set_tags,
+        assets::asset_data,
+        assets::asset_data_save,
+        assets::asset_table_import,
+        assets::asset_rust_source,
     ]
 }

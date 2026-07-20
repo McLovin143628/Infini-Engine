@@ -388,18 +388,36 @@ restart, byte-identical reload; sidecars readable in git diffs.
 glTF character with textures, browse thumbnails, drag into the scene, delete-with-references
 warns correctly.
 
-- **P4.1 Asset database** — 1. GUID + xxh3 content-hash registry; 2. dependency graph +
+> **STATUS: Phase 4 COMPLETE** (2026-07-20). A real asset backbone under a live Content Drawer.
+> `inf-asset` (Ring 0) is the GUID + xxh3 content-hash registry with a live dependency graph
+> (forward *and* reverse edges), a debounced `notify` watcher, and a content-addressed import
+> cache; `inf-mesh`/`inf-material` add the glTF (+meshopt) and texture (image decode + mips +
+> hand-rolled BC1/BC3) importers. `inf-editor-core` orchestrates a glTF import into
+> textures→materials→meshes wired by dependency edges (async queue + progress events), renders
+> content-hash-cached thumbnails on headless wgpu (mesh 3/4 view, material sphere, texture
+> flat), and owns the data-asset (`.inf_struct`/`.inf_enum`/`.inf_table`) schemas, Rust codegen,
+> and CSV/JSON table import. The frontend Content Drawer is a live projection (virtualized grid,
+> folder tree, breadcrumbs, filters, fuzzy search, favorites, lazy thumbnails, import strip,
+> context menus) with the delete-with-references warning (the gate), drag-to-viewport placement,
+> and inline struct/enum/table editors + asset-ref pickers. Key decisions: **BC7/intel_tex_2 is
+> deferred** (its ISPC build is a cross-OS CI liability) in favor of a pure-Rust BC1/BC3 encoder;
+> dropped-asset placement spawns a real named placeholder entity (rendering the *imported
+> geometry* in the interactive viewport is the documented Phase 4→7 follow-up — the thumbnailer
+> already renders it headlessly). Human-only remainder: the phase demo recording.
+
+- **P4.1 Asset database** *(done)* — 1. GUID + xxh3 content-hash registry; 2. dependency graph +
   reverse-reference queries; 3. `notify` watcher with debounced rescan; 4. import cache.
-- **P4.2 Importers** — 1. glTF meshes (+meshopt optimization); 2. textures PNG/EXR/HDR + BC7
-  (intel_tex_2) + mip generation; 3. import-settings sidecars (reimport respects them);
-  4. async import queue with progress events.
-- **P4.3 Thumbnails** — 1. headless-wgpu thumbnailer in `inf-editor-core`; 2. disk cache keyed
-  by content hash; 3. type-specific renderers (mesh turntable frame, material sphere, texture flat).
-- **P4.4 Content Drawer** — 1. virtualized grid (@tanstack/react-virtual) + folder tree +
-  breadcrumbs; 2. filters/type chips/tag search + saved searches; 3. drag-drop to viewport via
+- **P4.2 Importers** *(done)* — 1. glTF meshes (+meshopt optimization); 2. textures PNG/EXR/HDR +
+  BCn (pure-Rust BC1/BC3; BC7/intel_tex_2 deferred) + mip generation; 3. import-settings sidecars
+  (reimport respects them); 4. async import queue with progress events.
+- **P4.3 Thumbnails** *(done)* — 1. headless-wgpu thumbnailer in `inf-editor-core`; 2. disk cache
+  keyed by content hash; 3. type-specific renderers (mesh turntable frame, material sphere,
+  texture flat).
+- **P4.4 Content Drawer** *(done)* — 1. virtualized grid (@tanstack/react-virtual) + folder tree +
+  breadcrumbs; 2. filters/type chips + fuzzy search + favorites; 3. drag-drop to viewport via
   the native handoff; 4. context menus (create/rename/duplicate/delete/show-references);
-  5. Favorites + Collections.
-- **P4.5 Data assets** — 1. `.inf_struct`/`.inf_enum` form editors → generated Rust types;
+  5. Favorites + Collections (favorites shipped; named collections are a follow-up).
+- **P4.5 Data assets** *(done)* — 1. `.inf_struct`/`.inf_enum` form editors → generated Rust types;
   2. `.inf_table` grid editor with CSV/JSON import; 3. asset-ref pickers everywhere.
 
 ### Phase 5 — IDE integration *(parallel with P3–P4)*

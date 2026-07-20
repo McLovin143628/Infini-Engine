@@ -12,6 +12,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { AssetRefDto } from "../bindings/AssetRefDto";
 import type { AssetSnapshot } from "../bindings/AssetSnapshot";
+import type { DataAssetDto } from "../bindings/DataAssetDto";
+import type { DataFieldDto } from "../bindings/DataFieldDto";
 import type { DeleteResult } from "../bindings/DeleteResult";
 import type { DetailsDto } from "../bindings/DetailsDto";
 import type { LayoutSummary } from "../bindings/LayoutSummary";
@@ -24,6 +26,8 @@ import type { ViewportRect } from "../bindings/ViewportRect";
 export type {
   AssetRefDto,
   AssetSnapshot,
+  DataAssetDto,
+  DataFieldDto,
   DeleteResult,
   DetailsDto,
   LayoutSummary,
@@ -135,4 +139,12 @@ export const assets = {
   rename: (id: string, name: string): Promise<void> => invoke("asset_rename", { id, name }),
   duplicate: (id: string): Promise<string> => invoke<string>("asset_duplicate", { id }),
   setTags: (id: string, tags: string[]): Promise<void> => invoke("asset_set_tags", { id, tags }),
+  /** Load a data asset (struct/enum/table) for editing; null if not a data kind. */
+  data: (id: string): Promise<DataAssetDto | null> =>
+    invoke<DataAssetDto | null>("asset_data", { id }),
+  dataSave: (dataAsset: DataAssetDto): Promise<void> =>
+    invoke("asset_data_save", { dataAsset }),
+  tableImport: (id: string, source: string): Promise<void> =>
+    invoke("asset_table_import", { id, source }),
+  rustSource: (id: string): Promise<string> => invoke<string>("asset_rust_source", { id }),
 };
