@@ -353,18 +353,33 @@ correct on three DPI configs; golden-image tests running in CI.
 save/load. **Done when:** author a primitive+lights scene, 50-step undo/redo clean, save,
 restart, byte-identical reload; sidecars readable in git diffs.
 
-- **P3.1 ECS foundation** — 1. `inf-ecs` facade (bevy_ecs+bevy_reflect), component registration
+> **STATUS: Phase 3 COMPLETE** (2026-07-20). The mock Outliner/Details are now a live
+> editor↔world binding over a real `bevy_ecs` world. The authoritative `SceneDoc`
+> (`inf-editor-core::scene`) owns the world + selection + undo + serialization; the frontend
+> is a projection kept in sync by a full snapshot + incremental `world://delta` events; the
+> native viewport renders and picks against the *same* document (single source of truth).
+> Gate met: primitives+lights authored via the Outliner Add menu, 50-step undo/redo clean
+> (tested), Ctrl+S quicksave → reload is byte-identical (tested), TOML sidecars are
+> git-diffable. Key decisions: `bevy_reflect` runs **without** its glam feature (it pins glam
+> 0.32; the renderer is 0.33) — editable math is f64 value types that derive Reflect + serde,
+> and reflection stays sealed inside `inf-ecs` (the facade rule) behind plain PropValue
+> descriptors; euler-degree rotation in the Transform (UE-style Details); `.inf_lvl` =
+> deterministic bincode payload + TOML metadata sidecar. Gizmo writeback writes world-space
+> TRS as local (correct for roots/identity-parent objects; full parent-relative solve is a
+> follow-up). Human-only remainder: a live demo recording + the macOS viewport hardware pass.
+
+- **P3.1 ECS foundation** *(done)* — 1. `inf-ecs` facade (bevy_ecs+bevy_reflect), component registration
   macro; 2. transform hierarchy (f64 roots, propagation, dirty tracking); 3. core components
   (Name, Transform, Visibility, MeshRef, Light, Camera); 4. spawn/despawn command buffers.
-- **P3.2 Editor↔world binding** — 1. world-snapshot IPC protocol (diff-based, not full dumps);
+- **P3.2 Editor↔world binding** *(done)* — 1. world-snapshot IPC protocol (diff-based, not full dumps);
   2. Outliner bound live (create/rename/reparent/delete/multi-select); 3. selection service
   (viewport picking ↔ Outliner ↔ Details single source of truth).
-- **P3.3 Details via reflection** — 1. reflection walker → property-tree IPC schema; 2. editor
+- **P3.3 Details via reflection** *(done)* — 1. reflection walker → property-tree IPC schema; 2. editor
   widgets per type (numeric drag, vec3, color, enum dropdown, asset ref); 3. multi-object edit;
   4. per-property reset + revert.
-- **P3.4 Undo/redo** — 1. command stack in `inf-editor-core` (every mutation is a command);
+- **P3.4 Undo/redo** *(done)* — 1. command stack in `inf-editor-core` (every mutation is a command);
   2. transaction grouping (gizmo drag = one entry); 3. reflection-diff property tests.
-- **P3.5 Scene serialization** — 1. `.inf_lvl` bincode + TOML sidecar; 2. stable entity GUIDs;
+- **P3.5 Scene serialization** *(done)* — 1. `.inf_lvl` bincode + TOML sidecar; 2. stable entity GUIDs;
   3. schema-version + migration harness; 4. autosave + crash recovery file.
 
 ### Phase 4 — Asset system & Content Drawer
