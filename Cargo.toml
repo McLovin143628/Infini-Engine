@@ -57,6 +57,17 @@ pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 windows = "0.62"
 glam = "0.33"
+# ── ECS + reflection (Phase 3). bevy_ecs standalone is the archetype ECS;
+# bevy_reflect powers the Details panel + scene serde. inf-ecs is the ONLY
+# crate that names them (three-ring facade discipline). Pinned to a bevy
+# release whose `glam` matches our workspace pin so reflected math types line
+# up (no dual-glam in the tree).
+bevy_ecs = "0.19"
+# NB: NOT the `glam` feature — that pins glam 0.32 and would put a second glam
+# in the tree alongside our 0.33 renderer pin. inf-ecs reflects transforms as
+# f64 value types instead (see ecs::components), converting to glam for math.
+bevy_reflect = "0.19"
+uuid = { version = "1", features = ["v4", "serde"] }
 # macOS viewport embedding (Spike A) — objc2 framework crates
 objc2 = "0.6"
 objc2-foundation = "0.3"

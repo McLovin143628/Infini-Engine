@@ -9,3 +9,9 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+bevy_ecs = { workspace = true }
+bevy_reflect = { workspace = true }
+glam = { workspace = true }
+inf-math = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
