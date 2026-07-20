@@ -8,3 +8,5 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+inf-runtime = { workspace = true }
+thiserror = { workspace = true }

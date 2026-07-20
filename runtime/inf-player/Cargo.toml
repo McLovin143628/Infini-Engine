@@ -9,3 +9,14 @@ authors.workspace = true
 
 [dependencies]
 inf-runtime = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+inf-editor-core = { workspace = true }
