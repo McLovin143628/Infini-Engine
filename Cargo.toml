@@ -73,6 +73,8 @@ proptest = "1"
 libloading = "0.8"
 # ── cooked snapshots / PIE protocol (Spike D) ──
 bincode = { version = "2", features = ["serde"] }
+# ── editor↔frontend shared types → committed TS bindings (CI drift-checked) ──
+ts-rs = "12"
 
 # intra-workspace crates
 inf-core = { path = "crates/inf-core" }

@@ -1,0 +1,57 @@
+# cargo-deny configuration — supply-chain gates run in CI on every commit.
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Check the full graph for every platform we ship or develop on.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+# Only flag unmaintained crates we depend on DIRECTLY — the tauri/wry tree
+# drags in unmaintained transitive deps (gtk3 bindings, rust-unic,
+# proc-macro-error) we cannot fix from here; upstream owns those.
+unmaintained = "workspace"
+ignore = [
+    # bincode 2 is a deliberate roadmap pick for cooked snapshots / the PIE
+    # protocol (fast, compact, serde-compatible). "Unmaintained" here means
+    # low release cadence, not a vulnerability; revisit at P9 (packaging)
+    # and swap to postcard if it becomes a liability.
+    "RUSTSEC-2025-0141",
+]
+
+[licenses]
+version = 2
+# Additions need a rationale in the PR description.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "CC0-1.0",
+    "MPL-2.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions are inevitable in the tauri/wgpu trees; surfaced as
+# warnings so they stay visible without blocking.
+multiple-versions = "warn"
+# Our own manifests must always pin.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

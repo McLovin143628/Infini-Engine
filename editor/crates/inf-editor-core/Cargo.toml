@@ -6,7 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish = false
 
 [dependencies]
 inf-runtime = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
+ts-rs = { workspace = true }

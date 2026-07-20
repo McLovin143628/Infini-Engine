@@ -32,6 +32,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Format
@@ -41,7 +45,19 @@ jobs:
         run: cargo clippy --workspace --all-targets
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo nextest run --workspace
+
+      - name: Doctests (nextest does not run them)
+        run: cargo test --workspace --doc
+
+  deny:
+    name: cargo-deny (advisories, licenses, bans, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
 
   frontend:
     name: Frontend
@@ -59,5 +75,26 @@ jobs:
       - run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
       - name: Build
         run: npm run build
+
+  bindings-drift:
+    name: TS bindings drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate bindings from Rust types
+        run: cargo test -p inf-editor-core --test bindings
+      - name: Committed bindings must match the Rust types
+        run: |
+          git diff --exit-code -- editor/studio/src/bindings
+          untracked="$(git ls-files --others --exclude-standard editor/studio/src/bindings)"
+          if [ -n "$untracked" ]; then
+            echo "bindings exported but not committed:"; echo "$untracked"; exit 1
+          fi

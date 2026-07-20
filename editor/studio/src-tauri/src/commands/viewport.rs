@@ -7,6 +7,8 @@
 
 use std::sync::Mutex;
 
+use inf_editor_core::ipc::{ViewportDrop, ViewportRect};
+
 #[derive(Default)]
 pub struct ViewportState(Mutex<Option<inf_viewport::ViewportHandle>>);
 
@@ -60,42 +62,38 @@ fn attach_native(_window: &tauri::Window) -> Result<inf_viewport::ViewportHandle
     Ok(inf_viewport::spawn(0))
 }
 
-/// Update the viewport rectangle. Arguments are physical pixels relative to
-/// the window client area (the frontend multiplies by devicePixelRatio).
+/// Update the viewport rectangle ([`ViewportRect`]: physical pixels relative
+/// to the window client area; the frontend multiplies by devicePixelRatio).
 #[tauri::command]
 pub async fn viewport_set_rect(
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+    rect: ViewportRect,
     state: tauri::State<'_, ViewportState>,
 ) -> Result<(), String> {
     let guard = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(handle) = guard.as_ref() {
         handle.set_rect(inf_viewport::ViewportRect {
-            x: x.round() as i32,
-            y: y.round() as i32,
-            width: width.round().max(0.0) as u32,
-            height: height.round().max(0.0) as u32,
+            x: rect.x.round() as i32,
+            y: rect.y.round() as i32,
+            width: rect.width.round().max(0.0) as u32,
+            height: rect.height.round().max(0.0) as u32,
         });
     }
     Ok(())
 }
 
-/// Hand off a drag that ended over the viewport hole. `x`/`y` are physical
-/// pixels relative to the hole's top-left corner. HTML drag ghosts die over
-/// the native window (airspace rule), so the drop point crosses via IPC and
-/// the engine side takes over — Phase 3 turns this into a pick-ray spawn.
+/// Hand off a drag that ended over the viewport hole ([`ViewportDrop`]:
+/// physical pixels relative to the hole's top-left corner). HTML drag ghosts
+/// die over the native window (airspace rule), so the drop point crosses via
+/// IPC and the engine side takes over — Phase 3 turns this into a pick-ray
+/// spawn.
 #[tauri::command]
 pub async fn viewport_drop(
-    x: f64,
-    y: f64,
-    payload: String,
+    drop: ViewportDrop,
     state: tauri::State<'_, ViewportState>,
 ) -> Result<(), String> {
     let guard = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(handle) = guard.as_ref() {
-        handle.drop_payload(x as f32, y as f32, &payload);
+        handle.drop_payload(drop.x as f32, drop.y as f32, &drop.payload);
     }
     Ok(())
 }

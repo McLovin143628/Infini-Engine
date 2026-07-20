@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { viewport } from "../lib/ipc";
+import { toPhysicalRect } from "../lib/viewportRect";
 
 /**
  * The viewport "hole": an empty div whose rectangle is mirrored to the native
@@ -16,9 +17,8 @@ export default function ViewportPanel() {
 
     let raf = 0;
     const report = () => {
-      const r = el.getBoundingClientRect();
-      const s = window.devicePixelRatio;
-      viewport.setRect(r.x * s, r.y * s, r.width * s, r.height * s).catch(() => {});
+      const rect = toPhysicalRect(el.getBoundingClientRect(), window.devicePixelRatio);
+      viewport.setRect(rect).catch(() => {});
     };
     const schedule = () => {
       cancelAnimationFrame(raf);

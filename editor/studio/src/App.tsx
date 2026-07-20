@@ -55,7 +55,7 @@ export default function App() {
     }
     const s = window.devicePixelRatio;
     viewport
-      .drop((e.clientX - r.left) * s, (e.clientY - r.top) * s, "TestActor")
+      .drop({ x: (e.clientX - r.left) * s, y: (e.clientY - r.top) * s, payload: "TestActor" })
       .catch((err) => console.error("viewport drop failed:", err));
   }, []);
 

@@ -246,25 +246,34 @@ Notation: **P4.2** = phase 4, sub-phase 2; batches are the numbered lists inside
 spikes. **Done when:** CI green (Win/mac/Linux); Spike A triangle demo recorded; Spike B
 proptests green; memos A–D committed.
 
-- **P0.1 Repository & workspace scaffold**
+- **P0.1 Repository & workspace scaffold** *(done)*
   1. Git repo, `.gitignore`, README, this roadmap. *(done)*
-  2. Cargo workspace with every Ring 0/1 crate as an empty compiling `lib.rs` + rustfmt/clippy/deny config.
-  3. Studio app scaffold: Tauri v2 + Vite + React + TS + Tailwind; window opens with placeholder shell.
-  4. `tools/inf-cli` skeleton (`inf --version`); `runtime/` crate stubs.
-  5. ts-rs binding export harness + committed bindings directory.
-- **P0.2 CI & quality gates**
-  1. GitHub Actions: fmt, clippy `-D warnings`, nextest, cargo-deny on 3 OSes.
-  2. Frontend job: tsc, eslint, vitest.
-  3. Bindings-drift job (regenerate + `git diff --exit-code`).
-  4. PR template, branch protection notes, conventional-commit convention doc.
+  2. Cargo workspace with every Ring 0/1 crate as an empty compiling `lib.rs` + rustfmt/clippy/deny config. *(done)*
+  3. Studio app scaffold: Tauri v2 + Vite + React + TS + Tailwind; window opens with placeholder shell. *(done)*
+  4. `tools/inf-cli` skeleton (`inf --version`); `runtime/` crate stubs. *(done)*
+  5. ts-rs binding export harness + committed bindings directory. *(done — `inf_editor_core::ipc`
+     types exported by `cargo test -p inf-editor-core --test bindings` into
+     `editor/studio/src/bindings/`)*
+- **P0.2 CI & quality gates** *(done)*
+  1. GitHub Actions: fmt, clippy `-D warnings`, nextest, cargo-deny on 3 OSes. *(done —
+     deny runs as its own ubuntu job; results are OS-independent since `deny.toml`
+     pins the four target triples)*
+  2. Frontend job: tsc, eslint, vitest. *(done)*
+  3. Bindings-drift job (regenerate + `git diff --exit-code`). *(done — also fails on
+     exported-but-uncommitted files)*
+  4. PR template, branch protection notes, conventional-commit convention doc. *(done —
+     `.github/PULL_REQUEST_TEMPLATE.md`, `docs/CONTRIBUTING.md`)*
 - **P0.3 Spike A — embedded viewport** (see §5) — batches: Win32 child HWND + wgpu clear;
-  rect-sync IPC + resize; DPI matrix; flycam capture; macOS port; memo.
+  rect-sync IPC + resize; DPI matrix; flycam capture; macOS port; memo. *(GO — memo
+  committed; remaining manual passes: DPI matrix at 150/200% + cross-monitor drag, and a
+  macOS run on real hardware — the mac port is compile-verified only)*
 - **P0.4 Spike B — transpiler round-trip** — batches: node model fixture; codegen for
   Branch/Sequence/var/call/math kit; syn lifter; proptest harness; hand-edit corpus; memo.
+  *(GO — memo committed)*
 - **P0.5 Spike C — hot reload** — batches: vtable host + sample plugin; state snapshot/restore;
-  panic containment; Windows file-lock dance; memo.
+  panic containment; Windows file-lock dance; memo. *(GO — memo committed)*
 - **P0.6 Spike D — PIE process model** — batches: player stub + local-channel snapshot
-  handoff; crash-isolation test; embed-window experiment; memo.
+  handoff; crash-isolation test; embed-window experiment; memo. *(GO — memo committed)*
 
 ### Phase 1 — Studio Shell v1
 

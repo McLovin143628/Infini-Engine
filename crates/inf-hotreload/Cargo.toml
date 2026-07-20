@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish = false
 
 [features]
 # Plugins depend on this crate with `default-features = false` (guest + abi
