@@ -317,20 +317,35 @@ placeholder panels, persisted layouts, detachable windows, command palette — d
 and gizmos. **Done when:** 10k cubes at vsync; select + translate/rotate/scale with gizmos;
 correct on three DPI configs; golden-image tests running in CI.
 
-- **P2.1 Surface & device management** — 1. `inf-render` device/queue/surface init + swapchain
-  lifecycle; 2. production rect-sync (debounced reconfigure, letterboxing); 3. multi-DPI +
-  monitor-change handling; 4. crash-safe device-lost recovery.
-- **P2.2 Forward renderer core** — 1. render-graph skeleton + WGSL pipeline cache; 2. depth +
-  MSAA + sRGB; 3. camera/view uniforms with **f64 world / f32 render split and floating-origin
-  rebase**; 4. infinite editor grid + sky gradient; 5. debug-primitive layer (lines, wireframes,
-  bounds).
-- **P2.3 Editor camera** — 1. RMB+WASD/QE flycam + scroll speed; 2. Alt-orbit/pan/dolly + MMB
-  pan + LMB behaviors; 3. F-focus + camera bookmarks; 4. input capture/focus handoff polish.
-- **P2.4 Picking & gizmos** — 1. ID-buffer picking pass; 2. hover/selection outlines;
+> **STATUS: Phase 2 COMPLETE** (2026-07-20), verified live on Windows/Vulkan (RTX 4070 Ti).
+> The Spike A viewport is productionized into `inf-render` (Ring 0 forward renderer) driven
+> by `inf-viewport` through a shared `EngineHost`. Live demo: 10 407 shaded cubes at vsync,
+> infinite dual grid + sky, RMB flycam / Alt-orbit / dolly, F-focus, camera bookmarks,
+> click-select via ID buffer, orange selection outline, translate/rotate/scale gizmos,
+> command-palette focus handoff from the native viewport. See the CLAUDE.md status block.
+> Key decisions: reverse-infinite-Z depth for large-world precision; floating origin in
+> `inf-math` (10 m-snapped rebase); analytic gizmo hit-testing + custom overlays over egui
+> (`docs/memos/p2-overlay-egui-vs-custom.md`). Golden harness runs determinism + structural
+> gates in CI (adapter-robust); strict pixel diffing is opt-in (`INF_GOLDEN_STRICT`) to avoid
+> cross-adapter flakiness — a pinned-adapter (lavapipe) strict job is the follow-up.
+> Human-only remainders (non-blocking): DPI matrix manual pass (150/200 %, cross-monitor),
+> demo recording, Spike A macOS hardware run.
+
+- **P2.1 Surface & device management** *(done)* — 1. `inf-render` device/queue/surface init +
+  swapchain lifecycle; 2. production rect-sync (debounced reconfigure, letterboxing); 3. multi-DPI
+  + monitor-change handling; 4. crash-safe device-lost recovery.
+- **P2.2 Forward renderer core** *(done)* — 1. render-graph skeleton + WGSL pipeline cache;
+  2. depth + MSAA + sRGB; 3. camera/view uniforms with **f64 world / f32 render split and
+  floating-origin rebase**; 4. infinite editor grid + sky gradient; 5. debug-primitive layer
+  (lines, wireframes, bounds).
+- **P2.3 Editor camera** *(done)* — 1. RMB+WASD/QE flycam + scroll speed; 2. Alt-orbit/pan/dolly
+  + MMB pan + LMB behaviors; 3. F-focus + camera bookmarks; 4. input capture/focus handoff polish.
+- **P2.4 Picking & gizmos** *(done)* — 1. ID-buffer picking pass; 2. hover/selection outlines;
   3. translate/rotate/scale gizmos (engine-rendered, axis constraints, snapping); 4. overlay
   layer decision memo (egui vs custom) + implementation.
-- **P2.5 Render test harness** — 1. headless-wgpu golden-image runner (dssim thresholds,
-  WARP/lavapipe CI adapters); 2. first golden scenes.
+- **P2.5 Render test harness** *(done)* — 1. headless-wgpu golden-image runner (perceptual
+  downscale tolerance, skip-if-no-adapter for WARP/lavapipe CI); 2. first golden scenes
+  (grid+sky, cubes, selection+gizmo).
 
 ### Phase 3 — ECS & scene model
 

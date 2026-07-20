@@ -12,6 +12,7 @@
 pub mod camera;
 pub mod debug_draw;
 pub mod gizmo;
+pub mod golden;
 pub mod gpu;
 pub mod graph;
 pub mod headless;
