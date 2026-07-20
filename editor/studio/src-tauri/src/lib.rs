@@ -26,10 +26,12 @@ pub fn run() {
     tauri::Builder::default()
         .manage(commands::ViewportState::default())
         .manage(commands::SceneState::default())
+        .manage(commands::AssetState::default())
         .invoke_handler(commands::invoke_handler())
         .setup(|app| {
             logging::attach_app(app.handle().clone());
             commands::recover_scene_on_boot(app.handle());
+            commands::init_assets_on_boot(app.handle());
             tracing::info!("Infinity Engine starting");
             Ok(())
         })

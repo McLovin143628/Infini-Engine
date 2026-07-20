@@ -2259,8 +2259,10 @@ version = "0.1.0"
 name = "inf-studio"
 version = "0.1.0"
 dependencies = [
+ "inf-asset",
  "inf-core",
  "inf-editor-core",
+ "inf-material",
  "inf-viewport",
  "raw-window-handle",
  "serde",

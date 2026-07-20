@@ -8,6 +8,7 @@
 
 pub mod import;
 pub mod queue;
+pub mod snapshot;
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +25,9 @@ pub struct AssetProject {
     root: PathBuf,
     db: AssetDb,
     cache: ImportCache,
+    /// Monotonic content version — bumped by every mutation so the frontend can
+    /// detect a change and re-fetch the snapshot.
+    version: u64,
 }
 
 impl AssetProject {
@@ -35,7 +39,12 @@ impl AssetProject {
         let mut db = AssetDb::new(&root);
         db.scan()?;
         let cache = ImportCache::open(root.join(".inf").join("import-cache"))?;
-        Ok(Self { root, db, cache })
+        Ok(Self {
+            root,
+            db,
+            cache,
+            version: 1,
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -48,9 +57,21 @@ impl AssetProject {
         &mut self.db
     }
 
+    /// The current content version.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// Bump the content version (called by every mutation).
+    pub fn bump(&mut self) {
+        self.version += 1;
+    }
+
     /// Rescan the whole content root from disk.
     pub fn rescan(&mut self) -> Result<usize> {
-        self.db.scan()
+        let n = self.db.scan()?;
+        self.bump();
+        Ok(n)
     }
 
     /// Absolute default import destination folder (created if missing).
@@ -97,6 +118,7 @@ impl AssetProject {
             path,
             name,
         });
+        self.bump();
         Ok(id)
     }
 
@@ -124,6 +146,7 @@ impl AssetProject {
             .unwrap_or(new_name)
             .to_string();
         self.db.insert(entry);
+        self.bump();
         Ok(())
     }
 
@@ -158,13 +181,16 @@ impl AssetProject {
             path,
             name,
         });
+        self.bump();
         Ok(new_id)
     }
 
     /// Set an asset's tags (persisted).
     pub fn set_tags(&mut self, id: AssetId, tags: Vec<String>) -> Result<()> {
         self.db.set_tags(id, tags)?;
-        self.db.persist(id)
+        self.db.persist(id)?;
+        self.bump();
+        Ok(())
     }
 
     /// Delete an asset. Unless `force`, refuses (with the list of referrers)
@@ -178,6 +204,7 @@ impl AssetProject {
             let _ = std::fs::remove_file(&entry.path);
             let side = inf_asset::sidecar_path(&entry.path);
             let _ = std::fs::remove_file(side);
+            self.bump();
         }
         Ok(Vec::new()) // empty = deleted
     }

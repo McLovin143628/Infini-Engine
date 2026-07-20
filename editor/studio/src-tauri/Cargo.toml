@@ -23,6 +23,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 inf-core = { workspace = true }
 inf-editor-core = { workspace = true }
+inf-asset = { workspace = true }
+inf-material = { workspace = true }
 inf-viewport = { workspace = true }
 raw-window-handle = { workspace = true }
 uuid = { workspace = true }

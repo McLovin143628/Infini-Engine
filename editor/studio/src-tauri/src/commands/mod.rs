@@ -3,10 +3,12 @@
 //! here, in one place.
 
 mod app;
+mod assets;
 mod layout;
 mod scene;
 mod viewport;
 
+pub use assets::{init_assets_on_boot, AssetState};
 pub use scene::{recover_scene_on_boot, SceneState};
 pub use viewport::ViewportState;
 
@@ -37,5 +39,14 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         scene::scene_open,
         scene::scene_new,
         scene::scene_autosave,
+        assets::assets_snapshot,
+        assets::asset_references,
+        assets::asset_thumbnail,
+        assets::asset_import,
+        assets::asset_create,
+        assets::asset_delete,
+        assets::asset_rename,
+        assets::asset_duplicate,
+        assets::asset_set_tags,
     ]
 }

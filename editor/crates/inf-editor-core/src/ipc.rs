@@ -211,3 +211,106 @@ pub enum SpawnKind {
     SpotLight,
     Camera,
 }
+
+// ── Asset system / Content Drawer (Phase 4) ──────────────────────────────
+//
+// The asset database lives in `inf-editor-core::assets` over the project's
+// content root. The Content Drawer consumes these GUID-keyed DTOs via the
+// `assets_snapshot` command and re-fetches on the `assets://changed` event; a
+// separate `assets://import` event streams import-job progress. Thumbnails come
+// as data-URLs from `asset_thumbnail` (lazy, per visible cell).
+
+/// One asset row in the Content Drawer grid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AssetDto {
+    /// Stable GUID string.
+    pub id: String,
+    pub name: String,
+    /// Kind slug ("mesh", "texture", …) for filtering/icons.
+    pub kind: String,
+    /// Kind display label ("Static Mesh", …).
+    pub kind_label: String,
+    /// Folder path relative to the content root ("", "meshes", "props/env").
+    pub folder: String,
+    /// Payload path relative to the content root (forward slashes).
+    pub path: String,
+    /// xxh3 content hash hex (the thumbnail + change key).
+    pub content_hash: String,
+    /// User tags.
+    pub tags: Vec<String>,
+    /// Import source (relative), if imported.
+    pub source: Option<String>,
+    /// Number of assets this one references (outgoing deps).
+    #[ts(type = "number")]
+    pub dep_count: u32,
+    /// Number of assets that reference this one (for the delete warning badge).
+    #[ts(type = "number")]
+    pub ref_count: u32,
+    /// Whether this kind has a rendered thumbnail (else the UI shows an icon).
+    pub previewable: bool,
+}
+
+/// A folder in the content tree (`assets_snapshot`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AssetFolderDto {
+    /// Path relative to the content root ("" = root).
+    pub path: String,
+    /// Leaf folder name ("" for the root).
+    pub name: String,
+    /// Child folder paths.
+    pub children: Vec<String>,
+    /// Assets directly in this folder.
+    #[ts(type = "number")]
+    pub asset_count: u32,
+}
+
+/// The full content snapshot (`assets_snapshot` command).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AssetSnapshot {
+    /// Monotonic version (bumped on every content change).
+    #[ts(type = "number")]
+    pub version: u64,
+    /// Absolute content-root path, for display.
+    pub root: String,
+    pub assets: Vec<AssetDto>,
+    pub folders: Vec<AssetFolderDto>,
+}
+
+/// A lightweight reference to another asset (delete-warning referrer list).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AssetRefDto {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+}
+
+/// The result of a delete request (`asset_delete`): either it happened, or it
+/// was blocked by the assets still referencing the target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct DeleteResult {
+    pub deleted: bool,
+    /// Non-empty only when `deleted` is false — the referrers to warn about.
+    pub blockers: Vec<AssetRefDto>,
+}
+
+/// One import-progress event (`assets://import`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ImportEventDto {
+    #[ts(type = "number")]
+    pub job: u64,
+    pub source: String,
+    /// "started" | "finished" | "failed".
+    pub phase: String,
+    /// GUIDs produced (on "finished").
+    pub produced: Vec<String>,
+    pub primary: Option<String>,
+    pub cached: bool,
+    pub error: Option<String>,
+}
+
+/// The `assets://changed` event payload — a version bump prompting a re-fetch.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct AssetChanged {
+    #[ts(type = "number")]
+    pub version: u64,
+}
