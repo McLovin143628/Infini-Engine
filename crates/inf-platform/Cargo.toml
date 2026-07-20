@@ -1,0 +1,10 @@
+[package]
+name = "inf-platform"
+description = "Platform HAL traits: window/surface, vfs, time, threads. The console seam."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

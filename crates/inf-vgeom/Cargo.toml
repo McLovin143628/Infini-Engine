@@ -1,0 +1,10 @@
+[package]
+name = "inf-vgeom"
+description = "Virtualized geometry (Phase 13): meshlet DAG, streaming, GPU occlusion culling."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

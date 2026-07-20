@@ -1,0 +1,10 @@
+[package]
+name = "inf-render-2d"
+description = "2D rendering: sprite batcher, tilemaps, 2D lights."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

@@ -1,0 +1,10 @@
+[package]
+name = "inf-mesh"
+description = "Mesh import processing and optimization; later home of the meshlet builder."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

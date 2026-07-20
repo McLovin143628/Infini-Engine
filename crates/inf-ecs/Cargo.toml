@@ -1,0 +1,10 @@
+[package]
+name = "inf-ecs"
+description = "ECS facade over bevy_ecs + bevy_reflect. The only crate that names bevy_ecs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

@@ -1,0 +1,10 @@
+[package]
+name = "inf-scene"
+description = "Scene model: .inf_lvl format, transform hierarchy, .inf_act prefab instantiation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

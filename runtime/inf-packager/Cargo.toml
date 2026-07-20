@@ -1,0 +1,10 @@
+[package]
+name = "inf-packager"
+description = "Cook + bundle pipeline: asset packs, blueprint compilation, per-platform bundling."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

@@ -1,0 +1,10 @@
+[package]
+name = "inf-graph"
+description = "Generic node-graph DAG: model, compile, exec, derive, cache, registry."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

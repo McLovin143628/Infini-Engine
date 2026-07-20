@@ -1,0 +1,10 @@
+[package]
+name = "inf-editor-core"
+description = "Editor core (Tauri-free): project model, asset queries, undo/redo, thumbnailer, build orchestration."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

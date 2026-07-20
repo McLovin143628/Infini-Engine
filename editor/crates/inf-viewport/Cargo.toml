@@ -1,0 +1,10 @@
+[package]
+name = "inf-viewport"
+description = "Native viewport host: per-OS child window embedding, input capture, surface lifecycle."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

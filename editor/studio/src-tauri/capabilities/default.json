@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal capability set for the main Studio window. All privileged operations route through audited #[tauri::command] modules, never raw plugin permissions.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

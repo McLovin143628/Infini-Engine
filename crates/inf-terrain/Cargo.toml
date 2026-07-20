@@ -1,0 +1,10 @@
+[package]
+name = "inf-terrain"
+description = "Terrain: quadtree/clipmap heightfield, GPU erosion, splat layers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

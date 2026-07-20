@@ -1,0 +1,83 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/inf-core",
+    "crates/inf-math",
+    "crates/inf-platform",
+    "crates/inf-ecs",
+    "crates/inf-asset",
+    "crates/inf-scene",
+    "crates/inf-render",
+    "crates/inf-render-2d",
+    "crates/inf-mesh",
+    "crates/inf-vgeom",
+    "crates/inf-material",
+    "crates/inf-terrain",
+    "crates/inf-pcg",
+    "crates/inf-physics",
+    "crates/inf-audio",
+    "crates/inf-anim",
+    "crates/inf-input",
+    "crates/inf-graph",
+    "crates/inf-blueprint",
+    "crates/inf-transpile",
+    "crates/inf-hotreload",
+    "crates/inf-runtime",
+    "editor/crates/inf-editor-core",
+    "editor/crates/inf-viewport",
+    "editor/studio/src-tauri",
+    "runtime/inf-player",
+    "runtime/inf-packager",
+    "tools/inf-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/McLovin143628/Infinity-Engine"
+authors = ["Infinity Engine contributors"]
+
+[workspace.dependencies]
+# ── shared, version-pinned once here; crates reference with { workspace = true } ──
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# intra-workspace crates
+inf-core = { path = "crates/inf-core" }
+inf-math = { path = "crates/inf-math" }
+inf-platform = { path = "crates/inf-platform" }
+inf-ecs = { path = "crates/inf-ecs" }
+inf-asset = { path = "crates/inf-asset" }
+inf-scene = { path = "crates/inf-scene" }
+inf-render = { path = "crates/inf-render" }
+inf-render-2d = { path = "crates/inf-render-2d" }
+inf-mesh = { path = "crates/inf-mesh" }
+inf-vgeom = { path = "crates/inf-vgeom" }
+inf-material = { path = "crates/inf-material" }
+inf-terrain = { path = "crates/inf-terrain" }
+inf-pcg = { path = "crates/inf-pcg" }
+inf-physics = { path = "crates/inf-physics" }
+inf-audio = { path = "crates/inf-audio" }
+inf-anim = { path = "crates/inf-anim" }
+inf-input = { path = "crates/inf-input" }
+inf-graph = { path = "crates/inf-graph" }
+inf-blueprint = { path = "crates/inf-blueprint" }
+inf-transpile = { path = "crates/inf-transpile" }
+inf-hotreload = { path = "crates/inf-hotreload" }
+inf-runtime = { path = "crates/inf-runtime" }
+inf-editor-core = { path = "editor/crates/inf-editor-core" }
+inf-viewport = { path = "editor/crates/inf-viewport" }
+inf-packager = { path = "runtime/inf-packager" }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"

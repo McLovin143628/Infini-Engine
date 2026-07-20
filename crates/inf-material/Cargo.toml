@@ -1,0 +1,10 @@
+[package]
+name = "inf-material"
+description = "Materials: material model, .inf_mat graph to WGSL codegen, .inf_tex compute graphs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

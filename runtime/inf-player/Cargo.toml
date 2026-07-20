@@ -1,0 +1,11 @@
+[package]
+name = "inf-player"
+description = "Standalone game player: loads cooked packs and runs inf-runtime. Doubles as the PIE subprocess."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+inf-runtime = { workspace = true }

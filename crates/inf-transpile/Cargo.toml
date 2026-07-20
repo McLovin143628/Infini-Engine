@@ -1,0 +1,10 @@
+[package]
+name = "inf-transpile"
+description = "Bidirectional graph <-> Rust transpiler (syn/quote/prettyplease)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

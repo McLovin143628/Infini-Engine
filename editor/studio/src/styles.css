@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+/* ── Infinity Studio design tokens (Phase 1 will grow this into the theme system) ── */
+:root {
+  --ink-bg-0: #0d0f12; /* deepest: viewport gutter, drawers */
+  --ink-bg-1: #14171c; /* panel background */
+  --ink-bg-2: #1b1f26; /* raised: headers, toolbars */
+  --ink-bg-3: #242933; /* hover / active surfaces */
+  --ink-border: #2c313b;
+  --ink-text: #d5d9e0;
+  --ink-text-dim: #8a919e;
+  --ink-accent: #3d8bff; /* single accent hue */
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--ink-bg-0);
+  color: var(--ink-text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  user-select: none;
+}

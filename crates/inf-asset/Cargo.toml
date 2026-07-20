@@ -1,0 +1,10 @@
+[package]
+name = "inf-asset"
+description = "Asset system: .inf_* schemas, bincode payload + TOML sidecars, GUIDs, asset DB, importers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

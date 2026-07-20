@@ -1,0 +1,10 @@
+[package]
+name = "inf-core"
+description = "Core primitives: ids, errors, tracing setup, frame clock, job system facade."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
