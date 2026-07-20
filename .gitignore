@@ -1,0 +1,50 @@
+# ── Claude / AI assistant local files (never push) ──
+CLAUDE.md
+**/CLAUDE.md
+.claude/
+.claude/**
+
+# ── Secrets / credentials / personal info (never push) ──
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*
+*secrets*
+*.local.json
+settings.local.*
+
+# ── Rust ──
+target/
+target-*/
+Cargo.lock.orig
+**/*.rs.bk
+
+# ── Node / frontend ──
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+
+# ── Tauri generated ──
+**/src-tauri/gen/
+**/gen/schemas/
+
+# ── Editors / OS junk ──
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ── Logs / temp ──
+*.log
+build_log*.txt
+tmp/
+temp/
