@@ -159,10 +159,17 @@ impl PluginHost {
         let shadow = self.shadow_dir.join(format!("{stem}.{hash:016x}.{ext}"));
         if !shadow.exists() {
             // Write via temp + rename so a concurrent load of the same
-            // contents can't observe a half-written shadow.
-            let tmp = self
-                .shadow_dir
-                .join(format!("{stem}.{hash:016x}.{}.tmp", std::process::id()));
+            // contents can't observe a half-written shadow. The temp name
+            // must be unique per WRITER, not per process: concurrent loads
+            // from two threads racing on a pid-only name interleave their
+            // writes and rename a torn dylib into place (caught by macOS CI,
+            // where dlopen then fails with an empty error string).
+            static WRITER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let unique = WRITER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp = self.shadow_dir.join(format!(
+                "{stem}.{hash:016x}.{}.{unique}.tmp",
+                std::process::id()
+            ));
             fs::write(&tmp, &bytes)?;
             if let Err(err) = fs::rename(&tmp, &shadow) {
                 let _ = fs::remove_file(&tmp);
