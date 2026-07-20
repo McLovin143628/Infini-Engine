@@ -12,6 +12,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { LogLine } from "../bindings/LogLine";
+import type { ViewportKey } from "../bindings/ViewportKey";
 
 export type { UnlistenFn };
 
@@ -19,6 +20,8 @@ export type { UnlistenFn };
 export interface EventPayloads {
   /** Structured tracing output → Output Log panel (P1.4). */
   "log://line": LogLine;
+  /** Global-shortcut chord forwarded from the native viewport (P2.3.4). */
+  "viewport://key": ViewportKey;
 }
 
 export type EventChannel = keyof EventPayloads;

@@ -14,7 +14,12 @@ import CommandPalette from "./shell/CommandPalette";
 import { DockWorkspace } from "./panels/dock/DockWorkspace";
 import ViewportPanel from "./viewport/ViewportPanel";
 import { bootstrapShellCommands } from "./shell/shellCommands";
-import { installKeybindingListener, registerDefaultKeybindings } from "./lib/keybindings";
+import {
+  dispatchChord,
+  installKeybindingListener,
+  registerDefaultKeybindings,
+} from "./lib/keybindings";
+import { listenTo } from "./lib/events";
 import { startLogListener } from "./stores/logStore";
 
 bootstrapShellCommands();
@@ -37,6 +42,23 @@ export default function App() {
   // detached windows mirror the log store over the bridge instead).
   useEffect(() => installKeybindingListener(), []);
   useEffect(() => startLogListener(), []);
+
+  // Focus handoff (P2.3.4): the native viewport forwards global-shortcut
+  // chords it doesn't consume so the palette/save/etc. keep working while the
+  // 3D view holds OS focus. StrictMode double-invoke → `disposed` guard so a
+  // late-resolving unlisten still fires.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    listenTo("viewport://key", (payload) => dispatchChord(payload.chord)).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   return (
     <div className="flex h-full flex-col">

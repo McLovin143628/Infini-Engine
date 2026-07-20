@@ -5,9 +5,12 @@
 //! frontend reports CSS rects × devicePixelRatio; we forward physical pixels
 //! to the `inf-viewport` thread.
 
+use std::sync::Arc;
 use std::sync::Mutex;
 
-use inf_editor_core::ipc::{ViewportDrop, ViewportRect};
+use inf_editor_core::ipc::{ViewportDrop, ViewportKey, ViewportRect};
+use inf_viewport::ViewportEvent;
+use tauri::Emitter;
 
 #[derive(Default)]
 pub struct ViewportState(Mutex<Option<inf_viewport::ViewportHandle>>);
@@ -28,6 +31,20 @@ pub async fn viewport_attach(
     Ok(())
 }
 
+/// Build the event sink that turns [`ViewportEvent`]s into namespaced webview
+/// events. Forwarded key chords arrive on `viewport://key` so the frontend's
+/// keybinding dispatcher can replay them (focus handoff, P2.3.4).
+fn event_sink(window: &tauri::Window) -> inf_viewport::ViewportEventSink {
+    let window = window.clone();
+    Arc::new(move |event: ViewportEvent| match event {
+        ViewportEvent::Key(chord) => {
+            if let Err(e) = window.emit("viewport://key", ViewportKey { chord: chord.chord }) {
+                tracing::warn!("viewport://key emit failed: {e}");
+            }
+        }
+    })
+}
+
 #[cfg(windows)]
 fn attach_native(window: &tauri::Window) -> Result<inf_viewport::ViewportHandle, String> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -35,7 +52,7 @@ fn attach_native(window: &tauri::Window) -> Result<inf_viewport::ViewportHandle,
         RawWindowHandle::Win32(h) => h.hwnd.get(),
         _ => return Err("expected a Win32 window handle".into()),
     };
-    Ok(inf_viewport::spawn(hwnd))
+    Ok(inf_viewport::spawn(hwnd, event_sink(window)))
 }
 
 #[cfg(target_os = "macos")]
@@ -45,21 +62,22 @@ fn attach_native(window: &tauri::Window) -> Result<inf_viewport::ViewportHandle,
         RawWindowHandle::AppKit(h) => h.ns_view.as_ptr() as isize,
         _ => return Err("expected an AppKit window handle".into()),
     };
+    let sink = event_sink(window);
     // AppKit setup must happen on the main thread; commands run on a worker.
     let (tx, rx) = std::sync::mpsc::channel();
     window
         .run_on_main_thread(move || {
-            let _ = tx.send(inf_viewport::spawn(ns_view));
+            let _ = tx.send(inf_viewport::spawn(ns_view, sink));
         })
         .map_err(|e| e.to_string())?;
     rx.recv().map_err(|e| e.to_string())
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-fn attach_native(_window: &tauri::Window) -> Result<inf_viewport::ViewportHandle, String> {
+fn attach_native(window: &tauri::Window) -> Result<inf_viewport::ViewportHandle, String> {
     // Linux embedding (X11 reparent / Wayland streaming fallback) is a later
     // Spike A batch — see ROADMAP §5.
-    Ok(inf_viewport::spawn(0))
+    Ok(inf_viewport::spawn(0, event_sink(window)))
 }
 
 /// Update the viewport rectangle ([`ViewportRect`]: physical pixels relative

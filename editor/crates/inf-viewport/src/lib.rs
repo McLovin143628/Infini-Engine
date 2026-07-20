@@ -25,6 +25,27 @@ mod win32;
 #[cfg(target_os = "macos")]
 mod macos;
 
+/// A keyboard chord the native viewport didn't consume, forwarded to the
+/// webview so global shortcuts (command palette, save, …) still fire while the
+/// 3D view holds OS focus. Normalized to the frontend's `chordOf` format.
+#[derive(Debug, Clone)]
+pub struct KeyChord {
+    /// e.g. "Ctrl+Shift+P", "F11". Modifier order: Ctrl, Alt, Shift.
+    pub chord: String,
+}
+
+/// Events the viewport surfaces back to Ring 2 (Tauri), which turns them into
+/// namespaced webview events. Ring 1 stays Tauri-free by going through this.
+#[derive(Debug, Clone)]
+pub enum ViewportEvent {
+    /// A global-shortcut key chord to replay into the webview (focus handoff).
+    Key(KeyChord),
+}
+
+/// Sink the host installs to receive [`ViewportEvent`]s. `Arc` so the render
+/// thread can hold it cheaply; `Send + Sync` so it crosses the thread boundary.
+pub type ViewportEventSink = std::sync::Arc<dyn Fn(ViewportEvent) + Send + Sync>;
+
 /// Physical-pixel rectangle of the viewport hole, relative to the parent
 /// window's client area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +124,7 @@ pub use macos::{spawn, ViewportHandle};
 pub struct ViewportHandle;
 
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn spawn(_parent: isize) -> ViewportHandle {
+pub fn spawn(_parent: isize, _sink: ViewportEventSink) -> ViewportHandle {
     tracing::warn!(
         "inf-viewport: native embedding not yet implemented on this OS (see ROADMAP §5 Spike A)"
     );

@@ -26,7 +26,7 @@ use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
 use crate::camera::EditorCamera;
 use crate::host::EngineHost;
-use crate::{SurfaceTarget, ViewportRect};
+use crate::{SurfaceTarget, ViewportEventSink, ViewportRect};
 
 enum Cmd {
     SetRect(ViewportRect),
@@ -71,7 +71,7 @@ impl ViewportHandle {
 /// Create the CAMetalLayer under `ns_view` (the Tauri contentView) and start
 /// the render thread. MUST be called on the AppKit main thread; the Ring-2
 /// caller dispatches via `run_on_main_thread`.
-pub fn spawn(ns_view: isize) -> ViewportHandle {
+pub fn spawn(ns_view: isize, sink: ViewportEventSink) -> ViewportHandle {
     let (tx, rx) = channel();
 
     if MainThreadMarker::new().is_none() {
@@ -105,6 +105,11 @@ pub fn spawn(ns_view: isize) -> ViewportHandle {
         // Intentional +1 retain: the layer lives until Destroy releases it.
         (Retained::into_raw(metal) as isize, scale)
     };
+
+    // macOS input (flycam/orbit + key forwarding) isn't wired yet — the camera
+    // holds its default pose, so there are no events to surface. Kept in the
+    // signature for parity with the Windows host; the hardware pass wires it.
+    let _ = sink;
 
     std::thread::Builder::new()
         .name("inf-viewport".into())

@@ -78,6 +78,19 @@ export function installKeybindingListener(target: Window = window): () => void {
   return () => target.removeEventListener("keydown", onKeyDown);
 }
 
+/**
+ * Dispatch a chord that arrived from outside the DOM — the native viewport
+ * forwards global shortcuts here when it holds OS focus (`viewport://key`,
+ * P2.3.4), since those key events never reach the webview. Returns true if a
+ * binding fired. No editable-target check: the viewport is never a text field.
+ */
+export function dispatchChord(chord: string): boolean {
+  const binding = bindings.get(chord);
+  if (!binding) return false;
+  executeCommand(binding.command);
+  return true;
+}
+
 /** Test-only: reset global state between cases. */
 export function __resetKeybindingsForTest(): void {
   bindings.clear();

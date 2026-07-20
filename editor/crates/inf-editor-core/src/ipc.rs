@@ -32,6 +32,16 @@ pub struct ViewportDrop {
     pub payload: String,
 }
 
+/// A keyboard chord the native viewport forwarded to the webview on
+/// `viewport://key`. When the 3D view holds OS focus, WASD/camera keys are
+/// consumed natively but global shortcuts (command palette, save, …) are
+/// replayed into the frontend keybinding dispatcher (focus handoff, P2.3.4).
+/// `chord` matches the frontend's `chordOf` format ("Ctrl+Shift+P", "F11").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ViewportKey {
+    pub chord: String,
+}
+
 /// Log severity for the Output Log panel. Mirrors `tracing::Level`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
