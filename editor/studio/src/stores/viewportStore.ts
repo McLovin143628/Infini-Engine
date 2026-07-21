@@ -45,10 +45,12 @@ interface ViewportUiState {
   sculptOp: SculptOpDto;
   /** Brush radius (world metres). */
   sculptRadius: number;
-  /** Brush strength (metres/dab for Raise/Lower/Noise; blend for Smooth/Flatten). */
+  /** Brush strength (metres/dab for Raise/Lower/Noise; blend for Smooth/Flatten; flow for Paint). */
   sculptStrength: number;
   /** Brush falloff curve. */
   sculptFalloff: SculptFalloffDto;
+  /** Target splat layer `0..=3` for the Paint op (P10.4). */
+  sculptPaintLayer: number;
 
   setMode: (mode: ViewportModeDto) => void;
   toggleMode: () => void;
@@ -65,7 +67,11 @@ interface ViewportUiState {
   nudgeSculptRadius: (dir: number) => void;
   setSculptStrength: (s: number) => void;
   setSculptFalloff: (f: SculptFalloffDto) => void;
+  setSculptPaintLayer: (n: number) => void;
 }
+
+/** Number of splat layers (matches inf_terrain::SPLAT_LAYERS / TERRAIN_LAYERS). */
+export const SPLAT_LAYER_COUNT = 4;
 
 /** Send the current sculpt brush settings to the native viewport. */
 function pushSculpt(s: ViewportUiState): void {
@@ -74,6 +80,7 @@ function pushSculpt(s: ViewportUiState): void {
     radius: s.sculptRadius,
     strength: s.sculptStrength,
     falloff: s.sculptFalloff,
+    paint_layer: s.sculptPaintLayer,
   };
   void viewport.setSculpt(dto).catch(() => {});
 }
@@ -100,6 +107,7 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   sculptRadius: 8,
   sculptStrength: 0.5,
   sculptFalloff: "Smooth",
+  sculptPaintLayer: 0,
 
   setMode: (mode) => {
     set({ mode });
@@ -152,6 +160,13 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   },
   setSculptFalloff: (sculptFalloff) => {
     set({ sculptFalloff });
+    pushSculpt(get());
+  },
+  setSculptPaintLayer: (n) => {
+    const sculptPaintLayer = Number.isFinite(n)
+      ? Math.min(Math.max(Math.round(n), 0), SPLAT_LAYER_COUNT - 1)
+      : 0;
+    set({ sculptPaintLayer });
     pushSculpt(get());
   },
 }));

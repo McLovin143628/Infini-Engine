@@ -447,6 +447,9 @@ pub enum ToolMode {
 /// The sculpt brush operation, mirrored from the toolbar. A flat, transport-
 /// friendly enum the host maps onto `inf_terrain::BrushOp` (filling in the
 /// op-specific parameters — smooth iterations, noise field, flatten target).
+/// `Paint` is the P10.4 splat sub-mode: it edits per-sample layer **weights**
+/// (via `inf_terrain::SplatStroke`) rather than heights, targeting
+/// [`SculptSettings::paint_layer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SculptOp {
     #[default]
@@ -455,6 +458,8 @@ pub enum SculptOp {
     Smooth,
     Flatten,
     Noise,
+    /// Paint splat weight toward [`SculptSettings::paint_layer`] (P10.4).
+    Paint,
 }
 
 /// Brush falloff curve, mirrored from the toolbar onto `inf_terrain::Falloff`.
@@ -477,6 +482,8 @@ pub struct SculptSettings {
     pub radius: f64,
     pub strength: f64,
     pub falloff: SculptFalloff,
+    /// Target splat layer `0..=3` for the [`SculptOp::Paint`] sub-mode (P10.4).
+    pub paint_layer: u8,
 }
 
 impl Default for SculptSettings {
@@ -486,6 +493,7 @@ impl Default for SculptSettings {
             radius: 8.0,
             strength: 0.5,
             falloff: SculptFalloff::Smooth,
+            paint_layer: 0,
         }
     }
 }

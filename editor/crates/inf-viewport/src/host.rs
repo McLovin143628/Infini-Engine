@@ -18,14 +18,14 @@ use inf_render::{
     handle_from_guid, ColliderOutline2D, ColliderOutline3D, DebugDraw, EngineRenderer, GizmoDelta,
     GizmoDrag, GizmoMode, GpuContext, HAlign, LightKind, MeshInstance, NineSliceParams,
     OrthoParams, Picker, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D, RenderScene,
-    RenderTerrain, RenderTerrainTile, RenderTilemap, RenderView, SpriteInstance, SurfaceChain,
-    TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
+    RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView,
+    SpriteInstance, SurfaceChain, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
 };
 use uuid::Uuid;
 
 use inf_terrain::{
-    dab_positions, raycast_terrain, BrushOp, BrushParams, Falloff, FlattenTarget, Stroke,
-    TerrainData,
+    dab_positions, raycast_terrain, BrushOp, BrushParams, Falloff, FlattenTarget, SplatStroke,
+    Stroke, TerrainData,
 };
 
 use crate::camera::{
@@ -105,14 +105,21 @@ pub struct EngineHost {
 struct SculptDrag {
     /// Target terrain entity.
     guid: Uuid,
-    /// The accumulating stroke (merged into one delta at commit).
-    stroke: Stroke,
+    /// The accumulating stroke (merged into one delta at commit) — a height
+    /// [`Stroke`] for the sculpt ops, or a [`SplatStroke`] for the Paint sub-mode.
+    kind: DragStroke,
     /// The effective op (Ctrl may flip Raise↔Lower).
     op: SculptOp,
     /// Last dab centre in terrain-local XZ (for even path resampling).
     last_local: DVec2,
     /// Local surface height under the stroke's first touch — the Flatten target.
     flatten_height: f64,
+}
+
+/// The in-flight stroke of a [`SculptDrag`]: a height sculpt or a splat paint.
+enum DragStroke {
+    Height(Stroke),
+    Splat(SplatStroke),
 }
 
 /// A selected 2D (non-mesh) entity's working transform for the gizmo. World
@@ -811,19 +818,40 @@ fn project_tilemap(tilemap: &Tilemap, translation: DVec3) -> RenderTilemap {
 fn project_terrain(terrain: &Terrain, translation: DVec3, version: u64) -> RenderTerrain {
     let data = &terrain.data;
     let res = data.tile_resolution();
+    let n = (res * res) as usize;
     let tiles = data
         .tiles()
-        .map(|(&coord, tile)| RenderTerrainTile {
-            coord,
-            origin: tile.origin + translation,
-            heights: tile.heights().to_vec(),
-            height_bounds: tile.height_bounds(),
+        .map(|(&coord, tile)| {
+            // Resolve the sparse weight store into a full res² buffer for upload
+            // (an unpainted tile → uniform default layer 0).
+            let weights: Vec<[u8; 4]> = if tile.weights_are_default() {
+                vec![inf_terrain::DEFAULT_WEIGHT; n]
+            } else {
+                (0..res)
+                    .flat_map(|j| (0..res).map(move |i| (i, j)))
+                    .map(|(i, j)| tile.weight_sample(res, i, j))
+                    .collect()
+            };
+            RenderTerrainTile {
+                coord,
+                origin: tile.origin + translation,
+                heights: tile.heights().to_vec(),
+                weights,
+                height_bounds: tile.height_bounds(),
+            }
         })
         .collect();
+    let layers = std::array::from_fn(|k| RenderTerrainLayer {
+        albedo: terrain.layers[k].albedo.to_array(),
+        roughness: terrain.layers[k].roughness as f32,
+        tex_scale: terrain.layers[k].tex_scale as f32,
+    });
     RenderTerrain {
         tile_resolution: res,
         meters_per_sample: data.meters_per_sample(),
         tiles,
+        layers,
+        macro_variation: terrain.macro_variation as f32,
         version,
     }
 }
@@ -1123,7 +1151,16 @@ impl EngineHost {
             .as_ref()
             .map(|d| d.op)
             .unwrap_or(self.sculpt.op);
-        let color = op_color(op);
+        // Paint recolours the ring by the target layer's albedo (so the swatch
+        // under the cursor reads as the layer being painted); sculpt ops use
+        // their fixed op colour.
+        let color = if op == SculptOp::Paint {
+            self.terrain_guid
+                .and_then(|g| doc.terrain_layer_albedo(g, self.sculpt.paint_layer))
+                .unwrap_or_else(|| op_color(op))
+        } else {
+            op_color(op)
+        };
         self.sculpt_ring_color = color;
         if let Some(guid) = self.terrain_guid {
             if let Some((data, translation)) = doc.terrain_data_and_origin(guid) {
@@ -1159,12 +1196,19 @@ impl EngineHost {
         };
         let op = effective_op(self.sculpt.op, ctrl);
         let settings = self.sculpt;
-        let mut stroke = Stroke::begin();
-        let (brush, params) = brush_of(op, &settings, center, height);
-        doc.sculpt_apply_dab(guid, &mut stroke, brush, params);
+        let kind = if op == SculptOp::Paint {
+            let mut stroke = SplatStroke::begin(settings.paint_layer);
+            doc.paint_apply_dab(guid, &mut stroke, paint_params(&settings, center));
+            DragStroke::Splat(stroke)
+        } else {
+            let mut stroke = Stroke::begin();
+            let (brush, params) = brush_of(op, &settings, center, height);
+            doc.sculpt_apply_dab(guid, &mut stroke, brush, params);
+            DragStroke::Height(stroke)
+        };
         self.sculpt_drag = Some(SculptDrag {
             guid,
-            stroke,
+            kind,
             op,
             last_local: center,
             flatten_height: height,
@@ -1191,9 +1235,16 @@ impl EngineHost {
         let dabs = dab_positions(&[last, cur], spacing);
         let mut new_last = last;
         for &c in dabs.iter().skip(1) {
-            let (brush, params) = brush_of(op, &settings, c, flatten_h);
             if let Some(d) = self.sculpt_drag.as_mut() {
-                doc.sculpt_apply_dab(guid, &mut d.stroke, brush, params);
+                match &mut d.kind {
+                    DragStroke::Height(stroke) => {
+                        let (brush, params) = brush_of(op, &settings, c, flatten_h);
+                        doc.sculpt_apply_dab(guid, stroke, brush, params);
+                    }
+                    DragStroke::Splat(stroke) => {
+                        doc.paint_apply_dab(guid, stroke, paint_params(&settings, c));
+                    }
+                }
             }
             new_last = c;
         }
@@ -1203,13 +1254,17 @@ impl EngineHost {
         self.refresh_ring(doc, cur);
     }
 
-    /// Finish the stroke: commit the merged [`inf_terrain::HeightDelta`] as one
-    /// undo step. Returns `true` if a non-empty stroke was recorded.
+    /// Finish the stroke: commit the merged height [`inf_terrain::HeightDelta`] or
+    /// splat [`inf_terrain::SplatDelta`] as one undo step. Returns `true` if a
+    /// non-empty stroke was recorded.
     pub fn finish_sculpt(&mut self, doc: &mut SceneDoc) -> bool {
         let Some(drag) = self.sculpt_drag.take() else {
             return false;
         };
-        doc.edit_commit_sculpt(drag.guid, drag.stroke)
+        match drag.kind {
+            DragStroke::Height(stroke) => doc.edit_commit_sculpt(drag.guid, stroke),
+            DragStroke::Splat(stroke) => doc.edit_commit_paint(drag.guid, stroke),
+        }
     }
 }
 
@@ -1225,23 +1280,37 @@ fn effective_op(op: SculptOp, ctrl: bool) -> SculptOp {
 
 /// Build the `inf_terrain` brush op + params for one dab from the toolbar
 /// settings, filling in the op-specific parameters the flat UI enum omits.
+fn falloff_of(f: SculptFalloff) -> Falloff {
+    match f {
+        SculptFalloff::Smooth => Falloff::Smooth,
+        SculptFalloff::Linear => Falloff::Linear,
+        SculptFalloff::Sphere => Falloff::Sphere,
+        SculptFalloff::Sharp => Falloff::Sharp,
+    }
+}
+
+/// Brush params for a splat-paint dab (P10.4): `strength` is the per-dab flow
+/// rate toward the target layer, `falloff` shapes it across the radius.
+fn paint_params(s: &SculptSettings, center: DVec2) -> BrushParams {
+    BrushParams {
+        center,
+        radius: s.radius,
+        strength: s.strength,
+        falloff: falloff_of(s.falloff),
+    }
+}
+
 fn brush_of(
     op: SculptOp,
     s: &SculptSettings,
     center: DVec2,
     flatten_height: f64,
 ) -> (BrushOp, BrushParams) {
-    let falloff = match s.falloff {
-        SculptFalloff::Smooth => Falloff::Smooth,
-        SculptFalloff::Linear => Falloff::Linear,
-        SculptFalloff::Sphere => Falloff::Sphere,
-        SculptFalloff::Sharp => Falloff::Sharp,
-    };
     let params = BrushParams {
         center,
         radius: s.radius,
         strength: s.strength,
-        falloff,
+        falloff: falloff_of(s.falloff),
     };
     let brush = match op {
         SculptOp::Raise => BrushOp::Raise,
@@ -1256,6 +1325,9 @@ fn brush_of(
             octaves: 4,
             amplitude: s.strength,
         },
+        // Paint is routed to the splat path before `brush_of` is reached; map it
+        // to a no-op-ish Raise for totality (never actually applied).
+        SculptOp::Paint => BrushOp::Raise,
     };
     (brush, params)
 }
@@ -1269,6 +1341,9 @@ fn op_color(op: SculptOp) -> [f32; 4] {
         SculptOp::Smooth => [0.40, 0.70, 1.00, 1.0],
         SculptOp::Flatten => [0.95, 0.85, 0.35, 1.0],
         SculptOp::Noise => [0.75, 0.50, 0.95, 1.0],
+        // Fallback only — the ring is normally recoloured to the target layer's
+        // albedo (see `refresh_ring`).
+        SculptOp::Paint => [0.90, 0.90, 0.90, 1.0],
     }
 }
 

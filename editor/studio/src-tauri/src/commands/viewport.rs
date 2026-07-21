@@ -244,6 +244,7 @@ pub async fn viewport_set_sculpt(
                 SculptOpDto::Smooth => SculptOp::Smooth,
                 SculptOpDto::Flatten => SculptOp::Flatten,
                 SculptOpDto::Noise => SculptOp::Noise,
+                SculptOpDto::Paint => SculptOp::Paint,
             },
             radius: sculpt.radius.max(0.0),
             strength: sculpt.strength,
@@ -253,6 +254,7 @@ pub async fn viewport_set_sculpt(
                 SculptFalloffDto::Sphere => SculptFalloff::Sphere,
                 SculptFalloffDto::Sharp => SculptFalloff::Sharp,
             },
+            paint_layer: sculpt.paint_layer.min(3),
         });
     }
     Ok(())

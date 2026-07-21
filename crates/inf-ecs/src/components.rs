@@ -1154,18 +1154,111 @@ impl Default for Camera {
     }
 }
 
+/// The number of splat material layers a [`Terrain`] blends (packed as RGBA8
+/// per-sample weights in [`TerrainData`]). Matches `inf_terrain::SPLAT_LAYERS`
+/// and the four channels of a weight sample.
+pub const TERRAIN_LAYERS: usize = 4;
+
+/// One splat material layer definition (P10.4): the surface a terrain sample
+/// blends toward where its weight channel dominates.
+///
+/// A **texture GUID is deliberately absent**: the interactive viewport can't yet
+/// upload asset textures (the same documented gap as [`Sprite::texture`] /
+/// material previews), so a layer is proven by its solid `albedo` + a procedural
+/// triplanar detail grain scaled by `tex_scale`. Per-layer albedo/normal/ORM
+/// texture refs are the documented follow-up. As a nested `#[reflect(ignore)]`
+/// array element it isn't surfaced in the generic Details grid (authored via the
+/// paint panel / defaults); it derives `Reflect` + `Default` so the array
+/// serdes and reflect-constructs.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Default)]
+pub struct TerrainLayer {
+    /// Linear base colour blended for this layer.
+    pub albedo: Color,
+    /// Perceptual roughness `[0, 1]` (feeds the shared terrain lighting spec).
+    #[serde(default = "default_layer_roughness")]
+    pub roughness: f64,
+    /// World metres per procedural detail-grain tile (triplanar detail scale).
+    #[serde(default = "default_layer_tex_scale")]
+    pub tex_scale: f64,
+}
+
+fn default_layer_roughness() -> f64 {
+    0.9
+}
+fn default_layer_tex_scale() -> f64 {
+    8.0
+}
+
+impl Default for TerrainLayer {
+    fn default() -> Self {
+        Self {
+            albedo: Color::new(0.35, 0.35, 0.35, 1.0),
+            roughness: default_layer_roughness(),
+            tex_scale: default_layer_tex_scale(),
+        }
+    }
+}
+
+/// The default four-layer palette: grass → rock → dirt → snow. The paint UI's
+/// layer swatches mirror these (per-terrain layer-colour editing in Details is
+/// the follow-up), and the terrain golden authors gradients across them.
+pub fn default_terrain_layers() -> [TerrainLayer; TERRAIN_LAYERS] {
+    [
+        TerrainLayer {
+            albedo: Color::new(0.20, 0.34, 0.14, 1.0), // grass
+            roughness: 0.92,
+            tex_scale: 6.0,
+        },
+        TerrainLayer {
+            albedo: Color::new(0.33, 0.30, 0.27, 1.0), // rock
+            roughness: 0.85,
+            tex_scale: 4.0,
+        },
+        TerrainLayer {
+            albedo: Color::new(0.42, 0.30, 0.18, 1.0), // dirt
+            roughness: 0.95,
+            tex_scale: 5.0,
+        },
+        TerrainLayer {
+            albedo: Color::new(0.86, 0.89, 0.94, 1.0), // snow
+            roughness: 0.65,
+            tex_scale: 10.0,
+        },
+    ]
+}
+
+fn default_macro_variation() -> f64 {
+    0.15
+}
+
 /// A heightfield terrain (P10.1) — the engine's massive-terrain component.
 ///
 /// The scalar config (`meters_per_sample`, `tile_resolution`) is reflected so the
 /// Details grid surfaces it; the paged height data ([`TerrainData`]) is
 /// `#[reflect(ignore)]` + serde-persisted, exactly like the [`Tilemap`] chunk
-/// store — sculpt/import tools (P10.2) edit it, not the property grid. The
-/// [`TerrainData`] is the authority for rendering and queries; the reflected
-/// scalars mirror its config (changing them in Details is a reconfigure hint the
-/// P10.2 terrain tooling applies — the stored `data` keeps its own config until
-/// then). Material/splat params land with P10.4.
+/// store — sculpt/paint/import tools (P10.2/P10.4) edit it, not the property
+/// grid. The [`TerrainData`] is the authority for rendering and queries; the
+/// reflected scalars mirror its config (changing them in Details is a reconfigure
+/// hint the P10.2 terrain tooling applies — the stored `data` keeps its own
+/// config until then).
 ///
-/// Additive component: every field carries `#[serde(default)]`.
+/// ## Splat materials (P10.4)
+///
+/// The paged [`TerrainData`] now stores a per-sample RGBA8 splat weight beside
+/// each height; `layers` defines the four [`TerrainLayer`]s those weights blend,
+/// and `macro_variation` is the amplitude of a large-scale fBm albedo modulation
+/// applied in the terrain shader. `layers` is `#[reflect(ignore)]` (an
+/// array-of-struct is not a Details-grid scalar; edited via the paint UI /
+/// defaults), while `macro_variation` is a plain reflected `f64` (Details-editable).
+///
+/// ## FROZEN SHAPE (`.inf_lvl` schema v4)
+///
+/// This component's field set is **finalized for the upcoming `.inf_lvl` v4
+/// schema batch** (the migration that first persists `Terrain`/[`PcgVolume`] in
+/// the `EntityRecord`). Every field is additive and `#[serde(default)]`, so a
+/// minimal `{}` payload and any pre-v4 partial payload decode; new fields append.
+/// Do not reorder or repurpose existing fields — extend additively.
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[reflect(Component, Default)]
 pub struct Terrain {
@@ -1175,12 +1268,23 @@ pub struct Terrain {
     /// Samples per tile side (mirrors the paged data's resolution).
     #[serde(default = "default_terrain_resolution")]
     pub tile_resolution: u32,
-    /// The paged `f64` world-space heightfield. `#[reflect(ignore)]` (not a
-    /// property-grid scalar) but serde-persisted so authored terrain survives a
-    /// save/load. `TerrainData`'s own manual serde keeps it deterministic.
+    /// The paged `f64` world-space heightfield (heights + splat weights).
+    /// `#[reflect(ignore)]` (not a property-grid scalar) but serde-persisted so
+    /// authored terrain survives a save/load. `TerrainData`'s own manual serde
+    /// keeps it deterministic and byte-stable for unpainted tiles.
     #[serde(default)]
     #[reflect(ignore)]
     pub data: TerrainData,
+    /// The four splat material layers the per-sample weights blend (P10.4).
+    /// `#[reflect(ignore)]` + serde-persisted (authored via the paint UI /
+    /// defaults), like an array field with no Details widget.
+    #[serde(default = "default_terrain_layers")]
+    #[reflect(ignore)]
+    pub layers: [TerrainLayer; TERRAIN_LAYERS],
+    /// Amplitude of the large-scale fBm albedo modulation applied in the terrain
+    /// shader (`0` = off). A plain reflected `f64` → Details-editable.
+    #[serde(default = "default_macro_variation")]
+    pub macro_variation: f64,
 }
 
 fn default_terrain_mps() -> f64 {
@@ -1197,6 +1301,8 @@ impl Default for Terrain {
             meters_per_sample: data.meters_per_sample(),
             tile_resolution: data.tile_resolution(),
             data,
+            layers: default_terrain_layers(),
+            macro_variation: default_macro_variation(),
         }
     }
 }
@@ -1204,13 +1310,15 @@ impl Default for Terrain {
 impl Terrain {
     /// An empty terrain configured with `tile_resolution` samples per tile side
     /// and `meters_per_sample` world spacing. The reflected scalars mirror the
-    /// paged data's config.
+    /// paged data's config; layers/macro use the defaults.
     pub fn configured(tile_resolution: u32, meters_per_sample: f64) -> Self {
         let data = TerrainData::new(tile_resolution, meters_per_sample);
         Self {
             meters_per_sample: data.meters_per_sample(),
             tile_resolution: data.tile_resolution(),
             data,
+            layers: default_terrain_layers(),
+            macro_variation: default_macro_variation(),
         }
     }
 }
@@ -1313,16 +1421,37 @@ mod tests {
         // Author a couple of tiles so the paged data is non-trivial.
         t.data.author_tile((0, 0), |x, z| (x + z) * 0.1);
         t.data.author_tile((1, 0), |x, z| (x + z) * 0.1);
+        // Non-default material params.
+        t.layers[1].albedo = Color::new(0.9, 0.1, 0.1, 1.0);
+        t.macro_variation = 0.4;
         let json = serde_json::to_string(&t).unwrap();
         let back: Terrain = serde_json::from_str(&json).unwrap();
         assert_eq!(t, back);
         assert_eq!(back.data.tile_count(), 2);
         assert_eq!(back.tile_resolution, 5);
+        assert_eq!(back.layers[1].albedo, Color::new(0.9, 0.1, 0.1, 1.0));
+        assert_eq!(back.macro_variation, 0.4);
 
-        // A minimal payload fills the scalar defaults + an empty terrain.
+        // A minimal payload fills the scalar defaults + an empty terrain + the
+        // default layer palette + default macro variation (the frozen-shape
+        // additive guarantee for the v4 schema).
         let d: Terrain = serde_json::from_str("{}").unwrap();
         assert_eq!(d.tile_resolution, inf_terrain::DEFAULT_TILE_RESOLUTION);
         assert!(d.data.is_empty());
+        assert_eq!(d.layers, default_terrain_layers());
+        assert_eq!(d.macro_variation, default_macro_variation());
+
+        // A pre-P10.4 payload (config + data, no layers/macro) still decodes,
+        // filling the material defaults — the additive-field guarantee.
+        let pre = serde_json::to_string(&serde_json::json!({
+            "meters_per_sample": 1.0,
+            "tile_resolution": 5,
+            "data": { "tile_resolution": 5, "meters_per_sample": 1.0, "tiles": [] }
+        }))
+        .unwrap();
+        let old: Terrain = serde_json::from_str(&pre).unwrap();
+        assert_eq!(old.layers, default_terrain_layers());
+        assert_eq!(old.macro_variation, default_macro_variation());
     }
 
     #[test]

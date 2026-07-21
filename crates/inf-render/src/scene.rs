@@ -131,23 +131,57 @@ pub struct RenderTerrainTile {
     pub origin: DVec3,
     /// `resolution²` row-major height offsets (metres) from `origin.y`.
     pub heights: Vec<f32>,
+    /// `resolution²` row-major RGBA8 splat weights (P10.4), resolved from the
+    /// tile's sparse store (an unpainted tile projects the uniform default). The
+    /// terrain pass uploads these into a per-tile `Rgba8Unorm` weight texture
+    /// beside the height texture.
+    pub weights: Vec<[u8; 4]>,
     /// Inclusive `(min, max)` of `heights` (for the tile's AABB cull bound).
     pub height_bounds: (f32, f32),
 }
 
+/// One terrain splat material layer (P10.4), projected from the ECS
+/// `TerrainLayer`. `tex_scale` is world metres per procedural detail-grain tile.
+/// (Layer texture GUIDs are deferred — the viewport can't upload asset textures
+/// yet; the shader proves the blend with albedo + procedural triplanar grain.)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderTerrainLayer {
+    /// Linear albedo (rgba).
+    pub albedo: [f32; 4],
+    /// Perceptual roughness `[0, 1]`.
+    pub roughness: f32,
+    /// World metres per detail-grain tile.
+    pub tex_scale: f32,
+}
+
+impl Default for RenderTerrainLayer {
+    fn default() -> Self {
+        Self {
+            albedo: [0.35, 0.35, 0.35, 1.0],
+            roughness: 0.9,
+            tex_scale: 8.0,
+        }
+    }
+}
+
 /// The renderer's terrain input: a paged heightfield projected from the ECS
 /// `Terrain` component. The [`TerrainNode`](crate::passes::terrain) uploads a
-/// per-tile R32Float height texture (cached, version-gated) and assembles
-/// concentric clipmap LOD rings around the camera each frame.
+/// per-tile R32Float height texture + a per-tile Rgba8Unorm splat-weight texture
+/// (both cached, version-gated) and assembles concentric clipmap LOD rings around
+/// the camera each frame, blending the four `layers` by the splat weights.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RenderTerrain {
-    /// Samples per tile side (the height-texture dimension).
+    /// Samples per tile side (the height/weight-texture dimension).
     pub tile_resolution: u32,
     /// World units between samples.
     pub meters_per_sample: f64,
     /// Authored tiles, sorted by coordinate (deterministic upload/draw order).
     pub tiles: Vec<RenderTerrainTile>,
-    /// Bump on any tile/height change — gates the GPU height-texture uploads.
+    /// The four splat material layers the per-sample weights blend (P10.4).
+    pub layers: [RenderTerrainLayer; 4],
+    /// Amplitude of the large-scale fBm albedo modulation (`0` = off).
+    pub macro_variation: f32,
+    /// Bump on any tile/height/weight/material change — gates the GPU uploads.
     pub version: u64,
 }
 

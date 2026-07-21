@@ -23,6 +23,7 @@ pub use erosion::{erode, erode_terrain, erode_with, ErosionParams, ErosionStats}
 mod noise;
 mod raycast;
 mod region;
+mod splat;
 mod tile;
 
 use glam::DVec3;
@@ -34,7 +35,8 @@ pub use import::{encode_png16, HeightImage, HeightmapImport, TerrainError};
 pub use noise::fbm_signed;
 pub use raycast::{raycast_terrain, TerrainHit};
 pub use region::HeightRegion;
-pub use tile::TerrainTile;
+pub use splat::{apply_paint, paint_weight, SplatDelta, SplatPatch, SplatStroke, SPLAT_LAYERS};
+pub use tile::{TerrainTile, DEFAULT_WEIGHT};
 
 /// The minimal world-space height query seam downstream systems code against
 /// (PCG scatter, sculpt brushes). Kept deliberately small: a paged heightfield,

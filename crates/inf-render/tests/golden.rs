@@ -22,10 +22,10 @@ use inf_render::golden::{image_diff, within_tolerance};
 use inf_render::{
     assemble_patches, expand_text, Ambient2D, EngineRenderer, GpuContext, HAlign, HeadlessTarget,
     LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D, RenderScene,
-    RenderTerrain, RenderTerrainTile, RenderTilemap, RenderView, SpriteInstance,
-    SpriteTextureUpload, TextParams, TilemapParams, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE,
-    BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS,
-    BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView,
+    SpriteInstance, SpriteTextureUpload, TextParams, TilemapParams, BILLBOARD_CYLINDRICAL,
+    BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP,
+    BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -345,10 +345,40 @@ fn golden_billboards() {
     assert!(blue, "expected the cylindrical (blue) billboard");
 }
 
+/// The default four-layer splat palette (grass / rock / dirt / snow), mirroring
+/// `inf_ecs::components::default_terrain_layers` (kept inline so inf-render stays
+/// free of an inf-ecs dep). Used by the terrain goldens so the layer-blended
+/// shading is exercised.
+fn default_layers() -> [RenderTerrainLayer; 4] {
+    [
+        RenderTerrainLayer {
+            albedo: [0.20, 0.34, 0.14, 1.0], // grass
+            roughness: 0.92,
+            tex_scale: 6.0,
+        },
+        RenderTerrainLayer {
+            albedo: [0.33, 0.30, 0.27, 1.0], // rock
+            roughness: 0.85,
+            tex_scale: 4.0,
+        },
+        RenderTerrainLayer {
+            albedo: [0.42, 0.30, 0.18, 1.0], // dirt
+            roughness: 0.95,
+            tex_scale: 5.0,
+        },
+        RenderTerrainLayer {
+            albedo: [0.86, 0.89, 0.94, 1.0], // snow
+            roughness: 0.65,
+            tex_scale: 10.0,
+        },
+    ]
+}
+
 /// A procedural sine-hills terrain across `ntx × ntz` tiles, authored from one
 /// global height function so tile edges are seamless. `res` samples/tile, `mps`
 /// metres/sample. Tiles are pushed in `(i32,i32)`-sorted order (matching the
-/// host's BTreeMap projection).
+/// host's BTreeMap projection). Unpainted (uniform layer 0 = grass) — the splat
+/// golden authors real weight gradients.
 fn hill_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
     let span = (res as f64 - 1.0) * mps;
     let f = |x: f64, z: f64| 4.0 * (x * 0.15).sin() * (z * 0.15).cos() + 3.5;
@@ -370,6 +400,7 @@ fn hill_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
                 coord: (tx, tz),
                 origin: DVec3::new(ox, 0.0, oz),
                 heights,
+                weights: Vec::new(),
                 height_bounds: (lo, hi),
             });
         }
@@ -378,6 +409,8 @@ fn hill_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
         tile_resolution: res,
         meters_per_sample: mps,
         tiles,
+        layers: default_layers(),
+        macro_variation: 0.15,
         version: 1,
     }
 }
@@ -397,11 +430,14 @@ fn look_view(eye: DVec3, target: DVec3) -> RenderView {
     }
 }
 
-/// Terrain golden (P10.1): a sine-hills heightfield across 2×2 tiles under an
-/// angled perspective camera, showing the terrain silhouette + slope/altitude
-/// debug shading against the sky. Exercises the clipmap patch assembly → height
-/// texture → vertex displacement path headlessly (determinism gate via
-/// `check_golden`; strict pixel diff opt-in).
+/// Terrain golden (P10.1 geometry, P10.4 shading): a sine-hills heightfield
+/// across 2×2 tiles under an angled perspective camera, showing the terrain
+/// silhouette + **splat-blended layer shading** against the sky. Unpainted, so
+/// weights are uniform layer 0 (grass) — this golden was **regenerated for
+/// P10.4** because the shading changed from the old slope/altitude debug ramp to
+/// the layer-based blend (albedo + triplanar grain + macro variation). Exercises
+/// the clipmap patch assembly → height/weight texture → vertex displacement path
+/// headlessly (determinism gate via `check_golden`; strict pixel diff opt-in).
 #[test]
 fn golden_terrain() {
     let Some(gpu) = gpu_or_skip() else { return };
@@ -461,6 +497,108 @@ fn golden_terrain_lod() {
         .chunks(4)
         .any(|p| p[0] as u16 + p[1] as u16 + p[2] as u16 > 150);
     assert!(lit, "expected a lit terrain pixel");
+}
+
+/// A splat-painted terrain (P10.4): 2×2 tiles with hand-authored weight gradients
+/// banding all four layers across +X (grass → dirt → rock → snow), plus a **steep
+/// cliff** wall so the triplanar detail path is exercised on near-vertical faces.
+/// Seamless across tile edges (weights authored from one global world function).
+fn splat_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
+    let span = (res as f64 - 1.0) * mps;
+    let total_w = ntx as f64 * span;
+    // A steep cliff wall at ~63% of the width (6 m rise over a ~4% band) over a
+    // gently rolling base — the wall's near-vertical normals drive triplanar.
+    let smoothstep = |e0: f64, e1: f64, x: f64| {
+        let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let height = |x: f64, z: f64| {
+        2.0 + 6.0 * smoothstep(0.60 * total_w, 0.64 * total_w, x) + 0.6 * (z * 0.2).sin()
+    };
+    // Four tent bands across the normalized width → four distinct, blended layers.
+    let weight = |x: f64| -> [u8; 4] {
+        let u = (x / total_w).clamp(0.0, 1.0);
+        let tent = |c: f64| (1.0 - (u - c).abs() * 3.0).max(0.0);
+        let raw = [tent(0.0), tent(1.0 / 3.0), tent(2.0 / 3.0), tent(1.0)];
+        let s: f64 = raw.iter().sum::<f64>().max(1e-6);
+        let mut out = [0u8; 4];
+        let mut acc = 0i32;
+        for k in 0..4 {
+            out[k] = (raw[k] / s * 255.0).round() as u8;
+            acc += out[k] as i32;
+        }
+        out[0] = (out[0] as i32 + (255 - acc)).clamp(0, 255) as u8; // exact sum 255
+        out
+    };
+    let mut tiles = Vec::new();
+    for tx in 0..ntx {
+        for tz in 0..ntz {
+            let (ox, oz) = (tx as f64 * span, tz as f64 * span);
+            let mut heights = vec![0f32; (res * res) as usize];
+            let mut weights = vec![[0u8; 4]; (res * res) as usize];
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for j in 0..res {
+                for i in 0..res {
+                    let (wx, wz) = (ox + i as f64 * mps, oz + j as f64 * mps);
+                    let h = height(wx, wz) as f32;
+                    heights[(j * res + i) as usize] = h;
+                    weights[(j * res + i) as usize] = weight(wx);
+                    lo = lo.min(h);
+                    hi = hi.max(h);
+                }
+            }
+            tiles.push(RenderTerrainTile {
+                coord: (tx, tz),
+                origin: DVec3::new(ox, 0.0, oz),
+                heights,
+                weights,
+                height_bounds: (lo, hi),
+            });
+        }
+    }
+    RenderTerrain {
+        tile_resolution: res,
+        meters_per_sample: mps,
+        tiles,
+        layers: default_layers(),
+        macro_variation: 0.15,
+        version: 1,
+    }
+}
+
+/// Terrain splat golden (P10.4): a heightfield with hand-authored weight gradients
+/// banding all four material layers across +X plus a steep cliff, proving the
+/// splat blend + triplanar path headlessly (determinism gate via `check_golden`;
+/// strict pixel diff opt-in).
+#[test]
+fn golden_terrain_splat() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let res = 33;
+    let terrain = splat_terrain(res, 1.0, 2, 2); // ~64 m square, banded layers
+    let scene = RenderScene {
+        grid_enabled: true,
+        terrain: Some(terrain),
+        ..Default::default()
+    };
+    // Angled overlook of the banded terrain, side-on to the cliff.
+    let view = look_view(DVec3::new(4.0, 22.0, -10.0), DVec3::new(40.0, 3.0, 32.0));
+    let img = check_golden(&gpu, "terrain_splat", &scene, &view);
+
+    // The four layers span from a green (grass) low band to a bright (snow) high
+    // band — assert both a greenish and a bright near-white terrain pixel exist.
+    let mut green = false;
+    let mut snow = false;
+    for chunk in img.chunks(4) {
+        let (r, g, b) = (chunk[0] as i32, chunk[1] as i32, chunk[2] as i32);
+        if g > 60 && g - r > 20 && g - b > 20 {
+            green = true;
+        }
+        if r > 180 && g > 180 && b > 180 {
+            snow = true;
+        }
+    }
+    assert!(green, "expected the grass (green) layer band");
+    assert!(snow, "expected the snow (bright) layer band");
 }
 
 /// A view looking straight down -Z at the world XY plane, so sprites (which lie

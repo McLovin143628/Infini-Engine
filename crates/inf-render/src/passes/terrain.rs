@@ -207,24 +207,84 @@ fn build_lod_geometry(cells: u32) -> (Vec<[f32; 3]>, Vec<u32>) {
     (verts, indices)
 }
 
-/// A cached per-tile R32Float height texture + its bind group.
-struct HeightTexture {
-    _texture: wgpu::Texture,
+/// A cached per-tile pair of textures — R32Float height + Rgba8Unorm splat
+/// weights — sharing one bind group (`@group(1)`).
+struct TileTextures {
+    _height: wgpu::Texture,
+    _weights: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     resolution: u32,
 }
 
+/// The terrain splat material uniform (`@group(2)`), std140-friendly: four
+/// layers' albedo + params (`x` = roughness, `y` = tex_scale) and the macro
+/// variation amplitude. Mirrors `TerrainMaterial` in terrain.wgsl.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MaterialRaw {
+    albedo: [[f32; 4]; 4],
+    params: [[f32; 4]; 4],
+    macro_amp: [f32; 4],
+}
+
+impl MaterialRaw {
+    fn from_terrain(terrain: &RenderTerrain) -> Self {
+        let mut albedo = [[0.0f32; 4]; 4];
+        let mut params = [[0.0f32; 4]; 4];
+        for (k, layer) in terrain.layers.iter().enumerate() {
+            albedo[k] = layer.albedo;
+            params[k] = [layer.roughness, layer.tex_scale.max(1e-3), 0.0, 0.0];
+        }
+        MaterialRaw {
+            albedo,
+            params,
+            macro_amp: [terrain.macro_variation, 0.0, 0.0, 0.0],
+        }
+    }
+}
+
 pub struct TerrainNode {
     pipeline: wgpu::RenderPipeline,
-    height_bgl: wgpu::BindGroupLayout,
+    tile_bgl: wgpu::BindGroupLayout,
     /// One grid mesh per LOD (index 0 = finest).
     lod_meshes: Vec<LodMesh>,
-    /// Per-tile height textures, keyed by tile coord (deterministic iteration).
-    textures: BTreeMap<(i32, i32), HeightTexture>,
-    /// Version of the terrain the texture cache reflects.
+    /// Per-tile height + weight textures, keyed by tile coord (deterministic).
+    textures: BTreeMap<(i32, i32), TileTextures>,
+    /// Terrain splat material uniform (`@group(2)`) + its bind group.
+    material_buffer: wgpu::Buffer,
+    material_bg: wgpu::BindGroup,
+    /// Version of the terrain the texture/material caches reflect.
     uploaded_version: Option<u64>,
     instances: Option<wgpu::Buffer>,
     instance_capacity: usize,
+}
+
+/// Reference (CPU) mirror of the shader's triplanar axis weights: normalized
+/// `pow(|n|, sharpness)` over the three world planes (YZ→x, XZ→y, XY→z). Kept in
+/// sync with `terrain.wgsl`; unit-tested so the blend law is pinned even though
+/// the shader itself needs a GPU. Returns `(w_x, w_y, w_z)` summing to 1.
+pub fn triplanar_axis_weights(normal: Vec3, sharpness: f32) -> [f32; 3] {
+    let mut w = [
+        normal.x.abs().powf(sharpness.max(1e-3)),
+        normal.y.abs().powf(sharpness.max(1e-3)),
+        normal.z.abs().powf(sharpness.max(1e-3)),
+    ];
+    let sum = w[0] + w[1] + w[2];
+    if sum > 0.0 {
+        w[0] /= sum;
+        w[1] /= sum;
+        w[2] /= sum;
+    } else {
+        w = [0.0, 1.0, 0.0]; // degenerate normal → treat as flat (top plane)
+    }
+    w
+}
+
+/// Reference (CPU) mirror of the shader's macro albedo modulation:
+/// `albedo · (1 + amp · fbm)` where `fbm ∈ [-1, 1]`. Kept in sync with
+/// `terrain.wgsl`; unit-tested.
+pub fn macro_modulate(albedo: Vec3, fbm: f32, amp: f32) -> Vec3 {
+    albedo * (1.0 + amp * fbm)
 }
 
 impl TerrainNode {
@@ -238,29 +298,62 @@ impl TerrainNode {
                 ),
             });
 
-        // Height texture bind group (@group(1)): a single unfilterable-float 2D
-        // texture (sampled via textureLoad — no sampler, no FLOAT32_FILTERABLE).
-        let height_bgl = gpu
+        // Per-tile bind group (@group(1)): the R32Float height texture (binding 0)
+        // + the Rgba8Unorm splat-weight texture (binding 1), both unfilterable-
+        // float and sampled via textureLoad (no sampler, no FLOAT32_FILTERABLE).
+        let tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let tile_bgl = gpu
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("terrain-height"),
+                label: Some("terrain-tile"),
+                entries: &[tex_entry(0), tex_entry(1)],
+            });
+
+        // Splat material uniform bind group (@group(2)).
+        let material_bgl = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("terrain-material"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 }],
             });
+        let material_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terrain-material"),
+            size: std::mem::size_of::<MaterialRaw>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let material_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("terrain-material"),
+            layout: &material_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: material_buffer.as_entire_binding(),
+            }],
+        });
 
         let layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("terrain"),
-                bind_group_layouts: &[Some(view_bgl), Some(&height_bgl)],
+                bind_group_layouts: &[Some(view_bgl), Some(&tile_bgl), Some(&material_bgl)],
                 immediate_size: 0,
             });
 
@@ -365,23 +458,34 @@ impl TerrainNode {
 
         Self {
             pipeline,
-            height_bgl,
+            tile_bgl,
             lod_meshes,
             textures: BTreeMap::new(),
+            material_buffer,
+            material_bg,
             uploaded_version: None,
             instances: None,
             instance_capacity: 0,
         }
     }
 
-    /// Upload / refresh the per-tile height textures when the terrain changed
-    /// (version-gated). Drops textures whose tiles vanished.
+    /// Upload / refresh the per-tile height + weight textures and the splat
+    /// material uniform when the terrain changed (version-gated). Drops textures
+    /// whose tiles vanished.
     fn sync_textures(&mut self, gpu: &GpuContext, terrain: &RenderTerrain) {
         if self.uploaded_version == Some(terrain.version) {
             return;
         }
         self.uploaded_version = Some(terrain.version);
         let res = terrain.tile_resolution.max(2);
+        let expect = (res * res) as usize;
+
+        // Splat material uniform (terrain-wide; re-upload on the same version gate).
+        gpu.queue.write_buffer(
+            &self.material_buffer,
+            0,
+            bytemuck::bytes_of(&MaterialRaw::from_terrain(terrain)),
+        );
 
         // Remove textures for tiles no longer present.
         let live: std::collections::BTreeSet<(i32, i32)> =
@@ -389,7 +493,6 @@ impl TerrainNode {
         self.textures.retain(|k, _| live.contains(k));
 
         for tile in &terrain.tiles {
-            let expect = (res * res) as usize;
             if tile.heights.len() != expect {
                 continue; // malformed — skip rather than panic mid-frame
             }
@@ -398,15 +501,13 @@ impl TerrainNode {
                 .get(&tile.coord)
                 .is_some_and(|t| t.resolution == res);
             if !reuse {
-                self.textures.insert(
-                    tile.coord,
-                    create_height_texture(gpu, &self.height_bgl, res),
-                );
+                self.textures
+                    .insert(tile.coord, create_tile_textures(gpu, &self.tile_bgl, res));
             }
             let tex = &self.textures[&tile.coord];
             gpu.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &tex._texture,
+                    texture: &tex._height,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
@@ -423,41 +524,87 @@ impl TerrainNode {
                     depth_or_array_layers: 1,
                 },
             );
+
+            // Splat weights: fall back to a uniform default when a tile projected
+            // no (or a malformed) weight buffer, so shading stays layer 0.
+            // Uniform default = 100% layer 0 (mirrors inf_terrain::DEFAULT_WEIGHT;
+            // kept local so the renderer stays independent of inf-terrain).
+            const DEFAULT_WEIGHT: [u8; 4] = [255, 0, 0, 0];
+            let default_weights;
+            let weights: &[[u8; 4]] = if tile.weights.len() == expect {
+                &tile.weights
+            } else {
+                default_weights = vec![DEFAULT_WEIGHT; expect];
+                &default_weights
+            };
+            gpu.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex._weights,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(weights),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(res * 4),
+                    rows_per_image: Some(res),
+                },
+                wgpu::Extent3d {
+                    width: res,
+                    height: res,
+                    depth_or_array_layers: 1,
+                },
+            );
         }
     }
 }
 
-/// Create an empty `res × res` R32Float height texture + its bind group.
-fn create_height_texture(
+/// Create an empty `res × res` R32Float height texture + Rgba8Unorm weight
+/// texture, sharing one bind group.
+fn create_tile_textures(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
     res: u32,
-) -> HeightTexture {
-    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("terrain-height"),
-        size: wgpu::Extent3d {
-            width: res,
-            height: res,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R32Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+) -> TileTextures {
+    let size = wgpu::Extent3d {
+        width: res,
+        height: res,
+        depth_or_array_layers: 1,
+    };
+    let make = |label: &str, format: wgpu::TextureFormat| {
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    };
+    let height = make("terrain-height", wgpu::TextureFormat::R32Float);
+    let weights = make("terrain-weights", wgpu::TextureFormat::Rgba8Unorm);
+    let hview = height.create_view(&wgpu::TextureViewDescriptor::default());
+    let wview = weights.create_view(&wgpu::TextureViewDescriptor::default());
     let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("terrain-height"),
+        label: Some("terrain-tile"),
         layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: wgpu::BindingResource::TextureView(&view),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&hview),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&wview),
+            },
+        ],
     });
-    HeightTexture {
-        _texture: texture,
+    TileTextures {
+        _height: height,
+        _weights: weights,
         bind_group,
         resolution: res,
     }
@@ -542,6 +689,7 @@ impl RenderNode for TerrainNode {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
+        pass.set_bind_group(2, &self.material_bg, &[]);
         pass.set_vertex_buffer(1, inst_buf.slice(..));
 
         for (idx, patch) in patches.iter().enumerate() {
@@ -576,6 +724,7 @@ mod tests {
                     coord: (tx, tz),
                     origin: DVec3::new(tx as f64 * span, 0.0, tz as f64 * span),
                     heights: vec![0.0; (res * res) as usize],
+                    weights: Vec::new(),
                     height_bounds: (0.0, 0.0),
                 });
             }
@@ -584,6 +733,8 @@ mod tests {
             tile_resolution: res,
             meters_per_sample: mps,
             tiles,
+            layers: Default::default(),
+            macro_variation: 0.0,
             version: 1,
         }
     }
@@ -661,8 +812,11 @@ mod tests {
                 coord: (0, 0),
                 origin: DVec3::new(0.0, 0.0, 1000.0), // way behind a -Z camera
                 heights: vec![0.0; (res * res) as usize],
+                weights: Vec::new(),
                 height_bounds: (0.0, 0.0),
             }],
+            layers: Default::default(),
+            macro_variation: 0.0,
             version: 1,
         };
         let view = RenderView {
@@ -677,6 +831,70 @@ mod tests {
             ortho: None,
         };
         assert!(assemble_patches(&terrain, &view, &FloatingOrigin::new(DVec3::ZERO)).is_empty());
+    }
+
+    #[test]
+    fn triplanar_weights_normalize_and_favour_dominant_axis() {
+        // A flat-top normal (+Y) → the XZ (y) plane dominates and the weights sum
+        // to 1.
+        let w = triplanar_axis_weights(Vec3::Y, 4.0);
+        let sum = w[0] + w[1] + w[2];
+        assert!((sum - 1.0).abs() < 1e-5, "weights must sum to 1: {w:?}");
+        assert!(
+            w[1] > w[0] && w[1] > w[2],
+            "top plane should dominate: {w:?}"
+        );
+
+        // A 45° X/Y normal with higher sharpness biases harder toward the larger
+        // component than a low sharpness does.
+        let n = Vec3::new(1.0, 1.0, 0.0).normalize();
+        let soft = triplanar_axis_weights(n, 1.0);
+        let hard = triplanar_axis_weights(n, 8.0);
+        assert!((soft[0] - soft[1]).abs() < 1e-5, "equal axes stay equal");
+        assert!((hard[0] - hard[1]).abs() < 1e-5);
+        // A steep (mostly-X) normal: sharpness pushes weight onto the YZ (x) plane.
+        let steep = Vec3::new(0.9, 0.2, 0.386).normalize();
+        let s1 = triplanar_axis_weights(steep, 1.0);
+        let s8 = triplanar_axis_weights(steep, 8.0);
+        assert!(
+            s8[0] > s1[0],
+            "sharper blend concentrates on the dominant axis"
+        );
+    }
+
+    #[test]
+    fn triplanar_degenerate_normal_falls_back_to_top() {
+        let w = triplanar_axis_weights(Vec3::ZERO, 4.0);
+        assert_eq!(w, [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn macro_modulation_scales_albedo() {
+        let a = Vec3::new(0.4, 0.5, 0.6);
+        // No fBm → unchanged.
+        assert_eq!(macro_modulate(a, 0.0, 0.3), a);
+        // Positive fBm brightens, negative darkens, symmetrically.
+        let up = macro_modulate(a, 1.0, 0.2);
+        let dn = macro_modulate(a, -1.0, 0.2);
+        assert!(up.x > a.x && dn.x < a.x);
+        assert!(
+            (up + dn - a * 2.0).length() < 1e-6,
+            "modulation is symmetric"
+        );
+    }
+
+    #[test]
+    fn material_raw_packs_layers_and_macro() {
+        let mut terrain = flat_terrain(1);
+        terrain.layers[2].albedo = [0.1, 0.2, 0.3, 1.0];
+        terrain.layers[2].roughness = 0.25;
+        terrain.layers[2].tex_scale = 3.0;
+        terrain.macro_variation = 0.7;
+        let raw = MaterialRaw::from_terrain(&terrain);
+        assert_eq!(raw.albedo[2], [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(raw.params[2][0], 0.25);
+        assert_eq!(raw.params[2][1], 3.0);
+        assert_eq!(raw.macro_amp[0], 0.7);
     }
 
     #[test]

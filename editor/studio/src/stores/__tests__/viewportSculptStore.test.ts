@@ -30,6 +30,7 @@ beforeEach(() => {
     sculptRadius: 8,
     sculptStrength: 0.5,
     sculptFalloff: "Smooth",
+    sculptPaintLayer: 0,
   });
   vi.clearAllMocks();
 });
@@ -55,7 +56,18 @@ describe("viewportStore sculpt actions", () => {
       radius: 8,
       strength: 0.5,
       falloff: "Smooth",
+      paint_layer: 0,
     });
+  });
+
+  it("setSculptPaintLayer clamps to 0..3 and pushes", () => {
+    useViewportStore.getState().setSculptPaintLayer(2);
+    expect(useViewportStore.getState().sculptPaintLayer).toBe(2);
+    expect(viewport.setSculpt).toHaveBeenCalledWith(
+      expect.objectContaining({ paint_layer: 2 }),
+    );
+    useViewportStore.getState().setSculptPaintLayer(99);
+    expect(useViewportStore.getState().sculptPaintLayer).toBe(3);
   });
 
   it("does not push the brush when switching back to Select", () => {

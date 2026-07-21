@@ -28,9 +28,20 @@ const SCULPT_OPS: [SculptOpDto, string][] = [
   ["Smooth", "Smooth"],
   ["Flatten", "Flatten"],
   ["Noise", "Noise"],
+  ["Paint", "Paint"],
 ];
 
 const SCULPT_FALLOFFS: SculptFalloffDto[] = ["Smooth", "Linear", "Sphere", "Sharp"];
+
+/** Swatch colour + name for each splat layer (sRGB approximations of the default
+ * `inf_ecs` layer palette: grass / rock / dirt / snow). Per-terrain layer-colour
+ * editing in Details is the documented follow-up. */
+const LAYER_SWATCHES: [string, string][] = [
+  ["#7a9c66", "Grass"],
+  ["#99928b", "Rock"],
+  ["#aa9273", "Dirt"],
+  ["#eef1f8", "Snow"],
+];
 
 export default function ViewportToolbar() {
   const mode = useViewportStore((s) => s.mode);
@@ -144,10 +155,12 @@ function SculptControls() {
   const sculptRadius = useViewportStore((s) => s.sculptRadius);
   const sculptStrength = useViewportStore((s) => s.sculptStrength);
   const sculptFalloff = useViewportStore((s) => s.sculptFalloff);
+  const sculptPaintLayer = useViewportStore((s) => s.sculptPaintLayer);
   const setSculptOp = useViewportStore((s) => s.setSculptOp);
   const setSculptRadius = useViewportStore((s) => s.setSculptRadius);
   const setSculptStrength = useViewportStore((s) => s.setSculptStrength);
   const setSculptFalloff = useViewportStore((s) => s.setSculptFalloff);
+  const setSculptPaintLayer = useViewportStore((s) => s.setSculptPaintLayer);
   const openErode = useShellStore((s) => s.setErodeOpen);
 
   return (
@@ -158,7 +171,7 @@ function SculptControls() {
             key={id}
             type="button"
             aria-pressed={sculptOp === id}
-            title={`${label} brush`}
+            title={id === "Paint" ? "Paint splat layer weights (P10.4)" : `${label} brush`}
             className={`flex h-6 items-center rounded px-2 ${
               sculptOp === id
                 ? "bg-(--ink-accent) text-(--ink-bg-0)"
@@ -170,6 +183,33 @@ function SculptControls() {
           </button>
         ))}
       </div>
+      {/* Splat layer picker (Paint op only): four swatches showing the layer
+          colours; the selected layer is what the brush paints toward. */}
+      {sculptOp === "Paint" && (
+        <div
+          className="flex items-center gap-1 rounded bg-(--ink-bg-0) p-0.5"
+          role="group"
+          aria-label="Splat layer"
+        >
+          {LAYER_SWATCHES.map(([color, name], i) => (
+            <button
+              key={name}
+              type="button"
+              aria-pressed={sculptPaintLayer === i}
+              title={`Paint layer ${i + 1} (${name})`}
+              onClick={() => setSculptPaintLayer(i)}
+              className={`flex h-6 w-6 items-center justify-center rounded text-[10px] font-medium ${
+                sculptPaintLayer === i
+                  ? "ring-2 ring-(--ink-accent)"
+                  : "ring-1 ring-(--ink-border) hover:ring-(--ink-text-dim)"
+              }`}
+              style={{ backgroundColor: color, color: "#111" }}
+            >
+              {i + 1}
+            </button>
+          ))}
+        </div>
+      )}
       <label className="flex items-center gap-1 text-(--ink-text-dim)">
         Radius
         <NumberField
@@ -188,7 +228,7 @@ function SculptControls() {
           min={0}
           step={0.05}
           onChange={setSculptStrength}
-          title="Per-dab strength (metres, or blend fraction for Smooth/Flatten)"
+          title="Per-dab strength (metres; blend fraction for Smooth/Flatten; flow rate for Paint)"
         />
       </label>
       <label className="flex items-center gap-1 text-(--ink-text-dim)">

@@ -42,8 +42,8 @@ pub use pick::Picker;
 pub use renderer::{EngineRenderer, MASK_FORMAT, SCENE_FORMAT, SCENE_SAMPLES};
 pub use scene::{
     Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D,
-    RenderScene, RenderTerrain, RenderTerrainTile, RenderTilemap, SkyParams, SpriteInstance,
-    SpriteTextureUpload, TextureHandle, TilemapParams, ID_GIZMO_BASE, ID_NONE,
+    RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap, SkyParams,
+    SpriteInstance, SpriteTextureUpload, TextureHandle, TilemapParams, ID_GIZMO_BASE, ID_NONE,
 };
 // 2D batcher API surfaced through the renderer for hosts.
 pub use inf_render_2d::{

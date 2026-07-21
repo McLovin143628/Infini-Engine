@@ -323,6 +323,16 @@ impl<'de> Deserialize<'de> for TerrainData {
                     tile.heights().len()
                 )));
             }
+            // Splat weights are stored sparsely: absent (len 0) means the uniform
+            // default (layer 0). When present they must match the height
+            // resolution exactly, so a corrupt/mismatched weight buffer is caught
+            // on load like a bad height buffer.
+            let wl = tile.weights_len();
+            if wl != 0 && wl != expect {
+                return Err(serde::de::Error::custom(format!(
+                    "terrain tile ({x},{z}) has {wl} weight samples, expected {expect} or 0"
+                )));
+            }
             data.tiles.insert((x, z), tile);
         }
         Ok(data)

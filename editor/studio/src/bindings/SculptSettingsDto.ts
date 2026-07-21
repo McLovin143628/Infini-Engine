@@ -8,4 +8,9 @@ import type { SculptOpDto } from "./SculptOpDto";
  * metres at full weight for Raise/Lower/Noise, or a `[0,1]` blend fraction for
  * Smooth/Flatten.
  */
-export type SculptSettingsDto = { op: SculptOpDto, radius: number, strength: number, falloff: SculptFalloffDto, };
+export type SculptSettingsDto = { op: SculptOpDto, radius: number, strength: number, falloff: SculptFalloffDto, 
+/**
+ * Target splat layer `0..=3` for the `Paint` op (P10.4). Ignored by the
+ * height ops.
+ */
+paint_layer: number, };

@@ -527,7 +527,8 @@ pub enum ToolModeDto {
     Sculpt,
 }
 
-/// The sculpt brush operation. Serializes as its tag string.
+/// The sculpt brush operation. Serializes as its tag string. `Paint` is the
+/// P10.4 splat sub-mode (edits layer weights, targeting `paint_layer`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub enum SculptOpDto {
     Raise,
@@ -535,6 +536,7 @@ pub enum SculptOpDto {
     Smooth,
     Flatten,
     Noise,
+    Paint,
 }
 
 /// The sculpt brush falloff curve. Serializes as its tag string.
@@ -556,6 +558,9 @@ pub struct SculptSettingsDto {
     pub radius: f64,
     pub strength: f64,
     pub falloff: SculptFalloffDto,
+    /// Target splat layer `0..=3` for the `Paint` op (P10.4). Ignored by the
+    /// height ops.
+    pub paint_layer: u8,
 }
 
 // ── Terrain erosion bake (P10.3b) ────────────────────────────────────────

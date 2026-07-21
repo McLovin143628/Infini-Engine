@@ -16,7 +16,9 @@ use inf_ecs::components::{
     Primitive, Sprite, Terrain, Text2D, Tilemap, Transform, Visibility,
 };
 use inf_ecs::{ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d};
-use inf_terrain::{BrushOp, BrushParams, HeightDelta, Stroke, TerrainData};
+use inf_terrain::{
+    BrushOp, BrushParams, HeightDelta, SplatDelta, SplatStroke, Stroke, TerrainData,
+};
 use uuid::Uuid;
 
 use crate::ipc::{SceneNode, SceneSnapshot, SpawnKind};
@@ -543,6 +545,101 @@ impl SceneDoc {
         };
         if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
             terrain.data.revert_delta(delta);
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    // ── terrain splat painting (P10.4) ───────────────────────────────────
+    //
+    // The exact twin of the sculpt seam above, one layer over: the viewport
+    // thread accumulates a paint gesture into an `inf_terrain::SplatStroke`,
+    // mutating the entity's live weight buffers per dab (so the render weight
+    // texture re-uploads mid-drag on the version bump), then commits the merged
+    // `SplatDelta` as ONE undo step. `PaintSplat` is a separate `EditCommand`
+    // from `SculptTerrain` — height and weight deltas are genuinely different
+    // payloads, and keeping them apart leaves the existing sculpt-undo path
+    // byte-stable rather than folding both into one enum.
+
+    /// The linear albedo of a terrain entity's splat `layer` (`0..=3`), for the
+    /// paint brush-ring colour. `None` if the entity has no `Terrain`.
+    pub fn terrain_layer_albedo(&self, guid: Uuid, layer: u8) -> Option<[f32; 4]> {
+        let e = self.world.entity_of(guid)?;
+        let terrain = self.world.world().get::<Terrain>(e)?;
+        Some(
+            terrain.layers[(layer as usize) % terrain.layers.len()]
+                .albedo
+                .to_array(),
+        )
+    }
+
+    /// Apply one paint dab into an ongoing `stroke`, mutating the entity's live
+    /// weight buffers, and bump the version so the render weight texture
+    /// re-uploads next frame (live paint feedback). No-op without a `Terrain`.
+    /// Non-recording — the merged delta is recorded at commit.
+    pub fn paint_apply_dab(&mut self, guid: Uuid, stroke: &mut SplatStroke, params: BrushParams) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
+            stroke.add_dab(&mut terrain.data, params);
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    /// Finish a paint `stroke` and record it as one undo step. The dabs already
+    /// mutated the weights (via [`Self::paint_apply_dab`]); this finalizes the
+    /// merged [`SplatDelta`] and pushes the command. An empty stroke records
+    /// nothing. Returns whether an undo entry was recorded.
+    pub fn edit_commit_paint(&mut self, guid: Uuid, stroke: SplatStroke) -> bool {
+        let Some(e) = self.world.entity_of(guid) else {
+            return false;
+        };
+        let Some(terrain) = self.world.world().get::<Terrain>(e) else {
+            return false;
+        };
+        let delta = stroke.finish(&terrain.data);
+        if delta.is_empty() {
+            return false;
+        }
+        self.history.record(
+            "Paint Splat",
+            EditCommand::PaintSplat {
+                guid,
+                delta: Box::new(delta),
+            },
+        );
+        true
+    }
+
+    /// Redo a paint stroke: replay its `after` weights. Non-recording.
+    pub(crate) fn raw_apply_splat_delta(&mut self, guid: Uuid, delta: &SplatDelta) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
+            terrain.data.apply_splat_delta(delta);
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    /// Undo a paint stroke: replay its `before` weights and drop any weight
+    /// buffers the stroke materialized, returning the terrain byte-identical to
+    /// before the stroke. Non-recording.
+    pub(crate) fn raw_revert_splat_delta(&mut self, guid: Uuid, delta: &SplatDelta) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
+            terrain.data.revert_splat_delta(delta);
         } else {
             return;
         }
@@ -1550,6 +1647,64 @@ mod tests {
             .height_at(center)
             .unwrap();
         assert!((redone - raised).abs() < 1e-6, "redo replayed the stroke");
+    }
+
+    #[test]
+    fn paint_stroke_is_one_undo_step_and_byte_identical_revert() {
+        use glam::DVec2;
+        use inf_terrain::{BrushParams, SplatStroke};
+
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Terrain, "", None);
+        let e = doc.entity_of(g).unwrap();
+
+        // Serialize the pristine (unpainted) terrain data for a byte-identical
+        // revert check.
+        let pristine =
+            serde_json::to_string(&doc.world().world().get::<Terrain>(e).unwrap().data).unwrap();
+
+        let (data, _origin) = doc.terrain_data_and_origin(g).unwrap();
+        let center = {
+            let span = data.tile_span();
+            DVec2::new(span * 0.5, span * 0.5)
+        };
+
+        // A paint stroke of a few overlapping dabs onto layer 2 → one undo step.
+        let mut stroke = SplatStroke::begin(2);
+        let params = BrushParams::new(center, 6.0, 1.0);
+        for _ in 0..3 {
+            doc.paint_apply_dab(g, &mut stroke, params);
+        }
+        assert!(doc.edit_commit_paint(g, stroke), "non-empty paint records");
+
+        // Some tile is now painted (its weight buffer materialized).
+        let painted_any = doc
+            .world()
+            .world()
+            .get::<Terrain>(e)
+            .unwrap()
+            .data
+            .tiles()
+            .any(|(_, t)| !t.weights_are_default());
+        assert!(painted_any, "paint materialized a weight buffer");
+        let painted =
+            serde_json::to_string(&doc.world().world().get::<Terrain>(e).unwrap().data).unwrap();
+
+        // One undo → byte-identical to the pristine terrain (materialized buffers
+        // dropped back to the sparse default).
+        assert!(doc.undo(), "one undo step for the paint stroke");
+        let undone =
+            serde_json::to_string(&doc.world().world().get::<Terrain>(e).unwrap().data).unwrap();
+        assert_eq!(
+            undone, pristine,
+            "paint undo restored byte-identical terrain"
+        );
+
+        // Redo replays the painted weights exactly.
+        assert!(doc.redo(), "redo the paint stroke");
+        let redone =
+            serde_json::to_string(&doc.world().world().get::<Terrain>(e).unwrap().data).unwrap();
+        assert_eq!(redone, painted, "redo replayed the paint stroke");
     }
 
     #[test]
