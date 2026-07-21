@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import {
+  Code2,
   FolderTree,
   GitBranch,
   Globe2,
@@ -12,6 +13,7 @@ import {
 } from "lucide-react";
 import { viewport } from "../lib/ipc";
 import DetailsPanel from "./DetailsPanel";
+import EditorPanel from "./EditorPanel";
 import FileExplorerPanel from "./FileExplorerPanel";
 import GitPanel from "./GitPanel";
 import OutlinerPanel from "./OutlinerPanel";
@@ -189,6 +191,16 @@ registerPanelType({
   singleton: true,
   defaultLocation: "left",
   defaultSize: { w: 300, h: 480 },
+});
+
+registerPanelType({
+  type: "editor",
+  title: () => "Code Editor",
+  icon: Code2,
+  component: EditorPanel,
+  singleton: true,
+  defaultLocation: "bottom",
+  defaultSize: { w: 900, h: 480 },
 });
 
 registerPanelType({

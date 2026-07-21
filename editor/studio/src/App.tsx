@@ -25,6 +25,7 @@ import { startLogListener } from "./stores/logStore";
 import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
 import { initAssetSync, registerAssetCommands } from "./stores/assetStore";
 import { initProjectSync, registerProjectCommands } from "./stores/projectStore";
+import { initEditorSync } from "./stores/editorStore";
 import { scene as sceneIpc } from "./lib/ipc";
 
 bootstrapShellCommands();
@@ -84,6 +85,9 @@ export default function App() {
       dispose?.();
     };
   }, []);
+
+  // Subscribe to infinity:open-file so the Code Editor opens tabs (P5.1).
+  useEffect(() => initEditorSync(), []);
 
   // Debounced crash-recovery autosave (P3.5.4): flush unsaved work every 5 s.
   useEffect(() => {
