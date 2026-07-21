@@ -2209,6 +2209,12 @@ dependencies = [
 [[package]]
 name = "inf-graph"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "xxhash-rust",
+]
 
 [[package]]
 name = "inf-hotreload"
