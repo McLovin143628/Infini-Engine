@@ -1,15 +1,15 @@
 //! ECS ↔ physics bridge (3D): the `d3` mirror of [`crate::d2::PhysicsBridge2D`].
 //!
-//! # Why this half takes a snapshot, not an `&EcsWorld`
+//! # Two entry points: a raw snapshot and the ECS adapter
 //!
-//! The d2 bridge reads `inf_ecs::components::{RigidBody2D, Collider2D}` directly.
-//! The **3D** scene components (`RigidBody3D`, `Collider3D`, …) do not exist in
-//! `inf-ecs` yet — they land next batch, when `inf-ecs` is editable. So the
-//! reconcile / spawn / update / despawn / write-back **engine** here consumes a
-//! plain, facade-local snapshot ([`EntitySync3D`]) instead of naming ECS types.
-//! Everything except the thin `sync_from_world(&EcsWorld)` adapter is implemented
-//! and tested now; that adapter is a ~30-line function (in the batch report) that
-//! reads the real components into `EntitySync3D` and calls [`sync`](PhysicsBridge3D::sync).
+//! The reconcile / spawn / update / despawn / write-back **engine** here consumes
+//! a plain, facade-local snapshot ([`EntitySync3D`]) via [`sync`](PhysicsBridge3D::sync)
+//! so it never has to name ECS types. On top of it,
+//! [`sync_from_world`](PhysicsBridge3D::sync_from_world) reads the real
+//! `inf_ecs::components::{RigidBody3D, Collider3D, Transform}` into `EntitySync3D`
+//! and calls `sync`, and [`write_back_into`](PhysicsBridge3D::write_back_into)
+//! copies the simulated dynamic poses back onto the entities' `Transform`s — the
+//! exact `d2` shape at 3D (full translation + quaternion, not just XY + Z-euler).
 //!
 //! Determinism (§2.5) is preserved exactly as in d2: **every** entity pass —
 //! spawn, update, despawn, write-back — runs in sorted `Guid` order (a `BTreeMap`
@@ -28,9 +28,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use glam::{DQuat, DVec3};
+use inf_ecs::components::{
+    BodyKind3D as SceneBodyKind3D, Collider3D, ColliderShape3DKind, RigidBody3D, Transform,
+};
+use inf_ecs::{EcsWorld, Vec3d};
 use uuid::Uuid;
 
-use super::world::{BodyKind3D, ColliderDesc3D, PhysicsWorld3D};
+use super::world::{BodyKind3D, ColliderDesc3D, ColliderShape3D, PhysicsWorld3D};
 use super::{BodyId3D, ColliderId3D};
 
 /// A rigid-body descriptor — the facade-local shape of the future `RigidBody3D`
@@ -141,6 +145,39 @@ impl PhysicsBridge3D {
     /// Advance the simulation by `dt` seconds (the caller's fixed step).
     pub fn step(&mut self, dt: f64) {
         self.world.step(dt);
+    }
+
+    /// Reconcile the physics world with the current ECS components: gather every
+    /// entity carrying a [`RigidBody3D`] and/or [`Collider3D`] into an
+    /// [`EntitySync3D`] snapshot (reading its `Transform` for the world pose —
+    /// translation + rotation quaternion) and hand it to [`sync`](Self::sync),
+    /// which reconciles in deterministic `Guid` order. The `d3` mirror of
+    /// [`crate::d2::PhysicsBridge2D::sync_from_world`].
+    pub fn sync_from_world(&mut self, world: &EcsWorld) {
+        let mut snaps: Vec<EntitySync3D> = Vec::new();
+        for entity in world.world().iter_entities() {
+            let Some(guid) = entity.get::<inf_ecs::Guid>().map(|g| g.0) else {
+                continue;
+            };
+            let rb = entity.get::<RigidBody3D>().copied();
+            let col = entity.get::<Collider3D>().copied();
+            if rb.is_none() && col.is_none() {
+                continue;
+            }
+            let transform = entity
+                .get::<Transform>()
+                .copied()
+                .unwrap_or(Transform::IDENTITY);
+            snaps.push(EntitySync3D {
+                guid,
+                body: rb.map(body_desc),
+                collider: col.as_ref().map(collider_desc),
+                translation: transform.translation.to_dvec3(),
+                rotation: transform.quat(),
+            });
+        }
+        // `sync` sorts by Guid internally, so the gather order here is irrelevant.
+        self.sync(&snaps);
     }
 
     /// Reconcile the physics world with a scene snapshot: spawn new
@@ -267,10 +304,82 @@ impl PhysicsBridge3D {
         }
         out
     }
+
+    /// Write simulated **dynamic** poses back onto the ECS `Transform`s: full
+    /// world translation and orientation (extracted into the transform's euler
+    /// degrees). Runs in `Guid` order and marks the world dirty so transform
+    /// propagation reruns. Static/kinematic bodies are editor-driven and are not
+    /// written back. The `d3` mirror of [`crate::d2::PhysicsBridge2D::write_back`]
+    /// (at 3D the solver owns all three axes and the full rotation, so — unlike
+    /// d2, which preserves Z translation — every component is overwritten).
+    pub fn write_back_into(&mut self, world: &mut EcsWorld) {
+        let mut changed = false;
+        for (guid, rec) in &self.entities {
+            if rec.kind != BodyKind3D::Dynamic {
+                continue;
+            }
+            let (Some(translation), Some(rotation)) = (
+                self.world.body_translation(rec.body),
+                self.world.body_rotation(rec.body),
+            ) else {
+                continue;
+            };
+            let Some(entity) = world.entity_of(*guid) else {
+                continue;
+            };
+            if let Some(mut t) = world.world_mut().get_mut::<Transform>(entity) {
+                t.translation = Vec3d::from_dvec3(translation);
+                t.set_quat(rotation);
+                changed = true;
+            }
+        }
+        if changed {
+            world.mark_dirty();
+        }
+    }
 }
 
 fn apply_rb_props(world: &mut PhysicsWorld3D, body: BodyId3D, rb: &BodyDesc3D) {
     world.set_body_gravity_scale(body, rb.gravity_scale);
     world.set_body_damping(body, rb.linear_damping, rb.angular_damping);
     world.set_body_locked_rotations(body, rb.fixed_rotation);
+}
+
+fn to_phys_kind(k: SceneBodyKind3D) -> BodyKind3D {
+    match k {
+        SceneBodyKind3D::Static => BodyKind3D::Static,
+        SceneBodyKind3D::Kinematic => BodyKind3D::Kinematic,
+        SceneBodyKind3D::Dynamic => BodyKind3D::Dynamic,
+    }
+}
+
+/// Map a scene [`RigidBody3D`] onto the facade-local [`BodyDesc3D`].
+fn body_desc(rb: RigidBody3D) -> BodyDesc3D {
+    BodyDesc3D {
+        kind: to_phys_kind(rb.kind),
+        gravity_scale: rb.gravity_scale,
+        fixed_rotation: rb.fixed_rotation,
+        linear_damping: rb.linear_damping,
+        angular_damping: rb.angular_damping,
+    }
+}
+
+/// Map a scene [`Collider3D`] onto the facade-local [`ColliderDesc3D`].
+fn collider_desc(col: &Collider3D) -> ColliderDesc3D {
+    let shape = match col.shape_kind {
+        ColliderShape3DKind::Box => ColliderShape3D::Box {
+            half_extents: col.half_extents.to_dvec3(),
+        },
+        ColliderShape3DKind::Sphere => ColliderShape3D::Sphere { radius: col.radius },
+        ColliderShape3DKind::Capsule => ColliderShape3D::Capsule {
+            half_height: col.half_extents.y,
+            radius: col.radius,
+        },
+    };
+    ColliderDesc3D::new(shape)
+        .friction(col.friction)
+        .restitution(col.restitution)
+        .density(col.density)
+        .sensor(col.sensor)
+        .local_translation(col.offset.to_dvec3())
 }

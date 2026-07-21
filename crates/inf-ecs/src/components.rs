@@ -959,6 +959,164 @@ impl Default for CharacterController2D {
     }
 }
 
+/// How a [`RigidBody3D`] is driven by the 3D solver (the `d3` mirror of
+/// [`BodyKind2D`]; a plain reflected enum so the Details grid surfaces it on the
+/// enum-dropdown widget — like [`LightKind`]).
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BodyKind3D {
+    /// Never moved by the solver; infinite mass (floors, walls, level geometry).
+    #[default]
+    Static,
+    /// Moved only by its `Transform` (a moving platform / mover); pushes dynamic
+    /// bodies but is not pushed back.
+    Kinematic,
+    /// Fully simulated: gravity, forces, impulses, and contacts move it.
+    Dynamic,
+}
+
+/// A 3D rigid body (P9.1). Pairs with a [`Collider3D`] on the same entity; the
+/// `PhysicsBridge3D` in `inf-physics` mirrors it into the rapier world. The `d3`
+/// mirror of [`RigidBody2D`].
+///
+/// Additive component: every field carries `#[serde(default)]` so a minimal
+/// payload (and any future field) round-trips.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct RigidBody3D {
+    /// Static / Kinematic / Dynamic.
+    #[serde(default)]
+    pub kind: BodyKind3D,
+    /// Per-body multiplier on world gravity (`1` = full, `0` = float, `<0` =
+    /// anti-gravity). Dynamic bodies only.
+    #[serde(default = "default_gravity_scale")]
+    pub gravity_scale: f64,
+    /// Lock all rotation so the body never spins (typical for characters).
+    #[serde(default)]
+    pub fixed_rotation: bool,
+    /// Linear velocity decay per second (drag).
+    #[serde(default)]
+    pub linear_damping: f64,
+    /// Angular velocity decay per second.
+    #[serde(default)]
+    pub angular_damping: f64,
+}
+
+impl Default for RigidBody3D {
+    fn default() -> Self {
+        Self {
+            kind: BodyKind3D::Static,
+            gravity_scale: default_gravity_scale(),
+            fixed_rotation: false,
+            linear_damping: 0.0,
+            angular_damping: 0.0,
+        }
+    }
+}
+
+/// The shape family of a [`Collider3D`].
+///
+/// A **flat** enum (no per-variant data), like [`ColliderShape2DKind`]: the
+/// Details reflection walker surfaces it as a *unit* dropdown, so the shape's
+/// numeric parameters live in sibling fields ([`Collider3D::half_extents`] /
+/// [`Collider3D::radius`]). Trimesh (static-mesh) colliders are intentionally
+/// omitted — they are not authored as a primitive shape and land with P12.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ColliderShape3DKind {
+    /// Axis-aligned box; uses [`Collider3D::half_extents`] (radius ignored).
+    #[default]
+    Box,
+    /// Sphere; uses [`Collider3D::radius`] (half_extents ignored).
+    Sphere,
+    /// Vertical capsule; segment half-length = `half_extents.y`, swept by
+    /// [`Collider3D::radius`] (half_extents.x/z ignored).
+    Capsule,
+}
+
+/// A 3D collider (P9.1). Attaches to the entity's [`RigidBody3D`] (or, if the
+/// entity has none, an implicit static body) in the rapier world. The `d3`
+/// mirror of [`Collider2D`].
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Collider3D {
+    /// Box / Sphere / Capsule (selects which of the fields below apply).
+    #[serde(default)]
+    pub shape_kind: ColliderShape3DKind,
+    /// Box half-extents; capsule uses `.y` as the segment half-length.
+    /// (Ignored for Sphere.)
+    #[serde(default = "default_half_extents_3d")]
+    pub half_extents: Vec3d,
+    /// Sphere / capsule radius. (Ignored for Box.)
+    #[serde(default = "default_radius")]
+    pub radius: f64,
+    /// Offset from the body origin, in the body frame (world units).
+    #[serde(default)]
+    pub offset: Vec3d,
+    /// Coulomb friction coefficient.
+    #[serde(default = "default_friction")]
+    pub friction: f64,
+    /// Bounciness in `[0, 1]`.
+    #[serde(default)]
+    pub restitution: f64,
+    /// Mass density (drives a dynamic body's mass/inertia).
+    #[serde(default = "default_density")]
+    pub density: f64,
+    /// A trigger volume: detects overlaps but generates no contact force.
+    #[serde(default)]
+    pub sensor: bool,
+}
+
+fn default_half_extents_3d() -> Vec3d {
+    Vec3d::splat(0.5)
+}
+
+impl Default for Collider3D {
+    fn default() -> Self {
+        Self {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: default_half_extents_3d(),
+            radius: default_radius(),
+            offset: Vec3d::ZERO,
+            friction: default_friction(),
+            restitution: 0.0,
+            density: default_density(),
+            sensor: false,
+        }
+    }
+}
+
+/// Tuning for a kinematic 3D character mover (P9.1) — an entity driven by a
+/// Blueprint `physics3d.move_and_slide` node rather than the dynamic solver. The
+/// `d3` mirror of [`CharacterController2D`].
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct CharacterController3D {
+    /// Steepest slope (degrees from "up") the character can walk up.
+    #[serde(default = "default_max_slope_deg")]
+    pub max_slope_deg: f64,
+    /// Snap to ground when within this distance (world units; `0` disables — the
+    /// character flies off ledges/ramps).
+    #[serde(default = "default_snap_to_ground")]
+    pub snap_to_ground: f64,
+    /// Skin width kept between the character and the world (must be > 0 for
+    /// numerical stability).
+    #[serde(default = "default_mover_offset")]
+    pub offset: f64,
+}
+
+impl Default for CharacterController3D {
+    fn default() -> Self {
+        Self {
+            max_slope_deg: default_max_slope_deg(),
+            snap_to_ground: default_snap_to_ground(),
+            offset: default_mover_offset(),
+        }
+    }
+}
+
 /// A scene camera (distinct from the editor's fly camera).
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[reflect(Component, Default)]
@@ -1227,6 +1385,64 @@ mod tests {
         assert_eq!(cc, back);
         let d: CharacterController2D = serde_json::from_str("{}").unwrap();
         assert_eq!(d, CharacterController2D::default());
+        assert_eq!(d.max_slope_deg, 45.0);
+    }
+
+    #[test]
+    fn rigid_body_3d_serde_round_trips_and_defaults() {
+        let rb = RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            gravity_scale: 2.0,
+            fixed_rotation: true,
+            linear_damping: 0.1,
+            angular_damping: 0.2,
+        };
+        let json = serde_json::to_string(&rb).unwrap();
+        let back: RigidBody3D = serde_json::from_str(&json).unwrap();
+        assert_eq!(rb, back);
+        // An empty payload fills every field from the defaults.
+        let d: RigidBody3D = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, RigidBody3D::default());
+        assert_eq!(d.kind, BodyKind3D::Static);
+        assert_eq!(d.gravity_scale, 1.0);
+    }
+
+    #[test]
+    fn collider_3d_serde_round_trips_and_defaults() {
+        let c = Collider3D {
+            shape_kind: ColliderShape3DKind::Capsule,
+            half_extents: Vec3d::new(0.3, 0.8, 0.3),
+            radius: 0.25,
+            offset: Vec3d::new(0.0, 0.1, 0.0),
+            friction: 0.9,
+            restitution: 0.2,
+            density: 2.0,
+            sensor: true,
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        let back: Collider3D = serde_json::from_str(&json).unwrap();
+        assert_eq!(c, back);
+        // Defaults: box, unit-ish material.
+        let d: Collider3D = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, Collider3D::default());
+        assert_eq!(d.shape_kind, ColliderShape3DKind::Box);
+        assert_eq!(d.half_extents, Vec3d::splat(0.5));
+        assert_eq!(d.friction, 0.5);
+        assert_eq!(d.density, 1.0);
+    }
+
+    #[test]
+    fn character_controller_3d_serde_round_trips_and_defaults() {
+        let cc = CharacterController3D {
+            max_slope_deg: 60.0,
+            snap_to_ground: 0.5,
+            offset: 0.05,
+        };
+        let json = serde_json::to_string(&cc).unwrap();
+        let back: CharacterController3D = serde_json::from_str(&json).unwrap();
+        assert_eq!(cc, back);
+        let d: CharacterController3D = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, CharacterController3D::default());
         assert_eq!(d.max_slope_deg, 45.0);
     }
 
