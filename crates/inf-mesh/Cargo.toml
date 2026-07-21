@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 inf-asset = { workspace = true }
+inf-anim = { workspace = true }
 serde = { workspace = true }
 bytemuck = { workspace = true }
 glam = { workspace = true }

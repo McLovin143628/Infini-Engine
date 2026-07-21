@@ -230,6 +230,9 @@ impl SimSession {
         // 4. Physics → ECS.
         self.bridge.write_back(doc.world_mut());
         doc.world_mut().propagate();
+        // 5. Advance skeletal-animation play-heads (P11.1). Order-independent
+        //    per-entity `t` integration → deterministic at the fixed `dt`.
+        inf_ecs::anim::advance_anim_players(doc.world_mut(), dt);
         // Rising edges are one fixed step wide.
         self.just_pressed.clear();
         self.steps += 1;

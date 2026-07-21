@@ -183,23 +183,24 @@ pub const MAX_LIGHTS: usize = 16;
 /// light; for point, the render-local position. `color.a` = intensity.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct GpuLight {
+pub(crate) struct GpuLight {
     color: [f32; 4],
     pos_dir: [f32; 4],
     params: [f32; 4], // x = range
 }
 
-/// The lights uniform block bound at `@group(1)`.
+/// The lights uniform block bound at `@group(1)`. Shared by the rigid mesh pass
+/// and the skinned mesh pass (identical lighting model).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct LightsUniform {
+pub(crate) struct LightsUniform {
     count: [u32; 4], // x = active count
     items: [GpuLight; MAX_LIGHTS],
 }
 
 impl LightsUniform {
     /// Project world-space scene lights into render-local GPU lights.
-    fn from_scene(scene: &RenderScene, origin: &FloatingOrigin) -> Self {
+    pub(crate) fn from_scene(scene: &RenderScene, origin: &FloatingOrigin) -> Self {
         let mut items = [GpuLight {
             color: [0.0; 4],
             pos_dir: [0.0; 4],

@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 
-use glam::{DVec3, Quat, Vec2, Vec3};
+use glam::{DVec3, Mat4, Quat, Vec2, Vec3};
 use inf_math::FloatingOrigin;
 use inf_render::gizmo::{self, GizmoAxis, GizmoMode};
 use inf_render::golden::{image_diff, within_tolerance};
@@ -23,9 +23,10 @@ use inf_render::{
     assemble_patches, expand_text, Ambient2D, EngineRenderer, GpuContext, HAlign, HeadlessTarget,
     LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D, RenderScene,
     RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView,
-    SpriteInstance, SpriteTextureUpload, TextParams, TilemapParams, BILLBOARD_CYLINDRICAL,
-    BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP,
-    BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance, SpriteTextureUpload,
+    TextParams, TilemapParams, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL,
+    BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE,
+    HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -1029,4 +1030,150 @@ fn golden_ortho_2d() {
     }
     assert!(red, "expected a red tile under the ortho camera");
     assert!(magenta, "expected the magenta sprite over the tiles");
+}
+
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// A procedural skinned cylinder (P11.1) + a 2-joint bend skeleton + a rotation
+/// clip. The lower half is weighted to the root joint, the upper half to the
+/// child joint (blended across the middle band), so rotating the child bends the
+/// top of the cylinder. Returns the skeleton, the clip, and the bind-space mesh.
+fn skinned_cylinder() -> (inf_anim::Skeleton, inf_anim::AnimClip, SkinnedMeshData) {
+    use inf_anim::{
+        AnimClip, Interpolation, Joint, JointTrack, JointTransform, QuatTrack, Skeleton,
+    };
+
+    // Skeleton: root at the origin, child 1 unit up (+Y). Inverse binds are the
+    // inverse of each joint's global bind, so the rest pose is undeformed.
+    let j0 = JointTransform::IDENTITY;
+    let j1 = JointTransform::from_trs(Vec3::Y, Quat::IDENTITY, Vec3::ONE);
+    let g0 = j0.to_mat4();
+    let g1 = g0 * j1.to_mat4();
+    let skeleton = Skeleton::new(vec![
+        Joint {
+            name: "root".into(),
+            parent: None,
+            inverse_bind: g0.inverse().to_cols_array(),
+            local_bind: j0,
+        },
+        Joint {
+            name: "upper".into(),
+            parent: Some(0),
+            inverse_bind: g1.inverse().to_cols_array(),
+            local_bind: j1,
+        },
+    ])
+    .unwrap();
+
+    // Clip: rotate the child joint 0° → 60° about +Z over 1 second.
+    let mut jt = JointTrack::new(1);
+    jt.rotation = Some(QuatTrack::new(
+        vec![0.0, 1.0],
+        vec![
+            Quat::IDENTITY.to_array(),
+            Quat::from_rotation_z(60f32.to_radians()).to_array(),
+        ],
+        Interpolation::Linear,
+    ));
+    let clip = AnimClip::new("bend", vec![jt]);
+
+    // A radial cylinder along +Y, height 2, radius 0.35.
+    let (radial, rings, radius, height) = (16usize, 8usize, 0.35f32, 2.0f32);
+    let mut vertices = Vec::new();
+    for r in 0..=rings {
+        let y = height * r as f32 / rings as f32;
+        let w1 = smoothstep(0.5, 1.5, y);
+        let w0 = 1.0 - w1;
+        for s in 0..radial {
+            let a = std::f32::consts::TAU * s as f32 / radial as f32;
+            let (c, sn) = (a.cos(), a.sin());
+            vertices.push(SkinnedVertex {
+                pos: [radius * c, y, radius * sn],
+                normal: [c, 0.0, sn],
+                joints: [0, 1, 0, 0],
+                weights: [w0, w1, 0.0, 0.0],
+            });
+        }
+    }
+    let mut indices = Vec::new();
+    for r in 0..rings {
+        for s in 0..radial {
+            let s1 = (s + 1) % radial;
+            let a = (r * radial + s) as u32;
+            let b = (r * radial + s1) as u32;
+            let c = ((r + 1) * radial + s) as u32;
+            let d = ((r + 1) * radial + s1) as u32;
+            // Outward-facing winding (CCW seen from outside the tube).
+            indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
+    (skeleton, clip, SkinnedMeshData { vertices, indices })
+}
+
+/// The skinning palette (`global · inverse_bind` per joint) for a clip at time `t`.
+fn palette_at(sk: &inf_anim::Skeleton, clip: &inf_anim::AnimClip, t: f32) -> Vec<Mat4> {
+    let pose = inf_anim::sample_clip(sk, clip, t, false);
+    inf_anim::skinning_matrices(sk, &pose)
+}
+
+/// Skinned-mesh golden (P11.1): a procedural skinned cylinder driven by a real
+/// `inf-anim` clip, rendered at `t=0` (rest, straight) vs `t=mid` (bent). The
+/// committed golden is the bent pose; the structural gate proves **deformation**
+/// — the two poses render meaningfully differently — and that the skinned pixels
+/// are lit (the GPU skinning path actually ran). Determinism gate via
+/// `check_golden`; strict pixel diff opt-in. The unskinned pipeline is untouched,
+/// so every other golden stays byte-stable.
+#[test]
+fn golden_skinned_mesh() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (sk, clip, mesh) = skinned_cylinder();
+
+    let make = |palette: Vec<Mat4>| SkinnedInstance {
+        translation: DVec3::ZERO,
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+        color: [0.75, 0.55, 0.35, 1.0],
+        metallic: 0.0,
+        roughness: 0.6,
+        emissive: [0.0; 3],
+        id: 1,
+        mesh: 0,
+        palette,
+    };
+
+    let mut rest = RenderScene {
+        grid_enabled: true,
+        skinned_meshes: vec![mesh.clone()],
+        ..Default::default()
+    };
+    rest.skinned.push(make(palette_at(&sk, &clip, 0.0)));
+    rest.mark_dirty();
+
+    let mut bent = RenderScene {
+        grid_enabled: true,
+        skinned_meshes: vec![mesh],
+        ..Default::default()
+    };
+    bent.skinned.push(make(palette_at(&sk, &clip, 0.5)));
+    bent.mark_dirty();
+
+    // Angled view framing the ~2 m tall cylinder around its middle.
+    let view = look_view(DVec3::new(3.2, 1.6, 3.6), DVec3::new(0.0, 1.0, 0.0));
+    let rest_img = render(&gpu, &rest, &view);
+    let bent_img = check_golden(&gpu, "skinned_mesh", &bent, &view);
+
+    // Deformation: the bent pose differs meaningfully from the rest pose.
+    let (mean, max) = image_diff(&rest_img, &bent_img, W, H);
+    assert!(
+        mean > 0.002,
+        "expected visible skinning deformation between t=0 and t=mid (mean {mean}, max {max})"
+    );
+    // The skinned cylinder is actually lit (the GPU skinning path ran).
+    let lit = bent_img
+        .chunks(4)
+        .any(|p| p[0] as u16 + p[1] as u16 + p[2] as u16 > 150);
+    assert!(lit, "expected a lit skinned pixel");
 }

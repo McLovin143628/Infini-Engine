@@ -10,11 +10,15 @@
 //! normals are generated (flat per-face); missing tangents default (the material
 //! pass can regenerate from UVs later).
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use glam::Vec3;
+use glam::{Mat4, Vec3};
+use inf_anim::{
+    AnimClip, Interpolation, Joint, JointTrack, JointTransform, QuatTrack, Skeleton, Vec3Track,
+};
 
-use crate::asset::{MeshAsset, MeshVertex, SubMesh};
+use crate::asset::{MeshAsset, MeshVertex, SubMesh, VertexSkin};
 use crate::error::MeshError;
 use crate::optimize::optimize;
 
@@ -46,6 +50,26 @@ pub struct ImportedMaterial {
 pub struct ImportedMesh {
     pub name: String,
     pub mesh: MeshAsset,
+    /// Index into [`GltfImport::skeletons`] this mesh is skinned to, if any
+    /// (resolved from the glTF node that pairs this mesh with a skin).
+    pub skin: Option<usize>,
+}
+
+/// One imported skinning skeleton (from a glTF `skin`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedSkeleton {
+    pub name: String,
+    pub skeleton: Skeleton,
+}
+
+/// One imported animation clip (from a glTF `animation`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedClip {
+    pub name: String,
+    pub clip: AnimClip,
+    /// Index into [`GltfImport::skeletons`] this clip's tracks target, if the
+    /// channels resolved to a skin's joints.
+    pub skeleton: Option<usize>,
 }
 
 /// The full result of importing a glTF file.
@@ -54,6 +78,10 @@ pub struct GltfImport {
     pub meshes: Vec<ImportedMesh>,
     pub materials: Vec<ImportedMaterial>,
     pub images: Vec<RawImage>,
+    /// Skinning skeletons (P11.1), one per glTF `skin`, in `skin.index()` order.
+    pub skeletons: Vec<ImportedSkeleton>,
+    /// Skeletal animation clips (P11.1), one per glTF `animation`.
+    pub clips: Vec<ImportedClip>,
 }
 
 /// Import a glTF/GLB file.
@@ -67,6 +95,128 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
         .collect();
 
     let mut out = GltfImport::default();
+
+    // Skins → skeletons (P11.1). `node_to_joint[skin_index]` maps a glTF node
+    // index to its joint index within that skeleton (used to bind clip channels).
+    let mut node_to_joint: Vec<HashMap<usize, u16>> = Vec::new();
+    {
+        // Child → parent map (glTF nodes have no back-pointer to their parent).
+        let mut parent_of: HashMap<usize, usize> = HashMap::new();
+        for node in doc.nodes() {
+            for child in node.children() {
+                parent_of.insert(child.index(), node.index());
+            }
+        }
+        for skin in doc.skins() {
+            let joint_nodes: Vec<gltf::Node> = skin.joints().collect();
+            let map: HashMap<usize, u16> = joint_nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.index(), i as u16))
+                .collect();
+            let reader = skin.reader(|b| Some(&buffers[b.index()]));
+            let ibms: Vec<[[f32; 4]; 4]> = reader
+                .read_inverse_bind_matrices()
+                .map(|it| it.collect())
+                .unwrap_or_default();
+            let mut joints = Vec::with_capacity(joint_nodes.len());
+            for (i, node) in joint_nodes.iter().enumerate() {
+                let parent = parent_of
+                    .get(&node.index())
+                    .and_then(|p| map.get(p))
+                    .copied();
+                let (t, r, s) = node.transform().decomposed();
+                let inverse_bind = ibms
+                    .get(i)
+                    .map(|m| Mat4::from_cols_array_2d(m).to_cols_array())
+                    .unwrap_or_else(|| Mat4::IDENTITY.to_cols_array());
+                joints.push(Joint {
+                    name: node.name().unwrap_or("joint").to_string(),
+                    parent,
+                    inverse_bind,
+                    local_bind: JointTransform {
+                        translation: t,
+                        rotation: r,
+                        scale: s,
+                    },
+                });
+            }
+            // v1: trust the glTF joint order (parents-before-children in every
+            // exporter we target). A non-topological skin errors here; a stable
+            // topological re-sort + JOINTS_0/channel remap is a documented P11.x
+            // follow-up.
+            let skeleton = Skeleton::new(joints)
+                .map_err(|e| MeshError::Gltf(format!("skin {}: {e}", skin.index())))?;
+            out.skeletons.push(ImportedSkeleton {
+                name: skin.name().unwrap_or("Skeleton").to_string(),
+                skeleton,
+            });
+            node_to_joint.push(map);
+        }
+    }
+
+    // Node → skin index, so a mesh drawn by a skinned node binds to its skeleton.
+    let mut mesh_to_skin: HashMap<usize, usize> = HashMap::new();
+    for node in doc.nodes() {
+        if let (Some(mesh), Some(skin)) = (node.mesh(), node.skin()) {
+            mesh_to_skin.insert(mesh.index(), skin.index());
+        }
+    }
+
+    // Animations → clips (P11.1).
+    for anim in doc.animations() {
+        let mut tracks_by_joint: BTreeMap<u16, JointTrack> = BTreeMap::new();
+        let mut skel_idx: Option<usize> = None;
+        for channel in anim.channels() {
+            let target = channel.target().node().index();
+            let Some((si, joint)) = find_joint(&node_to_joint, target) else {
+                continue; // a channel targeting a non-joint node (v1 skips it)
+            };
+            // v1: a clip binds to a single skeleton (the first it touches).
+            if *skel_idx.get_or_insert(si) != si {
+                continue;
+            }
+            let sampler = channel.sampler();
+            let cubic = matches!(
+                sampler.interpolation(),
+                gltf::animation::Interpolation::CubicSpline
+            );
+            let interp = match sampler.interpolation() {
+                gltf::animation::Interpolation::Step => Interpolation::Step,
+                // LINEAR and (cubic-resampled-to-linear) CUBICSPLINE both land here.
+                _ => Interpolation::Linear,
+            };
+            let reader = channel.reader(|b| Some(&buffers[b.index()]));
+            let times: Vec<f32> = match reader.read_inputs() {
+                Some(it) => it.collect(),
+                None => continue,
+            };
+            let entry = tracks_by_joint
+                .entry(joint)
+                .or_insert_with(|| JointTrack::new(joint));
+            match reader.read_outputs() {
+                Some(gltf::animation::util::ReadOutputs::Translations(it)) => {
+                    let vals = resample_cubic(it.collect(), cubic);
+                    entry.translation = Some(Vec3Track::new(times, vals, interp));
+                }
+                Some(gltf::animation::util::ReadOutputs::Scales(it)) => {
+                    let vals = resample_cubic(it.collect(), cubic);
+                    entry.scale = Some(Vec3Track::new(times, vals, interp));
+                }
+                Some(gltf::animation::util::ReadOutputs::Rotations(rot)) => {
+                    let vals = resample_cubic(rot.into_f32().collect(), cubic);
+                    entry.rotation = Some(QuatTrack::new(times, vals, interp));
+                }
+                _ => {}
+            }
+        }
+        let tracks: Vec<JointTrack> = tracks_by_joint.into_values().collect();
+        out.clips.push(ImportedClip {
+            name: anim.name().unwrap_or("Animation").to_string(),
+            clip: AnimClip::new(anim.name().unwrap_or("Animation").to_string(), tracks),
+            skeleton: skel_idx,
+        });
+    }
 
     // Images → RGBA8.
     for (i, img) in images.iter().enumerate() {
@@ -121,6 +271,13 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
                 .map(|t| t.into_f32().collect::<Vec<_>>());
             let tangents: Option<Vec<[f32; 4]>> = reader.read_tangents().map(|t| t.collect());
 
+            // Skinning influences (P11.1): JOINTS_0 (widened to u16) + WEIGHTS_0
+            // (normalized). Present together on a skinned primitive.
+            let joints0: Option<Vec<[u16; 4]>> =
+                reader.read_joints(0).map(|j| j.into_u16().collect());
+            let weights0: Option<Vec<[f32; 4]>> =
+                reader.read_weights(0).map(|w| w.into_f32().collect());
+
             let normals = normals.unwrap_or_else(|| compute_normals(&positions, &indices));
 
             let mut verts = Vec::with_capacity(positions.len());
@@ -136,13 +293,42 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
                 });
             }
 
-            let (verts, idx) = optimize(verts, indices);
-            submeshes.push(SubMesh {
-                name: format!("{name}_{pi}"),
-                vertices: verts,
-                indices: idx,
-                material_slot: prim.material().index().map(|i| i as u32),
-            });
+            let skin: Vec<VertexSkin> = match (joints0, weights0) {
+                (Some(j), Some(w)) => (0..positions.len())
+                    .map(|i| {
+                        VertexSkin {
+                            joints: *j.get(i).unwrap_or(&[0; 4]),
+                            weights: *w.get(i).unwrap_or(&[1.0, 0.0, 0.0, 0.0]),
+                        }
+                        .normalized()
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+
+            let material_slot = prim.material().index().map(|i| i as u32);
+            let sub = if skin.is_empty() {
+                // Rigid submesh: the meshopt weld/cache/fetch pass reorders verts.
+                let (verts, idx) = optimize(verts, indices);
+                SubMesh {
+                    name: format!("{name}_{pi}"),
+                    vertices: verts,
+                    indices: idx,
+                    material_slot,
+                    skin: Vec::new(),
+                }
+            } else {
+                // Skinned submesh: skip meshopt so the parallel `skin` stream stays
+                // index-aligned to `vertices` (a skin-aware remap is a follow-up).
+                SubMesh {
+                    name: format!("{name}_{pi}"),
+                    vertices: verts,
+                    indices,
+                    material_slot,
+                    skin,
+                }
+            };
+            submeshes.push(sub);
         }
         if submeshes.is_empty() {
             continue;
@@ -150,6 +336,7 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
         out.meshes.push(ImportedMesh {
             name: name.clone(),
             mesh: MeshAsset::new(submeshes, material_names.clone()),
+            skin: mesh_to_skin.get(&mesh.index()).copied(),
         });
     }
 
@@ -157,6 +344,30 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
         return Err(MeshError::Gltf(format!("{path:?}: no triangle meshes")));
     }
     Ok(out)
+}
+
+/// Find the `(skeleton_index, joint_index)` a glTF node maps to, scanning each
+/// skin's node→joint map.
+fn find_joint(node_to_joint: &[HashMap<usize, u16>], node: usize) -> Option<(usize, u16)> {
+    node_to_joint
+        .iter()
+        .enumerate()
+        .find_map(|(si, map)| map.get(&node).map(|&j| (si, j)))
+}
+
+/// Resample a glTF animation output stream to one value per keyframe.
+///
+/// A `CUBICSPLINE` sampler stores three values per key — `[in_tangent, value,
+/// out_tangent]` — so its output length is `3 · keys`; v1 keeps the middle
+/// **value** of each triple and drops the tangents (the curve is treated as
+/// linear between the preserved sample points). A `STEP`/`LINEAR` stream is one
+/// value per key and passes through unchanged.
+fn resample_cubic<T: Copy>(values: Vec<T>, cubic: bool) -> Vec<T> {
+    if cubic {
+        values.chunks_exact(3).map(|c| c[1]).collect()
+    } else {
+        values
+    }
 }
 
 /// Flat per-face normals for geometry that ships without them.
@@ -302,5 +513,165 @@ mod tests {
         // Normals were generated (the source had none): +Z face.
         let n = m.submeshes[0].vertices[0].normal;
         assert!(n[2] > 0.9, "generated normal faces +Z, got {n:?}");
+        // A plain triangle has no skin / skeleton / clips.
+        assert!(imported.skeletons.is_empty());
+        assert!(imported.clips.is_empty());
+        assert!(!m.submeshes[0].is_skinned());
+        assert!(imported.meshes[0].skin.is_none());
+    }
+
+    /// Append `f32`s to `buf` and return the starting byte offset.
+    fn push_f32s(buf: &mut Vec<u8>, vals: &[f32]) -> usize {
+        let off = buf.len();
+        for &v in vals {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        off
+    }
+
+    /// A programmatically built skinned glTF: a 3-joint arm (chain along +Y), a
+    /// one-triangle skinned mesh, and a 2-keyframe rotation clip on the middle
+    /// joint. No binary fixtures — the buffer + JSON are constructed in-test.
+    #[test]
+    fn imports_a_skinned_arm_with_a_rotation_clip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+
+        // 0: POSITION — 3 verts (VEC3 f32).
+        let pos_off = push_f32s(&mut buf, &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 2.0, 0.0]);
+        // 1: WEIGHTS_0 — 3 verts (VEC4 f32), each fully weighted to one joint.
+        let wgt_off = push_f32s(
+            &mut buf,
+            &[
+                1.0, 0.0, 0.0, 0.0, // v0 → joint 0
+                1.0, 0.0, 0.0, 0.0, // v1 → joint 0
+                1.0, 0.0, 0.0, 0.0, // v2 → joint 1
+            ],
+        );
+        // 2: inverseBindMatrices — 3 × MAT4 f32 (identity).
+        let ibm_off = {
+            let off = buf.len();
+            for _ in 0..3 {
+                let m = Mat4::IDENTITY.to_cols_array();
+                for v in m {
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            off
+        };
+        // 3: animation input times — 2 (SCALAR f32).
+        let time_off = push_f32s(&mut buf, &[0.0, 1.0]);
+        // 4: animation output rotations — 2 × VEC4 f32 (identity, then 90° about Z).
+        let rot_off = push_f32s(
+            &mut buf,
+            &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.707_106_77, 0.707_106_77],
+        );
+        // 5: indices — 3 × u16, 4-byte aligned.
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+        let idx_off = buf.len();
+        for i in [0u16, 1, 2] {
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+        // 6: JOINTS_0 — 3 verts × VEC4 u16.
+        let joint_off = buf.len();
+        for j in [[0u16, 0, 0, 0], [0, 0, 0, 0], [1, 0, 0, 0]] {
+            for c in j {
+                buf.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+
+        std::fs::write(dir.path().join("arm.bin"), &buf).unwrap();
+
+        let gltf = format!(
+            r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [0, 3] }}],
+  "nodes": [
+    {{ "name": "joint0", "translation": [0,0,0], "children": [1] }},
+    {{ "name": "joint1", "translation": [0,1,0], "children": [2] }},
+    {{ "name": "joint2", "translation": [0,1,0] }},
+    {{ "name": "armMeshNode", "mesh": 0, "skin": 0 }}
+  ],
+  "meshes": [{{ "name": "Arm", "primitives": [{{
+    "attributes": {{ "POSITION": 0, "JOINTS_0": 6, "WEIGHTS_0": 1 }},
+    "indices": 5
+  }}] }}],
+  "skins": [{{ "name": "ArmSkel", "joints": [0,1,2], "inverseBindMatrices": 2 }}],
+  "animations": [{{
+    "name": "Wave",
+    "channels": [{{ "sampler": 0, "target": {{ "node": 1, "path": "rotation" }} }}],
+    "samplers": [{{ "input": 3, "output": 4, "interpolation": "LINEAR" }}]
+  }}],
+  "buffers": [{{ "uri": "arm.bin", "byteLength": {total} }}],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": {pos_off}, "byteLength": 36, "target": 34962 }},
+    {{ "buffer": 0, "byteOffset": {wgt_off}, "byteLength": 48, "target": 34962 }},
+    {{ "buffer": 0, "byteOffset": {ibm_off}, "byteLength": 192 }},
+    {{ "buffer": 0, "byteOffset": {time_off}, "byteLength": 8 }},
+    {{ "buffer": 0, "byteOffset": {rot_off}, "byteLength": 32 }},
+    {{ "buffer": 0, "byteOffset": {idx_off}, "byteLength": 6, "target": 34963 }},
+    {{ "buffer": 0, "byteOffset": {joint_off}, "byteLength": 24, "target": 34962 }}
+  ],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0,0,0], "max": [1,2,0] }},
+    {{ "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC4" }},
+    {{ "bufferView": 2, "componentType": 5126, "count": 3, "type": "MAT4" }},
+    {{ "bufferView": 3, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0.0], "max": [1.0] }},
+    {{ "bufferView": 4, "componentType": 5126, "count": 2, "type": "VEC4" }},
+    {{ "bufferView": 5, "componentType": 5123, "count": 3, "type": "SCALAR" }},
+    {{ "bufferView": 6, "componentType": 5123, "count": 3, "type": "VEC4" }}
+  ]
+}}"#,
+            total = buf.len(),
+            pos_off = pos_off,
+            wgt_off = wgt_off,
+            ibm_off = ibm_off,
+            time_off = time_off,
+            rot_off = rot_off,
+            idx_off = idx_off,
+            joint_off = joint_off,
+        );
+        let path = dir.path().join("arm.gltf");
+        std::fs::write(&path, gltf).unwrap();
+
+        let imported = import_gltf(&path).unwrap();
+
+        // One skeleton: a 3-joint chain, parents preceding children.
+        assert_eq!(imported.skeletons.len(), 1);
+        let sk = &imported.skeletons[0].skeleton;
+        assert_eq!(sk.len(), 3);
+        assert_eq!(sk.joint(0).unwrap().parent, None);
+        assert_eq!(sk.joint(1).unwrap().parent, Some(0));
+        assert_eq!(sk.joint(2).unwrap().parent, Some(1));
+        // Joint local binds carry the node translations.
+        assert_eq!(sk.joint(1).unwrap().local_bind.translation, [0.0, 1.0, 0.0]);
+
+        // The mesh is skinned to skeleton 0 with index-aligned, normalized weights.
+        let im = &imported.meshes[0];
+        assert_eq!(im.skin, Some(0));
+        let sub = &im.mesh.submeshes[0];
+        assert!(sub.is_skinned());
+        assert_eq!(sub.skin.len(), sub.vertices.len());
+        assert_eq!(sub.skin[0].joints, [0, 0, 0, 0]);
+        assert_eq!(sub.skin[2].joints, [1, 0, 0, 0]);
+        assert!((sub.skin[0].weights.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+
+        // One clip: a 2-key rotation track on joint 1, bound to skeleton 0.
+        assert_eq!(imported.clips.len(), 1);
+        let clip = &imported.clips[0];
+        assert_eq!(clip.skeleton, Some(0));
+        assert_eq!(clip.clip.duration, 1.0);
+        assert_eq!(clip.clip.tracks.len(), 1);
+        let track = &clip.clip.tracks[0];
+        assert_eq!(track.joint, 1);
+        let rot = track.rotation.as_ref().unwrap();
+        assert_eq!(rot.times, vec![0.0, 1.0]);
+        assert_eq!(rot.values.len(), 2);
     }
 }

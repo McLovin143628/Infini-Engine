@@ -9,3 +9,10 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+glam = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+inf-asset = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

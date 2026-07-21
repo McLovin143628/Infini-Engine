@@ -136,6 +136,10 @@ impl EngineRenderer {
         let mut graph = RenderGraph::default();
         graph.add(passes::sky::SkyNode::new(gpu, &view_bgl));
         graph.add(passes::mesh::MeshNode::new(gpu, &view_bgl));
+        // Skinned meshes (P11.1) draw right after the rigid meshes, into the same
+        // MSAA scene + depth targets. A no-op when `scene.skinned` is empty, so
+        // every pre-P11 scene stays byte-identical.
+        graph.add(passes::skinned::SkinnedMeshNode::new(gpu, &view_bgl));
         // Terrain draws opaque + depth-writing after meshes and before the grid,
         // so the infinite grid is occluded where terrain rises above the ground
         // plane. A no-op when the scene has no terrain (pre-P10.1 byte stability).

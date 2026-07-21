@@ -173,7 +173,45 @@ fn import_gltf(
         produced.push(id);
     }
 
-    // 3. Meshes; each depends on the materials its submeshes use.
+    // 3. Skeletons (P11.1): one `.inf_skel` per glTF skin. Meshes depend on their
+    //    skeleton; clips depend on it too (skeleton ← clips, mesh → skeleton).
+    let mut skeleton_ids: Vec<AssetId> = Vec::with_capacity(g.skeletons.len());
+    for sk in &g.skeletons {
+        let asset = inf_anim::SkeletonAsset::new(sk.skeleton.clone());
+        let name = format!("{}_{}", file_stem(source), sk.name);
+        let id = project.write_asset(
+            dest_dir,
+            &name,
+            &asset,
+            Some(source_rel.clone()),
+            vec![],
+            None,
+        )?;
+        skeleton_ids.push(id);
+        produced.push(id);
+    }
+
+    // 4. Animation clips (P11.1): one `.inf_anim` per glTF animation, each with a
+    //    dependency edge onto the skeleton its tracks target.
+    for clip in &g.clips {
+        let skel_id = clip.skeleton.and_then(|i| skeleton_ids.get(i).copied());
+        let skel_bytes = skel_id.map(|id| *id.uuid().as_bytes());
+        let asset = inf_anim::AnimClipAsset::new(clip.clip.clone(), skel_bytes);
+        let deps: Vec<AssetId> = skel_id.into_iter().collect();
+        let name = format!("{}_{}", file_stem(source), clip.name);
+        let id = project.write_asset(
+            dest_dir,
+            &name,
+            &asset,
+            Some(source_rel.clone()),
+            deps,
+            None,
+        )?;
+        produced.push(id);
+    }
+
+    // 5. Meshes; each depends on the materials its submeshes use, plus its
+    //    skeleton (when skinned).
     let mut primary = None;
     for im in &g.meshes {
         let used: BTreeSet<u32> = im
@@ -182,10 +220,13 @@ fn import_gltf(
             .iter()
             .filter_map(|s| s.material_slot)
             .collect();
-        let deps: Vec<AssetId> = used
+        let mut deps: Vec<AssetId> = used
             .into_iter()
             .filter_map(|slot| material_ids.get(slot as usize).copied())
             .collect();
+        if let Some(sid) = im.skin.and_then(|i| skeleton_ids.get(i).copied()) {
+            deps.push(sid);
+        }
         let id = project.write_asset(
             dest_dir,
             &im.name,
@@ -281,6 +322,151 @@ mod tests {
         assert_eq!(proj.db().get(mat_id).unwrap().kind(), AssetKind::Material);
         // Reverse edge: deleting the material now warns (mesh references it).
         assert_eq!(proj.referenced_by(mat_id), vec![mesh_id]);
+    }
+
+    /// A programmatically built skinned glTF (a 2-joint chain, a skinned
+    /// triangle, one rotation clip) with an external buffer. Mirrors the
+    /// inf-mesh importer fixture; used to prove the editor's asset wiring.
+    fn write_skinned_gltf(dir: &Path) -> std::path::PathBuf {
+        let mut buf: Vec<u8> = Vec::new();
+        let push_f32s = |buf: &mut Vec<u8>, vals: &[f32]| -> usize {
+            let off = buf.len();
+            for &v in vals {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            off
+        };
+        let pos_off = push_f32s(&mut buf, &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 2.0, 0.0]);
+        let wgt_off = push_f32s(
+            &mut buf,
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        );
+        let identity: [f32; 16] = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let ibm_off = buf.len();
+        for _ in 0..2 {
+            for v in identity {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let time_off = push_f32s(&mut buf, &[0.0, 1.0]);
+        let rot_off = push_f32s(
+            &mut buf,
+            &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.707_106_77, 0.707_106_77],
+        );
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+        let idx_off = buf.len();
+        for i in [0u16, 1, 2] {
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+        let joint_off = buf.len();
+        for j in [[0u16, 0, 0, 0], [0, 0, 0, 0], [1, 0, 0, 0]] {
+            for c in j {
+                buf.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        std::fs::write(dir.join("skin.bin"), &buf).unwrap();
+        let gltf = format!(
+            r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [0, 2] }}],
+  "nodes": [
+    {{ "name": "j0", "translation": [0,0,0], "children": [1] }},
+    {{ "name": "j1", "translation": [0,1,0] }},
+    {{ "name": "skinNode", "mesh": 0, "skin": 0 }}
+  ],
+  "meshes": [{{ "name": "SkinMesh", "primitives": [{{ "attributes": {{ "POSITION": 0, "JOINTS_0": 6, "WEIGHTS_0": 1 }}, "indices": 5 }}] }}],
+  "skins": [{{ "name": "Skel", "joints": [0,1], "inverseBindMatrices": 2 }}],
+  "animations": [{{ "name": "Wave", "channels": [{{ "sampler": 0, "target": {{ "node": 1, "path": "rotation" }} }}], "samplers": [{{ "input": 3, "output": 4, "interpolation": "LINEAR" }}] }}],
+  "buffers": [{{ "uri": "skin.bin", "byteLength": {total} }}],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": {pos_off}, "byteLength": 36, "target": 34962 }},
+    {{ "buffer": 0, "byteOffset": {wgt_off}, "byteLength": 48, "target": 34962 }},
+    {{ "buffer": 0, "byteOffset": {ibm_off}, "byteLength": 128 }},
+    {{ "buffer": 0, "byteOffset": {time_off}, "byteLength": 8 }},
+    {{ "buffer": 0, "byteOffset": {rot_off}, "byteLength": 32 }},
+    {{ "buffer": 0, "byteOffset": {idx_off}, "byteLength": 6, "target": 34963 }},
+    {{ "buffer": 0, "byteOffset": {joint_off}, "byteLength": 24, "target": 34962 }}
+  ],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0,0,0], "max": [1,2,0] }},
+    {{ "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC4" }},
+    {{ "bufferView": 2, "componentType": 5126, "count": 2, "type": "MAT4" }},
+    {{ "bufferView": 3, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0.0], "max": [1.0] }},
+    {{ "bufferView": 4, "componentType": 5126, "count": 2, "type": "VEC4" }},
+    {{ "bufferView": 5, "componentType": 5123, "count": 3, "type": "SCALAR" }},
+    {{ "bufferView": 6, "componentType": 5123, "count": 3, "type": "VEC4" }}
+  ]
+}}"#,
+            total = buf.len(),
+            pos_off = pos_off,
+            wgt_off = wgt_off,
+            ibm_off = ibm_off,
+            time_off = time_off,
+            rot_off = rot_off,
+            idx_off = idx_off,
+            joint_off = joint_off,
+        );
+        let path = dir.join("skin.gltf");
+        std::fs::write(&path, gltf).unwrap();
+        path
+    }
+
+    #[test]
+    fn skinned_gltf_import_creates_skeleton_and_clip_assets_with_edges() {
+        let src = tempfile::tempdir().unwrap();
+        let proj_dir = tempfile::tempdir().unwrap();
+        let gltf = write_skinned_gltf(src.path());
+
+        let mut proj = AssetProject::open(proj_dir.path()).unwrap();
+        let dest = proj.content_dir("imported").unwrap();
+        let out = proj.import_file(&gltf, &dest).unwrap();
+
+        // Exactly one skeleton + one clip asset were produced.
+        let kinds: Vec<AssetKind> = out
+            .produced
+            .iter()
+            .map(|id| proj.db().get(*id).unwrap().kind())
+            .collect();
+        assert_eq!(
+            kinds.iter().filter(|k| **k == AssetKind::Skeleton).count(),
+            1
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| **k == AssetKind::AnimClip).count(),
+            1
+        );
+
+        let skel_id = out
+            .produced
+            .iter()
+            .copied()
+            .find(|id| proj.db().get(*id).unwrap().kind() == AssetKind::Skeleton)
+            .unwrap();
+        let clip_id = out
+            .produced
+            .iter()
+            .copied()
+            .find(|id| proj.db().get(*id).unwrap().kind() == AssetKind::AnimClip)
+            .unwrap();
+        let mesh_id = out.primary.unwrap();
+
+        // mesh → skeleton and clip → skeleton dependency edges both exist.
+        assert!(proj.db().references_of(mesh_id).unwrap().contains(&skel_id));
+        assert_eq!(proj.db().references_of(clip_id).unwrap(), vec![skel_id]);
+        // Reverse edge: the skeleton is referenced by both the mesh and the clip.
+        let mut referrers = proj.referenced_by(skel_id);
+        referrers.sort();
+        let mut expected = vec![mesh_id, clip_id];
+        expected.sort();
+        assert_eq!(referrers, expected);
     }
 
     #[test]

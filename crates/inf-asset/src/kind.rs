@@ -35,6 +35,10 @@ pub enum AssetKind {
     Audio,
     /// Procedural-content-generation graph (`.inf_pcg`) — scatter rules + samplers.
     Pcg,
+    /// Skinning skeleton (`.inf_skel`) — a joint hierarchy + inverse binds (P11.1).
+    Skeleton,
+    /// Skeletal animation clip (`.inf_anim`) — per-joint keyframe tracks (P11.1).
+    AnimClip,
     /// Anything else living under the content root.
     Unknown,
 }
@@ -55,6 +59,8 @@ impl AssetKind {
             AssetKind::Table => "inf_table",
             AssetKind::Audio => "inf_audio",
             AssetKind::Pcg => "inf_pcg",
+            AssetKind::Skeleton => "inf_skel",
+            AssetKind::AnimClip => "inf_anim",
             AssetKind::Unknown => return None,
         })
     }
@@ -74,6 +80,8 @@ impl AssetKind {
             "inf_table" => AssetKind::Table,
             "inf_audio" => AssetKind::Audio,
             "inf_pcg" => AssetKind::Pcg,
+            "inf_skel" => AssetKind::Skeleton,
+            "inf_anim" => AssetKind::AnimClip,
             _ => AssetKind::Unknown,
         }
     }
@@ -101,6 +109,8 @@ impl AssetKind {
             AssetKind::Table => "table",
             AssetKind::Audio => "audio",
             AssetKind::Pcg => "pcg",
+            AssetKind::Skeleton => "skeleton",
+            AssetKind::AnimClip => "anim_clip",
             AssetKind::Unknown => "unknown",
         }
     }
@@ -120,6 +130,8 @@ impl AssetKind {
             AssetKind::Table => "Data Table",
             AssetKind::Audio => "Audio",
             AssetKind::Pcg => "PCG Graph",
+            AssetKind::Skeleton => "Skeleton",
+            AssetKind::AnimClip => "Animation",
             AssetKind::Unknown => "File",
         }
     }
@@ -140,6 +152,8 @@ impl AssetKind {
             AssetKind::Table,
             AssetKind::Audio,
             AssetKind::Pcg,
+            AssetKind::Skeleton,
+            AssetKind::AnimClip,
         ]
     }
 }

@@ -25,6 +25,7 @@ inf-math = { workspace = true }
 inf-asset = { workspace = true }
 inf-mesh = { workspace = true }
 inf-material = { workspace = true }
+inf-anim = { workspace = true }
 inf-render = { workspace = true }
 glam = { workspace = true }
 wgpu = { workspace = true }

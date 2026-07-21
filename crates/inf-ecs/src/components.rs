@@ -1411,6 +1411,120 @@ impl Default for PcgVolume {
     }
 }
 
+/// A skinned mesh binding (P11.1): the GUIDs of the skeletal mesh asset and the
+/// skeleton (`.inf_skel`) that deforms it. The `d3` skeletal analogue of
+/// [`MeshRef`] — an entity carrying this renders the skinned mesh driven by its
+/// [`AnimPlayer`]'s pose.
+///
+/// Both GUIDs are `#[reflect(ignore)]` (no asset-ref Details widget yet — the
+/// same documented gap as [`Sprite::texture`]) + `#[serde(default)]`, so they are
+/// assigned by drag-drop and still serde-persisted.
+///
+/// ## Persistence — the same v-slot gap as [`Terrain`] / [`PcgVolume`]
+///
+/// This is an **additive** component (registered + reflected + serde) but it is
+/// **not yet a slot in the `.inf_lvl` `EntityRecord`** (frozen at v4). A spawned
+/// [`SkeletalMesh`]/[`AnimPlayer`] is therefore live-session only; the v5 schema
+/// migration is where the pair first persists (the same pattern the
+/// `terrain_is_not_persisted_yet_v4_todo` guard pins). The guard test
+/// `skeletal_components_serde_round_trip` documents the gap; **no schema bump is
+/// made here.**
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[reflect(Component, Default)]
+pub struct SkeletalMesh {
+    /// Skeletal mesh asset GUID (`.inf_mesh` with per-vertex skin); `None` → the
+    /// renderer's placeholder.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub mesh: Option<Uuid>,
+    /// Skeleton asset GUID (`.inf_skel`) that binds the mesh's joint indices.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub skeleton: Option<Uuid>,
+}
+
+/// A clip play-head (P11.1): drives an entity's [`SkeletalMesh`] by advancing a
+/// `.inf_anim` clip's time each fixed step (see [`crate::anim`]). Deterministic —
+/// `t` integrates at the fixed `dt`.
+///
+/// See [`SkeletalMesh`] for the shared v5 persistence gap.
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct AnimPlayer {
+    /// The `.inf_anim` clip GUID to play; `None` → the bind pose. `#[reflect(ignore)]`
+    /// + serde-persisted (assigned by drag), like [`SkeletalMesh::mesh`].
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub clip: Option<Uuid>,
+    /// Current play-head in seconds. Advanced by `speed·dt` each fixed step.
+    #[serde(default)]
+    pub t: f64,
+    /// Playback rate multiplier (`1` = real time, `0.5` = half speed, `<0` =
+    /// reverse).
+    #[serde(default = "default_anim_speed")]
+    pub speed: f64,
+    /// Wrap `t` at the clip end (`true`) or clamp/hold the last pose (`false`).
+    #[serde(default = "default_anim_looping")]
+    pub looping: bool,
+    /// Whether the play-head advances at all.
+    #[serde(default = "default_anim_playing")]
+    pub playing: bool,
+    /// Clip length in seconds, resolved from the `.inf_anim` asset by the anim
+    /// system so the tick can wrap/clamp without loading the asset. `0` = unknown
+    /// → `t` free-runs (pose sampling still wraps). A derived cache, but
+    /// `#[serde(default)]` (not `skip`) so it survives a round-trip once resolved.
+    #[serde(default)]
+    pub duration: f64,
+}
+
+fn default_anim_speed() -> f64 {
+    1.0
+}
+fn default_anim_looping() -> bool {
+    true
+}
+fn default_anim_playing() -> bool {
+    true
+}
+
+impl Default for AnimPlayer {
+    fn default() -> Self {
+        Self {
+            clip: None,
+            t: 0.0,
+            speed: default_anim_speed(),
+            looping: default_anim_looping(),
+            playing: default_anim_playing(),
+            duration: 0.0,
+        }
+    }
+}
+
+impl AnimPlayer {
+    /// Advance the play-head by one step of `dt` seconds (no-op when paused):
+    /// `t + speed·dt`, then wrap ([`looping`](Self::looping)) or clamp against
+    /// [`duration`](Self::duration). A non-positive duration leaves `t`
+    /// free-running (pose sampling wraps later). Pure + deterministic — the same
+    /// integration the runtime and editor Simulate ticks share (kept inline so
+    /// the foundational ECS crate needs no `inf-anim` dependency; mirrors
+    /// `inf_anim::advance_clip_time`).
+    pub fn advance(&mut self, dt: f64) {
+        if !self.playing {
+            return;
+        }
+        let next = self.t + self.speed * dt;
+        self.t = if self.duration <= 0.0 {
+            next
+        } else if self.looping {
+            next.rem_euclid(self.duration)
+        } else {
+            next.clamp(0.0, self.duration)
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1839,5 +1953,80 @@ mod tests {
         }"#;
         let s: Sprite = serde_json::from_str(pre_billboard).unwrap();
         assert_eq!(s.billboard, BillboardMode::None);
+    }
+
+    #[test]
+    fn skeletal_components_serde_round_trip() {
+        // NOTE: like `Terrain`/`PcgVolume`, `SkeletalMesh`/`AnimPlayer` are NOT yet
+        // slots in the v4 `.inf_lvl` `EntityRecord` — this component-level
+        // round-trip is all the persistence they have until the schema-v5
+        // migration (the same gap `terrain_is_not_persisted_yet_v4_todo` pins).
+        let sm = SkeletalMesh {
+            mesh: Some(Uuid::from_u128(0xA11CE)),
+            skeleton: Some(Uuid::from_u128(0xB0B)),
+        };
+        let back: SkeletalMesh =
+            serde_json::from_str(&serde_json::to_string(&sm).unwrap()).unwrap();
+        assert_eq!(sm, back);
+
+        let ap = AnimPlayer {
+            clip: Some(Uuid::from_u128(0xC11E)),
+            t: 1.25,
+            speed: 0.5,
+            looping: false,
+            playing: true,
+            duration: 2.0,
+        };
+        let back: AnimPlayer = serde_json::from_str(&serde_json::to_string(&ap).unwrap()).unwrap();
+        assert_eq!(ap, back);
+
+        // A minimal payload fills the additive defaults (speed 1, looping, playing).
+        let d: AnimPlayer = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, AnimPlayer::default());
+        assert_eq!(d.speed, 1.0);
+        assert!(d.looping && d.playing);
+        let d: SkeletalMesh = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, SkeletalMesh::default());
+    }
+
+    #[test]
+    fn anim_player_advance_wraps_clamps_and_pauses() {
+        // Looping wraps against duration.
+        let mut p = AnimPlayer {
+            t: 1.8,
+            speed: 1.0,
+            duration: 2.0,
+            looping: true,
+            ..Default::default()
+        };
+        p.advance(0.5);
+        assert!((p.t - 0.3).abs() < 1e-9);
+        // Non-looping clamps at the end.
+        let mut p = AnimPlayer {
+            t: 1.9,
+            speed: 1.0,
+            duration: 2.0,
+            looping: false,
+            ..Default::default()
+        };
+        p.advance(0.5);
+        assert_eq!(p.t, 2.0);
+        // Unknown duration free-runs.
+        let mut p = AnimPlayer {
+            t: 0.0,
+            speed: 2.0,
+            duration: 0.0,
+            ..Default::default()
+        };
+        p.advance(0.5);
+        assert_eq!(p.t, 1.0);
+        // Paused never advances.
+        let mut p = AnimPlayer {
+            t: 0.4,
+            playing: false,
+            ..Default::default()
+        };
+        p.advance(1.0);
+        assert_eq!(p.t, 0.4);
     }
 }

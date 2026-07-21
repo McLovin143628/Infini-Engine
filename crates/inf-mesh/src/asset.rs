@@ -32,6 +32,47 @@ impl Default for MeshVertex {
     }
 }
 
+/// Per-vertex skinning influences (P11.1): the four joints that deform a vertex
+/// and their **normalized** weights (`Σ = 1`). Stored as a **parallel stream**
+/// to [`SubMesh::vertices`] (index-aligned) rather than folded into
+/// [`MeshVertex`] so the existing 48-byte interleaved vertex — and every
+/// `.inf_mesh` payload written before skinning — is untouched. `#[repr(C)]` +
+/// `Pod` so the renderer uploads it straight to a GPU vertex buffer. 24 bytes,
+/// naturally aligned (no padding).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Pod, Zeroable)]
+pub struct VertexSkin {
+    /// Joint indices into the mesh's skeleton (glTF `JOINTS_0`, widened to u16).
+    pub joints: [u16; 4],
+    /// Influence weights (glTF `WEIGHTS_0`), normalized so they sum to 1.
+    pub weights: [f32; 4],
+}
+
+impl Default for VertexSkin {
+    fn default() -> Self {
+        Self {
+            joints: [0; 4],
+            weights: [1.0, 0.0, 0.0, 0.0],
+        }
+    }
+}
+
+impl VertexSkin {
+    /// Normalize the weights so they sum to 1 (falls back to "all joint 0" when
+    /// the weights are degenerate / zero).
+    pub fn normalized(mut self) -> Self {
+        let sum: f32 = self.weights.iter().sum();
+        if sum > 1e-6 {
+            for w in &mut self.weights {
+                *w /= sum;
+            }
+        } else {
+            self.weights = [1.0, 0.0, 0.0, 0.0];
+        }
+        self
+    }
+}
+
 /// An axis-aligned bounding box in the mesh's local space (render f32).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Aabb {
@@ -99,6 +140,13 @@ pub struct SubMesh {
     pub indices: Vec<u32>,
     /// Material slot index (glTF primitive material), or `None` for default.
     pub material_slot: Option<u32>,
+    /// Per-vertex skinning influences (P11.1), index-aligned to `vertices`.
+    /// **Additive field:** `#[serde(default)]` → an empty vec for every pre-P11
+    /// payload and every static (unskinned) primitive, so this submesh is a rigid
+    /// mesh unless a skin stream is present. When non-empty, `skin.len() ==
+    /// vertices.len()`.
+    #[serde(default)]
+    pub skin: Vec<VertexSkin>,
 }
 
 impl SubMesh {
@@ -107,6 +155,10 @@ impl SubMesh {
     }
     pub fn vertex_count(&self) -> usize {
         self.vertices.len()
+    }
+    /// Whether this submesh carries per-vertex skinning influences.
+    pub fn is_skinned(&self) -> bool {
+        !self.skin.is_empty()
     }
 }
 
@@ -122,7 +174,11 @@ pub struct MeshAsset {
 }
 
 impl MeshAsset {
-    pub const CURRENT_VERSION: u32 = 1;
+    /// Schema v2 (P11.1): [`SubMesh`] gained the additive, `#[serde(default)]`
+    /// `skin` stream. A v1 payload has no skinned submeshes; new payloads always
+    /// write the (possibly empty) stream. No custom migration is needed beyond
+    /// the default newer-than-current guard.
+    pub const CURRENT_VERSION: u32 = 2;
 
     /// Assemble a mesh from submeshes, computing the overall bounds.
     pub fn new(submeshes: Vec<SubMesh>, material_slots: Vec<String>) -> Self {
@@ -170,6 +226,7 @@ mod tests {
             vertices: vec![v(0.0, 0.0), v(1.0, 0.0), v(1.0, 1.0), v(0.0, 1.0)],
             indices: vec![0, 1, 2, 0, 2, 3],
             material_slot: Some(0),
+            skin: Vec::new(),
         }
     }
 

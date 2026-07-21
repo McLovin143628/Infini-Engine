@@ -267,6 +267,10 @@ impl RuntimeSim {
         // 4. Physics → ECS.
         self.bridge.write_back(&mut self.world);
         self.world.propagate();
+        // 5. Advance skeletal-animation play-heads (P11.1) — the same order-free,
+        //    fixed-`dt` integration the editor Simulate tick runs (preview ==
+        //    shipped).
+        inf_ecs::anim::advance_anim_players(&mut self.world, dt);
         // Roll interpolation history + rising edges.
         std::mem::swap(&mut self.prev_positions, &mut self.cur_positions);
         self.capture_positions();

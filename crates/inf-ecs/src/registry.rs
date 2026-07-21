@@ -11,10 +11,10 @@ use bevy_ecs::reflect::ReflectComponent;
 use bevy_reflect::{TypePath, TypeRegistry};
 
 use crate::components::{
-    AtlasRect, BillboardMode, BodyKind2D, BodyKind3D, Camera, CharacterController2D,
+    AnimPlayer, AtlasRect, BillboardMode, BodyKind2D, BodyKind3D, Camera, CharacterController2D,
     CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, Light,
     Light2D, LightKind, Material, MeshRef, Name, NineSlice, PcgVolume, Primitive, RigidBody2D,
-    RigidBody3D, Sprite, Terrain, Text2D, TextAlign, Tilemap, Transform, Visibility,
+    RigidBody3D, SkeletalMesh, Sprite, Terrain, Text2D, TextAlign, Tilemap, Transform, Visibility,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -80,6 +80,8 @@ impl ComponentRegistry {
             Transform => "Transform",
             Visibility => "Visibility",
             MeshRef => "Mesh",
+            SkeletalMesh => "Skeletal Mesh",
+            AnimPlayer => "Anim Player",
             Sprite => "Sprite",
             NineSlice => "Nine Slice",
             Text2D => "Text",
@@ -143,7 +145,7 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        assert_eq!(reg.editable().len(), 19);
+        assert_eq!(reg.editable().len(), 21);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

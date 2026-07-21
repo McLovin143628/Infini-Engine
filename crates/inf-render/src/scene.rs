@@ -4,7 +4,7 @@
 //! arrives in Phase 3 — the host converts whatever it has into this). The
 //! `version` counter gates GPU re-uploads: bump it on any instance change.
 
-use glam::{DVec3, Quat, Vec3};
+use glam::{DVec3, Mat4, Quat, Vec3};
 
 use crate::debug_draw::DebugDraw;
 
@@ -64,6 +64,56 @@ impl MeshInstance {
             id,
         }
     }
+}
+
+/// One vertex of a [`SkinnedMeshData`] — position + normal in **bind (rest)
+/// space**, plus the four joint influences that deform it. `#[repr(C)]` + `Pod`
+/// so it uploads straight to a GPU vertex buffer (56 bytes, no padding).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SkinnedVertex {
+    pub pos: [f32; 3],
+    pub normal: [f32; 3],
+    /// Joint indices into the instance's skinning palette.
+    pub joints: [u32; 4],
+    /// Normalized influence weights (`Σ = 1`).
+    pub weights: [f32; 4],
+}
+
+/// Bind-space geometry for a skinned mesh: an interleaved [`SkinnedVertex`]
+/// buffer + a 32-bit index buffer. Referenced by [`SkinnedInstance::mesh`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkinnedMeshData {
+    pub vertices: Vec<SkinnedVertex>,
+    pub indices: Vec<u32>,
+}
+
+/// One skinned draw: a [`SkinnedMeshData`] (by index into
+/// [`RenderScene::skinned_meshes`]) placed by a world transform and deformed by a
+/// per-instance **skinning palette** (`global · inverse_bind` per joint, computed
+/// CPU-side by the host — v1; a GPU palette compute pass is a P15 optimization).
+///
+/// The palette is applied in the vertex shader **before** the model matrix, so it
+/// stays in bind/model space (no floating-origin adjustment needed — only the
+/// model translation is origin-relative, exactly like [`MeshInstance`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkinnedInstance {
+    /// World-space translation (f64 — architecture rule 3).
+    pub translation: DVec3,
+    pub rotation: Quat,
+    pub scale: Vec3,
+    /// Linear-space base color (rgba).
+    pub color: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub emissive: [f32; 3],
+    /// Stable pick id (`ID_NONE` reserved).
+    pub id: u32,
+    /// Index into [`RenderScene::skinned_meshes`].
+    pub mesh: usize,
+    /// The skinning palette: one matrix per skeleton joint, indexed by the
+    /// vertex `joints`. Bound as a `@group(3)` storage buffer.
+    pub palette: Vec<Mat4>,
 }
 
 /// Directional vs point light (spot is projected as point for now).
@@ -214,6 +264,13 @@ impl Default for SkyParams {
 #[derive(Debug, Clone, Default)]
 pub struct RenderScene {
     pub instances: Vec<MeshInstance>,
+    /// Bind-space geometry for skinned meshes (P11.1), referenced by
+    /// [`SkinnedInstance::mesh`]. Empty ⇒ the skinned pass is a no-op (every
+    /// pre-P11 scene stays byte-identical).
+    pub skinned_meshes: Vec<SkinnedMeshData>,
+    /// GPU-skinned instances (P11.1). Each carries its own joint palette; drawn
+    /// by the skinned mesh pass after the rigid mesh pass, into the same targets.
+    pub skinned: Vec<SkinnedInstance>,
     /// Scene lights (directional + point). Empty ⇒ the shader falls back to a
     /// default editor sun so unlit demo scenes still render.
     pub lights: Vec<RenderLight>,

@@ -2643,6 +2643,13 @@ dependencies = [
 [[package]]
 name = "inf-anim"
 version = "0.1.0"
+dependencies = [
+ "glam 0.33.2",
+ "inf-asset",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
 
 [[package]]
 name = "inf-asset"
@@ -2722,6 +2729,7 @@ dependencies = [
  "bytemuck",
  "csv",
  "glam 0.33.2",
+ "inf-anim",
  "inf-asset",
  "inf-blueprint",
  "inf-core",
@@ -2822,6 +2830,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.2",
  "gltf",
+ "inf-anim",
  "inf-asset",
  "meshopt",
  "serde",
@@ -2929,6 +2938,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.2",
+ "inf-anim",
  "inf-math",
  "inf-render-2d",
  "png 0.18.1",

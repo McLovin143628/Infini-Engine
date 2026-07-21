@@ -9,7 +9,10 @@ pub mod error;
 pub mod gltf_import;
 pub mod optimize;
 
-pub use asset::{Aabb, MeshAsset, MeshVertex, SubMesh};
+pub use asset::{Aabb, MeshAsset, MeshVertex, SubMesh, VertexSkin};
 pub use error::MeshError;
-pub use gltf_import::{import_gltf, GltfImport, ImportedMaterial, ImportedMesh, RawImage};
+pub use gltf_import::{
+    import_gltf, GltfImport, ImportedClip, ImportedMaterial, ImportedMesh, ImportedSkeleton,
+    RawImage,
+};
 pub use optimize::optimize;

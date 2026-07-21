@@ -8,7 +8,7 @@ use glam::{DQuat, DVec2, DVec3, Vec2, Vec3};
 use inf_ecs::components::{
     Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, ComputedVisibility,
     GlobalTransform, Light, Light2D, LightKind as EcsLightKind, Material, MeshRef, NineSlice,
-    PcgVolume, Sprite, Terrain, Text2D, TextAlign, Tilemap,
+    PcgVolume, SkeletalMesh, Sprite, Terrain, Text2D, TextAlign, Tilemap,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::scene::SceneDoc;
@@ -505,7 +505,37 @@ impl EngineHost {
                     .insert(guid, project_collider_3d(col, translation, rotation));
             }
 
+            // Skeletal meshes (P11.1): the interactive viewport can't upload asset
+            // geometry yet (the same documented gap as MeshRef→asset / sprites),
+            // and GPU skinning is proven headlessly by the `golden_skinned_mesh`
+            // golden. A `SkeletalMesh` entity (without a primitive `MeshRef`)
+            // therefore projects as a **selectable placeholder cube** so it is
+            // authorable in the scene; driving a real `RenderScene::skinned`
+            // instance from an uploaded `.inf_mesh` + `.inf_skel` + the entity's
+            // `AnimPlayer` pose is the documented viewport follow-up (v1 skinned
+            // rendering in the editor is placeholder-only, headless-golden-proven).
             if w.get::<MeshRef>(entity).is_none() {
+                if visible && w.get::<SkeletalMesh>(entity).is_some() {
+                    let affine = w
+                        .get::<GlobalTransform>(entity)
+                        .map(|g| g.0)
+                        .unwrap_or(glam::DAffine3::IDENTITY);
+                    let (scale, rot, translation) = affine.to_scale_rotation_translation();
+                    let id = next_id;
+                    next_id += 1;
+                    self.scene.instances.push(MeshInstance {
+                        translation,
+                        rotation: rot.as_quat(),
+                        scale: scale.as_vec3(),
+                        color: [0.55, 0.60, 0.72, 1.0],
+                        metallic: 0.0,
+                        roughness: 0.6,
+                        emissive: [0.0; 3],
+                        id,
+                    });
+                    self.id_to_guid.insert(id, guid);
+                    self.guid_to_id.insert(guid, id);
+                }
                 continue; // only meshes become draw instances
             }
             if !visible {

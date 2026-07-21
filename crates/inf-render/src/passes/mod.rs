@@ -8,6 +8,7 @@ pub mod grid;
 pub mod mask;
 pub mod mesh;
 pub mod resolve;
+pub mod skinned;
 pub mod sky;
 pub mod sprite;
 pub mod terrain;
