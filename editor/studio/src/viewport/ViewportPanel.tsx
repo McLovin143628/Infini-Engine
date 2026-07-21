@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { viewport } from "../lib/ipc";
 import { toPhysicalRect } from "../lib/viewportRect";
+import { useSimStore } from "../stores/simStore";
 import ViewportToolbar from "./ViewportToolbar";
 
 /**
@@ -15,6 +16,8 @@ import ViewportToolbar from "./ViewportToolbar";
  */
 export default function ViewportPanel() {
   const holeRef = useRef<HTMLDivElement>(null);
+  // Simulate (P8.4): a live session tints the viewport frame.
+  const running = useSimStore((s) => s.running);
 
   useEffect(() => {
     const el = holeRef.current;
@@ -69,7 +72,9 @@ export default function ViewportPanel() {
       <div
         ref={holeRef}
         data-viewport-hole
-        className="flex flex-1 items-center justify-center rounded border border-(--ink-border) bg-(--ink-bg-0)"
+        className={`flex flex-1 items-center justify-center rounded border bg-(--ink-bg-0) ${
+          running ? "border-(--ink-success)" : "border-(--ink-border)"
+        }`}
       >
         <div className="text-center text-(--ink-text-dim)">
           <div className="mb-2 text-3xl">∞</div>

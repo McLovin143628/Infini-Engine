@@ -27,6 +27,7 @@ import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
 import { initAssetSync, registerAssetCommands } from "./stores/assetStore";
 import { initProjectSync, registerProjectCommands } from "./stores/projectStore";
 import { initViewportSync, registerViewportCommands } from "./stores/viewportStore";
+import { initSimSync, registerSimCommands } from "./stores/simStore";
 import { initEditorSync } from "./stores/editorStore";
 import { initLsp } from "./lib/editor/lspBridge";
 import { scene as sceneIpc } from "./lib/ipc";
@@ -37,6 +38,7 @@ registerSceneCommands();
 registerAssetCommands();
 registerProjectCommands();
 registerViewportCommands();
+registerSimCommands();
 
 export default function App() {
   useEffect(() => {
@@ -93,6 +95,17 @@ export default function App() {
   // Load per-project pixels-per-unit + apply 2D snap settings; reload on
   // project change (P8.2c). StrictMode-safe.
   useEffect(() => initViewportSync(), []);
+
+  // Sync Simulate running state + subscribe to sim://state (P8.4). StrictMode-safe.
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    let disposed = false;
+    initSimSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
+  }, []);
 
   // Subscribe to infinity:open-file so the Code Editor opens tabs (P5.1).
   useEffect(() => initEditorSync(), []);

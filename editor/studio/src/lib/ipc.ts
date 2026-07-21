@@ -379,3 +379,24 @@ export const material = {
   bake: (id: string, size: number, name: string): Promise<string> =>
     invoke<string>("material_bake", { id, size, name }),
 };
+
+/**
+ * In-editor Simulate / Play (P8.4). Drives the `SimSession` over the live
+ * `SceneDoc`: `start` snapshots the world + fires BeginPlay, `tick` advances one
+ * frame with the currently-held actions (the backend owns fixed-step
+ * accumulation), `stop` restores the pre-play world exactly. Running state also
+ * broadcasts on the `sim://state` event (see lib/events.ts).
+ */
+export const sim = {
+  /** Enter Simulate over the current scene. Rejects (e.g. no scene) with a message. */
+  start: (): Promise<void> => invoke("sim_start"),
+  /**
+   * Advance one frame with the held actions (`["left","jump"]`). Resolves to
+   * whether a session was running (false = no-op). Arg name is camelCase.
+   */
+  tick: (keys: string[]): Promise<boolean> => invoke<boolean>("sim_tick", { keys }),
+  /** Exit Simulate, restoring the pre-play world. */
+  stop: (): Promise<void> => invoke("sim_stop"),
+  /** Whether a Simulate session is currently running (mount-time sync). */
+  isRunning: (): Promise<boolean> => invoke<boolean>("sim_is_running"),
+};

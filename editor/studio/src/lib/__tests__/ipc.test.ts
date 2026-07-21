@@ -7,7 +7,7 @@
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, expect, test } from "vitest";
 
-import { app, layouts, viewport } from "../ipc";
+import { app, layouts, sim, viewport } from "../ipc";
 
 afterEach(() => {
   clearMocks();
@@ -56,4 +56,26 @@ test("layout wrappers invoke the layout_* commands with typed payloads", async (
     "layout_delete",
   ]);
   expect(calls[0][1]).toEqual({ name: "Default", json: '{"v":1}' });
+});
+
+test("sim wrappers invoke the sim_* commands with typed payloads", async () => {
+  const calls: Array<[string, unknown]> = [];
+  mockIPC((cmd, args) => {
+    calls.push([cmd, args]);
+    if (cmd === "sim_tick") return true;
+    if (cmd === "sim_is_running") return false;
+  });
+
+  await sim.start();
+  await expect(sim.tick(["left", "jump"])).resolves.toBe(true);
+  await sim.stop();
+  await expect(sim.isRunning()).resolves.toBe(false);
+
+  expect(calls.map(([cmd]) => cmd)).toEqual([
+    "sim_start",
+    "sim_tick",
+    "sim_stop",
+    "sim_is_running",
+  ]);
+  expect(calls[1][1]).toEqual({ keys: ["left", "jump"] });
 });

@@ -6,7 +6,7 @@
  * the unhandled-command hook.
  */
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { registerCommands, setCommandHandler, setUnhandledCommandHook } from "../lib/commands";
+import { setCommandHandler, setUnhandledCommandHook } from "../lib/commands";
 import { registerMenuCommands } from "../lib/menus";
 import { useDockLayout } from "../panels/dock/dockLayoutStore";
 import { useShellStore } from "../stores/shellStore";
@@ -37,13 +37,8 @@ function phaseHint(id: string): string | undefined {
 export function bootstrapShellCommands(): void {
   registerMenuCommands();
 
-  // Toolbar-only commands (not reachable from the menu tree).
-  registerCommands([
-    { id: "play.start", title: "Play", category: "Play", shortcut: "Alt+P" },
-    { id: "play.pause", title: "Pause", category: "Play" },
-    { id: "play.stop", title: "Stop", category: "Play", shortcut: "Esc" },
-    { id: "play.step", title: "Step Frame", category: "Play" },
-  ]);
+  // The Simulate play cluster (sim.play/pause/stop/step) is a live command
+  // family registered by `registerSimCommands()` (stores/simStore) — P8.4.
 
   setUnhandledCommandHook((cmd) => {
     const hint = phaseHint(cmd.id);

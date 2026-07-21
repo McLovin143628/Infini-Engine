@@ -17,6 +17,7 @@ import {
   Square,
 } from "lucide-react";
 import { executeCommand } from "../lib/commands";
+import { useSimStore } from "../stores/simStore";
 
 function ToolButton(props: {
   label: string;
@@ -45,6 +46,9 @@ function Divider() {
 export default function MainToolbar() {
   // Selection-mode segmented control is a visual stub until P2.4 gizmos.
   const [mode, setMode] = useState<"select" | "landscape" | "foliage">("select");
+  // Simulate (P8.4): the play cluster reflects the live session state.
+  const running = useSimStore((s) => s.running);
+  const paused = useSimStore((s) => s.paused);
 
   return (
     <div className="flex h-10 shrink-0 items-center gap-1 border-b border-(--ink-border) bg-(--ink-bg-2) px-2">
@@ -86,20 +90,34 @@ export default function MainToolbar() {
 
       <div className="flex-1" />
 
-      {/* Play controls — live in P9 (PIE); enumerated now. */}
-      <div className="flex items-center gap-0.5 rounded bg-(--ink-bg-1) p-0.5">
-        <ToolButton label="Play (Alt+P)" command="play.start" accent>
-          <Play size={16} />
-        </ToolButton>
-        <ToolButton label="Pause" command="play.pause">
-          <Pause size={15} />
-        </ToolButton>
-        <ToolButton label="Stop (Esc)" command="play.stop">
-          <Square size={13} />
-        </ToolButton>
-        <ToolButton label="Step Frame" command="play.step">
-          <SkipForward size={15} />
-        </ToolButton>
+      {/* Simulate controls (P8.4): Play when stopped; Pause/Stop/Step when
+          running. A success ring marks a live session. */}
+      <div
+        className={`flex items-center gap-0.5 rounded bg-(--ink-bg-1) p-0.5 ${
+          running ? "ring-1 ring-(--ink-success)" : ""
+        }`}
+      >
+        {!running ? (
+          <ToolButton label="Play (Alt+P)" command="sim.play" accent>
+            <Play size={16} />
+          </ToolButton>
+        ) : (
+          <>
+            <ToolButton
+              label={paused ? "Resume (Alt+P)" : "Pause"}
+              command={paused ? "sim.play" : "sim.pause"}
+              accent={paused}
+            >
+              {paused ? <Play size={15} /> : <Pause size={15} />}
+            </ToolButton>
+            <ToolButton label="Stop" command="sim.stop">
+              <Square size={13} />
+            </ToolButton>
+            <ToolButton label="Step Frame" command="sim.step">
+              <SkipForward size={15} />
+            </ToolButton>
+          </>
+        )}
       </div>
       <button
         className="flex h-7 items-center gap-1 rounded px-2 text-(--ink-text-dim) hover:bg-(--ink-bg-3)"

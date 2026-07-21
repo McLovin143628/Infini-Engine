@@ -38,6 +38,8 @@ export interface EventPayloads {
   "graph://sync": string;
   /** A material graph mutated (payload = material id) → re-sync canvas (P7.2). */
   "material://sync": string;
+  /** Simulate started (`true`) / stopped (`false`) → sync the play toolbar (P8.4). */
+  "sim://state": boolean;
 }
 
 export type EventChannel = keyof EventPayloads;
