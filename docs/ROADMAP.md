@@ -426,18 +426,39 @@ warns correctly.
 **Done when:** open a sample project, completions/diagnostics live in a hand-written system,
 `cargo check` runs in the embedded terminal, git panel stages and commits.
 
-- **P5.1 Editor panel** — 1. CodeMirror 6 port (compartments, themes bridged to Studio theme);
-  2. multi-tab + split editors in dock panels; 3. minimap, indentation guides, breadcrumbs;
-  4. diff & merge views.
-- **P5.2 Language intelligence** — 1. LSP client + rust-analyzer auto-install (SHA-256
-  verified); 2. diagnostics/Problems panel + squiggles + quick fixes; 3. hover/defs/refs/rename/
-  outline; 4. inlay hints, code lens, signature help.
-- **P5.3 Terminal & shell** — 1. xterm.js + portable-pty port; 2. split/tabbed terminals;
-  3. task runner presets (`cargo check`, `cargo test`, cook).
-- **P5.4 Git & search** — 1. git2 panel port (status/stage/commit/branch/stash/log/diff);
-  2. file-tree git status dots; 3. global search panel (ripgrep-style, fuzzy file open).
-- **P5.5 Project system** — 1. `inf new` (templates → user cargo workspace + `inf.toml`);
-  2. project open/recent/switcher; 3. per-project settings storage.
+> **STATUS: Phase 5 COMPLETE** (2026-07-20). The CodeR IDE stack ported into Studio dock panels.
+> A lightweight Ring-0 `inf-project` crate (shared by editor/CLI/runtime) owns `inf.toml`,
+> templates + scaffolding, and the recent list; `inf new` scaffolds a real user cargo crate;
+> opening a project re-roots the asset database to its Content dir. Dockable panels: a
+> **CodeMirror 6 editor** (per-file tabs with preserved undo/cursor, syntax highlighting,
+> minimap, `--ink`-bridged theme, Ctrl+S save), an **xterm.js Terminal** (portable-pty / ConPTY,
+> `cargo check`/`test`/`build` presets — the gate), a **Source Control** panel (shells out to
+> `git`: status/stage/unstage/commit/diff/branch), **Search** (ignore-walk content search +
+> fuzzy Go-to-File), a **File Explorer** (tree + git status letters), a **Problems** panel, and
+> **LSP language intelligence** (a hand-rolled JSON-RPC-over-stdio rust-analyzer client → live
+> completions/hover/diagnostics via a CodeMirror compartment seam). Files open through one
+> `infinity:open-file` event; every panel is a `registerPanelType` entry. Key decisions: git
+> **shells out to the `git` CLI** (no git2 native linkage, per the CodeR map); the rust-analyzer
+> **HTTPS auto-installer is deferred** (the `ureq` TLS stack pulls `webpki-roots`, CDLA-Permissive-2.0,
+> off the deny allow-list) in favor of PATH/cache resolution — RA runtime is human-verified like
+> the GPU paths. Human-only remainders: split editors, diff/merge-view, stash/blame/log, inlay
+> hints/code-lens/rename, the SHA-verified multi-server installer, and the phase demo recording.
+
+- **P5.1 Editor panel** *(done)* — 1. CodeMirror 6 port (compartments, themes bridged to Studio
+  theme); 2. multi-tab editors in dock panels (split editors: follow-up); 3. minimap, indentation
+  guides (breadcrumbs: follow-up); 4. diff view (in Source Control; merge view: follow-up).
+- **P5.2 Language intelligence** *(done)* — 1. LSP client (rust-analyzer via PATH/cache;
+  SHA-verified auto-install: follow-up); 2. diagnostics/Problems panel + squiggles (quick fixes:
+  follow-up); 3. hover + completion + go-to-definition (refs/rename/outline: follow-up);
+  4. inlay hints, code lens, signature help: follow-up.
+- **P5.3 Terminal & shell** *(done)* — 1. xterm.js + portable-pty port; 2. tabbed terminals
+  (one per panel instance; split: follow-up); 3. task runner presets (`cargo check`, `test`,
+  `build`).
+- **P5.4 Git & search** *(done)* — 1. git panel (status/stage/commit/branch/diff via the `git`
+  CLI; stash/log: follow-up); 2. file-tree git status letters; 3. global search panel
+  (ignore-walk, fuzzy file open).
+- **P5.5 Project system** *(done)* — 1. `inf new` (templates → user cargo workspace + `inf.toml`);
+  2. project open/recent/switcher (Start Screen); 3. per-project content re-rooting.
 
 ### Phase 6 — Infinity Blueprints & transpiler v1 *(signature feature)*
 
