@@ -75,6 +75,22 @@ impl AssetState {
         resolve_material(&proj, id, 0)
     }
 
+    /// Load a `.inf_act` blueprint **class** by its asset GUID (P9.5): decodes
+    /// the committed JSON payload. `None` if the asset is missing or not a
+    /// blueprint. Used by Simulate to resolve a scene's persisted `ActorClass`
+    /// bindings to runnable classes.
+    pub fn load_blueprint_class(&self, id: AssetId) -> Option<inf_blueprint::BlueprintClass> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        let entry = proj.db().get(id)?;
+        if entry.kind() != inf_asset::AssetKind::Blueprint {
+            return None;
+        }
+        let bytes = std::fs::read(&entry.path).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
     /// Create a new material instance of `parent` (P7.4). Returns the new id.
     pub fn create_material_instance(&self, parent: AssetId, name: &str) -> Result<AssetId, String> {
         self.with_project(|proj| {

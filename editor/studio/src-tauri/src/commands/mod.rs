@@ -66,6 +66,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         scene::scene_create,
         scene::scene_spawn_asset,
         scene::scene_apply_material,
+        scene::scene_apply_actor,
         scene::scene_apply_sprite_slice,
         scene::tilemap_get,
         scene::tilemap_paint,

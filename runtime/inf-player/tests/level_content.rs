@@ -31,7 +31,9 @@ fn dev_built() -> BuiltWorld {
     let sample = sample_dir();
     let bytes = std::fs::read(sample.join("Platformer.inf_lvl")).unwrap();
     let actors = level::load_actor_classes_from_dir(&sample);
+    let by_guid = level::load_actor_classes_by_guid_from_dir(&sample);
     InfSceneWorldBuilder::with_defaults(actors)
+        .with_bindings(by_guid)
         .build(&bytes)
         .expect("dev-dir level builds")
 }
@@ -45,7 +47,11 @@ fn cook_sample(tmp: &Path) -> PathBuf {
     let content = proj.join("Content");
     std::fs::create_dir_all(&content).unwrap();
     let sample = sample_dir();
-    for f in ["Platformer.inf_lvl", "Coyote.inf_act"] {
+    for f in [
+        "Platformer.inf_lvl",
+        "Coyote.inf_act",
+        "Coyote.inf_act.toml",
+    ] {
         std::fs::copy(sample.join(f), content.join(f)).unwrap();
     }
     let out = tmp.join("out");
@@ -57,7 +63,10 @@ fn cook_sample(tmp: &Path) -> PathBuf {
 fn pack_built(pack_dir: &Path) -> BuiltWorld {
     let source = PackLevelSource::open(pack_dir).expect("pack opens");
     let actors = source.actor_classes().expect("actor classes decode");
-    let builder = InfSceneWorldBuilder::with_defaults(actors);
+    let by_guid = source
+        .blueprint_classes_by_guid()
+        .expect("pack blueprint index");
+    let builder = InfSceneWorldBuilder::with_defaults(actors).with_bindings(by_guid);
     level::load(&source, &builder).expect("pack level builds")
 }
 
@@ -90,12 +99,31 @@ fn dev_level_builds_expected_entities_and_components() {
         "one 2D light"
     );
 
-    // Physics/binding aren't persisted in `.inf_lvl` (documented follow-up), so
-    // the level's actor list is empty today.
+    // Physics is now persisted (schema v3): the player carries a body + collider
+    // + character controller.
+    use inf_ecs::components::{Collider2D, RigidBody2D};
     assert!(
-        built.actors.is_empty(),
-        "no CharacterController2D persists in the level → no bound actors yet"
+        w.iter_entities()
+            .filter(|e| e.contains::<RigidBody2D>())
+            .count()
+            >= 1,
+        "rigid bodies persist in v3"
     );
+    assert!(
+        w.iter_entities()
+            .filter(|e| e.contains::<Collider2D>())
+            .count()
+            >= 1,
+        "colliders persist in v3"
+    );
+
+    // The persisted `actor` binding resolves the Coyote class onto the player.
+    assert_eq!(
+        built.actors.len(),
+        1,
+        "the player's actor binding is resolved"
+    );
+    assert_eq!(built.actors[0].0, uuid::Uuid::from_u128(0x8401_0004));
 }
 
 #[test]
@@ -120,6 +148,66 @@ fn cooked_and_uncooked_produce_the_same_trace() {
     assert_eq!(
         dev, cooked,
         "the level runs identically whether read from the dev dir or the cooked pack"
+    );
+}
+
+/// THE PAYOFF (P9.5): cook the v3 platformer → run it headless off the pack →
+/// the persisted Coyote blueprint actually runs, so the trace differs from a bake
+/// that binds no actor (gameplay is present, not just a static scene).
+#[test]
+fn cooked_gameplay_trace_differs_from_a_no_actor_bake() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = cook_sample(tmp.path());
+
+    // With the persisted actor binding → gameplay runs.
+    let with_actor = fold_trace(pack_built(&out), 90, None);
+
+    // A no-actor bake: same cooked pack + level, but zero bindings and zero
+    // fallback classes → the character is never ticked.
+    let no_actor = {
+        let source = PackLevelSource::open(&out).unwrap();
+        use inf_player::level::LevelSource;
+        let bytes = source.level_bytes().unwrap();
+        let built = InfSceneWorldBuilder::new(vec![], glam::DVec2::ZERO, 60.0)
+            .build(&bytes)
+            .unwrap();
+        assert!(built.actors.is_empty(), "the no-actor bake binds nothing");
+        fold_trace(built, 90, None)
+    };
+
+    assert_ne!(
+        with_actor, no_actor,
+        "the coyote blueprint running off the cooked level changes the trace"
+    );
+}
+
+/// The other half of the payoff: a **scripted-input** run off the cooked pack
+/// moves the character (the blueprint's `input.is_down("right")` → move_and_slide
+/// drives the player right), proving real, controllable gameplay off real content.
+#[test]
+fn scripted_input_moves_the_character_off_the_cooked_pack() {
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let out = cook_sample(tmp.path());
+    let built = pack_built(&out);
+    assert_eq!(built.actors.len(), 1, "the player's coyote actor is bound");
+
+    let player = uuid::Uuid::from_u128(0x8401_0004);
+    let mut sim = RuntimeSim::new(built.world, built.actors, built.gravity, built.hz);
+
+    let x_of = |sim: &RuntimeSim| {
+        let e = sim.world().entity_of(player).unwrap();
+        sim.world().world_translation(e).unwrap().x
+    };
+    let before = x_of(&sim);
+    for _ in 0..40 {
+        sim.step_once(RuntimeInput::with_down(["right"]));
+    }
+    let after = x_of(&sim);
+    assert!(
+        after > before + 0.5,
+        "holding 'right' should move the character right (before {before}, after {after})"
     );
 }
 

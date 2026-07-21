@@ -23,7 +23,7 @@ pub mod world;
 
 pub use bevy_ecs::prelude::Entity;
 pub use components::{
-    AtlasRect, BillboardMode, BodyKind2D, BodyKind3D, Camera, CharacterController2D,
+    ActorClass, AtlasRect, BillboardMode, BodyKind2D, BodyKind3D, Camera, CharacterController2D,
     CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
     ComputedVisibility, GlobalTransform, Guid, Light, LightKind, Material, MeshRef, Name,
     Primitive, RigidBody2D, RigidBody3D, Sprite, TileBounds, TileChunk, Tilemap, Transform,

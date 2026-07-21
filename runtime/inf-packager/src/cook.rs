@@ -6,12 +6,14 @@
 //! 1. **Open** the project + **scan** its asset database.
 //! 2. **Resolve roots.** Explicit `--roots`, else the default set: every level
 //!    plus every script asset (`.inf_act`/`.inf_fn`). Levels are the entry
-//!    points; scripts are treated as implicit roots because the level↔blueprint
-//!    binding isn't yet persisted in `.inf_lvl` (it is assigned in editor code —
-//!    a documented follow-up), so packing all gameplay logic is the honest
-//!    behaviour. Data assets enter only through a root's dependency closure.
-//! 3. **Close** over forward dependency edges (BFS) to pull in referenced assets;
-//!    unreferenced strays are dropped.
+//!    points; scripts are kept as implicit default roots so a project with
+//!    library functions or not-yet-bound classes still ships its gameplay logic.
+//!    Data assets enter only through a root's dependency closure.
+//! 3. **Close** over forward dependency edges (BFS) to pull in referenced assets:
+//!    the explicit sidecar `dependencies` **and** a level's persisted `actor`
+//!    bindings (schema v3 — a real level→blueprint edge, so an explicit-roots
+//!    cook of just a level still ships its bound classes). Unreferenced strays
+//!    are dropped.
 //! 4. **Compile blueprints** — decode + migrate + statically validate every
 //!    `.inf_act`/`.inf_fn` IR; a broken graph fails the cook with a
 //!    handler-anchored error.
@@ -276,6 +278,11 @@ fn is_root_kind(kind: AssetKind) -> bool {
 
 /// The transitive closure of `roots` over forward dependency edges, returned
 /// sorted (deterministic packing order).
+///
+/// Two edge sources are followed: the explicit sidecar `dependencies`
+/// ([`AssetDb::references_of`]) and — for `.inf_lvl` levels — the **persisted
+/// per-entity `actor` bindings** (P9.5), which form a real level→blueprint edge
+/// so an explicit-roots cook (`--roots <level>`) still ships the bound classes.
 fn dependency_closure(db: &AssetDb, roots: &[AssetId]) -> Vec<AssetId> {
     let mut seen: BTreeSet<AssetId> = BTreeSet::new();
     let mut queue: VecDeque<AssetId> = VecDeque::new();
@@ -292,6 +299,35 @@ fn dependency_closure(db: &AssetDb, roots: &[AssetId]) -> Vec<AssetId> {
                 }
             }
         }
+        for dep in level_actor_deps(db, id) {
+            if db.contains(dep) && seen.insert(dep) {
+                queue.push_back(dep);
+            }
+        }
     }
     seen.into_iter().collect()
+}
+
+/// The blueprint-class asset GUIDs a level binds through its persisted `actor`
+/// slots (schema v3). Empty for non-levels or an undecodable payload — decode
+/// errors surface later in the real cook stage with a proper error.
+fn level_actor_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
+    let Some(entry) = db.get(id) else {
+        return Vec::new();
+    };
+    if entry.kind() != AssetKind::Level {
+        return Vec::new();
+    }
+    let Ok(raw) = std::fs::read(&entry.path) else {
+        return Vec::new();
+    };
+    let Ok(level) = inf_scene::decode(&raw) else {
+        return Vec::new();
+    };
+    level
+        .entities
+        .iter()
+        .filter_map(|e| e.actor)
+        .map(AssetId)
+        .collect()
 }

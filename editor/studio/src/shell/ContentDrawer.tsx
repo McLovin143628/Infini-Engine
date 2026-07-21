@@ -544,6 +544,12 @@ function AssetCell({
         sceneIpc
           .applyMaterial(asset.id)
           .catch((err) => console.error("apply material failed", err));
+      } else if (asset.kind === "blueprint") {
+        // Bind-by-drag: a `.inf_act` dropped over the viewport binds the current
+        // selection to that blueprint class (its ActorClass link) (P9.5).
+        sceneIpc
+          .applyActor(asset.id)
+          .catch((err) => console.error("bind actor failed", err));
       } else {
         sceneIpc
           .spawnAsset(asset.id)
@@ -669,6 +675,14 @@ function AssetContextMenu({
     pushStatus(`Created an instance of "${asset.name}".`);
   };
   const isMaterialLike = asset.kind === "material" || asset.kind === "material_instance";
+  const bindToSelection = async () => {
+    const n = await sceneIpc.applyActor(asset.id);
+    pushStatus(
+      n > 0
+        ? `Bound "${asset.name}" to ${n} entity(ies).`
+        : "Select an entity first, then bind the blueprint.",
+    );
+  };
 
   return (
     <div
@@ -678,6 +692,8 @@ function AssetContextMenu({
     >
       {isMaterialLike &&
         item("Apply to Selection", <Paintbrush size={13} />, () => void applyToSelection())}
+      {asset.kind === "blueprint" &&
+        item("Bind to Selection", <Link2 size={13} />, () => void bindToSelection())}
       {asset.kind === "material" &&
         item("Create Instance", <Copy size={13} />, () => void createInstance())}
       {item("Rename", <Pencil size={13} />, doRename)}

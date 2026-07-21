@@ -200,6 +200,37 @@ pub async fn scene_apply_material(
     Ok(applied)
 }
 
+/// Bind a `.inf_act` blueprint-class asset to entities (Content-Drawer drag a
+/// blueprint onto an entity / "Bind Actor", P9.5). Sets the entity's `ActorClass`
+/// link to the asset GUID as one undo step; `targets` defaults to the current
+/// selection. Returns how many entities were (re)bound.
+#[tauri::command]
+pub async fn scene_apply_actor(
+    app: AppHandle,
+    state: State<'_, SceneState>,
+    asset_id: String,
+    targets: Option<Vec<String>>,
+) -> Result<usize, String> {
+    let id = asset_id
+        .parse::<inf_asset::AssetId>()
+        .map_err(|e| e.to_string())?;
+    let applied = {
+        let mut doc = lock(&state.doc)?;
+        let targets: Vec<Uuid> = match targets {
+            Some(list) => list
+                .iter()
+                .filter_map(|s| Uuid::parse_str(s).ok())
+                .collect(),
+            None => doc.selection().to_vec(),
+        };
+        doc.edit_apply_actor(&targets, id.uuid())
+    };
+    if applied > 0 {
+        emit_world_delta(&app, &state);
+    }
+    Ok(applied)
+}
+
 /// Apply a texture's sprite-sheet slice to entities (Sprite Sheet panel "Apply
 /// to Selection", P8.2a). Sets `Sprite.texture` + `Sprite.atlas_rect` (and,
 /// when `resize_to_slice`, `Sprite.size` from the slice's pixel aspect) on the

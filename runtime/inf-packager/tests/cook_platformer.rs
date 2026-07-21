@@ -21,7 +21,13 @@ fn make_platformer_project(root: &Path) {
     let content = root.join("Content");
     std::fs::create_dir_all(&content).unwrap();
     let sample = workspace_root().join("samples/platformer-2d");
-    for f in ["Platformer.inf_lvl", "Coyote.inf_act"] {
+    // Copy the blueprint's sidecar too, so its **stable** asset GUID (the one the
+    // level's persisted `actor` binding points at) survives the cook.
+    for f in [
+        "Platformer.inf_lvl",
+        "Coyote.inf_act",
+        "Coyote.inf_act.toml",
+    ] {
         std::fs::copy(sample.join(f), content.join(f)).unwrap();
     }
 }
@@ -129,6 +135,49 @@ fn a_broken_blueprint_fails_with_a_handler_anchored_error() {
         }
         other => panic!("expected a Blueprint error, got {other:?}"),
     }
+}
+
+#[test]
+fn explicit_level_root_pulls_the_bound_blueprint_via_actor_edge() {
+    // Deliverable 5: with ONLY the level as an explicit root, the blueprint bound
+    // by the level's persisted `actor` slot is still shipped — pulled through the
+    // real level→blueprint dependency edge (not because scripts are default roots).
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    make_platformer_project(&proj);
+
+    // Resolve the level's asset GUID from a scan of the same content root.
+    let mut db = inf_asset::AssetDb::new(proj.join("Content"));
+    db.scan().unwrap();
+    let level_id = db
+        .iter()
+        .find(|e| e.kind() == inf_asset::AssetKind::Level)
+        .expect("level present")
+        .id();
+
+    let out = proj.join("out");
+    let report = cook(
+        &proj,
+        &out,
+        &CookOptions {
+            roots: Some(vec![level_id]),
+            pack_name: None,
+        },
+    )
+    .expect("explicit-roots cook succeeds");
+
+    assert_eq!(
+        report.kinds.get("blueprint"),
+        Some(&1),
+        "the bound blueprint is packed via the actor edge, not as a default root"
+    );
+    let reader = PackReader::open(&out.join(DEFAULT_PACK_NAME)).unwrap();
+    assert!(
+        reader
+            .index()
+            .any(|e| e.kind == inf_asset::AssetKind::Blueprint),
+        "the pack contains the bound Coyote blueprint"
+    );
 }
 
 #[test]

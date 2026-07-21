@@ -73,6 +73,13 @@ pub(crate) enum EditCommand {
         guid: Uuid,
         cells: Vec<(i32, i32, u32, u32)>,
     },
+    /// Whole-component `ActorClass` swap (P9.5): the blueprint-class binding GUID
+    /// (a non-reflected identity link) round-trips as a value; `None` = unbound.
+    SetActor {
+        guid: Uuid,
+        before: Option<Uuid>,
+        after: Option<Uuid>,
+    },
 }
 
 impl EditCommand {
@@ -103,6 +110,9 @@ impl EditCommand {
                 let after: Vec<(i32, i32, u32)> =
                     cells.iter().map(|&(x, y, _, a)| (x, y, a)).collect();
                 doc.raw_set_tiles(*guid, &after);
+            }
+            EditCommand::SetActor { guid, after, .. } => {
+                doc.raw_set_actor(*guid, *after);
             }
         }
     }
@@ -142,6 +152,9 @@ impl EditCommand {
                 let before: Vec<(i32, i32, u32)> =
                     cells.iter().map(|&(x, y, b, _)| (x, y, b)).collect();
                 doc.raw_set_tiles(*guid, &before);
+            }
+            EditCommand::SetActor { guid, before, .. } => {
+                doc.raw_set_actor(*guid, *before);
             }
         }
     }

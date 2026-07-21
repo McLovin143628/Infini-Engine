@@ -187,6 +187,13 @@ export const scene = {
   applyMaterial: (assetId: string, targets: string[] | null = null): Promise<number> =>
     invoke<number>("scene_apply_material", { assetId, targets }),
   /**
+   * Bind a `.inf_act` blueprint-class asset to entities (P9.5). Sets each
+   * target's `ActorClass` link to the asset GUID; `targets` defaults to the
+   * current selection. Resolves to how many entities were (re)bound.
+   */
+  applyActor: (assetId: string, targets: string[] | null = null): Promise<number> =>
+    invoke<number>("scene_apply_actor", { assetId, targets }),
+  /**
    * Apply a texture's sprite-sheet slice to entities (P8.2a). `slice` is a
    * resolved slice name (grid cells are index-named "0","1",…; manual rects use
    * their names). `resizeToSlice` sets the quad size from the slice's pixel

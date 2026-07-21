@@ -14,9 +14,11 @@
 use std::path::{Path, PathBuf};
 
 use inf_ecs::components::{
-    Camera, Light, Light2D, Material, MeshRef, NineSlice, Sprite, Text2D, Tilemap, Transform,
-    Visibility,
+    ActorClass, Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D,
+    Light, Light2D, Material, MeshRef, NineSlice, RigidBody2D, RigidBody3D, Sprite, Text2D,
+    Tilemap, Transform, Visibility,
 };
+use inf_ecs::math::{Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -29,7 +31,48 @@ use crate::scene::SceneDoc;
 /// * v2 — P8.2b: appended the five 2D components (sprite / tilemap / nine-slice
 ///   / text / 2D light). Older v1 payloads load with those slots defaulted to
 ///   `None` (see [`decode`] + [`SceneFileV1`]).
-pub const SCHEMA_VERSION: u32 = 2;
+/// * v3 — P9.5: appended the six physics components (`rigid_body_2d` /
+///   `collider_2d` / `character_controller_2d` + the 3D trio) and the per-entity
+///   blueprint-class binding (`actor`), plus a file-level [`LevelSettings`]
+///   record (gravity + sim rate). Older v1/v2 payloads load with the new slots
+///   defaulted and default settings (see [`decode`] + [`SceneFileV2`]).
+pub const SCHEMA_VERSION: u32 = 3;
+
+/// File-level simulation settings (P9.5 · schema v3). Replaces the player's
+/// hard-coded `DEFAULT_GRAVITY`/`DEFAULT_HZ`. The serde defaults **preserve the
+/// pre-v3 behaviour exactly**:
+///
+/// * `gravity_2d` = [`Vec2d::ZERO`] — the 2D **character-self-gravity**
+///   convention: the platformer character applies its own gravity in the
+///   blueprint (`vy -= GRAVITY*dt`), so a nonzero world gravity would double it.
+/// * `gravity_3d` = `(0, -9.81, 0)` — real-world down for the 3D dynamic solver.
+/// * `sim_hz` = `60` — the fixed update rate.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LevelSettings {
+    #[serde(default)]
+    pub gravity_2d: Vec2d,
+    #[serde(default = "default_gravity_3d")]
+    pub gravity_3d: Vec3d,
+    #[serde(default = "default_sim_hz")]
+    pub sim_hz: f64,
+}
+
+fn default_gravity_3d() -> Vec3d {
+    Vec3d::new(0.0, -9.81, 0.0)
+}
+fn default_sim_hz() -> f64 {
+    60.0
+}
+
+impl Default for LevelSettings {
+    fn default() -> Self {
+        Self {
+            gravity_2d: Vec2d::ZERO,
+            gravity_3d: default_gravity_3d(),
+            sim_hz: default_sim_hz(),
+        }
+    }
+}
 
 /// One entity's persisted state. All component slots are always present in the
 /// binary stream (bincode is not self-describing — `Option` encodes its own
@@ -66,6 +109,29 @@ pub struct EntityRecord {
     /// A 2D radial light.
     #[serde(default)]
     pub light_2d: Option<Light2D>,
+    // ── v3 (P9.5) physics components + actor binding ──────────────────────
+    /// A 2D rigid body.
+    #[serde(default)]
+    pub rigid_body_2d: Option<RigidBody2D>,
+    /// A 2D collider.
+    #[serde(default)]
+    pub collider_2d: Option<Collider2D>,
+    /// A 2D kinematic character mover tuning block.
+    #[serde(default)]
+    pub character_controller_2d: Option<CharacterController2D>,
+    /// A 3D rigid body.
+    #[serde(default)]
+    pub rigid_body_3d: Option<RigidBody3D>,
+    /// A 3D collider.
+    #[serde(default)]
+    pub collider_3d: Option<Collider3D>,
+    /// A 3D kinematic character mover tuning block.
+    #[serde(default)]
+    pub character_controller_3d: Option<CharacterController3D>,
+    /// The GUID of the `.inf_act` blueprint-class asset bound to this entity
+    /// (the [`ActorClass`] link); `None` when the entity runs no blueprint.
+    #[serde(default)]
+    pub actor: Option<Uuid>,
 }
 
 /// A schema-v1 [`EntityRecord`] (pre-P8.2b) — exactly the byte layout written by
@@ -85,10 +151,10 @@ pub struct EntityRecordV1 {
 }
 
 impl EntityRecordV1 {
-    /// Lift a v1 record to the current shape (2D component slots default to
-    /// `None`).
-    fn into_current(self) -> EntityRecord {
-        EntityRecord {
+    /// Lift a v1 record to the **v2** shape (2D component slots default to
+    /// `None`). First hop of the v1→v2→v3 chain.
+    fn into_v2(self) -> EntityRecordV2 {
+        EntityRecordV2 {
             guid: self.guid,
             name: self.name,
             parent: self.parent,
@@ -116,6 +182,86 @@ pub struct SceneFileV1 {
 }
 
 impl SceneFileV1 {
+    /// Lift a v1 file to the **v2** shape (first hop of the v1→v2→v3 chain).
+    fn into_v2(self) -> SceneFileV2 {
+        SceneFileV2 {
+            schema_version: 2,
+            title: self.title,
+            entities: self
+                .entities
+                .into_iter()
+                .map(EntityRecordV1::into_v2)
+                .collect(),
+        }
+    }
+}
+
+/// A schema-**v2** [`EntityRecord`] (pre-P9.5) — the exact byte layout written
+/// by P8.2b..P9.4 editors, used only to decode legacy payloads. Frozen forever
+/// so the committed v2 fixture (and any level saved before P9.5) loads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityRecordV2 {
+    pub guid: Uuid,
+    pub name: String,
+    pub parent: Option<Uuid>,
+    pub transform: Transform,
+    pub visible: bool,
+    pub mesh: Option<MeshRef>,
+    pub material: Option<Material>,
+    pub light: Option<Light>,
+    pub camera: Option<Camera>,
+    #[serde(default)]
+    pub sprite: Option<Sprite>,
+    #[serde(default)]
+    pub tilemap: Option<Tilemap>,
+    #[serde(default)]
+    pub nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    pub text2d: Option<Text2D>,
+    #[serde(default)]
+    pub light_2d: Option<Light2D>,
+}
+
+impl EntityRecordV2 {
+    /// Lift a v2 record to the current (v3) shape: physics slots + actor default
+    /// to `None`.
+    fn into_current(self) -> EntityRecord {
+        EntityRecord {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: None,
+            collider_2d: None,
+            character_controller_2d: None,
+            rigid_body_3d: None,
+            collider_3d: None,
+            character_controller_3d: None,
+            actor: None,
+        }
+    }
+}
+
+/// A schema-v2 [`SceneFile`] (frozen layout for legacy decode).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneFileV2 {
+    pub schema_version: u32,
+    pub title: String,
+    pub entities: Vec<EntityRecordV2>,
+}
+
+impl SceneFileV2 {
+    /// Lift a v2 file to the current (v3) shape (default [`LevelSettings`]).
     fn into_current(self) -> SceneFile {
         SceneFile {
             schema_version: SCHEMA_VERSION,
@@ -123,8 +269,9 @@ impl SceneFileV1 {
             entities: self
                 .entities
                 .into_iter()
-                .map(EntityRecordV1::into_current)
+                .map(EntityRecordV2::into_current)
                 .collect(),
+            settings: LevelSettings::default(),
         }
     }
 }
@@ -144,6 +291,10 @@ pub struct SceneFile {
     pub title: String,
     /// Entities in creation order (parents precede children).
     pub entities: Vec<EntityRecord>,
+    /// File-level simulation settings (schema v3). `#[serde(default)]` keeps the
+    /// dual-format (TOML/JSON) round trip working for older, settings-less docs.
+    #[serde(default)]
+    pub settings: LevelSettings,
 }
 
 /// Sidecar metadata (TOML). Deterministic field order → stable git diffs.
@@ -186,6 +337,13 @@ pub fn record_of(doc: &SceneDoc, guid: Uuid) -> Option<EntityRecord> {
         nine_slice: w.get::<NineSlice>(e).cloned(),
         text2d: w.get::<Text2D>(e).cloned(),
         light_2d: w.get::<Light2D>(e).copied(),
+        rigid_body_2d: w.get::<RigidBody2D>(e).copied(),
+        collider_2d: w.get::<Collider2D>(e).copied(),
+        character_controller_2d: w.get::<CharacterController2D>(e).copied(),
+        rigid_body_3d: w.get::<RigidBody3D>(e).copied(),
+        collider_3d: w.get::<Collider3D>(e).copied(),
+        character_controller_3d: w.get::<CharacterController3D>(e).copied(),
+        actor: w.get::<ActorClass>(e).map(|a| a.0),
     })
 }
 
@@ -200,6 +358,7 @@ pub fn to_scene_file(doc: &SceneDoc) -> SceneFile {
         schema_version: SCHEMA_VERSION,
         title: doc.title().to_string(),
         entities,
+        settings: doc.settings(),
     }
 }
 
@@ -221,9 +380,15 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
             let (v1, _): (SceneFileV1, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v1: {e}"))?;
-            migrate(v1.into_current())
+            migrate(v1.into_v2().into_current())
         }
         2 => {
+            let (v2, _): (SceneFileV2, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| format!("decode v2: {e}"))?;
+            migrate(v2.into_current())
+        }
+        3 => {
             let (file, _): (SceneFile, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode: {e}"))?;
@@ -244,7 +409,8 @@ pub fn migrate(file: SceneFile) -> Result<SceneFile, String> {
             file.schema_version
         ));
     }
-    // v1 is current; future upgrades chain here (v1→v2→…).
+    // Records are already lifted to the current shape by the versioned decode
+    // (v1→v2→v3); nothing more to do here. Future upgrades chain in `decode`.
     Ok(file)
 }
 
@@ -288,8 +454,30 @@ pub fn apply_to_doc(doc: &mut SceneDoc, file: &SceneFile) {
         if let Some(l) = &rec.light_2d {
             w.entity_mut(e).insert(*l);
         }
+        if let Some(c) = &rec.rigid_body_2d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.collider_2d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.character_controller_2d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.rigid_body_3d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.collider_3d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.character_controller_3d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(actor) = rec.actor {
+            w.entity_mut(e).insert(ActorClass(actor));
+        }
     }
     doc.set_title(&file.title);
+    doc.set_settings(file.settings);
     doc.world_mut().mark_dirty();
     doc.world_mut().propagate();
 }
@@ -464,6 +652,7 @@ mod tests {
             schema_version: SCHEMA_VERSION + 1,
             title: "x".into(),
             entities: vec![],
+            settings: LevelSettings::default(),
         };
         assert!(migrate(file.clone()).is_err());
         file.schema_version = SCHEMA_VERSION;
@@ -478,6 +667,7 @@ mod tests {
             schema_version: SCHEMA_VERSION + 3,
             title: "future".into(),
             entities: vec![],
+            settings: LevelSettings::default(),
         };
         let bytes = encode(&file).unwrap();
         assert!(decode(&bytes).is_err());
@@ -756,14 +946,20 @@ mod tests {
         assert!(by_name("Sun").light.is_some());
         assert!(by_name("Cam").camera.is_some());
         assert!(!by_name("Cam").visible);
-        // Every new 2D slot defaulted to None on the old payload.
+        // Every 2D + v3 slot defaulted on the old payload.
         for r in &file.entities {
             assert!(r.sprite.is_none());
             assert!(r.tilemap.is_none());
             assert!(r.nine_slice.is_none());
             assert!(r.text2d.is_none());
             assert!(r.light_2d.is_none());
+            assert!(r.rigid_body_2d.is_none());
+            assert!(r.collider_2d.is_none());
+            assert!(r.character_controller_2d.is_none());
+            assert!(r.actor.is_none());
         }
+        // Legacy files carry no settings → the defaults (2D gravity zero).
+        assert_eq!(file.settings, LevelSettings::default());
     }
 
     #[test]
@@ -772,5 +968,224 @@ mod tests {
         apply_to_doc(&mut doc, &decode(&v1_fixture_bytes()).unwrap());
         assert_eq!(doc.snapshot().nodes.len(), 4);
         assert_eq!(doc.title(), "Fixture Level");
+    }
+
+    // ── schema-v3 (P9.5) physics + actor + settings persistence ────────────
+
+    use inf_ecs::components::{
+        ActorClass, BodyKind2D, CharacterController2D as CC2D, Collider2D, ColliderShape2DKind,
+        RigidBody2D,
+    };
+    use inf_ecs::math::Vec3d;
+
+    /// Author a scene exercising every v3 slot: a static ground (rb2d+collider),
+    /// a player (rb2d + collider + character controller + an actor binding), and
+    /// non-default level settings — so a round trip covers physics + actor +
+    /// settings.
+    fn authored_v3_scene() -> (SceneDoc, uuid::Uuid) {
+        let actor_guid = uuid::Uuid::from_u128(0xAC70_0001);
+        let mut doc = SceneDoc::new();
+        doc.set_title("Physics Level");
+        doc.set_settings(LevelSettings {
+            gravity_2d: Vec2d::new(0.0, -20.0),
+            gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+            sim_hz: 120.0,
+        });
+
+        let ground = doc.create(SpawnKind::Empty, "Ground", None);
+        insert!(
+            doc,
+            ground,
+            RigidBody2D {
+                kind: BodyKind2D::Static,
+                ..Default::default()
+            }
+        );
+        insert!(
+            doc,
+            ground,
+            Collider2D {
+                shape_kind: ColliderShape2DKind::Box,
+                half_extents: Vec2d::new(3.0, 0.5),
+                ..Default::default()
+            }
+        );
+
+        let player = doc.create(SpawnKind::Empty, "Player", None);
+        insert!(
+            doc,
+            player,
+            RigidBody2D {
+                kind: BodyKind2D::Kinematic,
+                fixed_rotation: true,
+                ..Default::default()
+            }
+        );
+        insert!(
+            doc,
+            player,
+            Collider2D {
+                shape_kind: ColliderShape2DKind::Capsule,
+                half_extents: Vec2d::new(0.3, 0.35),
+                radius: 0.3,
+                ..Default::default()
+            }
+        );
+        insert!(doc, player, CC2D::default());
+        insert!(doc, player, ActorClass(actor_guid));
+
+        doc.world_mut().propagate();
+        (doc, actor_guid)
+    }
+
+    #[test]
+    fn round_trip_with_v3_physics_and_actor_is_byte_identical() {
+        let (doc, actor_guid) = authored_v3_scene();
+        let bytes1 = encode(&to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], 3, "authored payload is a genuine schema-v3 file");
+
+        let mut doc2 = SceneDoc::new();
+        apply_to_doc(&mut doc2, &decode(&bytes1).unwrap());
+        let bytes2 = encode(&to_scene_file(&doc2)).unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "save→load→save with physics + actor + settings must be byte-identical"
+        );
+
+        // The reloaded doc keeps the physics components, the actor binding, and
+        // the non-default settings.
+        let file = to_scene_file(&doc2);
+        let player = file.entities.iter().find(|r| r.name == "Player").unwrap();
+        assert_eq!(player.rigid_body_2d.unwrap().kind, BodyKind2D::Kinematic);
+        assert_eq!(
+            player.collider_2d.unwrap().shape_kind,
+            ColliderShape2DKind::Capsule
+        );
+        assert!(player.character_controller_2d.is_some());
+        assert_eq!(player.actor, Some(actor_guid));
+        assert_eq!(doc2.settings().gravity_2d, Vec2d::new(0.0, -20.0));
+        assert_eq!(doc2.settings().sim_hz, 120.0);
+    }
+
+    #[test]
+    fn v3_scene_is_dual_format_serde_safe() {
+        // The dual-format rule: physics + actor + settings must survive TOML/JSON.
+        let (doc, _) = authored_v3_scene();
+        let file = to_scene_file(&doc);
+        let toml_s = toml::to_string(&file).expect("v3 scene serializes to TOML");
+        let back: SceneFile = toml::from_str(&toml_s).expect("v3 scene deserializes from TOML");
+        assert_eq!(
+            back, file,
+            "TOML round trip preserves physics + actor + settings"
+        );
+        let json = serde_json::to_string(&file).unwrap();
+        assert_eq!(serde_json::from_str::<SceneFile>(&json).unwrap(), file);
+    }
+
+    // ── v2 forever-load fixture discipline (mirrors the v1 fixture) ─────────
+
+    /// The committed pre-P9.5 (schema v2) payload, load-tested forever.
+    fn v2_fixture_bytes() -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v2.inf_lvl");
+        std::fs::read(path).expect("committed v2 fixture is present")
+    }
+
+    /// Rebuild the exact schema-v2 `SceneFile` the v2 fixture was generated from,
+    /// from the frozen [`EntityRecordV2`]/[`SceneFileV2`] types. Any change to the
+    /// v2 layout breaks this (the provenance lock).
+    fn v2_reference() -> SceneFileV2 {
+        let g = uuid::Uuid::from_u128;
+        let mut tm = Tilemap {
+            atlas_cols: 2,
+            atlas_rows: 2,
+            ..Default::default()
+        };
+        tm.set_tile(0, 0, 1);
+        tm.set_tile(1, 0, 2);
+        SceneFileV2 {
+            schema_version: 2,
+            title: "V2 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV2 {
+                    guid: g(0x2001),
+                    name: "Ground".into(),
+                    parent: None,
+                    transform: EcsTransform {
+                        translation: inf_ecs::math::Vec3d::ZERO,
+                        rotation: inf_ecs::math::Vec3d::ZERO,
+                        scale: inf_ecs::math::Vec3d::new(10.0, 1.0, 1.0),
+                    },
+                    visible: true,
+                    mesh: Some(inf_ecs::components::MeshRef {
+                        primitive: inf_ecs::components::Primitive::Plane,
+                    }),
+                    material: Some(inf_ecs::components::Material::default()),
+                    light: None,
+                    camera: None,
+                    sprite: None,
+                    tilemap: Some(tm),
+                    nine_slice: None,
+                    text2d: None,
+                    light_2d: None,
+                },
+                EntityRecordV2 {
+                    guid: g(0x2002),
+                    name: "Sprite".into(),
+                    parent: None,
+                    transform: EcsTransform::from_translation(glam::DVec3::new(1.0, 2.0, 0.0)),
+                    visible: true,
+                    mesh: None,
+                    material: None,
+                    light: None,
+                    camera: None,
+                    sprite: Some(Sprite {
+                        size: Vec2d::new(0.8, 1.2),
+                        color: Color::new(0.9, 0.4, 0.3, 1.0),
+                        ..Default::default()
+                    }),
+                    tilemap: None,
+                    nine_slice: None,
+                    text2d: None,
+                    light_2d: Some(Light2D {
+                        color: Color::WHITE,
+                        intensity: 1.0,
+                        radius: 5.0,
+                    }),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn v2_fixture_is_reproducible_and_genuinely_v2() {
+        let bytes = v2_fixture_bytes();
+        assert_eq!(bytes[0], 2, "fixture must be a genuine schema-v2 payload");
+        let rebuilt = bincode::serde::encode_to_vec(v2_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v2 fixture must match our frozen v2 writer"
+        );
+    }
+
+    #[test]
+    fn v2_fixture_loads_forever_and_lifts_to_v3() {
+        let file = decode(&v2_fixture_bytes()).expect("v2 fixture decodes");
+        assert_eq!(file.schema_version, SCHEMA_VERSION);
+        assert_eq!(file.title, "V2 Fixture Level");
+        assert_eq!(file.entities.len(), 2);
+        let by_name = |n: &str| file.entities.iter().find(|r| r.name == n).unwrap();
+        // v2 data preserved through the v2→v3 lift.
+        assert!(by_name("Ground").tilemap.is_some());
+        assert!(by_name("Sprite").sprite.is_some());
+        assert!(by_name("Sprite").light_2d.is_some());
+        // Every v3 slot defaulted, and settings default (2D gravity zero).
+        for r in &file.entities {
+            assert!(r.rigid_body_2d.is_none());
+            assert!(r.collider_2d.is_none());
+            assert!(r.rigid_body_3d.is_none());
+            assert!(r.actor.is_none());
+        }
+        assert_eq!(file.settings, LevelSettings::default());
     }
 }

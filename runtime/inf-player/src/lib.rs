@@ -101,13 +101,15 @@ fn build_world(args: &Args) -> Result<BuiltWorld, String> {
                 .or_else(|| path.parent().map(PathBuf::from))
                 .unwrap_or_else(|| PathBuf::from("."));
             let actors = level::load_actor_classes_from_dir(&content_dir);
-            let builder = InfSceneWorldBuilder::with_defaults(actors);
+            let by_guid = level::load_actor_classes_by_guid_from_dir(&content_dir);
+            let builder = InfSceneWorldBuilder::with_defaults(actors).with_bindings(by_guid);
             level::load(&source, &builder)
         }
         WorldChoice::Pack(path) => {
             let source = PackLevelSource::open(path)?;
             let actors = source.actor_classes()?;
-            let builder = InfSceneWorldBuilder::with_defaults(actors);
+            let by_guid = source.blueprint_classes_by_guid()?;
+            let builder = InfSceneWorldBuilder::with_defaults(actors).with_bindings(by_guid);
             level::load(&source, &builder)
         }
     }

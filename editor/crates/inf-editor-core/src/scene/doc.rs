@@ -18,7 +18,7 @@ use inf_ecs::{ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d};
 use uuid::Uuid;
 
 use crate::ipc::{SceneNode, SceneSnapshot, SpawnKind};
-use crate::scene::serialize::EntityRecord;
+use crate::scene::serialize::{EntityRecord, LevelSettings};
 use crate::scene::undo::{EditCommand, EditHistory};
 
 pub struct SceneDoc {
@@ -30,6 +30,9 @@ pub struct SceneDoc {
     version: u64,
     dirty: bool,
     title: String,
+    /// File-level simulation settings (gravity + rate), persisted in `.inf_lvl`
+    /// (schema v3). Defaults preserve pre-v3 behaviour.
+    settings: LevelSettings,
     history: EditHistory,
 }
 
@@ -48,6 +51,7 @@ impl SceneDoc {
             version: 0,
             dirty: false,
             title: "Untitled".to_string(),
+            settings: LevelSettings::default(),
             history: EditHistory::default(),
         }
     }
@@ -76,6 +80,16 @@ impl SceneDoc {
 
     pub fn set_title(&mut self, title: impl Into<String>) {
         self.title = title.into();
+    }
+
+    /// File-level simulation settings (gravity + rate), persisted in `.inf_lvl`.
+    pub fn settings(&self) -> LevelSettings {
+        self.settings
+    }
+
+    /// Replace the level settings (the loader + a settings editor call this).
+    pub fn set_settings(&mut self, settings: LevelSettings) {
+        self.settings = settings;
     }
 
     pub fn selection(&self) -> &[Uuid] {
@@ -155,6 +169,7 @@ impl SceneDoc {
         self.world.clear();
         self.order.clear();
         self.selection.clear();
+        self.settings = LevelSettings::default();
     }
 
     /// Read one entity's editable component properties (Details, P3.3).
@@ -361,6 +376,37 @@ impl SceneDoc {
         }
     }
 
+    /// Read an entity's [`ActorClass`] blueprint-class binding GUID, if any.
+    pub(crate) fn raw_get_actor(&self, guid: Uuid) -> Option<Uuid> {
+        let e = self.world.entity_of(guid)?;
+        self.world
+            .world()
+            .get::<inf_ecs::components::ActorClass>(e)
+            .map(|a| a.0)
+    }
+
+    /// Insert (`Some`) or remove (`None`) an entity's [`ActorClass`] binding.
+    pub(crate) fn raw_set_actor(&mut self, guid: Uuid, actor: Option<Uuid>) {
+        if let Some(e) = self.world.entity_of(guid) {
+            match actor {
+                Some(a) => {
+                    self.world
+                        .world_mut()
+                        .entity_mut(e)
+                        .insert(inf_ecs::components::ActorClass(a));
+                }
+                None => {
+                    self.world
+                        .world_mut()
+                        .entity_mut(e)
+                        .remove::<inf_ecs::components::ActorClass>();
+                }
+            }
+            self.world.mark_dirty();
+            self.touch();
+        }
+    }
+
     /// Read an entity's [`Tilemap`] component (the chunk map the Details grid
     /// can't reach — the tile-painting panel reads it to render the grid).
     pub fn raw_get_tilemap(&self, guid: Uuid) -> Option<Tilemap> {
@@ -428,6 +474,28 @@ impl SceneDoc {
         }
         if let Some(l) = &rec.light_2d {
             w.entity_mut(e).insert(*l);
+        }
+        if let Some(c) = &rec.rigid_body_2d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.collider_2d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.character_controller_2d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.rigid_body_3d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.collider_3d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.character_controller_3d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(actor) = rec.actor {
+            w.entity_mut(e)
+                .insert(inf_ecs::components::ActorClass(actor));
         }
         self.touch();
     }
@@ -642,6 +710,37 @@ impl SceneDoc {
                 tp,
                 "emissive",
                 &PropValue::Color([emissive[0], emissive[1], emissive[2], 1.0]),
+            );
+            applied += 1;
+        }
+        self.commit_transaction();
+        applied
+    }
+
+    /// Bind a blueprint-class asset GUID to each target entity's [`ActorClass`]
+    /// link as one undo step (Content-Drawer drag a `.inf_act` onto an entity,
+    /// P9.5 — mirrors [`Self::edit_apply_material`]). Returns how many entities
+    /// were (re)bound; a target already bound to the same GUID is skipped.
+    pub fn edit_apply_actor(&mut self, targets: &[Uuid], actor: Uuid) -> usize {
+        self.begin_transaction("Bind Actor");
+        let mut applied = 0;
+        for &g in targets {
+            if self.world.entity_of(g).is_none() {
+                continue;
+            }
+            let before = self.raw_get_actor(g);
+            let after = Some(actor);
+            if before == after {
+                continue;
+            }
+            self.raw_set_actor(g, after);
+            self.history.record(
+                "Bind Actor",
+                EditCommand::SetActor {
+                    guid: g,
+                    before,
+                    after,
+                },
             );
             applied += 1;
         }

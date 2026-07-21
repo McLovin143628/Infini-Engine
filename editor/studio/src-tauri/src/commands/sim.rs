@@ -18,10 +18,11 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use glam::DVec2;
-use inf_editor_core::samples::character_actors;
+use inf_editor_core::samples::bound_actors;
 use inf_editor_core::simulate::{SimInput, SimSession, SIM_HZ};
 use tauri::{AppHandle, Emitter, State};
 
+use super::assets::AssetState;
 use super::scene::SceneState;
 
 /// Live Simulate state: the session (absent when stopped) + the last tick's
@@ -37,16 +38,21 @@ struct SimInner {
     last: Option<Instant>,
 }
 
-/// Enter Simulate over the current scene: snapshot the world, attach the
-/// coyote-time class to every `CharacterController2D` entity, and fire BeginPlay.
+/// Enter Simulate over the current scene: snapshot the world, bind actors —
+/// **preferring the scene's persisted `ActorClass` links** (P9.5), resolving each
+/// via the project asset DB, and falling back to the `CharacterController2D`
+/// heuristic for scenes with no bindings — and fire BeginPlay.
 #[tauri::command]
 pub async fn sim_start(
     app: AppHandle,
     scene: State<'_, SceneState>,
     sim: State<'_, SimState>,
+    assets: State<'_, AssetState>,
 ) -> Result<(), String> {
     let mut doc = scene.doc.lock().map_err(|_| "scene lock poisoned")?;
-    let actors = character_actors(&doc);
+    let actors = bound_actors(&doc, |guid| {
+        assets.load_blueprint_class(inf_asset::AssetId(guid))
+    });
     // Character applies its own gravity in the blueprint → world gravity is zero.
     let session = SimSession::enter(&mut doc, actors, DVec2::ZERO, SIM_HZ);
     doc.bump_version_for_runtime();

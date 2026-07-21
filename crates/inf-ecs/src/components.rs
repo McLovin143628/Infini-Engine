@@ -31,6 +31,23 @@ impl Guid {
     }
 }
 
+/// A per-entity **blueprint-class binding** (P9.5 · `.inf_lvl` schema v3): the
+/// GUID of the `.inf_act` blueprint-class asset this entity runs at play time.
+/// Persisted in `.inf_lvl` (the `EntityRecord::actor` slot) and resolved by the
+/// player / in-editor Simulate to a `BlueprintClass`.
+///
+/// Not reflected — like [`Guid`], it is an identity/link, not an editable
+/// numeric property, so it stays out of the generic Details grid (it is authored
+/// by dragging a `.inf_act` onto the entity, and shown read-only in Details).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ActorClass(pub Uuid);
+
+impl ActorClass {
+    pub fn new(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+}
+
 /// The Outliner label (UE's "actor label"). Shown in the Outliner + Details
 /// header and renamed through a dedicated command, so it is registered for
 /// reflection but excluded from the generic property grid.

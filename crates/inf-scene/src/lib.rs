@@ -32,13 +32,46 @@
 //!   runtime" step).
 
 use inf_ecs::components::{
-    Camera, Light, Light2D, Material, MeshRef, NineSlice, Sprite, Text2D, Tilemap, Transform,
+    Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D, Light, Light2D,
+    Material, MeshRef, NineSlice, RigidBody2D, RigidBody3D, Sprite, Text2D, Tilemap, Transform,
 };
+use inf_ecs::math::{Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// The current on-disk `.inf_lvl` schema (matches the editor's `SCHEMA_VERSION`).
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
+
+/// File-level simulation settings (schema v3), mirroring the editor's
+/// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
+/// 2D gravity **zero** (the character-self-gravity convention), 3D gravity
+/// `(0, -9.81, 0)`, and a 60 Hz fixed rate.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeSettings {
+    #[serde(default)]
+    pub gravity_2d: Vec2d,
+    #[serde(default = "default_gravity_3d")]
+    pub gravity_3d: Vec3d,
+    #[serde(default = "default_sim_hz")]
+    pub sim_hz: f64,
+}
+
+fn default_gravity_3d() -> Vec3d {
+    Vec3d::new(0.0, -9.81, 0.0)
+}
+fn default_sim_hz() -> f64 {
+    60.0
+}
+
+impl Default for RuntimeSettings {
+    fn default() -> Self {
+        Self {
+            gravity_2d: Vec2d::ZERO,
+            gravity_3d: default_gravity_3d(),
+            sim_hz: default_sim_hz(),
+        }
+    }
+}
 
 /// A failure decoding or encoding a `.inf_lvl`.
 #[derive(Debug, thiserror::Error)]
@@ -94,6 +127,22 @@ pub struct RuntimeEntity {
     pub text2d: Option<Text2D>,
     #[serde(default)]
     pub light_2d: Option<Light2D>,
+    // ── v3 (P9.5) physics components + actor binding ──────────────────────
+    #[serde(default)]
+    pub rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    pub collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    pub character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    pub rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    pub collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    pub character_controller_3d: Option<CharacterController3D>,
+    /// GUID of the `.inf_act` blueprint-class asset bound to this entity.
+    #[serde(default)]
+    pub actor: Option<Uuid>,
 }
 
 /// A decoded level ready for the runtime to instantiate.
@@ -103,6 +152,8 @@ pub struct RuntimeLevel {
     pub title: String,
     /// Entities in creation order (parents precede children).
     pub entities: Vec<RuntimeEntity>,
+    /// File-level simulation settings (gravity + rate).
+    pub settings: RuntimeSettings,
 }
 
 impl RuntimeLevel {
@@ -148,12 +199,14 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v2 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v3 file layout (current). `entities` reuses [`RuntimeEntity`].
 #[derive(Serialize, Deserialize)]
-struct SceneFileV2 {
+struct SceneFileV3 {
     schema_version: u32,
     title: String,
     entities: Vec<RuntimeEntity>,
+    #[serde(default)]
+    settings: RuntimeSettings,
 }
 
 /// A frozen schema-v1 entity record (pre-P8.2b, 3D only). Never changes.
@@ -179,6 +232,40 @@ struct SceneFileV1 {
     entities: Vec<EntityRecordV1>,
 }
 
+/// A frozen schema-v2 entity record (pre-P9.5: 3D + the five 2D slots, no
+/// physics/actor). Never changes.
+#[derive(Deserialize)]
+struct EntityRecordV2 {
+    guid: Uuid,
+    name: String,
+    parent: Option<Uuid>,
+    transform: Transform,
+    visible: bool,
+    mesh: Option<MeshRef>,
+    material: Option<Material>,
+    light: Option<Light>,
+    camera: Option<Camera>,
+    #[serde(default)]
+    sprite: Option<Sprite>,
+    #[serde(default)]
+    tilemap: Option<Tilemap>,
+    #[serde(default)]
+    nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    text2d: Option<Text2D>,
+    #[serde(default)]
+    light_2d: Option<Light2D>,
+}
+
+/// A frozen schema-v2 file layout.
+#[derive(Deserialize)]
+struct SceneFileV2 {
+    #[allow(dead_code)]
+    schema_version: u32,
+    title: String,
+    entities: Vec<EntityRecordV2>,
+}
+
 impl EntityRecordV1 {
     fn into_runtime(self) -> RuntimeEntity {
         RuntimeEntity {
@@ -196,6 +283,41 @@ impl EntityRecordV1 {
             nine_slice: None,
             text2d: None,
             light_2d: None,
+            rigid_body_2d: None,
+            collider_2d: None,
+            character_controller_2d: None,
+            rigid_body_3d: None,
+            collider_3d: None,
+            character_controller_3d: None,
+            actor: None,
+        }
+    }
+}
+
+impl EntityRecordV2 {
+    fn into_runtime(self) -> RuntimeEntity {
+        RuntimeEntity {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: None,
+            collider_2d: None,
+            character_controller_2d: None,
+            rigid_body_3d: None,
+            collider_3d: None,
+            character_controller_3d: None,
+            actor: None,
         }
     }
 }
@@ -216,6 +338,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV1::into_runtime)
                     .collect(),
+                settings: RuntimeSettings::default(),
             })
         }
         2 => {
@@ -224,7 +347,22 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v2: {e}")))?;
             Ok(RuntimeLevel {
                 title: v2.title,
-                entities: v2.entities,
+                entities: v2
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV2::into_runtime)
+                    .collect(),
+                settings: RuntimeSettings::default(),
+            })
+        }
+        3 => {
+            let (v3, _): (SceneFileV3, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v3: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v3.title,
+                entities: v3.entities,
+                settings: v3.settings,
             })
         }
         found => Err(SceneError::SchemaTooNew {
@@ -234,12 +372,13 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     }
 }
 
-/// Encode a level to the current schema (v2) as a deterministic bincode payload.
+/// Encode a level to the current schema (v3) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV2 {
+    let file = SceneFileV3 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
+        settings: level.settings,
     };
     bincode::serde::encode_to_vec(&file, bincode_config())
         .map_err(|e| SceneError::Encode(e.to_string()))
@@ -319,27 +458,77 @@ mod tests {
     }
 
     #[test]
-    fn v2_decode_encode_is_byte_identical_for_committed_bytes() {
-        // A committed v2 level re-encodes to the exact same bytes — decode/encode
-        // is a lossless identity on current-schema content (so the cook's runtime
-        // rewrite of an already-v2 level is a no-op, and deterministic).
+    fn v3_decode_encode_is_byte_identical_for_committed_bytes() {
+        // The committed platformer is now a schema-v3 level; decode/encode is a
+        // lossless identity on current-schema content (so the cook's runtime
+        // rewrite of an already-v3 level is a no-op, and deterministic).
         let original = read_committed("samples/platformer-2d/Platformer.inf_lvl");
+        assert_eq!(original[0], 3, "committed platformer is schema v3");
         let level = RuntimeLevel::decode(&original).unwrap();
         let reencoded = level.encode().unwrap();
-        assert_eq!(original, reencoded, "v2 round trip must be byte-identical");
+        assert_eq!(original, reencoded, "v3 round trip must be byte-identical");
+    }
+
+    /// The frozen pre-P9.5 (schema v2) platformer, load-tested forever so v2
+    /// decode stays covered even though the committed sample is now v3.
+    #[test]
+    fn v2_platformer_fixture_loads_forever_and_lifts() {
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/platformer_v2.inf_lvl"),
+        )
+        .expect("committed v2 platformer fixture present");
+        assert_eq!(bytes[0], 2, "fixture is a genuine schema-v2 payload");
+        let level = RuntimeLevel::decode(&bytes).expect("v2 fixture decodes");
+        assert_eq!(level.title, "Platformer 2D");
+        assert_eq!(level.len(), 5);
+        assert!(level.entities.iter().any(|e| e.tilemap.is_some()));
+        // v2 had no physics/actor slots → all defaulted, settings default.
+        for e in &level.entities {
+            assert!(e.rigid_body_2d.is_none());
+            assert!(e.collider_2d.is_none());
+            assert!(e.actor.is_none());
+        }
+        assert_eq!(level.settings, RuntimeSettings::default());
+        // Rewriting a v2 level upgrades it to v3 (the cook's runtime rewrite).
+        let out = level.encode().unwrap();
+        assert_eq!(out[0], SCHEMA_VERSION as u8);
+        assert_eq!(RuntimeLevel::decode(&out).unwrap(), level);
     }
 
     #[test]
-    fn v1_reencodes_to_v2() {
+    fn v1_reencodes_to_current() {
         let bytes = std::fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v1.inf_lvl"),
         )
         .unwrap();
         let level = RuntimeLevel::decode(&bytes).unwrap();
         let out = level.encode().unwrap();
-        // The rewritten payload is genuine schema v2, and re-decodes equal.
+        // The rewritten payload is genuine current schema (v3), re-decodes equal.
         assert_eq!(out[0], SCHEMA_VERSION as u8);
         assert_eq!(RuntimeLevel::decode(&out).unwrap(), level);
+    }
+
+    #[test]
+    fn committed_platformer_persists_physics_and_actor() {
+        // The regenerated v3 sample carries the player's physics + actor binding.
+        let level =
+            RuntimeLevel::decode(&read_committed("samples/platformer-2d/Platformer.inf_lvl"))
+                .unwrap();
+        assert!(
+            level.entities.iter().any(|e| e.rigid_body_2d.is_some()),
+            "v3 sample persists a rigid body"
+        );
+        assert!(
+            level
+                .entities
+                .iter()
+                .any(|e| e.character_controller_2d.is_some()),
+            "v3 sample persists a character controller"
+        );
+        assert!(
+            level.entities.iter().any(|e| e.actor.is_some()),
+            "v3 sample persists an actor binding (the Coyote class)"
+        );
     }
 
     #[test]
@@ -348,6 +537,7 @@ mod tests {
         let level = RuntimeLevel {
             title: "x".into(),
             entities: vec![],
+            settings: RuntimeSettings::default(),
         };
         let mut bytes = level.encode().unwrap();
         // schema_version is the first byte for small values; bump it well past us.

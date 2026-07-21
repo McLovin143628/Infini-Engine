@@ -30,8 +30,8 @@ use inf_blueprint::{
     Param, Stmt, Ty, Variable,
 };
 use inf_ecs::components::{
-    BillboardMode, BodyKind2D, CharacterController2D, Collider2D, ColliderShape2DKind, Light2D,
-    RigidBody2D, Sprite, Tilemap, Transform,
+    ActorClass, BillboardMode, BodyKind2D, CharacterController2D, Collider2D, ColliderShape2DKind,
+    Light2D, RigidBody2D, Sprite, Tilemap, Transform,
 };
 use inf_ecs::math::{Color, Vec2d};
 
@@ -48,6 +48,10 @@ pub const LIGHT_GUID: Uuid = Uuid::from_u128(0x8401_0005);
 pub const LEVEL_GUID: Uuid = Uuid::from_u128(0x8401_0000);
 /// The coyote actor class id.
 pub const COYOTE_CLASS_ID: &str = "act:coyote_player";
+/// The **asset** GUID of the committed `Coyote.inf_act` (its inf_asset sidecar,
+/// P9.5). Stable so the level's persisted `actor` binding (the [`ActorClass`] on
+/// the player) resolves to this blueprint through the AssetDb / cooked pack.
+pub const COYOTE_ASSET_GUID: Uuid = Uuid::from_u128(0x8401_00AC);
 
 // ── Coyote-time tuning (world units, seconds) ────────────────────────────────
 /// Downward acceleration applied to `vy` each tick.
@@ -413,6 +417,14 @@ pub fn platformer_scene() -> SceneDoc {
             offset: 0.02,
         }
     );
+    // Bind the player to the Coyote blueprint class (P9.5 persisted actor link):
+    // the level now carries its own gameplay binding — no CC2D heuristic needed.
+    insert!(doc, PLAYER_GUID, ActorClass(COYOTE_ASSET_GUID));
+
+    // Level settings: the platformer keeps the character-self-gravity convention
+    // (2D world gravity ZERO) at 60 Hz — i.e. the schema-v3 defaults, now made
+    // explicit + persisted instead of the player's old hard-coded constants.
+    doc.set_settings(crate::scene::serialize::LevelSettings::default());
 
     doc.world_mut().propagate();
     doc.mark_saved();
@@ -424,10 +436,40 @@ pub fn platformer_actors() -> Vec<(Uuid, BlueprintClass)> {
     vec![(PLAYER_GUID, coyote_class())]
 }
 
+/// Resolve the in-editor Simulate actor list, **preferring the level's persisted
+/// [`ActorClass`] bindings** (P9.5): each entity carrying an `ActorClass` is run
+/// with the blueprint class its asset GUID resolves to (via `resolve`, which the
+/// caller backs with the project's asset DB). Falls back to the legacy
+/// [`character_actors`] heuristic when the scene carries **no** bindings at all
+/// (kept for scenes authored before v3). Guid order.
+pub fn bound_actors<F>(doc: &SceneDoc, mut resolve: F) -> Vec<(Uuid, BlueprintClass)>
+where
+    F: FnMut(Uuid) -> Option<BlueprintClass>,
+{
+    let mut out = Vec::new();
+    let mut any_binding = false;
+    let w = doc.world();
+    for &guid in doc.order() {
+        if let Some(e) = w.entity_of(guid) {
+            if let Some(ac) = w.world().get::<ActorClass>(e) {
+                any_binding = true;
+                if let Some(class) = resolve(ac.0) {
+                    out.push((guid, class));
+                }
+            }
+        }
+    }
+    if any_binding && !out.is_empty() {
+        out
+    } else {
+        // No bindings (or none resolved) → legacy CC2D heuristic.
+        character_actors(doc)
+    }
+}
+
 /// Discover controllable actors in an arbitrary scene for Simulate: every entity
-/// carrying a `CharacterController2D` gets the coyote-time class (P8.4 has no
-/// per-entity blueprint-class link component yet — a P9 follow-up; this heuristic
-/// lets "drop the platformer sample, press Play" work today). Guid order.
+/// carrying a `CharacterController2D` gets the coyote-time class (the legacy
+/// pre-v3 heuristic, kept as the fallback for [`bound_actors`]). Guid order.
 pub fn character_actors(doc: &SceneDoc) -> Vec<(Uuid, BlueprintClass)> {
     let mut out = Vec::new();
     let w = doc.world();
@@ -614,8 +656,20 @@ pub fn write_sample() -> Result<(), String> {
 
     // Actor: JSON payload (see `encode_actor` — bincode can't round-trip it).
     let class = coyote_class();
-    std::fs::write(dir.join("Coyote.inf_act"), encode_actor(&class)?)
-        .map_err(|e| format!("write actor: {e}"))?;
+    let act_bytes = encode_actor(&class)?;
+    let act_path = dir.join("Coyote.inf_act");
+    std::fs::write(&act_path, &act_bytes).map_err(|e| format!("write actor: {e}"))?;
+
+    // Its inf_asset sidecar with the **stable** [`COYOTE_ASSET_GUID`], so the
+    // level's persisted `actor` binding resolves to this blueprint through the
+    // AssetDb + cooked pack (P9.5 dependency edge level→blueprint).
+    let side = inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(COYOTE_ASSET_GUID),
+        inf_asset::AssetKind::Blueprint,
+        inf_asset::ContentHash::of(&act_bytes),
+    );
+    side.save(&act_path)
+        .map_err(|e| format!("write actor sidecar: {e}"))?;
 
     std::fs::write(dir.join("README.md"), SAMPLE_README)
         .map_err(|e| format!("write readme: {e}"))?;

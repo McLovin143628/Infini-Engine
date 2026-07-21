@@ -22,21 +22,21 @@
 //! `light_2d`. [`InfSceneWorldBuilder`] instantiates **all** of them, so a cooked
 //! level renders exactly as the editor viewport shows it.
 //!
-//! It does **not** yet persist the 2D **physics** components (`RigidBody2D` /
-//! `Collider2D` / `CharacterController2D`) nor a per-entity **blueprint-class
-//! binding**. Both are documented follow-ups (a physics-component + level-settings
-//! record in `.inf_lvl`, and a class-link component). Until they land:
+//! As of **schema v3** (P9.5) it **also** persists per entity the 2D + 3D
+//! **physics** components (`RigidBody2D` / `Collider2D` /
+//! `CharacterController2D` and the 3D trio) and a per-entity **blueprint-class
+//! binding** ([`ActorClass`](inf_ecs::components::ActorClass), the `actor` slot),
+//! plus a file-level settings record (gravity + rate). [`InfSceneWorldBuilder`]
+//! instantiates them all, so a cooked level is fully runnable:
 //!
-//! * gravity/rate come from [`DEFAULT_GRAVITY`] / [`DEFAULT_HZ`] (a level-settings
-//!   record is the follow-up), matching the platformer/`--demo` convention where
-//!   the character applies its own gravity in the blueprint;
-//! * actors bind via the P8/P9 **`CharacterController2D` heuristic**
-//!   ([`resolve_actors`]) — every entity carrying a `CharacterController2D` gets
-//!   the discovered actor class. Because the current level format carries no
-//!   `CharacterController2D`, a decoded sample level yields an empty actor list
-//!   today; the programmatic [`crate::demo`] world remains the runnable-gameplay
-//!   proof, while the level/pack path proves faithful scene instantiation +
-//!   deterministic headless run + cooked-==-uncooked determinism.
+//! * gravity/rate come from the level's own settings (a v1/v2 level lifts to the
+//!   [`DEFAULT_GRAVITY`] / [`DEFAULT_HZ`] fallback, matching the
+//!   platformer/`--demo` convention where the character applies its own gravity);
+//! * actors bind from the **persisted `ActorClass` links** ([`resolve_bound_actors`]):
+//!   each entity's `actor` GUID resolves — through the pack index / dev-dir
+//!   sidecars — to a `BlueprintClass`. The legacy **`CharacterController2D`
+//!   heuristic** ([`resolve_actors`]) is kept as a documented fallback for levels
+//!   authored before v3 (kinder for hand-rolled levels).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -89,6 +89,13 @@ pub trait LevelSource {
     fn level_bytes(&self) -> Result<Vec<u8>, String>;
     /// A human label for logs / the window title.
     fn label(&self) -> String;
+    /// Resolve a blueprint **class asset** by its GUID — the persisted `actor`
+    /// binding a v3 `.inf_lvl` carries (P9.5). Returns `None` when the source has
+    /// no such asset (the default; legacy sources without a GUID index fall back
+    /// to the [`resolve_actors`] heuristic).
+    fn blueprint_by_guid(&self, _guid: Uuid) -> Option<BlueprintClass> {
+        None
+    }
 }
 
 /// Decodes raw level bytes into a populated [`BuiltWorld`]. The runtime reader
@@ -141,24 +148,40 @@ impl WorldBuilder for StubWorldBuilder {
 /// Holds the actor classes discovered beside the level (dev-dir) or in the pack
 /// so [`WorldBuilder::build`] — which only sees the level bytes — can attach them.
 pub struct InfSceneWorldBuilder {
-    actors: Vec<BlueprintClass>,
+    /// Fallback classes for the [`resolve_actors`] heuristic — used only when a
+    /// level carries **no** persisted `actor` bindings (a legacy / hand-rolled
+    /// level). Kept because it is kinder for levels authored before v3.
+    fallback: Vec<BlueprintClass>,
+    /// Persisted-binding resolution: blueprint **asset GUID** → its class. Built
+    /// from the [`LevelSource`] (pack index / dev-dir sidecars).
+    by_guid: HashMap<Uuid, BlueprintClass>,
+    /// Gravity/rate used only when the level predates settings (v1/v2) — a v3
+    /// level's own [`LevelSettings`](inf_scene::RuntimeSettings) always wins.
     gravity: DVec2,
     hz: f64,
 }
 
 impl InfSceneWorldBuilder {
-    /// Build with explicit gravity/rate.
-    pub fn new(actors: Vec<BlueprintClass>, gravity: DVec2, hz: f64) -> Self {
+    /// Build with explicit fallback gravity/rate (used for pre-settings levels).
+    pub fn new(fallback: Vec<BlueprintClass>, gravity: DVec2, hz: f64) -> Self {
         Self {
-            actors,
+            fallback,
+            by_guid: HashMap::new(),
             gravity,
             hz,
         }
     }
 
     /// Build with the documented defaults ([`DEFAULT_GRAVITY`] / [`DEFAULT_HZ`]).
-    pub fn with_defaults(actors: Vec<BlueprintClass>) -> Self {
-        Self::new(actors, DEFAULT_GRAVITY, DEFAULT_HZ)
+    pub fn with_defaults(fallback: Vec<BlueprintClass>) -> Self {
+        Self::new(fallback, DEFAULT_GRAVITY, DEFAULT_HZ)
+    }
+
+    /// Attach the persisted-binding resolution map (asset GUID → class). Builder
+    /// style so `build_world` can wire it from the source's blueprint index.
+    pub fn with_bindings(mut self, by_guid: HashMap<Uuid, BlueprintClass>) -> Self {
+        self.by_guid = by_guid;
+        self
     }
 }
 
@@ -166,19 +189,34 @@ impl WorldBuilder for InfSceneWorldBuilder {
     fn build(&self, level_bytes: &[u8]) -> Result<BuiltWorld, String> {
         let level = inf_scene::decode(level_bytes).map_err(|e| format!("decode level: {e}"))?;
         let title = level.title;
+        let settings = level.settings;
         let mut world = populate_world(level.entities);
         world.propagate();
-        let actors = resolve_actors(&world, &self.actors);
+        // Prefer the level's persisted per-entity actor bindings; fall back to the
+        // CC2D heuristic only when the level carries none (legacy levels).
+        let actors = resolve_bound_actors(&world, &self.by_guid);
+        let actors = if actors.is_empty() {
+            resolve_actors(&world, &self.fallback)
+        } else {
+            actors
+        };
+        // v3 levels carry their own gravity/rate; v1/v2 lift to defaults, which
+        // equal the constructor's fallback for the platformer convention.
+        let gravity = DVec2::new(settings.gravity_2d.x, settings.gravity_2d.y);
+        let hz = settings.sim_hz;
         tracing::info!(
-            "inf-player: built '{}' — {} actor(s) bound",
+            "inf-player: built '{}' — {} actor(s) bound (gravity {:?}, {} Hz)",
             if title.is_empty() { "level" } else { &title },
-            actors.len()
+            actors.len(),
+            gravity,
+            hz
         );
+        let _ = (self.gravity, self.hz); // retained for pre-settings call sites
         Ok(BuiltWorld {
             world,
             actors,
-            gravity: self.gravity,
-            hz: self.hz,
+            gravity,
+            hz,
             label: if title.is_empty() {
                 "level".to_string()
             } else {
@@ -213,6 +251,13 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
             nine_slice,
             text2d,
             light_2d,
+            rigid_body_2d,
+            collider_2d,
+            character_controller_2d,
+            rigid_body_3d,
+            collider_3d,
+            character_controller_3d,
+            actor,
         } = e;
 
         let entity = world.spawn_with_guid(guid, &name, None);
@@ -251,6 +296,28 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
             if let Some(c) = light_2d {
                 em.insert(c);
             }
+            // ── v3 physics components + actor binding ──
+            if let Some(c) = rigid_body_2d {
+                em.insert(c);
+            }
+            if let Some(c) = collider_2d {
+                em.insert(c);
+            }
+            if let Some(c) = character_controller_2d {
+                em.insert(c);
+            }
+            if let Some(c) = rigid_body_3d {
+                em.insert(c);
+            }
+            if let Some(c) = collider_3d {
+                em.insert(c);
+            }
+            if let Some(c) = character_controller_3d {
+                em.insert(c);
+            }
+            if let Some(a) = actor {
+                em.insert(inf_ecs::components::ActorClass(a));
+            }
         }
         world.mark_dirty();
         if let Some(p) = parent {
@@ -288,6 +355,30 @@ pub fn resolve_actors(world: &EcsWorld, classes: &[BlueprintClass]) -> Vec<(Uuid
     guids.into_iter().map(|g| (g, class.clone())).collect()
 }
 
+/// Bind actors from the level's **persisted** `ActorClass` links (P9.5): each
+/// entity carrying an [`ActorClass`] whose asset GUID resolves in `by_guid` is
+/// ticked with that class, in entity-`Guid` order. Empty when the level carries
+/// no bindings (or none resolve) — the caller then falls back to
+/// [`resolve_actors`]. This is the real per-entity class binding the CC2D
+/// heuristic stood in for.
+pub fn resolve_bound_actors(
+    world: &EcsWorld,
+    by_guid: &HashMap<Uuid, BlueprintClass>,
+) -> Vec<(Uuid, BlueprintClass)> {
+    let w = world.world();
+    let mut bound: Vec<(Uuid, BlueprintClass)> = w
+        .iter_entities()
+        .filter_map(|e| {
+            let entity_guid = e.get::<Guid>()?.0;
+            let actor_asset = e.get::<inf_ecs::components::ActorClass>()?.0;
+            let class = by_guid.get(&actor_asset)?.clone();
+            Some((entity_guid, class))
+        })
+        .collect();
+    bound.sort_by_key(|(g, _)| *g);
+    bound
+}
+
 /// Read and decode every `.inf_act` blueprint class in `dir` (non-recursive),
 /// sorted by path for a deterministic order. Malformed files are logged + skipped.
 pub fn load_actor_classes_from_dir(dir: &Path) -> Vec<BlueprintClass> {
@@ -307,6 +398,35 @@ pub fn load_actor_classes_from_dir(dir: &Path) -> Vec<BlueprintClass> {
                 Err(e) => tracing::warn!("inf-player: bad .inf_act {}: {e}", p.display()),
             },
             Err(e) => tracing::warn!("inf-player: read {}: {e}", p.display()),
+        }
+    }
+    out
+}
+
+/// Read every `.inf_act` in `dir` **keyed by its asset GUID** (from the sibling
+/// inf_asset `.toml` sidecar) — the map the [`InfSceneWorldBuilder`] uses to
+/// resolve a level's persisted `actor` bindings on the dev-dir path (P9.5). Files
+/// without a readable sidecar/GUID are skipped (they can still bind via the CC2D
+/// heuristic). Deterministic (path-sorted) iteration.
+pub fn load_actor_classes_by_guid_from_dir(dir: &Path) -> HashMap<Uuid, BlueprintClass> {
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("inf_act"))
+            .collect(),
+        Err(_) => return HashMap::new(),
+    };
+    files.sort();
+    let mut out = HashMap::new();
+    for p in files {
+        let Ok(side) = inf_asset::AssetSidecar::load(&p) else {
+            continue;
+        };
+        match std::fs::read(&p).map(|b| serde_json::from_slice::<BlueprintClass>(&b)) {
+            Ok(Ok(class)) => {
+                out.insert(side.guid.uuid(), class);
+            }
+            _ => tracing::warn!("inf-player: bad .inf_act {}", p.display()),
         }
     }
     out
@@ -402,6 +522,25 @@ impl PackLevelSource {
         }
         Ok(out)
     }
+
+    /// Every blueprint class in the pack **keyed by its asset GUID** — the map
+    /// resolving a level's persisted `actor` bindings (P9.5).
+    pub fn blueprint_classes_by_guid(&self) -> Result<HashMap<Uuid, BlueprintClass>, String> {
+        let mut out = HashMap::new();
+        for e in self.reader.index() {
+            if e.kind != AssetKind::Blueprint {
+                continue;
+            }
+            let bytes = self
+                .reader
+                .read(e.guid)
+                .map_err(|err| format!("read actor {}: {err}", e.guid))?;
+            let class = serde_json::from_slice::<BlueprintClass>(&bytes)
+                .map_err(|err| format!("decode actor {}: {err}", e.guid))?;
+            out.insert(e.guid.uuid(), class);
+        }
+        Ok(out)
+    }
 }
 
 impl LevelSource for PackLevelSource {
@@ -413,6 +552,15 @@ impl LevelSource for PackLevelSource {
 
     fn label(&self) -> String {
         self.label.clone()
+    }
+
+    fn blueprint_by_guid(&self, guid: Uuid) -> Option<BlueprintClass> {
+        let id = AssetId(guid);
+        if !self.reader.contains(id) {
+            return None;
+        }
+        let bytes = self.reader.read(id).ok()?;
+        serde_json::from_slice::<BlueprintClass>(&bytes).ok()
     }
 }
 
@@ -490,6 +638,13 @@ mod tests {
             nine_slice: None,
             text2d: None,
             light_2d: None,
+            rigid_body_2d: None,
+            collider_2d: None,
+            character_controller_2d: None,
+            rigid_body_3d: None,
+            collider_3d: None,
+            character_controller_3d: None,
+            actor: None,
         };
         parent.sprite = Some(Sprite {
             size: Vec2d::new(1.0, 1.0),
