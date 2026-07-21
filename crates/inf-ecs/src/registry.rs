@@ -11,8 +11,8 @@ use bevy_ecs::reflect::ReflectComponent;
 use bevy_reflect::{TypePath, TypeRegistry};
 
 use crate::components::{
-    AtlasRect, Camera, Light, LightKind, Material, MeshRef, Name, Primitive, Sprite, Transform,
-    Visibility,
+    AtlasRect, Camera, Light, LightKind, Material, MeshRef, Name, Primitive, Sprite, Tilemap,
+    Transform, Visibility,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -73,6 +73,7 @@ impl ComponentRegistry {
             Visibility => "Visibility",
             MeshRef => "Mesh",
             Sprite => "Sprite",
+            Tilemap => "Tilemap",
             Material => "Material",
             Light => "Light",
             Camera => "Camera",
@@ -123,7 +124,7 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        assert_eq!(reg.editable().len(), 7);
+        assert_eq!(reg.editable().len(), 8);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

@@ -7,15 +7,15 @@ use std::collections::HashMap;
 use glam::{DVec3, Vec2, Vec3};
 use inf_ecs::components::{
     ComputedVisibility, GlobalTransform, Light, LightKind as EcsLightKind, Material, MeshRef,
-    Sprite,
+    Sprite, Tilemap,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::scene::SceneDoc;
 use inf_math::FloatingOrigin;
 use inf_render::{
     gizmo, handle_from_guid, EngineRenderer, GizmoDelta, GizmoDrag, GizmoMode, GpuContext,
-    LightKind, MeshInstance, Picker, RenderLight, RenderScene, RenderView, SpriteInstance,
-    SurfaceChain,
+    LightKind, MeshInstance, Picker, RenderChunk, RenderLight, RenderScene, RenderTilemap,
+    RenderView, SpriteInstance, SurfaceChain, TilemapParams,
 };
 use uuid::Uuid;
 
@@ -140,6 +140,7 @@ impl EngineHost {
         self.scene.instances.clear();
         self.scene.lights.clear();
         self.scene.sprites.clear();
+        self.scene.tilemaps.clear();
         self.id_to_guid.clear();
         self.guid_to_id.clear();
 
@@ -175,6 +176,20 @@ impl EngineHost {
                         .map(|g| g.translation())
                         .unwrap_or(DVec3::ZERO);
                     self.scene.sprites.push(project_sprite(sprite, translation));
+                }
+            }
+
+            // Tilemaps project into the 2D tilemap list (P8.1b); the sprite pass
+            // culls + expands their chunks each frame.
+            if let Some(tilemap) = w.get::<Tilemap>(entity) {
+                if visible && !tilemap.is_empty() {
+                    let translation = w
+                        .get::<GlobalTransform>(entity)
+                        .map(|g| g.translation())
+                        .unwrap_or(DVec3::ZERO);
+                    self.scene
+                        .tilemaps
+                        .push(project_tilemap(tilemap, translation));
                 }
             }
 
@@ -289,6 +304,38 @@ fn project_sprite(sprite: &Sprite, translation: DVec3) -> SpriteInstance {
         flip_x: sprite.flip_x,
         flip_y: sprite.flip_y,
     }
+}
+
+/// Project an ECS [`Tilemap`] (+ its world position) into a [`RenderTilemap`].
+///
+/// The atlas texture GUID maps to a `TextureHandle`, but — like [`project_sprite`]
+/// — the viewport thread has no asset-DB access yet, so no RGBA bytes are pushed:
+/// referenced tilemaps render as the white fallback tinted by `tint` (colored
+/// cells). The headless golden test exercises the full textured path. The chunk
+/// data is copied out of the sparse ECS store once per document version; the
+/// sprite pass culls + expands it per frame.
+fn project_tilemap(tilemap: &Tilemap, translation: DVec3) -> RenderTilemap {
+    let params = TilemapParams {
+        origin: translation,
+        tile_size: Vec2::new(tilemap.tile_size.x as f32, tilemap.tile_size.y as f32),
+        atlas_cols: tilemap.atlas_cols,
+        atlas_rows: tilemap.atlas_rows,
+        texture: tilemap
+            .texture
+            .map(|u| handle_from_guid(u.as_u128()))
+            .unwrap_or(inf_render::WHITE_TEXTURE),
+        color: tilemap.tint.to_array(),
+        sorting_layer: tilemap.sorting_layer,
+        order: tilemap.order,
+    };
+    let chunks = tilemap
+        .occupied_chunks()
+        .map(|(&coord, chunk)| RenderChunk {
+            coord,
+            tiles: chunk.tiles().to_vec(),
+        })
+        .collect();
+    RenderTilemap { params, chunks }
 }
 
 /// The pointer-driven interaction API (select, hover, gizmo drag). Currently

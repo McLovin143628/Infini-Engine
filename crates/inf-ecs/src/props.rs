@@ -113,6 +113,9 @@ fn read_value(pr: &dyn PartialReflect) -> Option<PropValue> {
     if let Some(v) = pr.try_downcast_ref::<i32>() {
         return Some(PropValue::Number(*v as f64));
     }
+    if let Some(v) = pr.try_downcast_ref::<u32>() {
+        return Some(PropValue::Number(*v as f64));
+    }
     if let Some(v) = pr.try_downcast_ref::<bool>() {
         return Some(PropValue::Bool(*v));
     }
@@ -192,6 +195,9 @@ fn apply_value(field: &mut dyn PartialReflect, value: &PropValue) -> bool {
             } else if let Some(x) = field.try_downcast_mut::<i32>() {
                 *x = n.round() as i32;
                 true
+            } else if let Some(x) = field.try_downcast_mut::<u32>() {
+                *x = n.round().max(0.0) as u32;
+                true
             } else {
                 false
             }
@@ -241,7 +247,7 @@ fn prettify(field: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{Light, MeshRef, Transform};
+    use crate::components::{Light, MeshRef, Tilemap, Transform};
 
     use crate::EcsWorld;
 
@@ -275,6 +281,39 @@ mod tests {
             }
             other => panic!("expected enum, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn reads_and_writes_u32_atlas_dims() {
+        // The tilemap's atlas grid dims are `u32` — they must surface on the
+        // number widget and round-trip a write (chunk map / texture are ignored).
+        let mut w = EcsWorld::new();
+        let e = w.spawn("Tiles", None);
+        w.world_mut().entity_mut(e).insert(Tilemap {
+            atlas_cols: 4,
+            ..Default::default()
+        });
+        let reg = ComponentRegistry::new();
+
+        let props = read_entity(w.world(), &reg, e);
+        let tm = props.iter().find(|p| p.display == "Tilemap").unwrap();
+        let cols = tm.fields.iter().find(|f| f.name == "atlas_cols").unwrap();
+        assert_eq!(cols.value, PropValue::Number(4.0));
+        // The ignored chunk map / texture never appear as editable fields.
+        assert!(tm
+            .fields
+            .iter()
+            .all(|f| f.name != "chunks" && f.name != "texture"));
+
+        assert!(write_field(
+            w.world_mut(),
+            &reg,
+            e,
+            <Tilemap as TypePath>::type_path(),
+            "atlas_cols",
+            &PropValue::Number(8.0),
+        ));
+        assert_eq!(w.world().entity(e).get::<Tilemap>().unwrap().atlas_cols, 8);
     }
 
     #[test]

@@ -24,6 +24,12 @@
 
 use glam::{DVec3, Vec2};
 
+pub mod tilemap;
+pub use tilemap::{
+    aabb_visible, atlas_uv, chunk_world_aabb, expand_chunk, RenderChunk, RenderTilemap,
+    TilemapParams, TILE_CHUNK_DIM,
+};
+
 /// Opaque GPU texture identity (a hash of an asset GUID, see
 /// [`handle_from_guid`]). `0` is reserved to mean "no texture" → the renderer's
 /// 1×1 white fallback.
@@ -120,6 +126,22 @@ pub struct BatchedSprites {
     pub batches: Vec<SpriteBatch>,
 }
 
+/// A pre-expanded, already-in-draw-order run of sprite instances that bypasses
+/// the loose-sprite sort — e.g. one expanded tilemap chunk. Every instance
+/// shares one `texture` and one `(sorting_layer, order)`, so the whole run is a
+/// single contiguous batch. Used for tilemaps: expanding 100k tiles as loose
+/// [`SpriteInstance`]s would dominate the batcher's `O(n log n)` sort, whereas a
+/// per-chunk prebatched run is placed in `O(1)` (plus a stable sort over the
+/// handful of runs).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrebatchedRun {
+    pub texture: TextureHandle,
+    pub sorting_layer: i32,
+    pub order: i32,
+    /// Instances in final intra-run draw order (row-major chunk expansion).
+    pub instances: Vec<SpriteInstance>,
+}
+
 /// Sort `sprites` into draw order and split them into per-texture batches.
 ///
 /// Sorting is **stable** by `(layer, order, texture)`, so:
@@ -130,10 +152,61 @@ pub struct BatchedSprites {
 /// so a texture can legitimately appear in several batches when interleaved by
 /// order — the minimum number of state changes the ordering constraint allows.
 pub fn batch_sprites(sprites: &[SpriteInstance]) -> BatchedSprites {
-    let mut instances = sprites.to_vec();
-    // `sort_by_key` is a stable sort — equal keys keep input order.
-    instances.sort_by_key(sort_key);
+    batch_scene(sprites, &[])
+}
 
+/// Batch loose `sprites` together with pre-expanded `prebatched` runs (tilemap
+/// chunks) into one final draw order.
+///
+/// **Ordering semantics.** The unified painter order is by `(sorting_layer,
+/// order)`. Loose sprites and prebatched runs interleave by that key; within an
+/// *equal* `(layer, order)`:
+///   1. all loose sprites are placed first (sorted among themselves by texture,
+///      then stable by input order — the P8.1a guarantee), then
+///   2. the prebatched runs, in the order they were passed (the host passes them
+///      in tilemap-entity order, so this is deterministic and controllable).
+///
+/// After merging, batches are recomputed as maximal equal-texture runs over the
+/// final order — so a prebatched run that happens to share a neighbour's texture
+/// coalesces into one draw call rather than forcing a redundant state change.
+pub fn batch_scene(sprites: &[SpriteInstance], prebatched: &[PrebatchedRun]) -> BatchedSprites {
+    // Loose sprites in painter order (stable by (layer, order, texture)).
+    let mut loose = sprites.to_vec();
+    loose.sort_by_key(sort_key);
+
+    // Prebatched runs ordered by (layer, order); a stable sort preserves the
+    // caller's (tilemap-entity) order for equal keys.
+    let mut runs: Vec<&PrebatchedRun> = prebatched.iter().collect();
+    runs.sort_by_key(|r| (r.sorting_layer, r.order));
+
+    // Merge: walk both sequences, emitting the lower (layer, order) first and,
+    // on a tie, all equal-key loose sprites before the prebatched runs.
+    let mut instances: Vec<SpriteInstance> =
+        Vec::with_capacity(loose.len() + runs.iter().map(|r| r.instances.len()).sum::<usize>());
+    let mut li = 0;
+    let mut ri = 0;
+    while li < loose.len() || ri < runs.len() {
+        let loose_key = loose.get(li).map(|s| (s.sorting_layer, s.order));
+        let run_key = runs.get(ri).map(|r| (r.sorting_layer, r.order));
+        let take_loose = match (loose_key, run_key) {
+            (Some(l), Some(r)) => l <= r, // tie → loose first
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        if take_loose {
+            let key = loose_key.unwrap();
+            while li < loose.len() && (loose[li].sorting_layer, loose[li].order) == key {
+                instances.push(loose[li]);
+                li += 1;
+            }
+        } else {
+            instances.extend_from_slice(&runs[ri].instances);
+            ri += 1;
+        }
+    }
+
+    // Maximal equal-texture runs over the final order.
     let mut batches = Vec::new();
     let mut i = 0;
     while i < instances.len() {
@@ -293,6 +366,81 @@ mod tests {
         let out = batch_sprites(&[sprite(0, 0, 10), sprite(0, 2, 10), sprite(0, 1, 20)]);
         let tex: Vec<_> = out.batches.iter().map(|b| (b.texture, b.count)).collect();
         assert_eq!(tex, vec![(10, 1), (20, 1), (10, 1)]);
+    }
+
+    fn run(layer: i32, order: i32, texture: TextureHandle, n: usize) -> PrebatchedRun {
+        let mut s = sprite(layer, order, texture);
+        // Tag each instance's position so we can track run identity/order.
+        let instances = (0..n)
+            .map(|k| {
+                s.position = DVec3::new(texture as f64, k as f64, 0.0);
+                s
+            })
+            .collect();
+        PrebatchedRun {
+            texture,
+            sorting_layer: layer,
+            order,
+            instances,
+        }
+    }
+
+    #[test]
+    fn batch_scene_places_loose_before_prebatched_on_equal_key() {
+        // One loose sprite and one prebatched run at the SAME (layer, order):
+        // the loose sprite draws first, the run after.
+        let loose = vec![sprite(0, 0, 10)];
+        let runs = vec![run(0, 0, 20, 2)];
+        let out = batch_scene(&loose, &runs);
+        let tex: Vec<_> = out.instances.iter().map(|s| s.texture).collect();
+        assert_eq!(tex, vec![10, 20, 20]);
+        // Two batches: loose(10), then the run(20).
+        assert_eq!(
+            out.batches,
+            vec![
+                SpriteBatch {
+                    texture: 10,
+                    start: 0,
+                    count: 1
+                },
+                SpriteBatch {
+                    texture: 20,
+                    start: 1,
+                    count: 2
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn batch_scene_interleaves_runs_and_loose_by_layer() {
+        // Loose sprite on layer 1; two runs on layers 0 and 2. Painter order must
+        // be run(0) → loose(1) → run(2).
+        let loose = vec![sprite(1, 0, 50)];
+        let runs = vec![run(2, 0, 70, 1), run(0, 0, 60, 1)];
+        let out = batch_scene(&loose, &runs);
+        let tex: Vec<_> = out.instances.iter().map(|s| s.texture).collect();
+        assert_eq!(tex, vec![60, 50, 70]);
+    }
+
+    #[test]
+    fn batch_scene_preserves_run_input_order_on_equal_key() {
+        // Two runs with the same (layer, order): they keep the order passed in
+        // (the host's tilemap-entity order) — determinism.
+        let runs = vec![run(0, 0, 80, 1), run(0, 0, 81, 1)];
+        let out = batch_scene(&[], &runs);
+        let tex: Vec<_> = out.instances.iter().map(|s| s.texture).collect();
+        assert_eq!(tex, vec![80, 81]);
+        // Reversing the input reverses the draw order (order is caller-controlled).
+        let out2 = batch_scene(&[], &[runs[1].clone(), runs[0].clone()]);
+        let tex2: Vec<_> = out2.instances.iter().map(|s| s.texture).collect();
+        assert_eq!(tex2, vec![81, 80]);
+    }
+
+    #[test]
+    fn batch_scene_matches_batch_sprites_with_no_runs() {
+        let loose = vec![sprite(1, 0, 10), sprite(0, 0, 20), sprite(0, 0, 10)];
+        assert_eq!(batch_scene(&loose, &[]), batch_sprites(&loose));
     }
 
     #[test]

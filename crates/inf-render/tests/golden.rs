@@ -20,8 +20,9 @@ use inf_math::FloatingOrigin;
 use inf_render::gizmo::{self, GizmoAxis, GizmoMode};
 use inf_render::golden::{image_diff, within_tolerance};
 use inf_render::{
-    EngineRenderer, GpuContext, HeadlessTarget, LightKind, MeshInstance, RenderLight, RenderScene,
-    RenderView, SpriteInstance, SpriteTextureUpload, HEADLESS_FORMAT,
+    EngineRenderer, GpuContext, HeadlessTarget, LightKind, MeshInstance, RenderChunk, RenderLight,
+    RenderScene, RenderTilemap, RenderView, SpriteInstance, SpriteTextureUpload, TilemapParams,
+    HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -378,4 +379,129 @@ fn golden_sprites_2d() {
     assert!(red, "expected a red sprite checker cell");
     assert!(blue, "expected a blue sprite checker cell");
     assert!(bright, "expected bright sprite checker cells");
+}
+
+/// A `size×size` RGBA atlas of four solid-color quadrants (2×2 grid), laid out
+/// so 1-based tile indices 1..=4 map to top-left, top-right, bottom-left,
+/// bottom-right respectively (row-major, row 0 = the atlas top row).
+fn quad_atlas(size: u32, cells: [[u8; 3]; 4]) -> Vec<u8> {
+    let half = size / 2;
+    let mut v = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let q = (y >= half) as usize * 2 + (x >= half) as usize; // 0=TL,1=TR,2=BL,3=BR
+            let c = cells[q];
+            v.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+    }
+    v
+}
+
+/// 2D tilemap golden (P8.1b): an in-test procedural 4-cell atlas painted across
+/// a patch of tiles that straddles **two** chunks, with one loose sprite on a
+/// higher sorting layer drawn over the tiles (an ordering proof). Exercises the
+/// chunk cull → expansion → prebatched-run → sprite-pass path headlessly
+/// (determinism gate via `check_golden`; strict pixel diff opt-in).
+#[test]
+fn golden_tilemap_2d() {
+    let Some(gpu) = gpu_or_skip() else { return };
+
+    const ATLAS: u64 = 0x71;
+    // 1→red(TL), 2→green(TR), 3→blue(BL), 4→yellow(BR).
+    let atlas = quad_atlas(
+        64,
+        [[220, 40, 40], [40, 200, 60], [60, 90, 220], [230, 210, 40]],
+    );
+
+    let tile = 0.3_f64;
+    let dim = TILE_CHUNK_DIM as f64;
+    let params = TilemapParams {
+        // Place the vertical chunk boundary (global tile x=32) at world x=0 and
+        // the row gy=16 at world y=0, so the painted patch centers on screen.
+        origin: DVec3::new(-dim * tile, -dim * 0.5 * tile, 0.0),
+        tile_size: Vec2::new(tile as f32, tile as f32),
+        atlas_cols: 2,
+        atlas_rows: 2,
+        texture: ATLAS,
+        color: [1.0, 1.0, 1.0, 1.0],
+        sorting_layer: 0,
+        order: 0,
+    };
+
+    // Paint tiles gx∈[28,36) gy∈[14,18): 8×4 = 32 tiles spanning chunk (0,0)
+    // (gx 28..31) and chunk (1,0) (gx 32..35). Index cycles 1..=4.
+    let n = (TILE_CHUNK_DIM * TILE_CHUNK_DIM) as usize;
+    let mut chunk0 = vec![0u32; n];
+    let mut chunk1 = vec![0u32; n];
+    for gy in 14..18i32 {
+        for gx in 28..36i32 {
+            let idx = (((gx + gy).rem_euclid(4)) + 1) as u32;
+            let (cx, lx) = (gx.div_euclid(TILE_CHUNK_DIM), gx.rem_euclid(TILE_CHUNK_DIM));
+            let ly = gy.rem_euclid(TILE_CHUNK_DIM);
+            let slot = (ly * TILE_CHUNK_DIM + lx) as usize;
+            match cx {
+                0 => chunk0[slot] = idx,
+                1 => chunk1[slot] = idx,
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        pending_texture_uploads: vec![SpriteTextureUpload {
+            handle: ATLAS,
+            width: 64,
+            height: 64,
+            rgba8: atlas,
+        }],
+        tilemaps: vec![RenderTilemap {
+            params,
+            chunks: vec![
+                RenderChunk {
+                    coord: (0, 0),
+                    tiles: chunk0,
+                },
+                RenderChunk {
+                    coord: (1, 0),
+                    tiles: chunk1,
+                },
+            ],
+        }],
+        ..Default::default()
+    };
+
+    // A loose magenta sprite on a HIGHER sorting layer, centered over the tiles:
+    // it must draw on top (proving loose-vs-prebatched ordering).
+    scene.sprites.push(SpriteInstance {
+        position: DVec3::new(0.0, 0.0, 0.0),
+        size: Vec2::new(0.8, 0.8),
+        color: [0.95, 0.15, 0.95, 1.0],
+        sorting_layer: 1,
+        ..Default::default()
+    });
+    scene.mark_dirty();
+
+    let img = check_golden(&gpu, "tilemap_2d", &scene, &front_view());
+
+    // At least two distinct atlas cells are visible (proves 1-based indexing +
+    // ≥2 chunks expanded), and the loose magenta sprite paints over the center.
+    let mut red = false;
+    let mut blue = false;
+    let mut magenta = false;
+    for chunk in img.chunks(4) {
+        let (r, g, b) = (chunk[0] as i32, chunk[1] as i32, chunk[2] as i32);
+        if r > 140 && r - g > 80 && r - b > 80 {
+            red = true;
+        }
+        if b > 140 && b - r > 60 && b - g > 40 {
+            blue = true;
+        }
+        if r > 150 && b > 150 && r - g > 60 && b - g > 60 {
+            magenta = true;
+        }
+    }
+    assert!(red, "expected a red tile (atlas cell 1)");
+    assert!(blue, "expected a blue tile (atlas cell 3)");
+    assert!(magenta, "expected the loose magenta sprite over the tiles");
 }

@@ -6,6 +6,8 @@
 //! (`GlobalTransform`, `ComputedVisibility`) are plain components refreshed by
 //! transform propagation.
 
+use std::collections::BTreeMap;
+
 use bevy_ecs::prelude::*;
 use bevy_ecs::reflect::ReflectComponent;
 use bevy_reflect::std_traits::ReflectDefault;
@@ -283,6 +285,290 @@ impl Default for Sprite {
     }
 }
 
+/// Side length (in tiles) of one square [`TileChunk`]. A tilemap stores tiles
+/// in fixed `CHUNK_DIM × CHUNK_DIM` blocks keyed by chunk coordinate, so a huge
+/// (or negative-addressed) map only allocates memory for the regions that are
+/// actually painted, and serialization/iteration stay chunk-granular. Must match
+/// `inf_render_2d::TILE_CHUNK_DIM` (the renderer expands chunks with the same
+/// stride).
+pub const CHUNK_DIM: i32 = 32;
+
+/// Number of tiles in one [`TileChunk`] (`CHUNK_DIM²` = 1024).
+pub const CHUNK_TILES: usize = (CHUNK_DIM * CHUNK_DIM) as usize;
+
+/// Row-major local index of tile `(lx, ly)` within a chunk (`0 ≤ lx,ly < CHUNK_DIM`).
+#[inline]
+fn chunk_index(lx: i32, ly: i32) -> usize {
+    (ly * CHUNK_DIM + lx) as usize
+}
+
+/// Split a global tile coordinate into `(chunk, local)`, correct for negatives
+/// (floored chunk, Euclidean remainder → local always in `0..CHUNK_DIM`).
+#[inline]
+fn split_coord(v: i32) -> (i32, i32) {
+    (v.div_euclid(CHUNK_DIM), v.rem_euclid(CHUNK_DIM))
+}
+
+/// A fixed `CHUNK_DIM × CHUNK_DIM` block of tile indices. `0` = empty; any other
+/// value is a **1-based** index into the tilemap's atlas grid (so cell `0` is
+/// still addressable as index `1`).
+///
+/// Stored as a heap-boxed fixed array (dense within a painted region, cheap to
+/// index). Serde (manual — `serde` only derives arrays up to length 32) writes
+/// it as a flat sequence of `CHUNK_TILES` `u32`s; the chunk map itself is
+/// `#[reflect(ignore)]` on [`Tilemap`], so this type is not reflected.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TileChunk {
+    tiles: Box<[u32; CHUNK_TILES]>,
+}
+
+impl TileChunk {
+    /// An all-empty chunk.
+    pub fn empty() -> Self {
+        Self {
+            tiles: Box::new([0; CHUNK_TILES]),
+        }
+    }
+
+    /// The tile index at local `(lx, ly)` (`0` = empty).
+    pub fn get(&self, lx: i32, ly: i32) -> u32 {
+        self.tiles[chunk_index(lx, ly)]
+    }
+
+    /// Write the tile index at local `(lx, ly)`.
+    pub fn set(&mut self, lx: i32, ly: i32, idx: u32) {
+        self.tiles[chunk_index(lx, ly)] = idx;
+    }
+
+    /// True when every tile is empty (used to drop chunks that were fully erased).
+    pub fn is_empty(&self) -> bool {
+        self.tiles.iter().all(|&t| t == 0)
+    }
+
+    /// The raw row-major tile array (length [`CHUNK_TILES`]); consumed by the
+    /// renderer's chunk expansion.
+    pub fn tiles(&self) -> &[u32] {
+        &self.tiles[..]
+    }
+}
+
+impl Default for TileChunk {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl std::fmt::Debug for TileChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let occupied = self.tiles.iter().filter(|&&t| t != 0).count();
+        f.debug_struct("TileChunk")
+            .field("occupied", &occupied)
+            .finish()
+    }
+}
+
+impl Serialize for TileChunk {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        // Slices serialize as a length-prefixed sequence (bincode) / array (TOML/JSON).
+        self.tiles[..].serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for TileChunk {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v: Vec<u32> = Vec::deserialize(d)?;
+        if v.len() != CHUNK_TILES {
+            return Err(serde::de::Error::invalid_length(
+                v.len(),
+                &"a chunk of CHUNK_TILES (1024) tile indices",
+            ));
+        }
+        let mut tiles = Box::new([0u32; CHUNK_TILES]);
+        tiles.copy_from_slice(&v);
+        Ok(Self { tiles })
+    }
+}
+
+/// Inclusive tile-coordinate bounding box of a tilemap's occupied tiles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TileBounds {
+    pub min_x: i32,
+    pub min_y: i32,
+    pub max_x: i32,
+    pub max_y: i32,
+}
+
+/// A 2D tilemap: a sparse, chunked grid of atlas-indexed tiles rendered as one
+/// batch per occupied chunk by the 2D pass (`inf-render-2d` expansion +
+/// `inf-render` sprite pass).
+///
+/// Tiles are addressed by signed integer grid coordinates and stored in fixed
+/// [`TileChunk`]s (see [`CHUNK_DIM`]) keyed by chunk coordinate in a
+/// `BTreeMap` — deterministic serialization/iteration and memory proportional to
+/// the painted area, not the addressable range. Visibility follows the shared
+/// [`Visibility`]/`ComputedVisibility` components (like sprites/meshes).
+///
+/// Additive component: every field carries `#[serde(default)]` so older levels
+/// still load. The Details grid surfaces the scalar fields only; the chunk map
+/// is `#[reflect(ignore)]` (painting is a dedicated tool, P8.x).
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Tilemap {
+    /// Atlas texture asset GUID; `None` → the renderer's 1×1 white fallback.
+    /// `#[reflect(ignore)]` + serde-persisted, exactly like [`Sprite::texture`].
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub texture: Option<Uuid>,
+    /// World units per tile (width, height) — one tile cell's extent.
+    pub tile_size: Vec2d,
+    /// Atlas grid width in cells: a 1-based tile index maps to atlas cell
+    /// `index - 1`, at `(col, row) = ((index-1) % atlas_cols, (index-1) / atlas_cols)`.
+    #[serde(default = "default_atlas_dim")]
+    pub atlas_cols: u32,
+    /// Atlas grid height in cells.
+    #[serde(default = "default_atlas_dim")]
+    pub atlas_rows: u32,
+    /// Coarse draw bucket (lower draws further back).
+    #[serde(default)]
+    pub sorting_layer: i32,
+    /// Fine ordering within a layer (lower draws further back).
+    #[serde(default)]
+    pub order: i32,
+    /// Linear tint multiplied with every sampled tile texel (straight alpha).
+    pub tint: Color,
+    /// Sparse tile storage: chunk coordinate → its `CHUNK_DIM²` block. Empty
+    /// chunks are never stored (erasing the last tile drops the chunk).
+    ///
+    /// Serialized as a flat, deterministically-ordered sequence of
+    /// `(x, y, chunk)` entries (not a native map) so it encodes in formats that
+    /// forbid non-string map keys — JSON/TOML as well as the `.inf_lvl` bincode
+    /// payload. `BTreeMap` iteration keeps the order stable.
+    #[serde(default, with = "chunk_map_serde")]
+    #[reflect(ignore)]
+    pub chunks: BTreeMap<(i32, i32), TileChunk>,
+}
+
+/// serde adapter: `BTreeMap<(i32,i32), TileChunk>` ⇄ a flat `(x, y, chunk)`
+/// sequence (portable across bincode/TOML/JSON; deterministic via `BTreeMap`).
+mod chunk_map_serde {
+    use super::{BTreeMap, TileChunk};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        map: &BTreeMap<(i32, i32), TileChunk>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let entries: Vec<(i32, i32, &TileChunk)> =
+            map.iter().map(|(&(x, y), c)| (x, y, c)).collect();
+        entries.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<BTreeMap<(i32, i32), TileChunk>, D::Error> {
+        let entries: Vec<(i32, i32, TileChunk)> = Vec::deserialize(d)?;
+        Ok(entries.into_iter().map(|(x, y, c)| ((x, y), c)).collect())
+    }
+}
+
+fn default_atlas_dim() -> u32 {
+    1
+}
+
+impl Default for Tilemap {
+    fn default() -> Self {
+        Self {
+            texture: None,
+            tile_size: Vec2d::ONE,
+            atlas_cols: 1,
+            atlas_rows: 1,
+            sorting_layer: 0,
+            order: 0,
+            tint: Color::WHITE,
+            chunks: BTreeMap::new(),
+        }
+    }
+}
+
+impl Tilemap {
+    /// The tile index at grid coordinate `(x, y)` (`0` = empty). Reads of
+    /// unpainted regions return `0` without allocating.
+    pub fn get_tile(&self, x: i32, y: i32) -> u32 {
+        let (cx, lx) = split_coord(x);
+        let (cy, ly) = split_coord(y);
+        self.chunks
+            .get(&(cx, cy))
+            .map(|c| c.get(lx, ly))
+            .unwrap_or(0)
+    }
+
+    /// Set the tile index at grid coordinate `(x, y)`. `idx == 0` clears the
+    /// tile (and drops the chunk if it becomes empty); a non-zero `idx` is a
+    /// 1-based atlas cell and allocates the chunk on demand.
+    pub fn set_tile(&mut self, x: i32, y: i32, idx: u32) {
+        let (cx, lx) = split_coord(x);
+        let (cy, ly) = split_coord(y);
+        if idx == 0 {
+            if let Some(chunk) = self.chunks.get_mut(&(cx, cy)) {
+                chunk.set(lx, ly, 0);
+                if chunk.is_empty() {
+                    self.chunks.remove(&(cx, cy));
+                }
+            }
+            return;
+        }
+        self.chunks.entry((cx, cy)).or_default().set(lx, ly, idx);
+    }
+
+    /// Clear the tile at grid coordinate `(x, y)` (equivalent to `set_tile(x, y, 0)`).
+    pub fn clear_tile(&mut self, x: i32, y: i32) {
+        self.set_tile(x, y, 0);
+    }
+
+    /// True when no tile is painted anywhere.
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    /// Iterate occupied chunks in deterministic (chunk-coordinate) order.
+    pub fn occupied_chunks(&self) -> impl Iterator<Item = (&(i32, i32), &TileChunk)> {
+        self.chunks.iter()
+    }
+
+    /// Inclusive tile-coordinate bounds of the painted tiles, or `None` when the
+    /// map is empty. Scans occupied tiles (chunk-sparse), so cost is proportional
+    /// to the painted area.
+    pub fn bounds(&self) -> Option<TileBounds> {
+        let mut acc: Option<TileBounds> = None;
+        for (&(cx, cy), chunk) in &self.chunks {
+            for ly in 0..CHUNK_DIM {
+                for lx in 0..CHUNK_DIM {
+                    if chunk.get(lx, ly) == 0 {
+                        continue;
+                    }
+                    let gx = cx * CHUNK_DIM + lx;
+                    let gy = cy * CHUNK_DIM + ly;
+                    acc = Some(match acc {
+                        None => TileBounds {
+                            min_x: gx,
+                            min_y: gy,
+                            max_x: gx,
+                            max_y: gy,
+                        },
+                        Some(b) => TileBounds {
+                            min_x: b.min_x.min(gx),
+                            min_y: b.min_y.min(gy),
+                            max_x: b.max_x.max(gx),
+                            max_y: b.max_y.max(gy),
+                        },
+                    });
+                }
+            }
+        }
+        acc
+    }
+}
+
 #[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum LightKind {
     #[default]
@@ -352,6 +638,104 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: Sprite = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn tilemap_set_get_clear_roundtrips() {
+        let mut tm = Tilemap::default();
+        assert_eq!(tm.get_tile(0, 0), 0);
+        assert!(tm.is_empty());
+
+        tm.set_tile(3, 5, 7);
+        assert_eq!(tm.get_tile(3, 5), 7);
+        assert!(!tm.is_empty());
+        // Setting one tile allocates exactly one chunk.
+        assert_eq!(tm.chunks.len(), 1);
+
+        // Clearing the only tile drops the chunk (memory-sane).
+        tm.clear_tile(3, 5);
+        assert_eq!(tm.get_tile(3, 5), 0);
+        assert!(tm.is_empty());
+        assert_eq!(tm.chunks.len(), 0);
+    }
+
+    #[test]
+    fn tilemap_negative_coords_split_into_distinct_chunks() {
+        let mut tm = Tilemap::default();
+        // (-1, -1) floors to chunk (-1,-1) local (31,31); (0,0) is chunk (0,0).
+        tm.set_tile(-1, -1, 2);
+        tm.set_tile(0, 0, 3);
+        assert_eq!(tm.get_tile(-1, -1), 2);
+        assert_eq!(tm.get_tile(0, 0), 3);
+        assert_eq!(tm.chunks.len(), 2);
+        assert!(tm.chunks.contains_key(&(-1, -1)));
+        assert!(tm.chunks.contains_key(&(0, 0)));
+        // Tiles across the chunk boundary stay independent.
+        assert_eq!(tm.get_tile(-1, 0), 0);
+    }
+
+    #[test]
+    fn tilemap_bounds_span_occupied_tiles_across_chunks() {
+        let mut tm = Tilemap::default();
+        assert_eq!(tm.bounds(), None);
+        tm.set_tile(-2, 4, 1);
+        tm.set_tile(40, 3, 1); // chunk (1,0)
+        tm.set_tile(5, -7, 1); // chunk (0,-1)
+        let b = tm.bounds().unwrap();
+        assert_eq!(
+            b,
+            TileBounds {
+                min_x: -2,
+                min_y: -7,
+                max_x: 40,
+                max_y: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn tile_chunk_serde_roundtrips_full_array() {
+        let mut chunk = TileChunk::empty();
+        chunk.set(0, 0, 11);
+        chunk.set(31, 31, 22);
+        let json = serde_json::to_string(&chunk).unwrap();
+        let back: TileChunk = serde_json::from_str(&json).unwrap();
+        assert_eq!(chunk, back);
+        // A wrong-length payload is rejected.
+        assert!(serde_json::from_str::<TileChunk>("[1,2,3]").is_err());
+    }
+
+    #[test]
+    fn tilemap_serde_roundtrips_with_chunks() {
+        let mut tm = Tilemap {
+            texture: Some(Uuid::from_u128(0xABCD)),
+            tile_size: Vec2d::new(0.5, 0.25),
+            atlas_cols: 4,
+            atlas_rows: 2,
+            sorting_layer: -1,
+            order: 3,
+            tint: Color::new(0.5, 0.6, 0.7, 1.0),
+            chunks: BTreeMap::new(),
+        };
+        tm.set_tile(1, 1, 5);
+        tm.set_tile(100, -50, 8);
+        let json = serde_json::to_string(&tm).unwrap();
+        let back: Tilemap = serde_json::from_str(&json).unwrap();
+        assert_eq!(tm, back);
+    }
+
+    #[test]
+    fn tilemap_defaults_fill_missing_fields() {
+        // A minimal payload (pre-additive-field) reconstructs via serde defaults.
+        let minimal = r#"{
+            "texture": null,
+            "tile_size": { "x": 1.0, "y": 1.0 },
+            "tint": { "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0 }
+        }"#;
+        let tm: Tilemap = serde_json::from_str(minimal).unwrap();
+        assert_eq!(tm, Tilemap::default());
+        assert_eq!(tm.atlas_cols, 1);
+        assert_eq!(tm.atlas_rows, 1);
     }
 
     #[test]

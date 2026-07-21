@@ -11,9 +11,12 @@
 use std::collections::BTreeMap;
 
 use inf_math::FloatingOrigin;
-use inf_render_2d::{batch_sprites, SpriteBatch, SpriteInstance, TextureHandle};
+use inf_render_2d::{
+    aabb_visible, batch_scene, chunk_world_aabb, expand_chunk, PrebatchedRun, SpriteBatch,
+    SpriteInstance, TextureHandle,
+};
 
-use crate::camera::{DEPTH_COMPARE, DEPTH_FORMAT};
+use crate::camera::{RenderView, DEPTH_COMPARE, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
@@ -381,18 +384,23 @@ impl SpriteNode {
 
     /// Ingest any pending texture uploads (dedup by handle), then re-batch +
     /// re-pack the instance buffer when the scene changed or the origin rebased.
+    ///
+    /// Tilemaps are culled + expanded against the **current camera** every frame
+    /// they are present (their visible-chunk set depends on the view), so the
+    /// version/origin gate is bypassed whenever `scene.tilemaps` is non-empty.
     fn sync(&mut self, gpu: &GpuContext, frame: &FrameData) {
         for up in &frame.scene.pending_texture_uploads {
             self.textures.ingest(gpu, up);
         }
 
         let key = (frame.scene.version, frame.view.origin.origin());
-        if self.uploaded_key == Some(key) {
+        if self.uploaded_key == Some(key) && frame.scene.tilemaps.is_empty() {
             return;
         }
         self.uploaded_key = Some(key);
 
-        let batched = batch_sprites(&frame.scene.sprites);
+        let runs = build_tilemap_runs(frame.scene, frame.view);
+        let batched = batch_scene(&frame.scene.sprites, &runs);
         self.batches = batched.batches;
 
         let raw: Vec<SpriteRaw> = batched
@@ -470,6 +478,44 @@ impl RenderNode for SpriteNode {
     }
 }
 
+/// Cull each tilemap's chunks against `view` and expand the visible ones into
+/// prebatched sprite runs (one run per occupied, on-screen chunk). Runs are
+/// emitted in tilemap order (then chunk order), which `batch_scene` treats as
+/// the deterministic tie-break for equal `(layer, order)`.
+fn build_tilemap_runs(scene: &crate::scene::RenderScene, view: &RenderView) -> Vec<PrebatchedRun> {
+    if scene.tilemaps.is_empty() {
+        return Vec::new();
+    }
+    let view_proj = view.view_proj();
+    let origin = &view.origin;
+    let mut runs = Vec::new();
+    for tm in &scene.tilemaps {
+        // Margin so a chunk straddling a screen edge isn't popped early.
+        let margin = glam::Vec3::splat(tm.params.tile_size.max_element());
+        for chunk in &tm.chunks {
+            let (wmin, wmax) = chunk_world_aabb(&tm.params, chunk.coord);
+            // Floating-origin rebase to render-local (a pure translation, so it
+            // preserves the min/max ordering).
+            let lmin = origin.to_render(wmin) - margin;
+            let lmax = origin.to_render(wmax) + margin;
+            if !aabb_visible(lmin, lmax, &view_proj) {
+                continue;
+            }
+            let mut instances = Vec::new();
+            expand_chunk(&tm.params, chunk, &mut instances);
+            if !instances.is_empty() {
+                runs.push(PrebatchedRun {
+                    texture: tm.params.texture,
+                    sorting_layer: tm.params.sorting_layer,
+                    order: tm.params.order,
+                    instances,
+                });
+            }
+        }
+    }
+    runs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +555,68 @@ mod tests {
         assert_eq!(mip_levels(1, 1), 1);
         assert_eq!(mip_levels(8, 8), 4); // 8,4,2,1
         assert_eq!(mip_levels(256, 64), 9); // driven by the larger side
+    }
+
+    #[test]
+    fn build_runs_culls_offscreen_chunks_and_skips_empty() {
+        use crate::scene::RenderScene;
+        use inf_render_2d::{RenderChunk, RenderTilemap, TilemapParams, TILE_CHUNK_DIM};
+
+        let view = RenderView {
+            origin: FloatingOrigin::new(DVec3::ZERO),
+            eye_world: DVec3::new(0.0, 0.0, 6.0),
+            forward: glam::Vec3::NEG_Z,
+            up: glam::Vec3::Y,
+            fov_y: 60f32.to_radians(),
+            near: 0.05,
+            width: 320,
+            height: 180,
+        };
+        let params = TilemapParams {
+            origin: DVec3::new(-1.0, -1.0, 0.0),
+            tile_size: glam::Vec2::new(0.1, 0.1),
+            atlas_cols: 1,
+            atlas_rows: 1,
+            texture: 0xA1,
+            color: [1.0; 4],
+            sorting_layer: 0,
+            order: 0,
+        };
+        let n = (TILE_CHUNK_DIM * TILE_CHUNK_DIM) as usize;
+        // Chunk (0,0): one painted tile near the origin → on-screen.
+        let mut near_tiles = vec![0u32; n];
+        near_tiles[0] = 1;
+        // Chunk (1000,0): painted but far off to the right → culled.
+        let mut far_tiles = vec![0u32; n];
+        far_tiles[0] = 1;
+        // Chunk (0,1): entirely empty → produces no run even if on-screen.
+        let empty_tiles = vec![0u32; n];
+
+        let scene = RenderScene {
+            tilemaps: vec![RenderTilemap {
+                params,
+                chunks: vec![
+                    RenderChunk {
+                        coord: (0, 0),
+                        tiles: near_tiles,
+                    },
+                    RenderChunk {
+                        coord: (1000, 0),
+                        tiles: far_tiles,
+                    },
+                    RenderChunk {
+                        coord: (0, 1),
+                        tiles: empty_tiles,
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+
+        let runs = build_tilemap_runs(&scene, &view);
+        // Only the near, non-empty chunk survives.
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].texture, 0xA1);
+        assert_eq!(runs[0].instances.len(), 1);
     }
 }

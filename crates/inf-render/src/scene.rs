@@ -8,7 +8,9 @@ use glam::{DVec3, Quat, Vec3};
 
 use crate::debug_draw::DebugDraw;
 
-pub use inf_render_2d::{SpriteInstance, TextureHandle};
+pub use inf_render_2d::{
+    PrebatchedRun, RenderChunk, RenderTilemap, SpriteInstance, TextureHandle, TilemapParams,
+};
 
 /// A one-shot request to upload an RGBA8 texture into the sprite pass's GPU
 /// cache, keyed by [`TextureHandle`]. The pass dedups by handle, so re-listing
@@ -116,11 +118,18 @@ pub struct RenderScene {
     pub lights: Vec<RenderLight>,
     /// 2D sprites (batched + drawn by the sprite pass over the 3D scene).
     pub sprites: Vec<SpriteInstance>,
+    /// 2D tilemaps (P8.1b). The sprite pass culls each tilemap's chunks against
+    /// the camera and expands the visible ones into prebatched sprite runs, then
+    /// batches them together with the loose `sprites`. Because culling depends on
+    /// the live camera, the pass re-expands tilemaps every frame (not gated by
+    /// `version`) while any tilemap is present — a documented v1 cost (a
+    /// camera-delta / dirty-region optimization is a follow-up).
+    pub tilemaps: Vec<RenderTilemap>,
     /// Textures to hand to the sprite pass's GPU cache (drained/deduped by
     /// handle). The host populates this once per newly-referenced texture.
     pub pending_texture_uploads: Vec<SpriteTextureUpload>,
-    /// Bump on every change to `instances`/`lights`/`sprites` — gates buffer
-    /// re-upload.
+    /// Bump on every change to `instances`/`lights`/`sprites`/`tilemaps` — gates
+    /// buffer re-upload (tilemaps additionally re-expand per frame for culling).
     pub version: u64,
     pub sky: SkyParams,
     pub grid_enabled: bool,
