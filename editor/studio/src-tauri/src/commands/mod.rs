@@ -13,6 +13,7 @@ mod material;
 mod project;
 mod scene;
 mod search;
+mod sorting;
 mod terminal;
 mod viewport;
 
@@ -59,6 +60,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         scene::scene_create,
         scene::scene_spawn_asset,
         scene::scene_apply_material,
+        scene::scene_apply_sprite_slice,
         scene::scene_delete,
         scene::scene_rename,
         scene::scene_reparent,
@@ -86,6 +88,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         assets::asset_data_save,
         assets::asset_table_import,
         assets::asset_rust_source,
+        assets::texture_get_slices,
+        assets::texture_set_slices,
+        sorting::layers_get,
+        sorting::layers_set,
         project::project_templates,
         project::project_recent,
         project::project_current,

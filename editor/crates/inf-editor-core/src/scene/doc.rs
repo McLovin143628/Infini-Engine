@@ -11,9 +11,10 @@
 //! entity ids are reused across despawn and never serialized.
 
 use inf_ecs::components::{
-    Camera, Light, LightKind, Material, MeshRef, Primitive, Transform, Visibility,
+    AtlasRect, Camera, Light, LightKind, Material, MeshRef, Primitive, Sprite, Transform,
+    Visibility,
 };
-use inf_ecs::{ComputedVisibility, EcsWorld, Entity, PropValue};
+use inf_ecs::{ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d};
 use uuid::Uuid;
 
 use crate::ipc::{SceneNode, SceneSnapshot, SpawnKind};
@@ -330,6 +331,29 @@ impl SceneDoc {
         }
     }
 
+    /// Read an entity's [`Sprite`] component (the fields — `texture`,
+    /// `atlas_rect` — that the reflection Details grid can't reach).
+    pub(crate) fn raw_get_sprite(&self, guid: Uuid) -> Option<Sprite> {
+        let e = self.world.entity_of(guid)?;
+        self.world.world().get::<Sprite>(e).cloned()
+    }
+
+    /// Insert (`Some`) or remove (`None`) an entity's [`Sprite`] component.
+    pub(crate) fn raw_set_sprite(&mut self, guid: Uuid, sprite: Option<Sprite>) {
+        if let Some(e) = self.world.entity_of(guid) {
+            match sprite {
+                Some(s) => {
+                    self.world.world_mut().entity_mut(e).insert(s);
+                }
+                None => {
+                    self.world.world_mut().entity_mut(e).remove::<Sprite>();
+                }
+            }
+            self.world.mark_dirty();
+            self.touch();
+        }
+    }
+
     /// Recreate an entity from a serialized record at order slot `at`.
     pub(crate) fn raw_spawn_record(&mut self, rec: &EntityRecord, at: usize) {
         let e = self.spawn_bare(rec.guid, &rec.name, rec.parent);
@@ -573,6 +597,55 @@ impl SceneDoc {
         applied
     }
 
+    /// Apply a sprite-sheet slice to each target's [`Sprite`] component as one
+    /// undo step (P8.2a "Apply to Selection"). A target without a `Sprite` gets
+    /// one inserted (defaults + the slice); an existing one keeps its other
+    /// fields (pivot, color, sorting layer, flips). `size`, when `Some`, sets the
+    /// quad extent from the slice's pixel aspect. Returns how many were updated.
+    pub fn edit_apply_sprite_slice(
+        &mut self,
+        targets: &[Uuid],
+        texture: Option<uuid::Uuid>,
+        uv_min: [f64; 2],
+        uv_max: [f64; 2],
+        size: Option<[f64; 2]>,
+    ) -> usize {
+        let atlas_rect = AtlasRect {
+            min: Vec2d::new(uv_min[0], uv_min[1]),
+            max: Vec2d::new(uv_max[0], uv_max[1]),
+        };
+        self.begin_transaction("Apply Sprite Slice");
+        let mut applied = 0;
+        for &g in targets {
+            if self.world.entity_of(g).is_none() {
+                continue;
+            }
+            let before = self.raw_get_sprite(g);
+            let mut sprite = before.clone().unwrap_or_default();
+            sprite.texture = texture;
+            sprite.atlas_rect = atlas_rect;
+            if let Some(sz) = size {
+                sprite.size = Vec2d::new(sz[0], sz[1]);
+            }
+            let after = Some(sprite);
+            if before == after {
+                continue;
+            }
+            self.raw_set_sprite(g, after.clone());
+            self.history.record(
+                "Apply Sprite Slice",
+                EditCommand::SetSprite {
+                    guid: g,
+                    before,
+                    after,
+                },
+            );
+            applied += 1;
+        }
+        self.commit_transaction();
+        applied
+    }
+
     // ── history control ──────────────────────────────────────────────────
 
     /// Open an undo transaction; every recorded edit until [`Self::commit_transaction`]
@@ -727,6 +800,9 @@ fn kind_of(world: &EcsWorld, e: Entity) -> String {
     if w.get::<MeshRef>(e).is_some() {
         return "Static Mesh".to_string();
     }
+    if w.get::<Sprite>(e).is_some() {
+        return "Sprite".to_string();
+    }
     // No renderable payload: a folder if it has children, else a plain actor.
     if !world.children_of(e).is_empty() {
         "Folder".to_string()
@@ -851,6 +927,35 @@ mod tests {
             doc.prop_value(cube, tp, "metallic"),
             Some(PropValue::Number(0.0))
         );
+    }
+
+    #[test]
+    fn apply_sprite_slice_inserts_and_undoes_as_one_step() {
+        let mut doc = SceneDoc::new();
+        let e = doc.create(SpawnKind::Empty, "Sprite", None);
+        assert!(doc.raw_get_sprite(e).is_none(), "no sprite to start");
+
+        let tex = uuid::Uuid::from_u128(0xABCD);
+        let applied =
+            doc.edit_apply_sprite_slice(&[e], Some(tex), [0.25, 0.5], [0.5, 1.0], Some([2.0, 1.0]));
+        assert_eq!(applied, 1);
+        let s = doc.raw_get_sprite(e).expect("sprite inserted");
+        assert_eq!(s.texture, Some(tex));
+        assert_eq!(
+            s.atlas_rect,
+            AtlasRect {
+                min: Vec2d::new(0.25, 0.5),
+                max: Vec2d::new(0.5, 1.0),
+            }
+        );
+        assert_eq!(s.size, Vec2d::new(2.0, 1.0));
+        assert_eq!(doc.kind_of_guid(e), "Sprite");
+
+        // One undo removes the whole Sprite (it didn't exist before).
+        assert!(doc.undo());
+        assert!(doc.raw_get_sprite(e).is_none(), "undo removes the sprite");
+        assert!(doc.redo());
+        assert_eq!(doc.raw_get_sprite(e).unwrap().texture, Some(tex));
     }
 
     #[test]

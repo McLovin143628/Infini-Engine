@@ -106,6 +106,7 @@ export const MENU_BAR: TopMenu[] = [
       act("window.search", "Search"),
       act("window.worldSettings", "World Settings"),
       act("window.placeActors", "Place Actors"),
+      act("window.sortingLayers", "Sorting Layers…"),
       sep,
       sub("Load Layout", [
         act("window.layout.default", "Default Editor Layout"),

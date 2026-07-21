@@ -9,6 +9,7 @@ import TitleBar from "./shell/TitleBar";
 import MainToolbar from "./shell/MainToolbar";
 import StatusBar from "./shell/StatusBar";
 import LayoutDialog from "./shell/LayoutDialog";
+import SortingLayersDialog from "./shell/SortingLayersDialog";
 import ContentDrawer from "./shell/ContentDrawer";
 import CommandPalette from "./shell/CommandPalette";
 import StartScreen from "./shell/StartScreen";
@@ -137,6 +138,7 @@ export default function App() {
       <ContentDrawer />
       <StatusBar />
       <LayoutDialog />
+      <SortingLayersDialog />
       <CommandPalette />
       <StartScreen />
     </div>

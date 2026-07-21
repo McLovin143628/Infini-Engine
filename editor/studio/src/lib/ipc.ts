@@ -34,7 +34,9 @@ import type { RecentProjectDto } from "../bindings/RecentProjectDto";
 import type { SearchHitDto } from "../bindings/SearchHitDto";
 import type { SearchOptsDto } from "../bindings/SearchOptsDto";
 import type { SceneSnapshot } from "../bindings/SceneSnapshot";
+import type { SortingLayerDto } from "../bindings/SortingLayerDto";
 import type { SpawnKind } from "../bindings/SpawnKind";
+import type { SpriteSheetDto } from "../bindings/SpriteSheetDto";
 import type { ViewportDrop } from "../bindings/ViewportDrop";
 import type { ViewportRect } from "../bindings/ViewportRect";
 
@@ -55,7 +57,9 @@ export type {
   SearchHitDto,
   SearchOptsDto,
   SceneSnapshot,
+  SortingLayerDto,
   SpawnKind,
+  SpriteSheetDto,
   ViewportDrop,
   ViewportRect,
 };
@@ -153,6 +157,41 @@ export const scene = {
    */
   applyMaterial: (assetId: string, targets: string[] | null = null): Promise<number> =>
     invoke<number>("scene_apply_material", { assetId, targets }),
+  /**
+   * Apply a texture's sprite-sheet slice to entities (P8.2a). `slice` is a
+   * resolved slice name (grid cells are index-named "0","1",…; manual rects use
+   * their names). `resizeToSlice` sets the quad size from the slice's pixel
+   * aspect. `targets` defaults to the current selection; resolves to how many
+   * entities were updated.
+   */
+  applySpriteSlice: (
+    assetId: string,
+    slice: string,
+    resizeToSlice: boolean,
+    targets: string[] | null = null,
+  ): Promise<number> =>
+    invoke<number>("scene_apply_sprite_slice", { assetId, slice, targets, resizeToSlice }),
+};
+
+/**
+ * Sprite-sheet slicing (P8.2a). A texture asset's slice model is persisted into
+ * its sidecar; the Sprite Sheet panel reads it, edits it live, and saves.
+ */
+export const texture = {
+  getSlices: (id: string): Promise<SpriteSheetDto> =>
+    invoke<SpriteSheetDto>("texture_get_slices", { id }),
+  setSlices: (slices: SpriteSheetDto): Promise<void> =>
+    invoke("texture_set_slices", { slices }),
+};
+
+/**
+ * Sorting-layer registry (P8.2a): a per-project map of `i32` layer ids → names,
+ * managed from the "Sorting Layers" dialog. `set` returns the normalized list.
+ */
+export const layers = {
+  get: (): Promise<SortingLayerDto[]> => invoke<SortingLayerDto[]>("layers_get"),
+  set: (rows: SortingLayerDto[]): Promise<SortingLayerDto[]> =>
+    invoke<SortingLayerDto[]>("layers_set", { layers: rows }),
 };
 
 /**

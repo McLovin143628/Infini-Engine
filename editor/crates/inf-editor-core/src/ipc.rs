@@ -421,6 +421,61 @@ pub struct SearchOptsDto {
     pub case_sensitive: bool,
 }
 
+// ── Sprite-sheet slicing (P8.2a) ─────────────────────────────────────────
+//
+// A texture asset's slice model round-trips through `texture_get_slices` /
+// `texture_set_slices`, which persist it into the texture's TOML sidecar. The
+// Sprite Sheet panel draws the grid overlay live (computing UVs in JS from these
+// pixel params) and applies a chosen slice to the selection via
+// `scene_apply_sprite_slice`. All slicing values are in texture pixels.
+
+/// Uniform-grid slicing parameters (texture pixels). `margin_*` is a single
+/// top-left offset; `padding_*` is the inter-cell gap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SpriteGridDto {
+    pub columns: u32,
+    pub rows: u32,
+    pub margin_x: u32,
+    pub margin_y: u32,
+    pub padding_x: u32,
+    pub padding_y: u32,
+}
+
+/// One named manual rectangle (texture pixels, top-left origin).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SpriteRectDto {
+    pub name: String,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A texture's full slice model plus its pixel dimensions (`texture_get_slices`;
+/// also the payload of `texture_set_slices`, where the dimensions are ignored).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SpriteSheetDto {
+    /// The texture asset GUID this model belongs to.
+    pub texture_id: String,
+    /// Grid definition, or `None` when the sheet is manual-only.
+    pub grid: Option<SpriteGridDto>,
+    /// Named manual rectangles.
+    pub manual: Vec<SpriteRectDto>,
+    /// Texture width/height in pixels (read from the payload; drives the overlay).
+    pub tex_width: u32,
+    pub tex_height: u32,
+}
+
+// ── Sorting layers (P8.2a) ───────────────────────────────────────────────
+
+/// One named sorting layer (`layers_get` / `layers_set`). `id` is the raw `i32`
+/// the `Sprite.sorting_layer` field stores.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SortingLayerDto {
+    pub id: i32,
+    pub name: String,
+}
+
 /// One `search_workspace` hit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct SearchHitDto {

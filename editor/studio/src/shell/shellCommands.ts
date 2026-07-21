@@ -75,6 +75,11 @@ export function bootstrapShellCommands(): void {
   setCommandHandler("window.worldSettings", panelToggle("worldSettings"));
   setCommandHandler("window.placeActors", panelToggle("placeActors"));
 
+  // Sorting-layer manager dialog (P8.2a).
+  setCommandHandler("window.sortingLayers", () => {
+    useShellStore.getState().setSortingLayersOpen(true);
+  });
+
   // Command palette + Content Drawer (P1.4).
   setCommandHandler("tools.commandPalette", () => {
     useShellStore.getState().setPaletteOpen(true);

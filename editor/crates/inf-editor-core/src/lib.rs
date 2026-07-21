@@ -7,4 +7,5 @@ pub mod ipc;
 pub mod layouts;
 pub mod pie;
 pub mod scene;
+pub mod sorting;
 pub mod thumbnail;

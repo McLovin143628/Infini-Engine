@@ -14,6 +14,8 @@ interface ShellState {
   statusMessage: string | null;
   /** Which layout dialog is open (Window ▸ Save/Load Layout). */
   layoutDialog: LayoutDialogKind;
+  /** Sorting-layer manager dialog open (Window ▸ Sorting Layers…, P8.2a). */
+  sortingLayersOpen: boolean;
   /** Content Drawer slide-up (P1.4.3). */
   drawerOpen: boolean;
   /** Command palette overlay (P1.4.5). */
@@ -22,6 +24,7 @@ interface ShellState {
   clearStatus: () => void;
   openLayoutDialog: (kind: Exclude<LayoutDialogKind, null>) => void;
   closeLayoutDialog: () => void;
+  setSortingLayersOpen: (open: boolean) => void;
   setDrawerOpen: (open: boolean) => void;
   toggleDrawer: () => void;
   setPaletteOpen: (open: boolean) => void;
@@ -32,6 +35,7 @@ let statusTimer: ReturnType<typeof setTimeout> | undefined;
 export const useShellStore = create<ShellState>((set) => ({
   statusMessage: null,
   layoutDialog: null,
+  sortingLayersOpen: false,
   drawerOpen: false,
   paletteOpen: false,
   pushStatus: (message, ttlMs = 4000) => {
@@ -45,6 +49,7 @@ export const useShellStore = create<ShellState>((set) => ({
   },
   openLayoutDialog: (kind) => set({ layoutDialog: kind }),
   closeLayoutDialog: () => set({ layoutDialog: null }),
+  setSortingLayersOpen: (sortingLayersOpen) => set({ sortingLayersOpen }),
   setDrawerOpen: (drawerOpen) => set({ drawerOpen }),
   toggleDrawer: () => set((s) => ({ drawerOpen: !s.drawerOpen })),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),

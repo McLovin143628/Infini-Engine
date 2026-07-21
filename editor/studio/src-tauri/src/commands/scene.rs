@@ -198,6 +198,59 @@ pub async fn scene_apply_material(
     Ok(applied)
 }
 
+/// Apply a texture's sprite-sheet slice to entities (Sprite Sheet panel "Apply
+/// to Selection", P8.2a). Sets `Sprite.texture` + `Sprite.atlas_rect` (and,
+/// when `resize_to_slice`, `Sprite.size` from the slice's pixel aspect) on the
+/// targets (or the current selection) as one undo transaction. `slice` is a
+/// resolved slice name (grid cells are index-named "0","1",…; manual rects use
+/// their names). Returns how many entities were updated.
+#[tauri::command]
+pub async fn scene_apply_sprite_slice(
+    app: AppHandle,
+    state: State<'_, SceneState>,
+    assets: State<'_, super::assets::AssetState>,
+    asset_id: String,
+    slice: String,
+    targets: Option<Vec<String>>,
+    resize_to_slice: bool,
+) -> Result<usize, String> {
+    let id = asset_id
+        .parse::<inf_asset::AssetId>()
+        .map_err(|e| e.to_string())?;
+    let (slices, w, h) = assets.read_sprite_slices(id)?;
+    let resolved = slices.resolve(w, h);
+    let hit = resolved
+        .iter()
+        .find(|s| s.name == slice)
+        .ok_or_else(|| format!("no slice `{slice}` in this sprite sheet"))?;
+
+    // Opt-in resize: a unit-height quad whose width matches the slice's aspect.
+    let size = if resize_to_slice {
+        let ph = hit.px[3].max(1) as f64;
+        Some([hit.px[2] as f64 / ph, 1.0])
+    } else {
+        None
+    };
+    let uv_min = hit.uv_min;
+    let uv_max = hit.uv_max;
+
+    let applied = {
+        let mut doc = lock(&state.doc)?;
+        let targets: Vec<Uuid> = match targets {
+            Some(list) => list
+                .iter()
+                .filter_map(|s| Uuid::parse_str(s).ok())
+                .collect(),
+            None => doc.selection().to_vec(),
+        };
+        doc.edit_apply_sprite_slice(&targets, Some(id.uuid()), uv_min, uv_max, size)
+    };
+    if applied > 0 {
+        emit_world_delta(&app, &state);
+    }
+    Ok(applied)
+}
+
 #[tauri::command]
 pub async fn scene_delete(
     app: AppHandle,

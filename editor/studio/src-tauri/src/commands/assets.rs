@@ -11,9 +11,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use inf_asset::{AssetChange, AssetId, AssetKind, AssetWatcher};
-use inf_editor_core::assets::{data, snapshot, AssetProject, ImportProgress, ImportQueue};
+use inf_editor_core::assets::{
+    data, snapshot, sprite_sheet, AssetProject, ImportProgress, ImportQueue,
+};
 use inf_editor_core::ipc::{
     AssetChanged, AssetRefDto, AssetSnapshot, DataAssetDto, DeleteResult, ImportEventDto,
+    SpriteSheetDto,
 };
 use inf_editor_core::thumbnail::{ThumbnailCache, Thumbnailer};
 use inf_material::MaterialAsset;
@@ -79,6 +82,34 @@ impl AssetState {
             let dir = proj.content_dir("materials").map_err(|e| e.to_string())?;
             proj.write_asset(&dir, name, &inst, None, inst.dependencies(), None)
                 .map_err(|e| e.to_string())
+        })
+    }
+
+    /// The current content-root directory (where per-project editor metadata —
+    /// e.g. the sorting-layer registry — is stored). `None` before boot.
+    pub fn content_root(&self) -> Option<PathBuf> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        Some(proj.root().to_path_buf())
+    }
+
+    /// Read a texture's sprite-sheet slice model + pixel dimensions (P8.2a).
+    pub fn read_sprite_slices(
+        &self,
+        id: AssetId,
+    ) -> Result<(sprite_sheet::SpriteSheetSlices, u32, u32), String> {
+        self.with_project(|proj| sprite_sheet::read_slices(proj, id).map_err(|e| e.to_string()))
+    }
+
+    /// Persist a texture's sprite-sheet slice model into its sidecar (P8.2a).
+    pub fn write_sprite_slices(
+        &self,
+        id: AssetId,
+        slices: &sprite_sheet::SpriteSheetSlices,
+    ) -> Result<(), String> {
+        self.with_project(|proj| {
+            sprite_sheet::write_slices(proj, id, slices).map_err(|e| e.to_string())
         })
     }
 
@@ -531,6 +562,35 @@ pub async fn asset_set_tags(
 ) -> Result<(), String> {
     let id = parse_id(&id)?;
     state.with_project(|p| p.set_tags(id, tags).map_err(|e| e.to_string()))?;
+    emit_changed(&app, &state);
+    Ok(())
+}
+
+// ── sprite-sheet slicing (P8.2a) ─────────────────────────────────────────────
+
+/// Read a texture's sprite-sheet slice model + pixel dimensions (the Sprite
+/// Sheet panel loads this to draw the grid overlay and list slices).
+#[tauri::command]
+pub async fn texture_get_slices(
+    id: String,
+    state: State<'_, AssetState>,
+) -> Result<SpriteSheetDto, String> {
+    let asset_id = parse_id(&id)?;
+    let (slices, w, h) = state.read_sprite_slices(asset_id)?;
+    Ok(slices.to_dto(id, w, h))
+}
+
+/// Persist a texture's sprite-sheet slice model into its sidecar (deterministic
+/// TOML, merged beside the texture-import settings). Emits `assets://changed`.
+#[tauri::command]
+pub async fn texture_set_slices(
+    app: AppHandle,
+    slices: SpriteSheetDto,
+    state: State<'_, AssetState>,
+) -> Result<(), String> {
+    let asset_id = parse_id(&slices.texture_id)?;
+    let model = sprite_sheet::SpriteSheetSlices::from_dto(&slices);
+    state.write_sprite_slices(asset_id, &model)?;
     emit_changed(&app, &state);
     Ok(())
 }

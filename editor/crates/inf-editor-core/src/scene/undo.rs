@@ -7,7 +7,7 @@
 //! commits a single undo entry (P3.4.2). Structural inverses (create/delete)
 //! reuse the P3.5 [`EntityRecord`] so a deleted subtree round-trips exactly.
 
-use inf_ecs::components::Transform;
+use inf_ecs::components::{Sprite, Transform};
 use inf_ecs::PropValue;
 use uuid::Uuid;
 
@@ -53,6 +53,14 @@ pub(crate) enum EditCommand {
         before: PropValue,
         after: PropValue,
     },
+    /// Whole-component `Sprite` swap (P8.2a). The `Sprite` fields the slicer
+    /// writes (`texture`, `atlas_rect`) aren't reflection-addressable, so the
+    /// component round-trips as a value; `None` means "no `Sprite` component".
+    SetSprite {
+        guid: Uuid,
+        before: Option<Sprite>,
+        after: Option<Sprite>,
+    },
 }
 
 impl EditCommand {
@@ -75,6 +83,9 @@ impl EditCommand {
                 ..
             } => {
                 doc.raw_write_prop(*guid, type_path, field, after);
+            }
+            EditCommand::SetSprite { guid, after, .. } => {
+                doc.raw_set_sprite(*guid, after.clone());
             }
         }
     }
@@ -106,6 +117,9 @@ impl EditCommand {
                 ..
             } => {
                 doc.raw_write_prop(*guid, type_path, field, before);
+            }
+            EditCommand::SetSprite { guid, before, .. } => {
+                doc.raw_set_sprite(*guid, before.clone());
             }
         }
     }

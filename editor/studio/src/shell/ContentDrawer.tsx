@@ -43,6 +43,7 @@ import { executeCommand } from "../lib/commands";
 import { scene as sceneIpc } from "../lib/ipc";
 import { useDockLayout } from "../panels/dock/dockLayoutStore";
 import { useShellStore } from "../stores/shellStore";
+import { useSpriteSheetStore } from "../stores/spriteSheetStore";
 import {
   childFolders,
   importViaDialog,
@@ -134,6 +135,11 @@ export default function ContentDrawer() {
     if (DATA_KINDS.has(asset.kind)) openEditor(asset.id);
     else if (asset.kind === "material")
       useDockLayout.getState().openPanel("material"); // P7.2 material editor
+    else if (asset.kind === "texture") {
+      // P8.2a: open the Sprite Sheet slicer bound to this texture.
+      void useSpriteSheetStore.getState().open(asset.id);
+      useDockLayout.getState().openPanel("spriteSheet");
+    }
   };
 
   // Kinds present, for the filter column.

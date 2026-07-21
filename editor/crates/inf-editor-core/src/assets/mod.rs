@@ -10,6 +10,7 @@ pub mod data;
 pub mod import;
 pub mod queue;
 pub mod snapshot;
+pub mod sprite_sheet;
 pub mod table_import;
 
 use std::path::{Path, PathBuf};
@@ -185,6 +186,24 @@ impl AssetProject {
         });
         self.bump();
         Ok(new_id)
+    }
+
+    /// Replace an asset's sidecar metadata in the DB and on disk, re-deriving
+    /// dependency edges from it. Bumps the content version. Used by the
+    /// sprite-sheet slicer to persist slices into the `import` table without
+    /// touching the payload (P8.2a).
+    pub fn replace_sidecar(&mut self, id: AssetId, sidecar: AssetSidecar) -> Result<()> {
+        let entry = self.db.get(id).ok_or(AssetError::UnknownAsset(id))?;
+        let path = entry.path.clone();
+        let name = entry.name.clone();
+        self.db.insert(AssetEntry {
+            sidecar,
+            path,
+            name,
+        });
+        self.db.persist(id)?;
+        self.bump();
+        Ok(())
     }
 
     /// Set an asset's tags (persisted).
