@@ -60,9 +60,22 @@ fn fixture_dylibs() -> &'static (PathBuf, PathBuf) {
                 }
             }
         }
+        // Copy the built artifacts into a process-private directory and load
+        // from those copies. nextest runs each test in its own process, so
+        // several of these test binaries invoke `cargo build` concurrently and
+        // may re-touch the shared `target/` dylibs; loading from a private copy
+        // makes the fixtures immune to a rebuild tearing the file mid-read
+        // (an intermittent macOS-only `dlopen` failure otherwise).
+        let stash = std::env::temp_dir().join(format!("inf-hotreload-fix-{}", std::process::id()));
+        std::fs::create_dir_all(&stash).expect("create fixture stash");
+        let stable = |src: PathBuf| -> PathBuf {
+            let dst = stash.join(src.file_name().expect("dylib file name"));
+            std::fs::copy(&src, &dst).expect("copy fixture dylib");
+            dst
+        };
         (
-            v1.expect("no v1 dylib in cargo output"),
-            v2.expect("no v2 dylib in cargo output"),
+            stable(v1.expect("no v1 dylib in cargo output")),
+            stable(v2.expect("no v2 dylib in cargo output")),
         )
     })
 }
