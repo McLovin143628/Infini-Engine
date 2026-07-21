@@ -1,0 +1,24 @@
+# ── Byte-exact engine assets ────────────────────────────────────────────────
+# Committed .inf_* payloads are locked byte-for-byte by tests (generator locks,
+# forever-load schema fixtures, golden scenes). Line-ending conversion on
+# checkout would silently break those locks on Windows (it did: Coyote.inf_act
+# is JSON text, and autocrlf checkout CRLF'd it under the Windows CI runner).
+# Never let git touch them.
+*.inf_lvl -text
+*.inf_act -text
+*.inf_fn -text
+*.inf_mat -text
+*.inf_mati -text
+*.inf_tex -text
+*.inf_pcg -text
+*.inf_enum -text
+*.inf_struct -text
+*.inf_table -text
+*.inf_anim -text
+*.inf_skel -text
+*.inf_sm -text
+*.png -text
+
+# TOML (asset sidecars included) participates in byte-determinism tests and is
+# always emitted with LF; check it out that way everywhere.
+*.toml text eol=lf
