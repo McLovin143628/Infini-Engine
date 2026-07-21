@@ -626,6 +626,42 @@ with Blueprint coyote-time jump plays in-viewport via interpreter.
 the platformer packages to a double-clickable exe on Windows/macOS/Linux; a deliberate PIE
 panic loses no editor state.
 
+> **STATUS: Phase 9 COMPLETE** (2026-07-21), CI-green on all three OSes. The make→play→ship
+> loop is closed. **P9.1**: the parallel `bevy_ecs` `Schedule` behind the facade
+> (`multi_threaded`; phase-set sync points; command-buffer-only structural changes;
+> `conflict_report()` discipline check) with the §8 replay gate REAL — serial == parallel
+> byte-identical across pool sizes 1/2/8 via subprocess probes, verified on CI on all three
+> OSes; headless `GameLoop` (fixed step + interpolation alpha, no wall clock); rapier3d-f64
+> facade mirroring d2 (incl. trimesh) + ECS wiring + 3D debug outlines; kira audio (device
+> backend feature-gated so CI never links ALSA/dbus; headless-consistent fallback tested);
+> inf-input action/axis maps (pure edge/deadzone core; gilrs behind a feature). **P9.2**:
+> deterministic `.inf_pack` (GUID-sorted index, xxh3-verified reads, zstd, byte-identical
+> rebuilds); dependency-closure cook with handler-anchored blueprint IR validation; the
+> runtime `.inf_lvl` reader lives in `inf-scene` (byte-lockstep with the editor codec,
+> proven on committed bytes — rings intact); `inf cook`/`inf pack ls`; Build ▸ Package
+> dialog. **Schema v3**: physics components + actor bindings + level settings persist
+> (frozen-v2 fixtures, v1→v2→v3 lift in both codecs); cook follows actor dep edges;
+> **gameplay runs off a real cooked pack** (trace-proven: differs from a no-actor bake,
+> scripted input moves the character). **P9.3**: standalone winit player (full render
+> stack, editor-free RuntimeSim, InputMap); `--headless --run-frames N --assert-exit` with
+> crash.txt capture + xxh3 determinism; **cooked == uncooked trace identity**. **P9.5**:
+> `inf export` → runnable folder (renamed player + pack + player.toml boot config + honest
+> PACKAGING.txt — no faked installers/notarization); the exported exe boots its own content
+> with zero args (tested); the §8 cook-and-run smoke runs on every push on all three OSes.
+> **P9.4**: PIE protocol v2 (versioned LE frames) streams the live unsaved doc + bound
+> classes to a spawned player that builds the world through the same code as the pack path
+> — **PIE == shipping proven byte-identical over a real subprocess**; Pause/Resume/Step/
+> Stop/Eject; deliberate panic loses no editor state (tested); zombie-free reaping;
+> Windows embedded window via main-window-parent SetParent (sidestepping the Spike-D
+> teardown deadlock), Play-in-New-Window as the sanctioned fallback elsewhere; split-button
+> play cluster (Embedded / New Window / Simulate). Human-verified remainders: embedded-PIE
+> visual pass + demo recording, camera possession & Eject hand-back, input routing from the
+> embedded window, flash-free embed, macOS/Wayland embedded PIE, native macOS/Linux export
+> runs. Deferred: per-OS installers/signing (P15), mmap pack reader, shared Ring-0
+> scene→render projection (player duplicates the viewport's), 3D solver in the player
+> actor loop (2D bridge today), compiled-dylib cook tier (interpreter IR ships; dylib is
+> the hot-reload tier).
+
 - **P9.1 Runtime assembly** — 1. `inf-runtime` game loop (fixed-step sim + interpolated
   render); 2. **parallel ECS schedule** — enable `bevy_ecs` `multi_threaded`, run systems through
   a real `Schedule` on the P7.0 job pool, structural changes resolved at deterministic sync points;
