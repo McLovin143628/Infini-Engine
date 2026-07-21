@@ -10,8 +10,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use inf_asset::{AssetId, PackReader};
+use inf_blueprint::BlueprintClass;
 use inf_packager::{
-    cook, export, export_android, export_web, AndroidExportOptions, CookOptions, ExportOptions,
+    build_mod_wasm, cook, export, export_android, export_web, generate_mod_crate,
+    AndroidExportOptions, CookOptions, ExportOptions, ModBuildOptions, ModBuildOutcome,
     WebExportOptions,
 };
 use inf_project::{Project, ProjectTemplate};
@@ -45,6 +47,7 @@ fn print_help() {
          USAGE:\n  \
              inf new <name> [--template <slug>] [--dir <path>]\n  \
              inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]\n  \
+             inf cook --mods <class.inf_act> [--out <dir>]\n  \
              inf export --project <dir> [--out <dir>] [--target current|web|android] [--player-bin <path>]\n  \
              inf pack ls <pack.inf_pack>\n  \
              inf --version\n\n\
@@ -115,15 +118,27 @@ fn cmd_new(args: &[String]) -> ExitCode {
     }
 }
 
-/// `inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]`
+/// `inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]`, or
+/// `inf cook --mods <class.inf_act> [--out <dir>]` (the WASM mod cook target).
 fn cmd_cook(args: &[String]) -> ExitCode {
     let mut project: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
     let mut roots: Option<Vec<AssetId>> = None;
+    let mut mods: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--mods" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => mods = Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--mods needs a path to a `.inf_act` blueprint class");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
             "--project" | "-p" => {
                 i += 1;
                 match args.get(i) {
@@ -174,8 +189,16 @@ fn cmd_cook(args: &[String]) -> ExitCode {
         i += 1;
     }
 
+    // The `--mods` path is a self-contained cook target (blueprint → wasm mod).
+    if let Some(class_path) = mods {
+        return cmd_cook_mods(&class_path, out);
+    }
+
     let Some(project) = project else {
-        eprintln!("usage: inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]");
+        eprintln!(
+            "usage: inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]\n   \
+                    or: inf cook --mods <class.inf_act> [--out <dir>]"
+        );
         return ExitCode::FAILURE;
     };
     // Default output: `<project>/Build`.
@@ -192,6 +215,67 @@ fn cmd_cook(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("cook failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `inf cook --mods <class.inf_act> [--out <dir>]` — the WASM mod cook target:
+/// transpile the blueprint class → Rust, generate the mod `cdylib` crate, and
+/// build it to `wasm32-unknown-unknown` when the toolchain is present.
+fn cmd_cook_mods(class_path: &PathBuf, out: Option<PathBuf>) -> ExitCode {
+    let text = match std::fs::read_to_string(class_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", class_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let class: BlueprintClass = match serde_json::from_str(&text) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "{} is not a JSON blueprint class: {e}",
+                class_path.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let out_dir = out.unwrap_or_else(|| PathBuf::from("Mods"));
+    // The generated crate references the shim by a repo-relative path; when
+    // writing under an arbitrary out dir, point it at the workspace crate.
+    let opts = ModBuildOptions::default();
+    let generated = match generate_mod_crate(&class, &opts) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("mod codegen failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let crate_dir = out_dir.join(&generated.crate_name);
+    if let Err(e) = generated.write_to(&crate_dir) {
+        eprintln!("writing mod crate: {e}");
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "Generated mod crate `{}` at {}",
+        generated.crate_name,
+        crate_dir.display()
+    );
+
+    match build_mod_wasm(&crate_dir) {
+        Ok(ModBuildOutcome::Built(wasm)) => {
+            println!("Built {}", wasm.display());
+            ExitCode::SUCCESS
+        }
+        Ok(ModBuildOutcome::ToolchainMissing(instructions)) => {
+            println!("{instructions}");
+            // Not a failure: the crate is generated + ready to build.
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("mod build failed: {e}");
             ExitCode::FAILURE
         }
     }

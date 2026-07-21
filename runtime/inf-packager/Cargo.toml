@@ -13,6 +13,9 @@ inf-asset = { workspace = true }
 inf-scene = { workspace = true }
 inf-anim = { workspace = true }
 inf-blueprint = { workspace = true }
+# WASM mod cook target (P14.5): the SAME transpiler the compiled/dylib path uses,
+# lowering a blueprint class → Rust for the generated mod crate.
+inf-transpile = { workspace = true }
 inf-project = { workspace = true }
 # Cook stage: derive the virtualized-geometry `.inf_vmesh` from `.inf_mesh`.
 inf-mesh = { workspace = true }

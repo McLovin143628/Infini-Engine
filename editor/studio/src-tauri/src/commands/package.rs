@@ -95,6 +95,10 @@ fn cook_error_to_dto(err: CookError) -> PackageErrorDto {
             dto.class = "export".into();
             dto.message = message;
         }
+        CookError::Mod(message) => {
+            dto.class = "mod".into();
+            dto.message = message;
+        }
         CookError::Mesh { guid, message } => {
             dto.class = "mesh".into();
             dto.message = message;

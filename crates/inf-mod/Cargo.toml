@@ -1,0 +1,15 @@
+[package]
+name = "inf-mod"
+description = "Guest-side shim for Infinity Engine WASM mods: safe wrappers over the host ABI + the entry macro (P14.5)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+# No dependencies: this crate is the thin, self-contained surface a mod compiles
+# against for `wasm32-unknown-unknown`. It is also a normal workspace member so
+# `cargo check`/clippy/fmt cover it on the host (where the wasm imports are
+# cfg-stubbed — see src/lib.rs).
+[dependencies]

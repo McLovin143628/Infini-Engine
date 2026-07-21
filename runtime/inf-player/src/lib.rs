@@ -30,6 +30,10 @@ pub mod demo;
 pub mod input;
 pub mod level;
 pub mod log;
+// Native-only sandboxed WASM mod loading (P14.5). Gated off wasm32 so the
+// browser player never pulls `wasmtime`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mods;
 pub mod render;
 pub mod runtime_sim;
 pub mod vmesh;
@@ -165,8 +169,11 @@ pub fn run_headless(args: &Args) -> ExitCode {
 
     tracing::info!("inf-player: headless run of '{label}' for {frames} frame(s)");
 
-    let outcome =
-        std::panic::catch_unwind(AssertUnwindSafe(|| fold_trace(built, frames, panic_after)));
+    let mut sim = sim_from_built(built);
+    attach_mods(&mut sim, args);
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        fold_trace_sim(sim, frames, panic_after)
+    }));
 
     match outcome {
         Ok(hash) => {
@@ -202,7 +209,8 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     // P13.4: load the cook-derived vmesh DAGs so `MeshRef.asset` entities render
     // real geometry (meshlet path / classic fallback per the renderer's auto-tier).
     let vmeshes = std::sync::Arc::new(load_vmeshes(args));
-    let sim = sim_from_built(built);
+    let mut sim = sim_from_built(built);
+    attach_mods(&mut sim, args);
     match window::run(title, args.width, args.height, sim, map, vmeshes) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -271,11 +279,37 @@ pub fn sim_from_built(built: BuiltWorld) -> RuntimeSim {
     sim
 }
 
+/// Attach the `--mods` directory's sandboxed WASM mods to `sim` (P14.5). Native
+/// only; a no-op on the browser player (which loads no native mods) and when no
+/// `--mods` dir was given.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn attach_mods(sim: &mut RuntimeSim, args: &Args) {
+    let Some(dir) = &args.mods_dir else {
+        return;
+    };
+    // Spawned entities get ids above the actor range.
+    let first_free = sim.entity_map().keys().max().copied().unwrap_or(0) + 1;
+    match mods::PlayerMods::load(dir, first_free) {
+        Ok(m) if !m.is_empty() => sim.set_mods(Box::new(m)),
+        Ok(_) => tracing::warn!("inf-player: no mods loaded from {}", dir.display()),
+        Err(e) => tracing::error!("inf-player: failed to load mods: {e}"),
+    }
+}
+
+/// No-op on wasm32 (the browser player does not load native mods).
+#[cfg(target_arch = "wasm32")]
+pub fn attach_mods(_sim: &mut RuntimeSim, _args: &Args) {}
+
 /// Run `frames` fixed steps of `built` (no input) and fold every step's
 /// `Guid`-sorted state into a 128-bit xxh3 trace — the determinism fingerprint.
 /// Panics deliberately at frame `panic_after` when set (the crash-path fixture).
 pub fn fold_trace(built: BuiltWorld, frames: u64, panic_after: Option<u64>) -> u128 {
-    let mut sim = sim_from_built(built);
+    fold_trace_sim(sim_from_built(built), frames, panic_after)
+}
+
+/// Fold `frames` fixed steps of an already-built [`RuntimeSim`] (so a caller can
+/// attach `--mods` before folding). See [`fold_trace`].
+pub fn fold_trace_sim(mut sim: RuntimeSim, frames: u64, panic_after: Option<u64>) -> u128 {
     let mut hasher = Xxh3::new();
     for step in 0..frames {
         if panic_after == Some(step) {

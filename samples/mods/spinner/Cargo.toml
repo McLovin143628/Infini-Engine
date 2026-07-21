@@ -1,0 +1,23 @@
+[package]
+name = "spinner-mod"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The guest shim (safe wrappers over the host ABI + the entry macro).
+inf-mod = { path = "../../../crates/inf-mod" }
+
+[profile.release]
+# Small, fast mod binaries.
+opt-level = "s"
+lto = true
+
+# Detach from the engine workspace: this package builds ONLY for
+# wasm32-unknown-unknown (a native cdylib build would fail to link the wasm-only
+# host imports). Its own `[workspace]` table keeps `cargo check --workspace` at
+# the repo root from trying to build it natively.
+[workspace]

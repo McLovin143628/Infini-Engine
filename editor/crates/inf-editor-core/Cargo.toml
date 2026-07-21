@@ -32,6 +32,12 @@ inf-material = { workspace = true }
 inf-audio = { workspace = true }
 inf-anim = { workspace = true }
 inf-render = { workspace = true }
+# P14.5 WASM modding: the editor loads/hot-reloads sandboxed mods in Simulate via
+# a ModsSession over the same inf-wasm-host loader the player uses.
+inf-wasm-host = { workspace = true }
+# File-watching the mods dir for hot-reload (same crates the asset watcher uses).
+notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
 glam = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }

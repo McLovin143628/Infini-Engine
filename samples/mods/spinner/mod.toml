@@ -1,0 +1,10 @@
+# Capability grant for the spinner mod (P14.5). Deny-by-default: only the
+# capabilities listed here are linked into the sandbox; a missing mod.toml would
+# grant nothing at all.
+name = "spinner"
+
+[caps]
+entities = true   # set_entity_translation — orbit the actor
+input = true      # input_is_down("boost")
+log = true        # the init() greeting
+spawn = false     # not needed

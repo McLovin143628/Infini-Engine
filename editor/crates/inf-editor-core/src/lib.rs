@@ -7,6 +7,7 @@ pub mod collision_layers;
 pub mod erosion_gpu;
 pub mod ipc;
 pub mod layouts;
+pub mod mods;
 pub mod pie;
 pub mod project_settings;
 pub mod samples;

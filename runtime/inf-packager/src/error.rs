@@ -50,6 +50,10 @@ pub enum CookError {
     /// or writing the launch config.
     #[error("export: {0}")]
     Export(String),
+
+    /// A WASM mod cook step failed (transpile, crate generation, or wasm build).
+    #[error("mod: {0}")]
+    Mod(String),
 }
 
 /// Convenience alias.

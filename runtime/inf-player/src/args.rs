@@ -63,6 +63,10 @@ pub struct Args {
     /// Optional content directory for `--level` mode: where `.inf_act` actor
     /// classes are discovered. Defaults to the level file's own directory.
     pub content: Option<PathBuf>,
+    /// Optional mods directory (`--mods <dir>`): every `.wasm` in it is loaded as
+    /// a sandboxed WASM mod, each granted the caps in its sibling `mod.toml`
+    /// (P14.5). Ticked per fixed step in filename order.
+    pub mods_dir: Option<PathBuf>,
     pub width: u32,
     pub height: u32,
     /// PIE tick rate (only meaningful in `--pie`).
@@ -85,6 +89,7 @@ impl Default for Args {
             title_override: None,
             run_frames: 0,
             content: None,
+            mods_dir: None,
             width: 1280,
             height: 720,
             tick_hz: inf_runtime::TICK_HZ,
@@ -130,6 +135,10 @@ impl Args {
                 "--content" => {
                     let v = iter.next().ok_or("--content needs a directory")?;
                     args.content = Some(PathBuf::from(v));
+                }
+                "--mods" => {
+                    let v = iter.next().ok_or("--mods needs a directory")?;
+                    args.mods_dir = Some(PathBuf::from(v));
                 }
                 "--run-frames" => {
                     let v = iter.next().ok_or("--run-frames needs a value")?;

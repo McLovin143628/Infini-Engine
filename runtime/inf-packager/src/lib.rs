@@ -16,6 +16,7 @@ pub mod bundle;
 pub mod cook;
 pub mod error;
 pub mod manifest;
+pub mod mods;
 pub mod targets;
 
 pub use bundle::{export, ExportOptions, ExportReport, ExportTarget, WindowConfig};
@@ -24,6 +25,10 @@ pub use cook::{
 };
 pub use error::{CookError, Result};
 pub use manifest::{CookManifest, MANIFEST_FILE, MANIFEST_SCHEMA_VERSION};
+pub use mods::{
+    build_mod_wasm, generate_mod_crate, wasm_target_installed, GeneratedModCrate, ModBuildOptions,
+    ModBuildOutcome,
+};
 pub use targets::{
     export_android, export_web, AndroidExportOptions, AndroidExportReport, WebExportOptions,
     WebExportReport,

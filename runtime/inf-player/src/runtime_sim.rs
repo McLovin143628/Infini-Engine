@@ -94,6 +94,23 @@ impl RuntimeInput {
     }
 }
 
+/// A per-fixed-step hook the sim ticks after gameplay/physics/anim, given
+/// mutable access to the world + the blueprint entity-id map + this step's input
+/// (P14.5). The WASM mod loader implements it (`crate::mods::PlayerMods`); the
+/// trait names no `wasmtime`/`inf-wasm-host` types so the sim stays buildable for
+/// `wasm32` (the browser player, which loads no native mods).
+pub trait ModHook {
+    /// Advance mods one fixed step. `entities` is the live blueprint `i64 →
+    /// Guid` map (mutable so a spawning mod can register new entities).
+    fn tick(
+        &mut self,
+        world: &mut EcsWorld,
+        entities: &mut BTreeMap<i64, Uuid>,
+        dt: f64,
+        input: &RuntimeInput,
+    );
+}
+
 /// One actor's live class + instance state.
 struct ActorState {
     class: BlueprintClass,
@@ -156,6 +173,9 @@ pub struct RuntimeSim {
     prev_positions: HashMap<Uuid, DVec3>,
     /// World-space translations at the current fixed step.
     cur_positions: HashMap<Uuid, DVec3>,
+    /// Optional sandboxed WASM mods, ticked each fixed step (P14.5). `None` on
+    /// the browser player + any run without `--mods`.
+    mods: Option<Box<dyn ModHook>>,
 }
 
 /// The obstruction gain (linear) applied to an occluded spatial source — a −12 dB
@@ -214,6 +234,7 @@ impl RuntimeSim {
             steps: 0,
             prev_positions: HashMap::new(),
             cur_positions: HashMap::new(),
+            mods: None,
         };
 
         sim.bridge.sync_from_world(&sim.world);
@@ -254,6 +275,18 @@ impl RuntimeSim {
     /// Seed the resolvable `.inf_audio` payloads in bulk (level loader).
     pub fn set_audio_clips(&mut self, clips: BTreeMap<Uuid, AudioAsset>) {
         self.audio_clips = clips;
+    }
+
+    /// Attach a per-fixed-step mod hook (the WASM mod loader). Ticked each fixed
+    /// step after gameplay/physics/anim (P14.5).
+    pub fn set_mods(&mut self, mods: Box<dyn ModHook>) {
+        self.mods = Some(mods);
+    }
+
+    /// The live blueprint `i64 → Guid` entity map (read-only; tests + the mod
+    /// adapter map opaque ids to entities through it).
+    pub fn entity_map(&self) -> &BTreeMap<i64, Uuid> {
+        &self.entities
     }
 
     /// Install a named-bus mixer on the audio engine (loaded from
@@ -388,6 +421,9 @@ impl RuntimeSim {
         // ── P11.3 attachments ── entities ride their target's socket, post-anim.
         update_attachments(&mut self.world);
         self.world.propagate();
+        // ── P14.5 WASM mods ── tick sandboxed mods against the world (after
+        //    gameplay/physics/anim), then propagate their transform edits.
+        self.tick_mods(dt);
         // ── P12.3 audio step ── last, observing this step's final transforms
         //    (preview == shipped: the same logic the editor SimSession runs).
         self.audio_step();
@@ -396,6 +432,19 @@ impl RuntimeSim {
         self.capture_positions();
         self.just_pressed.clear();
         self.steps += 1;
+    }
+
+    /// Tick attached WASM mods, then propagate their transform edits so
+    /// mod-moved entities reach `GlobalTransform` for rendering/audio (P14.5).
+    /// The hook is lifted out during its run so it can borrow the world + entity
+    /// map mutably without aliasing `self.mods`.
+    fn tick_mods(&mut self, dt: f64) {
+        let Some(mut mods) = self.mods.take() else {
+            return;
+        };
+        mods.tick(&mut self.world, &mut self.entities, dt, &self.input);
+        self.mods = Some(mods);
+        self.world.propagate();
     }
 
     /// The P12.3 audio step — the shipped mirror of `SimSession::audio_step`.

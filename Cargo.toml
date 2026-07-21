@@ -25,6 +25,8 @@ members = [
     "crates/inf-hotreload",
     "crates/inf-hotreload/test-plugins/v1",
     "crates/inf-hotreload/test-plugins/v2",
+    "crates/inf-wasm-host",
+    "crates/inf-mod",
     "crates/inf-net",
     "crates/inf-runtime",
     "platforms/inf-platform-null",
@@ -35,6 +37,11 @@ members = [
     "runtime/inf-packager",
     "tools/inf-cli",
 ]
+# The sample mods build to wasm32-unknown-unknown as standalone cdylib packages
+# (a native cdylib build would fail to link the wasm-only host imports), so they
+# declare their own `[workspace]` and are excluded from this one. The cook target
+# + the inf-wasm-host end-to-end test build them for wasm32 out-of-band.
+exclude = ["samples/mods"]
 
 [workspace.package]
 version = "0.1.0"
@@ -100,6 +107,26 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 proptest = "1"
 # ── hot reload (Spike C) ──
 libloading = "0.8"
+# ── sandboxed WASM mod tier (Phase 14.5) ──
+# wasmtime = the mod sandbox. Its whole tree (cranelift/wasmparser/regalloc2/
+# pulley/cap-* off) is Apache-2.0 WITH LLVM-exception or MIT/Apache — on the deny
+# allow-list. default-features off + a tight feature set: JIT compile (`cranelift`),
+# `runtime`, `std`, `gc` (module validation expects the type machinery), the
+# signal-based trap handler, and `wat` so tests build tiny modules from text. No
+# component-model / async / WASI / gc: a mod is a plain core module behind our own
+# i64/f64 host ABI. Only inf-wasm-host names it (three-ring facade discipline); it
+# is NEVER built for wasm32 (the browser player does not load native mods).
+wasmtime = { version = "47", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "std",
+    "wat",
+] }
+# wat = the WebAssembly-text → binary assembler (already in-tree via wasmtime's
+# `wat` feature; Apache-2.0 WITH LLVM-exception, on the allow-list). inf-wasm-host
+# re-exports a `wat_to_wasm` helper so tests across the workspace can build tiny
+# real `.wasm` modules without a wasm toolchain.
+wat = "1"
 # ── cooked snapshots / PIE protocol (Spike D) ──
 bincode = { version = "2", features = ["serde"] }
 # ── asset sidecars / .inf_lvl human-readable metadata (deterministic emit) ──
@@ -264,6 +291,8 @@ inf-transpile = { path = "crates/inf-transpile" }
 # default-features off so plugin cdylibs get guest+abi only; host consumers
 # (editor, runtime) add `features = ["host"]`.
 inf-hotreload = { path = "crates/inf-hotreload", default-features = false }
+inf-wasm-host = { path = "crates/inf-wasm-host" }
+inf-mod = { path = "crates/inf-mod" }
 inf-net = { path = "crates/inf-net" }
 inf-platform-null = { path = "platforms/inf-platform-null" }
 inf-runtime = { path = "crates/inf-runtime" }

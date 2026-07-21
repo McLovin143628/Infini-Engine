@@ -74,6 +74,11 @@ windows = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# Sandboxed WASM mods (P14.5) — native only; the browser (wasm32) player loads no
+# native mods and must not pull wasmtime.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inf-wasm-host = { workspace = true }
+
 # ── Web target (P14.2): the wasm32 player runs in the browser over WebGPU. These
 # deps only apply to `wasm32-unknown-unknown`; the desktop build is unchanged.
 # Cargo features unify across the tree, so enabling `uuid`'s `js` randomness
