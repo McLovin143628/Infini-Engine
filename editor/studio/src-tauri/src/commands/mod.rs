@@ -4,9 +4,12 @@
 
 mod app;
 mod assets;
+mod files;
+mod git;
 mod layout;
 mod project;
 mod scene;
+mod search;
 mod terminal;
 mod viewport;
 
@@ -67,5 +70,17 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         terminal::pty_write,
         terminal::pty_resize,
         terminal::pty_close,
+        files::file_read,
+        files::file_write,
+        files::list_project_files,
+        git::git_status,
+        git::git_stage,
+        git::git_unstage,
+        git::git_discard,
+        git::git_commit,
+        git::git_file_diff,
+        git::git_branches,
+        git::git_init,
+        search::search_workspace,
     ]
 }

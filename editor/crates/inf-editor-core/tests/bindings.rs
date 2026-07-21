@@ -9,9 +9,10 @@ use std::path::Path;
 
 use inf_editor_core::ipc::{
     AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot, ComponentDto, DataAssetDto,
-    DataFieldDto, DeleteResult, DetailsDto, ImportEventDto, LayoutSummary, LogLine, ProjectInfoDto,
-    ProjectTemplateDto, PropFieldDto, PropValueDto, RecentProjectDto, SceneDelta, SceneNode,
-    SceneSnapshot, SpawnKind, ViewportDrop, ViewportKey, ViewportRect,
+    DataFieldDto, DeleteResult, DetailsDto, FileEntryDto, GitFileDto, GitStatusDto, ImportEventDto,
+    LayoutSummary, LogLine, ProjectInfoDto, ProjectTemplateDto, PropFieldDto, PropValueDto,
+    RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot, SearchHitDto, SearchOptsDto, SpawnKind,
+    ViewportDrop, ViewportKey, ViewportRect,
 };
 use ts_rs::{Config, TS};
 
@@ -46,4 +47,9 @@ fn export_bindings() {
     ProjectInfoDto::export_all(&cfg).expect("export ProjectInfoDto");
     RecentProjectDto::export_all(&cfg).expect("export RecentProjectDto");
     ProjectTemplateDto::export_all(&cfg).expect("export ProjectTemplateDto");
+    FileEntryDto::export_all(&cfg).expect("export FileEntryDto");
+    GitStatusDto::export_all(&cfg).expect("export GitStatusDto");
+    GitFileDto::export_all(&cfg).expect("export GitFileDto");
+    SearchOptsDto::export_all(&cfg).expect("export SearchOptsDto");
+    SearchHitDto::export_all(&cfg).expect("export SearchHitDto");
 }

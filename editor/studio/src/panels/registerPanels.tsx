@@ -1,16 +1,22 @@
 import { useCallback, useState } from "react";
 import {
+  FolderTree,
+  GitBranch,
   Globe2,
   ListTree,
   PlusSquare,
   ScrollText,
+  Search,
   SlidersHorizontal,
   SquareTerminal,
 } from "lucide-react";
 import { viewport } from "../lib/ipc";
 import DetailsPanel from "./DetailsPanel";
+import FileExplorerPanel from "./FileExplorerPanel";
+import GitPanel from "./GitPanel";
 import OutlinerPanel from "./OutlinerPanel";
 import OutputLogPanel from "./OutputLogPanel";
+import SearchPanel from "./SearchPanel";
 import TerminalPanel from "./TerminalPanel";
 import { registerPanelType } from "./panelRegistry";
 
@@ -160,5 +166,38 @@ registerPanelType({
   defaultLocation: "bottom",
   defaultSize: { w: 720, h: 260 },
   // A session's PTY dies with the app; don't try to restore it across restarts.
+  transient: true,
+});
+
+// ── IDE panels (P5.4) ──────────────────────────────────────────────────────
+
+registerPanelType({
+  type: "explorer",
+  title: () => "Explorer",
+  icon: FolderTree,
+  component: FileExplorerPanel,
+  singleton: true,
+  defaultLocation: "left",
+  defaultSize: { w: 280, h: 480 },
+});
+
+registerPanelType({
+  type: "git",
+  title: () => "Source Control",
+  icon: GitBranch,
+  component: GitPanel,
+  singleton: true,
+  defaultLocation: "left",
+  defaultSize: { w: 300, h: 480 },
+});
+
+registerPanelType({
+  type: "search",
+  title: () => "Search",
+  icon: Search,
+  component: SearchPanel,
+  singleton: true,
+  defaultLocation: "left",
+  defaultSize: { w: 300, h: 480 },
   transient: true,
 });

@@ -115,6 +115,11 @@ csv = "1"
 # ── IDE: embedded terminal (Phase 5.3) ──
 # Cross-platform pseudo-terminal (ConPTY on Windows) for the terminal panel.
 portable-pty = "0.8"
+# ── IDE: file explorer + global search (Phase 5.4) ──
+# gitignore-aware directory walking (file explorer, workspace search); regex
+# for the search matcher.
+ignore = "0.4"
+regex = "1"
 # ── editor↔frontend shared types → committed TS bindings (CI drift-checked) ──
 ts-rs = "12"
 # test-only (dev-dependencies in member crates)

@@ -375,3 +375,63 @@ pub struct ProjectTemplateDto {
     pub label: String,
     pub description: String,
 }
+
+// ── IDE: file explorer / git / search (P5.4) ─────────────────────────────
+
+/// One entry in the project file tree (`list_project_files`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct FileEntryDto {
+    /// Path relative to the walked root (forward-slashed).
+    pub path: String,
+    /// Leaf name.
+    pub name: String,
+    pub is_dir: bool,
+}
+
+/// One changed file in `git_status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GitFileDto {
+    /// Path relative to the repo (forward-slashed).
+    pub path: String,
+    /// Short status code ("M", "A", "D", "R", "?", …).
+    pub status: String,
+    /// Whether the change is in the index (staged).
+    pub staged: bool,
+}
+
+/// The working-tree status (`git_status`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GitStatusDto {
+    /// False when `repo` is not a git repository.
+    pub is_repo: bool,
+    /// Current branch (or detached HEAD label).
+    pub branch: String,
+    /// Commits ahead of / behind the upstream.
+    #[ts(type = "number")]
+    pub ahead: u32,
+    #[ts(type = "number")]
+    pub behind: u32,
+    pub files: Vec<GitFileDto>,
+}
+
+/// Options for `search_workspace`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct SearchOptsDto {
+    pub regex: bool,
+    pub case_sensitive: bool,
+}
+
+/// One `search_workspace` hit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct SearchHitDto {
+    /// Path relative to the searched root (forward-slashed).
+    pub path: String,
+    /// 1-based line number.
+    #[ts(type = "number")]
+    pub line: u32,
+    /// 1-based column of the match start.
+    #[ts(type = "number")]
+    pub column: u32,
+    /// The matching line's text (trimmed to a sane length).
+    pub text: String,
+}

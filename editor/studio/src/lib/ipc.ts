@@ -16,11 +16,15 @@ import type { DataAssetDto } from "../bindings/DataAssetDto";
 import type { DataFieldDto } from "../bindings/DataFieldDto";
 import type { DeleteResult } from "../bindings/DeleteResult";
 import type { DetailsDto } from "../bindings/DetailsDto";
+import type { FileEntryDto } from "../bindings/FileEntryDto";
+import type { GitStatusDto } from "../bindings/GitStatusDto";
 import type { LayoutSummary } from "../bindings/LayoutSummary";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
 import type { ProjectTemplateDto } from "../bindings/ProjectTemplateDto";
 import type { PropValueDto } from "../bindings/PropValueDto";
 import type { RecentProjectDto } from "../bindings/RecentProjectDto";
+import type { SearchHitDto } from "../bindings/SearchHitDto";
+import type { SearchOptsDto } from "../bindings/SearchOptsDto";
 import type { SceneSnapshot } from "../bindings/SceneSnapshot";
 import type { SpawnKind } from "../bindings/SpawnKind";
 import type { ViewportDrop } from "../bindings/ViewportDrop";
@@ -33,11 +37,15 @@ export type {
   DataFieldDto,
   DeleteResult,
   DetailsDto,
+  FileEntryDto,
+  GitStatusDto,
   LayoutSummary,
   ProjectInfoDto,
   ProjectTemplateDto,
   PropValueDto,
   RecentProjectDto,
+  SearchHitDto,
+  SearchOptsDto,
   SceneSnapshot,
   SpawnKind,
   ViewportDrop,
@@ -183,4 +191,33 @@ export const project = {
     invoke<ProjectInfoDto>("project_new", { parent, name, template }),
   open: (root: string): Promise<ProjectInfoDto> => invoke<ProjectInfoDto>("project_open", { root }),
   close: (): Promise<void> => invoke("project_close"),
+};
+
+/** Project file surface (P5.4): read/write + a gitignore-aware listing. */
+export const files = {
+  read: (path: string): Promise<string> => invoke<string>("file_read", { path }),
+  write: (path: string, content: string): Promise<void> =>
+    invoke("file_write", { path, content }),
+  list: (root: string): Promise<FileEntryDto[]> =>
+    invoke<FileEntryDto[]>("list_project_files", { root }),
+};
+
+/** Git panel (P5.4): shells out to the `git` CLI. `repo` is the project root. */
+export const git = {
+  status: (repo: string): Promise<GitStatusDto> => invoke<GitStatusDto>("git_status", { repo }),
+  stage: (repo: string, paths: string[]): Promise<void> => invoke("git_stage", { repo, paths }),
+  unstage: (repo: string, paths: string[]): Promise<void> => invoke("git_unstage", { repo, paths }),
+  discard: (repo: string, paths: string[]): Promise<void> => invoke("git_discard", { repo, paths }),
+  commit: (repo: string, message: string): Promise<string> =>
+    invoke<string>("git_commit", { repo, message }),
+  fileDiff: (repo: string, path: string, staged: boolean): Promise<string> =>
+    invoke<string>("git_file_diff", { repo, path, staged }),
+  branches: (repo: string): Promise<string[]> => invoke<string[]>("git_branches", { repo }),
+  init: (repo: string): Promise<void> => invoke("git_init", { repo }),
+};
+
+/** Global workspace search (P5.4). */
+export const search = {
+  workspace: (root: string, query: string, opts: SearchOptsDto): Promise<SearchHitDto[]> =>
+    invoke<SearchHitDto[]>("search_workspace", { root, query, opts }),
 };
