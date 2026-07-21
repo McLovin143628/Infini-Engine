@@ -10,6 +10,7 @@ mod graph;
 mod layout;
 mod lsp;
 mod material;
+mod package;
 mod project;
 mod scene;
 mod search;
@@ -111,6 +112,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         project::project_new,
         project::project_open,
         project::project_close,
+        package::project_package,
         terminal::pty_create,
         terminal::pty_write,
         terminal::pty_resize,

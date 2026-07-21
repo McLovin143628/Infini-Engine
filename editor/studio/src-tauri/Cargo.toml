@@ -28,6 +28,7 @@ glam = { workspace = true }
 inf-asset = { workspace = true }
 inf-material = { workspace = true }
 inf-project = { workspace = true }
+inf-packager = { workspace = true }
 inf-graph = { workspace = true }
 inf-blueprint = { workspace = true }
 inf-transpile = { workspace = true }

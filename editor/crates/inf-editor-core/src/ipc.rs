@@ -560,6 +560,79 @@ pub struct TilemapDto {
     pub cells: Vec<TilemapCellDto>,
 }
 
+// ── Cook / Package (P9.2 item 3) ─────────────────────────────────────────
+//
+// The Build ▸ Package Project… dialog runs `inf_packager::cook` against the open
+// project on a blocking task (`project_package` command) and renders these
+// projections of `inf_packager::CookReport`. A cook failure rejects the command
+// with a structured `PackageErrorDto` instead of an opaque string so the dialog
+// can anchor blueprint failures to their class + handler. Start/finish is also
+// broadcast on the `package://state` event (a boolean running flag) for any
+// global listener. Per-stage progress is a documented follow-up — the `cook`
+// API exposes no progress callback yet, so we do not fake it.
+
+/// One per-kind asset count in a cook report (`PackageResultDto.kinds`). `kind`
+/// is the asset-kind slug (`"mesh"`, `"level"`, `"blueprint"`, …).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PackageKindCountDto {
+    pub kind: String,
+    #[ts(type = "number")]
+    pub count: u32,
+}
+
+/// A successful cook, projected for the Package dialog (`project_package`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct PackageResultDto {
+    pub project_name: String,
+    pub engine_version: String,
+    /// Output directory the build was written to (forward-slashed).
+    pub out_dir: String,
+    /// The written pack file (forward-slashed).
+    pub pack_path: String,
+    /// The written manifest file (forward-slashed).
+    pub manifest_path: String,
+    /// Total assets packed.
+    #[ts(type = "number")]
+    pub asset_count: u32,
+    /// Per-kind counts, sorted by slug.
+    pub kinds: Vec<PackageKindCountDto>,
+    /// Size of the written pack in bytes.
+    #[ts(type = "number")]
+    pub pack_bytes: u64,
+    /// Level GUIDs in the pack (sorted).
+    pub levels: Vec<String>,
+    /// The primary/boot level GUID (lowest), if any.
+    pub root_level: Option<String>,
+    /// How many blueprint assets were validated.
+    #[ts(type = "number")]
+    pub blueprints_validated: u32,
+    /// How many levels were rewritten to the runtime schema.
+    #[ts(type = "number")]
+    pub levels_rewritten: u32,
+    /// Non-fatal advisories (e.g. "no levels").
+    pub warnings: Vec<String>,
+}
+
+/// A structured cook failure (the `Err` payload of `project_package`). `class`
+/// is the error category slug; blueprint failures additionally carry the
+/// blueprint class name (`blueprint_class`) and the handler/function where the
+/// problem lives (`handler`) so the dialog can anchor the error. `guid` is the
+/// offending asset GUID when one is known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PackageErrorDto {
+    /// Error category: `"no_project"`, `"blueprint"`, `"scene"`, `"unknown_root"`,
+    /// `"bad_root"`, `"io"`, `"project"`, `"asset"`, `"manifest"`, `"internal"`.
+    pub class: String,
+    /// Human-readable message.
+    pub message: String,
+    /// The failing blueprint's class name (blueprint failures only).
+    pub blueprint_class: Option<String>,
+    /// The handler/function anchor (blueprint failures only).
+    pub handler: Option<String>,
+    /// The offending asset GUID, when known.
+    pub guid: Option<String>,
+}
+
 /// One `search_workspace` hit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct SearchHitDto {

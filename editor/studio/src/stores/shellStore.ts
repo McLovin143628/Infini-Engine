@@ -16,6 +16,8 @@ interface ShellState {
   layoutDialog: LayoutDialogKind;
   /** Sorting-layer manager dialog open (Window ▸ Sorting Layers…, P8.2a). */
   sortingLayersOpen: boolean;
+  /** Package/cook dialog open (Build ▸ Package Project…, P9.2). */
+  packageDialogOpen: boolean;
   /** Content Drawer slide-up (P1.4.3). */
   drawerOpen: boolean;
   /** Command palette overlay (P1.4.5). */
@@ -25,6 +27,7 @@ interface ShellState {
   openLayoutDialog: (kind: Exclude<LayoutDialogKind, null>) => void;
   closeLayoutDialog: () => void;
   setSortingLayersOpen: (open: boolean) => void;
+  setPackageDialogOpen: (open: boolean) => void;
   setDrawerOpen: (open: boolean) => void;
   toggleDrawer: () => void;
   setPaletteOpen: (open: boolean) => void;
@@ -36,6 +39,7 @@ export const useShellStore = create<ShellState>((set) => ({
   statusMessage: null,
   layoutDialog: null,
   sortingLayersOpen: false,
+  packageDialogOpen: false,
   drawerOpen: false,
   paletteOpen: false,
   pushStatus: (message, ttlMs = 4000) => {
@@ -50,6 +54,7 @@ export const useShellStore = create<ShellState>((set) => ({
   openLayoutDialog: (kind) => set({ layoutDialog: kind }),
   closeLayoutDialog: () => set({ layoutDialog: null }),
   setSortingLayersOpen: (sortingLayersOpen) => set({ sortingLayersOpen }),
+  setPackageDialogOpen: (packageDialogOpen) => set({ packageDialogOpen }),
   setDrawerOpen: (drawerOpen) => set({ drawerOpen }),
   toggleDrawer: () => set((s) => ({ drawerOpen: !s.drawerOpen })),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),

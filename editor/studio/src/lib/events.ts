@@ -40,6 +40,8 @@ export interface EventPayloads {
   "material://sync": string;
   /** Simulate started (`true`) / stopped (`false`) → sync the play toolbar (P8.4). */
   "sim://state": boolean;
+  /** A cook/package run started (`true`) / finished (`false`) (P9.2). */
+  "package://state": boolean;
 }
 
 export type EventChannel = keyof EventPayloads;

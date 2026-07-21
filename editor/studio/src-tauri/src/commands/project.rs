@@ -20,6 +20,17 @@ pub struct ProjectState {
     current: Arc<Mutex<Option<Project>>>,
 }
 
+impl ProjectState {
+    /// The open project's root path, if any. Used by sibling command modules
+    /// (e.g. the packager) that cook against the open project.
+    pub fn current_root(&self) -> Option<PathBuf> {
+        self.current
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|p| p.root.clone()))
+    }
+}
+
 fn info(p: &Project) -> ProjectInfoDto {
     ProjectInfoDto {
         name: p.name().to_string(),

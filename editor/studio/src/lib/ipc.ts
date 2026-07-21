@@ -27,6 +27,8 @@ import type { DetailsDto } from "../bindings/DetailsDto";
 import type { FileEntryDto } from "../bindings/FileEntryDto";
 import type { GitStatusDto } from "../bindings/GitStatusDto";
 import type { LayoutSummary } from "../bindings/LayoutSummary";
+import type { PackageErrorDto } from "../bindings/PackageErrorDto";
+import type { PackageResultDto } from "../bindings/PackageResultDto";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
 import type { ProjectSettingsDto } from "../bindings/ProjectSettingsDto";
 import type { ProjectTemplateDto } from "../bindings/ProjectTemplateDto";
@@ -55,6 +57,8 @@ export type {
   FileEntryDto,
   GitStatusDto,
   LayoutSummary,
+  PackageErrorDto,
+  PackageResultDto,
   ProjectInfoDto,
   ProjectTemplateDto,
   ProjectSettingsDto,
@@ -378,6 +382,19 @@ export const material = {
   /** Bake the graph to a new `.inf_tex` asset via a compute pass; returns the id. */
   bake: (id: string, size: number, name: string): Promise<string> =>
     invoke<string>("material_bake", { id, size, name }),
+};
+
+/**
+ * Cook / Package (P9.2 item 3). Runs `inf_packager::cook` against the open
+ * project on a blocking task and resolves to a `PackageResultDto`, or **rejects
+ * with a structured `PackageErrorDto`** (blueprint failures carry the class +
+ * handler anchor). Start/finish also broadcasts on `package://state`. Arg names
+ * are camelCase (Tauri maps to snake_case); `outDir` defaults to `<project>/Build`
+ * and `roots` (asset GUIDs) to the default root set.
+ */
+export const packaging = {
+  cook: (outDir: string | null = null, roots: string[] | null = null): Promise<PackageResultDto> =>
+    invoke<PackageResultDto>("project_package", { outDir, roots }),
 };
 
 /**

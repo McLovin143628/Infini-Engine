@@ -10,11 +10,11 @@ use std::path::Path;
 use inf_editor_core::ipc::{
     AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot, ComponentDto, DataAssetDto,
     DataFieldDto, DeleteResult, DetailsDto, FileEntryDto, GitFileDto, GitStatusDto, ImportEventDto,
-    LayoutSummary, LogLine, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto, PropFieldDto,
-    PropValueDto, RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot, SearchHitDto,
-    SearchOptsDto, Snap2DDto, SortingLayerDto, SpawnKind, SpriteGridDto, SpriteRectDto,
-    SpriteSheetDto, TilemapCellDto, TilemapDto, ViewportDrop, ViewportKey, ViewportModeDto,
-    ViewportRect,
+    LayoutSummary, LogLine, PackageErrorDto, PackageKindCountDto, PackageResultDto, ProjectInfoDto,
+    ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto, RecentProjectDto,
+    SceneDelta, SceneNode, SceneSnapshot, SearchHitDto, SearchOptsDto, Snap2DDto, SortingLayerDto,
+    SpawnKind, SpriteGridDto, SpriteRectDto, SpriteSheetDto, TilemapCellDto, TilemapDto,
+    ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
 };
 use ts_rs::{Config, TS};
 
@@ -63,4 +63,7 @@ fn export_bindings() {
     ProjectSettingsDto::export_all(&cfg).expect("export ProjectSettingsDto");
     TilemapCellDto::export_all(&cfg).expect("export TilemapCellDto");
     TilemapDto::export_all(&cfg).expect("export TilemapDto");
+    PackageKindCountDto::export_all(&cfg).expect("export PackageKindCountDto");
+    PackageResultDto::export_all(&cfg).expect("export PackageResultDto");
+    PackageErrorDto::export_all(&cfg).expect("export PackageErrorDto");
 }
