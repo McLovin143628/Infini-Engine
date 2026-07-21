@@ -3,6 +3,7 @@
 //! the shared editor↔frontend IPC types ([`ipc`]).
 
 pub mod assets;
+pub mod erosion_gpu;
 pub mod ipc;
 pub mod layouts;
 pub mod pie;

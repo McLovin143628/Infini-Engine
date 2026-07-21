@@ -18,12 +18,15 @@ import type {
   NodeDef,
 } from "./blueprintTypes";
 import type { MaterialCompileResult } from "./materialTypes";
+import type { PcgCompileResult, PcgEvaluateResult } from "./pcgTypes";
 import type { AssetRefDto } from "../bindings/AssetRefDto";
 import type { AssetSnapshot } from "../bindings/AssetSnapshot";
 import type { DataAssetDto } from "../bindings/DataAssetDto";
 import type { DataFieldDto } from "../bindings/DataFieldDto";
 import type { DeleteResult } from "../bindings/DeleteResult";
 import type { DetailsDto } from "../bindings/DetailsDto";
+import type { ErosionParamsDto } from "../bindings/ErosionParamsDto";
+import type { ErosionReportDto } from "../bindings/ErosionReportDto";
 import type { FileEntryDto } from "../bindings/FileEntryDto";
 import type { GitStatusDto } from "../bindings/GitStatusDto";
 import type { LayoutSummary } from "../bindings/LayoutSummary";
@@ -136,6 +139,22 @@ export const viewport = {
   /** Push the sculpt brush configuration (op / radius / strength / falloff). */
   setSculpt: (sculpt: SculptSettingsDto): Promise<void> =>
     invoke("viewport_set_sculpt", { sculpt }),
+};
+
+/**
+ * Terrain erosion bake (P10.3b). Runs the GPU hydraulic + thermal erosion
+ * compute pipeline (CPU reference fallback with no adapter) over the entity's
+ * terrain and commits ONE undoable height delta. `region` is an optional
+ * terrain-local `[minX, minZ, maxX, maxZ]`; omit to erode the whole terrain.
+ */
+export const terrain = {
+  erode: (
+    entity: string,
+    params: ErosionParamsDto,
+    steps: number,
+    region?: [number, number, number, number],
+  ): Promise<ErosionReportDto> =>
+    invoke<ErosionReportDto>("terrain_erode", { entity, params, steps, region: region ?? null }),
 };
 
 /**
@@ -397,6 +416,32 @@ export const material = {
   /** Bake the graph to a new `.inf_tex` asset via a compute pass; returns the id. */
   bake: (id: string, size: number, name: string): Promise<string> =>
     invoke<string>("material_bake", { id, size, name }),
+};
+
+/**
+ * PCG graphs (Phase 10.5b). Mirrors the material surface (CRUD + apply +
+ * undo/redo over the shared `inf-graph` shapes), plus `compile` (lower the graph
+ * to the runtime `PcgDocument` + node-anchored diagnostics), `save` (persist the
+ * graph into a `.inf_pcg` asset), and `evaluate` (scatter over the scene terrain
+ * into the selected `PcgVolume`, refreshing the viewport). Documents share the
+ * `BpDoc`/`BpEdit` shapes; only the compile/evaluate results are PCG-specific.
+ */
+export const pcg = {
+  registry: (): Promise<NodeDef[]> => invoke<NodeDef[]>("pcg_registry"),
+  list: (): Promise<BpDoc[]> => invoke<BpDoc[]>("pcg_list"),
+  create: (name: string): Promise<BpDoc> => invoke<BpDoc>("pcg_create", { name }),
+  get: (id: string): Promise<BpDoc> => invoke<BpDoc>("pcg_get", { id }),
+  apply: (id: string, edits: BpEdit[], label: string): Promise<GraphApplyResult> =>
+    invoke<GraphApplyResult>("pcg_apply", { id, edits, label }),
+  undo: (id: string): Promise<BpDoc | null> => invoke<BpDoc | null>("pcg_undo", { id }),
+  redo: (id: string): Promise<BpDoc | null> => invoke<BpDoc | null>("pcg_redo", { id }),
+  compile: (id: string): Promise<PcgCompileResult> =>
+    invoke<PcgCompileResult>("pcg_compile", { id }),
+  /** Persist the graph to a `.inf_pcg` asset; returns the written file name. */
+  save: (id: string, name: string): Promise<string> => invoke<string>("pcg_save", { id, name }),
+  /** Scatter over the scene terrain into the target volume (null → selection). */
+  evaluate: (id: string, entity: string | null): Promise<PcgEvaluateResult> =>
+    invoke<PcgEvaluateResult>("pcg_evaluate", { id, entity }),
 };
 
 /**

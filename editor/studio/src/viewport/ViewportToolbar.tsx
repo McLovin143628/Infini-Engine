@@ -6,6 +6,7 @@
  * each change to the native viewport over typed IPC.
  */
 import { useViewportStore } from "../stores/viewportStore";
+import { useShellStore } from "../stores/shellStore";
 import type { SculptFalloffDto } from "../bindings/SculptFalloffDto";
 import type { SculptOpDto } from "../bindings/SculptOpDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
@@ -147,6 +148,7 @@ function SculptControls() {
   const setSculptRadius = useViewportStore((s) => s.setSculptRadius);
   const setSculptStrength = useViewportStore((s) => s.setSculptStrength);
   const setSculptFalloff = useViewportStore((s) => s.setSculptFalloff);
+  const openErode = useShellStore((s) => s.setErodeOpen);
 
   return (
     <>
@@ -204,6 +206,15 @@ function SculptControls() {
           ))}
         </select>
       </label>
+      <div className="h-4 w-px bg-(--ink-border)" />
+      <button
+        type="button"
+        title="Bake hydraulic + thermal erosion onto the terrain (GPU compute; one undo step)"
+        onClick={() => openErode(true)}
+        className="flex h-6 items-center rounded border border-(--ink-border) px-2 text-(--ink-text-dim) hover:border-(--ink-accent) hover:text-(--ink-text)"
+      >
+        Erode…
+      </button>
     </>
   );
 }

@@ -37,6 +37,8 @@ pub fn run() {
         .manage(commands::LspState::default())
         .manage(commands::GraphState::default())
         .manage(commands::MaterialState::default())
+        .manage(commands::PcgState::default())
+        .manage(commands::ErosionState::default())
         .invoke_handler(commands::invoke_handler())
         .setup(|app| {
             logging::attach_app(app.handle().clone());

@@ -11,6 +11,7 @@ mod layout;
 mod lsp;
 mod material;
 mod package;
+mod pcg;
 mod pie;
 mod project;
 mod scene;
@@ -19,17 +20,20 @@ mod settings;
 mod sim;
 mod sorting;
 mod terminal;
+mod terrain;
 mod viewport;
 
 pub use assets::{init_assets_on_boot, AssetState};
 pub use graph::GraphState;
 pub use lsp::LspState;
 pub use material::MaterialState;
+pub use pcg::PcgState;
 pub use pie::PieState;
 pub use project::ProjectState;
 pub use scene::{recover_scene_on_boot, SceneState};
 pub use sim::SimState;
 pub use terminal::PtyState;
+pub use terrain::ErosionState;
 pub use viewport::ViewportState;
 
 pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
@@ -53,6 +57,17 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         material::material_redo,
         material::material_compile,
         material::material_bake,
+        terrain::terrain_erode,
+        pcg::pcg_registry,
+        pcg::pcg_list,
+        pcg::pcg_create,
+        pcg::pcg_get,
+        pcg::pcg_apply,
+        pcg::pcg_undo,
+        pcg::pcg_redo,
+        pcg::pcg_compile,
+        pcg::pcg_save,
+        pcg::pcg_evaluate,
         layout::layout_save,
         layout::layout_load,
         layout::layout_list,

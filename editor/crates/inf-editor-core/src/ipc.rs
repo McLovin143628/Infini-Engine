@@ -558,6 +558,103 @@ pub struct SculptSettingsDto {
     pub falloff: SculptFalloffDto,
 }
 
+// ── Terrain erosion bake (P10.3b) ────────────────────────────────────────
+//
+// The Erode dialog sends an `ErosionParamsDto` + step count to `terrain_erode`,
+// which runs the GPU compute pipeline (CPU reference fallback with no adapter)
+// and commits ONE undoable height delta. Mirrors `inf_terrain::ErosionParams`
+// field-for-field (`rain_seed` narrowed to `u32` to stay a JS `number`).
+
+/// Hydraulic + thermal erosion parameters (`terrain_erode`). Defaults come from
+/// [`inf_terrain::ErosionParams::default`]. Rates are per simulation step.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct ErosionParamsDto {
+    pub dt: f32,
+    pub rain_rate: f32,
+    pub rain_variation: f32,
+    pub rain_seed: u32,
+    pub rain_frequency: f64,
+    pub rain_octaves: u32,
+    pub evaporation: f32,
+    pub gravity: f32,
+    pub pipe_area: f32,
+    pub sediment_capacity: f32,
+    pub dissolving: f32,
+    pub deposition: f32,
+    pub min_tilt: f32,
+    pub max_erode_depth: f32,
+    pub thermal_talus_deg: f32,
+    pub thermal_rate: f32,
+    pub max_thermal_depth: f32,
+    pub thermal_every: u32,
+}
+
+impl ErosionParamsDto {
+    /// Convert to the Ring-0 [`inf_terrain::ErosionParams`].
+    pub fn to_params(&self) -> inf_terrain::ErosionParams {
+        inf_terrain::ErosionParams {
+            dt: self.dt,
+            rain_rate: self.rain_rate,
+            rain_variation: self.rain_variation,
+            rain_seed: self.rain_seed as u64,
+            rain_frequency: self.rain_frequency,
+            rain_octaves: self.rain_octaves,
+            evaporation: self.evaporation,
+            gravity: self.gravity,
+            pipe_area: self.pipe_area,
+            sediment_capacity: self.sediment_capacity,
+            dissolving: self.dissolving,
+            deposition: self.deposition,
+            min_tilt: self.min_tilt,
+            max_erode_depth: self.max_erode_depth,
+            thermal_talus_deg: self.thermal_talus_deg,
+            thermal_rate: self.thermal_rate,
+            max_thermal_depth: self.max_thermal_depth,
+            thermal_every: self.thermal_every,
+        }
+    }
+}
+
+impl Default for ErosionParamsDto {
+    fn default() -> Self {
+        let p = inf_terrain::ErosionParams::default();
+        Self {
+            dt: p.dt,
+            rain_rate: p.rain_rate,
+            rain_variation: p.rain_variation,
+            rain_seed: p.rain_seed as u32,
+            rain_frequency: p.rain_frequency,
+            rain_octaves: p.rain_octaves,
+            evaporation: p.evaporation,
+            gravity: p.gravity,
+            pipe_area: p.pipe_area,
+            sediment_capacity: p.sediment_capacity,
+            dissolving: p.dissolving,
+            deposition: p.deposition,
+            min_tilt: p.min_tilt,
+            max_erode_depth: p.max_erode_depth,
+            thermal_talus_deg: p.thermal_talus_deg,
+            thermal_rate: p.thermal_rate,
+            max_thermal_depth: p.max_thermal_depth,
+            thermal_every: p.thermal_every,
+        }
+    }
+}
+
+/// Result of an erosion bake (`terrain_erode`). `mass_delta` is the net terrain
+/// volume change (world m³, negative = net-eroded), derived from the committed
+/// delta so it is adapter-independent. `sediment_moved` is the CPU reference's
+/// cumulative eroded volume — present only on the CPU (no-adapter) path, `None`
+/// on the GPU path (GPU stat reductions are omitted; see the executor docs).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct ErosionReportDto {
+    pub cells_changed: u32,
+    pub mass_delta: f64,
+    pub sediment_moved: Option<f64>,
+    pub used_gpu: bool,
+    pub steps: u32,
+}
+
 /// Per-project editor settings persisted under `<root>/.infinity/settings.toml`
 /// (`project_settings_get` / `project_settings_set`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]

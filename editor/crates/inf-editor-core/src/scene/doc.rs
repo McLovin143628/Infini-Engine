@@ -10,7 +10,7 @@
 //! GUIDs, not bevy `Entity` ids, are the identity that crosses every boundary:
 //! entity ids are reused across despawn and never serialized.
 
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 use inf_ecs::components::{
     AtlasRect, Camera, GlobalTransform, Light, Light2D, LightKind, Material, MeshRef, NineSlice,
     Primitive, Sprite, Terrain, Text2D, Tilemap, Transform, Visibility,
@@ -22,6 +22,19 @@ use uuid::Uuid;
 use crate::ipc::{SceneNode, SceneSnapshot, SpawnKind};
 use crate::scene::serialize::{EntityRecord, LevelSettings};
 use crate::scene::undo::{EditCommand, EditHistory};
+
+/// Per-bake accounting returned by [`SceneDoc::edit_erode_region`], derived from
+/// the committed height delta (so it is adapter-independent, unlike GPU float
+/// order). Richer stats (sediment moved, water balance) come from the CPU
+/// reference's [`inf_terrain::ErosionStats`] on the CPU path only.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ErodeReport {
+    /// Height samples the bake actually changed (`before != after`).
+    pub cells_changed: usize,
+    /// Net terrain-volume change `Σ(after − before)·l²` (world m³); negative =
+    /// net-eroded.
+    pub mass_delta: f64,
+}
 
 pub struct SceneDoc {
     world: EcsWorld,
@@ -535,6 +548,97 @@ impl SceneDoc {
         }
         self.world.mark_dirty();
         self.touch();
+    }
+
+    // ── terrain erosion bake (P10.3b) ────────────────────────────────────
+    //
+    // Erosion runs the GPU compute pipeline (or the CPU reference as the
+    // no-adapter fallback) over an extracted `HeightRegion`, writes the result
+    // back through the same seam as sculpt, and commits it as ONE
+    // `SculptTerrain` height delta — so an erosion bake is undoable for free and
+    // the viewport re-uploads on the version bump. ERODED TERRAIN IS DATA: the
+    // delta is stored in the level; only the *bake action* varies by GPU adapter
+    // (GPU f32 vs the partly-f64 CPU reference), scene determinism is unaffected.
+
+    /// The world-XZ AABB `[min, max]` covering the entity's authored terrain
+    /// tiles, in terrain-local coordinates (the space [`edit_erode_region`] and
+    /// `extract_region` expect). `None` when the entity has no `Terrain` or the
+    /// terrain is empty.
+    ///
+    /// [`edit_erode_region`]: Self::edit_erode_region
+    pub fn terrain_bounds(&self, guid: Uuid) -> Option<(DVec2, DVec2)> {
+        let e = self.world.entity_of(guid)?;
+        let data = &self.world.world().get::<Terrain>(e)?.data;
+        if data.is_empty() {
+            return None;
+        }
+        let span = data.tile_span();
+        let mut min = DVec2::splat(f64::INFINITY);
+        let mut max = DVec2::splat(f64::NEG_INFINITY);
+        for (&(tx, tz), _) in data.tiles() {
+            let o = DVec2::new(tx as f64 * span, tz as f64 * span);
+            min = min.min(o);
+            max = max.max(o + DVec2::splat(span));
+        }
+        Some((min, max))
+    }
+
+    /// Run an erosion bake over the terrain-local world AABB `[min, max]`
+    /// (expanded by `margin` samples so open-boundary draining happens outside
+    /// the area of interest) on `guid`'s terrain: `run` transforms the extracted
+    /// [`HeightRegion`](inf_terrain::HeightRegion) in place (the GPU pipeline, or
+    /// the CPU reference on the no-adapter fallback), and the result is committed
+    /// as ONE undoable `SculptTerrain` delta with a version bump. Returns
+    /// per-bake accounting (cells changed + net mass change) derived from the
+    /// committed delta — adapter-independent, unlike GPU float order. `None` when
+    /// the entity has no `Terrain`.
+    pub fn edit_erode_region<F>(
+        &mut self,
+        guid: Uuid,
+        min: DVec2,
+        max: DVec2,
+        margin: u32,
+        run: F,
+    ) -> Option<ErodeReport>
+    where
+        F: FnOnce(&mut inf_terrain::HeightRegion),
+    {
+        let e = self.world.entity_of(guid)?;
+        let (mps, delta) = {
+            let mut terrain = self.world.world_mut().get_mut::<Terrain>(e)?;
+            let mps = terrain.data.meters_per_sample();
+            let delta = terrain.data.edit_region(min, max, margin, run);
+            (mps, delta)
+        };
+        // Cells actually changed + net terrain-volume change, from the delta.
+        let area = mps * mps;
+        let mut cells_changed = 0usize;
+        let mut mass_delta = 0.0f64;
+        for p in &delta.patches {
+            for k in 0..p.before.len() {
+                let d = p.after[k] - p.before[k];
+                if d != 0.0 {
+                    cells_changed += 1;
+                    mass_delta += d as f64;
+                }
+            }
+        }
+        mass_delta *= area;
+        if !delta.is_empty() {
+            self.history.record(
+                "Erode Terrain",
+                EditCommand::SculptTerrain {
+                    guid,
+                    delta: Box::new(delta),
+                },
+            );
+            self.world.mark_dirty();
+            self.touch();
+        }
+        Some(ErodeReport {
+            cells_changed,
+            mass_delta,
+        })
     }
 
     /// Recreate an entity from a serialized record at order slot `at`.
