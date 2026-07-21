@@ -738,6 +738,36 @@ instances scattered by rules, 60 fps flythrough, works in PIE.
 **Goal:** things that move and feel alive. **Done when:** idle/run/jump state-machine character
 driven by Blueprint input runs across P10 terrain in PIE.
 
+> **STATUS: Phase 11 COMPLETE** (2026-07-21), CI-green on all three OSes. **P11.1**:
+> `inf-anim` pure pose math (validated topological skeletons, step/linear clips with
+> cubic-resampled import, shortest-path slerp sampling, blend_poses, skinning matrices);
+> `.inf_skel`/`.inf_anim` assets (pack codes 13/14); glTF skins/clips/JOINTS+WEIGHTS import
+> proven on an in-test-constructed glTF; GPU skinning as an additive pipeline (joints/
+> weights attributes + @group(3) palette buffer; unskinned path byte-stable, strict-golden
+> proven; golden_skinned_mesh bends a procedural cylinder); AnimPlayer ticks in both sim
+> loops. **P11.2**: 1D/2D blend spaces (bracketing/IDW-k3 v1); `.inf_sm` state machines as
+> a PLAIN serde model (states/transitions aren't a DAG — and no bincode escape hatch
+> needed), AND-condition transitions, exit-time gating, crossfade; the SmContext seam reads
+> Blueprint vars for conditions AND blend params; state-machine canvas panel (states as
+> nodes, transitions as edges, condition inspector). **P11.3**: sockets on SkeletonAsset +
+> AttachedTo following posed sockets; loop-safe root-motion extraction applied through the
+> 3D mover; the `physics3d.*` kit via Host::physics3d() (zero lowering changes — the
+> generic namespace path absorbed it; full transpile round-trips); both sim ticks run the
+> 2D+3D bridges; humanoid retarget v1 (bind-relative rotation copy). **P11.4**: sequencer
+> seed — scalar property tracks, non-dirtying scrub-with-restore (proven by test),
+> capture-key workflow, timeline panel. **Schema v5** persists all five animation
+> components (frozen-v4 fixtures both codecs; delete→undo restores); cook closes over
+> skeleton/clip/sm refs incl. SM→clip edges; ScenePayload v3 carries anim assets into PIE.
+> **The gate** (`samples/character-demo`): a 6-joint procedural character with programmatic
+> idle/run/jump clips and a state machine driven by Blueprint vars crosses sine-hill
+> terrain — x advances, Y tracks the heightfield (terrain.height_at host seam), jump
+> lifts and lands, SM transitions idle→run→jump in order, deterministic across two
+> independent cooks, and **PIE == shipping on the (x, y, sm-state) trace**. Human-verified
+> remainders: live skinned rendering in the interactive viewport (headless-golden-proven;
+> the shared mesh/texture-upload gap), the visual play pass + demo recording. Deferred:
+> in-panel blend-space authoring, Delaunay 2D blending, IK/foot fix-up, retarget scaling,
+> Vec3 blueprint value, pose-driven socket tracking, blend-space root motion.
+
 - **P11.1 Skeletal foundation** — 1. glTF skin/skeleton import (`.inf_skel`); 2. GPU skinning;
   3. clip playback + blending (`.inf_anim`).
 - **P11.2 Animation graphs** — 1. blend spaces (1D/2D); 2. state machine asset (`.inf_sm`) +
