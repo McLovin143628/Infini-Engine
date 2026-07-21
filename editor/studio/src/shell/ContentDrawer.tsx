@@ -41,6 +41,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/utils";
 import { executeCommand } from "../lib/commands";
 import { scene as sceneIpc } from "../lib/ipc";
+import { useDockLayout } from "../panels/dock/dockLayoutStore";
 import { useShellStore } from "../stores/shellStore";
 import {
   childFolders,
@@ -128,6 +129,8 @@ export default function ContentDrawer() {
 
   const onCellOpen = (asset: AssetDto) => {
     if (DATA_KINDS.has(asset.kind)) openEditor(asset.id);
+    else if (asset.kind === "material")
+      useDockLayout.getState().openPanel("material"); // P7.2 material editor
   };
 
   // Kinds present, for the filter column.

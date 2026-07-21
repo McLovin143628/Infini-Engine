@@ -97,6 +97,19 @@ impl Thumbnailer {
     pub fn size(&self) -> u32 {
         self.size
     }
+
+    /// Render a material graph's generated `surface_wgsl` on a lit preview
+    /// sphere (P7.2.3). `None` if no GPU adapter is available. `tex_count`
+    /// texture slots are bound to white; the surface must be naga-valid.
+    pub fn render_material_preview(
+        &mut self,
+        surface_wgsl: &str,
+        tex_count: u32,
+        size: u32,
+    ) -> Option<Vec<u8>> {
+        let gpu = self.gpu()?;
+        scene_render::render_material_preview(gpu, size, surface_wgsl, tex_count).ok()
+    }
 }
 
 /// A content-hash-keyed on-disk cache of encoded PNG thumbnails.

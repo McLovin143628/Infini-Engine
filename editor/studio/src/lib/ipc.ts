@@ -17,6 +17,7 @@ import type {
   GraphRunResult,
   NodeDef,
 } from "./blueprintTypes";
+import type { MaterialCompileResult } from "./materialTypes";
 import type { AssetRefDto } from "../bindings/AssetRefDto";
 import type { AssetSnapshot } from "../bindings/AssetSnapshot";
 import type { DataAssetDto } from "../bindings/DataAssetDto";
@@ -274,4 +275,24 @@ export const graph = {
   redo: (id: string): Promise<BpDoc | null> => invoke<BpDoc | null>("graph_redo", { id }),
   run: (id: string): Promise<GraphRunResult> => invoke<GraphRunResult>("graph_run", { id }),
   generate: (id: string): Promise<string> => invoke<string>("graph_generate", { id }),
+};
+
+/**
+ * Material graphs (Phase 7.2). Mirrors the blueprint surface (CRUD + apply +
+ * undo/redo over the shared `inf-graph` shapes), plus `compile`: the material
+ * node graph → naga-validated WGSL, node-anchored diagnostics, and an offscreen
+ * preview-sphere render (PNG data-URL). Documents share the `BpDoc`/`BpEdit`
+ * shapes; only the compile result is material-specific.
+ */
+export const material = {
+  registry: (): Promise<NodeDef[]> => invoke<NodeDef[]>("material_registry"),
+  list: (): Promise<BpDoc[]> => invoke<BpDoc[]>("material_list"),
+  create: (name: string): Promise<BpDoc> => invoke<BpDoc>("material_create", { name }),
+  get: (id: string): Promise<BpDoc> => invoke<BpDoc>("material_get", { id }),
+  apply: (id: string, edits: BpEdit[], label: string): Promise<GraphApplyResult> =>
+    invoke<GraphApplyResult>("material_apply", { id, edits, label }),
+  undo: (id: string): Promise<BpDoc | null> => invoke<BpDoc | null>("material_undo", { id }),
+  redo: (id: string): Promise<BpDoc | null> => invoke<BpDoc | null>("material_redo", { id }),
+  compile: (id: string): Promise<MaterialCompileResult> =>
+    invoke<MaterialCompileResult>("material_compile", { id }),
 };

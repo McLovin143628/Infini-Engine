@@ -36,6 +36,8 @@ export interface EventPayloads {
   "project://changed": ProjectInfoDto;
   /** A blueprint graph mutated (payload = graph id) → re-sync canvas (P6.2). */
   "graph://sync": string;
+  /** A material graph mutated (payload = material id) → re-sync canvas (P7.2). */
+  "material://sync": string;
 }
 
 export type EventChannel = keyof EventPayloads;

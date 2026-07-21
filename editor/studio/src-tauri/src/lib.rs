@@ -34,6 +34,7 @@ pub fn run() {
         .manage(commands::PtyState::default())
         .manage(commands::LspState::default())
         .manage(commands::GraphState::default())
+        .manage(commands::MaterialState::default())
         .invoke_handler(commands::invoke_handler())
         .setup(|app| {
             logging::attach_app(app.handle().clone());

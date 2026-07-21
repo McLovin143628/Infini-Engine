@@ -6,6 +6,7 @@ import {
   Globe2,
   ListChecks,
   ListTree,
+  Palette,
   PlusSquare,
   ScrollText,
   Search,
@@ -24,6 +25,7 @@ import ProblemsPanel from "./ProblemsPanel";
 import SearchPanel from "./SearchPanel";
 import TerminalPanel from "./TerminalPanel";
 import { BlueprintCanvas } from "./blueprint/BlueprintCanvas";
+import { MaterialCanvas } from "./material/MaterialCanvas";
 import { registerPanelType } from "./panelRegistry";
 
 /**
@@ -215,6 +217,16 @@ registerPanelType({
   singleton: true,
   defaultLocation: "bottom",
   defaultSize: { w: 1000, h: 560 },
+});
+
+registerPanelType({
+  type: "material",
+  title: () => "Material",
+  icon: Palette,
+  component: MaterialCanvas,
+  singleton: true,
+  defaultLocation: "bottom",
+  defaultSize: { w: 1040, h: 560 },
 });
 
 registerPanelType({

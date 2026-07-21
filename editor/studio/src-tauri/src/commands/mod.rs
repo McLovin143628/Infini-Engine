@@ -9,6 +9,7 @@ mod git;
 mod graph;
 mod layout;
 mod lsp;
+mod material;
 mod project;
 mod scene;
 mod search;
@@ -18,6 +19,7 @@ mod viewport;
 pub use assets::{init_assets_on_boot, AssetState};
 pub use graph::GraphState;
 pub use lsp::LspState;
+pub use material::MaterialState;
 pub use project::ProjectState;
 pub use scene::{recover_scene_on_boot, SceneState};
 pub use terminal::PtyState;
@@ -35,6 +37,14 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         graph::graph_redo,
         graph::graph_run,
         graph::graph_generate,
+        material::material_registry,
+        material::material_list,
+        material::material_create,
+        material::material_get,
+        material::material_apply,
+        material::material_undo,
+        material::material_redo,
+        material::material_compile,
         layout::layout_save,
         layout::layout_load,
         layout::layout_list,
