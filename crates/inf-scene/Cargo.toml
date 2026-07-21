@@ -9,3 +9,10 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# The runtime `.inf_lvl` reader decodes into the SAME `inf-ecs` component types
+# the editor's authoring codec writes, so bytes round-trip field-for-field.
+inf-ecs = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }

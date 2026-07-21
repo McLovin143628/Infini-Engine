@@ -1,12 +1,15 @@
 //! Infinity Engine command-line tool.
 //!
 //! Subcommands: `inf new <name>` (scaffold a project from a template),
-//! `inf --version`. `inf cook` (asset packs) and `inf bindings` land with their
-//! phases (P9 / tooling).
+//! `inf cook --project <dir>` (build a shippable asset pack + manifest),
+//! `inf pack ls <pack>` (inspect a `.inf_pack`), `inf --version`.
+//! `inf bindings` lands with its tooling phase.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use inf_asset::{AssetId, PackReader};
+use inf_packager::{cook, CookOptions};
 use inf_project::{Project, ProjectTemplate};
 
 fn main() -> ExitCode {
@@ -17,6 +20,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("new") => cmd_new(&args[1..]),
+        Some("cook") => cmd_cook(&args[1..]),
+        Some("pack") => cmd_pack(&args[1..]),
         Some("--help") | Some("-h") | None => {
             print_help();
             ExitCode::SUCCESS
@@ -34,9 +39,11 @@ fn print_help() {
         "inf {} — Infinity Engine CLI\n\n\
          USAGE:\n  \
              inf new <name> [--template <slug>] [--dir <path>]\n  \
+             inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]\n  \
+             inf pack ls <pack.inf_pack>\n  \
              inf --version\n\n\
          TEMPLATES:\n  \
-             blank-3d (default), 2d-platformer, first-person\n",
+             blank-3d (default), 2d-platformer, first-person, hybrid-2.5d\n",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -97,6 +104,133 @@ fn cmd_new(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]`
+fn cmd_cook(args: &[String]) -> ExitCode {
+    let mut project: Option<PathBuf> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut roots: Option<Vec<AssetId>> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--project" | "-p" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => project = Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--project needs a path");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            "--out" | "-o" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => out = Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--out needs a path");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            "--roots" | "-r" => {
+                i += 1;
+                match args.get(i) {
+                    Some(list) => {
+                        let mut ids = Vec::new();
+                        for tok in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                            match tok.parse::<AssetId>() {
+                                Ok(id) => ids.push(id),
+                                Err(_) => {
+                                    eprintln!("invalid root guid: {tok}");
+                                    return ExitCode::FAILURE;
+                                }
+                            }
+                        }
+                        roots = Some(ids);
+                    }
+                    None => {
+                        eprintln!("--roots needs a comma-separated guid list");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            other => {
+                eprintln!("unexpected argument: {other}");
+                return ExitCode::FAILURE;
+            }
+        }
+        i += 1;
+    }
+
+    let Some(project) = project else {
+        eprintln!("usage: inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]");
+        return ExitCode::FAILURE;
+    };
+    // Default output: `<project>/Build`.
+    let out = out.unwrap_or_else(|| project.join("Build"));
+
+    let opts = CookOptions {
+        roots,
+        ..Default::default()
+    };
+    match cook(&project, &out, &opts) {
+        Ok(report) => {
+            print!("{}", report.render());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cook failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `inf pack ls <pack>` — list a pack's index for debugging.
+fn cmd_pack(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("ls") => {
+            let Some(path) = args.get(1) else {
+                eprintln!("usage: inf pack ls <pack.inf_pack>");
+                return ExitCode::FAILURE;
+            };
+            match PackReader::open(&PathBuf::from(path)) {
+                Ok(reader) => {
+                    println!(
+                        "{} — format v{}, {} assets",
+                        path,
+                        reader.format_version(),
+                        reader.len()
+                    );
+                    println!(
+                        "{:<38} {:<18} {:>10} {:>10}  z",
+                        "guid", "kind", "stored", "raw"
+                    );
+                    for e in reader.index() {
+                        println!(
+                            "{:<38} {:<18} {:>10} {:>10}  {}",
+                            e.guid,
+                            e.kind.slug(),
+                            e.stored_len,
+                            e.uncompressed_len,
+                            if e.compressed { "zstd" } else { "raw" }
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cannot read pack: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        _ => {
+            eprintln!("usage: inf pack ls <pack.inf_pack>");
             ExitCode::FAILURE
         }
     }

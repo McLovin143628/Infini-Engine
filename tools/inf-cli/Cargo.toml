@@ -13,5 +13,9 @@ name = "inf"
 path = "src/main.rs"
 
 [dependencies]
+inf-asset = { workspace = true }
 inf-packager = { workspace = true }
 inf-project = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

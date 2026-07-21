@@ -9,3 +9,20 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+inf-asset = { workspace = true }
+inf-scene = { workspace = true }
+inf-blueprint = { workspace = true }
+inf-project = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Integration tests inspect the cooked pack + decode a level out of it.
+inf-asset = { workspace = true }
+inf-scene = { workspace = true }
+inf-project = { workspace = true }

@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

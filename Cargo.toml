@@ -58,6 +58,12 @@ wgpu = { version = "30", default-features = false, features = ["vulkan", "metal"
 # time without pulling wgpu into Ring-0 material codegen (P7.2).
 naga = { version = "30", features = ["wgsl-in"] }
 raw-window-handle = "0.6"
+# winit: the standalone player's (Ring 2) windowing/event loop (P9.3). The editor
+# viewport embeds a *child* HWND/NSView via `inf-viewport` and does NOT use winit;
+# only `inf-player` names it. 0.30 is the current ApplicationHandler-based API and
+# uses raw-window-handle 0.6 (matching wgpu 30), so one rwh in the tree. The wgpu
+# surface is created straight from the winit window — no per-OS surface code.
+winit = "0.30"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 windows = "0.62"
@@ -134,6 +140,15 @@ regex = "1"
 # (no async/futures tree pulled into Ring 0). tokio stays in Ring 2 by rule.
 rayon = "1"
 flume = { version = "0.11", default-features = false }
+# ── cook pipeline: asset-pack compression (Phase 9.2) ──
+# zstd compresses the content-addressed `.inf_pack` payload blobs. The C core is
+# built through zstd-sys/`cc` — the same cc toolchain `meshopt` already requires,
+# and far more CI-portable than the ISPC path we declined for BC7. With a FIXED
+# compression level and no timestamps/dictionary the output is deterministic, so
+# cooking the same inputs twice is byte-identical (the P9.2 gate). The crate and
+# its wrappers are MIT/Apache-2.0 (on the deny allow-list); the vendored C is
+# BSD-3-Clause (also allowed).
+zstd = "0.13"
 # ── editor↔frontend shared types → committed TS bindings (CI drift-checked) ──
 ts-rs = "12"
 # test-only (dev-dependencies in member crates)

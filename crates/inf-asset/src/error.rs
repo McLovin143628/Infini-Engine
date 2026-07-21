@@ -34,6 +34,10 @@ pub enum AssetError {
 
     #[error("import: {0}")]
     Import(String),
+
+    /// A pack could not be written, parsed, or verified (`.inf_pack`).
+    #[error("pack: {0}")]
+    Pack(String),
 }
 
 /// Convenience alias.
