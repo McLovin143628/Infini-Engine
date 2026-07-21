@@ -878,6 +878,41 @@ scene streams and culls at interactive rates; classic-LOD fallback documented fo
 runs on Android and in Chrome; two desktop instances replicate transforms; console-port design
 review passes against the HAL audit.
 
+> **STATUS: Phase 14 COMPLETE (engineering scope)** (2026-07-21), CI-green on all three
+> OSes. The honest-scope doctrine applies: device-dependent verification (a phone in
+> hand, a browser frame on screen) is human-only; everything CI can prove, it proves.
+> **P14.1/14.2**: the ENTIRE player dep tree cross-compiles for wasm32-unknown-unknown
+> with -D warnings — gated by the new CI wasm-check job (uuid js, getrandom wasm_js,
+> notify gated, zstd→ruzstd decode on wasm, the meshopt C++ builder cook-only);
+> `web::start_player(canvas, pack_url)` fetches packs over HTTP into the shared world
+> builder; Android android-native-activity entry (NDK-gated locally, non-blocking CI
+> check); pure TouchControls virtual gamepad feeding the existing InputMap; mobile
+> render-tier preset; `inf export --target web|android` with real builds when tools are
+> present, honest instructions otherwise. Honest remainder: the in-browser frame needs
+> the async-adapter seam (GpuContext block_on cannot run on the web main thread).
+> **P14.3**: inf-net sans-io reliability Endpoint — exactly-once-in-order proven under
+> 16 seeds of 30% loss/20% dup/40% reorder; Guid-keyed delta snapshots; RPC registry;
+> quinn QUIC transport behind an off-by-default feature (ring crypto; localhost
+> integration: 100 transforms + RPC round-trip); two-GameLoop replication proof; the
+> net-model memo (snapshot default; deterministic lockstep documented VIABLE because
+> §2.5 bit-determinism is CI-proven). **P14.4**: inf-platform HAL traits + desktop
+> backend; platforms/inf-platform-null implements all six seams (the out-of-tree
+> private-repo pattern demonstrated); the audit memo's honest gap table (file IO direct
+> in five crates, wgpu inherent, save-data greenfield) + cook-target plumbing + generic
+> TRC checklist. **P14.5**: the WASM modding tier per the crossref memo — inf-wasm-host
+> (wasmtime 47, core modules only): capability-scoped deny-by-default imports
+> (ungranted import = capability-anchored instantiation error), deterministic fuel
+> limits + opt-in epoch interruption (a deliberately hung mod traps, is disabled, the
+> host survives — tested), memory caps; the blueprint→Rust→wasm cook shim reuses the
+> EXISTING transpiler (one truth preserved; `inf cook --mods` generated AND compiled a
+> real mod); the spinner sample runs end-to-end in a real RuntimeSim (filename-ordered
+> deterministic ticking); editor ModsSession hot-reload proven by test (SimSession
+> glue = documented follow-up); the security-posture memo. Human-verified remainders:
+> browser/device runs, two-desktop live replication session, demo recordings.
+> Deferred: async-adapter web frame, range-request pack streaming, iOS xcodeproj/
+> signing, client prediction/interest management, mod-state migration across reload,
+> per-capability rate limits, HAL file-IO routing.
+
 - **P14.1 Mobile** — 1. Android export (wgpu Vulkan/GLES paths, touch in `inf-input`, APK
   packaging); 2. iOS export (Metal, xcodeproj generation, docs for signing); 3. mobile perf
   tier presets.
