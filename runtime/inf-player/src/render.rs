@@ -15,6 +15,8 @@
 //! fallback tinted by their color (a colored quad). Uploading real texture bytes
 //! is the same follow-up the editor documents.
 
+use std::sync::Arc;
+
 use glam::{DVec3, Vec2, Vec3};
 use uuid::Uuid;
 
@@ -25,13 +27,15 @@ use inf_ecs::components::{
 use inf_ecs::Guid;
 use inf_math::FloatingOrigin;
 use inf_render::{
-    expand_nine_slice, expand_text, handle_from_guid, EngineRenderer, GpuContext, HAlign,
-    LightKind, MeshInstance, NineSliceParams, PrebatchedRun, RenderChunk, RenderLight,
-    RenderLight2D, RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile,
-    RenderTilemap, RenderView, SurfaceChain, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
+    detect_tier, expand_nine_slice, expand_text, handle_from_guid, EngineRenderer, GpuContext,
+    HAlign, LightKind, MeshInstance, NineSliceParams, PrebatchedRun, RenderChunk, RenderLight,
+    RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
+    RenderTerrainTile, RenderTilemap, RenderView, SurfaceChain, TextParams, TilemapParams,
+    VgeomAsset, VgeomInstance, BUILTIN_FONT_TEXTURE,
 };
 
 use crate::runtime_sim::RuntimeSim;
+use crate::vmesh::VmeshRegistry;
 
 /// Owns the GPU stack + the render scene the player draws each frame.
 pub struct PlayerRenderHost {
@@ -40,6 +44,15 @@ pub struct PlayerRenderHost {
     renderer: EngineRenderer,
     scene: RenderScene,
     origin: FloatingOrigin,
+    /// The cook-derived `.inf_vmesh` DAGs a `MeshRef.asset` resolves to (P13.4);
+    /// empty for the `--demo` / primitive-only worlds. Set via [`set_vmeshes`].
+    ///
+    /// [`set_vmeshes`]: PlayerRenderHost::set_vmeshes
+    vmeshes: Arc<VmeshRegistry>,
+    /// Whether the auto-picked [`RenderTier`](inf_render::RenderTier) enables the
+    /// GPU meshlet path (High). Off → the classic discrete-LOD fallback renders the
+    /// same vgeom content (the renderer's `ClassicVgeomNode`).
+    vgeom_enabled: bool,
 }
 
 impl PlayerRenderHost {
@@ -52,7 +65,25 @@ impl PlayerRenderHost {
         height: u32,
     ) -> Result<Self, String> {
         let chain = SurfaceChain::new(&gpu, surface, width, height)?;
-        let renderer = EngineRenderer::new(&gpu, chain.target_format());
+        let mut renderer = EngineRenderer::new(&gpu, chain.target_format());
+
+        // Auto-tier (P13.4.2): probe the adapter, pick a render tier, and apply it
+        // to the renderer's settings. High enables the GPU meshlet path; Medium/Low
+        // fall back to the classic discrete-LOD path (and Low drops the expensive
+        // post effects). The decision is logged by `detect_tier`.
+        let base = RenderSettings::default();
+        let tier = detect_tier(&gpu, &base);
+        let settings = tier.apply(RenderSettings {
+            // Request the meshlet path; the tier clamps it down on Medium/Low.
+            vgeom: inf_render::VgeomSettings {
+                enabled: true,
+                ..base.vgeom
+            },
+            ..base
+        });
+        let vgeom_enabled = settings.vgeom.enabled;
+        renderer.set_settings(settings);
+
         Ok(Self {
             gpu,
             chain,
@@ -62,7 +93,17 @@ impl PlayerRenderHost {
                 ..Default::default()
             },
             origin: FloatingOrigin::default(),
+            vmeshes: Arc::new(VmeshRegistry::new()),
+            vgeom_enabled,
         })
+    }
+
+    /// Attach the cook-derived vmesh registry (from the loaded pack / dev-dir) so
+    /// `MeshRef.asset` entities render their real geometry — through the GPU meshlet
+    /// path (High tier) or the classic discrete-LOD fallback (otherwise). Empty for
+    /// primitive-only worlds.
+    pub fn set_vmeshes(&mut self, vmeshes: Arc<VmeshRegistry>) {
+        self.vmeshes = vmeshes;
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -81,7 +122,12 @@ impl PlayerRenderHost {
 
     /// Rebuild the render scene from the sim's world, interpolated by `alpha`.
     pub fn project(&mut self, sim: &RuntimeSim, alpha: f64) {
-        project_scene(&mut self.scene, sim, alpha);
+        project_scene(&mut self.scene, sim, alpha, &self.vmeshes);
+    }
+
+    /// Whether the GPU meshlet path is active (the auto-picked tier is High).
+    pub fn vgeom_enabled(&self) -> bool {
+        self.vgeom_enabled
     }
 
     /// Render one frame for `view`. Handles device-lost recovery like the editor
@@ -109,15 +155,23 @@ impl PlayerRenderHost {
 }
 
 /// Fill `scene` from `sim`'s world, blending actor positions by `alpha`.
-/// Deterministic `Guid` iteration order.
-fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64) {
+/// Deterministic `Guid` iteration order. `vmeshes` resolves a `MeshRef.asset` to
+/// its cook-derived meshlet DAG (P13.4) — a resolved mesh renders real geometry
+/// (meshlet path or classic fallback), an unresolved one falls back to a placeholder
+/// cube instance (as before).
+fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes: &VmeshRegistry) {
     scene.instances.clear();
     scene.lights.clear();
     scene.sprites.clear();
     scene.tilemaps.clear();
     scene.prebatched.clear();
     scene.lights_2d.clear();
+    scene.vgeom_assets.clear();
+    scene.vgeom_instances.clear();
     scene.terrain = None;
+    // Track which vmesh assets are already listed this frame (dedup — the render
+    // node caches GPU geometry by id, but the asset list must not duplicate).
+    let mut vgeom_seen: std::collections::HashSet<u128> = std::collections::HashSet::new();
 
     let world = sim.world();
     let w = world.world();
@@ -206,7 +260,7 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64) {
                 next_id += 1;
             }
         }
-        if w.get::<MeshRef>(entity).is_some() {
+        if let Some(mesh_ref) = w.get::<MeshRef>(entity) {
             let affine = w
                 .get::<GlobalTransform>(entity)
                 .map(|g| g.0)
@@ -224,16 +278,40 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64) {
                     )
                 })
                 .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3]));
-            scene.instances.push(MeshInstance {
-                translation,
-                rotation: rot.as_quat(),
-                scale: scale.as_vec3(),
-                color,
-                metallic,
-                roughness,
-                emissive,
-                id: next_id,
-            });
+
+            // P13.4: a MeshRef.asset with a cook-derived vmesh renders REAL geometry
+            // — the GPU meshlet path (vgeom on) or the classic discrete-LOD fallback
+            // (vgeom off), both driven by the same vgeom scene content. The tier the
+            // renderer settings carry picks which node draws it. An unresolved asset
+            // (or a primitive-only MeshRef) falls back to a placeholder cube.
+            let vgeom = mesh_ref.asset.and_then(|mesh_id| vmeshes.resolve(mesh_id));
+            if let Some((asset_id, mesh)) = vgeom {
+                if vgeom_seen.insert(asset_id) {
+                    scene.vgeom_assets.push(VgeomAsset { id: asset_id, mesh });
+                }
+                scene.vgeom_instances.push(VgeomInstance {
+                    asset: asset_id,
+                    translation,
+                    rotation: rot.as_quat(),
+                    scale: scale.as_vec3(),
+                    color,
+                    metallic,
+                    roughness,
+                    emissive,
+                    id: next_id,
+                });
+            } else {
+                scene.instances.push(MeshInstance {
+                    translation,
+                    rotation: rot.as_quat(),
+                    scale: scale.as_vec3(),
+                    color,
+                    metallic,
+                    roughness,
+                    emissive,
+                    id: next_id,
+                });
+            }
             next_id += 1;
         }
     }

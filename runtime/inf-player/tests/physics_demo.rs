@@ -1,11 +1,11 @@
 //! Phase-12-closing gate: the committed physics playground runs deterministically
 //! under the shipping pipeline, and PIE == shipping.
 //!
-//! The editor authors the `physics-playground` sample (schema-v6 `.inf_lvl` + the
+//! The editor authors the `physics-playground` sample (current-schema `.inf_lvl` + the
 //! two `.inf_audio` clips). These integration tests prove:
 //!
 //! * **(a) byte-identical save/reload** — the committed doc save→load→save is
-//!   byte-identical (a genuine schema-v6 payload carrying joints + audio).
+//!   byte-identical (a genuine current-schema payload carrying joints + audio).
 //! * **(b) cooked headless replay** — cooking the demo ships the referenced
 //!   `.inf_audio` clips through the new level→audio dependency edge; the player
 //!   builds the world off the pack and runs 300 fixed steps **twice**, yielding a
@@ -135,7 +135,7 @@ fn pos_of(sim: &RuntimeSim, guid: uuid::Uuid) -> glam::DVec3 {
     sim.world().world_translation(e).expect("world transform")
 }
 
-/// GATE (a): the committed doc save→load→save is byte-identical schema-v6.
+/// GATE (a): the committed doc save→load→save is byte-identical at the current schema.
 #[test]
 fn committed_playground_saves_and_reloads_byte_identical() {
     let doc = inf_editor_core::scene::serialize::load(&playground_dir().join("Playground.inf_lvl"))
@@ -145,8 +145,9 @@ fn committed_playground_saves_and_reloads_byte_identical() {
     )
     .expect("encode");
     assert_eq!(
-        bytes1[0], 6,
-        "the committed playground is a schema-v6 payload"
+        bytes1[0] as u32,
+        inf_scene::SCHEMA_VERSION,
+        "the committed playground is a current-schema payload"
     );
 
     let mut doc2 = inf_editor_core::scene::SceneDoc::new();

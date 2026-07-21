@@ -457,6 +457,10 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
             let mut deps: Vec<AssetId> = Vec::new();
             for e in &level.entities {
                 deps.extend(e.actor.map(AssetId));
+                // P13.4: a MeshRef.asset pulls its `.inf_mesh` into the closure, so
+                // the cook packs the mesh AND (for a dense mesh) derives + ships its
+                // `.inf_vmesh` meshlet DAG beside it (the virtualized-geometry path).
+                deps.extend(e.mesh.as_ref().and_then(|m| m.asset).map(AssetId));
                 deps.extend(e.pcg_volume.as_ref().and_then(|v| v.graph).map(AssetId));
                 if let Some(sk) = &e.skeletal_mesh {
                     deps.extend(sk.skeleton.map(AssetId));

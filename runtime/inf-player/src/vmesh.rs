@@ -130,6 +130,16 @@ impl VmeshRegistry {
         if !enabled {
             return None;
         }
+        self.resolve(mesh_id)
+    }
+
+    /// Resolve `mesh_id` to its cook-derived `(vmesh asset id as u128, meshlet DAG)`
+    /// **regardless of the render setting** (P13.4). The renderer's *tier* decides
+    /// which path draws the resolved vgeom content — the GPU meshlet path (High) or
+    /// the classic discrete-LOD fallback (Medium/Low) — so the scene content is the
+    /// same either way and this resolver is enabled-agnostic. `None` when the mesh
+    /// has no derived vmesh (an un-cooked / non-dense mesh ⇒ the placeholder path).
+    pub fn resolve(&self, mesh_id: Uuid) -> Option<(u128, Arc<VgeomMesh>)> {
         let vmesh_id = derived_vmesh_id(mesh_id);
         self.meshes
             .get(&vmesh_id)

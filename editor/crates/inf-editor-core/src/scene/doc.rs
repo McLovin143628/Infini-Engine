@@ -1431,8 +1431,13 @@ fn attach_kind(world: &mut EcsWorld, entity: Entity, kind: SpawnKind) {
         _ => None,
     };
     if let Some(primitive) = primitive {
-        w.entity_mut(entity)
-            .insert((MeshRef { primitive }, Material::default()));
+        w.entity_mut(entity).insert((
+            MeshRef {
+                primitive,
+                asset: None,
+            },
+            Material::default(),
+        ));
         return;
     }
     match kind {

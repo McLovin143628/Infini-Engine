@@ -1,5 +1,5 @@
-schema_version = 6
+schema_version = 7
 guid = "00000000-0000-0000-0000-000084010000"
 title = "Platformer 2D"
 entity_count = 5
-content_hash = "700f9629b8d699d2"
+content_hash = "337324b6363e581f"

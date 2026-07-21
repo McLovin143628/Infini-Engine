@@ -32,6 +32,7 @@ use inf_runtime::pie::{write_msg, EditorToPlayer, PlayerToEditor};
 use crate::input;
 use crate::render::PlayerRenderHost;
 use crate::runtime_sim::RuntimeSim;
+use crate::vmesh::VmeshRegistry;
 
 /// Play-in-editor control channel + report sink attached to a windowed player.
 /// Present only for the PIE window path; a standalone game leaves it `None`.
@@ -85,10 +86,21 @@ pub struct PlayerApp {
     pie: Option<PieLink>,
     /// PIE pause state (ignored when `pie` is `None`).
     paused: bool,
+    /// Cook-derived vmesh DAGs a `MeshRef.asset` resolves to (P13.4); attached to
+    /// the render host so asset meshes render real geometry. Empty for
+    /// primitive-only / PIE worlds.
+    vmeshes: Arc<VmeshRegistry>,
 }
 
 impl PlayerApp {
-    fn new(title: String, width: u32, height: u32, sim: RuntimeSim, map: InputMap) -> Self {
+    fn new(
+        title: String,
+        width: u32,
+        height: u32,
+        sim: RuntimeSim,
+        map: InputMap,
+        vmeshes: Arc<VmeshRegistry>,
+    ) -> Self {
         Self {
             title,
             width,
@@ -98,6 +110,7 @@ impl PlayerApp {
             live: None,
             pie: None,
             paused: false,
+            vmeshes,
         }
     }
 
@@ -214,7 +227,10 @@ impl PlayerApp {
         if live.host.is_lost() {
             tracing::warn!("inf-player: device lost — rebuilding GPU stack");
             match Self::build_host(&live.window, self.width, self.height) {
-                Ok(host) => live.host = host,
+                Ok(mut host) => {
+                    host.set_vmeshes(self.vmeshes.clone());
+                    live.host = host;
+                }
                 Err(e) => {
                     tracing::error!("inf-player: GPU rebuild failed: {e}");
                     event_loop.exit();
@@ -250,7 +266,10 @@ impl ApplicationHandler for PlayerApp {
         self.width = size.width.max(1);
         self.height = size.height.max(1);
         match Self::build_host(&window, self.width, self.height) {
-            Ok(host) => {
+            Ok(mut host) => {
+                // Attach the vmesh registry so `MeshRef.asset` entities render real
+                // geometry (meshlet path / classic fallback per the auto-tier).
+                host.set_vmeshes(self.vmeshes.clone());
                 // Report our native window handle so the editor can reparent us
                 // into the viewport slot (embedded PIE).
                 if let Some(pie) = self.pie.as_mut() {
@@ -321,10 +340,11 @@ pub fn run(
     height: u32,
     sim: RuntimeSim,
     map: InputMap,
+    vmeshes: Arc<VmeshRegistry>,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = PlayerApp::new(title, width, height, sim, map);
+    let mut app = PlayerApp::new(title, width, height, sim, map, vmeshes);
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("run_app: {e}"))
@@ -345,7 +365,16 @@ pub fn run_pie(
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = PlayerApp::new(title, width, height, sim, map);
+    // PIE streams no vmesh assets yet (a documented follow-up); asset meshes render
+    // as placeholder cubes in PIE until the payload carries the vmesh index.
+    let mut app = PlayerApp::new(
+        title,
+        width,
+        height,
+        sim,
+        map,
+        Arc::new(VmeshRegistry::new()),
+    );
     app.pie = Some(PieLink {
         control,
         out,

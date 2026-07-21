@@ -517,6 +517,7 @@ pub fn hybrid_scene() -> SceneDoc {
         HYBRID_GROUND_GUID,
         MeshRef {
             primitive: Primitive::Plane,
+            asset: None,
         }
     );
     insert!(
@@ -2329,6 +2330,225 @@ AND an identical audio command stream; the ragdoll settles bounded, the CCD bull
 is stopped, the ghost pair interpenetrates unimpeded, PIE == shipping.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// ── Phase 13 gate: the virtualized-geometry demo (P13.4) ─────────────────────
+//
+// The generator builds ONE dense displaced mesh asset (~33k triangles) and
+// instances it `GRID × GRID` times across an XZ plane, so the **source** triangle
+// count across instances exceeds 10M while the committed `.inf_lvl` stays tiny
+// (every instance references the single `.inf_mesh` by GUID). The cook derives the
+// `.inf_vmesh` meshlet DAG from that mesh (via the P13.4 `MeshRef.asset` →
+// dependency-closure edge); the player renders it through the GPU meshlet path
+// (vgeom on) or the classic discrete-LOD fallback (vgeom off / a lower render
+// tier). The gate lives in `runtime/inf-player/tests/vgeom_gate.rs`.
+
+/// Stable GUID of the vgeom-demo level.
+pub const VGEOM_DEMO_LEVEL_GUID: Uuid = Uuid::from_u128(0x8406_0001_0000_0000_0000_0000_0000_0001);
+/// Stable GUID of the shared dense `.inf_mesh` asset every instance references.
+pub const VGEOM_DEMO_MESH_GUID: Uuid = Uuid::from_u128(0x8406_0002_0000_0000_0000_0000_0000_0002);
+/// Stable GUID of the directional sun.
+pub const VGEOM_DEMO_SUN_GUID: Uuid = Uuid::from_u128(0x8406_0003_0000_0000_0000_0000_0000_0003);
+/// Base GUID for the grid instance entities (add the flat index).
+const VGEOM_DEMO_INSTANCE_BASE: u128 = 0x8406_0100_0000_0000_0000_0000_0000_0000;
+
+/// Grid subdivisions of the dense mesh — `2·N²` triangles (128 → 32 768 tris,
+/// well over the cook's 2048 `min_triangles` vmesh threshold).
+pub const VGEOM_DEMO_MESH_N: usize = 128;
+/// Instance grid side: `GRID × GRID` placed copies of the dense mesh.
+pub const VGEOM_DEMO_GRID: usize = 18;
+
+/// Total **source** triangles across every instance (`2·N² · GRID²`). Exceeds the
+/// phase gate's 10M requirement (128/18 → 10 616 832).
+pub const fn vgeom_demo_source_triangles() -> u64 {
+    (2 * VGEOM_DEMO_MESH_N * VGEOM_DEMO_MESH_N * VGEOM_DEMO_GRID * VGEOM_DEMO_GRID) as u64
+}
+
+/// One dense displaced-grid [`inf_mesh::MeshAsset`] (`2·N²` triangles) — the shared
+/// asset every instance references. A deterministic function of `N`, so the
+/// committed `.inf_mesh` is reproducible.
+pub fn vgeom_demo_mesh() -> inf_mesh::MeshAsset {
+    let n = VGEOM_DEMO_MESH_N;
+    let mut vertices = Vec::with_capacity((n + 1) * (n + 1));
+    for j in 0..=n {
+        for i in 0..=n {
+            let u = i as f32 / n as f32;
+            let v = j as f32 / n as f32;
+            let x = (u - 0.5) * 2.0;
+            let z = (v - 0.5) * 2.0;
+            let y = 0.3 * (x * 3.0).sin() * (z * 3.0).cos();
+            let nrm = glam::Vec3::new(
+                -0.9 * (x * 3.0).cos() * (z * 3.0).cos(),
+                1.0,
+                0.9 * (x * 3.0).sin() * (z * 3.0).sin(),
+            )
+            .normalize();
+            vertices.push(inf_mesh::MeshVertex {
+                position: [x, y, z],
+                normal: nrm.to_array(),
+                uv: [u, v],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            });
+        }
+    }
+    let stride = (n + 1) as u32;
+    let mut indices = Vec::with_capacity(n * n * 6);
+    for j in 0..n as u32 {
+        for i in 0..n as u32 {
+            let a = j * stride + i;
+            indices.extend_from_slice(&[a, a + stride, a + 1, a + 1, a + stride, a + stride + 1]);
+        }
+    }
+    let submesh = inf_mesh::SubMesh {
+        name: "dense".into(),
+        vertices,
+        indices,
+        material_slot: Some(0),
+        skin: Vec::new(),
+    };
+    inf_mesh::MeshAsset::new(vec![submesh], vec!["Default".into()])
+}
+
+/// The vgeom-demo scene: `GRID × GRID` instances of the dense mesh asset spread
+/// across an XZ plane, each an entity with a [`MeshRef`] whose `asset` points at
+/// [`VGEOM_DEMO_MESH_GUID`] (plus a placeholder `Cube` primitive for the editor
+/// viewport, which cannot render asset geometry yet), + a sun. The `.inf_lvl`
+/// stays small (one asset, many light instance records).
+pub fn vgeom_demo_scene() -> SceneDoc {
+    use inf_ecs::components::{Light, LightKind, Material, MeshRef, Primitive, Transform};
+    use inf_ecs::math::{Color, Vec3d};
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Vgeom Demo");
+
+    // Sun.
+    doc.create_with_guid(VGEOM_DEMO_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        VGEOM_DEMO_SUN_GUID,
+        Transform {
+            translation: Vec3d::ZERO,
+            rotation: Vec3d::new(-50.0, -30.0, 0.0),
+            scale: Vec3d::ONE,
+        }
+    );
+    insert!(
+        doc,
+        VGEOM_DEMO_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            color: Color::WHITE,
+            intensity: 3.0,
+        }
+    );
+
+    // The instance grid. `spacing` tiles the 2-unit-wide meshes edge-to-edge with a
+    // small gap, spreading them over the XZ plane so a ground-level camera sees only
+    // a small fraction (frustum + LOD) — the cull-ratio gate.
+    let grid = VGEOM_DEMO_GRID;
+    let spacing = 2.4f64;
+    let offset = (grid as f64 - 1.0) * 0.5 * spacing;
+    for j in 0..grid {
+        for i in 0..grid {
+            let idx = (j * grid + i) as u128;
+            let guid = Uuid::from_u128(VGEOM_DEMO_INSTANCE_BASE + idx);
+            let name = format!("Tile {i}x{j}");
+            doc.create_with_guid(guid, SpawnKind::Empty, &name, None);
+            insert!(
+                doc,
+                guid,
+                Transform {
+                    translation: Vec3d::new(
+                        i as f64 * spacing - offset,
+                        0.0,
+                        j as f64 * spacing - offset,
+                    ),
+                    rotation: Vec3d::ZERO,
+                    scale: Vec3d::ONE,
+                }
+            );
+            insert!(
+                doc,
+                guid,
+                MeshRef {
+                    primitive: Primitive::Cube,
+                    asset: Some(VGEOM_DEMO_MESH_GUID),
+                }
+            );
+            // A subtle per-tile tint so the instances read as distinct content.
+            let t = idx as f32 / (grid * grid) as f32;
+            insert!(
+                doc,
+                guid,
+                Material {
+                    base_color: Color::new(0.45 + 0.3 * t, 0.5, 0.65 - 0.3 * t, 1.0),
+                    metallic: 0.0,
+                    roughness: 0.7,
+                    emissive: Color::new(0.0, 0.0, 0.0, 1.0),
+                }
+            );
+        }
+    }
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+/// The repo-root `samples/vgeom-demo/` directory.
+pub fn vgeom_demo_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/vgeom-demo")
+}
+
+/// Write the committed vgeom-demo files from the generators (regeneration path):
+/// the `.inf_lvl` (+ sidecar), the dense `.inf_mesh` (+ its inf_asset sidecar so
+/// the `MeshRef.asset` refs resolve through the AssetDb / cooked pack), + README.
+pub fn write_vgeom_demo() -> Result<(), String> {
+    let dir = vgeom_demo_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    let doc = vgeom_demo_scene();
+    crate::scene::serialize::save(
+        &doc,
+        &dir.join("VgeomDemo.inf_lvl"),
+        Some(VGEOM_DEMO_LEVEL_GUID),
+    )?;
+
+    // The dense `.inf_mesh` payload + its inf_asset sidecar (STABLE mesh GUID the
+    // level's MeshRef.asset points at; the cook derives its `.inf_vmesh` beside it).
+    let mesh_bytes =
+        inf_asset::encode(&vgeom_demo_mesh()).map_err(|e| format!("encode mesh: {e}"))?;
+    let mesh_path = dir.join("Dense.inf_mesh");
+    std::fs::write(&mesh_path, &mesh_bytes).map_err(|e| format!("write mesh: {e}"))?;
+    inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(VGEOM_DEMO_MESH_GUID),
+        inf_asset::AssetKind::Mesh,
+        inf_asset::ContentHash::of(&mesh_bytes),
+    )
+    .save(&mesh_path)
+    .map_err(|e| format!("write mesh sidecar: {e}"))?;
+
+    std::fs::write(dir.join("README.md"), VGEOM_DEMO_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const VGEOM_DEMO_README: &str = "# Vgeom Demo (Phase-13 gate scene)\n\n\
+Generated by `inf_editor_core::samples::vgeom_demo_scene` — the P13.4 gate scene: a\n\
+grid of `GRID × GRID` instances of ONE dense displaced mesh asset, so the SOURCE\n\
+triangle count across instances exceeds 10M while the `.inf_lvl` stays tiny (every\n\
+instance references the single `Dense.inf_mesh` by GUID).\n\n\
+- `VgeomDemo.inf_lvl` — the scene (schema v7): instance transforms + `MeshRef.asset`\n\
+  refs + materials + a sun.\n\
+- `Dense.inf_mesh` — the shared ~33k-triangle displaced grid. The cook derives its\n\
+  `.inf_vmesh` meshlet DAG (via the `MeshRef.asset` dependency-closure edge) and\n\
+  ships both in the pack.\n\n\
+The gate (`runtime/inf-player/tests/vgeom_gate.rs`): byte-identical save/reload; a\n\
+cooked load where the total source triangles ≥ 10M and the GPU meshlet cull leaves\n\
+only a small fraction of meshlets visible from a ground-level camera (deterministic\n\
+across runs); the SAME pack with vgeom OFF renders through the classic discrete-LOD\n\
+fallback (a far camera picks a coarser level than a near one); and the auto-tier\n\
+disables vgeom on the Low tier. GPU parts skip cleanly with no adapter.\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2412,6 +2632,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn vgeom_demo_saves_and_reloads_byte_identical() {
+        let doc = vgeom_demo_scene();
+        let bytes1 =
+            crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], 7, "vgeom-demo writes as a schema-v7 file");
+
+        let mut doc2 = SceneDoc::new();
+        crate::scene::serialize::apply_to_doc(
+            &mut doc2,
+            &crate::scene::serialize::decode(&bytes1).unwrap(),
+        );
+        let bytes2 =
+            crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc2))
+                .unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "vgeom-demo scene must round-trip byte-identically"
+        );
+
+        // Every instance carries a MeshRef.asset pointing at the shared mesh GUID.
+        let file = crate::scene::serialize::to_scene_file(&doc2);
+        let inst: Vec<_> = file
+            .entities
+            .iter()
+            .filter(|r| r.mesh.as_ref().and_then(|m| m.asset).is_some())
+            .collect();
+        assert_eq!(inst.len(), VGEOM_DEMO_GRID * VGEOM_DEMO_GRID);
+        assert!(inst
+            .iter()
+            .all(|r| r.mesh.as_ref().unwrap().asset == Some(VGEOM_DEMO_MESH_GUID)));
+    }
+
+    #[test]
+    fn vgeom_demo_exceeds_10m_source_triangles() {
+        // The dense mesh's triangle count times the instance grid is the source
+        // triangle budget the phase gate demands (≥ 10M).
+        let mesh = vgeom_demo_mesh();
+        let per = mesh.triangle_count() as u64;
+        assert_eq!(per, (2 * VGEOM_DEMO_MESH_N * VGEOM_DEMO_MESH_N) as u64);
+        let total = per * (VGEOM_DEMO_GRID * VGEOM_DEMO_GRID) as u64;
+        assert_eq!(total, vgeom_demo_source_triangles());
+        assert!(
+            total >= 10_000_000,
+            "gate needs 10M+ source triangles, got {total}"
+        );
+        // Above the cook's default vmesh derivation threshold.
+        assert!(per >= 2048);
+    }
+
     /// Regenerate the committed files under `INF_BLESS_SAMPLES=1`; otherwise
     /// assert the committed bytes still match the generators (fixture lock).
     #[test]
@@ -2422,6 +2692,7 @@ mod tests {
             write_terrain_demo().expect("regenerate terrain demo");
             write_character_demo().expect("regenerate character demo");
             write_physics_playground().expect("regenerate physics playground");
+            write_vgeom_demo().expect("regenerate vgeom demo");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -2523,6 +2794,29 @@ mod tests {
                 "committed Sensor.inf_audio drifted from the generator"
             );
         }
+
+        // Vgeom-demo lock: the committed `.inf_lvl` + dense `.inf_mesh` still match
+        // the generators (skips gracefully before the first bless).
+        let vdir = vgeom_demo_dir();
+        let vlvl = vdir.join("VgeomDemo.inf_lvl");
+        let vmesh = vdir.join("Dense.inf_mesh");
+        if vlvl.exists() && vmesh.exists() {
+            let want_lvl = crate::scene::serialize::encode(
+                &crate::scene::serialize::to_scene_file(&vgeom_demo_scene()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&vlvl).unwrap(),
+                want_lvl,
+                "committed vgeom-demo .inf_lvl drifted from the generator"
+            );
+            let want_mesh = inf_asset::encode(&vgeom_demo_mesh()).unwrap();
+            assert_eq!(
+                std::fs::read(&vmesh).unwrap(),
+                want_mesh,
+                "committed Dense.inf_mesh drifted from the generator"
+            );
+        }
     }
 
     // ── Character-demo gate test (a): byte-identical save/reload ────────────
@@ -2540,7 +2834,7 @@ mod tests {
         let doc = character_demo_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 6, "character-demo writes as a schema-v6 file");
+        assert_eq!(bytes1[0], 7, "character-demo writes as a schema-v7 file");
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(
@@ -2602,7 +2896,7 @@ mod tests {
         let doc = terrain_demo_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 6, "terrain-demo writes as a schema-v6 file");
+        assert_eq!(bytes1[0], 7, "terrain-demo writes as a schema-v7 file");
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(
@@ -2688,7 +2982,7 @@ mod tests {
         let doc = physics_playground_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 6, "physics-playground writes a schema-v6 file");
+        assert_eq!(bytes1[0], 7, "physics-playground writes a schema-v7 file");
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(

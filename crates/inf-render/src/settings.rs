@@ -86,6 +86,14 @@ pub struct RenderSettings {
     /// Dynamic global illumination (P13.3b). **OFF by default** → the hemispheric
     /// ambient path is byte-identical.
     pub gi: GiSettings,
+    /// GPU-capability auto-tier override (P13.4.2). `None` → the host probes the
+    /// adapter and picks a [`RenderTier`](crate::caps::RenderTier)
+    /// ([`detect_tier`](crate::caps::detect_tier)); `Some(tier)` forces it
+    /// (bypasses detection — the gate forces `Low` to prove the vgeom
+    /// auto-disable). Inert to rendering on its own: a host applies the tier via
+    /// [`RenderTier::apply`](crate::caps::RenderTier::apply), which only clamps
+    /// features **down**, so the byte-stable defaults are unaffected.
+    pub tier_override: Option<crate::caps::RenderTier>,
 }
 
 /// Cascaded shadow map settings (P13.3b). The first directional light casts three
@@ -218,6 +226,7 @@ impl Default for RenderSettings {
             vgeom: VgeomSettings::default(),
             shadows: ShadowSettings::default(),
             gi: GiSettings::default(),
+            tier_override: None,
         }
     }
 }

@@ -10,6 +10,7 @@
 //! render-local at upload. Depth is reverse-infinite Z.
 
 pub mod camera;
+pub mod caps;
 pub mod csm;
 pub mod debug_draw;
 pub mod gi;
@@ -29,6 +30,7 @@ pub mod surface;
 pub use camera::{
     ortho_reverse_z, OrthoParams, RenderView, DEPTH_CLEAR, DEPTH_COMPARE, DEPTH_FORMAT,
 };
+pub use caps::{choose_tier, detect_tier, AdapterCaps, RenderTier};
 pub use debug_draw::{
     collider_outline_2d, collider_outline_3d, ColliderOutline2D, ColliderOutline3D, DebugDraw,
     DebugVertex,
@@ -59,6 +61,9 @@ pub use settings::{
 // The GPU meshlet cull readback (P13.1b) — the CPU-vs-GPU parity gate + the
 // player's vgeom-activation check drive it.
 pub use passes::vgeom::cull_visible;
+// The classic-LOD fallback selection (P13.4) — the CI-provable probe of what the
+// classic path draws when vgeom is off (the meshlet path's complement).
+pub use passes::classic_vgeom::{classic_lod_selection, ClassicSelection};
 // 2D batcher API surfaced through the renderer for hosts.
 pub use inf_render_2d::{
     aabb_visible, atlas_uv, batch_scene, batch_sprites, billboard_basis, builtin_font_rgba8,

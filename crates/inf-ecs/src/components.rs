@@ -181,11 +181,29 @@ pub enum Primitive {
     Cone,
 }
 
-/// A renderable mesh reference. Phase 4 adds an asset-GUID variant.
+/// A renderable mesh reference: a built-in [`Primitive`] and/or a mesh-**asset**
+/// GUID (P13.4).
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 #[reflect(Component, Default)]
 pub struct MeshRef {
     pub primitive: Primitive,
+    /// Mesh-asset GUID (P13.4 · `.inf_lvl` schema v7). `None` → render the
+    /// built-in `primitive` (the pre-P13.4 behaviour). `Some(guid)` → the entity
+    /// references a `.inf_mesh` asset; the **player** renders its real geometry —
+    /// through the cook-derived `.inf_vmesh` meshlet path when virtualized
+    /// geometry is enabled (the auto-tier's High tier), or the classic
+    /// discrete-LOD fallback otherwise — while the interactive editor viewport
+    /// keeps drawing the `primitive` placeholder (a documented gap: the
+    /// asset-DB-in-viewport binding is a follow-up).
+    ///
+    /// Additive field: `#[serde(default)]` so pre-v7 `.inf_lvl` files load with
+    /// `None`; `#[reflect(ignore)]` (assigned by drag-drop, not the Details
+    /// numeric grid, like [`Sprite::texture`]) — still serde-persisted, and the
+    /// cook walks it into the pack dependency closure so a referenced mesh (and
+    /// its derived vmesh) ship with the level.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub asset: Option<Uuid>,
 }
 
 /// Surface appearance: the metallic-roughness PBR parameter block (Phase 7).

@@ -247,6 +247,11 @@ impl EngineRenderer {
         // unless RenderSettings.vgeom is enabled and the scene carries vmesh
         // instances (so the classic path stays byte-identical).
         graph.add(passes::vgeom::VgeomNode::new(gpu, &view_bgl));
+        // Classic discrete-LOD fallback (P13.4): renders the SAME vgeom content as
+        // the meshlet path but through the ordinary PBR mesh pipeline, only when
+        // RenderSettings.vgeom is DISABLED (the auto-tier picks the path). The exact
+        // complement of VgeomNode, so scenes without vgeom content stay byte-stable.
+        graph.add(passes::classic_vgeom::ClassicVgeomNode::new(gpu, &view_bgl));
         graph.add(passes::skinned::SkinnedMeshNode::new(gpu, &view_bgl));
         graph.add(passes::terrain::TerrainNode::new(gpu, &view_bgl));
         graph.add(passes::grid::GridNode::new(gpu, &view_bgl));

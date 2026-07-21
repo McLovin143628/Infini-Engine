@@ -50,4 +50,6 @@ pub mod build;
 pub mod model;
 
 pub use build::{build_vgeom, BuildParams};
-pub use model::{Group, LevelRange, Meshlet, VgeomMesh, VgeomVertex};
+pub use model::{
+    pick_classic_level, ClassicLod, Group, LevelRange, Meshlet, VgeomMesh, VgeomVertex,
+};

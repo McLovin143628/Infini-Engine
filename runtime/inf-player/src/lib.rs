@@ -184,12 +184,49 @@ pub fn run_windowed(args: &Args) -> ExitCode {
         Some(t) => t.clone(),
         None => format!("Infinity Engine — {}", built.label),
     };
+    // P13.4: load the cook-derived vmesh DAGs so `MeshRef.asset` entities render
+    // real geometry (meshlet path / classic fallback per the renderer's auto-tier).
+    let vmeshes = std::sync::Arc::new(load_vmeshes(args));
     let sim = sim_from_built(built);
-    match window::run(title, args.width, args.height, sim, map) {
+    match window::run(title, args.width, args.height, sim, map, vmeshes) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("inf-player: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Load the `.inf_vmesh` registry for the chosen world: from the cooked pack
+/// (`--pack`), the level's dev-dir sidecars (`--level`), or empty (`--demo` /
+/// no meshes). The renderer resolves a `MeshRef.asset` against it (P13.4).
+fn load_vmeshes(args: &Args) -> vmesh::VmeshRegistry {
+    match &args.world {
+        WorldChoice::Demo => vmesh::VmeshRegistry::new(),
+        WorldChoice::Level(path) => {
+            let content_dir = args
+                .content
+                .clone()
+                .or_else(|| path.parent().map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("."));
+            vmesh::VmeshRegistry::from_dir(&content_dir)
+        }
+        WorldChoice::Pack(path) => {
+            let pack_path = if path.is_dir() {
+                path.join(level::PACK_FILE)
+            } else {
+                path.clone()
+            };
+            match inf_asset::PackReader::open(&pack_path)
+                .map_err(|e| e.to_string())
+                .and_then(|r| vmesh::VmeshRegistry::from_pack(&r))
+            {
+                Ok(reg) => reg,
+                Err(e) => {
+                    tracing::warn!("inf-player: no vmeshes loaded from pack: {e}");
+                    vmesh::VmeshRegistry::new()
+                }
+            }
         }
     }
 }

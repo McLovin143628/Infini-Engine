@@ -3,6 +3,7 @@
 //! resolves to the output.
 
 pub mod bloom;
+pub mod classic_vgeom;
 pub mod composite;
 pub mod debug;
 pub mod depth_prepass;

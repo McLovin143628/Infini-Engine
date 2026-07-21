@@ -67,7 +67,16 @@ use crate::scene::SceneDoc;
 ///   `Collider*` / `RigidBody*` slots, so they persisted from v3 with no version
 ///   bump. Older v1..v5 payloads load with all four slots defaulted (see [`decode`]
 ///   and [`SceneFileV5`]).
-pub const SCHEMA_VERSION: u32 = 6;
+///
+/// * v7 — P13.4: [`MeshRef`] gained a mesh-**asset** GUID field
+///   (`asset: Option<Uuid>`) so an entity can reference a `.inf_mesh` asset (the
+///   virtualized-geometry gate scene). This changed `MeshRef`'s byte layout, so
+///   the pre-v7 layout is frozen as [`MeshRefV6`] and every v1..v6 record carries
+///   its `mesh` slot as `Option<MeshRefV6>`; the [`EntityRecordV6::into_current`]
+///   hop lifts it with `asset: None`. No new entity slot was added — v7 differs
+///   from v6 only inside `MeshRef`. Older v1..v6 payloads load with `asset`
+///   defaulted to `None` (see [`decode`] + [`SceneFileV6`]).
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// File-level simulation settings (P9.5 · schema v3). Replaces the player's
 /// hard-coded `DEFAULT_GRAVITY`/`DEFAULT_HZ`. The serde defaults **preserve the
@@ -222,6 +231,27 @@ pub struct EntityRecord {
     pub audio_listener: Option<AudioListener>,
 }
 
+/// The **pre-v7** `MeshRef` byte layout (P13.4 froze this when `MeshRef` gained
+/// its `asset: Option<Uuid>` field). Every frozen entity record (v1..v6) carries
+/// its `mesh` slot as `Option<MeshRefV6>` so the committed v1..v6 fixtures — and
+/// any level saved before P13.4 — decode with their original bytes; the
+/// `into_current` hop lifts it to the live [`MeshRef`] with `asset: None`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MeshRefV6 {
+    pub primitive: inf_ecs::components::Primitive,
+}
+
+impl MeshRefV6 {
+    /// Lift to the current [`MeshRef`] (no asset reference — pre-v7 levels never
+    /// carried one).
+    fn into_current(self) -> MeshRef {
+        MeshRef {
+            primitive: self.primitive,
+            asset: None,
+        }
+    }
+}
+
 /// A schema-v1 [`EntityRecord`] (pre-P8.2b) — exactly the byte layout written by
 /// older editors, used only to decode legacy payloads. Kept frozen forever so
 /// the committed v1 fixture (and any level saved before P8.2b) loads.
@@ -232,7 +262,7 @@ pub struct EntityRecordV1 {
     pub parent: Option<Uuid>,
     pub transform: Transform,
     pub visible: bool,
-    pub mesh: Option<MeshRef>,
+    pub mesh: Option<MeshRefV6>,
     pub material: Option<Material>,
     pub light: Option<Light>,
     pub camera: Option<Camera>,
@@ -294,7 +324,7 @@ pub struct EntityRecordV2 {
     pub parent: Option<Uuid>,
     pub transform: Transform,
     pub visible: bool,
-    pub mesh: Option<MeshRef>,
+    pub mesh: Option<MeshRefV6>,
     pub material: Option<Material>,
     pub light: Option<Light>,
     pub camera: Option<Camera>,
@@ -375,7 +405,7 @@ pub struct EntityRecordV3 {
     pub parent: Option<Uuid>,
     pub transform: Transform,
     pub visible: bool,
-    pub mesh: Option<MeshRef>,
+    pub mesh: Option<MeshRefV6>,
     pub material: Option<Material>,
     pub light: Option<Light>,
     pub camera: Option<Camera>,
@@ -475,7 +505,7 @@ pub struct EntityRecordV4 {
     pub parent: Option<Uuid>,
     pub transform: Transform,
     pub visible: bool,
-    pub mesh: Option<MeshRef>,
+    pub mesh: Option<MeshRefV6>,
     pub material: Option<Material>,
     pub light: Option<Light>,
     pub camera: Option<Camera>,
@@ -583,7 +613,7 @@ pub struct EntityRecordV5 {
     pub parent: Option<Uuid>,
     pub transform: Transform,
     pub visible: bool,
-    pub mesh: Option<MeshRef>,
+    pub mesh: Option<MeshRefV6>,
     pub material: Option<Material>,
     pub light: Option<Light>,
     pub camera: Option<Camera>,
@@ -628,10 +658,10 @@ pub struct EntityRecordV5 {
 }
 
 impl EntityRecordV5 {
-    /// Lift a v5 record to the current (v6) shape: the four P12 joints/audio slots
+    /// Lift a v5 record to the **v6** shape: the four P12 joints/audio slots
     /// default to `None`.
-    fn into_current(self) -> EntityRecord {
-        EntityRecord {
+    fn into_v6(self) -> EntityRecordV6 {
+        EntityRecordV6 {
             guid: self.guid,
             name: self.name,
             parent: self.parent,
@@ -679,7 +709,139 @@ pub struct SceneFileV5 {
 }
 
 impl SceneFileV5 {
-    /// Lift a v5 file to the current (v6) shape (settings carry through).
+    /// Lift a v5 file to the **v6** shape (settings carry through).
+    fn into_v6(self) -> SceneFileV6 {
+        SceneFileV6 {
+            schema_version: 6,
+            title: self.title,
+            entities: self
+                .entities
+                .into_iter()
+                .map(EntityRecordV5::into_v6)
+                .collect(),
+            settings: self.settings,
+        }
+    }
+}
+
+/// A schema-**v6** [`EntityRecord`] (pre-P13.4) — the exact byte layout written by
+/// P12.4..P13.3 editors (all component slots through the P12 joints/audio, with the
+/// pre-v7 [`MeshRefV6`] mesh slot). Frozen forever so the committed v6 fixture (and
+/// any level saved before P13.4) loads. v7 changed only `MeshRef` (added `asset`),
+/// so this record differs from the live [`EntityRecord`] **only** in its `mesh` type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityRecordV6 {
+    pub guid: Uuid,
+    pub name: String,
+    pub parent: Option<Uuid>,
+    pub transform: Transform,
+    pub visible: bool,
+    pub mesh: Option<MeshRefV6>,
+    pub material: Option<Material>,
+    pub light: Option<Light>,
+    pub camera: Option<Camera>,
+    #[serde(default)]
+    pub sprite: Option<Sprite>,
+    #[serde(default)]
+    pub tilemap: Option<Tilemap>,
+    #[serde(default)]
+    pub nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    pub text2d: Option<Text2D>,
+    #[serde(default)]
+    pub light_2d: Option<Light2D>,
+    #[serde(default)]
+    pub rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    pub collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    pub character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    pub rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    pub collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    pub character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    pub actor: Option<Uuid>,
+    #[serde(default)]
+    pub terrain: Option<Terrain>,
+    #[serde(default)]
+    pub pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    pub skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    pub anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    pub anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    pub root_motion: Option<RootMotion>,
+    #[serde(default)]
+    pub attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    pub joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    pub joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    pub audio_source: Option<AudioSource>,
+    #[serde(default)]
+    pub audio_listener: Option<AudioListener>,
+}
+
+impl EntityRecordV6 {
+    /// Lift a v6 record to the current (v7) shape: the `mesh` slot's pre-v7
+    /// [`MeshRefV6`] gains a `None` asset reference; every other slot carries
+    /// through unchanged (v7 added no new entity slots).
+    fn into_current(self) -> EntityRecord {
+        EntityRecord {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh.map(MeshRefV6::into_current),
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+        }
+    }
+}
+
+/// A schema-v6 [`SceneFile`] (frozen layout for legacy decode).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneFileV6 {
+    pub schema_version: u32,
+    pub title: String,
+    pub entities: Vec<EntityRecordV6>,
+    #[serde(default)]
+    pub settings: LevelSettings,
+}
+
+impl SceneFileV6 {
+    /// Lift a v6 file to the current (v7) shape (settings carry through).
     fn into_current(self) -> SceneFile {
         SceneFile {
             schema_version: SCHEMA_VERSION,
@@ -687,7 +849,7 @@ impl SceneFileV5 {
             entities: self
                 .entities
                 .into_iter()
-                .map(EntityRecordV5::into_current)
+                .map(EntityRecordV6::into_current)
                 .collect(),
             settings: self.settings,
         }
@@ -809,33 +971,46 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
             let (v1, _): (SceneFileV1, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v1: {e}"))?;
-            migrate(v1.into_v2().into_v3().into_v4().into_v5().into_current())
+            migrate(
+                v1.into_v2()
+                    .into_v3()
+                    .into_v4()
+                    .into_v5()
+                    .into_v6()
+                    .into_current(),
+            )
         }
         2 => {
             let (v2, _): (SceneFileV2, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v2: {e}"))?;
-            migrate(v2.into_v3().into_v4().into_v5().into_current())
+            migrate(v2.into_v3().into_v4().into_v5().into_v6().into_current())
         }
         3 => {
             let (v3, _): (SceneFileV3, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v3: {e}"))?;
-            migrate(v3.into_v4().into_v5().into_current())
+            migrate(v3.into_v4().into_v5().into_v6().into_current())
         }
         4 => {
             let (v4, _): (SceneFileV4, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v4: {e}"))?;
-            migrate(v4.into_v5().into_current())
+            migrate(v4.into_v5().into_v6().into_current())
         }
         5 => {
             let (v5, _): (SceneFileV5, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v5: {e}"))?;
-            migrate(v5.into_current())
+            migrate(v5.into_v6().into_current())
         }
         6 => {
+            let (v6, _): (SceneFileV6, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| format!("decode v6: {e}"))?;
+            migrate(v6.into_current())
+        }
+        7 => {
             let (file, _): (SceneFile, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode: {e}"))?;
@@ -857,7 +1032,7 @@ pub fn migrate(file: SceneFile) -> Result<SceneFile, String> {
         ));
     }
     // Records are already lifted to the current shape by the versioned decode
-    // (v1→v2→v3→v4→v5→v6); nothing more to do here. Future upgrades chain in `decode`.
+    // (v1→v2→v3→v4→v5→v6→v7); nothing more to do here. Future upgrades chain in `decode`.
     Ok(file)
 }
 
@@ -1171,7 +1346,7 @@ mod tests {
 
         // save → load → save is byte-identical.
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 6, "authored payload is a genuine schema-v6 file");
+        assert_eq!(bytes1[0], 7, "authored payload is a genuine schema-v7 file");
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
         let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
@@ -1519,7 +1694,7 @@ mod tests {
                         scale: inf_ecs::math::Vec3d::new(20.0, 1.0, 20.0),
                     },
                     visible: true,
-                    mesh: Some(inf_ecs::components::MeshRef {
+                    mesh: Some(super::MeshRefV6 {
                         primitive: inf_ecs::components::Primitive::Plane,
                     }),
                     material: Some(inf_ecs::components::Material {
@@ -1535,7 +1710,7 @@ mod tests {
                     parent: None,
                     transform: EcsTransform::from_translation(glam::DVec3::new(-2.0, 0.5, 0.0)),
                     visible: true,
-                    mesh: Some(inf_ecs::components::MeshRef {
+                    mesh: Some(super::MeshRefV6 {
                         primitive: inf_ecs::components::Primitive::Cube,
                     }),
                     material: Some(inf_ecs::components::Material::default()),
@@ -1699,8 +1874,8 @@ mod tests {
         let (doc, actor_guid) = authored_v3_scene();
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
         assert_eq!(
-            bytes1[0], 6,
-            "the physics/actor content now writes as a schema-v6 file"
+            bytes1[0], 7,
+            "the physics/actor content now writes as a schema-v7 file"
         );
 
         let mut doc2 = SceneDoc::new();
@@ -1776,7 +1951,7 @@ mod tests {
                         scale: inf_ecs::math::Vec3d::new(10.0, 1.0, 1.0),
                     },
                     visible: true,
-                    mesh: Some(inf_ecs::components::MeshRef {
+                    mesh: Some(super::MeshRefV6 {
                         primitive: inf_ecs::components::Primitive::Plane,
                     }),
                     material: Some(inf_ecs::components::Material::default()),
@@ -2052,8 +2227,8 @@ mod tests {
 
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
         assert_eq!(
-            bytes1[0], 6,
-            "anim content writes as a genuine schema-v6 file"
+            bytes1[0], 7,
+            "anim content writes as a genuine schema-v7 file"
         );
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
@@ -2340,7 +2515,7 @@ mod tests {
         let _ = g_anchor;
 
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 6, "joints/audio content writes a schema-v6 file");
+        assert_eq!(bytes1[0], 7, "joints/audio content writes a schema-v7 file");
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
         let bytes2 = encode(&to_scene_file(&loaded)).unwrap();

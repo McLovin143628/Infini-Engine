@@ -41,7 +41,13 @@
 //!   `other` entity ref is serde-persisted), `audio_source` (a spatialized emitter,
 //!   its `clip` ref persisted) and `audio_listener` (the active-listener flag).
 //!   [`encode`] always writes the current schema, so cooking an older level
-//!   **rewrites it to v6** (the "rewrite the level payload for runtime" step).
+//!   **rewrites it to the current version** (the "rewrite the level payload for
+//!   runtime" step).
+//! * **v7** — P13.4: [`MeshRef`] gained a mesh-**asset** GUID field
+//!   (`asset: Option<Uuid>`). This changed `MeshRef`'s byte layout, so the pre-v7
+//!   layout is frozen as [`MeshRefV6`] and every v1..v6 record decodes its `mesh`
+//!   slot through it, lifting to the live [`MeshRef`] with `asset: None`. No new
+//!   entity slot was added — v7 differs from v6 only inside `MeshRef`.
 
 use inf_ecs::components::{
     AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource, Camera,
@@ -54,7 +60,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// The current on-disk `.inf_lvl` schema (matches the editor's `SCHEMA_VERSION`).
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// File-level simulation settings (schema v3), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -106,7 +112,7 @@ pub type Result<T> = std::result::Result<T, SceneError>;
 
 /// One entity's persisted state — the runtime record.
 ///
-/// This is the **current (schema-v6)** wire layout: field order and the
+/// This is the **current (schema-v7)** wire layout: field order and the
 /// `#[serde(default)]` markers mirror the editor's `EntityRecord` byte-for-byte so
 /// the same bincode payload decodes here. Component slots are `Option`s (a slot is
 /// `Some` when the entity carries that component).
@@ -217,7 +223,7 @@ impl RuntimeLevel {
         decode(bytes)
     }
 
-    /// Encode to the **current** schema (v6) — a deterministic bincode payload.
+    /// Encode to the **current** schema (v7) — a deterministic bincode payload.
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode(self)
     }
@@ -254,12 +260,112 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v6 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v7 file layout (current). `entities` reuses [`RuntimeEntity`].
 #[derive(Serialize, Deserialize)]
-struct SceneFileV6 {
+struct SceneFileV7 {
     schema_version: u32,
     title: String,
     entities: Vec<RuntimeEntity>,
+    #[serde(default)]
+    settings: RuntimeSettings,
+}
+
+/// The **pre-v7** `MeshRef` byte layout (P13.4 froze this when `MeshRef` gained
+/// its `asset` field). Every frozen entity record (v1..v6) decodes its `mesh`
+/// slot as `Option<MeshRefV6>`; [`MeshRefV6::into_current`] lifts it to the live
+/// [`MeshRef`] with `asset: None` (pre-v7 levels never referenced a mesh asset).
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct MeshRefV6 {
+    primitive: inf_ecs::components::Primitive,
+}
+
+impl MeshRefV6 {
+    fn into_current(self) -> MeshRef {
+        MeshRef {
+            primitive: self.primitive,
+            asset: None,
+        }
+    }
+
+    /// Downgrade a live [`MeshRef`] to the pre-v7 layout (drops the asset ref) —
+    /// used by the fixture bless path that writes older-schema records.
+    #[cfg(test)]
+    fn from_current(m: MeshRef) -> Self {
+        Self {
+            primitive: m.primitive,
+        }
+    }
+}
+
+/// A frozen schema-v6 entity record (pre-P13.4): all component slots through the
+/// P12 joints/audio, but with the pre-v7 [`MeshRefV6`] mesh slot. v7 changed only
+/// `MeshRef`, so this differs from the live [`RuntimeEntity`] only in `mesh`.
+#[derive(Serialize, Deserialize)]
+struct EntityRecordV6 {
+    guid: Uuid,
+    name: String,
+    parent: Option<Uuid>,
+    transform: Transform,
+    visible: bool,
+    mesh: Option<MeshRefV6>,
+    material: Option<Material>,
+    light: Option<Light>,
+    camera: Option<Camera>,
+    #[serde(default)]
+    sprite: Option<Sprite>,
+    #[serde(default)]
+    tilemap: Option<Tilemap>,
+    #[serde(default)]
+    nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    text2d: Option<Text2D>,
+    #[serde(default)]
+    light_2d: Option<Light2D>,
+    #[serde(default)]
+    rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    actor: Option<Uuid>,
+    #[serde(default)]
+    terrain: Option<Terrain>,
+    #[serde(default)]
+    pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    root_motion: Option<RootMotion>,
+    #[serde(default)]
+    attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    audio_source: Option<AudioSource>,
+    #[serde(default)]
+    audio_listener: Option<AudioListener>,
+}
+
+/// A frozen schema-v6 file layout.
+#[derive(Serialize, Deserialize)]
+struct SceneFileV6 {
+    #[allow(dead_code)]
+    schema_version: u32,
+    title: String,
+    entities: Vec<EntityRecordV6>,
     #[serde(default)]
     settings: RuntimeSettings,
 }
@@ -275,7 +381,7 @@ struct EntityRecordV5 {
     parent: Option<Uuid>,
     transform: Transform,
     visible: bool,
-    mesh: Option<MeshRef>,
+    mesh: Option<MeshRefV6>,
     material: Option<Material>,
     light: Option<Light>,
     camera: Option<Camera>,
@@ -344,7 +450,7 @@ struct EntityRecordV4 {
     parent: Option<Uuid>,
     transform: Transform,
     visible: bool,
-    mesh: Option<MeshRef>,
+    mesh: Option<MeshRefV6>,
     material: Option<Material>,
     light: Option<Light>,
     camera: Option<Camera>,
@@ -399,7 +505,7 @@ struct EntityRecordV3 {
     parent: Option<Uuid>,
     transform: Transform,
     visible: bool,
-    mesh: Option<MeshRef>,
+    mesh: Option<MeshRefV6>,
     material: Option<Material>,
     light: Option<Light>,
     camera: Option<Camera>,
@@ -448,7 +554,7 @@ struct EntityRecordV1 {
     parent: Option<Uuid>,
     transform: Transform,
     visible: bool,
-    mesh: Option<MeshRef>,
+    mesh: Option<MeshRefV6>,
     material: Option<Material>,
     light: Option<Light>,
     camera: Option<Camera>,
@@ -472,7 +578,7 @@ struct EntityRecordV2 {
     parent: Option<Uuid>,
     transform: Transform,
     visible: bool,
-    mesh: Option<MeshRef>,
+    mesh: Option<MeshRefV6>,
     material: Option<Material>,
     light: Option<Light>,
     camera: Option<Camera>,
@@ -505,7 +611,7 @@ impl EntityRecordV1 {
             parent: self.parent,
             transform: self.transform,
             visible: self.visible,
-            mesh: self.mesh,
+            mesh: self.mesh.map(MeshRefV6::into_current),
             material: self.material,
             light: self.light,
             camera: self.camera,
@@ -544,7 +650,7 @@ impl EntityRecordV2 {
             parent: self.parent,
             transform: self.transform,
             visible: self.visible,
-            mesh: self.mesh,
+            mesh: self.mesh.map(MeshRefV6::into_current),
             material: self.material,
             light: self.light,
             camera: self.camera,
@@ -583,7 +689,7 @@ impl EntityRecordV3 {
             parent: self.parent,
             transform: self.transform,
             visible: self.visible,
-            mesh: self.mesh,
+            mesh: self.mesh.map(MeshRefV6::into_current),
             material: self.material,
             light: self.light,
             camera: self.camera,
@@ -622,7 +728,7 @@ impl EntityRecordV4 {
             parent: self.parent,
             transform: self.transform,
             visible: self.visible,
-            mesh: self.mesh,
+            mesh: self.mesh.map(MeshRefV6::into_current),
             material: self.material,
             light: self.light,
             camera: self.camera,
@@ -661,7 +767,7 @@ impl EntityRecordV5 {
             parent: self.parent,
             transform: self.transform,
             visible: self.visible,
-            mesh: self.mesh,
+            mesh: self.mesh.map(MeshRefV6::into_current),
             material: self.material,
             light: self.light,
             camera: self.camera,
@@ -688,6 +794,48 @@ impl EntityRecordV5 {
             joint_3d: None,
             audio_source: None,
             audio_listener: None,
+        }
+    }
+}
+
+impl EntityRecordV6 {
+    /// Lift a frozen v6 record to the live [`RuntimeEntity`] (v7): the pre-v7
+    /// [`MeshRefV6`] mesh slot gains a `None` asset ref; every other slot carries
+    /// through unchanged (v7 added no new entity slot).
+    fn into_runtime(self) -> RuntimeEntity {
+        RuntimeEntity {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh.map(MeshRefV6::into_current),
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
         }
     }
 }
@@ -773,8 +921,22 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v6: {e}")))?;
             Ok(RuntimeLevel {
                 title: v6.title,
-                entities: v6.entities,
+                entities: v6
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV6::into_runtime)
+                    .collect(),
                 settings: v6.settings,
+            })
+        }
+        7 => {
+            let (v7, _): (SceneFileV7, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v7: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v7.title,
+                entities: v7.entities,
+                settings: v7.settings,
             })
         }
         found => Err(SceneError::SchemaTooNew {
@@ -784,9 +946,9 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     }
 }
 
-/// Encode a level to the current schema (v6) as a deterministic bincode payload.
+/// Encode a level to the current schema (v7) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV6 {
+    let file = SceneFileV7 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -875,10 +1037,10 @@ mod tests {
         // lossless identity on current-schema content (so the cook's runtime
         // rewrite of an already-current level is a no-op, and deterministic).
         let original = read_committed("samples/platformer-2d/Platformer.inf_lvl");
-        assert_eq!(original[0], 6, "committed platformer is schema v6");
+        assert_eq!(original[0], 7, "committed platformer is schema v7");
         let level = RuntimeLevel::decode(&original).unwrap();
         let reencoded = level.encode().unwrap();
-        assert_eq!(original, reencoded, "v6 round trip must be byte-identical");
+        assert_eq!(original, reencoded, "v7 round trip must be byte-identical");
     }
 
     /// Re-bless the v3/v4 platformer fixtures after a (pre-1.0-sanctioned)
@@ -905,7 +1067,7 @@ mod tests {
                     parent: e.parent,
                     transform: e.transform,
                     visible: e.visible,
-                    mesh: e.mesh,
+                    mesh: e.mesh.map(MeshRefV6::from_current),
                     material: e.material,
                     light: e.light,
                     camera: e.camera,
@@ -943,6 +1105,7 @@ mod tests {
                     parent: e.parent,
                     transform: e.transform,
                     visible: e.visible,
+                    // `e` is an EntityRecordV4 here — its mesh is already MeshRefV6.
                     mesh: e.mesh,
                     material: e.material,
                     light: e.light,
@@ -981,7 +1144,7 @@ mod tests {
                     parent: e.parent,
                     transform: e.transform,
                     visible: e.visible,
-                    mesh: e.mesh,
+                    mesh: e.mesh.map(MeshRefV6::from_current),
                     material: e.material,
                     light: e.light,
                     camera: e.camera,
