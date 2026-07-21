@@ -12,6 +12,9 @@ publish = false
 inf-core = { workspace = true }
 inf-runtime = { workspace = true }
 inf-ecs = { workspace = true }
+# Terrain sculpt strokes (P10.2b): the scene doc records `HeightDelta` undo steps
+# and applies live brush strokes to the `Terrain` component's paged data.
+inf-terrain = { workspace = true }
 inf-physics = { workspace = true }
 inf-blueprint = { workspace = true }
 inf-graph = { workspace = true }

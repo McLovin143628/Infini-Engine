@@ -27,7 +27,11 @@ import { startLogListener } from "./stores/logStore";
 import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
 import { initAssetSync, registerAssetCommands } from "./stores/assetStore";
 import { initProjectSync, registerProjectCommands } from "./stores/projectStore";
-import { initViewportSync, registerViewportCommands } from "./stores/viewportStore";
+import {
+  initSculptKeybindings,
+  initViewportSync,
+  registerViewportCommands,
+} from "./stores/viewportStore";
 import { initSimSync, registerSimCommands } from "./stores/simStore";
 import { initPieSync, registerPieCommands } from "./stores/pieStore";
 import { initEditorSync } from "./stores/editorStore";
@@ -98,6 +102,10 @@ export default function App() {
   // Load per-project pixels-per-unit + apply 2D snap settings; reload on
   // project change (P8.2c). StrictMode-safe.
   useEffect(() => initViewportSync(), []);
+
+  // `[` / `]` adjust the sculpt brush radius while the Sculpt tool is active
+  // (P10.2b). StrictMode-safe (disposer removes the listener).
+  useEffect(() => initSculptKeybindings(), []);
 
   // Sync Simulate running state + subscribe to sim://state (P8.4). StrictMode-safe.
   useEffect(() => {

@@ -6,12 +6,30 @@
  * each change to the native viewport over typed IPC.
  */
 import { useViewportStore } from "../stores/viewportStore";
+import type { SculptFalloffDto } from "../bindings/SculptFalloffDto";
+import type { SculptOpDto } from "../bindings/SculptOpDto";
+import type { ToolModeDto } from "../bindings/ToolModeDto";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
 
 const MODES: [ViewportModeDto, string][] = [
   ["Perspective", "Perspective"],
   ["TwoD", "2D"],
 ];
+
+const TOOLS: [ToolModeDto, string, string][] = [
+  ["Select", "Select", "Pick + transform (Q/W/E/R gizmos)"],
+  ["Sculpt", "Sculpt", "Terrain height brush (perspective only)"],
+];
+
+const SCULPT_OPS: [SculptOpDto, string][] = [
+  ["Raise", "Raise"],
+  ["Lower", "Lower"],
+  ["Smooth", "Smooth"],
+  ["Flatten", "Flatten"],
+  ["Noise", "Noise"],
+];
+
+const SCULPT_FALLOFFS: SculptFalloffDto[] = ["Smooth", "Linear", "Sphere", "Sharp"];
 
 export default function ViewportToolbar() {
   const mode = useViewportStore((s) => s.mode);
@@ -24,6 +42,8 @@ export default function ViewportToolbar() {
   const setGridSnapSize = useViewportStore((s) => s.setGridSnapSize);
   const setPixelSnapEnabled = useViewportStore((s) => s.setPixelSnapEnabled);
   const setPixelsPerUnit = useViewportStore((s) => s.setPixelsPerUnit);
+  const toolMode = useViewportStore((s) => s.toolMode);
+  const setToolMode = useViewportStore((s) => s.setToolMode);
 
   return (
     <div className="flex h-8 shrink-0 items-center gap-3 rounded border border-(--ink-border) bg-(--ink-bg-1) px-2 text-xs">
@@ -82,7 +102,109 @@ export default function ViewportToolbar() {
           </SnapToggle>
         </>
       )}
+
+      {/* Tool toggle + sculpt brush controls (perspective only; sculpting is a
+          3D-terrain tool). */}
+      {mode === "Perspective" && (
+        <>
+          <div className="h-4 w-px bg-(--ink-border)" />
+          <div
+            className="flex items-center rounded bg-(--ink-bg-0) p-0.5"
+            role="group"
+            aria-label="Viewport tool"
+          >
+            {TOOLS.map(([id, label, title]) => (
+              <button
+                key={id}
+                type="button"
+                aria-pressed={toolMode === id}
+                title={title}
+                className={`flex h-6 items-center rounded px-2 ${
+                  toolMode === id
+                    ? "bg-(--ink-bg-3) text-(--ink-text)"
+                    : "text-(--ink-text-dim) hover:text-(--ink-text)"
+                }`}
+                onClick={() => setToolMode(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {toolMode === "Sculpt" && <SculptControls />}
+        </>
+      )}
     </div>
+  );
+}
+
+/** Brush op / radius / strength / falloff for the Sculpt tool (P10.2b). */
+function SculptControls() {
+  const sculptOp = useViewportStore((s) => s.sculptOp);
+  const sculptRadius = useViewportStore((s) => s.sculptRadius);
+  const sculptStrength = useViewportStore((s) => s.sculptStrength);
+  const sculptFalloff = useViewportStore((s) => s.sculptFalloff);
+  const setSculptOp = useViewportStore((s) => s.setSculptOp);
+  const setSculptRadius = useViewportStore((s) => s.setSculptRadius);
+  const setSculptStrength = useViewportStore((s) => s.setSculptStrength);
+  const setSculptFalloff = useViewportStore((s) => s.setSculptFalloff);
+
+  return (
+    <>
+      <div className="flex items-center rounded bg-(--ink-bg-0) p-0.5" role="group" aria-label="Sculpt op">
+        {SCULPT_OPS.map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            aria-pressed={sculptOp === id}
+            title={`${label} brush`}
+            className={`flex h-6 items-center rounded px-2 ${
+              sculptOp === id
+                ? "bg-(--ink-accent) text-(--ink-bg-0)"
+                : "text-(--ink-text-dim) hover:text-(--ink-text)"
+            }`}
+            onClick={() => setSculptOp(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Radius
+        <NumberField
+          value={Math.round(sculptRadius * 100) / 100}
+          min={0.5}
+          step={0.5}
+          onChange={setSculptRadius}
+          title="Brush radius (world metres) — also [ / ]"
+          suffix="m"
+        />
+      </label>
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Strength
+        <NumberField
+          value={sculptStrength}
+          min={0}
+          step={0.05}
+          onChange={setSculptStrength}
+          title="Per-dab strength (metres, or blend fraction for Smooth/Flatten)"
+        />
+      </label>
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Falloff
+        <select
+          value={sculptFalloff}
+          title="Brush falloff curve"
+          onChange={(e) => setSculptFalloff(e.target.value as SculptFalloffDto)}
+          className="h-6 rounded border border-(--ink-border) bg-(--ink-bg-0) px-1 text-(--ink-text)"
+        >
+          {SCULPT_FALLOFFS.map((f) => (
+            <option key={f} value={f}>
+              {f}
+            </option>
+          ))}
+        </select>
+      </label>
+    </>
   );
 }
 

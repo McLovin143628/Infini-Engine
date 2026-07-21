@@ -10,11 +10,13 @@
 //! GUIDs, not bevy `Entity` ids, are the identity that crosses every boundary:
 //! entity ids are reused across despawn and never serialized.
 
+use glam::DVec3;
 use inf_ecs::components::{
-    AtlasRect, Camera, Light, Light2D, LightKind, Material, MeshRef, NineSlice, Primitive, Sprite,
-    Terrain, Text2D, Tilemap, Transform, Visibility,
+    AtlasRect, Camera, GlobalTransform, Light, Light2D, LightKind, Material, MeshRef, NineSlice,
+    Primitive, Sprite, Terrain, Text2D, Tilemap, Transform, Visibility,
 };
 use inf_ecs::{ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d};
+use inf_terrain::{BrushOp, BrushParams, HeightDelta, Stroke, TerrainData};
 use uuid::Uuid;
 
 use crate::ipc::{SceneNode, SceneSnapshot, SpawnKind};
@@ -425,6 +427,109 @@ impl SceneDoc {
             for &(x, y, idx) in cells {
                 tm.set_tile(x, y, idx);
             }
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    // ── terrain sculpting (P10.2b) ───────────────────────────────────────
+    //
+    // Sculpting mirrors the tile-paint contract one layer down (height samples,
+    // not tile cells): the viewport thread accumulates a mouse-down→up gesture
+    // into an `inf_terrain::Stroke`, mutating the entity's live `TerrainData` per
+    // dab (so the render cache re-uploads mid-drag on the version bump), then on
+    // release commits the merged `HeightDelta` as ONE undo step. Because the
+    // stroke already applied its dabs, `edit_commit_sculpt` only *records* — undo
+    // replays `before`, redo replays `after`.
+
+    /// Borrow an entity's [`Terrain`] paged heightfield + its world translation
+    /// (for the sculpt raycast / brush-ring overlay). `None` if the entity has no
+    /// `Terrain`.
+    pub fn terrain_data_and_origin(&self, guid: Uuid) -> Option<(&TerrainData, DVec3)> {
+        let e = self.world.entity_of(guid)?;
+        let w = self.world.world();
+        let data = &w.get::<Terrain>(e)?.data;
+        let translation = w
+            .get::<GlobalTransform>(e)
+            .map(|g| g.translation())
+            .unwrap_or(DVec3::ZERO);
+        Some((data, translation))
+    }
+
+    /// Apply one brush dab into an ongoing `stroke`, mutating the entity's live
+    /// `TerrainData`, and bump the version so the render terrain cache re-uploads
+    /// the dirtied tiles next frame (live sculpt feedback). No-op without a
+    /// `Terrain`. Non-recording — the merged delta is recorded at commit.
+    pub fn sculpt_apply_dab(
+        &mut self,
+        guid: Uuid,
+        stroke: &mut Stroke,
+        op: BrushOp,
+        params: BrushParams,
+    ) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
+            stroke.add_dab(&mut terrain.data, op, params);
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    /// Finish a sculpt `stroke` and record it as one undo step. The stroke's dabs
+    /// already mutated the terrain (via [`Self::sculpt_apply_dab`]), so this only
+    /// finalizes the merged [`HeightDelta`] and pushes the command — an empty
+    /// stroke records nothing. Returns whether an undo entry was recorded.
+    pub fn edit_commit_sculpt(&mut self, guid: Uuid, stroke: Stroke) -> bool {
+        let Some(e) = self.world.entity_of(guid) else {
+            return false;
+        };
+        let Some(terrain) = self.world.world().get::<Terrain>(e) else {
+            return false;
+        };
+        let delta = stroke.finish(&terrain.data);
+        if delta.is_empty() {
+            return false;
+        }
+        self.history.record(
+            "Sculpt Terrain",
+            EditCommand::SculptTerrain {
+                guid,
+                delta: Box::new(delta),
+            },
+        );
+        true
+    }
+
+    /// Redo a sculpt stroke: replay its `after` height samples (recreating any
+    /// tiles it authored). Non-recording; the undo layer drives it.
+    pub(crate) fn raw_apply_terrain_delta(&mut self, guid: Uuid, delta: &HeightDelta) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
+            terrain.data.apply_delta(delta);
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    /// Undo a sculpt stroke: replay its `before` height samples and drop the
+    /// tiles it authored from nothing, returning the terrain byte-identical to
+    /// before the stroke. Non-recording; the undo layer drives it.
+    pub(crate) fn raw_revert_terrain_delta(&mut self, guid: Uuid, delta: &HeightDelta) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
+            terrain.data.revert_delta(delta);
         } else {
             return;
         }
@@ -1278,6 +1383,69 @@ mod tests {
         // Undo the spawn → the terrain entity is gone.
         assert!(doc.undo(), "undo removes the spawned terrain");
         assert!(doc.entity_of(g).is_none(), "terrain despawned by undo");
+    }
+
+    #[test]
+    fn sculpt_stroke_is_one_undo_step_and_round_trips() {
+        use glam::DVec2;
+        use inf_terrain::{BrushOp, BrushParams, Stroke};
+
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Terrain, "", None);
+        let e = doc.entity_of(g).unwrap();
+
+        // Probe a point inside the starter terrain and record its height.
+        let (data, _origin) = doc.terrain_data_and_origin(g).unwrap();
+        let center = {
+            let span = data.tile_span();
+            DVec2::new(span * 0.5, span * 0.5)
+        };
+        let before = data.height_at(center).unwrap();
+
+        // A raise stroke of a few overlapping dabs → one merged undo step.
+        let mut stroke = Stroke::begin();
+        let params = BrushParams::new(center, 6.0, 3.0);
+        for _ in 0..3 {
+            doc.sculpt_apply_dab(g, &mut stroke, BrushOp::Raise, params);
+        }
+        assert!(
+            doc.edit_commit_sculpt(g, stroke),
+            "non-empty stroke records"
+        );
+
+        let raised = doc
+            .world()
+            .world()
+            .get::<Terrain>(e)
+            .unwrap()
+            .data
+            .height_at(center)
+            .unwrap();
+        assert!(raised > before + 1.0, "raise lifted the surface: {raised}");
+
+        // One undo reverts the whole stroke (not per-dab) back to byte-identical.
+        assert!(doc.undo(), "one undo step for the stroke");
+        let undone = doc
+            .world()
+            .world()
+            .get::<Terrain>(e)
+            .unwrap()
+            .data
+            .height_at(center)
+            .unwrap();
+        assert!((undone - before).abs() < 1e-6, "undo restored height");
+
+        // Redo replays it exactly.
+        assert!(doc.redo(), "redo the stroke");
+        let redone = doc
+            .world()
+            .world()
+            .get::<Terrain>(e)
+            .unwrap()
+            .data
+            .height_at(center)
+            .unwrap();
+        assert!((redone - raised).abs() < 1e-6, "redo replayed the stroke");
     }
 
     #[test]

@@ -9,6 +9,7 @@
 
 use inf_ecs::components::{Sprite, Transform};
 use inf_ecs::PropValue;
+use inf_terrain::HeightDelta;
 use uuid::Uuid;
 
 use crate::scene::serialize::EntityRecord;
@@ -80,6 +81,13 @@ pub(crate) enum EditCommand {
         before: Option<Uuid>,
         after: Option<Uuid>,
     },
+    /// One terrain sculpt stroke (P10.2b): a sparse before/after height-sample
+    /// record ([`HeightDelta`]). The live stroke already mutated the terrain when
+    /// this is recorded, so `apply`/`revert` here are pure redo/undo — redo
+    /// replays the `after` samples, undo replays `before` (and drops any tiles the
+    /// stroke authored from nothing). Boxed so the (potentially large) delta
+    /// doesn't bloat every other command variant.
+    SculptTerrain { guid: Uuid, delta: Box<HeightDelta> },
 }
 
 impl EditCommand {
@@ -113,6 +121,9 @@ impl EditCommand {
             }
             EditCommand::SetActor { guid, after, .. } => {
                 doc.raw_set_actor(*guid, *after);
+            }
+            EditCommand::SculptTerrain { guid, delta } => {
+                doc.raw_apply_terrain_delta(*guid, delta);
             }
         }
     }
@@ -155,6 +166,9 @@ impl EditCommand {
             }
             EditCommand::SetActor { guid, before, .. } => {
                 doc.raw_set_actor(*guid, *before);
+            }
+            EditCommand::SculptTerrain { guid, delta } => {
+                doc.raw_revert_terrain_delta(*guid, delta);
             }
         }
     }

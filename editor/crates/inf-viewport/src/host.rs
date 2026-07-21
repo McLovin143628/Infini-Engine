@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use glam::{DQuat, DVec3, Vec2, Vec3};
+use glam::{DQuat, DVec2, DVec3, Vec2, Vec3};
 use inf_ecs::components::{
     Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, ComputedVisibility,
     GlobalTransform, Light, Light2D, LightKind as EcsLightKind, Material, MeshRef, NineSlice,
@@ -23,7 +23,15 @@ use inf_render::{
 };
 use uuid::Uuid;
 
-use crate::camera::{Camera2D, EditorCamera, Snap2DSettings, ViewportMode, TWO_D_FAR, TWO_D_NEAR};
+use inf_terrain::{
+    dab_positions, raycast_terrain, BrushOp, BrushParams, Falloff, FlattenTarget, Stroke,
+    TerrainData,
+};
+
+use crate::camera::{
+    Camera2D, EditorCamera, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings, ToolMode,
+    ViewportMode, TWO_D_FAR, TWO_D_NEAR,
+};
 use crate::SurfaceTarget;
 
 pub struct EngineHost {
@@ -69,6 +77,36 @@ pub struct EngineHost {
     /// during a drag, written back on release. Mesh entities use the render
     /// instances instead (`scene.instances`). (P8.2c)
     selected_2d: HashMap<Uuid, Sel2D>,
+    /// Active tool: pick/gizmo (`Select`) or terrain sculpt (`Sculpt`). (P10.2b)
+    tool_mode: ToolMode,
+    /// Sculpt brush configuration pushed from the toolbar (P10.2b).
+    sculpt: SculptSettings,
+    /// GUID of the terrain entity the sculpt tool targets (the first visible,
+    /// non-empty terrain — matches `scene.terrain`). Set each projection.
+    terrain_guid: Option<Uuid>,
+    /// In-flight sculpt stroke: the accumulating brush gesture (`None` = idle).
+    sculpt_drag: Option<SculptDrag>,
+    /// World-space brush-ring loop points (following terrain height), rebuilt as
+    /// the cursor hovers/sculpts terrain; drawn as debug lines in Sculpt mode.
+    sculpt_ring: Vec<DVec3>,
+    /// Colour of the brush ring (encodes the active op).
+    sculpt_ring_color: [f32; 4],
+}
+
+/// An in-flight sculpt gesture (P10.2b): the mouse-down→up stroke accumulating
+/// dabs into one [`Stroke`], plus the state to resample the drag path and, on
+/// release, commit one [`inf_terrain::HeightDelta`] undo step.
+struct SculptDrag {
+    /// Target terrain entity.
+    guid: Uuid,
+    /// The accumulating stroke (merged into one delta at commit).
+    stroke: Stroke,
+    /// The effective op (Ctrl may flip Raise↔Lower).
+    op: SculptOp,
+    /// Last dab centre in terrain-local XZ (for even path resampling).
+    last_local: DVec2,
+    /// Local surface height under the stroke's first touch — the Flatten target.
+    flatten_height: f64,
 }
 
 /// A selected 2D (non-mesh) entity's working transform for the gizmo. World
@@ -134,6 +172,12 @@ impl EngineHost {
             mode: ViewportMode::Perspective,
             snap_2d: Snap2DSettings::default(),
             selected_2d: HashMap::new(),
+            tool_mode: ToolMode::Select,
+            sculpt: SculptSettings::default(),
+            terrain_guid: None,
+            sculpt_drag: None,
+            sculpt_ring: Vec::new(),
+            sculpt_ring_color: [1.0; 4],
         })
     }
 
@@ -211,6 +255,20 @@ impl EngineHost {
         self.snap_2d = snap;
     }
 
+    /// Switch the active tool (Select ↔ Sculpt) from the toolbar (P10.2b).
+    /// Leaving Sculpt drops any hovered brush ring.
+    pub fn set_tool_mode(&mut self, mode: ToolMode) {
+        self.tool_mode = mode;
+        if mode != ToolMode::Sculpt {
+            self.sculpt_ring.clear();
+        }
+    }
+
+    /// Replace the sculpt brush configuration (from the toolbar).
+    pub fn set_sculpt(&mut self, sculpt: SculptSettings) {
+        self.sculpt = sculpt;
+    }
+
     /// Translate snap increment (world units) for 2D mode, `0.0` ⇒ none. Only
     /// the Windows input layer applies it during a gizmo drag.
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -261,6 +319,7 @@ impl EngineHost {
         self.scene.prebatched.clear();
         self.scene.lights_2d.clear();
         self.scene.terrain = None;
+        self.terrain_guid = None;
         self.id_to_guid.clear();
         self.guid_to_id.clear();
         self.collider_outlines.clear();
@@ -368,6 +427,7 @@ impl EngineHost {
                             .unwrap_or(DVec3::ZERO);
                         self.scene.terrain =
                             Some(project_terrain(terrain, translation, doc.version()));
+                        self.terrain_guid = Some(guid);
                     }
                 }
             }
@@ -967,6 +1027,212 @@ impl EngineHost {
     pub fn end_gizmo(&mut self) {
         self.gizmo_drag = None;
     }
+
+    // ── terrain sculpting (P10.2b) ────────────────────────────────────────
+
+    /// The active tool (pick/gizmo vs terrain sculpt).
+    pub fn tool_mode(&self) -> ToolMode {
+        self.tool_mode
+    }
+
+    /// `true` while a sculpt stroke is in progress.
+    pub fn is_sculpting(&self) -> bool {
+        self.sculpt_drag.is_some()
+    }
+
+    /// Raycast the cursor against the target terrain, returning the hit centre in
+    /// terrain-local XZ and the local surface height there. Reuses the same
+    /// screen→world ray as picking/gizmo drags, rebased through the floating
+    /// origin and shifted into the terrain entity's local frame.
+    fn sculpt_pick(
+        &self,
+        doc: &SceneDoc,
+        view: &RenderView,
+        px: u32,
+        py: u32,
+    ) -> Option<(Uuid, DVec2, f64)> {
+        let guid = self.terrain_guid?;
+        let (data, translation) = doc.terrain_data_and_origin(guid)?;
+        let (ro, rd) = view.pixel_ray(px as f32, py as f32);
+        // Render-local ray → world → terrain-local (render axes == world axes).
+        let local_origin = self.origin.to_world(ro) - translation;
+        let hit = raycast_terrain(data, local_origin, rd.as_dvec3(), 1.0e6)?;
+        Some((guid, DVec2::new(hit.point.x, hit.point.z), hit.point.y))
+    }
+
+    /// Rebuild the brush-ring loop points from the current terrain around
+    /// `center` (terrain-local XZ), coloured by the active op. Clears the ring if
+    /// the terrain vanished.
+    fn refresh_ring(&mut self, doc: &SceneDoc, center: DVec2) {
+        let op = self
+            .sculpt_drag
+            .as_ref()
+            .map(|d| d.op)
+            .unwrap_or(self.sculpt.op);
+        let color = op_color(op);
+        self.sculpt_ring_color = color;
+        if let Some(guid) = self.terrain_guid {
+            if let Some((data, translation)) = doc.terrain_data_and_origin(guid) {
+                self.sculpt_ring = build_ring(data, translation, center, self.sculpt.radius);
+                return;
+            }
+        }
+        self.sculpt_ring.clear();
+    }
+
+    /// Update the hovered brush ring (idle Sculpt mode): raycast the cursor and
+    /// rebuild the ring, or clear it off-terrain.
+    pub fn update_sculpt_hover(&mut self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) {
+        match self.sculpt_pick(doc, view, px, py) {
+            Some((_, center, _)) => self.refresh_ring(doc, center),
+            None => self.sculpt_ring.clear(),
+        }
+    }
+
+    /// Begin a sculpt stroke under the cursor. Raycasts the terrain; on a hit,
+    /// opens a [`Stroke`], lays the first dab, and returns `true`. `ctrl` flips
+    /// Raise↔Lower for a temporary inverse brush (UE convention).
+    pub fn begin_sculpt(
+        &mut self,
+        doc: &mut SceneDoc,
+        view: &RenderView,
+        px: u32,
+        py: u32,
+        ctrl: bool,
+    ) -> bool {
+        let Some((guid, center, height)) = self.sculpt_pick(doc, view, px, py) else {
+            return false;
+        };
+        let op = effective_op(self.sculpt.op, ctrl);
+        let settings = self.sculpt;
+        let mut stroke = Stroke::begin();
+        let (brush, params) = brush_of(op, &settings, center, height);
+        doc.sculpt_apply_dab(guid, &mut stroke, brush, params);
+        self.sculpt_drag = Some(SculptDrag {
+            guid,
+            stroke,
+            op,
+            last_local: center,
+            flatten_height: height,
+        });
+        self.refresh_ring(doc, center);
+        true
+    }
+
+    /// Continue the stroke: resample the path from the last dab to the cursor at
+    /// even spacing (~⅓ radius) and lay a dab at each, mutating the live terrain
+    /// (which re-uploads next frame via the version bump).
+    pub fn update_sculpt(&mut self, doc: &mut SceneDoc, view: &RenderView, px: u32, py: u32) {
+        let Some(drag) = self.sculpt_drag.as_ref() else {
+            return;
+        };
+        let (guid, last, op, flatten_h) =
+            (drag.guid, drag.last_local, drag.op, drag.flatten_height);
+        let Some((_, cur, _)) = self.sculpt_pick(doc, view, px, py) else {
+            return; // cursor slid off the terrain — hold the stroke, add nothing
+        };
+        let settings = self.sculpt;
+        let spacing = (0.35 * settings.radius).max(0.05);
+        // `dab_positions` re-emits the start (`last`); skip it — already placed.
+        let dabs = dab_positions(&[last, cur], spacing);
+        let mut new_last = last;
+        for &c in dabs.iter().skip(1) {
+            let (brush, params) = brush_of(op, &settings, c, flatten_h);
+            if let Some(d) = self.sculpt_drag.as_mut() {
+                doc.sculpt_apply_dab(guid, &mut d.stroke, brush, params);
+            }
+            new_last = c;
+        }
+        if let Some(d) = self.sculpt_drag.as_mut() {
+            d.last_local = new_last;
+        }
+        self.refresh_ring(doc, cur);
+    }
+
+    /// Finish the stroke: commit the merged [`inf_terrain::HeightDelta`] as one
+    /// undo step. Returns `true` if a non-empty stroke was recorded.
+    pub fn finish_sculpt(&mut self, doc: &mut SceneDoc) -> bool {
+        let Some(drag) = self.sculpt_drag.take() else {
+            return false;
+        };
+        doc.edit_commit_sculpt(drag.guid, drag.stroke)
+    }
+}
+
+/// Effective op after a Ctrl modifier: Ctrl temporarily inverts Raise↔Lower (UE
+/// convention); other ops are unaffected.
+fn effective_op(op: SculptOp, ctrl: bool) -> SculptOp {
+    match (op, ctrl) {
+        (SculptOp::Raise, true) => SculptOp::Lower,
+        (SculptOp::Lower, true) => SculptOp::Raise,
+        (op, _) => op,
+    }
+}
+
+/// Build the `inf_terrain` brush op + params for one dab from the toolbar
+/// settings, filling in the op-specific parameters the flat UI enum omits.
+fn brush_of(
+    op: SculptOp,
+    s: &SculptSettings,
+    center: DVec2,
+    flatten_height: f64,
+) -> (BrushOp, BrushParams) {
+    let falloff = match s.falloff {
+        SculptFalloff::Smooth => Falloff::Smooth,
+        SculptFalloff::Linear => Falloff::Linear,
+        SculptFalloff::Sphere => Falloff::Sphere,
+        SculptFalloff::Sharp => Falloff::Sharp,
+    };
+    let params = BrushParams {
+        center,
+        radius: s.radius,
+        strength: s.strength,
+        falloff,
+    };
+    let brush = match op {
+        SculptOp::Raise => BrushOp::Raise,
+        SculptOp::Lower => BrushOp::Lower,
+        SculptOp::Smooth => BrushOp::Smooth { iterations: 1 },
+        SculptOp::Flatten => BrushOp::Flatten {
+            target: FlattenTarget::PickedHeight(flatten_height),
+        },
+        SculptOp::Noise => BrushOp::Noise {
+            seed: 0x5EED_1234,
+            frequency: 0.05,
+            octaves: 4,
+            amplitude: s.strength,
+        },
+    };
+    (brush, params)
+}
+
+/// The brush-ring colour for an op (green raise / red lower / blue smooth /
+/// yellow flatten / violet noise).
+fn op_color(op: SculptOp) -> [f32; 4] {
+    match op {
+        SculptOp::Raise => [0.35, 0.90, 0.45, 1.0],
+        SculptOp::Lower => [0.95, 0.45, 0.35, 1.0],
+        SculptOp::Smooth => [0.40, 0.70, 1.00, 1.0],
+        SculptOp::Flatten => [0.95, 0.85, 0.35, 1.0],
+        SculptOp::Noise => [0.75, 0.50, 0.95, 1.0],
+    }
+}
+
+/// Sample a closed ring of world-space points around `center` (terrain-local XZ)
+/// at `radius`, each lifted to the terrain surface height there (falling back to
+/// the centre height over holes), then shifted by the terrain's world
+/// translation. Connect consecutive points (and last→first) to stroke the ring.
+fn build_ring(data: &TerrainData, translation: DVec3, center: DVec2, radius: f64) -> Vec<DVec3> {
+    const SEGMENTS: u32 = 32;
+    let base_h = data.height_at(center).unwrap_or(0.0);
+    (0..SEGMENTS)
+        .map(|i| {
+            let a = std::f64::consts::TAU * (i as f64) / (SEGMENTS as f64);
+            let p = center + DVec2::new(radius * a.cos(), radius * a.sin());
+            let h = data.height_at(p).unwrap_or(base_h);
+            translation + DVec3::new(p.x, h, p.y)
+        })
+        .collect()
 }
 
 impl EngineHost {
@@ -1011,6 +1277,17 @@ impl EngineHost {
             }
             if let Some(cd) = self.collider_outlines_3d.get(guid) {
                 draw_collider_outline_3d(&mut self.scene.debug, &self.origin, cd);
+            }
+        }
+
+        // Sculpt brush ring (P10.2b): a closed loop following the terrain height
+        // under the cursor, coloured by the active op. Only in Sculpt mode.
+        if self.tool_mode == ToolMode::Sculpt && self.sculpt_ring.len() >= 2 {
+            let n = self.sculpt_ring.len();
+            for i in 0..n {
+                let a = self.origin.to_render(self.sculpt_ring[i]);
+                let b = self.origin.to_render(self.sculpt_ring[(i + 1) % n]);
+                self.scene.debug.line(a, b, self.sculpt_ring_color);
             }
         }
 

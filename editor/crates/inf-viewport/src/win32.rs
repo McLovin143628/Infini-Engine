@@ -39,7 +39,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use glam::DVec2;
 
 use crate::camera::{
-    Bookmarks, Camera2D, EditorCamera, FlyInput, NavInput, NavMode, Snap2DSettings, ViewportMode,
+    Bookmarks, Camera2D, EditorCamera, FlyInput, NavInput, NavMode, SculptSettings, Snap2DSettings,
+    ToolMode, ViewportMode,
 };
 use crate::host::EngineHost;
 use crate::{KeyChord, SharedScene, SurfaceTarget, ViewportEvent, ViewportEventSink, ViewportRect};
@@ -57,6 +58,10 @@ enum Cmd {
     SetMode(ViewportMode),
     /// Replace the 2D-mode snapping configuration from the toolbar.
     SetSnap2D(Snap2DSettings),
+    /// Switch the active tool (Select ↔ Sculpt) from the toolbar (P10.2b).
+    SetToolMode(ToolMode),
+    /// Replace the sculpt brush configuration from the toolbar (P10.2b).
+    SetSculpt(SculptSettings),
     /// Adopt a foreign (PIE player) window into the viewport slot: reparent it
     /// to our parent, position it at the hole, and hide our own child (embedded
     /// PIE, P9.4). The `isize` is the foreign HWND.
@@ -105,6 +110,16 @@ impl ViewportHandle {
     /// Replace the 2D-mode snapping configuration (grid + pixel snap).
     pub fn set_snap_2d(&self, snap: Snap2DSettings) {
         let _ = self.tx.send(Cmd::SetSnap2D(snap));
+    }
+
+    /// Switch the active viewport tool (Select ↔ Sculpt) (P10.2b).
+    pub fn set_tool_mode(&self, mode: ToolMode) {
+        let _ = self.tx.send(Cmd::SetToolMode(mode));
+    }
+
+    /// Replace the sculpt brush configuration (op / radius / strength / falloff).
+    pub fn set_sculpt(&self, sculpt: SculptSettings) {
+        let _ = self.tx.send(Cmd::SetSculpt(sculpt));
     }
 
     /// Adopt a foreign (PIE player) window into the viewport slot (embedded PIE,
@@ -659,6 +674,8 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 }
                 Ok(Cmd::SetMode(m)) => host.set_mode(m),
                 Ok(Cmd::SetSnap2D(s)) => host.set_snap_2d(s),
+                Ok(Cmd::SetToolMode(m)) => host.set_tool_mode(m),
+                Ok(Cmd::SetSculpt(s)) => host.set_sculpt(s),
                 Ok(Cmd::EmbedForeign(foreign)) => {
                     embed_foreign_window(parent_hwnd, foreign, last_rect);
                     unsafe {
@@ -779,79 +796,105 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 host.view_for(&camera)
             };
 
-            // Plain LMB: a handle under the cursor begins a gizmo drag (one
-            // undo transaction), otherwise it selects the picked entity.
-            if let Some((x, y, ctrl)) = input.left_press {
-                let (px, py) = (x.max(0) as u32, y.max(0) as u32);
-                if host.try_begin_gizmo(&interact_view, px, py) {
-                    doc.begin_transaction("Move");
-                } else {
-                    match host.pick_guid(&interact_view, px, py) {
-                        Some(guid) => {
-                            doc.select(&[guid], ctrl);
-                            world_changed = true;
-                        }
-                        None if !ctrl => {
-                            doc.clear_selection();
-                            world_changed = true;
-                        }
-                        None => {}
-                    }
-                    host.sync_from_doc(&doc); // reflect the new selection now
+            // Sculpt mode (perspective only): plain LMB paints a terrain height
+            // stroke instead of selecting/gizmo-dragging. The stroke lives on the
+            // viewport thread (like a gizmo drag) and commits one undo step at
+            // mouse-up (P10.2b). 2D mode keeps Select regardless of the tool.
+            let sculpting = host.tool_mode() == ToolMode::Sculpt && !two_d;
+            if sculpting {
+                if let Some((x, y, ctrl)) = input.left_press {
+                    let (px, py) = (x.max(0) as u32, y.max(0) as u32);
+                    host.begin_sculpt(&mut doc, &interact_view, px, py, ctrl);
                 }
-            }
-
-            if input.left_down && host.is_dragging_gizmo() {
-                let (x, y) = input.cursor;
-                // 2D: translate snaps to the toolbar's grid/pixel increment (or
-                // Shift for a 1 m fallback); rotate/scale keep the Shift snaps.
-                // Perspective keeps the Shift-drag snaps (1 m / 15° / 0.1 ratio).
-                let snap = if two_d {
-                    match host.gizmo_mode {
-                        GizmoMode::Translate => {
-                            let s = host.snap_2d_translate();
-                            if s > 0.0 {
-                                s
-                            } else if key_down(0x10) {
-                                1.0
-                            } else {
-                                0.0
-                            }
-                        }
-                        GizmoMode::Rotate if key_down(0x10) => 15f32.to_radians(),
-                        GizmoMode::Scale if key_down(0x10) => 0.1,
-                        _ => 0.0,
-                    }
-                } else if key_down(0x10) {
-                    match host.gizmo_mode {
-                        GizmoMode::Translate => 1.0,
-                        GizmoMode::Rotate => 15f32.to_radians(),
-                        GizmoMode::Scale => 0.1,
-                    }
-                } else {
-                    0.0
-                };
-                host.update_gizmo(&interact_view, x.max(0) as u32, y.max(0) as u32, snap);
-            }
-
-            if input.left_release {
-                if host.is_dragging_gizmo() {
-                    for (guid, transform) in host.selected_world_transforms() {
-                        doc.edit_set_transform(guid, transform);
-                    }
-                    doc.commit_transaction();
+                if input.left_down && host.is_sculpting() {
+                    let (x, y) = input.cursor;
+                    host.update_sculpt(&mut doc, &interact_view, x.max(0) as u32, y.max(0) as u32);
+                }
+                if input.left_release && host.is_sculpting() && host.finish_sculpt(&mut doc) {
                     world_changed = true;
                 }
-                host.end_gizmo();
-            }
-
-            // Hover highlight when idle (not dragging, not flying).
-            if input.cursor_moved && !input.left_down && input.capture == Capture::None {
-                let (x, y) = input.cursor;
-                if x >= 0 && y >= 0 {
-                    host.set_hover(&interact_view, x as u32, y as u32);
+                // Idle hover: the brush ring follows the cursor over terrain.
+                if !input.left_down && input.capture == Capture::None && input.cursor_moved {
+                    let (x, y) = input.cursor;
+                    if x >= 0 && y >= 0 {
+                        host.update_sculpt_hover(&doc, &interact_view, x as u32, y as u32);
+                    }
                 }
-            }
+            } else {
+                // Plain LMB: a handle under the cursor begins a gizmo drag (one
+                // undo transaction), otherwise it selects the picked entity.
+                if let Some((x, y, ctrl)) = input.left_press {
+                    let (px, py) = (x.max(0) as u32, y.max(0) as u32);
+                    if host.try_begin_gizmo(&interact_view, px, py) {
+                        doc.begin_transaction("Move");
+                    } else {
+                        match host.pick_guid(&interact_view, px, py) {
+                            Some(guid) => {
+                                doc.select(&[guid], ctrl);
+                                world_changed = true;
+                            }
+                            None if !ctrl => {
+                                doc.clear_selection();
+                                world_changed = true;
+                            }
+                            None => {}
+                        }
+                        host.sync_from_doc(&doc); // reflect the new selection now
+                    }
+                }
+
+                if input.left_down && host.is_dragging_gizmo() {
+                    let (x, y) = input.cursor;
+                    // 2D: translate snaps to the toolbar's grid/pixel increment (or
+                    // Shift for a 1 m fallback); rotate/scale keep the Shift snaps.
+                    // Perspective keeps the Shift-drag snaps (1 m / 15° / 0.1 ratio).
+                    let snap = if two_d {
+                        match host.gizmo_mode {
+                            GizmoMode::Translate => {
+                                let s = host.snap_2d_translate();
+                                if s > 0.0 {
+                                    s
+                                } else if key_down(0x10) {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            }
+                            GizmoMode::Rotate if key_down(0x10) => 15f32.to_radians(),
+                            GizmoMode::Scale if key_down(0x10) => 0.1,
+                            _ => 0.0,
+                        }
+                    } else if key_down(0x10) {
+                        match host.gizmo_mode {
+                            GizmoMode::Translate => 1.0,
+                            GizmoMode::Rotate => 15f32.to_radians(),
+                            GizmoMode::Scale => 0.1,
+                        }
+                    } else {
+                        0.0
+                    };
+                    host.update_gizmo(&interact_view, x.max(0) as u32, y.max(0) as u32, snap);
+                }
+
+                if input.left_release {
+                    if host.is_dragging_gizmo() {
+                        for (guid, transform) in host.selected_world_transforms() {
+                            doc.edit_set_transform(guid, transform);
+                        }
+                        doc.commit_transaction();
+                        world_changed = true;
+                    }
+                    host.end_gizmo();
+                }
+
+                // Hover highlight when idle (not dragging, not flying).
+                if input.cursor_moved && !input.left_down && input.capture == Capture::None {
+                    let (x, y) = input.cursor;
+                    if x >= 0 && y >= 0 {
+                        host.set_hover(&interact_view, x as u32, y as u32);
+                    }
+                }
+            } // end Select-tool interaction (else of `if sculpting`)
         }
         if world_changed {
             sink(ViewportEvent::WorldChanged);

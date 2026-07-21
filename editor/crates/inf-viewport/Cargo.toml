@@ -18,6 +18,10 @@ glam = { workspace = true }
 # spawn boundary on every platform, so it's a general (not target) dependency.
 inf-editor-core = { workspace = true }
 inf-ecs = { workspace = true }
+# Terrain heightfield + sculpt brushes (P10.2b): the host raycasts the cursor
+# against the shared terrain and applies strokes. Pure Ring-0 (no GPU), so it's
+# a general dependency even though only the windowed hosts drive sculpting.
+inf-terrain = { workspace = true }
 uuid = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]

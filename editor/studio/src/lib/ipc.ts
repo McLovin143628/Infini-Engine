@@ -35,6 +35,7 @@ import type { ProjectTemplateDto } from "../bindings/ProjectTemplateDto";
 import type { PropValueDto } from "../bindings/PropValueDto";
 import type { RecentProjectDto } from "../bindings/RecentProjectDto";
 import type { SearchHitDto } from "../bindings/SearchHitDto";
+import type { SculptSettingsDto } from "../bindings/SculptSettingsDto";
 import type { SearchOptsDto } from "../bindings/SearchOptsDto";
 import type { SceneSnapshot } from "../bindings/SceneSnapshot";
 import type { Snap2DDto } from "../bindings/Snap2DDto";
@@ -43,6 +44,7 @@ import type { SpawnKind } from "../bindings/SpawnKind";
 import type { SpriteSheetDto } from "../bindings/SpriteSheetDto";
 import type { TilemapCellDto } from "../bindings/TilemapCellDto";
 import type { TilemapDto } from "../bindings/TilemapDto";
+import type { ToolModeDto } from "../bindings/ToolModeDto";
 import type { ViewportDrop } from "../bindings/ViewportDrop";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
 import type { ViewportRect } from "../bindings/ViewportRect";
@@ -128,6 +130,12 @@ export const viewport = {
   setMode: (mode: ViewportModeDto): Promise<void> => invoke("viewport_set_mode", { mode }),
   /** Push the 2D-mode grid/pixel snapping configuration to the viewport. */
   setSnap2d: (snap: Snap2DDto): Promise<void> => invoke("viewport_set_snap2d", { snap }),
+  /** Switch the active tool (Select ↔ Sculpt terrain) (P10.2b). */
+  setToolMode: (mode: ToolModeDto): Promise<void> =>
+    invoke("viewport_set_tool_mode", { mode }),
+  /** Push the sculpt brush configuration (op / radius / strength / falloff). */
+  setSculpt: (sculpt: SculptSettingsDto): Promise<void> =>
+    invoke("viewport_set_sculpt", { sculpt }),
 };
 
 /**

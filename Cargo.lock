@@ -2733,6 +2733,7 @@ dependencies = [
  "inf-physics",
  "inf-render",
  "inf-runtime",
+ "inf-terrain",
  "png 0.18.1",
  "pollster",
  "serde",
@@ -2851,7 +2852,9 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "glam 0.33.2",
+ "inf-asset",
  "inf-core",
+ "inf-terrain",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -3000,6 +3003,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -3030,6 +3034,7 @@ dependencies = [
  "inf-editor-core",
  "inf-math",
  "inf-render",
+ "inf-terrain",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",

@@ -24,7 +24,9 @@ use objc2_app_kit::NSView;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
-use crate::camera::{Camera2D, EditorCamera, Snap2DSettings, ViewportMode};
+use crate::camera::{
+    Camera2D, EditorCamera, SculptSettings, Snap2DSettings, ToolMode, ViewportMode,
+};
 use crate::host::EngineHost;
 use crate::{SharedScene, SurfaceTarget, ViewportEventSink, ViewportRect};
 
@@ -34,6 +36,8 @@ enum Cmd {
     Drop { x: f32, y: f32, payload: String },
     SetMode(ViewportMode),
     SetSnap2D(Snap2DSettings),
+    SetToolMode(ToolMode),
+    SetSculpt(SculptSettings),
     Destroy,
 }
 
@@ -72,6 +76,18 @@ impl ViewportHandle {
     /// Replace the 2D-mode snapping configuration.
     pub fn set_snap_2d(&self, snap: Snap2DSettings) {
         let _ = self.tx.send(Cmd::SetSnap2D(snap));
+    }
+
+    /// Switch the active viewport tool (Select ↔ Sculpt) (P10.2b). macOS input
+    /// isn't wired yet, so this only sets the mode (drives the brush ring once
+    /// input lands with the hardware pass).
+    pub fn set_tool_mode(&self, mode: ToolMode) {
+        let _ = self.tx.send(Cmd::SetToolMode(mode));
+    }
+
+    /// Replace the sculpt brush configuration.
+    pub fn set_sculpt(&self, sculpt: SculptSettings) {
+        let _ = self.tx.send(Cmd::SetSculpt(sculpt));
     }
 
     /// Adopt a foreign PIE player window (no-op on macOS: cross-process view
@@ -200,6 +216,8 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedSce
                 }
                 Ok(Cmd::SetMode(m)) => host.set_mode(m),
                 Ok(Cmd::SetSnap2D(s)) => host.set_snap_2d(s),
+                Ok(Cmd::SetToolMode(m)) => host.set_tool_mode(m),
+                Ok(Cmd::SetSculpt(s)) => host.set_sculpt(s),
                 Ok(Cmd::Destroy) | Err(TryRecvError::Disconnected) => break 'outer,
                 Err(TryRecvError::Empty) => break,
             }

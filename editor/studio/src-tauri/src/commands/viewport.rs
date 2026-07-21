@@ -8,8 +8,13 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use inf_editor_core::ipc::{Snap2DDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect};
-use inf_viewport::{Snap2DSettings, ViewportEvent, ViewportMode};
+use inf_editor_core::ipc::{
+    SculptFalloffDto, SculptOpDto, SculptSettingsDto, Snap2DDto, ToolModeDto, ViewportDrop,
+    ViewportKey, ViewportModeDto, ViewportRect,
+};
+use inf_viewport::{
+    SculptFalloff, SculptOp, SculptSettings, Snap2DSettings, ToolMode, ViewportEvent, ViewportMode,
+};
 use tauri::{Emitter, Manager};
 
 use super::scene::{emit_world_delta, SceneState};
@@ -202,6 +207,52 @@ pub async fn viewport_set_snap2d(
             grid_size: snap.grid_size,
             pixel_enabled: snap.pixel_enabled,
             pixels_per_unit: snap.pixels_per_unit,
+        });
+    }
+    Ok(())
+}
+
+/// Switch the active viewport tool (Select ↔ Sculpt) from the toolbar (P10.2b).
+#[tauri::command]
+pub async fn viewport_set_tool_mode(
+    mode: ToolModeDto,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        handle.set_tool_mode(match mode {
+            ToolModeDto::Select => ToolMode::Select,
+            ToolModeDto::Sculpt => ToolMode::Sculpt,
+        });
+    }
+    Ok(())
+}
+
+/// Push the sculpt brush configuration (op / radius / strength / falloff) to the
+/// viewport (P10.2b).
+#[tauri::command]
+pub async fn viewport_set_sculpt(
+    sculpt: SculptSettingsDto,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        handle.set_sculpt(SculptSettings {
+            op: match sculpt.op {
+                SculptOpDto::Raise => SculptOp::Raise,
+                SculptOpDto::Lower => SculptOp::Lower,
+                SculptOpDto::Smooth => SculptOp::Smooth,
+                SculptOpDto::Flatten => SculptOp::Flatten,
+                SculptOpDto::Noise => SculptOp::Noise,
+            },
+            radius: sculpt.radius.max(0.0),
+            strength: sculpt.strength,
+            falloff: match sculpt.falloff {
+                SculptFalloffDto::Smooth => SculptFalloff::Smooth,
+                SculptFalloffDto::Linear => SculptFalloff::Linear,
+                SculptFalloffDto::Sphere => SculptFalloff::Sphere,
+                SculptFalloffDto::Sharp => SculptFalloff::Sharp,
+            },
         });
     }
     Ok(())

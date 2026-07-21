@@ -433,6 +433,63 @@ impl Snap2DSettings {
     }
 }
 
+/// Which viewport tool owns the left mouse button (P10.2b). `Select` is the
+/// default pick + transform-gizmo interaction; `Sculpt` turns an LMB-drag over a
+/// terrain entity into a height brush. Orthogonal to [`ViewportMode`] — sculpting
+/// is a perspective-only tool (2D mode keeps `Select`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolMode {
+    #[default]
+    Select,
+    Sculpt,
+}
+
+/// The sculpt brush operation, mirrored from the toolbar. A flat, transport-
+/// friendly enum the host maps onto `inf_terrain::BrushOp` (filling in the
+/// op-specific parameters — smooth iterations, noise field, flatten target).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SculptOp {
+    #[default]
+    Raise,
+    Lower,
+    Smooth,
+    Flatten,
+    Noise,
+}
+
+/// Brush falloff curve, mirrored from the toolbar onto `inf_terrain::Falloff`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SculptFalloff {
+    #[default]
+    Smooth,
+    Linear,
+    Sphere,
+    Sharp,
+}
+
+/// Sculpt brush configuration pushed from the viewport toolbar (P10.2b). The
+/// host reads it when starting a stroke; `radius` is world metres, `strength` is
+/// per-dab metres at full weight for Raise/Lower/Noise or a `[0,1]` blend
+/// fraction for Smooth/Flatten.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SculptSettings {
+    pub op: SculptOp,
+    pub radius: f64,
+    pub strength: f64,
+    pub falloff: SculptFalloff,
+}
+
+impl Default for SculptSettings {
+    fn default() -> Self {
+        Self {
+            op: SculptOp::Raise,
+            radius: 8.0,
+            strength: 0.5,
+            falloff: SculptFalloff::Smooth,
+        }
+    }
+}
+
 /// Shortest-path angular lerp (handles the ±π wrap).
 fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
     let mut d = (b - a) % std::f32::consts::TAU;

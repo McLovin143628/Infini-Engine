@@ -100,6 +100,13 @@ impl Default for LevelSettings {
 /// already round-trips through serde deterministically, so the record change is the
 /// only missing piece. Undo/redo of a terrain spawn are affected by the same gap
 /// (the Create/Delete commands snapshot through `EntityRecord`).
+///
+/// **P10.2b (sculpting) note:** in-viewport terrain sculpting mutates the live
+/// `Terrain::data` and records `EditCommand::SculptTerrain` (`HeightDelta`) undo
+/// steps that work *in-session* — but because the component itself isn't
+/// persisted, sculpted height is dropped on save/load just like a spawned
+/// terrain. The v4 slot above closes both gaps at once; no schema bump was made
+/// for sculpting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EntityRecord {
     pub guid: Uuid,
@@ -657,6 +664,10 @@ mod tests {
     /// there is no `terrain` slot on [`EntityRecord`]. This test pins the current
     /// (lossy) behavior so the day someone adds the v4 slot, this test flips and
     /// forces them to update it deliberately. See the `EntityRecord` doc TODO.
+    ///
+    /// The same gap swallows P10.2b **sculpted** height: strokes edit the live
+    /// `Terrain::data` (with working in-session undo) but never reach disk until
+    /// the v4 slot lands.
     #[test]
     fn terrain_is_not_persisted_yet_v4_todo() {
         use inf_ecs::components::Terrain;

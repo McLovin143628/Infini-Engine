@@ -512,6 +512,52 @@ pub struct Snap2DDto {
     pub pixels_per_unit: f32,
 }
 
+// ── Terrain sculpt tool (P10.2b) ─────────────────────────────────────────
+//
+// The viewport toolbar switches between the Select tool (pick/gizmo) and the
+// Sculpt tool (terrain height brush) via `viewport_set_tool_mode`, and pushes
+// the brush configuration via `viewport_set_sculpt`. Sculpting is a
+// perspective-only tool; 2D mode stays on Select.
+
+/// Active viewport tool (`viewport_set_tool_mode`). Serializes as the tag string
+/// `"Select"` / `"Sculpt"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum ToolModeDto {
+    Select,
+    Sculpt,
+}
+
+/// The sculpt brush operation. Serializes as its tag string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum SculptOpDto {
+    Raise,
+    Lower,
+    Smooth,
+    Flatten,
+    Noise,
+}
+
+/// The sculpt brush falloff curve. Serializes as its tag string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum SculptFalloffDto {
+    Smooth,
+    Linear,
+    Sphere,
+    Sharp,
+}
+
+/// Sculpt brush configuration pushed from the viewport toolbar
+/// (`viewport_set_sculpt`). `radius` is world metres; `strength` is per-dab
+/// metres at full weight for Raise/Lower/Noise, or a `[0,1]` blend fraction for
+/// Smooth/Flatten.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct SculptSettingsDto {
+    pub op: SculptOpDto,
+    pub radius: f64,
+    pub strength: f64,
+    pub falloff: SculptFalloffDto,
+}
+
 /// Per-project editor settings persisted under `<root>/.infinity/settings.toml`
 /// (`project_settings_get` / `project_settings_set`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]

@@ -12,9 +12,10 @@ use inf_editor_core::ipc::{
     DataFieldDto, DeleteResult, DetailsDto, FileEntryDto, GitFileDto, GitStatusDto, ImportEventDto,
     LayoutSummary, LogLine, PackageErrorDto, PackageKindCountDto, PackageResultDto, ProjectInfoDto,
     ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto, RecentProjectDto,
-    SceneDelta, SceneNode, SceneSnapshot, SearchHitDto, SearchOptsDto, Snap2DDto, SortingLayerDto,
-    SpawnKind, SpriteGridDto, SpriteRectDto, SpriteSheetDto, TilemapCellDto, TilemapDto,
-    ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
+    SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto, SculptOpDto, SculptSettingsDto,
+    SearchHitDto, SearchOptsDto, Snap2DDto, SortingLayerDto, SpawnKind, SpriteGridDto,
+    SpriteRectDto, SpriteSheetDto, TilemapCellDto, TilemapDto, ToolModeDto, ViewportDrop,
+    ViewportKey, ViewportModeDto, ViewportRect,
 };
 use ts_rs::{Config, TS};
 
@@ -60,6 +61,10 @@ fn export_bindings() {
     SortingLayerDto::export_all(&cfg).expect("export SortingLayerDto");
     ViewportModeDto::export_all(&cfg).expect("export ViewportModeDto");
     Snap2DDto::export_all(&cfg).expect("export Snap2DDto");
+    ToolModeDto::export_all(&cfg).expect("export ToolModeDto");
+    SculptOpDto::export_all(&cfg).expect("export SculptOpDto");
+    SculptFalloffDto::export_all(&cfg).expect("export SculptFalloffDto");
+    SculptSettingsDto::export_all(&cfg).expect("export SculptSettingsDto");
     ProjectSettingsDto::export_all(&cfg).expect("export ProjectSettingsDto");
     TilemapCellDto::export_all(&cfg).expect("export TilemapCellDto");
     TilemapDto::export_all(&cfg).expect("export TilemapDto");
