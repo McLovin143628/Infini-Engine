@@ -19,9 +19,10 @@
 //! rapier `Vector` *is* a `glam::DVec2`. The facade exposes `glam::DVec2` and the
 //! conversion to/from rapier is the identity.
 //!
-//! The 3D half (Phase 9/12) will wrap `rapier3d-f64` the same way in a sibling
-//! `d3` module; the 2D types are all `*2D`-suffixed so `d3` slots in beside `d2`
-//! without renaming anything.
+//! The 3D half ([`d3`], P9.1b) wraps `rapier3d-f64` the same way in a sibling
+//! module; the 2D types are all `*2D`-suffixed and the 3D types `*3D`-suffixed so
+//! both halves hoist to the crate root without a name clash. The one shared type
+//! is [`ContactPhase`] (Started/Stopped is dimension-agnostic).
 //!
 //! # Determinism (a product guarantee — §8, P12.2 replay harness)
 //!
@@ -58,14 +59,23 @@
 //!   implementation of the accumulate/interpolate loop.
 
 pub mod d2;
+pub mod d3;
 mod stepper;
 
 pub use stepper::FixedStepper;
 
 // Ergonomic re-exports of the 2D facade at the crate root. These are safe to hoist
-// because every 2D type is `*2D`/`*2`-suffixed or clearly 2D-named; the future
-// `d3` module keeps its own `*3D` names, so nothing here will collide.
+// because every 2D type is `*2D`/`*2`-suffixed or clearly 2D-named; the `d3`
+// module keeps its own `*3D` names, so nothing here collides.
 pub use d2::{
     BodyId, BodyKind, CharacterMove2D, CharacterMover2D, ColliderDesc2D, ColliderId,
     ColliderShape2D, ContactEvent2D, ContactPhase, PhysicsBridge2D, PhysicsWorld2D, RayHit2D,
+};
+
+// Ergonomic re-exports of the 3D facade at the crate root (all `*3D`-suffixed).
+// `ContactPhase` is shared with d2 and hoisted once, above.
+pub use d3::{
+    BodyDesc3D, BodyId3D, BodyKind3D, CharacterMove3D, CharacterMover3D, ColliderDesc3D,
+    ColliderId3D, ColliderShape3D, ContactEvent3D, EntitySync3D, PhysicsBridge3D, PhysicsWorld3D,
+    PoseWriteback3D, RayHit3D,
 };

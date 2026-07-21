@@ -13,6 +13,10 @@ publish = false
 # f64 + enhanced-determinism + no-`parallel` rationale. rapier's math types are
 # glam 0.33 (== our workspace pin), so the facade speaks `glam::DVec2` natively.
 rapier2d-f64 = { workspace = true }
+# The 3D physics engine (f64 build), the d3 sibling of rapier2d-f64. Same
+# f64 + enhanced-determinism + no-`parallel` rationale; math types are glam 0.33
+# so the facade speaks `glam::DVec3` / `glam::DQuat` natively.
+rapier3d-f64 = { workspace = true }
 glam = { workspace = true }
 # The ECS↔physics bridge (`d2::ecs`) reads scene components to build bodies.
 # Dependency direction is inf-physics → inf-ecs (both Ring 0); inf-ecs never

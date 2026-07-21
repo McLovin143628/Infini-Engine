@@ -1,6 +1,6 @@
 [package]
 name = "inf-input"
-description = "Input: action/axis mapping shared by editor and runtime."
+description = "Input: serde action/axis mapping + edge/deadzone state, shared by editor and runtime. Ring 0."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,18 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# InputMap serializes into project settings later (P9), so serde is core, not
+# behind the gamepad feature.
+serde = { workspace = true }
+# gilrs backs the optional gamepad poller. It links platform HID/udev libraries, so
+# it is OFF by default: the pure mapping/edge/deadzone core (the tested part) has no
+# device dependency and builds everywhere; the runtime enables `gamepad` for a real
+# poller. See the workspace-dependency comment.
+gilrs = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[features]
+default = []
+gamepad = ["dep:gilrs"]

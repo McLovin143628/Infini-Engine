@@ -1,6 +1,6 @@
 [package]
 name = "inf-audio"
-description = "Audio facade over kira."
+description = "Audio facade over kira: engine-side bus/volume model + spatial attenuation, no-device fallback. Ring 0."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,18 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# kira supplies StaticSoundData decoding (symphonia) + the mixer/handle types.
+# The workspace pin has default-features off (symphonia decoders only, no device
+# backend). The real cpal output backend is pulled in only by our `cpal` feature
+# below — see the workspace-dependency comment for the Linux-ALSA/CI rationale.
+kira = { workspace = true }
+# Engine vocabulary: listener/emitter poses are `glam::DVec3` (the f64 world).
+glam = { workspace = true }
+
+[features]
+# Off by default: the default build decodes sound + runs the deterministic no-device
+# path (what CI + tests exercise). The desktop runtime enables `cpal` to open a real
+# audio device (WASAPI/CoreAudio/ALSA); if no device is present the engine still
+# falls back to the same no-op path, so enabling it never breaks a headless run.
+default = []
+cpal = ["kira/cpal", "kira/cpal-realtime"]
