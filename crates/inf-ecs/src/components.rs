@@ -1525,6 +1525,183 @@ impl AnimPlayer {
     }
 }
 
+// ── P11.2 animation state machine (`.inf_sm`) ───────────────────────────────
+
+/// The live play state of an animation state machine on one entity (P11.2).
+///
+/// A plain POD **mirror** of `inf_anim::SmRuntime` — kept here so the foundational
+/// ECS crate needs no `inf-anim` dependency (the same boundary [`AnimPlayer`]
+/// preserves by re-deriving `advance` inline). The editor Simulate loop and the
+/// runtime sim — which *do* depend on `inf-anim` — convert this to/from
+/// `SmRuntime` around each step. Never serialized (see [`AnimStateMachine`]).
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct SmRuntimeState {
+    /// Active state index.
+    pub current: usize,
+    /// The state being cross-faded out of, if a fade is in progress.
+    pub prev: Option<usize>,
+    /// The outgoing state's frozen play-head.
+    pub prev_time: f64,
+    /// Elapsed cross-fade time (seconds).
+    pub fade_t: f64,
+    /// Total cross-fade duration (seconds).
+    pub fade_dur: f64,
+    /// Seconds spent in the current state.
+    pub state_time: f64,
+    /// Whether the runtime has been entered onto the machine's `entry` state.
+    pub started: bool,
+}
+
+fn default_params_from_vars() -> bool {
+    true
+}
+
+/// Drives an entity's [`SkeletalMesh`] from an animation state machine
+/// (`.inf_sm`, P11.2) instead of a single clip: each fixed step the machine
+/// evaluates its transition conditions against the actor's Blueprint variables
+/// and cross-fades between states (see `inf_anim::state_machine`). An entity may
+/// carry either an [`AnimPlayer`] or an `AnimStateMachine`; when both are present
+/// the **state machine wins** (documented in the Simulate/runtime tick).
+///
+/// ## Persistence — the same v-slot gap as [`SkeletalMesh`] / [`AnimPlayer`]
+///
+/// Additive component (registered + reflected + serde), but **not yet a slot in
+/// the `.inf_lvl` `EntityRecord`** (frozen at v4): a spawned `AnimStateMachine` is
+/// live-session only until the v5 schema migration. The [`runtime`](Self::runtime)
+/// field is `#[serde(skip)]` + `#[reflect(ignore)]` — rebuilt each play session,
+/// never persisted (like a physics solver's transient state).
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct AnimStateMachine {
+    /// The `.inf_sm` state-machine asset GUID; `None` → the bind pose.
+    /// `#[reflect(ignore)]` + serde-persisted (assigned by drag), like
+    /// [`SkeletalMesh::mesh`].
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub sm: Option<Uuid>,
+    /// Whether transition conditions + blend-space params read the actor's
+    /// Blueprint variables (v1 is always `true`; the field is present so a future
+    /// explicit param-binding table is an additive change).
+    #[serde(default = "default_params_from_vars")]
+    pub params_from_vars: bool,
+    /// Live runtime state — transient, never serialized or reflected.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub runtime: SmRuntimeState,
+}
+
+impl Default for AnimStateMachine {
+    fn default() -> Self {
+        Self {
+            sm: None,
+            params_from_vars: default_params_from_vars(),
+            runtime: SmRuntimeState::default(),
+        }
+    }
+}
+
+// ── P11.3 character tools: root motion + attachments ────────────────────────
+//
+// These are **live-session-only** components (like [`SkeletalMesh`]/[`AnimPlayer`],
+// the same v5 `.inf_lvl` persistence gap): they derive serde for completeness but
+// are not yet slots in the `EntityRecord`. They are deliberately **not reflected /
+// not registered** as editable Details components — they are authored by dedicated
+// P11.3 tooling (a root-motion toggle, a socket-attach action), a documented
+// follow-up — so this batch touches neither `registry.rs` nor its editable-count.
+
+/// How an entity consumes its [`AnimPlayer`] clip's **root motion** (P11.3).
+///
+/// A plain (non-reflected) enum: the root-motion mode is a gameplay toggle, not a
+/// Details-grid scalar. `ApplyToEntity` moves the *entity* by the clip's root-joint
+/// ground displacement each fixed step (through the 3D character mover when the
+/// entity is a [`CharacterController3D`], else a raw transform add).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RootMotionMode {
+    /// The clip's root motion stays in the pose (in-place animation); the entity
+    /// does not move. The default.
+    #[default]
+    None,
+    /// Extract the root-joint XZ translation + yaw each step and drive the entity's
+    /// `Transform` with it.
+    ApplyToEntity,
+}
+
+/// Marks an entity as **root-motion driven** (P11.3). Kept a small, orthogonal
+/// component (rather than a field on [`AnimPlayer`]) so animation-graph work can
+/// evolve pose driving independently. The sim tick reads this + the entity's
+/// [`AnimPlayer`] and applies [`inf_anim::root_delta`](../../inf_anim/index.html)
+/// once per fixed step.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct RootMotion {
+    /// How the entity consumes its clip's root motion.
+    #[serde(default)]
+    pub mode: RootMotionMode,
+}
+
+impl RootMotion {
+    /// A component that drives the entity from its clip's root motion.
+    pub fn apply() -> Self {
+        Self {
+            mode: RootMotionMode::ApplyToEntity,
+        }
+    }
+}
+
+/// Makes this entity **follow another entity's socket** (P11.3 attachments).
+///
+/// The attachment system ([`crate::attach::update_attachments`]) writes this
+/// entity's world `Transform` = `target.GlobalTransform · offset` each fixed step
+/// (post-anim-tick), so a weapon rides the hand, a hat rides the head, etc.
+///
+/// `target` is the followed entity's stable [`Guid`]. The **socket** name records
+/// which authored skeleton socket the offset was baked from; in v1 the follow uses
+/// the target's `GlobalTransform` composed with `offset` (the socket's bind
+/// transform folded into the offset by the attach tool). Live pose-driven socket
+/// tracking — evaluating the skeleton's animated joint each step — needs the
+/// skeleton/clip assets in the sim world and is a documented follow-up.
+///
+/// Not reflected (it carries a `Guid` link, like [`ActorClass`]); authored by the
+/// attach tool, shown read-only in Details.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AttachedTo {
+    /// The followed entity's stable identity.
+    pub target: Uuid,
+    /// The socket name on the target's skeleton this offset was baked from
+    /// (informational in v1; empty = attach to the target's origin).
+    #[serde(default)]
+    pub socket: String,
+    /// Local offset from the socket/target frame: translation (metres).
+    #[serde(default)]
+    pub offset_translation: Vec3d,
+    /// Local offset rotation (euler degrees, YXZ — the [`Transform`] convention).
+    #[serde(default)]
+    pub offset_rotation: Vec3d,
+}
+
+impl AttachedTo {
+    /// Attach to `target`'s `socket` with a pure translation offset.
+    pub fn new(target: Uuid, socket: impl Into<String>, offset_translation: Vec3d) -> Self {
+        Self {
+            target,
+            socket: socket.into(),
+            offset_translation,
+            offset_rotation: Vec3d::ZERO,
+        }
+    }
+
+    /// The offset as a local affine (matches [`Transform::affine`] conventions).
+    pub fn offset_affine(&self) -> DAffine3 {
+        let r = self.offset_rotation.to_dvec3();
+        let q = DQuat::from_euler(
+            glam::EulerRot::YXZ,
+            r.y.to_radians(),
+            r.x.to_radians(),
+            r.z.to_radians(),
+        );
+        DAffine3::from_rotation_translation(q, self.offset_translation.to_dvec3())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1987,6 +2164,34 @@ mod tests {
         assert!(d.looping && d.playing);
         let d: SkeletalMesh = serde_json::from_str("{}").unwrap();
         assert_eq!(d, SkeletalMesh::default());
+    }
+
+    #[test]
+    fn anim_state_machine_serde_skips_runtime() {
+        // The `sm` GUID + `params_from_vars` persist; the `runtime` is transient
+        // (serde-skip) and always comes back at its default (the same v5 gap as
+        // AnimPlayer — component-level round-trip only, until the schema migration).
+        let asm = AnimStateMachine {
+            sm: Some(Uuid::from_u128(0x5A11)),
+            params_from_vars: true,
+            runtime: SmRuntimeState {
+                current: 3,
+                state_time: 9.0,
+                started: true,
+                ..Default::default()
+            },
+        };
+        let json = serde_json::to_string(&asm).unwrap();
+        assert!(!json.contains("current"), "runtime must not serialize");
+        let back: AnimStateMachine = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sm, asm.sm);
+        assert!(back.params_from_vars);
+        assert_eq!(back.runtime, SmRuntimeState::default());
+
+        // A minimal payload fills the additive default (`params_from_vars = true`).
+        let d: AnimStateMachine = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, AnimStateMachine::default());
+        assert!(d.params_from_vars);
     }
 
     #[test]

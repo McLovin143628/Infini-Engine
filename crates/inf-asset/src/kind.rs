@@ -39,6 +39,9 @@ pub enum AssetKind {
     Skeleton,
     /// Skeletal animation clip (`.inf_anim`) — per-joint keyframe tracks (P11.1).
     AnimClip,
+    /// Animation state machine (`.inf_sm`) — states + transitions + blend spaces
+    /// (P11.2).
+    StateMachine,
     /// Anything else living under the content root.
     Unknown,
 }
@@ -61,6 +64,7 @@ impl AssetKind {
             AssetKind::Pcg => "inf_pcg",
             AssetKind::Skeleton => "inf_skel",
             AssetKind::AnimClip => "inf_anim",
+            AssetKind::StateMachine => "inf_sm",
             AssetKind::Unknown => return None,
         })
     }
@@ -82,6 +86,7 @@ impl AssetKind {
             "inf_pcg" => AssetKind::Pcg,
             "inf_skel" => AssetKind::Skeleton,
             "inf_anim" => AssetKind::AnimClip,
+            "inf_sm" => AssetKind::StateMachine,
             _ => AssetKind::Unknown,
         }
     }
@@ -111,6 +116,7 @@ impl AssetKind {
             AssetKind::Pcg => "pcg",
             AssetKind::Skeleton => "skeleton",
             AssetKind::AnimClip => "anim_clip",
+            AssetKind::StateMachine => "state_machine",
             AssetKind::Unknown => "unknown",
         }
     }
@@ -132,6 +138,7 @@ impl AssetKind {
             AssetKind::Pcg => "PCG Graph",
             AssetKind::Skeleton => "Skeleton",
             AssetKind::AnimClip => "Animation",
+            AssetKind::StateMachine => "State Machine",
             AssetKind::Unknown => "File",
         }
     }
@@ -154,6 +161,7 @@ impl AssetKind {
             AssetKind::Pcg,
             AssetKind::Skeleton,
             AssetKind::AnimClip,
+            AssetKind::StateMachine,
         ]
     }
 }

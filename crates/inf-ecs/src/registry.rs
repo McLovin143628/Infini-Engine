@@ -11,10 +11,11 @@ use bevy_ecs::reflect::ReflectComponent;
 use bevy_reflect::{TypePath, TypeRegistry};
 
 use crate::components::{
-    AnimPlayer, AtlasRect, BillboardMode, BodyKind2D, BodyKind3D, Camera, CharacterController2D,
-    CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, Light,
-    Light2D, LightKind, Material, MeshRef, Name, NineSlice, PcgVolume, Primitive, RigidBody2D,
-    RigidBody3D, SkeletalMesh, Sprite, Terrain, Text2D, TextAlign, Tilemap, Transform, Visibility,
+    AnimPlayer, AnimStateMachine, AtlasRect, BillboardMode, BodyKind2D, BodyKind3D, Camera,
+    CharacterController2D, CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind,
+    ColliderShape3DKind, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice, PcgVolume,
+    Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, Sprite, Terrain, Text2D, TextAlign, Tilemap,
+    Transform, Visibility,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -82,6 +83,7 @@ impl ComponentRegistry {
             MeshRef => "Mesh",
             SkeletalMesh => "Skeletal Mesh",
             AnimPlayer => "Anim Player",
+            AnimStateMachine => "Anim State Machine",
             Sprite => "Sprite",
             NineSlice => "Nine Slice",
             Text2D => "Text",
@@ -145,7 +147,7 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        assert_eq!(reg.editable().len(), 21);
+        assert_eq!(reg.editable().len(), 22);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

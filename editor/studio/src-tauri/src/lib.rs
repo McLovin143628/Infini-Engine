@@ -38,6 +38,7 @@ pub fn run() {
         .manage(commands::GraphState::default())
         .manage(commands::MaterialState::default())
         .manage(commands::PcgState::default())
+        .manage(commands::SmEditorState::default())
         .manage(commands::ErosionState::default())
         .manage(commands::SequencerState::default())
         .invoke_handler(commands::invoke_handler())

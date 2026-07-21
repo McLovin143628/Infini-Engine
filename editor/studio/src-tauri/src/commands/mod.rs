@@ -19,6 +19,7 @@ mod search;
 mod sequencer;
 mod settings;
 mod sim;
+mod sm;
 mod sorting;
 mod terminal;
 mod terrain;
@@ -34,6 +35,7 @@ pub use project::ProjectState;
 pub use scene::{recover_scene_on_boot, SceneState};
 pub use sequencer::SequencerState;
 pub use sim::SimState;
+pub use sm::SmEditorState;
 pub use terminal::PtyState;
 pub use terrain::ErosionState;
 pub use viewport::ViewportState;
@@ -70,6 +72,11 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         pcg::pcg_compile,
         pcg::pcg_save,
         pcg::pcg_evaluate,
+        sm::sm_list,
+        sm::sm_create,
+        sm::sm_get,
+        sm::sm_save,
+        sm::sm_list_clips,
         layout::layout_save,
         layout::layout_load,
         layout::layout_list,

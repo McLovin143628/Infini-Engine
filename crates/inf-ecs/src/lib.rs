@@ -12,6 +12,7 @@
 //! convert to glam for computation — see [`math`].
 
 pub mod anim;
+pub mod attach;
 pub mod components;
 pub mod hierarchy;
 pub mod math;
@@ -22,13 +23,15 @@ pub mod sim;
 pub mod transform;
 pub mod world;
 
+pub use attach::update_attachments;
 pub use bevy_ecs::prelude::Entity;
 pub use components::{
-    ActorClass, AnimPlayer, AtlasRect, BillboardMode, BodyKind2D, BodyKind3D, Camera,
-    CharacterController2D, CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind,
-    ColliderShape3DKind, ComputedVisibility, GlobalTransform, Guid, Light, LightKind, Material,
-    MeshRef, Name, PcgVolume, Primitive, RigidBody2D, RigidBody3D, ScatteredInstance, SkeletalMesh,
-    Sprite, Terrain, TileBounds, TileChunk, Tilemap, Transform, Visibility, CHUNK_DIM, CHUNK_TILES,
+    ActorClass, AnimPlayer, AnimStateMachine, AtlasRect, AttachedTo, BillboardMode, BodyKind2D,
+    BodyKind3D, Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D,
+    ColliderShape2DKind, ColliderShape3DKind, ComputedVisibility, GlobalTransform, Guid, Light,
+    LightKind, Material, MeshRef, Name, PcgVolume, Primitive, RigidBody2D, RigidBody3D, RootMotion,
+    RootMotionMode, ScatteredInstance, SkeletalMesh, SmRuntimeState, Sprite, Terrain, TileBounds,
+    TileChunk, Tilemap, Transform, Visibility, CHUNK_DIM, CHUNK_TILES,
 };
 pub use hierarchy::{ChildOf, Children};
 pub use math::{Color, Vec2d, Vec3d};

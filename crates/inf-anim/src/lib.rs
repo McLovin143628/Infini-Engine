@@ -18,13 +18,31 @@
 //!   resampled to linear on import (documented in [`clip`]).
 
 pub mod asset;
+pub mod blend_space;
 pub mod clip;
 pub mod pose;
 pub mod skeleton;
+pub mod state_machine;
+// P11.3 character tools (sockets / root motion / retarget) — new modules, each
+// pure like the rest of the crate.
+pub mod retarget;
+pub mod root_motion;
+pub mod sockets;
 
-pub use asset::{AnimClipAsset, SkeletonAsset};
+pub use asset::{AnimClipAsset, SkeletonAsset, StateMachineAsset};
+pub use blend_space::{
+    blend_weights_1d, blend_weights_2d, sample_blend_space_1d, sample_blend_space_2d, BlendEntry1D,
+    BlendEntry2D, BlendSpace1D, BlendSpace2D, ClipRef,
+};
 pub use clip::{AnimClip, Interpolation, JointTrack, QuatTrack, Vec3Track};
 pub use pose::{
     advance_clip_time, blend_poses, global_transforms, sample_clip, skinning_matrices, Pose,
 };
+pub use retarget::{humanoid_joint_names, retarget_pose, RetargetMap};
+pub use root_motion::{root_delta, root_joint_index, RootMotionDelta};
 pub use skeleton::{Joint, JointTransform, Skeleton, SkeletonError};
+pub use sockets::{find_socket, socket_transform, Socket};
+pub use state_machine::{
+    eval_pose, sample_motion, step, CmpOp, Motion, SmCondition, SmContext, SmRuntime, SmState,
+    SmTransition, StateMachine,
+};

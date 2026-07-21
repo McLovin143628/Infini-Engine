@@ -34,6 +34,7 @@ import TilemapPanel from "./TilemapPanel";
 import { BlueprintCanvas } from "./blueprint/BlueprintCanvas";
 import { MaterialCanvas } from "./material/MaterialCanvas";
 import { PcgCanvas } from "./pcg/PcgCanvas";
+import { StateMachineCanvas } from "./sm/StateMachineCanvas";
 import { registerPanelType } from "./panelRegistry";
 
 /**
@@ -242,6 +243,16 @@ registerPanelType({
   title: () => "PCG",
   icon: Sprout,
   component: PcgCanvas,
+  singleton: true,
+  defaultLocation: "bottom",
+  defaultSize: { w: 1040, h: 560 },
+});
+
+registerPanelType({
+  type: "stateMachine",
+  title: () => "State Machine",
+  icon: Workflow,
+  component: StateMachineCanvas,
   singleton: true,
   defaultLocation: "bottom",
   defaultSize: { w: 1040, h: 560 },

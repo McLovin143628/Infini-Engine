@@ -144,7 +144,9 @@ impl AssetState {
         })
     }
 
-    fn with_project<R>(
+    // `pub(super)` so sibling command modules (e.g. the P11.2 state-machine
+    // editor's `sm_list_clips`) can enumerate the asset db through the same guard.
+    pub(super) fn with_project<R>(
         &self,
         f: impl FnOnce(&mut AssetProject) -> Result<R, String>,
     ) -> Result<R, String> {

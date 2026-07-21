@@ -34,15 +34,27 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use glam::DVec2;
+use glam::{DQuat, DVec2, DVec3};
 use uuid::Uuid;
 
-use inf_blueprint::interp::{MoveResult2d, Physics2dHost, RayHit2d};
+// P11.3 root motion: the pure root-delta extractor + the clip/skeleton it reads.
+use inf_anim::state_machine::{SmContext, SmRuntime, StateMachine};
+use inf_anim::{root_delta, AnimClip, Skeleton};
+use inf_blueprint::interp::{
+    MoveResult2d, MoveResult3d, Physics2dHost, Physics3dHost, RayHit2d, RayHit3d,
+};
 use inf_blueprint::semantics::run_event;
 use inf_blueprint::{ActorInstance, BlueprintClass, EventKind, Host, InterpDebug, RunError, Value};
-use inf_ecs::components::{CharacterController2D, Collider2D, ColliderShape2DKind, Transform};
-use inf_ecs::{EcsWorld, Guid};
-use inf_physics::{CharacterMover2D, ColliderShape2D, FixedStepper, PhysicsBridge2D};
+use inf_ecs::components::{
+    AnimPlayer, AnimStateMachine, CharacterController2D, CharacterController3D, Collider2D,
+    Collider3D, ColliderShape2DKind, ColliderShape3DKind, RootMotion, RootMotionMode,
+    SmRuntimeState, Transform,
+};
+use inf_ecs::{update_attachments, EcsWorld, Entity, Guid};
+use inf_physics::{
+    CharacterMover2D, CharacterMover3D, ColliderShape2D, ColliderShape3D, FixedStepper,
+    PhysicsBridge2D, PhysicsBridge3D,
+};
 
 use crate::scene::serialize::{apply_to_doc, to_scene_file, SceneFile};
 use crate::scene::SceneDoc;
@@ -88,9 +100,24 @@ struct ActorState {
     instance: ActorInstance,
 }
 
+/// A resolved `.inf_anim` clip + the skeleton it animates, registered for
+/// **root-motion** extraction (P11.3). The sim can't reach the asset DB, so the
+/// caller (the editor Simulate wiring) seeds these via
+/// [`SimSession::register_root_motion_clip`]; a root-motion entity whose
+/// [`AnimPlayer`] clip GUID isn't registered simply skips root motion this run.
+struct RootClip {
+    skeleton: Skeleton,
+    clip: AnimClip,
+}
+
 /// A live in-editor Simulate session over one [`SceneDoc`].
 pub struct SimSession {
     bridge: PhysicsBridge2D,
+    /// The 3D physics bridge (P11.3), driven alongside the 2D one so
+    /// `physics3d.*` nodes + root-motion movers reach a rapier3d world.
+    bridge3d: PhysicsBridge3D,
+    /// Clips resolvable for root motion, keyed by `.inf_anim` GUID (P11.3).
+    clips: BTreeMap<Uuid, RootClip>,
     stepper: FixedStepper,
     /// Actors keyed by `Guid` (deterministic iteration).
     actors: BTreeMap<Uuid, ActorState>,
@@ -99,6 +126,11 @@ pub struct SimSession {
     /// The world state captured at [`enter`](Self::enter), restored on
     /// [`exit`](Self::exit).
     snapshot: SceneFile,
+    /// Resolvable `.inf_sm` state machines keyed by asset GUID (P11.2). Empty by
+    /// default; seed via [`set_state_machines`](Self::set_state_machines). Entities
+    /// with an [`AnimStateMachine`] whose `sm` GUID resolves here are stepped each
+    /// fixed tick.
+    state_machines: BTreeMap<Uuid, StateMachine>,
     /// Currently-held keys/actions.
     input: SimInput,
     /// Keys/actions held the previous tick (for rising-edge detection).
@@ -128,6 +160,9 @@ impl SimSession {
     ) -> Self {
         let snapshot = to_scene_file(doc);
         let bridge = PhysicsBridge2D::new(gravity);
+        // P11.3: a 3D bridge alongside the 2D one. The 2D vertical gravity maps to
+        // world −Y; a character applies its own gravity through move_and_slide.
+        let bridge3d = PhysicsBridge3D::new(DVec3::new(0.0, gravity.y, 0.0));
 
         // Assign stable i64 ids in Guid order, seed the `entity` variable.
         let mut entities = BTreeMap::new();
@@ -144,10 +179,13 @@ impl SimSession {
 
         let mut session = Self {
             bridge,
+            bridge3d,
+            clips: BTreeMap::new(),
             stepper: FixedStepper::from_hz(hz),
             actors: states,
             entities,
             snapshot,
+            state_machines: BTreeMap::new(),
             input: SimInput::default(),
             prev_down: BTreeSet::new(),
             just_pressed: BTreeSet::new(),
@@ -157,8 +195,23 @@ impl SimSession {
         };
 
         session.bridge.sync_from_world(doc.world());
+        session.bridge3d.sync_from_world(doc.world()); // P11.3 3D bridge
         session.run_all(doc, &EventKind::BeginPlay);
         session
+    }
+
+    /// Register a `.inf_anim` clip (with its skeleton) so a [`RootMotion`] entity
+    /// playing that clip drives its `Transform` from the clip's root motion
+    /// (P11.3). The editor Simulate wiring seeds these from the loaded assets;
+    /// unregistered clips simply skip root motion. Idempotent (re-registering
+    /// replaces).
+    pub fn register_root_motion_clip(
+        &mut self,
+        clip_guid: Uuid,
+        skeleton: Skeleton,
+        clip: AnimClip,
+    ) {
+        self.clips.insert(clip_guid, RootClip { skeleton, clip });
     }
 
     /// Advance Simulate by a frame's elapsed time via the fixed-step
@@ -184,6 +237,13 @@ impl SimSession {
     /// document is byte-for-byte what it was before play.
     pub fn exit(self, doc: &mut SceneDoc) {
         apply_to_doc(doc, &self.snapshot);
+    }
+
+    /// Seed the resolvable `.inf_sm` state machines (P11.2). An entity carrying an
+    /// [`AnimStateMachine`] whose `sm` GUID is present here is stepped each fixed
+    /// tick against the actor's Blueprint variables.
+    pub fn set_state_machines(&mut self, machines: BTreeMap<Uuid, StateMachine>) {
+        self.state_machines = machines;
     }
 
     /// The `debug.print` log accumulated so far.
@@ -221,21 +281,184 @@ impl SimSession {
         let dt = self.stepper.fixed_dt();
         // 1. ECS → physics.
         self.bridge.sync_from_world(doc.world());
-        // 2. Blueprint Tick for every actor (Guid order).
+        self.bridge3d.sync_from_world(doc.world()); // ── P11.3 3D bridge: sync ──
+                                                    // 2. Blueprint Tick for every actor (Guid order).
         let tick_args: BTreeMap<String, Value> = [("dt".to_string(), Value::Float(dt))].into();
         let args: std::collections::HashMap<String, Value> = tick_args.into_iter().collect();
         self.run_all_with_args(doc, &EventKind::Tick, &args);
         // 3. Solver.
         self.bridge.step(dt);
-        // 4. Physics → ECS.
+        self.bridge3d.step(dt); // ── P11.3 3D bridge: step ──
+                                // 4. Physics → ECS.
         self.bridge.write_back(doc.world_mut());
+        self.bridge3d.write_back_into(doc.world_mut()); // ── P11.3 3D bridge: write-back ──
         doc.world_mut().propagate();
         // 5. Advance skeletal-animation play-heads (P11.1). Order-independent
         //    per-entity `t` integration → deterministic at the fixed `dt`.
+        //    ── P11.3 root motion ── snapshot play-heads BEFORE advancing, advance,
+        //    then apply each RootMotion entity's clip root delta to its Transform.
+        let prev_ts = self.capture_root_motion_times(doc);
         inf_ecs::anim::advance_anim_players(doc.world_mut(), dt);
+        self.apply_root_motion(doc, &prev_ts);
+        doc.world_mut().propagate();
+        // ── P11.2 anim state machines ── (P11.3 root-motion consumes poses just
+        //    above this same marker; keep the two adjacent + separated.)
+        //    Step each `AnimStateMachine` against its actor's Blueprint variables.
+        self.advance_state_machines(doc, dt);
+        // ── P11.3 attachments ── entities ride their target's socket, written
+        //    post-anim-tick; propagate again so followers' own globals settle.
+        update_attachments(doc.world_mut());
+        doc.world_mut().propagate();
         // Rising edges are one fixed step wide.
         self.just_pressed.clear();
         self.steps += 1;
+    }
+
+    /// Snapshot the play-head `t` of every root-motion-driven, playing entity
+    /// **before** the anim advance, keyed by `Guid` (P11.3). The delta from these
+    /// to the post-advance `t` is the root motion applied this step.
+    fn capture_root_motion_times(&self, doc: &mut SceneDoc) -> BTreeMap<Uuid, f64> {
+        let mut out = BTreeMap::new();
+        let w = doc.world_mut().world_mut();
+        let mut q = w.query::<(&Guid, &RootMotion, &AnimPlayer)>();
+        for (g, rm, ap) in q.iter(w) {
+            if rm.mode == RootMotionMode::ApplyToEntity && ap.playing {
+                out.insert(g.0, ap.t);
+            }
+        }
+        out
+    }
+
+    /// Apply each root-motion entity's clip root delta to its `Transform` (P11.3).
+    ///
+    /// For each entity captured in `prev_ts`: extract the root delta over
+    /// `[prev_t, cur_t]` (via [`inf_anim::root_delta`]), rotate the ground-plane
+    /// translation into world by the entity's current yaw, add the clip's yaw, and
+    /// commit — **through the 3D character mover** (collision-resolved, grounded
+    /// reported) when the entity is a [`CharacterController3D`], else as a raw
+    /// transform add. Entities whose clip isn't registered skip silently.
+    fn apply_root_motion(&mut self, doc: &mut SceneDoc, prev_ts: &BTreeMap<Uuid, f64>) {
+        if prev_ts.is_empty() {
+            return;
+        }
+        // Read pass: gather (guid, entity, prev_t, cur_t, looping, clip, has_cc).
+        let mut work: Vec<(Uuid, Entity, f64, f64, bool, Uuid, bool)> = Vec::new();
+        for (&guid, &prev_t) in prev_ts {
+            let Some(entity) = doc.world().entity_of(guid) else {
+                continue;
+            };
+            let w = doc.world().world();
+            let Some(ap) = w.get::<AnimPlayer>(entity) else {
+                continue;
+            };
+            let Some(clip) = ap.clip else {
+                continue;
+            };
+            let has_cc = w.get::<CharacterController3D>(entity).is_some();
+            work.push((guid, entity, prev_t, ap.t, ap.looping, clip, has_cc));
+        }
+
+        let mut changed = false;
+        for (guid, entity, prev_t, cur_t, looping, clip_guid, has_cc) in work {
+            let Some(rc) = self.clips.get(&clip_guid) else {
+                continue;
+            };
+            let d = root_delta(&rc.clip, &rc.skeleton, prev_t as f32, cur_t as f32, looping);
+            if d.translation == glam::Vec3::ZERO && d.yaw == 0.0 {
+                continue;
+            }
+            let t = doc
+                .world()
+                .world()
+                .get::<Transform>(entity)
+                .copied()
+                .unwrap_or(Transform::IDENTITY);
+            // Root motion is expressed in the character's facing frame → rotate the
+            // ground-plane delta by the entity's current yaw into world space.
+            let yaw_rad = t.rotation.y.to_radians();
+            let local = DVec3::new(d.translation.x as f64, 0.0, d.translation.z as f64);
+            let world_delta = DQuat::from_rotation_y(yaw_rad) * local;
+            let new_yaw_deg = t.rotation.y + d.yaw.to_degrees() as f64;
+            let pos = t.translation.to_dvec3();
+
+            let new_pos = if has_cc {
+                // Drive the entity through the 3D mover so walls/steps/slopes apply.
+                let mover = build_mover3d(doc.world(), guid);
+                let exclude = self.bridge3d.collider_of(guid);
+                let res =
+                    self.bridge3d
+                        .world_mut()
+                        .move_character(&mover, pos, world_delta, exclude);
+                let np = pos + res.translation;
+                if let Some(body) = self.bridge3d.body_of(guid) {
+                    self.bridge3d.world_mut().set_body_translation(body, np);
+                }
+                self.grounded.insert(guid, res.grounded);
+                np
+            } else {
+                pos + world_delta
+            };
+
+            if let Some(mut tr) = doc.world_mut().world_mut().get_mut::<Transform>(entity) {
+                tr.translation.x = new_pos.x;
+                tr.translation.y = new_pos.y;
+                tr.translation.z = new_pos.z;
+                tr.rotation.y = new_yaw_deg;
+                changed = true;
+            }
+        }
+        if changed {
+            doc.world_mut().mark_dirty();
+        }
+    }
+
+    /// Step every entity's [`AnimStateMachine`] (P11.2) whose `sm` GUID resolves
+    /// in [`state_machines`](Self::state_machines). The transition conditions and
+    /// blend-space params read the entity's *actor* Blueprint variables (via the
+    /// [`SmContext`] seam); an entity with no actor gets an empty variable set, so
+    /// every param defaults to `0` (documented). Order-independent per entity →
+    /// deterministic. Runtime state lives on the component; only `t`-like play
+    /// state advances here (pose evaluation is render-time, the same placeholder
+    /// gap as [`inf_ecs::components::SkeletalMesh`]).
+    fn advance_state_machines(&mut self, doc: &mut SceneDoc, dt: f64) {
+        if self.state_machines.is_empty() {
+            return;
+        }
+        // Collect targets first so the mutable write-back doesn't overlap the read
+        // query. `(entity, guid, sm_guid, runtime-snapshot)`.
+        let mut targets: Vec<(Entity, Uuid, Uuid, SmRuntimeState)> = Vec::new();
+        {
+            let w = doc.world_mut().world_mut();
+            let mut q = w.query::<(Entity, &Guid, &AnimStateMachine)>();
+            for (e, g, asm) in q.iter(w) {
+                if let Some(sm_guid) = asm.sm {
+                    targets.push((e, g.0, sm_guid, asm.runtime));
+                }
+            }
+        }
+        for (entity, guid, sm_guid, rt_state) in targets {
+            let Some(machine) = self.state_machines.get(&sm_guid) else {
+                continue;
+            };
+            let vars = self
+                .actors
+                .get(&guid)
+                .map(|a| var_snapshot(&a.instance))
+                .unwrap_or_default();
+            let mut rt = to_anim_runtime(rt_state);
+            {
+                let lookup = |name: &str| vars.get(name).copied();
+                let ctx = SmContext::new(&lookup);
+                rt.advance(machine, &ctx, dt);
+            }
+            if let Some(mut asm) = doc
+                .world_mut()
+                .world_mut()
+                .get_mut::<AnimStateMachine>(entity)
+            {
+                asm.runtime = from_anim_runtime(rt);
+            }
+        }
     }
 
     /// Fire `event` (no args) on every actor.
@@ -261,6 +484,7 @@ impl SimSession {
             {
                 let mut host = SimHost {
                     bridge: &mut self.bridge,
+                    bridge3d: &mut self.bridge3d,
                     world: doc.world_mut(),
                     input: &self.input,
                     just_pressed: &self.just_pressed,
@@ -290,6 +514,8 @@ impl SimSession {
 /// [`ActorHost`](inf_blueprint::ActorHost).
 struct SimHost<'a> {
     bridge: &'a mut PhysicsBridge2D,
+    /// The 3D physics bridge (P11.3), powering `physics3d.*` nodes.
+    bridge3d: &'a mut PhysicsBridge3D,
     world: &'a mut EcsWorld,
     input: &'a SimInput,
     just_pressed: &'a BTreeSet<String>,
@@ -326,6 +552,10 @@ impl Host for SimHost<'_> {
     }
 
     fn physics(&mut self) -> Option<&mut dyn Physics2dHost> {
+        Some(self)
+    }
+
+    fn physics3d(&mut self) -> Option<&mut dyn Physics3dHost> {
         Some(self)
     }
 }
@@ -491,6 +721,169 @@ impl Physics2dHost for SimHost<'_> {
     }
 }
 
+impl Physics3dHost for SimHost<'_> {
+    fn move_and_slide(&mut self, entity: i64, motion: [f64; 3]) -> Result<MoveResult3d, String> {
+        let guid = self.guid_of(entity)?;
+        let body = self
+            .bridge3d
+            .body_of(guid)
+            .ok_or_else(|| format!("entity {entity} has no physics body"))?;
+        let pos = self
+            .bridge3d
+            .world()
+            .body_translation(body)
+            .ok_or("body vanished")?;
+        let exclude = self.bridge3d.collider_of(guid);
+        let mover = build_mover3d(self.world, guid);
+        let result = self.bridge3d.world_mut().move_character(
+            &mover,
+            pos,
+            DVec3::new(motion[0], motion[1], motion[2]),
+            exclude,
+        );
+        let new_pos = pos + result.translation;
+        self.bridge3d
+            .world_mut()
+            .set_body_translation(body, new_pos);
+        if let Some(entity) = self.world.entity_of(guid) {
+            if let Some(mut t) = self.world.world_mut().get_mut::<Transform>(entity) {
+                t.translation.x = new_pos.x;
+                t.translation.y = new_pos.y;
+                t.translation.z = new_pos.z;
+            }
+            self.world.mark_dirty();
+        }
+        self.grounded.insert(guid, result.grounded);
+        Ok(MoveResult3d {
+            applied: result.translation.into(),
+            grounded: result.grounded,
+        })
+    }
+
+    fn is_grounded(&mut self, entity: i64) -> Result<bool, String> {
+        let guid = self.guid_of(entity)?;
+        let body = self
+            .bridge3d
+            .body_of(guid)
+            .ok_or_else(|| format!("entity {entity} has no physics body"))?;
+        let pos = self
+            .bridge3d
+            .world()
+            .body_translation(body)
+            .ok_or("body vanished")?;
+        let exclude = self.bridge3d.collider_of(guid);
+        let mover = build_mover3d(self.world, guid);
+        let probe = self
+            .bridge3d
+            .world_mut()
+            .move_character(&mover, pos, DVec3::ZERO, exclude);
+        Ok(probe.grounded)
+    }
+
+    fn raycast(
+        &mut self,
+        origin: [f64; 3],
+        dir: [f64; 3],
+        max: f64,
+    ) -> Result<Option<RayHit3d>, String> {
+        let hit = self.bridge3d.world_mut().cast_ray(
+            DVec3::new(origin[0], origin[1], origin[2]),
+            DVec3::new(dir[0], dir[1], dir[2]),
+            max,
+        );
+        Ok(hit.map(|h| RayHit3d {
+            point: h.point.into(),
+            normal: h.normal.into(),
+        }))
+    }
+
+    fn set_velocity(&mut self, entity: i64, v: [f64; 3]) -> Result<(), String> {
+        let guid = self.guid_of(entity)?;
+        let body = self
+            .bridge3d
+            .body_of(guid)
+            .ok_or_else(|| format!("entity {entity} has no physics body"))?;
+        self.bridge3d
+            .world_mut()
+            .set_body_linvel(body, DVec3::new(v[0], v[1], v[2]));
+        Ok(())
+    }
+
+    fn get_velocity(&mut self, entity: i64) -> Result<[f64; 3], String> {
+        let guid = self.guid_of(entity)?;
+        let body = self
+            .bridge3d
+            .body_of(guid)
+            .ok_or_else(|| format!("entity {entity} has no physics body"))?;
+        Ok(self
+            .bridge3d
+            .world()
+            .body_linvel(body)
+            .unwrap_or(DVec3::ZERO)
+            .into())
+    }
+
+    fn apply_impulse(&mut self, entity: i64, v: [f64; 3]) -> Result<(), String> {
+        let guid = self.guid_of(entity)?;
+        let body = self
+            .bridge3d
+            .body_of(guid)
+            .ok_or_else(|| format!("entity {entity} has no physics body"))?;
+        self.bridge3d
+            .world_mut()
+            .apply_impulse(body, DVec3::new(v[0], v[1], v[2]));
+        Ok(())
+    }
+}
+
+/// Build a [`CharacterMover3D`] from an entity's `CharacterController3D` +
+/// `Collider3D`, defaulting to an upright capsule mover when absent (the `d3`
+/// mirror of `SimHost::mover_for`). Shared by the `physics3d.move_and_slide` host
+/// path and the root-motion applier.
+fn build_mover3d(world: &EcsWorld, guid: Uuid) -> CharacterMover3D {
+    let default_shape = ColliderShape3D::Capsule {
+        half_height: 0.5,
+        radius: 0.25,
+    };
+    let Some(entity) = world.entity_of(guid) else {
+        return CharacterMover3D::new(default_shape);
+    };
+    let w = world.world();
+    let shape = w
+        .get::<Collider3D>(entity)
+        .map(collider_shape3d)
+        .unwrap_or(default_shape);
+    let cc = w.get::<CharacterController3D>(entity).copied();
+    let mut mover = CharacterMover3D::new(shape).up(DVec3::Y).slide(true);
+    if let Some(cc) = cc {
+        mover = mover
+            .offset(cc.offset.max(1e-4))
+            .max_slope_climb_angle(cc.max_slope_deg.to_radians())
+            .snap_to_ground(if cc.snap_to_ground > 0.0 {
+                Some(cc.snap_to_ground)
+            } else {
+                None
+            });
+    } else {
+        mover = mover.offset(0.02);
+    }
+    mover
+}
+
+/// A `Collider3D` component's shape as the 3D physics-facade shape.
+fn collider_shape3d(c: &Collider3D) -> ColliderShape3D {
+    match c.shape_kind {
+        ColliderShape3DKind::Box => ColliderShape3D::Box {
+            half_extents: c.half_extents.to_dvec3(),
+        },
+        ColliderShape3DKind::Sphere => ColliderShape3D::Sphere { radius: c.radius },
+        ColliderShape3DKind::Capsule => ColliderShape3D::Capsule {
+            half_height: c.half_extents.y,
+            radius: c.radius,
+        },
+    }
+}
+
 /// A `Collider2D` component's shape as the physics-facade shape.
 fn collider_shape(c: &Collider2D) -> ColliderShape2D {
     match c.shape_kind {
@@ -513,6 +906,60 @@ fn arg_str(args: &[Value], i: usize) -> String {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+// ── P11.2 state-machine glue: ECS POD ↔ inf-anim runtime + var snapshot ──────
+//
+// The conversions are field-for-field (`SmRuntimeState` is a deliberate POD
+// mirror of `inf_anim::SmRuntime`, kept in `inf-ecs` so that crate needs no
+// `inf-anim` dep — see the `SmRuntimeState` docs). Duplicated in the shipped
+// player's `runtime_sim` for the same "preview == shipped" reason `SimHost` is.
+
+/// Convert the ECS component's transient runtime POD into the anim runtime.
+fn to_anim_runtime(s: SmRuntimeState) -> SmRuntime {
+    SmRuntime {
+        current: s.current,
+        prev: s.prev,
+        prev_time: s.prev_time,
+        fade_t: s.fade_t,
+        fade_dur: s.fade_dur,
+        state_time: s.state_time,
+        started: s.started,
+    }
+}
+
+/// Convert the advanced anim runtime back into the ECS component POD.
+fn from_anim_runtime(r: SmRuntime) -> SmRuntimeState {
+    SmRuntimeState {
+        current: r.current,
+        prev: r.prev,
+        prev_time: r.prev_time,
+        fade_t: r.fade_t,
+        fade_dur: r.fade_dur,
+        state_time: r.state_time,
+        started: r.started,
+    }
+}
+
+/// A `name → f64` snapshot of an actor's Blueprint variables, for the state
+/// machine's condition/param lookups. Non-numeric values (strings, unit, …) are
+/// dropped; `Bool` maps to `1.0`/`0.0`.
+fn var_snapshot(instance: &ActorInstance) -> BTreeMap<String, f64> {
+    instance
+        .vars
+        .iter()
+        .filter_map(|(k, v)| value_as_f64(v).map(|f| (k.clone(), f)))
+        .collect()
+}
+
+/// Coerce a Blueprint [`Value`] to `f64` for state-machine conditions/params.
+fn value_as_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Float(f) => Some(*f),
+        Value::Int(i) => Some(*i as f64),
+        Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
 }
 
 /// A `Guid` marker used to look up entities during Simulate (re-export helper so

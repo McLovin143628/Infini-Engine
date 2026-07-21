@@ -19,6 +19,7 @@ import type {
 } from "./blueprintTypes";
 import type { MaterialCompileResult } from "./materialTypes";
 import type { PcgCompileResult, PcgEvaluateResult } from "./pcgTypes";
+import type { SmClipDto, SmDoc } from "./smTypes";
 import type { AssetRefDto } from "../bindings/AssetRefDto";
 import type { AssetSnapshot } from "../bindings/AssetSnapshot";
 import type { DataAssetDto } from "../bindings/DataAssetDto";
@@ -475,6 +476,23 @@ export const pcg = {
   /** Scatter over the scene terrain into the target volume (null → selection). */
   evaluate: (id: string, entity: string | null): Promise<PcgEvaluateResult> =>
     invoke<PcgEvaluateResult>("pcg_evaluate", { id, entity }),
+};
+
+/**
+ * Animation State Machines (P11.2). Unlike the graph editors, a state machine is
+ * a plain typed model (states + transitions), so there is no registry / apply /
+ * undo surface — the frontend owns the document and pushes the whole thing back
+ * on `save` (which writes a `.inf_sm` asset). `listClips` enumerates the imported
+ * `.inf_anim` clips a state's Clip motion can point at.
+ */
+export const sm = {
+  list: (): Promise<SmDoc[]> => invoke<SmDoc[]>("sm_list"),
+  create: (name: string): Promise<SmDoc> => invoke<SmDoc>("sm_create", { name }),
+  get: (id: string): Promise<SmDoc> => invoke<SmDoc>("sm_get", { id }),
+  /** Persist `doc` to a `.inf_sm` asset; returns the written file name. */
+  save: (id: string, doc: SmDoc, name: string): Promise<string> =>
+    invoke<string>("sm_save", { id, doc, name }),
+  listClips: (): Promise<SmClipDto[]> => invoke<SmClipDto[]>("sm_list_clips"),
 };
 
 /**

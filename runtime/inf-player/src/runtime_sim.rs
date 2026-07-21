@@ -37,15 +37,26 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use glam::{DVec2, DVec3};
+use glam::{DQuat, DVec2, DVec3};
 use uuid::Uuid;
 
-use inf_blueprint::interp::{MoveResult2d, Physics2dHost, RayHit2d};
+use inf_anim::state_machine::{SmContext, SmRuntime, StateMachine};
+use inf_anim::{root_delta, AnimClip, Skeleton};
+use inf_blueprint::interp::{
+    MoveResult2d, MoveResult3d, Physics2dHost, Physics3dHost, RayHit2d, RayHit3d,
+};
 use inf_blueprint::semantics::run_event;
 use inf_blueprint::{ActorInstance, BlueprintClass, EventKind, Host, InterpDebug, RunError, Value};
-use inf_ecs::components::{CharacterController2D, Collider2D, ColliderShape2DKind, Transform};
-use inf_ecs::{sim_snapshot, EcsWorld};
-use inf_physics::{CharacterMover2D, ColliderShape2D, PhysicsBridge2D};
+use inf_ecs::components::{
+    AnimPlayer, AnimStateMachine, CharacterController2D, CharacterController3D, Collider2D,
+    Collider3D, ColliderShape2DKind, ColliderShape3DKind, RootMotion, RootMotionMode,
+    SmRuntimeState, Transform,
+};
+use inf_ecs::{sim_snapshot, update_attachments, EcsWorld, Entity, Guid};
+use inf_physics::{
+    CharacterMover2D, CharacterMover3D, ColliderShape2D, ColliderShape3D, PhysicsBridge2D,
+    PhysicsBridge3D,
+};
 use inf_runtime::FixedStep;
 
 /// The set of currently-held actions/keys for one tick (analogue of
@@ -86,10 +97,26 @@ struct ActorState {
     instance: ActorInstance,
 }
 
+/// A resolved `.inf_anim` clip + its skeleton, registered for **root-motion**
+/// extraction (P11.3) — the runtime mirror of the editor `SimSession`'s
+/// `RootClip`.
+struct RootClip {
+    skeleton: Skeleton,
+    clip: AnimClip,
+}
+
 /// A headless gameplay simulation over one owned [`EcsWorld`].
 pub struct RuntimeSim {
     world: EcsWorld,
     bridge: PhysicsBridge2D,
+    /// The 3D physics bridge (P11.3), driven alongside the 2D one for
+    /// `physics3d.*` nodes + root-motion movers.
+    bridge3d: PhysicsBridge3D,
+    /// Clips resolvable for root motion, keyed by `.inf_anim` GUID (P11.3).
+    clips: BTreeMap<Uuid, RootClip>,
+    /// Resolvable `.inf_sm` state machines keyed by asset GUID (P11.2). Entities
+    /// with an `AnimStateMachine` whose `sm` GUID resolves here step each tick.
+    state_machines: BTreeMap<Uuid, StateMachine>,
     stepper: FixedStep,
     /// Actors keyed by `Guid` (deterministic iteration).
     actors: BTreeMap<Uuid, ActorState>,
@@ -127,6 +154,8 @@ impl RuntimeSim {
     ) -> Self {
         world.propagate();
         let bridge = PhysicsBridge2D::new(gravity);
+        // P11.3: a 3D bridge alongside the 2D one (2D vertical gravity → world −Y).
+        let bridge3d = PhysicsBridge3D::new(DVec3::new(0.0, gravity.y, 0.0));
 
         // Assign stable i64 ids in Guid order, seed the `entity` variable.
         let mut entities = BTreeMap::new();
@@ -144,6 +173,9 @@ impl RuntimeSim {
         let mut sim = Self {
             world,
             bridge,
+            bridge3d,
+            clips: BTreeMap::new(),
+            state_machines: BTreeMap::new(),
             stepper: FixedStep::from_hz(hz),
             actors: states,
             entities,
@@ -158,10 +190,32 @@ impl RuntimeSim {
         };
 
         sim.bridge.sync_from_world(&sim.world);
+        sim.bridge3d.sync_from_world(&sim.world); // P11.3 3D bridge
         sim.run_all(&EventKind::BeginPlay);
         sim.capture_positions();
         sim.prev_positions = sim.cur_positions.clone();
         sim
+    }
+
+    /// Register a `.inf_anim` clip (with its skeleton) for root motion (P11.3) —
+    /// the runtime mirror of `SimSession::register_root_motion_clip`. The player's
+    /// level loader seeds these from the loaded assets; a [`RootMotion`] entity
+    /// whose clip isn't registered simply skips root motion.
+    pub fn register_root_motion_clip(
+        &mut self,
+        clip_guid: Uuid,
+        skeleton: Skeleton,
+        clip: AnimClip,
+    ) {
+        self.clips.insert(clip_guid, RootClip { skeleton, clip });
+    }
+
+    /// Register (or replace) the resolvable `.inf_sm` state machines (P11.2) — the
+    /// runtime mirror of `SimSession::set_state_machines`. The level loader seeds
+    /// these from the loaded assets; an [`AnimStateMachine`] entity whose `sm`
+    /// GUID isn't registered simply doesn't step.
+    pub fn set_state_machines(&mut self, machines: BTreeMap<Uuid, StateMachine>) {
+        self.state_machines = machines;
     }
 
     /// The owned world (read-only projection for the renderer / trace).
@@ -259,23 +313,165 @@ impl RuntimeSim {
         let dt = self.stepper.fixed_dt();
         // 1. ECS → physics.
         self.bridge.sync_from_world(&self.world);
-        // 2. Blueprint Tick for every actor (Guid order).
+        self.bridge3d.sync_from_world(&self.world); // ── P11.3 3D bridge: sync ──
+                                                    // 2. Blueprint Tick for every actor (Guid order).
         let args: HashMap<String, Value> = [("dt".to_string(), Value::Float(dt))].into();
         self.run_all_with_args(&EventKind::Tick, &args);
         // 3. Solver.
         self.bridge.step(dt);
-        // 4. Physics → ECS.
+        self.bridge3d.step(dt); // ── P11.3 3D bridge: step ──
+                                // 4. Physics → ECS.
         self.bridge.write_back(&mut self.world);
+        self.bridge3d.write_back_into(&mut self.world); // ── P11.3 3D bridge: write-back ──
         self.world.propagate();
         // 5. Advance skeletal-animation play-heads (P11.1) — the same order-free,
         //    fixed-`dt` integration the editor Simulate tick runs (preview ==
-        //    shipped).
+        //    shipped). ── P11.3 root motion ── snapshot play-heads, advance, apply.
+        let prev_ts = self.capture_root_motion_times();
         inf_ecs::anim::advance_anim_players(&mut self.world, dt);
+        // ── P11.2 anim state machines ── (adjacent to the P11.3 root-motion apply
+        //    above; kept separate). Step each `AnimStateMachine` against its
+        //    actor's Blueprint variables.
+        self.advance_state_machines(dt);
+        self.apply_root_motion(&prev_ts);
+        self.world.propagate();
+        // ── P11.3 attachments ── entities ride their target's socket, post-anim.
+        update_attachments(&mut self.world);
+        self.world.propagate();
         // Roll interpolation history + rising edges.
         std::mem::swap(&mut self.prev_positions, &mut self.cur_positions);
         self.capture_positions();
         self.just_pressed.clear();
         self.steps += 1;
+    }
+
+    /// Step every entity's [`AnimStateMachine`] (P11.2) whose `sm` GUID resolves
+    /// in [`state_machines`](Self::state_machines) — the runtime mirror of
+    /// `SimSession::advance_state_machines` (preview == shipped). Conditions +
+    /// blend params read the entity's actor Blueprint variables; an entity with no
+    /// actor gets an empty variable set (params default `0`). Order-independent →
+    /// deterministic.
+    fn advance_state_machines(&mut self, dt: f64) {
+        if self.state_machines.is_empty() {
+            return;
+        }
+        let mut targets: Vec<(Entity, Uuid, Uuid, SmRuntimeState)> = Vec::new();
+        {
+            let w = self.world.world_mut();
+            let mut q = w.query::<(Entity, &Guid, &AnimStateMachine)>();
+            for (e, g, asm) in q.iter(w) {
+                if let Some(sm_guid) = asm.sm {
+                    targets.push((e, g.0, sm_guid, asm.runtime));
+                }
+            }
+        }
+        for (entity, guid, sm_guid, rt_state) in targets {
+            let Some(machine) = self.state_machines.get(&sm_guid) else {
+                continue;
+            };
+            let vars = self
+                .actors
+                .get(&guid)
+                .map(|a| var_snapshot(&a.instance))
+                .unwrap_or_default();
+            let mut rt = to_anim_runtime(rt_state);
+            {
+                let lookup = |name: &str| vars.get(name).copied();
+                let ctx = SmContext::new(&lookup);
+                rt.advance(machine, &ctx, dt);
+            }
+            if let Some(mut asm) = self.world.world_mut().get_mut::<AnimStateMachine>(entity) {
+                asm.runtime = from_anim_runtime(rt);
+            }
+        }
+    }
+
+    /// Snapshot the play-head `t` of every root-motion-driven playing entity
+    /// before the anim advance (P11.3) — the runtime mirror of
+    /// `SimSession::capture_root_motion_times`.
+    fn capture_root_motion_times(&mut self) -> BTreeMap<Uuid, f64> {
+        let mut out = BTreeMap::new();
+        let w = self.world.world_mut();
+        let mut q = w.query::<(&inf_ecs::Guid, &RootMotion, &AnimPlayer)>();
+        for (g, rm, ap) in q.iter(w) {
+            if rm.mode == RootMotionMode::ApplyToEntity && ap.playing {
+                out.insert(g.0, ap.t);
+            }
+        }
+        out
+    }
+
+    /// Apply each root-motion entity's clip root delta to its `Transform` (P11.3)
+    /// — the runtime mirror of `SimSession::apply_root_motion`.
+    fn apply_root_motion(&mut self, prev_ts: &BTreeMap<Uuid, f64>) {
+        if prev_ts.is_empty() {
+            return;
+        }
+        let mut work: Vec<(Uuid, Entity, f64, f64, bool, Uuid, bool)> = Vec::new();
+        for (&guid, &prev_t) in prev_ts {
+            let Some(entity) = self.world.entity_of(guid) else {
+                continue;
+            };
+            let w = self.world.world();
+            let Some(ap) = w.get::<AnimPlayer>(entity) else {
+                continue;
+            };
+            let Some(clip) = ap.clip else {
+                continue;
+            };
+            let has_cc = w.get::<CharacterController3D>(entity).is_some();
+            work.push((guid, entity, prev_t, ap.t, ap.looping, clip, has_cc));
+        }
+
+        let mut changed = false;
+        for (guid, entity, prev_t, cur_t, looping, clip_guid, has_cc) in work {
+            let Some(rc) = self.clips.get(&clip_guid) else {
+                continue;
+            };
+            let d = root_delta(&rc.clip, &rc.skeleton, prev_t as f32, cur_t as f32, looping);
+            if d.translation == glam::Vec3::ZERO && d.yaw == 0.0 {
+                continue;
+            }
+            let t = self
+                .world
+                .world()
+                .get::<Transform>(entity)
+                .copied()
+                .unwrap_or(Transform::IDENTITY);
+            let yaw_rad = t.rotation.y.to_radians();
+            let local = DVec3::new(d.translation.x as f64, 0.0, d.translation.z as f64);
+            let world_delta = DQuat::from_rotation_y(yaw_rad) * local;
+            let new_yaw_deg = t.rotation.y + d.yaw.to_degrees() as f64;
+            let pos = t.translation.to_dvec3();
+
+            let new_pos = if has_cc {
+                let mover = build_mover3d(&self.world, guid);
+                let exclude = self.bridge3d.collider_of(guid);
+                let res =
+                    self.bridge3d
+                        .world_mut()
+                        .move_character(&mover, pos, world_delta, exclude);
+                let np = pos + res.translation;
+                if let Some(body) = self.bridge3d.body_of(guid) {
+                    self.bridge3d.world_mut().set_body_translation(body, np);
+                }
+                self.grounded.insert(guid, res.grounded);
+                np
+            } else {
+                pos + world_delta
+            };
+
+            if let Some(mut tr) = self.world.world_mut().get_mut::<Transform>(entity) {
+                tr.translation.x = new_pos.x;
+                tr.translation.y = new_pos.y;
+                tr.translation.z = new_pos.z;
+                tr.rotation.y = new_yaw_deg;
+                changed = true;
+            }
+        }
+        if changed {
+            self.world.mark_dirty();
+        }
     }
 
     /// Capture every actor's world translation into `cur_positions`.
@@ -308,6 +504,7 @@ impl RuntimeSim {
             {
                 let mut host = RuntimeHost {
                     bridge: &mut self.bridge,
+                    bridge3d: &mut self.bridge3d,
                     world: &mut self.world,
                     input: &self.input,
                     just_pressed: &self.just_pressed,
@@ -336,6 +533,8 @@ impl RuntimeSim {
 /// [`Host::physics`]. A line-for-line analogue of the editor `SimHost`.
 struct RuntimeHost<'a> {
     bridge: &'a mut PhysicsBridge2D,
+    /// The 3D physics bridge (P11.3), powering `physics3d.*` nodes.
+    bridge3d: &'a mut PhysicsBridge3D,
     world: &'a mut EcsWorld,
     input: &'a RuntimeInput,
     just_pressed: &'a BTreeSet<String>,
@@ -370,6 +569,10 @@ impl Host for RuntimeHost<'_> {
     }
 
     fn physics(&mut self) -> Option<&mut dyn Physics2dHost> {
+        Some(self)
+    }
+
+    fn physics3d(&mut self) -> Option<&mut dyn Physics3dHost> {
         Some(self)
     }
 }
@@ -527,6 +730,168 @@ impl Physics2dHost for RuntimeHost<'_> {
     }
 }
 
+impl Physics3dHost for RuntimeHost<'_> {
+    fn move_and_slide(&mut self, entity: i64, motion: [f64; 3]) -> Result<MoveResult3d, String> {
+        let guid = self.guid_of(entity)?;
+        let body = self
+            .bridge3d
+            .body_of(guid)
+            .ok_or_else(|| format!("entity {entity} has no physics body"))?;
+        let pos = self
+            .bridge3d
+            .world()
+            .body_translation(body)
+            .ok_or("body vanished")?;
+        let exclude = self.bridge3d.collider_of(guid);
+        let mover = build_mover3d(self.world, guid);
+        let result = self.bridge3d.world_mut().move_character(
+            &mover,
+            pos,
+            DVec3::new(motion[0], motion[1], motion[2]),
+            exclude,
+        );
+        let new_pos = pos + result.translation;
+        self.bridge3d
+            .world_mut()
+            .set_body_translation(body, new_pos);
+        if let Some(entity) = self.world.entity_of(guid) {
+            if let Some(mut t) = self.world.world_mut().get_mut::<Transform>(entity) {
+                t.translation.x = new_pos.x;
+                t.translation.y = new_pos.y;
+                t.translation.z = new_pos.z;
+            }
+            self.world.mark_dirty();
+        }
+        self.grounded.insert(guid, result.grounded);
+        Ok(MoveResult3d {
+            applied: result.translation.into(),
+            grounded: result.grounded,
+        })
+    }
+
+    fn is_grounded(&mut self, entity: i64) -> Result<bool, String> {
+        let guid = self.guid_of(entity)?;
+        let body = self
+            .bridge3d
+            .body_of(guid)
+            .ok_or_else(|| format!("entity {entity} has no physics body"))?;
+        let pos = self
+            .bridge3d
+            .world()
+            .body_translation(body)
+            .ok_or("body vanished")?;
+        let exclude = self.bridge3d.collider_of(guid);
+        let mover = build_mover3d(self.world, guid);
+        let probe = self
+            .bridge3d
+            .world_mut()
+            .move_character(&mover, pos, DVec3::ZERO, exclude);
+        Ok(probe.grounded)
+    }
+
+    fn raycast(
+        &mut self,
+        origin: [f64; 3],
+        dir: [f64; 3],
+        max: f64,
+    ) -> Result<Option<RayHit3d>, String> {
+        let hit = self.bridge3d.world_mut().cast_ray(
+            DVec3::new(origin[0], origin[1], origin[2]),
+            DVec3::new(dir[0], dir[1], dir[2]),
+            max,
+        );
+        Ok(hit.map(|h| RayHit3d {
+            point: h.point.into(),
+            normal: h.normal.into(),
+        }))
+    }
+
+    fn set_velocity(&mut self, entity: i64, v: [f64; 3]) -> Result<(), String> {
+        let guid = self.guid_of(entity)?;
+        let body = self
+            .bridge3d
+            .body_of(guid)
+            .ok_or_else(|| format!("entity {entity} has no physics body"))?;
+        self.bridge3d
+            .world_mut()
+            .set_body_linvel(body, DVec3::new(v[0], v[1], v[2]));
+        Ok(())
+    }
+
+    fn get_velocity(&mut self, entity: i64) -> Result<[f64; 3], String> {
+        let guid = self.guid_of(entity)?;
+        let body = self
+            .bridge3d
+            .body_of(guid)
+            .ok_or_else(|| format!("entity {entity} has no physics body"))?;
+        Ok(self
+            .bridge3d
+            .world()
+            .body_linvel(body)
+            .unwrap_or(DVec3::ZERO)
+            .into())
+    }
+
+    fn apply_impulse(&mut self, entity: i64, v: [f64; 3]) -> Result<(), String> {
+        let guid = self.guid_of(entity)?;
+        let body = self
+            .bridge3d
+            .body_of(guid)
+            .ok_or_else(|| format!("entity {entity} has no physics body"))?;
+        self.bridge3d
+            .world_mut()
+            .apply_impulse(body, DVec3::new(v[0], v[1], v[2]));
+        Ok(())
+    }
+}
+
+/// Build a [`CharacterMover3D`] from an entity's `CharacterController3D` +
+/// `Collider3D` (the runtime mirror of the editor's `build_mover3d`). Shared by
+/// the `physics3d.move_and_slide` host path and the root-motion applier.
+fn build_mover3d(world: &EcsWorld, guid: Uuid) -> CharacterMover3D {
+    let default_shape = ColliderShape3D::Capsule {
+        half_height: 0.5,
+        radius: 0.25,
+    };
+    let Some(entity) = world.entity_of(guid) else {
+        return CharacterMover3D::new(default_shape);
+    };
+    let w = world.world();
+    let shape = w
+        .get::<Collider3D>(entity)
+        .map(collider_shape3d)
+        .unwrap_or(default_shape);
+    let cc = w.get::<CharacterController3D>(entity).copied();
+    let mut mover = CharacterMover3D::new(shape).up(DVec3::Y).slide(true);
+    if let Some(cc) = cc {
+        mover = mover
+            .offset(cc.offset.max(1e-4))
+            .max_slope_climb_angle(cc.max_slope_deg.to_radians())
+            .snap_to_ground(if cc.snap_to_ground > 0.0 {
+                Some(cc.snap_to_ground)
+            } else {
+                None
+            });
+    } else {
+        mover = mover.offset(0.02);
+    }
+    mover
+}
+
+/// A `Collider3D` component's shape as the 3D physics-facade shape.
+fn collider_shape3d(c: &Collider3D) -> ColliderShape3D {
+    match c.shape_kind {
+        ColliderShape3DKind::Box => ColliderShape3D::Box {
+            half_extents: c.half_extents.to_dvec3(),
+        },
+        ColliderShape3DKind::Sphere => ColliderShape3D::Sphere { radius: c.radius },
+        ColliderShape3DKind::Capsule => ColliderShape3D::Capsule {
+            half_height: c.half_extents.y,
+            radius: c.radius,
+        },
+    }
+}
+
 /// A `Collider2D` component's shape as the physics-facade shape.
 fn collider_shape(c: &Collider2D) -> ColliderShape2D {
     match c.shape_kind {
@@ -549,4 +914,54 @@ fn arg_str(args: &[Value], i: usize) -> String {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+// ── P11.2 state-machine glue: ECS POD ↔ inf-anim runtime + var snapshot ──────
+// The editor `SimSession` duplicates these (preview == shipped) — see its docs
+// for why `SmRuntimeState` is a POD mirror kept out of `inf-anim`'s dep of `inf-ecs`.
+
+/// Convert the ECS component's transient runtime POD into the anim runtime.
+fn to_anim_runtime(s: SmRuntimeState) -> SmRuntime {
+    SmRuntime {
+        current: s.current,
+        prev: s.prev,
+        prev_time: s.prev_time,
+        fade_t: s.fade_t,
+        fade_dur: s.fade_dur,
+        state_time: s.state_time,
+        started: s.started,
+    }
+}
+
+/// Convert the advanced anim runtime back into the ECS component POD.
+fn from_anim_runtime(r: SmRuntime) -> SmRuntimeState {
+    SmRuntimeState {
+        current: r.current,
+        prev: r.prev,
+        prev_time: r.prev_time,
+        fade_t: r.fade_t,
+        fade_dur: r.fade_dur,
+        state_time: r.state_time,
+        started: r.started,
+    }
+}
+
+/// A `name → f64` snapshot of an actor's Blueprint variables for the state
+/// machine's condition/param lookups (non-numeric values dropped; `Bool` → 1/0).
+fn var_snapshot(instance: &ActorInstance) -> BTreeMap<String, f64> {
+    instance
+        .vars
+        .iter()
+        .filter_map(|(k, v)| value_as_f64(v).map(|f| (k.clone(), f)))
+        .collect()
+}
+
+/// Coerce a Blueprint [`Value`] to `f64` for state-machine conditions/params.
+fn value_as_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Float(f) => Some(*f),
+        Value::Int(i) => Some(*i as f64),
+        Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
 }

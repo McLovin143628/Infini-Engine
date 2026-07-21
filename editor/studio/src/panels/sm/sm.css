@@ -1,0 +1,136 @@
+/* Animation State Machine editor styles (P11.2). Reuses the blueprint canvas
+ * chrome (`bp-canvas`/`bp-toolbar`/`bp-btn`/`bp-flow`); only the state node + the
+ * right-hand inspector are SM-specific. All colors ride the `--ink-*` theme vars. */
+
+.sm-flow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* ── state node ── */
+.sm-node {
+  min-width: 130px;
+  border: 1px solid var(--ink-border);
+  border-radius: 8px;
+  background: var(--ink-bg-2);
+  padding: 6px 10px;
+  color: var(--ink-text);
+  font-size: 12px;
+}
+.sm-node--selected {
+  border-color: var(--ink-accent);
+  box-shadow: 0 0 0 1px var(--ink-accent);
+}
+.sm-node__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-weight: 600;
+}
+.sm-node__entry {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-bg-1);
+  background: var(--ink-accent);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.sm-node__motion {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--ink-text-dim);
+}
+.sm-handle {
+  width: 9px;
+  height: 9px;
+  background: var(--ink-accent);
+  border: 1px solid var(--ink-bg-1);
+}
+
+/* ── inspector ── */
+.sm-inspector {
+  width: 260px;
+  flex: 0 0 260px;
+  border-left: 1px solid var(--ink-border);
+  background: var(--ink-bg-1);
+  overflow-y: auto;
+  font-size: 12px;
+}
+.sm-insp__body {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sm-insp__title {
+  font-weight: 600;
+  color: var(--ink-text);
+}
+.sm-insp__subtitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+  color: var(--ink-text-dim);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+.sm-insp__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--ink-text-dim);
+}
+.sm-insp__row input[type="number"],
+.sm-insp__row select {
+  width: 130px;
+  background: var(--ink-bg-2);
+  border: 1px solid var(--ink-border);
+  border-radius: 4px;
+  color: var(--ink-text);
+  padding: 2px 4px;
+}
+.sm-insp__note {
+  font-style: italic;
+  color: var(--ink-text-dim);
+}
+.sm-insp__empty {
+  padding: 12px;
+  color: var(--ink-text-dim);
+  line-height: 1.5;
+}
+.sm-insp__delete {
+  margin-top: 10px;
+  align-self: flex-start;
+}
+
+.sm-cond {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.sm-cond__var {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--ink-bg-2);
+  border: 1px solid var(--ink-border);
+  border-radius: 4px;
+  color: var(--ink-text);
+  padding: 2px 4px;
+}
+.sm-cond__val {
+  width: 52px;
+  background: var(--ink-bg-2);
+  border: 1px solid var(--ink-border);
+  border-radius: 4px;
+  color: var(--ink-text);
+  padding: 2px 4px;
+}
+.bp-btn--sm {
+  padding: 1px 7px;
+  font-size: 12px;
+}
