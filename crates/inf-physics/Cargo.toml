@@ -1,6 +1,6 @@
 [package]
 name = "inf-physics"
-description = "Physics facade over rapier3d-f64 / rapier2d."
+description = "Physics facade over rapier2d-f64 (2D) / rapier3d-f64 (3D, later). Fixed-step, deterministic, Ring 0."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,8 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# The 2D physics engine (f64 build). See the workspace-dependency comment for the
+# f64 + enhanced-determinism + no-`parallel` rationale. rapier's math types are
+# glam 0.33 (== our workspace pin), so the facade speaks `glam::DVec2` natively.
+rapier2d-f64 = { workspace = true }
+glam = { workspace = true }

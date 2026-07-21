@@ -141,6 +141,18 @@ png = "0.18"
 # false` targets need.
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 
+# ── physics (Phase 8.3 / 9 / 12) ──
+# rapier2d-f64: the 2D physics engine, f64 build. f64 (not the f32 default) keeps
+# parity with the f64 world-coordinate doctrine (architecture rule 3) and avoids
+# precision cliffs on large 2D worlds. This build's math types ARE glam 0.33
+# (rapier → parry → glamx → glam 0.33, our workspace pin) so there is no second
+# glam in the tree and DVec2 flows through the facade for free. `enhanced-
+# determinism` (simba libm_force) makes stepping cross-platform bit-reproducible,
+# the P12.2 replay-harness guarantee. The `parallel` (rayon) feature is DELIBERATELY
+# left off so rapier does not spawn its own worker pool alongside inf-core's job
+# system and so a step is order-independent of thread scheduling. Apache-2.0.
+rapier2d-f64 = { version = "0.34", features = ["enhanced-determinism"] }
+
 # intra-workspace crates
 inf-core = { path = "crates/inf-core" }
 inf-math = { path = "crates/inf-math" }
