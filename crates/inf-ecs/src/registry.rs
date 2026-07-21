@@ -14,7 +14,7 @@ use crate::components::{
     AtlasRect, BillboardMode, BodyKind2D, BodyKind3D, Camera, CharacterController2D,
     CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, Light,
     Light2D, LightKind, Material, MeshRef, Name, NineSlice, Primitive, RigidBody2D, RigidBody3D,
-    Sprite, Text2D, TextAlign, Tilemap, Transform, Visibility,
+    Sprite, Terrain, Text2D, TextAlign, Tilemap, Transform, Visibility,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -85,6 +85,7 @@ impl ComponentRegistry {
             Text2D => "Text",
             Tilemap => "Tilemap",
             Material => "Material",
+            Terrain => "Terrain",
             Light => "Light",
             Light2D => "Light 2D",
             Camera => "Camera",
@@ -141,7 +142,7 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        assert_eq!(reg.editable().len(), 17);
+        assert_eq!(reg.editable().len(), 18);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

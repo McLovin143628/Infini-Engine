@@ -2708,6 +2708,7 @@ dependencies = [
  "bevy_tasks",
  "glam 0.33.2",
  "inf-math",
+ "inf-terrain",
  "serde",
  "serde_json",
  "uuid",
@@ -2847,6 +2848,15 @@ dependencies = [
 [[package]]
 name = "inf-pcg"
 version = "0.1.0"
+dependencies = [
+ "bincode",
+ "glam 0.33.2",
+ "inf-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "uuid",
+]
 
 [[package]]
 name = "inf-physics"
@@ -2984,6 +2994,13 @@ dependencies = [
 [[package]]
 name = "inf-terrain"
 version = "0.1.0"
+dependencies = [
+ "glam 0.33.2",
+ "image",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
 
 [[package]]
 name = "inf-transpile"

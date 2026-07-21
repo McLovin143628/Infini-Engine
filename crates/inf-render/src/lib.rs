@@ -34,12 +34,16 @@ pub use gizmo::{GizmoAxis, GizmoDelta, GizmoDrag, GizmoMode};
 pub use gpu::{create_instance, GpuContext};
 pub use headless::{HeadlessTarget, HEADLESS_FORMAT};
 pub use passes::composite::BlitMode;
+pub use passes::terrain::{
+    assemble_patches, cells_at_lod, lod_for_distance, lod_thresholds, morph_factor, TerrainPatch,
+    TERRAIN_BASE_CELLS, TERRAIN_LOD_COUNT,
+};
 pub use pick::Picker;
 pub use renderer::{EngineRenderer, MASK_FORMAT, SCENE_FORMAT, SCENE_SAMPLES};
 pub use scene::{
     Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D,
-    RenderScene, RenderTilemap, SkyParams, SpriteInstance, SpriteTextureUpload, TextureHandle,
-    TilemapParams, ID_GIZMO_BASE, ID_NONE,
+    RenderScene, RenderTerrain, RenderTerrainTile, RenderTilemap, SkyParams, SpriteInstance,
+    SpriteTextureUpload, TextureHandle, TilemapParams, ID_GIZMO_BASE, ID_NONE,
 };
 // 2D batcher API surfaced through the renderer for hosts.
 pub use inf_render_2d::{

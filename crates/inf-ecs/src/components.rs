@@ -13,6 +13,7 @@ use bevy_ecs::reflect::ReflectComponent;
 use bevy_reflect::std_traits::ReflectDefault;
 use bevy_reflect::Reflect;
 use glam::{DAffine3, DQuat, DVec3};
+use inf_terrain::TerrainData;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -1153,9 +1154,88 @@ impl Default for Camera {
     }
 }
 
+/// A heightfield terrain (P10.1) — the engine's massive-terrain component.
+///
+/// The scalar config (`meters_per_sample`, `tile_resolution`) is reflected so the
+/// Details grid surfaces it; the paged height data ([`TerrainData`]) is
+/// `#[reflect(ignore)]` + serde-persisted, exactly like the [`Tilemap`] chunk
+/// store — sculpt/import tools (P10.2) edit it, not the property grid. The
+/// [`TerrainData`] is the authority for rendering and queries; the reflected
+/// scalars mirror its config (changing them in Details is a reconfigure hint the
+/// P10.2 terrain tooling applies — the stored `data` keeps its own config until
+/// then). Material/splat params land with P10.4.
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Terrain {
+    /// World units between adjacent height samples.
+    #[serde(default = "default_terrain_mps")]
+    pub meters_per_sample: f64,
+    /// Samples per tile side (mirrors the paged data's resolution).
+    #[serde(default = "default_terrain_resolution")]
+    pub tile_resolution: u32,
+    /// The paged `f64` world-space heightfield. `#[reflect(ignore)]` (not a
+    /// property-grid scalar) but serde-persisted so authored terrain survives a
+    /// save/load. `TerrainData`'s own manual serde keeps it deterministic.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub data: TerrainData,
+}
+
+fn default_terrain_mps() -> f64 {
+    inf_terrain::DEFAULT_METERS_PER_SAMPLE
+}
+fn default_terrain_resolution() -> u32 {
+    inf_terrain::DEFAULT_TILE_RESOLUTION
+}
+
+impl Default for Terrain {
+    fn default() -> Self {
+        let data = TerrainData::default();
+        Self {
+            meters_per_sample: data.meters_per_sample(),
+            tile_resolution: data.tile_resolution(),
+            data,
+        }
+    }
+}
+
+impl Terrain {
+    /// An empty terrain configured with `tile_resolution` samples per tile side
+    /// and `meters_per_sample` world spacing. The reflected scalars mirror the
+    /// paged data's config.
+    pub fn configured(tile_resolution: u32, meters_per_sample: f64) -> Self {
+        let data = TerrainData::new(tile_resolution, meters_per_sample);
+        Self {
+            meters_per_sample: data.meters_per_sample(),
+            tile_resolution: data.tile_resolution(),
+            data,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terrain_serde_round_trips_and_defaults() {
+        let mut t = Terrain::configured(5, 2.0);
+        // Author a couple of tiles so the paged data is non-trivial.
+        t.data.author_tile((0, 0), |x, z| (x + z) * 0.1);
+        t.data.author_tile((1, 0), |x, z| (x + z) * 0.1);
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Terrain = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+        assert_eq!(back.data.tile_count(), 2);
+        assert_eq!(back.tile_resolution, 5);
+
+        // A minimal payload fills the scalar defaults + an empty terrain.
+        let d: Terrain = serde_json::from_str("{}").unwrap();
+        assert_eq!(d.tile_resolution, inf_terrain::DEFAULT_TILE_RESOLUTION);
+        assert!(d.data.is_empty());
+    }
 
     #[test]
     fn sprite_serde_round_trips() {

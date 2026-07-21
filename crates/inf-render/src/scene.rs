@@ -120,6 +120,44 @@ impl Default for Ambient2D {
     }
 }
 
+/// One terrain tile handed to the [`TerrainNode`](crate::passes::terrain): its
+/// grid coordinate, the `f64` world origin of sample `(0,0)`, and the row-major
+/// `f32` height offsets (from `origin.y`). Mirrors `inf_terrain::TerrainTile` but
+/// stays renderer-agnostic (the host projects it, like `RenderTilemap`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderTerrainTile {
+    pub coord: (i32, i32),
+    /// World position of sample `(0,0)` (`f64` anchor).
+    pub origin: DVec3,
+    /// `resolution²` row-major height offsets (metres) from `origin.y`.
+    pub heights: Vec<f32>,
+    /// Inclusive `(min, max)` of `heights` (for the tile's AABB cull bound).
+    pub height_bounds: (f32, f32),
+}
+
+/// The renderer's terrain input: a paged heightfield projected from the ECS
+/// `Terrain` component. The [`TerrainNode`](crate::passes::terrain) uploads a
+/// per-tile R32Float height texture (cached, version-gated) and assembles
+/// concentric clipmap LOD rings around the camera each frame.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RenderTerrain {
+    /// Samples per tile side (the height-texture dimension).
+    pub tile_resolution: u32,
+    /// World units between samples.
+    pub meters_per_sample: f64,
+    /// Authored tiles, sorted by coordinate (deterministic upload/draw order).
+    pub tiles: Vec<RenderTerrainTile>,
+    /// Bump on any tile/height change — gates the GPU height-texture uploads.
+    pub version: u64,
+}
+
+impl RenderTerrain {
+    /// World edge length of one tile: `(resolution − 1) · mps`.
+    pub fn tile_span(&self) -> f64 {
+        (self.tile_resolution.max(2) as f64 - 1.0) * self.meters_per_sample
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkyParams {
     /// Linear colors.
@@ -147,6 +185,11 @@ pub struct RenderScene {
     pub lights: Vec<RenderLight>,
     /// 2D sprites (batched + drawn by the sprite pass over the 3D scene).
     pub sprites: Vec<SpriteInstance>,
+    /// Heightfield terrain (P10.1). `Some` ⇒ the terrain pass draws clipmap LOD
+    /// rings around the camera; `None` ⇒ the pass is a no-op (so scenes without
+    /// terrain — every pre-P10.1 golden — stay byte-identical). Its own `version`
+    /// gates the per-tile height-texture uploads.
+    pub terrain: Option<RenderTerrain>,
     /// 2D tilemaps (P8.1b). The sprite pass culls each tilemap's chunks against
     /// the camera and expands the visible ones into prebatched sprite runs, then
     /// batches them together with the loose `sprites`. Because culling depends on

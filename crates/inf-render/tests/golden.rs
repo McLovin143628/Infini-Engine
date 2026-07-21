@@ -20,12 +20,12 @@ use inf_math::FloatingOrigin;
 use inf_render::gizmo::{self, GizmoAxis, GizmoMode};
 use inf_render::golden::{image_diff, within_tolerance};
 use inf_render::{
-    expand_text, Ambient2D, EngineRenderer, GpuContext, HAlign, HeadlessTarget, LightKind,
-    MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D, RenderScene,
-    RenderTilemap, RenderView, SpriteInstance, SpriteTextureUpload, TextParams, TilemapParams,
-    BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
-    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT,
-    TILE_CHUNK_DIM,
+    assemble_patches, expand_text, Ambient2D, EngineRenderer, GpuContext, HAlign, HeadlessTarget,
+    LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D, RenderScene,
+    RenderTerrain, RenderTerrainTile, RenderTilemap, RenderView, SpriteInstance,
+    SpriteTextureUpload, TextParams, TilemapParams, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE,
+    BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS,
+    BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -343,6 +343,124 @@ fn golden_billboards() {
     assert!(red, "expected the planar (red) sprite");
     assert!(green, "expected the spherical (green) billboard");
     assert!(blue, "expected the cylindrical (blue) billboard");
+}
+
+/// A procedural sine-hills terrain across `ntx × ntz` tiles, authored from one
+/// global height function so tile edges are seamless. `res` samples/tile, `mps`
+/// metres/sample. Tiles are pushed in `(i32,i32)`-sorted order (matching the
+/// host's BTreeMap projection).
+fn hill_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
+    let span = (res as f64 - 1.0) * mps;
+    let f = |x: f64, z: f64| 4.0 * (x * 0.15).sin() * (z * 0.15).cos() + 3.5;
+    let mut tiles = Vec::new();
+    for tx in 0..ntx {
+        for tz in 0..ntz {
+            let (ox, oz) = (tx as f64 * span, tz as f64 * span);
+            let mut heights = vec![0f32; (res * res) as usize];
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for j in 0..res {
+                for i in 0..res {
+                    let h = f(ox + i as f64 * mps, oz + j as f64 * mps) as f32;
+                    heights[(j * res + i) as usize] = h;
+                    lo = lo.min(h);
+                    hi = hi.max(h);
+                }
+            }
+            tiles.push(RenderTerrainTile {
+                coord: (tx, tz),
+                origin: DVec3::new(ox, 0.0, oz),
+                heights,
+                height_bounds: (lo, hi),
+            });
+        }
+    }
+    RenderTerrain {
+        tile_resolution: res,
+        meters_per_sample: mps,
+        tiles,
+        version: 1,
+    }
+}
+
+/// A perspective view from `eye` looking at `target`.
+fn look_view(eye: DVec3, target: DVec3) -> RenderView {
+    RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: eye,
+        forward: (target - eye).as_vec3().normalize(),
+        up: Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 0.05,
+        width: W,
+        height: H,
+        ortho: None,
+    }
+}
+
+/// Terrain golden (P10.1): a sine-hills heightfield across 2×2 tiles under an
+/// angled perspective camera, showing the terrain silhouette + slope/altitude
+/// debug shading against the sky. Exercises the clipmap patch assembly → height
+/// texture → vertex displacement path headlessly (determinism gate via
+/// `check_golden`; strict pixel diff opt-in).
+#[test]
+fn golden_terrain() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let res = 33;
+    let terrain = hill_terrain(res, 1.0, 2, 2); // 2×2 tiles, ~64 m square
+    let scene = RenderScene {
+        grid_enabled: true,
+        terrain: Some(terrain),
+        ..Default::default()
+    };
+    // Angled overlook of the terrain centre (~(32, ·, 32)).
+    let view = look_view(DVec3::new(32.0, 24.0, -12.0), DVec3::new(32.0, 3.0, 32.0));
+    let img = check_golden(&gpu, "terrain", &scene, &view);
+
+    // The lower band (terrain) is lit and clearly differs from the sky band above.
+    let sky = px(&img, W / 2, 6);
+    let ground = px(&img, W / 2, H - 12);
+    assert_ne!(sky, ground, "terrain band should differ from sky");
+    let lit = img
+        .chunks(4)
+        .any(|p| p[0] as u16 + p[1] as u16 + p[2] as u16 > 150);
+    assert!(lit, "expected a lit terrain pixel");
+}
+
+/// Terrain LOD golden (P10.1): the same hills across a long 6×2 strip with the
+/// camera at the near end, so tiles resolve to ≥2 distinct clipmap LOD rings by
+/// distance. Structural gate: assembly yields multiple LODs + the frame renders
+/// deterministically.
+#[test]
+fn golden_terrain_lod() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let res = 33;
+    let mps = 1.0;
+    let terrain = hill_terrain(res, mps, 6, 2); // long strip along +X
+                                                // Camera at the near (-X) end looking down the strip: near tiles LOD 0, far
+                                                // tiles coarsen → concentric rings.
+    let view = look_view(DVec3::new(-6.0, 40.0, 32.0), DVec3::new(140.0, 0.0, 32.0));
+
+    // The pure assembly must produce ≥2 distinct LOD levels (the "≥2 rings" gate).
+    let patches = assemble_patches(&terrain, &view, &view.origin);
+    let mut lods: Vec<u32> = patches.iter().map(|p| p.lod).collect();
+    lods.sort_unstable();
+    lods.dedup();
+    assert!(
+        lods.len() >= 2,
+        "expected ≥2 LOD rings, got LODs {lods:?} from {} patches",
+        patches.len()
+    );
+
+    let scene = RenderScene {
+        grid_enabled: true,
+        terrain: Some(terrain),
+        ..Default::default()
+    };
+    let img = check_golden(&gpu, "terrain_lod", &scene, &view);
+    let lit = img
+        .chunks(4)
+        .any(|p| p[0] as u16 + p[1] as u16 + p[2] as u16 > 150);
+    assert!(lit, "expected a lit terrain pixel");
 }
 
 /// A view looking straight down -Z at the world XY plane, so sprites (which lie

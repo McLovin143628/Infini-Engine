@@ -26,11 +26,14 @@ pub use components::{
     ActorClass, AtlasRect, BillboardMode, BodyKind2D, BodyKind3D, Camera, CharacterController2D,
     CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
     ComputedVisibility, GlobalTransform, Guid, Light, LightKind, Material, MeshRef, Name,
-    Primitive, RigidBody2D, RigidBody3D, Sprite, TileBounds, TileChunk, Tilemap, Transform,
-    Visibility, CHUNK_DIM, CHUNK_TILES,
+    Primitive, RigidBody2D, RigidBody3D, Sprite, Terrain, TileBounds, TileChunk, Tilemap,
+    Transform, Visibility, CHUNK_DIM, CHUNK_TILES,
 };
 pub use hierarchy::{ChildOf, Children};
 pub use math::{Color, Vec2d, Vec3d};
+// Terrain heightfield types re-exported so downstream editor crates (e.g. the
+// viewport host) reach them through the ECS facade without a direct dep.
+pub use inf_terrain::{HeightSource, TerrainData, TerrainTile};
 pub use props::{default_field, ComponentProps, PropField, PropValue};
 pub use registry::{ComponentInfo, ComponentRegistry};
 pub use schedule::{

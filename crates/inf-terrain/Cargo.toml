@@ -1,6 +1,6 @@
 [package]
 name = "inf-terrain"
-description = "Terrain: quadtree/clipmap heightfield, GPU erosion, splat layers."
+description = "Terrain: paged f64 heightfield, clipmap LOD source, heightmap import/export."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,13 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+glam = { workspace = true }
+serde = { workspace = true }
+# PNG16 + EXR heightmap decode/encode. The workspace `image` pin already enables
+# the `png` and `exr` features (see [workspace.dependencies]); a standalone `exr`
+# pin is unnecessary — `image` handles both formats through one DynamicImage path.
+image = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

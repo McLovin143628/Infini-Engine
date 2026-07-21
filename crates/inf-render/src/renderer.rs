@@ -136,6 +136,10 @@ impl EngineRenderer {
         let mut graph = RenderGraph::default();
         graph.add(passes::sky::SkyNode::new(gpu, &view_bgl));
         graph.add(passes::mesh::MeshNode::new(gpu, &view_bgl));
+        // Terrain draws opaque + depth-writing after meshes and before the grid,
+        // so the infinite grid is occluded where terrain rises above the ground
+        // plane. A no-op when the scene has no terrain (pre-P10.1 byte stability).
+        graph.add(passes::terrain::TerrainNode::new(gpu, &view_bgl));
         graph.add(passes::grid::GridNode::new(gpu, &view_bgl));
         // Sprites draw over the 3D scene (depth-tested, not depth-writing) and
         // under the debug/gizmo overlay.

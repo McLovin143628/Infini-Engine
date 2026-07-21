@@ -20,6 +20,10 @@ bevy_tasks = { workspace = true, features = ["multi_threaded"] }
 bevy_reflect = { workspace = true }
 glam = { workspace = true }
 inf-math = { workspace = true }
+# The paged heightfield backing the `Terrain` component (P10.1). Ring-0 → Ring-0
+# dep (inf-terrain never names bevy/reflect, so no cycle); the tile map is
+# `#[reflect(ignore)]` on `Terrain`, exactly like the tilemap chunk store.
+inf-terrain = { workspace = true }
 serde = { workspace = true }
 uuid = { workspace = true }
 

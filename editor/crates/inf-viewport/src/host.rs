@@ -8,7 +8,7 @@ use glam::{DQuat, DVec3, Vec2, Vec3};
 use inf_ecs::components::{
     Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, ComputedVisibility,
     GlobalTransform, Light, Light2D, LightKind as EcsLightKind, Material, MeshRef, NineSlice,
-    Sprite, Text2D, TextAlign, Tilemap,
+    Sprite, Terrain, Text2D, TextAlign, Tilemap,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::scene::SceneDoc;
@@ -18,8 +18,8 @@ use inf_render::{
     handle_from_guid, ColliderOutline2D, ColliderOutline3D, DebugDraw, EngineRenderer, GizmoDelta,
     GizmoDrag, GizmoMode, GpuContext, HAlign, LightKind, MeshInstance, NineSliceParams,
     OrthoParams, Picker, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D, RenderScene,
-    RenderTilemap, RenderView, SpriteInstance, SurfaceChain, TextParams, TilemapParams,
-    BUILTIN_FONT_TEXTURE,
+    RenderTerrain, RenderTerrainTile, RenderTilemap, RenderView, SpriteInstance, SurfaceChain,
+    TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
 };
 use uuid::Uuid;
 
@@ -260,6 +260,7 @@ impl EngineHost {
         self.scene.tilemaps.clear();
         self.scene.prebatched.clear();
         self.scene.lights_2d.clear();
+        self.scene.terrain = None;
         self.id_to_guid.clear();
         self.guid_to_id.clear();
         self.collider_outlines.clear();
@@ -350,6 +351,24 @@ impl EngineHost {
                     self.scene
                         .tilemaps
                         .push(project_tilemap(tilemap, translation));
+                }
+            }
+
+            // Heightfield terrain (P10.1) projects into the render scene's single
+            // terrain slot; the terrain pass assembles clipmap LOD rings each
+            // frame. First visible, non-empty terrain wins (multi-terrain merge is
+            // a follow-up). Version = doc version so height textures re-upload on
+            // any document change.
+            if self.scene.terrain.is_none() {
+                if let Some(terrain) = w.get::<Terrain>(entity) {
+                    if visible && !terrain.data.is_empty() {
+                        let translation = w
+                            .get::<GlobalTransform>(entity)
+                            .map(|g| g.translation())
+                            .unwrap_or(DVec3::ZERO);
+                        self.scene.terrain =
+                            Some(project_terrain(terrain, translation, doc.version()));
+                    }
                 }
             }
 
@@ -666,6 +685,33 @@ fn project_tilemap(tilemap: &Tilemap, translation: DVec3) -> RenderTilemap {
         })
         .collect();
     RenderTilemap { params, chunks }
+}
+
+/// Project an ECS [`Terrain`] (+ its world translation) into a [`RenderTerrain`].
+///
+/// Each authored tile becomes a [`RenderTerrainTile`] with its `f64` origin
+/// offset by the entity's world translation (so the terrain follows its
+/// transform), its `f32` height buffer copied out of the paged data, and its
+/// height bounds precomputed for the terrain pass's per-tile frustum cull. Tiles
+/// arrive in the paged data's `BTreeMap` order → deterministic upload/draw order.
+fn project_terrain(terrain: &Terrain, translation: DVec3, version: u64) -> RenderTerrain {
+    let data = &terrain.data;
+    let res = data.tile_resolution();
+    let tiles = data
+        .tiles()
+        .map(|(&coord, tile)| RenderTerrainTile {
+            coord,
+            origin: tile.origin + translation,
+            heights: tile.heights().to_vec(),
+            height_bounds: tile.height_bounds(),
+        })
+        .collect();
+    RenderTerrain {
+        tile_resolution: res,
+        meters_per_sample: data.meters_per_sample(),
+        tiles,
+        version,
+    }
 }
 
 /// Project an ECS [`Light2D`] (+ world position) into a renderer 2D light.
