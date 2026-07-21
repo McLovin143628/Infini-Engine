@@ -16,6 +16,7 @@ pub mod bundle;
 pub mod cook;
 pub mod error;
 pub mod manifest;
+pub mod targets;
 
 pub use bundle::{export, ExportOptions, ExportReport, ExportTarget, WindowConfig};
 pub use cook::{
@@ -23,3 +24,7 @@ pub use cook::{
 };
 pub use error::{CookError, Result};
 pub use manifest::{CookManifest, MANIFEST_FILE, MANIFEST_SCHEMA_VERSION};
+pub use targets::{
+    export_android, export_web, AndroidExportOptions, AndroidExportReport, WebExportOptions,
+    WebExportReport,
+};

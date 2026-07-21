@@ -874,6 +874,25 @@ impl PackLevelSource {
         })
     }
 
+    /// Build a pack source from an already-loaded [`PackReader`] — the path the
+    /// **web player** takes: it fetches the pack bytes over HTTP (no filesystem),
+    /// parses them with [`PackReader::from_bytes`], and boots the lowest-GUID
+    /// `Level` entry (there is no sibling `manifest.toml` to name a root, so v1
+    /// uses that deterministic fallback — the same rule `open` falls back to).
+    /// `label` names the world (the window title).
+    pub fn from_reader(reader: PackReader, label: impl Into<String>) -> Result<Self, String> {
+        let root_level = reader
+            .index()
+            .find(|e| e.kind == AssetKind::Level)
+            .map(|e| e.guid)
+            .ok_or_else(|| "pack has no level to boot".to_string())?;
+        Ok(Self {
+            reader,
+            root_level,
+            label: label.into(),
+        })
+    }
+
     /// Decode every `.inf_act` blueprint class stored in the pack (GUID order).
     pub fn actor_classes(&self) -> Result<Vec<BlueprintClass>, String> {
         let mut out = Vec::new();

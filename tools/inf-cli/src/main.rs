@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use inf_asset::{AssetId, PackReader};
-use inf_packager::{cook, export, CookOptions, ExportOptions};
+use inf_packager::{
+    cook, export, export_android, export_web, AndroidExportOptions, CookOptions, ExportOptions,
+    WebExportOptions,
+};
 use inf_project::{Project, ProjectTemplate};
 
 fn main() -> ExitCode {
@@ -42,7 +45,7 @@ fn print_help() {
          USAGE:\n  \
              inf new <name> [--template <slug>] [--dir <path>]\n  \
              inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]\n  \
-             inf export --project <dir> [--out <dir>] [--target current] [--player-bin <path>]\n  \
+             inf export --project <dir> [--out <dir>] [--target current|web|android] [--player-bin <path>]\n  \
              inf pack ls <pack.inf_pack>\n  \
              inf --version\n\n\
          TEMPLATES:\n  \
@@ -199,6 +202,7 @@ fn cmd_export(args: &[String]) -> ExitCode {
     let mut project: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
     let mut player_bin: Option<PathBuf> = None;
+    let mut target = String::from("current");
 
     let mut i = 0;
     while i < args.len() {
@@ -235,15 +239,10 @@ fn cmd_export(args: &[String]) -> ExitCode {
             }
             "--target" => {
                 i += 1;
-                match args.get(i).map(String::as_str) {
-                    // Only the host target is implemented; accept it explicitly.
-                    Some("current") => {}
-                    Some(other) => {
-                        eprintln!("unsupported --target '{other}' (only 'current' is implemented)");
-                        return ExitCode::FAILURE;
-                    }
+                match args.get(i) {
+                    Some(t) => target = t.clone(),
                     None => {
-                        eprintln!("--target needs a value (current)");
+                        eprintln!("--target needs a value (current | web | android)");
                         return ExitCode::FAILURE;
                     }
                 }
@@ -258,19 +257,46 @@ fn cmd_export(args: &[String]) -> ExitCode {
 
     let Some(project) = project else {
         eprintln!(
-            "usage: inf export --project <dir> [--out <dir>] [--target current] [--player-bin <path>]"
+            "usage: inf export --project <dir> [--out <dir>] [--target current|web|android] [--player-bin <path>]"
         );
         return ExitCode::FAILURE;
     };
 
-    let opts = ExportOptions {
-        out_dir: out,
-        player_bin,
-        ..Default::default()
-    };
-    match export(&project, &opts) {
-        Ok(report) => {
-            print!("{}", report.render());
+    match target.as_str() {
+        "current" => {
+            let opts = ExportOptions {
+                out_dir: out,
+                player_bin,
+                ..Default::default()
+            };
+            report_export(export(&project, &opts).map(|r| r.render()))
+        }
+        // Web (P14.2): cook + wasm bundle skeleton; runs the two-step wasm build
+        // when the toolchain is present, else leaves WEB_BUILD.txt instructions.
+        "web" => {
+            let opts = WebExportOptions {
+                out_dir: out,
+                run_toolchain: true,
+            };
+            report_export(export_web(&project, &opts).map(|r| r.render()))
+        }
+        // Android (P14.1): cook + cargo-ndk/APK build steps (NDK required).
+        "android" => {
+            let opts = AndroidExportOptions { out_dir: out };
+            report_export(export_android(&project, &opts).map(|r| r.render()))
+        }
+        other => {
+            eprintln!("unsupported --target '{other}' (current | web | android)");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Print an export report or its error.
+fn report_export(result: Result<String, inf_packager::CookError>) -> ExitCode {
+    match result {
+        Ok(rendered) => {
+            print!("{rendered}");
             ExitCode::SUCCESS
         }
         Err(e) => {

@@ -42,13 +42,35 @@ pub enum GamepadAxis {
     RightZ,
 }
 
+/// The lifecycle phase of a touch point (P14.1). Mirrors the winit / W3C
+/// `TouchPhase` set so a platform's raw touch stream maps 1:1 onto
+/// [`InputEvent::Touch`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum TouchPhase {
+    /// A finger touched down.
+    Started,
+    /// A tracked finger moved.
+    Moved,
+    /// A finger lifted cleanly.
+    Ended,
+    /// The touch was cancelled by the system (e.g. a gesture took over).
+    Cancelled,
+}
+
 /// A raw input event fed to [`InputState::apply`](crate::InputState::apply). The
 /// editor's Simulate loop and the runtime both translate their platform events
-/// into this shape; the gamepad poller produces the gamepad variants.
+/// into this shape; the gamepad poller produces the gamepad variants; the touch
+/// platforms (Android / iOS / web) produce [`Touch`](InputEvent::Touch).
 ///
 /// Keyboard keys use the **`KeyboardEvent.code`** convention (physical, layout-
 /// independent — `"KeyW"`, `"Space"`, `"ArrowLeft"`), the same strings the editor
 /// Simulate mapping already speaks (`editor/studio/src/stores/simStore.ts`).
+///
+/// [`Touch`](InputEvent::Touch) events are **not** map sources on their own —
+/// [`InputState`](crate::InputState) ignores them. On-screen controls
+/// ([`TouchControls`](crate::touch::TouchControls)) translate them into the
+/// gamepad axis/button variants that the [`InputMap`](crate::InputMap) already
+/// resolves, so touch reuses the whole action/axis pipeline.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
     /// A keyboard key changed state. `code` is a `KeyboardEvent.code` string.
@@ -60,6 +82,14 @@ pub enum InputEvent {
     },
     /// A gamepad analog axis moved. `value` is roughly `[-1, 1]`.
     GamepadAxis { axis: GamepadAxis, value: f32 },
+    /// A touch point changed. `id` identifies the finger across its lifetime;
+    /// `position` is in the same coordinate space the on-screen controls were
+    /// authored in (physical pixels, origin top-left, in the player).
+    Touch {
+        id: u64,
+        phase: TouchPhase,
+        position: [f32; 2],
+    },
 }
 
 /// A source that can trigger a digital **action**.

@@ -33,6 +33,14 @@ pub mod log;
 pub mod render;
 pub mod runtime_sim;
 pub mod vmesh;
+// The browser (wasm32) entry point + fetch/run glue (P14.2). Gated to wasm so
+// the desktop build never names wasm-bindgen/web-sys.
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+// The Android NativeActivity entry (`android_main`) (P14.1). Gated to Android;
+// builds with the NDK (cargo-ndk), device-verified (see docs/android-player.md).
+#[cfg(target_os = "android")]
+pub mod android;
 pub mod window;
 
 use std::panic::AssertUnwindSafe;
@@ -113,21 +121,28 @@ fn build_world(args: &Args) -> Result<BuiltWorld, String> {
                 .with_audio(audio);
             level::load(&source, &builder)
         }
-        WorldChoice::Pack(path) => {
-            let source = PackLevelSource::open(path)?;
-            let actors = source.actor_classes()?;
-            let by_guid = source.blueprint_classes_by_guid()?;
-            let pcgs = source.pcg_payloads_by_guid()?;
-            let (skeletons, clips, machines) = source.anim_assets()?;
-            let audio = source.audio_assets()?;
-            let builder = InfSceneWorldBuilder::with_defaults(actors)
-                .with_bindings(by_guid)
-                .with_pcgs(pcgs)
-                .with_anim_assets(skeletons, clips, machines)
-                .with_audio(audio);
-            level::load(&source, &builder)
-        }
+        WorldChoice::Pack(path) => build_world_from_pack(&PackLevelSource::open(path)?),
     }
+}
+
+/// Build a [`BuiltWorld`] from an opened cooked-pack source — shared by the
+/// `--pack` desktop boot ([`build_world`]) and the web fetch path
+/// ([`web`](crate::web)). Decodes the pack's actor classes, PCG graphs, anim
+/// assets, and audio, keys them by GUID, and runs the root `.inf_lvl` bytes
+/// through the same [`InfSceneWorldBuilder`] every boot path uses (so a pack runs
+/// identically however it was loaded).
+pub fn build_world_from_pack(source: &PackLevelSource) -> Result<BuiltWorld, String> {
+    let actors = source.actor_classes()?;
+    let by_guid = source.blueprint_classes_by_guid()?;
+    let pcgs = source.pcg_payloads_by_guid()?;
+    let (skeletons, clips, machines) = source.anim_assets()?;
+    let audio = source.audio_assets()?;
+    let builder = InfSceneWorldBuilder::with_defaults(actors)
+        .with_bindings(by_guid)
+        .with_pcgs(pcgs)
+        .with_anim_assets(skeletons, clips, machines)
+        .with_audio(audio);
+    level::load(source, &builder)
 }
 
 /// Headless CI path: no window/GPU. Run `--run-frames N` fixed steps of the world

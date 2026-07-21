@@ -73,14 +73,21 @@ impl PlayerRenderHost {
         // post effects). The decision is logged by `detect_tier`.
         let base = RenderSettings::default();
         let tier = detect_tier(&gpu, &base);
-        let settings = tier.apply(RenderSettings {
-            // Request the meshlet path; the tier clamps it down on Medium/Low.
+        // Desktop requests the meshlet path (the tier clamps it on Medium/Low);
+        // mobile/web (P14.1) starts from the clamped `mobile_default` profile
+        // instead — no vgeom, no SSAO/GI/TAA/bloom/shadows — then the live-adapter
+        // tier applies on top (Low still drops what little remains).
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        let requested = inf_render::RenderTier::mobile_default();
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        let requested = RenderSettings {
             vgeom: inf_render::VgeomSettings {
                 enabled: true,
                 ..base.vgeom
             },
             ..base
-        });
+        };
+        let settings = tier.apply(requested);
         let vgeom_enabled = settings.vgeom.enabled;
         renderer.set_settings(settings);
 

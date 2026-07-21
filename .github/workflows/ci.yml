@@ -85,6 +85,46 @@ jobs:
           "./target/debug/inf-player$EXE" --pack "$proj/Build" --headless --run-frames 300 --assert-exit
           rm -rf "$proj"
 
+  wasm-check:
+    name: Web player (wasm32) + Android (best-effort)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (keep the Android NDK)
+        run: |
+          # Reclaim space but KEEP /usr/local/lib/android — the Android NDK the
+          # best-effort cross-check below needs.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The real gate (P14.2): the standalone player must cross-compile for the
+      # browser's WebGPU target. getrandom needs its wasm backend selected.
+      - name: Web player — cargo check (wasm32 + WebGPU)
+        env:
+          RUSTFLAGS: '-D warnings --cfg getrandom_backend="wasm_js"'
+        run: cargo check --target wasm32-unknown-unknown -p inf-player
+
+      # Best-effort (P14.1): the Android player's cfg(target_os="android") paths.
+      # A plain `cargo check` cannot compile the C deps (zstd-sys/meshopt) without
+      # the NDK's clang; cargo-ndk wires the NDK toolchain (the runner preinstalls
+      # it). NON-BLOCKING — Android's real proof is a device build (docs/android-player.md).
+      - name: Android player — cargo-ndk check (best-effort, non-blocking)
+        continue-on-error: true
+        run: |
+          cargo install cargo-ndk --locked || { echo "cargo-ndk unavailable — skipping"; exit 0; }
+          cargo ndk -t arm64-v8a check -p inf-player \
+            || echo "Android check failed (NDK env unavailable) — non-blocking."
+
   deny:
     name: cargo-deny (advisories, licenses, bans, sources)
     runs-on: ubuntu-latest

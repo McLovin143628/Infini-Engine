@@ -28,6 +28,9 @@ pub mod kind;
 pub mod pack;
 pub mod payload;
 pub mod sidecar;
+// The `notify`-backed file watcher is host-only — there is no browser file
+// watcher, and the wasm player streams its pack over HTTP instead (P14.2).
+#[cfg(not(target_arch = "wasm32"))]
 pub mod watch;
 
 pub use data::{CellValue, EnumAsset, FieldDef, FieldType, StructAsset, TableAsset};
@@ -40,4 +43,5 @@ pub use kind::{importable_source_kind, AssetKind};
 pub use pack::{PackEntry, PackReader, PackWriter, PACK_FORMAT_VERSION, PACK_MAGIC};
 pub use payload::{decode, encode, AssetPayload};
 pub use sidecar::{is_sidecar, sidecar_path, AssetSidecar, SIDECAR_SCHEMA_VERSION};
+#[cfg(not(target_arch = "wasm32"))]
 pub use watch::{AssetChange, AssetWatcher};

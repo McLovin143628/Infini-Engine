@@ -68,7 +68,9 @@ const ENTRY_LEN: u64 = 60;
 
 /// zstd compression level used for cooked blobs. Cook is an offline step, so a
 /// high level trades build time for a smaller ship. Determinism is independent
-/// of the level; this is a pure size/speed knob (tunable later).
+/// of the level; this is a pure size/speed knob (tunable later). Only the native
+/// encoder uses it — the wasm build decodes only (see `zstd_decode`).
+#[cfg(not(target_arch = "wasm32"))]
 const ZSTD_LEVEL: i32 = 19;
 
 /// Payloads at least this large are considered for compression (below it the
@@ -269,14 +271,50 @@ fn maybe_compress(payload: &[u8]) -> Result<(Vec<u8>, bool)> {
     if payload.len() < COMPRESS_THRESHOLD {
         return Ok((payload.to_vec(), false));
     }
-    let packed = zstd::encode_all(payload, ZSTD_LEVEL)
-        .map_err(|e| AssetError::Pack(format!("zstd: {e}")))?;
+    let packed = zstd_encode(payload)?;
     if packed.len() < payload.len() {
         Ok((packed, true))
     } else {
         // Incompressible: store raw so we never inflate.
         Ok((payload.to_vec(), false))
     }
+}
+
+/// zstd encode — native uses the C `zstd` at [`ZSTD_LEVEL`]; wasm cannot encode
+/// (packs are written by the cook, which never runs in a browser), so this is an
+/// error there. Keeping it a function (not an inline call) is what lets the
+/// wasm build compile without pulling zstd-sys.
+#[cfg(not(target_arch = "wasm32"))]
+fn zstd_encode(payload: &[u8]) -> Result<Vec<u8>> {
+    zstd::encode_all(payload, ZSTD_LEVEL).map_err(|e| AssetError::Pack(format!("zstd: {e}")))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn zstd_encode(_payload: &[u8]) -> Result<Vec<u8>> {
+    Err(AssetError::Pack(
+        "pack writing (zstd encode) is not supported on wasm — packs are cooked on desktop".into(),
+    ))
+}
+
+/// zstd decode — native uses the C `zstd`; wasm uses the pure-Rust `ruzstd`
+/// streaming decoder (the browser player reads packs it fetched over HTTP). Both
+/// produce identical bytes, so the content-hash integrity check downstream is
+/// backend-agnostic.
+#[cfg(not(target_arch = "wasm32"))]
+fn zstd_decode(stored: &[u8]) -> Result<Vec<u8>> {
+    zstd::decode_all(stored).map_err(|e| AssetError::Pack(format!("zstd: {e}")))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn zstd_decode(stored: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(stored)
+        .map_err(|e| AssetError::Pack(format!("ruzstd init: {e}")))?;
+    let mut out = Vec::new();
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|e| AssetError::Pack(format!("ruzstd: {e}")))?;
+    Ok(out)
 }
 
 /// A read-only view over a `.inf_pack` (whole-file buffered).
@@ -393,7 +431,7 @@ impl PackReader {
         let start = e.offset as usize;
         let stored = &self.data[start..start + e.stored_len as usize];
         let payload = if e.compressed {
-            zstd::decode_all(stored).map_err(|err| {
+            zstd_decode(stored).map_err(|err| {
                 AssetError::Pack(format!("zstd decode {guid}: {err} (corrupt pack?)"))
             })?
         } else {

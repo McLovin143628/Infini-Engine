@@ -29,6 +29,7 @@
 
 mod map;
 mod state;
+pub mod touch;
 mod types;
 
 #[cfg(feature = "gamepad")]
@@ -36,4 +37,5 @@ pub mod poller;
 
 pub use map::InputMap;
 pub use state::InputState;
-pub use types::{ActionSource, AxisSource, GamepadAxis, GamepadButton, InputEvent};
+pub use touch::{Rect, TouchButton, TouchControls, VirtualStick};
+pub use types::{ActionSource, AxisSource, GamepadAxis, GamepadButton, InputEvent, TouchPhase};

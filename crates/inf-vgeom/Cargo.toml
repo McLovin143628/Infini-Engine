@@ -15,14 +15,20 @@ inf-asset = { workspace = true }
 # loop (§2.5); parallel_map's deterministic in-order collect keeps the build
 # reproducible regardless of pool size.
 inf-core = { workspace = true }
-# meshoptimizer: clusterization (build_meshlets), simplification with border locks
-# (simplify_with_locks), and cluster bounds/cones. Already pinned once in the
-# workspace for inf-mesh's import path; additive here.
-meshopt = { workspace = true }
 serde = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+# meshoptimizer: clusterization (build_meshlets), simplification with border locks
+# (simplify_with_locks), and cluster bounds/cones. Already pinned once in the
+# workspace for inf-mesh's import path; additive here. It builds meshoptimizer's
+# C++ via `cc`, which needs a C++ toolchain — so it is HOST-ONLY: the meshlet DAG
+# is BUILT at cook time (the `build` module), never in the browser player, which
+# only LOADS pre-cooked `.inf_vmesh` DAGs. Gating it out keeps the wasm player
+# free of any C/C++ toolchain requirement (P14.2).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+meshopt = { workspace = true }
 
 [dev-dependencies]
 inf-asset = { workspace = true }

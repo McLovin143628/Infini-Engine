@@ -97,6 +97,10 @@ impl InputState {
             InputEvent::GamepadAxis { axis, value } => {
                 self.axes_raw.insert(*axis, *value);
             }
+            // Raw touch is not a map source on its own — on-screen controls
+            // (`crate::touch::TouchControls`) translate it into the gamepad
+            // events above before it reaches the resolver, so here it is ignored.
+            InputEvent::Touch { .. } => {}
         }
     }
 

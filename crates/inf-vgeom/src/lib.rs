@@ -46,9 +46,13 @@
 //! * **Per-material meshlets** — v1 flattens all submeshes into one geometry;
 //!   material-slot tagging per meshlet is a follow-up.
 
+// The meshlet DAG BUILDER (uses meshopt's C++). Cook-time only — the browser
+// player loads pre-cooked DAGs, so `build` (and its `meshopt` dep) is host-only.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod build;
 pub mod model;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use build::{build_vgeom, BuildParams};
 pub use model::{
     pick_classic_level, ClassicLod, Group, LevelRange, Meshlet, VgeomMesh, VgeomVertex,

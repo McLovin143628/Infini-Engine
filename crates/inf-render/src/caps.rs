@@ -76,6 +76,40 @@ impl RenderTier {
         }
         settings
     }
+
+    /// The mobile baseline render profile (P14.1) — the [`RenderSettings`] a
+    /// phone / tablet / web player *starts from*, before the live adapter tier is
+    /// applied on top. Everything a mobile GPU budget cannot afford is off: the
+    /// GPU-driven virtualized-geometry meshlet path, SSAO, GI, TAA, and bloom;
+    /// shadows are off too.
+    ///
+    /// **Honest note on "shadow res 1024":** the cascaded-shadow-map resolution is
+    /// a *compile-time* constant ([`crate::csm::SHADOW_RESOLUTION`]), not a
+    /// runtime knob, so this preset cannot shrink the shadow map — it turns
+    /// shadows **off** on mobile instead (the safe, tile-GPU-friendly choice). A
+    /// runtime shadow-resolution setting (so mobile could keep low-res shadows) is
+    /// a documented follow-up. Likewise MSAA is a fixed 4× in the renderer, not a
+    /// settings field; a mobile 1×/2× MSAA knob is the same follow-up.
+    ///
+    /// The player applies this when built for `target_os = "android"` or
+    /// `target_arch = "wasm32"`, unless a [`RenderSettings::tier_override`] forces
+    /// a specific tier.
+    pub fn mobile_default() -> RenderSettings {
+        Self::clamp_mobile(RenderSettings::default())
+    }
+
+    /// Clamp a caller's requested `settings` down to the mobile ceiling. Like
+    /// [`apply`](RenderTier::apply) it **only turns features off, never on**, so a
+    /// project that ships custom settings still gets a mobile-safe profile.
+    pub fn clamp_mobile(mut settings: RenderSettings) -> RenderSettings {
+        settings.vgeom.enabled = false;
+        settings.ssao.enabled = false;
+        settings.gi.enabled = false;
+        settings.taa = false;
+        settings.bloom.enabled = false;
+        settings.shadows.enabled = false;
+        settings
+    }
 }
 
 /// The portable subset of adapter capabilities the tier decision reads. Captured
@@ -252,6 +286,41 @@ mod tests {
         let l = RenderTier::Low.apply(s2);
         assert!(!l.vgeom.enabled && !l.bloom.enabled && !l.ssao.enabled);
         assert!(!l.taa && !l.shadows.enabled && !l.gi.enabled);
+    }
+
+    #[test]
+    fn mobile_default_disables_the_expensive_features() {
+        // The P14.1 preset: no vgeom / SSAO / GI / TAA / bloom / shadows.
+        let m = RenderTier::mobile_default();
+        assert!(!m.vgeom.enabled);
+        assert!(!m.ssao.enabled);
+        assert!(!m.gi.enabled);
+        assert!(!m.taa);
+        assert!(!m.bloom.enabled);
+        assert!(!m.shadows.enabled);
+        // Still a valid HDR profile (the base render path is unchanged).
+        assert!(m.hdr);
+    }
+
+    #[test]
+    fn clamp_mobile_only_turns_features_off() {
+        // A caller that requested everything on gets a mobile-safe profile.
+        let mut maxed = RenderSettings::default();
+        maxed.vgeom.enabled = true;
+        maxed.ssao.enabled = true;
+        maxed.gi.enabled = true;
+        maxed.taa = true;
+        maxed.bloom.enabled = true;
+        maxed.shadows.enabled = true;
+        let clamped = RenderTier::clamp_mobile(maxed);
+        assert!(!clamped.vgeom.enabled && !clamped.ssao.enabled && !clamped.gi.enabled);
+        assert!(!clamped.taa && !clamped.bloom.enabled && !clamped.shadows.enabled);
+        // Idempotent + equals the preset when applied to defaults.
+        assert_eq!(RenderTier::clamp_mobile(clamped), clamped);
+        assert_eq!(
+            RenderTier::mobile_default(),
+            RenderTier::clamp_mobile(RenderSettings::default())
+        );
     }
 
     #[test]

@@ -74,6 +74,42 @@ windows = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# ── Web target (P14.2): the wasm32 player runs in the browser over WebGPU. These
+# deps only apply to `wasm32-unknown-unknown`; the desktop build is unchanged.
+# Cargo features unify across the tree, so enabling `uuid`'s `js` randomness
+# source here fixes every transitive `uuid` v4 user on wasm. `wgpu`'s `webgpu`
+# backend + `winit`'s web canvas replace the native surface path.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+uuid = { workspace = true, features = ["js"] }
+wgpu = { workspace = true, features = ["webgpu"] }
+# getrandom is a transitive dep (uuid/rand); force its browser backend on wasm.
+getrandom = { version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+# wasm-bindgen entry point + browser bindings for `start_player`.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Response",
+    "console",
+] }
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+# std::time::Instant panics on wasm; web-time reads performance.now() so the
+# fixed-step accumulator actually ticks in the browser.
+web-time = "1"
+
+# ── Android target (P14.1): winit needs an activity backend on Android. The
+# `android-native-activity` feature pulls the `android-activity` NativeActivity
+# glue that calls our `#[no_mangle] android_main` (see src/android.rs). Building
+# the shared object requires the Android NDK (via `cargo-ndk`); see
+# docs/android-player.md. Only applies to `*-linux-android` targets.
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { workspace = true, features = ["android-native-activity"] }
+
 [dev-dependencies]
 inf-editor-core = { workspace = true }
 # The cook-and-run + export-and-run integration tests drive the real cook pipeline

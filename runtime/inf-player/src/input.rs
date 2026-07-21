@@ -16,9 +16,15 @@ use inf_input::{InputMap, InputState};
 use crate::runtime_sim::RuntimeInput;
 
 /// The default platformer bindings. Actions match the sample Coyote graph
-/// (`left`, `right`, `jump`); `up`/`down` and a `move_x` axis round out the
-/// vocabulary for other content.
+/// (`left`, `right`, `jump`); `up`/`down` and a `move_x`/`move_y` axis round out
+/// the vocabulary for other content.
+///
+/// Gamepad + touch sources are bound alongside the keyboard: the South face
+/// button → `jump`, the left stick → `move_x`/`move_y`. On touch platforms the
+/// on-screen [`default_touch_controls`] emits exactly these gamepad events, so
+/// touch reuses the same bindings with no separate mapping.
 pub fn default_map() -> InputMap {
+    use inf_input::{GamepadAxis, GamepadButton};
     let mut m = InputMap::new();
     m.bind_key("left", "KeyA")
         .bind_key("left", "ArrowLeft")
@@ -31,11 +37,40 @@ pub fn default_map() -> InputMap {
         .bind_key("jump", "Space")
         .bind_key("jump", "KeyW")
         .bind_key("jump", "ArrowUp")
+        .bind_button("jump", GamepadButton::South)
         .bind_axis_key("move_x", "KeyD", 1.0)
         .bind_axis_key("move_x", "ArrowRight", 1.0)
         .bind_axis_key("move_x", "KeyA", -1.0)
-        .bind_axis_key("move_x", "ArrowLeft", -1.0);
+        .bind_axis_key("move_x", "ArrowLeft", -1.0)
+        .bind_axis_stick("move_x", GamepadAxis::LeftStickX, 1.0)
+        // Screen/stick y is +down; invert so "up = forward/positive".
+        .bind_axis_stick("move_y", GamepadAxis::LeftStickY, -1.0);
     m
+}
+
+/// The default on-screen touch layout (P14.1) for touch platforms (web /
+/// Android): a **left virtual stick** driving `move_x`/`move_y` (via the left
+/// gamepad stick) and a **right jump button** (the South face button). Both
+/// primitives are demonstrated; a game with a different control scheme (e.g. the
+/// 2D sample's digital `left`/`right`) builds its own [`TouchControls`] with
+/// `TouchButton`s bound to the D-pad.
+///
+/// **Honest layout note:** rects/centres are in physical pixels at a landscape
+/// ~1280×720 reference; a resolution-/safe-area-aware layout is a follow-up.
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+pub fn default_touch_controls() -> inf_input::TouchControls {
+    use inf_input::{GamepadAxis, GamepadButton, Rect, TouchButton, TouchControls, VirtualStick};
+    let mut c = TouchControls::new();
+    c.add_stick(
+        GamepadAxis::LeftStickX,
+        GamepadAxis::LeftStickY,
+        VirtualStick::new([200.0, 520.0], 140.0),
+    );
+    c.add_button(
+        GamepadButton::South,
+        TouchButton::new(Rect::new([1080.0, 460.0], [1240.0, 620.0])),
+    );
+    c
 }
 
 /// Load an [`InputMap`] from `input.toml` beside `level_path` if present, else

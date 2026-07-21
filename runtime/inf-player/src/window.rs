@@ -15,7 +15,12 @@
 use std::io::Write;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
+// std::time::Instant panics on wasm32-unknown-unknown; web-time reads
+// performance.now() so the fixed-step accumulator ticks in the browser.
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use glam::{DVec3, Vec3};
 use winit::application::ApplicationHandler;
@@ -90,6 +95,14 @@ pub struct PlayerApp {
     /// the render host so asset meshes render real geometry. Empty for
     /// primitive-only / PIE worlds.
     vmeshes: Arc<VmeshRegistry>,
+    /// The HTML canvas the winit window binds to (web only). Set by [`run_web`];
+    /// applied to the window attributes in `resumed`.
+    #[cfg(target_arch = "wasm32")]
+    canvas: Option<web_sys::HtmlCanvasElement>,
+    /// On-screen touch controls (a virtual gamepad). Present on touch platforms
+    /// (web/Android); `None` on desktop. Winit `Touch` events route through it.
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    touch: inf_input::TouchControls,
 }
 
 impl PlayerApp {
@@ -111,6 +124,10 @@ impl PlayerApp {
             pie: None,
             paused: false,
             vmeshes,
+            #[cfg(target_arch = "wasm32")]
+            canvas: None,
+            #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+            touch: crate::input::default_touch_controls(),
         }
     }
 
@@ -254,6 +271,13 @@ impl ApplicationHandler for PlayerApp {
         let attrs = Window::default_attributes()
             .with_title(&self.title)
             .with_inner_size(PhysicalSize::new(self.width, self.height));
+        // Web: bind the winit window to the page's <canvas> (the WebGPU surface
+        // is then created from it exactly like a native window).
+        #[cfg(target_arch = "wasm32")]
+        let attrs = {
+            use winit::platform::web::WindowAttributesExtWebSys;
+            attrs.with_canvas(self.canvas.clone())
+        };
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -326,6 +350,28 @@ impl ApplicationHandler for PlayerApp {
                     }
                 }
             }
+            // Touch platforms (web / Android): route winit touches through the
+            // on-screen virtual gamepad, which emits synthetic gamepad events the
+            // InputMap resolves — so touch drives the same actions/axes as a pad.
+            #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+            WindowEvent::Touch(t) => {
+                use winit::event::TouchPhase as WinitTouchPhase;
+                let phase = match t.phase {
+                    WinitTouchPhase::Started => inf_input::TouchPhase::Started,
+                    WinitTouchPhase::Moved => inf_input::TouchPhase::Moved,
+                    WinitTouchPhase::Ended => inf_input::TouchPhase::Ended,
+                    WinitTouchPhase::Cancelled => inf_input::TouchPhase::Cancelled,
+                };
+                let touch_ev = InputEvent::Touch {
+                    id: t.id,
+                    phase,
+                    position: [t.location.x as f32, t.location.y as f32],
+                };
+                let synth = self.touch.process(&[touch_ev]);
+                if let Some(live) = self.live.as_mut() {
+                    live.pending.extend(synth);
+                }
+            }
             WindowEvent::RedrawRequested => self.frame(event_loop),
             _ => {}
         }
@@ -383,4 +429,62 @@ pub fn run_pie(
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("run_app: {e}"))
+}
+
+/// Run the player on Android (P14.1): build the winit event loop from the
+/// `AndroidApp` handed to `android_main`, then run the shared [`PlayerApp`]
+/// (touch routing + mobile render tier are cfg'd on for `target_os = "android"`).
+/// Needs the NDK to build (`cargo-ndk`); like every GPU/device path it is
+/// structured for compilation and device-verified, not run in CI. See
+/// `docs/android-player.md`.
+#[cfg(target_os = "android")]
+pub fn run_android(
+    android_app: winit::platform::android::activity::AndroidApp,
+    title: String,
+    sim: RuntimeSim,
+    map: InputMap,
+) -> Result<(), String> {
+    use winit::platform::android::EventLoopBuilderExtAndroid;
+    let event_loop = EventLoop::builder()
+        .with_android_app(android_app)
+        .build()
+        .map_err(|e| format!("event loop: {e}"))?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    // Portrait-ish default; the surface reconfigures to the real window size on
+    // the first `Resized`.
+    let mut app = PlayerApp::new(title, 1080, 1920, sim, map, Arc::new(VmeshRegistry::new()));
+    event_loop
+        .run_app(&mut app)
+        .map_err(|e| format!("run_app: {e}"))
+}
+
+/// Run the player in the browser (P14.2): bind to `canvas`, then hand the app to
+/// winit's web event loop. Unlike the desktop [`run`], `spawn_app` **returns
+/// immediately** — the loop is driven by the browser's `requestAnimationFrame`,
+/// so the caller (the wasm entry) must not block afterwards. Needs WebGPU; like
+/// every GPU path it is compile-checked in CI and human-verified in a real
+/// browser.
+#[cfg(target_arch = "wasm32")]
+pub fn run_web(
+    title: String,
+    canvas: web_sys::HtmlCanvasElement,
+    sim: RuntimeSim,
+    map: InputMap,
+) -> Result<(), String> {
+    use winit::platform::web::EventLoopExtWebSys;
+    let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let width = canvas.width().max(1);
+    let height = canvas.height().max(1);
+    let mut app = PlayerApp::new(
+        title,
+        width,
+        height,
+        sim,
+        map,
+        Arc::new(VmeshRegistry::new()),
+    );
+    app.canvas = Some(canvas);
+    event_loop.spawn_app(app);
+    Ok(())
 }
