@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use inf_asset::{AssetChange, AssetId, AssetWatcher};
+use inf_asset::{AssetChange, AssetId, AssetKind, AssetWatcher};
 use inf_editor_core::assets::{data, snapshot, AssetProject, ImportProgress, ImportQueue};
 use inf_editor_core::ipc::{
     AssetChanged, AssetRefDto, AssetSnapshot, DataAssetDto, DeleteResult, ImportEventDto,
@@ -62,13 +62,24 @@ impl AssetState {
         })
     }
 
-    /// Load a material asset's PBR parameters (Content-Drawer apply-by-drag,
-    /// P7.1). `None` if the asset is missing or not a material.
+    /// Load a material's resolved PBR parameters (Content-Drawer apply-by-drag,
+    /// P7.1). A `MaterialInstance` (P7.4) is resolved against its parent chain.
+    /// `None` if the asset is missing or not a material/instance.
     pub fn load_material(&self, id: AssetId) -> Option<MaterialAsset> {
         let guard = self.inner.lock().ok()?;
         let inner = guard.as_ref()?;
         let proj = inner.project.lock().ok()?;
-        proj.load_payload::<MaterialAsset>(id).ok()
+        resolve_material(&proj, id, 0)
+    }
+
+    /// Create a new material instance of `parent` (P7.4). Returns the new id.
+    pub fn create_material_instance(&self, parent: AssetId, name: &str) -> Result<AssetId, String> {
+        self.with_project(|proj| {
+            let inst = inf_material::MaterialInstance::new(parent);
+            let dir = proj.content_dir("materials").map_err(|e| e.to_string())?;
+            proj.write_asset(&dir, name, &inst, None, inst.dependencies(), None)
+                .map_err(|e| e.to_string())
+        })
     }
 
     fn with_project<R>(
@@ -387,6 +398,24 @@ pub async fn asset_create(
     Ok(id.to_string())
 }
 
+/// Create a material instance of `parentId` (P7.4). Returns the new GUID.
+#[tauri::command]
+pub async fn asset_create_material_instance(
+    app: AppHandle,
+    parent_id: String,
+    name: Option<String>,
+    state: State<'_, AssetState>,
+) -> Result<String, String> {
+    let pid = parent_id.parse::<AssetId>().map_err(|e| e.to_string())?;
+    let base = state
+        .asset_name(pid)
+        .unwrap_or_else(|| "Material".to_string());
+    let name = name.unwrap_or_else(|| format!("{base} Instance"));
+    let id = state.create_material_instance(pid, &name)?;
+    emit_changed(&app, &state);
+    Ok(id.to_string())
+}
+
 /// Load a data asset (struct/enum/table) for editing. `null` if not a data kind.
 #[tauri::command]
 pub async fn asset_data(
@@ -504,6 +533,25 @@ pub async fn asset_set_tags(
     state.with_project(|p| p.set_tags(id, tags).map_err(|e| e.to_string()))?;
     emit_changed(&app, &state);
     Ok(())
+}
+
+/// Resolve a material or material-instance asset to concrete PBR parameters,
+/// following the instance→parent chain (depth-guarded against cycles).
+fn resolve_material(proj: &AssetProject, id: AssetId, depth: u32) -> Option<MaterialAsset> {
+    if depth > 16 {
+        return None; // pathological instance chain
+    }
+    match proj.db().get(id)?.kind() {
+        AssetKind::Material => proj.load_payload::<MaterialAsset>(id).ok(),
+        AssetKind::MaterialInstance => {
+            let inst = proj
+                .load_payload::<inf_material::MaterialInstance>(id)
+                .ok()?;
+            let parent = resolve_material(proj, inst.parent, depth + 1)?;
+            Some(inst.resolve(&parent))
+        }
+        _ => None,
+    }
 }
 
 /// Standard base64 (no line breaks) for thumbnail data URLs — avoids a dep.

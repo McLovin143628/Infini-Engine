@@ -13,6 +13,7 @@
 pub mod bc;
 pub mod error;
 pub mod graph;
+pub mod instance;
 pub mod material;
 pub mod texture;
 
@@ -22,6 +23,7 @@ pub use graph::{
     emit_texture_compute, emit_wgsl, material_registry, MatIssue, MatType, MaterialCompile,
     TextureCompile,
 };
+pub use instance::{MatOverrides, MaterialInstance};
 pub use material::MaterialAsset;
 pub use texture::{
     import_texture_bytes, texture_from_rgba8, TextureAsset, TextureCompression, TextureFormat,

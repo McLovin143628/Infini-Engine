@@ -58,6 +58,7 @@ const KIND_TINT: Record<string, string> = {
   mesh: "text-(--ink-info)",
   texture: "text-(--ink-success)",
   material: "text-(--ink-accent)",
+  material_instance: "text-(--ink-accent)",
   blueprint: "text-(--ink-accent)",
   audio: "text-(--ink-warning)",
   struct: "text-(--ink-info)",
@@ -79,6 +80,8 @@ function KindGlyph({ kind, size, className }: { kind: string; size: number; clas
       return <Image {...p} />;
     case "material":
       return <Circle {...p} />;
+    case "material_instance":
+      return <Paintbrush {...p} />;
     case "blueprint":
       return <FileCode2 {...p} />;
     case "audio":
@@ -529,9 +532,9 @@ function AssetCell({
     const inside =
       e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
     if (inside) {
-      if (asset.kind === "material") {
-        // Apply-by-drag: a material dropped over the viewport assigns to the
-        // current selection (the drop handoff carries no pick point) (P7.1).
+      if (asset.kind === "material" || asset.kind === "material_instance") {
+        // Apply-by-drag: a material/instance dropped over the viewport assigns
+        // to the current selection (the drop carries no pick point) (P7.1/P7.4).
         sceneIpc
           .applyMaterial(asset.id)
           .catch((err) => console.error("apply material failed", err));
@@ -654,6 +657,12 @@ function AssetContextMenu({
         : "Select an actor with a material first, then apply.",
     );
   };
+  const createInstance = async () => {
+    const { assets } = await import("../lib/ipc");
+    await assets.createMaterialInstance(asset.id);
+    pushStatus(`Created an instance of "${asset.name}".`);
+  };
+  const isMaterialLike = asset.kind === "material" || asset.kind === "material_instance";
 
   return (
     <div
@@ -661,8 +670,10 @@ function AssetContextMenu({
       style={{ left: x, top: y }}
       onClick={(e) => e.stopPropagation()}
     >
-      {asset.kind === "material" &&
+      {isMaterialLike &&
         item("Apply to Selection", <Paintbrush size={13} />, () => void applyToSelection())}
+      {asset.kind === "material" &&
+        item("Create Instance", <Copy size={13} />, () => void createInstance())}
       {item("Rename", <Pencil size={13} />, doRename)}
       {item("Duplicate", <Copy size={13} />, () => void store.duplicate(asset.id))}
       {item("Show References", <Link2 size={13} />, () => void showRefs())}

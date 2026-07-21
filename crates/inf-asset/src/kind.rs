@@ -17,8 +17,10 @@ pub enum AssetKind {
     Mesh,
     /// 2D texture (`.inf_tex`).
     Texture,
-    /// Material graph / instance (`.inf_mat`).
+    /// Material graph (`.inf_mat`).
     Material,
+    /// Material instance overriding a parent material's parameters (`.inf_mati`).
+    MaterialInstance,
     /// Actor assembly / blueprint class (`.inf_act`).
     Blueprint,
     /// Function library (`.inf_fn`).
@@ -43,6 +45,7 @@ impl AssetKind {
             AssetKind::Mesh => "inf_mesh",
             AssetKind::Texture => "inf_tex",
             AssetKind::Material => "inf_mat",
+            AssetKind::MaterialInstance => "inf_mati",
             AssetKind::Blueprint => "inf_act",
             AssetKind::FunctionLib => "inf_fn",
             AssetKind::Struct => "inf_struct",
@@ -59,6 +62,7 @@ impl AssetKind {
             "inf_lvl" => AssetKind::Level,
             "inf_mesh" => AssetKind::Mesh,
             "inf_tex" => AssetKind::Texture,
+            "inf_mati" => AssetKind::MaterialInstance,
             "inf_mat" => AssetKind::Material,
             "inf_act" => AssetKind::Blueprint,
             "inf_fn" => AssetKind::FunctionLib,
@@ -85,6 +89,7 @@ impl AssetKind {
             AssetKind::Mesh => "mesh",
             AssetKind::Texture => "texture",
             AssetKind::Material => "material",
+            AssetKind::MaterialInstance => "material_instance",
             AssetKind::Blueprint => "blueprint",
             AssetKind::FunctionLib => "function",
             AssetKind::Struct => "struct",
@@ -102,6 +107,7 @@ impl AssetKind {
             AssetKind::Mesh => "Static Mesh",
             AssetKind::Texture => "Texture",
             AssetKind::Material => "Material",
+            AssetKind::MaterialInstance => "Material Instance",
             AssetKind::Blueprint => "Blueprint",
             AssetKind::FunctionLib => "Function Library",
             AssetKind::Struct => "Struct",
@@ -120,6 +126,7 @@ impl AssetKind {
             AssetKind::Mesh,
             AssetKind::Texture,
             AssetKind::Material,
+            AssetKind::MaterialInstance,
             AssetKind::Blueprint,
             AssetKind::FunctionLib,
             AssetKind::Struct,

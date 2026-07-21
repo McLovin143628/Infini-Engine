@@ -531,6 +531,28 @@ interpreter; the generated Rust is hand-edited and the graph updates; round-trip
 **Goal:** `.inf_mat` graphs to live WGSL. **Done when:** layered PBR material with a
 procedural mask authored in-graph, applied to the P4 character, edits visible in <1 s.
 
+> **STATUS: Phase 7 COMPLETE** (2026-07-20), CI-green on all three OSes. The concurrency
+> foundation, PBR renderer, material node graph → WGSL, texture bake, and material instances
+> all landed. **P7.0** built the `inf-core` job system (rayon pool + named workers + flume;
+> `parallel_map` is a deterministic in-order pure map — the P7.0 guard) and wired parallel glTF
+> texture decode; a criterion bench proves scaling. **P7.1** replaced flat shading with a
+> Cook-Torrance GGX metallic-roughness BRDF lit by a projected scene-lights buffer (directional
+> + point, hemispheric ambient, ACES tonemap); `Material` gained metallic/roughness/emissive
+> (Details-editable via reflection) and Content-Drawer apply-by-drag. **P7.2** is the flagship:
+> `inf-material::graph` compiles a pure node DAG (inputs/const/math/vector/procedural/texture +
+> an `output.surface` sink) to a naga-validated `material_surface` WGSL fn (node-anchored
+> diagnostics, shared-node `let` hoisting), a Ring-2 `material_*` command surface, an offscreen
+> live-preview sphere (PBR-lit), and an `@xyflow` Material editor panel opened from a `.inf_mat`.
+> **P7.3** emits a `@compute cs_bake` shader that evaluates the graph per texel into a storage
+> texture and bakes it (headless) to a new `.inf_tex` asset (usable as a `tex.sample` input).
+> **P7.4** adds `.inf_mati` material instances (sparse overrides over a parent chain, resolved on
+> apply) + a PBR golden scene. Key decisions: naga standalone (wgpu 30's pin) validates codegen
+> in Ring-0 without pulling wgpu; the material graph reuses the blueprint substrate + frontend
+> wholesale (only the registry, node theme, and compile/preview differ). Documented follow-ups:
+> binding *real* referenced textures in the preview/bake (white today), per-material pipelines in
+> the *interactive* viewport (preview + thumbnailer already render generated shaders), the
+> instance override-parameter editor UI, and persisting a material's graph into its `.inf_mat`.
+
 - **P7.0 Concurrency foundation** *(the job system, finally real — see §2.5)* — 1. `inf-core`
   job system: a rayon compute pool (sized to cores, named threads) + `flume` channels + a thin
   `parallel_for` / scoped-fan-out API; 2. retire the placeholder facade — this is the single

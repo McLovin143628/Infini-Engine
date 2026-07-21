@@ -175,6 +175,9 @@ export const assets = {
   /** Create a new authored asset (Phase 4.4: "material"). Returns the GUID. */
   create: (kind: string, folder: string | null = null, name: string | null = null): Promise<string> =>
     invoke<string>("asset_create", { kind, folder, name }),
+  /** Create a material instance overriding a parent material (P7.4). */
+  createMaterialInstance: (parentId: string, name: string | null = null): Promise<string> =>
+    invoke<string>("asset_create_material_instance", { parentId, name }),
   /** Delete; when still referenced (and not forced) returns the blockers. */
   delete: (id: string, force = false): Promise<DeleteResult> =>
     invoke<DeleteResult>("asset_delete", { id, force }),

@@ -20,8 +20,8 @@ use inf_math::FloatingOrigin;
 use inf_render::gizmo::{self, GizmoAxis, GizmoMode};
 use inf_render::golden::{image_diff, within_tolerance};
 use inf_render::{
-    EngineRenderer, GpuContext, HeadlessTarget, MeshInstance, RenderScene, RenderView,
-    HEADLESS_FORMAT,
+    EngineRenderer, GpuContext, HeadlessTarget, LightKind, MeshInstance, RenderLight, RenderScene,
+    RenderView, HEADLESS_FORMAT,
 };
 
 const W: u32 = 320;
@@ -217,4 +217,59 @@ fn golden_selection_gizmo() {
         }
     }
     assert!(found_outline, "selection outline (orange) not found");
+}
+
+/// PBR material scene (P7.4 golden): metallic/roughness/emissive variation lit by
+/// a directional key + a coloured point light. Exercises the P7.1 shading path
+/// in CI (determinism gate via `check_golden`; strict pixel diff is opt-in).
+#[test]
+fn golden_pbr_materials() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        ..Default::default()
+    };
+    // A row of cubes sweeping roughness at metallic = 1.
+    for (i, &(x, rough, metallic, emissive)) in [
+        (-3.0f64, 0.1f32, 1.0f32, [0.0f32, 0.0, 0.0]),
+        (-1.0, 0.4, 1.0, [0.0, 0.0, 0.0]),
+        (1.0, 0.7, 0.0, [0.0, 0.0, 0.0]),
+        (3.0, 0.5, 0.0, [0.6, 0.15, 0.0]), // emissive
+    ]
+    .iter()
+    .enumerate()
+    {
+        scene.instances.push(MeshInstance {
+            translation: DVec3::new(x, 0.5, 0.0),
+            rotation: Quat::from_rotation_y(0.4),
+            scale: Vec3::ONE,
+            color: [0.85, 0.78, 0.55, 1.0],
+            metallic,
+            roughness: rough,
+            emissive,
+            id: i as u32 + 1,
+        });
+    }
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.9],
+        intensity: 3.0,
+        direction: Vec3::new(0.4, 0.8, 0.4).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+    });
+    scene.lights.push(RenderLight {
+        kind: LightKind::Point,
+        color: [0.3, 0.5, 1.0],
+        intensity: 30.0,
+        direction: Vec3::ZERO,
+        position: DVec3::new(0.0, 2.5, 2.0),
+        range: 12.0,
+    });
+    scene.mark_dirty();
+
+    let img = check_golden(&gpu, "pbr_materials", &scene, &overlook_view());
+    // The scene is lit: some pixel is clearly brighter than the dark backdrop.
+    let lit = img.chunks(4).any(|p| p[0] > 90 || p[1] > 90 || p[2] > 90);
+    assert!(lit, "expected a lit PBR pixel");
 }
