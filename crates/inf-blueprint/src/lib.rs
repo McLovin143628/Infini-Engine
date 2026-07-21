@@ -30,8 +30,8 @@ pub mod raise;
 pub mod semantics;
 
 pub use interp::{
-    eval_fn, eval_fn_traced, Debug as InterpDebug, Host, MoveResult2d, MoveResult3d, Physics2dHost,
-    Physics3dHost, RayHit2d, RayHit3d, RunError, Trace, Value,
+    eval_fn, eval_fn_traced, AudioHost, Debug as InterpDebug, Host, MoveResult2d, MoveResult3d,
+    Physics2dHost, Physics3dHost, RayHit2d, RayHit3d, RunError, Trace, Value,
 };
 pub use lower::{lower_event, lower_graph, LowerError};
 pub use nodekit::blueprint_registry;

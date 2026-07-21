@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use inf_asset::{AssetError, AssetId, ImportKey, Result};
+use inf_audio::{AudioAsset, AudioFormat, AudioImportSettings};
 use inf_material::{MaterialAsset, TextureImportSettings};
 use inf_mesh::GltfImport;
 
@@ -58,9 +59,10 @@ pub fn import_file(
         "png" | "jpg" | "jpeg" | "tga" | "bmp" | "hdr" | "exr" => {
             import_image(project, source, &bytes, dest_dir)?
         }
+        "wav" | "ogg" | "mp3" | "flac" => import_audio(project, source, &bytes, &ext, dest_dir)?,
         other => {
             return Err(AssetError::Import(format!(
-                "no importer for .{other} (audio/table import arrive in later phases)"
+                "no importer for .{other} (table import arrives in a later phase)"
             )))
         }
     };
@@ -69,6 +71,50 @@ pub fn import_file(
         let _ = project.cache_mut().put(key, primary, &bytes);
     }
     Ok(outcome)
+}
+
+/// A single audio file (WAV/OGG/FLAC/MP3) → one `.inf_audio` asset (P12.3).
+///
+/// The payload stores the **original compressed bytes** + a format tag + duration
+/// metadata decoded once here (see `inf_audio::AudioAsset` for why not PCM). The
+/// sidecar `import` table carries the default playback settings (loop flag /
+/// default bus / volume trim). No thumbnail is produced — the Content Drawer falls
+/// back to the audio glyph; a waveform thumbnail + an in-Details Play-button
+/// preview are documented follow-ups (a device in the editor is needed to hear it).
+fn import_audio(
+    project: &mut AssetProject,
+    source: &Path,
+    bytes: &[u8],
+    ext: &str,
+    dest_dir: &Path,
+) -> Result<ImportOutcome> {
+    let settings = AudioImportSettings::default();
+    let format = AudioFormat::from_extension(ext);
+    let audio = AudioAsset::from_encoded(bytes.to_vec(), format)
+        .map_err(|e| AssetError::Import(e.to_string()))?;
+    let name = file_stem(source);
+    let import_tbl = audio_settings_table(&settings);
+    let id = project.write_asset(
+        dest_dir,
+        &name,
+        &audio,
+        Some(rel_source(project, source)),
+        vec![],
+        import_tbl,
+    )?;
+    Ok(ImportOutcome {
+        produced: vec![id],
+        primary: Some(id),
+        cached: false,
+    })
+}
+
+/// Serialize audio import settings into the sidecar's `import` TOML table
+/// (mirrors [`settings_table`] for textures).
+fn audio_settings_table(settings: &AudioImportSettings) -> Option<toml::Table> {
+    toml::Value::try_from(settings)
+        .ok()
+        .and_then(|v| v.as_table().cloned())
 }
 
 /// A single image → one texture asset (sRGB base-color defaults).

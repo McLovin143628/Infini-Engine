@@ -46,6 +46,7 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(physics_nodes());
     reg.register_all(physics3d_nodes());
     reg.register_all(input_nodes());
+    reg.register_all(audio_nodes());
     reg
 }
 
@@ -386,6 +387,53 @@ fn input_nodes() -> Vec<NodeDef> {
     ]
 }
 
+/// The audio kit (P12.3): entity-based exec actions the Simulate/runtime audio
+/// step routes through the `audio.*` accessor into the host `AudioEngine`'s
+/// command queue. Each takes the emitter **entity as an `Int` data input** (wire
+/// an `engine.self`/entity ref), mirroring the physics kit — so they lower with
+/// zero special-casing (`build_call` turns the wired entity + params into the
+/// call args, emitting `audio::play(e)` / `audio::set_volume(e, 0.5)` etc.).
+///
+/// v1 is **entity-based only**: `play`/`stop`/`set_volume`/`set_pitch` act on an
+/// entity that carries an `AudioSource` component (clip/bus/params live there).
+/// A name-based `audio.play_oneshot(clip: Str)` is **deferred** — it needs an
+/// asset-DB name→GUID lookup in the host, which the entity-based path avoids
+/// (documented follow-up).
+fn audio_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("audio.play", "Play Audio", "audio")
+            .described("Start (or restart) the entity's AudioSource clip.")
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
+        NodeDef::new("audio.stop", "Stop Audio", "audio")
+            .described("Stop the entity's currently-playing AudioSource voice.")
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
+        NodeDef::new("audio.set_volume", "Set Audio Volume", "audio")
+            .described("Set the entity's AudioSource base volume (linear).")
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("volume", PortType::Float),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
+        NodeDef::new("audio.set_pitch", "Set Audio Pitch", "audio")
+            .described("Set the entity's AudioSource pitch (playback-rate factor).")
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("pitch", PortType::Float),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
+    ]
+}
+
 /// Classify a node `type_id` for the lowerer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeRole {
@@ -455,6 +503,27 @@ mod tests {
         assert!(rc.input(EXEC_IN).is_none());
         assert_eq!(rc.output("point_x").unwrap().ty, PortType::Float);
         assert_eq!(rc.output("normal_y").unwrap().ty, PortType::Float);
+    }
+
+    #[test]
+    fn audio_kit_is_registered() {
+        let reg = blueprint_registry();
+        for id in [
+            "audio.play",
+            "audio.stop",
+            "audio.set_volume",
+            "audio.set_pitch",
+        ] {
+            assert!(reg.get(id).is_some(), "missing audio node {id}");
+        }
+        // Every audio node is an exec action on an entity.
+        let play = reg.get("audio.play").unwrap();
+        assert!(play.input(EXEC_IN).is_some());
+        assert_eq!(play.input("entity").unwrap().ty, PortType::Int);
+        assert!(play.output(EXEC_THEN).is_some());
+        // set_volume carries the float value pin.
+        let sv = reg.get("audio.set_volume").unwrap();
+        assert_eq!(sv.input("volume").unwrap().ty, PortType::Float);
     }
 
     #[test]

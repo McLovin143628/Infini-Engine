@@ -668,6 +668,101 @@ mod tests {
         );
     }
 
+    /// An audio host that records the command stream (the mock the P12.3 headless
+    /// command-stream test asserts against).
+    #[derive(Default)]
+    struct MockAudio {
+        commands: Vec<String>,
+    }
+
+    impl crate::interp::Host for MockAudio {
+        fn call(&mut self, path: &[String], _args: &[Value]) -> Result<Value, crate::RunError> {
+            Err(crate::RunError::NoSuchHostFn(path.join("::")))
+        }
+        fn audio(&mut self) -> Option<&mut dyn crate::interp::AudioHost> {
+            Some(self)
+        }
+    }
+
+    impl crate::interp::AudioHost for MockAudio {
+        fn play(&mut self, entity: i64) -> Result<(), String> {
+            self.commands.push(format!("play {entity}"));
+            Ok(())
+        }
+        fn stop(&mut self, entity: i64) -> Result<(), String> {
+            self.commands.push(format!("stop {entity}"));
+            Ok(())
+        }
+        fn set_volume(&mut self, entity: i64, volume: f64) -> Result<(), String> {
+            self.commands.push(format!("set_volume {entity} {volume}"));
+            Ok(())
+        }
+        fn set_pitch(&mut self, entity: i64, pitch: f64) -> Result<(), String> {
+            self.commands.push(format!("set_pitch {entity} {pitch}"));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn lowers_and_runs_audio_kit_recording_the_command_stream() {
+        // begin_play → audio.play(e); audio.set_volume(e, 0.5); audio.stop(e)
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let ent = g.insert("lit.int", NodeUi::default());
+        g.node_mut(ent)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Int(7));
+        let vol = g.insert("lit.float", NodeUi::default());
+        g.node_mut(vol)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Float(0.5));
+        let play = g.insert("audio.play", NodeUi::default());
+        let setv = g.insert("audio.set_volume", NodeUi::default());
+        let stop = g.insert("audio.stop", NodeUi::default());
+
+        wire(&mut g, ent, "value", play, "entity");
+        wire(&mut g, ent, "value", setv, "entity");
+        wire(&mut g, vol, "value", setv, "volume");
+        wire(&mut g, ent, "value", stop, "entity");
+        wire(&mut g, bp, EXEC_THEN, play, "exec");
+        wire(&mut g, play, EXEC_THEN, setv, "exec");
+        wire(&mut g, setv, EXEC_THEN, stop, "exec");
+
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        let mut host = MockAudio::default();
+        eval_fn(&f, &HashMap::new(), &mut host).unwrap();
+        // The deterministic command stream, in exec order.
+        assert_eq!(
+            host.commands,
+            vec![
+                "play 7".to_string(),
+                "set_volume 7 0.5".to_string(),
+                "stop 7".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn audio_node_without_a_host_errors_cleanly() {
+        use crate::interp::PureHost;
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let ent = g.insert("lit.int", NodeUi::default());
+        let play = g.insert("audio.play", NodeUi::default());
+        wire(&mut g, ent, "value", play, "entity");
+        wire(&mut g, bp, EXEC_THEN, play, "exec");
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        let err = eval_fn(&f, &HashMap::new(), &mut PureHost).unwrap_err();
+        assert!(
+            matches!(&err, crate::RunError::Host(_, m) if m.contains("no audio host")),
+            "got {err:?}"
+        );
+    }
+
     /// A tiny 3D physics host: one entity with velocity + position that
     /// `move_and_slide` integrates (the `d3` mirror of [`MockPhysics`]).
     struct MockPhysics3d {

@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use inf_editor_core::ipc::CollisionLayerDto;
 use inf_editor_core::ipc::{
     AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot, ComponentDto, DataAssetDto,
     DataFieldDto, DeleteResult, DetailsDto, ErosionParamsDto, ErosionReportDto, FileEntryDto,
@@ -60,6 +61,7 @@ fn export_bindings() {
     SpriteRectDto::export_all(&cfg).expect("export SpriteRectDto");
     SpriteSheetDto::export_all(&cfg).expect("export SpriteSheetDto");
     SortingLayerDto::export_all(&cfg).expect("export SortingLayerDto");
+    CollisionLayerDto::export_all(&cfg).expect("export CollisionLayerDto");
     ViewportModeDto::export_all(&cfg).expect("export ViewportModeDto");
     Snap2DDto::export_all(&cfg).expect("export Snap2DDto");
     ToolModeDto::export_all(&cfg).expect("export ToolModeDto");

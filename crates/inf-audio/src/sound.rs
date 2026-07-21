@@ -68,4 +68,15 @@ impl SoundData {
     pub fn duration_secs(&self) -> f64 {
         self.inner.duration().as_secs_f64()
     }
+
+    /// The sound's sample rate in hertz, derived from its frame count and
+    /// duration (`0` if the duration is degenerate). Used to record `.inf_audio`
+    /// metadata at import.
+    pub fn sample_rate(&self) -> u32 {
+        let secs = self.inner.duration().as_secs_f64();
+        if secs <= 0.0 {
+            return 0;
+        }
+        (self.inner.num_frames() as f64 / secs).round() as u32
+    }
 }

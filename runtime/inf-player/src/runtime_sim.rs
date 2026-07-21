@@ -42,15 +42,18 @@ use uuid::Uuid;
 
 use inf_anim::state_machine::{SmContext, SmRuntime, StateMachine};
 use inf_anim::{root_delta, AnimClip, Skeleton};
+use inf_audio::{
+    Attenuation, AttenuationModel, AudioAsset, AudioCommand, AudioEngine, Listener, PlayCommand,
+};
 use inf_blueprint::interp::{
-    MoveResult2d, MoveResult3d, Physics2dHost, Physics3dHost, RayHit2d, RayHit3d,
+    AudioHost, MoveResult2d, MoveResult3d, Physics2dHost, Physics3dHost, RayHit2d, RayHit3d,
 };
 use inf_blueprint::semantics::run_event;
 use inf_blueprint::{ActorInstance, BlueprintClass, EventKind, Host, InterpDebug, RunError, Value};
 use inf_ecs::components::{
-    AnimPlayer, AnimStateMachine, CharacterController2D, CharacterController3D, Collider2D,
-    Collider3D, ColliderShape2DKind, ColliderShape3DKind, GlobalTransform, RootMotion,
-    RootMotionMode, SmRuntimeState, Terrain, Transform,
+    AnimPlayer, AnimStateMachine, AudioListener, AudioSource, CharacterController2D,
+    CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
+    DistanceModel, GlobalTransform, RootMotion, RootMotionMode, SmRuntimeState, Terrain, Transform,
 };
 use inf_ecs::{sim_snapshot, update_attachments, EcsWorld, Entity, Guid};
 use inf_physics::{
@@ -132,6 +135,21 @@ pub struct RuntimeSim {
     logs: Vec<String>,
     /// Last `move_and_slide` grounded result per actor.
     grounded: BTreeMap<Uuid, bool>,
+    /// P12.3 audio (the shipped mirror of the editor `SimSession`): the long-lived
+    /// host `AudioEngine` (a device build enables `cpal` — see the crate manifest;
+    /// headless/CI runs the no-device fallback consistently). Output-only, not sim
+    /// state: systems enqueue `audio_cmds`, drained here after each step.
+    audio: AudioEngine,
+    /// Resolvable `.inf_audio` payloads keyed by asset GUID (seeded by the level
+    /// loader). Decoded lazily on first play.
+    audio_clips: BTreeMap<Uuid, AudioAsset>,
+    /// The audio command queue: filled by autoplay + Blueprint `audio.*` nodes,
+    /// drained into `audio` at the end of a step (the determinism seam).
+    audio_cmds: Vec<AudioCommand>,
+    /// Entity `Guid`s whose autoplay `AudioSource` has already started.
+    audio_started: BTreeSet<Uuid>,
+    /// Accumulated drained audio command stream (determinism telemetry / test seam).
+    audio_log: Vec<AudioCommand>,
     /// Total fixed steps run.
     steps: u64,
     /// World-space translations one fixed step ago, for render interpolation.
@@ -139,6 +157,10 @@ pub struct RuntimeSim {
     /// World-space translations at the current fixed step.
     cur_positions: HashMap<Uuid, DVec3>,
 }
+
+/// The obstruction gain (linear) applied to an occluded spatial source — a −12 dB
+/// cut (P12.3); the shipped mirror of the editor constant.
+const OCCLUSION_CUT_LINEAR: f64 = 0.251_188_643_150_958; // 10^(-12/20)
 
 impl RuntimeSim {
     /// Build a runtime sim over `world`, ticking `actors` (each an entity `Guid`
@@ -184,6 +206,11 @@ impl RuntimeSim {
             just_pressed: BTreeSet::new(),
             logs: Vec::new(),
             grounded: BTreeMap::new(),
+            audio: AudioEngine::new(),
+            audio_clips: BTreeMap::new(),
+            audio_cmds: Vec::new(),
+            audio_started: BTreeSet::new(),
+            audio_log: Vec::new(),
             steps: 0,
             prev_positions: HashMap::new(),
             cur_positions: HashMap::new(),
@@ -216,6 +243,29 @@ impl RuntimeSim {
     /// GUID isn't registered simply doesn't step.
     pub fn set_state_machines(&mut self, machines: BTreeMap<Uuid, StateMachine>) {
         self.state_machines = machines;
+    }
+
+    /// Register a resolvable `.inf_audio` clip payload by asset GUID (P12.3) — the
+    /// runtime mirror of `SimSession::register_audio_clip`. Idempotent.
+    pub fn register_audio_clip(&mut self, clip_guid: Uuid, clip: AudioAsset) {
+        self.audio_clips.insert(clip_guid, clip);
+    }
+
+    /// Seed the resolvable `.inf_audio` payloads in bulk (level loader).
+    pub fn set_audio_clips(&mut self, clips: BTreeMap<Uuid, AudioAsset>) {
+        self.audio_clips = clips;
+    }
+
+    /// Install a named-bus mixer on the audio engine (loaded from
+    /// `.infinity/mixer.toml`).
+    pub fn set_audio_mixer(&mut self, mixer: inf_audio::MixerConfig) {
+        self.audio.set_mixer(mixer);
+    }
+
+    /// The accumulated audio command stream (P12.3): the deterministic play/stop/
+    /// set sequence a headless test asserts against instead of device output.
+    pub fn audio_command_log(&self) -> &[AudioCommand] {
+        &self.audio_log
     }
 
     /// The owned world (read-only projection for the renderer / trace).
@@ -338,11 +388,107 @@ impl RuntimeSim {
         // ── P11.3 attachments ── entities ride their target's socket, post-anim.
         update_attachments(&mut self.world);
         self.world.propagate();
+        // ── P12.3 audio step ── last, observing this step's final transforms
+        //    (preview == shipped: the same logic the editor SimSession runs).
+        self.audio_step();
         // Roll interpolation history + rising edges.
         std::mem::swap(&mut self.prev_positions, &mut self.cur_positions);
         self.capture_positions();
         self.just_pressed.clear();
         self.steps += 1;
+    }
+
+    /// The P12.3 audio step — the shipped mirror of `SimSession::audio_step`.
+    fn audio_step(&mut self) {
+        let listener = active_listener(&self.world);
+        let listener_pos = listener
+            .map(|l| l.position)
+            .unwrap_or_else(|| self.audio.listener().position);
+        if let Some(l) = listener {
+            self.audio_cmds.push(AudioCommand::SetListener(l));
+        }
+
+        // Autoplay once per not-yet-started `AudioSource` (Guid order).
+        let mut autoplay: Vec<(Uuid, AudioSource, DVec3)> = Vec::new();
+        for e in self.world.world().iter_entities() {
+            let Some(src) = e.get::<AudioSource>() else {
+                continue;
+            };
+            if !src.autoplay {
+                continue;
+            }
+            let Some(guid) = e.get::<Guid>().map(|g| g.0) else {
+                continue;
+            };
+            if self.audio_started.contains(&guid) {
+                continue;
+            }
+            let pos = e
+                .get::<GlobalTransform>()
+                .map(|g| g.translation())
+                .or_else(|| e.get::<Transform>().map(|t| t.translation.to_dvec3()))
+                .unwrap_or(DVec3::ZERO);
+            autoplay.push((guid, src.clone(), pos));
+        }
+        for (guid, src, pos) in autoplay {
+            self.audio_started.insert(guid);
+            let mut cmd = play_command_for(guid_source_key(guid), &src, src.spatial.then_some(pos));
+            if src.occlusion && src.spatial {
+                cmd.occlusion_gain = self.occlusion_gain(listener_pos, pos);
+            }
+            self.audio_cmds.push(AudioCommand::Play(cmd));
+        }
+
+        // Occlusion for Blueprint-queued Plays (source = actor entity id).
+        let mut occ: Vec<(usize, DVec3)> = Vec::new();
+        for (i, cmd) in self.audio_cmds.iter().enumerate() {
+            if let AudioCommand::Play(p) = cmd {
+                if let Some(pos) = p.position {
+                    if let Some(guid) = self.entities.get(&(p.source as i64)) {
+                        if audio_source_of(&self.world, *guid)
+                            .map(|s| s.occlusion)
+                            .unwrap_or(false)
+                        {
+                            occ.push((i, pos));
+                        }
+                    }
+                }
+            }
+        }
+        for (i, emitter) in occ {
+            let gain = self.occlusion_gain(listener_pos, emitter);
+            if let AudioCommand::Play(p) = &mut self.audio_cmds[i] {
+                p.occlusion_gain = gain;
+            }
+        }
+
+        let cmds = std::mem::take(&mut self.audio_cmds);
+        self.audio_log.extend(cmds.iter().cloned());
+        let clips = &self.audio_clips;
+        self.audio
+            .drain(&cmds, &|g| clips.get(&g).and_then(|a| a.decode().ok()));
+    }
+
+    /// One occlusion raycast from `listener` toward `emitter` (the shipped mirror
+    /// of the editor helper).
+    fn occlusion_gain(&mut self, listener: DVec3, emitter: DVec3) -> f64 {
+        let delta = emitter - listener;
+        let dist = delta.length();
+        if dist < 1e-6 {
+            return 1.0;
+        }
+        let dir = delta / dist;
+        match self.bridge3d.world_mut().cast_ray(listener, dir, dist) {
+            Some(hit) => {
+                let hit_dist = (hit.point - listener).length();
+                if hit_dist + 1e-3 < dist {
+                    OCCLUSION_CUT_LINEAR
+                } else {
+                    1.0
+                }
+            }
+            None => 1.0,
+        }
     }
 
     /// Step every entity's [`AnimStateMachine`] (P11.2) whose `sm` GUID resolves
@@ -511,6 +657,7 @@ impl RuntimeSim {
                     entities: &self.entities,
                     logs: &mut self.logs,
                     grounded: &mut self.grounded,
+                    audio_cmds: &mut self.audio_cmds,
                 };
                 if let Err(e) = run_event(
                     &state.class,
@@ -541,6 +688,8 @@ struct RuntimeHost<'a> {
     entities: &'a BTreeMap<i64, Uuid>,
     logs: &'a mut Vec<String>,
     grounded: &'a mut BTreeMap<Uuid, bool>,
+    /// The P12.3 audio command sink: `audio.*` nodes enqueue here.
+    audio_cmds: &'a mut Vec<AudioCommand>,
 }
 
 impl Host for RuntimeHost<'_> {
@@ -583,9 +732,56 @@ impl Host for RuntimeHost<'_> {
     fn physics3d(&mut self) -> Option<&mut dyn Physics3dHost> {
         Some(self)
     }
+
+    fn audio(&mut self) -> Option<&mut dyn AudioHost> {
+        Some(self)
+    }
+}
+
+/// `audio.*` nodes enqueue commands (P12.3) — the shipped mirror of the editor
+/// `SimHost`'s `AudioHost` impl.
+impl AudioHost for RuntimeHost<'_> {
+    fn play(&mut self, entity: i64) -> Result<(), String> {
+        let cmd = self.audio_play_command(entity)?;
+        self.audio_cmds.push(AudioCommand::Play(cmd));
+        Ok(())
+    }
+    fn stop(&mut self, entity: i64) -> Result<(), String> {
+        self.audio_cmds.push(AudioCommand::Stop {
+            source: entity as u64,
+        });
+        Ok(())
+    }
+    fn set_volume(&mut self, entity: i64, volume: f64) -> Result<(), String> {
+        self.audio_cmds.push(AudioCommand::SetVolume {
+            source: entity as u64,
+            volume,
+        });
+        Ok(())
+    }
+    fn set_pitch(&mut self, entity: i64, pitch: f64) -> Result<(), String> {
+        self.audio_cmds.push(AudioCommand::SetPitch {
+            source: entity as u64,
+            pitch,
+        });
+        Ok(())
+    }
 }
 
 impl RuntimeHost<'_> {
+    /// Build a [`PlayCommand`] from an entity's [`AudioSource`] (+ world pose).
+    fn audio_play_command(&self, entity: i64) -> Result<PlayCommand, String> {
+        let guid = self.guid_of(entity)?;
+        let src = audio_source_of(self.world, guid)
+            .ok_or_else(|| format!("entity {entity} has no AudioSource"))?;
+        let pos = emitter_position(self.world, guid);
+        Ok(play_command_for(
+            entity as u64,
+            &src,
+            src.spatial.then_some(pos),
+        ))
+    }
+
     fn guid_of(&self, entity: i64) -> Result<Uuid, String> {
         self.entities
             .get(&entity)
@@ -936,6 +1132,94 @@ fn arg_f64(args: &[Value], i: usize) -> f64 {
 /// Sample the world's terrain height at world `(x, z)` — the `terrain.height_at`
 /// host seam (P11.4), byte-for-byte the editor `SimHost`'s (preview == shipped).
 /// Uses the lowest-`Guid` non-empty [`Terrain`]; `0.0` with no terrain.
+/// A stable audio source key for a scene-placed emitter (the `Guid`'s low bits) —
+/// the shipped mirror of the editor helper.
+fn guid_source_key(guid: Uuid) -> u64 {
+    guid.as_u128() as u64
+}
+
+/// Read a clone of an entity's [`AudioSource`] by `Guid`.
+fn audio_source_of(world: &EcsWorld, guid: Uuid) -> Option<AudioSource> {
+    let e = world.entity_of(guid)?;
+    world.world().get::<AudioSource>(e).cloned()
+}
+
+/// An entity's world-space emitter position (global transform, else local, else 0).
+fn emitter_position(world: &EcsWorld, guid: Uuid) -> DVec3 {
+    let Some(e) = world.entity_of(guid) else {
+        return DVec3::ZERO;
+    };
+    world
+        .world()
+        .get::<GlobalTransform>(e)
+        .map(|g| g.translation())
+        .or_else(|| {
+            world
+                .world()
+                .get::<Transform>(e)
+                .map(|t| t.translation.to_dvec3())
+        })
+        .unwrap_or(DVec3::ZERO)
+}
+
+/// The first **active** [`AudioListener`] (Guid order), posed at the entity's
+/// world position (default orientation — a documented P12.3 follow-up).
+fn active_listener(world: &EcsWorld) -> Option<Listener> {
+    let mut best: Option<(Uuid, DVec3)> = None;
+    for e in world.world().iter_entities() {
+        let Some(al) = e.get::<AudioListener>() else {
+            continue;
+        };
+        if !al.active {
+            continue;
+        }
+        let guid = e.get::<Guid>().map(|g| g.0).unwrap_or_else(Uuid::nil);
+        let pos = e
+            .get::<GlobalTransform>()
+            .map(|g| g.translation())
+            .or_else(|| e.get::<Transform>().map(|t| t.translation.to_dvec3()))
+            .unwrap_or(DVec3::ZERO);
+        if best.as_ref().map(|(g, _)| guid < *g).unwrap_or(true) {
+            best = Some((guid, pos));
+        }
+    }
+    best.map(|(_, position)| Listener {
+        position,
+        ..Listener::default()
+    })
+}
+
+/// Build a [`PlayCommand`] from an [`AudioSource`] and an optional world position.
+fn play_command_for(source_key: u64, src: &AudioSource, position: Option<DVec3>) -> PlayCommand {
+    PlayCommand {
+        source: source_key,
+        clip: src.clip.unwrap_or_else(Uuid::nil),
+        bus: src.bus.clone(),
+        volume: src.volume,
+        pitch: src.pitch,
+        looping: src.looping,
+        position,
+        attenuation: attenuation_of(src),
+        occlusion_gain: 1.0,
+    }
+}
+
+/// Translate an [`AudioSource`]'s distance model + clamps into an
+/// `inf_audio::Attenuation`.
+fn attenuation_of(src: &AudioSource) -> Attenuation {
+    let model = match src.distance_model {
+        DistanceModel::Linear => AttenuationModel::Linear,
+        DistanceModel::Inverse => AttenuationModel::Inverse,
+        DistanceModel::Exponential => AttenuationModel::Exponential,
+    };
+    Attenuation {
+        model,
+        min_distance: src.min_distance,
+        max_distance: src.max_distance,
+        rolloff: src.rolloff.max(0.0),
+    }
+}
+
 fn terrain_height_at(world: &EcsWorld, x: f64, z: f64) -> f64 {
     let w = world.world();
     let mut picked: Option<(Uuid, DVec3, inf_terrain::TerrainData)> = None;

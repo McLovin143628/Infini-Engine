@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::interp::{
-    eval_fn_traced, Debug, Host, Physics2dHost, Physics3dHost, RunError, Trace, Value,
+    eval_fn_traced, AudioHost, Debug, Host, Physics2dHost, Physics3dHost, RunError, Trace, Value,
 };
 use crate::{BlueprintFn, Lit, Param, Ty};
 
@@ -262,6 +262,12 @@ impl Host for ActorHost<'_> {
     /// through the actor layer (the `d3` mirror of [`physics`](Self::physics)).
     fn physics3d(&mut self) -> Option<&mut dyn Physics3dHost> {
         self.inner.physics3d()
+    }
+
+    /// Forward audio likewise, so `audio.*` nodes reach the engine host's command
+    /// sink through the actor layer (P12.3).
+    fn audio(&mut self) -> Option<&mut dyn AudioHost> {
+        self.inner.audio()
     }
 }
 

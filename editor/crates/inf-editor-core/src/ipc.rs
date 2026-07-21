@@ -490,6 +490,16 @@ pub struct SortingLayerDto {
     pub name: String,
 }
 
+// ── Collision layers (P12.1) ─────────────────────────────────────────────
+
+/// One named collision layer (`collision_layers_get` / `collision_layers_set`).
+/// `bit` is the layer index in `0..32`; the `Collider*` masks store `1 << bit`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CollisionLayerDto {
+    pub bit: u8,
+    pub name: String,
+}
+
 // ── Viewport mode + 2D snapping (P8.2c) ──────────────────────────────────
 
 /// Active viewport projection: perspective 3D or orthographic 2D editing

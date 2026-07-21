@@ -35,17 +35,37 @@
 //! clock, and its mix math is pure. Determinism-sensitive callers that must not
 //! depend on the audio thread simply run the no-device fallback.
 //!
-//! # Spatial scope
+//! # Spatial scope (P12.3 depth)
 //!
-//! [`spatial`] provides the **basics**: a listener pose, per-emitter position, and
-//! distance attenuation (linear / inverse) feeding kira volume + panning. Real
-//! HRTF, occlusion, reverb, and a full effect graph are **P12.3**.
+//! [`spatial`] provides a listener pose, per-emitter position, and distance
+//! attenuation (linear / inverse / **exponential**, with min/max clamps) feeding
+//! kira volume + panning, plus an **occlusion** multiplier the caller supplies
+//! ([`AudioEngine::set_occlusion_hook`] / [`AudioEngine::set_occlusion`]). The
+//! named-bus [`mixer`] adds a hierarchical [`MixerConfig`](mixer::MixerConfig)
+//! with per-bus volume + a v1 effect chain (compute-side `Gain`, device-side
+//! `Lowpass`), persisted at `.infinity/mixer.toml`. The sim drives playback
+//! through the deterministic [`command`] queue, drained host-side by
+//! [`AudioEngine::drain`]. Real HRTF, reverb/sends, doppler, and audible per-bus
+//! DSP wiring are the documented follow-ups.
+//!
+//! # Asset
+//!
+//! [`asset`] is the `.inf_audio` [`AudioAsset`](asset::AudioAsset) payload:
+//! original compressed bytes + format tag + duration metadata, decoded on load
+//! (see its module docs for why not PCM).
 
 mod backend;
+pub mod command;
 mod engine;
+pub mod mixer;
 mod sound;
 pub mod spatial;
 
-pub use engine::{AudioEngine, Bus, PlaySettings, SoundHandle};
+pub mod asset;
+
+pub use asset::{AudioAsset, AudioFormat, AudioImportSettings, BusChoice};
+pub use command::{AudioCommand, AudioCommandQueue, PlayCommand};
+pub use engine::{AudioEngine, Bus, BusRef, OcclusionHook, PlaySettings, SoundHandle};
+pub use mixer::{Effect, MixerConfig, ResolvedBus};
 pub use sound::{DecodeError, SoundData};
 pub use spatial::{Attenuation, AttenuationModel, Listener};

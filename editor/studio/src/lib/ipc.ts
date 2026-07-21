@@ -46,6 +46,7 @@ import type { SeqInterpDto } from "../bindings/SeqInterpDto";
 import type { SequenceDto } from "../bindings/SequenceDto";
 import type { Snap2DDto } from "../bindings/Snap2DDto";
 import type { SortingLayerDto } from "../bindings/SortingLayerDto";
+import type { CollisionLayerDto } from "../bindings/CollisionLayerDto";
 import type { SpawnKind } from "../bindings/SpawnKind";
 import type { SpriteSheetDto } from "../bindings/SpriteSheetDto";
 import type { TilemapCellDto } from "../bindings/TilemapCellDto";
@@ -273,6 +274,19 @@ export const layers = {
   get: (): Promise<SortingLayerDto[]> => invoke<SortingLayerDto[]>("layers_get"),
   set: (rows: SortingLayerDto[]): Promise<SortingLayerDto[]> =>
     invoke<SortingLayerDto[]>("layers_set", { layers: rows }),
+};
+
+/**
+ * Collision-layer name registry (P12.1): a per-project map of the 32 collision
+ * bits → names, the sibling of {@link layers}. `set` returns the normalized list.
+ * A named-bitmask Details widget driven by this is a documented follow-up; today
+ * the `Collider*` masks are edited as raw `u32`.
+ */
+export const collisionLayers = {
+  get: (): Promise<CollisionLayerDto[]> =>
+    invoke<CollisionLayerDto[]>("collision_layers_get"),
+  set: (rows: CollisionLayerDto[]): Promise<CollisionLayerDto[]> =>
+    invoke<CollisionLayerDto[]>("collision_layers_set", { layers: rows }),
 };
 
 /**

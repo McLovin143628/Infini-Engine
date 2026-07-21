@@ -126,6 +126,20 @@ impl AssetState {
         std::fs::read(&entry.path).ok()
     }
 
+    /// Load an `.inf_audio` asset's **raw payload bytes** by its GUID (P12.3), so
+    /// the Simulate wiring can decode + seed it into the [`SimSession`]'s audio
+    /// engine. `None` if the asset is missing or not an audio asset.
+    pub fn load_audio_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        let entry = proj.db().get(id)?;
+        if entry.kind() != inf_asset::AssetKind::Audio {
+            return None;
+        }
+        std::fs::read(&entry.path).ok()
+    }
+
     /// Create a new material instance of `parent` (P7.4). Returns the new id.
     pub fn create_material_instance(&self, parent: AssetId, name: &str) -> Result<AssetId, String> {
         self.with_project(|proj| {

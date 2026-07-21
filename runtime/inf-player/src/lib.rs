@@ -104,10 +104,12 @@ fn build_world(args: &Args) -> Result<BuiltWorld, String> {
             let by_guid = level::load_actor_classes_by_guid_from_dir(&content_dir);
             let pcgs = level::load_pcg_payloads_by_guid_from_dir(&content_dir);
             let (skeletons, clips, machines) = level::load_anim_assets_from_dir(&content_dir);
+            let audio = level::load_audio_assets_from_dir(&content_dir);
             let builder = InfSceneWorldBuilder::with_defaults(actors)
                 .with_bindings(by_guid)
                 .with_pcgs(pcgs)
-                .with_anim_assets(skeletons, clips, machines);
+                .with_anim_assets(skeletons, clips, machines)
+                .with_audio(audio);
             level::load(&source, &builder)
         }
         WorldChoice::Pack(path) => {
@@ -116,10 +118,12 @@ fn build_world(args: &Args) -> Result<BuiltWorld, String> {
             let by_guid = source.blueprint_classes_by_guid()?;
             let pcgs = source.pcg_payloads_by_guid()?;
             let (skeletons, clips, machines) = source.anim_assets()?;
+            let audio = source.audio_assets()?;
             let builder = InfSceneWorldBuilder::with_defaults(actors)
                 .with_bindings(by_guid)
                 .with_pcgs(pcgs)
-                .with_anim_assets(skeletons, clips, machines);
+                .with_anim_assets(skeletons, clips, machines)
+                .with_audio(audio);
             level::load(&source, &builder)
         }
     }
@@ -202,6 +206,7 @@ pub fn sim_from_built(built: BuiltWorld) -> RuntimeSim {
         hz,
         state_machines,
         root_clips,
+        audio_clips,
         ..
     } = built;
     let mut sim = RuntimeSim::new(world, actors, gravity, hz);
@@ -209,6 +214,7 @@ pub fn sim_from_built(built: BuiltWorld) -> RuntimeSim {
     for (guid, skel, clip) in root_clips {
         sim.register_root_motion_clip(guid, skel, clip);
     }
+    sim.set_audio_clips(audio_clips);
     sim
 }
 

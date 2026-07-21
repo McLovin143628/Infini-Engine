@@ -71,11 +71,25 @@ pub async fn sim_start(
     let (machines, root_clips) = inf_editor_core::simulate::resolve_anim_assets(&doc, |guid| {
         assets.load_anim_bytes(inf_asset::AssetId(guid))
     });
+    // Resolve the scene's referenced `.inf_audio` clips (P12.3) so an `AudioSource`
+    // plays the same clip in Simulate as in the shipped player.
+    let audio_clips = inf_editor_core::simulate::resolve_audio_assets(&doc, |guid| {
+        assets.load_audio_bytes(inf_asset::AssetId(guid))
+    });
     // Character applies its own gravity in the blueprint → world gravity is zero.
     let mut session = SimSession::enter(&mut doc, actors, DVec2::ZERO, SIM_HZ);
     session.set_state_machines(machines);
     for (clip_guid, skeleton, clip) in root_clips {
         session.register_root_motion_clip(clip_guid, skeleton, clip);
+    }
+    session.set_audio_clips(audio_clips);
+    // Load the project mixer (`<project>/.infinity/mixer.toml`) if present; else the
+    // default. The mixer lives at the project root (the parent of Content).
+    if let Some(content) = assets.content_root() {
+        let root = content.parent().map(|p| p.to_path_buf()).unwrap_or(content);
+        if let Ok(mixer) = inf_audio::MixerConfig::load_or_default(&root) {
+            session.set_audio_mixer(mixer);
+        }
     }
     doc.bump_version_for_runtime();
     drop(doc);

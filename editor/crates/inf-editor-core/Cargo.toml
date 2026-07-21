@@ -25,6 +25,11 @@ inf-math = { workspace = true }
 inf-asset = { workspace = true }
 inf-mesh = { workspace = true }
 inf-material = { workspace = true }
+# Audio depth (P12.3): the `.inf_audio` importer builds an `AudioAsset` payload,
+# and Simulate holds a long-lived `AudioEngine` host resource + drains the audio
+# command queue. Default features (no `cpal`) → the deterministic no-device path
+# the editor/CI run; a device build opts into `cpal` at the Ring-2 layer.
+inf-audio = { workspace = true }
 inf-anim = { workspace = true }
 inf-render = { workspace = true }
 glam = { workspace = true }

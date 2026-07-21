@@ -1,23 +1,29 @@
-//! [`AudioEngine`]: the facade — a master + named-bus volume model, a spatial
-//! listener, and per-sound play/stop/pause handles over the kira [`Backend`].
+//! [`AudioEngine`]: the facade — a master + bus volume model (built-in enum buses
+//! *and* the P12.3 named-bus [`MixerConfig`]), a spatial listener with distance
+//! attenuation + occlusion, per-sound play/stop/pause handles, and the
+//! command-queue [`drain`](AudioEngine::drain) that the sim host uses.
 //!
 //! All mixing is computed **engine-side** (buses fold into one linear gain per
-//! voice, spatial position into gain + panning) and pushed to kira as a plain
-//! per-voice volume/panning/rate. That keeps the kira surface tiny (just "set this
-//! voice's params") and means the entire mix model is pure, inspectable, and
-//! testable without an audio device — which is exactly what the no-device fallback
-//! and CI rely on.
+//! voice; spatial position into gain + panning; occlusion into an extra gain
+//! multiplier) and pushed to kira as a plain per-voice volume/panning/rate. That
+//! keeps the kira surface tiny and means the entire mix model is pure,
+//! inspectable, and testable without an audio device — which is exactly what the
+//! no-device fallback and CI rely on.
 
 use std::collections::BTreeMap;
 
 use glam::DVec3;
+use uuid::Uuid;
 
 use crate::backend::Backend;
+use crate::command::{AudioCommand, PlayCommand};
+use crate::mixer::{MixerConfig, ResolvedBus};
 use crate::sound::SoundData;
 use crate::spatial::{Attenuation, Listener};
 
-/// A mixer bus. Minimal by design (P9.1b baseline); the full mixer + effect
-/// graph is P12.3.
+/// A built-in mixer bus (the P9.1b baseline, kept for back-compat). The general
+/// named-bus model is [`MixerConfig`]; a voice can play on either (see
+/// [`BusRef`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bus {
     /// The global bus — its volume scales everything.
@@ -27,6 +33,23 @@ pub enum Bus {
     /// Music.
     Music,
 }
+
+/// Which bus a voice plays on: a built-in [`Bus`] (legacy P9.1b path) or a named
+/// [`MixerConfig`] bus (P12.3; what the command queue / ECS `AudioSource.bus`
+/// use).
+#[derive(Clone, Debug, PartialEq)]
+pub enum BusRef {
+    /// A built-in enum bus, scaled by the engine's master/sfx/music volumes.
+    Builtin(Bus),
+    /// A named mixer bus; its folded gain comes from the [`MixerConfig`].
+    Named(String),
+}
+
+/// An occlusion hook: given the listener position and an emitter position, return
+/// an obstruction gain in `[0, 1]` (`1.0` = clear). The engine multiplies it into
+/// a spatial voice's gain. A caller (e.g. the sim's physics raycast) supplies it;
+/// see [`AudioEngine::set_occlusion_hook`].
+pub type OcclusionHook = Box<dyn Fn(DVec3, DVec3) -> f64 + Send + Sync>;
 
 /// An opaque handle to a playing (or paused) sound. Stable for the voice's
 /// lifetime; a stopped handle reads back as not-playing rather than aliasing a
@@ -38,12 +61,15 @@ pub struct SoundHandle(u64);
 /// `spatial` helpers) and hand to [`AudioEngine::play`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlaySettings {
-    /// Which bus the sound plays on.
+    /// Which built-in bus the sound plays on. (The command-queue path uses named
+    /// mixer buses instead — see [`AudioEngine::drain`].)
     pub bus: Bus,
     /// Base linear volume (`1.0` = unity), before bus/master/spatial scaling.
     pub volume: f64,
     /// Playback-rate factor (`1.0` = normal pitch/speed).
     pub pitch: f64,
+    /// Loop the whole clip (`true`) or play once (`false`).
+    pub looping: bool,
     /// A world-space emitter position for spatialization, or `None` for a
     /// non-positional (2D/UI) sound played at `panning = 0`.
     pub position: Option<DVec3>,
@@ -57,6 +83,7 @@ impl Default for PlaySettings {
             bus: Bus::Sfx,
             volume: 1.0,
             pitch: 1.0,
+            looping: false,
             position: None,
             attenuation: Attenuation::default(),
         }
@@ -93,17 +120,30 @@ impl PlaySettings {
         self.pitch = pitch;
         self
     }
+
+    /// Set the loop flag.
+    pub fn looping(mut self, looping: bool) -> Self {
+        self.looping = looping;
+        self
+    }
 }
 
 /// Per-voice engine-side state (independent of whether a device is active).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Voice {
-    bus: Bus,
+    bus: BusRef,
     base_volume: f64,
     pitch: f64,
+    looping: bool,
     paused: bool,
     position: Option<DVec3>,
     attenuation: Attenuation,
+    /// Whether the engine's [`OcclusionHook`] recomputes this voice's
+    /// `occlusion_gain` (direct-API path). Command-driven voices set this
+    /// `false` and carry the sim-supplied factor instead.
+    occlusion: bool,
+    /// Extra obstruction multiplier in `[0, 1]` (`1.0` = clear).
+    occlusion_gain: f64,
 }
 
 /// The audio facade over kira. Construct with [`new`](Self::new) (opens a device
@@ -117,6 +157,14 @@ pub struct AudioEngine {
     listener: Listener,
     voices: BTreeMap<u64, Voice>,
     next_id: u64,
+    /// The named-bus mixer (P12.3) + its folded gains/cutoffs cache.
+    mixer: MixerConfig,
+    resolved: BTreeMap<String, ResolvedBus>,
+    /// Source id (ECS entity bits) → its single active voice, for the command
+    /// queue (one voice per source).
+    sources: BTreeMap<u64, SoundHandle>,
+    /// Optional occlusion hook applied to spatial voices flagged `occlusion`.
+    occlusion_hook: Option<OcclusionHook>,
 }
 
 impl AudioEngine {
@@ -136,6 +184,8 @@ impl AudioEngine {
     }
 
     fn with_backend(backend: Backend) -> Self {
+        let mixer = MixerConfig::default();
+        let resolved = mixer.resolve();
         Self {
             backend,
             master_volume: 1.0,
@@ -144,6 +194,10 @@ impl AudioEngine {
             listener: Listener::default(),
             voices: BTreeMap::new(),
             next_id: 0,
+            mixer,
+            resolved,
+            sources: BTreeMap::new(),
+            occlusion_hook: None,
         }
     }
 
@@ -153,9 +207,81 @@ impl AudioEngine {
         self.backend.is_active()
     }
 
-    // ── Volume model ──────────────────────────────────────────────────────────
+    // ── Named-bus mixer (P12.3) ─────────────────────────────────────────────────
 
-    /// The volume of a bus (`Master` returns the global volume).
+    /// The active named-bus mixer configuration.
+    pub fn mixer(&self) -> &MixerConfig {
+        &self.mixer
+    }
+
+    /// Install a named-bus [`MixerConfig`], re-fold its gains/cutoffs, and re-push
+    /// every affected voice's mix. The command-queue path plays voices on named
+    /// buses, so this is how gameplay volume/effect settings reach the engine.
+    pub fn set_mixer(&mut self, mixer: MixerConfig) {
+        self.resolved = mixer.resolve();
+        self.mixer = mixer;
+        self.refresh_all();
+    }
+
+    /// The folded linear gain for a named mixer bus (`1.0` for an unknown bus).
+    pub fn named_bus_gain(&self, name: &str) -> f64 {
+        self.resolved.get(name).map(|r| r.gain).unwrap_or(1.0)
+    }
+
+    /// The folded (most-restrictive) lowpass cutoff for a named bus, if any. This
+    /// is a **device-side** DSP value: it is modelled + inspectable here, but only
+    /// audible on a `cpal` build once per-bus kira sub-tracks are wired (the
+    /// documented follow-up). `None` = no bus in the chain filters.
+    pub fn named_bus_lowpass_hz(&self, name: &str) -> Option<f64> {
+        self.resolved.get(name).and_then(|r| r.cutoff_hz)
+    }
+
+    // ── Occlusion (P12.3) ───────────────────────────────────────────────────────
+
+    /// Install (or clear) the [`OcclusionHook`]. When set, every spatial voice
+    /// flagged for occlusion (re)computes its obstruction gain from the hook, and
+    /// the engine multiplies that into the voice's gain. The caller supplies the
+    /// factor (e.g. a physics raycast); the engine just multiplies.
+    pub fn set_occlusion_hook(&mut self, hook: Option<OcclusionHook>) {
+        self.occlusion_hook = hook;
+        let ids: Vec<u64> = self.voices.keys().copied().collect();
+        for id in ids {
+            self.recompute_occlusion(id);
+        }
+        self.refresh_all();
+    }
+
+    /// Manually set a voice's obstruction gain (`[0, 1]`) and re-push its mix.
+    /// The command-queue path uses this to deliver a sim-computed occlusion
+    /// factor. Returns `false` for an unknown handle.
+    pub fn set_occlusion(&mut self, handle: SoundHandle, gain: f64) -> bool {
+        if let Some(v) = self.voices.get_mut(&handle.0) {
+            v.occlusion_gain = gain.clamp(0.0, 1.0);
+            self.refresh(handle.0);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Recompute one voice's occlusion gain from the hook (no-op if the voice is
+    /// not occlusion-flagged, non-spatial, or there is no hook).
+    fn recompute_occlusion(&mut self, id: u64) {
+        let Some(hook) = self.occlusion_hook.as_ref() else {
+            return;
+        };
+        if let Some(v) = self.voices.get_mut(&id) {
+            if v.occlusion {
+                if let Some(pos) = v.position {
+                    v.occlusion_gain = hook(self.listener.position, pos).clamp(0.0, 1.0);
+                }
+            }
+        }
+    }
+
+    // ── Volume model (built-in buses) ──────────────────────────────────────────
+
+    /// The volume of a built-in bus (`Master` returns the global volume).
     pub fn bus_volume(&self, bus: Bus) -> f64 {
         match bus {
             Bus::Master => self.master_volume,
@@ -164,8 +290,8 @@ impl AudioEngine {
         }
     }
 
-    /// Set a bus's volume (clamped non-negative) and re-push every affected
-    /// voice's mix. Setting `Master` scales the whole engine.
+    /// Set a built-in bus's volume (clamped non-negative) and re-push every
+    /// affected voice's mix. Setting `Master` scales the whole engine.
     pub fn set_bus_volume(&mut self, bus: Bus, volume: f64) {
         let v = volume.max(0.0);
         match bus {
@@ -193,31 +319,56 @@ impl AudioEngine {
         self.listener
     }
 
-    /// Move/orient the listener and re-push every spatial voice's mix.
+    /// Move/orient the listener and re-push every spatial voice's mix (occlusion
+    /// is recomputed too, since it depends on the listener position).
     pub fn set_listener(&mut self, listener: Listener) {
         self.listener = listener;
+        let ids: Vec<u64> = self.voices.keys().copied().collect();
+        for id in ids {
+            self.recompute_occlusion(id);
+        }
         self.refresh_all();
     }
 
-    // ── Playback ──────────────────────────────────────────────────────────────
+    // ── Playback (direct API) ──────────────────────────────────────────────────
 
     /// Start a sound and return its handle. In the no-device fallback this still
     /// allocates a handle and tracks the voice (so `is_playing`, `effective_*`,
     /// etc. behave consistently); only the audible output is skipped.
     pub fn play(&mut self, data: &SoundData, settings: PlaySettings) -> SoundHandle {
+        self.play_voice(
+            data,
+            Voice {
+                bus: BusRef::Builtin(settings.bus),
+                base_volume: settings.volume.max(0.0),
+                pitch: settings.pitch,
+                looping: settings.looping,
+                paused: false,
+                position: settings.position,
+                attenuation: settings.attenuation,
+                occlusion: settings.position.is_some(),
+                occlusion_gain: 1.0,
+            },
+        )
+    }
+
+    /// Insert a fully-built voice, compute its mix (incl. occlusion hook), and
+    /// hand it to the backend. Shared by [`play`](Self::play) and the command
+    /// queue.
+    fn play_voice(&mut self, data: &SoundData, mut voice: Voice) -> SoundHandle {
         let id = self.next_id;
         self.next_id += 1;
-        let voice = Voice {
-            bus: settings.bus,
-            base_volume: settings.volume.max(0.0),
-            pitch: settings.pitch,
-            paused: false,
-            position: settings.position,
-            attenuation: settings.attenuation,
-        };
+        // Apply the occlusion hook up front for hook-driven voices.
+        if voice.occlusion {
+            if let (Some(hook), Some(pos)) = (self.occlusion_hook.as_ref(), voice.position) {
+                voice.occlusion_gain = hook(self.listener.position, pos).clamp(0.0, 1.0);
+            }
+        }
         let (gain, pan) = self.compute(&voice);
+        let looping = voice.looping;
         self.voices.insert(id, voice);
-        self.backend.play(id, data, gain, pan, voice.pitch);
+        self.backend
+            .play(id, data, gain, pan, self.voices[&id].pitch, looping);
         SoundHandle(id)
     }
 
@@ -226,6 +377,8 @@ impl AudioEngine {
     pub fn stop(&mut self, handle: SoundHandle) -> bool {
         if self.voices.remove(&handle.0).is_some() {
             self.backend.stop(handle.0);
+            // Drop any source mapping that pointed at this handle.
+            self.sources.retain(|_, h| *h != handle);
             true
         } else {
             false
@@ -270,6 +423,14 @@ impl AudioEngine {
             .unwrap_or(false)
     }
 
+    /// Whether the handle names a looping voice.
+    pub fn is_looping(&self, handle: SoundHandle) -> bool {
+        self.voices
+            .get(&handle.0)
+            .map(|v| v.looping)
+            .unwrap_or(false)
+    }
+
     /// Set a voice's base (pre-bus) volume and re-push its mix.
     pub fn set_volume(&mut self, handle: SoundHandle, volume: f64) -> bool {
         if let Some(v) = self.voices.get_mut(&handle.0) {
@@ -295,8 +456,11 @@ impl AudioEngine {
     /// Move a spatial voice's emitter and re-push its mix. Returns `false` for an
     /// unknown handle; a non-spatial voice becomes spatial from now on.
     pub fn set_position(&mut self, handle: SoundHandle, position: DVec3) -> bool {
-        if let Some(v) = self.voices.get_mut(&handle.0) {
-            v.position = Some(position);
+        if self.voices.contains_key(&handle.0) {
+            if let Some(v) = self.voices.get_mut(&handle.0) {
+                v.position = Some(position);
+            }
+            self.recompute_occlusion(handle.0);
             self.refresh(handle.0);
             true
         } else {
@@ -305,8 +469,8 @@ impl AudioEngine {
     }
 
     /// The effective linear gain the engine is applying to a voice right now
-    /// (`master × bus × base × spatial`), or `None` for an unknown handle. Pure —
-    /// the primary observable the no-device tests assert against.
+    /// (`bus × base × spatial × occlusion`), or `None` for an unknown handle.
+    /// Pure — the primary observable the no-device tests assert against.
     pub fn effective_volume(&self, handle: SoundHandle) -> Option<f64> {
         self.voices.get(&handle.0).map(|v| self.compute(v).0)
     }
@@ -322,11 +486,74 @@ impl AudioEngine {
         self.voices.len()
     }
 
+    // ── Command queue (P12.3 drain-the-queue doctrine) ─────────────────────────
+
+    /// Drain a batch of [`AudioCommand`]s produced by the sim into the engine,
+    /// resolving each [`PlayCommand::clip`] GUID to a [`SoundData`] via `resolve`
+    /// (an unresolvable clip is a silent no-op). This is the **only** bridge from
+    /// deterministic sim state to the device: the command stream is the contract,
+    /// the device effects here are not sim state. See [`crate::command`].
+    pub fn drain(&mut self, cmds: &[AudioCommand], resolve: &dyn Fn(Uuid) -> Option<SoundData>) {
+        for cmd in cmds {
+            match cmd {
+                AudioCommand::Play(p) => self.apply_play(p, resolve),
+                AudioCommand::Stop { source } => {
+                    if let Some(h) = self.sources.remove(source) {
+                        self.stop(h);
+                    }
+                }
+                AudioCommand::SetVolume { source, volume } => {
+                    if let Some(&h) = self.sources.get(source) {
+                        self.set_volume(h, *volume);
+                    }
+                }
+                AudioCommand::SetPitch { source, pitch } => {
+                    if let Some(&h) = self.sources.get(source) {
+                        self.set_pitch(h, *pitch);
+                    }
+                }
+                AudioCommand::SetListener(l) => self.set_listener(*l),
+            }
+        }
+    }
+
+    /// The live handle for a source id (from a drained `Play`), if any.
+    pub fn source_handle(&self, source: u64) -> Option<SoundHandle> {
+        self.sources.get(&source).copied()
+    }
+
+    fn apply_play(&mut self, p: &PlayCommand, resolve: &dyn Fn(Uuid) -> Option<SoundData>) {
+        // One voice per source: replace any existing.
+        if let Some(h) = self.sources.remove(&p.source) {
+            self.stop(h);
+        }
+        let Some(data) = resolve(p.clip) else {
+            return; // unresolvable clip → silent no-op
+        };
+        let handle = self.play_voice(
+            &data,
+            Voice {
+                bus: BusRef::Named(p.bus.clone()),
+                base_volume: p.volume.max(0.0),
+                pitch: p.pitch,
+                looping: p.looping,
+                paused: false,
+                position: p.position,
+                attenuation: p.attenuation,
+                // The sim supplies the occlusion factor via the command; the hook
+                // does not clobber it.
+                occlusion: false,
+                occlusion_gain: p.occlusion_gain.clamp(0.0, 1.0),
+            },
+        );
+        self.sources.insert(p.source, handle);
+    }
+
     // ── internal ──────────────────────────────────────────────────────────────
 
-    fn bus_factor(&self, bus: Bus) -> f64 {
-        // The global master always applies; a per-bus factor applies on top for
-        // the non-master buses.
+    /// Linear factor for a built-in bus: master always applies; a per-bus factor
+    /// applies on top for the non-master buses.
+    fn builtin_bus_factor(&self, bus: Bus) -> f64 {
         self.master_volume
             * match bus {
                 Bus::Master => 1.0,
@@ -335,20 +562,32 @@ impl AudioEngine {
             }
     }
 
-    /// The `(gain, panning)` for a voice under the current buses + listener.
+    /// Linear factor for any [`BusRef`].
+    fn bus_factor(&self, bus: &BusRef) -> f64 {
+        match bus {
+            BusRef::Builtin(b) => self.builtin_bus_factor(*b),
+            BusRef::Named(name) => self.named_bus_gain(name),
+        }
+    }
+
+    /// The `(gain, panning)` for a voice under the current buses + listener +
+    /// occlusion.
     fn compute(&self, voice: &Voice) -> (f64, f64) {
-        let bus = self.bus_factor(voice.bus);
+        let bus = self.bus_factor(&voice.bus);
         match voice.position {
             Some(pos) => {
                 let (spatial_gain, pan) = self.listener.resolve(pos, &voice.attenuation);
-                (bus * voice.base_volume * spatial_gain, pan)
+                (
+                    bus * voice.base_volume * spatial_gain * voice.occlusion_gain,
+                    pan,
+                )
             }
             None => (bus * voice.base_volume, 0.0),
         }
     }
 
     fn refresh(&mut self, id: u64) {
-        if let Some(voice) = self.voices.get(&id).copied() {
+        if let Some(voice) = self.voices.get(&id).cloned() {
             let (gain, pan) = self.compute(&voice);
             self.backend.set_params(id, gain, pan, voice.pitch);
         }

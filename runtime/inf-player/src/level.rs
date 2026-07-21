@@ -93,6 +93,10 @@ pub struct BuiltWorld {
     /// [`RuntimeSim::register_root_motion_clip`](crate::runtime_sim::RuntimeSim::register_root_motion_clip).
     /// A clip whose skeleton ref doesn't resolve is dropped (root motion needs it).
     pub root_clips: Vec<(Uuid, Skeleton, AnimClip)>,
+    /// Resolved `.inf_audio` clips keyed by asset GUID (P12.3) — the caller seeds
+    /// [`RuntimeSim::set_audio_clips`](crate::runtime_sim::RuntimeSim::set_audio_clips)
+    /// so a scene `AudioSource` plays the same clip as in the editor Simulate.
+    pub audio_clips: BTreeMap<Uuid, inf_audio::AudioAsset>,
 }
 
 /// Produces the raw serialized bytes of a level (an `.inf_lvl` payload). The
@@ -181,6 +185,8 @@ pub struct InfSceneWorldBuilder {
     clips: HashMap<Uuid, AnimClipAsset>,
     /// `.inf_sm` state-machine payloads keyed by asset GUID (P11.4).
     machines: HashMap<Uuid, StateMachineAsset>,
+    /// `.inf_audio` clip payloads keyed by asset GUID (P12.3).
+    audio: HashMap<Uuid, inf_audio::AudioAsset>,
     /// Gravity/rate used only when the level predates settings (v1/v2) — a v3
     /// level's own [`LevelSettings`](inf_scene::RuntimeSettings) always wins.
     gravity: DVec2,
@@ -197,6 +203,7 @@ impl InfSceneWorldBuilder {
             skeletons: HashMap::new(),
             clips: HashMap::new(),
             machines: HashMap::new(),
+            audio: HashMap::new(),
             gravity,
             hz,
         }
@@ -236,6 +243,20 @@ impl InfSceneWorldBuilder {
         self.clips = clips;
         self.machines = machines;
         self
+    }
+
+    /// Attach the `.inf_audio` payloads (asset GUID → payload) used to seed the
+    /// [`RuntimeSim`](crate::runtime_sim::RuntimeSim)'s audio clips (P12.3). Builder
+    /// style, wired by `build_world` from the source's audio index.
+    pub fn with_audio(mut self, audio: HashMap<Uuid, inf_audio::AudioAsset>) -> Self {
+        self.audio = audio;
+        self
+    }
+
+    /// Resolve the `.inf_audio` payloads into the deterministic `Guid → AudioAsset`
+    /// map the runtime sim seeds (P12.3).
+    fn resolve_audio_clips(&self) -> BTreeMap<Uuid, inf_audio::AudioAsset> {
+        self.audio.iter().map(|(g, a)| (*g, a.clone())).collect()
     }
 
     /// Resolve the `.inf_sm` machines into the `Guid → StateMachine` map the
@@ -309,6 +330,7 @@ impl WorldBuilder for InfSceneWorldBuilder {
             },
             state_machines: self.resolve_state_machines(),
             root_clips: self.resolve_root_clips(),
+            audio_clips: self.resolve_audio_clips(),
         })
     }
 }
@@ -656,6 +678,13 @@ pub fn load_anim_assets_from_dir(
     )
 }
 
+/// The dev-dir `.inf_audio` payload map keyed by asset GUID (P12.3) — the audio
+/// mirror of [`load_anim_assets_from_dir`], seeded into the runtime sim so a scene
+/// `AudioSource` resolves the same clip it does in the editor Simulate.
+pub fn load_audio_assets_from_dir(dir: &Path) -> HashMap<Uuid, inf_audio::AudioAsset> {
+    load_anim_assets_by_guid_from_dir(dir, "inf_audio")
+}
+
 /// Bind actor classes to controllable entities (the P8/P9 heuristic mirrored from
 /// the editor's `samples::character_actors`): every entity carrying a
 /// `CharacterController2D` — in `Guid` order — is ticked with the first discovered
@@ -928,6 +957,13 @@ impl PackLevelSource {
             self.anim_assets_by_guid(AssetKind::AnimClip)?,
             self.anim_assets_by_guid(AssetKind::StateMachine)?,
         ))
+    }
+
+    /// Every `.inf_audio` payload in the pack keyed by asset GUID (P12.3) — the
+    /// audio mirror of [`anim_assets`](Self::anim_assets). The cook's dep closure
+    /// ships every clip a scene `AudioSource` references.
+    pub fn audio_assets(&self) -> Result<HashMap<Uuid, inf_audio::AudioAsset>, String> {
+        self.anim_assets_by_guid(AssetKind::Audio)
     }
 }
 

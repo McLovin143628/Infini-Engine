@@ -10,6 +10,11 @@
 use glam::DVec3;
 
 /// How an emitter's loudness falls off with distance from the listener.
+///
+/// All three models share the `[min_distance, max_distance]` clamp envelope
+/// (full volume at/within `min`, silent at/beyond `max`); they differ only in
+/// the curve between. Mirrors [`inf_ecs`](../../inf_ecs)'s `DistanceModel` so the
+/// sim can translate a component's model 1:1 (P12.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttenuationModel {
     /// Linear ramp from full volume at `min_distance` to silence at
@@ -18,6 +23,11 @@ pub enum AttenuationModel {
     /// Inverse-distance falloff (`min_distance / distance`), clamped to `[0, 1]`
     /// and to silence past `max_distance` — closer to physical 1/r rolloff.
     Inverse,
+    /// Exponential falloff: `(min_distance / distance)^rolloff` (P12.3), clamped
+    /// to `[0, 1]` and to silence past `max_distance`. `rolloff = 1` matches
+    /// [`Inverse`](Self::Inverse); larger values fall off faster. The rolloff
+    /// exponent lives on [`Attenuation::rolloff`].
+    Exponential,
 }
 
 /// The distance-attenuation curve for a spatial emitter.
@@ -28,6 +38,9 @@ pub struct Attenuation {
     pub min_distance: f64,
     /// At or beyond this distance the emitter is silent (gain 0.0).
     pub max_distance: f64,
+    /// Falloff exponent for [`AttenuationModel::Exponential`]; ignored by the
+    /// other models. `1.0` = plain inverse; higher = steeper. Clamped `>= 0`.
+    pub rolloff: f64,
 }
 
 impl Default for Attenuation {
@@ -36,6 +49,7 @@ impl Default for Attenuation {
             model: AttenuationModel::Inverse,
             min_distance: 1.0,
             max_distance: 100.0,
+            rolloff: 1.0,
         }
     }
 }
@@ -47,6 +61,7 @@ impl Attenuation {
             model: AttenuationModel::Linear,
             min_distance,
             max_distance,
+            rolloff: 1.0,
         }
     }
 
@@ -56,6 +71,18 @@ impl Attenuation {
             model: AttenuationModel::Inverse,
             min_distance,
             max_distance,
+            rolloff: 1.0,
+        }
+    }
+
+    /// An exponential-falloff curve (`(min/d)^rolloff`) between `min` and `max`
+    /// world units. `rolloff` is clamped non-negative.
+    pub fn exponential(min_distance: f64, max_distance: f64, rolloff: f64) -> Self {
+        Self {
+            model: AttenuationModel::Exponential,
+            min_distance,
+            max_distance,
+            rolloff: rolloff.max(0.0),
         }
     }
 
@@ -75,6 +102,9 @@ impl Attenuation {
                 ((self.max_distance - d) / (self.max_distance - self.min_distance)).clamp(0.0, 1.0)
             }
             AttenuationModel::Inverse => (self.min_distance / d).clamp(0.0, 1.0),
+            AttenuationModel::Exponential => (self.min_distance / d)
+                .powf(self.rolloff.max(0.0))
+                .clamp(0.0, 1.0),
         }
     }
 }
@@ -149,11 +179,28 @@ mod tests {
     }
 
     #[test]
+    fn exponential_gain_matches_inverse_at_rolloff_one_and_steepens() {
+        // rolloff = 1 is identical to Inverse.
+        let e1 = Attenuation::exponential(1.0, 100.0, 1.0);
+        let inv = Attenuation::inverse(1.0, 100.0);
+        assert!((e1.gain(2.0) - inv.gain(2.0)).abs() < 1e-12);
+        assert!((e1.gain(4.0) - inv.gain(4.0)).abs() < 1e-12);
+        // rolloff = 2 falls off faster: at d=2, (1/2)^2 = 0.25 < 0.5.
+        let e2 = Attenuation::exponential(1.0, 100.0, 2.0);
+        assert!((e2.gain(2.0) - 0.25).abs() < 1e-12);
+        assert!(e2.gain(2.0) < e1.gain(2.0));
+        // Envelope still applies: full within min, silent past max.
+        assert_eq!(e2.gain(0.5), 1.0);
+        assert_eq!(e2.gain(100.0), 0.0);
+    }
+
+    #[test]
     fn degenerate_attenuation_is_hard_cutoff() {
         let a = Attenuation {
             model: AttenuationModel::Linear,
             min_distance: 5.0,
             max_distance: 5.0,
+            rolloff: 1.0,
         };
         assert_eq!(a.gain(5.0), 1.0);
         assert_eq!(a.gain(5.0001), 0.0);

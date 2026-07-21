@@ -26,6 +26,7 @@ inf-core = { workspace = true }
 inf-editor-core = { workspace = true }
 glam = { workspace = true }
 inf-asset = { workspace = true }
+inf-audio = { workspace = true }
 inf-material = { workspace = true }
 inf-project = { workspace = true }
 inf-packager = { workspace = true }

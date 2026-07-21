@@ -16,6 +16,15 @@ publish = false
 kira = { workspace = true }
 # Engine vocabulary: listener/emitter poses are `glam::DVec3` (the f64 world).
 glam = { workspace = true }
+# The `.inf_audio` asset payload (P12.3) is an `inf_asset::AssetPayload`, mirroring
+# inf-mesh's `MeshAsset` — the dual-format bincode-payload + TOML-sidecar rule.
+inf-asset = { workspace = true }
+# MixerConfig + AudioImportSettings + AudioAsset are serde types; the mixer config
+# persists as deterministic TOML at `.infinity/mixer.toml`.
+serde = { workspace = true }
+toml = { workspace = true }
+# Audio-clip GUIDs on the command queue + asset refs are `uuid::Uuid`.
+uuid = { workspace = true }
 
 [features]
 # Off by default: the default build decodes sound + runs the deterministic no-device

@@ -4,8 +4,10 @@
 //! (and pass in CI).
 
 use glam::DVec3;
+use inf_audio::mixer::{Bus as MixerBus, Effect, MixerConfig, MIXER_SCHEMA_VERSION};
 use inf_audio::spatial::{Attenuation, Listener};
-use inf_audio::{AudioEngine, Bus, PlaySettings, SoundData};
+use inf_audio::{AudioCommand, AudioEngine, Bus, PlayCommand, PlaySettings, SoundData};
+use uuid::Uuid;
 
 /// Build a minimal valid 16-bit mono PCM WAV in memory, so the decode test drives
 /// kira's real symphonia path without shipping a binary fixture.
@@ -150,4 +152,104 @@ fn spatial_voice_attenuates_and_pans_with_listener() {
     });
     assert_eq!(engine.effective_volume(h), Some(1.0));
     assert_eq!(engine.effective_panning(h), Some(0.0));
+}
+
+// ── P12.3 depth: mixer, occlusion, command queue ────────────────────────────
+
+fn clip_stream(sample: SoundData) -> impl Fn(Uuid) -> Option<SoundData> {
+    // Any GUID resolves to the same decoded sound (the resolver the sim supplies
+    // maps GUID → decoded AudioAsset host-side).
+    move |_guid: Uuid| Some(sample.clone())
+}
+
+#[test]
+fn named_bus_mixer_gain_and_effect_fold_into_effective_volume() {
+    let mut engine = AudioEngine::disabled();
+    let sound = test_sound();
+    // Mixer: master 0.5, sfx child with a -6 dB gain effect.
+    let mixer = MixerConfig {
+        schema_version: MIXER_SCHEMA_VERSION,
+        buses: vec![
+            MixerBus {
+                name: "master".into(),
+                parent: None,
+                volume: 0.5,
+                effects: vec![],
+            },
+            MixerBus {
+                name: "sfx".into(),
+                parent: Some("master".into()),
+                volume: 1.0,
+                effects: vec![
+                    Effect::Gain { db: -6.0 },
+                    Effect::Lowpass { cutoff_hz: 900.0 },
+                ],
+            },
+        ],
+    };
+    engine.set_mixer(mixer);
+    // Play a command-queue voice on the named "sfx" bus at base volume 1.0.
+    let cmds = vec![AudioCommand::Play(PlayCommand::new(7, Uuid::nil(), "sfx"))];
+    engine.drain(&cmds, &clip_stream(sound));
+    let h = engine.source_handle(7).expect("source 7 has a voice");
+    // Folded gain: master 0.5 × sfx (-6 dB ≈ 0.501) ≈ 0.2506.
+    let expected = 0.5 * 10f64.powf(-6.0 / 20.0);
+    assert!((engine.effective_volume(h).unwrap() - expected).abs() < 1e-9);
+    // The device-side lowpass cutoff is modelled + folded (inspectable).
+    assert_eq!(engine.named_bus_lowpass_hz("sfx"), Some(900.0));
+}
+
+#[test]
+fn occlusion_hook_multiplies_spatial_gain() {
+    let mut engine = AudioEngine::disabled();
+    let sound = test_sound();
+    // A hook that halves gain for any obstructed pair.
+    engine.set_occlusion_hook(Some(Box::new(|_l, _e| 0.5)));
+    // A spatial voice within min_distance → spatial gain 1.0, so occlusion shows.
+    let h = engine.play(
+        &sound,
+        PlaySettings::spatial(
+            Bus::Sfx,
+            DVec3::new(0.0, 0.0, -0.5),
+            Attenuation::linear(1.0, 100.0),
+        ),
+    );
+    assert!((engine.effective_volume(h).unwrap() - 0.5).abs() < 1e-9);
+    // Clearing the hook and re-setting occlusion to 1.0 restores full gain.
+    engine.set_occlusion(h, 1.0);
+    assert!((engine.effective_volume(h).unwrap() - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn command_queue_drives_one_voice_per_source_with_replace_and_stop() {
+    let mut engine = AudioEngine::disabled();
+    let sound = test_sound();
+    let resolve = clip_stream(sound);
+
+    // Play source 1, then replace it (a second Play for the same source), then
+    // adjust it, then stop it — the deterministic stream a sim would emit.
+    let mut play2 = PlayCommand::new(1, Uuid::nil(), "sfx");
+    play2.volume = 0.25;
+    let stream = vec![
+        AudioCommand::Play(PlayCommand::new(1, Uuid::nil(), "sfx")),
+        AudioCommand::Play(play2), // replaces source 1's voice
+        AudioCommand::SetPitch {
+            source: 1,
+            pitch: 2.0,
+        },
+        AudioCommand::Play(PlayCommand::new(2, Uuid::nil(), "music")),
+    ];
+    engine.drain(&stream, &resolve);
+
+    // One active voice per source; source 1 was replaced (still 1 voice), plus
+    // source 2 → 2 voices total.
+    assert_eq!(engine.voice_count(), 2);
+    let h1 = engine.source_handle(1).unwrap();
+    assert_eq!(engine.effective_volume(h1), Some(0.25)); // the replacement's volume
+
+    // Stop source 1 via the queue.
+    engine.drain(&[AudioCommand::Stop { source: 1 }], &resolve);
+    assert!(engine.source_handle(1).is_none());
+    assert_eq!(engine.voice_count(), 1);
+    assert!(engine.source_handle(2).is_some());
 }

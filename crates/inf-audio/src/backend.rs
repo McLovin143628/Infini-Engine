@@ -73,8 +73,8 @@ impl Backend {
     }
 
     /// Start playing `data` as voice `id` with the given effective linear `gain`
-    /// (`0..`), stereo `panning` (`-1..1`), and playback `rate` (pitch factor).
-    /// No-op when disabled.
+    /// (`0..`), stereo `panning` (`-1..1`), playback `rate` (pitch factor), and a
+    /// `looping` flag (loop the whole clip). No-op when disabled.
     #[allow(unused_variables)]
     pub(crate) fn play(
         &mut self,
@@ -83,10 +83,11 @@ impl Backend {
         gain: f64,
         panning: f64,
         rate: f64,
+        looping: bool,
     ) {
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
-            inner.play(id, data, gain, panning, rate);
+            inner.play(id, data, gain, panning, rate, looping);
         }
     }
 
@@ -183,13 +184,18 @@ mod cpal_impl {
             gain: f64,
             panning: f64,
             rate: f64,
+            looping: bool,
         ) {
-            let sound = data
+            let mut sound = data
                 .inner
                 .clone()
                 .volume(to_decibels(gain))
                 .panning(Panning(panning as f32))
                 .playback_rate(PlaybackRate(rate));
+            if looping {
+                // Loop the whole clip (from 0 s to the end).
+                sound = sound.loop_region(0.0..);
+            }
             // `play` can fail if the command queue is momentarily full; a dropped
             // one-shot is a non-fatal, no-op outcome for the facade.
             if let Ok(handle) = self.manager.play(sound) {

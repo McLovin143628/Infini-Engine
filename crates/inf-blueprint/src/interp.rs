@@ -121,6 +121,18 @@ pub trait Host {
     fn physics3d(&mut self) -> Option<&mut dyn Physics3dHost> {
         None
     }
+
+    /// Optional access to the audio command sink, powering the `audio.*` blueprint
+    /// node kit (P12.3). The exact mirror of [`physics3d`](Self::physics3d):
+    /// `audio.*` nodes are ordinary [`Expr::Call`]s the interpreter routes to this
+    /// accessor with **no IR change**. Default `None` — a host without audio makes
+    /// every `audio.*` node report a clean "no audio host available" error. The
+    /// sim host overrides this to enqueue [`AudioCommand`](inf_audio::AudioCommand)s
+    /// (drained into the long-lived `AudioEngine` after the step); a `MockAudio`
+    /// records the command stream for tests.
+    fn audio(&mut self) -> Option<&mut dyn AudioHost> {
+        None
+    }
 }
 
 /// The result of a [`Physics2dHost::move_and_slide`] call.
@@ -363,6 +375,65 @@ pub(crate) fn dispatch_physics3d(
     }
 }
 
+/// The audio accessor the interpreter routes `audio.*` nodes to (P12.3). The
+/// **minimal Ring-0 runtime surface** the transpiler also targets: generated Rust
+/// emits free calls (`audio::play(entity)`, `audio::set_volume(entity, v)`, …)
+/// that a game-loop shim binds to a value implementing this trait (backed by the
+/// sim's `AudioCommandQueue`). Entities are opaque `i64` ids. All methods are
+/// void exec actions — v1 is entity-based only (the clip/bus/params live on the
+/// entity's `AudioSource` component; a name-based one-shot is a documented
+/// follow-up).
+pub trait AudioHost {
+    /// Start (or restart) `entity`'s `AudioSource` voice.
+    fn play(&mut self, entity: i64) -> Result<(), String>;
+    /// Stop `entity`'s currently-playing voice.
+    fn stop(&mut self, entity: i64) -> Result<(), String>;
+    /// Set `entity`'s base volume (linear).
+    fn set_volume(&mut self, entity: i64, volume: f64) -> Result<(), String>;
+    /// Set `entity`'s pitch (playback-rate factor).
+    fn set_pitch(&mut self, entity: i64, pitch: f64) -> Result<(), String>;
+}
+
+/// Route an `audio.*` [`Expr::Call`] to the host's [`AudioHost`] — the mirror of
+/// [`dispatch_physics3d`] for the entity-based audio kit. The call `path` is
+/// `["audio", op]`; all ops are void exec actions returning [`Value::Unit`].
+pub(crate) fn dispatch_audio(
+    host: &mut dyn Host,
+    path: &[String],
+    args: &[Value],
+) -> Result<Value, RunError> {
+    let key = path.join("::");
+    let err = |msg: String| RunError::Host(key.clone(), msg);
+    let audio = host
+        .audio()
+        .ok_or_else(|| err("no audio host available".into()))?;
+
+    let op = path.get(1).map(String::as_str).unwrap_or("");
+    let ent = |i: usize| args.get(i).map_or(Ok(0), Value::as_int);
+    let flt = |i: usize| args.get(i).map_or(Ok(0.0), Value::as_float);
+    let he = |e: String| RunError::Host(key.clone(), e);
+
+    match op {
+        "play" => {
+            audio.play(ent(0)?).map_err(he)?;
+            Ok(Value::Unit)
+        }
+        "stop" => {
+            audio.stop(ent(0)?).map_err(he)?;
+            Ok(Value::Unit)
+        }
+        "set_volume" => {
+            audio.set_volume(ent(0)?, flt(1)?).map_err(he)?;
+            Ok(Value::Unit)
+        }
+        "set_pitch" => {
+            audio.set_pitch(ent(0)?, flt(1)?).map_err(he)?;
+            Ok(Value::Unit)
+        }
+        _ => Err(err(format!("unknown audio node `{key}`"))),
+    }
+}
+
 /// A [`Host`] that knows nothing — every call errors. Useful for pure fns.
 pub struct PureHost;
 impl Host for PureHost {
@@ -558,6 +629,10 @@ impl Interp<'_> {
                     // The `d3` mirror: `physics3d.*` nodes route to the host's
                     // `Physics3dHost`, same no-IR-change pattern as `physics2d`.
                     dispatch_physics3d(self.host, path, &argv)
+                } else if path.first().map(String::as_str) == Some("audio") {
+                    // `audio.*` nodes route to the host's `AudioHost` (P12.3),
+                    // same no-IR-change pattern.
+                    dispatch_audio(self.host, path, &argv)
                 } else {
                     self.host.call(path, &argv)
                 }
