@@ -3,7 +3,8 @@
 //! The player has four dispatch modes, chosen by flags (see [`Mode`]):
 //!
 //! * **windowed** (default) — open a winit window + wgpu surface and play a
-//!   world (a `--level` when the runtime reader lands, else the `--demo` world).
+//!   world: a cooked `--pack`, a loose `--level`, the `--demo` world, or — with
+//!   no flag — the pack named by a `player.toml` beside the exe (exported game).
 //! * **headless** (`--headless`) — no window/GPU: run `--run-frames N` fixed
 //!   steps of the world and print the determinism hash. The CI smoke path
 //!   (`--headless --run-frames 300 --assert-exit`).
@@ -33,13 +34,17 @@ pub enum WorldChoice {
     /// The programmatic platformer world built in `demo.rs` (mirrors
     /// `samples/platformer-2d`). Fully runnable today.
     Demo,
-    /// A level loaded from disk through the [`LevelSource`]/[`WorldBuilder`]
-    /// seams. The byte read is real; decoding into an ECS world lands with the
-    /// P9.2 runtime reader (until then the build step returns a clear error).
+    /// A loose `.inf_lvl` file on disk (the `--level` dev-dir path). Decoded by
+    /// the `inf-scene` reader; `.inf_act` actor classes are read from the level's
+    /// directory (or `--content`).
     ///
     /// [`LevelSource`]: crate::level::LevelSource
     /// [`WorldBuilder`]: crate::level::WorldBuilder
     Level(PathBuf),
+    /// A cooked pack — either the directory holding `content.inf_pack` +
+    /// `manifest.toml`, or the pack file itself (the `--pack` / exported-game
+    /// path). The root level GUID comes from the manifest.
+    Pack(PathBuf),
 }
 
 /// Fully-parsed player arguments.
@@ -47,10 +52,16 @@ pub enum WorldChoice {
 pub struct Args {
     pub mode: Mode,
     pub world: WorldChoice,
+    /// Whether the world was chosen explicitly on the command line
+    /// (`--demo`/`--level`/`--pack`). When false the player may boot from a
+    /// `player.toml` beside its executable (the exported-game path).
+    pub world_explicit: bool,
+    /// Window-title override (from `player.toml`); falls back to the world label.
+    pub title_override: Option<String>,
     /// Fixed steps to run in headless mode.
     pub run_frames: u64,
-    /// Optional content directory (asset root beside the level). Reserved for
-    /// the pack/asset-DB wiring (P9.2); recorded now so the flag is stable.
+    /// Optional content directory for `--level` mode: where `.inf_act` actor
+    /// classes are discovered. Defaults to the level file's own directory.
     pub content: Option<PathBuf>,
     pub width: u32,
     pub height: u32,
@@ -70,6 +81,8 @@ impl Default for Args {
         Self {
             mode: Mode::Windowed,
             world: WorldChoice::Demo,
+            world_explicit: false,
+            title_override: None,
             run_frames: 0,
             content: None,
             width: 1280,
@@ -97,13 +110,22 @@ impl Args {
                 "--headless" => args.mode = Mode::Headless,
                 "--pie" => args.mode = Mode::Pie,
                 "--embed-probe" => args.mode = Mode::EmbedProbe,
-                "--demo" => args.world = WorldChoice::Demo,
+                "--demo" => {
+                    args.world = WorldChoice::Demo;
+                    args.world_explicit = true;
+                }
                 // Accepted for CI-invocation compatibility; the exit code already
                 // reflects success/failure.
                 "--assert-exit" => {}
                 "--level" => {
                     let v = iter.next().ok_or("--level needs a path")?;
                     args.world = WorldChoice::Level(PathBuf::from(v));
+                    args.world_explicit = true;
+                }
+                "--pack" => {
+                    let v = iter.next().ok_or("--pack needs a path")?;
+                    args.world = WorldChoice::Pack(PathBuf::from(v));
+                    args.world_explicit = true;
                 }
                 "--content" => {
                     let v = iter.next().ok_or("--content needs a directory")?;
@@ -175,6 +197,20 @@ mod tests {
         let a = parse(&["--level", "L.inf_lvl", "--content", "Content"]).unwrap();
         assert_eq!(a.world, WorldChoice::Level(PathBuf::from("L.inf_lvl")));
         assert_eq!(a.content, Some(PathBuf::from("Content")));
+        assert!(a.world_explicit);
+    }
+
+    #[test]
+    fn pack_flag_sets_pack_world_and_is_explicit() {
+        let a = parse(&["--pack", "Build"]).unwrap();
+        assert_eq!(a.world, WorldChoice::Pack(PathBuf::from("Build")));
+        assert!(a.world_explicit);
+    }
+
+    #[test]
+    fn default_world_is_not_explicit() {
+        // No world flag → the exported-game boot-config path may apply.
+        assert!(!parse(&["--headless"]).unwrap().world_explicit);
     }
 
     #[test]

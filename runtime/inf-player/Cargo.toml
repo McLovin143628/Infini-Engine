@@ -30,6 +30,10 @@ inf-blueprint = { workspace = true }
 inf-input = { workspace = true }
 inf-math = { workspace = true }
 inf-render = { workspace = true }
+# runtime .inf_lvl decode (P9.2) + the content pack reader (P9.2) — the player is
+# the pack consumer. Both Ring 0.
+inf-scene = { workspace = true }
+inf-asset = { workspace = true }
 # supporting vocabulary
 glam = { workspace = true }
 uuid = { workspace = true }
@@ -55,4 +59,9 @@ windows = { workspace = true, features = [
 
 [dev-dependencies]
 inf-editor-core = { workspace = true }
+# The cook-and-run + export-and-run integration tests drive the real cook pipeline
+# then boot the built player off its output (both Ring 2; dev-dep only — the
+# shipped player never depends on the cook pipeline).
+inf-packager = { workspace = true }
+inf-project = { workspace = true }
 tempfile = { workspace = true }

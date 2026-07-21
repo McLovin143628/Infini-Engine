@@ -59,6 +59,41 @@ fn cook_then_pack_ls_succeeds() {
 }
 
 #[test]
+fn export_bundles_with_an_explicit_player_bin() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    write_project(&proj, "2d-platformer");
+    let sample = workspace_root().join("samples/platformer-2d");
+    for f in ["Platformer.inf_lvl", "Coyote.inf_act"] {
+        std::fs::copy(sample.join(f), proj.join("Content").join(f)).unwrap();
+    }
+    // A stand-in player binary so the CLI export path doesn't release-build.
+    let fake = dir.path().join("player.bin");
+    std::fs::write(&fake, b"fake").unwrap();
+    let out = dir.path().join("export");
+
+    let res = Command::new(inf())
+        .args(["export", "--project"])
+        .arg(&proj)
+        .arg("--out")
+        .arg(&out)
+        .arg("--player-bin")
+        .arg(&fake)
+        .output()
+        .expect("inf export runs");
+    assert!(res.status.success(), "export exit: {:?}", res.status);
+
+    let bundle = out.join("CliTest");
+    assert!(bundle.join("content.inf_pack").exists(), "pack in bundle");
+    assert!(
+        bundle.join("player.toml").exists(),
+        "launch config in bundle"
+    );
+    let exe = bundle.join(format!("CliTest{}", std::env::consts::EXE_SUFFIX));
+    assert!(exe.exists(), "renamed exe in bundle");
+}
+
+#[test]
 fn cook_fails_nonzero_on_a_broken_blueprint() {
     let dir = tempfile::tempdir().unwrap();
     let proj = dir.path().join("proj");

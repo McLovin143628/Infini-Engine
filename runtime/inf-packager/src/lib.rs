@@ -7,14 +7,17 @@
 //! `content.inf_pack` plus a deterministic [`CookManifest`]. The standalone
 //! player ([`inf-player`](../inf_player/index.html)) is the pack consumer.
 //!
-//! Per-platform *bundling* (exe/installer/.app/AppImage) is P9.5 and layers on
-//! top of this cook output later.
+//! Per-platform *bundling* — [`export`] assembling a runnable desktop folder
+//! (renamed player exe + pack + manifest + launch config) — is P9.5 and layers on
+//! top of this cook output ([`bundle`]).
 
 pub mod blueprint;
+pub mod bundle;
 pub mod cook;
 pub mod error;
 pub mod manifest;
 
+pub use bundle::{export, ExportOptions, ExportReport, ExportTarget, WindowConfig};
 pub use cook::{cook, CookOptions, CookReport, DEFAULT_PACK_NAME};
 pub use error::{CookError, Result};
 pub use manifest::{CookManifest, MANIFEST_FILE, MANIFEST_SCHEMA_VERSION};

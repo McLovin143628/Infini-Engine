@@ -2,14 +2,15 @@
 //!
 //! Subcommands: `inf new <name>` (scaffold a project from a template),
 //! `inf cook --project <dir>` (build a shippable asset pack + manifest),
-//! `inf pack ls <pack>` (inspect a `.inf_pack`), `inf --version`.
-//! `inf bindings` lands with its tooling phase.
+//! `inf export --project <dir>` (assemble a runnable desktop bundle: renamed
+//! player exe + pack + manifest + launch config), `inf pack ls <pack>` (inspect a
+//! `.inf_pack`), `inf --version`. `inf bindings` lands with its tooling phase.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use inf_asset::{AssetId, PackReader};
-use inf_packager::{cook, CookOptions};
+use inf_packager::{cook, export, CookOptions, ExportOptions};
 use inf_project::{Project, ProjectTemplate};
 
 fn main() -> ExitCode {
@@ -21,6 +22,7 @@ fn main() -> ExitCode {
         }
         Some("new") => cmd_new(&args[1..]),
         Some("cook") => cmd_cook(&args[1..]),
+        Some("export") => cmd_export(&args[1..]),
         Some("pack") => cmd_pack(&args[1..]),
         Some("--help") | Some("-h") | None => {
             print_help();
@@ -40,6 +42,7 @@ fn print_help() {
          USAGE:\n  \
              inf new <name> [--template <slug>] [--dir <path>]\n  \
              inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]\n  \
+             inf export --project <dir> [--out <dir>] [--target current] [--player-bin <path>]\n  \
              inf pack ls <pack.inf_pack>\n  \
              inf --version\n\n\
          TEMPLATES:\n  \
@@ -186,6 +189,92 @@ fn cmd_cook(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("cook failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `inf export --project <dir> [--out <dir>] [--target current] [--player-bin <path>]`
+fn cmd_export(args: &[String]) -> ExitCode {
+    let mut project: Option<PathBuf> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut player_bin: Option<PathBuf> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--project" | "-p" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => project = Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--project needs a path");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            "--out" | "-o" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => out = Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--out needs a path");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            "--player-bin" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => player_bin = Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--player-bin needs a path");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            "--target" => {
+                i += 1;
+                match args.get(i).map(String::as_str) {
+                    // Only the host target is implemented; accept it explicitly.
+                    Some("current") => {}
+                    Some(other) => {
+                        eprintln!("unsupported --target '{other}' (only 'current' is implemented)");
+                        return ExitCode::FAILURE;
+                    }
+                    None => {
+                        eprintln!("--target needs a value (current)");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            other => {
+                eprintln!("unexpected argument: {other}");
+                return ExitCode::FAILURE;
+            }
+        }
+        i += 1;
+    }
+
+    let Some(project) = project else {
+        eprintln!(
+            "usage: inf export --project <dir> [--out <dir>] [--target current] [--player-bin <path>]"
+        );
+        return ExitCode::FAILURE;
+    };
+
+    let opts = ExportOptions {
+        out_dir: out,
+        player_bin,
+        ..Default::default()
+    };
+    match export(&project, &opts) {
+        Ok(report) => {
+            print!("{}", report.render());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("export failed: {e}");
             ExitCode::FAILURE
         }
     }

@@ -40,6 +40,11 @@ pub enum CookError {
 
     #[error("manifest toml: {0}")]
     Toml(#[from] toml::ser::Error),
+
+    /// A desktop-export (bundle) step failed: locating/copying the player binary,
+    /// or writing the launch config.
+    #[error("export: {0}")]
+    Export(String),
 }
 
 /// Convenience alias.

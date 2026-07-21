@@ -7,19 +7,25 @@
 //! subprocess (the `--pie` / `--embed-probe` modes, owned by the binary entry in
 //! `main.rs`).
 //!
-//! # Coordinate-free bring-up (the load-bearing scope decision)
+//! # Worlds the player can run (P9.5)
 //!
-//! The runtime `.inf_lvl` reader is a **concurrent** task (P9.2, `inf-scene`), so
-//! the player cannot yet decode a real level. Rather than block on it, everything
-//! else is built for real — window, wgpu renderer + its own ECS→scene projection,
-//! fixed-step loop, input mapping, and the actor-ticking sim — and the runtime is
-//! proven against a **programmatic** platformer world ([`demo`], `--demo`) that
-//! mirrors `samples/platformer-2d` and runs the sample's Coyote blueprint. The
-//! level path is fully wired through the [`LevelSource`](level::LevelSource) /
-//! [`WorldBuilder`](level::WorldBuilder) seams with a stub decoder; when P9.2
-//! lands it is a one-call swap (see [`level`]). This kept P9.3 fully unblocked.
+//! * `--demo` — the programmatic platformer ([`demo`]) that mirrors
+//!   `samples/platformer-2d` and runs the sample's Coyote blueprint end to end
+//!   (the runnable-gameplay proof, since physics/actor-binding aren't yet
+//!   persisted in `.inf_lvl` — see [`level`]).
+//! * `--level <path>` — a loose `.inf_lvl` decoded by the `inf-scene` reader.
+//! * `--pack <dir-or-pack>` — a cooked `content.inf_pack` (+ `manifest.toml`).
+//! * *no flag* — the pack named by a `player.toml` beside the executable, so a
+//!   double-clicked **exported** game boots its own content ([`config`]).
+//!
+//! Levels/packs decode through [`level::InfSceneWorldBuilder`] into a real
+//! [`EcsWorld`](inf_ecs::EcsWorld); the window, wgpu renderer, fixed-step loop,
+//! input mapping, and actor-ticking sim are all real. The headless path folds the
+//! same xxh3 determinism trace `inf_runtime::replay` uses — and a cooked pack runs
+//! byte-identically to its dev-dir source (the cooked-==-uncooked gate).
 
 pub mod args;
+pub mod config;
 pub mod demo;
 pub mod input;
 pub mod level;
@@ -29,20 +35,22 @@ pub mod runtime_sim;
 pub mod window;
 
 use std::panic::AssertUnwindSafe;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use xxhash_rust::xxh3::Xxh3;
 
 use args::{Args, Mode, WorldChoice};
-use level::{BuiltWorld, DevDirLevelSource, StubWorldBuilder};
+use level::{BuiltWorld, DevDirLevelSource, InfSceneWorldBuilder, PackLevelSource};
 use runtime_sim::{RuntimeInput, RuntimeSim};
 
 /// Dispatch the player for `args` (windowed / headless). `--pie` and
 /// `--embed-probe` are handled by the binary entry (`main.rs`) because they own
 /// process stdio / native windows and must not install the log/crash subscriber
 /// that would corrupt the PIE stdout protocol.
-pub fn run(args: Args) -> ExitCode {
+pub fn run(mut args: Args) -> ExitCode {
     log::init(args.log_file.clone(), args.crash_file.clone());
+    apply_boot_config(&mut args);
     match args.mode {
         Mode::Headless => run_headless(&args),
         Mode::Windowed => run_windowed(&args),
@@ -53,15 +61,54 @@ pub fn run(args: Args) -> ExitCode {
     }
 }
 
-/// Build the world the player runs: the programmatic demo, or a level loaded
-/// through the byte/decode seams. **The single P9.2 wiring point** is the
-/// [`StubWorldBuilder`] below — swap it for the inf-scene-backed builder.
+/// When no world was chosen on the command line, boot the pack named by a
+/// `player.toml` beside the executable (the exported-game path). A no-op when a
+/// world was given explicitly or no config is present.
+fn apply_boot_config(args: &mut Args) {
+    if args.world_explicit {
+        return;
+    }
+    let Some(cfg) = config::load_beside_exe() else {
+        return;
+    };
+    tracing::info!(
+        "inf-player: booting from player.toml → {}",
+        cfg.pack.display()
+    );
+    args.world = WorldChoice::Pack(cfg.pack);
+    if let Some(t) = cfg.title {
+        args.title_override = Some(t);
+    }
+    if let Some(w) = cfg.width {
+        args.width = w;
+    }
+    if let Some(h) = cfg.height {
+        args.height = h;
+    }
+}
+
+/// Build the world the player runs: the programmatic demo, a loose `.inf_lvl`, or
+/// a cooked pack. Levels/packs decode through the `inf-scene` reader and bind
+/// actor classes via [`InfSceneWorldBuilder`].
 fn build_world(args: &Args) -> Result<BuiltWorld, String> {
     match &args.world {
         WorldChoice::Demo => Ok(demo::build()),
         WorldChoice::Level(path) => {
             let source = DevDirLevelSource::new(path);
-            level::load(&source, &StubWorldBuilder)
+            let content_dir = args
+                .content
+                .clone()
+                .or_else(|| path.parent().map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("."));
+            let actors = level::load_actor_classes_from_dir(&content_dir);
+            let builder = InfSceneWorldBuilder::with_defaults(actors);
+            level::load(&source, &builder)
+        }
+        WorldChoice::Pack(path) => {
+            let source = PackLevelSource::open(path)?;
+            let actors = source.actor_classes()?;
+            let builder = InfSceneWorldBuilder::with_defaults(actors);
+            level::load(&source, &builder)
         }
     }
 }
@@ -114,9 +161,12 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     };
     let map = match &args.world {
         WorldChoice::Level(path) => input::load_map_beside(path),
-        WorldChoice::Demo => input::default_map(),
+        WorldChoice::Demo | WorldChoice::Pack(_) => input::default_map(),
     };
-    let title = format!("Infinity Engine — {}", built.label);
+    let title = match &args.title_override {
+        Some(t) => t.clone(),
+        None => format!("Infinity Engine — {}", built.label),
+    };
     let sim = RuntimeSim::new(built.world, built.actors, built.gravity, built.hz);
     match window::run(title, args.width, args.height, sim, map) {
         Ok(()) => ExitCode::SUCCESS,

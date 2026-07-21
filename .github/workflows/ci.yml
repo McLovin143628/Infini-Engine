@@ -66,6 +66,25 @@ jobs:
       - name: Doctests (nextest does not run them)
         run: cargo test --workspace --doc
 
+      - name: Cook-and-run smoke (§8)
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXE=""
+          [ "$RUNNER_OS" = "Windows" ] && EXE=".exe"
+          # Build the CLI + player once (debug; reuses this job's target dir/cache).
+          cargo build -p inf-cli -p inf-player
+          # Scaffold a throwaway project from the committed platformer sample.
+          proj="ci-platformer"
+          rm -rf "$proj"
+          mkdir -p "$proj/Content"
+          printf 'schema_version = 1\nname = "CI Platformer"\nengine_version = "0.1.0"\ntemplate = "2d-platformer"\n' > "$proj/inf.toml"
+          cp samples/platformer-2d/Platformer.inf_lvl samples/platformer-2d/Coyote.inf_act "$proj/Content/"
+          # Cook a shippable pack, then run it headless — the make→cook→play gate.
+          "./target/debug/inf$EXE" cook --project "$proj" --out "$proj/Build"
+          "./target/debug/inf-player$EXE" --pack "$proj/Build" --headless --run-frames 300 --assert-exit
+          rm -rf "$proj"
+
   deny:
     name: cargo-deny (advisories, licenses, bans, sources)
     runs-on: ubuntu-latest
