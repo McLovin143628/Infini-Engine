@@ -23,6 +23,15 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod interp;
+pub mod semantics;
+
+pub use interp::{eval_fn, eval_fn_traced, Debug as InterpDebug, Host, RunError, Trace, Value};
+pub use semantics::{
+    ActorHost, ActorInstance, BlueprintClass, BlueprintLibrary, Component, EventBinding, EventKind,
+    Variable, SCHEMA_VERSION,
+};
+
 /// Pin/value types available in the Spike B subset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ty {
