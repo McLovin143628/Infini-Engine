@@ -21,11 +21,58 @@ pub struct MeshInstance {
     pub translation: DVec3,
     pub rotation: Quat,
     pub scale: Vec3,
-    /// Linear-space base color.
+    /// Linear-space base color (rgba).
     pub color: [f32; 4],
+    /// Metallic-roughness PBR parameters.
+    pub metallic: f32,
+    pub roughness: f32,
+    /// Linear self-emitted color (rgb).
+    pub emissive: [f32; 3],
     /// Stable pick id; `ID_NONE` is reserved, ids ≥ `ID_GIZMO_BASE` are
     /// reserved for gizmo parts.
     pub id: u32,
+}
+
+impl MeshInstance {
+    /// A plain lit instance (metallic 0, roughness 0.5, no emission) — the
+    /// common case for tests and simple callers.
+    pub fn lit(translation: DVec3, rotation: Quat, scale: Vec3, color: [f32; 4], id: u32) -> Self {
+        Self {
+            translation,
+            rotation,
+            scale,
+            color,
+            metallic: 0.0,
+            roughness: 0.5,
+            emissive: [0.0; 3],
+            id,
+        }
+    }
+}
+
+/// Directional vs point light (spot is projected as point for now).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightKind {
+    Directional,
+    Point,
+}
+
+/// A scene light in world space. The mesh pass converts point positions to
+/// render-local (floating-origin-relative) space at upload, exactly like
+/// instance transforms.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderLight {
+    pub kind: LightKind,
+    /// Linear light color.
+    pub color: [f32; 3],
+    /// Radiant intensity multiplier.
+    pub intensity: f32,
+    /// Unit direction *toward* the light (directional only).
+    pub direction: Vec3,
+    /// World-space position (point only).
+    pub position: DVec3,
+    /// Influence radius in metres (point only); 0 ⇒ unbounded.
+    pub range: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -50,7 +97,10 @@ impl Default for SkyParams {
 #[derive(Debug, Clone, Default)]
 pub struct RenderScene {
     pub instances: Vec<MeshInstance>,
-    /// Bump on every change to `instances` — gates instance-buffer re-upload.
+    /// Scene lights (directional + point). Empty ⇒ the shader falls back to a
+    /// default editor sun so unlit demo scenes still render.
+    pub lights: Vec<RenderLight>,
+    /// Bump on every change to `instances`/`lights` — gates buffer re-upload.
     pub version: u64,
     pub sky: SkyParams,
     pub grid_enabled: bool,
@@ -77,13 +127,13 @@ mod tests {
     fn dirty_bumps_version() {
         let mut s = RenderScene::default();
         let v0 = s.version;
-        s.instances.push(MeshInstance {
-            translation: DVec3::ZERO,
-            rotation: Quat::IDENTITY,
-            scale: Vec3::ONE,
-            color: [1.0; 4],
-            id: 1,
-        });
+        s.instances.push(MeshInstance::lit(
+            DVec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::ONE,
+            [1.0; 4],
+            1,
+        ));
         s.mark_dirty();
         assert_ne!(s.version, v0);
     }

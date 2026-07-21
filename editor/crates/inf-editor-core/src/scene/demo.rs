@@ -73,9 +73,9 @@ fn set_transform(doc: &mut SceneDoc, guid: uuid::Uuid, t: Transform) {
 
 fn set_color(doc: &mut SceneDoc, guid: uuid::Uuid, color: Color) {
     if let Some(e) = doc.entity_of(guid) {
-        doc.world_mut()
-            .world_mut()
-            .entity_mut(e)
-            .insert(Material { base_color: color });
+        doc.world_mut().world_mut().entity_mut(e).insert(Material {
+            base_color: color,
+            ..Default::default()
+        });
     }
 }

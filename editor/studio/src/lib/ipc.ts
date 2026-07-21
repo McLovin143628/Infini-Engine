@@ -146,6 +146,12 @@ export const scene = {
   /** Spawn a Content-Drawer asset dropped over the viewport (P4.4). */
   spawnAsset: (assetId: string): Promise<string> =>
     invoke<string>("scene_spawn_asset", { assetId }),
+  /**
+   * Apply a material asset's PBR parameters to entities (P7.1). `targets`
+   * defaults to the current selection. Resolves to how many were updated.
+   */
+  applyMaterial: (assetId: string, targets: string[] | null = null): Promise<number> =>
+    invoke<number>("scene_apply_material", { assetId, targets }),
 };
 
 /**

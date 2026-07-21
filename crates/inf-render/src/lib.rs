@@ -31,5 +31,7 @@ pub use headless::{HeadlessTarget, HEADLESS_FORMAT};
 pub use passes::composite::BlitMode;
 pub use pick::Picker;
 pub use renderer::{EngineRenderer, MASK_FORMAT, SCENE_FORMAT, SCENE_SAMPLES};
-pub use scene::{MeshInstance, RenderScene, SkyParams, ID_GIZMO_BASE, ID_NONE};
+pub use scene::{
+    LightKind, MeshInstance, RenderLight, RenderScene, SkyParams, ID_GIZMO_BASE, ID_NONE,
+};
 pub use surface::{SurfaceChain, RECONFIGURE_DEBOUNCE};

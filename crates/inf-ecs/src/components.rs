@@ -168,17 +168,41 @@ pub struct MeshRef {
     pub primitive: Primitive,
 }
 
-/// Surface appearance (a stand-in for `.inf_mat` in Phase 7).
+/// Surface appearance: the metallic-roughness PBR parameter block (Phase 7).
+/// New fields carry `#[serde(default)]` so pre-P7 `.inf_lvl` files that only
+/// stored `base_color` still deserialize.
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[reflect(Component, Default)]
 pub struct Material {
     pub base_color: Color,
+    /// 0 = dielectric, 1 = metal.
+    #[serde(default = "default_metallic")]
+    pub metallic: f32,
+    /// Perceptual roughness, 0 = mirror-smooth, 1 = fully rough.
+    #[serde(default = "default_roughness")]
+    pub roughness: f32,
+    /// Self-emitted color (rgb; alpha ignored). Black = non-emissive.
+    #[serde(default = "default_emissive")]
+    pub emissive: Color,
+}
+
+fn default_metallic() -> f32 {
+    0.0
+}
+fn default_roughness() -> f32 {
+    0.5
+}
+fn default_emissive() -> Color {
+    Color::new(0.0, 0.0, 0.0, 1.0)
 }
 
 impl Default for Material {
     fn default() -> Self {
         Self {
             base_color: Color::new(0.8, 0.8, 0.8, 1.0),
+            metallic: default_metallic(),
+            roughness: default_roughness(),
+            emissive: default_emissive(),
         }
     }
 }

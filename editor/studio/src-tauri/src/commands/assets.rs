@@ -47,6 +47,15 @@ impl AssetState {
         proj.db().get(id).map(|e| e.name.clone())
     }
 
+    /// Load a material asset's PBR parameters (Content-Drawer apply-by-drag,
+    /// P7.1). `None` if the asset is missing or not a material.
+    pub fn load_material(&self, id: AssetId) -> Option<MaterialAsset> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        proj.load_payload::<MaterialAsset>(id).ok()
+    }
+
     fn with_project<R>(
         &self,
         f: impl FnOnce(&mut AssetProject) -> Result<R, String>,

@@ -158,6 +158,46 @@ pub async fn scene_spawn_asset(
     Ok(guid.to_string())
 }
 
+/// Apply a material asset's PBR parameters to entities (Content-Drawer
+/// apply-by-drag / "Apply to Selection", P7.1). `targets` defaults to the
+/// current selection. Returns how many entities were updated.
+#[tauri::command]
+pub async fn scene_apply_material(
+    app: AppHandle,
+    state: State<'_, SceneState>,
+    assets: State<'_, super::assets::AssetState>,
+    asset_id: String,
+    targets: Option<Vec<String>>,
+) -> Result<usize, String> {
+    let id = asset_id
+        .parse::<inf_asset::AssetId>()
+        .map_err(|e| e.to_string())?;
+    let mat = assets
+        .load_material(id)
+        .ok_or_else(|| "asset is not a material".to_string())?;
+    let applied = {
+        let mut doc = lock(&state.doc)?;
+        let targets: Vec<Uuid> = match targets {
+            Some(list) => list
+                .iter()
+                .filter_map(|s| Uuid::parse_str(s).ok())
+                .collect(),
+            None => doc.selection().to_vec(),
+        };
+        doc.edit_apply_material(
+            &targets,
+            mat.base_color,
+            mat.metallic,
+            mat.roughness,
+            mat.emissive,
+        )
+    };
+    if applied > 0 {
+        emit_world_delta(&app, &state);
+    }
+    Ok(applied)
+}
+
 #[tauri::command]
 pub async fn scene_delete(
     app: AppHandle,

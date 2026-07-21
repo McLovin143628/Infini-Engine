@@ -154,13 +154,13 @@ fn golden_cubes() {
     .into_iter()
     .enumerate()
     {
-        scene.instances.push(MeshInstance {
-            translation: DVec3::new(x, 0.5, z),
-            rotation: Quat::from_rotation_y(0.3),
-            scale: Vec3::ONE,
-            color: [c[0], c[1], c[2], 1.0],
-            id: i as u32 + 1,
-        });
+        scene.instances.push(MeshInstance::lit(
+            DVec3::new(x, 0.5, z),
+            Quat::from_rotation_y(0.3),
+            Vec3::ONE,
+            [c[0], c[1], c[2], 1.0],
+            i as u32 + 1,
+        ));
     }
     scene.mark_dirty();
     let img = check_golden(&gpu, "cubes", &scene, &overlook_view());
@@ -181,13 +181,13 @@ fn golden_selection_gizmo() {
         selected: vec![1],
         ..Default::default()
     };
-    scene.instances.push(MeshInstance {
-        translation: DVec3::new(0.0, 0.5, 0.0),
-        rotation: Quat::IDENTITY,
-        scale: Vec3::ONE,
-        color: [0.30, 0.55, 0.65, 1.0],
-        id: 1,
-    });
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, 0.5, 0.0),
+        Quat::IDENTITY,
+        Vec3::ONE,
+        [0.30, 0.55, 0.65, 1.0],
+        1,
+    ));
     scene.mark_dirty();
     let view = overlook_view();
     // Translate gizmo at the cube, screen-constant size.

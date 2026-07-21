@@ -38,13 +38,13 @@ fn renders_sky_grid_and_cube() {
         grid_enabled: true,
         ..Default::default()
     };
-    scene.instances.push(MeshInstance {
-        translation: DVec3::new(0.0, 0.5, 0.0),
-        rotation: Quat::IDENTITY,
-        scale: Vec3::ONE,
-        color: [0.8, 0.1, 0.1, 1.0],
-        id: 1,
-    });
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, 0.5, 0.0),
+        Quat::IDENTITY,
+        Vec3::ONE,
+        [0.8, 0.1, 0.1, 1.0],
+        1,
+    ));
     scene.mark_dirty();
 
     let view = RenderView {

@@ -43,7 +43,7 @@ impl MaskNode {
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("mask"),
                 source: wgpu::ShaderSource::Wgsl(
-                    super::scene_shader(include_str!("../shaders/mesh.wgsl")).into(),
+                    super::scene_shader(include_str!("../shaders/mask.wgsl")).into(),
                 ),
             });
 

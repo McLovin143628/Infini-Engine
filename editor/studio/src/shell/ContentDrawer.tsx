@@ -26,6 +26,7 @@ import {
   Layers,
   Link2,
   Music2,
+  Paintbrush,
   Pencil,
   Plus,
   Save,
@@ -525,9 +526,17 @@ function AssetCell({
     const inside =
       e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
     if (inside) {
-      sceneIpc
-        .spawnAsset(asset.id)
-        .catch((err) => console.error("spawn asset failed", err));
+      if (asset.kind === "material") {
+        // Apply-by-drag: a material dropped over the viewport assigns to the
+        // current selection (the drop handoff carries no pick point) (P7.1).
+        sceneIpc
+          .applyMaterial(asset.id)
+          .catch((err) => console.error("apply material failed", err));
+      } else {
+        sceneIpc
+          .spawnAsset(asset.id)
+          .catch((err) => console.error("spawn asset failed", err));
+      }
     }
   };
 
@@ -634,6 +643,14 @@ function AssetContextMenu({
     if (refs.length === 0) pushStatus(`"${asset.name}" is not referenced by anything.`);
     else pushStatus(`${asset.name} ← ${refs.map((r) => r.name).join(", ")}`);
   };
+  const applyToSelection = async () => {
+    const n = await sceneIpc.applyMaterial(asset.id);
+    pushStatus(
+      n > 0
+        ? `Applied "${asset.name}" to ${n} actor(s).`
+        : "Select an actor with a material first, then apply.",
+    );
+  };
 
   return (
     <div
@@ -641,6 +658,8 @@ function AssetContextMenu({
       style={{ left: x, top: y }}
       onClick={(e) => e.stopPropagation()}
     >
+      {asset.kind === "material" &&
+        item("Apply to Selection", <Paintbrush size={13} />, () => void applyToSelection())}
       {item("Rename", <Pencil size={13} />, doRename)}
       {item("Duplicate", <Copy size={13} />, () => void store.duplicate(asset.id))}
       {item("Show References", <Link2 size={13} />, () => void showRefs())}

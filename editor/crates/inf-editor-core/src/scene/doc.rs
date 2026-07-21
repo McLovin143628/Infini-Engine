@@ -536,6 +536,43 @@ impl SceneDoc {
         ok
     }
 
+    /// Apply a material's PBR parameters to each target entity's `Material`
+    /// component as one undo step (Content-Drawer apply-by-drag / "Apply to
+    /// Selection", P7.1). Targets without a `Material` are skipped. Returns how
+    /// many entities were updated.
+    pub fn edit_apply_material(
+        &mut self,
+        targets: &[Uuid],
+        base_color: [f32; 4],
+        metallic: f32,
+        roughness: f32,
+        emissive: [f32; 3],
+    ) -> usize {
+        let Some(tp) = self.world.registry().type_path_for("Material") else {
+            return 0;
+        };
+        self.begin_transaction("Apply Material");
+        let mut applied = 0;
+        for &g in targets {
+            // Only entities that already carry a Material component.
+            if self.prop_value(g, tp, "base_color").is_none() {
+                continue;
+            }
+            self.edit_set_prop(g, tp, "base_color", &PropValue::Color(base_color));
+            self.edit_set_prop(g, tp, "metallic", &PropValue::Number(metallic as f64));
+            self.edit_set_prop(g, tp, "roughness", &PropValue::Number(roughness as f64));
+            self.edit_set_prop(
+                g,
+                tp,
+                "emissive",
+                &PropValue::Color([emissive[0], emissive[1], emissive[2], 1.0]),
+            );
+            applied += 1;
+        }
+        self.commit_transaction();
+        applied
+    }
+
     // ── history control ──────────────────────────────────────────────────
 
     /// Open an undo transaction; every recorded edit until [`Self::commit_transaction`]
@@ -788,6 +825,32 @@ mod tests {
         // a gone, b (now a root) survives.
         assert!(snap.nodes.iter().all(|n| n.guid != a.to_string()));
         assert_eq!(snap.nodes.len(), 1);
+    }
+
+    #[test]
+    fn apply_material_sets_pbr_and_undoes_as_one_step() {
+        let mut doc = SceneDoc::new();
+        let cube = doc.create(SpawnKind::Cube, "Cube", None);
+        let tp = doc.world().registry().type_path_for("Material").unwrap();
+
+        let applied =
+            doc.edit_apply_material(&[cube], [1.0, 0.0, 0.0, 1.0], 1.0, 0.2, [0.5, 0.0, 0.0]);
+        assert_eq!(applied, 1);
+        assert_eq!(
+            doc.prop_value(cube, tp, "metallic"),
+            Some(PropValue::Number(1.0))
+        );
+        assert_eq!(
+            doc.prop_value(cube, tp, "base_color"),
+            Some(PropValue::Color([1.0, 0.0, 0.0, 1.0]))
+        );
+
+        // The four field writes collapse into one undo step (back to defaults).
+        assert!(doc.undo());
+        assert_eq!(
+            doc.prop_value(cube, tp, "metallic"),
+            Some(PropValue::Number(0.0))
+        );
     }
 
     #[test]

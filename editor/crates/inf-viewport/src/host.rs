@@ -5,13 +5,15 @@
 use std::collections::HashMap;
 
 use glam::{DVec3, Vec2, Vec3};
-use inf_ecs::components::{ComputedVisibility, GlobalTransform, Material, MeshRef};
+use inf_ecs::components::{
+    ComputedVisibility, GlobalTransform, Light, LightKind as EcsLightKind, Material, MeshRef,
+};
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::scene::SceneDoc;
 use inf_math::FloatingOrigin;
 use inf_render::{
-    gizmo, EngineRenderer, GizmoDelta, GizmoDrag, GizmoMode, GpuContext, MeshInstance, Picker,
-    RenderScene, RenderView, SurfaceChain,
+    gizmo, EngineRenderer, GizmoDelta, GizmoDrag, GizmoMode, GpuContext, LightKind, MeshInstance,
+    Picker, RenderLight, RenderScene, RenderView, SurfaceChain,
 };
 use uuid::Uuid;
 
@@ -134,6 +136,7 @@ impl EngineHost {
 
     fn rebuild_scene(&mut self, doc: &SceneDoc) {
         self.scene.instances.clear();
+        self.scene.lights.clear();
         self.id_to_guid.clear();
         self.guid_to_id.clear();
 
@@ -144,13 +147,25 @@ impl EngineHost {
             let Some(entity) = world.entity_of(guid) else {
                 continue;
             };
-            if w.get::<MeshRef>(entity).is_none() {
-                continue; // only meshes render (lights/cameras: Phase 4 icons)
-            }
             let visible = w
                 .get::<ComputedVisibility>(entity)
                 .map(|c| c.0)
                 .unwrap_or(true);
+
+            // Lights project into the renderer's light list (P7.1).
+            if let Some(light) = w.get::<Light>(entity) {
+                if visible {
+                    let affine = w
+                        .get::<GlobalTransform>(entity)
+                        .map(|g| g.0)
+                        .unwrap_or(glam::DAffine3::IDENTITY);
+                    self.scene.lights.push(project_light(light, &affine));
+                }
+            }
+
+            if w.get::<MeshRef>(entity).is_none() {
+                continue; // only meshes become draw instances
+            }
             if !visible {
                 continue;
             }
@@ -159,10 +174,18 @@ impl EngineHost {
                 .map(|g| g.0)
                 .unwrap_or(glam::DAffine3::IDENTITY);
             let (scale, rot, translation) = affine.to_scale_rotation_translation();
-            let color = w
+            let (color, metallic, roughness, emissive) = w
                 .get::<Material>(entity)
-                .map(|m| m.base_color.to_array())
-                .unwrap_or([0.8, 0.8, 0.8, 1.0]);
+                .map(|m| {
+                    let e = m.emissive.to_array();
+                    (
+                        m.base_color.to_array(),
+                        m.metallic,
+                        m.roughness,
+                        [e[0], e[1], e[2]],
+                    )
+                })
+                .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3]));
             let id = next_id;
             next_id += 1;
             self.scene.instances.push(MeshInstance {
@@ -170,6 +193,9 @@ impl EngineHost {
                 rotation: rot.as_quat(),
                 scale: scale.as_vec3(),
                 color,
+                metallic,
+                roughness,
+                emissive,
                 id,
             });
             self.id_to_guid.insert(id, guid);
@@ -184,6 +210,33 @@ impl EngineHost {
             .collect();
         self.scene.hovered = None;
         self.scene.mark_dirty();
+    }
+}
+
+/// Project an ECS `Light` (+ its world transform) into a renderer light. Spot is
+/// approximated as point until P11 adds cones.
+fn project_light(light: &Light, affine: &glam::DAffine3) -> RenderLight {
+    let (_, rot, translation) = affine.to_scale_rotation_translation();
+    let c = light.color.to_array();
+    let color = [c[0], c[1], c[2]];
+    match light.kind {
+        EcsLightKind::Directional => RenderLight {
+            kind: LightKind::Directional,
+            color,
+            intensity: light.intensity,
+            // Direction *toward* the light: the transform's +Z (emission is −Z).
+            direction: (rot * DVec3::Z).as_vec3(),
+            position: DVec3::ZERO,
+            range: 0.0,
+        },
+        EcsLightKind::Point | EcsLightKind::Spot => RenderLight {
+            kind: LightKind::Point,
+            color,
+            intensity: light.intensity,
+            direction: Vec3::ZERO,
+            position: translation,
+            range: 0.0,
+        },
     }
 }
 

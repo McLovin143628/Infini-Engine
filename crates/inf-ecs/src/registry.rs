@@ -81,6 +81,16 @@ impl ComponentRegistry {
         &self.types
     }
 
+    /// The reflect `type_path` of an editable component by its Details display
+    /// name (e.g. `"Material"`), for editor code that mutates components by
+    /// field without naming `bevy_reflect` itself.
+    pub fn type_path_for(&self, display: &str) -> Option<&'static str> {
+        self.editable
+            .iter()
+            .find(|c| c.display == display)
+            .map(|c| c.type_path)
+    }
+
     /// The editable components, in canonical Details order.
     pub fn editable(&self) -> &[ComponentInfo] {
         &self.editable

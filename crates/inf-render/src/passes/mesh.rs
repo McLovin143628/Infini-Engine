@@ -10,7 +10,7 @@ use crate::camera::{DEPTH_COMPARE, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
-use crate::scene::MeshInstance;
+use crate::scene::{LightKind, MeshInstance, RenderScene};
 
 /// Vertex: position + normal.
 #[repr(C)]
@@ -20,7 +20,7 @@ pub struct MeshVertex {
     pub normal: [f32; 3],
 }
 
-/// Per-instance GPU data. Matches the `@location(3..=11)` attributes in
+/// Per-instance GPU data. Matches the `@location(3..=13)` attributes in
 /// mesh.wgsl.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -31,6 +31,10 @@ pub struct InstanceRaw {
     pub color: [f32; 4],
     /// x = pick id.
     pub misc: [u32; 4],
+    /// PBR params: x = metallic, y = roughness (z, w reserved).
+    pub pbr: [f32; 4],
+    /// Emissive color: rgb (w reserved).
+    pub emissive: [f32; 4],
 }
 
 impl InstanceRaw {
@@ -49,11 +53,13 @@ impl InstanceRaw {
             ],
             color: inst.color,
             misc: [inst.id, 0, 0, 0],
+            pbr: [inst.metallic, inst.roughness, 0.0, 0.0],
+            emissive: [inst.emissive[0], inst.emissive[1], inst.emissive[2], 0.0],
         }
     }
 }
 
-pub const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 9] = [
+pub const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 11] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x4,
         offset: 0,
@@ -98,6 +104,16 @@ pub const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 9] = [
         format: wgpu::VertexFormat::Uint32x4,
         offset: 128,
         shader_location: 11,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 144,
+        shader_location: 12,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 160,
+        shader_location: 13,
     },
 ];
 
@@ -159,6 +175,64 @@ pub fn cube_geometry() -> (Vec<MeshVertex>, Vec<u16>) {
     (verts, indices)
 }
 
+/// Max scene lights uploaded per frame (must match `MAX_LIGHTS` in mesh.wgsl).
+pub const MAX_LIGHTS: usize = 16;
+
+/// One GPU light, std140-friendly (all vec4). `pos_dir.w` = kind (0 directional,
+/// 1 point); for directional, `pos_dir.xyz` is the unit direction toward the
+/// light; for point, the render-local position. `color.a` = intensity.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuLight {
+    color: [f32; 4],
+    pos_dir: [f32; 4],
+    params: [f32; 4], // x = range
+}
+
+/// The lights uniform block bound at `@group(1)`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LightsUniform {
+    count: [u32; 4], // x = active count
+    items: [GpuLight; MAX_LIGHTS],
+}
+
+impl LightsUniform {
+    /// Project world-space scene lights into render-local GPU lights.
+    fn from_scene(scene: &RenderScene, origin: &FloatingOrigin) -> Self {
+        let mut items = [GpuLight {
+            color: [0.0; 4],
+            pos_dir: [0.0; 4],
+            params: [0.0; 4],
+        }; MAX_LIGHTS];
+        let count = scene.lights.len().min(MAX_LIGHTS);
+        for (slot, light) in items.iter_mut().zip(scene.lights.iter()).take(count) {
+            slot.color = [
+                light.color[0],
+                light.color[1],
+                light.color[2],
+                light.intensity,
+            ];
+            match light.kind {
+                LightKind::Directional => {
+                    let d = light.direction.normalize_or_zero();
+                    slot.pos_dir = [d.x, d.y, d.z, 0.0];
+                }
+                LightKind::Point => {
+                    // Render-local position (origin-relative), like instances.
+                    let p = (light.position - origin.origin()).as_vec3();
+                    slot.pos_dir = [p.x, p.y, p.z, 1.0];
+                    slot.params[0] = light.range;
+                }
+            }
+        }
+        Self {
+            count: [count as u32, 0, 0, 0],
+            items,
+        }
+    }
+}
+
 pub struct MeshNode {
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
@@ -168,6 +242,8 @@ pub struct MeshNode {
     instance_capacity: usize,
     uploaded_version: Option<(u64, glam::DVec3)>,
     instance_count: u32,
+    lights_buf: wgpu::Buffer,
+    lights_bg: wgpu::BindGroup,
 }
 
 impl MeshNode {
@@ -199,11 +275,42 @@ impl MeshNode {
         gpu.queue
             .write_buffer(&indices, 0, bytemuck::cast_slice(&idx));
 
+        // Lights uniform block (@group(1)).
+        let lights_bgl = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mesh-lights"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let lights_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mesh-lights"),
+            size: std::mem::size_of::<LightsUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let lights_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mesh-lights"),
+            layout: &lights_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: lights_buf.as_entire_binding(),
+            }],
+        });
+
         let layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("mesh"),
-                bind_group_layouts: &[Some(view_bgl)],
+                bind_group_layouts: &[Some(view_bgl), Some(&lights_bgl)],
                 immediate_size: 0,
             });
 
@@ -256,6 +363,8 @@ impl MeshNode {
             instance_capacity: 0,
             uploaded_version: None,
             instance_count: 0,
+            lights_buf,
+            lights_bg,
         }
     }
 
@@ -266,6 +375,12 @@ impl MeshNode {
         if self.uploaded_version == Some(key) {
             return;
         }
+
+        // Lights depend on the same key (scene version + origin, since point
+        // positions are render-local).
+        let lights = LightsUniform::from_scene(frame.scene, &frame.view.origin);
+        gpu.queue
+            .write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lights));
 
         let raw: Vec<InstanceRaw> = frame
             .scene
@@ -347,6 +462,7 @@ impl RenderNode for MeshNode {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
+        pass.set_bind_group(1, &self.lights_bg, &[]);
         self.draw_all(&mut pass);
     }
 }
@@ -360,19 +476,15 @@ mod tests {
     fn instance_raw_matches_attribute_offsets() {
         let v = InstanceRaw::pack(
             &FloatingOrigin::new(DVec3::ZERO),
-            &MeshInstance {
-                translation: DVec3::ZERO,
-                rotation: Quat::IDENTITY,
-                scale: Vec3::ONE,
-                color: [1.0; 4],
-                id: 1,
-            },
+            &MeshInstance::lit(DVec3::ZERO, Quat::IDENTITY, Vec3::ONE, [1.0; 4], 1),
         );
         let base = &v as *const InstanceRaw as usize;
-        assert_eq!(std::mem::size_of::<InstanceRaw>(), 144);
+        assert_eq!(std::mem::size_of::<InstanceRaw>(), 176);
         assert_eq!(&v.normal_mat as *const _ as usize - base, 64);
         assert_eq!(&v.color as *const _ as usize - base, 112);
         assert_eq!(&v.misc as *const _ as usize - base, 128);
+        assert_eq!(&v.pbr as *const _ as usize - base, 144);
+        assert_eq!(&v.emissive as *const _ as usize - base, 160);
     }
 
     #[test]
@@ -392,13 +504,13 @@ mod tests {
         let origin = FloatingOrigin::new(DVec3::new(1000.0, 0.0, 0.0));
         let raw = InstanceRaw::pack(
             &origin,
-            &MeshInstance {
-                translation: DVec3::new(1001.0, 2.0, 3.0),
-                rotation: Quat::IDENTITY,
-                scale: Vec3::ONE,
-                color: [1.0; 4],
-                id: 7,
-            },
+            &MeshInstance::lit(
+                DVec3::new(1001.0, 2.0, 3.0),
+                Quat::IDENTITY,
+                Vec3::ONE,
+                [1.0; 4],
+                7,
+            ),
         );
         // Translation column is origin-relative.
         assert_eq!(&raw.model[12..15], &[1.0, 2.0, 3.0]);
