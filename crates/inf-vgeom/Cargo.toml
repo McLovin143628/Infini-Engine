@@ -9,3 +9,20 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# Ring-0 asset dual-format rule: VgeomMesh is an AssetPayload (`.inf_vmesh`).
+inf-asset = { workspace = true }
+# The Ring-0 compute job system — per-group simplification is a named parallel hot
+# loop (§2.5); parallel_map's deterministic in-order collect keeps the build
+# reproducible regardless of pool size.
+inf-core = { workspace = true }
+# meshoptimizer: clusterization (build_meshlets), simplification with border locks
+# (simplify_with_locks), and cluster bounds/cones. Already pinned once in the
+# workspace for inf-mesh's import path; additive here.
+meshopt = { workspace = true }
+serde = { workspace = true }
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+inf-asset = { workspace = true }

@@ -35,6 +35,11 @@ pub enum CookError {
     #[error("root asset {0} is not in the project")]
     UnknownRoot(AssetId),
 
+    /// A mesh asset failed to decode while deriving its virtualized-geometry
+    /// (`.inf_vmesh`) form.
+    #[error("mesh {guid}: {message}")]
+    Mesh { guid: AssetId, message: String },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 

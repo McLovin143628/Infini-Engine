@@ -179,6 +179,7 @@ fn explicit_level_root_pulls_the_referenced_pcg_via_graph_edge() {
         &CookOptions {
             roots: Some(vec![level_id]),
             pack_name: None,
+            ..Default::default()
         },
     )
     .expect("explicit-roots cook succeeds");

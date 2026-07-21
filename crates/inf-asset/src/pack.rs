@@ -98,6 +98,7 @@ fn kind_code(kind: AssetKind) -> u16 {
         AssetKind::Skeleton => 13,
         AssetKind::AnimClip => 14,
         AssetKind::StateMachine => 15,
+        AssetKind::MeshletMesh => 16,
     }
 }
 
@@ -119,6 +120,7 @@ fn kind_from_code(code: u16) -> AssetKind {
         13 => AssetKind::Skeleton,
         14 => AssetKind::AnimClip,
         15 => AssetKind::StateMachine,
+        16 => AssetKind::MeshletMesh,
         _ => AssetKind::Unknown,
     }
 }

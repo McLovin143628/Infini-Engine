@@ -21,7 +21,20 @@
 //! 5. **Rewrite levels for runtime** — decode each `.inf_lvl` with the Ring-0
 //!    [`inf_scene`] reader (validating it) and re-encode to the current runtime
 //!    schema (upgrading legacy v1 levels to v2).
-//! 6. **Pack + manifest** — write `content.inf_pack` (sorted, zstd, deterministic)
+//! 6. **Derive virtualized geometry** (P13.1) — for every `.inf_mesh` in the
+//!    closure whose triangle count is at least
+//!    [`VgeomCookOptions::min_triangles`], build a meshlet LOD DAG
+//!    ([`inf_vgeom::build_vgeom`]) and pack it beside the mesh as an `.inf_vmesh`
+//!    ([`AssetKind::MeshletMesh`]). The source `.inf_mesh` stays authoring-clean;
+//!    the render-optimized form is *derived* at cook (roadmap P13.1). The derived
+//!    asset's GUID is a deterministic function of the mesh GUID
+//!    ([`derived_vmesh_id`]) so both cooks and the runtime agree without an index:
+//!    the next-wave renderer, when virtualized geometry is enabled, computes the
+//!    vmesh id from a mesh's id and prefers it if present in the pack, else falls
+//!    back to the classic `.inf_mesh` LOD path (roadmap risk #3). The build is
+//!    deterministic (`meshopt` + `inf_core::parallel_map`'s in-order collect), so
+//!    the vmesh derivation preserves the cook's byte-identical guarantee.
+//! 7. **Pack + manifest** — write `content.inf_pack` (sorted, zstd, deterministic)
 //!    and a deterministic `manifest.toml`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -46,6 +59,44 @@ pub struct CookOptions {
     pub roots: Option<Vec<AssetId>>,
     /// Pack file name (defaults to [`DEFAULT_PACK_NAME`]).
     pub pack_name: Option<String>,
+    /// Virtualized-geometry (`.inf_vmesh`) derivation controls.
+    pub vgeom: VgeomCookOptions,
+}
+
+/// Controls the cook's virtualized-geometry derivation (P13.1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VgeomCookOptions {
+    /// Whether to derive `.inf_vmesh` meshlet DAGs from cooked meshes.
+    pub enabled: bool,
+    /// Only meshes with at least this many triangles get a derived DAG (below it
+    /// the classic single-mesh path is cheaper than a virtualized one).
+    pub min_triangles: usize,
+}
+
+impl Default for VgeomCookOptions {
+    fn default() -> Self {
+        // Enabled by default, but only for meshes dense enough to benefit — small
+        // props stay on the classic path (and the derivation is a no-op for them).
+        Self {
+            enabled: true,
+            min_triangles: 2048,
+        }
+    }
+}
+
+/// The fixed salt XORed into a mesh GUID to derive its `.inf_vmesh` GUID.
+///
+/// XOR with a constant is a bijection, so distinct mesh ids always yield distinct
+/// vmesh ids; the salt makes a collision with any *authored* asset id vanishingly
+/// unlikely (and the cook guards the remaining case). This lets the runtime find
+/// a mesh's virtualized form by computing the id — no side index needed.
+const VMESH_ID_SALT: u128 = 0x7635_4e56_4d45_5348_1f13_1a2b_3c4d_5e6f;
+
+/// Derive the deterministic `.inf_vmesh` asset id for a given mesh id.
+pub fn derived_vmesh_id(mesh_id: AssetId) -> AssetId {
+    AssetId(uuid::Uuid::from_u128(
+        mesh_id.uuid().as_u128() ^ VMESH_ID_SALT,
+    ))
 }
 
 /// The outcome of a successful cook.
@@ -73,6 +124,8 @@ pub struct CookReport {
     pub blueprints_validated: usize,
     /// How many levels were rewritten to the runtime schema.
     pub levels_rewritten: usize,
+    /// How many `.inf_vmesh` meshlet DAGs were derived from meshes (P13.1).
+    pub meshlet_meshes_derived: usize,
     /// Non-fatal advisories (e.g. "no levels").
     pub warnings: Vec<String>,
 }
@@ -102,6 +155,12 @@ impl CookReport {
             "  {} blueprint(s) validated, {} level(s) rewritten for runtime\n",
             self.blueprints_validated, self.levels_rewritten
         ));
+        if self.meshlet_meshes_derived > 0 {
+            s.push_str(&format!(
+                "  {} meshlet DAG(s) derived (.inf_vmesh)\n",
+                self.meshlet_meshes_derived
+            ));
+        }
         match self.root_level {
             Some(l) => s.push_str(&format!("  root level: {l}\n")),
             None => s.push_str("  root level: (none)\n"),
@@ -150,6 +209,10 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     let mut levels: Vec<AssetId> = Vec::new();
     let mut blueprints_validated = 0usize;
     let mut levels_rewritten = 0usize;
+    let mut meshlet_meshes_derived = 0usize;
+    // Meshlet DAGs derived alongside their meshes, added after the closure so a
+    // derived id never shadows a real closure asset processed later.
+    let mut derived_vmeshes: Vec<(AssetId, Vec<u8>)> = Vec::new();
 
     for guid in &closure {
         let entry = db.get(*guid).ok_or(CookError::UnknownRoot(*guid))?.clone();
@@ -220,9 +283,36 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
 
         writer.add_bytes(*guid, kind, &cooked)?;
         *kinds.entry(kind.slug().to_string()).or_default() += 1;
+
+        // ── 6. derive virtualized geometry for dense meshes ─────────────────
+        if kind == AssetKind::Mesh && opts.vgeom.enabled {
+            // For a mesh `cooked == raw` (it rides through verbatim).
+            if let Some(vmesh_bytes) = derive_vmesh(*guid, &cooked, opts.vgeom.min_triangles)? {
+                let vmesh_id = derived_vmesh_id(*guid);
+                // Guard the (astronomically unlikely) collision with a real asset
+                // or an already-derived vmesh; skip with a warning rather than
+                // corrupt the pack.
+                if db.contains(vmesh_id) || derived_vmeshes.iter().any(|(id, _)| *id == vmesh_id) {
+                    warnings.push(format!(
+                        "skipped vmesh for mesh {guid}: derived id {vmesh_id} collides"
+                    ));
+                } else {
+                    derived_vmeshes.push((vmesh_id, vmesh_bytes));
+                }
+            }
+        }
     }
 
-    // ── 6. write pack + manifest ────────────────────────────────────────────
+    // Pack the derived meshlet DAGs (order-independent — the writer sorts by GUID).
+    for (vmesh_id, bytes) in &derived_vmeshes {
+        writer.add_bytes(*vmesh_id, AssetKind::MeshletMesh, bytes)?;
+        *kinds
+            .entry(AssetKind::MeshletMesh.slug().to_string())
+            .or_default() += 1;
+        meshlet_meshes_derived += 1;
+    }
+
+    // ── 7. write pack + manifest ────────────────────────────────────────────
     std::fs::create_dir_all(out_dir)?;
     let pack_name = opts
         .pack_name
@@ -264,8 +354,37 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
         root_level,
         blueprints_validated,
         levels_rewritten,
+        meshlet_meshes_derived,
         warnings,
     })
+}
+
+/// Build the `.inf_vmesh` payload for a `.inf_mesh`, or `None` if the mesh is
+/// below `min_triangles` (stays on the classic path) or has no geometry.
+fn derive_vmesh(guid: AssetId, raw: &[u8], min_triangles: usize) -> Result<Option<Vec<u8>>> {
+    let mesh: inf_mesh::MeshAsset = inf_asset::decode(raw).map_err(|e| CookError::Mesh {
+        guid,
+        message: e.to_string(),
+    })?;
+    if mesh.triangle_count() < min_triangles.max(1) {
+        return Ok(None);
+    }
+    let (positions, normals, uvs, indices) = mesh.vgeom_streams();
+    if indices.len() < 3 {
+        return Ok(None);
+    }
+    let vgeom = inf_vgeom::build_vgeom(
+        &positions,
+        &normals,
+        &uvs,
+        &indices,
+        inf_vgeom::BuildParams::default(),
+    );
+    let bytes = inf_asset::encode(&vgeom).map_err(|e| CookError::Mesh {
+        guid,
+        message: e.to_string(),
+    })?;
+    Ok(Some(bytes))
 }
 
 /// Kinds that are cook roots by default: levels (entry points) and script assets

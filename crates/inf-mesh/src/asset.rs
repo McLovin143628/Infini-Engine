@@ -201,6 +201,32 @@ impl MeshAsset {
     pub fn vertex_count(&self) -> usize {
         self.submeshes.iter().map(SubMesh::vertex_count).sum()
     }
+
+    /// Flatten every submesh into one combined `(positions, normals, uvs,
+    /// indices)` geometry — the raw streams the virtualized-geometry builder
+    /// (`inf-vgeom`) consumes at cook time. Submesh index buffers are rebased
+    /// onto the concatenated vertex buffer.
+    ///
+    /// v1 fuses all material slots into one geometry (virtualized geometry treats
+    /// the whole mesh as one clusterizable surface); per-slot meshlet tagging is a
+    /// documented follow-up. Additive: does not change any payload.
+    #[allow(clippy::type_complexity)]
+    pub fn vgeom_streams(&self) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut uvs = Vec::new();
+        let mut indices = Vec::new();
+        for sm in &self.submeshes {
+            let base = positions.len() as u32;
+            for v in &sm.vertices {
+                positions.push(v.position);
+                normals.push(v.normal);
+                uvs.push(v.uv);
+            }
+            indices.extend(sm.indices.iter().map(|&i| i + base));
+        }
+        (positions, normals, uvs, indices)
+    }
 }
 
 impl AssetPayload for MeshAsset {

@@ -149,6 +149,7 @@ pub async fn project_package(
     let opts = CookOptions {
         roots: parsed_roots,
         pack_name: None,
+        ..Default::default()
     };
 
     // Cook on a blocking task; announce running state to any global listener.

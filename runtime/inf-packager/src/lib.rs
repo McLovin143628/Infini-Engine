@@ -18,6 +18,8 @@ pub mod error;
 pub mod manifest;
 
 pub use bundle::{export, ExportOptions, ExportReport, ExportTarget, WindowConfig};
-pub use cook::{cook, CookOptions, CookReport, DEFAULT_PACK_NAME};
+pub use cook::{
+    cook, derived_vmesh_id, CookOptions, CookReport, VgeomCookOptions, DEFAULT_PACK_NAME,
+};
 pub use error::{CookError, Result};
 pub use manifest::{CookManifest, MANIFEST_FILE, MANIFEST_SCHEMA_VERSION};

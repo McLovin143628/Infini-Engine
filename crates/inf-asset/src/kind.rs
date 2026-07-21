@@ -15,6 +15,9 @@ pub enum AssetKind {
     Level,
     /// Static or skinned mesh (`.inf_mesh`).
     Mesh,
+    /// Meshlet LOD DAG for virtualized geometry (`.inf_vmesh`) — derived at cook
+    /// time from a [`Mesh`](AssetKind::Mesh) (P13.1).
+    MeshletMesh,
     /// 2D texture (`.inf_tex`).
     Texture,
     /// Material graph (`.inf_mat`).
@@ -52,6 +55,7 @@ impl AssetKind {
         Some(match self {
             AssetKind::Level => "inf_lvl",
             AssetKind::Mesh => "inf_mesh",
+            AssetKind::MeshletMesh => "inf_vmesh",
             AssetKind::Texture => "inf_tex",
             AssetKind::Material => "inf_mat",
             AssetKind::MaterialInstance => "inf_mati",
@@ -74,6 +78,7 @@ impl AssetKind {
         match ext.to_ascii_lowercase().as_str() {
             "inf_lvl" => AssetKind::Level,
             "inf_mesh" => AssetKind::Mesh,
+            "inf_vmesh" => AssetKind::MeshletMesh,
             "inf_tex" => AssetKind::Texture,
             "inf_mati" => AssetKind::MaterialInstance,
             "inf_mat" => AssetKind::Material,
@@ -104,6 +109,7 @@ impl AssetKind {
         match self {
             AssetKind::Level => "level",
             AssetKind::Mesh => "mesh",
+            AssetKind::MeshletMesh => "meshlet_mesh",
             AssetKind::Texture => "texture",
             AssetKind::Material => "material",
             AssetKind::MaterialInstance => "material_instance",
@@ -126,6 +132,7 @@ impl AssetKind {
         match self {
             AssetKind::Level => "Level",
             AssetKind::Mesh => "Static Mesh",
+            AssetKind::MeshletMesh => "Meshlet Mesh",
             AssetKind::Texture => "Texture",
             AssetKind::Material => "Material",
             AssetKind::MaterialInstance => "Material Instance",
@@ -149,6 +156,7 @@ impl AssetKind {
         &[
             AssetKind::Level,
             AssetKind::Mesh,
+            AssetKind::MeshletMesh,
             AssetKind::Texture,
             AssetKind::Material,
             AssetKind::MaterialInstance,
