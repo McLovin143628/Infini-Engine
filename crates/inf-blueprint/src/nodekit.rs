@@ -43,6 +43,7 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(variable_nodes());
     reg.register_all(flow_nodes());
     reg.register_all(action_nodes());
+    reg.register_all(physics_nodes());
     reg
 }
 
@@ -199,6 +200,78 @@ fn action_nodes() -> Vec<NodeDef> {
     ]
 }
 
+/// The 2D character-controller / physics kit (P8.3b) — the nodes the platformer
+/// uses. Execution reaches the physics world through the interpreter
+/// [`Physics2dHost`](crate::interp::Physics2dHost); the transpiler emits the
+/// matching `physics2d::*` free calls. Entities are `Int` pins; 2D vectors are
+/// **split `_x`/`_y` `Float` pins** because the blueprint IR has no first-class
+/// `Vec2` value type yet (the P6 value set is scalar-only) — promoting `Vec2` to
+/// an IR value (with round-trip + parity coverage) is a documented follow-up.
+///
+/// Exec actions (`move_and_slide`, `set_velocity`, `apply_impulse`) lower to an
+/// `ExprStmt`/`Let` host call; pure queries (`is_grounded`, `raycast`,
+/// `get_velocity`) lower to data-pin calls, with multi-component results
+/// (`raycast`, `get_velocity`) fanning each output pin to its own
+/// `physics2d::<op>::<field>` call (see [`crate::lower`]).
+fn physics_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("physics2d.move_and_slide", "Move and Slide", "physics 2d")
+            .described("Slide an entity by a motion vector, resolving collisions.")
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("motion_x", PortType::Float),
+                PortDef::new("motion_y", PortType::Float),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("grounded", PortType::Bool),
+            ]),
+        NodeDef::new("physics2d.is_grounded", "Is Grounded", "physics 2d")
+            .described("Whether the entity is currently touching the ground.")
+            .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
+            .with_outputs(vec![PortDef::new("grounded", PortType::Bool)]),
+        NodeDef::new("physics2d.raycast", "Raycast", "physics 2d")
+            .described("Cast a ray; reports hit + world point + surface normal.")
+            .with_inputs(vec![
+                PortDef::new("origin_x", PortType::Float),
+                PortDef::new("origin_y", PortType::Float),
+                PortDef::new("dir_x", PortType::Float),
+                PortDef::new("dir_y", PortType::Float),
+                PortDef::new("max", PortType::Float),
+            ])
+            .with_outputs(vec![
+                PortDef::new("hit", PortType::Bool),
+                PortDef::new("point_x", PortType::Float),
+                PortDef::new("point_y", PortType::Float),
+                PortDef::new("normal_x", PortType::Float),
+                PortDef::new("normal_y", PortType::Float),
+            ]),
+        NodeDef::new("physics2d.set_velocity", "Set Velocity", "physics 2d")
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("vx", PortType::Float),
+                PortDef::new("vy", PortType::Float),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
+        NodeDef::new("physics2d.get_velocity", "Get Velocity", "physics 2d")
+            .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
+            .with_outputs(vec![
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+            ]),
+        NodeDef::new("physics2d.apply_impulse", "Apply Impulse", "physics 2d")
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("vx", PortType::Float),
+                PortDef::new("vy", PortType::Float),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
+    ]
+}
+
 /// Classify a node `type_id` for the lowerer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeRole {
@@ -244,6 +317,30 @@ mod tests {
         let tick = reg.get("event.tick").unwrap();
         assert!(tick.output(EXEC_THEN).is_some());
         assert_eq!(tick.output("dt").unwrap().ty, PortType::Float);
+    }
+
+    #[test]
+    fn physics_kit_is_registered() {
+        let reg = blueprint_registry();
+        for id in [
+            "physics2d.move_and_slide",
+            "physics2d.is_grounded",
+            "physics2d.raycast",
+            "physics2d.set_velocity",
+            "physics2d.get_velocity",
+            "physics2d.apply_impulse",
+        ] {
+            assert!(reg.get(id).is_some(), "missing physics node {id}");
+        }
+        // move_and_slide is an exec action with a grounded data output.
+        let mas = reg.get("physics2d.move_and_slide").unwrap();
+        assert!(mas.input(EXEC_IN).is_some());
+        assert_eq!(mas.output("grounded").unwrap().ty, PortType::Bool);
+        // raycast is a pure query (no exec) with the split vector outputs.
+        let rc = reg.get("physics2d.raycast").unwrap();
+        assert!(rc.input(EXEC_IN).is_none());
+        assert_eq!(rc.output("point_x").unwrap().ty, PortType::Float);
+        assert_eq!(rc.output("normal_y").unwrap().ty, PortType::Float);
     }
 
     #[test]

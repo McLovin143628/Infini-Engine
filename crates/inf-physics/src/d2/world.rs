@@ -387,6 +387,49 @@ impl PhysicsWorld2D {
         }
     }
 
+    /// Change a body's kind (Static/Kinematic/Dynamic) in place, waking it.
+    pub fn set_body_kind(&mut self, body: BodyId, kind: BodyKind) -> bool {
+        if let Some(rb) = self.bodies.get_mut(body.0) {
+            rb.set_body_type(kind.to_rapier(), true);
+            self.query_dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Per-body multiplier on world gravity (dynamic bodies).
+    pub fn set_body_gravity_scale(&mut self, body: BodyId, scale: f64) -> bool {
+        if let Some(rb) = self.bodies.get_mut(body.0) {
+            rb.set_gravity_scale(scale, true);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Linear + angular velocity decay per second (drag).
+    pub fn set_body_damping(&mut self, body: BodyId, linear: f64, angular: f64) -> bool {
+        if let Some(rb) = self.bodies.get_mut(body.0) {
+            rb.set_linear_damping(linear);
+            rb.set_angular_damping(angular);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Lock (or unlock) the body's rotation so the solver never spins it — the
+    /// usual setting for an upright character.
+    pub fn set_body_locked_rotations(&mut self, body: BodyId, locked: bool) -> bool {
+        if let Some(rb) = self.bodies.get_mut(body.0) {
+            rb.lock_rotations(locked, true);
+            true
+        } else {
+            false
+        }
+    }
+
     // ── Colliders ─────────────────────────────────────────────────────────────
 
     /// Attach a collider to a body. Returns `None` if the body handle is invalid.

@@ -756,6 +756,184 @@ impl Default for Light {
     }
 }
 
+/// How a [`RigidBody2D`] is driven by the 2D solver (mirrors
+/// [`inf_physics::BodyKind`], kept as a plain reflected enum so the Details
+/// grid surfaces it on the enum-dropdown widget — like [`LightKind`]).
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BodyKind2D {
+    /// Never moved by the solver; infinite mass (floors, walls).
+    #[default]
+    Static,
+    /// Moved only by its `Transform` (a moving platform / mover); pushes dynamic
+    /// bodies but is not pushed back.
+    Kinematic,
+    /// Fully simulated: gravity, forces, impulses, and contacts move it.
+    Dynamic,
+}
+
+/// A 2D rigid body (P8.3b). Pairs with a [`Collider2D`] on the same entity; the
+/// `PhysicsBridge2D` in `inf-physics` mirrors it into the rapier world.
+///
+/// Additive component: every field carries `#[serde(default)]` so a minimal
+/// payload (and any future field) round-trips.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct RigidBody2D {
+    /// Static / Kinematic / Dynamic.
+    #[serde(default)]
+    pub kind: BodyKind2D,
+    /// Per-body multiplier on world gravity (`1` = full, `0` = float, `<0` =
+    /// anti-gravity). Dynamic bodies only.
+    #[serde(default = "default_gravity_scale")]
+    pub gravity_scale: f64,
+    /// Lock rotation so the body never spins (typical for characters).
+    #[serde(default)]
+    pub fixed_rotation: bool,
+    /// Linear velocity decay per second (drag).
+    #[serde(default)]
+    pub linear_damping: f64,
+    /// Angular velocity decay per second.
+    #[serde(default)]
+    pub angular_damping: f64,
+}
+
+fn default_gravity_scale() -> f64 {
+    1.0
+}
+
+impl Default for RigidBody2D {
+    fn default() -> Self {
+        Self {
+            kind: BodyKind2D::Static,
+            gravity_scale: default_gravity_scale(),
+            fixed_rotation: false,
+            linear_damping: 0.0,
+            angular_damping: 0.0,
+        }
+    }
+}
+
+/// The shape family of a [`Collider2D`].
+///
+/// A **flat** enum (no per-variant data) rather than a data-carrying enum: the
+/// Details reflection walker (`crate::props`) only descends value types and
+/// surfaces enums as a *unit* dropdown, so the shape's numeric parameters live
+/// in sibling fields ([`Collider2D::half_extents`] / [`Collider2D::radius`])
+/// that the grid can edit. Which field applies is documented per variant.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ColliderShape2DKind {
+    /// Axis-aligned box; uses [`Collider2D::half_extents`] (radius ignored).
+    #[default]
+    Box,
+    /// Circle; uses [`Collider2D::radius`] (half_extents ignored).
+    Circle,
+    /// Vertical capsule; segment half-length = `half_extents.y`, swept by
+    /// [`Collider2D::radius`] (half_extents.x ignored).
+    Capsule,
+}
+
+/// A 2D collider (P8.3b). Attaches to the entity's [`RigidBody2D`] (or, if the
+/// entity has none, an implicit static body) in the rapier world.
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Collider2D {
+    /// Box / Circle / Capsule (selects which of the fields below apply).
+    #[serde(default)]
+    pub shape_kind: ColliderShape2DKind,
+    /// Box half-width/half-height; capsule uses `.y` as the segment half-length.
+    /// (Ignored for Circle.)
+    #[serde(default = "default_half_extents")]
+    pub half_extents: Vec2d,
+    /// Circle / capsule radius. (Ignored for Box.)
+    #[serde(default = "default_radius")]
+    pub radius: f64,
+    /// Offset from the body origin, in the body frame (world units).
+    #[serde(default)]
+    pub offset: Vec2d,
+    /// Coulomb friction coefficient.
+    #[serde(default = "default_friction")]
+    pub friction: f64,
+    /// Bounciness in `[0, 1]`.
+    #[serde(default)]
+    pub restitution: f64,
+    /// Mass density (drives a dynamic body's mass/inertia).
+    #[serde(default = "default_density")]
+    pub density: f64,
+    /// A trigger volume: detects overlaps but generates no contact force.
+    #[serde(default)]
+    pub sensor: bool,
+}
+
+fn default_half_extents() -> Vec2d {
+    Vec2d::splat(0.5)
+}
+fn default_radius() -> f64 {
+    0.5
+}
+fn default_friction() -> f64 {
+    0.5
+}
+fn default_density() -> f64 {
+    1.0
+}
+
+impl Default for Collider2D {
+    fn default() -> Self {
+        Self {
+            shape_kind: ColliderShape2DKind::Box,
+            half_extents: default_half_extents(),
+            radius: default_radius(),
+            offset: Vec2d::ZERO,
+            friction: default_friction(),
+            restitution: 0.0,
+            density: default_density(),
+            sensor: false,
+        }
+    }
+}
+
+/// Tuning for a kinematic character mover (P8.3b) — an entity driven by the
+/// Blueprint `physics2d.move_and_slide` node rather than the dynamic solver.
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct CharacterController2D {
+    /// Steepest slope (degrees from "up") the character can walk up.
+    #[serde(default = "default_max_slope_deg")]
+    pub max_slope_deg: f64,
+    /// Snap to ground when within this distance (world units; `0` disables — the
+    /// character flies off ledges/ramps).
+    #[serde(default = "default_snap_to_ground")]
+    pub snap_to_ground: f64,
+    /// Skin width kept between the character and the world (must be > 0 for
+    /// numerical stability).
+    #[serde(default = "default_mover_offset")]
+    pub offset: f64,
+}
+
+fn default_max_slope_deg() -> f64 {
+    45.0
+}
+fn default_snap_to_ground() -> f64 {
+    0.2
+}
+fn default_mover_offset() -> f64 {
+    0.02
+}
+
+impl Default for CharacterController2D {
+    fn default() -> Self {
+        Self {
+            max_slope_deg: default_max_slope_deg(),
+            snap_to_ground: default_snap_to_ground(),
+            offset: default_mover_offset(),
+        }
+    }
+}
+
 /// A scene camera (distinct from the editor's fly camera).
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[reflect(Component, Default)]
@@ -966,6 +1144,64 @@ mod tests {
         let back: Light2D = serde_json::from_str(&json).unwrap();
         assert_eq!(l, back);
         assert_eq!(Light2D::default().radius, 5.0);
+    }
+
+    #[test]
+    fn rigid_body_2d_serde_round_trips_and_defaults() {
+        let rb = RigidBody2D {
+            kind: BodyKind2D::Dynamic,
+            gravity_scale: 2.0,
+            fixed_rotation: true,
+            linear_damping: 0.1,
+            angular_damping: 0.2,
+        };
+        let json = serde_json::to_string(&rb).unwrap();
+        let back: RigidBody2D = serde_json::from_str(&json).unwrap();
+        assert_eq!(rb, back);
+        // An empty payload fills every field from the defaults.
+        let d: RigidBody2D = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, RigidBody2D::default());
+        assert_eq!(d.kind, BodyKind2D::Static);
+        assert_eq!(d.gravity_scale, 1.0);
+    }
+
+    #[test]
+    fn collider_2d_serde_round_trips_and_defaults() {
+        let c = Collider2D {
+            shape_kind: ColliderShape2DKind::Capsule,
+            half_extents: Vec2d::new(0.3, 0.8),
+            radius: 0.25,
+            offset: Vec2d::new(0.0, 0.1),
+            friction: 0.9,
+            restitution: 0.2,
+            density: 2.0,
+            sensor: true,
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        let back: Collider2D = serde_json::from_str(&json).unwrap();
+        assert_eq!(c, back);
+        // Defaults: box, unit-ish material.
+        let d: Collider2D = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, Collider2D::default());
+        assert_eq!(d.shape_kind, ColliderShape2DKind::Box);
+        assert_eq!(d.half_extents, Vec2d::splat(0.5));
+        assert_eq!(d.friction, 0.5);
+        assert_eq!(d.density, 1.0);
+    }
+
+    #[test]
+    fn character_controller_2d_serde_round_trips_and_defaults() {
+        let cc = CharacterController2D {
+            max_slope_deg: 60.0,
+            snap_to_ground: 0.5,
+            offset: 0.05,
+        };
+        let json = serde_json::to_string(&cc).unwrap();
+        let back: CharacterController2D = serde_json::from_str(&json).unwrap();
+        assert_eq!(cc, back);
+        let d: CharacterController2D = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, CharacterController2D::default());
+        assert_eq!(d.max_slope_deg, 45.0);
     }
 
     #[test]

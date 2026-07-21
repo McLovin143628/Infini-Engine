@@ -29,7 +29,10 @@ pub mod nodekit;
 pub mod raise;
 pub mod semantics;
 
-pub use interp::{eval_fn, eval_fn_traced, Debug as InterpDebug, Host, RunError, Trace, Value};
+pub use interp::{
+    eval_fn, eval_fn_traced, Debug as InterpDebug, Host, MoveResult2d, Physics2dHost, RayHit2d,
+    RunError, Trace, Value,
+};
 pub use lower::{lower_event, lower_graph, LowerError};
 pub use nodekit::blueprint_registry;
 pub use raise::{event_kind_of, raise_fn, RaiseError};

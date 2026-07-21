@@ -14,3 +14,9 @@ publish = false
 # glam 0.33 (== our workspace pin), so the facade speaks `glam::DVec2` natively.
 rapier2d-f64 = { workspace = true }
 glam = { workspace = true }
+# The ECS↔physics bridge (`d2::ecs`) reads scene components to build bodies.
+# Dependency direction is inf-physics → inf-ecs (both Ring 0); inf-ecs never
+# names physics, so there is no cycle.
+inf-ecs = { workspace = true }
+# Entity identity (Guid) keys the deterministic entity↔handle maps.
+uuid = { workspace = true }

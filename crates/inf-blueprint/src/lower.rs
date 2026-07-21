@@ -269,6 +269,15 @@ impl Lowerer<'_> {
         Ok(Expr::Call { path, args })
     }
 
+    /// How many non-exec data outputs `node` declares.
+    fn data_output_count(&self, node: NodeId) -> usize {
+        self.graph
+            .node(node)
+            .and_then(|n| self.reg.get(&n.type_id))
+            .map(|def| def.outputs.iter().filter(|p| !p.ty.is_exec()).count())
+            .unwrap_or(0)
+    }
+
     /// The non-exec, non-param-pin input port names of `node`, in order.
     fn data_input_ports(&self, node: NodeId) -> Vec<String> {
         self.graph
@@ -341,7 +350,20 @@ impl Lowerer<'_> {
                     args: vec![Expr::Lit(Lit::Str(name))],
                 }
             }
-            NodeRole::PureCall => self.build_call(node, &type_id, prelude)?,
+            NodeRole::PureCall => {
+                let mut call = self.build_call(node, &type_id, prelude)?;
+                // A pure node with several data outputs (e.g. `physics2d.raycast`
+                // → hit/point/normal, `physics2d.get_velocity` → x/y) fans each
+                // output pin to its own `…::<field>` call, so a single wire
+                // carries a single scalar. Single-output pure calls keep their
+                // bare path (`vars::get`, `physics2d::is_grounded`).
+                if self.data_output_count(node) > 1 {
+                    if let Expr::Call { path, .. } = &mut call {
+                        path.push(port.to_string());
+                    }
+                }
+                call
+            }
             // An action's data output must have been bound to a local when the
             // action ran; reaching here means it wasn't on the exec path.
             NodeRole::Action => {
@@ -514,6 +536,136 @@ mod tests {
         let args: HashMap<String, Value> = [("dt".into(), Value::Float(0.5))].into();
         eval_fn(f, &args, &mut host).unwrap();
         assert_eq!(last, Some(45.0));
+    }
+
+    /// A tiny physics host for exercising the character kit end-to-end: one
+    /// entity with a velocity + position; `move_and_slide` integrates it.
+    struct MockPhysics {
+        vx: f64,
+        vy: f64,
+        x: f64,
+        y: f64,
+    }
+
+    impl crate::interp::Host for MockPhysics {
+        fn call(&mut self, path: &[String], _args: &[Value]) -> Result<Value, crate::RunError> {
+            Err(crate::RunError::NoSuchHostFn(path.join("::")))
+        }
+        fn physics(&mut self) -> Option<&mut dyn crate::interp::Physics2dHost> {
+            Some(self)
+        }
+    }
+
+    impl crate::interp::Physics2dHost for MockPhysics {
+        fn move_and_slide(
+            &mut self,
+            _entity: i64,
+            motion: [f64; 2],
+        ) -> Result<crate::interp::MoveResult2d, String> {
+            self.x += motion[0];
+            self.y += motion[1];
+            Ok(crate::interp::MoveResult2d {
+                applied: motion,
+                grounded: self.y <= 0.0,
+            })
+        }
+        fn is_grounded(&mut self, _entity: i64) -> Result<bool, String> {
+            Ok(self.y <= 0.0)
+        }
+        fn raycast(
+            &mut self,
+            _o: [f64; 2],
+            _d: [f64; 2],
+            _m: f64,
+        ) -> Result<Option<crate::interp::RayHit2d>, String> {
+            Ok(None)
+        }
+        fn set_velocity(&mut self, _entity: i64, v: [f64; 2]) -> Result<(), String> {
+            self.vx = v[0];
+            self.vy = v[1];
+            Ok(())
+        }
+        fn get_velocity(&mut self, _entity: i64) -> Result<[f64; 2], String> {
+            Ok([self.vx, self.vy])
+        }
+        fn apply_impulse(&mut self, _entity: i64, v: [f64; 2]) -> Result<(), String> {
+            self.vx += v[0];
+            self.vy += v[1];
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn lowers_and_runs_character_kit() {
+        // begin_play → set_velocity(e, 4, -2); move_and_slide(e, get_velocity(e).x,
+        //                                                     get_velocity(e).y)
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let ent = g.insert("lit.int", NodeUi::default());
+        g.node_mut(ent)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Int(1));
+        let vx = g.insert("lit.float", NodeUi::default());
+        g.node_mut(vx)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Float(4.0));
+        let vy = g.insert("lit.float", NodeUi::default());
+        g.node_mut(vy)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Float(-2.0));
+        let sv = g.insert("physics2d.set_velocity", NodeUi::default());
+        let getv = g.insert("physics2d.get_velocity", NodeUi::default());
+        let mas = g.insert("physics2d.move_and_slide", NodeUi::default());
+
+        wire(&mut g, ent, "value", sv, "entity");
+        wire(&mut g, vx, "value", sv, "vx");
+        wire(&mut g, vy, "value", sv, "vy");
+        wire(&mut g, ent, "value", getv, "entity");
+        wire(&mut g, ent, "value", mas, "entity");
+        wire(&mut g, getv, "x", mas, "motion_x");
+        wire(&mut g, getv, "y", mas, "motion_y");
+        wire(&mut g, bp, EXEC_THEN, sv, "exec");
+        wire(&mut g, sv, EXEC_THEN, mas, "exec");
+
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+
+        // The split get_velocity outputs lower to per-field calls.
+        let src = format!("{:?}", f.body);
+        assert!(src.contains("get_velocity"), "body: {src}");
+
+        let mut host = MockPhysics {
+            vx: 0.0,
+            vy: 0.0,
+            x: 0.0,
+            y: 0.0,
+        };
+        eval_fn(&f, &HashMap::new(), &mut host).unwrap();
+        // set_velocity(4,-2) → get_velocity=(4,-2) → move_and_slide adds it once.
+        assert_eq!(host.vx, 4.0);
+        assert_eq!(host.x, 4.0);
+        assert_eq!(host.y, -2.0);
+    }
+
+    #[test]
+    fn physics_node_without_a_world_errors_cleanly() {
+        use crate::interp::PureHost;
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let ent = g.insert("lit.int", NodeUi::default());
+        let sv = g.insert("physics2d.set_velocity", NodeUi::default());
+        wire(&mut g, ent, "value", sv, "entity");
+        wire(&mut g, bp, EXEC_THEN, sv, "exec");
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        let err = eval_fn(&f, &HashMap::new(), &mut PureHost).unwrap_err();
+        assert!(
+            matches!(&err, crate::RunError::Host(_, m) if m.contains("no physics world")),
+            "got {err:?}"
+        );
     }
 
     #[test]

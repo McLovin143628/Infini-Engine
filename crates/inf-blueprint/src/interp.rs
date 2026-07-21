@@ -96,6 +96,137 @@ pub enum RunError {
 pub trait Host {
     /// Dispatch a call to `path` (e.g. `["actor", "rotate"]`) with `args`.
     fn call(&mut self, path: &[String], args: &[Value]) -> Result<Value, RunError>;
+
+    /// Optional access to a 2D physics world, powering the `physics2d.*`
+    /// blueprint node kit (P8.3b). Added via the [`Host`] boundary with **no IR
+    /// change** — physics nodes are ordinary [`Expr::Call`]s that the
+    /// interpreter routes here — exactly like member variables were added
+    /// through `vars::*` calls.
+    ///
+    /// The default returns `None`: a host without a physics world makes every
+    /// `physics2d.*` node report a clean "no physics world available" error (or,
+    /// for the void actions, do nothing) rather than dispatching. A host that
+    /// owns a [`PhysicsBridge2D`](../../inf_physics/index.html) overrides this.
+    fn physics(&mut self) -> Option<&mut dyn Physics2dHost> {
+        None
+    }
+}
+
+/// The result of a [`Physics2dHost::move_and_slide`] call.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MoveResult2d {
+    /// The collision-resolved translation actually applied to the character.
+    pub applied: [f64; 2],
+    /// Whether the character ended the move grounded.
+    pub grounded: bool,
+}
+
+/// A ray/shape hit returned by [`Physics2dHost::raycast`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RayHit2d {
+    /// World-space point of impact.
+    pub point: [f64; 2],
+    /// Surface normal at the impact.
+    pub normal: [f64; 2],
+}
+
+/// The 2D-physics accessor the interpreter routes `physics2d.*` nodes to.
+///
+/// This is the **minimal Ring-0 runtime surface** the transpiler also targets:
+/// generated Rust emits free calls (`physics2d::move_and_slide(entity, mx, my)`,
+/// `physics2d::raycast::hit(ox, oy, dx, dy, max)`, …) that a P9 game-loop shim
+/// binds to a value implementing this trait (backed by an `inf_physics`
+/// `PhysicsBridge2D`). Entities are opaque `i64` ids (the runtime maps them to
+/// its own entity handles); vectors are split `[x, y]` because the blueprint IR
+/// has no first-class `Vec2` value yet (a documented follow-up — see the node
+/// kit). Every method returns `Result<_, String>` so a bad entity id surfaces
+/// as a host error rather than a panic.
+pub trait Physics2dHost {
+    /// Move-and-slide `entity` by `motion`, resolving collisions; returns the
+    /// applied translation and whether it ended grounded.
+    fn move_and_slide(&mut self, entity: i64, motion: [f64; 2]) -> Result<MoveResult2d, String>;
+    /// Whether `entity` is currently touching the ground.
+    fn is_grounded(&mut self, entity: i64) -> Result<bool, String>;
+    /// Cast a ray from `origin` along `dir` up to `max`; `None` on a miss.
+    fn raycast(
+        &mut self,
+        origin: [f64; 2],
+        dir: [f64; 2],
+        max: f64,
+    ) -> Result<Option<RayHit2d>, String>;
+    /// Set `entity`'s linear velocity.
+    fn set_velocity(&mut self, entity: i64, v: [f64; 2]) -> Result<(), String>;
+    /// Read `entity`'s linear velocity.
+    fn get_velocity(&mut self, entity: i64) -> Result<[f64; 2], String>;
+    /// Apply an instantaneous linear impulse to `entity`.
+    fn apply_impulse(&mut self, entity: i64, v: [f64; 2]) -> Result<(), String>;
+}
+
+/// Route a `physics2d.*` [`Expr::Call`] to the host's [`Physics2dHost`]. The
+/// call `path` is `["physics2d", op]` or `["physics2d", op, field]` for the
+/// multi-component queries (a vector/tuple result split into scalar output
+/// pins). Kept in one place so every [`Host`] that provides `physics()`
+/// supports the whole node kit identically — and so the interpreter and the
+/// transpiled Rust agree field-for-field.
+pub(crate) fn dispatch_physics2d(
+    host: &mut dyn Host,
+    path: &[String],
+    args: &[Value],
+) -> Result<Value, RunError> {
+    let key = path.join("::");
+    let err = |msg: String| RunError::Host(key.clone(), msg);
+    let phys = host
+        .physics()
+        .ok_or_else(|| err("no physics world available".into()))?;
+
+    let op = path.get(1).map(String::as_str).unwrap_or("");
+    let field = path.get(2).map(String::as_str);
+    let ent = |i: usize| args.get(i).map_or(Ok(0), Value::as_int);
+    let flt = |i: usize| args.get(i).map_or(Ok(0.0), Value::as_float);
+    let he = |e: String| RunError::Host(key.clone(), e);
+
+    match (op, field) {
+        ("move_and_slide", None) => {
+            let r = phys
+                .move_and_slide(ent(0)?, [flt(1)?, flt(2)?])
+                .map_err(he)?;
+            // This node's single data output is `grounded`; the applied vector is
+            // a documented follow-up (needs multi-value pins / a Vec2 type).
+            Ok(Value::Bool(r.grounded))
+        }
+        ("is_grounded", None) => Ok(Value::Bool(phys.is_grounded(ent(0)?).map_err(he)?)),
+        ("raycast", Some(field)) => {
+            let hit = phys
+                .raycast([flt(0)?, flt(1)?], [flt(2)?, flt(3)?], flt(4)?)
+                .map_err(he)?;
+            Ok(match field {
+                "hit" => Value::Bool(hit.is_some()),
+                "point_x" => Value::Float(hit.map_or(0.0, |h| h.point[0])),
+                "point_y" => Value::Float(hit.map_or(0.0, |h| h.point[1])),
+                "normal_x" => Value::Float(hit.map_or(0.0, |h| h.normal[0])),
+                "normal_y" => Value::Float(hit.map_or(0.0, |h| h.normal[1])),
+                other => return Err(err(format!("unknown raycast field `{other}`"))),
+            })
+        }
+        ("get_velocity", Some(field)) => {
+            let v = phys.get_velocity(ent(0)?).map_err(he)?;
+            Ok(match field {
+                "x" => Value::Float(v[0]),
+                "y" => Value::Float(v[1]),
+                other => return Err(err(format!("unknown get_velocity field `{other}`"))),
+            })
+        }
+        ("set_velocity", None) => {
+            phys.set_velocity(ent(0)?, [flt(1)?, flt(2)?]).map_err(he)?;
+            Ok(Value::Unit)
+        }
+        ("apply_impulse", None) => {
+            phys.apply_impulse(ent(0)?, [flt(1)?, flt(2)?])
+                .map_err(he)?;
+            Ok(Value::Unit)
+        }
+        _ => Err(err(format!("unknown physics2d node `{key}`"))),
+    }
 }
 
 /// A [`Host`] that knows nothing — every call errors. Useful for pure fns.
@@ -284,7 +415,14 @@ impl Interp<'_> {
                     .iter()
                     .map(|a| self.eval(a))
                     .collect::<Result<_, _>>()?;
-                self.host.call(path, &argv)
+                // `physics2d.*` nodes are ordinary calls the interpreter routes
+                // to the host's `Physics2dHost` (no IR change) — mirroring how
+                // `vars::*` reaches actor state through the Host boundary.
+                if path.first().map(String::as_str) == Some("physics2d") {
+                    dispatch_physics2d(self.host, path, &argv)
+                } else {
+                    self.host.call(path, &argv)
+                }
             }
         }
     }

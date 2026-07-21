@@ -21,8 +21,9 @@ pub mod world;
 
 pub use bevy_ecs::prelude::Entity;
 pub use components::{
-    AtlasRect, Camera, ComputedVisibility, GlobalTransform, Guid, Light, LightKind, Material,
-    MeshRef, Name, Primitive, Sprite, TileBounds, TileChunk, Tilemap, Transform, Visibility,
+    AtlasRect, BodyKind2D, Camera, CharacterController2D, Collider2D, ColliderShape2DKind,
+    ComputedVisibility, GlobalTransform, Guid, Light, LightKind, Material, MeshRef, Name,
+    Primitive, RigidBody2D, Sprite, TileBounds, TileChunk, Tilemap, Transform, Visibility,
     CHUNK_DIM, CHUNK_TILES,
 };
 pub use hierarchy::{ChildOf, Children};

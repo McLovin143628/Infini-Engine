@@ -2469,7 +2469,9 @@ name = "inf-physics"
 version = "0.1.0"
 dependencies = [
  "glam 0.33.2",
+ "inf-ecs",
  "rapier2d-f64",
+ "uuid",
 ]
 
 [[package]]

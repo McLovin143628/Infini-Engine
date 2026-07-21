@@ -6,17 +6,18 @@ use std::collections::HashMap;
 
 use glam::{DVec3, Vec2, Vec3};
 use inf_ecs::components::{
-    ComputedVisibility, GlobalTransform, Light, Light2D, LightKind as EcsLightKind, Material,
-    MeshRef, NineSlice, Sprite, Text2D, TextAlign, Tilemap,
+    Collider2D, ColliderShape2DKind, ComputedVisibility, GlobalTransform, Light, Light2D,
+    LightKind as EcsLightKind, Material, MeshRef, NineSlice, Sprite, Text2D, TextAlign, Tilemap,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::scene::SceneDoc;
 use inf_math::FloatingOrigin;
 use inf_render::{
-    expand_nine_slice, expand_text, gizmo, handle_from_guid, EngineRenderer, GizmoDelta, GizmoDrag,
-    GizmoMode, GpuContext, HAlign, LightKind, MeshInstance, NineSliceParams, Picker, PrebatchedRun,
-    RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderTilemap, RenderView,
-    SpriteInstance, SurfaceChain, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
+    collider_outline_2d, expand_nine_slice, expand_text, gizmo, handle_from_guid,
+    ColliderOutline2D, DebugDraw, EngineRenderer, GizmoDelta, GizmoDrag, GizmoMode, GpuContext,
+    HAlign, LightKind, MeshInstance, NineSliceParams, Picker, PrebatchedRun, RenderChunk,
+    RenderLight, RenderLight2D, RenderScene, RenderTilemap, RenderView, SpriteInstance,
+    SurfaceChain, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
 };
 use uuid::Uuid;
 
@@ -42,8 +43,25 @@ pub struct EngineHost {
     /// pick resolve to a scene entity and a gizmo write back to the document.
     id_to_guid: HashMap<u32, Uuid>,
     guid_to_id: HashMap<Uuid, u32>,
+    /// World-space 2D collider outlines by GUID (P8.3b), rebuilt each projection.
+    /// Rendered as debug lines for the current selection only.
+    collider_outlines: HashMap<Uuid, ColliderDebug>,
+    /// GUIDs of the document's current selection (for collider debug draw —
+    /// covers every selected entity, not just the mesh instances).
+    selected_guids: Vec<Uuid>,
     /// Document version the current projection reflects (skip redundant rebuilds).
     synced_version: Option<u64>,
+}
+
+/// A selected entity's collider, resolved to world space for debug outlining.
+struct ColliderDebug {
+    shape: ColliderOutline2D,
+    /// Collider offset in the body frame (world units, XY).
+    offset: Vec2,
+    /// Entity world translation (Z kept so the outline sits in the sprite plane).
+    world_pos: DVec3,
+    /// Z rotation of the body (radians).
+    z_rot: f64,
 }
 
 impl EngineHost {
@@ -66,6 +84,8 @@ impl EngineHost {
             fov_y: 60f32.to_radians(),
             id_to_guid: HashMap::new(),
             guid_to_id: HashMap::new(),
+            collider_outlines: HashMap::new(),
+            selected_guids: Vec::new(),
             synced_version: None,
         })
     }
@@ -146,6 +166,7 @@ impl EngineHost {
         self.scene.lights_2d.clear();
         self.id_to_guid.clear();
         self.guid_to_id.clear();
+        self.collider_outlines.clear();
 
         let world = doc.world();
         let w = world.world();
@@ -235,6 +256,20 @@ impl EngineHost {
                 }
             }
 
+            // 2D colliders cache a world-space outline (P8.3b); drawn as debug
+            // lines for the selection only (in `render_frame`). Independent of
+            // MeshRef — a collider often sits on a sprite or bare entity.
+            if let Some(col) = w.get::<Collider2D>(entity) {
+                let affine = w
+                    .get::<GlobalTransform>(entity)
+                    .map(|g| g.0)
+                    .unwrap_or(glam::DAffine3::IDENTITY);
+                let (_, rot, translation) = affine.to_scale_rotation_translation();
+                let (_, _, z_rot) = rot.to_euler(glam::EulerRot::YXZ);
+                self.collider_outlines
+                    .insert(guid, project_collider(col, translation, z_rot));
+            }
+
             if w.get::<MeshRef>(entity).is_none() {
                 continue; // only meshes become draw instances
             }
@@ -280,8 +315,62 @@ impl EngineHost {
             .iter()
             .filter_map(|g| self.guid_to_id.get(g).copied())
             .collect();
+        // Full selection (any entity) drives the collider debug outlines.
+        self.selected_guids = doc.selection().to_vec();
         self.scene.hovered = None;
         self.scene.mark_dirty();
+    }
+}
+
+/// Project a [`Collider2D`] (+ its world pose) into a world-space debug outline.
+fn project_collider(col: &Collider2D, world_pos: DVec3, z_rot: f64) -> ColliderDebug {
+    let shape = match col.shape_kind {
+        ColliderShape2DKind::Box => ColliderOutline2D::Box {
+            half: Vec2::new(col.half_extents.x as f32, col.half_extents.y as f32),
+        },
+        ColliderShape2DKind::Circle => ColliderOutline2D::Circle {
+            radius: col.radius as f32,
+        },
+        ColliderShape2DKind::Capsule => ColliderOutline2D::Capsule {
+            half_height: col.half_extents.y as f32,
+            radius: col.radius as f32,
+        },
+    };
+    ColliderDebug {
+        shape,
+        offset: Vec2::new(col.offset.x as f32, col.offset.y as f32),
+        world_pos,
+        z_rot,
+    }
+}
+
+/// Stroke a collider outline into the debug-line layer, rebasing through the
+/// floating origin. Points are generated in the collider's local XY frame,
+/// rotated by the body's Z rotation, offset, and lifted onto the entity's world
+/// position (Z preserved so the outline sits in the sprite plane).
+fn draw_collider_outline(debug: &mut DebugDraw, origin: &FloatingOrigin, cd: &ColliderDebug) {
+    const COLLIDER_COLOR: [f32; 4] = [0.30, 0.95, 0.55, 1.0];
+    /// Circle/capsule tessellation for the debug outline.
+    const CIRCLE_SEGMENTS: u32 = 32;
+
+    let (sin, cos) = (cd.z_rot.sin() as f32, cd.z_rot.cos() as f32);
+    let rotate = |p: Vec2| Vec2::new(cos * p.x - sin * p.y, sin * p.x + cos * p.y);
+    let offset = rotate(cd.offset);
+
+    let pts = collider_outline_2d(cd.shape, CIRCLE_SEGMENTS);
+    if pts.is_empty() {
+        return;
+    }
+    // World-space (then render-local) point for a local outline vertex.
+    let to_local = |p: Vec2| {
+        let r = rotate(p) + offset;
+        let world = cd.world_pos + DVec3::new(r.x as f64, r.y as f64, 0.0);
+        origin.to_render(world)
+    };
+    for i in 0..pts.len() {
+        let a = to_local(pts[i]);
+        let b = to_local(pts[(i + 1) % pts.len()]);
+        debug.line(a, b, COLLIDER_COLOR);
     }
 }
 
@@ -637,6 +726,12 @@ impl EngineHost {
                 size,
                 active,
             );
+        }
+        // 2D collider outlines for the current selection (P8.3b).
+        for guid in &self.selected_guids {
+            if let Some(cd) = self.collider_outlines.get(guid) {
+                draw_collider_outline(&mut self.scene.debug, &self.origin, cd);
+            }
         }
 
         let Some(frame) = self.chain.acquire(&self.gpu) else {

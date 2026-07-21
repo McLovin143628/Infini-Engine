@@ -48,8 +48,11 @@
 //!
 //! # Layout
 //!
-//! * [`d2`] — the 2D physics world, bodies, colliders, events, queries, and the
-//!   kinematic character mover.
+//! * [`d2`] — the 2D physics world, bodies, colliders, events, queries, the
+//!   kinematic character mover, and [`d2::PhysicsBridge2D`] (the ECS↔physics
+//!   sync). The bridge is why this crate depends on `inf-ecs`: the dependency
+//!   direction is **inf-physics → inf-ecs** (both Ring 0), and inf-ecs never
+//!   names physics, so there is no cycle.
 //! * [`FixedStepper`] — a pure fixed-timestep accumulator shared by every caller
 //!   (editor Simulate today, `inf-runtime` in P9) so there is one correct
 //!   implementation of the accumulate/interpolate loop.
@@ -64,5 +67,5 @@ pub use stepper::FixedStepper;
 // `d3` module keeps its own `*3D` names, so nothing here will collide.
 pub use d2::{
     BodyId, BodyKind, CharacterMove2D, CharacterMover2D, ColliderDesc2D, ColliderId,
-    ColliderShape2D, ContactEvent2D, ContactPhase, PhysicsWorld2D, RayHit2D,
+    ColliderShape2D, ContactEvent2D, ContactPhase, PhysicsBridge2D, PhysicsWorld2D, RayHit2D,
 };

@@ -8,11 +8,13 @@
 use rapier2d_f64::prelude::{ColliderHandle, RigidBodyHandle};
 
 mod character;
+mod ecs;
 mod events;
 mod query;
 mod world;
 
 pub use character::{CharacterMove2D, CharacterMover2D};
+pub use ecs::PhysicsBridge2D;
 pub use events::{ContactEvent2D, ContactPhase};
 pub use query::RayHit2D;
 pub use world::{BodyKind, ColliderDesc2D, ColliderShape2D, PhysicsWorld2D};
