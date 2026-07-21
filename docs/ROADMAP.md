@@ -684,6 +684,42 @@ panic loses no editor state.
 massive scattering. **Done when:** 16 km² terrain sculpted + interactively eroded, 1M+
 instances scattered by rules, 60 fps flythrough, works in PIE.
 
+> **STATUS: Phase 10 COMPLETE** (2026-07-21), CI-green on all three OSes. The proprietary
+> terrain + PCG stack. **P10.1**: sparse f64-anchored tile heightfield (tile-local f32 —
+> the precision doctrine applied to ground; shared edges, seamless), bilinear/normal
+> queries, PNG16/EXR import, chunked-LOD clipmap renderer (4 LODs, smoothstep morph, skirt
+> rings, per-patch cull, R32Float tile textures via textureLoad so CI adapters work).
+> **P10.2**: brush core (raise/lower/smooth/flatten/world-anchored-noise; falloff
+> profiles; HeightDelta = dense per-tile patches + created_tiles → byte-identical undo)
+> + in-viewport sculpting (ray-march picking, gizmo-style stroke transactions, engine-
+> rendered brush ring, toolbar controls) + splat painting one storey up (SplatDelta,
+> exact-255 renormalization, per-layer flow). **P10.3**: virtual-pipes hydraulic + thermal
+> erosion — deterministic mass-accounted CPU reference (closed-box conservation, monotonic
+> talus relaxation, byte-identical with stochastic rain; 13.6M cell-steps/s) and a WGSL
+> port that is bit-exact at early steps (two-tier parity gates with a documented cross-
+> adapter envelope — Metal fast-math drifts chaotic long-runs; the 8-step per-cell gate is
+> the precision spec); bakes are ONE undo step; eroded terrain is data (adapter variance
+> confined to the bake action). **P10.4**: 4-layer splat materials (sparse RGBA8 weights
+> beside heights, byte-compatible serde both directions), triplanar procedural grain on
+> steep faces, macro fBm variation; VT exploration memo (defer to P13/P15 with revisit
+> criteria). **P10.5**: deterministic massive-scale scattering (counter-hashed, pool-size-
+> invariant, 100k instances/0.06s; density/slope/altitude/mask samplers + combinators;
+> hand-rolled seeded fBm) + the PCG node editor on the shared canvas (graph→PcgDocument
+> lowering with node-anchored diagnostics, .inf_pcg stores graph-as-JSON-in-bincode —
+> the third dodge of the skip_serializing_if/bincode trap, now joined by format-aware
+> TerrainTile serde) + PcgVolume instances rendered through the instanced path with
+> volume-select picking. **Schema v4** persists Terrain (heights + weights) and PcgVolume;
+> guard tests flipped to byte-identical round-trips; cook follows PCG graph dep edges;
+> the player evaluates volumes on load and renders terrain; `samples/terrain-demo` gate
+> scene passes all three gates — byte-identical save/reload, cooked headless population
+> with deterministic instances, and **PIE == shipping for terrain + PCG content**.
+> Human-verified remainders: the 16 km²/1M-instance/60 fps flythrough perf pass (the
+> machinery exists; scale numbers need eyes + Tracy), live sculpt/erode/paint visual
+> pass, demo recording. Deferred: per-layer texture GUIDs + real mesh/texture upload in
+> the interactive viewport (the one shared gap), GPU-instanced scatter + impostor/LOD
+> fade (P13 pairs), erosion sub-region drag-select, streaming/paging of terrain tiles,
+> multi-terrain merge, PCG mask-image node + multi-rule lowering, moving-camera re-eval.
+
 - **P10.1 Heightfield core** — 1. quadtree/clipmap terrain in f64 world space; 2. LOD morphing,
   skirts, frustum culling; 3. heightmap import (EXR/PNG16) + export.
 - **P10.2 Sculpt & paint** — 1. brush framework (raise/lower/smooth/flatten/noise); 2. GPU
