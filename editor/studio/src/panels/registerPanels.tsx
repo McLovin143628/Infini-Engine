@@ -1,9 +1,17 @@
 import { useCallback, useState } from "react";
-import { Globe2, ListTree, PlusSquare, ScrollText, SlidersHorizontal } from "lucide-react";
+import {
+  Globe2,
+  ListTree,
+  PlusSquare,
+  ScrollText,
+  SlidersHorizontal,
+  SquareTerminal,
+} from "lucide-react";
 import { viewport } from "../lib/ipc";
 import DetailsPanel from "./DetailsPanel";
 import OutlinerPanel from "./OutlinerPanel";
 import OutputLogPanel from "./OutputLogPanel";
+import TerminalPanel from "./TerminalPanel";
 import { registerPanelType } from "./panelRegistry";
 
 /**
@@ -141,4 +149,16 @@ registerPanelType({
   singleton: true,
   defaultLocation: "left",
   defaultSize: { w: 300, h: 460 },
+});
+
+registerPanelType({
+  type: "terminal",
+  title: () => "Terminal",
+  icon: SquareTerminal,
+  component: TerminalPanel,
+  singleton: true,
+  defaultLocation: "bottom",
+  defaultSize: { w: 720, h: 260 },
+  // A session's PTY dies with the app; don't try to restore it across restarts.
+  transient: true,
 });

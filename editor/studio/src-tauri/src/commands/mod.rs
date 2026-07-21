@@ -7,11 +7,13 @@ mod assets;
 mod layout;
 mod project;
 mod scene;
+mod terminal;
 mod viewport;
 
 pub use assets::{init_assets_on_boot, AssetState};
 pub use project::ProjectState;
 pub use scene::{recover_scene_on_boot, SceneState};
+pub use terminal::PtyState;
 pub use viewport::ViewportState;
 
 pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
@@ -61,5 +63,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         project::project_new,
         project::project_open,
         project::project_close,
+        terminal::pty_create,
+        terminal::pty_write,
+        terminal::pty_resize,
+        terminal::pty_close,
     ]
 }

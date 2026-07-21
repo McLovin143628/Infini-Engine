@@ -98,6 +98,7 @@ export const MENU_BAR: TopMenu[] = [
       act("window.details", "Details"),
       act("window.contentDrawer", "Content Drawer", "Ctrl+Space"),
       act("window.outputLog", "Output Log"),
+      act("window.terminal", "Terminal"),
       act("window.worldSettings", "World Settings"),
       act("window.placeActors", "Place Actors"),
       sep,

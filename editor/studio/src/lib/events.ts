@@ -56,3 +56,25 @@ export function listenToDynamic<T>(
 ): Promise<UnlistenFn> {
   return listen<T>(channel, (event) => handler(event.payload));
 }
+
+// ── Terminal (P5.3): per-session parameterized channels ────────────────────
+
+/** `pty://output/{id}` payload — base64-encoded shell bytes. */
+export interface PtyOutput {
+  id: string;
+  data: string;
+}
+/** `pty://exit/{id}` payload. */
+export interface PtyExit {
+  id: string;
+  code: number | null;
+}
+
+/** Subscribe to a session's output stream. */
+export function onPtyOutput(id: string, handler: (p: PtyOutput) => void): Promise<UnlistenFn> {
+  return listenToDynamic<PtyOutput>(`pty://output/${id}`, handler);
+}
+/** Subscribe to a session's exit. */
+export function onPtyExit(id: string, handler: (p: PtyExit) => void): Promise<UnlistenFn> {
+  return listenToDynamic<PtyExit>(`pty://exit/${id}`, handler);
+}

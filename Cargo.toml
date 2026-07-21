@@ -112,6 +112,9 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 # CSV/JSON import for .inf_table data assets (P4.5).
 csv = "1"
+# ── IDE: embedded terminal (Phase 5.3) ──
+# Cross-platform pseudo-terminal (ConPTY on Windows) for the terminal panel.
+portable-pty = "0.8"
 # ── editor↔frontend shared types → committed TS bindings (CI drift-checked) ──
 ts-rs = "12"
 # test-only (dev-dependencies in member crates)

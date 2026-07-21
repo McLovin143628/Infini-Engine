@@ -49,6 +49,20 @@ export const app = {
   version: (): Promise<string> => invoke<string>("app_version"),
 };
 
+/**
+ * Embedded terminal (P5.3). A session is a real PTY in the backend; output
+ * streams on `pty://output/{id}` (see lib/events.ts). Arg names are camelCase.
+ */
+export const pty = {
+  /** Open a session in `cwd` sized `cols`×`rows`; returns the session id. */
+  create: (cwd: string | null, cols: number, rows: number): Promise<string> =>
+    invoke<string>("pty_create", { cwd, cols, rows }),
+  write: (id: string, data: string): Promise<void> => invoke("pty_write", { id, data }),
+  resize: (id: string, cols: number, rows: number): Promise<void> =>
+    invoke("pty_resize", { id, cols, rows }),
+  close: (id: string): Promise<void> => invoke("pty_close", { id }),
+};
+
 /** Named dock-layout presets, persisted in the app config dir (P1.2.5). */
 export const layouts = {
   save: (name: string, json: string): Promise<void> => invoke("layout_save", { name, json }),

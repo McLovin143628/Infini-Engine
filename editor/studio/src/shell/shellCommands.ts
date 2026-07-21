@@ -66,6 +66,7 @@ export function bootstrapShellCommands(): void {
   setCommandHandler("window.details", panelToggle("details"));
   setCommandHandler("window.outputLog", panelToggle("outputLog"));
   setCommandHandler("tools.outputLog", panelToggle("outputLog"));
+  setCommandHandler("window.terminal", panelToggle("terminal"));
   setCommandHandler("window.worldSettings", panelToggle("worldSettings"));
   setCommandHandler("window.placeActors", panelToggle("placeActors"));
 
