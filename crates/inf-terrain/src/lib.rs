@@ -14,14 +14,22 @@
 //! lookup that hides the paging. The clipmap-LOD renderer lives in `inf-render`;
 //! it consumes a projection of this data.
 
+mod brush;
 mod data;
+mod delta;
 mod import;
+mod noise;
+mod region;
 mod tile;
 
 use glam::DVec3;
 
+pub use brush::{apply_brush, dab_positions, BrushOp, BrushParams, Falloff, FlattenTarget, Stroke};
 pub use data::{TerrainData, DEFAULT_METERS_PER_SAMPLE, DEFAULT_TILE_RESOLUTION};
+pub use delta::{HeightDelta, TilePatch};
 pub use import::{encode_png16, HeightImage, HeightmapImport, TerrainError};
+pub use noise::fbm_signed;
+pub use region::HeightRegion;
 pub use tile::TerrainTile;
 
 /// The minimal world-space height query seam downstream systems code against

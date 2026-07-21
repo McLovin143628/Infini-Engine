@@ -19,3 +19,5 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Byte-identity checks: xxh3 a terrain's tiles before/after an undo round-trip.
+xxhash-rust = { workspace = true }
