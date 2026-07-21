@@ -33,6 +33,8 @@ pub enum AssetKind {
     Table,
     /// Audio clip (`.inf_audio`).
     Audio,
+    /// Procedural-content-generation graph (`.inf_pcg`) — scatter rules + samplers.
+    Pcg,
     /// Anything else living under the content root.
     Unknown,
 }
@@ -52,6 +54,7 @@ impl AssetKind {
             AssetKind::Enum => "inf_enum",
             AssetKind::Table => "inf_table",
             AssetKind::Audio => "inf_audio",
+            AssetKind::Pcg => "inf_pcg",
             AssetKind::Unknown => return None,
         })
     }
@@ -70,6 +73,7 @@ impl AssetKind {
             "inf_enum" => AssetKind::Enum,
             "inf_table" => AssetKind::Table,
             "inf_audio" => AssetKind::Audio,
+            "inf_pcg" => AssetKind::Pcg,
             _ => AssetKind::Unknown,
         }
     }
@@ -96,6 +100,7 @@ impl AssetKind {
             AssetKind::Enum => "enum",
             AssetKind::Table => "table",
             AssetKind::Audio => "audio",
+            AssetKind::Pcg => "pcg",
             AssetKind::Unknown => "unknown",
         }
     }
@@ -114,6 +119,7 @@ impl AssetKind {
             AssetKind::Enum => "Enum",
             AssetKind::Table => "Data Table",
             AssetKind::Audio => "Audio",
+            AssetKind::Pcg => "PCG Graph",
             AssetKind::Unknown => "File",
         }
     }
@@ -133,6 +139,7 @@ impl AssetKind {
             AssetKind::Enum,
             AssetKind::Table,
             AssetKind::Audio,
+            AssetKind::Pcg,
         ]
     }
 }

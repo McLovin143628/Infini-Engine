@@ -12,13 +12,19 @@ publish = false
 # The Ring-0 compute job system (§2.5): scatter is a named hot loop parallelized
 # deterministically via `parallel_map` over cells.
 inf-core = { workspace = true }
+# The terrain heightfield seam: `inf_terrain::HeightSource` bridges to this
+# crate's `HeightProvider` (see the blanket impl in `height.rs`), so a real
+# `TerrainData` can drive scatter.
+inf-terrain = { workspace = true }
 # f64 world coordinates (DVec3) + orientations (DQuat) — architecture rule 3.
 glam = { workspace = true }
 serde = { workspace = true }
 # Deterministic, byte-identical `.inf_pcg` payload encoding.
 bincode = { workspace = true }
-# Mesh asset references on a PCG kind (raw GUID; inf-asset is deliberately NOT a
-# dep this batch — see the AssetKind::Pcg handoff note in `asset.rs`).
+# The dual-format asset rule: `AssetKind::Pcg` + `AssetPayload` for the `.inf_pcg`
+# document (one encode/decode code path across the engine).
+inf-asset = { workspace = true }
+# Mesh asset references on a PCG kind (raw GUID) + the asset id/kind types.
 uuid = { workspace = true }
 thiserror = { workspace = true }
 

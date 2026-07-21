@@ -12,7 +12,7 @@
 
 use inf_ecs::components::{
     AtlasRect, Camera, Light, Light2D, LightKind, Material, MeshRef, NineSlice, Primitive, Sprite,
-    Text2D, Tilemap, Transform, Visibility,
+    Terrain, Text2D, Tilemap, Transform, Visibility,
 };
 use inf_ecs::{ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d};
 use uuid::Uuid;
@@ -1018,6 +1018,9 @@ fn kind_of(world: &EcsWorld, e: Entity) -> String {
     if w.get::<Light2D>(e).is_some() {
         return "2D Light".to_string();
     }
+    if w.get::<Terrain>(e).is_some() {
+        return "Terrain".to_string();
+    }
     // No renderable payload: a folder if it has children, else a plain actor.
     if !world.children_of(e).is_empty() {
         "Folder".to_string()
@@ -1043,6 +1046,7 @@ fn default_name(kind: SpawnKind) -> String {
         SpawnKind::Text2d => "Text",
         SpawnKind::NineSlice => "NineSlice",
         SpawnKind::Light2d => "Light2D",
+        SpawnKind::Terrain => "Terrain",
     }
     .to_string()
 }
@@ -1108,6 +1112,17 @@ fn attach_kind(world: &mut EcsWorld, entity: Entity, kind: SpawnKind) {
         }
         SpawnKind::Light2d => {
             w.entity_mut(entity).insert(Light2D::default());
+        }
+        // ── 3D terrain (P10): a small starter sine-hill so it's visible on spawn ─
+        SpawnKind::Terrain => {
+            let mut terrain = Terrain::configured(64, 1.0);
+            let span = terrain.data.tile_span();
+            terrain
+                .data
+                .write_region(glam::DVec2::ZERO, glam::DVec2::splat(span), |x, z| {
+                    2.0 * (x * 0.1).sin() * (z * 0.1).cos()
+                });
+            w.entity_mut(entity).insert(terrain);
         }
         SpawnKind::Empty
         | SpawnKind::Cube
@@ -1241,6 +1256,28 @@ mod tests {
         let dto = crate::scene::tilemap::build_dto(&doc, g).expect("tilemap restored");
         assert_eq!(dto.cells.len(), 2, "painted tiles survive delete→undo");
         assert_eq!(dto.atlas_cols, 4);
+    }
+
+    #[test]
+    fn spawns_terrain_with_starter_hill_and_undo_removes_it() {
+        // P10: a spawned Terrain carries a non-empty starter heightfield, reports
+        // the "Terrain" type label, and undoing the spawn removes it.
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Terrain, "", None);
+        assert_eq!(doc.display_name(g), "Terrain", "default name");
+        assert_eq!(doc.kind_of_guid(g), "Terrain", "type label");
+
+        // The starter sine-hill authored at least one tile (visible immediately).
+        let e = doc.entity_of(g).unwrap();
+        let terrain = doc.world().world().get::<Terrain>(e).unwrap();
+        assert!(
+            !terrain.data.is_empty(),
+            "starter terrain has authored tiles"
+        );
+
+        // Undo the spawn → the terrain entity is gone.
+        assert!(doc.undo(), "undo removes the spawned terrain");
+        assert!(doc.entity_of(g).is_none(), "terrain despawned by undo");
     }
 
     #[test]

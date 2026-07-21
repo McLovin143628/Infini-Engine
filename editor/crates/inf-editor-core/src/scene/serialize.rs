@@ -82,6 +82,24 @@ impl Default for LevelSettings {
 /// added at the end; a payload from schema `v(N-1)` is decoded via its
 /// version-specific record ([`EntityRecordV1`]) and lifted with the new slots
 /// defaulted — never by reinterpreting the shorter byte stream.
+///
+/// # ⚠️ NOT YET PERSISTED: `inf_ecs::Terrain` (P10.1)
+///
+/// A spawned [`inf_ecs::components::Terrain`] (Add ▸ Terrain, [`SpawnKind::Terrain`])
+/// is **live-session only** — this v3 `EntityRecord` has **no `terrain` slot**, so a
+/// terrain is dropped on save and absent on reload (see the guard test
+/// `terrain_is_not_persisted_yet_v4_todo`). This is deliberately *not* fixed in the
+/// P10 glue batch: adding the slot is a schema-v3→v4 migration (a frozen
+/// `EntityRecordV3` + a `SceneFileV3`→current lift, a v3 forever-load fixture, and
+/// `record_of`/`raw_spawn_record`/`apply_to_doc` wiring), which must land as its own
+/// versioned change, not smuggled into a glue batch.
+///
+/// **TODO(P10 · v4):** bump [`SCHEMA_VERSION`] to 4 and append
+/// `pub terrain: Option<inf_ecs::components::Terrain>` here (`#[serde(default)]`),
+/// mirroring how the v2 2D slots and v3 physics slots were added. `TerrainData`
+/// already round-trips through serde deterministically, so the record change is the
+/// only missing piece. Undo/redo of a terrain spawn are affected by the same gap
+/// (the Create/Delete commands snapshot through `EntityRecord`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EntityRecord {
     pub guid: Uuid,
@@ -633,6 +651,43 @@ mod tests {
         let mut loaded = load(&path).unwrap();
         assert_eq!(loaded.snapshot().nodes.len(), n_before);
         assert!(!loaded.is_dirty(), "a freshly loaded doc is clean");
+    }
+
+    /// GUARD (P10.1): a spawned `Terrain` is **not** persisted by the v3 schema —
+    /// there is no `terrain` slot on [`EntityRecord`]. This test pins the current
+    /// (lossy) behavior so the day someone adds the v4 slot, this test flips and
+    /// forces them to update it deliberately. See the `EntityRecord` doc TODO.
+    #[test]
+    fn terrain_is_not_persisted_yet_v4_todo() {
+        use inf_ecs::components::Terrain;
+
+        let mut doc = SceneDoc::new();
+        let g = doc.create(SpawnKind::Terrain, "Terrain", None);
+        // The live entity carries a non-empty starter terrain.
+        let e = doc.entity_of(g).unwrap();
+        assert!(
+            !doc.world()
+                .world()
+                .get::<Terrain>(e)
+                .unwrap()
+                .data
+                .is_empty(),
+            "spawned terrain is live in-session"
+        );
+
+        // Save → load round trip.
+        let bytes = encode(&to_scene_file(&doc)).unwrap();
+        let mut loaded = SceneDoc::new();
+        apply_to_doc(&mut loaded, &decode(&bytes).unwrap());
+
+        // The entity survives (name/transform persist) …
+        let e2 = loaded.entity_of(g).expect("entity itself persists");
+        // … but its Terrain component is GONE (no v3 slot). When v4 adds the slot,
+        // this assertion flips to `is_some()` and the test name's TODO is done.
+        assert!(
+            loaded.world().world().get::<Terrain>(e2).is_none(),
+            "terrain is dropped on save/load until the v4 slot exists"
+        );
     }
 
     #[test]

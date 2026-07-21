@@ -27,6 +27,7 @@ const ADD_SECTIONS: Array<{ heading?: string; items: Array<{ kind: SpawnKind; la
       { kind: "plane", label: "Plane" },
       { kind: "cylinder", label: "Cylinder" },
       { kind: "cone", label: "Cone" },
+      { kind: "terrain", label: "Terrain" },
     ],
   },
   {

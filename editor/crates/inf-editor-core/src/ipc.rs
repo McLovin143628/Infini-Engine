@@ -221,6 +221,9 @@ pub enum SpawnKind {
     NineSlice,
     /// A 2D radial light.
     Light2d,
+    // ── 3D terrain (P10) ──────────────────────────────────────────────────
+    /// A heightfield terrain (starter sine-hill; sculpt/import tooling edits it).
+    Terrain,
 }
 
 // ── Asset system / Content Drawer (Phase 4) ──────────────────────────────

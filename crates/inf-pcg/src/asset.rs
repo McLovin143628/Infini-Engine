@@ -5,19 +5,15 @@
 //! `schema_version` field, deterministic **bincode** encoding, and a `migrate`
 //! step that rejects newer-than-current files.
 //!
-//! ## inf-asset handoff (deliberately NOT wired this batch)
+//! ## inf-asset integration (wired — P10 glue batch)
 //!
-//! The engine's `AssetPayload` trait requires `const KIND: AssetKind`, and
-//! `AssetKind` (in `inf-asset`) has **no `Pcg` variant** yet. Adding it means
-//! editing `inf-asset`, which is outside this batch's file boundary. So this
-//! payload is self-contained (its own `encode`/`decode`) and carries the slug +
-//! extension it *will* register as. The orchestrator's follow-up:
-//!
-//! 1. add `AssetKind::Pcg` → `"inf_pcg"` / slug `"pcg"` in `inf-asset`;
-//! 2. add `inf-asset` as a dep and `impl inf_asset::AssetPayload for
-//!    PcgAssetPayload` (KIND = `AssetKind::Pcg`, SCHEMA_VERSION =
-//!    `CURRENT_VERSION`), then this module's `encode`/`decode` can defer to
-//!    `inf_asset::{encode, decode}` for one code path across the engine.
+//! [`PcgAssetPayload`] implements [`inf_asset::AssetPayload`]
+//! (`KIND = AssetKind::Pcg`, `SCHEMA_VERSION = CURRENT_VERSION`), so it rides the
+//! engine's single dual-format code path. The inherent [`PcgAssetPayload::encode`]
+//! / [`PcgAssetPayload::decode`] now **defer to** [`inf_asset::encode`] /
+//! [`inf_asset::decode`] — byte-identical to the old self-contained path (both use
+//! `bincode::config::standard()`), just unified — while keeping the crate-local
+//! [`PcgError`] surface its callers already expect.
 
 use serde::{Deserialize, Serialize};
 
@@ -61,23 +57,22 @@ impl PcgAssetPayload {
         }
     }
 
-    /// The shared, deterministic bincode configuration (fixed-endian `standard`,
-    /// matching `inf_asset::bincode_config` so re-encoding is byte-identical).
-    fn config() -> impl bincode::config::Config {
-        bincode::config::standard()
-    }
-
-    /// Encode to deterministic bincode bytes.
+    /// Encode to deterministic bincode bytes (defers to [`inf_asset::encode`], the
+    /// engine-wide codec — byte-identical to the former self-contained path).
     pub fn encode(&self) -> Result<Vec<u8>, PcgError> {
-        bincode::serde::encode_to_vec(self, Self::config())
-            .map_err(|e| PcgError::Encode(e.to_string()))
+        inf_asset::encode(self).map_err(|e| PcgError::Encode(e.to_string()))
     }
 
-    /// Decode from bincode bytes, running the schema migration.
+    /// Decode from bincode bytes, running the schema migration (defers to
+    /// [`inf_asset::decode`]). A newer-than-current schema surfaces as
+    /// [`PcgError::SchemaTooNew`], preserving this crate's error contract.
     pub fn decode(bytes: &[u8]) -> Result<Self, PcgError> {
-        let (value, _): (Self, usize) = bincode::serde::decode_from_slice(bytes, Self::config())
-            .map_err(|e| PcgError::Decode(e.to_string()))?;
-        value.migrate()
+        inf_asset::decode::<Self>(bytes).map_err(|e| match e {
+            inf_asset::AssetError::SchemaTooNew { found, current, .. } => {
+                PcgError::SchemaTooNew { found, current }
+            }
+            other => PcgError::Decode(other.to_string()),
+        })
     }
 
     /// Upgrade an older decoded payload to [`Self::CURRENT_VERSION`]. Rejects
@@ -92,6 +87,17 @@ impl PcgAssetPayload {
         }
         // No breaking layout changes yet; equal-or-older is accepted as-is.
         Ok(self)
+    }
+}
+
+/// The dual-format asset-rule integration: a `.inf_pcg` document is a first-class
+/// engine payload. `decode` (via [`inf_asset::decode`]) applies the trait's
+/// newer-than-current guard using this `SCHEMA_VERSION`.
+impl inf_asset::AssetPayload for PcgAssetPayload {
+    const KIND: inf_asset::AssetKind = inf_asset::AssetKind::Pcg;
+    const SCHEMA_VERSION: u32 = Self::CURRENT_VERSION;
+    fn schema_version(&self) -> u32 {
+        self.schema_version
     }
 }
 
@@ -140,5 +146,42 @@ mod tests {
     fn kind_constants() {
         assert_eq!(PcgAssetPayload::EXTENSION, "inf_pcg");
         assert_eq!(PcgAssetPayload::KIND_SLUG, "pcg");
+    }
+
+    #[test]
+    fn kind_agrees_with_inf_asset_registry() {
+        use inf_asset::AssetKind;
+        // The payload's slug/extension consts match the registered `AssetKind::Pcg`,
+        // and the extension classifies back to that kind (the round trip).
+        assert_eq!(AssetKind::Pcg.slug(), PcgAssetPayload::KIND_SLUG);
+        assert_eq!(AssetKind::Pcg.extension(), Some(PcgAssetPayload::EXTENSION));
+        assert_eq!(AssetKind::Pcg.label(), "PCG Graph");
+        assert_eq!(
+            AssetKind::from_extension(PcgAssetPayload::EXTENSION),
+            AssetKind::Pcg
+        );
+    }
+
+    #[test]
+    fn payload_round_trips_via_inf_asset_codec() {
+        use inf_asset::AssetPayload;
+
+        let p = demo();
+        // The engine-wide codec round-trips the payload …
+        let bytes = inf_asset::encode(&p).unwrap();
+        assert_eq!(inf_asset::decode::<PcgAssetPayload>(&bytes).unwrap(), p);
+        // … and is byte-identical to the inherent (deferring) encode.
+        assert_eq!(bytes, p.encode().unwrap());
+
+        // The trait's newer-than-current guard fires through the shared codec.
+        let mut future = p;
+        future.schema_version = 99;
+        let bytes = inf_asset::encode(&future).unwrap();
+        assert!(matches!(
+            inf_asset::decode::<PcgAssetPayload>(&bytes),
+            Err(inf_asset::AssetError::SchemaTooNew { .. })
+        ));
+        // The KIND const is wired.
+        assert_eq!(PcgAssetPayload::KIND, inf_asset::AssetKind::Pcg);
     }
 }

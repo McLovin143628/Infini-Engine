@@ -94,6 +94,7 @@ fn kind_code(kind: AssetKind) -> u16 {
         AssetKind::Enum => 9,
         AssetKind::Table => 10,
         AssetKind::Audio => 11,
+        AssetKind::Pcg => 12,
     }
 }
 
@@ -111,6 +112,7 @@ fn kind_from_code(code: u16) -> AssetKind {
         9 => AssetKind::Enum,
         10 => AssetKind::Table,
         11 => AssetKind::Audio,
+        12 => AssetKind::Pcg,
         _ => AssetKind::Unknown,
     }
 }
