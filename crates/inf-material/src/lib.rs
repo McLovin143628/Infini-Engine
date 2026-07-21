@@ -6,16 +6,19 @@
 //!   * [`MaterialAsset`] (`.inf_mat`): the PBR metallic-roughness parameter
 //!     block + texture GUID references.
 //!
-//! The material node graph → WGSL codegen and `.inf_tex` compute graphs are
-//! Phase 7; this crate is the foundation they build on.
+//! Phase 7 adds the material **node graph → WGSL** codegen ([`graph`]): a
+//! `.inf_mat` is authored as a pure node DAG over the shared `inf_graph`
+//! substrate and compiled to a naga-validated `material_surface` WGSL function.
 
 pub mod bc;
 pub mod error;
+pub mod graph;
 pub mod material;
 pub mod texture;
 
 pub use bc::{decode_bc1, decode_bc3};
 pub use error::MaterialError;
+pub use graph::{emit_wgsl, material_registry, MatIssue, MatType, MaterialCompile};
 pub use material::MaterialAsset;
 pub use texture::{
     import_texture_bytes, texture_from_rgba8, TextureAsset, TextureCompression, TextureFormat,

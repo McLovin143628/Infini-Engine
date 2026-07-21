@@ -53,6 +53,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # compile. Vulkan-first on Windows until tauri reaches windows 0.62 — see the
 # Spike A memo.
 wgpu = { version = "30", default-features = false, features = ["vulkan", "metal", "wgsl"] }
+# naga standalone (same pin wgpu 30 uses, so one copy in the tree) — the WGSL
+# front-end + validator let inf-material validate graph-generated WGSL at author
+# time without pulling wgpu into Ring-0 material codegen (P7.2).
+naga = { version = "30", features = ["wgsl-in"] }
 raw-window-handle = "0.6"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }

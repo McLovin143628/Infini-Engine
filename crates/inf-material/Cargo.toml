@@ -10,10 +10,13 @@ publish = false
 
 [dependencies]
 inf-asset = { workspace = true }
+inf-graph = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 image = { workspace = true }
+# Author-time validation of graph-generated WGSL (P7.2).
+naga = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

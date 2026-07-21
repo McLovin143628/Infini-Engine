@@ -2378,6 +2378,8 @@ version = "0.1.0"
 dependencies = [
  "image",
  "inf-asset",
+ "inf-graph",
+ "naga",
  "serde",
  "tempfile",
  "thiserror 2.0.19",
