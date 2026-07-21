@@ -5,10 +5,12 @@
 mod app;
 mod assets;
 mod layout;
+mod project;
 mod scene;
 mod viewport;
 
 pub use assets::{init_assets_on_boot, AssetState};
+pub use project::ProjectState;
 pub use scene::{recover_scene_on_boot, SceneState};
 pub use viewport::ViewportState;
 
@@ -53,5 +55,11 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         assets::asset_data_save,
         assets::asset_table_import,
         assets::asset_rust_source,
+        project::project_templates,
+        project::project_recent,
+        project::project_current,
+        project::project_new,
+        project::project_open,
+        project::project_close,
     ]
 }

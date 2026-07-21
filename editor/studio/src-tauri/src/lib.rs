@@ -30,6 +30,7 @@ pub fn run() {
         .manage(commands::ViewportState::default())
         .manage(commands::SceneState::default())
         .manage(commands::AssetState::default())
+        .manage(commands::ProjectState::default())
         .invoke_handler(commands::invoke_handler())
         .setup(|app| {
             logging::attach_app(app.handle().clone());

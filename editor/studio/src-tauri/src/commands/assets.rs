@@ -56,45 +56,72 @@ impl AssetState {
         let mut proj = inner.project.lock().map_err(|e| e.to_string())?;
         f(&mut proj)
     }
+
+    /// Rebuild the asset subsystem against a new content root (on project
+    /// open/switch). The old import worker + watcher stop when their `AssetInner`
+    /// is dropped; the shared background tick picks up the new one. Emits
+    /// `assets://changed` so the Content Drawer re-syncs.
+    pub fn reroot(&self, app: &AppHandle, content_root: PathBuf) {
+        match build_inner(app, &content_root) {
+            Some(inner) => {
+                if let Ok(mut guard) = self.inner.lock() {
+                    *guard = Some(inner);
+                }
+                tracing::info!("asset system re-rooted to {}", content_root.display());
+            }
+            None => tracing::error!("asset re-root failed for {}", content_root.display()),
+        }
+        emit_changed(app, self);
+    }
 }
 
-/// Create the content root under the app data dir, open the project, spawn the
-/// import worker + file watcher, and start the background progress/rescan tick.
+/// Build a fresh [`AssetInner`] rooted at `content_root`: open the project (seed
+/// starter content if empty), spawn the import worker + file watcher, and open
+/// the (content-hash-keyed, shared) thumbnail cache. `None` on failure.
+fn build_inner(app: &AppHandle, content_root: &std::path::Path) -> Option<AssetInner> {
+    let project = match AssetProject::open(content_root) {
+        Ok(p) => Arc::new(Mutex::new(p)),
+        Err(e) => {
+            tracing::error!("asset project open failed: {e}");
+            return None;
+        }
+    };
+    seed_starter_content(&project, content_root);
+
+    let queue = ImportQueue::spawn(project.clone());
+    let watcher = AssetWatcher::watch(content_root, WATCH_DEBOUNCE)
+        .map_err(|e| tracing::warn!("asset watcher: {e}"))
+        .ok();
+    let cache_dir = app.path().app_data_dir().ok()?.join("thumbnails");
+    let cache = match ThumbnailCache::open(cache_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("thumbnail cache: {e}");
+            return None;
+        }
+    };
+    Some(AssetInner {
+        project,
+        queue,
+        watcher,
+        thumb: Thumbnailer::default(),
+        cache,
+    })
+}
+
+/// Boot the asset subsystem at the default content root (`<app_data>/Content`),
+/// so the app works before any project is opened. Opening a project re-roots it
+/// via [`AssetState::reroot`]. Starts the background progress/rescan tick once.
 pub fn init_assets_on_boot(app: &AppHandle) {
     let Ok(base) = app.path().app_data_dir() else {
         tracing::warn!("no app data dir; asset system disabled");
         return;
     };
     let root = base.join("Content");
-    let project = match AssetProject::open(&root) {
-        Ok(p) => Arc::new(Mutex::new(p)),
-        Err(e) => {
-            tracing::error!("asset project open failed: {e}");
-            return;
+    if let Some(inner) = build_inner(app, &root) {
+        if let Some(state) = app.try_state::<AssetState>() {
+            *state.inner.lock().expect("asset state") = Some(inner);
         }
-    };
-    seed_starter_content(&project, &root);
-
-    let queue = ImportQueue::spawn(project.clone());
-    let watcher = AssetWatcher::watch(&root, WATCH_DEBOUNCE)
-        .map_err(|e| tracing::warn!("asset watcher: {e}"))
-        .ok();
-    let cache = match ThumbnailCache::open(base.join("thumbnails")) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("thumbnail cache: {e}");
-            return;
-        }
-    };
-
-    if let Some(state) = app.try_state::<AssetState>() {
-        *state.inner.lock().expect("asset state") = Some(AssetInner {
-            project,
-            queue,
-            watcher,
-            thumb: Thumbnailer::default(),
-            cache,
-        });
     }
     spawn_tick(app.clone());
     tracing::info!("asset system ready ({})", root.display());

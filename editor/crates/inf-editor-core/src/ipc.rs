@@ -344,3 +344,34 @@ pub struct DataAssetDto {
     /// Table rows (cells as display strings, column-aligned).
     pub rows: Vec<Vec<String>>,
 }
+
+// ── Project system (P5.5) ────────────────────────────────────────────────
+
+/// The currently-open project, as the editor start screen / title bar sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ProjectInfoDto {
+    pub name: String,
+    /// Absolute project root (forward-slashed).
+    pub root: String,
+    /// Content root relative to the project.
+    pub content_dir: String,
+    /// Levels root relative to the project.
+    pub levels_dir: String,
+    /// Template slug the project was scaffolded from.
+    pub template: String,
+}
+
+/// One entry in the recent-projects list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct RecentProjectDto {
+    pub name: String,
+    pub path: String,
+}
+
+/// A first-run project template (New Project dialog).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ProjectTemplateDto {
+    pub slug: String,
+    pub label: String,
+    pub description: String,
+}

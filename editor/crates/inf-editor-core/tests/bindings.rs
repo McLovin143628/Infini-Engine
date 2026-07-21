@@ -9,9 +9,9 @@ use std::path::Path;
 
 use inf_editor_core::ipc::{
     AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot, ComponentDto, DataAssetDto,
-    DataFieldDto, DeleteResult, DetailsDto, ImportEventDto, LayoutSummary, LogLine, PropFieldDto,
-    PropValueDto, SceneDelta, SceneNode, SceneSnapshot, SpawnKind, ViewportDrop, ViewportKey,
-    ViewportRect,
+    DataFieldDto, DeleteResult, DetailsDto, ImportEventDto, LayoutSummary, LogLine, ProjectInfoDto,
+    ProjectTemplateDto, PropFieldDto, PropValueDto, RecentProjectDto, SceneDelta, SceneNode,
+    SceneSnapshot, SpawnKind, ViewportDrop, ViewportKey, ViewportRect,
 };
 use ts_rs::{Config, TS};
 
@@ -43,4 +43,7 @@ fn export_bindings() {
     AssetChanged::export_all(&cfg).expect("export AssetChanged");
     DataAssetDto::export_all(&cfg).expect("export DataAssetDto");
     DataFieldDto::export_all(&cfg).expect("export DataFieldDto");
+    ProjectInfoDto::export_all(&cfg).expect("export ProjectInfoDto");
+    RecentProjectDto::export_all(&cfg).expect("export RecentProjectDto");
+    ProjectTemplateDto::export_all(&cfg).expect("export ProjectTemplateDto");
 }

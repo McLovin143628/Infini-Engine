@@ -14,6 +14,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AssetChanged } from "../bindings/AssetChanged";
 import type { ImportEventDto } from "../bindings/ImportEventDto";
 import type { LogLine } from "../bindings/LogLine";
+import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
 import type { SceneDelta } from "../bindings/SceneDelta";
 import type { ViewportKey } from "../bindings/ViewportKey";
 
@@ -31,6 +32,8 @@ export interface EventPayloads {
   "assets://changed": AssetChanged;
   /** Import-job progress (P4.2.4). */
   "assets://import": ImportEventDto;
+  /** A project was opened/created → leave the start screen, re-sync (P5.5). */
+  "project://changed": ProjectInfoDto;
 }
 
 export type EventChannel = keyof EventPayloads;

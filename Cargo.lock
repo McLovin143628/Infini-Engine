@@ -2275,6 +2275,7 @@ dependencies = [
  "inf-core",
  "inf-editor-core",
  "inf-material",
+ "inf-project",
  "inf-viewport",
  "raw-window-handle",
  "serde",

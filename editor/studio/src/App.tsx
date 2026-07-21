@@ -11,6 +11,7 @@ import StatusBar from "./shell/StatusBar";
 import LayoutDialog from "./shell/LayoutDialog";
 import ContentDrawer from "./shell/ContentDrawer";
 import CommandPalette from "./shell/CommandPalette";
+import StartScreen from "./shell/StartScreen";
 import { DockWorkspace } from "./panels/dock/DockWorkspace";
 import ViewportPanel from "./viewport/ViewportPanel";
 import { bootstrapShellCommands } from "./shell/shellCommands";
@@ -23,12 +24,14 @@ import { listenTo } from "./lib/events";
 import { startLogListener } from "./stores/logStore";
 import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
 import { initAssetSync, registerAssetCommands } from "./stores/assetStore";
+import { initProjectSync, registerProjectCommands } from "./stores/projectStore";
 import { scene as sceneIpc } from "./lib/ipc";
 
 bootstrapShellCommands();
 registerDefaultKeybindings();
 registerSceneCommands();
 registerAssetCommands();
+registerProjectCommands();
 
 export default function App() {
   useEffect(() => {
@@ -65,6 +68,17 @@ export default function App() {
     let dispose: (() => void) | undefined;
     let disposed = false;
     initAssetSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
+  }, []);
+
+  // Load the project state + subscribe to project://changed (P5.5).
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    let disposed = false;
+    initProjectSync().then((fn) => (disposed ? fn() : (dispose = fn)));
     return () => {
       disposed = true;
       dispose?.();
@@ -108,6 +122,7 @@ export default function App() {
       <StatusBar />
       <LayoutDialog />
       <CommandPalette />
+      <StartScreen />
     </div>
   );
 }

@@ -26,6 +26,7 @@ inf-core = { workspace = true }
 inf-editor-core = { workspace = true }
 inf-asset = { workspace = true }
 inf-material = { workspace = true }
+inf-project = { workspace = true }
 inf-viewport = { workspace = true }
 raw-window-handle = { workspace = true }
 uuid = { workspace = true }

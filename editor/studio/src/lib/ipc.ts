@@ -17,7 +17,10 @@ import type { DataFieldDto } from "../bindings/DataFieldDto";
 import type { DeleteResult } from "../bindings/DeleteResult";
 import type { DetailsDto } from "../bindings/DetailsDto";
 import type { LayoutSummary } from "../bindings/LayoutSummary";
+import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
+import type { ProjectTemplateDto } from "../bindings/ProjectTemplateDto";
 import type { PropValueDto } from "../bindings/PropValueDto";
+import type { RecentProjectDto } from "../bindings/RecentProjectDto";
 import type { SceneSnapshot } from "../bindings/SceneSnapshot";
 import type { SpawnKind } from "../bindings/SpawnKind";
 import type { ViewportDrop } from "../bindings/ViewportDrop";
@@ -31,7 +34,10 @@ export type {
   DeleteResult,
   DetailsDto,
   LayoutSummary,
+  ProjectInfoDto,
+  ProjectTemplateDto,
   PropValueDto,
+  RecentProjectDto,
   SceneSnapshot,
   SpawnKind,
   ViewportDrop,
@@ -147,4 +153,20 @@ export const assets = {
   tableImport: (id: string, source: string): Promise<void> =>
     invoke("asset_table_import", { id, source }),
   rustSource: (id: string): Promise<string> => invoke<string>("asset_rust_source", { id }),
+};
+
+/**
+ * Project system (Phase 5.5). Opening/creating a project re-roots the asset
+ * database and emits `project://changed`. Arg names are camelCase.
+ */
+export const project = {
+  templates: (): Promise<ProjectTemplateDto[]> =>
+    invoke<ProjectTemplateDto[]>("project_templates"),
+  recent: (): Promise<RecentProjectDto[]> => invoke<RecentProjectDto[]>("project_recent"),
+  current: (): Promise<ProjectInfoDto | null> =>
+    invoke<ProjectInfoDto | null>("project_current"),
+  newProject: (parent: string, name: string, template: string): Promise<ProjectInfoDto> =>
+    invoke<ProjectInfoDto>("project_new", { parent, name, template }),
+  open: (root: string): Promise<ProjectInfoDto> => invoke<ProjectInfoDto>("project_open", { root }),
+  close: (): Promise<void> => invoke("project_close"),
 };
