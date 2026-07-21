@@ -58,7 +58,7 @@ interchangeably, because graphs transpile to real Rust source and stay bidirecti
 infinity_engine/
 ├── Cargo.toml                # single workspace; [workspace.dependencies] pins all versions
 ├── crates/                   # ─ Ring 0
-│   ├── inf-core        ids, errors, tracing, frame clock, job system (rayon+tokio facade)
+│   ├── inf-core        ids, errors, tracing, frame clock, job system (rayon pool + flume; §2.5, built P7.0)
 │   ├── inf-math        glam-based; WorldPos(DVec3) f64 world / f32 render split, floating-origin
 │   ├── inf-platform    HAL traits: window/surface, vfs, time, threads (console seam)
 │   ├── inf-ecs         facade over bevy_ecs + bevy_reflect (sole crate naming bevy_ecs)
@@ -123,6 +123,36 @@ infinity_engine/
   TypeScript bindings; CI fails on drift.
 - Tauri capability ACL stays minimal: no raw fs/shell plugin permissions — everything routes
   through audited commands.
+
+### 2.5 Concurrency & parallelism model *(a first-class concern, not an afterthought)*
+
+Multi-core parallelism is a headline reason to build the engine in Rust, so it is an owned,
+scheduled deliverable — not an emergent property. The doctrine:
+
+- **`inf-core` owns the compute job system** (Ring 0): a **rayon** worker pool sized to the
+  machine plus **`flume`** channels for work hand-off and results. This is the single place
+  gameplay/render/asset code reaches for data-parallelism (`par_iter`, scoped fan-out, task
+  graphs). It is built as **P7.0** (its first real consumer is material-graph compile), replacing
+  the placeholder facade the workspace layout has long described.
+- **`tokio` stays in Ring 2** (editor IO: LSP, pty, file watching, dialogs). It never enters a
+  Ring-0 hot loop — async is for IO concurrency, rayon is for compute parallelism.
+- **The ECS runs a real parallel schedule.** `inf-ecs` enables `bevy_ecs`'s `multi_threaded`
+  feature and drives systems through a genuine `Schedule` whose non-conflicting systems run on the
+  job pool — the report's "systems are parallel functions over contiguous memory" made real. Stood
+  up in **P9.1** with the runtime game loop.
+- **Parallel *and* deterministic.** The fixed-step sim keeps its bit-determinism guarantee by
+  requiring within-step systems to be order-independent (disjoint component access, or explicit
+  ordering edges where they conflict) and by resolving structural changes at deterministic sync
+  points. Determinism is proven by the replay harness (§8) running under the parallel scheduler —
+  parallelism must never change the result of a step.
+- **Data-race freedom is free.** Rust's borrow checker enforces at compile time the thread-safety
+  the report describes; there is no runtime cost and no class of use-after-free/data-race bugs to
+  chase.
+
+Named hot loops to parallelize (each owned by the phase where it lives, not deferred wholesale to
+Phase 15): ECS transform propagation + gameplay systems (P9), asset import + cook (P7.0 / P9.2),
+material/texture graph compile (P7), meshlet DAG build (P13.1), GPU draw-command prep (P13), PCG
+scatter (P10.5). Phase 15 keeps only the final *tuning/profiling* pass, not the initial build-out.
 
 ## 3. Asset system & file formats
 
@@ -501,6 +531,12 @@ interpreter; the generated Rust is hand-edited and the graph updates; round-trip
 **Goal:** `.inf_mat` graphs to live WGSL. **Done when:** layered PBR material with a
 procedural mask authored in-graph, applied to the P4 character, edits visible in <1 s.
 
+- **P7.0 Concurrency foundation** *(the job system, finally real — see §2.5)* — 1. `inf-core`
+  job system: a rayon compute pool (sized to cores, named threads) + `flume` channels + a thin
+  `parallel_for` / scoped-fan-out API; 2. retire the placeholder facade — this is the single
+  Ring-0 data-parallelism entry point; 3. first consumers wired here: parallel asset import and
+  the material/texture graph compile; 4. a criterion bench proving scaling + a determinism guard
+  (same input → same output regardless of pool size).
 - **P7.1 Material model** — 1. PBR BRDF + lighting pass in `inf-render` (directional + point,
   IBL basic); 2. material parameter blocks + per-material bind groups; 3. material assignment in
   Details + Content Drawer apply-by-drag.
@@ -532,7 +568,10 @@ the platformer packages to a double-clickable exe on Windows/macOS/Linux; a deli
 panic loses no editor state.
 
 - **P9.1 Runtime assembly** — 1. `inf-runtime` game loop (fixed-step sim + interpolated
-  render); 2. rapier3d + kira baseline integration; 3. `inf-input` action mapping + gamepad.
+  render); 2. **parallel ECS schedule** — enable `bevy_ecs` `multi_threaded`, run systems through
+  a real `Schedule` on the P7.0 job pool, structural changes resolved at deterministic sync points;
+  the fixed-step result is **identical to the serial baseline** (replay-harness gate, §8);
+  3. rapier3d + kira baseline integration; 4. `inf-input` action mapping + gamepad.
 - **P9.2 Cook pipeline** — 1. asset pack format (content-addressed, compressed); 2. cook =
   resolve deps → compile blueprints → release-build user crate → bundle; 3. `inf cook` CLI +
   editor Package dialog.
@@ -622,6 +661,16 @@ review passes against the HAL audit.
   plumbing for out-of-tree platform crates; 3. private-repo pattern + docs for PS5/Xbox/Switch
   backends (NDA SDKs and devkits required; cannot live in this public repo); 4. controller/TRC
   compliance checklist drafts.
+- **P14.5 Sandboxed extensibility / modding** *(reuses one authoring model — see the crossref
+  memo)* — 1. a sandboxed **WASM** runtime (e.g. `wasmtime`) in `inf-runtime` loading mods/plugins
+  as `.wasm`; 2. a **WASM cook target** so a mod authored in the *same* Blueprints/Rust is compiled
+  (blueprint → Rust → wasm) — no new scripting language, "two ways to code, one truth" preserved;
+  3. a stable, **capability-scoped host API** (explicit, deny-by-default surface for entities,
+  assets, input, events) so untrusted mods stay safe; 4. hot-reload of WASM modules in the editor +
+  a sample "moddable" game. Rationale: the blueprint interpreter already gives fast no-recompile
+  *iteration*; the capability WASM adds is **safe, no-compiler, end-user extensibility** that dylib
+  (ABI-fragile/unsafe) and blueprints (not runtime-user-facing) cannot. This resolves the P14.2
+  "interpreter vs wasm-compiled blueprints" decision toward a shared WASM path.
 
 ### Phase 15 — Polish, optimization, docs & samples
 
@@ -654,7 +703,7 @@ tutorial, and ships a small game in a weekend.
 | TS bindings | ts-rs | proven pattern; CI drift-checked |
 | Transpiler | syn 2 + quote + prettyplease | the only serious option; deterministic formatting |
 | Hot reload | libloading + hand-rolled #[repr(C)] vtables | abi_stable judged too invasive (Spike C re-checks) |
-| Concurrency | rayon (frame) + tokio (editor IO) + flume | keep tokio out of Ring 0 hot loops |
+| Concurrency | rayon compute pool + flume (Ring 0 job system) + tokio (Ring 2 editor IO) | first-class; see §2.5, built P7.0, parallel ECS P9.1 |
 | Profiling | tracing + tracing-tracy | doubles as Output Log source |
 | OS interop | windows, objc2(+app-kit), x11rb, raw-window-handle | Spike A requirements |
 | Watching | notify + notify-debouncer-full | asset DB + transpiler sync |
@@ -672,6 +721,13 @@ Deferred decisions: egui vs custom viewport overlay (P2.4 memo); FBX support (de
 GI technique (P13.3 memo); text rendering in-engine (glyphon likely, P11+); web blueprint
 execution mode (P14.2).
 
+Deliberate non-goals (decided, not gaps): **no separate embedded scripting language** (Rhai/Lua/
+Rune) — the blueprint interpreter already delivers no-recompile iteration over the *same* IR that
+ships as Rust, so a third language would fracture "two ways to code, one truth"; safe end-user
+extensibility is served by the P14.5 WASM tier instead. WGSL over `rust-gpu` (naga validates at
+author time). Native wgpu viewport over immediate-mode egui (§2.3.1). See
+`docs/memos/rust-report-crossref.md`.
+
 ## 8. Verification & CI strategy
 
 - **Every commit, 3 OSes:** `cargo fmt --check` · `cargo clippy --workspace -D warnings` ·
@@ -685,6 +741,9 @@ execution mode (P14.2).
 - **Undo:** property test — any command sequence + inverses restores reflection-diff equality.
 - **Parity gate:** each blueprint fixture runs under interpreter *and* compiled dylib; outputs
   must match (the preview == shipped guarantee).
+- **Concurrency determinism (from P9.1):** the fixed-step replay harness runs a sample under the
+  **parallel** ECS schedule and asserts a byte-identical trace to the serial baseline across pool
+  sizes — parallelism may never change a step's result (§2.5).
 - **Cook/PIE:** CI cooks a sample and runs `inf-player --headless --run-frames 300 --assert-exit`.
 - **Performance:** criterion benches (transform propagation, sprite batcher, scatter kernels);
   nightly frame-budget smoke on a reference scene with a hard ms budget that only ratchets down.
