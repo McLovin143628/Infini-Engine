@@ -15,6 +15,7 @@ import ErodeDialog from "./shell/ErodeDialog";
 import ContentDrawer from "./shell/ContentDrawer";
 import CommandPalette from "./shell/CommandPalette";
 import StartScreen from "./shell/StartScreen";
+import FirstRunTour from "./shell/FirstRunTour";
 import { DockWorkspace } from "./panels/dock/DockWorkspace";
 import ViewportPanel from "./viewport/ViewportPanel";
 import { bootstrapShellCommands } from "./shell/shellCommands";
@@ -27,7 +28,8 @@ import { listenTo } from "./lib/events";
 import { startLogListener } from "./stores/logStore";
 import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
 import { initAssetSync, registerAssetCommands } from "./stores/assetStore";
-import { initProjectSync, registerProjectCommands } from "./stores/projectStore";
+import { initProjectSync, registerProjectCommands, useProjectStore } from "./stores/projectStore";
+import { useTourStore } from "./stores/tourStore";
 import {
   initSculptKeybindings,
   initViewportSync,
@@ -130,6 +132,21 @@ export default function App() {
     };
   }, []);
 
+  // First-run tour (P15.3): deferred until the first project is open (before
+  // that the StartScreen overlay covers the shell). `maybeAutostart` no-ops if
+  // the tour was already seen/dismissed, so re-firing on every project change
+  // is safe.
+  useEffect(() => {
+    const check = () => {
+      const s = useProjectStore.getState();
+      if (s.current !== null && !s.showStartScreen) {
+        useTourStore.getState().maybeAutostart();
+      }
+    };
+    check();
+    return useProjectStore.subscribe(check);
+  }, []);
+
   // Subscribe to infinity:open-file so the Code Editor opens tabs (P5.1).
   useEffect(() => initEditorSync(), []);
 
@@ -185,6 +202,7 @@ export default function App() {
       <ErodeDialog />
       <CommandPalette />
       <StartScreen />
+      <FirstRunTour />
     </div>
   );
 }

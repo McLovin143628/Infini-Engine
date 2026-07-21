@@ -112,6 +112,9 @@ export const MENU_BAR: TopMenu[] = [
       sep,
       sub("Load Layout", [
         act("window.layout.default", "Default Editor Layout"),
+        act("window.layout.discipline.3d", "3D Layout"),
+        act("window.layout.discipline.2d", "2D Layout"),
+        act("window.layout.discipline.scripting", "Scripting Layout"),
         act("window.layout.load", "Load Layout…"),
       ]),
       act("window.layout.save", "Save Layout As…"),
@@ -211,6 +214,7 @@ export const MENU_BAR: TopMenu[] = [
     items: [
       act("help.documentation", "Documentation"),
       act("help.roadmap", "Engineering Roadmap"),
+      act("help.tour", "Interactive Tour"),
       act("help.reportBug", "Report a Bug…"),
       sep,
       act("help.about", "About Infinity Engine"),

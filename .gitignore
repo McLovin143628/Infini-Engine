@@ -43,6 +43,9 @@ Desktop.ini
 .vscode/*
 !.vscode/extensions.json
 
+# ── Docs (mdBook rendered output) ──
+docs/book/book/
+
 # ── Logs / temp ──
 *.log
 build_log*.txt

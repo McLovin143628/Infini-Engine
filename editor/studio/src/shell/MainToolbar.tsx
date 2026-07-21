@@ -79,6 +79,7 @@ function PlayCluster() {
 
   return (
     <div
+      data-tour="play-cluster"
       className={`relative flex items-center gap-0.5 rounded bg-(--ink-bg-1) p-0.5 ${
         running ? "ring-1 ring-(--ink-success)" : ""
       }`}

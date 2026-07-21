@@ -23,6 +23,7 @@ export default function StatusBar() {
   return (
     <div className="flex h-7 shrink-0 items-center gap-1 border-t border-(--ink-border) bg-(--ink-bg-2) px-2 text-(--ink-text-dim)">
       <button
+        data-tour="content-drawer"
         className="flex h-full items-center gap-1 px-2 hover:bg-(--ink-bg-3) hover:text-(--ink-text)"
         onClick={() => executeCommand("window.contentDrawer")}
       >
@@ -37,6 +38,7 @@ export default function StatusBar() {
         Output Log
       </button>
       <button
+        data-tour="command-palette"
         className="flex h-full items-center gap-1 px-2 hover:bg-(--ink-bg-3) hover:text-(--ink-text)"
         onClick={() => executeCommand("tools.commandPalette")}
       >

@@ -92,6 +92,8 @@ export type {
 export const app = {
   /** Editor backend version, shown in the status bar. */
   version: (): Promise<string> => invoke<string>("app_version"),
+  /** Multi-line build banner (version + git hash) for the About dialog. */
+  buildInfo: (): Promise<string> => invoke<string>("app_build_info"),
 };
 
 /**

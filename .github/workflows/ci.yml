@@ -157,6 +157,20 @@ jobs:
       - name: Build
         run: npm run build
 
+  docs:
+    name: Docs (mdBook)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # cargo-binstall-style prebuilt install of mdBook — no compile, ~seconds.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook
+      - name: Build the docs site
+        run: mdbook build docs/book
+      # The rendered site lands in docs/book/book (gitignored); publishing it to
+      # GitHub Pages / a docs host is an ops step (see docs/release-channels.md).
+
   bindings-drift:
     name: TS bindings drift
     runs-on: ubuntu-latest

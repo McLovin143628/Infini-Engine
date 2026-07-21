@@ -1,17 +1,25 @@
 /**
- * Start screen (Phase 5.5): the New / Open / Recent project surface.
+ * Start screen (Phase 5.5; template gallery P15.3): the New / Open / Recent
+ * project surface.
  *
  * Shown full-surface when no project is open (or File → New/Open forces it).
  * Airspace rule: it can cross the native viewport hole, so it holds a
  * viewport-overlay acquisition (hides the native child) for its lifetime, like
  * the menus / palette / dialogs.
+ *
+ * The template picker is a gallery of cards, each with a hand-drawn inline-SVG
+ * preview and a discipline chip. Creating a project applies the chosen
+ * discipline's first-run layout preset (3D / 2D / Scripting).
  */
 import { useMemo, useState } from "react";
-import { Box, Clock, FolderOpen, FolderPlus, Rocket, X } from "lucide-react";
+import { Clock, FolderOpen, FolderPlus, Rocket, X } from "lucide-react";
 
 import { cn } from "../lib/utils";
+import { DISCIPLINE_HINT, DISCIPLINE_LABEL, DISCIPLINES, type Discipline } from "../lib/disciplines";
 import { useViewportOverlay } from "../lib/viewportOverlay";
+import { applyDisciplineLayout } from "../panels/dock/dockLayoutStore";
 import { useProjectStore } from "../stores/projectStore";
+import { templateVisual } from "./templatePreviews";
 
 export default function StartScreen() {
   const ready = useProjectStore((s) => s.ready);
@@ -36,6 +44,7 @@ function StartScreenBody({ canCancel }: { canCancel: boolean }) {
 
   const [name, setName] = useState("MyGame");
   const [template, setTemplate] = useState(() => templates[0]?.slug ?? "blank-3d");
+  const [discipline, setDiscipline] = useState<Discipline>(() => templateVisual(template).discipline);
 
   // Keep the selected template valid once templates load.
   const selected = useMemo(
@@ -43,9 +52,26 @@ function StartScreenBody({ canCancel }: { canCancel: boolean }) {
     [templates, template],
   );
 
+  // Picking a template resets the discipline to that template's natural one
+  // (the user can still override it with the chips below).
+  const pickTemplate = (slug: string) => {
+    setTemplate(slug);
+    setDiscipline(templateVisual(slug).discipline);
+  };
+
+  const onCreate = async () => {
+    const before = useProjectStore.getState().current;
+    await newViaDialog(name, selected);
+    const st = useProjectStore.getState();
+    if (st.error === null && st.current && st.current !== before) {
+      // Brand-new project → open into the chosen discipline's first-run layout.
+      applyDisciplineLayout(discipline);
+    }
+  };
+
   return (
     <div className="absolute inset-0 z-40 flex items-center justify-center bg-(--ink-bg-0)/95 p-6">
-      <div className="flex h-full max-h-[560px] w-full max-w-4xl overflow-hidden rounded-lg border border-(--ink-border) bg-(--ink-bg-1) shadow-2xl">
+      <div className="flex h-full max-h-[600px] w-full max-w-5xl overflow-hidden rounded-lg border border-(--ink-border) bg-(--ink-bg-1) shadow-2xl">
         {/* New project */}
         <div className="flex min-w-0 flex-1 flex-col border-r border-(--ink-border) p-6">
           <div className="mb-4 flex items-center gap-2">
@@ -73,35 +99,65 @@ function StartScreenBody({ canCancel }: { canCancel: boolean }) {
           />
 
           <div className="mb-1 text-[11px] font-semibold text-(--ink-text-dim)">Template</div>
-          <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-auto pr-1">
-            {templates.map((t) => (
+          <div className="grid min-h-0 flex-1 grid-cols-2 gap-2 overflow-auto pr-1">
+            {templates.map((t) => {
+              const isSel = selected === t.slug;
+              return (
+                <button
+                  key={t.slug}
+                  className={cn(
+                    "flex flex-col overflow-hidden rounded border text-left",
+                    isSel
+                      ? "border-(--ink-accent) bg-(--ink-accent-muted)"
+                      : "border-(--ink-border) bg-(--ink-bg-2) hover:border-(--ink-border-strong)",
+                  )}
+                  onClick={() => pickTemplate(t.slug)}
+                  aria-pressed={isSel}
+                >
+                  <div className="h-20 w-full border-b border-(--ink-border) bg-(--ink-bg-0)">
+                    {templateVisual(t.slug).preview}
+                  </div>
+                  <div className="min-w-0 p-2">
+                    <span className="block truncate text-sm">{t.label}</span>
+                    <span className="mt-0.5 block text-[11px] leading-snug text-(--ink-text-faint)">
+                      {t.description}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Discipline → first-run layout preset. */}
+          <div className="mt-3 mb-1 text-[11px] font-semibold text-(--ink-text-dim)">
+            First-run layout
+          </div>
+          <div className="flex gap-1.5">
+            {DISCIPLINES.map((d) => (
               <button
-                key={t.slug}
+                key={d}
+                title={DISCIPLINE_HINT[d]}
                 className={cn(
-                  "flex items-start gap-2 rounded border p-2 text-left",
-                  selected === t.slug
-                    ? "border-(--ink-accent) bg-(--ink-accent-muted)"
-                    : "border-(--ink-border) bg-(--ink-bg-2) hover:border-(--ink-border-strong)",
+                  "flex-1 rounded border px-2 py-1 text-xs",
+                  discipline === d
+                    ? "border-(--ink-accent) bg-(--ink-accent-muted) text-(--ink-text)"
+                    : "border-(--ink-border) bg-(--ink-bg-2) text-(--ink-text-dim) hover:border-(--ink-border-strong)",
                 )}
-                onClick={() => setTemplate(t.slug)}
+                onClick={() => setDiscipline(d)}
+                aria-pressed={discipline === d}
               >
-                <Box size={16} className="mt-0.5 shrink-0 text-(--ink-info)" />
-                <span className="min-w-0">
-                  <span className="block text-sm">{t.label}</span>
-                  <span className="block truncate text-[11px] text-(--ink-text-faint)">
-                    {t.description}
-                  </span>
-                </span>
+                {DISCIPLINE_LABEL[d]}
               </button>
             ))}
           </div>
+          <div className="mt-1 text-[10px] text-(--ink-text-faint)">{DISCIPLINE_HINT[discipline]}</div>
 
-          {error && <div className="mt-2 text-xs text-(--ink-danger)">{error}</div>}
+          {error && <div className="mt-2 text-xs text-(--ink-error)">{error}</div>}
 
           <div className="mt-4 flex gap-2">
             <button
               className="flex h-8 flex-1 items-center justify-center gap-1.5 rounded bg-(--ink-accent) text-sm text-(--ink-text-onaccent) hover:bg-(--ink-accent-hover)"
-              onClick={() => void newViaDialog(name, selected)}
+              onClick={() => void onCreate()}
             >
               <FolderPlus size={15} /> Create Project…
             </button>

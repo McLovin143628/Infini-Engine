@@ -7,9 +7,12 @@
  */
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { setCommandHandler, setUnhandledCommandHook } from "../lib/commands";
+import { app } from "../lib/ipc";
+import { DISCIPLINE_LABEL } from "../lib/disciplines";
 import { registerMenuCommands } from "../lib/menus";
-import { useDockLayout } from "../panels/dock/dockLayoutStore";
+import { applyDisciplineLayout, useDockLayout } from "../panels/dock/dockLayoutStore";
 import { useShellStore } from "../stores/shellStore";
+import { useTourStore } from "../stores/tourStore";
 
 /** Which phase delivers each stubbed command family (status-toast hint). */
 const PHASE_HINTS: [RegExp, string][] = [
@@ -107,15 +110,38 @@ export function bootstrapShellCommands(): void {
   setCommandHandler("window.layout.load", () => {
     useShellStore.getState().openLayoutDialog("load");
   });
+
+  // Discipline first-run layout presets (P15.3).
+  (["3d", "2d", "scripting"] as const).forEach((d) => {
+    setCommandHandler(`window.layout.discipline.${d}`, () => {
+      applyDisciplineLayout(d);
+      useShellStore.getState().pushStatus(`${DISCIPLINE_LABEL[d]} layout applied.`);
+    });
+  });
+
+  // Interactive first-run tour (P15.3) — replayable from Help ▸ Interactive Tour.
+  setCommandHandler("help.tour", () => {
+    useTourStore.getState().start();
+  });
+  setCommandHandler("help.documentation", () => {
+    useShellStore
+      .getState()
+      .pushStatus("Docs: build the mdBook at docs/book (mdbook serve docs/book), or see docs/ROADMAP.md.", 6000);
+  });
   setCommandHandler("window.fullscreen", async () => {
     const win = getCurrentWindow();
     const fs = await win.isFullscreen();
     await win.setFullscreen(!fs);
   });
-  setCommandHandler("help.about", () => {
-    useShellStore
-      .getState()
-      .pushStatus("Infinity Engine — native Rust core, Tauri v2 editor. See docs/ROADMAP.md.", 6000);
+  setCommandHandler("help.about", async () => {
+    // Surface the build banner (version + git hash) embedded at build time.
+    let info = "Infinity Engine — native Rust core, Tauri v2 editor.";
+    try {
+      info = (await app.buildInfo()).replace(/\n/g, " · ");
+    } catch {
+      // Backend unavailable (e.g. detached-window context) — keep the fallback.
+    }
+    useShellStore.getState().pushStatus(info, 6000);
   });
   setCommandHandler("help.roadmap", () => {
     useShellStore.getState().pushStatus("The roadmap lives at docs/ROADMAP.md in the repository.", 6000);

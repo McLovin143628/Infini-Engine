@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { layouts } from "../../lib/ipc";
+import type { Discipline } from "../../lib/disciplines";
 import { clampPanelRect, type ContainerSize, type PanelRect } from "../panelRect";
 import { panelDefFor, panelTypeOf } from "../panelRegistry";
 import {
@@ -362,6 +363,149 @@ export function defaultDockLayout(): DockLayout {
     },
     docks,
   };
+}
+
+// =============================================================================
+// Discipline layout presets (P15.3): first-run layouts per discipline
+// =============================================================================
+
+/** A single docked panel state with a sensible float fallback. */
+function basePanel(
+  type: string,
+  location: PanelState["location"],
+  lastDock: DockSide | null,
+): PanelState {
+  const size = panelDefFor(type)?.defaultSize ?? { w: 340, h: 440 };
+  return {
+    type,
+    params: null,
+    location,
+    floatRect: { x: 24, y: 24, w: size.w, h: size.h },
+    floatZ: 0,
+    minimized: false,
+    lastDock,
+    windowRect: null,
+  };
+}
+
+interface RegionSpec {
+  side: DockSide;
+  size: number;
+  groups: Array<{ weight: number; tabs: string[] }>;
+}
+
+/** Build a layout from a docked-region spec + a list of pre-seeded hidden panels. */
+function buildLayout(
+  regions: RegionSpec[],
+  hidden: Array<{ type: string; lastDock: DockSide | null }>,
+): DockLayout {
+  const docks = emptyRegions();
+  const panels: Record<string, PanelState> = {};
+  for (const rs of regions) {
+    const groups = rs.groups
+      .filter((g) => g.tabs.length > 0)
+      .map((g) => {
+        const id = newGroupId();
+        for (const t of g.tabs) {
+          panels[t] = basePanel(t, { kind: "docked", side: rs.side, groupId: id }, rs.side);
+        }
+        return { id, tabs: [...g.tabs], activeTab: g.tabs[0]!, weight: g.weight };
+      });
+    docks[rs.side] = { size: rs.size, groups };
+  }
+  for (const h of hidden) {
+    if (panels[h.type]) continue;
+    panels[h.type] = basePanel(h.type, { kind: "hidden" }, h.lastDock);
+  }
+  return { panels, docks };
+}
+
+/**
+ * The three first-run discipline layouts (ROADMAP §4). `repairLayout` runs on
+ * every one so an unregistered panel type degrades gracefully.
+ *  - **3d**: Place Actors (left) · Outliner/Details (right) · Output Log (bottom).
+ *  - **2d**: Outliner/Details (right) · Output Log (bottom) — viewport-forward.
+ *  - **scripting**: Explorer (left) · Outliner/Details (right) · Editor/Terminal/
+ *    Problems tabs (bottom) — IDE-forward.
+ */
+export function disciplineLayout(kind: Discipline): DockLayout {
+  let layout: DockLayout;
+  switch (kind) {
+    case "2d":
+      layout = buildLayout(
+        [
+          {
+            side: "right",
+            size: 320,
+            groups: [
+              { weight: 0.42, tabs: ["outliner"] },
+              { weight: 0.58, tabs: ["details"] },
+            ],
+          },
+          { side: "bottom", size: 220, groups: [{ weight: 1, tabs: ["outputLog"] }] },
+        ],
+        [
+          { type: "placeActors", lastDock: "left" },
+          { type: "worldSettings", lastDock: "right" },
+        ],
+      );
+      break;
+    case "scripting":
+      layout = buildLayout(
+        [
+          { side: "left", size: 300, groups: [{ weight: 1, tabs: ["explorer"] }] },
+          {
+            side: "right",
+            size: 300,
+            groups: [
+              { weight: 0.5, tabs: ["outliner"] },
+              { weight: 0.5, tabs: ["details"] },
+            ],
+          },
+          {
+            side: "bottom",
+            size: 300,
+            groups: [{ weight: 1, tabs: ["editor", "terminal", "problems"] }],
+          },
+        ],
+        [
+          { type: "outputLog", lastDock: "bottom" },
+          { type: "placeActors", lastDock: "left" },
+          { type: "worldSettings", lastDock: "right" },
+        ],
+      );
+      break;
+    case "3d":
+    default:
+      layout = buildLayout(
+        [
+          { side: "left", size: 280, groups: [{ weight: 1, tabs: ["placeActors"] }] },
+          {
+            side: "right",
+            size: 320,
+            groups: [
+              { weight: 0.42, tabs: ["outliner"] },
+              { weight: 0.58, tabs: ["details"] },
+            ],
+          },
+          { side: "bottom", size: 220, groups: [{ weight: 1, tabs: ["outputLog"] }] },
+        ],
+        [{ type: "worldSettings", lastDock: "right" }],
+      );
+      break;
+  }
+  return repairLayout(layout);
+}
+
+/**
+ * Swap the live layout to a discipline preset and persist it as the active
+ * layout. Used by the New Project gallery (first-run) and Window ▸ Layout.
+ */
+export function applyDisciplineLayout(kind: Discipline): void {
+  const store = useDockLayout.getState();
+  const container = store.container ?? { w: 1280, h: 720 };
+  store.hydrate(toDockDoc(disciplineLayout(kind)), container);
+  void layouts.save(ACTIVE_LAYOUT_NAME, JSON.stringify(toDockDoc(useDockLayout.getState().layout)));
 }
 
 // =============================================================================

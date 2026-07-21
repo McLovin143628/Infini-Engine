@@ -1,0 +1,20 @@
+[book]
+title = "Infinity Engine — Documentation"
+description = "The user guide for Infinity Engine, a Rust game engine with a Tauri + React editor."
+authors = ["Infinity Engine contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/McLovin143628/Infinity-Engine"
+edit-url-template = "https://github.com/McLovin143628/Infinity-Engine/edit/main/docs/book/{path}"
+
+[output.html.fold]
+enable = true
+level = 1
