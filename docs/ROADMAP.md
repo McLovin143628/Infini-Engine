@@ -941,6 +941,32 @@ review passes against the HAL audit.
 **Goal:** commercial-grade finish. **Done when:** a newcomer installs Studio, follows the
 tutorial, and ships a small game in a weekend.
 
+> **STATUS: Phase 15 COMPLETE (engineering scope)** (2026-07-21), CI-green on all three
+> OSes — and with it, **every phase of this roadmap is implemented**. **P15.1**:
+> tracing-tracy behind an off-by-default feature (spans unconditional: per-frame/
+> per-pass render, per-phase sim, cook/import/vgeom stages; docs/profiling.md); the §8
+> budget ratchets live in the normal test run (FRAME_BUDGET_MS 33 vs 0.185 measured;
+> SIM_STEP_BUDGET_MS 2 vs ~0.02; 5s open/startup tripwires vs 5.6ms measured — the
+> constants only go down); the cook's per-asset CPU work fans across the job pool with
+> byte-determinism gates still green (zstd serial, documented). **P15.2**: structured
+> crash reports (player: engine/OS/adapter/log-tail + crashes/ dir; editor: src-tauri
+> panic hook + log ring; the viewport thread is catch_unwind-wrapped — the editor
+> survives its render loop panicking); upload is a documented opt-in stub, never silent
+> telemetry; autosave recovery never panics on corrupt files (.corrupt quarantine +
+> fallback, tested); an ignored deterministic 10k-cycle soak with bounded-memory
+> asserts. **P15.3**: template gallery with SVG previews + 3D/2D/Scripting first-run
+> layouts; the 7-step anchored first-run tour (deferred to first project open,
+> replayable from Help); docs/book mdBook with nine real content pages + a CI build;
+> first-person template upgraded to a real starter scene; samples index with the honest
+> three-games status (platformer done; exploration = parts exist; shooter = follow-up).
+> **P15.4**: branding sweep clean; docs/LICENSING.md presents options for the OWNER's
+> decision (deliberately not picked); one version source + build-time git hash → About;
+> docs/release-channels.md (honest updater spec). Human-verified remainders: Tracy
+> profiling sessions on real content, the newcomer-weekend test itself, demo recordings,
+> docs-site deploy (ops), the signed updater (ops). Deferred: the third sample game +
+> composing the exploration demo, frontend adoption of the diagnostics command,
+> renderer/runtime byte-counters in MemoryReport, parallel zstd, mouse-look input seams.
+
 - **P15.1 Performance** — 1. Tracy-instrumented frame-budget passes (editor + runtime);
   2. startup-time budget; 3. parallel import/cook tuning; 4. memory profiling + budgets.
 - **P15.2 Stability** — 1. crash reporter (minidump + opt-in upload); 2. autosave/recovery
