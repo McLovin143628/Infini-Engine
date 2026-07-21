@@ -20,9 +20,9 @@ use inf_math::FloatingOrigin;
 use inf_render::gizmo::{self, GizmoAxis, GizmoMode};
 use inf_render::golden::{image_diff, within_tolerance};
 use inf_render::{
-    EngineRenderer, GpuContext, HeadlessTarget, LightKind, MeshInstance, RenderChunk, RenderLight,
-    RenderScene, RenderTilemap, RenderView, SpriteInstance, SpriteTextureUpload, TilemapParams,
-    HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    Ambient2D, EngineRenderer, GpuContext, HeadlessTarget, LightKind, MeshInstance, RenderChunk,
+    RenderLight, RenderLight2D, RenderScene, RenderTilemap, RenderView, SpriteInstance,
+    SpriteTextureUpload, TilemapParams, HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -504,4 +504,73 @@ fn golden_tilemap_2d() {
     assert!(red, "expected a red tile (atlas cell 1)");
     assert!(blue, "expected a blue tile (atlas cell 3)");
     assert!(magenta, "expected the loose magenta sprite over the tiles");
+}
+
+/// 2D lighting golden (P8.1c): a dark scene ambient with two colored 2D lights
+/// (red on the left, blue on the right) over a big white sprite patch. The
+/// `smoothstep` falloff paints a red glow on the left half, a blue glow on the
+/// right, and near-black between/outside the radii — proving the sprite shader's
+/// 2D-light path (determinism gate via `check_golden`; strict pixel diff opt-in).
+#[test]
+fn golden_2d_lit() {
+    let Some(gpu) = gpu_or_skip() else { return };
+
+    let mut scene = RenderScene {
+        // Grid off so the sprite lighting reads without the grid underneath.
+        grid_enabled: false,
+        // Fully dark ambient: the two lights alone shape the image, and the
+        // sprite's far corners stay black (the "dark region" assertion below).
+        // (sRGB encoding lifts small linear values a lot, so a truly dark region
+        // needs ~0 linear ambient.)
+        ambient_2d: Ambient2D([0.0, 0.0, 0.0]),
+        ..Default::default()
+    };
+
+    // One big white quad (the untextured white fallback) covering the frame, so
+    // every sampled pixel is the lit sprite (no sky leaking into the readback).
+    scene.sprites.push(SpriteInstance {
+        position: DVec3::new(0.0, 0.0, 0.0),
+        size: Vec2::new(40.0, 24.0),
+        color: [1.0, 1.0, 1.0, 1.0],
+        sorting_layer: 0,
+        ..Default::default()
+    });
+
+    // Red light on the left, blue on the right.
+    scene.lights_2d.push(RenderLight2D {
+        color: [1.0, 0.1, 0.1],
+        intensity: 1.5,
+        radius: 2.2,
+        position: DVec3::new(-1.4, 0.0, 0.0),
+    });
+    scene.lights_2d.push(RenderLight2D {
+        color: [0.1, 0.2, 1.0],
+        intensity: 1.5,
+        radius: 2.2,
+        position: DVec3::new(1.4, 0.0, 0.0),
+    });
+    scene.mark_dirty();
+
+    let img = check_golden(&gpu, "2d_lit", &scene, &front_view());
+
+    // The left glow is red-dominant, the right glow blue-dominant, and some
+    // pixel is near-black (outside both radii / dark ambient).
+    let mut red = false;
+    let mut blue = false;
+    let mut dark = false;
+    for chunk in img.chunks(4) {
+        let (r, g, b) = (chunk[0] as i32, chunk[1] as i32, chunk[2] as i32);
+        if r > 90 && r - g > 50 && r - b > 50 {
+            red = true;
+        }
+        if b > 90 && b - r > 50 && b - g > 30 {
+            blue = true;
+        }
+        if r < 20 && g < 20 && b < 20 {
+            dark = true;
+        }
+    }
+    assert!(red, "expected the red 2D light glow");
+    assert!(blue, "expected the blue 2D light glow");
+    assert!(dark, "expected a dark region outside the light radii");
 }

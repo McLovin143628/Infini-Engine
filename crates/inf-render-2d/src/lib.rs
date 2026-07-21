@@ -24,7 +24,14 @@
 
 use glam::{DVec3, Vec2};
 
+pub mod nine_slice;
+pub mod text;
 pub mod tilemap;
+pub use nine_slice::{expand_nine_slice, NineSliceParams};
+pub use text::{
+    builtin_font_rgba8, expand_text, HAlign, TextParams, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP,
+    BUILTIN_FONT_ROWS,
+};
 pub use tilemap::{
     aabb_visible, atlas_uv, chunk_world_aabb, expand_chunk, RenderChunk, RenderTilemap,
     TilemapParams, TILE_CHUNK_DIM,
@@ -37,6 +44,14 @@ pub type TextureHandle = u64;
 
 /// The reserved handle meaning "no texture / use the 1×1 white fallback".
 pub const WHITE_TEXTURE: TextureHandle = 0;
+
+/// The reserved handle for the built-in 8×8 bitmap font atlas
+/// ([`builtin_font_rgba8`]). The sprite pass uploads that atlas under this
+/// handle at startup, so a `Text2D` with no font asset (`font_texture = None`)
+/// resolves here. A distinctive high value that [`handle_from_guid`] is
+/// astronomically unlikely to collide with (and a collision would merely alias
+/// one texture to the font — harmless).
+pub const BUILTIN_FONT_TEXTURE: TextureHandle = 0xF047_0000_0000_0001;
 
 /// One CPU-side sprite ready for batching. World position is f64 (the render
 /// pass rebases it against the floating origin, exactly like mesh instances);
@@ -277,6 +292,20 @@ pub fn handle_from_guid(guid: u128) -> TextureHandle {
     }
 }
 
+/// The 2D-light radial falloff, mirroring `sprite.wgsl`'s
+/// `smoothstep(radius, 0.0, dist)` **exactly**: `1` at the light, smoothly
+/// easing to `0` at (and past) `radius`. Kept CPU-side so the shading curve is
+/// unit-testable, the same way [`corner_offset`] mirrors the vertex shader. A
+/// non-positive radius contributes nothing (matches the shader's guard).
+pub fn light2d_falloff(radius: f32, dist: f32) -> f32 {
+    if radius <= 0.0 {
+        return 0.0;
+    }
+    // smoothstep(edge0=radius, edge1=0, x=dist): t = clamp((radius-dist)/radius).
+    let t = ((radius - dist) / radius).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,5 +528,19 @@ mod tests {
         assert_ne!(handle_from_guid(0), WHITE_TEXTURE);
         // Distinct GUIDs generally map to distinct handles.
         assert_ne!(handle_from_guid(1), handle_from_guid(2));
+    }
+
+    #[test]
+    fn light2d_falloff_is_one_at_center_zero_at_radius() {
+        assert_eq!(light2d_falloff(2.0, 0.0), 1.0);
+        assert_eq!(light2d_falloff(2.0, 2.0), 0.0);
+        // Past the radius clamps to zero (never negative).
+        assert_eq!(light2d_falloff(2.0, 5.0), 0.0);
+        // Smooth + strictly decreasing across the interval.
+        let mid = light2d_falloff(2.0, 1.0);
+        assert!(mid > 0.0 && mid < 1.0);
+        assert!(light2d_falloff(2.0, 0.5) > light2d_falloff(2.0, 1.5));
+        // Degenerate radius contributes nothing (matches the shader guard).
+        assert_eq!(light2d_falloff(0.0, 0.0), 0.0);
     }
 }

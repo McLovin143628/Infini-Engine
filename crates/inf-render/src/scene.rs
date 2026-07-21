@@ -91,6 +91,35 @@ pub struct RenderLight {
     pub range: f32,
 }
 
+/// A minimal 2D light (P8.1c): a soft radial falloff in the sprite plane. The
+/// sprite pass converts `position` to render-local (floating-origin-relative) at
+/// upload, exactly like 3D point lights, and lights every sprite/tile/text/
+/// 9-slice fragment by world-XY distance.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderLight2D {
+    /// Linear light color.
+    pub color: [f32; 3],
+    /// Brightness multiplier.
+    pub intensity: f32,
+    /// World-space falloff radius; the contribution is `smoothstep(radius, 0,
+    /// dist)`, so it is full at the light and zero at/after `radius`.
+    pub radius: f32,
+    /// World-space position (the sprite plane's XY is what matters).
+    pub position: DVec3,
+}
+
+/// Scene-level 2D ambient term. **Defaults to white (`1,1,1`)** so that with no
+/// [`RenderLight2D`] present every sprite renders exactly as before
+/// (`texel·tint·1`) — the byte-stability guarantee for pre-P8.1c goldens.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ambient2D(pub [f32; 3]);
+
+impl Default for Ambient2D {
+    fn default() -> Self {
+        Self([1.0, 1.0, 1.0])
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkyParams {
     /// Linear colors.
@@ -125,6 +154,17 @@ pub struct RenderScene {
     /// `version`) while any tilemap is present — a documented v1 cost (a
     /// camera-delta / dirty-region optimization is a follow-up).
     pub tilemaps: Vec<RenderTilemap>,
+    /// Host-expanded 2D primitives that are already in draw order and share one
+    /// `(layer, order, texture)` per run — 9-slices (nine quads) and text blocks
+    /// (one quad per glyph), expanded by `inf-render-2d`. The sprite pass merges
+    /// these with the loose `sprites` and the tilemap runs in one painter sort.
+    /// Version-gated (the host rebuilds them on document change), unlike
+    /// tilemaps which additionally re-expand per frame for culling.
+    pub prebatched: Vec<PrebatchedRun>,
+    /// Minimal 2D lights (P8.1c). Empty ⇒ only `ambient_2d` lights the sprites.
+    pub lights_2d: Vec<RenderLight2D>,
+    /// Scene-level 2D ambient (default white → unlit sprites unchanged).
+    pub ambient_2d: Ambient2D,
     /// Textures to hand to the sprite pass's GPU cache (drained/deduped by
     /// handle). The host populates this once per newly-referenced texture.
     pub pending_texture_uploads: Vec<SpriteTextureUpload>,

@@ -12,15 +12,15 @@ use std::collections::BTreeMap;
 
 use inf_math::FloatingOrigin;
 use inf_render_2d::{
-    aabb_visible, batch_scene, chunk_world_aabb, expand_chunk, PrebatchedRun, SpriteBatch,
-    SpriteInstance, TextureHandle,
+    aabb_visible, batch_scene, builtin_font_rgba8, chunk_world_aabb, expand_chunk, PrebatchedRun,
+    SpriteBatch, SpriteInstance, TextureHandle, BUILTIN_FONT_TEXTURE,
 };
 
 use crate::camera::{RenderView, DEPTH_COMPARE, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
-use crate::scene::SpriteTextureUpload;
+use crate::scene::{RenderScene, SpriteTextureUpload};
 
 /// Per-instance GPU data; matches the `@location(0..=5)` attributes in
 /// sprite.wgsl.
@@ -87,6 +87,68 @@ const SPRITE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = [
     },
 ];
 
+/// Max 2D lights uploaded per frame (must match `MAX_2D_LIGHTS` in sprite.wgsl).
+pub const MAX_2D_LIGHTS: usize = 16;
+
+/// One GPU 2D light, std140-friendly (all vec4). `color.a` = intensity;
+/// `pos.xy` = render-local position, `pos.z` = falloff radius.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuLight2D {
+    color: [f32; 4],
+    pos: [f32; 4],
+}
+
+/// The 2D lights uniform block bound at `@group(2)` of the sprite pipeline.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Lights2DUniform {
+    count: [u32; 4],   // x = active count
+    ambient: [f32; 4], // rgb = scene ambient
+    items: [GpuLight2D; MAX_2D_LIGHTS],
+}
+
+impl Lights2DUniform {
+    /// Project world-space 2D lights into render-local GPU lights + ambient.
+    fn from_scene(scene: &RenderScene, origin: &FloatingOrigin) -> Self {
+        let mut items = [GpuLight2D {
+            color: [0.0; 4],
+            pos: [0.0; 4],
+        }; MAX_2D_LIGHTS];
+        let count = scene.lights_2d.len().min(MAX_2D_LIGHTS);
+        for (slot, light) in items.iter_mut().zip(scene.lights_2d.iter()).take(count) {
+            slot.color = [
+                light.color[0],
+                light.color[1],
+                light.color[2],
+                light.intensity,
+            ];
+            // Render-local position (origin-relative), like 3D point lights.
+            let p = (light.position - origin.origin()).as_vec3();
+            slot.pos = [p.x, p.y, light.radius, 0.0];
+        }
+        let a = scene.ambient_2d.0;
+        Self {
+            count: [count as u32, 0, 0, 0],
+            ambient: [a[0], a[1], a[2], 0.0],
+            items,
+        }
+    }
+
+    /// The default (no lights, white ambient) block — what the buffer holds
+    /// before the first sync so a sprite drawn on frame 0 is still unlit-correct.
+    fn white_ambient() -> Self {
+        Self {
+            count: [0; 4],
+            ambient: [1.0, 1.0, 1.0, 0.0],
+            items: [GpuLight2D {
+                color: [0.0; 4],
+                pos: [0.0; 4],
+            }; MAX_2D_LIGHTS],
+        }
+    }
+}
+
 /// A single cached GPU texture and its (texture+sampler) bind group.
 struct TextureEntry {
     // Held to keep the texture (and its views) alive; the bind group borrows it.
@@ -120,11 +182,19 @@ impl SpriteTextures {
         });
         // 1×1 opaque white fallback (sRGB target so sampling yields linear 1.0).
         let fallback = upload_rgba8(gpu, &layout, &sampler, 1, 1, &[255, 255, 255, 255]);
+        let mut map = BTreeMap::new();
+        // Built-in bitmap font, always available under its reserved handle so a
+        // `Text2D` with no font asset renders with zero setup.
+        let (font_rgba, fw, fh) = builtin_font_rgba8();
+        map.insert(
+            BUILTIN_FONT_TEXTURE,
+            upload_rgba8(gpu, &layout, &sampler, fw, fh, &font_rgba),
+        );
         Self {
             layout,
             sampler,
             fallback,
-            map: BTreeMap::new(),
+            map,
         }
     }
 
@@ -279,6 +349,8 @@ pub struct SpriteNode {
     batches: Vec<SpriteBatch>,
     /// (scene version, floating origin) the current instance buffer reflects.
     uploaded_key: Option<(u64, glam::DVec3)>,
+    lights2d_buf: wgpu::Buffer,
+    lights2d_bg: wgpu::BindGroup,
 }
 
 impl SpriteNode {
@@ -316,11 +388,48 @@ impl SpriteNode {
                 ],
             });
 
+        // 2D lights uniform block (@group(2)).
+        let lights2d_bgl = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("sprite-lights2d"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let lights2d_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sprite-lights2d"),
+            size: std::mem::size_of::<Lights2DUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Seed with white ambient / no lights so a sprite is correct on frame 0.
+        gpu.queue.write_buffer(
+            &lights2d_buf,
+            0,
+            bytemuck::bytes_of(&Lights2DUniform::white_ambient()),
+        );
+        let lights2d_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sprite-lights2d"),
+            layout: &lights2d_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: lights2d_buf.as_entire_binding(),
+            }],
+        });
+
         let layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("sprite"),
-                bind_group_layouts: &[Some(view_bgl), Some(&tex_bgl)],
+                bind_group_layouts: &[Some(view_bgl), Some(&tex_bgl), Some(&lights2d_bgl)],
                 immediate_size: 0,
             });
 
@@ -379,6 +488,8 @@ impl SpriteNode {
             instance_capacity: 0,
             batches: Vec::new(),
             uploaded_key: None,
+            lights2d_buf,
+            lights2d_bg,
         }
     }
 
@@ -399,7 +510,16 @@ impl SpriteNode {
         }
         self.uploaded_key = Some(key);
 
-        let runs = build_tilemap_runs(frame.scene, frame.view);
+        // 2D lights are render-local, so they depend on the same (version,
+        // origin) key; upload them whenever we re-batch.
+        let lights2d = Lights2DUniform::from_scene(frame.scene, &frame.view.origin);
+        gpu.queue
+            .write_buffer(&self.lights2d_buf, 0, bytemuck::bytes_of(&lights2d));
+
+        // Tilemap chunks (culled + expanded per frame) plus the host's
+        // already-expanded 9-slice / text runs, all merged in one painter sort.
+        let mut runs = build_tilemap_runs(frame.scene, frame.view);
+        runs.extend(frame.scene.prebatched.iter().cloned());
         let batched = batch_scene(&frame.scene.sprites, &runs);
         self.batches = batched.batches;
 
@@ -469,6 +589,7 @@ impl RenderNode for SpriteNode {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
+        pass.set_bind_group(2, &self.lights2d_bg, &[]);
         pass.set_vertex_buffer(0, instances.slice(..));
         for batch in &self.batches {
             pass.set_bind_group(1, self.textures.bind_group(batch.texture), &[]);
@@ -548,6 +669,38 @@ mod tests {
             },
         );
         assert_eq!(&raw.center[..3], &[2.0, 3.0, -1.0]);
+    }
+
+    #[test]
+    fn lights2d_uniform_rebases_and_carries_ambient() {
+        use crate::scene::{Ambient2D, RenderLight2D, RenderScene};
+        let scene = RenderScene {
+            ambient_2d: Ambient2D([0.2, 0.3, 0.4]),
+            lights_2d: vec![RenderLight2D {
+                color: [1.0, 0.5, 0.25],
+                intensity: 2.0,
+                radius: 3.5,
+                position: DVec3::new(1002.0, 5.0, 0.0),
+            }],
+            ..Default::default()
+        };
+        let origin = FloatingOrigin::new(DVec3::new(1000.0, 0.0, 0.0));
+        let u = Lights2DUniform::from_scene(&scene, &origin);
+        assert_eq!(u.count[0], 1);
+        assert_eq!(u.ambient, [0.2, 0.3, 0.4, 0.0]);
+        // Position is origin-relative; radius packs into pos.z, intensity into color.a.
+        assert_eq!(u.items[0].pos, [2.0, 5.0, 3.5, 0.0]);
+        assert_eq!(u.items[0].color, [1.0, 0.5, 0.25, 2.0]);
+    }
+
+    #[test]
+    fn lights2d_uniform_default_is_white_ambient() {
+        use crate::scene::RenderScene;
+        let scene = RenderScene::default();
+        let u = Lights2DUniform::from_scene(&scene, &FloatingOrigin::new(DVec3::ZERO));
+        // No lights, white ambient → sprites render exactly as pre-P8.1c.
+        assert_eq!(u.count[0], 0);
+        assert_eq!(u.ambient, [1.0, 1.0, 1.0, 0.0]);
     }
 
     #[test]

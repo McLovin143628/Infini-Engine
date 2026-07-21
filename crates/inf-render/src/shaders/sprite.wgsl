@@ -22,6 +22,8 @@ struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
+    // Render-local world XY of this fragment (for 2D-light distance).
+    @location(2) world_xy: vec2<f32>,
 };
 
 @vertex
@@ -45,6 +47,7 @@ fn vs(in: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
 
     var out: VsOut;
     out.pos = view.view_proj * vec4<f32>(world, 1.0);
+    out.world_xy = world.xy;
 
     // UVs: +Y (top, cy==1) maps to uv_min.y (texture top). Flips mirror.
     var u = cx;
@@ -64,9 +67,39 @@ fn vs(in: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
 @group(1) @binding(0) var sprite_tex: texture_2d<f32>;
 @group(1) @binding(1) var sprite_samp: sampler;
 
+// ── 2D lights (must match Lights2DUniform / MAX_2D_LIGHTS in passes/sprite.rs) ──
+const MAX_2D_LIGHTS: u32 = 16u;
+
+struct GpuLight2D {
+    color: vec4<f32>, // rgb = color, a = intensity
+    pos:   vec4<f32>, // xy = render-local position, z = radius
+};
+struct Lights2D {
+    count:   vec4<u32>, // x = active count
+    ambient: vec4<f32>, // rgb = scene ambient (default 1,1,1)
+    items:   array<GpuLight2D, MAX_2D_LIGHTS>,
+};
+@group(2) @binding(0) var<uniform> lights2d: Lights2D;
+
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(sprite_tex, sprite_samp, in.uv);
     // Straight alpha: texel and tint multiply; the pipeline does the over-blend.
-    return texel * in.color;
+    let base = texel * in.color;
+
+    // Accumulate lighting: ambient + Σ light·intensity·smoothstep(radius,0,dist).
+    // With the default white ambient and no lights, factor == (1,1,1), so
+    // `base.rgb * factor == base.rgb` exactly — pre-P8.1c sprites are unchanged.
+    var factor = lights2d.ambient.rgb;
+    let count = lights2d.count.x;
+    for (var i = 0u; i < count && i < MAX_2D_LIGHTS; i = i + 1u) {
+        let lt = lights2d.items[i];
+        let radius = lt.pos.z;
+        if (radius > 0.0) {
+            let d = distance(in.world_xy, lt.pos.xy);
+            let atten = smoothstep(radius, 0.0, d);
+            factor += lt.color.rgb * lt.color.a * atten;
+        }
+    }
+    return vec4<f32>(base.rgb * factor, base.a);
 }

@@ -569,6 +569,166 @@ impl Tilemap {
     }
 }
 
+/// A 9-slice sprite (P8.1c): a bordered panel whose four corners keep a fixed
+/// world thickness while its edges stretch along one axis and its center
+/// stretches along both. Expanded into nine quads by the 2D pass
+/// (`inf_render_2d::expand_nine_slice`). Visibility follows the shared
+/// [`Visibility`]/`ComputedVisibility` components.
+///
+/// Additive component: every field carries `#[serde(default)]` so older levels
+/// still load.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct NineSlice {
+    /// Texture/atlas asset GUID; `None` → the renderer's 1×1 white fallback.
+    /// `#[reflect(ignore)]` + serde-persisted, exactly like [`Sprite::texture`].
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub texture: Option<Uuid>,
+    /// Total panel extent in world units (width, height).
+    pub size: Vec2d,
+    /// Normalized border fractions of the **texture**: `[left, right, top,
+    /// bottom]`. An array has no Details widget yet, so it is not surfaced in the
+    /// generic grid (authored by the 9-slice tool, a follow-up); still
+    /// serde-persisted.
+    #[serde(default = "default_border_uv")]
+    pub border_uv: [f64; 4],
+    /// World thickness of the borders (`x` = left/right column, `y` = top/bottom
+    /// row). Clamped to half the size at expansion so borders never overlap.
+    #[serde(default = "default_border_world")]
+    pub border_world: Vec2d,
+    /// Linear tint multiplied with every cell texel (straight alpha).
+    pub tint: Color,
+    #[serde(default)]
+    pub sorting_layer: i32,
+    #[serde(default)]
+    pub order: i32,
+}
+
+fn default_border_uv() -> [f64; 4] {
+    [1.0 / 3.0; 4]
+}
+fn default_border_world() -> Vec2d {
+    Vec2d::splat(0.25)
+}
+
+impl Default for NineSlice {
+    fn default() -> Self {
+        Self {
+            texture: None,
+            size: Vec2d::splat(2.0),
+            border_uv: default_border_uv(),
+            border_world: default_border_world(),
+            tint: Color::WHITE,
+            sorting_layer: 0,
+            order: 0,
+        }
+    }
+}
+
+/// Horizontal alignment of a [`Text2D`] block about its anchor.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+/// A bitmap-text label (P8.1c): a string laid out as one monospace quad per
+/// glyph, sampling a fixed-grid ASCII bitmap-font atlas. Expanded by the 2D pass
+/// (`inf_render_2d::expand_text`). Visibility follows the shared
+/// [`Visibility`]/`ComputedVisibility` components.
+///
+/// Additive component: every optional field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Text2D {
+    /// The string to render (`'\n'` breaks lines).
+    pub text: String,
+    /// Bitmap-font atlas asset GUID; `None` → the renderer's built-in 8×8 font.
+    /// `#[reflect(ignore)]` + serde-persisted, exactly like [`Sprite::texture`].
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub font_texture: Option<Uuid>,
+    /// Font-atlas grid dimensions in glyph cells (built-in font = 16×6).
+    #[serde(default = "default_glyph_cols")]
+    pub glyph_cols: u32,
+    #[serde(default = "default_glyph_rows")]
+    pub glyph_rows: u32,
+    /// Codepoint of atlas cell 0 (usually 32 = space).
+    #[serde(default = "default_first_codepoint")]
+    pub first_codepoint: u32,
+    /// World size of one glyph cell (width, height).
+    pub glyph_size: Vec2d,
+    /// Extra advance as a fraction of glyph width (0 = tight monospace).
+    #[serde(default)]
+    pub tracking: f64,
+    /// Linear tint multiplied with every glyph texel (straight alpha).
+    pub tint: Color,
+    #[serde(default)]
+    pub sorting_layer: i32,
+    #[serde(default)]
+    pub order: i32,
+    /// Per-line horizontal alignment. (Editable in Details via the enum-dropdown
+    /// reflection support used by [`LightKind`].)
+    #[serde(default)]
+    pub halign: TextAlign,
+}
+
+fn default_glyph_cols() -> u32 {
+    16
+}
+fn default_glyph_rows() -> u32 {
+    6
+}
+fn default_first_codepoint() -> u32 {
+    32
+}
+
+impl Default for Text2D {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            font_texture: None,
+            glyph_cols: default_glyph_cols(),
+            glyph_rows: default_glyph_rows(),
+            first_codepoint: default_first_codepoint(),
+            glyph_size: Vec2d::ONE,
+            tracking: 0.0,
+            tint: Color::WHITE,
+            sorting_layer: 0,
+            order: 0,
+            halign: TextAlign::Left,
+        }
+    }
+}
+
+/// A minimal 2D light (P8.1c): a soft radial falloff in the sprite plane, added
+/// to the scene ambient by the sprite fragment shader. A per-light **layer mask**
+/// (restricting which sorting layers it affects) is a documented follow-up — for
+/// now every 2D light affects every sprite/tile/text/9-slice fragment.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Light2D {
+    /// Linear light color.
+    pub color: Color,
+    /// Brightness multiplier.
+    pub intensity: f32,
+    /// World-space falloff radius (contribution is `smoothstep(radius, 0, dist)`).
+    pub radius: f32,
+}
+
+impl Default for Light2D {
+    fn default() -> Self {
+        Self {
+            color: Color::WHITE,
+            intensity: 1.0,
+            radius: 5.0,
+        }
+    }
+}
+
 #[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum LightKind {
     #[default]
@@ -736,6 +896,76 @@ mod tests {
         assert_eq!(tm, Tilemap::default());
         assert_eq!(tm.atlas_cols, 1);
         assert_eq!(tm.atlas_rows, 1);
+    }
+
+    #[test]
+    fn nine_slice_serde_round_trips_and_defaults() {
+        let ns = NineSlice {
+            texture: Some(Uuid::from_u128(0xBEEF)),
+            size: Vec2d::new(6.0, 4.0),
+            border_uv: [0.2, 0.3, 0.25, 0.15],
+            border_world: Vec2d::new(0.5, 0.75),
+            tint: Color::new(0.1, 0.2, 0.3, 1.0),
+            sorting_layer: 2,
+            order: 1,
+        };
+        let json = serde_json::to_string(&ns).unwrap();
+        let back: NineSlice = serde_json::from_str(&json).unwrap();
+        assert_eq!(ns, back);
+
+        // A minimal payload reconstructs the additive fields via serde defaults.
+        let minimal = r#"{
+            "texture": null,
+            "size": { "x": 2.0, "y": 2.0 },
+            "tint": { "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0 }
+        }"#;
+        let ns: NineSlice = serde_json::from_str(minimal).unwrap();
+        assert_eq!(ns, NineSlice::default());
+    }
+
+    #[test]
+    fn text2d_serde_round_trips_and_defaults() {
+        let t = Text2D {
+            text: "Hi\nthere".to_string(),
+            font_texture: Some(Uuid::from_u128(0xF0)),
+            glyph_cols: 16,
+            glyph_rows: 6,
+            first_codepoint: 32,
+            glyph_size: Vec2d::new(0.5, 0.5),
+            tracking: 0.1,
+            tint: Color::new(0.9, 0.8, 0.7, 1.0),
+            sorting_layer: 3,
+            order: 4,
+            halign: TextAlign::Center,
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Text2D = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+
+        // A minimal payload (only always-present fields) fills the rest.
+        let minimal = r#"{
+            "text": "x",
+            "glyph_size": { "x": 1.0, "y": 1.0 },
+            "tint": { "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0 }
+        }"#;
+        let t: Text2D = serde_json::from_str(minimal).unwrap();
+        assert_eq!(t.glyph_cols, 16);
+        assert_eq!(t.glyph_rows, 6);
+        assert_eq!(t.first_codepoint, 32);
+        assert_eq!(t.halign, TextAlign::Left);
+    }
+
+    #[test]
+    fn light2d_serde_round_trips() {
+        let l = Light2D {
+            color: Color::new(1.0, 0.5, 0.2, 1.0),
+            intensity: 2.5,
+            radius: 8.0,
+        };
+        let json = serde_json::to_string(&l).unwrap();
+        let back: Light2D = serde_json::from_str(&json).unwrap();
+        assert_eq!(l, back);
+        assert_eq!(Light2D::default().radius, 5.0);
     }
 
     #[test]

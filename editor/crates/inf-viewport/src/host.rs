@@ -6,16 +6,17 @@ use std::collections::HashMap;
 
 use glam::{DVec3, Vec2, Vec3};
 use inf_ecs::components::{
-    ComputedVisibility, GlobalTransform, Light, LightKind as EcsLightKind, Material, MeshRef,
-    Sprite, Tilemap,
+    ComputedVisibility, GlobalTransform, Light, Light2D, LightKind as EcsLightKind, Material,
+    MeshRef, NineSlice, Sprite, Text2D, TextAlign, Tilemap,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::scene::SceneDoc;
 use inf_math::FloatingOrigin;
 use inf_render::{
-    gizmo, handle_from_guid, EngineRenderer, GizmoDelta, GizmoDrag, GizmoMode, GpuContext,
-    LightKind, MeshInstance, Picker, RenderChunk, RenderLight, RenderScene, RenderTilemap,
-    RenderView, SpriteInstance, SurfaceChain, TilemapParams,
+    expand_nine_slice, expand_text, gizmo, handle_from_guid, EngineRenderer, GizmoDelta, GizmoDrag,
+    GizmoMode, GpuContext, HAlign, LightKind, MeshInstance, NineSliceParams, Picker, PrebatchedRun,
+    RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderTilemap, RenderView,
+    SpriteInstance, SurfaceChain, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
 };
 use uuid::Uuid;
 
@@ -141,6 +142,8 @@ impl EngineHost {
         self.scene.lights.clear();
         self.scene.sprites.clear();
         self.scene.tilemaps.clear();
+        self.scene.prebatched.clear();
+        self.scene.lights_2d.clear();
         self.id_to_guid.clear();
         self.guid_to_id.clear();
 
@@ -176,6 +179,45 @@ impl EngineHost {
                         .map(|g| g.translation())
                         .unwrap_or(DVec3::ZERO);
                     self.scene.sprites.push(project_sprite(sprite, translation));
+                }
+            }
+
+            // 2D lights project into the sprite pass's light list (P8.1c).
+            if let Some(light2d) = w.get::<Light2D>(entity) {
+                if visible {
+                    let translation = w
+                        .get::<GlobalTransform>(entity)
+                        .map(|g| g.translation())
+                        .unwrap_or(DVec3::ZERO);
+                    self.scene
+                        .lights_2d
+                        .push(project_light2d(light2d, translation));
+                }
+            }
+
+            // 9-slices expand to nine quads (P8.1c), pushed as one prebatched run.
+            if let Some(nine) = w.get::<NineSlice>(entity) {
+                if visible {
+                    let translation = w
+                        .get::<GlobalTransform>(entity)
+                        .map(|g| g.translation())
+                        .unwrap_or(DVec3::ZERO);
+                    self.scene
+                        .prebatched
+                        .push(project_nine_slice(nine, translation));
+                }
+            }
+
+            // Text blocks expand to one quad per glyph (P8.1c), one prebatched run.
+            if let Some(text) = w.get::<Text2D>(entity) {
+                if visible {
+                    let translation = w
+                        .get::<GlobalTransform>(entity)
+                        .map(|g| g.translation())
+                        .unwrap_or(DVec3::ZERO);
+                    if let Some(run) = project_text(text, translation) {
+                        self.scene.prebatched.push(run);
+                    }
                 }
             }
 
@@ -336,6 +378,91 @@ fn project_tilemap(tilemap: &Tilemap, translation: DVec3) -> RenderTilemap {
         })
         .collect();
     RenderTilemap { params, chunks }
+}
+
+/// Project an ECS [`Light2D`] (+ world position) into a renderer 2D light.
+fn project_light2d(light: &Light2D, translation: DVec3) -> RenderLight2D {
+    let c = light.color.to_array();
+    RenderLight2D {
+        color: [c[0], c[1], c[2]],
+        intensity: light.intensity,
+        radius: light.radius,
+        position: translation,
+    }
+}
+
+/// Project an ECS [`NineSlice`] (+ world position) into a prebatched run of nine
+/// cell quads centered on the entity. Like [`project_sprite`], the texture GUID
+/// maps to a handle but no bytes are uploaded from the viewport thread yet
+/// (referenced panels render as the tinted white fallback; the headless golden
+/// exercises the textured path).
+fn project_nine_slice(nine: &NineSlice, translation: DVec3) -> PrebatchedRun {
+    let params = NineSliceParams {
+        position: translation,
+        pivot: Vec2::splat(0.5),
+        size: Vec2::new(nine.size.x as f32, nine.size.y as f32),
+        border_uv: [
+            nine.border_uv[0] as f32,
+            nine.border_uv[1] as f32,
+            nine.border_uv[2] as f32,
+            nine.border_uv[3] as f32,
+        ],
+        border_world: Vec2::new(nine.border_world.x as f32, nine.border_world.y as f32),
+        color: nine.tint.to_array(),
+        texture: nine
+            .texture
+            .map(|u| handle_from_guid(u.as_u128()))
+            .unwrap_or(inf_render::WHITE_TEXTURE),
+        sorting_layer: nine.sorting_layer,
+        order: nine.order,
+    };
+    let instances = expand_nine_slice(&params).to_vec();
+    PrebatchedRun {
+        texture: params.texture,
+        sorting_layer: params.sorting_layer,
+        order: params.order,
+        instances,
+    }
+}
+
+/// Project an ECS [`Text2D`] (+ world position) into a prebatched run of glyph
+/// quads. A `None` font asset resolves to the renderer's built-in 8×8 bitmap
+/// font ([`BUILTIN_FONT_TEXTURE`], always uploaded by the sprite pass). Returns
+/// `None` when the string produces no glyphs (nothing to draw).
+fn project_text(text: &Text2D, translation: DVec3) -> Option<PrebatchedRun> {
+    let texture = text
+        .font_texture
+        .map(|u| handle_from_guid(u.as_u128()))
+        .unwrap_or(BUILTIN_FONT_TEXTURE);
+    let halign = match text.halign {
+        TextAlign::Left => HAlign::Left,
+        TextAlign::Center => HAlign::Center,
+        TextAlign::Right => HAlign::Right,
+    };
+    let params = TextParams {
+        position: translation,
+        text: &text.text,
+        glyph_cols: text.glyph_cols,
+        glyph_rows: text.glyph_rows,
+        first_codepoint: text.first_codepoint,
+        glyph_size: Vec2::new(text.glyph_size.x as f32, text.glyph_size.y as f32),
+        tracking: text.tracking as f32,
+        color: text.tint.to_array(),
+        texture,
+        sorting_layer: text.sorting_layer,
+        order: text.order,
+        halign,
+    };
+    let instances = expand_text(&params);
+    if instances.is_empty() {
+        return None;
+    }
+    Some(PrebatchedRun {
+        texture,
+        sorting_layer: text.sorting_layer,
+        order: text.order,
+        instances,
+    })
 }
 
 /// The pointer-driven interaction API (select, hover, gizmo drag). Currently
