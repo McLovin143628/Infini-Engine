@@ -826,6 +826,42 @@ ragdoll, spatial audio) runs deterministically under replay test.
 **Goal:** Nanite-class geometry and Substrate-class materials. **Done when:** a 10M+ triangle
 scene streams and culls at interactive rates; classic-LOD fallback documented for older GPUs.
 
+> **STATUS: Phase 13 COMPLETE** (2026-07-21), CI-green on all three OSes. The flagship —
+> all original implementations. **P13.1 (virtualized geometry)**: offline meshlet DAG
+> builder (64v/124t clusterize → greedy shared-edge grouping → border-locked group
+> simplify (parallel, pool-size-invariant) → recluster → link; strictly-monotonic error
+> intervals tile [0,∞)) with THE proof — watertightness by edge bookkeeping across 400+
+> threshold sweeps (crack-free, non-overlapping at any cut); `.inf_vmesh` (pack code 16,
+> coarse-first for streaming) cook-derived for meshes ≥2048 tris; the GPU path: cull
+> compute (LOD cut → frustum → cone → optional HZB (reverse-Z MIN-depth pyramid, wired,
+> two-pass re-projection deferred)) with the parity trick — the pixel tolerance projects
+> to ONE per-instance CPU scalar so the branchless GPU cut is BIT-IDENTICAL to
+> VgeomMesh::select (parity test exact); vertex-pulled single draw_indirect per asset.
+> **P13.2**: Substrate-class slabs over the material graph (MatSlab WGSL structs,
+> factor/mask blends, byte-identical legacy back-compat, node-anchored both-wired errors)
+> + advisory complexity budgets in the panel. **P13.3**: HDR (Rgba16Float, tonemap
+> hoisted to post), bloom, TAA (Halton jitter, history reprojection, convergence smoke),
+> half-res SSAO (ambient-only); 3-cascade CSM (texel-snapped bounding-sphere fits, PCF);
+> and the **dynamic GI** — camera-centred 64³ analytic voxelization, 16×8×16 probes ×48
+> deterministic golden-spiral rays with marched sun visibility, L1 SH, trilinear ambient
+> evaluation — proven by golden_gi_bleed (near-wall red/green 1.135 vs far 1.040, byte-
+> identical double-render); AO+shadow+GI consolidated into one EnvBinding under the
+> 4-bind-group ceiling, off-paths instruction-stream-identical (19 prior goldens byte-
+> stable). **P13.4**: MeshRef.asset (schema v7 both codecs; frozen MeshRefV6 repointing
+> kept all v1–v5 fixtures decoding unchanged); TRUE discrete-LOD classic fallback
+> (per-level index buffers over the shared vmesh vertices, picked by the SAME threshold
+> rule — parity, not distance-cull); adapter capability probe → High/Medium/Low
+> auto-tiering (clamps down only, override + memo). **The gate** (`samples/vgeom-demo`):
+> 18×18 instances of a 33k-tri mesh = **10,616,832 source triangles**, ground-camera GPU
+> cull to **2.4% visible**, deterministic across runs; the same pack renders classically
+> with far-camera picking strictly coarser LODs; forced-Low auto-disables vgeom.
+> Human-verified remainders: interactive-rate flythrough on hardware (the machinery +
+> ratios are proven; frame-rate needs eyes), live visual passes, demo recording.
+> Deferred: two-pass HZB occlusion, meshlet streaming/paging, editor-viewport real-mesh
+> rendering + PIE vmesh streaming (player renders real geometry; viewport placeholders),
+> per-slab textures/normals, temporal probe amortization, specular GI, cascade blending,
+> quantized vgeom vertices, per-material meshlet tagging.
+
 - **P13.1 Meshlet pipeline** — 1. meshopt clusterization + simplification DAG builder (offline,
   in cook); 2. meshlet pack format + streaming; 3. GPU-driven culling (two-pass occlusion,
   HZB); 4. meshlet LOD selection compute.
