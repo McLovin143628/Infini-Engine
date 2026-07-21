@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { executeCommand } from "../lib/commands";
 import { useSimStore } from "../stores/simStore";
+import { usePieStore } from "../stores/pieStore";
 
 function ToolButton(props: {
   label: string;
@@ -43,13 +44,128 @@ function Divider() {
   return <div className="mx-1 h-5 w-px bg-(--ink-border)" />;
 }
 
+/** One item in the Play split-button dropdown. */
+function MenuItem(props: { label: string; command: string; onPick: () => void }) {
+  return (
+    <button
+      className="flex w-full items-center gap-2 whitespace-nowrap px-3 py-1.5 text-left text-(--ink-text) hover:bg-(--ink-bg-3)"
+      onClick={() => {
+        props.onPick();
+        executeCommand(props.command);
+      }}
+    >
+      {props.label}
+    </button>
+  );
+}
+
+/**
+ * The unified play cluster (P9.4): Play-In-Editor (subprocess) is primary, with
+ * a split-button dropdown for the mode — "Play (Embedded)", "Play in New Window",
+ * and the in-process "Simulate". While a session runs, the transport buttons
+ * (Pause/Resume/Stop/Step) drive whichever kind is live; Eject sits in the menu.
+ */
+function PlayCluster() {
+  const pieRunning = usePieStore((s) => s.running);
+  const piePaused = usePieStore((s) => s.paused);
+  const simRunning = useSimStore((s) => s.running);
+  const simPaused = useSimStore((s) => s.paused);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  const running = pieRunning || simRunning;
+  const paused = pieRunning ? piePaused : simPaused;
+  // Which command family drives the transport buttons.
+  const p = pieRunning ? "pie" : "sim";
+
+  return (
+    <div
+      className={`relative flex items-center gap-0.5 rounded bg-(--ink-bg-1) p-0.5 ${
+        running ? "ring-1 ring-(--ink-success)" : ""
+      }`}
+    >
+      {!running ? (
+        <>
+          <ToolButton label="Play in Editor (Shift+Alt+P)" command="pie.play" accent>
+            <Play size={16} />
+            <span className="text-sm">Play</span>
+          </ToolButton>
+          <button
+            title="Play options"
+            aria-label="Play options"
+            className="flex h-7 items-center rounded px-1 text-(--ink-text-dim) hover:bg-(--ink-bg-3)"
+            onClick={() => setMenuOpen((o) => !o)}
+          >
+            <ChevronDown size={14} />
+          </button>
+        </>
+      ) : (
+        <>
+          <ToolButton
+            label={paused ? "Resume" : "Pause"}
+            command={paused ? `${p}.resume` : `${p}.pause`}
+            accent={paused}
+          >
+            {paused ? <Play size={15} /> : <Pause size={15} />}
+          </ToolButton>
+          <ToolButton label="Stop" command={`${p}.stop`}>
+            <Square size={13} />
+          </ToolButton>
+          <ToolButton label="Step Frame" command={`${p}.step`}>
+            <SkipForward size={15} />
+          </ToolButton>
+          {pieRunning && (
+            <button
+              title="Play options"
+              aria-label="Play options"
+              className="flex h-7 items-center rounded px-1 text-(--ink-text-dim) hover:bg-(--ink-bg-3)"
+              onClick={() => setMenuOpen((o) => !o)}
+            >
+              <ChevronDown size={14} />
+            </button>
+          )}
+        </>
+      )}
+
+      {menuOpen && (
+        <>
+          {/* Click-away backdrop. */}
+          <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+          <div className="absolute right-0 top-9 z-50 min-w-44 overflow-hidden rounded border border-(--ink-border) bg-(--ink-bg-2) py-1 shadow-lg">
+            {!running ? (
+              <>
+                <MenuItem
+                  label="Play (Embedded)"
+                  command="pie.play"
+                  onPick={() => setMenuOpen(false)}
+                />
+                <MenuItem
+                  label="Play in New Window"
+                  command="pie.playWindow"
+                  onPick={() => setMenuOpen(false)}
+                />
+                <div className="my-1 h-px bg-(--ink-border)" />
+                <MenuItem label="Simulate" command="sim.play" onPick={() => setMenuOpen(false)} />
+              </>
+            ) : (
+              <>
+                <MenuItem
+                  label="Eject (release input)"
+                  command="pie.eject"
+                  onPick={() => setMenuOpen(false)}
+                />
+                <MenuItem label="Stop" command="pie.stop" onPick={() => setMenuOpen(false)} />
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function MainToolbar() {
   // Selection-mode segmented control is a visual stub until P2.4 gizmos.
   const [mode, setMode] = useState<"select" | "landscape" | "foliage">("select");
-  // Simulate (P8.4): the play cluster reflects the live session state.
-  const running = useSimStore((s) => s.running);
-  const paused = useSimStore((s) => s.paused);
-
   return (
     <div className="flex h-10 shrink-0 items-center gap-1 border-b border-(--ink-border) bg-(--ink-bg-2) px-2">
       <ToolButton label="Save Current Level (Ctrl+S)" command="file.saveLevel">
@@ -90,35 +206,9 @@ export default function MainToolbar() {
 
       <div className="flex-1" />
 
-      {/* Simulate controls (P8.4): Play when stopped; Pause/Stop/Step when
-          running. A success ring marks a live session. */}
-      <div
-        className={`flex items-center gap-0.5 rounded bg-(--ink-bg-1) p-0.5 ${
-          running ? "ring-1 ring-(--ink-success)" : ""
-        }`}
-      >
-        {!running ? (
-          <ToolButton label="Play (Alt+P)" command="sim.play" accent>
-            <Play size={16} />
-          </ToolButton>
-        ) : (
-          <>
-            <ToolButton
-              label={paused ? "Resume (Alt+P)" : "Pause"}
-              command={paused ? "sim.play" : "sim.pause"}
-              accent={paused}
-            >
-              {paused ? <Play size={15} /> : <Pause size={15} />}
-            </ToolButton>
-            <ToolButton label="Stop" command="sim.stop">
-              <Square size={13} />
-            </ToolButton>
-            <ToolButton label="Step Frame" command="sim.step">
-              <SkipForward size={15} />
-            </ToolButton>
-          </>
-        )}
-      </div>
+      {/* Play cluster (P9.4): PIE subprocess (embedded / new window) + Simulate,
+          via a split-button dropdown. A success ring marks a live session. */}
+      <PlayCluster />
       <button
         className="flex h-7 items-center gap-1 rounded px-2 text-(--ink-text-dim) hover:bg-(--ink-bg-3)"
         onClick={() => executeCommand("platforms.windows")}

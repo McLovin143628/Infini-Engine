@@ -29,6 +29,7 @@ import { initAssetSync, registerAssetCommands } from "./stores/assetStore";
 import { initProjectSync, registerProjectCommands } from "./stores/projectStore";
 import { initViewportSync, registerViewportCommands } from "./stores/viewportStore";
 import { initSimSync, registerSimCommands } from "./stores/simStore";
+import { initPieSync, registerPieCommands } from "./stores/pieStore";
 import { initEditorSync } from "./stores/editorStore";
 import { initLsp } from "./lib/editor/lspBridge";
 import { scene as sceneIpc } from "./lib/ipc";
@@ -40,6 +41,7 @@ registerAssetCommands();
 registerProjectCommands();
 registerViewportCommands();
 registerSimCommands();
+registerPieCommands();
 
 export default function App() {
   useEffect(() => {
@@ -102,6 +104,17 @@ export default function App() {
     let dispose: (() => void) | undefined;
     let disposed = false;
     initSimSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
+  }, []);
+
+  // Sync PIE session state + subscribe to pie://state (P9.4). StrictMode-safe.
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    let disposed = false;
+    initPieSync().then((fn) => (disposed ? fn() : (dispose = fn)));
     return () => {
       disposed = true;
       dispose?.();

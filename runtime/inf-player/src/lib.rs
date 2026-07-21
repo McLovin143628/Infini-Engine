@@ -199,3 +199,51 @@ pub fn fold_trace(built: BuiltWorld, frames: u64, panic_after: Option<u64>) -> u
 pub fn demo_trace(frames: u64) -> u128 {
     fold_trace(demo::build(), frames, None)
 }
+
+// ── PIE real-content path (P9.4) ─────────────────────────────────────────────
+
+use inf_blueprint::BlueprintClass;
+use inf_runtime::pie::ScenePayload;
+
+/// Build a [`BuiltWorld`] from a streamed [`ScenePayload`] **exactly like the
+/// cooked-pack path**: decode the classes, key them by asset GUID, and run the
+/// v3 `.inf_lvl` bytes through [`InfSceneWorldBuilder::with_bindings`]. This is
+/// the seam that makes PIE == shipping — the same builder the `--pack` /
+/// `--level` boot uses, fed the live editor scene instead of a cooked file.
+pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, String> {
+    use crate::level::WorldBuilder;
+    use std::collections::HashMap;
+
+    let mut fallback: Vec<BlueprintClass> = Vec::new();
+    let mut by_guid: HashMap<uuid::Uuid, BlueprintClass> = HashMap::new();
+    for (guid, bytes) in &payload.classes {
+        let class: BlueprintClass = serde_json::from_slice(bytes)
+            .map_err(|e| format!("decode blueprint class {guid}: {e}"))?;
+        by_guid.insert(*guid, class.clone());
+        fallback.push(class);
+    }
+    let builder = InfSceneWorldBuilder::with_defaults(fallback).with_bindings(by_guid);
+    builder.build(&payload.level_bytes)
+}
+
+/// One fixed step's determinism fingerprint: xxh3-64 of the `Guid`-sorted sim
+/// snapshot — the per-frame `state_hash` a PIE `Frame` reports. Shared by the
+/// PIE loop and the in-process reference so a mismatch is a real divergence.
+pub fn step_state_hash(sim: &mut RuntimeSim) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(&sim.state_bytes())
+}
+
+/// The in-process reference the PIE==shipping gate compares against: build the
+/// world from `payload`, step it `frames` fixed steps with no input, and record
+/// each step's [`step_state_hash`]. A PIE subprocess fed the same payload must
+/// stream byte-identical per-step hashes.
+pub fn scene_trace(payload: &ScenePayload, frames: u64) -> Result<Vec<u64>, String> {
+    let built = build_world_from_payload(payload)?;
+    let mut sim = RuntimeSim::new(built.world, built.actors, built.gravity, built.hz);
+    let mut hashes = Vec::with_capacity(frames as usize);
+    for _ in 0..frames {
+        sim.step_once(RuntimeInput::default());
+        hashes.push(step_state_hash(&mut sim));
+    }
+    Ok(hashes)
+}

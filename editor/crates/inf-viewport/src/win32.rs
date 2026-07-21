@@ -27,12 +27,13 @@ use windows::Win32::UI::Input::{
     RAWINPUTDEVICE_FLAGS, RAWINPUTHEADER, RID_INPUT, RIM_TYPEMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, PeekMessageW, RegisterClassW,
-    SetCursorPos, SetWindowPos, ShowCursor, ShowWindow, TranslateMessage, HWND_TOP, MSG, PM_REMOVE,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CAPTURECHANGED,
-    WM_ERASEBKGND, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-    WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetWindowLongPtrW,
+    PeekMessageW, RegisterClassW, SetCursorPos, SetParent, SetWindowLongPtrW, SetWindowPos,
+    ShowCursor, ShowWindow, TranslateMessage, GWL_STYLE, HWND_TOP, MSG, PM_REMOVE, SWP_NOACTIVATE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_ERASEBKGND, WM_INPUT,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD,
+    WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 use glam::DVec2;
@@ -56,6 +57,12 @@ enum Cmd {
     SetMode(ViewportMode),
     /// Replace the 2D-mode snapping configuration from the toolbar.
     SetSnap2D(Snap2DSettings),
+    /// Adopt a foreign (PIE player) window into the viewport slot: reparent it
+    /// to our parent, position it at the hole, and hide our own child (embedded
+    /// PIE, P9.4). The `isize` is the foreign HWND.
+    EmbedForeign(isize),
+    /// Release the embedded foreign window and restore our own child.
+    ReleaseForeign,
     Destroy,
 }
 
@@ -98,6 +105,18 @@ impl ViewportHandle {
     /// Replace the 2D-mode snapping configuration (grid + pixel snap).
     pub fn set_snap_2d(&self, snap: Snap2DSettings) {
         let _ = self.tx.send(Cmd::SetSnap2D(snap));
+    }
+
+    /// Adopt a foreign (PIE player) window into the viewport slot (embedded PIE,
+    /// P9.4). The foreign window is reparented under our parent, sized to the
+    /// hole, and our own render child is hidden. `hwnd` is the player's HWND.
+    pub fn embed_foreign(&self, hwnd: isize) {
+        let _ = self.tx.send(Cmd::EmbedForeign(hwnd));
+    }
+
+    /// Release the embedded foreign window and restore our own render child.
+    pub fn release_foreign(&self) {
+        let _ = self.tx.send(Cmd::ReleaseForeign);
     }
 
     /// Tear down the viewport thread and its window.
@@ -486,6 +505,40 @@ fn create_child_window(parent_hwnd: isize) -> windows::core::Result<HWND> {
     }
 }
 
+/// Reparent a foreign (PIE player) window into our parent window tree — the
+/// proven Spike D cross-process sequence: switch it to `WS_CHILD`, `SetParent`
+/// onto the editor's parent window, then position it at the hole rect. The
+/// parent window is owned by the Tauri main thread (which always pumps), so the
+/// child's later `DestroyWindow` `WM_PARENTNOTIFY` never deadlocks us (the
+/// Spike D pump-while-teardown finding).
+fn embed_foreign_window(parent_hwnd: isize, foreign: isize, rect: Option<ViewportRect>) {
+    let parent = HWND(parent_hwnd as *mut _);
+    let child = HWND(foreign as *mut _);
+    unsafe {
+        // MSDN order: WS_CHILD before SetParent (a top-level window must lose its
+        // overlapped styles first).
+        let style = GetWindowLongPtrW(child, GWL_STYLE);
+        let child_style = (style & !(WS_OVERLAPPEDWINDOW.0 as isize)) | (WS_CHILD.0 as isize);
+        SetWindowLongPtrW(child, GWL_STYLE, child_style);
+        if let Err(e) = SetParent(child, Some(parent)) {
+            tracing::warn!("inf-viewport: SetParent for embedded PIE failed: {e}");
+            return;
+        }
+        if let Some(r) = rect {
+            let _ = SetWindowPos(
+                child,
+                Some(HWND_TOP),
+                r.x,
+                r.y,
+                r.width.max(1) as i32,
+                r.height.max(1) as i32,
+                SWP_NOACTIVATE,
+            );
+        }
+        let _ = ShowWindow(child, SW_SHOWNA);
+    }
+}
+
 fn register_raw_mouse(hwnd: HWND) {
     // Usage page 0x01 (generic desktop), usage 0x02 (mouse); deltas are
     // delivered as WM_INPUT while our window has keyboard focus.
@@ -579,6 +632,11 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
     let mut focus_goal = None;
     let mut last_frame = Instant::now();
 
+    // Embedded PIE (P9.4): the adopted foreign player window + the latest hole
+    // rect, so rect changes follow the embedded window while our own child hides.
+    let mut embedded: Option<HWND> = None;
+    let mut last_rect: Option<ViewportRect> = None;
+
     'outer: loop {
         // 1. Apply pending commands (coalesce rect updates to the latest).
         let mut latest_rect: Option<ViewportRect> = None;
@@ -586,8 +644,11 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
             match rx.try_recv() {
                 Ok(Cmd::SetRect(r)) => latest_rect = Some(r),
                 Ok(Cmd::SetVisible(v)) => unsafe {
-                    // SW_SHOWNA: show without stealing focus from the webview.
-                    let _ = ShowWindow(hwnd, if v { SW_SHOWNA } else { SW_HIDE });
+                    // While a PIE window is embedded, keep our own child hidden.
+                    if embedded.is_none() {
+                        // SW_SHOWNA: show without stealing focus from the webview.
+                        let _ = ShowWindow(hwnd, if v { SW_SHOWNA } else { SW_HIDE });
+                    }
                 },
                 Ok(Cmd::Drop { x, y, payload }) => {
                     // Spike A handoff stub: Phase 3 turns this into a pick
@@ -598,14 +659,31 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 }
                 Ok(Cmd::SetMode(m)) => host.set_mode(m),
                 Ok(Cmd::SetSnap2D(s)) => host.set_snap_2d(s),
+                Ok(Cmd::EmbedForeign(foreign)) => {
+                    embed_foreign_window(parent_hwnd, foreign, last_rect);
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_HIDE);
+                    }
+                    embedded = Some(HWND(foreign as *mut _));
+                }
+                Ok(Cmd::ReleaseForeign) => {
+                    embedded = None;
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_SHOWNA);
+                    }
+                }
                 Ok(Cmd::Destroy) | Err(TryRecvError::Disconnected) => break 'outer,
                 Err(TryRecvError::Empty) => break,
             }
         }
         if let Some(r) = latest_rect {
+            last_rect = Some(r);
+            // Move the embedded PIE window (if any) instead of our hidden child;
+            // always keep our own child sized so a release restores cleanly.
+            let target = embedded.unwrap_or(hwnd);
             unsafe {
                 let _ = SetWindowPos(
-                    hwnd,
+                    target,
                     None,
                     r.x,
                     r.y,
@@ -613,6 +691,17 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                     r.height.max(1) as i32,
                     SWP_NOACTIVATE | SWP_NOZORDER,
                 );
+                if embedded.is_some() {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        r.x,
+                        r.y,
+                        r.width.max(1) as i32,
+                        r.height.max(1) as i32,
+                        SWP_NOACTIVATE | SWP_NOZORDER,
+                    );
+                }
             }
             host.resize(r.width.max(1), r.height.max(1));
         }

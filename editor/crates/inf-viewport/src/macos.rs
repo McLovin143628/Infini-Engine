@@ -74,6 +74,14 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::SetSnap2D(snap));
     }
 
+    /// Adopt a foreign PIE player window (no-op on macOS: cross-process view
+    /// adoption is unsupported, so PIE uses "Play in New Window" — see the
+    /// Spike D memo). Kept for a uniform `ViewportHandle` surface.
+    pub fn embed_foreign(&self, _hwnd: isize) {}
+
+    /// Release an embedded foreign window (no-op on macOS).
+    pub fn release_foreign(&self) {}
+
     /// Tear down the viewport thread and its layer.
     pub fn destroy(&self) {
         let _ = self.tx.send(Cmd::Destroy);

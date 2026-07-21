@@ -54,9 +54,22 @@ fn main() -> ExitCode {
     }
 }
 
-/// The PIE loop (Spike D): a reader thread turns stdin frames into channel
-/// messages; the main loop applies control, steps the toy world at `tick_hz`, and
-/// streams `Frame` reports. Stdout carries protocol frames only.
+/// The active PIE runtime: nothing yet, the Spike-D toy world, or the **real**
+/// content world driven by `RuntimeSim` (the P9.4 PIE==shipping path).
+enum Active {
+    None,
+    Toy(World),
+    Real {
+        sim: Box<inf_player::runtime_sim::RuntimeSim>,
+        frame: u64,
+    },
+}
+
+/// The PIE loop (Spike D + P9.4): a reader thread turns stdin frames into channel
+/// messages; the main loop applies control and either streams the toy world (auto)
+/// or steps the real content world (step-driven, deterministic). A `LoadScene`
+/// requesting a window hands off to the windowed player. Stdout carries protocol
+/// frames only.
 fn run_pie(tick_hz: u32) -> ExitCode {
     use std::sync::mpsc;
     use std::time::Duration;
@@ -84,9 +97,9 @@ fn run_pie(tick_hz: u32) -> ExitCode {
     }
     eprintln!("inf-player: PIE session ready (tick-hz {tick_hz})");
 
-    let mut world: Option<World> = None;
+    let mut active = Active::None;
     let mut paused = false;
-    let tick_duration = if tick_hz == 0 {
+    let mut tick_duration = if tick_hz == 0 {
         Duration::ZERO
     } else {
         Duration::from_secs_f64(1.0 / tick_hz as f64)
@@ -96,11 +109,17 @@ fn run_pie(tick_hz: u32) -> ExitCode {
         let mut disconnected = false;
         loop {
             match rx.try_recv() {
-                Ok(msg) => {
-                    if let Some(code) = handle_msg(msg, &mut world, &mut paused, &mut stdout) {
-                        return code;
-                    }
-                }
+                Ok(msg) => match handle_msg(
+                    msg,
+                    &mut active,
+                    &mut paused,
+                    &mut tick_duration,
+                    &mut stdout,
+                ) {
+                    Control::Continue => {}
+                    Control::Exit(code) => return code,
+                    Control::RunWindow(payload) => return run_pie_window(payload, rx, stdout),
+                },
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     disconnected = true;
@@ -113,27 +132,29 @@ fn run_pie(tick_hz: u32) -> ExitCode {
             return ExitCode::SUCCESS;
         }
 
-        if let Some(world) = world.as_mut().filter(|_| !paused) {
-            world.step();
-            let frame = PlayerToEditor::Frame {
-                frame: world.frame,
-                state_hash: world.state_hash(),
-                actors: world.actor_states(),
-            };
-            if write_msg(&mut stdout, &frame).is_err() {
-                eprintln!("inf-player: editor closed stdout; exiting");
-                return ExitCode::SUCCESS;
+        // Auto-advance a running runtime (toy streams; real is step-driven so it
+        // only auto-runs once Resumed).
+        let running = !paused && !matches!(active, Active::None);
+        if running {
+            if let Some(code) = advance_and_report(&mut active, &mut stdout) {
+                return code;
             }
             if !tick_duration.is_zero() {
                 std::thread::sleep(tick_duration);
             }
         } else {
             match rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(msg) => {
-                    if let Some(code) = handle_msg(msg, &mut world, &mut paused, &mut stdout) {
-                        return code;
-                    }
-                }
+                Ok(msg) => match handle_msg(
+                    msg,
+                    &mut active,
+                    &mut paused,
+                    &mut tick_duration,
+                    &mut stdout,
+                ) {
+                    Control::Continue => {}
+                    Control::Exit(code) => return code,
+                    Control::RunWindow(payload) => return run_pie_window(payload, rx, stdout),
+                },
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     eprintln!("inf-player: editor closed the channel; exiting");
@@ -144,17 +165,57 @@ fn run_pie(tick_hz: u32) -> ExitCode {
     }
 }
 
-/// Apply one control message. `Some(code)` means "exit now with this code".
+/// What a handled control message asks the loop to do next.
+enum Control {
+    Continue,
+    Exit(ExitCode),
+    /// A `LoadScene` requested a window: leave the headless loop and run the
+    /// windowed player over `payload` (embedded / new-window PIE).
+    RunWindow(inf_runtime::pie::ScenePayload),
+}
+
+/// Advance the active runtime one fixed step and stream a `Frame`. `Some(code)`
+/// means the editor closed stdout — exit cleanly.
+fn advance_and_report(active: &mut Active, stdout: &mut impl std::io::Write) -> Option<ExitCode> {
+    let frame = match active {
+        Active::Toy(world) => {
+            world.step();
+            PlayerToEditor::Frame {
+                frame: world.frame,
+                state_hash: world.state_hash(),
+                actors: world.actor_states(),
+            }
+        }
+        Active::Real { sim, frame } => {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+            *frame += 1;
+            PlayerToEditor::Frame {
+                frame: *frame,
+                state_hash: inf_player::step_state_hash(sim),
+                actors: Vec::new(),
+            }
+        }
+        Active::None => return None,
+    };
+    if write_msg(stdout, &frame).is_err() {
+        eprintln!("inf-player: editor closed stdout; exiting");
+        return Some(ExitCode::SUCCESS);
+    }
+    None
+}
+
+/// Apply one control message.
 fn handle_msg(
     msg: EditorToPlayer,
-    world: &mut Option<World>,
+    active: &mut Active,
     paused: &mut bool,
+    tick_duration: &mut std::time::Duration,
     stdout: &mut impl std::io::Write,
-) -> Option<ExitCode> {
+) -> Control {
     let reply = match msg {
         EditorToPlayer::Load(snapshot) => {
             eprintln!(
-                "inf-player: loading level '{}' ({} actors)",
+                "inf-player: loading toy level '{}' ({} actors)",
                 snapshot.level,
                 snapshot.actors.len()
             );
@@ -162,8 +223,49 @@ fn handle_msg(
                 level: snapshot.level.clone(),
                 actor_count: snapshot.actors.len(),
             };
-            *world = Some(World::from_snapshot(&snapshot));
+            *active = Active::Toy(World::from_snapshot(&snapshot));
+            *paused = false; // the toy world streams
             loaded
+        }
+        EditorToPlayer::LoadScene(payload) => {
+            eprintln!(
+                "inf-player: loading real scene '{}' ({} class(es), windowed {})",
+                payload.label,
+                payload.classes.len(),
+                payload.windowed
+            );
+            if payload.tick_hz == 0 {
+                *tick_duration = std::time::Duration::ZERO;
+            } else {
+                *tick_duration = std::time::Duration::from_secs_f64(1.0 / payload.tick_hz as f64);
+            }
+            if payload.windowed {
+                return Control::RunWindow(payload);
+            }
+            match inf_player::build_world_from_payload(&payload) {
+                Ok(built) => {
+                    let level = built.label.clone();
+                    let actor_count = built.actors.len();
+                    let sim = inf_player::runtime_sim::RuntimeSim::new(
+                        built.world,
+                        built.actors,
+                        built.gravity,
+                        built.hz,
+                    );
+                    *active = Active::Real {
+                        sim: Box::new(sim),
+                        frame: 0,
+                    };
+                    // Real headless PIE is step-driven (deterministic) until
+                    // Resumed — so the trace gate reads exactly N frames.
+                    *paused = true;
+                    PlayerToEditor::Loaded { level, actor_count }
+                }
+                Err(e) => {
+                    eprintln!("inf-player: build scene failed: {e}");
+                    PlayerToEditor::Error { message: e }
+                }
+            }
         }
         EditorToPlayer::Pause => {
             *paused = true;
@@ -173,16 +275,98 @@ fn handle_msg(
             *paused = false;
             PlayerToEditor::Resumed
         }
+        EditorToPlayer::Step { count } => {
+            for _ in 0..count {
+                if let Some(code) = advance_and_report(active, stdout) {
+                    return Control::Exit(code);
+                }
+            }
+            state_report(active, *paused)
+        }
+        EditorToPlayer::Eject => {
+            // v1: release input possession. The player keeps running; a true
+            // camera hand-back is a documented follow-up (no input is possessed
+            // in headless PIE, so this is a clean ack).
+            eprintln!("inf-player: eject — input possession released");
+            PlayerToEditor::Ejected
+        }
+        EditorToPlayer::SetViewport(_rect) => {
+            // Headless PIE has no window; the embedded/windowed path applies the
+            // rect. Ack silently by reporting current state.
+            state_report(active, *paused)
+        }
         EditorToPlayer::Stop => {
             let _ = write_msg(stdout, &PlayerToEditor::Stopped);
-            return Some(ExitCode::SUCCESS);
+            return Control::Exit(ExitCode::SUCCESS);
         }
         EditorToPlayer::InjectPanic => {
             panic!("deliberate PIE panic (injected by editor)");
         }
     };
     if write_msg(stdout, &reply).is_err() {
-        return Some(ExitCode::SUCCESS);
+        return Control::Exit(ExitCode::SUCCESS);
     }
-    None
+    Control::Continue
+}
+
+/// A `State` report reflecting the active runtime's frame count + pause flag.
+fn state_report(active: &Active, paused: bool) -> PlayerToEditor {
+    let (running, frame) = match active {
+        Active::None => (false, 0),
+        Active::Toy(w) => (true, w.frame),
+        Active::Real { frame, .. } => (true, *frame),
+    };
+    PlayerToEditor::State(inf_runtime::pie::PlayerState {
+        running,
+        paused,
+        frame,
+        last_error: None,
+    })
+}
+
+/// Run the **windowed** PIE player over a real scene payload (embedded /
+/// new-window). Blocks in the winit loop, reporting its window handle and
+/// obeying Pause/Resume/Stop/Eject/SetViewport control frames. Needs a GPU +
+/// display, so — like every GPU path — it is compile-checked in CI and
+/// human-verified live.
+fn run_pie_window(
+    payload: inf_runtime::pie::ScenePayload,
+    rx: std::sync::mpsc::Receiver<EditorToPlayer>,
+    mut stdout: impl std::io::Write + 'static,
+) -> ExitCode {
+    let built = match inf_player::build_world_from_payload(&payload) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("inf-player: build scene failed: {e}");
+            let _ = write_msg(&mut stdout, &PlayerToEditor::Error { message: e });
+            return ExitCode::FAILURE;
+        }
+    };
+    let level = built.label.clone();
+    let actor_count = built.actors.len();
+    if write_msg(&mut stdout, &PlayerToEditor::Loaded { level, actor_count }).is_err() {
+        return ExitCode::SUCCESS;
+    }
+    let title = format!("Infinity Engine (PIE) — {}", built.label);
+    let sim = inf_player::runtime_sim::RuntimeSim::new(
+        built.world,
+        built.actors,
+        built.gravity,
+        built.hz,
+    );
+    match inf_player::window::run_pie(
+        title,
+        1280,
+        720,
+        sim,
+        inf_player::input::default_map(),
+        rx,
+        Box::new(stdout),
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("inf-player: PIE window error: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }

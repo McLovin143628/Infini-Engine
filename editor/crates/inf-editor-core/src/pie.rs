@@ -13,8 +13,18 @@ use std::sync::mpsc::Receiver;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use inf_runtime::pie::{read_msg, write_msg, EditorToPlayer, PlayerToEditor, PIE_PROTOCOL_VERSION};
+use inf_runtime::pie::{
+    read_msg, write_msg, EditorToPlayer, PlayerToEditor, ScenePayload, ViewportRectMsg,
+    PIE_PROTOCOL_VERSION,
+};
 use inf_runtime::CookedSnapshot;
+
+use uuid::Uuid;
+
+use inf_blueprint::BlueprintClass;
+use inf_ecs::components::ActorClass;
+
+use crate::scene::{serialize, SceneDoc};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PieError {
@@ -45,15 +55,11 @@ pub struct PieSession {
 }
 
 impl PieSession {
-    /// Spawn `player_bin --pie --tick-hz N`, complete the `Ready` handshake,
-    /// send the snapshot, and wait for `Loaded`.
-    pub fn spawn(
-        player_bin: &Path,
-        snapshot: &CookedSnapshot,
-        tick_hz: u32,
-    ) -> Result<Self, PieError> {
+    /// Spawn `player_bin --pie`, wire the reader threads, and complete the
+    /// version-checked `Ready` handshake (no content sent yet).
+    fn spawn_ready(player_bin: &Path) -> Result<Self, PieError> {
         let mut child = Command::new(player_bin)
-            .args(["--pie", "--tick-hz", &tick_hz.to_string()])
+            .arg("--pie")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -83,7 +89,7 @@ impl PieSession {
             }
         });
 
-        let mut session = PieSession {
+        let session = PieSession {
             child,
             stdin,
             events,
@@ -91,31 +97,98 @@ impl PieSession {
         };
 
         match session.next_event(Duration::from_secs(10)) {
-            Some(PlayerToEditor::Ready { protocol }) if protocol == PIE_PROTOCOL_VERSION => {}
-            Some(PlayerToEditor::Ready { protocol }) => {
-                return Err(PieError::Protocol(format!(
-                    "player speaks protocol {protocol}, editor speaks {PIE_PROTOCOL_VERSION}"
-                )));
+            Some(PlayerToEditor::Ready { protocol }) if protocol == PIE_PROTOCOL_VERSION => {
+                Ok(session)
             }
-            Some(other) => {
-                return Err(PieError::Protocol(format!("expected Ready, got {other:?}")));
+            Some(PlayerToEditor::Ready { protocol }) => Err(PieError::Protocol(format!(
+                "player speaks protocol {protocol}, editor speaks {PIE_PROTOCOL_VERSION}"
+            ))),
+            Some(other) => Err(PieError::Protocol(format!("expected Ready, got {other:?}"))),
+            None => {
+                let mut s = session;
+                Err(PieError::HandshakeExit(s.describe_exit()))
             }
-            None => return Err(PieError::HandshakeExit(session.describe_exit())),
         }
+    }
 
-        session.send(&EditorToPlayer::Load(snapshot.clone()))?;
-        match session.next_event(Duration::from_secs(10)) {
-            Some(PlayerToEditor::Loaded { .. }) => Ok(session),
+    /// Wait for the `Loaded` acknowledgement after a content frame.
+    fn await_loaded(mut self) -> Result<Self, PieError> {
+        match self.next_event(Duration::from_secs(10)) {
+            Some(PlayerToEditor::Loaded { .. }) => Ok(self),
+            Some(PlayerToEditor::Error { message }) => {
+                Err(PieError::Protocol(format!("player load error: {message}")))
+            }
             Some(other) => Err(PieError::Protocol(format!(
                 "expected Loaded, got {other:?}"
             ))),
-            None => Err(PieError::HandshakeExit(session.describe_exit())),
+            None => Err(PieError::HandshakeExit(self.describe_exit())),
         }
+    }
+
+    /// Spawn `player_bin --pie`, complete the `Ready` handshake, send the toy
+    /// [`CookedSnapshot`] (Spike D crash/pause/determinism drills), and wait for
+    /// `Loaded`. `tick_hz` paces the toy stream.
+    pub fn spawn(
+        player_bin: &Path,
+        snapshot: &CookedSnapshot,
+        _tick_hz: u32,
+    ) -> Result<Self, PieError> {
+        let mut session = Self::spawn_ready(player_bin)?;
+        session.send(&EditorToPlayer::Load(snapshot.clone()))?;
+        session.await_loaded()
+    }
+
+    /// Spawn `player_bin --pie`, complete the handshake, hand over the **real**
+    /// live scene ([`ScenePayload`]: v3 `.inf_lvl` bytes + bound classes), and
+    /// wait for `Loaded`. The player builds the world exactly like the shipping
+    /// pack path — the PIE == shipping guarantee.
+    pub fn spawn_scene(player_bin: &Path, payload: &ScenePayload) -> Result<Self, PieError> {
+        let mut session = Self::spawn_ready(player_bin)?;
+        session.send(&EditorToPlayer::LoadScene(payload.clone()))?;
+        session.await_loaded()
     }
 
     pub fn send(&mut self, msg: &EditorToPlayer) -> Result<(), PieError> {
         write_msg(&mut self.stdin, msg)?;
         Ok(())
+    }
+
+    /// Pause the running player.
+    pub fn pause(&mut self) -> Result<(), PieError> {
+        self.send(&EditorToPlayer::Pause)
+    }
+
+    /// Resume a paused player.
+    pub fn resume(&mut self) -> Result<(), PieError> {
+        self.send(&EditorToPlayer::Resume)
+    }
+
+    /// Advance exactly `count` fixed steps (works while paused). The player
+    /// streams one `Frame` per step.
+    pub fn step(&mut self, count: u32) -> Result<(), PieError> {
+        self.send(&EditorToPlayer::Step { count })
+    }
+
+    /// Release input possession back to the editor (v1 Eject semantics). The
+    /// player keeps running.
+    pub fn eject(&mut self) -> Result<(), PieError> {
+        self.send(&EditorToPlayer::Eject)
+    }
+
+    /// Forward a viewport rect change to an embedded player (physical pixels).
+    pub fn set_viewport(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), PieError> {
+        self.send(&EditorToPlayer::SetViewport(ViewportRectMsg {
+            x,
+            y,
+            width,
+            height,
+        }))
     }
 
     /// Next player event, or `None` if the stream ended / nothing arrived
@@ -201,5 +274,87 @@ impl Drop for PieSession {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+}
+
+/// Build the [`ScenePayload`] handed to the player from the **live** document:
+/// the v3 `.inf_lvl` bytes of the current (unsaved-included) doc, plus the bound
+/// blueprint classes. Bindings resolve like [`crate::samples::bound_actors`]:
+/// the scene's persisted [`ActorClass`] links first (each asset GUID resolved
+/// via `resolve`), falling back to the `CharacterController2D` coyote class for
+/// scenes authored before per-entity bindings. This is the point of PIE:
+/// unsaved edits are previewed exactly.
+pub fn build_scene_payload<F>(
+    doc: &SceneDoc,
+    mut resolve: F,
+    tick_hz: u32,
+    windowed: bool,
+) -> Result<ScenePayload, PieError>
+where
+    F: FnMut(Uuid) -> Option<BlueprintClass>,
+{
+    let level_bytes = serialize::encode(&serialize::to_scene_file(doc))
+        .map_err(|e| PieError::Protocol(format!("encode scene: {e}")))?;
+
+    let encode_class = |class: &BlueprintClass| -> Result<Vec<u8>, PieError> {
+        crate::samples::encode_actor(class)
+            .map_err(|e| PieError::Protocol(format!("encode blueprint class: {e}")))
+    };
+
+    let mut classes: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    let world = doc.world();
+    for &guid in doc.order() {
+        if let Some(e) = world.entity_of(guid) {
+            if let Some(ac) = world.world().get::<ActorClass>(e) {
+                let asset = ac.0;
+                if seen.insert(asset) {
+                    if let Some(class) = resolve(asset) {
+                        classes.push((asset, encode_class(&class)?));
+                    }
+                }
+            }
+        }
+    }
+
+    // Legacy fallback: no persisted bindings resolved → send the CC2D coyote
+    // class under a synthetic GUID so the player's `resolve_actors` heuristic
+    // has a class (mirrors `samples::bound_actors`' fallback).
+    if classes.is_empty() {
+        if let Some((_g, class)) = crate::samples::character_actors(doc).into_iter().next() {
+            const SYNTH: Uuid = Uuid::from_u128(0xFA11_BACC_0000_0001);
+            classes.push((SYNTH, encode_class(&class)?));
+        }
+    }
+
+    Ok(ScenePayload::new(
+        doc.title(),
+        level_bytes,
+        classes,
+        tick_hz,
+        windowed,
+    ))
+}
+
+/// Locate the `inf-player` binary next to the running editor executable (dev
+/// and shipped both place it in the same directory). Honours the
+/// `INF_PLAYER_BIN` environment override. Returns the first existing candidate,
+/// else the sibling path (so a spawn failure names the expected location).
+pub fn find_player_bin() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if let Ok(p) = std::env::var("INF_PLAYER_BIN") {
+        return PathBuf::from(p);
+    }
+    let exe_name = if cfg!(windows) {
+        "inf-player.exe"
+    } else {
+        "inf-player"
+    };
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(exe_name)));
+    match sibling {
+        Some(p) => p,
+        None => PathBuf::from(exe_name),
     }
 }

@@ -12,6 +12,8 @@
 //! human-verified, not exercised in CI. CI covers it with `cargo check` (it must
 //! compile) and covers the gameplay/determinism headlessly.
 
+use std::io::Write;
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -25,10 +27,36 @@ use winit::window::{Window, WindowId};
 
 use inf_input::{InputEvent, InputMap, InputState};
 use inf_render::{create_instance, GpuContext, OrthoParams, RenderView};
+use inf_runtime::pie::{write_msg, EditorToPlayer, PlayerToEditor};
 
 use crate::input;
 use crate::render::PlayerRenderHost;
 use crate::runtime_sim::RuntimeSim;
+
+/// Play-in-editor control channel + report sink attached to a windowed player.
+/// Present only for the PIE window path; a standalone game leaves it `None`.
+struct PieLink {
+    control: Receiver<EditorToPlayer>,
+    out: Box<dyn Write>,
+    hwnd_reported: bool,
+}
+
+/// The native window handle as an `i64` for the PIE `Window` report (HWND on
+/// Windows; `0` where not applicable). Lets the editor reparent the window into
+/// the viewport slot.
+#[cfg(windows)]
+fn window_handle_i64(window: &Window) -> i64 {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(h)) => h.hwnd.get() as i64,
+        _ => 0,
+    }
+}
+
+#[cfg(not(windows))]
+fn window_handle_i64(_window: &Window) -> i64 {
+    0
+}
 
 /// Orthographic near/far for the 2D-style player camera (reverse-Z inside the
 /// renderer; these are positive distances from the eye).
@@ -53,6 +81,10 @@ pub struct PlayerApp {
     sim: RuntimeSim,
     input_state: InputState,
     live: Option<Live>,
+    /// Play-in-editor link (control frames + reports); `None` for standalone.
+    pie: Option<PieLink>,
+    /// PIE pause state (ignored when `pie` is `None`).
+    paused: bool,
 }
 
 impl PlayerApp {
@@ -64,6 +96,58 @@ impl PlayerApp {
             sim,
             input_state: InputState::new(map),
             live: None,
+            pie: None,
+            paused: false,
+        }
+    }
+
+    /// Drain any pending PIE control frames. Returns `true` to request exit
+    /// (Stop / channel closed).
+    fn drain_pie_control(&mut self) -> bool {
+        let Some(pie) = self.pie.as_mut() else {
+            return false;
+        };
+        loop {
+            match pie.control.try_recv() {
+                Ok(EditorToPlayer::Pause) => {
+                    self.paused = true;
+                    let _ = write_msg(&mut pie.out, &PlayerToEditor::Paused);
+                }
+                Ok(EditorToPlayer::Resume) => {
+                    self.paused = false;
+                    let _ = write_msg(&mut pie.out, &PlayerToEditor::Resumed);
+                }
+                Ok(EditorToPlayer::Step { count }) => {
+                    // A single-step while paused: advance the fixed sim directly.
+                    for _ in 0..count {
+                        self.sim
+                            .step_once(crate::runtime_sim::RuntimeInput::default());
+                    }
+                }
+                Ok(EditorToPlayer::SetViewport(r)) => {
+                    // The editor owns our rect via the parent window; still resize
+                    // the surface so the swapchain matches.
+                    self.width = r.width.max(1);
+                    self.height = r.height.max(1);
+                    if let Some(live) = self.live.as_mut() {
+                        live.host.resize(self.width, self.height);
+                    }
+                }
+                Ok(EditorToPlayer::Eject) => {
+                    let _ = write_msg(&mut pie.out, &PlayerToEditor::Ejected);
+                }
+                Ok(EditorToPlayer::Stop) => {
+                    let _ = write_msg(&mut pie.out, &PlayerToEditor::Stopped);
+                    return true;
+                }
+                Ok(EditorToPlayer::InjectPanic) => {
+                    panic!("deliberate PIE panic (injected by editor)");
+                }
+                // Already loaded; ignore a second content frame.
+                Ok(EditorToPlayer::Load(_)) | Ok(EditorToPlayer::LoadScene(_)) => {}
+                Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return true,
+            }
         }
     }
 
@@ -117,7 +201,10 @@ impl PlayerApp {
         };
         self.input_state.apply(&events);
         let held = input::held_actions(&self.input_state);
-        self.sim.run_frame(dt, held);
+        // PIE pause freezes the sim but keeps rendering the last frame.
+        if !self.paused {
+            self.sim.run_frame(dt, held);
+        }
 
         let alpha = self.sim.alpha();
         let view = self.view();
@@ -164,6 +251,15 @@ impl ApplicationHandler for PlayerApp {
         self.height = size.height.max(1);
         match Self::build_host(&window, self.width, self.height) {
             Ok(host) => {
+                // Report our native window handle so the editor can reparent us
+                // into the viewport slot (embedded PIE).
+                if let Some(pie) = self.pie.as_mut() {
+                    if !pie.hwnd_reported {
+                        let handle = window_handle_i64(&window);
+                        let _ = write_msg(&mut pie.out, &PlayerToEditor::Window { handle });
+                        pie.hwnd_reported = true;
+                    }
+                }
                 window.request_redraw();
                 self.live = Some(Live {
                     window,
@@ -176,6 +272,12 @@ impl ApplicationHandler for PlayerApp {
                 tracing::error!("inf-player: GPU init failed: {e}");
                 event_loop.exit();
             }
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.drain_pie_control() {
+            event_loop.exit();
         }
     }
 
@@ -223,6 +325,32 @@ pub fn run(
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = PlayerApp::new(title, width, height, sim, map);
+    event_loop
+        .run_app(&mut app)
+        .map_err(|e| format!("run_app: {e}"))
+}
+
+/// Run the windowed player as a **play-in-editor** window: identical to [`run`]
+/// but wired to a PIE control channel (Pause/Resume/Step/Stop/Eject/SetViewport)
+/// and a report sink (`Window` handle for reparenting, `Paused`/`Resumed`/…).
+/// Blocks until Stop or the window closes.
+pub fn run_pie(
+    title: String,
+    width: u32,
+    height: u32,
+    sim: RuntimeSim,
+    map: InputMap,
+    control: Receiver<EditorToPlayer>,
+    out: Box<dyn Write>,
+) -> Result<(), String> {
+    let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let mut app = PlayerApp::new(title, width, height, sim, map);
+    app.pie = Some(PieLink {
+        control,
+        out,
+        hwnd_reported: false,
+    });
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("run_app: {e}"))

@@ -20,6 +20,23 @@ import type { ViewportKey } from "../bindings/ViewportKey";
 
 export type { UnlistenFn };
 
+/**
+ * Play-In-Editor session state broadcast on `pie://state` (P9.4). Hand-mirrored
+ * from `commands::pie::PieStateEvent` (Ring-2-only shape, no ts-rs binding).
+ */
+export interface PieStateEvent {
+  /** A player subprocess is live (playing or paused). */
+  running: boolean;
+  /** Live but the player's fixed step is frozen. */
+  paused: boolean;
+  /** `"embedded"`, `"window"`, or `""` when stopped. */
+  mode: string;
+  /** The player's current fixed-step frame count. */
+  frame: number;
+  /** A crash / load message when the session died unexpectedly. */
+  error: string | null;
+}
+
 /** Payload types per fixed channel. Extend as backends start emitting. */
 export interface EventPayloads {
   /** Structured tracing output → Output Log panel (P1.4). */
@@ -40,6 +57,8 @@ export interface EventPayloads {
   "material://sync": string;
   /** Simulate started (`true`) / stopped (`false`) → sync the play toolbar (P8.4). */
   "sim://state": boolean;
+  /** Play-In-Editor session state (running/paused/mode/frame/error) (P9.4). */
+  "pie://state": PieStateEvent;
   /** A cook/package run started (`true`) / finished (`false`) (P9.2). */
   "package://state": boolean;
 }

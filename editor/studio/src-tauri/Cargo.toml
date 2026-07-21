@@ -33,6 +33,9 @@ inf-graph = { workspace = true }
 inf-blueprint = { workspace = true }
 inf-transpile = { workspace = true }
 inf-viewport = { workspace = true }
+# The PIE (play-in-editor) protocol types + tick rate (P9.4). Ring 2 spawns the
+# player subprocess and speaks the local channel.
+inf-runtime = { workspace = true }
 raw-window-handle = { workspace = true }
 uuid = { workspace = true }
 portable-pty = { workspace = true }

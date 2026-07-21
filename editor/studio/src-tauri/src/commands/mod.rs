@@ -11,6 +11,7 @@ mod layout;
 mod lsp;
 mod material;
 mod package;
+mod pie;
 mod project;
 mod scene;
 mod search;
@@ -24,6 +25,7 @@ pub use assets::{init_assets_on_boot, AssetState};
 pub use graph::GraphState;
 pub use lsp::LspState;
 pub use material::MaterialState;
+pub use pie::PieState;
 pub use project::ProjectState;
 pub use scene::{recover_scene_on_boot, SceneState};
 pub use sim::SimState;
@@ -87,6 +89,13 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         sim::sim_tick,
         sim::sim_stop,
         sim::sim_is_running,
+        pie::pie_start,
+        pie::pie_pause,
+        pie::pie_resume,
+        pie::pie_step,
+        pie::pie_eject,
+        pie::pie_stop,
+        pie::pie_is_running,
         assets::assets_snapshot,
         assets::asset_references,
         assets::asset_thumbnail,

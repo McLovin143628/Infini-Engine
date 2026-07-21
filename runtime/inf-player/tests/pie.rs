@@ -173,6 +173,164 @@ fn player_crash_is_isolated_from_the_editor() {
     second.stop(Duration::from_secs(5)).unwrap();
 }
 
+// ── P9.4: real-content PIE (the PIE == shipping gate) ────────────────────────
+
+use inf_runtime::pie::ScenePayload;
+
+/// The live platformer scene + Coyote class as a headless (step-driven) PIE
+/// payload — exactly what the editor streams over the channel.
+fn platformer_payload() -> ScenePayload {
+    let doc = inf_editor_core::samples::platformer_scene();
+    inf_editor_core::pie::build_scene_payload(
+        &doc,
+        |guid| {
+            (guid == inf_editor_core::samples::COYOTE_ASSET_GUID)
+                .then(inf_editor_core::samples::coyote_class)
+        },
+        0, // tick-hz 0: no per-frame sleep (step-driven determinism)
+        false,
+    )
+    .expect("build scene payload")
+}
+
+/// **PIE == shipping.** A player fed the streamed live scene builds its world
+/// through the *same* `InfSceneWorldBuilder` the cooked-pack boot uses, so its
+/// per-step determinism trace is byte-identical to the in-process shipping
+/// trace for the same content.
+#[test]
+fn pie_scene_trace_matches_shipping() {
+    let payload = platformer_payload();
+    const N: u32 = 120;
+
+    let mut session = PieSession::spawn_scene(&player_bin(), &payload).expect("scene session");
+    session.step(N).expect("step N");
+
+    let mut got = Vec::with_capacity(N as usize);
+    for _ in 0..N {
+        let ev = session
+            .wait_for(Duration::from_secs(10), |e| {
+                matches!(e, PlayerToEditor::Frame { .. })
+            })
+            .expect("a frame per step");
+        if let PlayerToEditor::Frame { state_hash, .. } = ev {
+            got.push(state_hash);
+        }
+    }
+
+    // The in-process reference is the shipping/pack-path build of the same
+    // payload (same builder + RuntimeSim). Byte-identical == PIE preview can
+    // never diverge from the shipped game.
+    let want = inf_player::scene_trace(&payload, N as u64).expect("shipping trace");
+    assert_eq!(
+        got, want,
+        "streamed PIE trace must equal the shipping trace"
+    );
+    // The trace is non-trivial: gravity + input-free physics advances state.
+    assert!(got.windows(2).any(|w| w[0] != w[1]), "state must evolve");
+
+    session.stop(Duration::from_secs(5)).expect("graceful stop");
+}
+
+/// Step control on real content: a step-driven session emits exactly one frame
+/// per requested step and none unbidden, then stops cleanly.
+#[test]
+fn pie_scene_step_control_and_clean_stop() {
+    let payload = platformer_payload();
+    let mut session = PieSession::spawn_scene(&player_bin(), &payload).expect("scene session");
+
+    // Nothing streams before a Step (real headless PIE is step-driven).
+    assert!(
+        session.next_event(Duration::from_millis(300)).is_none(),
+        "no frames until stepped"
+    );
+
+    session.step(5).unwrap();
+    for _ in 0..5 {
+        session
+            .wait_for(Duration::from_secs(5), |e| {
+                matches!(e, PlayerToEditor::Frame { .. })
+            })
+            .expect("stepped frame");
+    }
+    // Exactly five frames — a trailing `State` ack is fine, but no sixth frame.
+    while let Some(ev) = session.next_event(Duration::from_millis(300)) {
+        assert!(
+            !matches!(ev, PlayerToEditor::Frame { .. }),
+            "no extra frames after the 5 stepped"
+        );
+    }
+
+    let status = session.stop(Duration::from_secs(5)).expect("graceful stop");
+    assert!(status.success(), "clean exit on Stop: {status:?}");
+}
+
+/// A script panic in a **real-content** session kills only the player; the
+/// editor-side session observes the nonzero exit and captures the panic text
+/// (the crash-isolation guarantee, exercised through the real world build).
+#[test]
+fn pie_scene_crash_is_isolated() {
+    let payload = platformer_payload();
+    let mut session = PieSession::spawn_scene(&player_bin(), &payload).expect("scene session");
+    session.step(1).unwrap();
+    session
+        .wait_for(Duration::from_secs(5), |e| {
+            matches!(e, PlayerToEditor::Frame { .. })
+        })
+        .expect("running before the crash");
+
+    session.send(&EditorToPlayer::InjectPanic).unwrap();
+    let status = session
+        .wait_exit(Duration::from_secs(10))
+        .expect("player must die");
+    assert!(!status.success(), "a panic must not exit 0: {status:?}");
+    assert_eq!(
+        session.health(),
+        SessionHealth::Exited {
+            code: status.code()
+        }
+    );
+    assert!(
+        session
+            .stderr_lines()
+            .join("\n")
+            .contains("deliberate PIE panic"),
+        "panic text captured for the Output Log"
+    );
+
+    // The editor is unaffected: a fresh session starts immediately.
+    let mut second = PieSession::spawn_scene(&player_bin(), &payload).expect("fresh session");
+    second.step(1).unwrap();
+    second
+        .wait_for(Duration::from_secs(5), |e| {
+            matches!(e, PlayerToEditor::Frame { .. })
+        })
+        .expect("fresh session runs");
+    second.stop(Duration::from_secs(5)).unwrap();
+}
+
+/// A stopped session leaves no zombie: `stop` reaps the child, and even an
+/// abrupt drop (no Stop) kills + reaps it via `Drop`.
+#[test]
+fn pie_scene_stop_leaves_no_zombie() {
+    let payload = platformer_payload();
+
+    // Graceful stop reaps the child (a real exit status, not a leak).
+    let session = PieSession::spawn_scene(&player_bin(), &payload).expect("session");
+    let status = session.stop(Duration::from_secs(5)).expect("stop reaps");
+    assert!(status.success());
+
+    // A dropped session (no Stop) must not leave the player running: Drop kills
+    // + waits, so the handle teardown returns promptly.
+    let mut dropped = PieSession::spawn_scene(&player_bin(), &payload).expect("session");
+    dropped.step(1).unwrap();
+    let start = std::time::Instant::now();
+    drop(dropped);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "Drop must kill + reap the child promptly (no zombie / no hang)"
+    );
+}
+
 /// The Spike D "embed-window experiment": prove a window owned by another
 /// process can be reparented into ours (the P9 plan for putting the PIE
 /// player's swapchain inside the editor viewport hole).

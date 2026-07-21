@@ -48,6 +48,9 @@ tracing-subscriber = { workspace = true }
 # too, but the player needs the type to build a surface from the winit window.
 winit = { workspace = true }
 wgpu = { workspace = true }
+# The PIE window reports its native handle (HWND) so the editor can reparent it
+# into the viewport slot (embedded PIE).
+raw-window-handle = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [

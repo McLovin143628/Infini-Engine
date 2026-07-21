@@ -90,3 +90,56 @@ caveat recorded below. Crates: `inf-runtime` (sim/snapshot/protocol),
 - The embedded-window path needs the Spike A rect-sync + DPI treatment
   when it becomes a real feature (P9.4 batch 3); the probe only proves
   the OS primitive.
+
+## P9.4 — PIE productionized (2026-07-21)
+
+The Spike D machinery is now the real Play-In-Editor feature. What landed:
+
+1. **Real content handoff (PIE == shipping).** The wire protocol went to
+   **v2**: a **versioned little-endian frame header** (`magic u32` +
+   `frame_ver u16` + `len u32` + bincode) self-describes every frame, and a
+   new `EditorToPlayer::LoadScene(ScenePayload)` streams the **live** editor
+   scene — v3 `.inf_lvl` bytes of the *unsaved-included* `SceneDoc` + the
+   bound blueprint classes as `(guid, json)`. The player builds its world
+   through the **same `InfSceneWorldBuilder::with_bindings`** the cooked-pack
+   boot uses. The gate: `pie_scene_trace_matches_shipping` streams the live
+   platformer through a real subprocess and asserts its per-step xxh3 trace
+   is **byte-identical** to the in-process pack-path build (`scene_trace`).
+   Previewing cannot diverge from shipping.
+2. **Control surface.** `Pause/Resume/Step{count}/Stop/Eject/SetViewport`
+   control frames + `Window{handle}` / `State` / `Ejected` / `Error`
+   reports on top of Spike D. Real headless PIE is **step-driven** (starts
+   paused) so the determinism gate reads exactly N frames; the windowed path
+   auto-runs. `Eject` is v1 = release input possession (a clean ack; true
+   camera hand-back is deferred — **NOT faked**).
+3. **Editor side.** `inf_editor_core::pie` (Ring 1 — already the subprocess
+   owner since Spike D, so process IO here needs no new ring exception) gains
+   `PieSession::spawn_scene`, the control methods, `build_scene_payload`
+   (serializes the live doc + resolves bound classes, mirroring
+   `samples::bound_actors`), and `find_player_bin` (sibling-of-exe +
+   `INF_PLAYER_BIN` override). Ring-2 `commands/pie.rs` stays thin: spawn +
+   a **crash-monitor thread** (waits on the child → crash toast + viewport
+   restore + toolbar reset, editor intact) + `pie://state` events. Tests
+   (in `inf-player/tests/pie.rs`, which dev-deps editor-core): PIE==shipping,
+   step/pause/stop, real-content crash isolation + panic-text capture,
+   zombie-free stop (graceful reap + `Drop` kill).
+4. **Embedded window — HONEST status.** The **proven** `SetParent` sequence
+   is wired into `inf-viewport` as `embed_foreign`/`release_foreign`, run on
+   the **viewport render thread** (which pumps) with the parent set to the
+   **Tauri main window** — so the child's teardown `WM_PARENTNOTIFY` lands on
+   the always-pumping main thread, sidestepping the Spike D deadlock. The
+   player reports its HWND; the monitor reparents it into the hole, hides the
+   native viewport child (the refcounted `set_visible` discipline), and
+   follows rect changes; stop/crash restores everything. **This live embed is
+   Windows-only and human-verify-only** (GPU + window; not exercised in CI,
+   like every GPU path). On non-Windows — or if the player never reports a
+   usable HWND — PIE runs as **"Play in New Window"**, the roadmap-sanctioned
+   fallback, which is the always-working path and the primary UX on
+   macOS/Linux. The frontend split-button offers Embedded / New Window /
+   Simulate explicitly; nothing about embed success is faked.
+
+**Deferred (documented, not faked):** true camera possession + editor-camera
+hand-back on Eject; input routing from the embedded window back through the
+editor's focus-handoff channel (the player owns its own input today); a
+flash-free embed (the reparent momentarily shows the player window top-level
+before adoption); macOS/Wayland embedded PIE (needs shared-surface streaming).

@@ -149,5 +149,7 @@ impl ViewportHandle {
     pub fn drop_payload(&self, _x: f32, _y: f32, _payload: &str) {}
     pub fn set_mode(&self, _mode: camera::ViewportMode) {}
     pub fn set_snap_2d(&self, _snap: camera::Snap2DSettings) {}
+    pub fn embed_foreign(&self, _hwnd: isize) {}
+    pub fn release_foreign(&self) {}
     pub fn destroy(&self) {}
 }

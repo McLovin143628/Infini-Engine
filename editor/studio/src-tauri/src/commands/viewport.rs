@@ -17,6 +17,36 @@ use super::scene::{emit_world_delta, SceneState};
 #[derive(Default)]
 pub struct ViewportState(Mutex<Option<inf_viewport::ViewportHandle>>);
 
+impl ViewportState {
+    /// Show/hide the native viewport child (used by PIE embedding to hide the
+    /// editor viewport while the player window occupies the slot).
+    pub fn set_visible(&self, visible: bool) {
+        if let Ok(guard) = self.0.lock() {
+            if let Some(handle) = guard.as_ref() {
+                handle.set_visible(visible);
+            }
+        }
+    }
+
+    /// Adopt a foreign (PIE player) window into the viewport slot (embedded PIE).
+    pub fn embed_foreign(&self, hwnd: i64) {
+        if let Ok(guard) = self.0.lock() {
+            if let Some(handle) = guard.as_ref() {
+                handle.embed_foreign(hwnd as isize);
+            }
+        }
+    }
+
+    /// Release an embedded foreign window and restore the native viewport child.
+    pub fn release_foreign(&self) {
+        if let Ok(guard) = self.0.lock() {
+            if let Some(handle) = guard.as_ref() {
+                handle.release_foreign();
+            }
+        }
+    }
+}
+
 /// Create (once) the native child viewport inside the calling window.
 #[tauri::command]
 pub async fn viewport_attach(

@@ -424,3 +424,27 @@ export const sim = {
   /** Whether a Simulate session is currently running (mount-time sync). */
   isRunning: (): Promise<boolean> => invoke<boolean>("sim_is_running"),
 };
+
+/**
+ * Play-In-Editor (P9.4). Spawns `inf-player` as a crash-isolated subprocess and
+ * streams the **live** scene (unsaved edits included) to it — the same content
+ * path a shipped game uses. `start` mode is `"embedded"` (reparent the player
+ * window into the viewport, Windows) or `"window"` ("Play in New Window",
+ * always works). Session state broadcasts on `pie://state`.
+ */
+export const pie = {
+  /** Start PIE in the given mode; resumes if already paused. */
+  start: (mode: "embedded" | "window"): Promise<void> => invoke("pie_start", { mode }),
+  /** Pause the running player. */
+  pause: (): Promise<void> => invoke("pie_pause"),
+  /** Resume a paused player. */
+  resume: (): Promise<void> => invoke("pie_resume"),
+  /** Advance exactly one fixed step (while paused). */
+  step: (): Promise<void> => invoke("pie_step"),
+  /** Release input possession back to the editor (v1 Eject). */
+  eject: (): Promise<void> => invoke("pie_eject"),
+  /** Stop PIE: kill the player, restore the viewport. */
+  stop: (): Promise<void> => invoke("pie_stop"),
+  /** Whether a PIE session is running (mount-time sync). */
+  isRunning: (): Promise<boolean> => invoke<boolean>("pie_is_running"),
+};
