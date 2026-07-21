@@ -9,7 +9,14 @@ authors.workspace = true
 publish = false
 
 [dependencies]
-bevy_ecs = { workspace = true }
+# `multi_threaded` enables bevy_ecs's parallel Schedule executor (P9.1a, §2.5).
+# The feature is added here — inf-ecs is the sole crate naming bevy_ecs — while
+# the version pin stays in [workspace.dependencies] (architecture rule 5).
+bevy_ecs = { workspace = true, features = ["multi_threaded"] }
+# bevy_tasks (bevy_ecs's own task-pool crate) is named directly only to size and
+# name the ECS `ComputeTaskPool` the multi_threaded executor runs on — see
+# `schedule::init_ecs_task_pool` and its §2.5 two-pools doctrine note.
+bevy_tasks = { workspace = true, features = ["multi_threaded"] }
 bevy_reflect = { workspace = true }
 glam = { workspace = true }
 inf-math = { workspace = true }

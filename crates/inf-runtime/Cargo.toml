@@ -9,7 +9,18 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# ECS facade + the parallel sim schedule (P9.1a, §2.5). inf-runtime is the game
+# loop; the access-declared sim systems live behind the inf-ecs facade.
+inf-ecs = { workspace = true }
 bincode = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }
 xxhash-rust = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "schedule"
+harness = false

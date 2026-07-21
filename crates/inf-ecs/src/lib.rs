@@ -16,6 +16,8 @@ pub mod hierarchy;
 pub mod math;
 pub mod props;
 pub mod registry;
+pub mod schedule;
+pub mod sim;
 pub mod transform;
 pub mod world;
 
@@ -30,4 +32,8 @@ pub use hierarchy::{ChildOf, Children};
 pub use math::{Color, Vec2d, Vec3d};
 pub use props::{default_field, ComponentProps, PropField, PropValue};
 pub use registry::{ComponentInfo, ComponentRegistry};
+pub use schedule::{
+    ecs_task_pool_threads, init_ecs_task_pool, ScheduleMode, SimSchedule, SimScheduleBuilder,
+};
+pub use sim::{sim_snapshot, AngularVelocity, EntitySimState, Lifetime, SimConfig, Velocity};
 pub use world::EcsWorld;

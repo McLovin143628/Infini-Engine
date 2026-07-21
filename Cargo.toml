@@ -72,6 +72,10 @@ bevy_ecs = "0.19"
 # in the tree alongside our 0.33 renderer pin. inf-ecs reflects transforms as
 # f64 value types instead (see ecs::components), converting to glam for math.
 bevy_reflect = "0.19"
+# bevy_tasks pinned to the same 0.19 release as bevy_ecs (one copy in the tree).
+# inf-ecs enables its `multi_threaded` feature to size/name the ECS ComputeTaskPool
+# the parallel Schedule executor runs on (P9.1a, §2.5). Only inf-ecs names it.
+bevy_tasks = "0.19"
 uuid = { version = "1", features = ["v4", "serde"] }
 # macOS viewport embedding (Spike A) — objc2 framework crates
 objc2 = "0.6"
@@ -152,6 +156,36 @@ criterion = { version = "0.7", default-features = false, features = ["cargo_benc
 # left off so rapier does not spawn its own worker pool alongside inf-core's job
 # system and so a step is order-independent of thread scheduling. Apache-2.0.
 rapier2d-f64 = { version = "0.34", features = ["enhanced-determinism"] }
+# rapier3d-f64: the 3D physics engine, same version family + rationale as rapier2d
+# above. f64 keeps parity with the f64 world-coordinate doctrine; this build's math
+# types are glam 0.33 too (rapier3d → parry3d-f64 → glamx → glam 0.33, our pin) so a
+# rapier `Vector` IS a `glam::DVec3` and a `Rotation` a `glam::DQuat` — no second glam
+# in the tree. `enhanced-determinism` gives cross-platform bit-reproducible stepping
+# (the P12.2 replay guarantee); the `parallel` (rayon) feature is DELIBERATELY off so a
+# step is order-independent of thread scheduling and rapier never spawns a pool beside
+# inf-core's job system. Apache-2.0. (P9.1 3D baseline; deepened at P12.)
+rapier3d-f64 = { version = "0.34", features = ["enhanced-determinism"] }
+# kira: the audio engine (roadmap §7 — game-oriented: clocks, tweens, spatial; rodio is
+# playback-only). default-features OFF: kira's defaults pull the `cpal` device backend
+# (which links ALSA on Linux + libdbus via `cpal-realtime-dbus`) — a system-dep CI has
+# no headers for. inf-audio therefore enables only symphonia decoders by default and puts
+# the real cpal output backend behind its own non-default `cpal` feature (the desktop
+# runtime opts in; CI + tests run the deterministic no-device path). MIT OR Apache-2.0;
+# the symphonia decoder tree is MPL-2.0 (on the deny allow-list).
+kira = { version = "0.12", default-features = false, features = [
+    "symphonia",
+    "wav",
+    "pcm",
+    "ogg",
+    "vorbis",
+    "flac",
+    "mp3",
+] }
+# gilrs: cross-platform gamepad input (roadmap P9.1 item 4). Pulled ONLY behind
+# inf-input's non-default `gamepad` feature — it links platform HID/udev libs, so the
+# pure action/axis-mapping core (the tested part) stays dependency-light and CI-safe;
+# the desktop runtime enables `gamepad` for a real poller. MIT OR Apache-2.0.
+gilrs = "0.11"
 
 # intra-workspace crates
 inf-core = { path = "crates/inf-core" }
