@@ -9,3 +9,19 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# The Ring-0 compute job system (§2.5): scatter is a named hot loop parallelized
+# deterministically via `parallel_map` over cells.
+inf-core = { workspace = true }
+# f64 world coordinates (DVec3) + orientations (DQuat) — architecture rule 3.
+glam = { workspace = true }
+serde = { workspace = true }
+# Deterministic, byte-identical `.inf_pcg` payload encoding.
+bincode = { workspace = true }
+# Mesh asset references on a PCG kind (raw GUID; inf-asset is deliberately NOT a
+# dep this batch — see the AssetKind::Pcg handoff note in `asset.rs`).
+uuid = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Human-readable serde round-trip check for the rule model.
+serde_json = { workspace = true }
