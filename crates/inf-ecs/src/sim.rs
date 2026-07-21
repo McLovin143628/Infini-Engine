@@ -232,6 +232,7 @@ pub(crate) fn accumulate_centroid(q: Query<&Transform>, mut centroid: ResMut<Cen
 
 /// Scatter step: nudge each mover's velocity toward the swarm centroid (a spring).
 /// Pure per-entity write from a shared read — deterministic under any pool size.
+#[tracing::instrument(level = "trace", skip_all)]
 pub(crate) fn attract_to_centroid(
     mut q: Query<(&mut Velocity, &Transform)>,
     centroid: Res<Centroid>,
@@ -258,6 +259,7 @@ pub(crate) fn attract_to_centroid(
 }
 
 /// Integrate velocity into translation.
+#[tracing::instrument(level = "trace", skip_all)]
 pub(crate) fn integrate_velocity(mut q: Query<(&mut Transform, &Velocity)>, time: Res<SimTime>) {
     let dt = time.dt;
     for (mut t, vel) in &mut q {
@@ -316,6 +318,7 @@ pub(crate) fn bounce_bounds(mut q: Query<(&mut Transform, &mut Velocity)>, bound
 /// Age lifetimes. Disjoint from every Transform/Velocity system, so it runs
 /// concurrently with the whole motion pipeline — the schedule's parallelism
 /// showcase.
+#[tracing::instrument(level = "trace", skip_all)]
 pub(crate) fn age_lifetime(mut q: Query<&mut Lifetime>, time: Res<SimTime>) {
     let dt = time.dt;
     for mut l in &mut q {
@@ -334,6 +337,7 @@ pub(crate) fn reap_expired(q: Query<(&Guid, &Lifetime)>, mut ctrl: ResMut<SimCon
 }
 
 /// Enact queued spawns through deferred `Commands` (applied at the sync point).
+#[tracing::instrument(level = "trace", skip_all)]
 pub(crate) fn apply_spawns(mut commands: Commands, mut ctrl: ResMut<SimControl>) {
     let reqs = std::mem::take(&mut ctrl.spawn);
     for req in reqs {
@@ -377,6 +381,7 @@ pub(crate) fn apply_despawns(
 /// Propagation is intentionally serial for now (a whole-world hierarchy walk);
 /// parallelizing it per-root is a documented §2.5 follow-up — the parallel win in
 /// this phase is running the independent gameplay systems concurrently.
+#[tracing::instrument(level = "trace", skip_all)]
 pub(crate) fn propagate_transforms(world: &mut World) {
     crate::transform::propagate(world);
 }

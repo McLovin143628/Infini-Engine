@@ -4,6 +4,7 @@
 
 pub mod assets;
 pub mod collision_layers;
+pub mod diagnostics;
 pub mod erosion_gpu;
 pub mod ipc;
 pub mod layouts;

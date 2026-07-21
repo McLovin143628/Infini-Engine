@@ -20,10 +20,22 @@ use tracing_subscriber::Layer;
 
 /// Bounded pre-webview buffer (drops oldest beyond this).
 const BUFFER_CAP: usize = 512;
+/// Recent-line ring for the crash reporter (P15.2) — always on, independent of
+/// the webview, so a crash file can include the last log lines.
+const CRASH_RING_CAP: usize = 128;
 
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 static BUFFER: Mutex<VecDeque<LogLine>> = Mutex::new(VecDeque::new());
+static CRASH_RING: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 static SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// The most recent formatted log lines (oldest first), for a crash report.
+pub fn recent_lines() -> Vec<String> {
+    CRASH_RING
+        .lock()
+        .map(|r| r.iter().cloned().collect())
+        .unwrap_or_default()
+}
 
 /// Install the app handle and flush everything buffered so far.
 pub fn attach_app(app: tauri::AppHandle) {
@@ -99,6 +111,17 @@ impl<S: Subscriber> Layer<S> for LogBridgeLayer {
             message,
             timestamp_ms: now_ms(),
         };
+
+        // Feed the crash-report ring (bounded, always on).
+        if let Ok(mut ring) = CRASH_RING.lock() {
+            if ring.len() >= CRASH_RING_CAP {
+                ring.pop_front();
+            }
+            ring.push_back(format!(
+                "{:>5?} {}: {}",
+                line.level, line.target, line.message
+            ));
+        }
 
         if let Some(app) = APP.get() {
             let _ = app.emit("log://line", &line);

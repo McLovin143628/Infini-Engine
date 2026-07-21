@@ -981,9 +981,45 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
         } else {
             host.view_for(&camera)
         };
-        if let Err(e) = host.render_frame(&render_view) {
-            tracing::error!("inf-viewport: unrecoverable render failure: {e}");
-            break 'outer;
+        // Guard the render against a panic in engine code (P15.2). Rather than let
+        // it unwind across the OS thread boundary, we catch it, write a crash
+        // report, log a graceful message, and exit the render loop — the editor
+        // process (and its webview) survive instead of the whole app dying.
+        let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            host.render_frame(&render_view)
+        }));
+        match render_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::error!("inf-viewport: unrecoverable render failure: {e}");
+                break 'outer;
+            }
+            Err(payload) => {
+                let msg = inf_editor_core::diagnostics::panic_message(&*payload);
+                let report = inf_editor_core::diagnostics::CrashReport {
+                    app: "inf-viewport".into(),
+                    engine_version: env!("CARGO_PKG_VERSION").into(),
+                    os: std::env::consts::OS.into(),
+                    arch: std::env::consts::ARCH.into(),
+                    location: "<viewport render thread>".into(),
+                    message: msg.clone(),
+                    adapter: None,
+                    log_tail: Vec::new(),
+                };
+                let dir = std::env::temp_dir().join("InfinityEngine").join("crashes");
+                match inf_editor_core::diagnostics::write_crash_report(&dir, &report) {
+                    Ok(path) => tracing::error!(
+                        "inf-viewport: render thread panicked ({msg}); crash report at {} — \
+                         viewport stopped, editor still running",
+                        path.display()
+                    ),
+                    Err(werr) => tracing::error!(
+                        "inf-viewport: render thread panicked ({msg}); \
+                         failed to write crash report: {werr}"
+                    ),
+                }
+                break 'outer;
+            }
         }
     }
 

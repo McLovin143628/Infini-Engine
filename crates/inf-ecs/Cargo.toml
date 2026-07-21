@@ -26,6 +26,12 @@ inf-math = { workspace = true }
 inf-terrain = { workspace = true }
 serde = { workspace = true }
 uuid = { workspace = true }
+# Profiling spans (P15.1): the per-phase sim systems carry `trace`-level
+# `#[tracing::instrument]` spans. At the default `info` filter they are disabled
+# (near-zero cost — no subscriber records them); a Tracy run enables `trace` on
+# this target to see per-phase timing. Spans never affect step results, so the
+# §8 replay-determinism gate is untouched.
+tracing = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

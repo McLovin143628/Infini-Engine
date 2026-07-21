@@ -157,6 +157,14 @@ pub fn build_vgeom(
     indices: &[u32],
     params: BuildParams,
 ) -> VgeomMesh {
+    // Meshlet-DAG build span (P15.1): the heaviest single cook stage. Free at the
+    // default filter; a Tracy capture shows the clusterize→group→simplify loop.
+    let _span = tracing::info_span!(
+        "build_vgeom",
+        verts = positions.len(),
+        tris = indices.len() / 3
+    )
+    .entered();
     let params = params.validated();
 
     // Interleave the raw vertex streams.

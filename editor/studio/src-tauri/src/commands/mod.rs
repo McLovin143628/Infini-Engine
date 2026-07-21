@@ -5,6 +5,7 @@
 mod app;
 mod assets;
 mod collision_layers;
+mod diagnostics;
 mod files;
 mod git;
 mod graph;
@@ -27,6 +28,7 @@ mod terrain;
 mod viewport;
 
 pub use assets::{init_assets_on_boot, AssetState};
+pub use diagnostics::{install_crash_hook, set_crash_dir};
 pub use graph::GraphState;
 pub use lsp::LspState;
 pub use material::MaterialState;
@@ -44,6 +46,7 @@ pub use viewport::ViewportState;
 pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         app::app_version,
+        app::app_build_info,
         graph::graph_registry,
         graph::graph_list,
         graph::graph_create,
@@ -182,5 +185,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         lsp::lsp_did_change,
         lsp::lsp_did_close,
         lsp::lsp_request,
+        diagnostics::editor_diagnostics,
     ]
 }

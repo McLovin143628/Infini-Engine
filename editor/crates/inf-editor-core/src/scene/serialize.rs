@@ -1217,14 +1217,35 @@ pub fn write_recovery(doc: &SceneDoc, dir: &Path) -> Result<(), String> {
 
 /// If a recovery file exists, load it and delete it (consumed on startup so a
 /// clean exit removes it). Returns `None` when there's nothing to recover.
+///
+/// Hardened (P15.2): a **corrupt / truncated** recovery file never panics and is
+/// never silently dropped — it is moved aside to `crash-recovery.inf_lvl.corrupt`
+/// and a warning is logged, so startup falls back cleanly to the last good save
+/// while the bad file is preserved for diagnosis.
 pub fn take_recovery(dir: &Path) -> Option<SceneDoc> {
     let path = recovery_path(dir);
     if !path.exists() {
         return None;
     }
-    let doc = load(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    doc
+    match load(&path) {
+        Ok(doc) => {
+            let _ = std::fs::remove_file(&path);
+            Some(doc)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "crash-recovery file is corrupt ({e}); preserving it as .corrupt and \
+                 falling back to the last saved level"
+            );
+            let aside = path.with_extension("inf_lvl.corrupt");
+            if std::fs::rename(&path, &aside).is_err() {
+                // If we cannot move it aside, remove it so it does not block the
+                // next boot — but never panic.
+                let _ = std::fs::remove_file(&path);
+            }
+            None
+        }
+    }
 }
 
 /// Remove the recovery file (called on a clean save / exit).
@@ -1472,6 +1493,98 @@ mod tests {
         let recovered = take_recovery(dir.path());
         assert!(recovered.is_some());
         assert!(!recovery_path(dir.path()).exists(), "consumed on recovery");
+    }
+
+    /// P15.2: autosave fires (writes recovery) only when the doc is dirty — the
+    /// `scene_autosave` command's `is_dirty()` gate, exercised at the core level.
+    #[test]
+    fn autosave_only_persists_a_dirty_doc() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A freshly-loaded/saved doc is clean → the command would skip; simulate
+        // that gate here (a clean doc leaves no recovery file behind).
+        let mut clean = SceneDoc::with_demo();
+        clean.mark_saved();
+        assert!(!clean.is_dirty(), "a saved doc is clean");
+        if clean.is_dirty() {
+            write_recovery(&clean, dir.path()).unwrap();
+        }
+        assert!(
+            !recovery_path(dir.path()).exists(),
+            "a clean doc must not autosave"
+        );
+
+        // A mutation dirties the doc → the command would write recovery.
+        let mut doc = SceneDoc::with_demo();
+        doc.mark_saved();
+        doc.edit_create(SpawnKind::Cube, "Cube", None);
+        assert!(doc.is_dirty(), "an edit dirties the doc");
+        if doc.is_dirty() {
+            write_recovery(&doc, dir.path()).unwrap();
+        }
+        assert!(
+            recovery_path(dir.path()).exists(),
+            "a dirty doc autosaves a recovery file"
+        );
+    }
+
+    /// P15.2: a simulated crash → reopen recovers the exact pre-crash document.
+    #[test]
+    fn recovery_restores_the_pre_crash_document() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Author some work, then "autosave" (the state the process holds when it
+        // dies without an explicit save).
+        let mut doc = SceneDoc::with_demo();
+        let c = doc.edit_create(SpawnKind::Cone, "Recovered Cone", None);
+        let tp = transform_path(&doc);
+        doc.write_prop(
+            c,
+            tp,
+            "translation",
+            &inf_ecs::PropValue::Vec3([7.0, 8.0, 9.0]),
+        );
+        write_recovery(&doc, dir.path()).unwrap();
+        let pre_crash = encode(&to_scene_file(&doc)).unwrap();
+
+        // "Crash" (drop the doc) then reboot: take_recovery yields an equal doc.
+        drop(doc);
+        let recovered = take_recovery(dir.path()).expect("recovered a doc");
+        let post_crash = encode(&to_scene_file(&recovered)).unwrap();
+        assert_eq!(
+            pre_crash, post_crash,
+            "recovered document must equal the pre-crash document"
+        );
+        assert!(
+            !recovery_path(dir.path()).exists(),
+            "the recovery file is consumed on successful recovery"
+        );
+    }
+
+    /// P15.2: a corrupt / truncated recovery file is handled gracefully — no
+    /// panic, no crash — and the bad file is preserved as `.corrupt` while
+    /// startup falls back to the last good save (`take_recovery` returns `None`).
+    #[test]
+    fn corrupt_recovery_file_is_handled_gracefully() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Write a valid recovery file, then truncate it to garbage.
+        let doc = SceneDoc::with_demo();
+        write_recovery(&doc, dir.path()).unwrap();
+        let path = recovery_path(dir.path());
+        std::fs::write(&path, b"\x00\x01\x02 not a valid inf_lvl payload").unwrap();
+
+        // No panic; returns None (caller falls back to last good save).
+        let recovered = take_recovery(dir.path());
+        assert!(recovered.is_none(), "a corrupt file recovers nothing");
+        assert!(
+            !path.exists(),
+            "the corrupt file is moved aside (not left in place)"
+        );
+        assert!(
+            path.with_extension("inf_lvl.corrupt").exists(),
+            "the corrupt file is preserved as .corrupt for diagnosis"
+        );
     }
 
     #[test]

@@ -57,6 +57,15 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# tracing-tracy = the Tracy profiler subscriber layer (P15.1). Pulled ONLY behind
+# the `tracy` feature on the Ring-2 apps (inf-studio / inf-player) — OFF by
+# default. Because it is an optional, off-by-default dep, default builds and
+# `cargo deny` (which resolves default features) never compile its vendored C++
+# Tracy client (tracy-client-sys, MIT; the vendored Tracy is BSD-3-Clause — both
+# on the deny allow-list). The doctrine (§2.5 / tech matrix): profiling spans
+# exist UNCONDITIONALLY via `tracing`; this crate only adds a subscriber *layer*
+# that records them, so a default (no-`tracy`) build carries zero profiling cost.
+tracing-tracy = "0.11"
 # default-features off: the dx12 backend currently mixes windows 0.62 (wgpu-hal)
 # with windows 0.61 (unified into tauri's bucket by the resolver) and fails to
 # compile. Vulkan-first on Windows until tauri reaches windows 0.62 — see the

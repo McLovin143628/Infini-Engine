@@ -9,19 +9,29 @@
 mod commands;
 mod logging;
 
+use tauri::Manager as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
 pub fn run() {
     // Console output + the Output Log bridge share one EnvFilter; events
     // fired before the webview exists buffer inside the bridge layer.
-    tracing_subscriber::registry()
+    let subscriber = tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
-        .with(logging::LogBridgeLayer)
-        .init();
+        .with(logging::LogBridgeLayer);
+    // Tracy profiler layer (P15.1), behind the off-by-default `tracy` feature.
+    #[cfg(feature = "tracy")]
+    let subscriber = subscriber.with(tracing_tracy::TracyLayer::default());
+    subscriber.init();
+
+    // Editor-side crash reporter (P15.2): a Rust panic hook that writes a
+    // structured, timestamped crash file (engine version, OS, panic location +
+    // message) into the crash dir, then chains to the default hook. No telemetry
+    // upload (opt-in only; see `docs/profiling.md`).
+    commands::install_crash_hook();
 
     tauri::Builder::default()
         // Native file-open dialog for asset import (P4.4). The only plugin;
@@ -44,6 +54,11 @@ pub fn run() {
         .invoke_handler(commands::invoke_handler())
         .setup(|app| {
             logging::attach_app(app.handle().clone());
+            // Point the crash reporter at the app-data crash dir now that it
+            // resolves (before this a very-early panic falls back to a temp dir).
+            if let Ok(dir) = app.path().app_data_dir() {
+                commands::set_crash_dir(dir.join("crashes"));
+            }
             commands::recover_scene_on_boot(app.handle());
             commands::init_assets_on_boot(app.handle());
             tracing::info!("Infinity Engine starting");

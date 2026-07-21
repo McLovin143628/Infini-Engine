@@ -58,6 +58,9 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Tracy profiler layer (P15.1) — pulled ONLY by the `tracy` feature (off by
+# default); see [features] below and `docs/profiling.md`.
+tracing-tracy = { workspace = true, optional = true }
 # windowing + surface (Ring 2 only names these). wgpu comes in through inf-render
 # too, but the player needs the type to build a surface from the winit window.
 winit = { workspace = true }
@@ -65,6 +68,14 @@ wgpu = { workspace = true }
 # The PIE window reports its native handle (HWND) so the editor can reparent it
 # into the viewport slot (embedded PIE).
 raw-window-handle = { workspace = true }
+
+[features]
+# Tracy live profiler capture (P15.1). OFF by default so a shipped player carries
+# zero profiling cost and never links the vendored C++ Tracy client. Turn on with
+# `cargo run -p inf-player --features tracy` and connect the Tracy viewer; the
+# `render_frame` / `sim_step` spans (and, at `RUST_LOG=trace`, the per-pass /
+# per-phase spans) stream live. See docs/profiling.md.
+tracy = ["dep:tracing-tracy"]
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [

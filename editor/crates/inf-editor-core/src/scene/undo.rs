@@ -219,6 +219,17 @@ impl EditHistory {
         !self.redo.is_empty()
     }
 
+    /// Number of undo entries currently on the stack (bounded by [`HISTORY_LIMIT`]).
+    /// Surfaced by the memory diagnostics (P15) — the "undo stack depth" budget.
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Number of redo entries currently on the stack.
+    pub fn redo_len(&self) -> usize {
+        self.redo.len()
+    }
+
     /// Label of the next undo/redo entry (for the Edit menu: "Undo Rename").
     pub fn undo_label(&self) -> Option<&str> {
         self.undo.last().map(|t| t.label.as_str())

@@ -177,12 +177,14 @@ fn import_gltf(
             }
         })
         .collect();
-    let decoded: Vec<std::result::Result<inf_material::TextureAsset, String>> =
+    let decoded: Vec<std::result::Result<inf_material::TextureAsset, String>> = {
+        let _span = tracing::info_span!("import_textures", images = g.images.len()).entered();
         inf_core::parallel_map((0..g.images.len()).collect(), |i| {
             let img = &g.images[i];
             inf_material::texture_from_rgba8(img.rgba8.clone(), img.width, img.height, settings[i])
                 .map_err(|e| e.to_string())
-        });
+        })
+    };
     for (i, tex) in decoded.into_iter().enumerate() {
         let tex = tex.map_err(AssetError::Import)?;
         let name = format!("{}_{}", file_stem(source), g.images[i].name);

@@ -65,6 +65,9 @@ impl PlayerRenderHost {
         height: u32,
     ) -> Result<Self, String> {
         let chain = SurfaceChain::new(&gpu, surface, width, height)?;
+        // Record the GPU adapter for the crash report (P15.2) as a first-class
+        // field (it also already appears in the tracing log tail).
+        crate::log::set_adapter_info(format!("{:?}", gpu.adapter.get_info()));
         let mut renderer = EngineRenderer::new(&gpu, chain.target_format());
 
         // Auto-tier (P13.4.2): probe the adapter, pick a render tier, and apply it

@@ -309,6 +309,10 @@ impl EngineRenderer {
         out_view: &wgpu::TextureView,
         out_size: (u32, u32),
     ) {
+        // Frame-budget profiling span (P15.1). Exists unconditionally via
+        // `tracing`; the Tracy layer (behind the apps' `tracy` feature) records
+        // it, and the per-pass spans in `RenderGraph::run` nest inside it.
+        let _frame_span = tracing::info_span!("render_frame", frame = self.frame_index).entered();
         let scene_size = (view.width.max(1), view.height.max(1));
         let resized = self.targets.as_ref().is_none_or(|t| t.size != scene_size);
         if resized {

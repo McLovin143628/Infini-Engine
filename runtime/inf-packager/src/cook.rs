@@ -172,8 +172,124 @@ impl CookReport {
     }
 }
 
+/// A single asset's owned cook input, read serially from the `AssetDb` then
+/// handed to the parallel cook stage (so the parallel closure owns its data and
+/// never borrows the DB).
+enum CookInput {
+    /// An unknown-kind asset that is skipped (carries its advisory message).
+    Skipped(String),
+    Asset {
+        guid: AssetId,
+        kind: AssetKind,
+        /// Authoring name (used to anchor a decode error before the graph names
+        /// itself).
+        name: String,
+        raw: Vec<u8>,
+    },
+}
+
+/// The result of cooking one asset, folded back into the pack serially in
+/// closure order.
+enum CookOutput {
+    Skipped(String),
+    Cooked {
+        guid: AssetId,
+        kind: AssetKind,
+        cooked: Vec<u8>,
+        is_level: bool,
+        is_blueprint: bool,
+        /// A derived meshlet DAG `(vmesh_id, bytes)` for a dense mesh.
+        vmesh: Option<(AssetId, Vec<u8>)>,
+    },
+}
+
+/// Cook one asset: decode/validate/re-encode + optional vmesh derivation. Pure
+/// over its input (no shared mutable state), so it runs on the job pool and its
+/// output is a deterministic function of the input bytes.
+fn cook_one(input: CookInput, opts: &CookOptions) -> Result<CookOutput> {
+    let (guid, kind, name, raw) = match input {
+        CookInput::Skipped(w) => return Ok(CookOutput::Skipped(w)),
+        CookInput::Asset {
+            guid,
+            kind,
+            name,
+            raw,
+        } => (guid, kind, name, raw),
+    };
+
+    let mut is_level = false;
+    let mut is_blueprint = false;
+    let cooked: Vec<u8> = match kind {
+        AssetKind::Level => {
+            let level =
+                inf_scene::decode(&raw).map_err(|source| CookError::Scene { guid, source })?;
+            is_level = true;
+            inf_scene::encode(&level).map_err(|source| CookError::Scene { guid, source })?
+        }
+        AssetKind::Blueprint => {
+            let mut class: BlueprintClass =
+                serde_json::from_slice(&raw).map_err(|e| CookError::Blueprint {
+                    guid,
+                    class: name.clone(),
+                    handler: "<decode>".into(),
+                    message: e.to_string(),
+                })?;
+            if let Some(issue) = validate_class(&mut class) {
+                return Err(CookError::Blueprint {
+                    guid,
+                    class: class.name,
+                    handler: issue.handler,
+                    message: issue.message,
+                });
+            }
+            is_blueprint = true;
+            raw
+        }
+        AssetKind::FunctionLib => {
+            let mut lib: BlueprintLibrary =
+                serde_json::from_slice(&raw).map_err(|e| CookError::Blueprint {
+                    guid,
+                    class: name.clone(),
+                    handler: "<decode>".into(),
+                    message: e.to_string(),
+                })?;
+            if let Some(issue) = validate_library(&mut lib) {
+                return Err(CookError::Blueprint {
+                    guid,
+                    class: lib.name,
+                    handler: issue.handler,
+                    message: issue.message,
+                });
+            }
+            is_blueprint = true;
+            raw
+        }
+        // Data assets ride through verbatim (already deterministic bincode).
+        _ => raw,
+    };
+
+    // ── derive virtualized geometry for dense meshes (for a mesh cooked == raw) ─
+    let vmesh = if kind == AssetKind::Mesh && opts.vgeom.enabled {
+        let _span = tracing::info_span!("derive_vmesh", %guid).entered();
+        derive_vmesh(guid, &cooked, opts.vgeom.min_triangles)?
+            .map(|bytes| (derived_vmesh_id(guid), bytes))
+    } else {
+        None
+    };
+
+    Ok(CookOutput::Cooked {
+        guid,
+        kind,
+        cooked,
+        is_level,
+        is_blueprint,
+        vmesh,
+    })
+}
+
 /// Cook `project_root` into `out_dir`, producing a pack + manifest.
 pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<CookReport> {
+    let _span = tracing::info_span!("cook").entered();
     let project = Project::open(project_root)?;
     let mut db = AssetDb::new(project.content_root());
     db.scan()?;
@@ -203,7 +319,48 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     // ── 3. dependency closure (BFS over forward edges) ──────────────────────
     let closure = dependency_closure(&db, &roots);
 
-    // ── 4/5. compile blueprints + rewrite levels; collect cooked payloads ───
+    // ── 4/5/6. compile blueprints + rewrite levels + derive vmesh ───────────
+    //
+    // The per-asset CPU work (scene decode/re-encode, blueprint decode+validate,
+    // meshlet-DAG derivation) is a **pure function of each asset's input bytes**,
+    // and [`PackWriter`] stores into a GUID-keyed `BTreeMap` (sorting on write),
+    // so we can fan the work across the Ring-0 job pool and then fold the results
+    // back **serially, in closure order**, and still get a byte-identical pack
+    // (the P9.2 determinism gate). We read each asset's bytes serially first (I/O
+    // bound + needs the `AssetDb`), then hand owned inputs to the parallel stage,
+    // then fold — `?`-ing on the first error in closure order preserves the
+    // fail-fast, handler-anchored first-broken-blueprint contract.
+    let inputs: Vec<CookInput> = {
+        let _span = tracing::info_span!("cook_read", assets = closure.len()).entered();
+        let mut inputs = Vec::with_capacity(closure.len());
+        for guid in &closure {
+            let entry = db.get(*guid).ok_or(CookError::UnknownRoot(*guid))?;
+            let kind = entry.kind();
+            if kind == AssetKind::Unknown {
+                inputs.push(CookInput::Skipped(format!(
+                    "skipped unknown-kind asset at {}",
+                    entry.path.display()
+                )));
+                continue;
+            }
+            let raw = std::fs::read(&entry.path)?;
+            inputs.push(CookInput::Asset {
+                guid: *guid,
+                kind,
+                name: entry.name.clone(),
+                raw,
+            });
+        }
+        inputs
+    };
+
+    // Parallel, deterministic (in-order) map: cook every asset on the job pool.
+    let outputs: Vec<Result<CookOutput>> = {
+        let _span = tracing::info_span!("cook_assets", assets = inputs.len()).entered();
+        inf_core::parallel_map(inputs, |input| cook_one(input, opts))
+    };
+
+    // Serial fold in closure order → byte-identical pack + fail-fast first error.
     let mut writer = PackWriter::new();
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
     let mut levels: Vec<AssetId> = Vec::new();
@@ -214,90 +371,39 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     // derived id never shadows a real closure asset processed later.
     let mut derived_vmeshes: Vec<(AssetId, Vec<u8>)> = Vec::new();
 
-    for guid in &closure {
-        let entry = db.get(*guid).ok_or(CookError::UnknownRoot(*guid))?.clone();
-        let kind = entry.kind();
-        if kind == AssetKind::Unknown {
-            warnings.push(format!(
-                "skipped unknown-kind asset at {}",
-                entry.path.display()
-            ));
-            continue;
-        }
-        let raw = std::fs::read(&entry.path)?;
-
-        let cooked: Vec<u8> = match kind {
-            AssetKind::Level => {
-                let level = inf_scene::decode(&raw).map_err(|source| CookError::Scene {
-                    guid: *guid,
-                    source,
-                })?;
-                levels.push(*guid);
-                levels_rewritten += 1;
-                inf_scene::encode(&level).map_err(|source| CookError::Scene {
-                    guid: *guid,
-                    source,
-                })?
-            }
-            AssetKind::Blueprint => {
-                let mut class: BlueprintClass =
-                    serde_json::from_slice(&raw).map_err(|e| CookError::Blueprint {
-                        guid: *guid,
-                        class: entry.name.clone(),
-                        handler: "<decode>".into(),
-                        message: e.to_string(),
-                    })?;
-                if let Some(issue) = validate_class(&mut class) {
-                    return Err(CookError::Blueprint {
-                        guid: *guid,
-                        class: class.name,
-                        handler: issue.handler,
-                        message: issue.message,
-                    });
+    for output in outputs {
+        match output? {
+            CookOutput::Skipped(warning) => warnings.push(warning),
+            CookOutput::Cooked {
+                guid,
+                kind,
+                cooked,
+                is_level,
+                is_blueprint,
+                vmesh,
+            } => {
+                writer.add_bytes(guid, kind, &cooked)?;
+                *kinds.entry(kind.slug().to_string()).or_default() += 1;
+                if is_level {
+                    levels.push(guid);
+                    levels_rewritten += 1;
                 }
-                blueprints_validated += 1;
-                raw
-            }
-            AssetKind::FunctionLib => {
-                let mut lib: BlueprintLibrary =
-                    serde_json::from_slice(&raw).map_err(|e| CookError::Blueprint {
-                        guid: *guid,
-                        class: entry.name.clone(),
-                        handler: "<decode>".into(),
-                        message: e.to_string(),
-                    })?;
-                if let Some(issue) = validate_library(&mut lib) {
-                    return Err(CookError::Blueprint {
-                        guid: *guid,
-                        class: lib.name,
-                        handler: issue.handler,
-                        message: issue.message,
-                    });
+                if is_blueprint {
+                    blueprints_validated += 1;
                 }
-                blueprints_validated += 1;
-                raw
-            }
-            // Data assets ride through verbatim (already deterministic bincode).
-            _ => raw,
-        };
-
-        writer.add_bytes(*guid, kind, &cooked)?;
-        *kinds.entry(kind.slug().to_string()).or_default() += 1;
-
-        // ── 6. derive virtualized geometry for dense meshes ─────────────────
-        if kind == AssetKind::Mesh && opts.vgeom.enabled {
-            // For a mesh `cooked == raw` (it rides through verbatim).
-            if let Some(vmesh_bytes) = derive_vmesh(*guid, &cooked, opts.vgeom.min_triangles)? {
-                let vmesh_id = derived_vmesh_id(*guid);
-                // Guard the (astronomically unlikely) collision with a real asset
-                // or an already-derived vmesh; skip with a warning rather than
-                // corrupt the pack.
-                if db.contains(vmesh_id) || derived_vmeshes.iter().any(|(id, _)| *id == vmesh_id) {
-                    warnings.push(format!(
-                        "skipped vmesh for mesh {guid}: derived id {vmesh_id} collides"
-                    ));
-                } else {
-                    derived_vmeshes.push((vmesh_id, vmesh_bytes));
+                if let Some((vmesh_id, vmesh_bytes)) = vmesh {
+                    // Guard the (astronomically unlikely) collision with a real
+                    // asset or an already-derived vmesh; skip with a warning
+                    // rather than corrupt the pack.
+                    if db.contains(vmesh_id)
+                        || derived_vmeshes.iter().any(|(id, _)| *id == vmesh_id)
+                    {
+                        warnings.push(format!(
+                            "skipped vmesh for mesh {guid}: derived id {vmesh_id} collides"
+                        ));
+                    } else {
+                        derived_vmeshes.push((vmesh_id, vmesh_bytes));
+                    }
                 }
             }
         }

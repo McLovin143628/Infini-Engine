@@ -17,12 +17,24 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::EnvFilter;
 
 /// How many recent log lines the crash report includes.
 pub const RING_CAP: usize = 256;
+
+/// The active GPU adapter description (`wgpu::AdapterInfo` debug), recorded at
+/// render init so a crash report can name the GPU as a first-class field. `None`
+/// on a headless/no-adapter run.
+static ADAPTER: OnceLock<String> = OnceLock::new();
+
+/// Record the active GPU adapter for the crash report (called once from render
+/// init). First call wins.
+pub fn set_adapter_info(info: String) {
+    let _ = ADAPTER.set(info);
+}
 
 #[derive(Clone)]
 struct Ring(Arc<Mutex<VecDeque<String>>>);
@@ -142,13 +154,19 @@ pub fn init(log_file: Option<PathBuf>, crash_file: PathBuf) {
         file,
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    // `try_init` is a no-op (Err) if a subscriber is already set — fine.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    // Layered registry form (equivalent to the old `fmt()` builder) so the Tracy
+    // profiler layer can be appended behind the `tracy` feature (P15.1). `try_init`
+    // is a no-op (Err) if a subscriber is already set — fine.
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
         .with_target(false)
-        .with_writer(factory)
-        .try_init();
+        .with_writer(factory);
+    let subscriber = tracing_subscriber::registry().with(filter).with(fmt_layer);
+    #[cfg(feature = "tracy")]
+    let subscriber = subscriber.with(tracing_tracy::TracyLayer::default());
+    let _ = subscriber.try_init();
 
     let cell = CRASH.get_or_init(|| {
         Mutex::new(CrashState {
@@ -176,22 +194,59 @@ fn install_panic_hook() {
                 let report = build_report(info, &state.ring.snapshot());
                 eprintln!("{report}");
                 let _ = std::fs::write(&state.crash_file, report.as_bytes());
+                // Also drop a timestamped copy into a `crashes/` dir beside the
+                // primary crash file, so repeated crashes each leave a record
+                // (P15.2). Best-effort — the primary write above is the contract.
+                write_timestamped_copy(&state.crash_file, report.as_bytes());
             }
         }
         default(info);
     }));
 }
 
-/// Format a crash report from a panic and the recent log lines.
+/// Write a timestamped duplicate of the crash report into a `crashes/` directory
+/// alongside `primary`. Best-effort (ignored on any error).
+fn write_timestamped_copy(primary: &std::path::Path, bytes: &[u8]) {
+    let dir = primary
+        .parent()
+        .map(|p| p.join("crashes"))
+        .unwrap_or_else(|| PathBuf::from("crashes"));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let _ = std::fs::write(dir.join(format!("crash-{millis}.txt")), bytes);
+}
+
+/// Format a crash report from a panic and the recent log lines. Fields are
+/// engine version, OS/arch, GPU adapter (if known), panic location + message,
+/// and a tail of recent log lines.
 fn build_report(info: &std::panic::PanicHookInfo<'_>, log_lines: &[String]) -> String {
     let msg = payload_str(info.payload());
     let loc = info
         .location()
         .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
         .unwrap_or_else(|| "<unknown>".to_string());
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
 
     let mut out = String::new();
     out.push_str("inf-player CRASH\n");
+    out.push_str(&format!("engine  : {}\n", env!("CARGO_PKG_VERSION")));
+    out.push_str(&format!(
+        "os      : {} ({})\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    if let Some(adapter) = ADAPTER.get() {
+        out.push_str(&format!("adapter : {adapter}\n"));
+    }
+    out.push_str(&format!("time    : {millis} ms since epoch\n"));
     out.push_str(&format!("message : {msg}\n"));
     out.push_str(&format!("location: {loc}\n"));
     out.push_str(&format!(

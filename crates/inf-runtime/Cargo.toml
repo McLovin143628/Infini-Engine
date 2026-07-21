@@ -21,6 +21,10 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
+# Profiling spans (P15.1): one `info`-level `sim_step` span per fixed step so a
+# Tracy capture (behind the apps' `tracy` feature) shows the sim frame budget;
+# the per-phase `trace` spans live behind the inf-ecs facade.
+tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

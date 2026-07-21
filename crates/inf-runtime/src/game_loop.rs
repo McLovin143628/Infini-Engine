@@ -57,6 +57,10 @@ impl GameLoop {
     /// Advance exactly one fixed step, regardless of the accumulator (for tests
     /// and the replay harness). Returns the new total step count.
     pub fn step_once(&mut self) -> u64 {
+        // Sim frame-budget span (P15.1); the inf-ecs per-phase `trace` spans nest
+        // inside it under a Tracy capture. Free at the default `info` filter when
+        // no subscriber records it.
+        let _span = tracing::info_span!("sim_step", step = self.steps).entered();
         self.schedule.run(&mut self.world);
         self.steps += 1;
         self.steps

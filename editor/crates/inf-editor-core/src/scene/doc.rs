@@ -1237,6 +1237,17 @@ impl SceneDoc {
         self.history.can_redo()
     }
 
+    /// Undo-stack depth (bounded by the history limit). Used by the P15 memory
+    /// diagnostics + the soak test's "memory doesn't grow unboundedly" invariant.
+    pub fn undo_len(&self) -> usize {
+        self.history.undo_len()
+    }
+
+    /// Redo-stack depth.
+    pub fn redo_len(&self) -> usize {
+        self.history.redo_len()
+    }
+
     /// Undo the most recent transaction. Returns whether anything was undone.
     pub fn undo(&mut self) -> bool {
         self.history.commit();

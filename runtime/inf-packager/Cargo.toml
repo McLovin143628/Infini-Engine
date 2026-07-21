@@ -9,6 +9,11 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# The Ring-0 compute job system (§2.5, P7.0): the cook's per-asset CPU work
+# (scene decode/re-encode, blueprint validate, vmesh DAG derivation, zstd) is
+# fanned across the rayon pool via `inf_core::parallel_map` — a DETERMINISTIC
+# in-order map, so the pack stays byte-identical (the P9.2 cook-determinism gate).
+inf-core = { workspace = true }
 inf-asset = { workspace = true }
 inf-scene = { workspace = true }
 inf-anim = { workspace = true }
