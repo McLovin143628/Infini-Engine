@@ -374,6 +374,10 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
             anim_state_machine,
             root_motion,
             attached_to,
+            joint_2d,
+            joint_3d,
+            audio_source,
+            audio_listener,
         } = e;
 
         let entity = world.spawn_with_guid(guid, &name, None);
@@ -455,6 +459,19 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
                 em.insert(c);
             }
             if let Some(c) = attached_to {
+                em.insert(c);
+            }
+            // ── v6 joints / spatial-audio components ──
+            if let Some(c) = joint_2d {
+                em.insert(c);
+            }
+            if let Some(c) = joint_3d {
+                em.insert(c);
+            }
+            if let Some(c) = audio_source {
+                em.insert(c);
+            }
+            if let Some(c) = audio_listener {
                 em.insert(c);
             }
         }
@@ -1076,6 +1093,10 @@ mod tests {
             anim_state_machine: None,
             root_motion: None,
             attached_to: None,
+            joint_2d: None,
+            joint_3d: None,
+            audio_source: None,
+            audio_listener: None,
         };
         parent.sprite = Some(Sprite {
             size: Vec2d::new(1.0, 1.0),

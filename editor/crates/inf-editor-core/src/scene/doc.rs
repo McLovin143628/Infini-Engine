@@ -852,6 +852,19 @@ impl SceneDoc {
         if let Some(c) = &rec.attached_to {
             w.entity_mut(e).insert(c.clone());
         }
+        // v6 (P12.4): a delete→undo also restores the joints/audio component set.
+        if let Some(c) = &rec.joint_2d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.joint_3d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.audio_source {
+            w.entity_mut(e).insert(c.clone());
+        }
+        if let Some(c) = &rec.audio_listener {
+            w.entity_mut(e).insert(*c);
+        }
         self.touch();
     }
 

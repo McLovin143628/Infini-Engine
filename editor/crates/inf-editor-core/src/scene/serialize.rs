@@ -14,10 +14,10 @@
 use std::path::{Path, PathBuf};
 
 use inf_ecs::components::{
-    ActorClass, AnimPlayer, AnimStateMachine, AttachedTo, Camera, CharacterController2D,
-    CharacterController3D, Collider2D, Collider3D, Light, Light2D, Material, MeshRef, NineSlice,
-    PcgVolume, RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, Sprite, Terrain, Text2D,
-    Tilemap, Transform, Visibility,
+    ActorClass, AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource, Camera,
+    CharacterController2D, CharacterController3D, Collider2D, Collider3D, Joint2D, Joint3D, Light,
+    Light2D, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D, RigidBody3D, RootMotion,
+    SkeletalMesh, Sprite, Terrain, Text2D, Tilemap, Transform, Visibility,
 };
 use inf_ecs::math::{Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
@@ -55,22 +55,19 @@ use crate::scene::SceneDoc;
 ///   they first persist. Older v1..v4 payloads load with all five slots
 ///   defaulted (see [`decode`] + [`SceneFileV4`]).
 ///
-/// # v6 persistence gap (P12.1 — joints, DEFERRED)
-///
-/// P12.1 added the `Joint2D` / `Joint3D` components ([`inf_ecs::components::Joint3D`]).
-/// They are **not** yet slots on [`EntityRecord`] — persisting them is a pure
-/// **append** (a `joint_2d` / `joint_3d` `Option<_>` slot, both `#[serde(default)]`,
-/// exactly like the v3 physics slots) that will bump this constant to **v6**. It is
-/// deliberately deferred this batch: joints round-trip through the **live** ECS and
-/// the physics bridge (so Simulate/PIE joints work in-session), but a saved
-/// `.inf_lvl` does not yet carry them. The component's own serialization is already
-/// disk-ready — including the `#[reflect(ignore)]` `other` entity ref, which serde
-/// **does** persist — and is pinned by the `joint_3d_serde_round_trip_including_entity_ref`
-/// guard test in `inf-ecs`, so the eventual v6 slot is a mechanical append with no
-/// format churn. The collision-layer / combine-rule / CCD fields added in the same
-/// batch are `#[serde(default)]` extensions of the **existing** `Collider*` /
-/// `RigidBody*` slots, so they persist today with no version bump.
-pub const SCHEMA_VERSION: u32 = 5;
+/// * v6 — P12.4: appended the four P12 **joints / spatial-audio** components —
+///   `joint_2d` / `joint_3d` ([`Joint2D`] / [`Joint3D`], the physics constraint
+///   linking two bodies; the `#[reflect(ignore)]` `other` entity ref is
+///   serde-persisted), `audio_source` ([`AudioSource`], a spatialized emitter) and
+///   `audio_listener` ([`AudioListener`], the active listener flag). All four were
+///   live-session-only through v5 (the `joint_3d_serde_round_trip_including_entity_ref`
+///   and `audio_components_serde_round_trip` guards pinned the gap); v6 is where
+///   they first persist. The collision-layer / combine-rule / CCD fields added in
+///   the same P12.1 batch are `#[serde(default)]` extensions of the **existing**
+///   `Collider*` / `RigidBody*` slots, so they persisted from v3 with no version
+///   bump. Older v1..v5 payloads load with all four slots defaulted (see [`decode`]
+///   and [`SceneFileV5`]).
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// File-level simulation settings (P9.5 · schema v3). Replaces the player's
 /// hard-coded `DEFAULT_GRAVITY`/`DEFAULT_HZ`. The serde defaults **preserve the
@@ -209,6 +206,20 @@ pub struct EntityRecord {
     /// A socket-follow attachment (rides another entity's socket).
     #[serde(default)]
     pub attached_to: Option<AttachedTo>,
+    // ── v6 (P12.4) joints / spatial-audio components ──────────────────────
+    /// A 2D physics joint (links this body to `other`'s). Its `#[reflect(ignore)]`
+    /// `other` entity ref is serde-persisted.
+    #[serde(default)]
+    pub joint_2d: Option<Joint2D>,
+    /// A 3D physics joint (links this body to `other`'s).
+    #[serde(default)]
+    pub joint_3d: Option<Joint3D>,
+    /// A spatialized sound emitter (its `clip` ref persists; playback is output-only).
+    #[serde(default)]
+    pub audio_source: Option<AudioSource>,
+    /// The active spatial-audio listener flag.
+    #[serde(default)]
+    pub audio_listener: Option<AudioListener>,
 }
 
 /// A schema-v1 [`EntityRecord`] (pre-P8.2b) — exactly the byte layout written by
@@ -499,10 +510,10 @@ pub struct EntityRecordV4 {
 }
 
 impl EntityRecordV4 {
-    /// Lift a v4 record to the current (v5) shape: the five P11 animation /
-    /// character slots default to `None`.
-    fn into_current(self) -> EntityRecord {
-        EntityRecord {
+    /// Lift a v4 record to the **v5** shape: the five P11 animation / character
+    /// slots default to `None`.
+    fn into_v5(self) -> EntityRecordV5 {
+        EntityRecordV5 {
             guid: self.guid,
             name: self.name,
             parent: self.parent,
@@ -546,7 +557,129 @@ pub struct SceneFileV4 {
 }
 
 impl SceneFileV4 {
-    /// Lift a v4 file to the current (v5) shape (settings carry through).
+    /// Lift a v4 file to the **v5** shape (settings carry through).
+    fn into_v5(self) -> SceneFileV5 {
+        SceneFileV5 {
+            schema_version: 5,
+            title: self.title,
+            entities: self
+                .entities
+                .into_iter()
+                .map(EntityRecordV4::into_v5)
+                .collect(),
+            settings: self.settings,
+        }
+    }
+}
+
+/// A schema-**v5** [`EntityRecord`] (pre-P12.4) — the exact byte layout written by
+/// P11.4..P12.3 editors (3D + 2D + physics + actor + terrain + pcg + the five
+/// anim/character slots), used only to decode legacy payloads. Frozen forever so
+/// the committed v5 fixture (and any level saved before P12.4) loads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityRecordV5 {
+    pub guid: Uuid,
+    pub name: String,
+    pub parent: Option<Uuid>,
+    pub transform: Transform,
+    pub visible: bool,
+    pub mesh: Option<MeshRef>,
+    pub material: Option<Material>,
+    pub light: Option<Light>,
+    pub camera: Option<Camera>,
+    #[serde(default)]
+    pub sprite: Option<Sprite>,
+    #[serde(default)]
+    pub tilemap: Option<Tilemap>,
+    #[serde(default)]
+    pub nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    pub text2d: Option<Text2D>,
+    #[serde(default)]
+    pub light_2d: Option<Light2D>,
+    #[serde(default)]
+    pub rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    pub collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    pub character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    pub rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    pub collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    pub character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    pub actor: Option<Uuid>,
+    #[serde(default)]
+    pub terrain: Option<Terrain>,
+    #[serde(default)]
+    pub pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    pub skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    pub anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    pub anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    pub root_motion: Option<RootMotion>,
+    #[serde(default)]
+    pub attached_to: Option<AttachedTo>,
+}
+
+impl EntityRecordV5 {
+    /// Lift a v5 record to the current (v6) shape: the four P12 joints/audio slots
+    /// default to `None`.
+    fn into_current(self) -> EntityRecord {
+        EntityRecord {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: None,
+            joint_3d: None,
+            audio_source: None,
+            audio_listener: None,
+        }
+    }
+}
+
+/// A schema-v5 [`SceneFile`] (frozen layout for legacy decode).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneFileV5 {
+    pub schema_version: u32,
+    pub title: String,
+    pub entities: Vec<EntityRecordV5>,
+    #[serde(default)]
+    pub settings: LevelSettings,
+}
+
+impl SceneFileV5 {
+    /// Lift a v5 file to the current (v6) shape (settings carry through).
     fn into_current(self) -> SceneFile {
         SceneFile {
             schema_version: SCHEMA_VERSION,
@@ -554,7 +687,7 @@ impl SceneFileV4 {
             entities: self
                 .entities
                 .into_iter()
-                .map(EntityRecordV4::into_current)
+                .map(EntityRecordV5::into_current)
                 .collect(),
             settings: self.settings,
         }
@@ -636,6 +769,10 @@ pub fn record_of(doc: &SceneDoc, guid: Uuid) -> Option<EntityRecord> {
         anim_state_machine: w.get::<AnimStateMachine>(e).copied(),
         root_motion: w.get::<RootMotion>(e).copied(),
         attached_to: w.get::<AttachedTo>(e).cloned(),
+        joint_2d: w.get::<Joint2D>(e).copied(),
+        joint_3d: w.get::<Joint3D>(e).copied(),
+        audio_source: w.get::<AudioSource>(e).cloned(),
+        audio_listener: w.get::<AudioListener>(e).copied(),
     })
 }
 
@@ -672,27 +809,33 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
             let (v1, _): (SceneFileV1, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v1: {e}"))?;
-            migrate(v1.into_v2().into_v3().into_v4().into_current())
+            migrate(v1.into_v2().into_v3().into_v4().into_v5().into_current())
         }
         2 => {
             let (v2, _): (SceneFileV2, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v2: {e}"))?;
-            migrate(v2.into_v3().into_v4().into_current())
+            migrate(v2.into_v3().into_v4().into_v5().into_current())
         }
         3 => {
             let (v3, _): (SceneFileV3, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v3: {e}"))?;
-            migrate(v3.into_v4().into_current())
+            migrate(v3.into_v4().into_v5().into_current())
         }
         4 => {
             let (v4, _): (SceneFileV4, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v4: {e}"))?;
-            migrate(v4.into_current())
+            migrate(v4.into_v5().into_current())
         }
         5 => {
+            let (v5, _): (SceneFileV5, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| format!("decode v5: {e}"))?;
+            migrate(v5.into_current())
+        }
+        6 => {
             let (file, _): (SceneFile, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode: {e}"))?;
@@ -714,7 +857,7 @@ pub fn migrate(file: SceneFile) -> Result<SceneFile, String> {
         ));
     }
     // Records are already lifted to the current shape by the versioned decode
-    // (v1→v2→v3→v4→v5); nothing more to do here. Future upgrades chain in `decode`.
+    // (v1→v2→v3→v4→v5→v6); nothing more to do here. Future upgrades chain in `decode`.
     Ok(file)
 }
 
@@ -799,6 +942,18 @@ pub fn apply_to_doc(doc: &mut SceneDoc, file: &SceneFile) {
         }
         if let Some(c) = &rec.attached_to {
             w.entity_mut(e).insert(c.clone());
+        }
+        if let Some(c) = &rec.joint_2d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.joint_3d {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.audio_source {
+            w.entity_mut(e).insert(c.clone());
+        }
+        if let Some(c) = &rec.audio_listener {
+            w.entity_mut(e).insert(*c);
         }
     }
     doc.set_title(&file.title);
@@ -1016,7 +1171,7 @@ mod tests {
 
         // save → load → save is byte-identical.
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 5, "authored payload is a genuine schema-v5 file");
+        assert_eq!(bytes1[0], 6, "authored payload is a genuine schema-v6 file");
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
         let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
@@ -1544,8 +1699,8 @@ mod tests {
         let (doc, actor_guid) = authored_v3_scene();
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
         assert_eq!(
-            bytes1[0], 5,
-            "the physics/actor content now writes as a schema-v5 file"
+            bytes1[0], 6,
+            "the physics/actor content now writes as a schema-v6 file"
         );
 
         let mut doc2 = SceneDoc::new();
@@ -1897,8 +2052,8 @@ mod tests {
 
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
         assert_eq!(
-            bytes1[0], 5,
-            "anim content writes as a genuine schema-v5 file"
+            bytes1[0], 6,
+            "anim content writes as a genuine schema-v6 file"
         );
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
@@ -2108,6 +2263,289 @@ mod tests {
             assert!(r.anim_state_machine.is_none());
             assert!(r.root_motion.is_none());
             assert!(r.attached_to.is_none());
+            // v6 joints/audio slots also defaulted on the old payload.
+            assert!(r.joint_2d.is_none());
+            assert!(r.joint_3d.is_none());
+            assert!(r.audio_source.is_none());
+            assert!(r.audio_listener.is_none());
+        }
+    }
+
+    // ── v6 (P12.4) joints / spatial-audio component persistence ────────────
+
+    use inf_ecs::components::{
+        AudioListener, AudioSource, DistanceModel, Joint2D, Joint3D, JointKind2D, JointKind3D,
+    };
+
+    /// FLIPPED (P12.4 · schema v6): a spawned `Joint2D` / `Joint3D` (including the
+    /// `#[reflect(ignore)]` `other` entity ref) + `AudioSource` (with its `clip`
+    /// ref) + `AudioListener` now **persist** across save/load and are
+    /// byte-identical on re-encode — the guards the P12.1..P12.3 batches left as
+    /// `joint_3d_serde_round_trip_including_entity_ref` + `audio_components_serde_round_trip`
+    /// (component-only, no `.inf_lvl` slot). The v6 slots close the gap.
+    #[test]
+    fn joints_and_audio_persist_across_save_load_v6() {
+        let other_guid = uuid::Uuid::from_u128(0x12_0B01);
+        let clip_guid = uuid::Uuid::from_u128(0x12_C11B);
+
+        let mut doc = SceneDoc::new();
+        // The "other" body a joint links to.
+        let g_anchor = doc.create(SpawnKind::Empty, "Anchor", None);
+        // A body with a 3D joint + a 2D joint + an audio emitter.
+        let g = doc.create(SpawnKind::Empty, "Body", None);
+        {
+            let e = doc.entity_of(g).unwrap();
+            let w = doc.world_mut().world_mut();
+            w.entity_mut(e).insert(Joint3D {
+                other: Some(other_guid),
+                kind: JointKind3D::Revolute,
+                axis: Vec3d::new(0.0, 0.0, 1.0),
+                limits_enabled: true,
+                limit_min: -1.5,
+                limit_max: 1.5,
+                motor_enabled: true,
+                motor_target_vel: 8.0,
+                ..Default::default()
+            });
+            w.entity_mut(e).insert(Joint2D {
+                other: Some(other_guid),
+                kind: JointKind2D::Distance,
+                max_distance: 1.5,
+                ..Default::default()
+            });
+            w.entity_mut(e).insert(AudioSource {
+                clip: Some(clip_guid),
+                bus: "sfx".into(),
+                volume: 0.75,
+                looping: true,
+                spatial: true,
+                distance_model: DistanceModel::Exponential,
+                rolloff: 2.0,
+                occlusion: true,
+                autoplay: true,
+                ..Default::default()
+            });
+            doc.world_mut().mark_dirty();
+        }
+        // A listener on a second entity.
+        let g_listener = doc.create(SpawnKind::Empty, "Listener", None);
+        {
+            let e = doc.entity_of(g_listener).unwrap();
+            doc.world_mut()
+                .world_mut()
+                .entity_mut(e)
+                .insert(AudioListener { active: true });
+            doc.world_mut().mark_dirty();
+        }
+        let _ = g_anchor;
+
+        let bytes1 = encode(&to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], 6, "joints/audio content writes a schema-v6 file");
+        let mut loaded = SceneDoc::new();
+        apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
+        let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "joints/audio save→load→save must be byte-identical"
+        );
+
+        // Every component survives with its values (incl. the joint entity ref).
+        let e2 = loaded.entity_of(g).expect("body persists");
+        let w = loaded.world().world();
+        let j3 = w.get::<Joint3D>(e2).expect("joint_3d persists");
+        assert_eq!(j3.other, Some(other_guid));
+        assert_eq!(j3.kind, JointKind3D::Revolute);
+        assert!(j3.motor_enabled);
+        assert_eq!(j3.motor_target_vel, 8.0);
+        let j2 = w.get::<Joint2D>(e2).expect("joint_2d persists");
+        assert_eq!(j2.other, Some(other_guid));
+        assert_eq!(j2.kind, JointKind2D::Distance);
+        let src = w.get::<AudioSource>(e2).expect("audio_source persists");
+        assert_eq!(src.clip, Some(clip_guid));
+        assert!(src.autoplay && src.looping && src.occlusion);
+        let le = loaded.entity_of(g_listener).unwrap();
+        assert!(
+            loaded
+                .world()
+                .world()
+                .get::<AudioListener>(le)
+                .expect("audio_listener persists")
+                .active
+        );
+    }
+
+    /// Delete → undo restores the P12 joints/audio component set (the v6 record
+    /// slots feed Create/Delete snapshotting through [`record_of`]).
+    #[test]
+    fn delete_undo_restores_joints_and_audio_v6() {
+        let clip = uuid::Uuid::from_u128(0x12_DEAD);
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Empty, "Body", None);
+        {
+            let e = doc.entity_of(g).unwrap();
+            let w = doc.world_mut().world_mut();
+            w.entity_mut(e).insert(Joint3D {
+                other: Some(uuid::Uuid::from_u128(0x12_A0)),
+                kind: JointKind3D::Spherical,
+                ..Default::default()
+            });
+            w.entity_mut(e).insert(AudioSource {
+                clip: Some(clip),
+                autoplay: true,
+                ..Default::default()
+            });
+            doc.world_mut().mark_dirty();
+        }
+        doc.edit_delete(&[g]);
+        assert!(doc.entity_of(g).is_none(), "deleted");
+        doc.undo();
+        let e = doc.entity_of(g).expect("entity restored by undo");
+        let w = doc.world().world();
+        assert_eq!(
+            w.get::<Joint3D>(e).expect("joint_3d restored").kind,
+            JointKind3D::Spherical
+        );
+        assert_eq!(
+            w.get::<AudioSource>(e).expect("audio_source restored").clip,
+            Some(clip)
+        );
+    }
+
+    // ── v5 forever-load fixture discipline (mirrors the v1..v4 fixtures) ────
+
+    /// Rebuild the exact schema-v5 `SceneFile` the v5 fixture was generated from,
+    /// from the frozen [`EntityRecordV5`]/[`SceneFileV5`] types (the provenance
+    /// lock). Exercises the anim/character slots v5 introduced so the frozen layout
+    /// is genuinely covered.
+    fn v5_reference() -> SceneFileV5 {
+        use inf_ecs::components::{RootMotion, SkeletalMesh};
+        let g = uuid::Uuid::from_u128;
+        SceneFileV5 {
+            schema_version: 5,
+            title: "V5 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV5 {
+                    guid: g(0x5001),
+                    name: "Ground".into(),
+                    parent: None,
+                    transform: EcsTransform::from_translation(glam::DVec3::new(0.0, -0.5, 0.0)),
+                    visible: true,
+                    mesh: None,
+                    material: None,
+                    light: None,
+                    camera: None,
+                    sprite: None,
+                    tilemap: None,
+                    nine_slice: None,
+                    text2d: None,
+                    light_2d: None,
+                    rigid_body_2d: None,
+                    collider_2d: None,
+                    character_controller_2d: None,
+                    rigid_body_3d: None,
+                    collider_3d: None,
+                    character_controller_3d: None,
+                    actor: None,
+                    terrain: None,
+                    pcg_volume: None,
+                    skeletal_mesh: None,
+                    anim_player: None,
+                    anim_state_machine: None,
+                    root_motion: None,
+                    attached_to: None,
+                },
+                EntityRecordV5 {
+                    guid: g(0x5002),
+                    name: "Character".into(),
+                    parent: None,
+                    transform: EcsTransform::from_translation(glam::DVec3::new(0.0, 0.9, 0.0)),
+                    visible: true,
+                    mesh: None,
+                    material: None,
+                    light: None,
+                    camera: None,
+                    sprite: None,
+                    tilemap: None,
+                    nine_slice: None,
+                    text2d: None,
+                    light_2d: None,
+                    rigid_body_2d: None,
+                    collider_2d: None,
+                    character_controller_2d: None,
+                    rigid_body_3d: None,
+                    collider_3d: None,
+                    character_controller_3d: None,
+                    actor: Some(g(0x5ACC)),
+                    terrain: None,
+                    pcg_volume: None,
+                    skeletal_mesh: Some(SkeletalMesh {
+                        mesh: None,
+                        skeleton: Some(g(0x5_5EE1)),
+                    }),
+                    anim_player: None,
+                    anim_state_machine: None,
+                    root_motion: Some(RootMotion::apply()),
+                    attached_to: None,
+                },
+            ],
+            settings: LevelSettings::default(),
+        }
+    }
+
+    /// Write the committed v5 fixture from [`v5_reference`] under
+    /// `INF_BLESS_FIXTURES=1` (the temporary-writer discipline).
+    #[test]
+    fn bless_v5_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").is_err() {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v5_reference(), bincode_config()).unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v5.inf_lvl");
+        std::fs::write(&path, &bytes).expect("write v5 fixture");
+        eprintln!("blessed v5 fixture: {}", path.display());
+    }
+
+    #[test]
+    fn v5_fixture_is_reproducible_and_genuinely_v5() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v5.inf_lvl");
+        if !path.exists() {
+            eprintln!("SKIP: v5 fixture not blessed yet ({})", path.display());
+            return;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes[0], 5, "fixture must be a genuine schema-v5 payload");
+        let rebuilt = bincode::serde::encode_to_vec(v5_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v5 fixture must match our frozen v5 writer"
+        );
+    }
+
+    #[test]
+    fn v5_fixture_loads_forever_and_lifts_to_v6() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v5.inf_lvl");
+        if !path.exists() {
+            eprintln!("SKIP: v5 fixture not blessed yet ({})", path.display());
+            return;
+        }
+        let file = decode(&std::fs::read(&path).unwrap()).expect("v5 fixture decodes");
+        assert_eq!(file.schema_version, SCHEMA_VERSION);
+        assert_eq!(file.title, "V5 Fixture Level");
+        assert_eq!(file.entities.len(), 2);
+        let by_name = |n: &str| file.entities.iter().find(|r| r.name == n).unwrap();
+        // v5 anim/character data preserved through the v5→v6 lift.
+        assert!(by_name("Character").skeletal_mesh.is_some());
+        assert!(by_name("Character").root_motion.is_some());
+        assert!(by_name("Character").actor.is_some());
+        // Every v6 joints/audio slot defaulted on the old payload.
+        for r in &file.entities {
+            assert!(r.joint_2d.is_none());
+            assert!(r.joint_3d.is_none());
+            assert!(r.audio_source.is_none());
+            assert!(r.audio_listener.is_none());
         }
     }
 }

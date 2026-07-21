@@ -35,21 +35,26 @@
 //!   `skeletal_mesh` / `anim_player` / `anim_state_machine` / `root_motion` /
 //!   `attached_to`. `AnimStateMachine`'s transient `runtime` is `#[serde(skip)]`,
 //!   so the machine persists without its play state (rebuilt on load), like a
-//!   `PcgVolume`'s `evaluated` cache. [`encode`] always writes the current
-//!   schema, so cooking an older level **rewrites it to v5** (the "rewrite the
-//!   level payload for runtime" step).
+//!   `PcgVolume`'s `evaluated` cache.
+//! * **v6** — appends the four P12 joints / spatial-audio components: `joint_2d` /
+//!   `joint_3d` (the physics constraint linking two bodies; the `#[reflect(ignore)]`
+//!   `other` entity ref is serde-persisted), `audio_source` (a spatialized emitter,
+//!   its `clip` ref persisted) and `audio_listener` (the active-listener flag).
+//!   [`encode`] always writes the current schema, so cooking an older level
+//!   **rewrites it to v6** (the "rewrite the level payload for runtime" step).
 
 use inf_ecs::components::{
-    AnimPlayer, AnimStateMachine, AttachedTo, Camera, CharacterController2D, CharacterController3D,
-    Collider2D, Collider3D, Light, Light2D, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D,
-    RigidBody3D, RootMotion, SkeletalMesh, Sprite, Terrain, Text2D, Tilemap, Transform,
+    AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource, Camera,
+    CharacterController2D, CharacterController3D, Collider2D, Collider3D, Joint2D, Joint3D, Light,
+    Light2D, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D, RigidBody3D, RootMotion,
+    SkeletalMesh, Sprite, Terrain, Text2D, Tilemap, Transform,
 };
 use inf_ecs::math::{Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// The current on-disk `.inf_lvl` schema (matches the editor's `SCHEMA_VERSION`).
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// File-level simulation settings (schema v3), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -101,7 +106,7 @@ pub type Result<T> = std::result::Result<T, SceneError>;
 
 /// One entity's persisted state — the runtime record.
 ///
-/// This is the **current (schema-v4)** wire layout: field order and the
+/// This is the **current (schema-v6)** wire layout: field order and the
 /// `#[serde(default)]` markers mirror the editor's `EntityRecord` byte-for-byte so
 /// the same bincode payload decodes here. Component slots are `Option`s (a slot is
 /// `Some` when the entity carries that component).
@@ -178,6 +183,21 @@ pub struct RuntimeEntity {
     /// A socket-follow attachment (rides another entity's socket).
     #[serde(default)]
     pub attached_to: Option<AttachedTo>,
+    // ── v6 (P12.4) joints / spatial-audio components ──────────────────────
+    /// A 2D physics joint (links this body to `other`'s; the physics bridge
+    /// reconciles it from the ECS components each step).
+    #[serde(default)]
+    pub joint_2d: Option<Joint2D>,
+    /// A 3D physics joint.
+    #[serde(default)]
+    pub joint_3d: Option<Joint3D>,
+    /// A spatialized sound emitter (its `clip` ref persists; the sim emits audio
+    /// commands from it — the cook ships the referenced `.inf_audio`).
+    #[serde(default)]
+    pub audio_source: Option<AudioSource>,
+    /// The active spatial-audio listener flag.
+    #[serde(default)]
+    pub audio_listener: Option<AudioListener>,
 }
 
 /// A decoded level ready for the runtime to instantiate.
@@ -197,7 +217,7 @@ impl RuntimeLevel {
         decode(bytes)
     }
 
-    /// Encode to the **current** schema (v4) — a deterministic bincode payload.
+    /// Encode to the **current** schema (v6) — a deterministic bincode payload.
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode(self)
     }
@@ -234,12 +254,78 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v5 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v6 file layout (current). `entities` reuses [`RuntimeEntity`].
 #[derive(Serialize, Deserialize)]
-struct SceneFileV5 {
+struct SceneFileV6 {
     schema_version: u32,
     title: String,
     entities: Vec<RuntimeEntity>,
+    #[serde(default)]
+    settings: RuntimeSettings,
+}
+
+/// A frozen schema-v5 entity record (pre-P12.4: 3D + 2D + physics + actor +
+/// terrain + pcg + the five anim/character slots, no joints/audio). The FIELD SET
+/// never changes; same pre-1.0 embed-live-components caveat (and bless-path
+/// `Serialize`) as [`EntityRecordV4`].
+#[derive(Serialize, Deserialize)]
+struct EntityRecordV5 {
+    guid: Uuid,
+    name: String,
+    parent: Option<Uuid>,
+    transform: Transform,
+    visible: bool,
+    mesh: Option<MeshRef>,
+    material: Option<Material>,
+    light: Option<Light>,
+    camera: Option<Camera>,
+    #[serde(default)]
+    sprite: Option<Sprite>,
+    #[serde(default)]
+    tilemap: Option<Tilemap>,
+    #[serde(default)]
+    nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    text2d: Option<Text2D>,
+    #[serde(default)]
+    light_2d: Option<Light2D>,
+    #[serde(default)]
+    rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    actor: Option<Uuid>,
+    #[serde(default)]
+    terrain: Option<Terrain>,
+    #[serde(default)]
+    pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    root_motion: Option<RootMotion>,
+    #[serde(default)]
+    attached_to: Option<AttachedTo>,
+}
+
+/// A frozen schema-v5 file layout (carries the v3 file-level settings record).
+#[derive(Serialize, Deserialize)]
+struct SceneFileV5 {
+    #[allow(dead_code)]
+    schema_version: u32,
+    title: String,
+    entities: Vec<EntityRecordV5>,
     #[serde(default)]
     settings: RuntimeSettings,
 }
@@ -442,6 +528,10 @@ impl EntityRecordV1 {
             anim_state_machine: None,
             root_motion: None,
             attached_to: None,
+            joint_2d: None,
+            joint_3d: None,
+            audio_source: None,
+            audio_listener: None,
         }
     }
 }
@@ -477,6 +567,10 @@ impl EntityRecordV2 {
             anim_state_machine: None,
             root_motion: None,
             attached_to: None,
+            joint_2d: None,
+            joint_3d: None,
+            audio_source: None,
+            audio_listener: None,
         }
     }
 }
@@ -512,6 +606,10 @@ impl EntityRecordV3 {
             anim_state_machine: None,
             root_motion: None,
             attached_to: None,
+            joint_2d: None,
+            joint_3d: None,
+            audio_source: None,
+            audio_listener: None,
         }
     }
 }
@@ -547,6 +645,49 @@ impl EntityRecordV4 {
             anim_state_machine: None,
             root_motion: None,
             attached_to: None,
+            joint_2d: None,
+            joint_3d: None,
+            audio_source: None,
+            audio_listener: None,
+        }
+    }
+}
+
+impl EntityRecordV5 {
+    fn into_runtime(self) -> RuntimeEntity {
+        RuntimeEntity {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: None,
+            joint_3d: None,
+            audio_source: None,
+            audio_listener: None,
         }
     }
 }
@@ -618,8 +759,22 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v5: {e}")))?;
             Ok(RuntimeLevel {
                 title: v5.title,
-                entities: v5.entities,
+                entities: v5
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV5::into_runtime)
+                    .collect(),
                 settings: v5.settings,
+            })
+        }
+        6 => {
+            let (v6, _): (SceneFileV6, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v6: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v6.title,
+                entities: v6.entities,
+                settings: v6.settings,
             })
         }
         found => Err(SceneError::SchemaTooNew {
@@ -629,9 +784,9 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     }
 }
 
-/// Encode a level to the current schema (v5) as a deterministic bincode payload.
+/// Encode a level to the current schema (v6) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV5 {
+    let file = SceneFileV6 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -716,14 +871,14 @@ mod tests {
 
     #[test]
     fn current_decode_encode_is_byte_identical_for_committed_bytes() {
-        // The committed platformer is now a schema-v5 level; decode/encode is a
+        // The committed platformer is now a schema-v6 level; decode/encode is a
         // lossless identity on current-schema content (so the cook's runtime
         // rewrite of an already-current level is a no-op, and deterministic).
         let original = read_committed("samples/platformer-2d/Platformer.inf_lvl");
-        assert_eq!(original[0], 5, "committed platformer is schema v5");
+        assert_eq!(original[0], 6, "committed platformer is schema v6");
         let level = RuntimeLevel::decode(&original).unwrap();
         let reencoded = level.encode().unwrap();
-        assert_eq!(original, reencoded, "v5 round trip must be byte-identical");
+        assert_eq!(original, reencoded, "v6 round trip must be byte-identical");
     }
 
     /// Re-bless the v3/v4 platformer fixtures after a (pre-1.0-sanctioned)
@@ -811,6 +966,84 @@ mod tests {
         let bytes = bincode::serde::encode_to_vec(&v3, bincode_config()).unwrap();
         assert_eq!(bytes[0], 3);
         std::fs::write(fixtures.join("platformer_v3.inf_lvl"), &bytes).unwrap();
+
+        // v5: strip only the v6 joints/audio slots (the platformer carries none,
+        // so this is a lossless downgrade of the committed sample).
+        let v5 = SceneFileV5 {
+            schema_version: 5,
+            title: level.title.clone(),
+            entities: level
+                .entities
+                .iter()
+                .map(|e| EntityRecordV5 {
+                    guid: e.guid,
+                    name: e.name.clone(),
+                    parent: e.parent,
+                    transform: e.transform,
+                    visible: e.visible,
+                    mesh: e.mesh,
+                    material: e.material,
+                    light: e.light,
+                    camera: e.camera,
+                    sprite: e.sprite.clone(),
+                    tilemap: e.tilemap.clone(),
+                    nine_slice: e.nine_slice.clone(),
+                    text2d: e.text2d.clone(),
+                    light_2d: e.light_2d,
+                    rigid_body_2d: e.rigid_body_2d,
+                    collider_2d: e.collider_2d,
+                    character_controller_2d: e.character_controller_2d,
+                    rigid_body_3d: e.rigid_body_3d,
+                    collider_3d: e.collider_3d,
+                    character_controller_3d: e.character_controller_3d,
+                    actor: e.actor,
+                    terrain: e.terrain.clone(),
+                    pcg_volume: e.pcg_volume.clone(),
+                    skeletal_mesh: e.skeletal_mesh,
+                    anim_player: e.anim_player,
+                    anim_state_machine: e.anim_state_machine,
+                    root_motion: e.root_motion,
+                    attached_to: e.attached_to.clone(),
+                })
+                .collect(),
+            settings: level.settings,
+        };
+        let bytes = bincode::serde::encode_to_vec(&v5, bincode_config()).unwrap();
+        assert_eq!(bytes[0], 5);
+        std::fs::write(fixtures.join("platformer_v5.inf_lvl"), &bytes).unwrap();
+    }
+
+    /// The frozen pre-P12.4 (schema v5) platformer, load-tested forever so v5
+    /// decode stays covered even though the committed sample is now v6.
+    #[test]
+    fn v5_platformer_fixture_loads_forever_and_lifts() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/platformer_v5.inf_lvl");
+        if !path.exists() {
+            eprintln!(
+                "SKIP: v5 platformer fixture not blessed yet ({})",
+                path.display()
+            );
+            return;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes[0], 5, "fixture is a genuine schema-v5 payload");
+        let level = RuntimeLevel::decode(&bytes).expect("v5 fixture decodes");
+        assert_eq!(level.title, "Platformer 2D");
+        assert_eq!(level.len(), 5);
+        assert!(level.entities.iter().any(|e| e.rigid_body_2d.is_some()));
+        assert!(level.entities.iter().any(|e| e.actor.is_some()));
+        // v5 had no joints/audio slots → all defaulted.
+        for e in &level.entities {
+            assert!(e.joint_2d.is_none());
+            assert!(e.joint_3d.is_none());
+            assert!(e.audio_source.is_none());
+            assert!(e.audio_listener.is_none());
+        }
+        // Rewriting a v5 level upgrades it to v6 (the cook's runtime rewrite).
+        let out = level.encode().unwrap();
+        assert_eq!(out[0], SCHEMA_VERSION as u8);
+        assert_eq!(RuntimeLevel::decode(&out).unwrap(), level);
     }
 
     /// The frozen pre-P11.4 (schema v4) platformer, load-tested forever so v4

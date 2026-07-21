@@ -1559,6 +1559,776 @@ height), jumps (Y rises then returns), and its state machine transitions\n\
 idle→run→jump. PIE == shipping (identical trace/probes on both paths).\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// ── Physics-playground gate scene (P12.4) ────────────────────────────────────
+//
+// The Phase-12-closing gate scene: a committed 3D physics playground composing
+// every P12 feature at once — box stacks, a motorized revolute spinner, a
+// distance-rope pendulum, a prismatic slider, a CCD bullet vs a thin wall, a
+// collision-layer ghost pair, a sensor plate, and a small **ragdoll**
+// (`inf_physics::ragdoll::build_ragdoll` output, its descs mapped to `Joint3D`
+// components) — plus TWO spatial `AudioSource`s (one autoplay-looping on the
+// spinner with occlusion, one on the sensor plate) and an `AudioListener` on a
+// camera. All persisted as schema-v6 `.inf_lvl` bytes under
+// `samples/physics-playground/`, with the two `.inf_audio` clips beside it.
+//
+// The in-code determinism guarantee is `inf-physics`'s
+// `playground_determinism.rs`; this is the same composition as **committed
+// content**, run through the cook/PIE pipeline by the runtime gate
+// (`runtime/inf-player/tests/physics_demo.rs`): 300 fixed steps twice yields a
+// byte-identical pose trace + identical audio command stream, PIE == shipping.
+//
+// Joints/audio persist because P12.4 bumped the `.inf_lvl` schema to v6 (the
+// `joint_2d`/`joint_3d`/`audio_source`/`audio_listener` slots); the physics bridge
+// reconciles the joints from the ECS components each step, so authoring
+// `RigidBody3D` + `Collider3D` + `Joint3D` is sufficient to simulate them.
+
+pub const PLAYGROUND_LEVEL_GUID: Uuid = Uuid::from_u128(0x8405_0000);
+pub const PLAYGROUND_GROUND_GUID: Uuid = Uuid::from_u128(0x8405_0001);
+pub const PLAYGROUND_SPINNER_HUB_GUID: Uuid = Uuid::from_u128(0x8405_0020);
+pub const PLAYGROUND_SPINNER_WHEEL_GUID: Uuid = Uuid::from_u128(0x8405_0021);
+pub const PLAYGROUND_PENDULUM_ANCHOR_GUID: Uuid = Uuid::from_u128(0x8405_0030);
+pub const PLAYGROUND_PENDULUM_BOB_GUID: Uuid = Uuid::from_u128(0x8405_0031);
+pub const PLAYGROUND_SLIDER_RAIL_GUID: Uuid = Uuid::from_u128(0x8405_0040);
+pub const PLAYGROUND_SLIDER_GUID: Uuid = Uuid::from_u128(0x8405_0041);
+pub const PLAYGROUND_BULLET_WALL_GUID: Uuid = Uuid::from_u128(0x8405_0050);
+pub const PLAYGROUND_BULLET_GUID: Uuid = Uuid::from_u128(0x8405_0051);
+pub const PLAYGROUND_GHOST_A_GUID: Uuid = Uuid::from_u128(0x8405_0060);
+pub const PLAYGROUND_GHOST_B_GUID: Uuid = Uuid::from_u128(0x8405_0061);
+pub const PLAYGROUND_SENSOR_GUID: Uuid = Uuid::from_u128(0x8405_0070);
+pub const PLAYGROUND_SENSOR_PROBE_GUID: Uuid = Uuid::from_u128(0x8405_0071);
+pub const PLAYGROUND_CAMERA_GUID: Uuid = Uuid::from_u128(0x8405_0090);
+/// First box of the stack (subsequent boxes are `+ i`).
+pub const PLAYGROUND_STACK_BASE_GUID: u128 = 0x8405_0010;
+/// First ragdoll part (subsequent parts are `+ i`, in `build_ragdoll` order).
+pub const PLAYGROUND_RAGDOLL_BASE_GUID: u128 = 0x8405_0080;
+/// The two committed `.inf_audio` clip asset GUIDs (stable so the AudioSource
+/// `clip` refs resolve through the AssetDb / cooked pack, and the cook's
+/// level→audio dep edge ships them).
+pub const PLAYGROUND_SPINNER_CLIP_GUID: Uuid = Uuid::from_u128(0x8405_00A0);
+pub const PLAYGROUND_SENSOR_CLIP_GUID: Uuid = Uuid::from_u128(0x8405_00A1);
+
+/// The number of dynamic boxes in the settling stack.
+pub const PLAYGROUND_STACK_COUNT: usize = 5;
+
+/// Map a ragdoll [`inf_physics::d3::JointDesc3D`] onto a persisted [`Joint3D`]
+/// component (the "descs mapped to components" step). The other body is `other`.
+fn joint3d_from_ragdoll(
+    other: Uuid,
+    desc: inf_physics::d3::JointDesc3D,
+) -> inf_ecs::components::Joint3D {
+    use inf_ecs::components::{Joint3D, JointKind3D as EK};
+    use inf_physics::d3::JointKind3D as PK;
+    let mut j = Joint3D {
+        other: Some(other),
+        local_anchor: desc.local_anchor1.into(),
+        other_anchor: desc.local_anchor2.into(),
+        ..Default::default()
+    };
+    match desc.kind {
+        PK::Fixed => j.kind = EK::Fixed,
+        PK::Spherical => j.kind = EK::Spherical,
+        PK::Distance { max_distance } => {
+            j.kind = EK::Distance;
+            j.max_distance = max_distance;
+        }
+        PK::Revolute {
+            axis,
+            limits,
+            motor,
+        } => {
+            j.kind = EK::Revolute;
+            j.axis = axis.into();
+            if let Some([lo, hi]) = limits {
+                j.limits_enabled = true;
+                j.limit_min = lo;
+                j.limit_max = hi;
+            }
+            if let Some(m) = motor {
+                j.motor_enabled = true;
+                j.motor_target_pos = m.target_pos;
+                j.motor_target_vel = m.target_vel;
+                j.motor_stiffness = m.stiffness;
+                j.motor_damping = m.damping;
+                j.motor_max_force = m.max_force;
+            }
+        }
+        PK::Prismatic {
+            axis,
+            limits,
+            motor,
+        } => {
+            j.kind = EK::Prismatic;
+            j.axis = axis.into();
+            if let Some([lo, hi]) = limits {
+                j.limits_enabled = true;
+                j.limit_min = lo;
+                j.limit_max = hi;
+            }
+            if let Some(m) = motor {
+                j.motor_enabled = true;
+                j.motor_target_pos = m.target_pos;
+                j.motor_target_vel = m.target_vel;
+                j.motor_stiffness = m.stiffness;
+                j.motor_damping = m.damping;
+                j.motor_max_force = m.max_force;
+            }
+        }
+    }
+    j
+}
+
+/// The small humanoid skeleton fed to [`build_ragdoll`] (world-space bone
+/// endpoints of a figure standing at world x = 30). Names classify to Hips /
+/// Spine / Chest / Head / UpperArm{L,R} / Thigh{L,R} → 8 bodies + 7 joints.
+pub fn playground_ragdoll_skeleton() -> Vec<inf_physics::ragdoll::RagdollBone> {
+    use inf_physics::ragdoll::RagdollBone;
+    let x = 30.0;
+    vec![
+        RagdollBone::new("hips", DVec3::new(x, 2.0, 0.0), DVec3::new(x, 2.3, 0.0)),
+        RagdollBone::new("spine", DVec3::new(x, 2.3, 0.0), DVec3::new(x, 2.7, 0.0)),
+        RagdollBone::new("chest", DVec3::new(x, 2.7, 0.0), DVec3::new(x, 3.1, 0.0)),
+        RagdollBone::new("head", DVec3::new(x, 3.1, 0.0), DVec3::new(x, 3.5, 0.0)),
+        RagdollBone::new(
+            "upperarm_l",
+            DVec3::new(x - 0.1, 3.0, 0.0),
+            DVec3::new(x - 0.6, 3.0, 0.0),
+        ),
+        RagdollBone::new(
+            "upperarm_r",
+            DVec3::new(x + 0.1, 3.0, 0.0),
+            DVec3::new(x + 0.6, 3.0, 0.0),
+        ),
+        RagdollBone::new(
+            "thigh_l",
+            DVec3::new(x - 0.15, 2.0, 0.0),
+            DVec3::new(x - 0.15, 1.3, 0.0),
+        ),
+        RagdollBone::new(
+            "thigh_r",
+            DVec3::new(x + 0.15, 2.0, 0.0),
+            DVec3::new(x + 0.15, 1.3, 0.0),
+        ),
+    ]
+}
+
+/// Build the physics-playground [`SceneDoc`]. See the module note for the layout.
+pub fn physics_playground_scene() -> SceneDoc {
+    use inf_ecs::components::{
+        AudioListener, AudioSource, BodyKind3D, Camera, Collider3D, ColliderShape3DKind,
+        DistanceModel, Joint3D, JointKind3D, Light, LightKind, RigidBody3D,
+    };
+    use inf_ecs::math::Vec3d;
+    use inf_physics::ragdoll::{build_ragdoll, RagdollConfig};
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Physics Playground");
+
+    // Helpers to cut the boilerplate.
+    let static_body = || RigidBody3D {
+        kind: BodyKind3D::Static,
+        ..Default::default()
+    };
+    let box_collider = |half: Vec3d| Collider3D {
+        shape_kind: ColliderShape3DKind::Box,
+        half_extents: half,
+        ..Default::default()
+    };
+
+    // ── Ground slab (static box; top at y = 0). ──
+    doc.create_with_guid(PLAYGROUND_GROUND_GUID, SpawnKind::Empty, "Ground", None);
+    insert!(
+        doc,
+        PLAYGROUND_GROUND_GUID,
+        Transform::from_translation(DVec3::new(0.0, -0.5, 0.0))
+    );
+    insert!(doc, PLAYGROUND_GROUND_GUID, static_body());
+    insert!(
+        doc,
+        PLAYGROUND_GROUND_GUID,
+        box_collider(Vec3d::new(48.0, 0.5, 48.0))
+    );
+
+    // ── A settling box stack (5 dynamic boxes at x = 0). ──
+    for i in 0..PLAYGROUND_STACK_COUNT {
+        let guid = Uuid::from_u128(PLAYGROUND_STACK_BASE_GUID + i as u128);
+        doc.create_with_guid(guid, SpawnKind::Empty, &format!("Box {i}"), None);
+        insert!(
+            doc,
+            guid,
+            Transform::from_translation(DVec3::new(0.0, 0.5 + i as f64 * 1.02, 0.0))
+        );
+        insert!(
+            doc,
+            guid,
+            RigidBody3D {
+                kind: BodyKind3D::Dynamic,
+                ..Default::default()
+            }
+        );
+        insert!(
+            doc,
+            guid,
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Box,
+                half_extents: Vec3d::splat(0.5),
+                friction: 0.7,
+                ..Default::default()
+            }
+        );
+    }
+
+    // ── A motorized revolute spinner (hub static, wheel dynamic, at x = 8). The
+    //    wheel also carries the autoplay-looping, occluded spatial AudioSource. ──
+    doc.create_with_guid(
+        PLAYGROUND_SPINNER_HUB_GUID,
+        SpawnKind::Empty,
+        "Spinner Hub",
+        None,
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SPINNER_HUB_GUID,
+        Transform::from_translation(DVec3::new(8.0, 4.0, 0.0))
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SPINNER_HUB_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        }
+    );
+    doc.create_with_guid(
+        PLAYGROUND_SPINNER_WHEEL_GUID,
+        SpawnKind::Empty,
+        "Spinner Wheel",
+        None,
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SPINNER_WHEEL_GUID,
+        Transform::from_translation(DVec3::new(8.0, 4.0, 0.0))
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SPINNER_WHEEL_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SPINNER_WHEEL_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::splat(0.4),
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SPINNER_WHEEL_GUID,
+        Joint3D {
+            other: Some(PLAYGROUND_SPINNER_HUB_GUID),
+            kind: JointKind3D::Revolute,
+            axis: Vec3d::new(0.0, 0.0, 1.0),
+            motor_enabled: true,
+            motor_target_vel: 8.0,
+            motor_damping: 1.0,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SPINNER_WHEEL_GUID,
+        AudioSource {
+            clip: Some(PLAYGROUND_SPINNER_CLIP_GUID),
+            bus: "sfx".to_string(),
+            volume: 0.8,
+            pitch: 1.0,
+            looping: true,
+            spatial: true,
+            min_distance: 2.0,
+            max_distance: 40.0,
+            distance_model: DistanceModel::Inverse,
+            rolloff: 1.0,
+            occlusion: true,
+            autoplay: true,
+        }
+    );
+
+    // ── A distance-rope pendulum (anchor static, bob dynamic, at x = -8). ──
+    doc.create_with_guid(
+        PLAYGROUND_PENDULUM_ANCHOR_GUID,
+        SpawnKind::Empty,
+        "Rope Anchor",
+        None,
+    );
+    insert!(
+        doc,
+        PLAYGROUND_PENDULUM_ANCHOR_GUID,
+        Transform::from_translation(DVec3::new(-8.0, 6.0, 0.0))
+    );
+    insert!(
+        doc,
+        PLAYGROUND_PENDULUM_ANCHOR_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        }
+    );
+    doc.create_with_guid(
+        PLAYGROUND_PENDULUM_BOB_GUID,
+        SpawnKind::Empty,
+        "Rope Bob",
+        None,
+    );
+    insert!(
+        doc,
+        PLAYGROUND_PENDULUM_BOB_GUID,
+        // Offset horizontally so the taut rope swings (a real pendulum).
+        Transform::from_translation(DVec3::new(-7.0, 4.8, 0.0))
+    );
+    insert!(
+        doc,
+        PLAYGROUND_PENDULUM_BOB_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PLAYGROUND_PENDULUM_BOB_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Sphere,
+            radius: 0.3,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PLAYGROUND_PENDULUM_BOB_GUID,
+        Joint3D {
+            other: Some(PLAYGROUND_PENDULUM_ANCHOR_GUID),
+            kind: JointKind3D::Distance,
+            max_distance: 1.5,
+            ..Default::default()
+        }
+    );
+
+    // ── A prismatic slider under gravity with limits (at x = 12). ──
+    doc.create_with_guid(
+        PLAYGROUND_SLIDER_RAIL_GUID,
+        SpawnKind::Empty,
+        "Slider Rail",
+        None,
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SLIDER_RAIL_GUID,
+        Transform::from_translation(DVec3::new(12.0, 6.0, 0.0))
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SLIDER_RAIL_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        }
+    );
+    doc.create_with_guid(PLAYGROUND_SLIDER_GUID, SpawnKind::Empty, "Slider", None);
+    insert!(
+        doc,
+        PLAYGROUND_SLIDER_GUID,
+        Transform::from_translation(DVec3::new(12.0, 6.0, 0.0))
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SLIDER_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SLIDER_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Sphere,
+            radius: 0.3,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SLIDER_GUID,
+        Joint3D {
+            other: Some(PLAYGROUND_SLIDER_RAIL_GUID),
+            kind: JointKind3D::Prismatic,
+            axis: Vec3d::new(0.0, 1.0, 0.0),
+            limits_enabled: true,
+            limit_min: -2.0,
+            limit_max: 0.0,
+            ..Default::default()
+        }
+    );
+
+    // ── A CCD bullet aimed (by fast gravity) at a thin horizontal wall (x = 24).
+    //    Without CCD the fast body tunnels the 0.04-thick plate; with it, it stops. ──
+    doc.create_with_guid(
+        PLAYGROUND_BULLET_WALL_GUID,
+        SpawnKind::Empty,
+        "Thin Wall",
+        None,
+    );
+    insert!(
+        doc,
+        PLAYGROUND_BULLET_WALL_GUID,
+        Transform::from_translation(DVec3::new(24.0, 5.0, 0.0))
+    );
+    insert!(
+        doc,
+        PLAYGROUND_BULLET_WALL_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PLAYGROUND_BULLET_WALL_GUID,
+        box_collider(Vec3d::new(2.0, 0.02, 2.0))
+    );
+    doc.create_with_guid(PLAYGROUND_BULLET_GUID, SpawnKind::Empty, "CCD Bullet", None);
+    insert!(
+        doc,
+        PLAYGROUND_BULLET_GUID,
+        Transform::from_translation(DVec3::new(24.0, 22.0, 0.0))
+    );
+    insert!(
+        doc,
+        PLAYGROUND_BULLET_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            // A heavy gravity scale accelerates it to a tunnelling speed fast.
+            gravity_scale: 12.0,
+            ccd_enabled: true,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PLAYGROUND_BULLET_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Sphere,
+            radius: 0.15,
+            ..Default::default()
+        }
+    );
+
+    // ── A collision-layer ghost PAIR: two dynamic spheres at the SAME point, each
+    //    with an empty collision filter (interact with nothing) → they free-fall in
+    //    lockstep, perfectly co-located, interpenetrating unimpeded (the layer
+    //    proof: were the filters non-empty the contact solver would shove them
+    //    apart, and the floor would stop them). ──
+    for (guid, name) in [
+        (PLAYGROUND_GHOST_A_GUID, "Ghost A"),
+        (PLAYGROUND_GHOST_B_GUID, "Ghost B"),
+    ] {
+        doc.create_with_guid(guid, SpawnKind::Empty, name, None);
+        insert!(
+            doc,
+            guid,
+            Transform::from_translation(DVec3::new(-16.0, 8.0, 0.0))
+        );
+        insert!(
+            doc,
+            guid,
+            RigidBody3D {
+                kind: BodyKind3D::Dynamic,
+                ..Default::default()
+            }
+        );
+        insert!(
+            doc,
+            guid,
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Sphere,
+                radius: 0.4,
+                // Membership present but an EMPTY filter → collides with nothing.
+                collision_memberships: 0b10,
+                collision_filter: 0,
+                ..Default::default()
+            }
+        );
+    }
+
+    // ── A sensor plate (static trigger volume, x = 16) with the second AudioSource,
+    //    plus a probe ball that falls THROUGH it (a sensor generates no force) and
+    //    lands on the ground — proving the plate is non-blocking. ──
+    doc.create_with_guid(
+        PLAYGROUND_SENSOR_GUID,
+        SpawnKind::Empty,
+        "Sensor Plate",
+        None,
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SENSOR_GUID,
+        Transform::from_translation(DVec3::new(16.0, 1.0, 0.0))
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SENSOR_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SENSOR_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(1.5, 0.5, 1.5),
+            sensor: true,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SENSOR_GUID,
+        AudioSource {
+            clip: Some(PLAYGROUND_SENSOR_CLIP_GUID),
+            bus: "sfx".to_string(),
+            volume: 0.6,
+            pitch: 1.0,
+            looping: false,
+            spatial: true,
+            min_distance: 1.0,
+            max_distance: 30.0,
+            distance_model: DistanceModel::Inverse,
+            rolloff: 1.0,
+            occlusion: false,
+            autoplay: true,
+        }
+    );
+    doc.create_with_guid(
+        PLAYGROUND_SENSOR_PROBE_GUID,
+        SpawnKind::Empty,
+        "Sensor Probe",
+        None,
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SENSOR_PROBE_GUID,
+        Transform::from_translation(DVec3::new(16.0, 5.0, 0.0))
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SENSOR_PROBE_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PLAYGROUND_SENSOR_PROBE_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Sphere,
+            radius: 0.25,
+            ..Default::default()
+        }
+    );
+
+    // ── A small ragdoll from `build_ragdoll` (its descs mapped to components). ──
+    let parts = build_ragdoll(&playground_ragdoll_skeleton(), RagdollConfig::default());
+    // Stable per-part GUIDs (index order == build_ragdoll's parents-first order).
+    let part_guid = |i: usize| Uuid::from_u128(PLAYGROUND_RAGDOLL_BASE_GUID + i as u128);
+    for (i, part) in parts.iter().enumerate() {
+        let guid = part_guid(i);
+        doc.create_with_guid(
+            guid,
+            SpawnKind::Empty,
+            &format!("Ragdoll {}", part.name),
+            None,
+        );
+        let mut t = Transform::from_translation(part.position);
+        t.set_quat(part.rotation);
+        insert!(doc, guid, t);
+        insert!(
+            doc,
+            guid,
+            RigidBody3D {
+                kind: BodyKind3D::Dynamic,
+                ..Default::default()
+            }
+        );
+        // The capsule spanning the bone (build_ragdoll always emits a Capsule).
+        if let inf_physics::ColliderShape3D::Capsule {
+            half_height,
+            radius,
+        } = part.collider.shape
+        {
+            insert!(
+                doc,
+                guid,
+                Collider3D {
+                    shape_kind: ColliderShape3DKind::Capsule,
+                    half_extents: Vec3d::new(radius, half_height, radius),
+                    radius,
+                    density: part.collider.density,
+                    friction: part.collider.friction,
+                    ..Default::default()
+                }
+            );
+        }
+        // The joint to the parent part (root has none).
+        if let Some(rj) = &part.joint {
+            let other = part_guid(rj.parent);
+            insert!(doc, guid, joint3d_from_ragdoll(other, rj.desc));
+        }
+    }
+
+    // ── A camera carrying the active AudioListener (the sim reads its pose). ──
+    doc.create_with_guid(PLAYGROUND_CAMERA_GUID, SpawnKind::Empty, "Camera", None);
+    insert!(
+        doc,
+        PLAYGROUND_CAMERA_GUID,
+        Transform::from_translation(DVec3::new(0.0, 6.0, -15.0))
+    );
+    insert!(doc, PLAYGROUND_CAMERA_GUID, Camera::default());
+    insert!(doc, PLAYGROUND_CAMERA_GUID, AudioListener { active: true });
+
+    // A directional sun so the playground reads (rendering is human-verified).
+    let sun = Uuid::from_u128(0x8405_0002);
+    doc.create_with_guid(sun, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        sun,
+        Transform {
+            translation: Vec3d::new(0.0, 30.0, 0.0),
+            rotation: Vec3d::new(-50.0, -30.0, 0.0),
+            scale: Vec3d::ONE,
+        }
+    );
+    insert!(
+        doc,
+        sun,
+        Light {
+            kind: LightKind::Directional,
+            color: Color::new(1.0, 0.97, 0.9, 1.0),
+            intensity: 2.5,
+        }
+    );
+
+    // The 3D physics gravity flows from `gravity_2d.y` (the runtime sim wires the
+    // 3D bridge to it), so the playground makes it explicit real-world down.
+    doc.set_settings(crate::scene::serialize::LevelSettings {
+        gravity_2d: Vec2d::new(0.0, -9.81),
+        gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+        sim_hz: 60.0,
+    });
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+/// The repo-root `samples/physics-playground/` directory.
+pub fn physics_playground_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/physics-playground")
+}
+
+/// A minimal valid 16-bit mono PCM WAV (decodable by kira headlessly), so the
+/// committed `.inf_audio` clips need no binary fixture. Ported from the
+/// `inf-audio` payload test's `tone_wav`.
+fn tone_wav(samples: usize, sample_rate: u32) -> Vec<u8> {
+    let bits = 16u16;
+    let channels = 1u16;
+    let block_align = channels * bits / 8;
+    let byte_rate = sample_rate * block_align as u32;
+    let data_len = samples as u32 * block_align as u32;
+    let mut w = Vec::new();
+    w.extend_from_slice(b"RIFF");
+    w.extend_from_slice(&(36 + data_len).to_le_bytes());
+    w.extend_from_slice(b"WAVE");
+    w.extend_from_slice(b"fmt ");
+    w.extend_from_slice(&16u32.to_le_bytes());
+    w.extend_from_slice(&1u16.to_le_bytes());
+    w.extend_from_slice(&channels.to_le_bytes());
+    w.extend_from_slice(&sample_rate.to_le_bytes());
+    w.extend_from_slice(&byte_rate.to_le_bytes());
+    w.extend_from_slice(&block_align.to_le_bytes());
+    w.extend_from_slice(&bits.to_le_bytes());
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&data_len.to_le_bytes());
+    for i in 0..samples {
+        let s = (i as i16).wrapping_mul(64);
+        w.extend_from_slice(&s.to_le_bytes());
+    }
+    w
+}
+
+/// The committed `AudioAsset` for the given clip (a short deterministic tone).
+pub fn playground_audio_asset() -> inf_audio::AudioAsset {
+    inf_audio::AudioAsset::from_encoded(tone_wav(4000, 8000), inf_audio::AudioFormat::Wav)
+        .expect("tone wav decodes")
+}
+
+/// Write the committed physics-playground files from the generators (regeneration
+/// path): the v6 `.inf_lvl` (+ sidecar), the two `.inf_audio` clips (+ inf_asset
+/// sidecars with their stable GUIDs so the AudioSource `clip` refs resolve through
+/// the AssetDb / cooked pack), + a README.
+pub fn write_physics_playground() -> Result<(), String> {
+    let dir = physics_playground_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    // Level (payload + sidecar) with a fixed level GUID.
+    let doc = physics_playground_scene();
+    crate::scene::serialize::save(
+        &doc,
+        &dir.join("Playground.inf_lvl"),
+        Some(PLAYGROUND_LEVEL_GUID),
+    )?;
+
+    // The two committed `.inf_audio` clips (same tone; distinct stable GUIDs).
+    let audio = playground_audio_asset();
+    for (file, guid) in [
+        ("Spinner.inf_audio", PLAYGROUND_SPINNER_CLIP_GUID),
+        ("Sensor.inf_audio", PLAYGROUND_SENSOR_CLIP_GUID),
+    ] {
+        write_anim_asset(&dir, file, guid, inf_asset::AssetKind::Audio, &audio)?;
+    }
+
+    std::fs::write(dir.join("README.md"), PLAYGROUND_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const PLAYGROUND_README: &str = "# Physics Playground (Phase-12 gate scene)\n\n\
+Generated by `inf_editor_core::samples::physics_playground_scene` — the P12.4 gate\n\
+scene: a committed 3D physics playground composing every P12 feature at once — a\n\
+settling **box stack**, a **motorized revolute spinner**, a **distance-rope\n\
+pendulum**, a **prismatic slider**, a **CCD bullet** vs a thin wall, a\n\
+**collision-layer ghost pair** (overlapping, non-interacting via filters), a\n\
+**sensor plate**, and a small **ragdoll** (`inf_physics::ragdoll::build_ragdoll`\n\
+output, its joint descs mapped to `Joint3D` components) — plus two spatial\n\
+**AudioSource**s (one autoplay-looping on the spinner with occlusion, one on the\n\
+sensor) and an **AudioListener** on a camera.\n\n\
+- `Playground.inf_lvl` — the scene as schema-**v6** `.inf_lvl` bytes (joints +\n\
+  audio persist).\n\
+- `Spinner.inf_audio` / `Sensor.inf_audio` — the two clips the AudioSources\n\
+  reference (a short deterministic tone; shipped via the cook's level→audio edge).\n\n\
+Determinism is asserted by `runtime/inf-player/tests/physics_demo.rs`: 300 fixed\n\
+steps twice yield a byte-identical pose trace (xxh3 over Guid-sorted transforms)\n\
+AND an identical audio command stream; the ragdoll settles bounded, the CCD bullet\n\
+is stopped, the ghost pair interpenetrates unimpeded, PIE == shipping.\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1651,6 +2421,7 @@ mod tests {
             write_hybrid_template().expect("regenerate hybrid template");
             write_terrain_demo().expect("regenerate terrain demo");
             write_character_demo().expect("regenerate character demo");
+            write_physics_playground().expect("regenerate physics playground");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -1725,6 +2496,33 @@ mod tests {
                 "committed character-demo .inf_sm drifted from the generator"
             );
         }
+
+        // Physics-playground lock: the committed v6 `.inf_lvl` + the two
+        // `.inf_audio` clips still match the generators (skips before first bless).
+        let pdir = physics_playground_dir();
+        let plvl = pdir.join("Playground.inf_lvl");
+        if plvl.exists() {
+            let want_lvl = crate::scene::serialize::encode(
+                &crate::scene::serialize::to_scene_file(&physics_playground_scene()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&plvl).unwrap(),
+                want_lvl,
+                "committed physics-playground .inf_lvl drifted from the generator"
+            );
+            let want_audio = inf_asset::encode(&playground_audio_asset()).unwrap();
+            assert_eq!(
+                std::fs::read(pdir.join("Spinner.inf_audio")).unwrap(),
+                want_audio,
+                "committed Spinner.inf_audio drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(pdir.join("Sensor.inf_audio")).unwrap(),
+                want_audio,
+                "committed Sensor.inf_audio drifted from the generator"
+            );
+        }
     }
 
     // ── Character-demo gate test (a): byte-identical save/reload ────────────
@@ -1742,7 +2540,7 @@ mod tests {
         let doc = character_demo_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 5, "character-demo writes as a schema-v5 file");
+        assert_eq!(bytes1[0], 6, "character-demo writes as a schema-v6 file");
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(
@@ -1804,7 +2602,7 @@ mod tests {
         let doc = terrain_demo_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 5, "terrain-demo writes as a schema-v5 file");
+        assert_eq!(bytes1[0], 6, "terrain-demo writes as a schema-v6 file");
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(
@@ -1873,5 +2671,67 @@ mod tests {
         // Deterministic across two evaluations.
         let insts2 = inf_pcg::evaluate(&terrain_demo_pcg_document(), &provider, region);
         assert_eq!(insts, insts2);
+    }
+
+    // ── Physics-playground gate scene (P12.4) ──────────────────────────────
+
+    /// The P3 discipline applied to the playground: save → load → save is
+    /// byte-identical (a genuine schema-v6 payload), and the reloaded doc keeps the
+    /// joints (incl. the `other` entity refs), the audio sources (incl. `clip`
+    /// refs), the listener, and the collision-layer / CCD collider fields.
+    #[test]
+    fn physics_playground_saves_and_reloads_byte_identical() {
+        use inf_ecs::components::{
+            AudioListener, AudioSource, Collider3D, Joint3D, JointKind3D, RigidBody3D,
+        };
+
+        let doc = physics_playground_scene();
+        let bytes1 =
+            crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], 6, "physics-playground writes a schema-v6 file");
+
+        let mut doc2 = SceneDoc::new();
+        crate::scene::serialize::apply_to_doc(
+            &mut doc2,
+            &crate::scene::serialize::decode(&bytes1).unwrap(),
+        );
+        let bytes2 =
+            crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc2))
+                .unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "physics-playground save→load→save must be byte-identical"
+        );
+
+        let w = doc2.world().world();
+        // The motorized spinner joint persists with its motor + other ref.
+        let we = doc2.entity_of(PLAYGROUND_SPINNER_WHEEL_GUID).unwrap();
+        let sj = w.get::<Joint3D>(we).expect("spinner joint persists");
+        assert_eq!(sj.kind, JointKind3D::Revolute);
+        assert_eq!(sj.other, Some(PLAYGROUND_SPINNER_HUB_GUID));
+        assert!(sj.motor_enabled);
+        assert_eq!(sj.motor_target_vel, 8.0);
+        // The spinner's autoplay/looping/occluded AudioSource persists.
+        let src = w.get::<AudioSource>(we).expect("spinner audio persists");
+        assert_eq!(src.clip, Some(PLAYGROUND_SPINNER_CLIP_GUID));
+        assert!(src.autoplay && src.looping && src.occlusion && src.spatial);
+        // The CCD bullet's collider/body fields persist.
+        let be = doc2.entity_of(PLAYGROUND_BULLET_GUID).unwrap();
+        assert!(w.get::<RigidBody3D>(be).unwrap().ccd_enabled);
+        // The ghost pair's collision-layer filter persists (empty filter).
+        let ge = doc2.entity_of(PLAYGROUND_GHOST_A_GUID).unwrap();
+        assert_eq!(w.get::<Collider3D>(ge).unwrap().collision_filter, 0);
+        // The sensor plate is a persisted trigger volume.
+        let se = doc2.entity_of(PLAYGROUND_SENSOR_GUID).unwrap();
+        assert!(w.get::<Collider3D>(se).unwrap().sensor);
+        // The camera carries the active listener.
+        let ce = doc2.entity_of(PLAYGROUND_CAMERA_GUID).unwrap();
+        assert!(w.get::<AudioListener>(ce).unwrap().active);
+        // The ragdoll produced 8 bodies + 7 joints (its descs mapped to components).
+        let ragdoll_joints = (0..8)
+            .filter_map(|i| doc2.entity_of(Uuid::from_u128(PLAYGROUND_RAGDOLL_BASE_GUID + i)))
+            .filter(|&e| w.get::<Joint3D>(e).is_some())
+            .count();
+        assert_eq!(ragdoll_joints, 7, "ragdoll wires 7 parent joints");
     }
 }

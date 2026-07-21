@@ -350,6 +350,8 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
                         .and_then(|s| s.sm)
                         .map(AssetId),
                 );
+                // P12.4: an AudioSource pulls its referenced `.inf_audio` clip.
+                deps.extend(e.audio_source.as_ref().and_then(|a| a.clip).map(AssetId));
             }
             deps
         }
