@@ -20,13 +20,14 @@ use inf_math::FloatingOrigin;
 use inf_render::gizmo::{self, GizmoAxis, GizmoMode};
 use inf_render::golden::{image_diff, within_tolerance};
 use inf_render::{
-    assemble_patches, expand_text, Ambient2D, EngineRenderer, GpuContext, HAlign, HeadlessTarget,
-    LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D, RenderScene,
-    RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView,
-    SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance, SpriteTextureUpload,
-    TextParams, TilemapParams, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL,
-    BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE,
-    HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    assemble_patches, expand_text, Ambient2D, BloomSettings, EngineRenderer, GpuContext, HAlign,
+    HeadlessTarget, LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight,
+    RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
+    RenderTerrainTile, RenderTilemap, RenderView, SkinnedInstance, SkinnedMeshData, SkinnedVertex,
+    SpriteInstance, SpriteTextureUpload, SsaoSettings, TextParams, TilemapParams,
+    BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
+    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT,
+    TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -65,8 +66,21 @@ fn overlook_view() -> RenderView {
 }
 
 fn render(gpu: &GpuContext, scene: &RenderScene, view: &RenderView) -> Vec<u8> {
+    render_with(gpu, scene, view, RenderSettings::default())
+}
+
+/// Render one frame with explicit HDR/post settings (bloom/SSAO/exposure). TAA is
+/// intentionally not exercised here — single-frame determinism goldens keep it
+/// off; the multi-frame convergence is covered by `taa_multiframe_stable`.
+fn render_with(
+    gpu: &GpuContext,
+    scene: &RenderScene,
+    view: &RenderView,
+    settings: RenderSettings,
+) -> Vec<u8> {
     let target = HeadlessTarget::new(gpu, W, H);
     let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
+    renderer.set_settings(settings);
     renderer.render(gpu, scene, view, &target.view, (W, H));
     target.read_rgba(gpu).expect("readback")
 }
@@ -97,8 +111,19 @@ fn px(rgba: &[u8], x: u32, y: u32) -> [u8; 4] {
 
 /// The shared gate: determinism, then golden write/compare.
 fn check_golden(gpu: &GpuContext, name: &str, scene: &RenderScene, view: &RenderView) -> Vec<u8> {
-    let a = render(gpu, scene, view);
-    let b = render(gpu, scene, view);
+    check_golden_with(gpu, name, scene, view, RenderSettings::default())
+}
+
+/// [`check_golden`] with explicit post settings (bloom/SSAO goldens).
+fn check_golden_with(
+    gpu: &GpuContext,
+    name: &str,
+    scene: &RenderScene,
+    view: &RenderView,
+    settings: RenderSettings,
+) -> Vec<u8> {
+    let a = render_with(gpu, scene, view, settings);
+    let b = render_with(gpu, scene, view, settings);
     let (mean, max) = image_diff(&a, &b, W, H);
     assert!(
         mean < 0.005 && max < 0.05,
@@ -1176,4 +1201,207 @@ fn golden_skinned_mesh() {
         .chunks(4)
         .any(|p| p[0] as u16 + p[1] as u16 + p[2] as u16 > 150);
     assert!(lit, "expected a lit skinned pixel");
+}
+
+// ── P13.3a: HDR post pipeline (bloom, SSAO, TAA) ─────────────────────────────
+
+/// HDR bloom golden (P13.3a): a dark scene with a few **strongly emissive** cubes
+/// (linear emissive ≫ 1) so the bloom threshold prefilter + blur mip chain lights
+/// up a soft glow the tonemap adds back. Structural gate: with bloom ON the frame
+/// carries more total energy than with bloom OFF (the additive blurred glow),
+/// while the emitters stay bright and coloured (no NaN blowout). Determinism via
+/// `check_golden_with`; strict pixel diff opt-in.
+#[test]
+fn golden_hdr_bloom() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    for (i, (x, emissive)) in [
+        (-2.6f64, [8.0f32, 1.0, 0.4]),
+        (0.0, [0.5, 7.0, 1.0]),
+        (2.6, [0.6, 1.2, 9.0]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        scene.instances.push(MeshInstance {
+            translation: DVec3::new(x, 0.5, 0.0),
+            rotation: Quat::from_rotation_y(0.3),
+            scale: Vec3::splat(0.6),
+            color: [0.02, 0.02, 0.02, 1.0],
+            metallic: 0.0,
+            roughness: 0.5,
+            emissive,
+            id: i as u32 + 1,
+        });
+    }
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(0.0, 1.5, 7.0), DVec3::new(0.0, 0.5, 0.0));
+
+    let bloom_on = RenderSettings {
+        bloom: BloomSettings {
+            enabled: true,
+            threshold: 1.0,
+            knee: 0.6,
+            intensity: 0.5,
+        },
+        ..RenderSettings::default()
+    };
+
+    let img = check_golden_with(&gpu, "hdr_bloom", &scene, &view, bloom_on);
+    let img_off = render_with(&gpu, &scene, &view, RenderSettings::default());
+
+    let sum = |img: &[u8]| -> u64 {
+        img.chunks(4)
+            .map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64)
+            .sum()
+    };
+    let (sum_on, sum_off) = (sum(&img), sum(&img_off));
+    assert!(
+        sum_on > sum_off + (img.len() as u64 / 4),
+        "bloom should add glow energy (on {sum_on} vs off {sum_off})"
+    );
+    let bright = img
+        .chunks(4)
+        .any(|p| p[0] > 180 || p[1] > 180 || p[2] > 180);
+    assert!(bright, "expected the emissive cubes to stay bright");
+}
+
+/// SSAO golden (P13.3a): a cluster of boxes forming **crevices** (a floor slab
+/// with blocks pressed together and one stacked), lit by a single soft
+/// directional key, SSAO ON. Structural gate: SSAO **darkens** the frame overall
+/// (ambient occluded in the contact creases) while the scene stays lit — proving
+/// the depth-prepass → half-res AO → ambient-multiply path ran. Determinism via
+/// `check_golden_with`; strict pixel diff opt-in.
+#[test]
+fn golden_ssao() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.25, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(8.0, 0.5, 8.0),
+        [0.6, 0.6, 0.62, 1.0],
+        1,
+    ));
+    for (p, id) in [
+        (DVec3::new(-0.55, 0.5, 0.0), 2u32),
+        (DVec3::new(0.55, 0.5, 0.0), 3),
+        (DVec3::new(0.0, 0.5, -0.9), 4),
+        (DVec3::new(0.0, 1.5, 0.0), 5),
+    ] {
+        scene.instances.push(MeshInstance::lit(
+            p,
+            Quat::IDENTITY,
+            Vec3::ONE,
+            [0.7, 0.65, 0.6, 1.0],
+            id,
+        ));
+    }
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.95],
+        intensity: 1.2,
+        direction: Vec3::new(0.3, 0.9, 0.3).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+    });
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(3.0, 2.6, 4.2), DVec3::new(0.0, 0.6, 0.0));
+
+    let ssao_on = RenderSettings {
+        ssao: SsaoSettings {
+            enabled: true,
+            radius: 0.7,
+            intensity: 1.0,
+            bias: 0.03,
+        },
+        ..RenderSettings::default()
+    };
+
+    let img = check_golden_with(&gpu, "ssao", &scene, &view, ssao_on);
+    let img_off = render_with(&gpu, &scene, &view, RenderSettings::default());
+
+    let sum = |img: &[u8]| -> u64 {
+        img.chunks(4)
+            .map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64)
+            .sum()
+    };
+    let (sum_on, sum_off) = (sum(&img), sum(&img_off));
+    assert!(
+        sum_on < sum_off,
+        "SSAO should darken the ambient term (on {sum_on} vs off {sum_off})"
+    );
+    let lit = img
+        .chunks(4)
+        .any(|p| p[0] as u16 + p[1] as u16 + p[2] as u16 > 200);
+    assert!(lit, "expected the SSAO scene to stay lit");
+}
+
+/// TAA multi-frame stability smoke (P13.3a): with TAA ON and a **static** camera,
+/// render N frames on one renderer (the history accumulates). Asserts (1) no NaN /
+/// out-of-range garbage ever appears, and (2) after convergence consecutive frames
+/// differ by a small, bounded amount (jitter+history settle to a steady image) —
+/// not a pixel golden, since TAA is intentionally non-deterministic frame to
+/// frame. Skips with no GPU adapter.
+#[test]
+fn taa_multiframe_stable() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        ..Default::default()
+    };
+    for (i, (x, z, c)) in [
+        (0.0, 0.0, [0.80, 0.20, 0.20]),
+        (2.0, -1.0, [0.20, 0.70, 0.30]),
+        (-1.8, 1.2, [0.25, 0.45, 0.95]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        scene.instances.push(MeshInstance::lit(
+            DVec3::new(x, 0.5, z),
+            Quat::from_rotation_y(0.3),
+            Vec3::ONE,
+            [c[0], c[1], c[2], 1.0],
+            i as u32 + 1,
+        ));
+    }
+    scene.mark_dirty();
+    let view = overlook_view();
+
+    let settings = RenderSettings {
+        taa: true,
+        ..RenderSettings::default()
+    };
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    renderer.set_settings(settings);
+
+    let mut prev: Option<Vec<u8>> = None;
+    let mut last_delta = (1.0f32, 1.0f32);
+    for f in 0..12 {
+        renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+        let img = target.read_rgba(&gpu).expect("readback");
+        // A NaN blowout would clamp the whole buffer to black or white.
+        let nonblack = img.chunks(4).any(|p| p[0] > 5 || p[1] > 5 || p[2] > 5);
+        let nonwhite = img
+            .chunks(4)
+            .any(|p| p[0] < 250 || p[1] < 250 || p[2] < 250);
+        assert!(nonblack && nonwhite, "frame {f} degenerate (NaN blowout?)");
+        if let Some(p) = &prev {
+            last_delta = image_diff(p, &img, W, H);
+        }
+        prev = Some(img);
+    }
+    let (mean, max) = last_delta;
+    assert!(
+        mean < 0.02 && max < 0.35,
+        "TAA did not converge: last frame delta mean {mean}, max {max}"
+    );
 }

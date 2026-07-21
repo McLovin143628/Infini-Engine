@@ -21,6 +21,7 @@ pub mod pick;
 pub mod pipeline;
 pub mod renderer;
 pub mod scene;
+pub mod settings;
 pub mod surface;
 
 pub use camera::{
@@ -39,12 +40,18 @@ pub use passes::terrain::{
     TERRAIN_BASE_CELLS, TERRAIN_LOD_COUNT,
 };
 pub use pick::Picker;
-pub use renderer::{EngineRenderer, MASK_FORMAT, SCENE_FORMAT, SCENE_SAMPLES};
+pub use renderer::{
+    EngineRenderer, AO_FORMAT, HDR_FORMAT, LDR_FORMAT, MASK_FORMAT, SCENE_FORMAT, SCENE_SAMPLES,
+};
 pub use scene::{
     Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D,
     RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap,
     SkinnedInstance, SkinnedMeshData, SkinnedVertex, SkyParams, SpriteInstance,
     SpriteTextureUpload, TextureHandle, TilemapParams, ID_GIZMO_BASE, ID_NONE,
+};
+pub use settings::{
+    halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
+    BloomSettings, RenderSettings, SsaoSettings,
 };
 // 2D batcher API surfaced through the renderer for hosts.
 pub use inf_render_2d::{

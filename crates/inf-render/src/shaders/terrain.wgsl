@@ -27,6 +27,11 @@ struct TerrainMaterial {
 };
 @group(2) @binding(0) var<uniform> material: TerrainMaterial;
 
+// SSAO (P13.3a): group 3 (after the material group). 1×1 white when disabled →
+// ambient unchanged.
+@group(3) @binding(0) var ao_tex: texture_2d<f32>;
+@group(3) @binding(1) var ao_smp: sampler;
+
 struct VIn {
     // Vertex: unit patch coordinates in [0,1]² + skirt flag (z = 1 on the
     // boundary skirt ring, else 0).
@@ -186,12 +191,6 @@ fn vs(in: VIn) -> VOut {
     return out;
 }
 
-// Narkowicz ACES filmic approximation.
-fn tonemap_aces(x: vec3<f32>) -> vec3<f32> {
-    let a = 2.51; let b = 0.03; let c = 2.43; let d = 0.59; let e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
-}
-
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     let span = in.span_res.x;
@@ -247,12 +246,13 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     let gloss = (1.0 - roughness) * (1.0 - roughness);
     let spec_power = mix(8.0, 128.0, gloss);
     let spec = pow(max(dot(n, half_v), 0.0), spec_power) * gloss * 0.4;
-    let lo = albedo * (ambient + ndl * vec3<f32>(1.15, 1.10, 1.0)) + vec3<f32>(spec);
+    // SSAO modulates the ambient (hemispheric) term only, never the direct sun.
+    let ao = textureSampleLevel(ao_tex, ao_smp, in.clip.xy / view.grid_axis_viewport.zw, 0.0).r;
+    let lo = albedo * (ambient * ao + ndl * vec3<f32>(1.15, 1.10, 1.0)) + vec3<f32>(spec);
 
-    var col = tonemap_aces(lo);
-    // Distance haze toward the horizon colour.
+    // HDR-linear haze; the post tonemap pass (ACES + exposure) runs afterward.
     let dist = length(in.world_local - view.eye.xyz);
     let haze = 1.0 - exp(-dist * 0.0025);
-    col = mix(col, vec3<f32>(0.055, 0.081, 0.120), haze * 0.5);
+    let col = mix(lo, vec3<f32>(0.055, 0.081, 0.120), haze * 0.5);
     return vec4<f32>(col, 1.0);
 }

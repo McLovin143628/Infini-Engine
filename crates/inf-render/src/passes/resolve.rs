@@ -19,7 +19,7 @@ impl RenderNode for ResolveNode {
             label: Some("resolve"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &frame.targets.color_msaa,
-                resolve_target: Some(&frame.targets.scene_color),
+                resolve_target: Some(&frame.targets.scene_hdr),
                 depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load,

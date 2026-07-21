@@ -2851,8 +2851,10 @@ dependencies = [
  "inf-anim",
  "inf-asset",
  "inf-blueprint",
+ "inf-mesh",
  "inf-project",
  "inf-scene",
+ "inf-vgeom",
  "serde",
  "serde_json",
  "tempfile",
@@ -3051,6 +3053,15 @@ dependencies = [
 [[package]]
 name = "inf-vgeom"
 version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "inf-asset",
+ "inf-core",
+ "meshopt",
+ "serde",
+ "thiserror 2.0.19",
+ "tracing",
+]
 
 [[package]]
 name = "inf-viewport"

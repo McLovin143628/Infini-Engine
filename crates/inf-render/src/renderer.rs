@@ -1,45 +1,93 @@
 //! The engine renderer: owns frame targets, the shared view bind group, and
 //! the render graph. One instance per output (editor viewport, headless test).
+//!
+//! ## HDR pipeline (P13.3a)
+//!
+//! Scene passes render into a linear **`Rgba16Float` HDR** MSAA target (no
+//! per-pass tonemapping anymore — the ACES tonemap is a single post step). The
+//! frame flows:
+//!
+//! ```text
+//! sky → [depth prepass] → [SSAO] → mesh/skinned/terrain (sample AO) → grid →
+//! sprite → debug → resolve(MSAA→scene_hdr) → [TAA] → bloom → tonemap(→LDR) →
+//! mask → composite(→swapchain)
+//! ```
+//!
+//! Bracketed passes are gated by [`RenderSettings`]; at the defaults (bloom off,
+//! SSAO off, TAA off, exposure 1.0) the post chain is just ACES tonemap + dither,
+//! producing the same look the in-shader tonemap used to (the goldens were
+//! regenerated once for the float-pipeline reorder).
+
+use glam::{Mat4, Vec3};
 
 use crate::camera::{RenderView, ViewUniforms, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::graph::RenderGraph;
 use crate::passes;
 use crate::scene::RenderScene;
+use crate::settings::{halton_jitter, mip_chain_sizes, RenderSettings};
 
-/// Offscreen scene color format — fixed regardless of the output/swapchain
-/// format so shading and goldens behave identically everywhere; the composite
-/// blit converts.
-pub const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// Offscreen HDR scene-colour format: linear `Rgba16Float`. All scene passes
+/// render into this (MSAA) target; the tonemap post pass converts to the LDR
+/// swapchain format. Fixed regardless of the output format so shading + goldens
+/// behave identically everywhere.
+pub const SCENE_FORMAT: wgpu::TextureFormat = HDR_FORMAT;
+/// The HDR intermediate format (scene colour, resolve, bloom, TAA history).
+pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// Display-referred LDR the tonemap writes and the composite reads.
+pub const LDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 /// Selection/hover mask format.
 pub const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+/// Single-channel SSAO target format (half-res).
+pub const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// 4× MSAA — guaranteed support for all formats we use.
 pub const SCENE_SAMPLES: u32 = 4;
+/// Bloom downsample mip-chain depth (levels beyond half-res).
+pub const BLOOM_MAX_MIPS: u32 = 6;
 
 /// Per-size GPU targets. Recreated when the scene size changes; `generation`
 /// lets nodes cache bind groups against the current views.
 pub struct FrameTargets {
     pub size: (u32, u32),
     pub generation: u64,
+    /// MSAA HDR scene colour (scene passes render here).
     pub color_msaa: wgpu::TextureView,
+    /// MSAA scene depth.
     pub depth: wgpu::TextureView,
+    /// Resolved single-sample HDR scene colour (MSAA resolve target).
+    pub scene_hdr: wgpu::TextureView,
+    /// Display-referred LDR (tonemap output; composite input).
     pub scene_color: wgpu::TextureView,
     pub mask: wgpu::TextureView,
+    /// Half-res SSAO output the lit passes sample (white when SSAO is off).
+    pub ao: wgpu::TextureView,
+    /// Half-res raw SSAO (before the blur).
+    pub ao_raw: wgpu::TextureView,
+    /// Single-sample sampleable scene depth (SSAO + TAA reprojection).
+    pub depth_prepass: wgpu::TextureView,
+    /// Bloom mip chain (index 0 = half-res; the tonemap adds mip 0).
+    pub bloom: Vec<wgpu::TextureView>,
+    pub bloom_sizes: Vec<(u32, u32)>,
+    /// TAA history ping-pong (HDR).
+    pub taa_history: [wgpu::TextureView; 2],
+    /// Half-res AO target size in px (for the SSAO shader).
+    pub ao_size: (u32, u32),
 }
 
 impl FrameTargets {
     fn create(gpu: &GpuContext, size: (u32, u32), generation: u64) -> Self {
         let (width, height) = (size.0.max(1), size.1.max(1));
-        let extent = wgpu::Extent3d {
-            width,
-            height,
+        let (aw, ah) = ((width / 2).max(1), (height / 2).max(1));
+        let extent = |w: u32, h: u32| wgpu::Extent3d {
+            width: w,
+            height: h,
             depth_or_array_layers: 1,
         };
-        let tex = |label, format, samples, usage: wgpu::TextureUsages| {
+        let tex = |label: &str, w: u32, h: u32, format, samples, usage: wgpu::TextureUsages| {
             gpu.device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
-                    size: extent,
+                    size: extent(w, h),
                     mip_level_count: 1,
                     sample_count: samples,
                     dimension: wgpu::TextureDimension::D2,
@@ -49,33 +97,48 @@ impl FrameTargets {
                 })
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
+        const RT: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        const RT_TEX: wgpu::TextureUsages =
+            wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING);
+
+        let bloom_sizes = mip_chain_sizes(width, height, BLOOM_MAX_MIPS);
+        let bloom: Vec<wgpu::TextureView> = bloom_sizes
+            .iter()
+            .map(|&(w, h)| tex("bloom-mip", w, h, HDR_FORMAT, 1, RT_TEX))
+            .collect();
+
         Self {
             size: (width, height),
             generation,
             color_msaa: tex(
                 "scene-color-msaa",
-                SCENE_FORMAT,
+                width,
+                height,
+                HDR_FORMAT,
                 SCENE_SAMPLES,
-                wgpu::TextureUsages::RENDER_ATTACHMENT,
+                RT,
             ),
             depth: tex(
                 "scene-depth",
+                width,
+                height,
                 DEPTH_FORMAT,
                 SCENE_SAMPLES,
-                wgpu::TextureUsages::RENDER_ATTACHMENT,
+                RT,
             ),
-            scene_color: tex(
-                "scene-color",
-                SCENE_FORMAT,
-                1,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            ),
-            mask: tex(
-                "outline-mask",
-                MASK_FORMAT,
-                1,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            ),
+            scene_hdr: tex("scene-hdr", width, height, HDR_FORMAT, 1, RT_TEX),
+            scene_color: tex("scene-color", width, height, LDR_FORMAT, 1, RT_TEX),
+            mask: tex("outline-mask", width, height, MASK_FORMAT, 1, RT_TEX),
+            ao: tex("ssao", aw, ah, AO_FORMAT, 1, RT_TEX),
+            ao_raw: tex("ssao-raw", aw, ah, AO_FORMAT, 1, RT_TEX),
+            depth_prepass: tex("depth-prepass", width, height, DEPTH_FORMAT, 1, RT_TEX),
+            taa_history: [
+                tex("taa-history-0", width, height, HDR_FORMAT, 1, RT_TEX),
+                tex("taa-history-1", width, height, HDR_FORMAT, 1, RT_TEX),
+            ],
+            bloom,
+            bloom_sizes,
+            ao_size: (aw, ah),
         }
     }
 }
@@ -89,6 +152,21 @@ pub struct FrameData<'a> {
     pub out_view: &'a wgpu::TextureView,
     pub out_size: (u32, u32),
     pub out_format: wgpu::TextureFormat,
+    /// Active HDR/post settings for this frame.
+    pub settings: &'a RenderSettings,
+    /// Monotonic frame counter (drives the TAA jitter sequence + ping-pong).
+    pub frame_index: u64,
+    /// The HDR view bloom + tonemap read: the TAA output when TAA is on, else
+    /// the resolved `scene_hdr`.
+    pub post_hdr: &'a wgpu::TextureView,
+    /// TAA history ping-pong: `prev` = last frame's accumulation, `cur` = the one
+    /// the TAA node writes this frame (== `post_hdr` when TAA is on).
+    pub taa_history_prev: &'a wgpu::TextureView,
+    pub taa_history_cur: &'a wgpu::TextureView,
+    /// Jittered view-projection of the **previous** frame (TAA reprojection).
+    pub taa_prev_view_proj: [f32; 16],
+    /// False on the first frame / after a resize (history has nothing usable).
+    pub taa_history_valid: bool,
 }
 
 pub struct EngineRenderer {
@@ -99,6 +177,10 @@ pub struct EngineRenderer {
     next_generation: u64,
     graph: RenderGraph,
     out_format: wgpu::TextureFormat,
+    settings: RenderSettings,
+    frame_index: u64,
+    /// Jittered view-proj we rendered last frame (TAA reprojection source).
+    prev_view_proj: Option<[f32; 16]>,
 }
 
 impl EngineRenderer {
@@ -135,23 +217,24 @@ impl EngineRenderer {
 
         let mut graph = RenderGraph::default();
         graph.add(passes::sky::SkyNode::new(gpu, &view_bgl));
+        // SSAO/TAA scene-depth prepass (rigid meshes only); a no-op unless SSAO
+        // or TAA is enabled. Runs before SSAO so the AO can sample it, and before
+        // the lit passes so they can multiply AO into their ambient term.
+        graph.add(passes::depth_prepass::DepthPrepassNode::new(gpu, &view_bgl));
+        graph.add(passes::ssao::SsaoNode::new(gpu, &view_bgl));
         graph.add(passes::mesh::MeshNode::new(gpu, &view_bgl));
-        // Skinned meshes (P11.1) draw right after the rigid meshes, into the same
-        // MSAA scene + depth targets. A no-op when `scene.skinned` is empty, so
-        // every pre-P11 scene stays byte-identical.
         graph.add(passes::skinned::SkinnedMeshNode::new(gpu, &view_bgl));
-        // Terrain draws opaque + depth-writing after meshes and before the grid,
-        // so the infinite grid is occluded where terrain rises above the ground
-        // plane. A no-op when the scene has no terrain (pre-P10.1 byte stability).
         graph.add(passes::terrain::TerrainNode::new(gpu, &view_bgl));
         graph.add(passes::grid::GridNode::new(gpu, &view_bgl));
-        // Sprites draw over the 3D scene (depth-tested, not depth-writing) and
-        // under the debug/gizmo overlay.
         graph.add(passes::sprite::SpriteNode::new(gpu, &view_bgl));
         graph.add(passes::debug::DebugNode::new(gpu, &view_bgl));
         graph.add(passes::resolve::ResolveNode);
+        // Post chain (all read/write single-sample HDR/LDR targets).
+        graph.add(passes::taa::TaaNode::new(gpu, &view_bgl));
+        graph.add(passes::bloom::BloomNode::new(gpu));
+        graph.add(passes::tonemap::TonemapNode::new(gpu));
         // The mask feeds the composite's outline dilate; it renders into the
-        // single-sample mask target independently of the MSAA scene resolve.
+        // single-sample mask target independently of the scene resolve.
         graph.add(passes::mask::MaskNode::new(gpu, &view_bgl));
         graph.add(passes::composite::CompositeNode::new(gpu));
 
@@ -163,7 +246,25 @@ impl EngineRenderer {
             next_generation: 1,
             graph,
             out_format,
+            settings: RenderSettings::default(),
+            frame_index: 0,
+            prev_view_proj: None,
         }
+    }
+
+    /// The active HDR/post settings.
+    pub fn settings(&self) -> &RenderSettings {
+        &self.settings
+    }
+
+    /// Replace the HDR/post settings (bloom, SSAO, TAA, exposure, dither). The
+    /// viewport + player expose this to their UI; goldens set it per scene.
+    pub fn set_settings(&mut self, settings: RenderSettings) {
+        // Toggling TAA invalidates the accumulated history.
+        if settings.taa != self.settings.taa {
+            self.prev_view_proj = None;
+        }
+        self.settings = settings;
     }
 
     /// Render one frame of `scene` into `out_view` (`out_size` = the output
@@ -178,16 +279,40 @@ impl EngineRenderer {
         out_size: (u32, u32),
     ) {
         let scene_size = (view.width.max(1), view.height.max(1));
-        if self.targets.as_ref().is_none_or(|t| t.size != scene_size) {
+        let resized = self.targets.as_ref().is_none_or(|t| t.size != scene_size);
+        if resized {
             self.targets = Some(FrameTargets::create(gpu, scene_size, self.next_generation));
             self.next_generation += 1;
+            self.prev_view_proj = None; // history textures were reallocated
         }
 
-        gpu.queue.write_buffer(
-            &self.view_buf,
-            0,
-            bytemuck::bytes_of(&ViewUniforms::from_view(view)),
-        );
+        // Camera sub-pixel jitter (TAA only), applied to the projection.
+        let base_vp = view.view_proj();
+        let jitter = if self.settings.taa {
+            halton_jitter(self.frame_index)
+        } else {
+            [0.0, 0.0]
+        };
+        let jvp = if self.settings.taa {
+            let ox = 2.0 * jitter[0] / scene_size.0 as f32;
+            let oy = 2.0 * jitter[1] / scene_size.1 as f32;
+            Mat4::from_translation(Vec3::new(ox, oy, 0.0)) * base_vp
+        } else {
+            base_vp
+        };
+
+        let mut uniforms = ViewUniforms::from_view(view);
+        if self.settings.taa {
+            uniforms.view_proj = jvp.to_cols_array();
+            uniforms.inv_view_proj = jvp.inverse().to_cols_array();
+        }
+        gpu.queue
+            .write_buffer(&self.view_buf, 0, bytemuck::bytes_of(&uniforms));
+
+        let history_valid = self.settings.taa && !resized && self.prev_view_proj.is_some();
+        let prev_vp = self.prev_view_proj.unwrap_or_else(|| jvp.to_cols_array());
+        let cur = (self.frame_index & 1) as usize;
+        let prev = 1 - cur;
 
         let mut encoder = gpu
             .device
@@ -195,16 +320,33 @@ impl EngineRenderer {
                 label: Some("frame"),
             });
 
+        let targets = self.targets.as_ref().unwrap();
+        let post_hdr = if self.settings.taa {
+            &targets.taa_history[cur]
+        } else {
+            &targets.scene_hdr
+        };
         let frame = FrameData {
             scene,
             view,
-            targets: self.targets.as_ref().unwrap(),
+            targets,
             view_bg: &self.view_bg,
             out_view,
             out_size,
             out_format: self.out_format,
+            settings: &self.settings,
+            frame_index: self.frame_index,
+            post_hdr,
+            taa_history_prev: &targets.taa_history[prev],
+            taa_history_cur: &targets.taa_history[cur],
+            taa_prev_view_proj: prev_vp,
+            taa_history_valid: history_valid,
         };
         self.graph.run(gpu, &mut encoder, &frame);
         gpu.queue.submit([encoder.finish()]);
+
+        // Next frame reprojects against the matrix we actually rendered with.
+        self.prev_view_proj = Some(jvp.to_cols_array());
+        self.frame_index = self.frame_index.wrapping_add(1);
     }
 }

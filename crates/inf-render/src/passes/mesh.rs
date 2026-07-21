@@ -245,6 +245,7 @@ pub struct MeshNode {
     instance_count: u32,
     lights_buf: wgpu::Buffer,
     lights_bg: wgpu::BindGroup,
+    ao: super::AoBinding,
 }
 
 impl MeshNode {
@@ -307,11 +308,12 @@ impl MeshNode {
             }],
         });
 
+        let ao = super::AoBinding::new(gpu);
         let layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("mesh"),
-                bind_group_layouts: &[Some(view_bgl), Some(&lights_bgl)],
+                bind_group_layouts: &[Some(view_bgl), Some(&lights_bgl), Some(&ao.bgl)],
                 immediate_size: 0,
             });
 
@@ -366,6 +368,7 @@ impl MeshNode {
             instance_count: 0,
             lights_buf,
             lights_bg,
+            ao,
         }
     }
 
@@ -437,6 +440,8 @@ impl RenderNode for MeshNode {
         if self.instance_count == 0 {
             return;
         }
+        // Cheap Arc handle clone → no borrow of `self.ao` held during the pass.
+        let ao_bg = self.ao.bind_group(gpu, frame).clone();
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mesh"),
@@ -464,6 +469,7 @@ impl RenderNode for MeshNode {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
         pass.set_bind_group(1, &self.lights_bg, &[]);
+        pass.set_bind_group(2, &ao_bg, &[]);
         self.draw_all(&mut pass);
     }
 }

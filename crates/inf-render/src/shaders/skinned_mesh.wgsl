@@ -75,6 +75,12 @@ struct Lights {
 };
 @group(1) @binding(0) var<uniform> lights: Lights;
 
+// SSAO (P13.3a): group 2 (the material seam slot on the skinned pipeline is
+// group 2 empty in the old layout — replaced by the AO bind). 1×1 white when
+// disabled → ambient unchanged.
+@group(2) @binding(0) var ao_tex: texture_2d<f32>;
+@group(2) @binding(1) var ao_smp: sampler;
+
 const PI: f32 = 3.14159265359;
 
 fn distribution_ggx(n_dot_h: f32, rough: f32) -> f32 {
@@ -128,15 +134,6 @@ fn point_attenuation(dist: f32, range: f32) -> f32 {
     return inv_sq * t * t;
 }
 
-fn tonemap_aces(x: vec3<f32>) -> vec3<f32> {
-    let a = 2.51;
-    let b = 0.03;
-    let c = 2.43;
-    let d = 0.59;
-    let e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
-}
-
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
@@ -171,16 +168,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     let up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
     let amb = mix(vec3<f32>(0.03, 0.03, 0.035), vec3<f32>(0.10, 0.13, 0.18), up);
-    lo += amb * albedo * (1.0 - metallic);
-    lo += amb * f0 * 0.5;
+    let ao = textureSampleLevel(ao_tex, ao_smp, in.pos.xy / view.grid_axis_viewport.zw, 0.0).r;
+    lo += amb * albedo * (1.0 - metallic) * ao;
+    lo += amb * f0 * 0.5 * ao;
 
     lo += in.emissive;
 
-    var col = tonemap_aces(lo);
-
+    // HDR-linear haze; the post tonemap pass runs afterward.
     let dist = length(in.world_pos - view.eye.xyz);
     let haze = 1.0 - exp(-dist * 0.004);
-    col = mix(col, vec3<f32>(0.055, 0.081, 0.120), haze * 0.4);
+    let col = mix(lo, vec3<f32>(0.055, 0.081, 0.120), haze * 0.4);
 
     return vec4<f32>(col, in.color.a);
 }
