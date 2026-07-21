@@ -6,6 +6,7 @@ mod app;
 mod assets;
 mod files;
 mod git;
+mod graph;
 mod layout;
 mod lsp;
 mod project;
@@ -15,6 +16,7 @@ mod terminal;
 mod viewport;
 
 pub use assets::{init_assets_on_boot, AssetState};
+pub use graph::GraphState;
 pub use lsp::LspState;
 pub use project::ProjectState;
 pub use scene::{recover_scene_on_boot, SceneState};
@@ -24,6 +26,15 @@ pub use viewport::ViewportState;
 pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         app::app_version,
+        graph::graph_registry,
+        graph::graph_list,
+        graph::graph_create,
+        graph::graph_get,
+        graph::graph_apply,
+        graph::graph_undo,
+        graph::graph_redo,
+        graph::graph_run,
+        graph::graph_generate,
         layout::layout_save,
         layout::layout_load,
         layout::layout_list,

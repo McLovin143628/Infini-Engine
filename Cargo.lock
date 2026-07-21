@@ -2357,10 +2357,13 @@ version = "0.1.0"
 dependencies = [
  "ignore",
  "inf-asset",
+ "inf-blueprint",
  "inf-core",
  "inf-editor-core",
+ "inf-graph",
  "inf-material",
  "inf-project",
+ "inf-transpile",
  "inf-viewport",
  "portable-pty",
  "raw-window-handle",
