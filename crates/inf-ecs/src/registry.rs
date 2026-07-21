@@ -11,9 +11,9 @@ use bevy_ecs::reflect::ReflectComponent;
 use bevy_reflect::{TypePath, TypeRegistry};
 
 use crate::components::{
-    AtlasRect, BodyKind2D, Camera, CharacterController2D, Collider2D, ColliderShape2DKind, Light,
-    Light2D, LightKind, Material, MeshRef, Name, NineSlice, Primitive, RigidBody2D, Sprite, Text2D,
-    TextAlign, Tilemap, Transform, Visibility,
+    AtlasRect, BillboardMode, BodyKind2D, Camera, CharacterController2D, Collider2D,
+    ColliderShape2DKind, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice, Primitive,
+    RigidBody2D, Sprite, Text2D, TextAlign, Tilemap, Transform, Visibility,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -54,6 +54,7 @@ impl ComponentRegistry {
         types.register::<TextAlign>();
         types.register::<BodyKind2D>();
         types.register::<ColliderShape2DKind>();
+        types.register::<BillboardMode>();
         types.register::<AtlasRect>();
         types.register::<String>();
 

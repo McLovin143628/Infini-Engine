@@ -545,6 +545,18 @@ fn project_sprite(sprite: &Sprite, translation: DVec3) -> SpriteInstance {
         order: sprite.order,
         flip_x: sprite.flip_x,
         flip_y: sprite.flip_y,
+        billboard: billboard_mode(sprite.billboard),
+    }
+}
+
+/// Map the ECS [`BillboardMode`] enum onto the renderer's `u8` billboard flag
+/// (P8.4a) — the sprite pass orients the quad by the camera basis for the
+/// non-planar modes.
+fn billboard_mode(mode: inf_ecs::BillboardMode) -> u8 {
+    match mode {
+        inf_ecs::BillboardMode::None => inf_render::BILLBOARD_NONE,
+        inf_ecs::BillboardMode::Spherical => inf_render::BILLBOARD_SPHERICAL,
+        inf_ecs::BillboardMode::Cylindrical => inf_render::BILLBOARD_CYLINDRICAL,
     }
 }
 

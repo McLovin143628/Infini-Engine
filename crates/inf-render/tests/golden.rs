@@ -23,8 +23,9 @@ use inf_render::{
     expand_text, Ambient2D, EngineRenderer, GpuContext, HAlign, HeadlessTarget, LightKind,
     MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D, RenderScene,
     RenderTilemap, RenderView, SpriteInstance, SpriteTextureUpload, TextParams, TilemapParams,
-    BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE,
-    HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
+    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT,
+    TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -277,6 +278,71 @@ fn golden_pbr_materials() {
     // The scene is lit: some pixel is clearly brighter than the dark backdrop.
     let lit = img.chunks(4).any(|p| p[0] > 90 || p[1] > 90 || p[2] > 90);
     assert!(lit, "expected a lit PBR pixel");
+}
+
+/// 2.5D billboard golden (P8.4a): an **angled perspective** camera over a row of
+/// sprites — one flat (planar, in the world XY plane), one spherical billboard,
+/// one cylindrical billboard — plus a ground grid for depth context. Under the
+/// oblique view the planar sprite is seen edge-on/foreshortened while the two
+/// billboards turn to face the camera, proving the vertex-shader orientation
+/// (determinism gate via `check_golden`; strict pixel diff opt-in). The camera
+/// basis rides in the view uniform (`cam_right`/`cam_up`).
+#[test]
+fn golden_billboards() {
+    let Some(gpu) = gpu_or_skip() else { return };
+
+    const TEX: u64 = 0xB1;
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        pending_texture_uploads: vec![SpriteTextureUpload {
+            handle: TEX,
+            width: 64,
+            height: 64,
+            rgba8: checkerboard(64, 4, [230, 80, 40], 255),
+        }],
+        ..Default::default()
+    };
+
+    // Three cards standing on the ground plane (pivot bottom-centre), spread
+    // along X, each with a distinct billboard mode + tint.
+    for (x, mode, tint) in [
+        (-2.2f64, BILLBOARD_NONE, [1.0f32, 0.3, 0.3, 1.0]),
+        (0.0, BILLBOARD_SPHERICAL, [0.3, 1.0, 0.4, 1.0]),
+        (2.2, BILLBOARD_CYLINDRICAL, [0.4, 0.5, 1.0, 1.0]),
+    ] {
+        scene.sprites.push(SpriteInstance {
+            position: DVec3::new(x, 1.0, 0.0),
+            size: Vec2::new(1.6, 2.0),
+            pivot: Vec2::new(0.5, 0.5),
+            color: tint,
+            texture: TEX,
+            sorting_layer: 1,
+            billboard: mode,
+            ..Default::default()
+        });
+    }
+    scene.mark_dirty();
+
+    // The angled overlook view (perspective, camera at (6,4.5,9) → origin).
+    let img = check_golden(&gpu, "billboards", &scene, &overlook_view());
+
+    // Each tinted billboard shows up: a red, a green and a blue sprite region.
+    let (mut red, mut green, mut blue) = (false, false, false);
+    for chunk in img.chunks(4) {
+        let (r, g, b) = (chunk[0] as i32, chunk[1] as i32, chunk[2] as i32);
+        if r > 130 && r - g > 60 && r - b > 60 {
+            red = true;
+        }
+        if g > 130 && g - r > 50 && g - b > 40 {
+            green = true;
+        }
+        if b > 130 && b - r > 40 && b - g > 40 {
+            blue = true;
+        }
+    }
+    assert!(red, "expected the planar (red) sprite");
+    assert!(green, "expected the spherical (green) billboard");
+    assert!(blue, "expected the cylindrical (blue) billboard");
 }
 
 /// A view looking straight down -Z at the world XY plane, so sprites (which lie

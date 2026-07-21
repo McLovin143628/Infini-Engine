@@ -97,6 +97,13 @@ impl SceneDoc {
         self.dirty = true;
     }
 
+    /// Bump the version **without** dirtying — the Simulate loop (P8.4) calls
+    /// this after mutating the ECS world so the viewport re-syncs, but a live
+    /// preview must not mark the document unsaved (exit restores it anyway).
+    pub fn bump_version_for_runtime(&mut self) {
+        self.version += 1;
+    }
+
     /// Clear the dirty flag (after a successful save) without bumping version.
     pub fn mark_saved(&mut self) {
         self.dirty = false;

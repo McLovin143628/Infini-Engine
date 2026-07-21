@@ -24,6 +24,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 inf-core = { workspace = true }
 inf-editor-core = { workspace = true }
+glam = { workspace = true }
 inf-asset = { workspace = true }
 inf-material = { workspace = true }
 inf-project = { workspace = true }

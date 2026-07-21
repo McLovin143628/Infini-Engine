@@ -15,7 +15,7 @@ struct VsIn {
     @location(2) pivot: vec4<f32>,    // x,y = pivot in [0,1]
     @location(3) uv: vec4<f32>,       // xy = uv_min, zw = uv_max
     @location(4) color: vec4<f32>,    // linear straight-alpha tint
-    @location(5) flags: vec4<u32>,    // x = flip_x, y = flip_y
+    @location(5) flags: vec4<u32>,    // x = flip_x, y = flip_y, z = billboard mode
 };
 
 struct VsOut {
@@ -36,14 +36,37 @@ fn vs(in: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
     let rot = in.size_rot.z;
     let pivot = in.pivot.xy;
 
-    // Pivot-relative, size-scaled local plane offset, rotated about +Z.
+    // Pivot-relative, size-scaled local plane offset, rotated about the quad
+    // normal (billboard modes keep rotation in the oriented plane).
     let local = vec2<f32>((cx - pivot.x) * size.x, (cy - pivot.y) * size.y);
     let s = sin(rot);
     let c = cos(rot);
     let r = vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
 
-    // Sprite lies in the world XY plane facing +Z; offset along world X/Y.
-    let world = in.center.xyz + vec3<f32>(r.x, r.y, 0.0);
+    // Billboard mode (flags.z): 0 = planar (world XY plane, facing +Z — the
+    // pre-2.5D path, byte-identical to before), 1 = spherical (full camera
+    // basis), 2 = cylindrical (world-up, camera-facing right). Mirrors
+    // inf_render_2d::billboard_basis / corner_offset_billboard.
+    let mode = in.flags.z;
+    var world: vec3<f32>;
+    if (mode == 0u) {
+        // Sprite lies in the world XY plane facing +Z; offset along world X/Y.
+        world = in.center.xyz + vec3<f32>(r.x, r.y, 0.0);
+    } else {
+        var right = view.cam_right.xyz;
+        var up = view.cam_up.xyz;
+        if (mode == 2u) {
+            // Cylindrical: upright about world +Y, right flattened to horizontal.
+            let flat = vec3<f32>(right.x, 0.0, right.z);
+            if (dot(flat, flat) > 1e-12) {
+                right = normalize(flat);
+            } else {
+                right = vec3<f32>(1.0, 0.0, 0.0);
+            }
+            up = vec3<f32>(0.0, 1.0, 0.0);
+        }
+        world = in.center.xyz + right * r.x + up * r.y;
+    }
 
     var out: VsOut;
     out.pos = view.view_proj * vec4<f32>(world, 1.0);

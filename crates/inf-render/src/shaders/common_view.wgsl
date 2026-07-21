@@ -15,6 +15,11 @@ struct View {
     // x = 1.0 in orthographic (2D) mode else 0.0; y = -origin.y (render-local
     // world Y axis, for the 2D XY grid); zw reserved.
     mode_axis: vec4<f32>,
+    // Camera right / up basis (render-local), xyz; w unused. Only the sprite
+    // pass reads these (to orient billboards). Appended last — other passes that
+    // declare the shorter View struct are unaffected.
+    cam_right: vec4<f32>,
+    cam_up: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> view: View;
 

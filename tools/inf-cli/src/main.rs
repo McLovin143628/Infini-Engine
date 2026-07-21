@@ -54,7 +54,9 @@ fn cmd_new(args: &[String]) -> ExitCode {
                 match args.get(i).and_then(|s| ProjectTemplate::from_slug(s)) {
                     Some(t) => template = t,
                     None => {
-                        eprintln!("unknown template (use blank-3d / 2d-platformer / first-person)");
+                        eprintln!(
+                            "unknown template (use blank-3d / 2d-platformer / first-person / hybrid-2.5d)"
+                        );
                         return ExitCode::FAILURE;
                     }
                 }

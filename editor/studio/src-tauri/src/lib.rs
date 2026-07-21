@@ -29,6 +29,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::ViewportState::default())
         .manage(commands::SceneState::default())
+        .manage(commands::SimState::default())
         .manage(commands::AssetState::default())
         .manage(commands::ProjectState::default())
         .manage(commands::PtyState::default())

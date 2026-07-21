@@ -133,6 +133,7 @@ pub fn expand_chunk(params: &TilemapParams, chunk: &RenderChunk, out: &mut Vec<S
                 order: params.order,
                 flip_x: false,
                 flip_y: false,
+                billboard: crate::BILLBOARD_NONE,
             });
         }
     }

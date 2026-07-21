@@ -2359,11 +2359,14 @@ dependencies = [
  "csv",
  "glam 0.33.2",
  "inf-asset",
+ "inf-blueprint",
  "inf-core",
  "inf-ecs",
+ "inf-graph",
  "inf-material",
  "inf-math",
  "inf-mesh",
+ "inf-physics",
  "inf-render",
  "inf-runtime",
  "png 0.18.1",
@@ -2537,6 +2540,7 @@ version = "0.1.0"
 name = "inf-studio"
 version = "0.1.0"
 dependencies = [
+ "glam 0.33.2",
  "ignore",
  "inf-asset",
  "inf-blueprint",

@@ -1,0 +1,120 @@
+//! Simulate commands (P8.4): drive the in-editor [`SimSession`] over the shared
+//! [`SceneDoc`] so a Blueprint + 2D-physics scene plays in the viewport.
+//!
+//! The session lives here behind a `Mutex`; it borrows the **same** `SceneDoc`
+//! the viewport renders (`SceneState::doc`), so ticking mutates the live world
+//! and the native viewport re-syncs on the bumped version. Enter snapshots the
+//! world; Stop restores it exactly.
+//!
+//! Input path (P8.4.3): `sim_tick` receives the currently-held keys/actions from
+//! the frontend each frame (a rAF loop) — the "frontend-focused" input route that
+//! always works. When the **native** viewport holds OS focus it forwards
+//! unconsumed keys over `viewport://key` (the Phase-2 focus-handoff channel); the
+//! frontend merges those into the held set it passes here. Driving the tick from
+//! a real frame timer is the human-verified remainder (CI scripts the session
+//! directly — see `inf-editor-core`'s `simulate_platformer` test).
+
+use std::sync::Mutex;
+use std::time::Instant;
+
+use glam::DVec2;
+use inf_editor_core::samples::character_actors;
+use inf_editor_core::simulate::{SimInput, SimSession, SIM_HZ};
+use tauri::{AppHandle, Emitter, State};
+
+use super::scene::SceneState;
+
+/// Live Simulate state: the session (absent when stopped) + the last tick's
+/// wall-clock instant (for the frame delta fed to the fixed-step accumulator).
+#[derive(Default)]
+pub struct SimState {
+    inner: Mutex<SimInner>,
+}
+
+#[derive(Default)]
+struct SimInner {
+    session: Option<SimSession>,
+    last: Option<Instant>,
+}
+
+/// Enter Simulate over the current scene: snapshot the world, attach the
+/// coyote-time class to every `CharacterController2D` entity, and fire BeginPlay.
+#[tauri::command]
+pub async fn sim_start(
+    app: AppHandle,
+    scene: State<'_, SceneState>,
+    sim: State<'_, SimState>,
+) -> Result<(), String> {
+    let mut doc = scene.doc.lock().map_err(|_| "scene lock poisoned")?;
+    let actors = character_actors(&doc);
+    // Character applies its own gravity in the blueprint → world gravity is zero.
+    let session = SimSession::enter(&mut doc, actors, DVec2::ZERO, SIM_HZ);
+    doc.bump_version_for_runtime();
+    drop(doc);
+
+    let mut inner = sim.inner.lock().map_err(|_| "sim lock poisoned")?;
+    inner.session = Some(session);
+    inner.last = Some(Instant::now());
+    let _ = app.emit("sim://state", true);
+    Ok(())
+}
+
+/// Advance Simulate by one frame with the given held keys/actions (e.g.
+/// `["left","jump"]`). No-op when not running.
+#[tauri::command]
+pub async fn sim_tick(
+    scene: State<'_, SceneState>,
+    sim: State<'_, SimState>,
+    keys: Vec<String>,
+) -> Result<bool, String> {
+    let mut inner = sim.inner.lock().map_err(|_| "sim lock poisoned")?;
+    if inner.session.is_none() {
+        return Ok(false);
+    }
+    let now = Instant::now();
+    let dt = inner
+        .last
+        .map(|t| now.duration_since(t).as_secs_f64())
+        .unwrap_or(1.0 / SIM_HZ)
+        // Guard a huge first/hitched frame (the stepper also clamps).
+        .clamp(0.0, 0.25);
+    inner.last = Some(now);
+
+    let mut doc = scene.doc.lock().map_err(|_| "scene lock poisoned")?;
+    let session = inner.session.as_mut().expect("session present");
+    session.tick(&mut doc, dt, SimInput::with_down(keys));
+    doc.bump_version_for_runtime();
+    Ok(true)
+}
+
+/// Exit Simulate: restore the pre-play world exactly.
+#[tauri::command]
+pub async fn sim_stop(
+    app: AppHandle,
+    scene: State<'_, SceneState>,
+    sim: State<'_, SimState>,
+) -> Result<(), String> {
+    let session = {
+        let mut inner = sim.inner.lock().map_err(|_| "sim lock poisoned")?;
+        inner.last = None;
+        inner.session.take()
+    };
+    if let Some(session) = session {
+        let mut doc = scene.doc.lock().map_err(|_| "scene lock poisoned")?;
+        session.exit(&mut doc);
+        doc.bump_version_for_runtime();
+    }
+    let _ = app.emit("sim://state", false);
+    Ok(())
+}
+
+/// Whether a Simulate session is currently running.
+#[tauri::command]
+pub async fn sim_is_running(sim: State<'_, SimState>) -> Result<bool, String> {
+    Ok(sim
+        .inner
+        .lock()
+        .map_err(|_| "sim lock poisoned")?
+        .session
+        .is_some())
+}

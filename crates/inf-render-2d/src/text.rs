@@ -128,6 +128,7 @@ pub fn expand_text(params: &TextParams) -> Vec<SpriteInstance> {
                 order: params.order,
                 flip_x: false,
                 flip_y: false,
+                billboard: crate::BILLBOARD_NONE,
             });
         }
     }

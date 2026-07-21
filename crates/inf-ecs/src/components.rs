@@ -229,6 +229,25 @@ impl Default for AtlasRect {
     }
 }
 
+/// How a [`Sprite`] orients its quad relative to the camera (P8.4a, 2.5D).
+///
+/// A **flat** reflected enum (like [`ColliderShape2DKind`]): the Details grid
+/// surfaces it on the unit-enum dropdown. `None` is the classic world-XY-plane
+/// sprite (facing +Z); the billboard modes rotate the quad in the vertex shader
+/// so a 2D sprite reads as a card standing up in a 3D scene.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BillboardMode {
+    /// Fixed in the world XY plane, facing +Z (the pre-2.5D behaviour).
+    #[default]
+    None,
+    /// Always faces the camera fully (rotates about both axes) — the classic
+    /// "particle" billboard.
+    Spherical,
+    /// Faces the camera but stays upright about world **+Y** (trees, characters
+    /// in a 2.5D scene): rotates only about the vertical axis.
+    Cylindrical,
+}
+
 /// A 2D sprite: a textured, tinted, sortable quad. Rendered by the 2D pass
 /// (`inf-render-2d` batcher + `inf-render` sprite pass) over the 3D scene.
 ///
@@ -267,6 +286,11 @@ pub struct Sprite {
     pub flip_x: bool,
     #[serde(default)]
     pub flip_y: bool,
+    /// Camera-facing mode (P8.4a). Additive field: `#[serde(default)]` →
+    /// [`BillboardMode::None`], so a sprite saved before 2.5D (and every existing
+    /// self-describing payload) round-trips unchanged.
+    #[serde(default)]
+    pub billboard: BillboardMode,
 }
 
 impl Default for Sprite {
@@ -281,6 +305,7 @@ impl Default for Sprite {
             order: 0,
             flip_x: false,
             flip_y: false,
+            billboard: BillboardMode::None,
         }
     }
 }
@@ -972,6 +997,7 @@ mod tests {
             order: 5,
             flip_x: true,
             flip_y: false,
+            billboard: BillboardMode::Spherical,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: Sprite = serde_json::from_str(&json).unwrap();
@@ -1218,5 +1244,32 @@ mod tests {
         assert_eq!(s, Sprite::default());
         assert_eq!(s.atlas_rect, AtlasRect::default());
         assert_eq!(s.sorting_layer, 0);
+        // The appended 2.5D field defaults to None on a pre-billboard payload.
+        assert_eq!(s.billboard, BillboardMode::None);
+    }
+
+    #[test]
+    fn sprite_billboard_field_round_trips_and_defaults() {
+        // A full sprite carrying a billboard mode round-trips.
+        let s = Sprite {
+            billboard: BillboardMode::Cylindrical,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Sprite = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.billboard, BillboardMode::Cylindrical);
+
+        // A payload written before the field existed (no `billboard` key) decodes
+        // with `billboard` defaulted to None — the additive-field discipline.
+        let pre_billboard = r#"{
+            "texture": null,
+            "size": { "x": 1.0, "y": 1.0 },
+            "pivot": { "x": 0.5, "y": 0.5 },
+            "color": { "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0 },
+            "atlas_rect": { "min": {"x":0.0,"y":0.0}, "max": {"x":1.0,"y":1.0} },
+            "sorting_layer": 0, "order": 0, "flip_x": false, "flip_y": false
+        }"#;
+        let s: Sprite = serde_json::from_str(pre_billboard).unwrap();
+        assert_eq!(s.billboard, BillboardMode::None);
     }
 }

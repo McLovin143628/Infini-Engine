@@ -36,7 +36,9 @@ pub struct SpriteRaw {
     /// xy = uv_min, zw = uv_max.
     uv: [f32; 4],
     color: [f32; 4],
-    /// x = flip_x, y = flip_y (0/1).
+    /// x = flip_x, y = flip_y, **z = billboard mode** (0 none / 1 spherical /
+    /// 2 cylindrical), w unused. The z slot was previously always 0, so existing
+    /// (non-billboard) instances pack byte-identically — the goldens stay stable.
     flags: [u32; 4],
 }
 
@@ -49,7 +51,7 @@ impl SpriteRaw {
             pivot: [s.pivot.x, s.pivot.y, 0.0, 0.0],
             uv: [s.uv_min.x, s.uv_min.y, s.uv_max.x, s.uv_max.y],
             color: s.color,
-            flags: [s.flip_x as u32, s.flip_y as u32, 0, 0],
+            flags: [s.flip_x as u32, s.flip_y as u32, s.billboard as u32, 0],
         }
     }
 }

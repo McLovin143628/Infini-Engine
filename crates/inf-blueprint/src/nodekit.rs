@@ -44,6 +44,7 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(flow_nodes());
     reg.register_all(action_nodes());
     reg.register_all(physics_nodes());
+    reg.register_all(input_nodes());
     reg
 }
 
@@ -272,6 +273,30 @@ fn physics_nodes() -> Vec<NodeDef> {
     ]
 }
 
+/// The input-state kit (P8.4): pure Bool queries the Simulate loop answers from
+/// the focused viewport's keyboard state. Both take the action/key **as a `Str`
+/// data input** (wire a `lit.str`) rather than a node param, so they lower with
+/// zero special-casing — `PureCall` `build_call` turns the wired key into the
+/// call's single argument, emitting `input::is_down("left")` /
+/// `input::just_pressed("jump")`. `is_down` is the held state (polled every
+/// tick for movement); `just_pressed` is the rising edge (one tick only — the
+/// jump trigger). The interpreter routes both through the ordinary
+/// [`Host`](crate::interp::Host) boundary (the `input.*` namespace), exactly like
+/// `engine.*`; the transpiler emits matching `input::*` free calls a P9 game-loop
+/// shim binds.
+fn input_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("input.is_down", "Is Key Down", "input")
+            .described("True while the named action/key is held.")
+            .with_inputs(vec![PortDef::new("key", PortType::Str).required()])
+            .with_outputs(vec![PortDef::new("down", PortType::Bool)]),
+        NodeDef::new("input.just_pressed", "Was Key Pressed", "input")
+            .described("True only on the tick the named action/key went down (rising edge).")
+            .with_inputs(vec![PortDef::new("key", PortType::Str).required()])
+            .with_outputs(vec![PortDef::new("pressed", PortType::Bool)]),
+    ]
+}
+
 /// Classify a node `type_id` for the lowerer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeRole {
@@ -341,6 +366,17 @@ mod tests {
         assert!(rc.input(EXEC_IN).is_none());
         assert_eq!(rc.output("point_x").unwrap().ty, PortType::Float);
         assert_eq!(rc.output("normal_y").unwrap().ty, PortType::Float);
+    }
+
+    #[test]
+    fn input_kit_is_registered() {
+        let reg = blueprint_registry();
+        let down = reg.get("input.is_down").expect("input.is_down");
+        assert!(down.input(EXEC_IN).is_none(), "is_down is a pure query");
+        assert_eq!(down.input("key").unwrap().ty, PortType::Str);
+        assert_eq!(down.output("down").unwrap().ty, PortType::Bool);
+        let jp = reg.get("input.just_pressed").expect("input.just_pressed");
+        assert_eq!(jp.output("pressed").unwrap().ty, PortType::Bool);
     }
 
     #[test]

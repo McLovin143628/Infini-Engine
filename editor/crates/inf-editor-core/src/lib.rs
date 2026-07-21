@@ -7,6 +7,8 @@ pub mod ipc;
 pub mod layouts;
 pub mod pie;
 pub mod project_settings;
+pub mod samples;
 pub mod scene;
+pub mod simulate;
 pub mod sorting;
 pub mod thumbnail;

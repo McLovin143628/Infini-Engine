@@ -133,6 +133,14 @@ pub struct ViewUniforms {
     /// (render-local position of the world Y axis, for the 2D XY grid);
     /// zw reserved. Appended so pre-2D passes/goldens stay byte-identical.
     pub mode_axis: [f32; 4],
+    /// Camera **right** basis vector (render-local == world axes; the origin only
+    /// translates), xyz; w unused. Read only by the sprite pass to orient
+    /// billboards (P8.4a). Appended after `mode_axis` so every other pass — which
+    /// declares the shorter `View` struct — is unaffected and its goldens stay
+    /// byte-identical (a uniform buffer may be larger than a shader's struct).
+    pub cam_right: [f32; 4],
+    /// Camera **up** basis vector (render-local), xyz; w unused. See `cam_right`.
+    pub cam_up: [f32; 4],
 }
 
 /// Fixed editor sun for Phase 2 (light theory arrives with materials, P7).
@@ -142,6 +150,11 @@ impl ViewUniforms {
     pub fn from_view(view: &RenderView) -> Self {
         let vp = view.view_proj();
         let origin = view.origin.origin();
+        // Camera basis (render-local == world directions): right = fwd × up,
+        // true up = right × fwd. Used to orient billboard sprites.
+        let fwd = view.forward.normalize_or_zero();
+        let cam_right = fwd.cross(view.up).normalize_or_zero();
+        let cam_up = cam_right.cross(fwd).normalize_or_zero();
         Self {
             view_proj: vp.to_cols_array(),
             inv_view_proj: vp.inverse().to_cols_array(),
@@ -161,6 +174,8 @@ impl ViewUniforms {
                 0.0,
             )
             .to_array(),
+            cam_right: cam_right.extend(0.0).to_array(),
+            cam_up: cam_up.extend(0.0).to_array(),
         }
     }
 }
@@ -250,11 +265,20 @@ mod tests {
         assert_eq!(u.grid_axis_viewport[1], 300.0);
         assert_eq!(
             std::mem::size_of::<ViewUniforms>(),
-            (16 + 16 + 4 + 4 + 4 + 4) * 4
+            (16 + 16 + 4 + 4 + 4 + 4 + 4 + 4) * 4
         );
         // Perspective packs mode flag 0; the origin's Y still populates the 2D
         // axis slot (only read by the grid shader in ortho).
         assert_eq!(u.mode_axis[0], 0.0);
+    }
+
+    #[test]
+    fn uniforms_pack_camera_basis_for_billboards() {
+        // A camera looking down -Z with up +Y: right = +X, up = +Y.
+        let v = test_view();
+        let u = ViewUniforms::from_view(&v);
+        assert!((Vec3::from_slice(&u.cam_right[..3]) - Vec3::X).length() < 1e-6);
+        assert!((Vec3::from_slice(&u.cam_up[..3]) - Vec3::Y).length() < 1e-6);
     }
 
     #[test]

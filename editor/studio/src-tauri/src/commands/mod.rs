@@ -14,6 +14,7 @@ mod project;
 mod scene;
 mod search;
 mod settings;
+mod sim;
 mod sorting;
 mod terminal;
 mod viewport;
@@ -24,6 +25,7 @@ pub use lsp::LspState;
 pub use material::MaterialState;
 pub use project::ProjectState;
 pub use scene::{recover_scene_on_boot, SceneState};
+pub use sim::SimState;
 pub use terminal::PtyState;
 pub use viewport::ViewportState;
 
@@ -79,6 +81,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         scene::scene_open,
         scene::scene_new,
         scene::scene_autosave,
+        sim::sim_start,
+        sim::sim_tick,
+        sim::sim_stop,
+        sim::sim_is_running,
         assets::assets_snapshot,
         assets::asset_references,
         assets::asset_thumbnail,

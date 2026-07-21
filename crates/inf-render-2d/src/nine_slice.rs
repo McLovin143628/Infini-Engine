@@ -113,6 +113,7 @@ pub fn expand_nine_slice(p: &NineSliceParams) -> [SpriteInstance; 9] {
                 order: p.order,
                 flip_x: false,
                 flip_y: false,
+                billboard: crate::BILLBOARD_NONE,
             };
         }
     }

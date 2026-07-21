@@ -40,9 +40,10 @@ pub use scene::{
 };
 // 2D batcher API surfaced through the renderer for hosts.
 pub use inf_render_2d::{
-    aabb_visible, atlas_uv, batch_scene, batch_sprites, builtin_font_rgba8, chunk_world_aabb,
-    expand_chunk, expand_nine_slice, expand_text, handle_from_guid, BatchedSprites, HAlign,
-    NineSliceParams, SpriteBatch, TextParams, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP,
-    BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, TILE_CHUNK_DIM, WHITE_TEXTURE,
+    aabb_visible, atlas_uv, batch_scene, batch_sprites, billboard_basis, builtin_font_rgba8,
+    chunk_world_aabb, corner_offset_billboard, expand_chunk, expand_nine_slice, expand_text,
+    handle_from_guid, BatchedSprites, HAlign, NineSliceParams, SpriteBatch, TextParams,
+    BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
+    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, TILE_CHUNK_DIM, WHITE_TEXTURE,
 };
 pub use surface::{SurfaceChain, RECONFIGURE_DEBOUNCE};

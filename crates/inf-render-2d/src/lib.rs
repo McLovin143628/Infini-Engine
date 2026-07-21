@@ -22,7 +22,7 @@
 //! `texel * tint` unmodified and the pipeline blends with
 //! `src=SrcAlpha, dst=OneMinusSrcAlpha`. See `inf-render`'s sprite pass.
 
-use glam::{DVec3, Vec2};
+use glam::{DVec3, Vec2, Vec3};
 
 pub mod nine_slice;
 pub mod text;
@@ -44,6 +44,16 @@ pub type TextureHandle = u64;
 
 /// The reserved handle meaning "no texture / use the 1×1 white fallback".
 pub const WHITE_TEXTURE: TextureHandle = 0;
+
+/// Billboard mode packed into a [`SpriteInstance`] (mirrors
+/// `inf_ecs::BillboardMode` — kept as a `u8` here so this pure-CPU crate stays
+/// free of an `inf-ecs` dependency). `0` = planar (the pre-2.5D behaviour),
+/// `1` = spherical (full camera-facing), `2` = cylindrical (upright about world
+/// +Y). The value rides in `SpriteRaw.flags.z`; the vertex shader orients the
+/// quad by the camera basis when it is non-zero. See `sprite.wgsl`.
+pub const BILLBOARD_NONE: u8 = 0;
+pub const BILLBOARD_SPHERICAL: u8 = 1;
+pub const BILLBOARD_CYLINDRICAL: u8 = 2;
 
 /// The reserved handle for the built-in 8×8 bitmap font atlas
 /// ([`builtin_font_rgba8`]). The sprite pass uploads that atlas under this
@@ -81,6 +91,10 @@ pub struct SpriteInstance {
     pub order: i32,
     pub flip_x: bool,
     pub flip_y: bool,
+    /// Camera-facing mode (P8.4a): [`BILLBOARD_NONE`] (planar, the default),
+    /// [`BILLBOARD_SPHERICAL`], or [`BILLBOARD_CYLINDRICAL`]. Non-zero orients
+    /// the quad by the camera basis in the vertex shader.
+    pub billboard: u8,
 }
 
 impl Default for SpriteInstance {
@@ -98,6 +112,7 @@ impl Default for SpriteInstance {
             order: 0,
             flip_x: false,
             flip_y: false,
+            billboard: BILLBOARD_NONE,
         }
     }
 }
@@ -255,6 +270,47 @@ pub fn corner_offset(s: &SpriteInstance, vertex_index: u32) -> Vec2 {
     let local = Vec2::new((c.x - s.pivot.x) * s.size.x, (c.y - s.pivot.y) * s.size.y);
     let (sin, cos) = s.rotation.sin_cos();
     Vec2::new(local.x * cos - local.y * sin, local.x * sin + local.y * cos)
+}
+
+/// The camera-facing basis a billboard mode uses to place its quad, given the
+/// camera's render-local `right` and `up` vectors. Mirrors the branch in
+/// `sprite.wgsl` **exactly** so the orientation is unit-testable:
+///
+/// * [`BILLBOARD_SPHERICAL`] → `(right, up)` verbatim (full camera-facing).
+/// * [`BILLBOARD_CYLINDRICAL`] → world-up `(0,1,0)` and the horizontal component
+///   of `right` (renormalized; falls back to `+X` if degenerate), so the card
+///   stays upright and only yaws toward the camera.
+///
+/// [`BILLBOARD_NONE`] never calls this (its quad lies in the world XY plane).
+pub fn billboard_basis(mode: u8, cam_right: Vec3, cam_up: Vec3) -> (Vec3, Vec3) {
+    match mode {
+        BILLBOARD_CYLINDRICAL => {
+            let flat = Vec3::new(cam_right.x, 0.0, cam_right.z);
+            let right = if flat.length_squared() > 1e-12 {
+                flat.normalize()
+            } else {
+                Vec3::X
+            };
+            (right, Vec3::Y)
+        }
+        // Spherical (and any non-zero fallthrough): full camera basis.
+        _ => (cam_right, cam_up),
+    }
+}
+
+/// The world-space offset of corner `vertex_index` for a **billboarded** sprite:
+/// the same pivot-relative, size-scaled, Z-rotated local plane offset as
+/// [`corner_offset`], but mapped onto the camera-facing `(right, up)` basis from
+/// [`billboard_basis`] instead of the world XY plane. Mirrors `sprite.wgsl`.
+pub fn corner_offset_billboard(
+    s: &SpriteInstance,
+    vertex_index: u32,
+    cam_right: Vec3,
+    cam_up: Vec3,
+) -> Vec3 {
+    let local = corner_offset(s, vertex_index); // pivot/size/rotation in plane
+    let (right, up) = billboard_basis(s.billboard, cam_right, cam_up);
+    right * local.x + up * local.y
 }
 
 /// The texture UV of corner `vertex_index`, applying the atlas rect and flips.
@@ -521,6 +577,48 @@ mod tests {
         assert_eq!(corner_uv(&fx, 2), Vec2::new(0.75, 0.5));
         let fy = SpriteInstance { flip_y: true, ..s };
         assert_eq!(corner_uv(&fy, 2), Vec2::new(0.25, 1.0));
+    }
+
+    #[test]
+    fn billboard_basis_spherical_is_camera_basis_cylindrical_is_upright() {
+        // A camera looking down -Z with up +Y: right = +X.
+        let right = Vec3::X;
+        let up = Vec3::Y;
+        assert_eq!(billboard_basis(BILLBOARD_SPHERICAL, right, up), (right, up));
+
+        // Tilt the camera so its "up" gains a Z component (pitched down): the
+        // cylindrical basis keeps world up and flattens right to horizontal.
+        let tilted_up = Vec3::new(0.0, 0.7, 0.7).normalize();
+        let tilted_right = Vec3::X; // still horizontal
+        let (r, u) = billboard_basis(BILLBOARD_CYLINDRICAL, tilted_right, tilted_up);
+        assert_eq!(u, Vec3::Y, "cylindrical stays upright about world Y");
+        assert!(
+            (r - Vec3::X).length() < 1e-6,
+            "right flattened to horizontal"
+        );
+
+        // A camera rolled so its right has a Y component: cylindrical drops the Y.
+        let rolled_right = Vec3::new(0.6, 0.8, 0.0).normalize();
+        let (r2, _) = billboard_basis(BILLBOARD_CYLINDRICAL, rolled_right, Vec3::Y);
+        assert!(r2.y.abs() < 1e-6, "cylindrical right is horizontal: {r2:?}");
+    }
+
+    #[test]
+    fn corner_offset_billboard_maps_plane_onto_camera_basis() {
+        // Spherical billboard facing a -Z camera: the world XY plane offset is
+        // reproduced (right=+X, up=+Y), so it matches the planar offset embedded
+        // in Z=0.
+        let s = SpriteInstance {
+            size: Vec2::new(4.0, 2.0),
+            pivot: Vec2::splat(0.5),
+            billboard: BILLBOARD_SPHERICAL,
+            ..Default::default()
+        };
+        let o = corner_offset_billboard(&s, 3, Vec3::X, Vec3::Y);
+        assert!((o - Vec3::new(2.0, 1.0, 0.0)).length() < 1e-6, "{o:?}");
+        // With the camera pointing down +Z (right=-X), the card flips to face it.
+        let o2 = corner_offset_billboard(&s, 3, -Vec3::X, Vec3::Y);
+        assert!((o2 - Vec3::new(-2.0, 1.0, 0.0)).length() < 1e-6, "{o2:?}");
     }
 
     #[test]

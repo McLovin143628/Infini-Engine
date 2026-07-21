@@ -42,6 +42,15 @@ fn float(g: &mut Graph, v: f64) -> NodeId {
     n
 }
 
+fn text(g: &mut Graph, v: &str) -> NodeId {
+    let n = g.insert("lit.str", NodeUi::default());
+    g.node_mut(n)
+        .unwrap()
+        .params
+        .insert("value".into(), ParamValue::Text(v.into()));
+    n
+}
+
 /// Generate → lift, returning the single lifted blueprint fn.
 fn relift(f: &BlueprintFn) -> BlueprintFn {
     let src = generate_fn(f).expect("generate");
@@ -102,6 +111,43 @@ fn character_kit_graph_round_trips() {
     assert!(src.contains("physics2d::move_and_slide("), "src:\n{src}");
     assert!(src.contains("physics2d::get_velocity::x("), "src:\n{src}");
     assert!(src.contains("physics2d::get_velocity::y("), "src:\n{src}");
+}
+
+/// The P8.4 input-state kit (`input.is_down`, `input.just_pressed`): a graph
+/// gating a jump on the `jump` action, plus a `left`/`right` `is_down` read,
+/// lowers and survives generate → lift, emitting `input::*` free calls.
+#[test]
+fn input_kit_graph_round_trips() {
+    let reg = blueprint_registry();
+    let mut g = Graph::empty();
+
+    let tick = g.insert("event.tick", NodeUi::default());
+    let ent = int(&mut g, 1);
+    // input.just_pressed("jump") → gate a move_and_slide with a small vertical.
+    let jump_key = text(&mut g, "jump");
+    let jp = g.insert("input.just_pressed", NodeUi::default());
+    let right_key = text(&mut g, "right");
+    let down = g.insert("input.is_down", NodeUi::default());
+    let br = g.insert("flow.branch", NodeUi::default());
+    let mas = g.insert("physics2d.move_and_slide", NodeUi::default());
+
+    wire(&mut g, jump_key, "value", jp, "key");
+    wire(&mut g, right_key, "value", down, "key");
+    // Branch on just_pressed("jump").
+    wire(&mut g, jp, "pressed", br, "condition");
+    wire(&mut g, tick, EXEC_THEN, br, "exec");
+    // True arm: move. `down` feeds motion_x (bool→the transpiler emits the call).
+    wire(&mut g, ent, "value", mas, "entity");
+    wire(&mut g, down, "down", mas, "motion_x");
+    wire(&mut g, br, "true", mas, "exec");
+
+    let lowered = lower_graph(&g, &reg).expect("lower").pop().unwrap();
+    let lifted = relift(&lowered);
+    assert_eq!(&lifted, &lowered, "input-kit IR must survive transpile");
+
+    let src = generate_fn(&lowered).unwrap();
+    assert!(src.contains("input::just_pressed(\"jump\")"), "src:\n{src}");
+    assert!(src.contains("input::is_down(\"right\")"), "src:\n{src}");
 }
 
 #[test]
