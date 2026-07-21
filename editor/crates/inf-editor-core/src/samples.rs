@@ -2362,9 +2362,31 @@ pub const fn vgeom_demo_source_triangles() -> u64 {
     (2 * VGEOM_DEMO_MESH_N * VGEOM_DEMO_MESH_N * VGEOM_DEMO_GRID * VGEOM_DEMO_GRID) as u64
 }
 
+/// A byte-portable sine: std `f32::sin` is NOT bit-identical across libms (MSVC
+/// vs glibc diverged on the Ubuntu CI runner — the generator-lock caught it), so
+/// the displacement uses this pure-arithmetic minimax polynomial instead. IEEE
+/// f32 add/mul/floor are exactly specified, so the committed mesh bytes are
+/// identical on every platform.
+fn psin(x: f32) -> f32 {
+    use std::f32::consts::TAU;
+    // Range-reduce to [-π, π] (floor is exact; inputs here are small, no
+    // catastrophic cancellation at the scales the generator uses).
+    let x = x - (x / TAU + 0.5).floor() * TAU;
+    // Odd 7th-order minimax on [-π, π] (~1e-4 abs error — far below visual or
+    // meshlet-build significance, and perfectly reproducible).
+    let x2 = x * x;
+    x * (0.987_862 + x2 * (-0.155_271 + x2 * (0.005_641_12 - x2 * 0.000_060_461_2)))
+}
+
+/// Byte-portable cosine via [`psin`].
+fn pcos(x: f32) -> f32 {
+    psin(x + std::f32::consts::FRAC_PI_2)
+}
+
 /// One dense displaced-grid [`inf_mesh::MeshAsset`] (`2·N²` triangles) — the shared
-/// asset every instance references. A deterministic function of `N`, so the
-/// committed `.inf_mesh` is reproducible.
+/// asset every instance references. A deterministic function of `N` built on
+/// byte-portable arithmetic ([`psin`]/[`pcos`]), so the committed `.inf_mesh` is
+/// reproducible on every platform.
 pub fn vgeom_demo_mesh() -> inf_mesh::MeshAsset {
     let n = VGEOM_DEMO_MESH_N;
     let mut vertices = Vec::with_capacity((n + 1) * (n + 1));
@@ -2374,11 +2396,11 @@ pub fn vgeom_demo_mesh() -> inf_mesh::MeshAsset {
             let v = j as f32 / n as f32;
             let x = (u - 0.5) * 2.0;
             let z = (v - 0.5) * 2.0;
-            let y = 0.3 * (x * 3.0).sin() * (z * 3.0).cos();
+            let y = 0.3 * psin(x * 3.0) * pcos(z * 3.0);
             let nrm = glam::Vec3::new(
-                -0.9 * (x * 3.0).cos() * (z * 3.0).cos(),
+                -0.9 * pcos(x * 3.0) * pcos(z * 3.0),
                 1.0,
-                0.9 * (x * 3.0).sin() * (z * 3.0).sin(),
+                0.9 * psin(x * 3.0) * psin(z * 3.0),
             )
             .normalize();
             vertices.push(inf_mesh::MeshVertex {
