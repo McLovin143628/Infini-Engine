@@ -41,6 +41,9 @@ inf-anim = { workspace = true }
 inf-input = { workspace = true }
 inf-math = { workspace = true }
 inf-render = { workspace = true }
+# Virtualized geometry (P13.1b): the runtime resolves a mesh's cook-derived
+# `.inf_vmesh` (meshlet DAG) and hands it to the renderer's GPU meshlet path.
+inf-vgeom = { workspace = true }
 # runtime .inf_lvl decode (P9.2) + the content pack reader (P9.2) — the player is
 # the pack consumer. Both Ring 0.
 inf-scene = { workspace = true }

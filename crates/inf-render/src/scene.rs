@@ -4,9 +4,13 @@
 //! arrives in Phase 3 — the host converts whatever it has into this). The
 //! `version` counter gates GPU re-uploads: bump it on any instance change.
 
+use std::sync::Arc;
+
 use glam::{DVec3, Mat4, Quat, Vec3};
 
 use crate::debug_draw::DebugDraw;
+
+pub use inf_vgeom::VgeomMesh;
 
 pub use inf_render_2d::{
     PrebatchedRun, RenderChunk, RenderTilemap, SpriteInstance, TextureHandle, TilemapParams,
@@ -54,6 +58,67 @@ impl MeshInstance {
     /// common case for tests and simple callers.
     pub fn lit(translation: DVec3, rotation: Quat, scale: Vec3, color: [f32; 4], id: u32) -> Self {
         Self {
+            translation,
+            rotation,
+            scale,
+            color,
+            metallic: 0.0,
+            roughness: 0.5,
+            emissive: [0.0; 3],
+            id,
+        }
+    }
+}
+
+/// A virtualized-geometry (meshlet DAG) asset referenced by one or more
+/// [`VgeomInstance`]s (P13.1b). The renderer uploads each distinct asset's
+/// meshlets/vertices into GPU storage buffers **once** (cached by [`id`]) and the
+/// cull compute expands every instance × meshlet pair. `id` is the cook-derived
+/// `.inf_vmesh` asset GUID (as a `u128`), so the host keys stable content.
+///
+/// [`id`]: VgeomAsset::id
+#[derive(Debug, Clone)]
+pub struct VgeomAsset {
+    /// Stable asset id (the derived `.inf_vmesh` GUID as a `u128`).
+    pub id: u128,
+    /// The shared meshlet DAG (uploaded once, cached).
+    pub mesh: Arc<VgeomMesh>,
+}
+
+/// One placed instance of a [`VgeomAsset`] (P13.1b) — the meshlet-path twin of a
+/// [`MeshInstance`]. Multiple instances of the same `asset` share its GPU buffers;
+/// the cull compute emits one visible-list entry per surviving (instance, meshlet)
+/// pair. World transform is f64 (architecture rule 3); the renderer projects it to
+/// an origin-relative model matrix at upload, exactly like [`MeshInstance`].
+#[derive(Debug, Clone, Copy)]
+pub struct VgeomInstance {
+    /// Which [`VgeomAsset`] (by [`VgeomAsset::id`]) this instance draws.
+    pub asset: u128,
+    pub translation: DVec3,
+    pub rotation: Quat,
+    pub scale: Vec3,
+    /// Linear-space base color (rgba).
+    pub color: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    /// Linear self-emitted color (rgb).
+    pub emissive: [f32; 3],
+    /// Stable pick id (`ID_NONE` reserved).
+    pub id: u32,
+}
+
+impl VgeomInstance {
+    /// A plain lit instance of `asset` (metallic 0, roughness 0.5, no emission).
+    pub fn lit(
+        asset: u128,
+        translation: DVec3,
+        rotation: Quat,
+        scale: Vec3,
+        color: [f32; 4],
+        id: u32,
+    ) -> Self {
+        Self {
+            asset,
             translation,
             rotation,
             scale,
@@ -271,6 +336,16 @@ pub struct RenderScene {
     /// GPU-skinned instances (P11.1). Each carries its own joint palette; drawn
     /// by the skinned mesh pass after the rigid mesh pass, into the same targets.
     pub skinned: Vec<SkinnedInstance>,
+    /// Virtualized-geometry (meshlet DAG) assets referenced by
+    /// [`vgeom_instances`](Self::vgeom_instances) (P13.1b). Each is uploaded to GPU
+    /// storage buffers once (cached by [`VgeomAsset::id`]). Empty ⇒ the meshlet
+    /// pass is a no-op (every scene without vmesh content stays byte-identical).
+    pub vgeom_assets: Vec<VgeomAsset>,
+    /// Placed meshlet-path instances (P13.1b). Drawn by the GPU-driven
+    /// [`crate::passes::vgeom`] pass (cull+LOD compute → vertex-pulled indirect
+    /// draw) when [`RenderSettings::vgeom`](crate::RenderSettings) is enabled,
+    /// after the rigid mesh pass, into the same MSAA targets.
+    pub vgeom_instances: Vec<VgeomInstance>,
     /// Scene lights (directional + point). Empty ⇒ the shader falls back to a
     /// default editor sun so unlit demo scenes still render.
     pub lights: Vec<RenderLight>,

@@ -73,6 +73,51 @@ pub struct RenderSettings {
     /// Temporal anti-aliasing. **OFF by default** (headless determinism); when
     /// on, the camera jitters (Halton 2,3) and a history buffer accumulates.
     pub taa: bool,
+    /// Virtualized-geometry meshlet render path (P13.1b). When **on**, a scene's
+    /// `vgeom_instances` are drawn by the GPU-driven meshlet path (cull+LOD
+    /// compute → vertex-pulled indirect draw) instead of the classic mesh
+    /// instance path. **OFF by default** so every existing golden — none of which
+    /// carries `vgeom_instances` — stays byte-identical, and the field is inert
+    /// on scenes with no vmesh content.
+    pub vgeom: VgeomSettings,
+}
+
+/// Virtualized-geometry (meshlet) render-path settings (P13.1b).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VgeomSettings {
+    /// Master enable for the meshlet path. Off → the [`crate::passes::vgeom`]
+    /// node emits no commands (byte-stable classic path).
+    pub enabled: bool,
+    /// Target screen-space error, in **pixels**. A meshlet is drawn when its
+    /// projected object-space error stays under this tolerance while its
+    /// coarser-replacement's exceeds it (the LOD cut). Larger ⇒ coarser LODs
+    /// selected sooner (fewer meshlets). Default ≈ 1 px.
+    pub pixel_error: f32,
+    /// Per-meshlet flat debug colouring (hash of meshlet id) instead of PBR
+    /// shading — a visual proof of the cluster/LOD structure for the golden.
+    pub debug_meshlets: bool,
+    /// HZB occlusion test in the cull compute (**v1**: tested against the current
+    /// frame's classic depth-prepass; see [`crate::passes::vgeom`]). OFF by
+    /// default: the tested/golden path is frustum + cone + LOD only, so the
+    /// GPU visible set matches the CPU reference exactly (no depth dependence).
+    pub occlusion: bool,
+    /// Backface normal-cone culling in the cull compute.
+    pub cone_cull: bool,
+    /// Frustum-sphere culling in the cull compute.
+    pub frustum_cull: bool,
+}
+
+impl Default for VgeomSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pixel_error: 1.0,
+            debug_meshlets: false,
+            occlusion: false,
+            cone_cull: true,
+            frustum_cull: true,
+        }
+    }
 }
 
 impl Default for RenderSettings {
@@ -84,15 +129,17 @@ impl Default for RenderSettings {
             bloom: BloomSettings::default(),
             ssao: SsaoSettings::default(),
             taa: false,
+            vgeom: VgeomSettings::default(),
         }
     }
 }
 
 impl RenderSettings {
     /// Whether a single-sample scene-depth prepass is needed this frame (SSAO
-    /// reads it for AO; TAA reads it for camera reprojection).
+    /// reads it for AO; TAA reprojects against it; the vgeom HZB occlusion test
+    /// samples it).
     pub fn needs_depth_prepass(&self) -> bool {
-        self.ssao.enabled || self.taa
+        self.ssao.enabled || self.taa || (self.vgeom.enabled && self.vgeom.occlusion)
     }
 }
 

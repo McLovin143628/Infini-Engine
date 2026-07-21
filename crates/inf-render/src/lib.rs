@@ -47,12 +47,16 @@ pub use scene::{
     Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D,
     RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap,
     SkinnedInstance, SkinnedMeshData, SkinnedVertex, SkyParams, SpriteInstance,
-    SpriteTextureUpload, TextureHandle, TilemapParams, ID_GIZMO_BASE, ID_NONE,
+    SpriteTextureUpload, TextureHandle, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh,
+    ID_GIZMO_BASE, ID_NONE,
 };
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
-    BloomSettings, RenderSettings, SsaoSettings,
+    BloomSettings, RenderSettings, SsaoSettings, VgeomSettings,
 };
+// The GPU meshlet cull readback (P13.1b) — the CPU-vs-GPU parity gate + the
+// player's vgeom-activation check drive it.
+pub use passes::vgeom::cull_visible;
 // 2D batcher API surfaced through the renderer for hosts.
 pub use inf_render_2d::{
     aabb_visible, atlas_uv, batch_scene, batch_sprites, billboard_basis, builtin_font_rgba8,

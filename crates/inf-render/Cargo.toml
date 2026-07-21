@@ -11,6 +11,10 @@ publish = false
 [dependencies]
 inf-math = { workspace = true }
 inf-render-2d = { workspace = true }
+# Virtualized geometry (P13.1b GPU meshlet path): the renderer uploads a
+# `VgeomMesh` (meshlet DAG) into storage buffers and culls/selects on the GPU.
+# Ring 0 → Ring 0; the shipping renderer consumes the cook-derived data model.
+inf-vgeom = { workspace = true }
 wgpu = { workspace = true }
 glam = { workspace = true }
 pollster = { workspace = true }

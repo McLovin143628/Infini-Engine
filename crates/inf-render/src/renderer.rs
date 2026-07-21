@@ -223,6 +223,11 @@ impl EngineRenderer {
         graph.add(passes::depth_prepass::DepthPrepassNode::new(gpu, &view_bgl));
         graph.add(passes::ssao::SsaoNode::new(gpu, &view_bgl));
         graph.add(passes::mesh::MeshNode::new(gpu, &view_bgl));
+        // GPU-driven virtualized-geometry (meshlet) path (P13.1b). Runs right
+        // after the rigid mesh pass, into the same MSAA scene targets; a no-op
+        // unless RenderSettings.vgeom is enabled and the scene carries vmesh
+        // instances (so the classic path stays byte-identical).
+        graph.add(passes::vgeom::VgeomNode::new(gpu, &view_bgl));
         graph.add(passes::skinned::SkinnedMeshNode::new(gpu, &view_bgl));
         graph.add(passes::terrain::TerrainNode::new(gpu, &view_bgl));
         graph.add(passes::grid::GridNode::new(gpu, &view_bgl));

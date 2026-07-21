@@ -17,6 +17,7 @@ pub mod ssao;
 pub mod taa;
 pub mod terrain;
 pub mod tonemap;
+pub mod vgeom;
 
 use crate::gpu::GpuContext;
 use crate::renderer::FrameData;

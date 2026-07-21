@@ -32,6 +32,7 @@ pub mod level;
 pub mod log;
 pub mod render;
 pub mod runtime_sim;
+pub mod vmesh;
 pub mod window;
 
 use std::panic::AssertUnwindSafe;

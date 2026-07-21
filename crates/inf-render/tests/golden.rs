@@ -14,20 +14,22 @@
 //! (headless CI without lavapipe/WARP).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use glam::{DVec3, Mat4, Quat, Vec2, Vec3};
+use glam::{DVec3, Mat3, Mat4, Quat, Vec2, Vec3};
 use inf_math::FloatingOrigin;
 use inf_render::gizmo::{self, GizmoAxis, GizmoMode};
 use inf_render::golden::{image_diff, within_tolerance};
+use inf_render::passes::vgeom::{cpu_visible_set, cull_flags, frustum_planes, lod_threshold};
 use inf_render::{
-    assemble_patches, expand_text, Ambient2D, BloomSettings, EngineRenderer, GpuContext, HAlign,
-    HeadlessTarget, LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight,
-    RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
+    assemble_patches, cull_visible, expand_text, Ambient2D, BloomSettings, EngineRenderer,
+    GpuContext, HAlign, HeadlessTarget, LightKind, MeshInstance, PrebatchedRun, RenderChunk,
+    RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
     RenderTerrainTile, RenderTilemap, RenderView, SkinnedInstance, SkinnedMeshData, SkinnedVertex,
-    SpriteInstance, SpriteTextureUpload, SsaoSettings, TextParams, TilemapParams,
-    BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
-    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT,
-    TILE_CHUNK_DIM,
+    SpriteInstance, SpriteTextureUpload, SsaoSettings, TextParams, TilemapParams, VgeomAsset,
+    VgeomInstance, VgeomMesh, VgeomSettings, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE,
+    BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS,
+    BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -1403,5 +1405,244 @@ fn taa_multiframe_stable() {
     assert!(
         mean < 0.02 && max < 0.35,
         "TAA did not converge: last frame delta mean {mean}, max {max}"
+    );
+}
+
+// ── P13.1b: GPU-driven virtualized-geometry (meshlet) path ───────────────────
+
+/// A dense procedural mesh: an `n×n` grid quad-plane displaced by a smooth
+/// bi-sinusoid (so it has real curvature → nontrivial normal cones + multiple LOD
+/// levels), spanning x,z ∈ [-1, 1]. `2·n·n` triangles → the vgeom builder produces
+/// several meshlets and coarser LOD levels.
+fn dense_grid_mesh(n: usize) -> VgeomMesh {
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    for j in 0..=n {
+        for i in 0..=n {
+            let u = i as f32 / n as f32;
+            let v = j as f32 / n as f32;
+            let x = (u - 0.5) * 2.0;
+            let z = (v - 0.5) * 2.0;
+            let y = 0.3 * (x * 3.0).sin() * (z * 3.0).cos();
+            let dydx = 0.3 * 3.0 * (x * 3.0).cos() * (z * 3.0).cos();
+            let dydz = -0.3 * 3.0 * (x * 3.0).sin() * (z * 3.0).sin();
+            let nrm = Vec3::new(-dydx, 1.0, -dydz).normalize();
+            positions.push([x, y, z]);
+            normals.push(nrm.to_array());
+            uvs.push([u, v]);
+        }
+    }
+    let stride = (n + 1) as u32;
+    let mut indices = Vec::new();
+    for j in 0..n as u32 {
+        for i in 0..n as u32 {
+            let a = j * stride + i;
+            let b = a + 1;
+            let c = a + stride;
+            let d = c + 1;
+            indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
+    inf_vgeom::build_vgeom(
+        &positions,
+        &normals,
+        &uvs,
+        &indices,
+        inf_vgeom::BuildParams::default(),
+    )
+}
+
+const VGEOM_ASSET: u128 = 0x1313_1b00_dead_beef;
+
+fn vgeom_scene(mesh: Arc<VgeomMesh>, scale: f32) -> RenderScene {
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        vgeom_assets: vec![VgeomAsset {
+            id: VGEOM_ASSET,
+            mesh,
+        }],
+        ..Default::default()
+    };
+    scene.vgeom_instances.push(VgeomInstance::lit(
+        VGEOM_ASSET,
+        DVec3::ZERO,
+        Quat::IDENTITY,
+        Vec3::splat(scale),
+        [0.72, 0.52, 0.30, 1.0],
+        1,
+    ));
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.97, 0.9],
+        intensity: 3.0,
+        direction: Vec3::new(0.35, 0.85, 0.4).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+    });
+    scene.mark_dirty();
+    scene
+}
+
+fn vgeom_settings() -> RenderSettings {
+    RenderSettings {
+        vgeom: VgeomSettings {
+            enabled: true,
+            ..VgeomSettings::default()
+        },
+        ..RenderSettings::default()
+    }
+}
+
+/// vgeom **dense** golden (P13.1b): the dense mesh at close range under an angled
+/// key light, drawn entirely through the GPU meshlet path (cull+LOD compute →
+/// vertex-pulled indirect draw). Structural gate: the meshlet surface is lit (the
+/// path actually rasterized geometry) and the visible-meshlet count read back from
+/// the cull compute is > 0. Determinism via `check_golden_with`; strict pixel diff
+/// opt-in. The classic path is untouched (no `MeshInstance`s), so every other
+/// golden stays byte-identical.
+#[test]
+fn golden_vgeom_dense() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mesh = Arc::new(dense_grid_mesh(40));
+    let scene = vgeom_scene(mesh.clone(), 2.0);
+    // Close overlook of the ~4 m mesh.
+    let view = look_view(DVec3::new(0.0, 3.2, 4.6), DVec3::new(0.0, 0.0, 0.0));
+
+    let img = check_golden_with(&gpu, "vgeom_dense", &scene, &view, vgeom_settings());
+    let lit = img
+        .chunks(4)
+        .any(|p| p[0] as u16 + p[1] as u16 + p[2] as u16 > 150);
+    assert!(lit, "expected the meshlet surface to be lit");
+
+    // The cull compute selected some meshlets for this frame.
+    let visible = cull_visible(
+        &gpu,
+        &mesh,
+        &scene.vgeom_instances,
+        &view,
+        &vgeom_settings().vgeom,
+    );
+    assert!(
+        !visible.is_empty(),
+        "expected visible meshlets at close range"
+    );
+}
+
+/// vgeom **far** golden (P13.1b) + the **LOD proof**: the same dense mesh viewed
+/// from far away resolves to a COARSER cut — the cull compute selects strictly
+/// FEWER meshlets than at close range (larger projected screen-error threshold ⇒
+/// coarser LOD). Determinism via `check_golden_with`; strict pixel diff opt-in.
+#[test]
+fn golden_vgeom_far() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mesh = Arc::new(dense_grid_mesh(40));
+    let scene = vgeom_scene(mesh.clone(), 2.0);
+
+    let close = look_view(DVec3::new(0.0, 3.2, 4.6), DVec3::new(0.0, 0.0, 0.0));
+    let far = look_view(DVec3::new(0.0, 26.0, 38.0), DVec3::new(0.0, 0.0, 0.0));
+
+    let img = check_golden_with(&gpu, "vgeom_far", &scene, &far, vgeom_settings());
+    // Something rendered (the mesh is small but present).
+    let any = img.chunks(4).any(|p| p[0] > 8 || p[1] > 8 || p[2] > 8);
+    assert!(any, "expected the far meshlet mesh to render");
+
+    let s = vgeom_settings().vgeom;
+    let n_close = cull_visible(&gpu, &mesh, &scene.vgeom_instances, &close, &s).len();
+    let n_far = cull_visible(&gpu, &mesh, &scene.vgeom_instances, &far, &s).len();
+    eprintln!(
+        "vgeom LOD proof: {} total meshlets, close cut = {n_close}, far cut = {n_far}",
+        mesh.meshlet_count()
+    );
+    assert!(
+        n_close > 0 && n_far > 0,
+        "both cuts non-empty (close {n_close}, far {n_far})"
+    );
+    assert!(
+        n_far < n_close,
+        "LOD proof: far cut should select fewer meshlets (close {n_close}, far {n_far})"
+    );
+}
+
+/// CPU-vs-GPU cut parity (P13.1b — the strongest gate): for a fixed camera with
+/// the whole mesh comfortably in-frustum and cone culling off, the GPU cull
+/// compute's visible meshlet set (read back) must **exactly** equal the CPU
+/// reference `cpu_visible_set` (the identical LOD cut + frustum filter), which in
+/// turn equals `VgeomMesh::select(t)` (the offline reference rule). The
+/// per-instance threshold `t` is a single scalar uploaded verbatim, so the
+/// branchless cut is bit-identical on both sides.
+#[test]
+fn vgeom_cpu_gpu_cut_parity() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mesh = dense_grid_mesh(40);
+
+    // The whole mesh (spans ±1, scale 1) sits well inside a 60° frustum at this
+    // distance — no meshlet is near a frustum boundary, so float divergence can't
+    // flip a cull. Cone culling is off (its per-normal boundary is the only place
+    // CPU/GPU could disagree); it is exercised by the pure `cpu_visible_set` unit
+    // tests instead.
+    let view = look_view(DVec3::new(0.0, 2.2, 4.2), DVec3::new(0.0, 0.0, 0.0));
+    let inst = VgeomInstance::lit(
+        VGEOM_ASSET,
+        DVec3::ZERO,
+        Quat::IDENTITY,
+        Vec3::ONE,
+        [0.7, 0.7, 0.7, 1.0],
+        1,
+    );
+    let settings = VgeomSettings {
+        enabled: true,
+        cone_cull: false,
+        frustum_cull: true,
+        occlusion: false,
+        pixel_error: 1.0,
+        debug_meshlets: false,
+    };
+
+    let gpu_pairs = cull_visible(&gpu, &mesh, std::slice::from_ref(&inst), &view, &settings);
+    // Single instance ⇒ instance index is always 0; extract the meshlet ids.
+    let gpu_meshlets: Vec<u32> = gpu_pairs.iter().map(|e| e[1]).collect();
+
+    // CPU reference (same math as the shader).
+    let origin = view.origin;
+    let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
+    let max_scale = inst.scale.abs().max_element().max(1e-6);
+    let inv_scale = inst.scale.max(Vec3::splat(1e-6)).recip();
+    let normal_mat = Mat3::from_quat(inst.rotation) * Mat3::from_diagonal(inv_scale);
+    let eye = view.eye_local();
+    let center_world = model.transform_point3(Vec3::from(mesh.center));
+    let radius = mesh.radius * max_scale;
+    let t = lod_threshold(
+        eye,
+        center_world,
+        radius,
+        max_scale,
+        &view,
+        settings.pixel_error,
+    );
+    let planes = frustum_planes(view.view_proj());
+    let cpu_meshlets = cpu_visible_set(
+        &mesh,
+        model,
+        normal_mat,
+        eye,
+        t,
+        max_scale,
+        &planes,
+        cull_flags(&settings),
+    );
+
+    assert!(!cpu_meshlets.is_empty(), "reference cut is empty");
+    assert_eq!(
+        gpu_meshlets, cpu_meshlets,
+        "GPU visible set must equal the CPU reference (frustum + LOD)"
+    );
+
+    // And the CPU reference (frustum passes everything here) equals the offline
+    // rule VgeomMesh::select(t) — the meshlet DAG cut.
+    let select_ids: Vec<u32> = mesh.select(t).map(|(i, _)| i as u32).collect();
+    assert_eq!(
+        cpu_meshlets, select_ids,
+        "frustum passes all in-view meshlets ⇒ cut == VgeomMesh::select(t)"
     );
 }
