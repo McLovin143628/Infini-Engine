@@ -7,7 +7,7 @@
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, expect, test } from "vitest";
 
-import { app, layouts, sim, viewport } from "../ipc";
+import { app, layouts, pcg, sim, viewport } from "../ipc";
 
 afterEach(() => {
   clearMocks();
@@ -78,4 +78,31 @@ test("sim wrappers invoke the sim_* commands with typed payloads", async () => {
     "sim_is_running",
   ]);
   expect(calls[1][1]).toEqual({ keys: ["left", "jump"] });
+});
+
+test("pcg wrappers invoke the pcg_* commands with typed payloads", async () => {
+  const calls: Array<[string, unknown]> = [];
+  mockIPC((cmd, args) => {
+    calls.push([cmd, args]);
+    if (cmd === "pcg_compile")
+      return { ok: true, issues: [], ruleCount: 1, summary: "1 rule(s)" };
+    if (cmd === "pcg_evaluate")
+      return { entity: "abc", placed: 7, issues: [], ok: true };
+    if (cmd === "pcg_save") return "PCG_Graph.inf_pcg";
+  });
+
+  await pcg.apply("pcg:1", [], "Edit");
+  await expect(pcg.compile("pcg:1")).resolves.toMatchObject({ ok: true, ruleCount: 1 });
+  await expect(pcg.evaluate("pcg:1", null)).resolves.toMatchObject({ placed: 7 });
+  await expect(pcg.save("pcg:1", "PCG Graph")).resolves.toBe("PCG_Graph.inf_pcg");
+
+  expect(calls.map(([cmd]) => cmd)).toEqual([
+    "pcg_apply",
+    "pcg_compile",
+    "pcg_evaluate",
+    "pcg_save",
+  ]);
+  expect(calls[0][1]).toEqual({ id: "pcg:1", edits: [], label: "Edit" });
+  expect(calls[2][1]).toEqual({ id: "pcg:1", entity: null });
+  expect(calls[3][1]).toEqual({ id: "pcg:1", name: "PCG Graph" });
 });

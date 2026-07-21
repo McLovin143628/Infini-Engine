@@ -34,27 +34,71 @@ pub enum PcgError {
 }
 
 /// The versioned on-disk body of a `.inf_pcg` asset.
+///
+/// ## What a `.inf_pcg` stores (P10.5b decision)
+///
+/// The editor's node graph is the authored source of truth — the volume
+/// evaluates by [`lower_graph`](crate::graph::lower_graph)ing it into a
+/// [`PcgDocument`] on demand, so the graph must survive a save (unlike materials,
+/// whose `.inf_mat` graph-persistence is still a documented follow-up — PCG does
+/// it here).
+///
+/// The graph is stored as a **JSON string** ([`graph_json`](Self::graph_json)),
+/// not as a nested `inf_graph::Graph`: that model is wire-tuned for JSON
+/// (`#[serde(skip_serializing_if)]` on `NodeUi::color` / `GraphDoc::viewport`),
+/// which **desyncs a non-self-describing bincode stream**. Serializing the graph
+/// to JSON first (then embedding the string in the bincode payload) sidesteps
+/// that entirely and keeps the whole payload deterministic. The legacy
+/// `document` field is **kept** (v1 payloads carried only it) so old files still
+/// decode: when `graph_json` is `Some`, it is the source of truth; otherwise the
+/// stored `document` is used directly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PcgAssetPayload {
     pub schema_version: u32,
+    /// The authored editor graph as JSON (source of truth from v2 on). `None` on
+    /// a v1 payload, which carried only the lowered `document`. JSON — not a
+    /// nested `Graph` — because that model's `skip_serializing_if` fields are not
+    /// bincode-safe (see the type docs).
+    #[serde(default)]
+    pub graph_json: Option<String>,
+    /// The lowered runtime model. From v2 this is a convenience mirror of the
+    /// graph; on a v1 payload it is the only content.
     #[serde(default)]
     pub document: PcgDocument,
 }
 
 impl PcgAssetPayload {
-    /// The current on-disk schema version.
-    pub const CURRENT_VERSION: u32 = 1;
+    /// The current on-disk schema version. v2 (P10.5b) appended the editor
+    /// `graph`; v1 payloads (document-only) still decode via `#[serde(default)]`.
+    pub const CURRENT_VERSION: u32 = 2;
     /// The stable UI/filter slug this kind registers as in `inf-asset`.
     pub const KIND_SLUG: &'static str = "pcg";
     /// The canonical file extension (without the dot).
     pub const EXTENSION: &'static str = "inf_pcg";
 
-    /// Wrap `document` at the current schema version.
+    /// Wrap a lowered `document` at the current schema version (no editor graph).
     pub fn new(document: PcgDocument) -> Self {
         Self {
             schema_version: Self::CURRENT_VERSION,
+            graph_json: None,
             document,
         }
+    }
+
+    /// Wrap an authored editor graph (serialized to JSON — the source of truth)
+    /// plus its lowered `document` mirror, at the current schema version.
+    pub fn from_graph(graph: &inf_graph::Graph, document: PcgDocument) -> Self {
+        Self {
+            schema_version: Self::CURRENT_VERSION,
+            graph_json: serde_json::to_string(graph).ok(),
+            document,
+        }
+    }
+
+    /// Parse the stored editor graph, if present.
+    pub fn graph(&self) -> Option<inf_graph::Graph> {
+        let json = self.graph_json.as_ref()?;
+        serde_json::from_str(json).ok()
     }
 
     /// Encode to deterministic bincode bytes (defers to [`inf_asset::encode`], the
@@ -76,8 +120,9 @@ impl PcgAssetPayload {
     }
 
     /// Upgrade an older decoded payload to [`Self::CURRENT_VERSION`]. Rejects
-    /// newer-than-current. (v1 is the first version — this is the migration stub
-    /// future `vN → vN+1` chains hang off, per ROADMAP §3.)
+    /// newer-than-current. v1→v2 is purely additive (the `graph` field defaults
+    /// to `None`, so a v1 document-only payload lifts cleanly), so equal-or-older
+    /// is accepted as-is — this stays the stub future breaking chains hang off.
     pub fn migrate(self) -> Result<Self, PcgError> {
         if self.schema_version > Self::CURRENT_VERSION {
             return Err(PcgError::SchemaTooNew {
@@ -137,9 +182,34 @@ mod tests {
             PcgAssetPayload::decode(&bytes),
             Err(PcgError::SchemaTooNew {
                 found: 99,
-                current: 1
+                current: 2
             })
         ));
+    }
+
+    #[test]
+    fn graph_round_trips_and_is_the_source_of_truth() {
+        use crate::graph::{lower_graph, pcg_registry};
+        use inf_graph::Graph;
+
+        // An authored graph → its lowered document, both stored in the payload.
+        let reg = pcg_registry();
+        let mut g = Graph::empty();
+        let scat = g.insert("scatter.scatter", inf_graph::NodeUi::default());
+        let out = g.insert("output.pcg", inf_graph::NodeUi::default());
+        g.links.push(inf_graph::Link {
+            from: scat,
+            from_port: "out".into(),
+            to: out,
+            to_port: "scatter".into(),
+        });
+        let doc = lower_graph(&g, &reg).document;
+        let payload = PcgAssetPayload::from_graph(&g, doc);
+        let bytes = payload.encode().unwrap();
+        let back = PcgAssetPayload::decode(&bytes).unwrap();
+        assert_eq!(back, payload);
+        assert_eq!(back.graph(), Some(g));
+        assert_eq!(back.schema_version, 2);
     }
 
     #[test]

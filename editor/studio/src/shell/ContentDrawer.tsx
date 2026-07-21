@@ -135,6 +135,8 @@ export default function ContentDrawer() {
     if (DATA_KINDS.has(asset.kind)) openEditor(asset.id);
     else if (asset.kind === "material")
       useDockLayout.getState().openPanel("material"); // P7.2 material editor
+    else if (asset.kind === "pcg")
+      useDockLayout.getState().openPanel("pcg"); // P10.5b PCG editor
     else if (asset.kind === "texture") {
       // P8.2a: open the Sprite Sheet slicer bound to this texture.
       void useSpriteSheetStore.getState().open(asset.id);

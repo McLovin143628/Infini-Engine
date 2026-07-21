@@ -18,7 +18,9 @@
 //! * [`sampler`] — [`DensityField`] sources, terrain filters, and combinators.
 //! * [`scatter`] — the deterministic, `parallel_map`-parallel scatter kernel.
 //! * [`rules`] — the serializable [`PcgDocument`] rule model + [`evaluate`].
-//! * [`asset`] — the `.inf_pcg` [`PcgAssetPayload`] envelope.
+//! * [`graph`] — the editor node kit over `inf-graph` + [`lower_graph`] (the
+//!   `.inf_pcg` graph → the stable `PcgDocument`; editor preview == runtime).
+//! * [`asset`] — the `.inf_pcg` [`PcgAssetPayload`] envelope (stores the graph).
 //!
 //! ## Determinism doctrine
 //!
@@ -33,6 +35,7 @@
 //! (P10.5b), and PCG debug visualization (P10.5.5).
 
 pub mod asset;
+pub mod graph;
 pub mod hash;
 pub mod height;
 pub mod noise;
@@ -41,6 +44,7 @@ pub mod sampler;
 pub mod scatter;
 
 pub use asset::{PcgAssetPayload, PcgError};
+pub use graph::{lower_graph, pcg_registry, LoweredPcg, PcgGraphIssue, PcgSeverity};
 pub use height::{FnHeight, HeightProvider};
 pub use noise::ValueNoise;
 pub use rules::{evaluate, PcgDocument, PcgKind, PcgLayer, PcgRule, SamplerDef};

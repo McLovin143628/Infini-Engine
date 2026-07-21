@@ -13,6 +13,7 @@ import {
   ScrollText,
   Search,
   SlidersHorizontal,
+  Sprout,
   SquareTerminal,
   Workflow,
 } from "lucide-react";
@@ -30,6 +31,7 @@ import TerminalPanel from "./TerminalPanel";
 import TilemapPanel from "./TilemapPanel";
 import { BlueprintCanvas } from "./blueprint/BlueprintCanvas";
 import { MaterialCanvas } from "./material/MaterialCanvas";
+import { PcgCanvas } from "./pcg/PcgCanvas";
 import { registerPanelType } from "./panelRegistry";
 
 /**
@@ -228,6 +230,16 @@ registerPanelType({
   title: () => "Material",
   icon: Palette,
   component: MaterialCanvas,
+  singleton: true,
+  defaultLocation: "bottom",
+  defaultSize: { w: 1040, h: 560 },
+});
+
+registerPanelType({
+  type: "pcg",
+  title: () => "PCG",
+  icon: Sprout,
+  component: PcgCanvas,
   singleton: true,
   defaultLocation: "bottom",
   defaultSize: { w: 1040, h: 560 },

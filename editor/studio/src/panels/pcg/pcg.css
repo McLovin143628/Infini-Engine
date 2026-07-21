@@ -1,0 +1,112 @@
+/* PCG editor: layout on top of the shared bp-* node/canvas styles. */
+
+.pcg-toolbar__title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-text, #e6e8ec);
+  padding: 0 6px;
+}
+
+.pcg-toolbar__status {
+  font-size: 11px;
+  opacity: 0.75;
+  padding: 0 8px;
+}
+
+.pcg-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.pcg-side {
+  width: 232px;
+  flex: 0 0 232px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--ink-border, #2a2e35);
+  background: var(--ink-bg-1, #16181d);
+  overflow: hidden;
+}
+
+.pcg-side__summary {
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 8px;
+  border-bottom: 1px solid var(--ink-border, #2a2e35);
+  color: var(--ink-text, #e6e8ec);
+  opacity: 0.85;
+}
+
+.pcg-side__eval {
+  padding: 8px;
+  border-bottom: 1px solid var(--ink-border, #2a2e35);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pcg-side__eval-result {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.pcg-issues {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pcg-issue {
+  font-size: 10.5px;
+  line-height: 1.35;
+  padding: 3px 6px;
+  border-radius: 3px;
+  word-break: break-word;
+}
+
+.pcg-issue--error {
+  background: rgba(200, 60, 60, 0.16);
+  color: #f0a0a0;
+}
+
+.pcg-issue--warning {
+  background: rgba(200, 160, 60, 0.14);
+  color: #e6c98a;
+}
+
+.pcg-issue--ok {
+  opacity: 0.5;
+}
+
+.pcg-flow {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Node parameter fields (mirrors .mat-field). */
+.pcg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 4px;
+}
+
+.pcg-field--row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.pcg-field__label {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.pcg-field .bp-input {
+  width: 72px;
+}

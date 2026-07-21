@@ -1215,6 +1215,94 @@ impl Terrain {
     }
 }
 
+/// One baked PCG instance — the world-space result of evaluating a
+/// [`PcgVolume`]'s graph over the scene terrain. The viewport projects each into
+/// the existing mesh-instance path.
+///
+/// A deliberately dependency-light mirror of `inf_pcg::PcgInstance` (kept local
+/// so the foundational ECS crate does not pull the whole scatter runtime just to
+/// hold a result cache): the `pcg_evaluate` command converts one to the other.
+/// Not reflected / not serialized — it is a derived cache (see [`PcgVolume`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScatteredInstance {
+    /// World-space position.
+    pub position: DVec3,
+    /// World-space orientation.
+    pub rotation: DQuat,
+    /// Uniform scale.
+    pub scale: f64,
+    /// Palette index resolved by the rule (which mesh/primitive kind).
+    pub kind: u32,
+}
+
+/// A procedural scatter volume (P10.5b): a rectangular XZ region, centered on the
+/// entity's [`Transform`], populated by evaluating a `.inf_pcg` graph over the
+/// scene terrain. The editor evaluates on demand (`pcg_evaluate`) and stores the
+/// result in [`evaluated`](Self::evaluated); the viewport projects that cache
+/// into scattered mesh instances.
+///
+/// Follows the shared [`Visibility`]/[`ComputedVisibility`] components (like
+/// sprites / tilemaps / terrain) — no per-volume `visible` field.
+///
+/// ## Persistence — the same v4 gap as [`Terrain`]
+///
+/// This is an **additive** component (registered + reflected + serde), but — like
+/// [`Terrain`] — it is **not yet persisted in `.inf_lvl`**: the schema-v3
+/// `EntityRecord` has no `pcg_volume` slot, so a spawned volume is live-session
+/// only. Closing the gap is the same schema-v3→v4 migration the `Terrain` guard
+/// test (`terrain_is_not_persisted_yet_v4_todo`) pins; this component's guard test
+/// (`pcg_volume_serde_round_trips`) documents the same. No schema bump is made
+/// here.
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct PcgVolume {
+    /// The `.inf_pcg` graph asset that drives scatter. `#[reflect(ignore)]` +
+    /// serde-persisted (assigned by drag / the PCG panel), exactly like
+    /// [`Sprite::texture`]. `None` → nothing to evaluate.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub graph: Option<Uuid>,
+    /// Half-extent of the scatter region in world XZ, centered on the entity's
+    /// transform: the evaluated region is `[center − extent, center + extent]`.
+    #[serde(default = "default_pcg_extent")]
+    pub extent: Vec2d,
+    /// Seed offset mixed into every rule's scatter seed, so two volumes sharing a
+    /// graph scatter differently.
+    #[serde(default)]
+    pub seed: u32,
+    /// Instances farther than this from the camera are skipped at projection
+    /// (`0` = unlimited). A simple, documented per-instance draw-distance cull.
+    #[serde(default = "default_pcg_draw_distance")]
+    pub draw_distance: f64,
+    /// The last evaluation's instances — a derived cache refreshed by the
+    /// `pcg_evaluate` command. `#[serde(skip)]` (NOT persisted — recomputed on
+    /// demand, never written to `.inf_lvl`) + `#[reflect(ignore)]`.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub evaluated: Vec<ScatteredInstance>,
+}
+
+fn default_pcg_extent() -> Vec2d {
+    Vec2d::splat(50.0)
+}
+fn default_pcg_draw_distance() -> f64 {
+    1000.0
+}
+
+impl Default for PcgVolume {
+    fn default() -> Self {
+        Self {
+            graph: None,
+            extent: default_pcg_extent(),
+            seed: 0,
+            draw_distance: default_pcg_draw_distance(),
+            evaluated: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1235,6 +1323,44 @@ mod tests {
         let d: Terrain = serde_json::from_str("{}").unwrap();
         assert_eq!(d.tile_resolution, inf_terrain::DEFAULT_TILE_RESOLUTION);
         assert!(d.data.is_empty());
+    }
+
+    #[test]
+    fn pcg_volume_serde_round_trips() {
+        // The evaluated cache is `#[serde(skip)]` — a save must never carry it,
+        // and a decode fills it empty (recomputed on demand). Everything else
+        // round-trips. NOTE: like `Terrain`, `PcgVolume` is NOT yet a slot in the
+        // v3 `.inf_lvl` `EntityRecord` — this component-level round-trip is all
+        // the persistence it has until the schema-v4 migration (the same gap the
+        // `terrain_is_not_persisted_yet_v4_todo` guard pins).
+        let v = PcgVolume {
+            graph: Some(Uuid::from_u128(0xC0FFEE)),
+            extent: Vec2d::new(80.0, 40.0),
+            seed: 7,
+            draw_distance: 600.0,
+            evaluated: vec![ScatteredInstance {
+                position: DVec3::new(1.0, 2.0, 3.0),
+                rotation: DQuat::IDENTITY,
+                scale: 1.5,
+                kind: 2,
+            }],
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        // The skipped cache is absent from the serialized form …
+        assert!(!json.contains("evaluated"));
+        let back: PcgVolume = serde_json::from_str(&json).unwrap();
+        // … and decodes empty, while the persisted fields round-trip.
+        assert!(back.evaluated.is_empty());
+        assert_eq!(back.graph, v.graph);
+        assert_eq!(back.extent, v.extent);
+        assert_eq!(back.seed, 7);
+        assert_eq!(back.draw_distance, 600.0);
+
+        // A minimal payload fills every field from the defaults.
+        let d: PcgVolume = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, PcgVolume::default());
+        assert_eq!(d.extent, Vec2d::splat(50.0));
+        assert_eq!(d.draw_distance, 1000.0);
     }
 
     #[test]

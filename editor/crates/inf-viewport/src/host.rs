@@ -8,7 +8,7 @@ use glam::{DQuat, DVec2, DVec3, Vec2, Vec3};
 use inf_ecs::components::{
     Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, ComputedVisibility,
     GlobalTransform, Light, Light2D, LightKind as EcsLightKind, Material, MeshRef, NineSlice,
-    Sprite, Terrain, Text2D, TextAlign, Tilemap,
+    PcgVolume, Sprite, Terrain, Text2D, TextAlign, Tilemap,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::scene::SceneDoc;
@@ -91,6 +91,12 @@ pub struct EngineHost {
     sculpt_ring: Vec<DVec3>,
     /// Colour of the brush ring (encodes the active op).
     sculpt_ring_color: [f32; 4],
+    /// Camera eye captured on the last rendered frame (P10.5b). PCG scatter
+    /// instances are draw-distance-culled against it at projection time; because
+    /// projection is doc-version-gated (not per-frame), the cull set refreshes
+    /// whenever the document changes (a `pcg_evaluate` bumps the version) rather
+    /// than continuously as the camera moves — a documented v1 simplification.
+    last_eye_world: DVec3,
 }
 
 /// An in-flight sculpt gesture (P10.2b): the mouse-down→up stroke accumulating
@@ -178,6 +184,7 @@ impl EngineHost {
             sculpt_drag: None,
             sculpt_ring: Vec::new(),
             sculpt_ring_color: [1.0; 4],
+            last_eye_world: DVec3::ZERO,
         })
     }
 
@@ -432,6 +439,39 @@ impl EngineHost {
                 }
             }
 
+            // PCG scatter volumes (P10.5b): project the cached evaluated
+            // instances (refreshed on demand by `pcg_evaluate`) into the existing
+            // mesh-instance path as placeholder cubes — kind→GUID→real-mesh upload
+            // is the same documented viewport gap as sprites/tilemaps, so PCG
+            // proves placement/density/orientation with primitives. Draw-distance
+            // culled against the last camera eye. A pick on a scattered cube
+            // resolves to the volume entity (id→guid), so the volume is selectable
+            // by clicking its content.
+            if let Some(vol) = w.get::<PcgVolume>(entity) {
+                if visible && !vol.evaluated.is_empty() {
+                    let dd = vol.draw_distance;
+                    for si in &vol.evaluated {
+                        if dd > 0.0 && (si.position - self.last_eye_world).length() > dd {
+                            continue;
+                        }
+                        let id = next_id;
+                        next_id += 1;
+                        self.scene.instances.push(MeshInstance {
+                            translation: si.position,
+                            rotation: si.rotation.as_quat(),
+                            scale: Vec3::splat(si.scale as f32),
+                            color: pcg_kind_color(si.kind),
+                            metallic: 0.0,
+                            roughness: 0.75,
+                            emissive: [0.0; 3],
+                            id,
+                        });
+                        // Pick a scattered cube → select the owning volume.
+                        self.id_to_guid.insert(id, guid);
+                    }
+                }
+            }
+
             // 2D colliders cache a world-space outline (P8.3b); drawn as debug
             // lines for the selection only (in `render_frame`). Independent of
             // MeshRef — a collider often sits on a sprite or bare entity.
@@ -638,6 +678,20 @@ fn draw_collider_outline_3d(debug: &mut DebugDraw, origin: &FloatingOrigin, cd: 
     for [a, b] in collider_outline_3d(cd.shape, CIRCLE_SEGMENTS) {
         debug.line(to_local(a), to_local(b), COLLIDER_COLOR);
     }
+}
+
+/// A distinct placeholder colour per PCG kind index, so a multi-kind scatter
+/// reads as varied content even before real meshes upload (P10.5b). Cycles
+/// through a small foliage/rock palette.
+fn pcg_kind_color(kind: u32) -> [f32; 4] {
+    const PALETTE: [[f32; 4]; 5] = [
+        [0.28, 0.52, 0.24, 1.0], // foliage green
+        [0.55, 0.40, 0.22, 1.0], // trunk brown
+        [0.62, 0.60, 0.55, 1.0], // rock grey
+        [0.75, 0.68, 0.35, 1.0], // dry grass
+        [0.35, 0.58, 0.45, 1.0], // shrub teal
+    ];
+    PALETTE[(kind as usize) % PALETTE.len()]
 }
 
 /// Project an ECS `Light` (+ its world transform) into a renderer light. Spot is
@@ -1241,6 +1295,9 @@ impl EngineHost {
     /// first). Handles crash-safe device-lost recovery internally; only errors
     /// that survive a full stack rebuild are returned.
     pub fn render_frame(&mut self, view: &RenderView) -> Result<(), String> {
+        // Remember the camera eye for PCG draw-distance culling on the next
+        // projection (see `last_eye_world`).
+        self.last_eye_world = view.eye_world;
         if self.gpu.is_lost() {
             tracing::warn!("inf-viewport: device lost — rebuilding GPU stack");
             let (w, h) = self.chain.requested_size();

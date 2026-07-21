@@ -19,15 +19,19 @@ inf-terrain = { workspace = true }
 # f64 world coordinates (DVec3) + orientations (DQuat) — architecture rule 3.
 glam = { workspace = true }
 serde = { workspace = true }
+# The editor graph is embedded in the `.inf_pcg` payload as a JSON string (the
+# `inf-graph` model's `skip_serializing_if` fields are not bincode-safe).
+serde_json = { workspace = true }
 # Deterministic, byte-identical `.inf_pcg` payload encoding.
 bincode = { workspace = true }
 # The dual-format asset rule: `AssetKind::Pcg` + `AssetPayload` for the `.inf_pcg`
 # document (one encode/decode code path across the engine).
 inf-asset = { workspace = true }
+# The shared node-graph substrate (P10.5b editor kit): the `.inf_pcg` editor
+# authors a DAG over `inf-graph` (same substrate as Blueprints/materials); the
+# graph is the on-disk source of truth and `lower_graph` targets `PcgDocument`.
+inf-graph = { workspace = true }
 # Mesh asset references on a PCG kind (raw GUID) + the asset id/kind types.
 uuid = { workspace = true }
 thiserror = { workspace = true }
 
-[dev-dependencies]
-# Human-readable serde round-trip check for the rule model.
-serde_json = { workspace = true }
