@@ -24,6 +24,8 @@ use crate::camera::{RenderView, ViewUniforms, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::graph::RenderGraph;
 use crate::passes;
+use crate::passes::gi::GiResources;
+use crate::passes::shadow::ShadowResources;
 use crate::scene::RenderScene;
 use crate::settings::{halton_jitter, mip_chain_sizes, RenderSettings};
 
@@ -163,6 +165,12 @@ pub struct FrameData<'a> {
     /// the TAA node writes this frame (== `post_hdr` when TAA is on).
     pub taa_history_prev: &'a wgpu::TextureView,
     pub taa_history_cur: &'a wgpu::TextureView,
+    /// Shared cascaded-shadow resources (P13.3b): the shadow node renders/writes
+    /// them, the lit passes sample them (byte-neutral when shadows are off).
+    pub shadow: &'a ShadowResources,
+    /// Shared dynamic-GI resources (P13.3b): the GI node writes the SH probes, the
+    /// lit passes sample them (byte-neutral when GI is off).
+    pub gi: &'a GiResources,
     /// Jittered view-projection of the **previous** frame (TAA reprojection).
     pub taa_prev_view_proj: [f32; 16],
     /// False on the first frame / after a resize (history has nothing usable).
@@ -181,6 +189,10 @@ pub struct EngineRenderer {
     frame_index: u64,
     /// Jittered view-proj we rendered last frame (TAA reprojection source).
     prev_view_proj: Option<[f32; 16]>,
+    /// Shared shadow + GI GPU resources (created once, independent of viewport
+    /// size; the shadow/GI graph nodes write them, the lit passes sample them).
+    shadow: ShadowResources,
+    gi: GiResources,
 }
 
 impl EngineRenderer {
@@ -217,6 +229,13 @@ impl EngineRenderer {
 
         let mut graph = RenderGraph::default();
         graph.add(passes::sky::SkyNode::new(gpu, &view_bgl));
+        // Cascaded shadow maps (P13.3b): renders the first directional light's
+        // cascades + publishes the shared shadow uniform. A no-op (uniform only)
+        // unless RenderSettings.shadows is enabled.
+        graph.add(passes::shadow::ShadowNode::new(gpu));
+        // Dynamic GI (P13.3b): voxelize the scene + march the probe grid to SH.
+        // A no-op (uniform only) unless RenderSettings.gi is enabled.
+        graph.add(passes::gi::GiNode::new(gpu));
         // SSAO/TAA scene-depth prepass (rigid meshes only); a no-op unless SSAO
         // or TAA is enabled. Runs before SSAO so the AO can sample it, and before
         // the lit passes so they can multiply AO into their ambient term.
@@ -254,6 +273,8 @@ impl EngineRenderer {
             settings: RenderSettings::default(),
             frame_index: 0,
             prev_view_proj: None,
+            shadow: ShadowResources::new(gpu),
+            gi: GiResources::new(gpu),
         }
     }
 
@@ -346,6 +367,8 @@ impl EngineRenderer {
             taa_history_cur: &targets.taa_history[cur],
             taa_prev_view_proj: prev_vp,
             taa_history_valid: history_valid,
+            shadow: &self.shadow,
+            gi: &self.gi,
         };
         self.graph.run(gpu, &mut encoder, &frame);
         gpu.queue.submit([encoder.finish()]);

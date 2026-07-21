@@ -10,7 +10,9 @@
 //! render-local at upload. Depth is reverse-infinite Z.
 
 pub mod camera;
+pub mod csm;
 pub mod debug_draw;
+pub mod gi;
 pub mod gizmo;
 pub mod golden;
 pub mod gpu;
@@ -52,7 +54,7 @@ pub use scene::{
 };
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
-    BloomSettings, RenderSettings, SsaoSettings, VgeomSettings,
+    BloomSettings, GiSettings, RenderSettings, ShadowSettings, SsaoSettings, VgeomSettings,
 };
 // The GPU meshlet cull readback (P13.1b) — the CPU-vs-GPU parity gate + the
 // player's vgeom-activation check drive it.

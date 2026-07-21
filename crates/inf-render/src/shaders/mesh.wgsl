@@ -60,11 +60,9 @@ struct Lights {
 };
 @group(1) @binding(0) var<uniform> lights: Lights;
 
-// Screen-space ambient occlusion (P13.3a). Group 2; a 1×1 white texture when
-// SSAO is disabled → the ambient term is unchanged (byte-stable). Sampled by the
-// fragment's framebuffer position, so it needs no extra vertex plumbing.
-@group(2) @binding(0) var ao_tex: texture_2d<f32>;
-@group(2) @binding(1) var ao_smp: sampler;
+// AO + cascaded shadows + dynamic GI ride the shared env bind group at @group(2)
+// (declared in env_lighting.wgsl, prepended by `lit_scene_shader`): `ao_tex`/`ao_smp`
+// (SSAO, white when off), `shadow_factor()`, and `gi_irradiance()`.
 
 const PI: f32 = 3.14159265359;
 
@@ -133,17 +131,29 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var lo = vec3<f32>(0.0);
     let count = lights.count.x;
     if (count == 0u) {
-        // Fallback editor sun so unlit demo scenes still render.
-        lo += shade_light(n, v, normalize(view.sun_dir.xyz), vec3<f32>(3.0),
+        // Fallback editor sun so unlit demo scenes still render (shadowed like the
+        // first directional light when CSM is on).
+        var d = shade_light(n, v, normalize(view.sun_dir.xyz), vec3<f32>(3.0),
                           albedo, metallic, rough, f0);
+        if (shadow.params.x > 0.5) {
+            d = d * shadow_factor(in.world_pos, n);
+        }
+        lo += d;
     } else {
+        // The first directional light receives the cascaded shadow factor.
+        var shadowed = false;
         for (var i = 0u; i < count && i < MAX_LIGHTS; i = i + 1u) {
             let light = lights.items[i];
             let radiance_base = light.color.rgb * light.color.a;
             if (light.pos_dir.w < 0.5) {
                 // Directional.
-                lo += shade_light(n, v, normalize(light.pos_dir.xyz), radiance_base,
+                var d = shade_light(n, v, normalize(light.pos_dir.xyz), radiance_base,
                                  albedo, metallic, rough, f0);
+                if (shadow.params.x > 0.5 && !shadowed) {
+                    d = d * shadow_factor(in.world_pos, n);
+                    shadowed = true;
+                }
+                lo += d;
             } else {
                 // Point.
                 let to_light = light.pos_dir.xyz - in.world_pos;
@@ -156,10 +166,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // Image-based ambient: hemispheric sky/ground irradiance, modulated by the
-    // screen-space AO (ambient term only — never the direct light above).
+    // Image-based ambient: hemispheric sky/ground irradiance by default, or the
+    // dynamic-GI probe irradiance when GI is on — modulated by the screen-space AO
+    // (ambient term only — never the direct light above).
     let up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
-    let amb = mix(vec3<f32>(0.03, 0.03, 0.035), vec3<f32>(0.10, 0.13, 0.18), up);
+    var amb = mix(vec3<f32>(0.03, 0.03, 0.035), vec3<f32>(0.10, 0.13, 0.18), up);
+    if (gi.params.x > 0.5) {
+        amb = gi_irradiance(in.world_pos, n);
+    }
     let ao = textureSampleLevel(ao_tex, ao_smp, in.pos.xy / view.grid_axis_viewport.zw, 0.0).r;
     lo += amb * albedo * (1.0 - metallic) * ao;
     lo += amb * f0 * 0.5 * ao;

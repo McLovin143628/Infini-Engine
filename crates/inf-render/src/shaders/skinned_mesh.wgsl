@@ -75,11 +75,9 @@ struct Lights {
 };
 @group(1) @binding(0) var<uniform> lights: Lights;
 
-// SSAO (P13.3a): group 2 (the material seam slot on the skinned pipeline is
-// group 2 empty in the old layout — replaced by the AO bind). 1×1 white when
-// disabled → ambient unchanged.
-@group(2) @binding(0) var ao_tex: texture_2d<f32>;
-@group(2) @binding(1) var ao_smp: sampler;
+// AO + cascaded shadows + dynamic GI ride the shared env bind group at @group(2)
+// (declared in env_lighting.wgsl, prepended by `lit_scene_shader`): `ao_tex`/`ao_smp`
+// (SSAO, white when off), `shadow_factor()`, and `gi_irradiance()`.
 
 const PI: f32 = 3.14159265359;
 
@@ -146,15 +144,25 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var lo = vec3<f32>(0.0);
     let count = lights.count.x;
     if (count == 0u) {
-        lo += shade_light(n, v, normalize(view.sun_dir.xyz), vec3<f32>(3.0),
+        var d = shade_light(n, v, normalize(view.sun_dir.xyz), vec3<f32>(3.0),
                           albedo, metallic, rough, f0);
+        if (shadow.params.x > 0.5) {
+            d = d * shadow_factor(in.world_pos, n);
+        }
+        lo += d;
     } else {
+        var shadowed = false;
         for (var i = 0u; i < count && i < MAX_LIGHTS; i = i + 1u) {
             let light = lights.items[i];
             let radiance_base = light.color.rgb * light.color.a;
             if (light.pos_dir.w < 0.5) {
-                lo += shade_light(n, v, normalize(light.pos_dir.xyz), radiance_base,
+                var d = shade_light(n, v, normalize(light.pos_dir.xyz), radiance_base,
                                  albedo, metallic, rough, f0);
+                if (shadow.params.x > 0.5 && !shadowed) {
+                    d = d * shadow_factor(in.world_pos, n);
+                    shadowed = true;
+                }
+                lo += d;
             } else {
                 let to_light = light.pos_dir.xyz - in.world_pos;
                 let dist = length(to_light);
@@ -167,7 +175,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     let up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
-    let amb = mix(vec3<f32>(0.03, 0.03, 0.035), vec3<f32>(0.10, 0.13, 0.18), up);
+    var amb = mix(vec3<f32>(0.03, 0.03, 0.035), vec3<f32>(0.10, 0.13, 0.18), up);
+    if (gi.params.x > 0.5) {
+        amb = gi_irradiance(in.world_pos, n);
+    }
     let ao = textureSampleLevel(ao_tex, ao_smp, in.pos.xy / view.grid_axis_viewport.zw, 0.0).r;
     lo += amb * albedo * (1.0 - metallic) * ao;
     lo += amb * f0 * 0.5 * ao;

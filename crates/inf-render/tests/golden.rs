@@ -23,13 +23,14 @@ use inf_render::golden::{image_diff, within_tolerance};
 use inf_render::passes::vgeom::{cpu_visible_set, cull_flags, frustum_planes, lod_threshold};
 use inf_render::{
     assemble_patches, cull_visible, expand_text, Ambient2D, BloomSettings, EngineRenderer,
-    GpuContext, HAlign, HeadlessTarget, LightKind, MeshInstance, PrebatchedRun, RenderChunk,
-    RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
-    RenderTerrainTile, RenderTilemap, RenderView, SkinnedInstance, SkinnedMeshData, SkinnedVertex,
-    SpriteInstance, SpriteTextureUpload, SsaoSettings, TextParams, TilemapParams, VgeomAsset,
-    VgeomInstance, VgeomMesh, VgeomSettings, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE,
-    BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS,
-    BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    GiSettings, GpuContext, HAlign, HeadlessTarget, LightKind, MeshInstance, PrebatchedRun,
+    RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
+    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings,
+    SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance, SpriteTextureUpload,
+    SsaoSettings, TextParams, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings,
+    BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
+    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT,
+    TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -1644,5 +1645,187 @@ fn vgeom_cpu_gpu_cut_parity() {
     assert_eq!(
         cpu_meshlets, select_ids,
         "frustum passes all in-view meshlets ⇒ cut == VgeomMesh::select(t)"
+    );
+}
+
+// ── P13.3b: cascaded shadow maps + dynamic GI ────────────────────────────────
+
+/// CSM golden (P13.3b): a caster/receiver scene — three boxes standing on a large
+/// white floor slab, lit by a single **low** directional sun so they cast long
+/// shadows across the floor. Shadows ON. Structural gate: the cascaded shadows
+/// **darken** the frame overall (direct light removed in the occluded floor
+/// regions) while the scene stays lit — proving the cascade render → PCF sample
+/// path ran. Determinism via `check_golden_with`; strict pixel diff opt-in. With
+/// shadows off every other golden stays byte-stable (verified).
+#[test]
+fn golden_csm() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    // A large receiver floor slab (top surface at y = 0).
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.25, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(12.0, 0.5, 12.0),
+        [0.78, 0.78, 0.80, 1.0],
+        1,
+    ));
+    // Three caster boxes.
+    for (i, (x, z)) in [(-2.2, 0.5), (1.0, -1.5), (2.6, 1.2)]
+        .into_iter()
+        .enumerate()
+    {
+        scene.instances.push(MeshInstance::lit(
+            DVec3::new(x, 0.9, z),
+            Quat::from_rotation_y(0.3),
+            Vec3::new(0.9, 1.8, 0.9),
+            [0.80, 0.42, 0.32, 1.0],
+            i as u32 + 2,
+        ));
+    }
+    // A low directional sun (grazing → long shadows).
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.97, 0.9],
+        intensity: 3.0,
+        direction: Vec3::new(0.55, 0.32, 0.45).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+    });
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(5.0, 5.5, 8.5), DVec3::new(0.0, 0.5, 0.0));
+
+    let shadows_on = RenderSettings {
+        shadows: ShadowSettings {
+            enabled: true,
+            ..ShadowSettings::default()
+        },
+        ..RenderSettings::default()
+    };
+
+    let img = check_golden_with(&gpu, "csm", &scene, &view, shadows_on);
+    let img_off = render_with(&gpu, &scene, &view, RenderSettings::default());
+
+    let sum = |img: &[u8]| -> u64 {
+        img.chunks(4)
+            .map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64)
+            .sum()
+    };
+    let (sum_on, sum_off) = (sum(&img), sum(&img_off));
+    assert!(
+        sum_on < sum_off,
+        "CSM should darken shadowed regions (on {sum_on} vs off {sum_off})"
+    );
+    let lit = img
+        .chunks(4)
+        .any(|p| p[0] as u16 + p[1] as u16 + p[2] as u16 > 200);
+    assert!(lit, "expected the CSM scene to stay lit");
+}
+
+/// Mean red/green ratio of the floor pixels in a screen band (rows `y0..y1`,
+/// central columns), skipping near-black (unlit / off-floor) pixels. The proof
+/// metric for `golden_gi_bleed`.
+fn band_red_ratio(img: &[u8], y0: u32, y1: u32) -> f32 {
+    let (mut r, mut g, mut n) = (0.0f64, 0.0f64, 0u32);
+    for y in y0..y1 {
+        for x in (W * 30 / 100)..(W * 70 / 100) {
+            let p = px(img, x, y);
+            // Skip near-black pixels (not lit floor).
+            if (p[0] as u16 + p[1] as u16 + p[2] as u16) < 30 {
+                continue;
+            }
+            r += p[0] as f64;
+            g += p[1] as f64;
+            n += 1;
+        }
+    }
+    if n == 0 || g == 0.0 {
+        return 0.0;
+    }
+    (r / g.max(1.0)) as f32
+}
+
+/// The GI proof golden (P13.3b) — **`golden_gi_bleed`**: a white floor and a tall
+/// **red** wall, with the sun angled so the wall's front face is lit and the floor
+/// receives grazing light. With dynamic GI ON, the floor **near the wall** picks up
+/// a red single-bounce, so its mean red/green ratio exceeds the far floor's by a
+/// clear margin — asserted structurally over two screen bands (the region assert,
+/// not a pixel compare). Also asserts determinism (two renders byte-identical).
+/// GI off keeps the hemispheric ambient path byte-stable (verified).
+#[test]
+fn golden_gi_bleed() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    // White floor slab (top surface at y = 0), extending toward the wall (−Z).
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.25, 0.5),
+        Quat::IDENTITY,
+        Vec3::new(12.0, 0.5, 11.0),
+        [0.90, 0.90, 0.90, 1.0],
+        1,
+    ));
+    // A tall RED wall along the far (−Z) edge, front face toward +Z (the floor).
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, 1.5, -4.0),
+        Quat::IDENTITY,
+        Vec3::new(11.0, 3.0, 0.5),
+        [0.90, 0.05, 0.05, 1.0],
+        2,
+    ));
+    // Sun from +Z and above: lights the wall's +Z face and grazes the floor. Kept
+    // moderate so the single-bounce GI (not the direct white light) shapes the
+    // floor's near-wall colour.
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.95],
+        intensity: 2.0,
+        direction: Vec3::new(0.0, 0.5, 1.0).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+    });
+    scene.mark_dirty();
+
+    // Look toward the wall base: the wall sits high in the frame, the floor fills
+    // the lower two thirds (near-wall floor above, far floor below).
+    let view = look_view(DVec3::new(0.0, 4.5, 7.0), DVec3::new(0.0, 0.0, -1.5));
+
+    let gi_on = RenderSettings {
+        gi: GiSettings {
+            enabled: true,
+            extent: 40.0,
+            rays: 48,
+            intensity: 2.5,
+        },
+        ..RenderSettings::default()
+    };
+
+    let img = check_golden_with(&gpu, "gi_bleed", &scene, &view, gi_on);
+
+    // Determinism: a second render is byte-identical to the golden render.
+    let img2 = render_with(&gpu, &scene, &view, gi_on);
+    let (mean, max) = image_diff(&img, &img2, W, H);
+    assert!(
+        mean == 0.0 && max == 0.0,
+        "GI must be deterministic (mean {mean}, max {max})"
+    );
+
+    // Region assert: the near-wall floor band is redder than the far floor band.
+    let near = band_red_ratio(&img, H * 40 / 100, H * 52 / 100);
+    let far = band_red_ratio(&img, H * 74 / 100, H * 90 / 100);
+    eprintln!("gi_bleed red/green ratio: near-wall {near:.3}, far {far:.3}");
+    assert!(
+        near > far + 0.05,
+        "expected red colour bleed near the wall (near {near:.3} vs far {far:.3})"
+    );
+
+    // Sanity: the near-wall floor actually picks up red (ratio clearly > 1).
+    assert!(
+        near > 1.03,
+        "near-wall floor not reddened (ratio {near:.3})"
     );
 }

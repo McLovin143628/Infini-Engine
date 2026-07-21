@@ -172,8 +172,8 @@ struct GpuSkinnedInstance {
 pub struct SkinnedMeshNode {
     pipeline: wgpu::RenderPipeline,
     joints_bgl: wgpu::BindGroupLayout,
-    /// SSAO bind at `@group(2)` (was the empty material-seam group pre-P13.3a).
-    ao: super::AoBinding,
+    /// AO + shadows + GI env bind at `@group(2)` (P13.3b; was the AO-only bind).
+    env: super::EnvBinding,
     lights_buf: wgpu::Buffer,
     lights_bg: wgpu::BindGroup,
     meshes: Vec<GpuSkinnedMesh>,
@@ -191,7 +191,7 @@ impl SkinnedMeshNode {
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("skinned-mesh"),
                 source: wgpu::ShaderSource::Wgsl(
-                    super::scene_shader(include_str!("../shaders/skinned_mesh.wgsl")).into(),
+                    super::lit_scene_shader(include_str!("../shaders/skinned_mesh.wgsl"), 2).into(),
                 ),
             });
 
@@ -226,8 +226,8 @@ impl SkinnedMeshNode {
             }],
         });
 
-        // @group(2) SSAO bind (white when SSAO is off → ambient unchanged).
-        let ao = super::AoBinding::new(gpu);
+        // @group(2) AO + shadows + GI env bind (byte-stable when all are off).
+        let env = super::EnvBinding::new(gpu);
 
         // @group(3) joint-matrix storage buffer.
         let joints_bgl = gpu
@@ -253,7 +253,7 @@ impl SkinnedMeshNode {
                 bind_group_layouts: &[
                     Some(view_bgl),
                     Some(&lights_bgl),
-                    Some(&ao.bgl),
+                    Some(&env.bgl),
                     Some(&joints_bgl),
                 ],
                 immediate_size: 0,
@@ -302,7 +302,7 @@ impl SkinnedMeshNode {
         Self {
             pipeline,
             joints_bgl,
-            ao,
+            env,
             lights_buf,
             lights_bg,
             meshes: Vec::new(),
@@ -429,7 +429,7 @@ impl RenderNode for SkinnedMeshNode {
         let Some(instance_buf) = self.instance_buf.as_ref() else {
             return;
         };
-        let ao_bg = self.ao.bind_group(gpu, frame).clone();
+        let env_bg = self.env.bind_group(gpu, frame).clone();
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("skinned-mesh"),
@@ -457,7 +457,7 @@ impl RenderNode for SkinnedMeshNode {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
         pass.set_bind_group(1, &self.lights_bg, &[]);
-        pass.set_bind_group(2, &ao_bg, &[]);
+        pass.set_bind_group(2, &env_bg, &[]);
         pass.set_vertex_buffer(1, instance_buf.slice(..));
 
         for (i, inst) in self.instances.iter().enumerate() {

@@ -27,10 +27,9 @@ struct TerrainMaterial {
 };
 @group(2) @binding(0) var<uniform> material: TerrainMaterial;
 
-// SSAO (P13.3a): group 3 (after the material group). 1×1 white when disabled →
-// ambient unchanged.
-@group(3) @binding(0) var ao_tex: texture_2d<f32>;
-@group(3) @binding(1) var ao_smp: sampler;
+// AO + cascaded shadows + dynamic GI ride the shared env bind group at @group(3)
+// (declared in env_lighting.wgsl, prepended by `lit_scene_shader`): `ao_tex`/`ao_smp`
+// (SSAO, white when off), `shadow_factor()`, and `gi_irradiance()`.
 
 struct VIn {
     // Vertex: unit patch coordinates in [0,1]² + skirt flag (z = 1 on the
@@ -236,9 +235,13 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 
     let sun = normalize(view.sun_dir.xyz);
     let ndl = max(dot(n, sun), 0.0);
-    // Hemispheric ambient (sky above / ground below).
+    // Hemispheric ambient (sky above / ground below), or the dynamic-GI probe
+    // irradiance when GI is on.
     let up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
-    let ambient = mix(vec3<f32>(0.05, 0.06, 0.07), vec3<f32>(0.16, 0.20, 0.26), up);
+    var ambient = mix(vec3<f32>(0.05, 0.06, 0.07), vec3<f32>(0.16, 0.20, 0.26), up);
+    if (gi.params.x > 0.5) {
+        ambient = gi_irradiance(in.world_local, n);
+    }
     // A cheap roughness-aware specular glint (Blinn-ish): smoother layers (lower
     // roughness) get a tighter, brighter highlight, so roughness reads visibly.
     let view_dir = normalize(view.eye.xyz - in.world_local);
@@ -246,9 +249,17 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     let gloss = (1.0 - roughness) * (1.0 - roughness);
     let spec_power = mix(8.0, 128.0, gloss);
     let spec = pow(max(dot(n, half_v), 0.0), spec_power) * gloss * 0.4;
-    // SSAO modulates the ambient (hemispheric) term only, never the direct sun.
+    // The direct sun (+ its glint) receives the cascaded shadow factor; SSAO
+    // modulates only the ambient term.
+    var direct = ndl * vec3<f32>(1.15, 1.10, 1.0);
+    var spec_term = vec3<f32>(spec);
+    if (shadow.params.x > 0.5) {
+        let sf = shadow_factor(in.world_local, n);
+        direct = direct * sf;
+        spec_term = spec_term * sf;
+    }
     let ao = textureSampleLevel(ao_tex, ao_smp, in.clip.xy / view.grid_axis_viewport.zw, 0.0).r;
-    let lo = albedo * (ambient * ao + ndl * vec3<f32>(1.15, 1.10, 1.0)) + vec3<f32>(spec);
+    let lo = albedo * (ambient * ao + direct) + spec_term;
 
     // HDR-linear haze; the post tonemap pass (ACES + exposure) runs afterward.
     let dist = length(in.world_local - view.eye.xyz);

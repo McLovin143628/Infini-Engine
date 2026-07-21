@@ -245,7 +245,7 @@ pub struct MeshNode {
     instance_count: u32,
     lights_buf: wgpu::Buffer,
     lights_bg: wgpu::BindGroup,
-    ao: super::AoBinding,
+    env: super::EnvBinding,
 }
 
 impl MeshNode {
@@ -255,7 +255,7 @@ impl MeshNode {
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("mesh"),
                 source: wgpu::ShaderSource::Wgsl(
-                    super::scene_shader(include_str!("../shaders/mesh.wgsl")).into(),
+                    super::lit_scene_shader(include_str!("../shaders/mesh.wgsl"), 2).into(),
                 ),
             });
 
@@ -308,12 +308,12 @@ impl MeshNode {
             }],
         });
 
-        let ao = super::AoBinding::new(gpu);
+        let env = super::EnvBinding::new(gpu);
         let layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("mesh"),
-                bind_group_layouts: &[Some(view_bgl), Some(&lights_bgl), Some(&ao.bgl)],
+                bind_group_layouts: &[Some(view_bgl), Some(&lights_bgl), Some(&env.bgl)],
                 immediate_size: 0,
             });
 
@@ -368,7 +368,7 @@ impl MeshNode {
             instance_count: 0,
             lights_buf,
             lights_bg,
-            ao,
+            env,
         }
     }
 
@@ -440,8 +440,8 @@ impl RenderNode for MeshNode {
         if self.instance_count == 0 {
             return;
         }
-        // Cheap Arc handle clone → no borrow of `self.ao` held during the pass.
-        let ao_bg = self.ao.bind_group(gpu, frame).clone();
+        // Cheap Arc handle clone → no borrow of `self.env` held during the pass.
+        let env_bg = self.env.bind_group(gpu, frame).clone();
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mesh"),
@@ -469,7 +469,7 @@ impl RenderNode for MeshNode {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
         pass.set_bind_group(1, &self.lights_bg, &[]);
-        pass.set_bind_group(2, &ao_bg, &[]);
+        pass.set_bind_group(2, &env_bg, &[]);
         self.draw_all(&mut pass);
     }
 }

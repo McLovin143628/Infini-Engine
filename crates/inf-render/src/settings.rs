@@ -80,6 +80,92 @@ pub struct RenderSettings {
     /// carries `vgeom_instances` — stays byte-identical, and the field is inert
     /// on scenes with no vmesh content.
     pub vgeom: VgeomSettings,
+    /// Cascaded shadow maps (P13.3b). **OFF by default** → every existing golden
+    /// stays byte-identical (receivers take the un-shadowed instruction path).
+    pub shadows: ShadowSettings,
+    /// Dynamic global illumination (P13.3b). **OFF by default** → the hemispheric
+    /// ambient path is byte-identical.
+    pub gi: GiSettings,
+}
+
+/// Cascaded shadow map settings (P13.3b). The first directional light casts three
+/// view-frustum-fit cascades into a `Depth32Float` array; the lit passes sample a
+/// 3×3 PCF shadow factor that multiplies that light's direct term. **OFF by
+/// default** so every existing golden — which renders with shadows off — stays
+/// byte-identical (the receiver shaders take the un-shadowed instruction path
+/// unchanged; see `shaders/mesh.wgsl`).
+///
+/// Cascade count + shadow-map resolution are compile-time constants
+/// ([`crate::csm::SHADOW_CASCADES`] / [`crate::csm::SHADOW_RESOLUTION`]); the
+/// tunable knobs are the split-scheme blend, the shadow view distance, and the two
+/// bias constants (documented defaults below).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowSettings {
+    /// Master enable. Off → the [`crate::passes::shadow`] node emits nothing and
+    /// receivers take the byte-stable un-shadowed path.
+    pub enabled: bool,
+    /// Shadow view distance (metres): the far edge of the last cascade. Beyond it
+    /// surfaces are fully lit. Default 60 m.
+    pub max_distance: f32,
+    /// Practical-split blend λ between the logarithmic and uniform split schemes
+    /// (0 = uniform, 1 = logarithmic). Default 0.7 (the standard CSM value).
+    pub lambda: f32,
+    /// Constant depth bias in light-clip NDC units, subtracted from the receiver's
+    /// compared depth to kill self-shadow acne. Default 0.0015.
+    pub depth_bias: f32,
+    /// Normal-offset bias in **shadow texels**: the receiver position is pushed
+    /// along its normal by this many cascade texels before projection (slope acne).
+    /// Default 2.0.
+    pub normal_bias: f32,
+}
+
+impl Default for ShadowSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_distance: 60.0,
+            lambda: 0.7,
+            depth_bias: 0.0015,
+            normal_bias: 2.0,
+        }
+    }
+}
+
+/// Dynamic global-illumination settings (P13.3b) — the real-time single-bounce
+/// diffuse GI. A camera-centred voxel volume is revoxelized each frame, a probe
+/// grid marches rays through it to L1 spherical harmonics, and the lit passes
+/// replace their hemispheric ambient constant with the probe-interpolated SH
+/// irradiance. **OFF by default** so every existing golden keeps the hemispheric
+/// ambient path byte-identical.
+///
+/// The voxel grid (64³) + probe grid (16×8×16) dimensions are compile-time
+/// constants ([`crate::gi`]); the tunables are the world extent, ray count, and
+/// output intensity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GiSettings {
+    /// Master enable. Off → the [`crate::passes::gi`] nodes emit nothing and the
+    /// receivers keep the byte-stable hemispheric ambient term.
+    pub enabled: bool,
+    /// World side length (metres) of the camera-centred voxel/probe volume.
+    /// Default 40 m.
+    pub extent: f32,
+    /// Rays marched per probe (fixed golden-spiral directions, deterministic).
+    /// Default 48.
+    pub rays: u32,
+    /// Multiplier on the reconstructed SH irradiance before it feeds the ambient
+    /// term. Default 1.0.
+    pub intensity: f32,
+}
+
+impl Default for GiSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            extent: 40.0,
+            rays: 48,
+            intensity: 1.0,
+        }
+    }
 }
 
 /// Virtualized-geometry (meshlet) render-path settings (P13.1b).
@@ -130,6 +216,8 @@ impl Default for RenderSettings {
             ssao: SsaoSettings::default(),
             taa: false,
             vgeom: VgeomSettings::default(),
+            shadows: ShadowSettings::default(),
+            gi: GiSettings::default(),
         }
     }
 }
@@ -252,6 +340,7 @@ mod tests {
     fn defaults_are_post_off_hdr_on() {
         let s = RenderSettings::default();
         assert!(s.hdr && !s.bloom.enabled && !s.ssao.enabled && !s.taa);
+        assert!(!s.shadows.enabled && !s.gi.enabled);
         assert_eq!(s.exposure, 1.0);
         assert!(!s.needs_depth_prepass());
         let mut s2 = s;

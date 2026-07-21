@@ -253,8 +253,8 @@ pub struct TerrainNode {
     /// Terrain splat material uniform (`@group(2)`) + its bind group.
     material_buffer: wgpu::Buffer,
     material_bg: wgpu::BindGroup,
-    /// SSAO bind at `@group(3)`.
-    ao: super::AoBinding,
+    /// AO + shadows + GI env bind at `@group(3)` (P13.3b).
+    env: super::EnvBinding,
     /// Version of the terrain the texture/material caches reflect.
     uploaded_version: Option<u64>,
     instances: Option<wgpu::Buffer>,
@@ -296,7 +296,7 @@ impl TerrainNode {
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("terrain"),
                 source: wgpu::ShaderSource::Wgsl(
-                    super::scene_shader(include_str!("../shaders/terrain.wgsl")).into(),
+                    super::lit_scene_shader(include_str!("../shaders/terrain.wgsl"), 3).into(),
                 ),
             });
 
@@ -351,7 +351,7 @@ impl TerrainNode {
             }],
         });
 
-        let ao = super::AoBinding::new(gpu);
+        let env = super::EnvBinding::new(gpu);
         let layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -360,7 +360,7 @@ impl TerrainNode {
                     Some(view_bgl),
                     Some(&tile_bgl),
                     Some(&material_bgl),
-                    Some(&ao.bgl),
+                    Some(&env.bgl),
                 ],
                 immediate_size: 0,
             });
@@ -471,7 +471,7 @@ impl TerrainNode {
             textures: BTreeMap::new(),
             material_buffer,
             material_bg,
-            ao,
+            env,
             uploaded_version: None,
             instances: None,
             instance_capacity: 0,
@@ -672,7 +672,7 @@ impl RenderNode for TerrainNode {
         let inst_buf = self.instances.as_ref().unwrap();
         gpu.queue
             .write_buffer(inst_buf, 0, bytemuck::cast_slice(&raw));
-        let ao_bg = self.ao.bind_group(gpu, frame).clone();
+        let env_bg = self.env.bind_group(gpu, frame).clone();
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("terrain"),
@@ -700,7 +700,7 @@ impl RenderNode for TerrainNode {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
         pass.set_bind_group(2, &self.material_bg, &[]);
-        pass.set_bind_group(3, &ao_bg, &[]);
+        pass.set_bind_group(3, &env_bg, &[]);
         pass.set_vertex_buffer(1, inst_buf.slice(..));
 
         for (idx, patch) in patches.iter().enumerate() {
