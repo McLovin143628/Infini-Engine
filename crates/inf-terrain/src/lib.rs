@@ -17,8 +17,11 @@
 mod brush;
 mod data;
 mod delta;
+pub mod erosion;
 mod import;
+pub use erosion::{erode, erode_terrain, erode_with, ErosionParams, ErosionStats};
 mod noise;
+mod raycast;
 mod region;
 mod tile;
 
@@ -29,6 +32,7 @@ pub use data::{TerrainData, DEFAULT_METERS_PER_SAMPLE, DEFAULT_TILE_RESOLUTION};
 pub use delta::{HeightDelta, TilePatch};
 pub use import::{encode_png16, HeightImage, HeightmapImport, TerrainError};
 pub use noise::fbm_signed;
+pub use raycast::{raycast_terrain, TerrainHit};
 pub use region::HeightRegion;
 pub use tile::TerrainTile;
 
