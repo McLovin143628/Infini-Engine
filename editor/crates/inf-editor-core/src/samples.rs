@@ -941,6 +941,624 @@ interpreter.\n\n\
   handler), stored as JSON.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// ── Character-demo gate scene (P11.4) ────────────────────────────────────────
+//
+// The Phase-11-closing gate scene: a sine-hill terrain (P10-style) and a
+// **character** driven by a Blueprint across it. The character carries the full
+// P11 animation/character component set — `SkeletalMesh` + `AnimStateMachine` +
+// `RootMotion` + a 3D `CharacterController3D`/`Collider3D`/`RigidBody3D` — plus an
+// actor blueprint that reads left/right input, moves via `physics3d.move_and_slide`
+// and tracks terrain height via the `terrain.height_at` host seam, jumping on the
+// `jump` action. A procedural 6-joint humanoid-ish skeleton, three programmatic
+// clips (idle bob / run forward via `straight_line_clip` / jump arc), and a
+// state machine (idle→run on speed>0.1, run→idle on ≤0.1, any→jump on
+// jump_pressed>0.5 with exit back) are committed as `.inf_skel` / `.inf_anim` /
+// `.inf_sm` sidecars. Committed as v5 `.inf_lvl` bytes under
+// `samples/character-demo/`.
+//
+// Root motion note: the run clip is authored with forward root translation (via
+// `straight_line_clip`, honest placeholder), but the entity is **state-machine
+// driven** (no `AnimPlayer`), so locomotion comes from the Blueprint's
+// `physics3d.move_and_slide` — root-motion *extraction* (which reads `AnimPlayer`)
+// is inert this session; the `RootMotion` component persists for future use.
+
+pub const CHARACTER_DEMO_LEVEL_GUID: Uuid = Uuid::from_u128(0x8404_0000);
+pub const CHARACTER_DEMO_TERRAIN_GUID: Uuid = Uuid::from_u128(0x8404_0001);
+pub const CHARACTER_DEMO_CHARACTER_GUID: Uuid = Uuid::from_u128(0x8404_0002);
+pub const CHARACTER_DEMO_SUN_GUID: Uuid = Uuid::from_u128(0x8404_0003);
+pub const CHARACTER_DEMO_CAMERA_GUID: Uuid = Uuid::from_u128(0x8404_0004);
+/// The committed anim asset GUIDs the level's components reference (stable so the
+/// refs resolve through the AssetDb / cooked pack and the cook's dep edges ship them).
+pub const CHARACTER_DEMO_SKELETON_GUID: Uuid = Uuid::from_u128(0x8404_00A0);
+pub const CHARACTER_DEMO_IDLE_CLIP_GUID: Uuid = Uuid::from_u128(0x8404_00A1);
+pub const CHARACTER_DEMO_RUN_CLIP_GUID: Uuid = Uuid::from_u128(0x8404_00A2);
+pub const CHARACTER_DEMO_JUMP_CLIP_GUID: Uuid = Uuid::from_u128(0x8404_00A3);
+pub const CHARACTER_DEMO_SM_GUID: Uuid = Uuid::from_u128(0x8404_00A4);
+pub const CHARACTER_DEMO_ACTOR_GUID: Uuid = Uuid::from_u128(0x8404_00AC);
+
+/// The actor class id string.
+pub const CHARACTER_DEMO_CLASS_ID: &str = "act:character_demo";
+
+// Terrain + tuning (world units, seconds).
+pub const CHARACTER_DEMO_RESOLUTION: u32 = 16;
+pub const CHARACTER_DEMO_MPS: f64 = 2.0;
+/// Horizontal run speed (m/s) from left/right input.
+pub const CHAR_MOVE_SPEED: f64 = 4.0;
+/// Downward acceleration applied to `vy` each tick.
+pub const CHAR_GRAVITY: f64 = 20.0;
+/// Upward velocity a jump imparts.
+pub const CHAR_JUMP_SPEED: f64 = 7.0;
+/// Height the capsule centre stands above the sampled terrain height.
+pub const CHAR_STAND: f64 = 0.9;
+/// Start position (world X); the character begins at the terrain origin where the
+/// height is exactly `0`, so its start Y is exactly `CHAR_STAND` (grounded).
+pub const CHAR_START_X: f64 = 0.0;
+/// Start Y = terrain height at the start (0) + the stand offset. Kept a const so
+/// the spawn `Transform` and the Blueprint's `BeginPlay` position seed agree
+/// exactly — the invariant that makes `transform == tracked position` hold each
+/// tick (`move_and_slide` deltas telescope).
+pub const CHAR_START_Y: f64 = CHAR_STAND;
+
+/// The demo's analytic terrain height at world `(x, z)` — a gentle sine hill along
+/// X (flat in Z along the character's z=0 path). `height(0,0) == 0`, so the
+/// character starts grounded at `CHAR_START_Y`. The runtime gate probes
+/// `TerrainData::height_at` + the character's Y against this.
+pub fn character_demo_height(x: f64, z: f64) -> f64 {
+    3.0 * (x * 0.08).sin() * (z * 0.08).cos()
+}
+
+/// A procedural 6-joint humanoid-ish skeleton (honest placeholder): hips (root) →
+/// spine → head, plus two upper arms and a foot. Bind transforms are simple local
+/// offsets; inverse-binds are identity (a placeholder rig, not an imported mesh).
+pub fn character_demo_skeleton() -> inf_anim::Skeleton {
+    use glam::{Mat4, Quat, Vec3};
+    use inf_anim::{Joint, JointTransform};
+    let joint = |name: &str, parent: Option<u16>, t: Vec3| Joint {
+        name: name.into(),
+        parent,
+        inverse_bind: Mat4::IDENTITY.to_cols_array(),
+        local_bind: JointTransform::from_trs(t, Quat::IDENTITY, Vec3::ONE),
+    };
+    inf_anim::Skeleton::new(vec![
+        joint("hips", None, Vec3::new(0.0, 1.0, 0.0)),
+        joint("spine", Some(0), Vec3::new(0.0, 0.4, 0.0)),
+        joint("head", Some(1), Vec3::new(0.0, 0.4, 0.0)),
+        joint("upper_arm_l", Some(1), Vec3::new(-0.25, 0.3, 0.0)),
+        joint("upper_arm_r", Some(1), Vec3::new(0.25, 0.3, 0.0)),
+        joint("foot", Some(0), Vec3::new(0.0, -0.9, 0.0)),
+    ])
+    .expect("valid procedural skeleton")
+}
+
+/// The **idle** clip: a subtle vertical bob of the hips (joint 0) over 2 s, looping.
+pub fn character_demo_idle_clip() -> inf_anim::AnimClip {
+    use inf_anim::{AnimClip, Interpolation, JointTrack, Vec3Track};
+    let mut jt = JointTrack::new(0);
+    jt.translation = Some(Vec3Track::new(
+        vec![0.0, 1.0, 2.0],
+        vec![[0.0, 1.0, 0.0], [0.0, 1.05, 0.0], [0.0, 1.0, 0.0]],
+        Interpolation::Linear,
+    ));
+    AnimClip::new("idle", vec![jt])
+}
+
+/// The **run** clip: forward root motion via the `straight_line_clip` helper
+/// (hips translate +X over the loop). Authored honestly even though locomotion is
+/// Blueprint-driven this session (see the module note).
+pub fn character_demo_run_clip() -> inf_anim::AnimClip {
+    inf_anim::root_motion::straight_line_clip("run", glam::Vec3::X, 2.0, 0.6)
+}
+
+/// The **jump** clip: a vertical arc on the hips (joint 0) over 0.5 s, non-looping.
+pub fn character_demo_jump_clip() -> inf_anim::AnimClip {
+    use inf_anim::{AnimClip, Interpolation, JointTrack, Vec3Track};
+    let mut jt = JointTrack::new(0);
+    jt.translation = Some(Vec3Track::new(
+        vec![0.0, 0.25, 0.5],
+        vec![[0.0, 1.0, 0.0], [0.0, 1.6, 0.0], [0.0, 1.0, 0.0]],
+        Interpolation::Linear,
+    ));
+    AnimClip::new("jump", vec![jt])
+}
+
+/// The state machine: idle(0) / run(1) / jump(2). Jump transitions are declared
+/// **first** so a jump pressed while moving wins over the run transition. Reads
+/// the actor's `speed` + `jump` Blueprint variables via the [`SmContext`] seam.
+pub fn character_demo_state_machine() -> inf_anim::StateMachine {
+    use inf_anim::state_machine::{CmpOp, Motion, SmCondition, SmState, SmTransition};
+    let clip_ref = |g: Uuid| *g.as_bytes();
+    let cond = |var: &str, op: CmpOp, value: f64| SmCondition {
+        var: var.into(),
+        op,
+        value,
+    };
+    let tr = |from: usize, to: usize, c: SmCondition| SmTransition {
+        from,
+        to,
+        duration: 0.15,
+        conditions: vec![c],
+        exit_time: None,
+    };
+    inf_anim::StateMachine {
+        states: vec![
+            SmState {
+                name: "idle".into(),
+                motion: Motion::Clip(clip_ref(CHARACTER_DEMO_IDLE_CLIP_GUID)),
+                looping: true,
+                speed: 1.0,
+                position: (0.0, 0.0),
+            },
+            SmState {
+                name: "run".into(),
+                motion: Motion::Clip(clip_ref(CHARACTER_DEMO_RUN_CLIP_GUID)),
+                looping: true,
+                speed: 1.0,
+                position: (240.0, 0.0),
+            },
+            SmState {
+                name: "jump".into(),
+                motion: Motion::Clip(clip_ref(CHARACTER_DEMO_JUMP_CLIP_GUID)),
+                looping: false,
+                speed: 1.0,
+                position: (120.0, -160.0),
+            },
+        ],
+        transitions: vec![
+            // any→jump (declared first so jump wins over run when both hold).
+            tr(0, 2, cond("jump", CmpOp::Gt, 0.5)),
+            tr(1, 2, cond("jump", CmpOp::Gt, 0.5)),
+            // locomotion.
+            tr(0, 1, cond("speed", CmpOp::Gt, 0.1)),
+            tr(1, 0, cond("speed", CmpOp::Le, 0.1)),
+            // exit jump back to run (moving) or idle (stopped).
+            tr(2, 1, cond("speed", CmpOp::Gt, 0.1)),
+            tr(2, 0, cond("speed", CmpOp::Le, 0.1)),
+        ],
+        entry: 0,
+    }
+}
+
+/// The character's **Tick** handler as `BlueprintFn` IR. Reads left/right + jump
+/// input, integrates a var-tracked position, clamps Y to `terrain.height_at + STAND`
+/// (gravity + grounding), sets the `speed`/`jump` vars the state machine reads, and
+/// drives the entity with `physics3d.move_and_slide` deltas.
+///
+/// Locals: `n1=entity`, `n2=vx` (mut), `n3=old_py`, `n4=ground`.
+fn character_tick_fn() -> BlueprintFn {
+    let e = || local(1);
+    let dt = || Expr::Param("dt".to_string());
+    let vx = || local(2);
+    let old_py = || local(3);
+    let ground = || local(4);
+
+    let body = vec![
+        let_named(1, "entity", false, get_var("entity")),
+        // Horizontal velocity from held input.
+        let_named(2, "vx", true, float_lit(0.0)),
+        if_then(
+            call(&["input", "is_down"], vec![str_lit("right")]),
+            vec![Stmt::Assign {
+                target: LocalId(2),
+                value: bin(BinOp::Add, vx(), float_lit(CHAR_MOVE_SPEED)),
+            }],
+            vec![],
+        ),
+        if_then(
+            call(&["input", "is_down"], vec![str_lit("left")]),
+            vec![Stmt::Assign {
+                target: LocalId(2),
+                value: bin(BinOp::Sub, vx(), float_lit(CHAR_MOVE_SPEED)),
+            }],
+            vec![],
+        ),
+        // speed = |vx| → drives idle↔run.
+        if_then(
+            bin(BinOp::Lt, vx(), float_lit(0.0)),
+            vec![set_var("speed", bin(BinOp::Sub, float_lit(0.0), vx()))],
+            vec![set_var("speed", vx())],
+        ),
+        // Jump on the rising edge while grounded → seed vy + the jump var.
+        if_then(
+            bin(
+                BinOp::And,
+                call(&["input", "just_pressed"], vec![str_lit("jump")]),
+                bin(BinOp::Gt, get_var("grounded"), float_lit(0.5)),
+            ),
+            vec![
+                set_var("vy", float_lit(CHAR_JUMP_SPEED)),
+                set_var("jump", float_lit(1.0)),
+            ],
+            vec![set_var("jump", float_lit(0.0))],
+        ),
+        // Gravity.
+        set_var(
+            "vy",
+            bin(
+                BinOp::Sub,
+                get_var("vy"),
+                bin(BinOp::Mul, float_lit(CHAR_GRAVITY), dt()),
+            ),
+        ),
+        // Integrate the var-tracked position.
+        let_named(3, "old_py", false, get_var("py")),
+        set_var(
+            "px",
+            bin(BinOp::Add, get_var("px"), bin(BinOp::Mul, vx(), dt())),
+        ),
+        set_var(
+            "py",
+            bin(BinOp::Add, old_py(), bin(BinOp::Mul, get_var("vy"), dt())),
+        ),
+        // Ground = terrain height under the character + the stand offset.
+        let_named(
+            4,
+            "ground",
+            false,
+            bin(
+                BinOp::Add,
+                call(
+                    &["terrain", "height_at"],
+                    vec![get_var("px"), get_var("pz")],
+                ),
+                float_lit(CHAR_STAND),
+            ),
+        ),
+        // Clamp to the ground when at/under it; else airborne.
+        if_then(
+            bin(BinOp::Le, get_var("py"), ground()),
+            vec![
+                set_var("py", ground()),
+                set_var("vy", float_lit(0.0)),
+                set_var("grounded", float_lit(1.0)),
+            ],
+            vec![set_var("grounded", float_lit(0.0))],
+        ),
+        // Move the entity by this tick's delta (x + the y delta toward the target).
+        Stmt::ExprStmt(call(
+            &["physics3d", "move_and_slide"],
+            vec![
+                e(),
+                bin(BinOp::Mul, vx(), dt()),
+                bin(BinOp::Sub, get_var("py"), old_py()),
+                float_lit(0.0),
+            ],
+        )),
+    ];
+
+    BlueprintFn {
+        id: EventKind::Tick.key(),
+        name: EventKind::Tick.key(),
+        params: vec![Param {
+            name: "dt".to_string(),
+            ty: Ty::Float,
+        }],
+        ret: Ty::Unit,
+        body,
+    }
+}
+
+/// A `BeginPlay` handler seeding the var-tracked position to the spawn position
+/// (so `transform == tracked position` holds), grounded and at rest.
+fn character_begin_play_fn() -> BlueprintFn {
+    BlueprintFn {
+        id: EventKind::BeginPlay.key(),
+        name: EventKind::BeginPlay.key(),
+        params: vec![],
+        ret: Ty::Unit,
+        body: vec![
+            set_var("px", float_lit(CHAR_START_X)),
+            set_var("py", float_lit(CHAR_START_Y)),
+            set_var("pz", float_lit(0.0)),
+            set_var("vy", float_lit(0.0)),
+            set_var("speed", float_lit(0.0)),
+            set_var("jump", float_lit(0.0)),
+            set_var("grounded", float_lit(1.0)),
+        ],
+    }
+}
+
+/// The character's [`BlueprintClass`] (the `.inf_act`).
+pub fn character_demo_class() -> BlueprintClass {
+    let mut class = BlueprintClass::new(CHARACTER_DEMO_CLASS_ID, "Character Demo");
+    let fvar = |name: &str| Variable {
+        name: name.into(),
+        ty: Ty::Float,
+        default: Lit::Float(0.0),
+        exposed: true,
+    };
+    class.variables = vec![
+        Variable {
+            name: "entity".into(),
+            ty: Ty::Int,
+            default: Lit::Int(0),
+            exposed: false,
+        },
+        fvar("px"),
+        fvar("py"),
+        fvar("pz"),
+        fvar("vy"),
+        fvar("speed"),
+        fvar("jump"),
+        fvar("grounded"),
+    ];
+    class.events = vec![
+        EventBinding {
+            event: EventKind::BeginPlay,
+            body: character_begin_play_fn(),
+        },
+        EventBinding {
+            event: EventKind::Tick,
+            body: character_tick_fn(),
+        },
+    ];
+    class
+}
+
+/// Build the character-demo [`SceneDoc`]: a sine-hill terrain, a character entity
+/// carrying the full P11 animation/character component set + the actor binding, a
+/// directional sun, and a camera.
+pub fn character_demo_scene() -> SceneDoc {
+    use inf_ecs::components::{
+        AnimStateMachine, BodyKind3D, Camera, CharacterController3D, Collider3D,
+        ColliderShape3DKind, Light, LightKind, RigidBody3D, RootMotion, SkeletalMesh, Terrain,
+    };
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Character Demo");
+
+    // ── Terrain: a sine hill at the origin (world XZ == terrain-local XZ, so the
+    //    height probe + the character's terrain.height_at seam are the bare
+    //    generator function). Authored over the character's path. ──
+    doc.create_with_guid(
+        CHARACTER_DEMO_TERRAIN_GUID,
+        SpawnKind::Empty,
+        "Terrain",
+        None,
+    );
+    insert!(
+        doc,
+        CHARACTER_DEMO_TERRAIN_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+    {
+        let mut terrain = Terrain::configured(CHARACTER_DEMO_RESOLUTION, CHARACTER_DEMO_MPS);
+        terrain.data.write_region(
+            glam::DVec2::new(-16.0, -16.0),
+            glam::DVec2::new(48.0, 16.0),
+            character_demo_height,
+        );
+        terrain.macro_variation = 0.15;
+        insert!(doc, CHARACTER_DEMO_TERRAIN_GUID, terrain);
+    }
+
+    // ── The character: SkeletalMesh + AnimStateMachine + RootMotion + a 3D
+    //    kinematic character controller, standing at the origin (grounded). ──
+    doc.create_with_guid(
+        CHARACTER_DEMO_CHARACTER_GUID,
+        SpawnKind::Empty,
+        "Character",
+        None,
+    );
+    insert!(
+        doc,
+        CHARACTER_DEMO_CHARACTER_GUID,
+        Transform::from_translation(DVec3::new(CHAR_START_X, CHAR_START_Y, 0.0))
+    );
+    insert!(
+        doc,
+        CHARACTER_DEMO_CHARACTER_GUID,
+        SkeletalMesh {
+            mesh: None,
+            skeleton: Some(CHARACTER_DEMO_SKELETON_GUID),
+        }
+    );
+    insert!(
+        doc,
+        CHARACTER_DEMO_CHARACTER_GUID,
+        AnimStateMachine {
+            sm: Some(CHARACTER_DEMO_SM_GUID),
+            params_from_vars: true,
+            ..Default::default()
+        }
+    );
+    insert!(doc, CHARACTER_DEMO_CHARACTER_GUID, RootMotion::apply());
+    insert!(
+        doc,
+        CHARACTER_DEMO_CHARACTER_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Kinematic,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        CHARACTER_DEMO_CHARACTER_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Capsule,
+            half_extents: inf_ecs::math::Vec3d::new(0.3, 0.5, 0.3),
+            radius: 0.3,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        CHARACTER_DEMO_CHARACTER_GUID,
+        CharacterController3D::default()
+    );
+    insert!(
+        doc,
+        CHARACTER_DEMO_CHARACTER_GUID,
+        ActorClass(CHARACTER_DEMO_ACTOR_GUID)
+    );
+
+    // ── A directional sun. ──
+    doc.create_with_guid(CHARACTER_DEMO_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        CHARACTER_DEMO_SUN_GUID,
+        Transform {
+            translation: inf_ecs::math::Vec3d::new(0.0, 30.0, 0.0),
+            rotation: inf_ecs::math::Vec3d::new(-50.0, -30.0, 0.0),
+            scale: inf_ecs::math::Vec3d::new(1.0, 1.0, 1.0),
+        }
+    );
+    insert!(
+        doc,
+        CHARACTER_DEMO_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            color: Color::new(1.0, 0.97, 0.9, 1.0),
+            intensity: 2.5,
+        }
+    );
+
+    // ── A camera framing the character. ──
+    doc.create_with_guid(CHARACTER_DEMO_CAMERA_GUID, SpawnKind::Empty, "Camera", None);
+    insert!(
+        doc,
+        CHARACTER_DEMO_CAMERA_GUID,
+        Transform::from_translation(DVec3::new(6.0, 4.0, -8.0))
+    );
+    insert!(doc, CHARACTER_DEMO_CAMERA_GUID, Camera::default());
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+/// The `(guid, class)` actor list for a headless Simulate of the character demo.
+pub fn character_demo_actors() -> Vec<(Uuid, BlueprintClass)> {
+    vec![(CHARACTER_DEMO_CHARACTER_GUID, character_demo_class())]
+}
+
+/// The repo-root `samples/character-demo/` directory.
+pub fn character_demo_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/character-demo")
+}
+
+/// Encode an [`AssetPayload`](inf_asset::AssetPayload) + write it with an inf_asset
+/// sidecar stamped with a stable GUID (the character-demo asset-writing helper).
+fn write_anim_asset<T: inf_asset::AssetPayload>(
+    dir: &std::path::Path,
+    file: &str,
+    guid: Uuid,
+    kind: inf_asset::AssetKind,
+    payload: &T,
+) -> Result<(), String> {
+    let bytes = inf_asset::encode(payload).map_err(|e| format!("encode {file}: {e}"))?;
+    let path = dir.join(file);
+    std::fs::write(&path, &bytes).map_err(|e| format!("write {file}: {e}"))?;
+    inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(guid),
+        kind,
+        inf_asset::ContentHash::of(&bytes),
+    )
+    .save(&path)
+    .map_err(|e| format!("write {file} sidecar: {e}"))
+}
+
+/// Write the committed character-demo files from the generators (regeneration
+/// path): the v5 `.inf_lvl` (+ sidecar), the `.inf_skel` / three `.inf_anim` /
+/// `.inf_sm` anim assets (+ sidecars with their stable GUIDs), the `.inf_act`
+/// actor (+ sidecar), and a README.
+pub fn write_character_demo() -> Result<(), String> {
+    use inf_anim::{AnimClipAsset, SkeletonAsset, StateMachineAsset};
+    use inf_asset::AssetKind;
+
+    let dir = character_demo_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    // Level (payload + sidecar).
+    let doc = character_demo_scene();
+    crate::scene::serialize::save(
+        &doc,
+        &dir.join("Character.inf_lvl"),
+        Some(CHARACTER_DEMO_LEVEL_GUID),
+    )?;
+
+    // Skeleton.
+    let skel_bytes_ref = *CHARACTER_DEMO_SKELETON_GUID.as_bytes();
+    write_anim_asset(
+        &dir,
+        "Character.inf_skel",
+        CHARACTER_DEMO_SKELETON_GUID,
+        AssetKind::Skeleton,
+        &SkeletonAsset::new(character_demo_skeleton()),
+    )?;
+
+    // Three clips (each bound to the skeleton GUID — a dep edge).
+    for (file, guid, clip) in [
+        (
+            "Idle.inf_anim",
+            CHARACTER_DEMO_IDLE_CLIP_GUID,
+            character_demo_idle_clip(),
+        ),
+        (
+            "Run.inf_anim",
+            CHARACTER_DEMO_RUN_CLIP_GUID,
+            character_demo_run_clip(),
+        ),
+        (
+            "Jump.inf_anim",
+            CHARACTER_DEMO_JUMP_CLIP_GUID,
+            character_demo_jump_clip(),
+        ),
+    ] {
+        write_anim_asset(
+            &dir,
+            file,
+            guid,
+            AssetKind::AnimClip,
+            &AnimClipAsset::new(clip, Some(skel_bytes_ref)),
+        )?;
+    }
+
+    // State machine (bound to the skeleton GUID; references the clip GUIDs).
+    write_anim_asset(
+        &dir,
+        "Locomotion.inf_sm",
+        CHARACTER_DEMO_SM_GUID,
+        AssetKind::StateMachine,
+        &StateMachineAsset::new(character_demo_state_machine(), Some(skel_bytes_ref)),
+    )?;
+
+    // Actor blueprint (JSON, like Coyote) + its inf_asset sidecar.
+    let class = character_demo_class();
+    let act_bytes = encode_actor(&class)?;
+    let act_path = dir.join("Character.inf_act");
+    std::fs::write(&act_path, &act_bytes).map_err(|e| format!("write actor: {e}"))?;
+    inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(CHARACTER_DEMO_ACTOR_GUID),
+        AssetKind::Blueprint,
+        inf_asset::ContentHash::of(&act_bytes),
+    )
+    .save(&act_path)
+    .map_err(|e| format!("write actor sidecar: {e}"))?;
+
+    std::fs::write(dir.join("README.md"), CHARACTER_DEMO_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const CHARACTER_DEMO_README: &str = "# Character Demo (Phase-11 gate scene)\n\n\
+Generated by `inf_editor_core::samples::character_demo_scene` — the P11.4 gate\n\
+scene: an idle/run/jump **state-machine character** driven by a Blueprint across a\n\
+sine-hill terrain (the P10→P11 capstone).\n\n\
+- `Character.inf_lvl` — the scene as schema-v5 `.inf_lvl` bytes (SkeletalMesh +\n\
+  AnimStateMachine + RootMotion + a 3D character controller persist).\n\
+- `Character.inf_skel` — a procedural 6-joint humanoid-ish skeleton.\n\
+- `Idle/Run/Jump.inf_anim` — three programmatic clips (bob / forward root motion /\n\
+  vertical arc).\n\
+- `Locomotion.inf_sm` — the state machine (idle→run on speed>0.1, run→idle on ≤0.1,\n\
+  any→jump on jump>0.5 with exit back).\n\
+- `Character.inf_act` — the actor blueprint (left/right → move_and_slide across the\n\
+  terrain via `terrain.height_at`; jump on the rising edge).\n\n\
+The terrain heights are `character_demo_height(x, z)`; the runtime gate scripts\n\
+input and asserts the character crosses the terrain (x advances, Y tracks the\n\
+height), jumps (Y rises then returns), and its state machine transitions\n\
+idle→run→jump. PIE == shipping (identical trace/probes on both paths).\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1032,6 +1650,7 @@ mod tests {
             write_sample().expect("regenerate sample");
             write_hybrid_template().expect("regenerate hybrid template");
             write_terrain_demo().expect("regenerate terrain demo");
+            write_character_demo().expect("regenerate character demo");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -1081,6 +1700,96 @@ mod tests {
                 "committed terrain-demo .inf_pcg drifted from the generator"
             );
         }
+
+        // Character-demo lock: the committed `.inf_lvl` + anim assets still match
+        // the generators (skips gracefully before the first bless).
+        let cdir = character_demo_dir();
+        let clvl = cdir.join("Character.inf_lvl");
+        if clvl.exists() {
+            let want_lvl = crate::scene::serialize::encode(
+                &crate::scene::serialize::to_scene_file(&character_demo_scene()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&clvl).unwrap(),
+                want_lvl,
+                "committed character-demo .inf_lvl drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(cdir.join("Locomotion.inf_sm")).unwrap(),
+                inf_asset::encode(&inf_anim::StateMachineAsset::new(
+                    character_demo_state_machine(),
+                    Some(*CHARACTER_DEMO_SKELETON_GUID.as_bytes()),
+                ))
+                .unwrap(),
+                "committed character-demo .inf_sm drifted from the generator"
+            );
+        }
+    }
+
+    // ── Character-demo gate test (a): byte-identical save/reload ────────────
+
+    /// GATE (a) — the P3 discipline applied to the character demo: save → load →
+    /// save is byte-identical (a genuine schema-v5 payload), and the reloaded doc
+    /// keeps the full P11 animation/character component set on the character.
+    #[test]
+    fn character_demo_saves_and_reloads_byte_identical() {
+        use inf_ecs::components::{
+            AnimStateMachine, CharacterController3D, Collider3D, RigidBody3D, RootMotion,
+            SkeletalMesh,
+        };
+
+        let doc = character_demo_scene();
+        let bytes1 =
+            crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], 5, "character-demo writes as a schema-v5 file");
+
+        let mut doc2 = SceneDoc::new();
+        crate::scene::serialize::apply_to_doc(
+            &mut doc2,
+            &crate::scene::serialize::decode(&bytes1).unwrap(),
+        );
+        let bytes2 =
+            crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc2))
+                .unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "character-demo save→load→save must be byte-identical"
+        );
+
+        // The character keeps every persisted anim/character component + its refs.
+        let ce = doc2.entity_of(CHARACTER_DEMO_CHARACTER_GUID).unwrap();
+        let w = doc2.world().world();
+        assert_eq!(
+            w.get::<SkeletalMesh>(ce).unwrap().skeleton,
+            Some(CHARACTER_DEMO_SKELETON_GUID)
+        );
+        assert_eq!(
+            w.get::<AnimStateMachine>(ce).unwrap().sm,
+            Some(CHARACTER_DEMO_SM_GUID)
+        );
+        assert!(w.get::<RootMotion>(ce).is_some());
+        assert!(w.get::<CharacterController3D>(ce).is_some());
+        assert!(w.get::<Collider3D>(ce).is_some());
+        assert!(w.get::<RigidBody3D>(ce).is_some());
+    }
+
+    /// The committed anim assets decode + the state machine references the three
+    /// committed clip GUIDs (the cook's SM→clip closure walks exactly these).
+    #[test]
+    fn character_demo_state_machine_references_its_clips() {
+        use inf_anim::state_machine::Motion;
+        let sm = character_demo_state_machine();
+        let clip_of = |i: usize| match &sm.states[i].motion {
+            Motion::Clip(c) => uuid::Uuid::from_bytes(*c),
+            _ => panic!("expected a clip motion"),
+        };
+        assert_eq!(clip_of(0), CHARACTER_DEMO_IDLE_CLIP_GUID);
+        assert_eq!(clip_of(1), CHARACTER_DEMO_RUN_CLIP_GUID);
+        assert_eq!(clip_of(2), CHARACTER_DEMO_JUMP_CLIP_GUID);
+        // The actor blueprint round-trips through its committed encoding.
+        let class = character_demo_class();
+        assert_eq!(decode_actor(&encode_actor(&class).unwrap()).unwrap(), class);
     }
 
     // ── Terrain-demo gate test (a): byte-identical save/reload ─────────────
@@ -1095,7 +1804,7 @@ mod tests {
         let doc = terrain_demo_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 4, "terrain-demo writes as a schema-v4 file");
+        assert_eq!(bytes1[0], 5, "terrain-demo writes as a schema-v5 file");
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(

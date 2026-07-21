@@ -2843,6 +2843,7 @@ dependencies = [
 name = "inf-packager"
 version = "0.1.0"
 dependencies = [
+ "inf-anim",
  "inf-asset",
  "inf-blueprint",
  "inf-project",

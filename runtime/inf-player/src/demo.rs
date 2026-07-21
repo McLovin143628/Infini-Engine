@@ -143,6 +143,8 @@ pub fn build() -> BuiltWorld {
         gravity: DVec2::ZERO,
         hz: 60.0,
         label: "platformer-demo".to_string(),
+        state_machines: std::collections::BTreeMap::new(),
+        root_clips: Vec::new(),
     }
 }
 

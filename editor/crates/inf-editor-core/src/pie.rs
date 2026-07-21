@@ -22,7 +22,7 @@ use inf_runtime::CookedSnapshot;
 use uuid::Uuid;
 
 use inf_blueprint::BlueprintClass;
-use inf_ecs::components::ActorClass;
+use inf_ecs::components::{ActorClass, AnimPlayer, AnimStateMachine, SkeletalMesh};
 
 use crate::scene::{serialize, SceneDoc};
 
@@ -284,16 +284,18 @@ impl Drop for PieSession {
 /// via `resolve`), falling back to the `CharacterController2D` coyote class for
 /// scenes authored before per-entity bindings. This is the point of PIE:
 /// unsaved edits are previewed exactly.
-pub fn build_scene_payload<F, G>(
+pub fn build_scene_payload<F, G, H>(
     doc: &SceneDoc,
     mut resolve: F,
     mut resolve_pcg: G,
+    mut resolve_anim: H,
     tick_hz: u32,
     windowed: bool,
 ) -> Result<ScenePayload, PieError>
 where
     F: FnMut(Uuid) -> Option<BlueprintClass>,
     G: FnMut(Uuid) -> Option<Vec<u8>>,
+    H: FnMut(Uuid) -> Option<Vec<u8>>,
 {
     let level_bytes = serialize::encode(&serialize::to_scene_file(doc))
         .map_err(|e| PieError::Protocol(format!("encode scene: {e}")))?;
@@ -348,7 +350,48 @@ where
         }
     }
 
-    Ok(ScenePayload::new(doc.title(), level_bytes, classes, tick_hz, windowed).with_pcgs(pcgs))
+    // Referenced P11 animation assets (P11.4): the directly-referenced
+    // `SkeletalMesh.skeleton` / `AnimPlayer.clip` / `AnimStateMachine.sm` GUIDs
+    // resolved to their `.inf_skel` / `.inf_anim` / `.inf_sm` bytes, so the PIE
+    // player resolves state machines + root-motion clips exactly like the shipping
+    // pack path (PIE == shipping for animation). A machine's transitively-played
+    // clips ship with the cooked pack for pose rendering (human-verified);
+    // gate (c) asserts the state trace, which needs only the machine + actor vars.
+    let mut skeletons: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut clips: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut machines: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut seen_anim: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    let collect = |guid: Uuid,
+                   out: &mut Vec<(Uuid, Vec<u8>)>,
+                   resolve_anim: &mut H,
+                   seen: &mut std::collections::HashSet<Uuid>| {
+        if seen.insert(guid) {
+            if let Some(bytes) = resolve_anim(guid) {
+                out.push((guid, bytes));
+            }
+        }
+    };
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let w = world.world();
+        if let Some(sk) = w.get::<SkeletalMesh>(e).and_then(|s| s.skeleton) {
+            collect(sk, &mut skeletons, &mut resolve_anim, &mut seen_anim);
+        }
+        if let Some(clip) = w.get::<AnimPlayer>(e).and_then(|p| p.clip) {
+            collect(clip, &mut clips, &mut resolve_anim, &mut seen_anim);
+        }
+        if let Some(sm) = w.get::<AnimStateMachine>(e).and_then(|s| s.sm) {
+            collect(sm, &mut machines, &mut resolve_anim, &mut seen_anim);
+        }
+    }
+
+    Ok(
+        ScenePayload::new(doc.title(), level_bytes, classes, tick_hz, windowed)
+            .with_pcgs(pcgs)
+            .with_anim_assets(skeletons, clips, machines),
+    )
 }
 
 /// Locate the `inf-player` binary next to the running editor executable (dev

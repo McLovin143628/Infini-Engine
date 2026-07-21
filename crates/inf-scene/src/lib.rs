@@ -31,20 +31,25 @@
 //! * **v3** — appends the six physics slots + the `actor` blueprint binding and a
 //!   file-level settings record (gravity + rate).
 //! * **v4** — appends the two P10 world components: `terrain` and `pcg_volume`.
-//!   [`encode`] always writes the current schema, so cooking an older level
-//!   **rewrites it to v4** (the "rewrite the level payload for runtime" step).
+//! * **v5** — appends the five P11 animation / character components:
+//!   `skeletal_mesh` / `anim_player` / `anim_state_machine` / `root_motion` /
+//!   `attached_to`. `AnimStateMachine`'s transient `runtime` is `#[serde(skip)]`,
+//!   so the machine persists without its play state (rebuilt on load), like a
+//!   `PcgVolume`'s `evaluated` cache. [`encode`] always writes the current
+//!   schema, so cooking an older level **rewrites it to v5** (the "rewrite the
+//!   level payload for runtime" step).
 
 use inf_ecs::components::{
-    Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D, Light, Light2D,
-    Material, MeshRef, NineSlice, PcgVolume, RigidBody2D, RigidBody3D, Sprite, Terrain, Text2D,
-    Tilemap, Transform,
+    AnimPlayer, AnimStateMachine, AttachedTo, Camera, CharacterController2D, CharacterController3D,
+    Collider2D, Collider3D, Light, Light2D, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D,
+    RigidBody3D, RootMotion, SkeletalMesh, Sprite, Terrain, Text2D, Tilemap, Transform,
 };
 use inf_ecs::math::{Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// The current on-disk `.inf_lvl` schema (matches the editor's `SCHEMA_VERSION`).
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// File-level simulation settings (schema v3), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -156,6 +161,23 @@ pub struct RuntimeEntity {
     /// the scatter on load.
     #[serde(default)]
     pub pcg_volume: Option<PcgVolume>,
+    // ── v5 (P11.4) animation / character components ───────────────────────
+    /// A skinned-mesh binding (skeletal mesh + skeleton GUID refs).
+    #[serde(default)]
+    pub skeletal_mesh: Option<SkeletalMesh>,
+    /// A single-clip play-head.
+    #[serde(default)]
+    pub anim_player: Option<AnimPlayer>,
+    /// An animation state machine; its `runtime` play state is `#[serde(skip)]`
+    /// (rebuilt on load, like `PcgVolume.evaluated`).
+    #[serde(default)]
+    pub anim_state_machine: Option<AnimStateMachine>,
+    /// How the entity consumes its clip's root motion.
+    #[serde(default)]
+    pub root_motion: Option<RootMotion>,
+    /// A socket-follow attachment (rides another entity's socket).
+    #[serde(default)]
+    pub attached_to: Option<AttachedTo>,
 }
 
 /// A decoded level ready for the runtime to instantiate.
@@ -212,12 +234,66 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v4 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v5 file layout (current). `entities` reuses [`RuntimeEntity`].
 #[derive(Serialize, Deserialize)]
-struct SceneFileV4 {
+struct SceneFileV5 {
     schema_version: u32,
     title: String,
     entities: Vec<RuntimeEntity>,
+    #[serde(default)]
+    settings: RuntimeSettings,
+}
+
+/// A frozen schema-v4 entity record (pre-P11.4: 3D + 2D + physics + actor +
+/// terrain + pcg, no anim/character components). Never changes.
+#[derive(Deserialize)]
+struct EntityRecordV4 {
+    guid: Uuid,
+    name: String,
+    parent: Option<Uuid>,
+    transform: Transform,
+    visible: bool,
+    mesh: Option<MeshRef>,
+    material: Option<Material>,
+    light: Option<Light>,
+    camera: Option<Camera>,
+    #[serde(default)]
+    sprite: Option<Sprite>,
+    #[serde(default)]
+    tilemap: Option<Tilemap>,
+    #[serde(default)]
+    nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    text2d: Option<Text2D>,
+    #[serde(default)]
+    light_2d: Option<Light2D>,
+    #[serde(default)]
+    rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    actor: Option<Uuid>,
+    #[serde(default)]
+    terrain: Option<Terrain>,
+    #[serde(default)]
+    pcg_volume: Option<PcgVolume>,
+}
+
+/// A frozen schema-v4 file layout (carries the v3 file-level settings record).
+#[derive(Deserialize)]
+struct SceneFileV4 {
+    #[allow(dead_code)]
+    schema_version: u32,
+    title: String,
+    entities: Vec<EntityRecordV4>,
     #[serde(default)]
     settings: RuntimeSettings,
 }
@@ -355,6 +431,11 @@ impl EntityRecordV1 {
             actor: None,
             terrain: None,
             pcg_volume: None,
+            skeletal_mesh: None,
+            anim_player: None,
+            anim_state_machine: None,
+            root_motion: None,
+            attached_to: None,
         }
     }
 }
@@ -385,6 +466,11 @@ impl EntityRecordV2 {
             actor: None,
             terrain: None,
             pcg_volume: None,
+            skeletal_mesh: None,
+            anim_player: None,
+            anim_state_machine: None,
+            root_motion: None,
+            attached_to: None,
         }
     }
 }
@@ -415,6 +501,46 @@ impl EntityRecordV3 {
             actor: self.actor,
             terrain: None,
             pcg_volume: None,
+            skeletal_mesh: None,
+            anim_player: None,
+            anim_state_machine: None,
+            root_motion: None,
+            attached_to: None,
+        }
+    }
+}
+
+impl EntityRecordV4 {
+    fn into_runtime(self) -> RuntimeEntity {
+        RuntimeEntity {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: None,
+            anim_player: None,
+            anim_state_machine: None,
+            root_motion: None,
+            attached_to: None,
         }
     }
 }
@@ -472,8 +598,22 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v4: {e}")))?;
             Ok(RuntimeLevel {
                 title: v4.title,
-                entities: v4.entities,
+                entities: v4
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV4::into_runtime)
+                    .collect(),
                 settings: v4.settings,
+            })
+        }
+        5 => {
+            let (v5, _): (SceneFileV5, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v5: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v5.title,
+                entities: v5.entities,
+                settings: v5.settings,
             })
         }
         found => Err(SceneError::SchemaTooNew {
@@ -483,9 +623,9 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     }
 }
 
-/// Encode a level to the current schema (v4) as a deterministic bincode payload.
+/// Encode a level to the current schema (v5) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV4 {
+    let file = SceneFileV5 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -569,15 +709,43 @@ mod tests {
     }
 
     #[test]
-    fn v4_decode_encode_is_byte_identical_for_committed_bytes() {
-        // The committed platformer is now a schema-v4 level; decode/encode is a
+    fn current_decode_encode_is_byte_identical_for_committed_bytes() {
+        // The committed platformer is now a schema-v5 level; decode/encode is a
         // lossless identity on current-schema content (so the cook's runtime
-        // rewrite of an already-v4 level is a no-op, and deterministic).
+        // rewrite of an already-current level is a no-op, and deterministic).
         let original = read_committed("samples/platformer-2d/Platformer.inf_lvl");
-        assert_eq!(original[0], 4, "committed platformer is schema v4");
+        assert_eq!(original[0], 5, "committed platformer is schema v5");
         let level = RuntimeLevel::decode(&original).unwrap();
         let reencoded = level.encode().unwrap();
-        assert_eq!(original, reencoded, "v4 round trip must be byte-identical");
+        assert_eq!(original, reencoded, "v5 round trip must be byte-identical");
+    }
+
+    /// The frozen pre-P11.4 (schema v4) platformer, load-tested forever so v4
+    /// decode stays covered even though the committed sample is now v5.
+    #[test]
+    fn v4_platformer_fixture_loads_forever_and_lifts() {
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/platformer_v4.inf_lvl"),
+        )
+        .expect("committed v4 platformer fixture present");
+        assert_eq!(bytes[0], 4, "fixture is a genuine schema-v4 payload");
+        let level = RuntimeLevel::decode(&bytes).expect("v4 fixture decodes");
+        assert_eq!(level.title, "Platformer 2D");
+        assert_eq!(level.len(), 5);
+        // v4 carried physics + actor, but no anim/character components → defaulted.
+        assert!(level.entities.iter().any(|e| e.rigid_body_2d.is_some()));
+        assert!(level.entities.iter().any(|e| e.actor.is_some()));
+        for e in &level.entities {
+            assert!(e.skeletal_mesh.is_none());
+            assert!(e.anim_player.is_none());
+            assert!(e.anim_state_machine.is_none());
+            assert!(e.root_motion.is_none());
+            assert!(e.attached_to.is_none());
+        }
+        // Rewriting a v4 level upgrades it to v5 (the cook's runtime rewrite).
+        let out = level.encode().unwrap();
+        assert_eq!(out[0], SCHEMA_VERSION as u8);
+        assert_eq!(RuntimeLevel::decode(&out).unwrap(), level);
     }
 
     /// The frozen pre-P10.6 (schema v3) platformer, load-tested forever so v3

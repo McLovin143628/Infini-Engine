@@ -49,8 +49,8 @@ use inf_blueprint::semantics::run_event;
 use inf_blueprint::{ActorInstance, BlueprintClass, EventKind, Host, InterpDebug, RunError, Value};
 use inf_ecs::components::{
     AnimPlayer, AnimStateMachine, CharacterController2D, CharacterController3D, Collider2D,
-    Collider3D, ColliderShape2DKind, ColliderShape3DKind, RootMotion, RootMotionMode,
-    SmRuntimeState, Transform,
+    Collider3D, ColliderShape2DKind, ColliderShape3DKind, GlobalTransform, RootMotion,
+    RootMotionMode, SmRuntimeState, Terrain, Transform,
 };
 use inf_ecs::{sim_snapshot, update_attachments, EcsWorld, Entity, Guid};
 use inf_physics::{
@@ -559,6 +559,14 @@ impl Host for RuntimeHost<'_> {
                 self.logs.push(arg_str(args, 0));
                 Ok(Value::Unit)
             }
+            // terrain.height_at(x, z) → world height at that XZ (P11.4) — the same
+            // seam the editor SimHost exposes (preview == shipped): a 3D character
+            // reads it to stay on a heightfield terrain (no physics collider).
+            (Some("terrain"), Some("height_at")) => Ok(Value::Float(terrain_height_at(
+                self.world,
+                arg_f64(args, 0),
+                arg_f64(args, 1),
+            ))),
             // Unknown engine call: log it (matching the editor host) so a
             // partially-authored blueprint still runs rather than aborting.
             _ => {
@@ -914,6 +922,49 @@ fn arg_str(args: &[Value], i: usize) -> String {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// Coerce a positional blueprint arg to `f64` (`Int` widens; else `0.0`).
+fn arg_f64(args: &[Value], i: usize) -> f64 {
+    match args.get(i) {
+        Some(Value::Float(f)) => *f,
+        Some(Value::Int(n)) => *n as f64,
+        _ => 0.0,
+    }
+}
+
+/// Sample the world's terrain height at world `(x, z)` — the `terrain.height_at`
+/// host seam (P11.4), byte-for-byte the editor `SimHost`'s (preview == shipped).
+/// Uses the lowest-`Guid` non-empty [`Terrain`]; `0.0` with no terrain.
+fn terrain_height_at(world: &EcsWorld, x: f64, z: f64) -> f64 {
+    let w = world.world();
+    let mut picked: Option<(Uuid, DVec3, inf_terrain::TerrainData)> = None;
+    for e in w.iter_entities() {
+        let Some(guid) = e.get::<Guid>().map(|g| g.0) else {
+            continue;
+        };
+        let Some(t) = e.get::<Terrain>() else {
+            continue;
+        };
+        if t.data.is_empty() {
+            continue;
+        }
+        let origin = e
+            .get::<GlobalTransform>()
+            .map(|g| g.translation())
+            .or_else(|| e.get::<Transform>().map(|t| t.translation.to_dvec3()))
+            .unwrap_or(DVec3::ZERO);
+        if picked.as_ref().map(|(g, _, _)| guid < *g).unwrap_or(true) {
+            picked = Some((guid, origin, t.data.clone()));
+        }
+    }
+    match picked {
+        Some((_, origin, data)) => data
+            .height_at(DVec2::new(x - origin.x, z - origin.z))
+            .map(|h| h + origin.y)
+            .unwrap_or(0.0),
+        None => 0.0,
+    }
 }
 
 // ── P11.2 state-machine glue: ECS POD ↔ inf-anim runtime + var snapshot ──────

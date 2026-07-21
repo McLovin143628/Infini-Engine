@@ -300,7 +300,7 @@ fn dependency_closure(db: &AssetDb, roots: &[AssetId]) -> Vec<AssetId> {
                 }
             }
         }
-        for dep in level_asset_deps(db, id) {
+        for dep in asset_deps(db, id) {
             if db.contains(dep) && seen.insert(dep) {
                 queue.push_back(dep);
             }
@@ -309,29 +309,83 @@ fn dependency_closure(db: &AssetDb, roots: &[AssetId]) -> Vec<AssetId> {
     seen.into_iter().collect()
 }
 
-/// The asset GUIDs a level references through its persisted per-entity slots:
-/// the `actor` blueprint-class bindings (schema v3) **and** the `PcgVolume.graph`
-/// scatter-graph refs (schema v4 — a real level→`.inf_pcg` edge, so an
-/// explicit-roots cook of just a level still ships the referenced graph). Empty
-/// for non-levels or an undecodable payload — decode errors surface later in the
-/// real cook stage with a proper error.
-fn level_asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
+/// The asset GUIDs an asset references through its persisted refs — the real
+/// forward edges (beyond the explicit sidecar `dependencies`) the cook must close
+/// over. Empty for kinds with no such refs, or an undecodable payload (decode
+/// errors surface later in the real cook stage with a proper error).
+///
+/// * **Level** (`.inf_lvl`) — its persisted per-entity slots: `actor`
+///   blueprint-class bindings (v3), `PcgVolume.graph` scatter refs (v4), and the
+///   v5 animation-component refs: `SkeletalMesh.{skeleton, mesh}`,
+///   `AnimPlayer.clip`, `AnimStateMachine.sm` (real level→anim edges, so an
+///   explicit-roots cook of just a level ships its referenced anim assets).
+/// * **StateMachine** (`.inf_sm`) — the clip GUIDs its states/blend-spaces play
+///   (`Motion::Clip` + blend entries) **and** its skeleton ref. This closes the
+///   `state-machine → clip` edge so the clips a machine plays ship in the pack.
+/// * **AnimClip** (`.inf_anim`) — the skeleton GUID it was authored against.
+fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
     let Some(entry) = db.get(id) else {
         return Vec::new();
     };
-    if entry.kind() != AssetKind::Level {
-        return Vec::new();
-    }
     let Ok(raw) = std::fs::read(&entry.path) else {
         return Vec::new();
     };
-    let Ok(level) = inf_scene::decode(&raw) else {
-        return Vec::new();
-    };
-    let actors = level.entities.iter().filter_map(|e| e.actor);
-    let pcgs = level
-        .entities
-        .iter()
-        .filter_map(|e| e.pcg_volume.as_ref().and_then(|v| v.graph));
-    actors.chain(pcgs).map(AssetId).collect()
+    match entry.kind() {
+        AssetKind::Level => {
+            let Ok(level) = inf_scene::decode(&raw) else {
+                return Vec::new();
+            };
+            let mut deps: Vec<AssetId> = Vec::new();
+            for e in &level.entities {
+                deps.extend(e.actor.map(AssetId));
+                deps.extend(e.pcg_volume.as_ref().and_then(|v| v.graph).map(AssetId));
+                if let Some(sk) = &e.skeletal_mesh {
+                    deps.extend(sk.skeleton.map(AssetId));
+                    deps.extend(sk.mesh.map(AssetId));
+                }
+                deps.extend(e.anim_player.as_ref().and_then(|p| p.clip).map(AssetId));
+                deps.extend(
+                    e.anim_state_machine
+                        .as_ref()
+                        .and_then(|s| s.sm)
+                        .map(AssetId),
+                );
+            }
+            deps
+        }
+        AssetKind::StateMachine => {
+            let Ok(sm) = inf_asset::decode::<inf_anim::StateMachineAsset>(&raw) else {
+                return Vec::new();
+            };
+            let mut deps: Vec<AssetId> = Vec::new();
+            deps.extend(sm.skeleton.map(|b| AssetId(uuid::Uuid::from_bytes(b))));
+            for st in &sm.machine.states {
+                for clip in motion_clip_refs(&st.motion) {
+                    deps.push(AssetId(uuid::Uuid::from_bytes(clip)));
+                }
+            }
+            deps
+        }
+        AssetKind::AnimClip => {
+            let Ok(clip) = inf_asset::decode::<inf_anim::AnimClipAsset>(&raw) else {
+                return Vec::new();
+            };
+            clip.skeleton
+                .map(|b| AssetId(uuid::Uuid::from_bytes(b)))
+                .into_iter()
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Every clip GUID a state's [`Motion`](inf_anim::state_machine::Motion) plays: a
+/// single clip, or every entry of a 1D/2D blend space.
+fn motion_clip_refs(motion: &inf_anim::state_machine::Motion) -> Vec<[u8; 16]> {
+    use inf_anim::state_machine::Motion;
+    match motion {
+        Motion::Clip(c) => vec![*c],
+        Motion::Blend1D(space) => space.entries.iter().map(|e| e.clip).collect(),
+        Motion::Blend2D(space) => space.entries.iter().map(|e| e.clip).collect(),
+    }
 }

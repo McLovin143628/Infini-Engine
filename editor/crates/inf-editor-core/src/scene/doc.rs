@@ -834,6 +834,24 @@ impl SceneDoc {
         if let Some(v) = &rec.pcg_volume {
             w.entity_mut(e).insert(v.clone());
         }
+        // v5 animation / character components: a deleted-then-undone character
+        // restores its full SkeletalMesh / AnimPlayer / AnimStateMachine /
+        // RootMotion / AttachedTo set (mirrors the v4 terrain/PCG restore above).
+        if let Some(c) = &rec.skeletal_mesh {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.anim_player {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.anim_state_machine {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.root_motion {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.attached_to {
+            w.entity_mut(e).insert(c.clone());
+        }
         self.touch();
     }
 

@@ -14,9 +14,10 @@
 use std::path::{Path, PathBuf};
 
 use inf_ecs::components::{
-    ActorClass, Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D,
-    Light, Light2D, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D, RigidBody3D, Sprite,
-    Terrain, Text2D, Tilemap, Transform, Visibility,
+    ActorClass, AnimPlayer, AnimStateMachine, AttachedTo, Camera, CharacterController2D,
+    CharacterController3D, Collider2D, Collider3D, Light, Light2D, Material, MeshRef, NineSlice,
+    PcgVolume, RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, Sprite, Terrain, Text2D,
+    Tilemap, Transform, Visibility,
 };
 use inf_ecs::math::{Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
@@ -42,7 +43,18 @@ use crate::scene::SceneDoc;
 ///   `evaluated` cache is `#[serde(skip)]` so it persists **empty** and is
 ///   re-evaluated on demand). Older v1/v2/v3 payloads load with both slots
 ///   defaulted (see [`decode`] + [`SceneFileV3`]).
-pub const SCHEMA_VERSION: u32 = 4;
+/// * v5 — P11.4: appended the five P11 **animation / character** components —
+///   `skeletal_mesh` ([`SkeletalMesh`], skinned-mesh + skeleton GUID refs),
+///   `anim_player` ([`AnimPlayer`], a clip play-head), `anim_state_machine`
+///   ([`AnimStateMachine`]; its `runtime` state is `#[serde(skip)]` so the
+///   machine persists **without** transient play state, exactly like a
+///   `PcgVolume`'s `evaluated` cache), `root_motion` ([`RootMotion`], the
+///   root-motion consume mode) and `attached_to` ([`AttachedTo`], a socket
+///   follow). All five were live-session-only through v4 (the
+///   `skeletal_components_serde_round_trip` guard pinned the gap); v5 is where
+///   they first persist. Older v1..v4 payloads load with all five slots
+///   defaulted (see [`decode`] + [`SceneFileV4`]).
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// File-level simulation settings (P9.5 · schema v3). Replaces the player's
 /// hard-coded `DEFAULT_GRAVITY`/`DEFAULT_HZ`. The serde defaults **preserve the
@@ -163,6 +175,24 @@ pub struct EntityRecord {
     /// `#[serde(skip)]`, so only the `graph` ref + region + seed persist.
     #[serde(default)]
     pub pcg_volume: Option<PcgVolume>,
+    // ── v5 (P11.4) animation / character components ───────────────────────
+    /// A skinned-mesh binding (skeletal mesh + skeleton GUID refs).
+    #[serde(default)]
+    pub skeletal_mesh: Option<SkeletalMesh>,
+    /// A single-clip play-head.
+    #[serde(default)]
+    pub anim_player: Option<AnimPlayer>,
+    /// An animation state machine. Its `runtime` play state is `#[serde(skip)]`
+    /// — persisted **without** transient state (rebuilt each play session), like
+    /// [`PcgVolume`]'s `evaluated` cache.
+    #[serde(default)]
+    pub anim_state_machine: Option<AnimStateMachine>,
+    /// How the entity consumes its clip's root motion.
+    #[serde(default)]
+    pub root_motion: Option<RootMotion>,
+    /// A socket-follow attachment (rides another entity's socket).
+    #[serde(default)]
+    pub attached_to: Option<AttachedTo>,
 }
 
 /// A schema-v1 [`EntityRecord`] (pre-P8.2b) — exactly the byte layout written by
@@ -349,10 +379,10 @@ pub struct EntityRecordV3 {
 }
 
 impl EntityRecordV3 {
-    /// Lift a v3 record to the current (v4) shape: terrain + pcg_volume default to
-    /// `None`.
-    fn into_current(self) -> EntityRecord {
-        EntityRecord {
+    /// Lift a v3 record to the **v4** shape: terrain + pcg_volume default to
+    /// `None`. Second-to-last hop of the v1→…→v5 chain.
+    fn into_v4(self) -> EntityRecordV4 {
+        EntityRecordV4 {
             guid: self.guid,
             name: self.name,
             parent: self.parent,
@@ -392,7 +422,115 @@ pub struct SceneFileV3 {
 }
 
 impl SceneFileV3 {
-    /// Lift a v3 file to the current (v4) shape (settings carry through).
+    /// Lift a v3 file to the **v4** shape (settings carry through).
+    fn into_v4(self) -> SceneFileV4 {
+        SceneFileV4 {
+            schema_version: 4,
+            title: self.title,
+            entities: self
+                .entities
+                .into_iter()
+                .map(EntityRecordV3::into_v4)
+                .collect(),
+            settings: self.settings,
+        }
+    }
+}
+
+/// A schema-**v4** [`EntityRecord`] (pre-P11.4) — the exact byte layout written by
+/// P10.6..P11.3 editors (3D + 2D + physics + actor + terrain + pcg), used only to
+/// decode legacy payloads. Frozen forever so the committed v4 fixture (and any
+/// level saved before P11.4) loads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityRecordV4 {
+    pub guid: Uuid,
+    pub name: String,
+    pub parent: Option<Uuid>,
+    pub transform: Transform,
+    pub visible: bool,
+    pub mesh: Option<MeshRef>,
+    pub material: Option<Material>,
+    pub light: Option<Light>,
+    pub camera: Option<Camera>,
+    #[serde(default)]
+    pub sprite: Option<Sprite>,
+    #[serde(default)]
+    pub tilemap: Option<Tilemap>,
+    #[serde(default)]
+    pub nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    pub text2d: Option<Text2D>,
+    #[serde(default)]
+    pub light_2d: Option<Light2D>,
+    #[serde(default)]
+    pub rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    pub collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    pub character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    pub rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    pub collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    pub character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    pub actor: Option<Uuid>,
+    #[serde(default)]
+    pub terrain: Option<Terrain>,
+    #[serde(default)]
+    pub pcg_volume: Option<PcgVolume>,
+}
+
+impl EntityRecordV4 {
+    /// Lift a v4 record to the current (v5) shape: the five P11 animation /
+    /// character slots default to `None`.
+    fn into_current(self) -> EntityRecord {
+        EntityRecord {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: None,
+            anim_player: None,
+            anim_state_machine: None,
+            root_motion: None,
+            attached_to: None,
+        }
+    }
+}
+
+/// A schema-v4 [`SceneFile`] (frozen layout for legacy decode).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneFileV4 {
+    pub schema_version: u32,
+    pub title: String,
+    pub entities: Vec<EntityRecordV4>,
+    #[serde(default)]
+    pub settings: LevelSettings,
+}
+
+impl SceneFileV4 {
+    /// Lift a v4 file to the current (v5) shape (settings carry through).
     fn into_current(self) -> SceneFile {
         SceneFile {
             schema_version: SCHEMA_VERSION,
@@ -400,7 +538,7 @@ impl SceneFileV3 {
             entities: self
                 .entities
                 .into_iter()
-                .map(EntityRecordV3::into_current)
+                .map(EntityRecordV4::into_current)
                 .collect(),
             settings: self.settings,
         }
@@ -477,6 +615,11 @@ pub fn record_of(doc: &SceneDoc, guid: Uuid) -> Option<EntityRecord> {
         actor: w.get::<ActorClass>(e).map(|a| a.0),
         terrain: w.get::<Terrain>(e).cloned(),
         pcg_volume: w.get::<PcgVolume>(e).cloned(),
+        skeletal_mesh: w.get::<SkeletalMesh>(e).copied(),
+        anim_player: w.get::<AnimPlayer>(e).copied(),
+        anim_state_machine: w.get::<AnimStateMachine>(e).copied(),
+        root_motion: w.get::<RootMotion>(e).copied(),
+        attached_to: w.get::<AttachedTo>(e).cloned(),
     })
 }
 
@@ -513,21 +656,27 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
             let (v1, _): (SceneFileV1, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v1: {e}"))?;
-            migrate(v1.into_v2().into_v3().into_current())
+            migrate(v1.into_v2().into_v3().into_v4().into_current())
         }
         2 => {
             let (v2, _): (SceneFileV2, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v2: {e}"))?;
-            migrate(v2.into_v3().into_current())
+            migrate(v2.into_v3().into_v4().into_current())
         }
         3 => {
             let (v3, _): (SceneFileV3, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v3: {e}"))?;
-            migrate(v3.into_current())
+            migrate(v3.into_v4().into_current())
         }
         4 => {
+            let (v4, _): (SceneFileV4, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| format!("decode v4: {e}"))?;
+            migrate(v4.into_current())
+        }
+        5 => {
             let (file, _): (SceneFile, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode: {e}"))?;
@@ -549,7 +698,7 @@ pub fn migrate(file: SceneFile) -> Result<SceneFile, String> {
         ));
     }
     // Records are already lifted to the current shape by the versioned decode
-    // (v1→v2→v3→v4); nothing more to do here. Future upgrades chain in `decode`.
+    // (v1→v2→v3→v4→v5); nothing more to do here. Future upgrades chain in `decode`.
     Ok(file)
 }
 
@@ -619,6 +768,21 @@ pub fn apply_to_doc(doc: &mut SceneDoc, file: &SceneFile) {
         }
         if let Some(v) = &rec.pcg_volume {
             w.entity_mut(e).insert(v.clone());
+        }
+        if let Some(c) = &rec.skeletal_mesh {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.anim_player {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.anim_state_machine {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.root_motion {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.attached_to {
+            w.entity_mut(e).insert(c.clone());
         }
     }
     doc.set_title(&file.title);
@@ -836,7 +1000,7 @@ mod tests {
 
         // save → load → save is byte-identical.
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 4, "authored payload is a genuine schema-v4 file");
+        assert_eq!(bytes1[0], 5, "authored payload is a genuine schema-v5 file");
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
         let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
@@ -1364,8 +1528,8 @@ mod tests {
         let (doc, actor_guid) = authored_v3_scene();
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
         assert_eq!(
-            bytes1[0], 4,
-            "the physics/actor content now writes as a schema-v4 file"
+            bytes1[0], 5,
+            "the physics/actor content now writes as a schema-v5 file"
         );
 
         let mut doc2 = SceneDoc::new();
@@ -1653,6 +1817,281 @@ mod tests {
         for r in &file.entities {
             assert!(r.terrain.is_none());
             assert!(r.pcg_volume.is_none());
+            // v5 anim/character slots also defaulted on the old payload.
+            assert!(r.skeletal_mesh.is_none());
+            assert!(r.anim_player.is_none());
+            assert!(r.anim_state_machine.is_none());
+            assert!(r.root_motion.is_none());
+            assert!(r.attached_to.is_none());
+        }
+    }
+
+    // ── v5 (P11.4) animation / character component persistence ─────────────
+
+    /// FLIPPED (P11.4 · schema v5): a spawned `SkeletalMesh` + `AnimPlayer` +
+    /// `AnimStateMachine` + `RootMotion` + `AttachedTo` now **persist** across
+    /// save/load and are byte-identical on re-encode — the guard the P11.1..P11.3
+    /// batches left as `skeletal_components_serde_round_trip` (component-only,
+    /// no `.inf_lvl` slot). The v5 slots close the gap. The `AnimStateMachine`'s
+    /// transient `runtime` state is `#[serde(skip)]`, so it must persist reset.
+    #[test]
+    fn anim_components_persist_across_save_load_v5() {
+        use inf_ecs::components::{
+            AnimPlayer, AnimStateMachine, AttachedTo, RootMotion, SkeletalMesh,
+        };
+
+        let skel_guid = uuid::Uuid::from_u128(0x11_5EE1);
+        let mesh_guid = uuid::Uuid::from_u128(0x11_3E54);
+        let clip_guid = uuid::Uuid::from_u128(0x11_C11B);
+        let sm_guid = uuid::Uuid::from_u128(0x11_5A11);
+        let target_guid = uuid::Uuid::from_u128(0x11_7A67);
+
+        let mut doc = SceneDoc::new();
+        let g = doc.create(SpawnKind::Empty, "Character", None);
+        {
+            let e = doc.entity_of(g).unwrap();
+            let mut asm = AnimStateMachine {
+                sm: Some(sm_guid),
+                params_from_vars: true,
+                ..Default::default()
+            };
+            // A non-default runtime must NOT reach disk (serde-skipped).
+            asm.runtime.current = 2;
+            asm.runtime.started = true;
+            let w = doc.world_mut().world_mut();
+            w.entity_mut(e).insert(SkeletalMesh {
+                mesh: Some(mesh_guid),
+                skeleton: Some(skel_guid),
+            });
+            w.entity_mut(e).insert(AnimPlayer {
+                clip: Some(clip_guid),
+                speed: 1.5,
+                looping: false,
+                ..Default::default()
+            });
+            w.entity_mut(e).insert(asm);
+            w.entity_mut(e).insert(RootMotion::apply());
+            w.entity_mut(e).insert(AttachedTo::new(
+                target_guid,
+                "hand_r",
+                Vec3d::new(0.0, 1.0, 0.0),
+            ));
+            doc.world_mut().mark_dirty();
+        }
+
+        let bytes1 = encode(&to_scene_file(&doc)).unwrap();
+        assert_eq!(
+            bytes1[0], 5,
+            "anim content writes as a genuine schema-v5 file"
+        );
+        let mut loaded = SceneDoc::new();
+        apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
+        let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "anim components save→load→save must be byte-identical (runtime skipped)"
+        );
+
+        // Every component survives with its values.
+        let e2 = loaded.entity_of(g).expect("entity persists");
+        let w = loaded.world().world();
+        let sk = w.get::<SkeletalMesh>(e2).expect("skeletal_mesh persists");
+        assert_eq!(sk.skeleton, Some(skel_guid));
+        assert_eq!(sk.mesh, Some(mesh_guid));
+        let ap = w.get::<AnimPlayer>(e2).expect("anim_player persists");
+        assert_eq!(ap.clip, Some(clip_guid));
+        assert_eq!(ap.speed, 1.5);
+        assert!(!ap.looping);
+        let asm = w
+            .get::<AnimStateMachine>(e2)
+            .expect("anim_state_machine persists");
+        assert_eq!(asm.sm, Some(sm_guid));
+        assert!(asm.params_from_vars);
+        assert_eq!(
+            asm.runtime,
+            inf_ecs::components::SmRuntimeState::default(),
+            "the transient runtime state is never persisted"
+        );
+        let rm = w.get::<RootMotion>(e2).expect("root_motion persists");
+        assert_eq!(rm.mode, inf_ecs::components::RootMotionMode::ApplyToEntity);
+        let at = w.get::<AttachedTo>(e2).expect("attached_to persists");
+        assert_eq!(at.target, target_guid);
+        assert_eq!(at.socket, "hand_r");
+    }
+
+    /// Delete → undo restores the full P11 animation/character component set (the
+    /// v5 record slots feed Create/Delete snapshotting through [`record_of`]).
+    #[test]
+    fn delete_undo_restores_anim_components_v5() {
+        use inf_ecs::components::{AnimStateMachine, RootMotion, SkeletalMesh};
+
+        let sm_guid = uuid::Uuid::from_u128(0x11_DEAD);
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Empty, "Character", None);
+        {
+            let e = doc.entity_of(g).unwrap();
+            let w = doc.world_mut().world_mut();
+            w.entity_mut(e).insert(SkeletalMesh {
+                skeleton: Some(uuid::Uuid::from_u128(0x11_B0AE)),
+                ..Default::default()
+            });
+            w.entity_mut(e).insert(AnimStateMachine {
+                sm: Some(sm_guid),
+                ..Default::default()
+            });
+            w.entity_mut(e).insert(RootMotion::apply());
+            doc.world_mut().mark_dirty();
+        }
+
+        doc.edit_delete(&[g]);
+        assert!(doc.entity_of(g).is_none(), "deleted");
+        doc.undo();
+
+        let e = doc.entity_of(g).expect("entity restored by undo");
+        let w = doc.world().world();
+        assert!(w.get::<SkeletalMesh>(e).is_some(), "skeletal_mesh restored");
+        assert_eq!(
+            w.get::<AnimStateMachine>(e)
+                .expect("state machine restored")
+                .sm,
+            Some(sm_guid)
+        );
+        assert!(w.get::<RootMotion>(e).is_some(), "root_motion restored");
+    }
+
+    // ── v4 forever-load fixture discipline (mirrors the v1/v2/v3 fixtures) ───
+
+    /// The committed pre-P11.4 (schema v4) payload, load-tested forever.
+    fn v4_fixture_bytes() -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v4.inf_lvl");
+        std::fs::read(path).expect("committed v4 fixture is present")
+    }
+
+    /// Rebuild the exact schema-v4 `SceneFile` the v4 fixture was generated from,
+    /// from the frozen [`EntityRecordV4`]/[`SceneFileV4`] types (the provenance
+    /// lock). Exercises the terrain + pcg slots v4 introduced so the frozen layout
+    /// is genuinely covered.
+    fn v4_reference() -> SceneFileV4 {
+        use inf_ecs::components::{
+            BodyKind3D, Collider3D, ColliderShape3DKind, PcgVolume, RigidBody3D,
+        };
+        let g = uuid::Uuid::from_u128;
+        SceneFileV4 {
+            schema_version: 4,
+            title: "V4 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV4 {
+                    guid: g(0x4001),
+                    name: "Ground".into(),
+                    parent: None,
+                    transform: EcsTransform::from_translation(glam::DVec3::new(0.0, -0.5, 0.0)),
+                    visible: true,
+                    mesh: None,
+                    material: None,
+                    light: None,
+                    camera: None,
+                    sprite: None,
+                    tilemap: None,
+                    nine_slice: None,
+                    text2d: None,
+                    light_2d: None,
+                    rigid_body_2d: None,
+                    collider_2d: None,
+                    character_controller_2d: None,
+                    rigid_body_3d: Some(RigidBody3D {
+                        kind: BodyKind3D::Static,
+                        ..Default::default()
+                    }),
+                    collider_3d: Some(Collider3D {
+                        shape_kind: ColliderShape3DKind::Box,
+                        half_extents: Vec3d::new(5.0, 0.5, 5.0),
+                        ..Default::default()
+                    }),
+                    character_controller_3d: None,
+                    actor: None,
+                    terrain: None,
+                    pcg_volume: None,
+                },
+                EntityRecordV4 {
+                    guid: g(0x4002),
+                    name: "Scatter".into(),
+                    parent: None,
+                    transform: EcsTransform::IDENTITY,
+                    visible: true,
+                    mesh: None,
+                    material: None,
+                    light: None,
+                    camera: None,
+                    sprite: None,
+                    tilemap: None,
+                    nine_slice: None,
+                    text2d: None,
+                    light_2d: None,
+                    rigid_body_2d: None,
+                    collider_2d: None,
+                    character_controller_2d: None,
+                    rigid_body_3d: None,
+                    collider_3d: None,
+                    character_controller_3d: None,
+                    actor: None,
+                    terrain: None,
+                    pcg_volume: Some(PcgVolume {
+                        graph: Some(g(0x4ACC)),
+                        extent: Vec2d::new(40.0, 40.0),
+                        seed: 3,
+                        ..Default::default()
+                    }),
+                },
+            ],
+            settings: LevelSettings::default(),
+        }
+    }
+
+    /// Write the committed v4 fixture from [`v4_reference`] under
+    /// `INF_BLESS_FIXTURES=1` (the temporary-writer discipline the fixture
+    /// provenance rule calls for).
+    #[test]
+    fn bless_v4_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").is_err() {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v4_reference(), bincode_config()).unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v4.inf_lvl");
+        std::fs::write(&path, &bytes).expect("write v4 fixture");
+        eprintln!("blessed v4 fixture: {}", path.display());
+    }
+
+    #[test]
+    fn v4_fixture_is_reproducible_and_genuinely_v4() {
+        let bytes = v4_fixture_bytes();
+        assert_eq!(bytes[0], 4, "fixture must be a genuine schema-v4 payload");
+        let rebuilt = bincode::serde::encode_to_vec(v4_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v4 fixture must match our frozen v4 writer"
+        );
+    }
+
+    #[test]
+    fn v4_fixture_loads_forever_and_lifts_to_v5() {
+        let file = decode(&v4_fixture_bytes()).expect("v4 fixture decodes");
+        assert_eq!(file.schema_version, SCHEMA_VERSION);
+        assert_eq!(file.title, "V4 Fixture Level");
+        assert_eq!(file.entities.len(), 2);
+        let by_name = |n: &str| file.entities.iter().find(|r| r.name == n).unwrap();
+        // v4 physics + pcg data preserved through the v4→v5 lift.
+        assert!(by_name("Ground").rigid_body_3d.is_some());
+        assert!(by_name("Ground").collider_3d.is_some());
+        assert!(by_name("Scatter").pcg_volume.is_some());
+        // Every v5 anim/character slot defaulted on the old payload.
+        for r in &file.entities {
+            assert!(r.skeletal_mesh.is_none());
+            assert!(r.anim_player.is_none());
+            assert!(r.anim_state_machine.is_none());
+            assert!(r.root_motion.is_none());
+            assert!(r.attached_to.is_none());
         }
     }
 }

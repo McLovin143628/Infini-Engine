@@ -59,7 +59,11 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 /// * v2 — appended `pcgs`: the `.inf_pcg` graph payloads a v4 level's
 ///   [`PcgVolume`]s reference, so the PIE player evaluates scatter exactly like
 ///   the shipping pack path.
-pub const SCENE_PAYLOAD_VERSION: u32 = 2;
+/// * v3 — appended the P11 animation assets a v5 level's components reference:
+///   `skeletons` (`.inf_skel`), `clips` (`.inf_anim`) and `machines` (`.inf_sm`),
+///   so the PIE player resolves state machines / root-motion clips exactly like
+///   the shipping pack path (PIE == shipping for animation).
+pub const SCENE_PAYLOAD_VERSION: u32 = 3;
 
 /// Upper bound on a single frame; anything larger means a desynced or
 /// corrupt stream and is treated as an error rather than an allocation. A
@@ -85,6 +89,18 @@ pub struct ScenePayload {
     /// these on load (schema v2). `#[serde(default)]` so a v1 payload decodes.
     #[serde(default)]
     pub pcgs: Vec<(Uuid, Vec<u8>)>,
+    /// Referenced skeletons: `(asset guid, .inf_skel bincode bytes)` — keyed by a
+    /// v5 level's `SkeletalMesh.skeleton` / clip-skeleton refs (schema v3).
+    #[serde(default)]
+    pub skeletons: Vec<(Uuid, Vec<u8>)>,
+    /// Referenced clips: `(asset guid, .inf_anim bincode bytes)` — keyed by a v5
+    /// level's `AnimPlayer.clip` refs (schema v3).
+    #[serde(default)]
+    pub clips: Vec<(Uuid, Vec<u8>)>,
+    /// Referenced state machines: `(asset guid, .inf_sm bincode bytes)` — keyed by
+    /// a v5 level's `AnimStateMachine.sm` refs (schema v3).
+    #[serde(default)]
+    pub machines: Vec<(Uuid, Vec<u8>)>,
     /// Fixed update rate (Hz) the player ticks at.
     pub tick_hz: u32,
     /// Open a real window (`true`, the embedded / new-window PIE path) vs run
@@ -107,6 +123,9 @@ impl ScenePayload {
             level_bytes,
             classes,
             pcgs: Vec::new(),
+            skeletons: Vec::new(),
+            clips: Vec::new(),
+            machines: Vec::new(),
             tick_hz,
             windowed,
         }
@@ -116,6 +135,21 @@ impl ScenePayload {
     /// Builder-style so [`Self::new`]'s signature stays stable.
     pub fn with_pcgs(mut self, pcgs: Vec<(Uuid, Vec<u8>)>) -> Self {
         self.pcgs = pcgs;
+        self
+    }
+
+    /// Attach the referenced P11 animation assets (`(asset guid, bytes)` for each
+    /// of `.inf_skel` / `.inf_anim` / `.inf_sm`). Builder-style so [`Self::new`]'s
+    /// signature stays stable.
+    pub fn with_anim_assets(
+        mut self,
+        skeletons: Vec<(Uuid, Vec<u8>)>,
+        clips: Vec<(Uuid, Vec<u8>)>,
+        machines: Vec<(Uuid, Vec<u8>)>,
+    ) -> Self {
+        self.skeletons = skeletons;
+        self.clips = clips;
+        self.machines = machines;
         self
     }
 }

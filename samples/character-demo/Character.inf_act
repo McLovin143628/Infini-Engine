@@ -1,0 +1,968 @@
+{
+  "schema_version": 1,
+  "id": "act:character_demo",
+  "name": "Character Demo",
+  "components": [],
+  "variables": [
+    {
+      "name": "entity",
+      "ty": "Int",
+      "default": {
+        "Int": 0
+      },
+      "exposed": false
+    },
+    {
+      "name": "px",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": true
+    },
+    {
+      "name": "py",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": true
+    },
+    {
+      "name": "pz",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": true
+    },
+    {
+      "name": "vy",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": true
+    },
+    {
+      "name": "speed",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": true
+    },
+    {
+      "name": "jump",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": true
+    },
+    {
+      "name": "grounded",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": true
+    }
+  ],
+  "events": [
+    {
+      "event": "BeginPlay",
+      "body": {
+        "id": "begin_play",
+        "name": "begin_play",
+        "params": [],
+        "ret": "Unit",
+        "body": [
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "px"
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.0
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "py"
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.9
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "pz"
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.0
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "vy"
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.0
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "speed"
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.0
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "jump"
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.0
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "grounded"
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 1.0
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "event": "Tick",
+      "body": {
+        "id": "tick",
+        "name": "tick",
+        "params": [
+          {
+            "name": "dt",
+            "ty": "Float"
+          }
+        ],
+        "ret": "Unit",
+        "body": [
+          {
+            "Let": {
+              "id": 1,
+              "binding": {
+                "Named": "entity"
+              },
+              "ty": null,
+              "mutable": false,
+              "value": {
+                "Call": {
+                  "path": [
+                    "vars",
+                    "get"
+                  ],
+                  "args": [
+                    {
+                      "Lit": {
+                        "Str": "entity"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "Let": {
+              "id": 2,
+              "binding": {
+                "Named": "vx"
+              },
+              "ty": null,
+              "mutable": true,
+              "value": {
+                "Lit": {
+                  "Float": 0.0
+                }
+              }
+            }
+          },
+          {
+            "If": {
+              "cond": {
+                "Call": {
+                  "path": [
+                    "input",
+                    "is_down"
+                  ],
+                  "args": [
+                    {
+                      "Lit": {
+                        "Str": "right"
+                      }
+                    }
+                  ]
+                }
+              },
+              "then_body": [
+                {
+                  "Assign": {
+                    "target": 2,
+                    "value": {
+                      "Binary": [
+                        "Add",
+                        {
+                          "Local": 2
+                        },
+                        {
+                          "Lit": {
+                            "Float": 4.0
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "else_body": []
+            }
+          },
+          {
+            "If": {
+              "cond": {
+                "Call": {
+                  "path": [
+                    "input",
+                    "is_down"
+                  ],
+                  "args": [
+                    {
+                      "Lit": {
+                        "Str": "left"
+                      }
+                    }
+                  ]
+                }
+              },
+              "then_body": [
+                {
+                  "Assign": {
+                    "target": 2,
+                    "value": {
+                      "Binary": [
+                        "Sub",
+                        {
+                          "Local": 2
+                        },
+                        {
+                          "Lit": {
+                            "Float": 4.0
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "else_body": []
+            }
+          },
+          {
+            "If": {
+              "cond": {
+                "Binary": [
+                  "Lt",
+                  {
+                    "Local": 2
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.0
+                    }
+                  }
+                ]
+              },
+              "then_body": [
+                {
+                  "ExprStmt": {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "set"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "speed"
+                          }
+                        },
+                        {
+                          "Binary": [
+                            "Sub",
+                            {
+                              "Lit": {
+                                "Float": 0.0
+                              }
+                            },
+                            {
+                              "Local": 2
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "else_body": [
+                {
+                  "ExprStmt": {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "set"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "speed"
+                          }
+                        },
+                        {
+                          "Local": 2
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "If": {
+              "cond": {
+                "Binary": [
+                  "And",
+                  {
+                    "Call": {
+                      "path": [
+                        "input",
+                        "just_pressed"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "jump"
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "Binary": [
+                      "Gt",
+                      {
+                        "Call": {
+                          "path": [
+                            "vars",
+                            "get"
+                          ],
+                          "args": [
+                            {
+                              "Lit": {
+                                "Str": "grounded"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "Lit": {
+                          "Float": 0.5
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              "then_body": [
+                {
+                  "ExprStmt": {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "set"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "vy"
+                          }
+                        },
+                        {
+                          "Lit": {
+                            "Float": 7.0
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "ExprStmt": {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "set"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "jump"
+                          }
+                        },
+                        {
+                          "Lit": {
+                            "Float": 1.0
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "else_body": [
+                {
+                  "ExprStmt": {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "set"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "jump"
+                          }
+                        },
+                        {
+                          "Lit": {
+                            "Float": 0.0
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "vy"
+                    }
+                  },
+                  {
+                    "Binary": [
+                      "Sub",
+                      {
+                        "Call": {
+                          "path": [
+                            "vars",
+                            "get"
+                          ],
+                          "args": [
+                            {
+                              "Lit": {
+                                "Str": "vy"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "Binary": [
+                          "Mul",
+                          {
+                            "Lit": {
+                              "Float": 20.0
+                            }
+                          },
+                          {
+                            "Param": "dt"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "Let": {
+              "id": 3,
+              "binding": {
+                "Named": "old_py"
+              },
+              "ty": null,
+              "mutable": false,
+              "value": {
+                "Call": {
+                  "path": [
+                    "vars",
+                    "get"
+                  ],
+                  "args": [
+                    {
+                      "Lit": {
+                        "Str": "py"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "px"
+                    }
+                  },
+                  {
+                    "Binary": [
+                      "Add",
+                      {
+                        "Call": {
+                          "path": [
+                            "vars",
+                            "get"
+                          ],
+                          "args": [
+                            {
+                              "Lit": {
+                                "Str": "px"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "Binary": [
+                          "Mul",
+                          {
+                            "Local": 2
+                          },
+                          {
+                            "Param": "dt"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "py"
+                    }
+                  },
+                  {
+                    "Binary": [
+                      "Add",
+                      {
+                        "Local": 3
+                      },
+                      {
+                        "Binary": [
+                          "Mul",
+                          {
+                            "Call": {
+                              "path": [
+                                "vars",
+                                "get"
+                              ],
+                              "args": [
+                                {
+                                  "Lit": {
+                                    "Str": "vy"
+                                  }
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Param": "dt"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "Let": {
+              "id": 4,
+              "binding": {
+                "Named": "ground"
+              },
+              "ty": null,
+              "mutable": false,
+              "value": {
+                "Binary": [
+                  "Add",
+                  {
+                    "Call": {
+                      "path": [
+                        "terrain",
+                        "height_at"
+                      ],
+                      "args": [
+                        {
+                          "Call": {
+                            "path": [
+                              "vars",
+                              "get"
+                            ],
+                            "args": [
+                              {
+                                "Lit": {
+                                  "Str": "px"
+                                }
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "Call": {
+                            "path": [
+                              "vars",
+                              "get"
+                            ],
+                            "args": [
+                              {
+                                "Lit": {
+                                  "Str": "pz"
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.9
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "If": {
+              "cond": {
+                "Binary": [
+                  "Le",
+                  {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "get"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "py"
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "Local": 4
+                  }
+                ]
+              },
+              "then_body": [
+                {
+                  "ExprStmt": {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "set"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "py"
+                          }
+                        },
+                        {
+                          "Local": 4
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "ExprStmt": {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "set"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "vy"
+                          }
+                        },
+                        {
+                          "Lit": {
+                            "Float": 0.0
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "ExprStmt": {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "set"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "grounded"
+                          }
+                        },
+                        {
+                          "Lit": {
+                            "Float": 1.0
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "else_body": [
+                {
+                  "ExprStmt": {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "set"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "grounded"
+                          }
+                        },
+                        {
+                          "Lit": {
+                            "Float": 0.0
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "physics3d",
+                  "move_and_slide"
+                ],
+                "args": [
+                  {
+                    "Local": 1
+                  },
+                  {
+                    "Binary": [
+                      "Mul",
+                      {
+                        "Local": 2
+                      },
+                      {
+                        "Param": "dt"
+                      }
+                    ]
+                  },
+                  {
+                    "Binary": [
+                      "Sub",
+                      {
+                        "Call": {
+                          "path": [
+                            "vars",
+                            "get"
+                          ],
+                          "args": [
+                            {
+                              "Lit": {
+                                "Str": "py"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "Local": 3
+                      }
+                    ]
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.0
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "functions": []
+}

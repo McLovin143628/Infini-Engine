@@ -38,12 +38,13 @@
 //!   heuristic** ([`resolve_actors`]) is kept as a documented fallback for levels
 //!   authored before v3 (kinder for hand-rolled levels).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use glam::{DVec2, DVec3};
 use uuid::Uuid;
 
+use inf_anim::{AnimClip, AnimClipAsset, Skeleton, SkeletonAsset, StateMachine, StateMachineAsset};
 use inf_asset::{AssetId, AssetKind, PackReader};
 use inf_blueprint::BlueprintClass;
 use inf_ecs::components::{
@@ -83,6 +84,15 @@ pub struct BuiltWorld {
     pub hz: f64,
     /// A human label for logs / the window title.
     pub label: String,
+    /// Resolved `.inf_sm` state machines keyed by asset GUID (P11.4) — the map
+    /// the caller seeds [`RuntimeSim::set_state_machines`](crate::runtime_sim::RuntimeSim::set_state_machines)
+    /// with so an `AnimStateMachine` entity steps like the editor Simulate.
+    pub state_machines: BTreeMap<Uuid, StateMachine>,
+    /// Resolved root-motion clips: `(clip asset GUID, skeleton, clip)` (P11.4) —
+    /// the caller registers each via
+    /// [`RuntimeSim::register_root_motion_clip`](crate::runtime_sim::RuntimeSim::register_root_motion_clip).
+    /// A clip whose skeleton ref doesn't resolve is dropped (root motion needs it).
+    pub root_clips: Vec<(Uuid, Skeleton, AnimClip)>,
 }
 
 /// Produces the raw serialized bytes of a level (an `.inf_lvl` payload). The
@@ -164,6 +174,13 @@ pub struct InfSceneWorldBuilder {
     /// persisted; see [`evaluate_pcg_volumes`]). Built from the [`LevelSource`]
     /// (pack index / dev-dir sidecars) or the streamed PIE payload.
     pcgs: HashMap<Uuid, PcgAssetPayload>,
+    /// `.inf_skel` payloads keyed by asset GUID (P11.4) — resolves the skeleton a
+    /// clip / skeletal mesh references.
+    skeletons: HashMap<Uuid, SkeletonAsset>,
+    /// `.inf_anim` clip payloads keyed by asset GUID (P11.4).
+    clips: HashMap<Uuid, AnimClipAsset>,
+    /// `.inf_sm` state-machine payloads keyed by asset GUID (P11.4).
+    machines: HashMap<Uuid, StateMachineAsset>,
     /// Gravity/rate used only when the level predates settings (v1/v2) — a v3
     /// level's own [`LevelSettings`](inf_scene::RuntimeSettings) always wins.
     gravity: DVec2,
@@ -177,6 +194,9 @@ impl InfSceneWorldBuilder {
             fallback,
             by_guid: HashMap::new(),
             pcgs: HashMap::new(),
+            skeletons: HashMap::new(),
+            clips: HashMap::new(),
+            machines: HashMap::new(),
             gravity,
             hz,
         }
@@ -200,6 +220,49 @@ impl InfSceneWorldBuilder {
     pub fn with_pcgs(mut self, pcgs: HashMap<Uuid, PcgAssetPayload>) -> Self {
         self.pcgs = pcgs;
         self
+    }
+
+    /// Attach the P11 animation asset maps (asset GUID → payload) used to seed the
+    /// [`RuntimeSim`](crate::runtime_sim::RuntimeSim)'s state machines + root-motion
+    /// clips. Builder style so `build_world` can wire them from the source's anim
+    /// index (or a PIE payload).
+    pub fn with_anim_assets(
+        mut self,
+        skeletons: HashMap<Uuid, SkeletonAsset>,
+        clips: HashMap<Uuid, AnimClipAsset>,
+        machines: HashMap<Uuid, StateMachineAsset>,
+    ) -> Self {
+        self.skeletons = skeletons;
+        self.clips = clips;
+        self.machines = machines;
+        self
+    }
+
+    /// Resolve the `.inf_sm` machines into the `Guid → StateMachine` map the
+    /// [`RuntimeSim`](crate::runtime_sim::RuntimeSim) steps against (P11.4).
+    fn resolve_state_machines(&self) -> BTreeMap<Uuid, StateMachine> {
+        self.machines
+            .iter()
+            .map(|(g, a)| (*g, a.machine.clone()))
+            .collect()
+    }
+
+    /// Resolve each `.inf_anim` clip into `(clip GUID, skeleton, clip)` for
+    /// root-motion registration, joining the clip's skeleton ref to a loaded
+    /// `.inf_skel` (P11.4). Clips whose skeleton doesn't resolve are dropped (root
+    /// motion needs a skeleton to sample the root joint). Deterministic (Guid order).
+    fn resolve_root_clips(&self) -> Vec<(Uuid, Skeleton, AnimClip)> {
+        let mut out: Vec<(Uuid, Skeleton, AnimClip)> = self
+            .clips
+            .iter()
+            .filter_map(|(g, ca)| {
+                let skel_guid = Uuid::from_bytes(ca.skeleton?);
+                let sk = self.skeletons.get(&skel_guid)?;
+                Some((*g, sk.skeleton.clone(), ca.clip.clone()))
+            })
+            .collect();
+        out.sort_by_key(|(g, _, _)| *g);
+        out
     }
 }
 
@@ -244,6 +307,8 @@ impl WorldBuilder for InfSceneWorldBuilder {
             } else {
                 title
             },
+            state_machines: self.resolve_state_machines(),
+            root_clips: self.resolve_root_clips(),
         })
     }
 }
@@ -282,6 +347,11 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
             actor,
             terrain,
             pcg_volume,
+            skeletal_mesh,
+            anim_player,
+            anim_state_machine,
+            root_motion,
+            attached_to,
         } = e;
 
         let entity = world.spawn_with_guid(guid, &name, None);
@@ -347,6 +417,22 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
                 em.insert(c);
             }
             if let Some(c) = pcg_volume {
+                em.insert(c);
+            }
+            // ── v5 animation / character components ──
+            if let Some(c) = skeletal_mesh {
+                em.insert(c);
+            }
+            if let Some(c) = anim_player {
+                em.insert(c);
+            }
+            if let Some(c) = anim_state_machine {
+                em.insert(c);
+            }
+            if let Some(c) = root_motion {
+                em.insert(c);
+            }
+            if let Some(c) = attached_to {
                 em.insert(c);
             }
         }
@@ -521,6 +607,53 @@ pub fn load_pcg_payloads_by_guid_from_dir(dir: &Path) -> HashMap<Uuid, PcgAssetP
         }
     }
     out
+}
+
+/// Read every P11 animation asset of extension `ext` in `dir` (non-recursive)
+/// **keyed by its asset GUID** (from the sibling inf_asset `.toml` sidecar) — the
+/// dev-dir twin of the pack anim loaders (P11.4). Files without a readable
+/// sidecar/GUID or a decodable payload are skipped. Deterministic (path-sorted).
+pub fn load_anim_assets_by_guid_from_dir<T: inf_asset::AssetPayload>(
+    dir: &Path,
+    ext: &str,
+) -> HashMap<Uuid, T> {
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some(ext))
+            .collect(),
+        Err(_) => return HashMap::new(),
+    };
+    files.sort();
+    let mut out = HashMap::new();
+    for p in files {
+        let Ok(side) = inf_asset::AssetSidecar::load(&p) else {
+            continue;
+        };
+        match std::fs::read(&p).map(|b| inf_asset::decode::<T>(&b)) {
+            Ok(Ok(payload)) => {
+                out.insert(side.guid.uuid(), payload);
+            }
+            _ => tracing::warn!("inf-player: bad .{ext} {}", p.display()),
+        }
+    }
+    out
+}
+
+/// The three dev-dir anim-asset maps (`.inf_skel` / `.inf_anim` / `.inf_sm`),
+/// keyed by asset GUID (P11.4).
+pub fn load_anim_assets_from_dir(
+    dir: &Path,
+) -> (
+    HashMap<Uuid, SkeletonAsset>,
+    HashMap<Uuid, AnimClipAsset>,
+    HashMap<Uuid, StateMachineAsset>,
+) {
+    (
+        load_anim_assets_by_guid_from_dir(dir, "inf_skel"),
+        load_anim_assets_by_guid_from_dir(dir, "inf_anim"),
+        load_anim_assets_by_guid_from_dir(dir, "inf_sm"),
+    )
 }
 
 /// Bind actor classes to controllable entities (the P8/P9 heuristic mirrored from
@@ -752,6 +885,50 @@ impl PackLevelSource {
         }
         Ok(out)
     }
+
+    /// Every anim asset of `kind` in the pack **keyed by its asset GUID**, decoded
+    /// as `T` (P11.4). The cook joins the level→anim-component edges (and the
+    /// state-machine→clip edge) into the dep closure, so the referenced
+    /// `.inf_skel` / `.inf_anim` / `.inf_sm` all ship in the pack.
+    pub fn anim_assets_by_guid<T: inf_asset::AssetPayload>(
+        &self,
+        kind: AssetKind,
+    ) -> Result<HashMap<Uuid, T>, String> {
+        let mut out = HashMap::new();
+        for e in self.reader.index() {
+            if e.kind != kind {
+                continue;
+            }
+            let bytes = self
+                .reader
+                .read(e.guid)
+                .map_err(|err| format!("read anim {}: {err}", e.guid))?;
+            let payload = inf_asset::decode::<T>(&bytes)
+                .map_err(|err| format!("decode anim {}: {err}", e.guid))?;
+            out.insert(e.guid.uuid(), payload);
+        }
+        Ok(out)
+    }
+
+    /// The three pack anim-asset maps (`.inf_skel` / `.inf_anim` / `.inf_sm`),
+    /// keyed by asset GUID (P11.4).
+    #[allow(clippy::type_complexity)]
+    pub fn anim_assets(
+        &self,
+    ) -> Result<
+        (
+            HashMap<Uuid, SkeletonAsset>,
+            HashMap<Uuid, AnimClipAsset>,
+            HashMap<Uuid, StateMachineAsset>,
+        ),
+        String,
+    > {
+        Ok((
+            self.anim_assets_by_guid(AssetKind::Skeleton)?,
+            self.anim_assets_by_guid(AssetKind::AnimClip)?,
+            self.anim_assets_by_guid(AssetKind::StateMachine)?,
+        ))
+    }
 }
 
 impl LevelSource for PackLevelSource {
@@ -858,6 +1035,11 @@ mod tests {
             actor: None,
             terrain: None,
             pcg_volume: None,
+            skeletal_mesh: None,
+            anim_player: None,
+            anim_state_machine: None,
+            root_motion: None,
+            attached_to: None,
         };
         parent.sprite = Some(Sprite {
             size: Vec2d::new(1.0, 1.0),

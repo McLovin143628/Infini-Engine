@@ -106,6 +106,26 @@ impl AssetState {
         std::fs::read(&entry.path).ok()
     }
 
+    /// Load a P11 animation asset's **raw bytes** by its asset GUID (P11.4): the
+    /// `.inf_skel` / `.inf_anim` / `.inf_sm` bytes streamed to the PIE player so it
+    /// resolves state machines + root-motion clips exactly like the shipping pack
+    /// path. `None` if the asset is missing or not an animation asset.
+    pub fn load_anim_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        let entry = proj.db().get(id)?;
+        if !matches!(
+            entry.kind(),
+            inf_asset::AssetKind::Skeleton
+                | inf_asset::AssetKind::AnimClip
+                | inf_asset::AssetKind::StateMachine
+        ) {
+            return None;
+        }
+        std::fs::read(&entry.path).ok()
+    }
+
     /// Create a new material instance of `parent` (P7.4). Returns the new id.
     pub fn create_material_instance(&self, parent: AssetId, name: &str) -> Result<AssetId, String> {
         self.with_project(|proj| {

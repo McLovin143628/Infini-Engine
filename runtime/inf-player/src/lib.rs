@@ -103,9 +103,11 @@ fn build_world(args: &Args) -> Result<BuiltWorld, String> {
             let actors = level::load_actor_classes_from_dir(&content_dir);
             let by_guid = level::load_actor_classes_by_guid_from_dir(&content_dir);
             let pcgs = level::load_pcg_payloads_by_guid_from_dir(&content_dir);
+            let (skeletons, clips, machines) = level::load_anim_assets_from_dir(&content_dir);
             let builder = InfSceneWorldBuilder::with_defaults(actors)
                 .with_bindings(by_guid)
-                .with_pcgs(pcgs);
+                .with_pcgs(pcgs)
+                .with_anim_assets(skeletons, clips, machines);
             level::load(&source, &builder)
         }
         WorldChoice::Pack(path) => {
@@ -113,9 +115,11 @@ fn build_world(args: &Args) -> Result<BuiltWorld, String> {
             let actors = source.actor_classes()?;
             let by_guid = source.blueprint_classes_by_guid()?;
             let pcgs = source.pcg_payloads_by_guid()?;
+            let (skeletons, clips, machines) = source.anim_assets()?;
             let builder = InfSceneWorldBuilder::with_defaults(actors)
                 .with_bindings(by_guid)
-                .with_pcgs(pcgs);
+                .with_pcgs(pcgs)
+                .with_anim_assets(skeletons, clips, machines);
             level::load(&source, &builder)
         }
     }
@@ -175,7 +179,7 @@ pub fn run_windowed(args: &Args) -> ExitCode {
         Some(t) => t.clone(),
         None => format!("Infinity Engine — {}", built.label),
     };
-    let sim = RuntimeSim::new(built.world, built.actors, built.gravity, built.hz);
+    let sim = sim_from_built(built);
     match window::run(title, args.width, args.height, sim, map) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -185,11 +189,34 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     }
 }
 
+/// Construct a [`RuntimeSim`] from a [`BuiltWorld`], seeding it with the level's
+/// resolved P11 animation assets (P11.4): the `.inf_sm` state machines and the
+/// root-motion `(skeleton, clip)` pairs. Every sim call site goes through here so
+/// windowed, headless, and PIE runs all step animation identically (preview ==
+/// shipped).
+pub fn sim_from_built(built: BuiltWorld) -> RuntimeSim {
+    let BuiltWorld {
+        world,
+        actors,
+        gravity,
+        hz,
+        state_machines,
+        root_clips,
+        ..
+    } = built;
+    let mut sim = RuntimeSim::new(world, actors, gravity, hz);
+    sim.set_state_machines(state_machines);
+    for (guid, skel, clip) in root_clips {
+        sim.register_root_motion_clip(guid, skel, clip);
+    }
+    sim
+}
+
 /// Run `frames` fixed steps of `built` (no input) and fold every step's
 /// `Guid`-sorted state into a 128-bit xxh3 trace — the determinism fingerprint.
 /// Panics deliberately at frame `panic_after` when set (the crash-path fixture).
 pub fn fold_trace(built: BuiltWorld, frames: u64, panic_after: Option<u64>) -> u128 {
-    let mut sim = RuntimeSim::new(built.world, built.actors, built.gravity, built.hz);
+    let mut sim = sim_from_built(built);
     let mut hasher = Xxh3::new();
     for step in 0..frames {
         if panic_after == Some(step) {
@@ -237,9 +264,34 @@ pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, St
             .map_err(|e| format!("decode pcg graph {guid}: {e}"))?;
         pcgs.insert(*guid, p);
     }
+    // Streamed P11 animation assets: the same `.inf_skel` / `.inf_anim` / `.inf_sm`
+    // bytes the cook ships, so the PIE player resolves state machines + root-motion
+    // clips identically to the shipping player (PIE == shipping for animation).
+    let mut skeletons: HashMap<uuid::Uuid, inf_anim::SkeletonAsset> = HashMap::new();
+    for (guid, bytes) in &payload.skeletons {
+        skeletons.insert(
+            *guid,
+            inf_asset::decode(bytes).map_err(|e| format!("decode skeleton {guid}: {e}"))?,
+        );
+    }
+    let mut clips: HashMap<uuid::Uuid, inf_anim::AnimClipAsset> = HashMap::new();
+    for (guid, bytes) in &payload.clips {
+        clips.insert(
+            *guid,
+            inf_asset::decode(bytes).map_err(|e| format!("decode clip {guid}: {e}"))?,
+        );
+    }
+    let mut machines: HashMap<uuid::Uuid, inf_anim::StateMachineAsset> = HashMap::new();
+    for (guid, bytes) in &payload.machines {
+        machines.insert(
+            *guid,
+            inf_asset::decode(bytes).map_err(|e| format!("decode state machine {guid}: {e}"))?,
+        );
+    }
     let builder = InfSceneWorldBuilder::with_defaults(fallback)
         .with_bindings(by_guid)
-        .with_pcgs(pcgs);
+        .with_pcgs(pcgs)
+        .with_anim_assets(skeletons, clips, machines);
     builder.build(&payload.level_bytes)
 }
 
@@ -256,7 +308,7 @@ pub fn step_state_hash(sim: &mut RuntimeSim) -> u64 {
 /// stream byte-identical per-step hashes.
 pub fn scene_trace(payload: &ScenePayload, frames: u64) -> Result<Vec<u64>, String> {
     let built = build_world_from_payload(payload)?;
-    let mut sim = RuntimeSim::new(built.world, built.actors, built.gravity, built.hz);
+    let mut sim = sim_from_built(built);
     let mut hashes = Vec::with_capacity(frames as usize);
     for _ in 0..frames {
         sim.step_once(RuntimeInput::default());

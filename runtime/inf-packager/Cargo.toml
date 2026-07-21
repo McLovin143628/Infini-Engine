@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 inf-asset = { workspace = true }
 inf-scene = { workspace = true }
+inf-anim = { workspace = true }
 inf-blueprint = { workspace = true }
 inf-project = { workspace = true }
 serde = { workspace = true }

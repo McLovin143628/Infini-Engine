@@ -65,8 +65,18 @@ pub async fn sim_start(
     let actors = bound_actors(&doc, |guid| {
         assets.load_blueprint_class(inf_asset::AssetId(guid))
     });
+    // Resolve the scene's referenced anim assets (state machines + root-motion
+    // clips) so an `AnimStateMachine` / `RootMotion` entity steps in Simulate
+    // exactly as it will in the shipped player (P11.4).
+    let (machines, root_clips) = inf_editor_core::simulate::resolve_anim_assets(&doc, |guid| {
+        assets.load_anim_bytes(inf_asset::AssetId(guid))
+    });
     // Character applies its own gravity in the blueprint → world gravity is zero.
-    let session = SimSession::enter(&mut doc, actors, DVec2::ZERO, SIM_HZ);
+    let mut session = SimSession::enter(&mut doc, actors, DVec2::ZERO, SIM_HZ);
+    session.set_state_machines(machines);
+    for (clip_guid, skeleton, clip) in root_clips {
+        session.register_root_motion_clip(clip_guid, skeleton, clip);
+    }
     doc.bump_version_for_runtime();
     drop(doc);
 

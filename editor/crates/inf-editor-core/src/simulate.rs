@@ -39,7 +39,7 @@ use uuid::Uuid;
 
 // P11.3 root motion: the pure root-delta extractor + the clip/skeleton it reads.
 use inf_anim::state_machine::{SmContext, SmRuntime, StateMachine};
-use inf_anim::{root_delta, AnimClip, Skeleton};
+use inf_anim::{root_delta, AnimClip, AnimClipAsset, Skeleton, SkeletonAsset, StateMachineAsset};
 use inf_blueprint::interp::{
     MoveResult2d, MoveResult3d, Physics2dHost, Physics3dHost, RayHit2d, RayHit3d,
 };
@@ -47,8 +47,8 @@ use inf_blueprint::semantics::run_event;
 use inf_blueprint::{ActorInstance, BlueprintClass, EventKind, Host, InterpDebug, RunError, Value};
 use inf_ecs::components::{
     AnimPlayer, AnimStateMachine, CharacterController2D, CharacterController3D, Collider2D,
-    Collider3D, ColliderShape2DKind, ColliderShape3DKind, RootMotion, RootMotionMode,
-    SmRuntimeState, Transform,
+    Collider3D, ColliderShape2DKind, ColliderShape3DKind, GlobalTransform, RootMotion,
+    RootMotionMode, SmRuntimeState, Terrain, Transform,
 };
 use inf_ecs::{update_attachments, EcsWorld, Entity, Guid};
 use inf_physics::{
@@ -542,6 +542,14 @@ impl Host for SimHost<'_> {
                 self.logs.push(arg_str(args, 0));
                 Ok(Value::Unit)
             }
+            // terrain.height_at(x, z) → the world height at that XZ (P11.4). The
+            // seam a 3D character reads to stay on a heightfield terrain (which has
+            // no physics collider); mirrored exactly in the shipped runtime host.
+            (Some("terrain"), Some("height_at")) => Ok(Value::Float(terrain_height_at(
+                self.world,
+                arg_f64(args, 0),
+                arg_f64(args, 1),
+            ))),
             // Unknown engine call: log it (matching the graph preview host) so a
             // partially-authored blueprint still runs rather than aborting.
             _ => {
@@ -908,6 +916,51 @@ fn arg_str(args: &[Value], i: usize) -> String {
         .unwrap_or_default()
 }
 
+/// Coerce a positional blueprint arg to `f64` (`Int` widens; else `0.0`).
+fn arg_f64(args: &[Value], i: usize) -> f64 {
+    match args.get(i) {
+        Some(Value::Float(f)) => *f,
+        Some(Value::Int(n)) => *n as f64,
+        _ => 0.0,
+    }
+}
+
+/// Sample the world's terrain height at world `(x, z)` — the `terrain.height_at`
+/// host seam (P11.4). Uses the **lowest-`Guid`** non-empty [`Terrain`] (a
+/// heightfield carries no physics collider, so a 3D character reads its height
+/// here to stay grounded); returns `0.0` with no terrain. Shared shape with the
+/// shipped runtime host so preview == shipped. Deterministic (Guid-picked).
+fn terrain_height_at(world: &EcsWorld, x: f64, z: f64) -> f64 {
+    let w = world.world();
+    let mut picked: Option<(Uuid, DVec3, inf_terrain::TerrainData)> = None;
+    for e in w.iter_entities() {
+        let Some(guid) = e.get::<Guid>().map(|g| g.0) else {
+            continue;
+        };
+        let Some(t) = e.get::<Terrain>() else {
+            continue;
+        };
+        if t.data.is_empty() {
+            continue;
+        }
+        let origin = e
+            .get::<GlobalTransform>()
+            .map(|g| g.translation())
+            .or_else(|| e.get::<Transform>().map(|t| t.translation.to_dvec3()))
+            .unwrap_or(DVec3::ZERO);
+        if picked.as_ref().map(|(g, _, _)| guid < *g).unwrap_or(true) {
+            picked = Some((guid, origin, t.data.clone()));
+        }
+    }
+    match picked {
+        Some((_, origin, data)) => data
+            .height_at(DVec2::new(x - origin.x, z - origin.z))
+            .map(|h| h + origin.y)
+            .unwrap_or(0.0),
+        None => 0.0,
+    }
+}
+
 // ── P11.2 state-machine glue: ECS POD ↔ inf-anim runtime + var snapshot ──────
 //
 // The conversions are field-for-field (`SmRuntimeState` is a deliberate POD
@@ -965,3 +1018,64 @@ fn value_as_f64(v: &Value) -> Option<f64> {
 /// A `Guid` marker used to look up entities during Simulate (re-export helper so
 /// callers building an actor list don't reach into `inf_ecs` directly).
 pub type ActorGuid = Guid;
+
+/// The seed maps [`resolve_anim_assets`] produces: the `.inf_sm` state machines
+/// (keyed by asset GUID) and the root-motion `(clip GUID, skeleton, clip)` triples.
+pub type AnimSeed = (
+    BTreeMap<Uuid, StateMachine>,
+    Vec<(Uuid, Skeleton, AnimClip)>,
+);
+
+/// Resolve a scene's referenced P11 animation assets into the seed maps a
+/// [`SimSession`] (and the shipped [`RuntimeSim`](../../inf_player/runtime_sim/index.html))
+/// need (P11.4): the `.inf_sm` state machines it steps, and the root-motion
+/// `(clip GUID, skeleton, clip)` triples it registers. `resolve_anim` reads an
+/// anim asset's raw bytes by GUID (the caller backs it with the project asset DB /
+/// the pack). A machine/clip whose bytes don't resolve is skipped; a clip whose
+/// skeleton doesn't resolve is dropped (root motion needs it). Deterministic
+/// (`BTreeMap`/Guid order). The caller seeds
+/// [`SimSession::set_state_machines`] + [`SimSession::register_root_motion_clip`]
+/// from the result — the editor Simulate twin of the player's
+/// `InfSceneWorldBuilder` anim resolution, so preview == shipped.
+pub fn resolve_anim_assets<H>(doc: &SceneDoc, mut resolve_anim: H) -> AnimSeed
+where
+    H: FnMut(Uuid) -> Option<Vec<u8>>,
+{
+    use std::collections::btree_map::Entry;
+    let mut machines: BTreeMap<Uuid, StateMachine> = BTreeMap::new();
+    let mut clips: BTreeMap<Uuid, (Skeleton, AnimClip)> = BTreeMap::new();
+    let world = doc.world();
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let w = world.world();
+        if let Some(sm_guid) = w.get::<AnimStateMachine>(e).and_then(|s| s.sm) {
+            if let Entry::Vacant(v) = machines.entry(sm_guid) {
+                if let Some(asset) = resolve_anim(sm_guid)
+                    .and_then(|b| inf_asset::decode::<StateMachineAsset>(&b).ok())
+                {
+                    v.insert(asset.machine);
+                }
+            }
+        }
+        if let Some(clip_guid) = w.get::<AnimPlayer>(e).and_then(|p| p.clip) {
+            if let Entry::Vacant(v) = clips.entry(clip_guid) {
+                if let Some(ca) = resolve_anim(clip_guid)
+                    .and_then(|b| inf_asset::decode::<AnimClipAsset>(&b).ok())
+                {
+                    if let Some(sk) = ca
+                        .skeleton
+                        .map(Uuid::from_bytes)
+                        .and_then(&mut resolve_anim)
+                        .and_then(|b| inf_asset::decode::<SkeletonAsset>(&b).ok())
+                    {
+                        v.insert((sk.skeleton, ca.clip));
+                    }
+                }
+            }
+        }
+    }
+    let root_clips = clips.into_iter().map(|(g, (s, c))| (g, s, c)).collect();
+    (machines, root_clips)
+}
