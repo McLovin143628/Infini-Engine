@@ -1,112 +1,62 @@
-//! Infinity Engine standalone player.
+//! Infinity Engine standalone player — binary entry.
 //!
-//! Three modes (Spike D):
+//! Modes (see [`inf_player::args`]):
 //!
-//! - `--headless --run-frames N [--assert-exit]` — run the demo snapshot N
-//!   fixed steps with no window/pacing and print the determinism hash. The
-//!   CI smoke path (`inf-player --headless --run-frames 300 --assert-exit`).
-//! - `--pie [--tick-hz N]` — play-in-editor subprocess: speak the
-//!   length-prefixed bincode protocol from `inf_runtime::pie` on
-//!   stdin/stdout (stdout is protocol-only; logs go to stderr).
-//! - `--embed-probe` *(Windows)* — create a bare Win32 window, print its
-//!   HWND, and pump messages until stdin closes. Exists so tests can prove
-//!   cross-process `SetParent` embedding (the P9 "PIE window in the
-//!   viewport hole" plan) actually works.
+//! - **windowed** (default, or `--demo` / `--level`) — open a winit window and
+//!   play; the fixed-step gameplay + interpolated rendering live in the library
+//!   ([`inf_player::run`]).
+//! - **headless** (`--headless --run-frames N [--assert-exit]`) — no window/GPU;
+//!   run the sim N steps and print the determinism hash. The CI smoke path.
+//! - **pie** (`--pie [--tick-hz N]`) — play-in-editor subprocess: speak the
+//!   length-prefixed bincode protocol from `inf_runtime::pie` on stdin/stdout
+//!   (stdout is protocol-only; logs go to stderr). Unchanged from Spike D; P9.4
+//!   builds the editor side out on top of it.
+//! - **embed-probe** (`--embed-probe`, Windows) — the Spike D cross-process
+//!   window-embedding probe (proves the P9.4 "PIE window in the viewport hole"
+//!   plan). Unchanged.
+//!
+//! `--pie` and `--embed-probe` are handled here (not via [`inf_player::run`])
+//! because they own process stdio / native windows: installing the tracing
+//! subscriber that tees logs to stdout would corrupt the PIE protocol stream.
 
 use std::process::ExitCode;
 
+use inf_player::args::{Args, Mode};
 use inf_runtime::pie::{read_msg, write_msg, EditorToPlayer, PlayerToEditor, PIE_PROTOCOL_VERSION};
-use inf_runtime::{CookedSnapshot, World};
+use inf_runtime::World;
 
 #[cfg(windows)]
 mod embed_probe;
 
-struct Args {
-    headless: bool,
-    run_frames: u64,
-    pie: bool,
-    tick_hz: u32,
-    embed_probe: bool,
-}
-
-fn parse_args() -> Result<Args, String> {
-    let mut args = Args {
-        headless: false,
-        run_frames: 0,
-        pie: false,
-        tick_hz: inf_runtime::TICK_HZ,
-        embed_probe: false,
-    };
-    let mut iter = std::env::args().skip(1);
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--headless" => args.headless = true,
-            "--pie" => args.pie = true,
-            "--embed-probe" => args.embed_probe = true,
-            // Accepted for CI-invocation compatibility; exit codes already
-            // reflect success/failure.
-            "--assert-exit" => {}
-            "--run-frames" => {
-                let value = iter.next().ok_or("--run-frames needs a value")?;
-                args.run_frames = value
-                    .parse()
-                    .map_err(|_| format!("bad --run-frames value '{value}'"))?;
-            }
-            "--tick-hz" => {
-                let value = iter.next().ok_or("--tick-hz needs a value")?;
-                args.tick_hz = value
-                    .parse()
-                    .map_err(|_| format!("bad --tick-hz value '{value}'"))?;
-            }
-            other => return Err(format!("unknown argument '{other}'")),
-        }
-    }
-    Ok(args)
-}
-
 fn main() -> ExitCode {
-    let args = match parse_args() {
+    let args = match Args::from_env() {
         Ok(args) => args,
         Err(msg) => {
             eprintln!("inf-player: {msg}");
             return ExitCode::FAILURE;
         }
     };
-    if args.embed_probe {
-        #[cfg(windows)]
-        return embed_probe::run();
-        #[cfg(not(windows))]
-        {
-            eprintln!("inf-player: --embed-probe is Windows-only");
-            return ExitCode::FAILURE;
+
+    match args.mode {
+        Mode::EmbedProbe => {
+            #[cfg(windows)]
+            {
+                embed_probe::run()
+            }
+            #[cfg(not(windows))]
+            {
+                eprintln!("inf-player: --embed-probe is Windows-only");
+                ExitCode::FAILURE
+            }
         }
+        Mode::Pie => run_pie(args.tick_hz),
+        Mode::Windowed | Mode::Headless => inf_player::run(args),
     }
-    if args.pie {
-        return run_pie(args.tick_hz);
-    }
-    if args.headless {
-        return run_headless(args.run_frames);
-    }
-    println!(
-        "inf-player {} (windowed mode lands in Phase 9)",
-        env!("CARGO_PKG_VERSION")
-    );
-    ExitCode::SUCCESS
 }
 
-fn run_headless(frames: u64) -> ExitCode {
-    let mut world = World::from_snapshot(&CookedSnapshot::demo());
-    for _ in 0..frames {
-        world.step();
-    }
-    println!("ran {frames} frames");
-    println!("final-state-hash: {:016x}", world.state_hash());
-    ExitCode::SUCCESS
-}
-
-/// The PIE loop: a reader thread turns stdin frames into channel messages;
-/// the main loop applies control, steps the world at `tick_hz`, and streams
-/// `Frame` reports. Stdout carries protocol frames only.
+/// The PIE loop (Spike D): a reader thread turns stdin frames into channel
+/// messages; the main loop applies control, steps the toy world at `tick_hz`, and
+/// streams `Frame` reports. Stdout carries protocol frames only.
 fn run_pie(tick_hz: u32) -> ExitCode {
     use std::sync::mpsc;
     use std::time::Duration;
@@ -119,8 +69,6 @@ fn run_pie(tick_hz: u32) -> ExitCode {
                 break;
             }
         }
-        // EOF or error: dropping the sender tells the main loop the editor
-        // is gone.
     });
 
     let mut stdout = std::io::stdout().lock();
@@ -145,7 +93,6 @@ fn run_pie(tick_hz: u32) -> ExitCode {
     };
 
     loop {
-        // Apply all pending control messages first.
         let mut disconnected = false;
         loop {
             match rx.try_recv() {
@@ -181,7 +128,6 @@ fn run_pie(tick_hz: u32) -> ExitCode {
                 std::thread::sleep(tick_duration);
             }
         } else {
-            // Idle (no level yet, or paused): block briefly on control.
             match rx.recv_timeout(Duration::from_millis(20)) {
                 Ok(msg) => {
                     if let Some(code) = handle_msg(msg, &mut world, &mut paused, &mut stdout) {
@@ -232,8 +178,6 @@ fn handle_msg(
             return Some(ExitCode::SUCCESS);
         }
         EditorToPlayer::InjectPanic => {
-            // The crash-isolation drill: an uncontained "script" panic. The
-            // process dies; the editor must not.
             panic!("deliberate PIE panic (injected by editor)");
         }
     };

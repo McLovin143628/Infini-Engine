@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use inf_editor_core::pie::{PieSession, SessionHealth};
 use inf_runtime::pie::{EditorToPlayer, PlayerToEditor};
-use inf_runtime::{CookedSnapshot, World};
+use inf_runtime::CookedSnapshot;
 
 fn player_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_inf-player"))
@@ -20,14 +20,29 @@ fn spawn_session() -> PieSession {
     PieSession::spawn(&player_bin(), &CookedSnapshot::demo(), 240).expect("PIE session spawns")
 }
 
+/// The P9.3 headless smoke path now runs the real demo world (ECS + physics +
+/// the Coyote blueprint) via `runtime_sim`, folding the same xxh3 trace the
+/// `inf_runtime::replay` harness uses. Two subprocess runs agree, and the
+/// subprocess agrees with the in-process demo trace.
 #[test]
-fn headless_run_is_deterministic_and_matches_in_process() {
+fn headless_demo_run_is_deterministic_and_matches_in_process() {
     let run = || {
         let output = Command::new(player_bin())
-            .args(["--headless", "--run-frames", "240", "--assert-exit"])
+            .args([
+                "--headless",
+                "--demo",
+                "--run-frames",
+                "240",
+                "--assert-exit",
+            ])
             .output()
             .expect("player runs");
-        assert!(output.status.success(), "exit: {:?}", output.status);
+        assert!(
+            output.status.success(),
+            "exit: {:?}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         stdout
             .lines()
@@ -38,12 +53,8 @@ fn headless_run_is_deterministic_and_matches_in_process() {
     let second = run();
     assert_eq!(first, second, "two headless runs must agree");
 
-    // And the subprocess agrees with stepping the same world in-process.
-    let mut world = World::from_snapshot(&CookedSnapshot::demo());
-    for _ in 0..240 {
-        world.step();
-    }
-    assert_eq!(first, format!("{:016x}", world.state_hash()));
+    // The subprocess agrees with the in-process demo trace (same 128-bit fold).
+    assert_eq!(first, format!("{:032x}", inf_player::demo_trace(240)));
 }
 
 #[test]

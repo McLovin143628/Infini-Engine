@@ -24,6 +24,14 @@ ignore = [
     # low release cadence, not a vulnerability; revisit at P9 (packaging)
     # and swap to postcard if it becomes a liability.
     "RUSTSEC-2025-0141",
+    # quick-xml 0.39.4 DoS-class parsing advisories (quadratic attribute
+    # checking / unbounded xmlns allocation). Pulled ONLY by winit's Linux
+    # Wayland stack (wayland-scanner/-protocols pin ^0.39; the fixed 0.41 is
+    # already in-tree for other consumers). The affected parser sees trusted
+    # Wayland protocol XML, not attacker-controlled input, in our builds.
+    # Drop these the moment the wayland crates bump their quick-xml req.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]
