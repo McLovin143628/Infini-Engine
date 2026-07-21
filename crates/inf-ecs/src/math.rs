@@ -8,8 +8,52 @@
 //! preserved: translations are f64 all the way to the floating-origin split.
 
 use bevy_reflect::Reflect;
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 use serde::{Deserialize, Serialize};
+
+/// A 2-component f64 vector for 2D component fields (sprite size, pivot, UV
+/// corners). Editable in the Details panel through the reflection walker, which
+/// surfaces it on the existing vector widget (see `crate::props`).
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Vec2d {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Vec2d {
+    pub const ZERO: Self = Self::splat(0.0);
+    pub const ONE: Self = Self::splat(1.0);
+
+    pub const fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+
+    pub const fn splat(v: f64) -> Self {
+        Self { x: v, y: v }
+    }
+
+    pub fn to_dvec2(self) -> DVec2 {
+        DVec2::new(self.x, self.y)
+    }
+}
+
+impl Default for Vec2d {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
+impl From<DVec2> for Vec2d {
+    fn from(v: DVec2) -> Self {
+        Self::new(v.x, v.y)
+    }
+}
+
+impl From<Vec2d> for DVec2 {
+    fn from(v: Vec2d) -> Self {
+        v.to_dvec2()
+    }
+}
 
 /// A 3-component f64 vector. Editable as a `vec3` widget in the Details panel.
 #[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]

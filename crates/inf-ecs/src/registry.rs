@@ -11,9 +11,10 @@ use bevy_ecs::reflect::ReflectComponent;
 use bevy_reflect::{TypePath, TypeRegistry};
 
 use crate::components::{
-    Camera, Light, LightKind, Material, MeshRef, Name, Primitive, Transform, Visibility,
+    AtlasRect, Camera, Light, LightKind, Material, MeshRef, Name, Primitive, Sprite, Transform,
+    Visibility,
 };
-use crate::math::{Color, Vec3d};
+use crate::math::{Color, Vec2d, Vec3d};
 
 /// Metadata for one editable component type.
 #[derive(Clone, Copy, Debug)]
@@ -45,9 +46,11 @@ impl ComponentRegistry {
         // Nested value / enum types: registered so reflect + serde can resolve
         // them, but never listed as editable components on their own.
         types.register::<Vec3d>();
+        types.register::<Vec2d>();
         types.register::<Color>();
         types.register::<Primitive>();
         types.register::<LightKind>();
+        types.register::<AtlasRect>();
         types.register::<String>();
 
         // `Name` is reflected (for completeness) but edited via a dedicated
@@ -69,6 +72,7 @@ impl ComponentRegistry {
             Transform => "Transform",
             Visibility => "Visibility",
             MeshRef => "Mesh",
+            Sprite => "Sprite",
             Material => "Material",
             Light => "Light",
             Camera => "Camera",
@@ -119,7 +123,7 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        assert_eq!(reg.editable().len(), 6);
+        assert_eq!(reg.editable().len(), 7);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

@@ -32,6 +32,11 @@ pub use passes::composite::BlitMode;
 pub use pick::Picker;
 pub use renderer::{EngineRenderer, MASK_FORMAT, SCENE_FORMAT, SCENE_SAMPLES};
 pub use scene::{
-    LightKind, MeshInstance, RenderLight, RenderScene, SkyParams, ID_GIZMO_BASE, ID_NONE,
+    LightKind, MeshInstance, RenderLight, RenderScene, SkyParams, SpriteInstance,
+    SpriteTextureUpload, TextureHandle, ID_GIZMO_BASE, ID_NONE,
+};
+// 2D batcher API surfaced through the renderer for hosts.
+pub use inf_render_2d::{
+    batch_sprites, handle_from_guid, BatchedSprites, SpriteBatch, WHITE_TEXTURE,
 };
 pub use surface::{SurfaceChain, RECONFIGURE_DEBOUNCE};

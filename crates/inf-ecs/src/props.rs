@@ -11,7 +11,7 @@ use bevy_reflect::enums::{DynamicEnum, DynamicVariant};
 use bevy_reflect::{PartialReflect, ReflectMut, ReflectRef, TypeInfo, TypePath};
 
 use crate::components::Name;
-use crate::math::{Color, Vec3d};
+use crate::math::{Color, Vec2d, Vec3d};
 use crate::registry::ComponentRegistry;
 
 /// A typed property value — the widget kind is implied by the variant.
@@ -96,6 +96,11 @@ fn read_value(pr: &dyn PartialReflect) -> Option<PropValue> {
     if let Some(v) = pr.try_downcast_ref::<Vec3d>() {
         return Some(PropValue::Vec3([v.x, v.y, v.z]));
     }
+    if let Some(v) = pr.try_downcast_ref::<Vec2d>() {
+        // Surfaced on the existing vector widget; the third slot is unused for a
+        // 2D value (reads back 0, write-back below keeps only x/y).
+        return Some(PropValue::Vec3([v.x, v.y, 0.0]));
+    }
     if let Some(v) = pr.try_downcast_ref::<Color>() {
         return Some(PropValue::Color([v.r, v.g, v.b, v.a]));
     }
@@ -103,6 +108,9 @@ fn read_value(pr: &dyn PartialReflect) -> Option<PropValue> {
         return Some(PropValue::Number(*v));
     }
     if let Some(v) = pr.try_downcast_ref::<f32>() {
+        return Some(PropValue::Number(*v as f64));
+    }
+    if let Some(v) = pr.try_downcast_ref::<i32>() {
         return Some(PropValue::Number(*v as f64));
     }
     if let Some(v) = pr.try_downcast_ref::<bool>() {
@@ -181,6 +189,9 @@ fn apply_value(field: &mut dyn PartialReflect, value: &PropValue) -> bool {
             } else if let Some(x) = field.try_downcast_mut::<f32>() {
                 *x = *n as f32;
                 true
+            } else if let Some(x) = field.try_downcast_mut::<i32>() {
+                *x = n.round() as i32;
+                true
             } else {
                 false
             }
@@ -190,10 +201,17 @@ fn apply_value(field: &mut dyn PartialReflect, value: &PropValue) -> bool {
             .try_downcast_mut::<String>()
             .map(|x| *x = t.clone())
             .is_some(),
-        PropValue::Vec3(a) => field
-            .try_downcast_mut::<Vec3d>()
-            .map(|v| *v = Vec3d::new(a[0], a[1], a[2]))
-            .is_some(),
+        PropValue::Vec3(a) => {
+            if let Some(v) = field.try_downcast_mut::<Vec3d>() {
+                *v = Vec3d::new(a[0], a[1], a[2]);
+                true
+            } else if let Some(v) = field.try_downcast_mut::<Vec2d>() {
+                *v = Vec2d::new(a[0], a[1]);
+                true
+            } else {
+                false
+            }
+        }
         PropValue::Color(c) => field
             .try_downcast_mut::<Color>()
             .map(|v| *v = Color::new(c[0], c[1], c[2], c[3]))

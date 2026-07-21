@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 inf-math = { workspace = true }
+inf-render-2d = { workspace = true }
 wgpu = { workspace = true }
 glam = { workspace = true }
 pollster = { workspace = true }

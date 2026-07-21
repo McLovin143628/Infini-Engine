@@ -21,11 +21,11 @@ pub mod world;
 
 pub use bevy_ecs::prelude::Entity;
 pub use components::{
-    Camera, ComputedVisibility, GlobalTransform, Guid, Light, LightKind, Material, MeshRef, Name,
-    Primitive, Transform, Visibility,
+    AtlasRect, Camera, ComputedVisibility, GlobalTransform, Guid, Light, LightKind, Material,
+    MeshRef, Name, Primitive, Sprite, Transform, Visibility,
 };
 pub use hierarchy::{ChildOf, Children};
-pub use math::{Color, Vec3d};
+pub use math::{Color, Vec2d, Vec3d};
 pub use props::{default_field, ComponentProps, PropField, PropValue};
 pub use registry::{ComponentInfo, ComponentRegistry};
 pub use world::EcsWorld;

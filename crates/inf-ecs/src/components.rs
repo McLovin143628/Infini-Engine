@@ -14,7 +14,7 @@ use glam::{DAffine3, DQuat, DVec3};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::math::{Color, Vec3d};
+use crate::math::{Color, Vec2d, Vec3d};
 
 /// Stable, save-surviving identity. Bevy `Entity` ids are reused across
 /// spawn/despawn and never persisted; the `Guid` is what `.inf_lvl` stores and
@@ -207,6 +207,82 @@ impl Default for Material {
     }
 }
 
+/// Normalized UV sub-rect into a sprite's texture/atlas. Default = the full
+/// texture `(0,0)-(1,1)`. As a nested struct it isn't surfaced in the generic
+/// Details grid (the reflection walker only descends value types); atlas rects
+/// are authored by the sprite-sheet slicer (P8.2) and always serde-persisted.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Default)]
+pub struct AtlasRect {
+    pub min: Vec2d,
+    pub max: Vec2d,
+}
+
+impl Default for AtlasRect {
+    fn default() -> Self {
+        Self {
+            min: Vec2d::ZERO,
+            max: Vec2d::ONE,
+        }
+    }
+}
+
+/// A 2D sprite: a textured, tinted, sortable quad. Rendered by the 2D pass
+/// (`inf-render-2d` batcher + `inf-render` sprite pass) over the 3D scene.
+///
+/// Visibility follows the shared [`Visibility`]/`ComputedVisibility` components
+/// (like meshes) — there is no per-sprite `visible` field.
+///
+/// Additive component (P8.1a): every new field carries `#[serde(default)]` so
+/// levels saved before this component existed still load.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Sprite {
+    /// Texture/atlas asset GUID; `None` → the renderer's 1×1 white fallback.
+    ///
+    /// `#[reflect(ignore)]`: the reflection Details grid has no asset-ref widget
+    /// yet (a follow-up shared with material texture refs), so the texture is
+    /// assigned via drag-drop rather than typed. It is still serde-persisted.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub texture: Option<Uuid>,
+    /// Quad extent in world units (width, height).
+    pub size: Vec2d,
+    /// Normalized anchor in `[0,1]²`; `(0.5, 0.5)` centers the quad.
+    pub pivot: Vec2d,
+    /// Linear tint multiplied with the sampled texel (straight alpha).
+    pub color: Color,
+    /// Atlas UV sub-rect (defaults to the full texture).
+    #[serde(default)]
+    pub atlas_rect: AtlasRect,
+    /// Coarse draw bucket (lower draws further back).
+    #[serde(default)]
+    pub sorting_layer: i32,
+    /// Fine ordering within a layer (lower draws further back).
+    #[serde(default)]
+    pub order: i32,
+    #[serde(default)]
+    pub flip_x: bool,
+    #[serde(default)]
+    pub flip_y: bool,
+}
+
+impl Default for Sprite {
+    fn default() -> Self {
+        Self {
+            texture: None,
+            size: Vec2d::ONE,
+            pivot: Vec2d::splat(0.5),
+            color: Color::WHITE,
+            atlas_rect: AtlasRect::default(),
+            sorting_layer: 0,
+            order: 0,
+            flip_x: false,
+            flip_y: false,
+        }
+    }
+}
+
 #[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum LightKind {
     #[default]
@@ -250,5 +326,47 @@ impl Default for Camera {
             near: 0.05,
             far: 10_000.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sprite_serde_round_trips() {
+        let s = Sprite {
+            texture: Some(Uuid::from_u128(0x1234_5678_9abc_def0_1122_3344_5566_7788)),
+            size: Vec2d::new(2.0, 3.0),
+            pivot: Vec2d::new(0.25, 0.75),
+            color: Color::new(0.2, 0.4, 0.6, 0.8),
+            atlas_rect: AtlasRect {
+                min: Vec2d::new(0.1, 0.2),
+                max: Vec2d::new(0.9, 0.8),
+            },
+            sorting_layer: -3,
+            order: 5,
+            flip_x: true,
+            flip_y: false,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Sprite = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn sprite_defaults_fill_missing_fields() {
+        // A pre-P8 payload predates every additive field: only the always-present
+        // fields are stored. `#[serde(default)]` must reconstruct the rest.
+        let minimal = r#"{
+            "texture": null,
+            "size": { "x": 1.0, "y": 1.0 },
+            "pivot": { "x": 0.5, "y": 0.5 },
+            "color": { "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0 }
+        }"#;
+        let s: Sprite = serde_json::from_str(minimal).unwrap();
+        assert_eq!(s, Sprite::default());
+        assert_eq!(s.atlas_rect, AtlasRect::default());
+        assert_eq!(s.sorting_layer, 0);
     }
 }

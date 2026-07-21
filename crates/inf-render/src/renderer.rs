@@ -137,6 +137,9 @@ impl EngineRenderer {
         graph.add(passes::sky::SkyNode::new(gpu, &view_bgl));
         graph.add(passes::mesh::MeshNode::new(gpu, &view_bgl));
         graph.add(passes::grid::GridNode::new(gpu, &view_bgl));
+        // Sprites draw over the 3D scene (depth-tested, not depth-writing) and
+        // under the debug/gizmo overlay.
+        graph.add(passes::sprite::SpriteNode::new(gpu, &view_bgl));
         graph.add(passes::debug::DebugNode::new(gpu, &view_bgl));
         graph.add(passes::resolve::ResolveNode);
         // The mask feeds the composite's outline dilate; it renders into the

@@ -1,1 +1,355 @@
-//! 2D rendering: sprite batcher, tilemaps, 2D lights.
+//! 2D rendering data + the CPU sprite batcher (P8.1a).
+//!
+//! # Seam: `inf-render-2d` ↔ `inf-render`
+//!
+//! This crate is the **pure-CPU data + batching half** of the 2D pipeline. It
+//! owns [`SpriteInstance`], the sort/batch algorithm, and the quad / UV / pivot
+//! math (mirrored 1:1 by the vertex shader) — with **no wgpu dependency**.
+//!
+//! `inf-render` depends on this crate, embeds `Vec<SpriteInstance>` in its
+//! `RenderScene`, and owns the **GPU half** (texture cache + sprite render pass)
+//! in its `passes::sprite` module.
+//!
+//! We chose this "batcher/data crate" seam — documented as acceptable in the
+//! P8.1a brief — rather than putting the render-graph node here, because the
+//! node must be constructed by `inf-render::EngineRenderer`; a node living in
+//! `inf-render-2d` would force `inf-render → inf-render-2d → inf-render`, a
+//! dependency cycle. Keeping the node in `inf-render` and the batcher here is
+//! acyclic and keeps the CPU math independently unit-testable.
+//!
+//! ## Alpha convention
+//! Sprites use **straight (non-premultiplied) alpha**: the fragment returns
+//! `texel * tint` unmodified and the pipeline blends with
+//! `src=SrcAlpha, dst=OneMinusSrcAlpha`. See `inf-render`'s sprite pass.
+
+use glam::{DVec3, Vec2};
+
+/// Opaque GPU texture identity (a hash of an asset GUID, see
+/// [`handle_from_guid`]). `0` is reserved to mean "no texture" → the renderer's
+/// 1×1 white fallback.
+pub type TextureHandle = u64;
+
+/// The reserved handle meaning "no texture / use the 1×1 white fallback".
+pub const WHITE_TEXTURE: TextureHandle = 0;
+
+/// One CPU-side sprite ready for batching. World position is f64 (the render
+/// pass rebases it against the floating origin, exactly like mesh instances);
+/// everything else is render-space f32.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpriteInstance {
+    /// World-space position of the sprite's pivot (f64 — architecture rule 3).
+    pub position: DVec3,
+    /// Sprite extent in world units (width, height).
+    pub size: Vec2,
+    /// Normalized anchor in `[0,1]²` — `(0.5, 0.5)` centers the quad on
+    /// `position`, `(0,0)` bottom-left, `(1,1)` top-right.
+    pub pivot: Vec2,
+    /// Rotation about +Z (world), radians, CCW.
+    pub rotation: f32,
+    /// Atlas sub-rect: minimum UV (top-left of the source region).
+    pub uv_min: Vec2,
+    /// Atlas sub-rect: maximum UV (bottom-right of the source region).
+    pub uv_max: Vec2,
+    /// Linear straight-alpha tint (rgba), multiplied with the texel.
+    pub color: [f32; 4],
+    /// Which GPU texture to sample; [`WHITE_TEXTURE`] = the white fallback.
+    pub texture: TextureHandle,
+    /// Coarse draw bucket (lower = further back).
+    pub sorting_layer: i32,
+    /// Fine ordering within a layer (lower = further back).
+    pub order: i32,
+    pub flip_x: bool,
+    pub flip_y: bool,
+}
+
+impl Default for SpriteInstance {
+    fn default() -> Self {
+        Self {
+            position: DVec3::ZERO,
+            size: Vec2::ONE,
+            pivot: Vec2::splat(0.5),
+            rotation: 0.0,
+            uv_min: Vec2::ZERO,
+            uv_max: Vec2::ONE,
+            color: [1.0; 4],
+            texture: WHITE_TEXTURE,
+            sorting_layer: 0,
+            order: 0,
+            flip_x: false,
+            flip_y: false,
+        }
+    }
+}
+
+impl SpriteInstance {
+    /// A centered, full-UV, white-tinted sprite at `position`.
+    pub fn at(position: DVec3) -> Self {
+        Self {
+            position,
+            ..Default::default()
+        }
+    }
+}
+
+/// The painter-sort key: `(sorting_layer, order, texture)`. Layer/order impose
+/// the required draw order; the texture tie-break lets same-position sprites
+/// batch by texture (their relative order is undefined anyway, so grouping is
+/// free). Sorting with a **stable** sort keeps input order among fully-equal
+/// keys — the determinism guarantee.
+#[inline]
+pub fn sort_key(s: &SpriteInstance) -> (i32, i32, TextureHandle) {
+    (s.sorting_layer, s.order, s.texture)
+}
+
+/// A contiguous run of sorted sprites sharing one texture → one draw call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpriteBatch {
+    pub texture: TextureHandle,
+    /// First instance index into [`BatchedSprites::instances`].
+    pub start: u32,
+    /// Number of instances in this run.
+    pub count: u32,
+}
+
+/// The batcher output: sprites in final draw order plus per-texture draw runs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BatchedSprites {
+    /// Sprites in draw order (painter-sorted).
+    pub instances: Vec<SpriteInstance>,
+    /// Draw runs; each is a maximal run of equal-texture consecutive sprites.
+    pub batches: Vec<SpriteBatch>,
+}
+
+/// Sort `sprites` into draw order and split them into per-texture batches.
+///
+/// Sorting is **stable** by `(layer, order, texture)`, so:
+/// * later layers/orders always draw on top (painter's algorithm), and
+/// * sprites that are fully order-equal keep their input order (determinism).
+///
+/// Batches are maximal runs of consecutive equal-texture sprites in that order,
+/// so a texture can legitimately appear in several batches when interleaved by
+/// order — the minimum number of state changes the ordering constraint allows.
+pub fn batch_sprites(sprites: &[SpriteInstance]) -> BatchedSprites {
+    let mut instances = sprites.to_vec();
+    // `sort_by_key` is a stable sort — equal keys keep input order.
+    instances.sort_by_key(sort_key);
+
+    let mut batches = Vec::new();
+    let mut i = 0;
+    while i < instances.len() {
+        let texture = instances[i].texture;
+        let start = i;
+        while i < instances.len() && instances[i].texture == texture {
+            i += 1;
+        }
+        batches.push(SpriteBatch {
+            texture,
+            start: start as u32,
+            count: (i - start) as u32,
+        });
+    }
+    BatchedSprites { instances, batches }
+}
+
+/// Unit-quad corner `(x, y)` in `{0,1}²` for a triangle-strip vertex index
+/// `0..4`: `0=(0,0) 1=(1,0) 2=(0,1) 3=(1,1)`. **Must** match the `vs` entry in
+/// `sprite.wgsl` (`x = vi & 1`, `y = (vi >> 1) & 1`).
+#[inline]
+pub fn unit_corner(vertex_index: u32) -> Vec2 {
+    Vec2::new((vertex_index & 1) as f32, ((vertex_index >> 1) & 1) as f32)
+}
+
+/// The pivot-relative, size-scaled, Z-rotated **local plane offset** of corner
+/// `vertex_index` (added to the sprite's render-local center in the shader).
+/// Mirrors `sprite.wgsl` exactly so tests validate the shipped math.
+pub fn corner_offset(s: &SpriteInstance, vertex_index: u32) -> Vec2 {
+    let c = unit_corner(vertex_index);
+    let local = Vec2::new((c.x - s.pivot.x) * s.size.x, (c.y - s.pivot.y) * s.size.y);
+    let (sin, cos) = s.rotation.sin_cos();
+    Vec2::new(local.x * cos - local.y * sin, local.x * sin + local.y * cos)
+}
+
+/// The texture UV of corner `vertex_index`, applying the atlas rect and flips.
+/// The quad's +Y (top, `corner.y == 1`) maps to `uv_min.y` (texture top), since
+/// texture V grows downward. Mirrors `sprite.wgsl` exactly.
+pub fn corner_uv(s: &SpriteInstance, vertex_index: u32) -> Vec2 {
+    let c = unit_corner(vertex_index);
+    let mut u = c.x;
+    let mut v = 1.0 - c.y;
+    if s.flip_x {
+        u = 1.0 - u;
+    }
+    if s.flip_y {
+        v = 1.0 - v;
+    }
+    Vec2::new(
+        s.uv_min.x + (s.uv_max.x - s.uv_min.x) * u,
+        s.uv_min.y + (s.uv_max.y - s.uv_min.y) * v,
+    )
+}
+
+/// Map a 128-bit asset GUID to a non-zero [`TextureHandle`]. The renderer keys
+/// its GPU texture cache on this. `0` (the white-fallback sentinel) is never
+/// produced.
+#[inline]
+pub fn handle_from_guid(guid: u128) -> TextureHandle {
+    let lo = guid as u64;
+    let hi = (guid >> 64) as u64;
+    let h = lo ^ hi.rotate_left(32);
+    // Never collide with the white-fallback sentinel.
+    if h == WHITE_TEXTURE {
+        0xffff_ffff_ffff_ffff
+    } else {
+        h
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sprite(layer: i32, order: i32, texture: TextureHandle) -> SpriteInstance {
+        SpriteInstance {
+            sorting_layer: layer,
+            order,
+            texture,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sort_orders_by_layer_then_order_then_texture() {
+        let input = vec![
+            sprite(1, 0, 10),
+            sprite(0, 5, 10),
+            sprite(0, 0, 20),
+            sprite(0, 0, 10),
+        ];
+        let out = batch_sprites(&input);
+        let keys: Vec<_> = out.instances.iter().map(sort_key).collect();
+        assert_eq!(keys, vec![(0, 0, 10), (0, 0, 20), (0, 5, 10), (1, 0, 10)]);
+    }
+
+    #[test]
+    fn sort_is_stable_for_equal_keys() {
+        // Three sprites with an identical key but distinguishable positions:
+        // a stable sort must preserve their input order.
+        let mut a = sprite(0, 0, 7);
+        a.position = DVec3::new(1.0, 0.0, 0.0);
+        let mut b = sprite(0, 0, 7);
+        b.position = DVec3::new(2.0, 0.0, 0.0);
+        let mut c = sprite(0, 0, 7);
+        c.position = DVec3::new(3.0, 0.0, 0.0);
+        let out = batch_sprites(&[a, b, c]);
+        let xs: Vec<f64> = out.instances.iter().map(|s| s.position.x).collect();
+        assert_eq!(xs, vec![1.0, 2.0, 3.0]);
+        // One batch (all share the texture).
+        assert_eq!(out.batches.len(), 1);
+        assert_eq!(out.batches[0].count, 3);
+    }
+
+    #[test]
+    fn batches_split_per_texture_run() {
+        // Same layer/order, three textures interleaved after the sort.
+        let out = batch_sprites(&[
+            sprite(0, 0, 30),
+            sprite(0, 0, 10),
+            sprite(0, 0, 20),
+            sprite(0, 0, 10),
+        ]);
+        // Sorted by texture within the equal (layer, order): 10,10,20,30.
+        let batches = &out.batches;
+        assert_eq!(batches.len(), 3);
+        assert_eq!(
+            batches[0],
+            SpriteBatch {
+                texture: 10,
+                start: 0,
+                count: 2
+            }
+        );
+        assert_eq!(
+            batches[1],
+            SpriteBatch {
+                texture: 20,
+                start: 2,
+                count: 1
+            }
+        );
+        assert_eq!(
+            batches[2],
+            SpriteBatch {
+                texture: 30,
+                start: 3,
+                count: 1
+            }
+        );
+    }
+
+    #[test]
+    fn texture_can_reappear_when_order_forces_it() {
+        // T10 at order 0, T20 at order 1, T10 at order 2 — the middle sprite
+        // forbids merging the two T10 draws.
+        let out = batch_sprites(&[sprite(0, 0, 10), sprite(0, 2, 10), sprite(0, 1, 20)]);
+        let tex: Vec<_> = out.batches.iter().map(|b| (b.texture, b.count)).collect();
+        assert_eq!(tex, vec![(10, 1), (20, 1), (10, 1)]);
+    }
+
+    #[test]
+    fn pivot_centers_and_corners_span_size() {
+        let s = SpriteInstance {
+            size: Vec2::new(4.0, 2.0),
+            pivot: Vec2::splat(0.5),
+            ..Default::default()
+        };
+        // Centered pivot: bottom-left corner is (-w/2, -h/2), top-right (+w/2,+h/2).
+        assert_eq!(corner_offset(&s, 0), Vec2::new(-2.0, -1.0));
+        assert_eq!(corner_offset(&s, 3), Vec2::new(2.0, 1.0));
+        // Bottom-left pivot puts the origin at the sprite's bottom-left corner.
+        let bl = SpriteInstance {
+            pivot: Vec2::ZERO,
+            ..s
+        };
+        assert_eq!(corner_offset(&bl, 0), Vec2::new(0.0, 0.0));
+        assert_eq!(corner_offset(&bl, 3), Vec2::new(4.0, 2.0));
+    }
+
+    #[test]
+    fn rotation_ninety_degrees_maps_x_to_y() {
+        let s = SpriteInstance {
+            size: Vec2::new(2.0, 2.0),
+            pivot: Vec2::ZERO,
+            rotation: std::f32::consts::FRAC_PI_2,
+            ..Default::default()
+        };
+        // Corner (1,0)*size = (2,0) rotated +90° → (0, 2).
+        let o = corner_offset(&s, 1);
+        assert!((o - Vec2::new(0.0, 2.0)).length() < 1e-5, "{o:?}");
+    }
+
+    #[test]
+    fn uv_rect_maps_corners_and_flips() {
+        let s = SpriteInstance {
+            uv_min: Vec2::new(0.25, 0.5),
+            uv_max: Vec2::new(0.75, 1.0),
+            ..Default::default()
+        };
+        // Top-left quad corner (0,1) → texture top-left (uv_min).
+        assert_eq!(corner_uv(&s, 2), Vec2::new(0.25, 0.5));
+        // Bottom-right quad corner (1,0) → texture bottom-right (uv_max).
+        assert_eq!(corner_uv(&s, 1), Vec2::new(0.75, 1.0));
+
+        // flip_x swaps left/right; flip_y swaps top/bottom.
+        let fx = SpriteInstance { flip_x: true, ..s };
+        assert_eq!(corner_uv(&fx, 2), Vec2::new(0.75, 0.5));
+        let fy = SpriteInstance { flip_y: true, ..s };
+        assert_eq!(corner_uv(&fy, 2), Vec2::new(0.25, 1.0));
+    }
+
+    #[test]
+    fn handle_from_guid_is_never_the_white_sentinel() {
+        assert_ne!(handle_from_guid(0), WHITE_TEXTURE);
+        // Distinct GUIDs generally map to distinct handles.
+        assert_ne!(handle_from_guid(1), handle_from_guid(2));
+    }
+}

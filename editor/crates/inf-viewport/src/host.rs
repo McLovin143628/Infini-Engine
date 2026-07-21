@@ -7,13 +7,15 @@ use std::collections::HashMap;
 use glam::{DVec3, Vec2, Vec3};
 use inf_ecs::components::{
     ComputedVisibility, GlobalTransform, Light, LightKind as EcsLightKind, Material, MeshRef,
+    Sprite,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::scene::SceneDoc;
 use inf_math::FloatingOrigin;
 use inf_render::{
-    gizmo, EngineRenderer, GizmoDelta, GizmoDrag, GizmoMode, GpuContext, LightKind, MeshInstance,
-    Picker, RenderLight, RenderScene, RenderView, SurfaceChain,
+    gizmo, handle_from_guid, EngineRenderer, GizmoDelta, GizmoDrag, GizmoMode, GpuContext,
+    LightKind, MeshInstance, Picker, RenderLight, RenderScene, RenderView, SpriteInstance,
+    SurfaceChain,
 };
 use uuid::Uuid;
 
@@ -137,6 +139,7 @@ impl EngineHost {
     fn rebuild_scene(&mut self, doc: &SceneDoc) {
         self.scene.instances.clear();
         self.scene.lights.clear();
+        self.scene.sprites.clear();
         self.id_to_guid.clear();
         self.guid_to_id.clear();
 
@@ -160,6 +163,18 @@ impl EngineHost {
                         .map(|g| g.0)
                         .unwrap_or(glam::DAffine3::IDENTITY);
                     self.scene.lights.push(project_light(light, &affine));
+                }
+            }
+
+            // Sprites project into the 2D sprite list (P8.1a). A sprite entity
+            // usually has no MeshRef, so this happens before the mesh gate.
+            if let Some(sprite) = w.get::<Sprite>(entity) {
+                if visible {
+                    let translation = w
+                        .get::<GlobalTransform>(entity)
+                        .map(|g| g.translation())
+                        .unwrap_or(DVec3::ZERO);
+                    self.scene.sprites.push(project_sprite(sprite, translation));
                 }
             }
 
@@ -237,6 +252,42 @@ fn project_light(light: &Light, affine: &glam::DAffine3) -> RenderLight {
             position: translation,
             range: 0.0,
         },
+    }
+}
+
+/// Project an ECS [`Sprite`] (+ its world position) into a renderer sprite.
+///
+/// The texture GUID maps to a `TextureHandle`, but the viewport thread has no
+/// asset-DB access yet, so no RGBA bytes are pushed to
+/// `RenderScene::pending_texture_uploads` — referenced sprites render as the
+/// renderer's white fallback tinted by `color` (a colored quad). Resolving the
+/// texture bytes in the viewport is the same documented follow-up as rendering
+/// imported mesh geometry (both need the asset DB threaded into the viewport;
+/// the headless golden test exercises the full textured path). Rotation is left
+/// at 0 for P8.1a (2D rotation tooling arrives in P8.2).
+fn project_sprite(sprite: &Sprite, translation: DVec3) -> SpriteInstance {
+    SpriteInstance {
+        position: translation,
+        size: Vec2::new(sprite.size.x as f32, sprite.size.y as f32),
+        pivot: Vec2::new(sprite.pivot.x as f32, sprite.pivot.y as f32),
+        rotation: 0.0,
+        uv_min: Vec2::new(
+            sprite.atlas_rect.min.x as f32,
+            sprite.atlas_rect.min.y as f32,
+        ),
+        uv_max: Vec2::new(
+            sprite.atlas_rect.max.x as f32,
+            sprite.atlas_rect.max.y as f32,
+        ),
+        color: sprite.color.to_array(),
+        texture: sprite
+            .texture
+            .map(|u| handle_from_guid(u.as_u128()))
+            .unwrap_or(inf_render::WHITE_TEXTURE),
+        sorting_layer: sprite.sorting_layer,
+        order: sprite.order,
+        flip_x: sprite.flip_x,
+        flip_y: sprite.flip_y,
     }
 }
 

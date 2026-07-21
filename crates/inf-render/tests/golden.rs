@@ -15,13 +15,13 @@
 
 use std::path::PathBuf;
 
-use glam::{DVec3, Quat, Vec3};
+use glam::{DVec3, Quat, Vec2, Vec3};
 use inf_math::FloatingOrigin;
 use inf_render::gizmo::{self, GizmoAxis, GizmoMode};
 use inf_render::golden::{image_diff, within_tolerance};
 use inf_render::{
     EngineRenderer, GpuContext, HeadlessTarget, LightKind, MeshInstance, RenderLight, RenderScene,
-    RenderView, HEADLESS_FORMAT,
+    RenderView, SpriteInstance, SpriteTextureUpload, HEADLESS_FORMAT,
 };
 
 const W: u32 = 320;
@@ -272,4 +272,110 @@ fn golden_pbr_materials() {
     // The scene is lit: some pixel is clearly brighter than the dark backdrop.
     let lit = img.chunks(4).any(|p| p[0] > 90 || p[1] > 90 || p[2] > 90);
     assert!(lit, "expected a lit PBR pixel");
+}
+
+/// A view looking straight down -Z at the world XY plane, so sprites (which lie
+/// in that plane facing +Z) face the camera head-on.
+fn front_view() -> RenderView {
+    RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: DVec3::new(0.0, 0.0, 6.0),
+        forward: Vec3::NEG_Z,
+        up: Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 0.05,
+        width: W,
+        height: H,
+    }
+}
+
+/// Procedural checkerboard: `cells×cells` grid over `size×size` px alternating
+/// `color` and white; `alpha` sets the color cells' opacity.
+fn checkerboard(size: u32, cells: u32, color: [u8; 3], alpha: u8) -> Vec<u8> {
+    let cell = (size / cells).max(1);
+    let mut v = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let on = ((x / cell) + (y / cell)).is_multiple_of(2);
+            if on {
+                v.extend_from_slice(&[color[0], color[1], color[2], alpha]);
+            } else {
+                v.extend_from_slice(&[235, 235, 235, 255]);
+            }
+        }
+    }
+    v
+}
+
+/// 2D sprite golden (P8.1a): two textured, alpha-blended sprites on distinct
+/// sorting layers, backed by in-test procedural checkerboards (no binary
+/// fixtures). Exercises the batcher → texture cache → sprite pass path in CI
+/// (determinism gate via `check_golden`; strict pixel diff is opt-in).
+#[test]
+fn golden_sprites_2d() {
+    let Some(gpu) = gpu_or_skip() else { return };
+
+    const TEX_A: u64 = 0xA1;
+    const TEX_B: u64 = 0xB2;
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        pending_texture_uploads: vec![
+            SpriteTextureUpload {
+                handle: TEX_A,
+                width: 64,
+                height: 64,
+                rgba8: checkerboard(64, 8, [220, 40, 40], 255),
+            },
+            SpriteTextureUpload {
+                handle: TEX_B,
+                width: 64,
+                height: 64,
+                rgba8: checkerboard(64, 8, [40, 90, 220], 255),
+            },
+        ],
+        ..Default::default()
+    };
+
+    // Two overlapping sprites: the blue one (higher layer) draws over the red.
+    scene.sprites.push(SpriteInstance {
+        position: DVec3::new(-0.6, 0.0, 0.0),
+        size: Vec2::new(2.4, 2.4),
+        color: [1.0, 1.0, 1.0, 1.0],
+        texture: TEX_A,
+        sorting_layer: 0,
+        ..Default::default()
+    });
+    scene.sprites.push(SpriteInstance {
+        position: DVec3::new(0.6, 0.0, 0.0),
+        size: Vec2::new(2.4, 2.4),
+        color: [1.0, 1.0, 1.0, 1.0],
+        texture: TEX_B,
+        sorting_layer: 1,
+        ..Default::default()
+    });
+    scene.mark_dirty();
+
+    let img = check_golden(&gpu, "sprites_2d", &scene, &front_view());
+
+    // Both sprites are visible: a red checker cell (texture A, its non-overlapped
+    // left half) and a blue one (texture B, drawn on top on the higher layer),
+    // plus the shared bright checker cells.
+    let mut red = false;
+    let mut blue = false;
+    let mut bright = false;
+    for chunk in img.chunks(4) {
+        let (r, g, b) = (chunk[0] as i32, chunk[1] as i32, chunk[2] as i32);
+        if r > 140 && r - b > 60 && r - g > 60 {
+            red = true;
+        }
+        if b > 120 && b - r > 40 {
+            blue = true;
+        }
+        if r > 200 && g > 200 && b > 200 {
+            bright = true;
+        }
+    }
+    assert!(red, "expected a red sprite checker cell");
+    assert!(blue, "expected a blue sprite checker cell");
+    assert!(bright, "expected bright sprite checker cells");
 }

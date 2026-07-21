@@ -8,6 +8,20 @@ use glam::{DVec3, Quat, Vec3};
 
 use crate::debug_draw::DebugDraw;
 
+pub use inf_render_2d::{SpriteInstance, TextureHandle};
+
+/// A one-shot request to upload an RGBA8 texture into the sprite pass's GPU
+/// cache, keyed by [`TextureHandle`]. The pass dedups by handle, so re-listing
+/// an already-uploaded texture is a cheap no-op. Straight RGBA8 rows,
+/// `width*height*4` bytes, sRGB-encoded base color.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpriteTextureUpload {
+    pub handle: TextureHandle,
+    pub width: u32,
+    pub height: u32,
+    pub rgba8: Vec<u8>,
+}
+
 /// Reserved instance id meaning "nothing" (ID buffer clear value).
 pub const ID_NONE: u32 = 0;
 
@@ -100,7 +114,13 @@ pub struct RenderScene {
     /// Scene lights (directional + point). Empty ⇒ the shader falls back to a
     /// default editor sun so unlit demo scenes still render.
     pub lights: Vec<RenderLight>,
-    /// Bump on every change to `instances`/`lights` — gates buffer re-upload.
+    /// 2D sprites (batched + drawn by the sprite pass over the 3D scene).
+    pub sprites: Vec<SpriteInstance>,
+    /// Textures to hand to the sprite pass's GPU cache (drained/deduped by
+    /// handle). The host populates this once per newly-referenced texture.
+    pub pending_texture_uploads: Vec<SpriteTextureUpload>,
+    /// Bump on every change to `instances`/`lights`/`sprites` — gates buffer
+    /// re-upload.
     pub version: u64,
     pub sky: SkyParams,
     pub grid_enabled: bool,
