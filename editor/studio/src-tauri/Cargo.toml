@@ -32,6 +32,7 @@ inf-packager = { workspace = true }
 inf-graph = { workspace = true }
 inf-ecs = { workspace = true }
 inf-pcg = { workspace = true }
+inf-anim = { workspace = true }
 inf-blueprint = { workspace = true }
 inf-transpile = { workspace = true }
 inf-viewport = { workspace = true }

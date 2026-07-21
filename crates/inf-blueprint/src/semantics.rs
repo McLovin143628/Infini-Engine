@@ -18,7 +18,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::interp::{eval_fn_traced, Debug, Host, Physics2dHost, RunError, Trace, Value};
+use crate::interp::{
+    eval_fn_traced, Debug, Host, Physics2dHost, Physics3dHost, RunError, Trace, Value,
+};
 use crate::{BlueprintFn, Lit, Param, Ty};
 
 /// Schema version stamped into every `.inf_act`/`.inf_fn` payload.
@@ -254,6 +256,12 @@ impl Host for ActorHost<'_> {
     /// physics-capable host reaches `physics2d.*` nodes through the actor layer.
     fn physics(&mut self) -> Option<&mut dyn Physics2dHost> {
         self.inner.physics()
+    }
+
+    /// Forward 3D physics likewise, so `physics3d.*` nodes reach the engine host
+    /// through the actor layer (the `d3` mirror of [`physics`](Self::physics)).
+    fn physics3d(&mut self) -> Option<&mut dyn Physics3dHost> {
+        self.inner.physics3d()
     }
 }
 

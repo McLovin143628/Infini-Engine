@@ -2893,6 +2893,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "glam 0.33.2",
+ "inf-anim",
  "inf-asset",
  "inf-blueprint",
  "inf-ecs",
@@ -2984,6 +2985,7 @@ version = "0.1.0"
 dependencies = [
  "glam 0.33.2",
  "ignore",
+ "inf-anim",
  "inf-asset",
  "inf-blueprint",
  "inf-core",

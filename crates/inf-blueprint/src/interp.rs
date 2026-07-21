@@ -110,6 +110,17 @@ pub trait Host {
     fn physics(&mut self) -> Option<&mut dyn Physics2dHost> {
         None
     }
+
+    /// Optional access to a **3D** physics world, powering the `physics3d.*`
+    /// blueprint node kit (P11.3). The exact `d3` mirror of [`physics`](Self::physics):
+    /// `physics3d.*` nodes are ordinary [`Expr::Call`]s the interpreter routes to
+    /// this accessor with **no IR change**. Default `None` — a host without a 3D
+    /// world makes every `physics3d.*` node report a clean "no physics world
+    /// available" error. A host that owns a
+    /// [`PhysicsBridge3D`](../../inf_physics/index.html) overrides this.
+    fn physics3d(&mut self) -> Option<&mut dyn Physics3dHost> {
+        None
+    }
 }
 
 /// The result of a [`Physics2dHost::move_and_slide`] call.
@@ -226,6 +237,129 @@ pub(crate) fn dispatch_physics2d(
             Ok(Value::Unit)
         }
         _ => Err(err(format!("unknown physics2d node `{key}`"))),
+    }
+}
+
+/// The result of a [`Physics3dHost::move_and_slide`] call (the `d3` mirror of
+/// [`MoveResult2d`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MoveResult3d {
+    /// The collision-resolved translation actually applied to the character.
+    pub applied: [f64; 3],
+    /// Whether the character ended the move grounded.
+    pub grounded: bool,
+}
+
+/// A ray hit returned by [`Physics3dHost::raycast`] (the `d3` mirror of
+/// [`RayHit2d`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RayHit3d {
+    /// World-space point of impact.
+    pub point: [f64; 3],
+    /// Surface normal at the impact.
+    pub normal: [f64; 3],
+}
+
+/// The 3D-physics accessor the interpreter routes `physics3d.*` nodes to — the
+/// exact `d3` mirror of [`Physics2dHost`]. Generated Rust emits free calls
+/// (`physics3d::move_and_slide(entity, mx, my, mz)`,
+/// `physics3d::raycast::point_z(...)`, …) a runtime shim binds to a value
+/// implementing this trait (backed by an `inf_physics` `PhysicsBridge3D`).
+/// Entities are opaque `i64` ids; vectors are split `[x, y, z]` because the
+/// blueprint IR has no first-class `Vec3` value yet (the same documented
+/// follow-up as the 2D kit). Every method returns `Result<_, String>`.
+pub trait Physics3dHost {
+    /// Move-and-slide `entity` by `motion`, resolving collisions; returns the
+    /// applied translation and whether it ended grounded.
+    fn move_and_slide(&mut self, entity: i64, motion: [f64; 3]) -> Result<MoveResult3d, String>;
+    /// Whether `entity` is currently touching the ground.
+    fn is_grounded(&mut self, entity: i64) -> Result<bool, String>;
+    /// Cast a ray from `origin` along `dir` up to `max`; `None` on a miss.
+    fn raycast(
+        &mut self,
+        origin: [f64; 3],
+        dir: [f64; 3],
+        max: f64,
+    ) -> Result<Option<RayHit3d>, String>;
+    /// Set `entity`'s linear velocity.
+    fn set_velocity(&mut self, entity: i64, v: [f64; 3]) -> Result<(), String>;
+    /// Read `entity`'s linear velocity.
+    fn get_velocity(&mut self, entity: i64) -> Result<[f64; 3], String>;
+    /// Apply an instantaneous linear impulse to `entity`.
+    fn apply_impulse(&mut self, entity: i64, v: [f64; 3]) -> Result<(), String>;
+}
+
+/// Route a `physics3d.*` [`Expr::Call`] to the host's [`Physics3dHost`] — the
+/// `d3` mirror of [`dispatch_physics2d`]. The call `path` is `["physics3d", op]`
+/// or `["physics3d", op, field]` for the multi-component queries (a vector result
+/// split into scalar output pins), so the interpreter and the transpiled Rust
+/// agree field-for-field.
+pub(crate) fn dispatch_physics3d(
+    host: &mut dyn Host,
+    path: &[String],
+    args: &[Value],
+) -> Result<Value, RunError> {
+    let key = path.join("::");
+    let err = |msg: String| RunError::Host(key.clone(), msg);
+    let phys = host
+        .physics3d()
+        .ok_or_else(|| err("no physics world available".into()))?;
+
+    let op = path.get(1).map(String::as_str).unwrap_or("");
+    let field = path.get(2).map(String::as_str);
+    let ent = |i: usize| args.get(i).map_or(Ok(0), Value::as_int);
+    let flt = |i: usize| args.get(i).map_or(Ok(0.0), Value::as_float);
+    let he = |e: String| RunError::Host(key.clone(), e);
+
+    match (op, field) {
+        ("move_and_slide", None) => {
+            let r = phys
+                .move_and_slide(ent(0)?, [flt(1)?, flt(2)?, flt(3)?])
+                .map_err(he)?;
+            // This node's single data output is `grounded` (the applied vector is
+            // the same Vec3-pin follow-up as the 2D kit).
+            Ok(Value::Bool(r.grounded))
+        }
+        ("is_grounded", None) => Ok(Value::Bool(phys.is_grounded(ent(0)?).map_err(he)?)),
+        ("raycast", Some(field)) => {
+            let hit = phys
+                .raycast(
+                    [flt(0)?, flt(1)?, flt(2)?],
+                    [flt(3)?, flt(4)?, flt(5)?],
+                    flt(6)?,
+                )
+                .map_err(he)?;
+            Ok(match field {
+                "hit" => Value::Bool(hit.is_some()),
+                "point_x" => Value::Float(hit.map_or(0.0, |h| h.point[0])),
+                "point_y" => Value::Float(hit.map_or(0.0, |h| h.point[1])),
+                "point_z" => Value::Float(hit.map_or(0.0, |h| h.point[2])),
+                "normal_x" => Value::Float(hit.map_or(0.0, |h| h.normal[0])),
+                "normal_y" => Value::Float(hit.map_or(0.0, |h| h.normal[1])),
+                "normal_z" => Value::Float(hit.map_or(0.0, |h| h.normal[2])),
+                other => return Err(err(format!("unknown raycast field `{other}`"))),
+            })
+        }
+        ("get_velocity", Some(field)) => {
+            let v = phys.get_velocity(ent(0)?).map_err(he)?;
+            Ok(match field {
+                "x" => Value::Float(v[0]),
+                "y" => Value::Float(v[1]),
+                "z" => Value::Float(v[2]),
+                other => return Err(err(format!("unknown get_velocity field `{other}`"))),
+            })
+        }
+        ("set_velocity", None) => {
+            phys.set_velocity(ent(0)?, [flt(1)?, flt(2)?, flt(3)?])
+                .map_err(he)?;
+            Ok(Value::Unit)
+        }
+        ("apply_impulse", None) => {
+            phys.apply_impulse(ent(0)?, [flt(1)?, flt(2)?, flt(3)?])
+                .map_err(he)?;
+            Ok(Value::Unit)
+        }
+        _ => Err(err(format!("unknown physics3d node `{key}`"))),
     }
 }
 
@@ -420,6 +554,10 @@ impl Interp<'_> {
                 // `vars::*` reaches actor state through the Host boundary.
                 if path.first().map(String::as_str) == Some("physics2d") {
                     dispatch_physics2d(self.host, path, &argv)
+                } else if path.first().map(String::as_str) == Some("physics3d") {
+                    // The `d3` mirror: `physics3d.*` nodes route to the host's
+                    // `Physics3dHost`, same no-IR-change pattern as `physics2d`.
+                    dispatch_physics3d(self.host, path, &argv)
                 } else {
                     self.host.call(path, &argv)
                 }

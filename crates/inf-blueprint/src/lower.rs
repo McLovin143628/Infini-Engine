@@ -668,6 +668,133 @@ mod tests {
         );
     }
 
+    /// A tiny 3D physics host: one entity with velocity + position that
+    /// `move_and_slide` integrates (the `d3` mirror of [`MockPhysics`]).
+    struct MockPhysics3d {
+        v: [f64; 3],
+        p: [f64; 3],
+    }
+
+    impl crate::interp::Host for MockPhysics3d {
+        fn call(&mut self, path: &[String], _args: &[Value]) -> Result<Value, crate::RunError> {
+            Err(crate::RunError::NoSuchHostFn(path.join("::")))
+        }
+        fn physics3d(&mut self) -> Option<&mut dyn crate::interp::Physics3dHost> {
+            Some(self)
+        }
+    }
+
+    impl crate::interp::Physics3dHost for MockPhysics3d {
+        fn move_and_slide(
+            &mut self,
+            _entity: i64,
+            motion: [f64; 3],
+        ) -> Result<crate::interp::MoveResult3d, String> {
+            for (p, m) in self.p.iter_mut().zip(motion) {
+                *p += m;
+            }
+            Ok(crate::interp::MoveResult3d {
+                applied: motion,
+                grounded: self.p[1] <= 0.0,
+            })
+        }
+        fn is_grounded(&mut self, _entity: i64) -> Result<bool, String> {
+            Ok(self.p[1] <= 0.0)
+        }
+        fn raycast(
+            &mut self,
+            _o: [f64; 3],
+            _d: [f64; 3],
+            _m: f64,
+        ) -> Result<Option<crate::interp::RayHit3d>, String> {
+            Ok(None)
+        }
+        fn set_velocity(&mut self, _entity: i64, v: [f64; 3]) -> Result<(), String> {
+            self.v = v;
+            Ok(())
+        }
+        fn get_velocity(&mut self, _entity: i64) -> Result<[f64; 3], String> {
+            Ok(self.v)
+        }
+        fn apply_impulse(&mut self, _entity: i64, v: [f64; 3]) -> Result<(), String> {
+            for (dst, src) in self.v.iter_mut().zip(v) {
+                *dst += src;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn lowers_and_runs_character_kit_3d() {
+        // begin_play → set_velocity(e, 4, -2, 3);
+        //   move_and_slide(e, get_velocity(e).x, .y, .z)
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let ent = g.insert("lit.int", NodeUi::default());
+        g.node_mut(ent)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Int(1));
+        let mk_float = |g: &mut Graph, v: f64| {
+            let n = g.insert("lit.float", NodeUi::default());
+            g.node_mut(n)
+                .unwrap()
+                .params
+                .insert("value".into(), ParamValue::Float(v));
+            n
+        };
+        let vx = mk_float(&mut g, 4.0);
+        let vy = mk_float(&mut g, -2.0);
+        let vz = mk_float(&mut g, 3.0);
+        let sv = g.insert("physics3d.set_velocity", NodeUi::default());
+        let getv = g.insert("physics3d.get_velocity", NodeUi::default());
+        let mas = g.insert("physics3d.move_and_slide", NodeUi::default());
+
+        wire(&mut g, ent, "value", sv, "entity");
+        wire(&mut g, vx, "value", sv, "vx");
+        wire(&mut g, vy, "value", sv, "vy");
+        wire(&mut g, vz, "value", sv, "vz");
+        wire(&mut g, ent, "value", getv, "entity");
+        wire(&mut g, ent, "value", mas, "entity");
+        wire(&mut g, getv, "x", mas, "motion_x");
+        wire(&mut g, getv, "y", mas, "motion_y");
+        wire(&mut g, getv, "z", mas, "motion_z");
+        wire(&mut g, bp, EXEC_THEN, sv, "exec");
+        wire(&mut g, sv, EXEC_THEN, mas, "exec");
+
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        let src = format!("{:?}", f.body);
+        assert!(src.contains("get_velocity"), "body: {src}");
+
+        let mut host = MockPhysics3d {
+            v: [0.0; 3],
+            p: [0.0; 3],
+        };
+        eval_fn(&f, &HashMap::new(), &mut host).unwrap();
+        // set_velocity(4,-2,3) → get_velocity=(4,-2,3) → move_and_slide adds it once.
+        assert_eq!(host.v, [4.0, -2.0, 3.0]);
+        assert_eq!(host.p, [4.0, -2.0, 3.0]);
+    }
+
+    #[test]
+    fn physics3d_node_without_a_world_errors_cleanly() {
+        use crate::interp::PureHost;
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let ent = g.insert("lit.int", NodeUi::default());
+        let sv = g.insert("physics3d.set_velocity", NodeUi::default());
+        wire(&mut g, ent, "value", sv, "entity");
+        wire(&mut g, bp, EXEC_THEN, sv, "exec");
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        let err = eval_fn(&f, &HashMap::new(), &mut PureHost).unwrap_err();
+        assert!(
+            matches!(&err, crate::RunError::Host(_, m) if m.contains("no physics world")),
+            "got {err:?}"
+        );
+    }
+
     #[test]
     fn lowers_branch() {
         // begin_play → branch(condition = 1 > 0) ? print("t") : print("f")

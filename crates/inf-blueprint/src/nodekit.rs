@@ -44,6 +44,7 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(flow_nodes());
     reg.register_all(action_nodes());
     reg.register_all(physics_nodes());
+    reg.register_all(physics3d_nodes());
     reg.register_all(input_nodes());
     reg
 }
@@ -273,6 +274,94 @@ fn physics_nodes() -> Vec<NodeDef> {
     ]
 }
 
+/// The 3D character-controller / physics kit (P11.3) — the exact `d3` mirror of
+/// [`physics_nodes`]. Execution reaches the 3D physics world through the
+/// interpreter [`Physics3dHost`](crate::interp::Physics3dHost); the transpiler
+/// emits the matching `physics3d::*` free calls. Entities are `Int` pins; 3D
+/// vectors are **split `_x`/`_y`/`_z` `Float` pins** (the IR still has no
+/// first-class `Vec3` value — the same documented follow-up as the 2D kit).
+///
+/// Exec actions (`move_and_slide`, `set_velocity`, `apply_impulse`) lower to an
+/// `ExprStmt`/`Let` host call; pure queries (`is_grounded`, `raycast`,
+/// `get_velocity`) lower to data-pin calls, with multi-component results
+/// (`raycast`, `get_velocity`) fanning each output pin to its own
+/// `physics3d::<op>::<field>` call — all through the **generic** lowerer
+/// ([`crate::lower::role_of`]), no physics3d-specific lowering code.
+fn physics3d_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new(
+            "physics3d.move_and_slide",
+            "Move and Slide (3D)",
+            "physics 3d",
+        )
+        .described("Slide an entity by a 3D motion vector, resolving collisions.")
+        .with_inputs(vec![
+            exec_in(),
+            PortDef::new("entity", PortType::Int).required(),
+            PortDef::new("motion_x", PortType::Float),
+            PortDef::new("motion_y", PortType::Float),
+            PortDef::new("motion_z", PortType::Float),
+        ])
+        .with_outputs(vec![
+            exec_out(EXEC_THEN),
+            PortDef::new("grounded", PortType::Bool),
+        ]),
+        NodeDef::new("physics3d.is_grounded", "Is Grounded (3D)", "physics 3d")
+            .described("Whether the entity is currently touching the ground.")
+            .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
+            .with_outputs(vec![PortDef::new("grounded", PortType::Bool)]),
+        NodeDef::new("physics3d.raycast", "Raycast (3D)", "physics 3d")
+            .described("Cast a 3D ray; reports hit + world point + surface normal.")
+            .with_inputs(vec![
+                PortDef::new("origin_x", PortType::Float),
+                PortDef::new("origin_y", PortType::Float),
+                PortDef::new("origin_z", PortType::Float),
+                PortDef::new("dir_x", PortType::Float),
+                PortDef::new("dir_y", PortType::Float),
+                PortDef::new("dir_z", PortType::Float),
+                PortDef::new("max", PortType::Float),
+            ])
+            .with_outputs(vec![
+                PortDef::new("hit", PortType::Bool),
+                PortDef::new("point_x", PortType::Float),
+                PortDef::new("point_y", PortType::Float),
+                PortDef::new("point_z", PortType::Float),
+                PortDef::new("normal_x", PortType::Float),
+                PortDef::new("normal_y", PortType::Float),
+                PortDef::new("normal_z", PortType::Float),
+            ]),
+        NodeDef::new("physics3d.set_velocity", "Set Velocity (3D)", "physics 3d")
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("vx", PortType::Float),
+                PortDef::new("vy", PortType::Float),
+                PortDef::new("vz", PortType::Float),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
+        NodeDef::new("physics3d.get_velocity", "Get Velocity (3D)", "physics 3d")
+            .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
+            .with_outputs(vec![
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+            ]),
+        NodeDef::new(
+            "physics3d.apply_impulse",
+            "Apply Impulse (3D)",
+            "physics 3d",
+        )
+        .with_inputs(vec![
+            exec_in(),
+            PortDef::new("entity", PortType::Int).required(),
+            PortDef::new("vx", PortType::Float),
+            PortDef::new("vy", PortType::Float),
+            PortDef::new("vz", PortType::Float),
+        ])
+        .with_outputs(vec![exec_out(EXEC_THEN)]),
+    ]
+}
+
 /// The input-state kit (P8.4): pure Bool queries the Simulate loop answers from
 /// the focused viewport's keyboard state. Both take the action/key **as a `Str`
 /// data input** (wire a `lit.str`) rather than a node param, so they lower with
@@ -366,6 +455,34 @@ mod tests {
         assert!(rc.input(EXEC_IN).is_none());
         assert_eq!(rc.output("point_x").unwrap().ty, PortType::Float);
         assert_eq!(rc.output("normal_y").unwrap().ty, PortType::Float);
+    }
+
+    #[test]
+    fn physics3d_kit_is_registered() {
+        let reg = blueprint_registry();
+        for id in [
+            "physics3d.move_and_slide",
+            "physics3d.is_grounded",
+            "physics3d.raycast",
+            "physics3d.set_velocity",
+            "physics3d.get_velocity",
+            "physics3d.apply_impulse",
+        ] {
+            assert!(reg.get(id).is_some(), "missing physics3d node {id}");
+        }
+        // move_and_slide is an exec action with x/y/z motion + a grounded output.
+        let mas = reg.get("physics3d.move_and_slide").unwrap();
+        assert!(mas.input(EXEC_IN).is_some());
+        assert_eq!(mas.input("motion_z").unwrap().ty, PortType::Float);
+        assert_eq!(mas.output("grounded").unwrap().ty, PortType::Bool);
+        // raycast is a pure query (no exec) with the split 3-component outputs.
+        let rc = reg.get("physics3d.raycast").unwrap();
+        assert!(rc.input(EXEC_IN).is_none());
+        assert_eq!(rc.output("point_z").unwrap().ty, PortType::Float);
+        assert_eq!(rc.output("normal_z").unwrap().ty, PortType::Float);
+        // get_velocity fans to x/y/z.
+        let gv = reg.get("physics3d.get_velocity").unwrap();
+        assert_eq!(gv.output("z").unwrap().ty, PortType::Float);
     }
 
     #[test]
