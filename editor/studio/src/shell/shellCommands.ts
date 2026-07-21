@@ -74,6 +74,7 @@ export function bootstrapShellCommands(): void {
   setCommandHandler("window.problems", panelToggle("problems"));
   setCommandHandler("window.worldSettings", panelToggle("worldSettings"));
   setCommandHandler("window.placeActors", panelToggle("placeActors"));
+  setCommandHandler("window.tilemap", panelToggle("tilemap"));
 
   // Sorting-layer manager dialog (P8.2a).
   setCommandHandler("window.sortingLayers", () => {

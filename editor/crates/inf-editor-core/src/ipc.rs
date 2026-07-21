@@ -210,6 +210,17 @@ pub enum SpawnKind {
     PointLight,
     SpotLight,
     Camera,
+    // ── 2D (P8.2b) ───────────────────────────────────────────────────────
+    /// A textured sprite quad.
+    Sprite,
+    /// A chunked 2D tilemap (painted with the Tilemap panel).
+    Tilemap,
+    /// A bitmap-text label.
+    Text2d,
+    /// A 9-slice bordered panel.
+    NineSlice,
+    /// A 2D radial light.
+    Light2d,
 }
 
 // ── Asset system / Content Drawer (Phase 4) ──────────────────────────────
@@ -474,6 +485,49 @@ pub struct SpriteSheetDto {
 pub struct SortingLayerDto {
     pub id: i32,
     pub name: String,
+}
+
+// ── Tilemap painting (P8.2b) ─────────────────────────────────────────────
+//
+// The Tilemap panel reads the selected entity's tilemap via `tilemap_get` and
+// paints strokes back via `tilemap_paint` (one undo step per stroke). Tile
+// indices are 1-based atlas cells (`0` = empty). Coordinates are signed grid
+// cells; the chunked storage means the addressable range is unbounded.
+
+/// One painted tile cell (`tilemap_get` output row / `tilemap_paint` input).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct TilemapCellDto {
+    pub x: i32,
+    pub y: i32,
+    /// 1-based atlas index; `0` erases.
+    #[ts(type = "number")]
+    pub tile: u32,
+}
+
+/// The selected entity's tilemap, projected for the paint panel (`tilemap_get`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct TilemapDto {
+    /// Owning entity GUID.
+    pub entity: String,
+    /// Atlas texture asset GUID, if one is assigned.
+    pub texture: Option<String>,
+    /// World units per tile cell.
+    pub tile_width: f64,
+    pub tile_height: f64,
+    /// Atlas grid the 1-based tile index maps into (tile→UV mapping).
+    #[ts(type = "number")]
+    pub atlas_cols: u32,
+    #[ts(type = "number")]
+    pub atlas_rows: u32,
+    /// Palette dimensions: the texture's P8.2a grid slicing when present, else
+    /// the atlas grid. The palette shows `palette_cols * palette_rows` numbered
+    /// swatches (indices `1..=count`).
+    #[ts(type = "number")]
+    pub palette_cols: u32,
+    #[ts(type = "number")]
+    pub palette_rows: u32,
+    /// Painted cells only (empty cells omitted), in deterministic chunk order.
+    pub cells: Vec<TilemapCellDto>,
 }
 
 /// One `search_workspace` hit.

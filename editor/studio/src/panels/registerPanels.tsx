@@ -4,6 +4,7 @@ import {
   FolderTree,
   GitBranch,
   Globe2,
+  Grid2x2,
   Grid3x3,
   ListChecks,
   ListTree,
@@ -26,6 +27,7 @@ import ProblemsPanel from "./ProblemsPanel";
 import SearchPanel from "./SearchPanel";
 import SpriteSheetPanel from "./SpriteSheetPanel";
 import TerminalPanel from "./TerminalPanel";
+import TilemapPanel from "./TilemapPanel";
 import { BlueprintCanvas } from "./blueprint/BlueprintCanvas";
 import { MaterialCanvas } from "./material/MaterialCanvas";
 import { registerPanelType } from "./panelRegistry";
@@ -236,6 +238,16 @@ registerPanelType({
   title: () => "Sprite Sheet",
   icon: Grid3x3,
   component: SpriteSheetPanel,
+  singleton: true,
+  defaultLocation: "bottom",
+  defaultSize: { w: 900, h: 560 },
+});
+
+registerPanelType({
+  type: "tilemap",
+  title: () => "Tilemap",
+  icon: Grid2x2,
+  component: TilemapPanel,
   singleton: true,
   defaultLocation: "bottom",
   defaultSize: { w: 900, h: 560 },

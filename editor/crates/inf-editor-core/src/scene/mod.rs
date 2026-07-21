@@ -10,6 +10,7 @@ pub mod demo;
 pub mod details;
 pub mod doc;
 pub mod serialize;
+pub mod tilemap;
 pub mod undo;
 
 pub use delta::diff;

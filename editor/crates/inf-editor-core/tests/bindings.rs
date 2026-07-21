@@ -12,8 +12,8 @@ use inf_editor_core::ipc::{
     DataFieldDto, DeleteResult, DetailsDto, FileEntryDto, GitFileDto, GitStatusDto, ImportEventDto,
     LayoutSummary, LogLine, ProjectInfoDto, ProjectTemplateDto, PropFieldDto, PropValueDto,
     RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot, SearchHitDto, SearchOptsDto,
-    SortingLayerDto, SpawnKind, SpriteGridDto, SpriteRectDto, SpriteSheetDto, ViewportDrop,
-    ViewportKey, ViewportRect,
+    SortingLayerDto, SpawnKind, SpriteGridDto, SpriteRectDto, SpriteSheetDto, TilemapCellDto,
+    TilemapDto, ViewportDrop, ViewportKey, ViewportRect,
 };
 use ts_rs::{Config, TS};
 
@@ -57,4 +57,6 @@ fn export_bindings() {
     SpriteRectDto::export_all(&cfg).expect("export SpriteRectDto");
     SpriteSheetDto::export_all(&cfg).expect("export SpriteSheetDto");
     SortingLayerDto::export_all(&cfg).expect("export SortingLayerDto");
+    TilemapCellDto::export_all(&cfg).expect("export TilemapCellDto");
+    TilemapDto::export_all(&cfg).expect("export TilemapDto");
 }

@@ -37,6 +37,8 @@ import type { SceneSnapshot } from "../bindings/SceneSnapshot";
 import type { SortingLayerDto } from "../bindings/SortingLayerDto";
 import type { SpawnKind } from "../bindings/SpawnKind";
 import type { SpriteSheetDto } from "../bindings/SpriteSheetDto";
+import type { TilemapCellDto } from "../bindings/TilemapCellDto";
+import type { TilemapDto } from "../bindings/TilemapDto";
 import type { ViewportDrop } from "../bindings/ViewportDrop";
 import type { ViewportRect } from "../bindings/ViewportRect";
 
@@ -60,6 +62,8 @@ export type {
   SortingLayerDto,
   SpawnKind,
   SpriteSheetDto,
+  TilemapCellDto,
+  TilemapDto,
   ViewportDrop,
   ViewportRect,
 };
@@ -171,6 +175,19 @@ export const scene = {
     targets: string[] | null = null,
   ): Promise<number> =>
     invoke<number>("scene_apply_sprite_slice", { assetId, slice, targets, resizeToSlice }),
+};
+
+/**
+ * Tilemap painting (P8.2b). `get` projects the selected entity's tilemap for
+ * the Tilemap paint panel; `paint` applies one stroke (mouse-down→up batch or a
+ * bounded flood-fill) as a single undo step. Tile indices are 1-based atlas
+ * cells (`0` erases). Arg names are camelCase (Tauri maps to snake_case).
+ */
+export const tilemap = {
+  get: (entity: string): Promise<TilemapDto | null> =>
+    invoke<TilemapDto | null>("tilemap_get", { entity }),
+  paint: (entity: string, cells: TilemapCellDto[]): Promise<number> =>
+    invoke<number>("tilemap_paint", { entity, cells }),
 };
 
 /**

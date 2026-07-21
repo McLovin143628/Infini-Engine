@@ -9,8 +9,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use inf_editor_core::ipc::{DetailsDto, PropValueDto, SceneSnapshot, SpawnKind};
-use inf_editor_core::scene::{details, diff, serialize, SceneDoc};
+use inf_editor_core::ipc::{
+    DetailsDto, PropValueDto, SceneSnapshot, SpawnKind, TilemapCellDto, TilemapDto,
+};
+use inf_editor_core::scene::{details, diff, serialize, tilemap, SceneDoc};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
@@ -249,6 +251,56 @@ pub async fn scene_apply_sprite_slice(
         emit_world_delta(&app, &state);
     }
     Ok(applied)
+}
+
+/// Read an entity's tilemap for the paint panel (P8.2b). `None` when the entity
+/// has no `Tilemap`. When the tilemap's atlas texture carries a P8.2a
+/// sprite-sheet grid, the palette dimensions are taken from that grid so the
+/// palette matches the sliced atlas.
+#[tauri::command]
+pub async fn tilemap_get(
+    state: State<'_, SceneState>,
+    assets: State<'_, super::assets::AssetState>,
+    entity: String,
+) -> Result<Option<TilemapDto>, String> {
+    let guid = Uuid::parse_str(&entity).map_err(|e| e.to_string())?;
+    let mut dto = {
+        let doc = lock(&state.doc)?;
+        tilemap::build_dto(&doc, guid)
+    };
+    if let Some(d) = dto.as_mut() {
+        if let Some(tex) = &d.texture {
+            if let Ok(id) = tex.parse::<inf_asset::AssetId>() {
+                if let Ok((slices, _, _)) = assets.read_sprite_slices(id) {
+                    if let Some(g) = slices.grid {
+                        d.palette_cols = g.columns.max(1);
+                        d.palette_rows = g.rows.max(1);
+                    }
+                }
+            }
+        }
+    }
+    Ok(dto)
+}
+
+/// Paint one stroke (a mouse-down→up batch, or a bounded flood-fill) onto an
+/// entity's tilemap as a **single** undo step (P8.2b). `cells` carries the new
+/// 1-based atlas index per cell (`0` erases). Returns how many cells actually
+/// changed; emits `world://delta` when non-zero so other views re-sync.
+#[tauri::command]
+pub async fn tilemap_paint(
+    app: AppHandle,
+    state: State<'_, SceneState>,
+    entity: String,
+    cells: Vec<TilemapCellDto>,
+) -> Result<usize, String> {
+    let guid = Uuid::parse_str(&entity).map_err(|e| e.to_string())?;
+    let batch: Vec<(i32, i32, u32)> = cells.iter().map(|c| (c.x, c.y, c.tile)).collect();
+    let n = lock(&state.doc)?.edit_paint_tiles(guid, &batch);
+    if n > 0 {
+        emit_world_delta(&app, &state);
+    }
+    Ok(n)
 }
 
 #[tauri::command]

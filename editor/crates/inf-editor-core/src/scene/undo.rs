@@ -18,8 +18,13 @@ use crate::scene::SceneDoc;
 pub const HISTORY_LIMIT: usize = 256;
 
 pub(crate) enum EditCommand {
-    /// `at` is the entity's slot in the creation-order list.
-    Create { at: usize, record: EntityRecord },
+    /// `at` is the entity's slot in the creation-order list. The record is boxed
+    /// so this variant doesn't bloat the whole enum (an `EntityRecord` grew with
+    /// the P8.2b 2D component slots).
+    Create {
+        at: usize,
+        record: Box<EntityRecord>,
+    },
     /// A deleted subtree (records with their original order slots) + the top
     /// GUIDs actually removed.
     Delete {
@@ -61,6 +66,13 @@ pub(crate) enum EditCommand {
         before: Option<Sprite>,
         after: Option<Sprite>,
     },
+    /// One tile-painting stroke (P8.2b). Stores the pre/post index of **only the
+    /// touched cells** — never a whole chunk map — so a stroke over a large map
+    /// stays cheap. `cells` is `(x, y, before, after)`.
+    SetTiles {
+        guid: Uuid,
+        cells: Vec<(i32, i32, u32, u32)>,
+    },
 }
 
 impl EditCommand {
@@ -86,6 +98,11 @@ impl EditCommand {
             }
             EditCommand::SetSprite { guid, after, .. } => {
                 doc.raw_set_sprite(*guid, after.clone());
+            }
+            EditCommand::SetTiles { guid, cells } => {
+                let after: Vec<(i32, i32, u32)> =
+                    cells.iter().map(|&(x, y, _, a)| (x, y, a)).collect();
+                doc.raw_set_tiles(*guid, &after);
             }
         }
     }
@@ -120,6 +137,11 @@ impl EditCommand {
             }
             EditCommand::SetSprite { guid, before, .. } => {
                 doc.raw_set_sprite(*guid, before.clone());
+            }
+            EditCommand::SetTiles { guid, cells } => {
+                let before: Vec<(i32, i32, u32)> =
+                    cells.iter().map(|&(x, y, b, _)| (x, y, b)).collect();
+                doc.raw_set_tiles(*guid, &before);
             }
         }
     }

@@ -11,8 +11,8 @@
 //! entity ids are reused across despawn and never serialized.
 
 use inf_ecs::components::{
-    AtlasRect, Camera, Light, LightKind, Material, MeshRef, Primitive, Sprite, Transform,
-    Visibility,
+    AtlasRect, Camera, Light, Light2D, LightKind, Material, MeshRef, NineSlice, Primitive, Sprite,
+    Text2D, Tilemap, Transform, Visibility,
 };
 use inf_ecs::{ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d};
 use uuid::Uuid;
@@ -354,6 +354,31 @@ impl SceneDoc {
         }
     }
 
+    /// Read an entity's [`Tilemap`] component (the chunk map the Details grid
+    /// can't reach — the tile-painting panel reads it to render the grid).
+    pub fn raw_get_tilemap(&self, guid: Uuid) -> Option<Tilemap> {
+        let e = self.world.entity_of(guid)?;
+        self.world.world().get::<Tilemap>(e).cloned()
+    }
+
+    /// Apply a batch of `(x, y, index)` tile writes to an entity's [`Tilemap`]
+    /// in place (non-recording; the undo layer + [`Self::edit_paint_tiles`] drive
+    /// this). No-op if the entity has no `Tilemap`.
+    pub(crate) fn raw_set_tiles(&mut self, guid: Uuid, cells: &[(i32, i32, u32)]) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut tm) = self.world.world_mut().get_mut::<Tilemap>(e) {
+            for &(x, y, idx) in cells {
+                tm.set_tile(x, y, idx);
+            }
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
     /// Recreate an entity from a serialized record at order slot `at`.
     pub(crate) fn raw_spawn_record(&mut self, rec: &EntityRecord, at: usize) {
         let e = self.spawn_bare(rec.guid, &rec.name, rec.parent);
@@ -382,6 +407,21 @@ impl SceneDoc {
         if let Some(c) = rec.camera {
             w.entity_mut(e).insert(c);
         }
+        if let Some(s) = &rec.sprite {
+            w.entity_mut(e).insert(s.clone());
+        }
+        if let Some(t) = &rec.tilemap {
+            w.entity_mut(e).insert(t.clone());
+        }
+        if let Some(n) = &rec.nine_slice {
+            w.entity_mut(e).insert(n.clone());
+        }
+        if let Some(t) = &rec.text2d {
+            w.entity_mut(e).insert(t.clone());
+        }
+        if let Some(l) = &rec.light_2d {
+            w.entity_mut(e).insert(*l);
+        }
         self.touch();
     }
 
@@ -401,8 +441,13 @@ impl SceneDoc {
         let guid = self.create(kind, name, parent);
         let at = self.order.iter().position(|g| *g == guid).unwrap_or(0);
         if let Some(record) = crate::scene::serialize::record_of(self, guid) {
-            self.history
-                .record("Create", EditCommand::Create { at, record });
+            self.history.record(
+                "Create",
+                EditCommand::Create {
+                    at,
+                    record: Box::new(record),
+                },
+            );
         }
         guid
     }
@@ -646,6 +691,58 @@ impl SceneDoc {
         applied
     }
 
+    /// Paint a batch of tiles onto an entity's [`Tilemap`] as **one** undo step
+    /// (a full mouse-down→up stroke, P8.2b). `cells` is `(x, y, index)` with
+    /// `index == 0` erasing. Only cells that actually change are touched, and the
+    /// recorded command stores just those cells' pre/post index (not the chunk
+    /// map). Returns how many cells changed. No-op if the entity has no `Tilemap`.
+    pub fn edit_paint_tiles(&mut self, guid: Uuid, cells: &[(i32, i32, u32)]) -> usize {
+        let Some(e) = self.world.entity_of(guid) else {
+            return 0;
+        };
+        // Diff against the current map. A stroke may touch a coordinate more than
+        // once (drag back over a cell); collapse to one entry per coordinate —
+        // original map value → final painted value — in first-touch order, and
+        // keep only cells that actually change.
+        let changed: Vec<(i32, i32, u32, u32)> = {
+            use std::collections::HashMap;
+            let Some(tm) = self.world.world().get::<Tilemap>(e) else {
+                return 0;
+            };
+            let mut orig: HashMap<(i32, i32), u32> = HashMap::new();
+            let mut last: HashMap<(i32, i32), u32> = HashMap::new();
+            let mut order: Vec<(i32, i32)> = Vec::new();
+            for &(x, y, after) in cells {
+                orig.entry((x, y)).or_insert_with(|| tm.get_tile(x, y));
+                if last.insert((x, y), after).is_none() {
+                    order.push((x, y));
+                }
+            }
+            order
+                .into_iter()
+                .filter_map(|k| {
+                    let (b, a) = (orig[&k], last[&k]);
+                    (b != a).then_some((k.0, k.1, b, a))
+                })
+                .collect()
+        };
+        if changed.is_empty() {
+            return 0;
+        }
+        let after_cells: Vec<(i32, i32, u32)> =
+            changed.iter().map(|&(x, y, _, a)| (x, y, a)).collect();
+        self.raw_set_tiles(guid, &after_cells);
+        let n = changed.len();
+        self.history.record(
+            "Paint Tiles",
+            EditCommand::SetTiles {
+                guid,
+                cells: changed,
+            },
+        );
+        n
+    }
+
     // ── history control ──────────────────────────────────────────────────
 
     /// Open an undo transaction; every recorded edit until [`Self::commit_transaction`]
@@ -803,6 +900,18 @@ fn kind_of(world: &EcsWorld, e: Entity) -> String {
     if w.get::<Sprite>(e).is_some() {
         return "Sprite".to_string();
     }
+    if w.get::<Tilemap>(e).is_some() {
+        return "Tilemap".to_string();
+    }
+    if w.get::<NineSlice>(e).is_some() {
+        return "Nine-Slice".to_string();
+    }
+    if w.get::<Text2D>(e).is_some() {
+        return "Text".to_string();
+    }
+    if w.get::<Light2D>(e).is_some() {
+        return "2D Light".to_string();
+    }
     // No renderable payload: a folder if it has children, else a plain actor.
     if !world.children_of(e).is_empty() {
         "Folder".to_string()
@@ -823,6 +932,11 @@ fn default_name(kind: SpawnKind) -> String {
         SpawnKind::PointLight => "PointLight",
         SpawnKind::SpotLight => "SpotLight",
         SpawnKind::Camera => "Camera",
+        SpawnKind::Sprite => "Sprite",
+        SpawnKind::Tilemap => "Tilemap",
+        SpawnKind::Text2d => "Text",
+        SpawnKind::NineSlice => "NineSlice",
+        SpawnKind::Light2d => "Light2D",
     }
     .to_string()
 }
@@ -864,6 +978,30 @@ fn attach_kind(world: &mut EcsWorld, entity: Entity, kind: SpawnKind) {
         }
         SpawnKind::Camera => {
             w.entity_mut(entity).insert(Camera::default());
+        }
+        // ── 2D kinds (P8.2b): sensible authorable defaults ────────────────
+        SpawnKind::Sprite => {
+            w.entity_mut(entity).insert(Sprite::default());
+        }
+        SpawnKind::Tilemap => {
+            // A 4×4 starter atlas so the paint palette is immediately usable.
+            w.entity_mut(entity).insert(Tilemap {
+                atlas_cols: 4,
+                atlas_rows: 4,
+                ..Tilemap::default()
+            });
+        }
+        SpawnKind::Text2d => {
+            w.entity_mut(entity).insert(Text2D {
+                text: "Text".to_string(),
+                ..Text2D::default()
+            });
+        }
+        SpawnKind::NineSlice => {
+            w.entity_mut(entity).insert(NineSlice::default());
+        }
+        SpawnKind::Light2d => {
+            w.entity_mut(entity).insert(Light2D::default());
         }
         SpawnKind::Empty
         | SpawnKind::Cube
@@ -956,6 +1094,47 @@ mod tests {
         assert!(doc.raw_get_sprite(e).is_none(), "undo removes the sprite");
         assert!(doc.redo());
         assert_eq!(doc.raw_get_sprite(e).unwrap().texture, Some(tex));
+    }
+
+    #[test]
+    fn spawns_2d_kinds_with_defaults_and_labels() {
+        let mut doc = SceneDoc::new();
+        let cases = [
+            (SpawnKind::Sprite, "Sprite", "Sprite"),
+            (SpawnKind::Tilemap, "Tilemap", "Tilemap"),
+            (SpawnKind::Text2d, "Text", "Text"),
+            (SpawnKind::NineSlice, "NineSlice", "Nine-Slice"),
+            (SpawnKind::Light2d, "Light2D", "2D Light"),
+        ];
+        for (kind, name, label) in cases {
+            let g = doc.create(kind, "", None);
+            assert_eq!(doc.display_name(g), name, "default name for {kind:?}");
+            assert_eq!(doc.kind_of_guid(g), label, "type label for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn spawned_2d_entity_round_trips_through_undo() {
+        // A spawned tilemap (with a starter atlas) survives delete→undo intact.
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Tilemap, "Map", None);
+        doc.edit_paint_tiles(g, &[(0, 0, 2), (1, 1, 3)]);
+        assert_eq!(
+            crate::scene::tilemap::build_dto(&doc, g)
+                .unwrap()
+                .cells
+                .len(),
+            2
+        );
+
+        doc.edit_delete(&[g]);
+        assert!(doc.entity_of(g).is_none());
+
+        // Undo delete → undo paint. The tilemap (and its painted cells) return.
+        assert!(doc.undo()); // undo delete
+        let dto = crate::scene::tilemap::build_dto(&doc, g).expect("tilemap restored");
+        assert_eq!(dto.cells.len(), 2, "painted tiles survive delete→undo");
+        assert_eq!(dto.atlas_cols, 4);
     }
 
     #[test]
