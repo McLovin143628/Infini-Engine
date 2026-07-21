@@ -13,9 +13,10 @@ use inf_editor_core::ipc::{
     GitFileDto, GitStatusDto, ImportEventDto, LayoutSummary, LogLine, PackageErrorDto,
     PackageKindCountDto, PackageResultDto, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto,
     PropFieldDto, PropValueDto, RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot,
-    SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, Snap2DDto,
-    SortingLayerDto, SpawnKind, SpriteGridDto, SpriteRectDto, SpriteSheetDto, TilemapCellDto,
-    TilemapDto, ToolModeDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
+    SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto,
+    SeqKeyDto, SeqTrackDto, SequenceDto, Snap2DDto, SortingLayerDto, SpawnKind, SpriteGridDto,
+    SpriteRectDto, SpriteSheetDto, TilemapCellDto, TilemapDto, ToolModeDto, ViewportDrop,
+    ViewportKey, ViewportModeDto, ViewportRect,
 };
 use ts_rs::{Config, TS};
 
@@ -73,4 +74,8 @@ fn export_bindings() {
     PackageKindCountDto::export_all(&cfg).expect("export PackageKindCountDto");
     PackageResultDto::export_all(&cfg).expect("export PackageResultDto");
     PackageErrorDto::export_all(&cfg).expect("export PackageErrorDto");
+    SequenceDto::export_all(&cfg).expect("export SequenceDto");
+    SeqTrackDto::export_all(&cfg).expect("export SeqTrackDto");
+    SeqKeyDto::export_all(&cfg).expect("export SeqKeyDto");
+    SeqInterpDto::export_all(&cfg).expect("export SeqInterpDto");
 }

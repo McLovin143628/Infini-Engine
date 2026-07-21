@@ -61,6 +61,8 @@ export interface EventPayloads {
   "pie://state": PieStateEvent;
   /** A cook/package run started (`true`) / finished (`false`) (P9.2). */
   "package://state": boolean;
+  /** A sequence file changed (payload = sequence name) → re-sync the Sequencer (P11.4). */
+  "seq://changed": string;
 }
 
 export type EventChannel = keyof EventPayloads;

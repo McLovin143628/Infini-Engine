@@ -798,3 +798,46 @@ pub struct SearchHitDto {
     /// The matching line's text (trimmed to a sane length).
     pub text: String,
 }
+
+// ── Sequencer (P11.4) ────────────────────────────────────────────────────────
+
+/// Keyframe interpolation for a sequencer track segment (mirrors
+/// [`crate::sequencer::Interp`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SeqInterpDto {
+    Step,
+    Linear,
+}
+
+/// One keyframe on a scalar track: a time (seconds), a scalar value, and the
+/// interpolation governing the segment starting here.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct SeqKeyDto {
+    pub t: f64,
+    pub value: f64,
+    pub interp: SeqInterpDto,
+}
+
+/// One scalar property track: the animated entity guid, the reflection scalar
+/// path (`"Transform.translation.x"`), and its sorted keys.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct SeqTrackDto {
+    /// Target entity guid (string form).
+    pub target: String,
+    /// Reflection scalar path.
+    pub path: String,
+    pub keys: Vec<SeqKeyDto>,
+}
+
+/// A sequencer timeline (the panel's document view; mirrors
+/// [`crate::sequencer::Sequence`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct SequenceDto {
+    pub name: String,
+    pub duration: f64,
+    /// Authoring frame rate hint — the retime/snap grid is `1 / fps_hint`.
+    #[ts(type = "number")]
+    pub fps_hint: u32,
+    pub tracks: Vec<SeqTrackDto>,
+}

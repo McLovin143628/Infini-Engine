@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import {
+  Clapperboard,
   Code2,
   FolderTree,
   GitBranch,
@@ -26,6 +27,7 @@ import OutlinerPanel from "./OutlinerPanel";
 import OutputLogPanel from "./OutputLogPanel";
 import ProblemsPanel from "./ProblemsPanel";
 import SearchPanel from "./SearchPanel";
+import SequencerPanel from "./SequencerPanel";
 import SpriteSheetPanel from "./SpriteSheetPanel";
 import TerminalPanel from "./TerminalPanel";
 import TilemapPanel from "./TilemapPanel";
@@ -263,6 +265,16 @@ registerPanelType({
   singleton: true,
   defaultLocation: "bottom",
   defaultSize: { w: 900, h: 560 },
+});
+
+registerPanelType({
+  type: "sequencer",
+  title: () => "Sequencer",
+  icon: Clapperboard,
+  component: SequencerPanel,
+  singleton: true,
+  defaultLocation: "bottom",
+  defaultSize: { w: 960, h: 340 },
 });
 
 registerPanelType({

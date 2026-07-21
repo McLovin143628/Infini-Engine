@@ -107,6 +107,7 @@ export const MENU_BAR: TopMenu[] = [
       act("window.worldSettings", "World Settings"),
       act("window.placeActors", "Place Actors"),
       act("window.tilemap", "Tilemap"),
+      act("window.sequencer", "Sequencer"),
       act("window.sortingLayers", "Sorting Layers…"),
       sep,
       sub("Load Layout", [

@@ -41,6 +41,8 @@ import type { SearchHitDto } from "../bindings/SearchHitDto";
 import type { SculptSettingsDto } from "../bindings/SculptSettingsDto";
 import type { SearchOptsDto } from "../bindings/SearchOptsDto";
 import type { SceneSnapshot } from "../bindings/SceneSnapshot";
+import type { SeqInterpDto } from "../bindings/SeqInterpDto";
+import type { SequenceDto } from "../bindings/SequenceDto";
 import type { Snap2DDto } from "../bindings/Snap2DDto";
 import type { SortingLayerDto } from "../bindings/SortingLayerDto";
 import type { SpawnKind } from "../bindings/SpawnKind";
@@ -72,6 +74,8 @@ export type {
   SearchHitDto,
   SearchOptsDto,
   SceneSnapshot,
+  SeqInterpDto,
+  SequenceDto,
   Snap2DDto,
   SortingLayerDto,
   SpawnKind,
@@ -268,6 +272,35 @@ export const layers = {
   get: (): Promise<SortingLayerDto[]> => invoke<SortingLayerDto[]>("layers_get"),
   set: (rows: SortingLayerDto[]): Promise<SortingLayerDto[]> =>
     invoke<SortingLayerDto[]>("layers_set", { layers: rows }),
+};
+
+/**
+ * Sequencer seed (P11.4): project-local property-track timelines under
+ * `.infinity/sequences/`. `scrub` previews sampled values in the viewport WITHOUT
+ * dirtying the scene (restored by `scrubStop`); it is refused while Simulate runs.
+ * `keySet` / `captureKey` mutate the sequence file (non-undoable v1) and emit
+ * `seq://changed`. `captureKey` reads the entity's live scalar into a key.
+ */
+export const sequencer = {
+  list: (): Promise<string[]> => invoke<string[]>("seq_list"),
+  get: (name: string): Promise<SequenceDto | null> =>
+    invoke<SequenceDto | null>("seq_get", { name }),
+  save: (sequence: SequenceDto): Promise<SequenceDto> =>
+    invoke<SequenceDto>("seq_save", { sequence }),
+  delete: (name: string): Promise<void> => invoke("seq_delete", { name }),
+  keySet: (
+    name: string,
+    target: string,
+    path: string,
+    t: number,
+    value: number,
+    interp: SeqInterpDto,
+  ): Promise<SequenceDto> =>
+    invoke<SequenceDto>("seq_key_set", { name, target, path, t, value, interp }),
+  captureKey: (name: string, target: string, path: string, t: number): Promise<SequenceDto> =>
+    invoke<SequenceDto>("seq_capture_key", { name, target, path, t }),
+  scrub: (name: string, t: number): Promise<void> => invoke("seq_scrub", { name, t }),
+  scrubStop: (): Promise<void> => invoke("seq_scrub_stop"),
 };
 
 /**

@@ -16,6 +16,7 @@ mod pie;
 mod project;
 mod scene;
 mod search;
+mod sequencer;
 mod settings;
 mod sim;
 mod sorting;
@@ -31,6 +32,7 @@ pub use pcg::PcgState;
 pub use pie::PieState;
 pub use project::ProjectState;
 pub use scene::{recover_scene_on_boot, SceneState};
+pub use sequencer::SequencerState;
 pub use sim::SimState;
 pub use terminal::PtyState;
 pub use terrain::ErosionState;
@@ -106,6 +108,14 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         sim::sim_tick,
         sim::sim_stop,
         sim::sim_is_running,
+        sequencer::seq_list,
+        sequencer::seq_get,
+        sequencer::seq_save,
+        sequencer::seq_delete,
+        sequencer::seq_key_set,
+        sequencer::seq_capture_key,
+        sequencer::seq_scrub,
+        sequencer::seq_scrub_stop,
         pie::pie_start,
         pie::pie_pause,
         pie::pie_resume,

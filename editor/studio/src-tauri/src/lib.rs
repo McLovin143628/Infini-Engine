@@ -39,6 +39,7 @@ pub fn run() {
         .manage(commands::MaterialState::default())
         .manage(commands::PcgState::default())
         .manage(commands::ErosionState::default())
+        .manage(commands::SequencerState::default())
         .invoke_handler(commands::invoke_handler())
         .setup(|app| {
             logging::attach_app(app.handle().clone());

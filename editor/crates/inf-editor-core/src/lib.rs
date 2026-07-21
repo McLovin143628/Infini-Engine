@@ -10,6 +10,7 @@ pub mod pie;
 pub mod project_settings;
 pub mod samples;
 pub mod scene;
+pub mod sequencer;
 pub mod simulate;
 pub mod sorting;
 pub mod thumbnail;

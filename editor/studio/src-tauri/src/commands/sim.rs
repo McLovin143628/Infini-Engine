@@ -32,6 +32,18 @@ pub struct SimState {
     inner: Mutex<SimInner>,
 }
 
+impl SimState {
+    /// Whether a Simulate session is live — other command modules (e.g. the
+    /// sequencer scrub, P11.4) consult this to avoid two writers fighting over the
+    /// shared `SceneDoc`.
+    pub fn is_running(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| inner.session.is_some())
+            .unwrap_or(false)
+    }
+}
+
 #[derive(Default)]
 struct SimInner {
     session: Option<SimSession>,

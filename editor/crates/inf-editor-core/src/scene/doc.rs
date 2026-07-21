@@ -246,6 +246,28 @@ impl SceneDoc {
         ok
     }
 
+    /// Write one component field for LIVE PREVIEW (the sequencer scrub, P11.4):
+    /// applies the value and bumps the version so the native viewport re-syncs,
+    /// but does **not** dirty the document. A scrub session restores the captured
+    /// originals on stop, so previewing a sequence never marks the scene unsaved
+    /// (mirrors [`Self::bump_version_for_runtime`], which the Simulate loop uses).
+    pub fn write_prop_preview(
+        &mut self,
+        guid: Uuid,
+        type_path: &str,
+        field: &str,
+        value: &inf_ecs::PropValue,
+    ) -> bool {
+        let Some(e) = self.world.entity_of(guid) else {
+            return false;
+        };
+        let ok = self.world.write_prop(e, type_path, field, value);
+        if ok {
+            self.bump_version_for_runtime();
+        }
+        ok
+    }
+
     pub fn rename(&mut self, guid: Uuid, name: &str) {
         if let Some(e) = self.world.entity_of(guid) {
             self.world.rename(e, name);
