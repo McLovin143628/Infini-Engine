@@ -69,6 +69,46 @@ pub struct MatIssueDto {
     pub message: String,
 }
 
+/// The material complexity-budget report (P13.2) mirrored for the frontend
+/// stat strip. `*_over` flags are advisory (warnings), not compile errors.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComplexityDto {
+    pub nodes: u32,
+    pub slabs: u32,
+    pub textures: u32,
+    pub est_alu_ops: u32,
+    pub max_nodes: u32,
+    pub max_slabs: u32,
+    pub max_textures: u32,
+    pub max_alu_ops: u32,
+    pub nodes_over: bool,
+    pub slabs_over: bool,
+    pub textures_over: bool,
+    pub alu_over: bool,
+    pub over_budget: bool,
+}
+
+impl From<inf_material::ComplexityReport> for ComplexityDto {
+    fn from(r: inf_material::ComplexityReport) -> Self {
+        Self {
+            nodes: r.nodes,
+            slabs: r.slabs,
+            textures: r.textures,
+            est_alu_ops: r.est_alu_ops,
+            max_nodes: r.budget.max_nodes,
+            max_slabs: r.budget.max_slabs,
+            max_textures: r.budget.max_textures,
+            max_alu_ops: r.budget.max_alu_ops,
+            nodes_over: r.nodes_over(),
+            slabs_over: r.slabs_over(),
+            textures_over: r.textures_over(),
+            alu_over: r.alu_over(),
+            over_budget: r.over_budget(),
+        }
+    }
+}
+
 /// Result of compiling a material graph to WGSL + a preview render.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +122,8 @@ pub struct MaterialCompileResult {
     pub texture_count: u32,
     /// The preview sphere as a PNG data-URL (`None` if compile failed or no GPU).
     pub image: Option<String>,
+    /// Advisory material-complexity budget report (P13.2).
+    pub complexity: ComplexityDto,
 }
 
 impl MaterialState {
@@ -251,7 +293,7 @@ pub async fn material_compile(
     state: State<'_, MaterialState>,
 ) -> Result<MaterialCompileResult, String> {
     // Compile under the store lock, then render the preview outside it.
-    let (wgsl, surface, ok, issues, tex_count) = state.with(|s| {
+    let (wgsl, surface, ok, issues, tex_count, complexity) = state.with(|s| {
         let doc = s
             .docs
             .get(&id)
@@ -275,6 +317,7 @@ pub async fn material_compile(
             c.ok,
             issues,
             c.textures.len() as u32,
+            ComplexityDto::from(c.complexity),
         ))
     })?;
 
@@ -293,6 +336,7 @@ pub async fn material_compile(
         issues,
         texture_count: tex_count,
         image,
+        complexity,
     })
 }
 

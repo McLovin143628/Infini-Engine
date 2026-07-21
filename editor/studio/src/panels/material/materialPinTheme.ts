@@ -13,6 +13,8 @@ export function matPinColor(ty: PortType): string {
         return "#5b9bd5";
       case "vec4f":
         return "#b57ce0";
+      case "slab":
+        return "#e08a4a";
       default:
         return "#5b9bd5";
     }
@@ -34,6 +36,8 @@ export function matCategoryColor(category: string): string {
       return "#6a4a7a";
     case "texture":
       return "#8a5a2a";
+    case "slab":
+      return "#8a5a3a";
     case "output":
       return "#8a3a3a";
     default:

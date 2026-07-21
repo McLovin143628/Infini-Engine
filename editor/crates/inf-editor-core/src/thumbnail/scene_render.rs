@@ -917,6 +917,28 @@ fn material_surface(mi: MatIn) -> Surface {
 }
 ";
 
+    // A P13.2 layered-slab surface: `material_surface` resolves a MatSlab tree
+    // and unpacks it into the four channels — exactly what inf-material emits for
+    // a `slab.*` graph. Verifies the preview wrapper embeds the MatSlab struct +
+    // helper cleanly (the `material_surface -> Surface` interface is unchanged).
+    const SLAB_SURFACE: &str = "\
+struct MatIn { uv: vec2<f32>, normal: vec3<f32>, world_pos: vec3<f32>, time: f32 };
+struct Surface { base_color: vec3<f32>, metallic: f32, roughness: f32, emissive: vec3<f32> };
+struct MatSlab { albedo: vec3<f32>, metallic: f32, roughness: f32, emissive: vec3<f32> };
+fn mat_slab_mix(a: MatSlab, b: MatSlab, t: f32) -> MatSlab {
+    return MatSlab(mix(a.albedo, b.albedo, t), mix(a.metallic, b.metallic, t), mix(a.roughness, b.roughness, t), mix(a.emissive, b.emissive, t));
+}
+fn material_surface(mi: MatIn) -> Surface {
+    let v0: MatSlab = mat_slab_mix(MatSlab(vec3<f32>(0.9, 0.1, 0.1), 0.0, 0.3, vec3<f32>(0.0)), MatSlab(vec3<f32>(0.1, 0.1, 0.9), 1.0, 0.7, vec3<f32>(0.0)), mi.uv.x);
+    var surf: Surface;
+    surf.base_color = v0.albedo;
+    surf.metallic = v0.metallic;
+    surf.roughness = v0.roughness;
+    surf.emissive = v0.emissive;
+    return surf;
+}
+";
+
     fn gpu_or_skip() -> Option<GpuContext> {
         GpuContext::headless().ok()
     }
@@ -936,6 +958,15 @@ fn material_surface(mi: MatIn) -> Surface {
         // Exercises the empty-group(1) + white-texture-group(2) path.
         let img = render_material_preview(&gpu, 32, TEX_SURFACE, 1).expect("textured preview");
         assert_eq!(img.len(), 32 * 32 * 4);
+    }
+
+    #[test]
+    fn material_preview_renders_layered_slab_surface() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        // P13.2: a slab-based surface embeds cleanly in the preview wrapper.
+        let img = render_material_preview(&gpu, 32, SLAB_SURFACE, 0).expect("slab preview");
+        assert_eq!(img.len(), 32 * 32 * 4);
+        assert!(img.chunks(4).any(|p| p[0] > 20 || p[2] > 20));
     }
 
     const BAKE_COMPUTE: &str = "\

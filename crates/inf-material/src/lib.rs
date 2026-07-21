@@ -20,8 +20,8 @@ pub mod texture;
 pub use bc::{decode_bc1, decode_bc3};
 pub use error::MaterialError;
 pub use graph::{
-    emit_texture_compute, emit_wgsl, material_registry, MatIssue, MatType, MaterialCompile,
-    TextureCompile,
+    analyze_complexity, analyze_with_budget, emit_texture_compute, emit_wgsl, material_registry,
+    ComplexityReport, MatIssue, MatType, MaterialBudget, MaterialCompile, TextureCompile,
 };
 pub use instance::{MatOverrides, MaterialInstance};
 pub use material::MaterialAsset;

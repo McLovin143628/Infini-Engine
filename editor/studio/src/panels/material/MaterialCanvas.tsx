@@ -25,6 +25,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { BpDoc, BpEdit, BpLink, PortType } from "../../lib/blueprintTypes";
 import { isExec } from "../../lib/blueprintTypes";
+import type { ComplexityReport } from "../../lib/materialTypes";
 import { useMaterialStore } from "../../stores/materialStore";
 import { NodePalette, type PaletteAnchor } from "../blueprint/NodePalette";
 import { wouldCycle } from "../blueprint/reducer";
@@ -230,6 +231,7 @@ function CanvasInner() {
               </div>
             )}
           </div>
+          {compileResult?.complexity && <BudgetStrip report={compileResult.complexity} />}
           <div className="mat-preview__issues">
             {compileResult?.issues.length ? (
               compileResult.issues.map((iss, i) => (
@@ -281,6 +283,33 @@ function CanvasInner() {
       </div>
 
       {showWgsl && compileResult && <pre className="bp-output__code mat-wgsl">{compileResult.wgsl}</pre>}
+    </div>
+  );
+}
+
+/** A compact advisory stat strip: nodes / slabs / textures / est-ops, with each
+ *  metric highlighted when it exceeds its (documented default) budget. */
+function BudgetStrip({ report }: { report: ComplexityReport }) {
+  const stats: { label: string; value: number; max: number; over: boolean }[] = [
+    { label: "nodes", value: report.nodes, max: report.maxNodes, over: report.nodesOver },
+    { label: "slabs", value: report.slabs, max: report.maxSlabs, over: report.slabsOver },
+    { label: "tex", value: report.textures, max: report.maxTextures, over: report.texturesOver },
+    { label: "ops", value: report.estAluOps, max: report.maxAluOps, over: report.aluOver },
+  ];
+  return (
+    <div
+      className={`mat-budget${report.overBudget ? " mat-budget--over" : ""}`}
+      title="Material complexity budget (advisory). value / budget"
+    >
+      {stats.map((s) => (
+        <div key={s.label} className={`mat-budget__stat${s.over ? " mat-budget__stat--over" : ""}`}>
+          <span className="mat-budget__label">{s.label}</span>
+          <span className="mat-budget__value">
+            {s.value}
+            <span className="mat-budget__max">/{s.max}</span>
+          </span>
+        </div>
+      ))}
     </div>
   );
 }

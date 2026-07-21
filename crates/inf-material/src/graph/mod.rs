@@ -7,9 +7,11 @@
 //! walks the compiled graph to generate a `material_surface` WGSL function and
 //! validates it with naga, mapping errors back onto the offending nodes.
 
+pub mod budget;
 pub mod emit;
 pub mod nodekit;
 
+pub use budget::{analyze_complexity, analyze_with_budget, ComplexityReport, MaterialBudget};
 pub use emit::{
     emit_texture_compute, emit_wgsl, MatIssue, MatSeverity, MaterialCompile, TextureBinding,
     TextureCompile,

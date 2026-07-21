@@ -12,6 +12,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use inf_graph::{Graph, NodeId, NodeRegistry, ParamValue};
 
+use super::budget::{analyze_complexity, ComplexityReport};
 use super::nodekit::MatType;
 
 /// A texture asset referenced by a `tex.sample` node → a preview binding slot.
@@ -51,6 +52,8 @@ pub struct MaterialCompile {
     pub textures: Vec<TextureBinding>,
     /// True when naga accepted the module (no error-severity issues).
     pub ok: bool,
+    /// Advisory material-complexity budget analysis (P13.2).
+    pub complexity: ComplexityReport,
 }
 
 /// Compile a material graph to WGSL and validate it.
@@ -83,6 +86,7 @@ pub fn emit_wgsl(graph: &Graph, reg: &NodeRegistry) -> MaterialCompile {
         issues,
         textures: em.textures,
         ok,
+        complexity: analyze_complexity(graph),
     }
 }
 
@@ -231,6 +235,34 @@ impl<'a> Emitter<'a> {
                 "vec3<f32>(0.0)".into(),
             );
         };
+        // P13.2 Slab path: a single Slab wire drives all four channels. It is
+        // exclusive with the legacy scalar inputs.
+        if self.graph.link_into(out_id, "surface").is_some() {
+            const SCALAR_CHANNELS: [&str; 4] = ["base_color", "metallic", "roughness", "emissive"];
+            if SCALAR_CHANNELS
+                .iter()
+                .any(|ch| self.graph.link_into(out_id, ch).is_some())
+            {
+                self.issues.push(MatIssue {
+                    node: Some(out_id.0),
+                    severity: MatSeverity::Error,
+                    message: "Material Output: connect either a Slab or the individual channels, \
+                              not both"
+                        .into(),
+                });
+            }
+            let (slab_expr, _) = self.resolve_input(out_id, "surface");
+            // Materialize once so the four channel reads don't re-evaluate the
+            // (possibly whole) slab sub-tree.
+            let name = self.materialize(out_id.0, &slab_expr, MatType::Slab);
+            return (
+                format!("{name}.albedo"),
+                format!("{name}.metallic"),
+                format!("{name}.roughness"),
+                format!("{name}.emissive"),
+            );
+        }
+
         let base = self.resolve_input_typed(out_id, "base_color", MatType::Vec3, "vec3<f32>(0.8)");
         let metallic = self.resolve_input_typed(out_id, "metallic", MatType::Float, "0.0");
         let roughness = self.resolve_input_typed(out_id, "roughness", MatType::Float, "0.5");
@@ -506,6 +538,64 @@ impl<'a> Emitter<'a> {
                 }
             }
 
+            // ── slabs (P13.2) ──
+            "slab.surface" => {
+                self.helpers.insert("slab");
+                let base =
+                    self.resolve_input_typed(node, "base_color", MatType::Vec3, "vec3<f32>(0.8)");
+                let metallic = self.resolve_input_typed(node, "metallic", MatType::Float, "0.0");
+                let roughness = self.resolve_input_typed(node, "roughness", MatType::Float, "0.5");
+                let emissive =
+                    self.resolve_input_typed(node, "emissive", MatType::Vec3, "vec3<f32>(0.0)");
+                (
+                    format!(
+                        "MatSlab({}, {}, {}, {})",
+                        base.0, metallic.0, roughness.0, emissive.0
+                    ),
+                    MatType::Slab,
+                )
+            }
+            "slab.blend" => {
+                self.helpers.insert("slab");
+                let (a, ta) = self.resolve_input(node, "a");
+                let (b, tb) = self.resolve_input(node, "b");
+                let factor = self.resolve_factor(node, &params);
+                (
+                    format!(
+                        "mat_slab_mix({}, {}, {factor})",
+                        self.coerce(&a, ta, MatType::Slab),
+                        self.coerce(&b, tb, MatType::Slab)
+                    ),
+                    MatType::Slab,
+                )
+            }
+            "slab.mask_blend" => {
+                self.helpers.insert("slab");
+                let (a, ta) = self.resolve_input(node, "a");
+                let (b, tb) = self.resolve_input(node, "b");
+                let (mask, tmask) = self.resolve_input(node, "mask");
+                let mask = self.coerce(&mask, tmask, MatType::Float);
+                // Feather is a compile-time param → compute smoothstep edges in
+                // Rust so degenerate (zero-width) transitions can't divide by
+                // zero in WGSL.
+                let feather = pf(&params, "feather").clamp(0.0, 0.5);
+                let e0 = (0.5 - feather).max(0.0);
+                let mut e1 = (0.5 + feather).min(1.0);
+                if e1 - e0 < 1e-4 {
+                    e1 = e0 + 1e-4;
+                }
+                (
+                    format!(
+                        "mat_slab_mix({}, {}, smoothstep({}, {}, {mask}))",
+                        self.coerce(&a, ta, MatType::Slab),
+                        self.coerce(&b, tb, MatType::Slab),
+                        fmt_f(e0),
+                        fmt_f(e1)
+                    ),
+                    MatType::Slab,
+                )
+            }
+
             other => {
                 self.issues.push(MatIssue {
                     node: Some(node.0),
@@ -613,6 +703,25 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Hoist an expression into a fresh `let`, returning its name. Used to
+    /// evaluate a Slab sub-tree once before reading its four fields.
+    fn materialize(&mut self, node: u32, expr: &str, ty: MatType) -> String {
+        let name = self.alloc_local();
+        self.push_line(node, &format!("let {name}: {} = {expr};", ty.wgsl()));
+        name
+    }
+
+    /// Resolve a `slab.blend` factor: the wired `factor` pin overrides the
+    /// stored `factor` param (a `param_pin`), else the param's value is used.
+    fn resolve_factor(&mut self, node: NodeId, params: &inf_graph::ParamMap) -> String {
+        if self.graph.link_into(node, "factor").is_some() {
+            let (f, tf) = self.resolve_input(node, "factor");
+            self.coerce(&f, tf, MatType::Float)
+        } else {
+            fmt_f(pf(params, "factor"))
+        }
+    }
+
     fn alloc_local(&mut self) -> String {
         let n = self.next_local;
         self.next_local += 1;
@@ -697,6 +806,12 @@ fn helper_src(name: &str) -> &'static str {
         "noise" => {
             "fn value_hash(p: vec2<f32>) -> f32 {\n    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);\n}\nfn value_noise(p: vec2<f32>) -> f32 {\n    let i = floor(p);\n    let f = fract(p);\n    let a = value_hash(i);\n    let b = value_hash(i + vec2<f32>(1.0, 0.0));\n    let c = value_hash(i + vec2<f32>(0.0, 1.0));\n    let d = value_hash(i + vec2<f32>(1.0, 1.0));\n    let u = f * f * (3.0 - 2.0 * f);\n    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);\n}\n"
         }
+        // P13.2 layered slabs: the struct + a channel-wise mix (WGSL module-scope
+        // declarations may be referenced before they appear, so helper ordering
+        // relative to this is irrelevant).
+        "slab" => {
+            "struct MatSlab {\n    albedo: vec3<f32>,\n    metallic: f32,\n    roughness: f32,\n    emissive: vec3<f32>,\n};\nfn mat_slab_mix(a: MatSlab, b: MatSlab, t: f32) -> MatSlab {\n    return MatSlab(mix(a.albedo, b.albedo, t), mix(a.metallic, b.metallic, t), mix(a.roughness, b.roughness, t), mix(a.emissive, b.emissive, t));\n}\n"
+        }
         _ => "",
     }
 }
@@ -716,6 +831,9 @@ fn zero_literal(t: MatType) -> String {
         MatType::Vec2 => "vec2<f32>(0.0)".into(),
         MatType::Vec3 => "vec3<f32>(0.0)".into(),
         MatType::Vec4 => "vec4<f32>(0.0)".into(),
+        // A sensible default slab (neutral gray dielectric) for an unconnected
+        // slab input, e.g. a `slab.blend` operand left dangling.
+        MatType::Slab => "MatSlab(vec3<f32>(0.8), 0.0, 0.5, vec3<f32>(0.0))".into(),
     }
 }
 
@@ -725,6 +843,7 @@ fn one_literal(t: MatType) -> String {
         MatType::Vec2 => "vec2<f32>(1.0)".into(),
         MatType::Vec3 => "vec3<f32>(1.0)".into(),
         MatType::Vec4 => "vec4<f32>(1.0)".into(),
+        MatType::Slab => "MatSlab(vec3<f32>(1.0), 1.0, 1.0, vec3<f32>(1.0))".into(),
     }
 }
 
@@ -940,5 +1059,237 @@ mod tests {
         assert_eq!(apply_edits(&mut g, &reg, &edits), edits.len());
         let c = emit_wgsl(&g, &reg);
         assert!(c.ok, "issues: {:?}", c.issues);
+    }
+
+    // ── P13.2 layered slabs ────────────────────────────────────────────────
+
+    /// A single `slab.surface` wired into `output.surface` compiles, validates,
+    /// packs a `MatSlab`, and drives the four channels from the resolved slab.
+    #[test]
+    fn slab_surface_passthrough_validates() {
+        let reg = material_registry();
+        let mut g = Graph::empty();
+        let edits = vec![
+            add(1, "output.surface"),
+            add(2, "slab.surface"),
+            add(3, "const.color"),
+            set(3, "r", 0.9),
+            set(3, "g", 0.1),
+            set(3, "b", 0.2),
+            add(4, "const.float"),
+            set(4, "value", 0.7),
+            wire(3, "out", 2, "base_color"),
+            wire(4, "out", 2, "roughness"),
+            wire(2, "out", 1, "surface"),
+        ];
+        assert_eq!(apply_edits(&mut g, &reg, &edits), edits.len());
+        let c = emit_wgsl(&g, &reg);
+        assert!(c.ok, "issues: {:?}", c.issues);
+        assert!(c.surface_wgsl.contains("struct MatSlab"));
+        assert!(c.surface_wgsl.contains("MatSlab(vec3<f32>(0.9"));
+        // The channels read from the materialized slab let.
+        assert!(c.surface_wgsl.contains(".albedo"));
+        assert!(c.surface_wgsl.contains("surf.roughness ="));
+    }
+
+    /// A slab graph and the equivalent scalar graph produce the same channel
+    /// values (behavioral back-compat of the Slab lowering).
+    #[test]
+    fn slab_passthrough_matches_scalar_graph() {
+        let reg = material_registry();
+
+        // Scalar graph: color → base_color, float → roughness.
+        let mut scalar = Graph::empty();
+        let se = vec![
+            add(1, "output.surface"),
+            add(2, "const.color"),
+            set(2, "r", 0.3),
+            set(2, "g", 0.4),
+            set(2, "b", 0.5),
+            add(3, "const.float"),
+            set(3, "value", 0.8),
+            wire(2, "out", 1, "base_color"),
+            wire(3, "out", 1, "roughness"),
+        ];
+        assert_eq!(apply_edits(&mut scalar, &reg, &se), se.len());
+        let sc = emit_wgsl(&scalar, &reg);
+        assert!(sc.ok);
+        // Scalar path assigns the color/roughness directly.
+        assert!(sc.surface_wgsl.contains("surf.base_color = vec3<f32>(0.3"));
+        assert!(sc.surface_wgsl.contains("surf.roughness = 0.8"));
+
+        // Slab graph: same consts → slab.surface → output.surface. The packed
+        // MatSlab carries the identical channel expressions.
+        let mut slab = Graph::empty();
+        let le = vec![
+            add(1, "output.surface"),
+            add(2, "slab.surface"),
+            add(3, "const.color"),
+            set(3, "r", 0.3),
+            set(3, "g", 0.4),
+            set(3, "b", 0.5),
+            add(4, "const.float"),
+            set(4, "value", 0.8),
+            wire(3, "out", 2, "base_color"),
+            wire(4, "out", 2, "roughness"),
+            wire(2, "out", 1, "surface"),
+        ];
+        assert_eq!(apply_edits(&mut slab, &reg, &le), le.len());
+        let lc = emit_wgsl(&slab, &reg);
+        assert!(lc.ok, "issues: {:?}", lc.issues);
+        // The same channel expressions appear inside the MatSlab constructor.
+        assert!(lc.surface_wgsl.contains("MatSlab(vec3<f32>(0.3"));
+        assert!(lc.surface_wgsl.contains(", 0.8, vec3<f32>(0.0))"));
+    }
+
+    /// A `slab.blend` midpoint (factor 0.5) emits a channel-wise `mix` at 0.5.
+    #[test]
+    fn slab_blend_midpoint_validates() {
+        let reg = material_registry();
+        let mut g = Graph::empty();
+        let edits = vec![
+            add(1, "output.surface"),
+            add(2, "slab.blend"),
+            set(2, "factor", 0.5),
+            add(3, "slab.surface"),
+            add(4, "slab.surface"),
+            wire(3, "out", 2, "a"),
+            wire(4, "out", 2, "b"),
+            wire(2, "out", 1, "surface"),
+        ];
+        assert_eq!(apply_edits(&mut g, &reg, &edits), edits.len());
+        let c = emit_wgsl(&g, &reg);
+        assert!(c.ok, "issues: {:?}", c.issues);
+        assert!(c.surface_wgsl.contains("mat_slab_mix("));
+        assert!(c.surface_wgsl.contains(", 0.5)"));
+    }
+
+    /// A wired `factor` pin overrides the stored blend param.
+    #[test]
+    fn slab_blend_factor_pin_overrides_param() {
+        let reg = material_registry();
+        let mut g = Graph::empty();
+        let edits = vec![
+            add(1, "output.surface"),
+            add(2, "slab.blend"),
+            set(2, "factor", 0.5),
+            add(3, "slab.surface"),
+            add(4, "slab.surface"),
+            add(5, "const.float"),
+            set(5, "value", 0.25),
+            wire(3, "out", 2, "a"),
+            wire(4, "out", 2, "b"),
+            wire(5, "out", 2, "factor"),
+            wire(2, "out", 1, "surface"),
+        ];
+        assert_eq!(apply_edits(&mut g, &reg, &edits), edits.len());
+        let c = emit_wgsl(&g, &reg);
+        assert!(c.ok, "issues: {:?}", c.issues);
+        // The wired 0.25 drives the mix, not the 0.5 param.
+        assert!(c.surface_wgsl.contains(", 0.25)"));
+    }
+
+    /// `slab.mask_blend` bakes feathered smoothstep edges around the 0.5
+    /// threshold and validates.
+    #[test]
+    fn slab_mask_blend_feather_validates() {
+        let reg = material_registry();
+        let mut g = Graph::empty();
+        let edits = vec![
+            add(1, "output.surface"),
+            add(2, "slab.mask_blend"),
+            set(2, "feather", 0.2),
+            add(3, "slab.surface"),
+            add(4, "slab.surface"),
+            add(5, "input.uv"),
+            add(6, "proc.noise"),
+            wire(3, "out", 2, "a"),
+            wire(4, "out", 2, "b"),
+            wire(5, "out", 6, "uv"),
+            wire(6, "out", 2, "mask"),
+            wire(2, "out", 1, "surface"),
+        ];
+        assert_eq!(apply_edits(&mut g, &reg, &edits), edits.len());
+        let c = emit_wgsl(&g, &reg);
+        assert!(c.ok, "issues: {:?}", c.issues);
+        // feather 0.2 → edges 0.3 .. 0.7.
+        assert!(c.surface_wgsl.contains("smoothstep(0.3, 0.7,"));
+    }
+
+    /// Nested blends over three slabs compile + validate (the tree substrate).
+    #[test]
+    fn nested_slab_blends_validate() {
+        let reg = material_registry();
+        let mut g = Graph::empty();
+        let edits = vec![
+            add(1, "output.surface"),
+            add(2, "slab.surface"),
+            add(3, "slab.surface"),
+            add(4, "slab.surface"),
+            add(5, "slab.blend"),
+            set(5, "factor", 0.3),
+            add(6, "slab.blend"),
+            set(6, "factor", 0.6),
+            wire(2, "out", 5, "a"),
+            wire(3, "out", 5, "b"),
+            wire(5, "out", 6, "a"), // blend(2,3) → a of blend 6
+            wire(4, "out", 6, "b"),
+            wire(6, "out", 1, "surface"),
+        ];
+        assert_eq!(apply_edits(&mut g, &reg, &edits), edits.len());
+        let c = emit_wgsl(&g, &reg);
+        assert!(c.ok, "issues: {:?}", c.issues);
+        // The outer blend nests the inner one directly (one materialized slab).
+        assert!(
+            c.surface_wgsl.contains("mat_slab_mix(mat_slab_mix("),
+            "nested blend:\n{}",
+            c.surface_wgsl
+        );
+        assert_eq!(c.complexity.slabs, 5);
+    }
+
+    /// Wiring BOTH a Slab and a scalar channel into `output.surface` is a
+    /// node-anchored compile error.
+    #[test]
+    fn slab_and_scalar_both_wired_errors() {
+        let reg = material_registry();
+        let mut g = Graph::empty();
+        let edits = vec![
+            add(1, "output.surface"),
+            add(2, "slab.surface"),
+            add(3, "const.color"),
+            wire(2, "out", 1, "surface"),
+            wire(3, "out", 1, "base_color"),
+        ];
+        assert_eq!(apply_edits(&mut g, &reg, &edits), edits.len());
+        let c = emit_wgsl(&g, &reg);
+        assert!(!c.ok, "both-wired should be an error");
+        let err = c
+            .issues
+            .iter()
+            .find(|i| i.severity == MatSeverity::Error)
+            .expect("an error issue");
+        assert_eq!(err.node, Some(1), "anchored to the output node");
+        assert!(err.message.contains("either a Slab or"));
+    }
+
+    /// The compile result carries a complexity report.
+    #[test]
+    fn compile_reports_complexity() {
+        let reg = material_registry();
+        let mut g = Graph::empty();
+        let edits = vec![
+            add(1, "output.surface"),
+            add(2, "slab.surface"),
+            add(3, "tex.sample"),
+            wire(3, "rgb", 2, "base_color"),
+            wire(2, "out", 1, "surface"),
+        ];
+        assert_eq!(apply_edits(&mut g, &reg, &edits), edits.len());
+        let c = emit_wgsl(&g, &reg);
+        assert!(c.ok, "issues: {:?}", c.issues);
+        assert_eq!(c.complexity.nodes, 3);
+        assert_eq!(c.complexity.slabs, 1);
+        assert_eq!(c.complexity.textures, 1);
     }
 }

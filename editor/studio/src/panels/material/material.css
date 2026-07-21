@@ -50,6 +50,52 @@
   opacity: 0.5;
 }
 
+/* Complexity budget stat strip (P13.2): nodes / slabs / tex / ops. */
+.mat-budget {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  padding: 4px 6px;
+  background: var(--ink-bg-1, #16181d);
+  border-bottom: 1px solid var(--ink-border, #2a2e35);
+}
+
+.mat-budget__stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 2px 0;
+  border-radius: 3px;
+}
+
+.mat-budget__stat--over {
+  background: rgba(200, 120, 40, 0.18);
+}
+
+.mat-budget__label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.55;
+}
+
+.mat-budget__value {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-text, #e6e8ec);
+}
+
+.mat-budget__stat--over .mat-budget__value {
+  color: #e6a25a;
+  font-weight: 600;
+}
+
+.mat-budget__max {
+  font-size: 9px;
+  opacity: 0.4;
+}
+
 .mat-preview__issues {
   flex: 1;
   overflow-y: auto;
