@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 use inf_ecs::components::{
     ActorClass, Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D,
-    Light, Light2D, Material, MeshRef, NineSlice, RigidBody2D, RigidBody3D, Sprite, Text2D,
-    Tilemap, Transform, Visibility,
+    Light, Light2D, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D, RigidBody3D, Sprite,
+    Terrain, Text2D, Tilemap, Transform, Visibility,
 };
 use inf_ecs::math::{Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
@@ -36,7 +36,13 @@ use crate::scene::SceneDoc;
 ///   blueprint-class binding (`actor`), plus a file-level [`LevelSettings`]
 ///   record (gravity + sim rate). Older v1/v2 payloads load with the new slots
 ///   defaulted and default settings (see [`decode`] + [`SceneFileV2`]).
-pub const SCHEMA_VERSION: u32 = 3;
+/// * v4 — P10.6: appended the two P10 world components — `terrain`
+///   ([`inf_ecs::components::Terrain`], heightfield + splat weights + layers) and
+///   `pcg_volume` ([`inf_ecs::components::PcgVolume`], a scatter volume; its
+///   `evaluated` cache is `#[serde(skip)]` so it persists **empty** and is
+///   re-evaluated on demand). Older v1/v2/v3 payloads load with both slots
+///   defaulted (see [`decode`] + [`SceneFileV3`]).
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// File-level simulation settings (P9.5 · schema v3). Replaces the player's
 /// hard-coded `DEFAULT_GRAVITY`/`DEFAULT_HZ`. The serde defaults **preserve the
@@ -83,30 +89,21 @@ impl Default for LevelSettings {
 /// version-specific record ([`EntityRecordV1`]) and lifted with the new slots
 /// defaulted — never by reinterpreting the shorter byte stream.
 ///
-/// # ⚠️ NOT YET PERSISTED: `inf_ecs::Terrain` (P10.1)
+/// # Terrain + PcgVolume persistence (P10.6 · schema v4)
 ///
-/// A spawned [`inf_ecs::components::Terrain`] (Add ▸ Terrain, [`SpawnKind::Terrain`])
-/// is **live-session only** — this v3 `EntityRecord` has **no `terrain` slot**, so a
-/// terrain is dropped on save and absent on reload (see the guard test
-/// `terrain_is_not_persisted_yet_v4_todo`). This is deliberately *not* fixed in the
-/// P10 glue batch: adding the slot is a schema-v3→v4 migration (a frozen
-/// `EntityRecordV3` + a `SceneFileV3`→current lift, a v3 forever-load fixture, and
-/// `record_of`/`raw_spawn_record`/`apply_to_doc` wiring), which must land as its own
-/// versioned change, not smuggled into a glue batch.
+/// As of schema **v4** this record carries a `terrain` slot
+/// ([`inf_ecs::components::Terrain`]) and a `pcg_volume` slot
+/// ([`inf_ecs::components::PcgVolume`]). A spawned terrain (Add ▸ Terrain,
+/// [`SpawnKind::Terrain`]) — including in-viewport **sculpted** height
+/// (`EditCommand::SculptTerrain`) and **painted** splat weights
+/// (`EditCommand::PaintSplat`) — now survives save/load and undo/redo of a
+/// Create/Delete. `TerrainData`'s manual serde keeps unpainted tiles byte-stable.
 ///
-/// **TODO(P10 · v4):** bump [`SCHEMA_VERSION`] to 4 and append
-/// `pub terrain: Option<inf_ecs::components::Terrain>` here (`#[serde(default)]`),
-/// mirroring how the v2 2D slots and v3 physics slots were added. `TerrainData`
-/// already round-trips through serde deterministically, so the record change is the
-/// only missing piece. Undo/redo of a terrain spawn are affected by the same gap
-/// (the Create/Delete commands snapshot through `EntityRecord`).
-///
-/// **P10.2b (sculpting) note:** in-viewport terrain sculpting mutates the live
-/// `Terrain::data` and records `EditCommand::SculptTerrain` (`HeightDelta`) undo
-/// steps that work *in-session* — but because the component itself isn't
-/// persisted, sculpted height is dropped on save/load just like a spawned
-/// terrain. The v4 slot above closes both gaps at once; no schema bump was made
-/// for sculpting.
+/// A [`PcgVolume`]'s `evaluated` instance cache is `#[serde(skip)]`, so the
+/// persisted volume carries only its `graph` ref + region + seed; the instances
+/// are re-evaluated on demand (in-editor by `pcg_evaluate`, in the shipped player
+/// on load — see `inf_player::level`). Save → load → save is byte-identical: the
+/// skipped cache never reaches the stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EntityRecord {
     pub guid: Uuid,
@@ -157,6 +154,15 @@ pub struct EntityRecord {
     /// (the [`ActorClass`] link); `None` when the entity runs no blueprint.
     #[serde(default)]
     pub actor: Option<Uuid>,
+    // ── v4 (P10.6) world components ───────────────────────────────────────
+    /// A heightfield terrain (paged heights + splat weights + material layers).
+    /// `TerrainData`'s manual serde keeps unpainted tiles byte-stable.
+    #[serde(default)]
+    pub terrain: Option<Terrain>,
+    /// A procedural scatter volume. Its `evaluated` instance cache is
+    /// `#[serde(skip)]`, so only the `graph` ref + region + seed persist.
+    #[serde(default)]
+    pub pcg_volume: Option<PcgVolume>,
 }
 
 /// A schema-v1 [`EntityRecord`] (pre-P8.2b) — exactly the byte layout written by
@@ -248,10 +254,10 @@ pub struct EntityRecordV2 {
 }
 
 impl EntityRecordV2 {
-    /// Lift a v2 record to the current (v3) shape: physics slots + actor default
-    /// to `None`.
-    fn into_current(self) -> EntityRecord {
-        EntityRecord {
+    /// Lift a v2 record to the **v3** shape: physics slots + actor default to
+    /// `None`. Second hop of the v1→v2→v3→v4 chain.
+    fn into_v3(self) -> EntityRecordV3 {
+        EntityRecordV3 {
             guid: self.guid,
             name: self.name,
             parent: self.parent,
@@ -286,7 +292,107 @@ pub struct SceneFileV2 {
 }
 
 impl SceneFileV2 {
-    /// Lift a v2 file to the current (v3) shape (default [`LevelSettings`]).
+    /// Lift a v2 file to the **v3** shape (default [`LevelSettings`]).
+    fn into_v3(self) -> SceneFileV3 {
+        SceneFileV3 {
+            schema_version: 3,
+            title: self.title,
+            entities: self
+                .entities
+                .into_iter()
+                .map(EntityRecordV2::into_v3)
+                .collect(),
+            settings: LevelSettings::default(),
+        }
+    }
+}
+
+/// A schema-**v3** [`EntityRecord`] (pre-P10.6) — the exact byte layout written by
+/// P9.5..P10.5 editors (3D + 2D + physics + actor), used only to decode legacy
+/// payloads. Frozen forever so the committed v3 fixture (and any level saved
+/// before P10.6) loads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityRecordV3 {
+    pub guid: Uuid,
+    pub name: String,
+    pub parent: Option<Uuid>,
+    pub transform: Transform,
+    pub visible: bool,
+    pub mesh: Option<MeshRef>,
+    pub material: Option<Material>,
+    pub light: Option<Light>,
+    pub camera: Option<Camera>,
+    #[serde(default)]
+    pub sprite: Option<Sprite>,
+    #[serde(default)]
+    pub tilemap: Option<Tilemap>,
+    #[serde(default)]
+    pub nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    pub text2d: Option<Text2D>,
+    #[serde(default)]
+    pub light_2d: Option<Light2D>,
+    #[serde(default)]
+    pub rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    pub collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    pub character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    pub rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    pub collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    pub character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    pub actor: Option<Uuid>,
+}
+
+impl EntityRecordV3 {
+    /// Lift a v3 record to the current (v4) shape: terrain + pcg_volume default to
+    /// `None`.
+    fn into_current(self) -> EntityRecord {
+        EntityRecord {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: None,
+            pcg_volume: None,
+        }
+    }
+}
+
+/// A schema-v3 [`SceneFile`] (frozen layout for legacy decode). Carries the
+/// file-level [`LevelSettings`] added in v3.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneFileV3 {
+    pub schema_version: u32,
+    pub title: String,
+    pub entities: Vec<EntityRecordV3>,
+    #[serde(default)]
+    pub settings: LevelSettings,
+}
+
+impl SceneFileV3 {
+    /// Lift a v3 file to the current (v4) shape (settings carry through).
     fn into_current(self) -> SceneFile {
         SceneFile {
             schema_version: SCHEMA_VERSION,
@@ -294,9 +400,9 @@ impl SceneFileV2 {
             entities: self
                 .entities
                 .into_iter()
-                .map(EntityRecordV2::into_current)
+                .map(EntityRecordV3::into_current)
                 .collect(),
-            settings: LevelSettings::default(),
+            settings: self.settings,
         }
     }
 }
@@ -369,6 +475,8 @@ pub fn record_of(doc: &SceneDoc, guid: Uuid) -> Option<EntityRecord> {
         collider_3d: w.get::<Collider3D>(e).copied(),
         character_controller_3d: w.get::<CharacterController3D>(e).copied(),
         actor: w.get::<ActorClass>(e).map(|a| a.0),
+        terrain: w.get::<Terrain>(e).cloned(),
+        pcg_volume: w.get::<PcgVolume>(e).cloned(),
     })
 }
 
@@ -405,15 +513,21 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
             let (v1, _): (SceneFileV1, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v1: {e}"))?;
-            migrate(v1.into_v2().into_current())
+            migrate(v1.into_v2().into_v3().into_current())
         }
         2 => {
             let (v2, _): (SceneFileV2, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v2: {e}"))?;
-            migrate(v2.into_current())
+            migrate(v2.into_v3().into_current())
         }
         3 => {
+            let (v3, _): (SceneFileV3, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| format!("decode v3: {e}"))?;
+            migrate(v3.into_current())
+        }
+        4 => {
             let (file, _): (SceneFile, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode: {e}"))?;
@@ -435,7 +549,7 @@ pub fn migrate(file: SceneFile) -> Result<SceneFile, String> {
         ));
     }
     // Records are already lifted to the current shape by the versioned decode
-    // (v1→v2→v3); nothing more to do here. Future upgrades chain in `decode`.
+    // (v1→v2→v3→v4); nothing more to do here. Future upgrades chain in `decode`.
     Ok(file)
 }
 
@@ -499,6 +613,12 @@ pub fn apply_to_doc(doc: &mut SceneDoc, file: &SceneFile) {
         }
         if let Some(actor) = rec.actor {
             w.entity_mut(e).insert(ActorClass(actor));
+        }
+        if let Some(t) = &rec.terrain {
+            w.entity_mut(e).insert(t.clone());
+        }
+        if let Some(v) = &rec.pcg_volume {
+            w.entity_mut(e).insert(v.clone());
         }
     }
     doc.set_title(&file.title);
@@ -660,45 +780,177 @@ mod tests {
         assert!(!loaded.is_dirty(), "a freshly loaded doc is clean");
     }
 
-    /// GUARD (P10.1): a spawned `Terrain` is **not** persisted by the v3 schema —
-    /// there is no `terrain` slot on [`EntityRecord`]. This test pins the current
-    /// (lossy) behavior so the day someone adds the v4 slot, this test flips and
-    /// forces them to update it deliberately. See the `EntityRecord` doc TODO.
-    ///
-    /// The same gap swallows P10.2b **sculpted** height: strokes edit the live
-    /// `Terrain::data` (with working in-session undo) but never reach disk until
-    /// the v4 slot lands.
+    /// FLIPPED (P10.6 · schema v4): a spawned `Terrain` — including sculpted
+    /// height and painted splat weights — now **persists** across save/load and is
+    /// byte-identical on re-encode. (This is the guard the v3 batch left as
+    /// `terrain_is_not_persisted_yet_v4_todo`; the v4 slot closed the gap.)
     #[test]
-    fn terrain_is_not_persisted_yet_v4_todo() {
+    fn terrain_persists_across_save_load_v4() {
         use inf_ecs::components::Terrain;
 
         let mut doc = SceneDoc::new();
         let g = doc.create(SpawnKind::Terrain, "Terrain", None);
-        // The live entity carries a non-empty starter terrain.
-        let e = doc.entity_of(g).unwrap();
+
+        // Author a multi-tile sculpted terrain (heights) + paint a splat band
+        // (materialized weights on some tiles) so both the sparse-default and
+        // materialized-weight paths round-trip.
+        {
+            let e = doc.entity_of(g).unwrap();
+            let mut t = Terrain::configured(8, 1.0);
+            let span = t.data.tile_span();
+            // A sine hill across a 2×2 tile block (heights authored, tiles created).
+            t.data.write_region(
+                inf_ecs::math::Vec2d::ZERO.to_dvec2(),
+                inf_ecs::math::Vec2d::splat(span * 2.0).to_dvec2(),
+                |x, z| 3.0 * (x * 0.1).sin() * (z * 0.1).cos(),
+            );
+            // Paint layer 1 into one tile → materialized weights there, defaults
+            // elsewhere (the sparse/materialized mix).
+            let _ = inf_terrain::apply_paint(
+                &mut t.data,
+                1,
+                inf_terrain::BrushParams::new(
+                    glam::DVec2::new(span * 0.5, span * 0.5),
+                    span * 0.4,
+                    1.0,
+                ),
+            );
+            t.macro_variation = 0.4;
+            doc.world_mut().world_mut().entity_mut(e).insert(t);
+            doc.world_mut().mark_dirty();
+        }
+
+        // Snapshot the authored terrain for a value comparison after reload.
+        let (want_tiles, want_probe, want_painted) = {
+            let e = doc.entity_of(g).unwrap();
+            let t = doc.world().world().get::<Terrain>(e).unwrap();
+            let probe = t.data.height_at(glam::DVec2::new(4.0, 4.0));
+            let painted = t.data.tiles().any(|(_, tile)| !tile.weights_are_default());
+            (t.data.tile_count(), probe, painted)
+        };
+        assert!(want_tiles >= 4, "multi-tile terrain authored");
         assert!(
-            !doc.world()
-                .world()
-                .get::<Terrain>(e)
-                .unwrap()
-                .data
-                .is_empty(),
-            "spawned terrain is live in-session"
+            want_painted,
+            "at least one tile carries materialized weights"
         );
 
-        // Save → load round trip.
-        let bytes = encode(&to_scene_file(&doc)).unwrap();
+        // save → load → save is byte-identical.
+        let bytes1 = encode(&to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], 4, "authored payload is a genuine schema-v4 file");
         let mut loaded = SceneDoc::new();
-        apply_to_doc(&mut loaded, &decode(&bytes).unwrap());
-
-        // The entity survives (name/transform persist) …
-        let e2 = loaded.entity_of(g).expect("entity itself persists");
-        // … but its Terrain component is GONE (no v3 slot). When v4 adds the slot,
-        // this assertion flips to `is_some()` and the test name's TODO is done.
-        assert!(
-            loaded.world().world().get::<Terrain>(e2).is_none(),
-            "terrain is dropped on save/load until the v4 slot exists"
+        apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
+        let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "terrain save→load→save must be byte-identical"
         );
+
+        // The reloaded terrain is present and preserves heights + weights.
+        let e2 = loaded.entity_of(g).expect("entity persists");
+        let t2 = loaded
+            .world()
+            .world()
+            .get::<Terrain>(e2)
+            .expect("terrain persists across save/load (v4)");
+        assert_eq!(t2.data.tile_count(), want_tiles);
+        assert_eq!(t2.data.height_at(glam::DVec2::new(4.0, 4.0)), want_probe);
+        assert!(
+            t2.data.tiles().any(|(_, tile)| !tile.weights_are_default()),
+            "painted (materialized) splat weights survive the round trip"
+        );
+        assert_eq!(t2.macro_variation, 0.4);
+    }
+
+    /// A [`PcgVolume`] with a graph ref round-trips (its `evaluated` cache is
+    /// `#[serde(skip)]`, so a save must never carry it, and the persisted volume
+    /// keeps its graph ref + region + seed).
+    #[test]
+    fn pcg_volume_persists_across_save_load_v4() {
+        use inf_ecs::components::PcgVolume;
+
+        let graph_guid = uuid::Uuid::from_u128(0x00C0_FFEE_1234);
+        let mut doc = SceneDoc::new();
+        let g = doc.create(SpawnKind::Empty, "Scatter", None);
+        {
+            let e = doc.entity_of(g).unwrap();
+            let mut vol = PcgVolume {
+                graph: Some(graph_guid),
+                extent: Vec2d::new(80.0, 40.0),
+                seed: 7,
+                ..Default::default()
+            };
+            // A non-empty evaluated cache must NOT reach disk (serde-skipped).
+            vol.evaluated.push(inf_ecs::components::ScatteredInstance {
+                position: glam::DVec3::new(1.0, 2.0, 3.0),
+                rotation: glam::DQuat::IDENTITY,
+                scale: 1.0,
+                kind: 0,
+            });
+            doc.world_mut().world_mut().entity_mut(e).insert(vol);
+            doc.world_mut().mark_dirty();
+        }
+
+        let bytes1 = encode(&to_scene_file(&doc)).unwrap();
+        let mut loaded = SceneDoc::new();
+        apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
+        let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "PCG volume save→load→save must be byte-identical (evaluated skipped)"
+        );
+
+        let e2 = loaded.entity_of(g).unwrap();
+        let v2 = loaded
+            .world()
+            .world()
+            .get::<PcgVolume>(e2)
+            .expect("pcg volume persists (v4)");
+        assert_eq!(v2.graph, Some(graph_guid));
+        assert_eq!(v2.extent, Vec2d::new(80.0, 40.0));
+        assert_eq!(v2.seed, 7);
+        assert!(
+            v2.evaluated.is_empty(),
+            "the evaluated cache is re-computed on demand, never persisted"
+        );
+    }
+
+    /// Delete → undo restores both a `Terrain` and a `PcgVolume` (the v3 batch
+    /// noted delete→undo lost `Terrain`; the v4 record slots fix it, since
+    /// Create/Delete snapshot through [`record_of`] / `raw_spawn_record`).
+    #[test]
+    fn delete_undo_restores_terrain_and_pcg_v4() {
+        use inf_ecs::components::{PcgVolume, Terrain};
+
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Empty, "World", None);
+        {
+            let e = doc.entity_of(g).unwrap();
+            let mut t = Terrain::configured(8, 1.0);
+            t.data.author_tile((0, 0), |x, z| 0.25 * (x + z));
+            let w = doc.world_mut().world_mut();
+            w.entity_mut(e).insert(t);
+            w.entity_mut(e).insert(PcgVolume {
+                graph: Some(uuid::Uuid::from_u128(0xABCD)),
+                ..Default::default()
+            });
+            doc.world_mut().mark_dirty();
+        }
+
+        // Delete (records the subtree through EntityRecord) then undo.
+        doc.edit_delete(&[g]);
+        assert!(doc.entity_of(g).is_none(), "deleted");
+        doc.undo();
+
+        let e = doc.entity_of(g).expect("entity restored by undo");
+        let w = doc.world().world();
+        let t = w
+            .get::<Terrain>(e)
+            .expect("terrain restored by delete→undo (v4)");
+        assert_eq!(t.data.tile_count(), 1);
+        let v = w
+            .get::<PcgVolume>(e)
+            .expect("pcg volume restored by delete→undo (v4)");
+        assert_eq!(v.graph, Some(uuid::Uuid::from_u128(0xABCD)));
     }
 
     #[test]
@@ -1023,6 +1275,9 @@ mod tests {
             assert!(r.collider_2d.is_none());
             assert!(r.character_controller_2d.is_none());
             assert!(r.actor.is_none());
+            // v4 world slots defaulted on the old payload.
+            assert!(r.terrain.is_none());
+            assert!(r.pcg_volume.is_none());
         }
         // Legacy files carry no settings → the defaults (2D gravity zero).
         assert_eq!(file.settings, LevelSettings::default());
@@ -1108,7 +1363,10 @@ mod tests {
     fn round_trip_with_v3_physics_and_actor_is_byte_identical() {
         let (doc, actor_guid) = authored_v3_scene();
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 3, "authored payload is a genuine schema-v3 file");
+        assert_eq!(
+            bytes1[0], 4,
+            "the physics/actor content now writes as a schema-v4 file"
+        );
 
         let mut doc2 = SceneDoc::new();
         apply_to_doc(&mut doc2, &decode(&bytes1).unwrap());
@@ -1235,23 +1493,166 @@ mod tests {
     }
 
     #[test]
-    fn v2_fixture_loads_forever_and_lifts_to_v3() {
+    fn v2_fixture_loads_forever_and_lifts_to_v4() {
         let file = decode(&v2_fixture_bytes()).expect("v2 fixture decodes");
         assert_eq!(file.schema_version, SCHEMA_VERSION);
         assert_eq!(file.title, "V2 Fixture Level");
         assert_eq!(file.entities.len(), 2);
         let by_name = |n: &str| file.entities.iter().find(|r| r.name == n).unwrap();
-        // v2 data preserved through the v2→v3 lift.
+        // v2 data preserved through the v2→v3→v4 lift.
         assert!(by_name("Ground").tilemap.is_some());
         assert!(by_name("Sprite").sprite.is_some());
         assert!(by_name("Sprite").light_2d.is_some());
-        // Every v3 slot defaulted, and settings default (2D gravity zero).
+        // Every v3 + v4 slot defaulted, and settings default (2D gravity zero).
         for r in &file.entities {
             assert!(r.rigid_body_2d.is_none());
             assert!(r.collider_2d.is_none());
             assert!(r.rigid_body_3d.is_none());
             assert!(r.actor.is_none());
+            assert!(r.terrain.is_none());
+            assert!(r.pcg_volume.is_none());
         }
         assert_eq!(file.settings, LevelSettings::default());
+    }
+
+    // ── v3 forever-load fixture discipline (mirrors the v1/v2 fixtures) ─────
+
+    /// The committed pre-P10.6 (schema v3) payload, load-tested forever.
+    fn v3_fixture_bytes() -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v3.inf_lvl");
+        std::fs::read(path).expect("committed v3 fixture is present")
+    }
+
+    /// Rebuild the exact schema-v3 `SceneFile` the v3 fixture was generated from,
+    /// from the frozen [`EntityRecordV3`]/[`SceneFileV3`] types. Any change to the
+    /// v3 layout breaks this (the provenance lock). Exercises the physics + actor
+    /// slots v3 introduced so the frozen layout is genuinely covered.
+    fn v3_reference() -> SceneFileV3 {
+        let g = uuid::Uuid::from_u128;
+        SceneFileV3 {
+            schema_version: 3,
+            title: "V3 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV3 {
+                    guid: g(0x3001),
+                    name: "Ground".into(),
+                    parent: None,
+                    transform: EcsTransform {
+                        translation: inf_ecs::math::Vec3d::ZERO,
+                        rotation: inf_ecs::math::Vec3d::ZERO,
+                        scale: inf_ecs::math::Vec3d::new(6.0, 1.0, 1.0),
+                    },
+                    visible: true,
+                    mesh: None,
+                    material: None,
+                    light: None,
+                    camera: None,
+                    sprite: None,
+                    tilemap: None,
+                    nine_slice: None,
+                    text2d: None,
+                    light_2d: None,
+                    rigid_body_2d: Some(RigidBody2D {
+                        kind: BodyKind2D::Static,
+                        ..Default::default()
+                    }),
+                    collider_2d: Some(Collider2D {
+                        shape_kind: ColliderShape2DKind::Box,
+                        half_extents: Vec2d::new(3.0, 0.5),
+                        ..Default::default()
+                    }),
+                    character_controller_2d: None,
+                    rigid_body_3d: None,
+                    collider_3d: None,
+                    character_controller_3d: None,
+                    actor: None,
+                },
+                EntityRecordV3 {
+                    guid: g(0x3002),
+                    name: "Player".into(),
+                    parent: None,
+                    transform: EcsTransform::from_translation(glam::DVec3::new(1.5, 0.8, 0.0)),
+                    visible: true,
+                    mesh: None,
+                    material: None,
+                    light: None,
+                    camera: None,
+                    sprite: Some(Sprite {
+                        size: Vec2d::new(0.8, 1.2),
+                        ..Default::default()
+                    }),
+                    tilemap: None,
+                    nine_slice: None,
+                    text2d: None,
+                    light_2d: None,
+                    rigid_body_2d: Some(RigidBody2D {
+                        kind: BodyKind2D::Kinematic,
+                        fixed_rotation: true,
+                        ..Default::default()
+                    }),
+                    collider_2d: None,
+                    character_controller_2d: Some(CC2D::default()),
+                    rigid_body_3d: None,
+                    collider_3d: None,
+                    character_controller_3d: None,
+                    actor: Some(g(0x3ACC)),
+                },
+            ],
+            settings: LevelSettings {
+                gravity_2d: Vec2d::new(0.0, -20.0),
+                gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+                sim_hz: 120.0,
+            },
+        }
+    }
+
+    /// Write the committed v3 fixture from [`v3_reference`] under
+    /// `INF_BLESS_FIXTURES=1`. This is the "temporary writer" the fixture
+    /// provenance discipline calls for — it regenerates the frozen-layout bytes
+    /// from the frozen types, then the reproducibility test locks them forever.
+    #[test]
+    fn bless_v3_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").is_err() {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v3_reference(), bincode_config()).unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v3.inf_lvl");
+        std::fs::write(&path, &bytes).expect("write v3 fixture");
+        eprintln!("blessed v3 fixture: {}", path.display());
+    }
+
+    #[test]
+    fn v3_fixture_is_reproducible_and_genuinely_v3() {
+        let bytes = v3_fixture_bytes();
+        assert_eq!(bytes[0], 3, "fixture must be a genuine schema-v3 payload");
+        let rebuilt = bincode::serde::encode_to_vec(v3_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v3 fixture must match our frozen v3 writer"
+        );
+    }
+
+    #[test]
+    fn v3_fixture_loads_forever_and_lifts_to_v4() {
+        let file = decode(&v3_fixture_bytes()).expect("v3 fixture decodes");
+        assert_eq!(file.schema_version, SCHEMA_VERSION);
+        assert_eq!(file.title, "V3 Fixture Level");
+        assert_eq!(file.entities.len(), 2);
+        let by_name = |n: &str| file.entities.iter().find(|r| r.name == n).unwrap();
+        // v3 physics/actor data preserved through the v3→v4 lift.
+        assert!(by_name("Ground").rigid_body_2d.is_some());
+        assert!(by_name("Ground").collider_2d.is_some());
+        assert!(by_name("Player").character_controller_2d.is_some());
+        assert!(by_name("Player").actor.is_some());
+        // v3 settings carry through.
+        assert_eq!(file.settings.gravity_2d, Vec2d::new(0.0, -20.0));
+        assert_eq!(file.settings.sim_hz, 120.0);
+        // Every v4 slot defaulted on the old payload.
+        for r in &file.entities {
+            assert!(r.terrain.is_none());
+            assert!(r.pcg_volume.is_none());
+        }
     }
 }

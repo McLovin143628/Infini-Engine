@@ -2730,6 +2730,7 @@ dependencies = [
  "inf-material",
  "inf-math",
  "inf-mesh",
+ "inf-pcg",
  "inf-physics",
  "inf-render",
  "inf-runtime",
@@ -2890,11 +2891,13 @@ dependencies = [
  "inf-input",
  "inf-math",
  "inf-packager",
+ "inf-pcg",
  "inf-physics",
  "inf-project",
  "inf-render",
  "inf-runtime",
  "inf-scene",
+ "inf-terrain",
  "raw-window-handle",
  "serde",
  "serde_json",
@@ -3001,6 +3004,7 @@ dependencies = [
 name = "inf-terrain"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "glam 0.33.2",
  "image",
  "serde",

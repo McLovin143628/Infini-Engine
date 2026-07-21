@@ -21,3 +21,6 @@ thiserror = { workspace = true }
 serde_json = { workspace = true }
 # Byte-identity checks: xxh3 a terrain's tiles before/after an undo round-trip.
 xxhash-rust = { workspace = true }
+# bincode round-trip guard: terrain persists in the bincode `.inf_lvl` (P10.6), so
+# the tile serde must be non-self-describing-safe.
+bincode = { workspace = true }

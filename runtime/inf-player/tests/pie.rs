@@ -187,7 +187,8 @@ fn platformer_payload() -> ScenePayload {
             (guid == inf_editor_core::samples::COYOTE_ASSET_GUID)
                 .then(inf_editor_core::samples::coyote_class)
         },
-        0, // tick-hz 0: no per-frame sleep (step-driven determinism)
+        |_guid| None, // no PCG graphs in the platformer scene
+        0,            // tick-hz 0: no per-frame sleep (step-driven determinism)
         false,
     )
     .expect("build scene payload")

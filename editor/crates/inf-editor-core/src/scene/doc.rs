@@ -803,6 +803,15 @@ impl SceneDoc {
             w.entity_mut(e)
                 .insert(inf_ecs::components::ActorClass(actor));
         }
+        // v4 world components: a deleted-then-undone terrain / PCG volume restores
+        // its full paged data + graph ref (the P10.6 fix for the "delete → undo
+        // loses Terrain" gap the v3 batch documented).
+        if let Some(t) = &rec.terrain {
+            w.entity_mut(e).insert(t.clone());
+        }
+        if let Some(v) = &rec.pcg_volume {
+            w.entity_mut(e).insert(v.clone());
+        }
         self.touch();
     }
 

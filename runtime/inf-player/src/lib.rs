@@ -102,14 +102,20 @@ fn build_world(args: &Args) -> Result<BuiltWorld, String> {
                 .unwrap_or_else(|| PathBuf::from("."));
             let actors = level::load_actor_classes_from_dir(&content_dir);
             let by_guid = level::load_actor_classes_by_guid_from_dir(&content_dir);
-            let builder = InfSceneWorldBuilder::with_defaults(actors).with_bindings(by_guid);
+            let pcgs = level::load_pcg_payloads_by_guid_from_dir(&content_dir);
+            let builder = InfSceneWorldBuilder::with_defaults(actors)
+                .with_bindings(by_guid)
+                .with_pcgs(pcgs);
             level::load(&source, &builder)
         }
         WorldChoice::Pack(path) => {
             let source = PackLevelSource::open(path)?;
             let actors = source.actor_classes()?;
             let by_guid = source.blueprint_classes_by_guid()?;
-            let builder = InfSceneWorldBuilder::with_defaults(actors).with_bindings(by_guid);
+            let pcgs = source.pcg_payloads_by_guid()?;
+            let builder = InfSceneWorldBuilder::with_defaults(actors)
+                .with_bindings(by_guid)
+                .with_pcgs(pcgs);
             level::load(&source, &builder)
         }
     }
@@ -222,7 +228,18 @@ pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, St
         by_guid.insert(*guid, class.clone());
         fallback.push(class);
     }
-    let builder = InfSceneWorldBuilder::with_defaults(fallback).with_bindings(by_guid);
+    // Streamed PCG graph payloads: the same `.inf_pcg` bytes the cook ships, so
+    // the PIE player evaluates scatter identically to the shipping player (the
+    // PIE == shipping guarantee extends to terrain/PCG content).
+    let mut pcgs: HashMap<uuid::Uuid, inf_pcg::PcgAssetPayload> = HashMap::new();
+    for (guid, bytes) in &payload.pcgs {
+        let p = inf_pcg::PcgAssetPayload::decode(bytes)
+            .map_err(|e| format!("decode pcg graph {guid}: {e}"))?;
+        pcgs.insert(*guid, p);
+    }
+    let builder = InfSceneWorldBuilder::with_defaults(fallback)
+        .with_bindings(by_guid)
+        .with_pcgs(pcgs);
     builder.build(&payload.level_bytes)
 }
 

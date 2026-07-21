@@ -10,10 +10,11 @@
 //!    library functions or not-yet-bound classes still ships its gameplay logic.
 //!    Data assets enter only through a root's dependency closure.
 //! 3. **Close** over forward dependency edges (BFS) to pull in referenced assets:
-//!    the explicit sidecar `dependencies` **and** a level's persisted `actor`
-//!    bindings (schema v3 — a real level→blueprint edge, so an explicit-roots
-//!    cook of just a level still ships its bound classes). Unreferenced strays
-//!    are dropped.
+//!    the explicit sidecar `dependencies` **and** a level's persisted per-entity
+//!    refs — its `actor` blueprint bindings (schema v3) and its `PcgVolume.graph`
+//!    scatter-graph refs (schema v4) — real level→asset edges, so an
+//!    explicit-roots cook of just a level still ships its bound classes + PCG
+//!    graphs. Unreferenced strays are dropped.
 //! 4. **Compile blueprints** — decode + migrate + statically validate every
 //!    `.inf_act`/`.inf_fn` IR; a broken graph fails the cook with a
 //!    handler-anchored error.
@@ -299,7 +300,7 @@ fn dependency_closure(db: &AssetDb, roots: &[AssetId]) -> Vec<AssetId> {
                 }
             }
         }
-        for dep in level_actor_deps(db, id) {
+        for dep in level_asset_deps(db, id) {
             if db.contains(dep) && seen.insert(dep) {
                 queue.push_back(dep);
             }
@@ -308,10 +309,13 @@ fn dependency_closure(db: &AssetDb, roots: &[AssetId]) -> Vec<AssetId> {
     seen.into_iter().collect()
 }
 
-/// The blueprint-class asset GUIDs a level binds through its persisted `actor`
-/// slots (schema v3). Empty for non-levels or an undecodable payload — decode
-/// errors surface later in the real cook stage with a proper error.
-fn level_actor_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
+/// The asset GUIDs a level references through its persisted per-entity slots:
+/// the `actor` blueprint-class bindings (schema v3) **and** the `PcgVolume.graph`
+/// scatter-graph refs (schema v4 — a real level→`.inf_pcg` edge, so an
+/// explicit-roots cook of just a level still ships the referenced graph). Empty
+/// for non-levels or an undecodable payload — decode errors surface later in the
+/// real cook stage with a proper error.
+fn level_asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
     let Some(entry) = db.get(id) else {
         return Vec::new();
     };
@@ -324,10 +328,10 @@ fn level_actor_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
     let Ok(level) = inf_scene::decode(&raw) else {
         return Vec::new();
     };
-    level
+    let actors = level.entities.iter().filter_map(|e| e.actor);
+    let pcgs = level
         .entities
         .iter()
-        .filter_map(|e| e.actor)
-        .map(AssetId)
-        .collect()
+        .filter_map(|e| e.pcg_volume.as_ref().and_then(|v| v.graph));
+    actors.chain(pcgs).map(AssetId).collect()
 }

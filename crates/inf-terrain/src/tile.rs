@@ -55,10 +55,11 @@ pub struct TerrainTile {
     weights: Vec<[u8; 4]>,
 }
 
-/// Serde wire form: `origin` as `[f64; 3]` (glam `DVec3` isn't serde-derivable
-/// without enabling glam's `serde` feature workspace-wide). `weights` is appended
-/// (P10.4) and skipped when empty, so pre-P10.4 tiles — and unpainted new tiles —
-/// encode byte-identically to the two-field form.
+/// Serde wire form for **human-readable** formats (JSON/TOML): `origin` as
+/// `[f64; 3]` (glam `DVec3` isn't serde-derivable without enabling glam's `serde`
+/// feature workspace-wide). `weights` is appended (P10.4) and skipped when empty,
+/// so pre-P10.4 tiles — and unpainted new tiles — encode byte-identically to the
+/// two-field form.
 #[derive(Serialize, Deserialize)]
 struct TerrainTileRaw {
     origin: [f64; 3],
@@ -67,25 +68,61 @@ struct TerrainTileRaw {
     weights: Vec<[u8; 4]>,
 }
 
+/// Serde wire form for **non-self-describing** formats (bincode — the `.inf_lvl`
+/// terrain persistence path, P10.6). `weights` is **always** encoded (as a plain
+/// length-prefixed sequence — a 0-length count for an unpainted tile), because a
+/// `skip_serializing_if` field desyncs a non-self-describing stream (the
+/// engine-wide bincode constraint; the same reason `.inf_pcg`/`.inf_act` store
+/// their skip-heavy models as JSON strings). An unpainted tile still costs only a
+/// single length byte, so terrain stays compact and byte-stable in bincode too.
+#[derive(Serialize, Deserialize)]
+struct TerrainTileBin {
+    origin: [f64; 3],
+    heights: Vec<f32>,
+    #[serde(default)]
+    weights: Vec<[u8; 4]>,
+}
+
 impl Serialize for TerrainTile {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        TerrainTileRaw {
-            origin: self.origin.to_array(),
-            heights: self.heights.clone(),
-            weights: self.weights.clone(),
+        // Human-readable formats keep the sparse (skip-empty) form so JSON/TOML
+        // stay byte-stable; bincode uses the always-present form so it never
+        // desyncs (see [`TerrainTileBin`]).
+        if s.is_human_readable() {
+            TerrainTileRaw {
+                origin: self.origin.to_array(),
+                heights: self.heights.clone(),
+                weights: self.weights.clone(),
+            }
+            .serialize(s)
+        } else {
+            TerrainTileBin {
+                origin: self.origin.to_array(),
+                heights: self.heights.clone(),
+                weights: self.weights.clone(),
+            }
+            .serialize(s)
         }
-        .serialize(s)
     }
 }
 
 impl<'de> Deserialize<'de> for TerrainTile {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let raw = TerrainTileRaw::deserialize(d)?;
-        Ok(Self {
-            origin: DVec3::from_array(raw.origin),
-            heights: raw.heights,
-            weights: raw.weights,
-        })
+        if d.is_human_readable() {
+            let raw = TerrainTileRaw::deserialize(d)?;
+            Ok(Self {
+                origin: DVec3::from_array(raw.origin),
+                heights: raw.heights,
+                weights: raw.weights,
+            })
+        } else {
+            let raw = TerrainTileBin::deserialize(d)?;
+            Ok(Self {
+                origin: DVec3::from_array(raw.origin),
+                heights: raw.heights,
+                weights: raw.weights,
+            })
+        }
     }
 }
 
@@ -289,5 +326,29 @@ mod tests {
         tile.clear_weights();
         assert!(tile.weights_are_default());
         assert!(!serde_json::to_string(&tile).unwrap().contains("weights"));
+    }
+
+    /// bincode is **non-self-describing**, so the skip-empty JSON form would
+    /// desync it (a `.inf_lvl` terrain persists via bincode, P10.6). The
+    /// format-aware serde must round-trip both an unpainted and a painted tile
+    /// through bincode, byte-identically on re-encode.
+    #[test]
+    fn tile_round_trips_through_bincode() {
+        let cfg = bincode::config::standard();
+        for mut tile in [TerrainTile::flat(2, DVec3::new(1.0, 2.0, 3.0)), {
+            let mut t = TerrainTile::flat(2, DVec3::ZERO);
+            t.set_weight_sample(2, 0, 0, [10, 200, 45, 0]);
+            t.set_weight_sample(2, 1, 1, [0, 0, 128, 127]);
+            t
+        }] {
+            // Give the unpainted tile some heights so both cases carry data.
+            tile.set_sample(2, 0, 0, 5.0);
+            let bytes = bincode::serde::encode_to_vec(&tile, cfg).unwrap();
+            let (back, _): (TerrainTile, usize) =
+                bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+            assert_eq!(tile, back, "bincode round trip must preserve the tile");
+            let bytes2 = bincode::serde::encode_to_vec(&back, cfg).unwrap();
+            assert_eq!(bytes, bytes2, "bincode re-encode is byte-identical");
+        }
     }
 }

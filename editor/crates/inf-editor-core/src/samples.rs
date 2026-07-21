@@ -676,6 +676,261 @@ pub fn write_sample() -> Result<(), String> {
     Ok(())
 }
 
+// ── Terrain-demo gate scene (P10.6) ──────────────────────────────────────────
+//
+// The Phase-10-closing gate scene: a multi-tile sculpted + splat-painted terrain,
+// a PCG scatter volume (noise+slope rule) referencing a committed `.inf_pcg`
+// graph, a directional sun, and a camera. Committed as v4 `.inf_lvl` bytes + the
+// `.inf_pcg` sidecar under `samples/terrain-demo/`. The terrain heights come from
+// [`terrain_demo_height`] so the runtime gate can probe `height_at` against the
+// exact generator function.
+
+pub const TERRAIN_DEMO_LEVEL_GUID: Uuid = Uuid::from_u128(0x8403_0000);
+pub const TERRAIN_DEMO_TERRAIN_GUID: Uuid = Uuid::from_u128(0x8403_0001);
+pub const TERRAIN_DEMO_PCG_GUID: Uuid = Uuid::from_u128(0x8403_0002);
+pub const TERRAIN_DEMO_SUN_GUID: Uuid = Uuid::from_u128(0x8403_0003);
+pub const TERRAIN_DEMO_CAMERA_GUID: Uuid = Uuid::from_u128(0x8403_0004);
+/// The **asset** GUID of the committed `Scatter.inf_pcg` (its inf_asset sidecar).
+/// Stable so the level's `PcgVolume.graph` ref resolves through the AssetDb /
+/// cooked pack, and the cook's level→pcg dep edge ships the graph.
+pub const TERRAIN_DEMO_PCG_ASSET_GUID: Uuid = Uuid::from_u128(0x8403_00AA);
+
+/// Terrain samples-per-tile side + world spacing for the demo (small, so the
+/// committed payload stays compact while genuinely multi-tile).
+pub const TERRAIN_DEMO_RESOLUTION: u32 = 16;
+pub const TERRAIN_DEMO_MPS: f64 = 2.0;
+/// World XZ span authored (a 2×2 tile block at the above resolution/spacing).
+pub const TERRAIN_DEMO_SPAN: f64 = 64.0;
+
+/// The demo's analytic terrain height at world `(x, z)` — a gentle sine hill. The
+/// runtime gate probes `TerrainData::height_at` at a grid point against this.
+pub fn terrain_demo_height(x: f64, z: f64) -> f64 {
+    6.0 * (x * 0.08).sin() * (z * 0.08).cos()
+}
+
+/// Build the demo's [`inf_pcg::PcgDocument`]: one layer, one rule scattering on a
+/// noise-modulated gentle-slope band — a few hundred instances over the terrain.
+/// Two weighted kinds so a multi-kind scatter reads as varied placeholder content.
+pub fn terrain_demo_pcg_document() -> inf_pcg::PcgDocument {
+    use inf_pcg::{PcgKind, PcgRule, SamplerDef};
+    let sampler = SamplerDef::Multiply(
+        Box::new(SamplerDef::Noise(inf_pcg::ValueNoise {
+            seed: 1337,
+            frequency: 0.05,
+            octaves: 3,
+            lacunarity: 2.0,
+            gain: 0.5,
+        })),
+        Box::new(SamplerDef::Slope {
+            min_deg: 0.0,
+            max_deg: 32.0,
+            feather_deg: 6.0,
+        }),
+    );
+    let rule = PcgRule {
+        name: "vegetation".into(),
+        sampler,
+        scatter: inf_pcg::ScatterParams {
+            seed: 2026_0721,
+            cell_size: 8.0,
+            base_density: 0.5,
+            jitter: 1.0,
+            align_to_normal: false,
+            scale_range: (0.8, 1.4),
+            rotation: inf_pcg::RotationMode::RandomYaw,
+            altitude_offset: 0.0,
+        },
+        kinds: vec![
+            PcgKind {
+                mesh: None,
+                weight: 3.0,
+            },
+            PcgKind {
+                mesh: None,
+                weight: 1.0,
+            },
+        ],
+    };
+    inf_pcg::PcgDocument::single_layer("ground", vec![rule])
+}
+
+/// The committed `.inf_pcg` payload for the demo (document-only envelope — the
+/// player evaluates from its stored lowered document).
+pub fn terrain_demo_pcg_payload() -> inf_pcg::PcgAssetPayload {
+    inf_pcg::PcgAssetPayload::new(terrain_demo_pcg_document())
+}
+
+/// Build the terrain-demo [`SceneDoc`]: a sculpted + painted heightfield terrain,
+/// a PCG scatter volume referencing the committed graph, a directional sun, and a
+/// camera framing the terrain.
+pub fn terrain_demo_scene() -> SceneDoc {
+    use inf_ecs::components::{Camera, Light, LightKind, PcgVolume, Terrain};
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Terrain Demo");
+
+    // ── Terrain: a multi-tile sine hill (sculpt-level detail via write_region) +
+    //    two splat-painted bands (materialized weights on some tiles, defaults on
+    //    others — the sparse/materialized mix). ──
+    doc.create_with_guid(TERRAIN_DEMO_TERRAIN_GUID, SpawnKind::Empty, "Terrain", None);
+    // Terrain entity sits at the origin, so world XZ == terrain-local XZ (the
+    // height probe + PCG height seam are then the bare generator function).
+    insert!(
+        doc,
+        TERRAIN_DEMO_TERRAIN_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+    {
+        let mut terrain = Terrain::configured(TERRAIN_DEMO_RESOLUTION, TERRAIN_DEMO_MPS);
+        terrain.data.write_region(
+            glam::DVec2::ZERO,
+            glam::DVec2::splat(TERRAIN_DEMO_SPAN),
+            terrain_demo_height,
+        );
+        // Splat band A: rock (layer 1) over the low-left quadrant.
+        let _ = inf_terrain::apply_paint(
+            &mut terrain.data,
+            1,
+            inf_terrain::BrushParams {
+                center: glam::DVec2::new(16.0, 16.0),
+                radius: 14.0,
+                strength: 1.0,
+                falloff: inf_terrain::Falloff::Plateau(0.5),
+            },
+        );
+        // Splat band B: dirt (layer 2) over an upper strip.
+        let _ = inf_terrain::apply_paint(
+            &mut terrain.data,
+            2,
+            inf_terrain::BrushParams {
+                center: glam::DVec2::new(16.0, 48.0),
+                radius: 12.0,
+                strength: 1.0,
+                falloff: inf_terrain::Falloff::Smooth,
+            },
+        );
+        terrain.macro_variation = 0.2;
+        insert!(doc, TERRAIN_DEMO_TERRAIN_GUID, terrain);
+    }
+
+    // ── PCG scatter volume: references the committed graph; centered over the
+    //    terrain so its region covers the authored footprint. ──
+    doc.create_with_guid(
+        TERRAIN_DEMO_PCG_GUID,
+        SpawnKind::Empty,
+        "Scatter Volume",
+        None,
+    );
+    insert!(
+        doc,
+        TERRAIN_DEMO_PCG_GUID,
+        Transform::from_translation(DVec3::new(
+            TERRAIN_DEMO_SPAN * 0.5,
+            0.0,
+            TERRAIN_DEMO_SPAN * 0.5
+        ))
+    );
+    insert!(
+        doc,
+        TERRAIN_DEMO_PCG_GUID,
+        PcgVolume {
+            graph: Some(TERRAIN_DEMO_PCG_ASSET_GUID),
+            extent: Vec2d::new(TERRAIN_DEMO_SPAN * 0.5, TERRAIN_DEMO_SPAN * 0.5),
+            seed: 0,
+            ..Default::default()
+        }
+    );
+
+    // ── A directional sun. ──
+    doc.create_with_guid(TERRAIN_DEMO_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        TERRAIN_DEMO_SUN_GUID,
+        Transform {
+            translation: inf_ecs::math::Vec3d::new(0.0, 40.0, 0.0),
+            // Angle the sun so the hills cast readable shading.
+            rotation: inf_ecs::math::Vec3d::new(-50.0, -30.0, 0.0),
+            scale: inf_ecs::math::Vec3d::new(1.0, 1.0, 1.0),
+        }
+    );
+    insert!(
+        doc,
+        TERRAIN_DEMO_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            color: Color::new(1.0, 0.97, 0.9, 1.0),
+            intensity: 2.5,
+        }
+    );
+
+    // ── A camera framing the terrain (the "camera note"). ──
+    doc.create_with_guid(TERRAIN_DEMO_CAMERA_GUID, SpawnKind::Empty, "Camera", None);
+    insert!(
+        doc,
+        TERRAIN_DEMO_CAMERA_GUID,
+        Transform::from_translation(DVec3::new(TERRAIN_DEMO_SPAN * 0.5, 30.0, -20.0))
+    );
+    insert!(doc, TERRAIN_DEMO_CAMERA_GUID, Camera::default());
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+/// The repo-root `samples/terrain-demo/` directory.
+pub fn terrain_demo_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/terrain-demo")
+}
+
+/// Write the committed terrain-demo files from the generators (regeneration path):
+/// the v4 `.inf_lvl` (+ sidecar), the `.inf_pcg` graph (+ its inf_asset sidecar so
+/// the `PcgVolume.graph` ref resolves through the AssetDb / cooked pack), + README.
+pub fn write_terrain_demo() -> Result<(), String> {
+    let dir = terrain_demo_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    // Level (payload + sidecar) with a fixed level GUID.
+    let doc = terrain_demo_scene();
+    crate::scene::serialize::save(
+        &doc,
+        &dir.join("TerrainDemo.inf_lvl"),
+        Some(TERRAIN_DEMO_LEVEL_GUID),
+    )?;
+
+    // The `.inf_pcg` graph payload + its inf_asset sidecar with the STABLE asset
+    // GUID the level's PcgVolume.graph points at.
+    let pcg_bytes = terrain_demo_pcg_payload()
+        .encode()
+        .map_err(|e| format!("encode pcg: {e}"))?;
+    let pcg_path = dir.join("Scatter.inf_pcg");
+    std::fs::write(&pcg_path, &pcg_bytes).map_err(|e| format!("write pcg: {e}"))?;
+    let side = inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(TERRAIN_DEMO_PCG_ASSET_GUID),
+        inf_asset::AssetKind::Pcg,
+        inf_asset::ContentHash::of(&pcg_bytes),
+    );
+    side.save(&pcg_path)
+        .map_err(|e| format!("write pcg sidecar: {e}"))?;
+
+    std::fs::write(dir.join("README.md"), TERRAIN_DEMO_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const TERRAIN_DEMO_README: &str = "# Terrain Demo (Phase-10 gate scene)\n\n\
+Generated by `inf_editor_core::samples::terrain_demo_scene` — the P10.6 gate\n\
+scene: a multi-tile **sculpted + splat-painted** heightfield terrain, a **PCG\n\
+scatter volume** (noise+slope rule) referencing `Scatter.inf_pcg`, a directional\n\
+sun, and a camera.\n\n\
+- `TerrainDemo.inf_lvl` — the scene as schema-v4 `.inf_lvl` bytes (terrain +\n\
+  PcgVolume persist).\n\
+- `Scatter.inf_pcg` — the scatter graph the volume evaluates on load (its\n\
+  instances are a derived cache, never persisted in the level).\n\n\
+The terrain heights are `terrain_demo_height(x, z)`; the runtime gate probes\n\
+`TerrainData::height_at` against it. The PCG volume's `evaluated` cache is\n\
+re-computed on load (editor `pcg_evaluate`, shipped/PIE player `evaluate_pcg_volumes`).\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 const SAMPLE_README: &str = "# 2D Platformer sample\n\n\
 Generated by `inf_editor_core::samples` — the Phase-8 gate scene. A small\n\
 platformer with a **Blueprint coyote-time jump** that plays in-viewport via the\n\
@@ -776,6 +1031,7 @@ mod tests {
         if std::env::var("INF_BLESS_SAMPLES").is_ok() {
             write_sample().expect("regenerate sample");
             write_hybrid_template().expect("regenerate hybrid template");
+            write_terrain_demo().expect("regenerate terrain demo");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -803,5 +1059,110 @@ mod tests {
             got_act, want_act,
             "committed .inf_act drifted from the generator"
         );
+
+        // Terrain-demo lock: the committed `.inf_lvl` + `.inf_pcg` still match the
+        // generators (skips gracefully before the first bless).
+        let tdir = terrain_demo_dir();
+        let tlvl = tdir.join("TerrainDemo.inf_lvl");
+        let tpcg = tdir.join("Scatter.inf_pcg");
+        if tlvl.exists() && tpcg.exists() {
+            let want_lvl = crate::scene::serialize::encode(
+                &crate::scene::serialize::to_scene_file(&terrain_demo_scene()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&tlvl).unwrap(),
+                want_lvl,
+                "committed terrain-demo .inf_lvl drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(&tpcg).unwrap(),
+                terrain_demo_pcg_payload().encode().unwrap(),
+                "committed terrain-demo .inf_pcg drifted from the generator"
+            );
+        }
+    }
+
+    // ── Terrain-demo gate test (a): byte-identical save/reload ─────────────
+
+    /// GATE (a) — the P3 discipline applied to the terrain-demo: save → load →
+    /// save is byte-identical, and the reloaded doc keeps the terrain (heights +
+    /// materialized splat weights) and the PCG volume's graph ref.
+    #[test]
+    fn terrain_demo_saves_and_reloads_byte_identical() {
+        use inf_ecs::components::{PcgVolume, Terrain};
+
+        let doc = terrain_demo_scene();
+        let bytes1 =
+            crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], 4, "terrain-demo writes as a schema-v4 file");
+
+        let mut doc2 = SceneDoc::new();
+        crate::scene::serialize::apply_to_doc(
+            &mut doc2,
+            &crate::scene::serialize::decode(&bytes1).unwrap(),
+        );
+        let bytes2 =
+            crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc2))
+                .unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "terrain-demo save→load→save must be byte-identical"
+        );
+
+        // Terrain survives with a value probe matching the generator function.
+        let te = doc2.entity_of(TERRAIN_DEMO_TERRAIN_GUID).unwrap();
+        let terrain = doc2.world().world().get::<Terrain>(te).unwrap();
+        assert!(
+            terrain.data.tile_count() >= 4,
+            "multi-tile terrain persists"
+        );
+        let probe = terrain
+            .data
+            .height_at(glam::DVec2::new(16.0, 16.0))
+            .unwrap();
+        assert!(
+            (probe - terrain_demo_height(16.0, 16.0)).abs() < 1e-3,
+            "height probe {probe} matches the generator function"
+        );
+        assert!(
+            terrain.data.tiles().any(|(_, t)| !t.weights_are_default()),
+            "painted (materialized) splat weights persist"
+        );
+
+        // The PCG volume keeps its graph ref (its evaluated cache is not persisted).
+        let pe = doc2.entity_of(TERRAIN_DEMO_PCG_GUID).unwrap();
+        let vol = doc2.world().world().get::<PcgVolume>(pe).unwrap();
+        assert_eq!(vol.graph, Some(TERRAIN_DEMO_PCG_ASSET_GUID));
+        assert!(vol.evaluated.is_empty());
+    }
+
+    /// The demo's PCG graph, evaluated over the demo terrain, places a few hundred
+    /// instances — the in-editor reference the runtime gate matches against.
+    #[test]
+    fn terrain_demo_pcg_scatters_a_few_hundred_instances() {
+        use inf_pcg::height::FnHeight;
+        use inf_pcg::Region;
+
+        let doc = terrain_demo_scene();
+        let te = doc.entity_of(TERRAIN_DEMO_TERRAIN_GUID).unwrap();
+        let data = doc
+            .world()
+            .world()
+            .get::<inf_ecs::components::Terrain>(te)
+            .unwrap()
+            .data
+            .clone();
+        let provider = FnHeight::new(move |x, z| data.height_at(glam::DVec2::new(x, z)));
+        let region = Region::from_xz(0.0, 0.0, TERRAIN_DEMO_SPAN, TERRAIN_DEMO_SPAN);
+        let insts = inf_pcg::evaluate(&terrain_demo_pcg_document(), &provider, region);
+        assert!(
+            insts.len() > 100,
+            "expected a few hundred instances, got {}",
+            insts.len()
+        );
+        // Deterministic across two evaluations.
+        let insts2 = inf_pcg::evaluate(&terrain_demo_pcg_document(), &provider, region);
+        assert_eq!(insts, insts2);
     }
 }

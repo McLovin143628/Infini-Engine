@@ -18,6 +18,9 @@ inf-terrain = { workspace = true }
 inf-physics = { workspace = true }
 inf-blueprint = { workspace = true }
 inf-graph = { workspace = true }
+# PCG scatter runtime: the samples generator authors a `.inf_pcg` graph for the
+# terrain-demo gate scene (P10.6).
+inf-pcg = { workspace = true }
 inf-math = { workspace = true }
 inf-asset = { workspace = true }
 inf-mesh = { workspace = true }

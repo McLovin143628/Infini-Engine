@@ -41,13 +41,17 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use glam::DVec2;
+use glam::{DVec2, DVec3};
 use uuid::Uuid;
 
 use inf_asset::{AssetId, AssetKind, PackReader};
 use inf_blueprint::BlueprintClass;
-use inf_ecs::components::CharacterController2D;
+use inf_ecs::components::{
+    CharacterController2D, GlobalTransform, PcgVolume, ScatteredInstance, Terrain, Transform,
+};
 use inf_ecs::{EcsWorld, Guid};
+use inf_pcg::height::FnHeight;
+use inf_pcg::{PcgAssetPayload, Region};
 use inf_scene::RuntimeEntity;
 
 /// The cook's default pack file name (kept in sync with
@@ -155,6 +159,11 @@ pub struct InfSceneWorldBuilder {
     /// Persisted-binding resolution: blueprint **asset GUID** → its class. Built
     /// from the [`LevelSource`] (pack index / dev-dir sidecars).
     by_guid: HashMap<Uuid, BlueprintClass>,
+    /// `.inf_pcg` graph payloads keyed by asset GUID — the map used to evaluate a
+    /// [`PcgVolume`]'s scatter **on load** (its `evaluated` cache is never
+    /// persisted; see [`evaluate_pcg_volumes`]). Built from the [`LevelSource`]
+    /// (pack index / dev-dir sidecars) or the streamed PIE payload.
+    pcgs: HashMap<Uuid, PcgAssetPayload>,
     /// Gravity/rate used only when the level predates settings (v1/v2) — a v3
     /// level's own [`LevelSettings`](inf_scene::RuntimeSettings) always wins.
     gravity: DVec2,
@@ -167,6 +176,7 @@ impl InfSceneWorldBuilder {
         Self {
             fallback,
             by_guid: HashMap::new(),
+            pcgs: HashMap::new(),
             gravity,
             hz,
         }
@@ -183,6 +193,14 @@ impl InfSceneWorldBuilder {
         self.by_guid = by_guid;
         self
     }
+
+    /// Attach the `.inf_pcg` payloads (asset GUID → graph payload) used to evaluate
+    /// [`PcgVolume`] scatter on load. Builder style so `build_world` can wire it
+    /// from the source's PCG index (or a PIE payload).
+    pub fn with_pcgs(mut self, pcgs: HashMap<Uuid, PcgAssetPayload>) -> Self {
+        self.pcgs = pcgs;
+        self
+    }
 }
 
 impl WorldBuilder for InfSceneWorldBuilder {
@@ -192,6 +210,10 @@ impl WorldBuilder for InfSceneWorldBuilder {
         let settings = level.settings;
         let mut world = populate_world(level.entities);
         world.propagate();
+        // Evaluate PCG scatter volumes on load: their `evaluated` cache is never
+        // persisted (`#[serde(skip)]`), so the player recomputes it from the
+        // referenced `.inf_pcg` graph against the level's terrain (P10.6).
+        evaluate_pcg_volumes(&mut world, &self.pcgs);
         // Prefer the level's persisted per-entity actor bindings; fall back to the
         // CC2D heuristic only when the level carries none (legacy levels).
         let actors = resolve_bound_actors(&world, &self.by_guid);
@@ -258,6 +280,8 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
             collider_3d,
             character_controller_3d,
             actor,
+            terrain,
+            pcg_volume,
         } = e;
 
         let entity = world.spawn_with_guid(guid, &name, None);
@@ -318,6 +342,13 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
             if let Some(a) = actor {
                 em.insert(inf_ecs::components::ActorClass(a));
             }
+            // ── v4 world components (terrain + PCG volume) ──
+            if let Some(c) = terrain {
+                em.insert(c);
+            }
+            if let Some(c) = pcg_volume {
+                em.insert(c);
+            }
         }
         world.mark_dirty();
         if let Some(p) = parent {
@@ -331,6 +362,165 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
         }
     }
     world
+}
+
+/// Evaluate every [`PcgVolume`] whose `graph` ref resolves in `pcgs`, refreshing
+/// its `evaluated` instance cache from the scatter graph over the level's terrain
+/// (P10.6). This is the runtime twin of the editor's `pcg_evaluate` command: the
+/// volume's instances are never persisted in `.inf_lvl` (they are a derived
+/// cache), so the shipped/PIE player must recompute them on load, exactly as the
+/// editor does on demand — keeping preview == shipping.
+///
+/// ## v1 simplifications (documented)
+///
+/// * The **first** non-empty [`Terrain`] in `Guid` order drives height/slope;
+///   with no terrain a flat `y = 0` plane is used (mirrors the command).
+/// * The height seam is an [`FnHeight`] closure shifted by the terrain entity's
+///   world origin — the general form of the [`inf_pcg::height::TerrainHeight`]
+///   bridge (which is exactly `TerrainHeight(data)` when that origin is zero).
+/// * Evaluation runs **once at load** (terrain is static in sim v1); a moving
+///   camera / streaming re-eval is a documented follow-up.
+pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetPayload>) {
+    if pcgs.is_empty() {
+        return;
+    }
+
+    // Deterministic Guid-sorted entity list (parents-first order is irrelevant
+    // here; sorting keeps terrain-pick + volume order stable across loads).
+    let ents: Vec<(Uuid, inf_ecs::Entity)> = {
+        let w = world.world();
+        let mut v: Vec<(Uuid, inf_ecs::Entity)> = w
+            .iter_entities()
+            .filter_map(|e| e.get::<Guid>().map(|g| (g.0, e.id())))
+            .collect();
+        v.sort_by_key(|(g, _)| *g);
+        v
+    };
+
+    // The first non-empty terrain (its paged data + world origin) drives scatter.
+    let terrain: Option<(inf_terrain::TerrainData, DVec3)> = {
+        let w = world.world();
+        ents.iter().find_map(|&(_, e)| {
+            let t = w.get::<Terrain>(e)?;
+            if t.data.is_empty() {
+                return None;
+            }
+            let origin = w
+                .get::<GlobalTransform>(e)
+                .map(|g| g.translation())
+                .unwrap_or(DVec3::ZERO);
+            Some((t.data.clone(), origin))
+        })
+    };
+
+    // Gather the volumes to evaluate: (entity, document, center, extent, seed).
+    struct Job {
+        entity: inf_ecs::Entity,
+        document: inf_pcg::PcgDocument,
+        center: DVec3,
+        extent: inf_ecs::math::Vec2d,
+        seed: u32,
+    }
+    let jobs: Vec<Job> = {
+        let w = world.world();
+        ents.iter()
+            .filter_map(|&(_, e)| {
+                let vol = w.get::<PcgVolume>(e)?;
+                let graph_guid = vol.graph?;
+                let payload = pcgs.get(&graph_guid)?;
+                // Prefer lowering the stored authored graph (parity with the
+                // editor's on-demand evaluate); fall back to the stored lowered
+                // document mirror (a v1 payload carries only that).
+                let document = match payload.graph() {
+                    Some(g) => inf_pcg::lower_graph(&g, &inf_pcg::pcg_registry()).document,
+                    None => payload.document.clone(),
+                };
+                let center = w
+                    .get::<GlobalTransform>(e)
+                    .map(|g| g.translation())
+                    .or_else(|| w.get::<Transform>(e).map(|t| t.translation.to_dvec3()))
+                    .unwrap_or(DVec3::ZERO);
+                Some(Job {
+                    entity: e,
+                    document,
+                    center,
+                    extent: vol.extent,
+                    seed: vol.seed,
+                })
+            })
+            .collect()
+    };
+
+    for mut job in jobs {
+        // Fold the volume seed into every rule so distinct volumes differ.
+        for layer in &mut job.document.layers {
+            for rule in &mut layer.rules {
+                rule.scatter.seed = rule.scatter.seed.wrapping_add(job.seed as u64);
+            }
+        }
+        let region = Region::from_xz(
+            job.center.x - job.extent.x,
+            job.center.z - job.extent.y,
+            job.center.x + job.extent.x,
+            job.center.z + job.extent.y,
+        );
+        let baked: Vec<ScatteredInstance> = match &terrain {
+            Some((data, o)) => {
+                let data = data.clone();
+                let o = *o;
+                let provider = FnHeight::new(move |x, z| {
+                    data.height_at(DVec2::new(x - o.x, z - o.z))
+                        .map(|h| h + o.y)
+                });
+                inf_pcg::evaluate(&job.document, &provider, region)
+            }
+            None => {
+                let provider = FnHeight::new(|_, _| Some(0.0));
+                inf_pcg::evaluate(&job.document, &provider, region)
+            }
+        }
+        .iter()
+        .map(|i| ScatteredInstance {
+            position: i.pos,
+            rotation: i.rotation,
+            scale: i.scale,
+            kind: i.kind_index,
+        })
+        .collect();
+
+        if let Some(mut vol) = world.world_mut().get_mut::<PcgVolume>(job.entity) {
+            vol.evaluated = baked;
+        }
+    }
+}
+
+/// Read every `.inf_pcg` payload in `dir` (non-recursive) **keyed by its asset
+/// GUID** (from the sibling inf_asset `.toml` sidecar) — the map the player uses
+/// to evaluate a level's [`PcgVolume`] scatter on load (dev-dir path). Files
+/// without a readable sidecar/GUID or a decodable payload are skipped.
+/// Deterministic (path-sorted) iteration.
+pub fn load_pcg_payloads_by_guid_from_dir(dir: &Path) -> HashMap<Uuid, PcgAssetPayload> {
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("inf_pcg"))
+            .collect(),
+        Err(_) => return HashMap::new(),
+    };
+    files.sort();
+    let mut out = HashMap::new();
+    for p in files {
+        let Ok(side) = inf_asset::AssetSidecar::load(&p) else {
+            continue;
+        };
+        match std::fs::read(&p).map(|b| PcgAssetPayload::decode(&b)) {
+            Ok(Ok(payload)) => {
+                out.insert(side.guid.uuid(), payload);
+            }
+            _ => tracing::warn!("inf-player: bad .inf_pcg {}", p.display()),
+        }
+    }
+    out
 }
 
 /// Bind actor classes to controllable entities (the P8/P9 heuristic mirrored from
@@ -541,6 +731,27 @@ impl PackLevelSource {
         }
         Ok(out)
     }
+
+    /// Every `.inf_pcg` graph payload in the pack **keyed by its asset GUID** — the
+    /// map the player uses to evaluate a level's [`PcgVolume`] scatter on load
+    /// (P10.6). The cook joins a level→`PcgVolume.graph` edge into the dep closure,
+    /// so the referenced `.inf_pcg` ships in the pack.
+    pub fn pcg_payloads_by_guid(&self) -> Result<HashMap<Uuid, PcgAssetPayload>, String> {
+        let mut out = HashMap::new();
+        for e in self.reader.index() {
+            if e.kind != AssetKind::Pcg {
+                continue;
+            }
+            let bytes = self
+                .reader
+                .read(e.guid)
+                .map_err(|err| format!("read pcg {}: {err}", e.guid))?;
+            let payload = PcgAssetPayload::decode(&bytes)
+                .map_err(|err| format!("decode pcg {}: {err}", e.guid))?;
+            out.insert(e.guid.uuid(), payload);
+        }
+        Ok(out)
+    }
 }
 
 impl LevelSource for PackLevelSource {
@@ -645,6 +856,8 @@ mod tests {
             collider_3d: None,
             character_controller_3d: None,
             actor: None,
+            terrain: None,
+            pcg_volume: None,
         };
         parent.sprite = Some(Sprite {
             size: Vec2d::new(1.0, 1.0),

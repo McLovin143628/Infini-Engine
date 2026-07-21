@@ -20,15 +20,15 @@ use uuid::Uuid;
 
 use inf_ecs::components::{
     ComputedVisibility, GlobalTransform, Light, Light2D, LightKind as EcsLightKind, Material,
-    MeshRef, NineSlice, Sprite, Text2D, TextAlign, Tilemap,
+    MeshRef, NineSlice, PcgVolume, Sprite, Terrain, Text2D, TextAlign, Tilemap,
 };
 use inf_ecs::Guid;
 use inf_math::FloatingOrigin;
 use inf_render::{
     expand_nine_slice, expand_text, handle_from_guid, EngineRenderer, GpuContext, HAlign,
     LightKind, MeshInstance, NineSliceParams, PrebatchedRun, RenderChunk, RenderLight,
-    RenderLight2D, RenderScene, RenderTilemap, RenderView, SurfaceChain, TextParams, TilemapParams,
-    BUILTIN_FONT_TEXTURE,
+    RenderLight2D, RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile,
+    RenderTilemap, RenderView, SurfaceChain, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
 };
 
 use crate::runtime_sim::RuntimeSim;
@@ -117,6 +117,7 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64) {
     scene.tilemaps.clear();
     scene.prebatched.clear();
     scene.lights_2d.clear();
+    scene.terrain = None;
 
     let world = sim.world();
     let w = world.world();
@@ -171,6 +172,40 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64) {
                 scene.tilemaps.push(project_tilemap(tilemap, translation));
             }
         }
+        // Heightfield terrain (P10.6): the player projects it into the render
+        // scene's single terrain slot exactly like the editor viewport host
+        // (`inf_viewport::host::project_terrain`), so cooked/PIE terrain renders.
+        // First visible, non-empty terrain wins (multi-terrain merge is a
+        // follow-up). Terrain is **static in sim v1**, so a constant version keeps
+        // the terrain pass from re-uploading height textures every frame.
+        if scene.terrain.is_none() {
+            if let Some(terrain) = w.get::<Terrain>(entity) {
+                if !terrain.data.is_empty() {
+                    scene.terrain = Some(project_terrain(terrain, translation, TERRAIN_VERSION));
+                }
+            }
+        }
+        // PCG scatter volumes (P10.6): project the volume's evaluated instance
+        // cache (populated on load by the level builder) into the existing
+        // mesh-instance path as placeholder cubes — the same viewport-parity gap
+        // as sprites/tilemaps (kind→real-mesh upload is a follow-up). Draw-distance
+        // is not culled here (the player has no persistent camera-eye seam yet; a
+        // documented follow-up mirroring the viewport's `last_eye_world` cull).
+        if let Some(vol) = w.get::<PcgVolume>(entity) {
+            for si in &vol.evaluated {
+                scene.instances.push(MeshInstance {
+                    translation: si.position,
+                    rotation: si.rotation.as_quat(),
+                    scale: Vec3::splat(si.scale as f32),
+                    color: pcg_kind_color(si.kind),
+                    metallic: 0.0,
+                    roughness: 0.75,
+                    emissive: [0.0; 3],
+                    id: next_id,
+                });
+                next_id += 1;
+            }
+        }
         if w.get::<MeshRef>(entity).is_some() {
             let affine = w
                 .get::<GlobalTransform>(entity)
@@ -204,6 +239,67 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64) {
     }
 
     scene.mark_dirty();
+}
+
+/// Terrain is static in the player's sim v1, so a fixed version keeps the terrain
+/// pass from re-uploading the height/weight textures every frame.
+const TERRAIN_VERSION: u64 = 1;
+
+/// Project an ECS [`Terrain`] (+ world translation) into a [`RenderTerrain`],
+/// mirroring `inf_viewport::host::project_terrain`: each authored tile becomes a
+/// [`RenderTerrainTile`] (heights + resolved RGBA8 splat weights + precomputed
+/// height bounds), plus the four material layers + macro variation.
+fn project_terrain(terrain: &Terrain, translation: DVec3, version: u64) -> RenderTerrain {
+    let data = &terrain.data;
+    let res = data.tile_resolution();
+    let n = (res * res) as usize;
+    let tiles = data
+        .tiles()
+        .map(|(&coord, tile)| {
+            let weights: Vec<[u8; 4]> = if tile.weights_are_default() {
+                vec![inf_terrain::DEFAULT_WEIGHT; n]
+            } else {
+                (0..res)
+                    .flat_map(|j| (0..res).map(move |i| (i, j)))
+                    .map(|(i, j)| tile.weight_sample(res, i, j))
+                    .collect()
+            };
+            RenderTerrainTile {
+                coord,
+                origin: tile.origin + translation,
+                heights: tile.heights().to_vec(),
+                weights,
+                height_bounds: tile.height_bounds(),
+            }
+        })
+        .collect();
+    let layers = std::array::from_fn(|k| RenderTerrainLayer {
+        albedo: terrain.layers[k].albedo.to_array(),
+        roughness: terrain.layers[k].roughness as f32,
+        tex_scale: terrain.layers[k].tex_scale as f32,
+    });
+    RenderTerrain {
+        tile_resolution: res,
+        meters_per_sample: data.meters_per_sample(),
+        tiles,
+        layers,
+        macro_variation: terrain.macro_variation as f32,
+        version,
+    }
+}
+
+/// A distinct placeholder colour per PCG kind index (mirrors the viewport host's
+/// `pcg_kind_color`), so a multi-kind scatter reads as varied content before real
+/// meshes upload.
+fn pcg_kind_color(kind: u32) -> [f32; 4] {
+    const PALETTE: [[f32; 4]; 5] = [
+        [0.28, 0.52, 0.24, 1.0], // foliage green
+        [0.55, 0.40, 0.22, 1.0], // trunk brown
+        [0.62, 0.60, 0.55, 1.0], // rock grey
+        [0.75, 0.68, 0.35, 1.0], // dry grass
+        [0.35, 0.58, 0.45, 1.0], // shrub teal
+    ];
+    PALETTE[(kind as usize) % PALETTE.len()]
 }
 
 fn project_light(light: &Light, affine: &glam::DAffine3) -> RenderLight {

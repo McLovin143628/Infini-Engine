@@ -26,6 +26,10 @@ inf-runtime = { workspace = true }
 # ── the real runtime the player drives (all Ring 0) ──
 inf-ecs = { workspace = true }
 inf-physics = { workspace = true }
+# Terrain heightfield projection + the PCG scatter runtime the player evaluates on
+# load (a PcgVolume's instances are never persisted — recomputed from its graph).
+inf-terrain = { workspace = true }
+inf-pcg = { workspace = true }
 inf-blueprint = { workspace = true }
 inf-input = { workspace = true }
 inf-math = { workspace = true }

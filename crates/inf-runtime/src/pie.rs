@@ -54,7 +54,12 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 
 /// Schema version of a [`ScenePayload`] (its own migratable envelope; the
 /// `.inf_lvl` bytes inside carry the scene schema version independently).
-pub const SCENE_PAYLOAD_VERSION: u32 = 1;
+///
+/// * v1 — level bytes + bound blueprint classes.
+/// * v2 — appended `pcgs`: the `.inf_pcg` graph payloads a v4 level's
+///   [`PcgVolume`]s reference, so the PIE player evaluates scatter exactly like
+///   the shipping pack path.
+pub const SCENE_PAYLOAD_VERSION: u32 = 2;
 
 /// Upper bound on a single frame; anything larger means a desynced or
 /// corrupt stream and is treated as an error rather than an allocation. A
@@ -75,6 +80,11 @@ pub struct ScenePayload {
     /// Bound blueprint classes: `(asset guid, .inf_act JSON bytes)`. The guid
     /// keys the level's persisted `ActorClass` bindings.
     pub classes: Vec<(Uuid, Vec<u8>)>,
+    /// Referenced PCG graphs: `(asset guid, .inf_pcg bincode bytes)`. The guid
+    /// keys a v4 level's `PcgVolume.graph` refs; the player evaluates scatter from
+    /// these on load (schema v2). `#[serde(default)]` so a v1 payload decodes.
+    #[serde(default)]
+    pub pcgs: Vec<(Uuid, Vec<u8>)>,
     /// Fixed update rate (Hz) the player ticks at.
     pub tick_hz: u32,
     /// Open a real window (`true`, the embedded / new-window PIE path) vs run
@@ -96,9 +106,17 @@ impl ScenePayload {
             label: label.into(),
             level_bytes,
             classes,
+            pcgs: Vec::new(),
             tick_hz,
             windowed,
         }
+    }
+
+    /// Attach the referenced `.inf_pcg` graph payloads (`(asset guid, bytes)`).
+    /// Builder-style so [`Self::new`]'s signature stays stable.
+    pub fn with_pcgs(mut self, pcgs: Vec<(Uuid, Vec<u8>)>) -> Self {
+        self.pcgs = pcgs;
+        self
     }
 }
 

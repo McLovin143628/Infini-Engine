@@ -284,14 +284,16 @@ impl Drop for PieSession {
 /// via `resolve`), falling back to the `CharacterController2D` coyote class for
 /// scenes authored before per-entity bindings. This is the point of PIE:
 /// unsaved edits are previewed exactly.
-pub fn build_scene_payload<F>(
+pub fn build_scene_payload<F, G>(
     doc: &SceneDoc,
     mut resolve: F,
+    mut resolve_pcg: G,
     tick_hz: u32,
     windowed: bool,
 ) -> Result<ScenePayload, PieError>
 where
     F: FnMut(Uuid) -> Option<BlueprintClass>,
+    G: FnMut(Uuid) -> Option<Vec<u8>>,
 {
     let level_bytes = serialize::encode(&serialize::to_scene_file(doc))
         .map_err(|e| PieError::Protocol(format!("encode scene: {e}")))?;
@@ -327,13 +329,26 @@ where
         }
     }
 
-    Ok(ScenePayload::new(
-        doc.title(),
-        level_bytes,
-        classes,
-        tick_hz,
-        windowed,
-    ))
+    // Referenced PCG graphs (P10.6): every `PcgVolume.graph` ref resolved to its
+    // `.inf_pcg` bytes, so the PIE player evaluates scatter identically to the
+    // shipping pack path (PIE == shipping for terrain/PCG content).
+    let mut pcgs: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut seen_pcg: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for &guid in doc.order() {
+        if let Some(e) = world.entity_of(guid) {
+            if let Some(vol) = world.world().get::<inf_ecs::components::PcgVolume>(e) {
+                if let Some(graph) = vol.graph {
+                    if seen_pcg.insert(graph) {
+                        if let Some(bytes) = resolve_pcg(graph) {
+                            pcgs.push((graph, bytes));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ScenePayload::new(doc.title(), level_bytes, classes, tick_hz, windowed).with_pcgs(pcgs))
 }
 
 /// Locate the `inf-player` binary next to the running editor executable (dev

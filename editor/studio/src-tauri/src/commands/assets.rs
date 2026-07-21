@@ -91,6 +91,21 @@ impl AssetState {
         serde_json::from_slice(&bytes).ok()
     }
 
+    /// Load a `.inf_pcg` graph asset's **raw bytes** by its asset GUID (P10.6):
+    /// the bytes streamed to the PIE player so it evaluates a scene's
+    /// [`PcgVolume`](inf_ecs::components::PcgVolume) scatter exactly like the
+    /// shipping pack path. `None` if the asset is missing or not a PCG graph.
+    pub fn load_pcg_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        let entry = proj.db().get(id)?;
+        if entry.kind() != inf_asset::AssetKind::Pcg {
+            return None;
+        }
+        std::fs::read(&entry.path).ok()
+    }
+
     /// Create a new material instance of `parent` (P7.4). Returns the new id.
     pub fn create_material_instance(&self, parent: AssetId, name: &str) -> Result<AssetId, String> {
         self.with_project(|proj| {
