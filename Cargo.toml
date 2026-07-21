@@ -25,7 +25,9 @@ members = [
     "crates/inf-hotreload",
     "crates/inf-hotreload/test-plugins/v1",
     "crates/inf-hotreload/test-plugins/v2",
+    "crates/inf-net",
     "crates/inf-runtime",
+    "platforms/inf-platform-null",
     "editor/crates/inf-editor-core",
     "editor/crates/inf-viewport",
     "editor/studio/src-tauri",
@@ -149,6 +151,13 @@ flume = { version = "0.11", default-features = false }
 # its wrappers are MIT/Apache-2.0 (on the deny allow-list); the vendored C is
 # BSD-3-Clause (also allowed).
 zstd = "0.13"
+# ── P14.2 web target ────────────────────────────────────────────────────────
+# ruzstd: a PURE-RUST zstd DECODER, used by inf-asset ONLY on wasm32 (the browser
+# player), where zstd-sys's C build does not target `wasm32-unknown-unknown`. The
+# desktop/native build keeps the faster C `zstd` (encode + decode) unchanged — so
+# cook determinism is untouched; wasm reads packs (decode-only) with ruzstd. MIT
+# (on the deny allow-list). Decode-only ⇒ the browser never cooks/writes packs.
+ruzstd = "0.8"
 # ── editor↔frontend shared types → committed TS bindings (CI drift-checked) ──
 ts-rs = "12"
 # test-only (dev-dependencies in member crates)
@@ -202,6 +211,34 @@ kira = { version = "0.12", default-features = false, features = [
 # the desktop runtime enables `gamepad` for a real poller. MIT OR Apache-2.0.
 gilrs = "0.11"
 
+# ── networking (Phase 14.3): the quinn QUIC transport, feature-gated ──────────
+# These are pulled ONLY behind inf-net's non-default `quic` feature (which the
+# Ring-2 apps + the integration test enable). tokio is a Ring-2-only dep by rule
+# (§2.5): the sans-io protocol core in inf-net has no async runtime, so the
+# deterministic sim never links tokio. Because `quic` is off in every default
+# build, this whole tree also stays out of the default `cargo deny` graph.
+#
+# Crypto backend = ring (NOT the aws-lc-rs default): default-features off on both
+# quinn and rustls, then the `ring` provider selected explicitly. This dodges the
+# aws-lc-sys ISPC/asm C build (a cross-OS CI liability, same reasoning as the BC7
+# intel_tex_2 decline). LICENSE NOTE: enabling `quic` in a cargo-deny run pulls
+# `ring`, whose SPDX is expressed via a license-file (ISC/MIT/OpenSSL mix) that
+# cargo-deny cannot classify without a `[licenses.clarify]` entry — deferred and
+# documented in docs/memos/p14-console-hal-audit.md (deny stays green while quic
+# is off by default). quinn/quinn-proto and rustls themselves are MIT/Apache-2.0/
+# ISC (already on the allow-list).
+quinn = { version = "0.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls-ring",
+    "log",
+] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
+tokio = { version = "1", default-features = false }
+# quinn datagrams take a `bytes::Bytes`; MIT/Apache, already transitive under the
+# quic tree. Only pulled behind inf-net's `quic` feature.
+bytes = "1"
+
 # intra-workspace crates
 inf-core = { path = "crates/inf-core" }
 inf-math = { path = "crates/inf-math" }
@@ -227,6 +264,8 @@ inf-transpile = { path = "crates/inf-transpile" }
 # default-features off so plugin cdylibs get guest+abi only; host consumers
 # (editor, runtime) add `features = ["host"]`.
 inf-hotreload = { path = "crates/inf-hotreload", default-features = false }
+inf-net = { path = "crates/inf-net" }
+inf-platform-null = { path = "platforms/inf-platform-null" }
 inf-runtime = { path = "crates/inf-runtime" }
 inf-editor-core = { path = "editor/crates/inf-editor-core" }
 inf-viewport = { path = "editor/crates/inf-viewport" }

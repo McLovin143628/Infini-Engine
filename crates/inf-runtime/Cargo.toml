@@ -12,6 +12,10 @@ publish = false
 # ECS facade + the parallel sim schedule (P9.1a, §2.5). inf-runtime is the game
 # loop; the access-declared sim systems live behind the inf-ecs facade.
 inf-ecs = { workspace = true }
+# The sans-io networking protocol core (P14.3). Only the DEFAULT (pure, no-tokio)
+# features — the replication glue produces/consumes NetSnapshots; the QUIC
+# transport (`quic` feature) is turned on by the Ring-2 apps, never here.
+inf-net = { workspace = true }
 bincode = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

@@ -1,0 +1,48 @@
+[package]
+name = "inf-net"
+description = "Networking: sans-io protocol core (framing, reliable/unreliable endpoint, snapshot replication, RPC) + an optional quinn (QUIC) transport."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[features]
+# Default is the PURE, sans-io protocol core — no tokio, no TLS, no sockets. This
+# is what Ring-0 consumers (inf-runtime replication glue) depend on, so networking
+# never drags an async runtime into the deterministic sim (§2.5).
+default = []
+# The quinn QUIC transport. OFF by default so the reliability/tokio/rustls/ring
+# tree is only ever built by the Ring-2 apps that own an async runtime (player,
+# dedicated server) and by the `--features quic` integration test. Keeping it
+# optional also keeps that tree out of the default `cargo deny` graph.
+quic = [
+    "dep:quinn",
+    "dep:rustls",
+    "dep:rcgen",
+    "dep:tokio",
+    "dep:tracing",
+    "dep:bytes",
+    "tokio/rt-multi-thread",
+    "tokio/macros",
+    "tokio/time",
+    "tokio/sync",
+]
+
+[dependencies]
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+# ── quic transport (feature-gated; see the `quic` feature) ──
+quinn = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+# NB: tokio is NOT a dev-dependency — the quic integration test uses the same
+# optional `tokio` dep the `quic` feature enables (with rt/macros/time above), so
+# the DEFAULT `cargo test -p inf-net` build never compiles tokio.

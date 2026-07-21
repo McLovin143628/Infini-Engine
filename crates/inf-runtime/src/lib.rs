@@ -19,11 +19,13 @@
 pub mod game_loop;
 pub mod pie;
 pub mod replay;
+pub mod replication;
 pub mod sim;
 pub mod snapshot;
 pub mod step;
 
 pub use game_loop::GameLoop;
+pub use replication::{apply_snapshot, snapshot_world, ReplicationSource};
 pub use sim::{Actor, ActorState, World, FIXED_DT, TICK_HZ};
 pub use snapshot::CookedSnapshot;
 pub use step::FixedStep;

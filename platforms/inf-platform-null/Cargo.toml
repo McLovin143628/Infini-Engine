@@ -1,0 +1,12 @@
+[package]
+name = "inf-platform-null"
+description = "The 'null console' mock backend for the inf-platform HAL — proves the console seam holds (ROADMAP P14.4). Layout demonstrates the out-of-tree private-backend pattern."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+inf-platform = { workspace = true }
