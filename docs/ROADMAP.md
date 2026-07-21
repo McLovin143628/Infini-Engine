@@ -782,6 +782,38 @@ driven by Blueprint input runs across P10 terrain in PIE.
 **Goal:** production-grade simulation. **Done when:** physics playground sample (joints,
 ragdoll, spatial audio) runs deterministically under replay test.
 
+> **STATUS: Phase 12 COMPLETE** (2026-07-21), CI-green on all three OSes. **P12.1**:
+> impulse joints in both facades (Fixed/Revolute/Prismatic/Spherical/Distance, motors +
+> limits, sorted deterministic ids) with flat Joint2D/3D components reconciled in a
+> second Guid-keyed bridge pass; CollisionLayers → InteractionGroups + a named 32-bit
+> registry (.infinity/collision_layers.toml); friction/restitution CombineRule; CCD with
+> tunnels-without/stops-with proofs in both dims; build_ragdoll (humanoid name-map →
+> capsule chain with limited joints; settles bounded); joint debug draw. **P12.2**: the
+> composed playground determinism gate (stacks + every joint kind + motorized hinge +
+> CCD bullet + layer ghost + sensor sweep → byte-identical 300-step runs, 2D and 3D);
+> the Jolt-vs-rapier memo — VERDICT: stay on rapier through P14 (f64 world fit,
+> cross-platform enhanced-determinism, pure-Rust CI), named revisit triggers recorded.
+> **P12.3**: .inf_audio assets (original compressed bytes, decode-on-load); the
+> command-queue doctrine — the audio command stream is a pure function of sim state,
+> the device is never sim state (headless tests assert the stream verbatim in editor
+> AND player); exponential attenuation + min/max clamps; raycast occlusion (−12 dB)
+> behind AudioSource.occlusion; .infinity/mixer.toml bus tree (Gain engine-side,
+> Lowpass modeled — kira TrackBuilder wiring is the device follow-up); audio.* nodes
+> with full transpile round-trips. **Schema v6** persists joints + audio source/listener
+> (frozen v5 both codecs; the downgrade-bless mechanism now standard); cook follows
+> AudioSource.clip edges. **The gate** (`samples/physics-playground`): slab, settling
+> stack, motorized spinner (+looping occluded spatial source), rope pendulum, prismatic
+> slider, CCD bullet vs thin wall, layer-ghost pair, sensor plate (+source), an
+> 8-bone/7-joint spawned ragdoll, camera listener — 300-step cooked replays are
+> byte-identical in BOTH pose trace and audio command stream, and **PIE == shipping on
+> both**. Pre-1.0 policy codified this phase: frozen records embed live component types;
+> layout changes re-bless fixtures (INF_BLESS_FIXTURES / downgrade-bless); true
+> loads-forever = frozen component snapshots at 1.0. Human-verified remainders: audible
+> playback pass (device builds), live joint/ragdoll visual pass, demo recording.
+> Deferred: doppler, reverb/sends + audible per-bus lowpass DSP, waveform thumbnails +
+> preview UI, ragdoll editor UI, named-bitmask Details widget, joint entity-ref picker,
+> contact-point debug draw, PIE audio-byte streaming (command-stream parity needs none).
+
 - **P12.1 Physics depth** — 1. joints/motors/CCD/queries; 2. collision layers + filtering UI;
   3. physics materials; 4. ragdoll setup tool; 5. debug-draw overlay.
 - **P12.2 Determinism** — 1. fixed-step replay harness; 2. Jolt-vs-rapier benchmark memo
