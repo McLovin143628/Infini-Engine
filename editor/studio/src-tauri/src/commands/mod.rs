@@ -7,6 +7,7 @@ mod assets;
 mod files;
 mod git;
 mod layout;
+mod lsp;
 mod project;
 mod scene;
 mod search;
@@ -14,6 +15,7 @@ mod terminal;
 mod viewport;
 
 pub use assets::{init_assets_on_boot, AssetState};
+pub use lsp::LspState;
 pub use project::ProjectState;
 pub use scene::{recover_scene_on_boot, SceneState};
 pub use terminal::PtyState;
@@ -82,5 +84,11 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         git::git_branches,
         git::git_init,
         search::search_workspace,
+        lsp::lsp_start,
+        lsp::lsp_stop,
+        lsp::lsp_did_open,
+        lsp::lsp_did_change,
+        lsp::lsp_did_close,
+        lsp::lsp_request,
     ]
 }

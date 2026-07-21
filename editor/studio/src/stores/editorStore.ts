@@ -8,7 +8,7 @@
 import { create } from "zustand";
 
 import type { EditorState } from "@codemirror/state";
-import type { ViewUpdate } from "@codemirror/view";
+import type { EditorView, ViewUpdate } from "@codemirror/view";
 
 import { createEditorState, registerSaveHandler } from "../lib/editor/setup";
 import { files } from "../lib/ipc";
@@ -28,6 +28,22 @@ export function tabStateFor(id: string): EditorState | undefined {
 }
 export function setTabState(id: string, state: EditorState): void {
   tabStates.set(id, state);
+}
+
+// The panel's single live EditorView, registered here so the LSP bridge (P5.2)
+// can reconfigure the extra compartment + push diagnostics without prop-drilling.
+let activeView: EditorView | null = null;
+export function setActiveView(v: EditorView | null): void {
+  activeView = v;
+}
+export function getActiveView(): EditorView | null {
+  return activeView;
+}
+
+/** The active tab's absolute path, or null. */
+export function activeTabPath(): string | null {
+  const { activeId, tabs } = useEditorStore.getState();
+  return tabs.find((t) => t.id === activeId)?.path ?? null;
 }
 
 let counter = 0;

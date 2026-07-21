@@ -10,7 +10,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 
 import { cn } from "../lib/utils";
-import { setTabState, tabStateFor, useEditorStore } from "../stores/editorStore";
+import { setActiveView, setTabState, tabStateFor, useEditorStore } from "../stores/editorStore";
 
 export default function EditorPanel() {
   const tabs = useEditorStore((s) => s.tabs);
@@ -27,7 +27,9 @@ export default function EditorPanel() {
     if (!hostRef.current) return;
     const view = new EditorView({ parent: hostRef.current });
     viewRef.current = view;
+    setActiveView(view); // hand the live view to the LSP bridge (P5.2)
     return () => {
+      setActiveView(null);
       view.destroy();
       viewRef.current = null;
     };

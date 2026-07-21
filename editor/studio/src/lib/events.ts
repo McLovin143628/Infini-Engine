@@ -78,3 +78,35 @@ export function onPtyOutput(id: string, handler: (p: PtyOutput) => void): Promis
 export function onPtyExit(id: string, handler: (p: PtyExit) => void): Promise<UnlistenFn> {
   return listenToDynamic<PtyExit>(`pty://exit/${id}`, handler);
 }
+
+// ── Language server (P5.2) ──────────────────────────────────────────────────
+
+/** A minimal LSP diagnostic (the shape rust-analyzer publishes). */
+export interface LspDiagnostic {
+  range: { start: LspPos; end: LspPos };
+  severity?: number; // 1 error, 2 warning, 3 info, 4 hint
+  message: string;
+  source?: string;
+  code?: string | number;
+}
+export interface LspPos {
+  line: number;
+  character: number;
+}
+/** `lsp://diagnostics` payload. */
+export interface LspDiagnosticsEvent {
+  uri: string;
+  diagnostics: LspDiagnostic[];
+}
+
+/** Subscribe to published diagnostics (one per file, replacing the prior set). */
+export function onLspDiagnostics(handler: (p: LspDiagnosticsEvent) => void): Promise<UnlistenFn> {
+  return listenToDynamic<LspDiagnosticsEvent>("lsp://diagnostics", handler);
+}
+/** Subscribe to server start/stop (payload `{ language }`). */
+export function onLspStarted(handler: (p: { language: string }) => void): Promise<UnlistenFn> {
+  return listenToDynamic<{ language: string }>("lsp://started", handler);
+}
+export function onLspStopped(handler: (p: { language: string }) => void): Promise<UnlistenFn> {
+  return listenToDynamic<{ language: string }>("lsp://stopped", handler);
+}

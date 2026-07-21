@@ -4,6 +4,7 @@ import {
   FolderTree,
   GitBranch,
   Globe2,
+  ListChecks,
   ListTree,
   PlusSquare,
   ScrollText,
@@ -18,6 +19,7 @@ import FileExplorerPanel from "./FileExplorerPanel";
 import GitPanel from "./GitPanel";
 import OutlinerPanel from "./OutlinerPanel";
 import OutputLogPanel from "./OutputLogPanel";
+import ProblemsPanel from "./ProblemsPanel";
 import SearchPanel from "./SearchPanel";
 import TerminalPanel from "./TerminalPanel";
 import { registerPanelType } from "./panelRegistry";
@@ -211,5 +213,16 @@ registerPanelType({
   singleton: true,
   defaultLocation: "left",
   defaultSize: { w: 300, h: 480 },
+  transient: true,
+});
+
+registerPanelType({
+  type: "problems",
+  title: () => "Problems",
+  icon: ListChecks,
+  component: ProblemsPanel,
+  singleton: true,
+  defaultLocation: "bottom",
+  defaultSize: { w: 720, h: 220 },
   transient: true,
 });

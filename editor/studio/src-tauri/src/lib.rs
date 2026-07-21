@@ -32,6 +32,7 @@ pub fn run() {
         .manage(commands::AssetState::default())
         .manage(commands::ProjectState::default())
         .manage(commands::PtyState::default())
+        .manage(commands::LspState::default())
         .invoke_handler(commands::invoke_handler())
         .setup(|app| {
             logging::attach_app(app.handle().clone());

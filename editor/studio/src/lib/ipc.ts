@@ -221,3 +221,23 @@ export const search = {
   workspace: (root: string, query: string, opts: SearchOptsDto): Promise<SearchHitDto[]> =>
     invoke<SearchHitDto[]>("search_workspace", { root, query, opts }),
 };
+
+/**
+ * Language intelligence (P5.2): a rust-analyzer LSP client. `didOpen/didChange/
+ * didClose` are fire-and-forget notifications; `request` pulls completion/hover/
+ * definition; diagnostics arrive on the `lsp://diagnostics` event.
+ */
+export const lsp = {
+  start: (language: string, workspace: string): Promise<void> =>
+    invoke("lsp_start", { language, workspace }),
+  stop: (language: string): Promise<void> => invoke("lsp_stop", { language }),
+  didOpen: (language: string, path: string, text: string): Promise<void> =>
+    invoke("lsp_did_open", { language, path, text }),
+  didChange: (language: string, path: string, text: string): Promise<void> =>
+    invoke("lsp_did_change", { language, path, text }),
+  didClose: (language: string, path: string): Promise<void> =>
+    invoke("lsp_did_close", { language, path }),
+  // `params`/result are raw LSP JSON (opaque to the typed layer).
+  request: (language: string, method: string, params: unknown): Promise<unknown> =>
+    invoke<unknown>("lsp_request", { language, method, params }),
+};

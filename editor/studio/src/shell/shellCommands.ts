@@ -71,6 +71,7 @@ export function bootstrapShellCommands(): void {
   setCommandHandler("window.git", panelToggle("git"));
   setCommandHandler("window.search", panelToggle("search"));
   setCommandHandler("window.editor", panelToggle("editor"));
+  setCommandHandler("window.problems", panelToggle("problems"));
   setCommandHandler("window.worldSettings", panelToggle("worldSettings"));
   setCommandHandler("window.placeActors", panelToggle("placeActors"));
 

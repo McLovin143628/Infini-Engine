@@ -26,6 +26,7 @@ import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
 import { initAssetSync, registerAssetCommands } from "./stores/assetStore";
 import { initProjectSync, registerProjectCommands } from "./stores/projectStore";
 import { initEditorSync } from "./stores/editorStore";
+import { initLsp } from "./lib/editor/lspBridge";
 import { scene as sceneIpc } from "./lib/ipc";
 
 bootstrapShellCommands();
@@ -88,6 +89,17 @@ export default function App() {
 
   // Subscribe to infinity:open-file so the Code Editor opens tabs (P5.1).
   useEffect(() => initEditorSync(), []);
+
+  // LSP bridge: rust-analyzer diagnostics/completions for open Rust files (P5.2).
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    let disposed = false;
+    initLsp().then((fn) => (disposed ? fn() : (dispose = fn)));
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
+  }, []);
 
   // Debounced crash-recovery autosave (P3.5.4): flush unsaved work every 5 s.
   useEffect(() => {

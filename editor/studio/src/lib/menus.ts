@@ -101,6 +101,7 @@ export const MENU_BAR: TopMenu[] = [
       act("window.terminal", "Terminal"),
       act("window.explorer", "Explorer"),
       act("window.editor", "Code Editor"),
+      act("window.problems", "Problems"),
       act("window.git", "Source Control"),
       act("window.search", "Search"),
       act("window.worldSettings", "World Settings"),
