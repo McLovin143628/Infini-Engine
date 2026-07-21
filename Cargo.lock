@@ -2151,6 +2151,7 @@ version = "0.1.0"
 name = "inf-blueprint"
 version = "0.1.0"
 dependencies = [
+ "inf-graph",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -2383,6 +2384,7 @@ name = "inf-transpile"
 version = "0.1.0"
 dependencies = [
  "inf-blueprint",
+ "inf-graph",
  "prettyplease",
  "proc-macro2",
  "proptest",

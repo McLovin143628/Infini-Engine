@@ -24,9 +24,13 @@
 use serde::{Deserialize, Serialize};
 
 pub mod interp;
+pub mod lower;
+pub mod nodekit;
 pub mod semantics;
 
 pub use interp::{eval_fn, eval_fn_traced, Debug as InterpDebug, Host, RunError, Trace, Value};
+pub use lower::{lower_event, lower_graph, LowerError};
+pub use nodekit::blueprint_registry;
 pub use semantics::{
     ActorHost, ActorInstance, BlueprintClass, BlueprintLibrary, Component, EventBinding, EventKind,
     Variable, SCHEMA_VERSION,
