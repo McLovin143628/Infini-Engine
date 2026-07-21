@@ -34,6 +34,8 @@ export interface EventPayloads {
   "assets://import": ImportEventDto;
   /** A project was opened/created → leave the start screen, re-sync (P5.5). */
   "project://changed": ProjectInfoDto;
+  /** A blueprint graph mutated (payload = graph id) → re-sync canvas (P6.2). */
+  "graph://sync": string;
 }
 
 export type EventChannel = keyof EventPayloads;

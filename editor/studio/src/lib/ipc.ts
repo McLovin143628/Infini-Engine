@@ -10,6 +10,13 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 
+import type {
+  BpDoc,
+  BpEdit,
+  GraphApplyResult,
+  GraphRunResult,
+  NodeDef,
+} from "./blueprintTypes";
 import type { AssetRefDto } from "../bindings/AssetRefDto";
 import type { AssetSnapshot } from "../bindings/AssetSnapshot";
 import type { DataAssetDto } from "../bindings/DataAssetDto";
@@ -240,4 +247,25 @@ export const lsp = {
   // `params`/result are raw LSP JSON (opaque to the typed layer).
   request: (language: string, method: string, params: unknown): Promise<unknown> =>
     invoke<unknown>("lsp_request", { language, method, params }),
+};
+
+/**
+ * Blueprint graphs (Phase 6). The visual node editor drives everything here:
+ * fetch the palette, CRUD documents, apply edit batches (invariant-checked +
+ * re-validated on the backend), run a graph through the interpreter, and read
+ * the generated Rust. Types come from `./blueprintTypes` (mirrors of the
+ * Ring-0 graph crate, not ts-rs). Edits are the kebab-case tagged union the
+ * backend deserializes as `inf_graph::GraphEdit`.
+ */
+export const graph = {
+  registry: (): Promise<NodeDef[]> => invoke<NodeDef[]>("graph_registry"),
+  list: (): Promise<BpDoc[]> => invoke<BpDoc[]>("graph_list"),
+  create: (name: string): Promise<BpDoc> => invoke<BpDoc>("graph_create", { name }),
+  get: (id: string): Promise<BpDoc> => invoke<BpDoc>("graph_get", { id }),
+  apply: (id: string, edits: BpEdit[], label: string): Promise<GraphApplyResult> =>
+    invoke<GraphApplyResult>("graph_apply", { id, edits, label }),
+  undo: (id: string): Promise<BpDoc | null> => invoke<BpDoc | null>("graph_undo", { id }),
+  redo: (id: string): Promise<BpDoc | null> => invoke<BpDoc | null>("graph_redo", { id }),
+  run: (id: string): Promise<GraphRunResult> => invoke<GraphRunResult>("graph_run", { id }),
+  generate: (id: string): Promise<string> => invoke<string>("graph_generate", { id }),
 };

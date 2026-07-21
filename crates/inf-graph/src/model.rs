@@ -84,6 +84,7 @@ pub struct NodeUi {
 /// key like `"flow.branch"` or `"math.add"`); this struct stores only identity,
 /// param overrides, the A/B `disabled` toggle, and canvas UI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Node {
     pub id: NodeId,
     pub type_id: String,
@@ -100,6 +101,7 @@ pub struct Node {
 /// A directed edge from one node's output port to another's input port, both
 /// referenced by name. An input port holds at most one link.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Link {
     pub from: NodeId,
     pub from_port: String,
@@ -110,6 +112,7 @@ pub struct Link {
 /// The graph topology: nodes keyed by id, a flat link list, and the monotonic
 /// id allocator. No single `output` field — a graph may have many sinks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Graph {
     pub nodes: BTreeMap<NodeId, Node>,
     pub links: Vec<Link>,
@@ -204,7 +207,7 @@ pub struct GraphViewport {
 
 /// A named, runnable graph document — the on-disk unit (one "sheet").
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GraphDoc {
     pub id: String,
     pub name: String,

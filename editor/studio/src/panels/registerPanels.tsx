@@ -11,6 +11,7 @@ import {
   Search,
   SlidersHorizontal,
   SquareTerminal,
+  Workflow,
 } from "lucide-react";
 import { viewport } from "../lib/ipc";
 import DetailsPanel from "./DetailsPanel";
@@ -22,6 +23,7 @@ import OutputLogPanel from "./OutputLogPanel";
 import ProblemsPanel from "./ProblemsPanel";
 import SearchPanel from "./SearchPanel";
 import TerminalPanel from "./TerminalPanel";
+import { BlueprintCanvas } from "./blueprint/BlueprintCanvas";
 import { registerPanelType } from "./panelRegistry";
 
 /**
@@ -203,6 +205,16 @@ registerPanelType({
   singleton: true,
   defaultLocation: "bottom",
   defaultSize: { w: 900, h: 480 },
+});
+
+registerPanelType({
+  type: "blueprint",
+  title: () => "Blueprint",
+  icon: Workflow,
+  component: BlueprintCanvas,
+  singleton: true,
+  defaultLocation: "bottom",
+  defaultSize: { w: 1000, h: 560 },
 });
 
 registerPanelType({

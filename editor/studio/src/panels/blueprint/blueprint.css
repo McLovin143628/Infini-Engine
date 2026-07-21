@@ -1,0 +1,235 @@
+/* Blueprint canvas styling (Phase 6). Dark, Unreal-ish node cards. */
+.bp-canvas {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background: #1b1d22;
+  color: #dfe3ea;
+  font-size: 12px;
+}
+.bp-canvas--loading {
+  align-items: center;
+  justify-content: center;
+  opacity: 0.6;
+}
+
+.bp-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #2a2d34;
+  background: #212429;
+}
+.bp-toolbar__spacer {
+  flex: 1;
+}
+.bp-toolbar__sep {
+  width: 1px;
+  height: 18px;
+  background: #363a42;
+  margin: 0 4px;
+}
+.bp-toolbar__issues {
+  color: #e2b04a;
+  font-size: 11px;
+}
+
+.bp-btn {
+  background: #2c3038;
+  border: 1px solid #3a3f48;
+  color: #dfe3ea;
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.bp-btn:hover {
+  background: #353a44;
+}
+.bp-btn--run {
+  background: #2e6b45;
+  border-color: #38804f;
+}
+.bp-btn--run:hover {
+  background: #35794f;
+}
+.bp-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.bp-flow {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Node card */
+.bp-node {
+  min-width: 150px;
+  background: #262a31;
+  border: 1px solid #363b44;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  font-size: 12px;
+}
+.bp-node--selected {
+  border-color: #f0a500;
+  box-shadow: 0 0 0 1px #f0a500;
+}
+.bp-node--unknown {
+  padding: 8px;
+  color: #e06c6c;
+  background: #3a2626;
+}
+.bp-node__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 9px;
+  color: #f4f6fa;
+}
+.bp-node__title {
+  font-weight: 600;
+}
+.bp-node__cat {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  opacity: 0.7;
+}
+.bp-node__body {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 4px;
+}
+.bp-node__col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.bp-node__col--out {
+  align-items: flex-end;
+}
+.bp-node__field {
+  padding: 4px 8px 8px;
+}
+.bp-input {
+  width: 100%;
+  background: #1b1d22;
+  border: 1px solid #3a3f48;
+  color: #dfe3ea;
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+/* Palette */
+.bp-palette__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+.bp-palette {
+  position: absolute;
+  z-index: 21;
+  width: 230px;
+  max-height: 340px;
+  display: flex;
+  flex-direction: column;
+  background: #23262c;
+  border: 1px solid #3a3f48;
+  border-radius: 6px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.bp-palette__search {
+  margin: 6px;
+  padding: 5px 8px;
+  background: #1b1d22;
+  border: 1px solid #3a3f48;
+  border-radius: 4px;
+  color: #dfe3ea;
+  font-size: 12px;
+}
+.bp-palette__list {
+  overflow-y: auto;
+  padding-bottom: 6px;
+}
+.bp-palette__group {
+  padding: 2px 0;
+}
+.bp-palette__cat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #9aa0a6;
+}
+.bp-palette__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 4px;
+}
+.bp-palette__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: #dfe3ea;
+  padding: 4px 22px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.bp-palette__item:hover {
+  background: #30353d;
+}
+.bp-palette__empty {
+  padding: 10px;
+  color: #7a808a;
+  text-align: center;
+}
+
+/* Output drawer */
+.bp-output {
+  max-height: 40%;
+  overflow: auto;
+  border-top: 1px solid #2a2d34;
+  background: #17191d;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 11px;
+}
+.bp-output__code {
+  margin: 0;
+  padding: 8px 12px;
+  white-space: pre;
+  color: #c9d1d9;
+}
+.bp-output__run {
+  padding: 8px 12px;
+}
+.bp-output__err {
+  color: #e06c6c;
+  margin-bottom: 4px;
+}
+.bp-output__log {
+  color: #9ad0ff;
+}
+.bp-output__vars {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.bp-output__var {
+  color: #7ee06e;
+}
