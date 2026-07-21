@@ -462,6 +462,17 @@ warns correctly.
 
 ### Phase 6 — Infinity Blueprints & transpiler v1 *(signature feature)*
 
+> **STATUS: Phase 6 COMPLETE** (2026-07-20). The signature feature's full stack is in and
+> CI-green. The graph ↔ IR ↔ Rust four-way sync is proven end-to-end and interpreter-vs-compiled
+> parity holds. `inf-graph` (de-geo'd DAG substrate), `inf-blueprint` (interpreter + semantics +
+> `.inf_act`/`.inf_fn` + node kit + graph↔IR lower/raise), `inf-transpile` (production round-trip),
+> the Ring-2 `graph_*` command surface, and the `@xyflow/react` Blueprint canvas all landed. The
+> "rotate on tick" gate authors in-graph, runs via the interpreter, and generates round-tripping
+> Rust. Human-verified remainders (the Phase-5 bar): live canvas interaction, and compile-on-save
+> dylib hot-swap in Simulate (the `inf-hotreload` mechanism is proven; wiring it to Simulate is a
+> follow-up alongside the P9 PIE/Simulate loop). Deferred niceties: comment/reroute nodes,
+> alignment/copy-paste, 1k-node perf pass, and idiomatic `self.field` variable sugar in the IR.
+
 **Goal:** author gameplay visually, watch it run live, read/edit the generated Rust, stay in
 sync. **Done when:** "rotate on tick + spawn prefab on click" authored purely in-graph runs via
 interpreter; the generated Rust is hand-edited and the graph updates; round-trip proptests in CI.
