@@ -575,6 +575,43 @@ procedural mask authored in-graph, applied to the P4 character, edits visible in
 **Goal:** first-class 2D/2.5D, not an afterthought. **Done when:** a small platformer scene
 with Blueprint coyote-time jump plays in-viewport via interpreter.
 
+> **STATUS: Phase 8 COMPLETE** (2026-07-21), CI-green on all three OSes, eight commits.
+> First-class 2D built on the shared 3D substrate. **P8.1**: `inf-render-2d` (pure-CPU
+> batcher — stable `(layer, order, texture)` sort + prebatched runs) + a GPU sprite pass
+> (vertex-shader quad expansion, GUID-keyed texture cache, straight alpha, depth-tested/
+> not-writing); chunked `Tilemap` (sparse 32×32 chunks, deterministic serde, chunk-level
+> cull, per-chunk draw runs — no per-tile sort at 100k tiles); `NineSlice`; `Text2D` with
+> an embedded public-domain font8x8 debug font (zero-asset text); minimal `Light2D`
+> (`@group(2)`, ambient defaults white — provably invisible until used, strict-golden
+> byte-stability held across every batch). **P8.2**: sprite-sheet slicing panel (sidecar
+> grid + named rects) + sorting-layer manager; `.inf_lvl` schema v2 (five 2D slots,
+> frozen-v1 decode + forever-load fixture); tile-paint panel (cell-level undo strokes,
+> bounded fill); orthographic 2D editor mode (shared reverse-Z convention, per-mode
+> cameras, zoom-to-cursor, XY grid, Z-less 2D gizmos, pixel snap with per-project PPU in
+> `.infinity/settings.toml`). **P8.3**: `rapier2d-f64` facade (`enhanced-determinism`,
+> rapier's rayon off — `inf-core` owns parallelism; 300-step byte-identical replay) +
+> Guid-ordered `PhysicsBridge2D` (sync/step/write-back; handle allocation never follows
+> entity-id churn) + selected-collider debug outlines + the `physics2d.*` blueprint kit
+> via a `Host::physics()` accessor (zero IR change; every node transpile-round-trips).
+> **P8.4 (the gate)**: spherical/cylindrical billboards; `SimSession` (enter snapshots →
+> per fixed step: sync → Guid-ordered blueprint tick over a real `Physics2dHost` adapter →
+> step → write-back → exit restores byte-for-byte); `input.is_down`/`just_pressed` nodes;
+> `samples/platformer-2d` with the coyote-time jump graph — CI proves the coyote window
+> (jump 3 steps after the ledge fires; post-window doesn't), deterministic re-runs, and
+> interpreter-vs-compiled parity over a live physics host; `hybrid-2.5d` template
+> (`inf new`-scaffolded); Play/Pause/Stop/Step toolbar + Alt+P driving `sim_start/tick/
+> stop` with layout-independent key routing. Key decisions: tilemaps/9-slice/text ride
+> the sprite pipeline as prebatched runs (one batching path, one painter order);
+> physics is f64 with rapier's math *being* workspace glam (via glamx — no conversion
+> layer); `.inf_act` stores JSON (bincode cannot round-trip `skip_serializing_if` —
+> documented latent issue for asset-DB integration). Human-verified remainders: the live
+> in-viewport play pass + demo recording, native-viewport held-key forwarding during
+> Simulate, a fixed-dt Step command (`SimSession::step_once` exists, not yet surfaced),
+> 2D click-picking (Outliner selects; ID buffer is mesh-only), macOS input (pre-existing).
+> Deferred niceties: live-viewport texture upload for 2D content (goldens prove the
+> textured path headlessly), atlas-image tile preview, Vec2 blueprint value type,
+> `Light2D` layer masks, camera-delta tilemap re-expansion caching.
+
 - **P8.1 2D rendering** — 1. sprite batcher (atlases, sorting layers, alpha); 2. tilemap
   renderer + tile editor panel; 3. 9-slice + text quads; 4. 2D lights (later batch, optional).
 - **P8.2 2D editing** — 1. orthographic camera + 2D editor mode toggle; 2. grid/pixel snapping,
