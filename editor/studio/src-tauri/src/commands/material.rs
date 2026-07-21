@@ -16,7 +16,10 @@ use inf_graph::{
     NodeRegistry,
 };
 use inf_material::graph::MatSeverity;
-use inf_material::{emit_wgsl, material_registry as build_material_registry};
+use inf_material::{
+    emit_texture_compute, emit_wgsl, material_registry as build_material_registry,
+    texture_from_rgba8, TextureImportSettings,
+};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -291,4 +294,43 @@ pub async fn material_compile(
         texture_count: tex_count,
         image,
     })
+}
+
+/// Bake the material graph to a `.inf_tex` texture asset via a compute pass
+/// (P7.3). Evaluates the graph per texel into an offscreen storage texture and
+/// writes the result as a new texture asset. Returns the new asset id.
+#[tauri::command]
+pub async fn material_bake(
+    id: String,
+    size: u32,
+    name: String,
+    state: State<'_, MaterialState>,
+    assets: State<'_, super::assets::AssetState>,
+) -> Result<String, String> {
+    let (compute_wgsl, ok, tex_count) = state.with(|s| {
+        let doc = s
+            .docs
+            .get(&id)
+            .ok_or_else(|| format!("no material `{id}`"))?;
+        let c = emit_texture_compute(&doc.graph, &s.registry);
+        Ok((c.compute_wgsl, c.ok, c.texture_count))
+    })?;
+    if !ok {
+        return Err("material has compile errors; fix them before baking".into());
+    }
+    let size = size.clamp(16, 2048);
+    let rgba = {
+        let mut prev = state.preview.lock().map_err(|e| e.to_string())?;
+        prev.bake_texture(&compute_wgsl, tex_count, size)
+            .ok_or("no GPU adapter available to bake")?
+    };
+    let tex = texture_from_rgba8(rgba, size, size, TextureImportSettings::default())
+        .map_err(|e| e.to_string())?;
+    let name = if name.is_empty() {
+        "Baked Texture".to_string()
+    } else {
+        name
+    };
+    let asset_id = assets.write_texture_asset(&name, &tex)?;
+    Ok(asset_id.to_string())
 }

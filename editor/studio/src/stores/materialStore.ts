@@ -31,6 +31,7 @@ interface MaterialState {
   undo: () => Promise<void>;
   redo: () => Promise<void>;
   compile: () => Promise<void>;
+  bake: (size: number, name: string) => Promise<string | null>;
   toggleWgsl: () => void;
 }
 
@@ -119,6 +120,17 @@ export const useMaterialStore = create<MaterialState>((set, get) => ({
     if (restored) {
       set({ doc: restored, canUndo: true });
       void get().compile();
+    }
+  },
+
+  bake: async (size, name) => {
+    const doc = get().doc;
+    if (!doc) return null;
+    try {
+      return await materialIpc.bake(doc.id, size, name);
+    } catch (e) {
+      console.error("material.bake failed", e);
+      return null;
     }
   },
 

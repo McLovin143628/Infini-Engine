@@ -86,6 +86,63 @@ pub fn emit_wgsl(graph: &Graph, reg: &NodeRegistry) -> MaterialCompile {
     }
 }
 
+/// The result of compiling a material graph to a **bake compute shader**
+/// (P7.3): each texel evaluates the graph and its `base_color` is written to a
+/// storage texture.
+#[derive(Debug, Clone)]
+pub struct TextureCompile {
+    /// The complete, naga-validated compute module (entry `cs_bake`).
+    pub compute_wgsl: String,
+    pub issues: Vec<MatIssue>,
+    /// `tex.sample` slots the graph references (bound white at bake time).
+    pub texture_count: u32,
+    pub ok: bool,
+}
+
+/// The compute wrapper that bakes a material graph's `base_color` to a texture.
+const BAKE_COMPUTE: &str = "\
+@group(0) @binding(0) var bake_out: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8)
+fn cs_bake(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = textureDimensions(bake_out);
+    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5)) / vec2<f32>(f32(dims.x), f32(dims.y));
+    var mi: MatIn;
+    mi.uv = uv;
+    mi.normal = vec3<f32>(0.0, 0.0, 1.0);
+    mi.world_pos = vec3<f32>(uv, 0.0);
+    mi.time = 0.0;
+    let s = material_surface(mi);
+    textureStore(bake_out, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(s.base_color, 1.0));
+}";
+
+/// Compile a material/texture graph to a bake **compute** shader (P7.3). Reuses
+/// the surface codegen and appends a compute entry that writes `base_color` per
+/// texel; the whole module is naga-validated.
+pub fn emit_texture_compute(graph: &Graph, reg: &NodeRegistry) -> TextureCompile {
+    let surface = emit_wgsl(graph, reg);
+    let compute_wgsl = format!("{}\n{BAKE_COMPUTE}", surface.surface_wgsl);
+
+    let mut issues = surface.issues;
+    if let Err(list) = validate_wgsl(&compute_wgsl) {
+        for (_, message) in list {
+            issues.push(MatIssue {
+                node: None,
+                severity: MatSeverity::Error,
+                message,
+            });
+        }
+    }
+    let ok = !issues.iter().any(|i| i.severity == MatSeverity::Error);
+    TextureCompile {
+        compute_wgsl,
+        issues,
+        texture_count: surface.textures.len() as u32,
+        ok,
+    }
+}
+
 /// A validation entry point so naga sees every global/fn as reachable.
 const VALIDATION_ENTRY: &str = "\
 @fragment
@@ -412,6 +469,24 @@ impl<'a> Emitter<'a> {
                         "value_noise({} * {scale})",
                         self.coerce(&uv, tuv, MatType::Vec2)
                     ),
+                    MatType::Float,
+                )
+            }
+            "proc.gradient" => {
+                let (uv, tuv) = self.resolve_input(node, "uv");
+                let uv2 = self.coerce(&uv, tuv, MatType::Vec2);
+                let comp = if matches!(params.get("vertical"), Some(ParamValue::Bool(true))) {
+                    "y"
+                } else {
+                    "x"
+                };
+                (format!("({uv2}).{comp}"), MatType::Float)
+            }
+            "proc.radial" => {
+                let (uv, tuv) = self.resolve_input(node, "uv");
+                let uv2 = self.coerce(&uv, tuv, MatType::Vec2);
+                (
+                    format!("clamp(length({uv2} - vec2<f32>(0.5)) * 2.0, 0.0, 1.0)"),
                     MatType::Float,
                 )
             }
@@ -821,6 +896,30 @@ mod tests {
         assert!(c.surface_wgsl.contains("mat_tex_0"));
         assert_eq!(c.textures.len(), 1);
         assert_eq!(c.textures[0].asset, "abc-123");
+    }
+
+    #[test]
+    fn texture_compute_bakes_gradient_and_validates() {
+        let reg = material_registry();
+        let mut g = Graph::empty();
+        let edits = vec![
+            add(1, "output.surface"),
+            add(2, "input.uv"),
+            add(3, "proc.gradient"),
+            add(4, "proc.radial"),
+            add(5, "vec.make3"),
+            wire(2, "out", 3, "uv"),
+            wire(2, "out", 4, "uv"),
+            wire(3, "out", 5, "x"),
+            wire(4, "out", 5, "y"),
+            wire(3, "out", 5, "z"),
+            wire(5, "out", 1, "base_color"),
+        ];
+        assert_eq!(apply_edits(&mut g, &reg, &edits), edits.len());
+        let c = emit_texture_compute(&g, &reg);
+        assert!(c.ok, "issues: {:?}", c.issues);
+        assert!(c.compute_wgsl.contains("@compute"));
+        assert!(c.compute_wgsl.contains("textureStore(bake_out"));
     }
 
     #[test]

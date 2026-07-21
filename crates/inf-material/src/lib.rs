@@ -18,7 +18,10 @@ pub mod texture;
 
 pub use bc::{decode_bc1, decode_bc3};
 pub use error::MaterialError;
-pub use graph::{emit_wgsl, material_registry, MatIssue, MatType, MaterialCompile};
+pub use graph::{
+    emit_texture_compute, emit_wgsl, material_registry, MatIssue, MatType, MaterialCompile,
+    TextureCompile,
+};
 pub use material::MaterialAsset;
 pub use texture::{
     import_texture_bytes, texture_from_rgba8, TextureAsset, TextureCompression, TextureFormat,

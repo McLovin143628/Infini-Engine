@@ -295,4 +295,7 @@ export const material = {
   redo: (id: string): Promise<BpDoc | null> => invoke<BpDoc | null>("material_redo", { id }),
   compile: (id: string): Promise<MaterialCompileResult> =>
     invoke<MaterialCompileResult>("material_compile", { id }),
+  /** Bake the graph to a new `.inf_tex` asset via a compute pass; returns the id. */
+  bake: (id: string, size: number, name: string): Promise<string> =>
+    invoke<string>("material_bake", { id, size, name }),
 };

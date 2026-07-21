@@ -69,6 +69,14 @@ function CanvasInner() {
   const compileResult = useMaterialStore((s) => s.compileResult);
   const showWgsl = useMaterialStore((s) => s.showWgsl);
   const toggleWgsl = useMaterialStore((s) => s.toggleWgsl);
+  const bake = useMaterialStore((s) => s.bake);
+
+  const onBake = useCallback(async () => {
+    const name = window.prompt("Bake to texture asset — name:", "Baked Texture");
+    if (name == null) return;
+    const id = await bake(512, name);
+    if (id) console.info(`baked texture asset ${id}`);
+  }, [bake]);
 
   const { screenToFlowPosition } = useReactFlow();
   const previewMove = useMaterialStore((s) => s.previewMove);
@@ -193,6 +201,14 @@ function CanvasInner() {
         </button>
         <button className="bp-btn" onClick={toggleWgsl}>
           {"</> WGSL"}
+        </button>
+        <button
+          className="bp-btn"
+          onClick={() => void onBake()}
+          disabled={!compileResult?.ok}
+          title="Bake this graph to a .inf_tex texture asset (compute pass)"
+        >
+          ⬇ Bake Texture
         </button>
         <span className="bp-toolbar__spacer" />
         <span className="mat-toolbar__status">

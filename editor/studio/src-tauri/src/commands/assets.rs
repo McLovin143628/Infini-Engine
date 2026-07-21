@@ -47,6 +47,21 @@ impl AssetState {
         proj.db().get(id).map(|e| e.name.clone())
     }
 
+    /// Write a baked texture as a new `.inf_tex` asset under `Content/baked`
+    /// (P7.3 material bake). Returns the new asset id; the file watcher then
+    /// re-syncs the Content Drawer.
+    pub fn write_texture_asset(
+        &self,
+        name: &str,
+        tex: &inf_material::TextureAsset,
+    ) -> Result<AssetId, String> {
+        self.with_project(|proj| {
+            let dir = proj.content_dir("baked").map_err(|e| e.to_string())?;
+            proj.write_asset(&dir, name, tex, None, vec![], None)
+                .map_err(|e| e.to_string())
+        })
+    }
+
     /// Load a material asset's PBR parameters (Content-Drawer apply-by-drag,
     /// P7.1). `None` if the asset is missing or not a material.
     pub fn load_material(&self, id: AssetId) -> Option<MaterialAsset> {

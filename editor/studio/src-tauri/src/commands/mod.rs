@@ -45,6 +45,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         material::material_undo,
         material::material_redo,
         material::material_compile,
+        material::material_bake,
         layout::layout_save,
         layout::layout_load,
         layout::layout_list,

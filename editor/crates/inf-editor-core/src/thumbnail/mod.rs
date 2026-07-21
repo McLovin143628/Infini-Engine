@@ -110,6 +110,18 @@ impl Thumbnailer {
         let gpu = self.gpu()?;
         scene_render::render_material_preview(gpu, size, surface_wgsl, tex_count).ok()
     }
+
+    /// Bake a texture graph's generated `compute_wgsl` (entry `cs_bake`) to a
+    /// `size × size` RGBA8 image (P7.3). `None` if no GPU adapter is available.
+    pub fn bake_texture(
+        &mut self,
+        compute_wgsl: &str,
+        tex_count: u32,
+        size: u32,
+    ) -> Option<Vec<u8>> {
+        let gpu = self.gpu()?;
+        scene_render::bake_texture(gpu, size, compute_wgsl, tex_count).ok()
+    }
 }
 
 /// A content-hash-keyed on-disk cache of encoded PNG thumbnails.

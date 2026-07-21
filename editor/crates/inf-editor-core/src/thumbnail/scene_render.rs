@@ -667,6 +667,168 @@ fn build_white_textures(
     (tex, sampler, bg, bgl)
 }
 
+// ── Texture graph bake (P7.3) ───────────────────────────────────────────────
+
+/// Run a material/texture graph's generated `compute_wgsl` (entry `cs_bake`) over
+/// a `size × size` storage texture and read back tightly-packed RGBA8 rows.
+/// `tex_count` `tex.sample` slots are bound to a shared white 1×1. The compute
+/// module must have been naga-validated (`inf_material::emit_texture_compute`).
+pub fn bake_texture(
+    gpu: &GpuContext,
+    size: u32,
+    compute_wgsl: &str,
+    tex_count: u32,
+) -> Result<Vec<u8>, String> {
+    let device = &gpu.device;
+
+    let out_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("bake-out"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let out_view = out_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("bake-shader"),
+        source: wgpu::ShaderSource::Wgsl(compute_wgsl.into()),
+    });
+
+    let out_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("bake-out-bgl"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                view_dimension: wgpu::TextureViewDimension::D2,
+            },
+            count: None,
+        }],
+    });
+    let out_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("bake-out-bg"),
+        layout: &out_bgl,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(&out_view),
+        }],
+    });
+
+    let tex_resources = (tex_count > 0).then(|| build_white_textures(gpu, tex_count));
+    let empty_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("bake-empty-bgl"),
+        entries: &[],
+    });
+    let empty_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("bake-empty-bg"),
+        layout: &empty_bgl,
+        entries: &[],
+    });
+    let layout_bgls: Vec<Option<&wgpu::BindGroupLayout>> = match &tex_resources {
+        Some((_, _, _, tex_bgl)) => vec![Some(&out_bgl), Some(&empty_bgl), Some(tex_bgl)],
+        None => vec![Some(&out_bgl)],
+    };
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("bake-layout"),
+        bind_group_layouts: &layout_bgls,
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("bake-pipeline"),
+        layout: Some(&layout),
+        module: &shader,
+        entry_point: Some("cs_bake"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("bake"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("bake-pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &out_bg, &[]);
+        if let Some((_, _, tex_bg, _)) = &tex_resources {
+            pass.set_bind_group(1, &empty_bg, &[]);
+            pass.set_bind_group(2, tex_bg, &[]);
+        }
+        let groups = size.div_ceil(8);
+        pass.dispatch_workgroups(groups, groups, 1);
+    }
+
+    // Read back the storage texture (256-aligned rows), unpadding into RGBA8.
+    let padded = align_up(size * 4, 256);
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bake-readback"),
+        size: (padded * size) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &out_tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(size),
+            },
+        },
+        wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.queue.submit([encoder.finish()]);
+
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| format!("poll: {e}"))?;
+    rx.recv()
+        .map_err(|e| format!("map_async dropped: {e}"))?
+        .map_err(|e| format!("map_async: {e}"))?;
+    let data = slice
+        .get_mapped_range()
+        .map_err(|e| format!("get_mapped_range: {e}"))?;
+    let row = (size * 4) as usize;
+    let mut out = Vec::with_capacity(row * size as usize);
+    for chunk in data.chunks(padded as usize) {
+        out.extend_from_slice(&chunk[..row]);
+    }
+    drop(data);
+    readback.unmap();
+    Ok(out)
+}
+
+fn align_up(v: u32, align: u32) -> u32 {
+    v.div_ceil(align) * align
+}
+
 /// Right-handed look-at (glam's built-in is deprecated in 0.33; we hand-roll to
 /// stay `-D warnings` clean and keep the depth convention explicit).
 fn look_at_rh(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
@@ -774,5 +936,43 @@ fn material_surface(mi: MatIn) -> Surface {
         // Exercises the empty-group(1) + white-texture-group(2) path.
         let img = render_material_preview(&gpu, 32, TEX_SURFACE, 1).expect("textured preview");
         assert_eq!(img.len(), 32 * 32 * 4);
+    }
+
+    const BAKE_COMPUTE: &str = "\
+struct MatIn { uv: vec2<f32>, normal: vec3<f32>, world_pos: vec3<f32>, time: f32 };
+struct Surface { base_color: vec3<f32>, metallic: f32, roughness: f32, emissive: vec3<f32> };
+fn material_surface(mi: MatIn) -> Surface {
+    var surf: Surface;
+    surf.base_color = vec3<f32>(mi.uv.x, mi.uv.y, 0.5);
+    surf.metallic = 0.0;
+    surf.roughness = 0.5;
+    surf.emissive = vec3<f32>(0.0);
+    return surf;
+}
+@group(0) @binding(0) var bake_out: texture_storage_2d<rgba8unorm, write>;
+@compute @workgroup_size(8, 8)
+fn cs_bake(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = textureDimensions(bake_out);
+    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5)) / vec2<f32>(f32(dims.x), f32(dims.y));
+    var mi: MatIn;
+    mi.uv = uv;
+    mi.normal = vec3<f32>(0.0, 0.0, 1.0);
+    mi.world_pos = vec3<f32>(uv, 0.0);
+    mi.time = 0.0;
+    let s = material_surface(mi);
+    textureStore(bake_out, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(s.base_color, 1.0));
+}
+";
+
+    #[test]
+    fn bake_texture_writes_a_gradient() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let img = bake_texture(&gpu, 16, BAKE_COMPUTE, 0).expect("bake");
+        assert_eq!(img.len(), 16 * 16 * 4);
+        // The R channel grows across the row (uv.x gradient): first texel < last.
+        let first_r = img[0];
+        let last_r = img[(15 * 4) as usize];
+        assert!(last_r > first_r, "expected a horizontal gradient in R");
     }
 }

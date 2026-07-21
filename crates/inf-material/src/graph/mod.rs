@@ -10,5 +10,8 @@
 pub mod emit;
 pub mod nodekit;
 
-pub use emit::{emit_wgsl, MatIssue, MatSeverity, MaterialCompile, TextureBinding};
+pub use emit::{
+    emit_texture_compute, emit_wgsl, MatIssue, MatSeverity, MaterialCompile, TextureBinding,
+    TextureCompile,
+};
 pub use nodekit::{material_registry, MatType};

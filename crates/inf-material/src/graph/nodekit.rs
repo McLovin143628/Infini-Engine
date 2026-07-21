@@ -195,6 +195,15 @@ fn proc_nodes() -> Vec<NodeDef> {
             .with_inputs(vec![port("uv", MatType::Vec2)])
             .with_outputs(vec![port("out", MatType::Float)])
             .with_params(vec![ParamDef::number("scale", 4.0).range(0.1, 128.0)]),
+        NodeDef::new("proc.gradient", "Linear Gradient", "procedural")
+            .described("A 0→1 gradient along U (or V)")
+            .with_inputs(vec![port("uv", MatType::Vec2)])
+            .with_outputs(vec![port("out", MatType::Float)])
+            .with_params(vec![ParamDef::toggle("vertical", false)]),
+        NodeDef::new("proc.radial", "Radial Gradient", "procedural")
+            .described("0 at UV center → 1 at the edges")
+            .with_inputs(vec![port("uv", MatType::Vec2)])
+            .with_outputs(vec![port("out", MatType::Float)]),
     ]
 }
 
