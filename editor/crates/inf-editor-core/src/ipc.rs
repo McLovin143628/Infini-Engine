@@ -487,6 +487,36 @@ pub struct SortingLayerDto {
     pub name: String,
 }
 
+// ── Viewport mode + 2D snapping (P8.2c) ──────────────────────────────────
+
+/// Active viewport projection: perspective 3D or orthographic 2D editing
+/// (`viewport_set_mode`). Serializes as the tag string `"Perspective"`/`"TwoD"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum ViewportModeDto {
+    Perspective,
+    TwoD,
+}
+
+/// 2D-mode snapping configuration pushed from the viewport toolbar
+/// (`viewport_set_snap2d`). Grid snap quantizes a translate to `grid_size` world
+/// units; **pixel snap** (finer) to `1/pixels_per_unit`. Pixel snap wins when
+/// both are enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct Snap2DDto {
+    pub grid_enabled: bool,
+    pub grid_size: f32,
+    pub pixel_enabled: bool,
+    pub pixels_per_unit: f32,
+}
+
+/// Per-project editor settings persisted under `<root>/.infinity/settings.toml`
+/// (`project_settings_get` / `project_settings_set`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct ProjectSettingsDto {
+    /// Pixels-per-unit for 2D pixel snapping (default 100).
+    pub pixels_per_unit: f32,
+}
+
 // ── Tilemap painting (P8.2b) ─────────────────────────────────────────────
 //
 // The Tilemap panel reads the selected entity's tilemap via `tilemap_get` and

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use glam::{DVec3, Vec2, Vec3};
+use glam::{DQuat, DVec3, Vec2, Vec3};
 use inf_ecs::components::{
     Collider2D, ColliderShape2DKind, ComputedVisibility, GlobalTransform, Light, Light2D,
     LightKind as EcsLightKind, Material, MeshRef, NineSlice, Sprite, Text2D, TextAlign, Tilemap,
@@ -15,13 +15,13 @@ use inf_math::FloatingOrigin;
 use inf_render::{
     collider_outline_2d, expand_nine_slice, expand_text, gizmo, handle_from_guid,
     ColliderOutline2D, DebugDraw, EngineRenderer, GizmoDelta, GizmoDrag, GizmoMode, GpuContext,
-    HAlign, LightKind, MeshInstance, NineSliceParams, Picker, PrebatchedRun, RenderChunk,
-    RenderLight, RenderLight2D, RenderScene, RenderTilemap, RenderView, SpriteInstance,
-    SurfaceChain, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
+    HAlign, LightKind, MeshInstance, NineSliceParams, OrthoParams, Picker, PrebatchedRun,
+    RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderTilemap, RenderView,
+    SpriteInstance, SurfaceChain, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
 };
 use uuid::Uuid;
 
-use crate::camera::EditorCamera;
+use crate::camera::{Camera2D, EditorCamera, Snap2DSettings, ViewportMode, TWO_D_FAR, TWO_D_NEAR};
 use crate::SurfaceTarget;
 
 pub struct EngineHost {
@@ -51,6 +51,33 @@ pub struct EngineHost {
     selected_guids: Vec<Uuid>,
     /// Document version the current projection reflects (skip redundant rebuilds).
     synced_version: Option<u64>,
+    /// Active projection: perspective (3D) or orthographic (2D editor). Drives
+    /// the gizmo handle set and the grid plane; the camera itself lives in the
+    /// platform loop (which keeps a separate pose per mode). (P8.2c)
+    pub mode: ViewportMode,
+    /// 2D-mode snapping config pushed from the toolbar (P8.2c). Only the Windows
+    /// input layer reads it (via [`EngineHost::snap_2d_translate`]).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    snap_2d: Snap2DSettings,
+    /// Working transforms of selected **non-mesh** entities (sprites, text, …)
+    /// for the gizmo: captured from the document on each projection, mutated
+    /// during a drag, written back on release. Mesh entities use the render
+    /// instances instead (`scene.instances`). (P8.2c)
+    selected_2d: HashMap<Uuid, Sel2D>,
+}
+
+/// A selected 2D (non-mesh) entity's working transform for the gizmo. World
+/// space; mirrors what a mesh instance carries so the writeback path is uniform.
+/// Only `translation` is read off Windows (the selection center); the rest feed
+/// the gizmo writeback, which is Windows-input-only for now.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+struct Sel2D {
+    translation: DVec3,
+    rotation: DQuat,
+    scale: DVec3,
+    /// Half-size estimate (world units) for the focus radius.
+    extent: f64,
 }
 
 /// A selected entity's collider, resolved to world space for debug outlining.
@@ -87,6 +114,9 @@ impl EngineHost {
             collider_outlines: HashMap::new(),
             selected_guids: Vec::new(),
             synced_version: None,
+            mode: ViewportMode::Perspective,
+            snap_2d: Snap2DSettings::default(),
+            selected_2d: HashMap::new(),
         })
     }
 
@@ -109,8 +139,8 @@ impl EngineHost {
         self.chain.request_resize(width, height);
     }
 
-    /// The render view for `camera` at the current surface size.
-    fn view_for(&self, camera: &EditorCamera) -> RenderView {
+    /// The perspective render view for `camera` at the current surface size.
+    pub fn view_for(&self, camera: &EditorCamera) -> RenderView {
         let (width, height) = self.chain.requested_size();
         RenderView {
             origin: self.origin,
@@ -121,22 +151,71 @@ impl EngineHost {
             near: 0.05,
             width,
             height,
+            ortho: None,
         }
     }
 
-    /// World-space center of the current selection, if any.
-    fn selection_center(&self) -> Option<DVec3> {
-        let sel = &self.scene.selected;
-        if sel.is_empty() {
-            return None;
+    /// The orthographic render view for the 2D camera at the current surface
+    /// size: eye above the XY plane looking down -Z, up = +Y, reverse-Z ortho.
+    pub fn view_2d(&self, cam: &Camera2D) -> RenderView {
+        let (width, height) = self.chain.requested_size();
+        RenderView {
+            origin: self.origin,
+            eye_world: cam.eye(),
+            forward: Vec3::NEG_Z,
+            up: Vec3::Y,
+            fov_y: self.fov_y,
+            near: 0.05,
+            width,
+            height,
+            ortho: Some(OrthoParams {
+                half_height: cam.half_height as f32,
+                near: TWO_D_NEAR,
+                far: TWO_D_FAR,
+            }),
         }
+    }
+
+    /// Current surface size in physical pixels (for camera/gizmo math). Only the
+    /// Windows input layer drives the cameras today.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn surface_size(&self) -> (u32, u32) {
+        self.chain.requested_size()
+    }
+
+    /// Switch the active projection (perspective ↔ 2D ortho). The platform loop
+    /// keeps a separate camera pose per mode, so switching preserves both.
+    pub fn set_mode(&mut self, mode: ViewportMode) {
+        self.mode = mode;
+    }
+
+    /// Replace the 2D-mode snapping configuration (from the toolbar).
+    pub fn set_snap_2d(&mut self, snap: Snap2DSettings) {
+        self.snap_2d = snap;
+    }
+
+    /// Translate snap increment (world units) for 2D mode, `0.0` ⇒ none. Only
+    /// the Windows input layer applies it during a gizmo drag.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn snap_2d_translate(&self) -> f32 {
+        self.snap_2d.translate_snap()
+    }
+
+    /// World-space center of the current selection, if any. Reads LIVE working
+    /// positions (mesh render instances + selected 2D entities) so it tracks a
+    /// gizmo drag in progress.
+    fn selection_center(&self) -> Option<DVec3> {
         let mut sum = DVec3::ZERO;
         let mut n = 0.0;
-        for id in sel {
+        for id in &self.scene.selected {
             if let Some(inst) = self.scene.instances.iter().find(|i| i.id == *id) {
                 sum += inst.translation;
                 n += 1.0;
             }
+        }
+        for s in self.selected_2d.values() {
+            sum += s.translation;
+            n += 1.0;
         }
         (n > 0.0).then(|| sum / n)
     }
@@ -317,6 +396,38 @@ impl EngineHost {
             .collect();
         // Full selection (any entity) drives the collider debug outlines.
         self.selected_guids = doc.selection().to_vec();
+
+        // Capture working transforms for selected NON-mesh entities (sprites,
+        // text, tilemaps, …) so the gizmo can move them in 2D. Mesh entities are
+        // covered by their render instances instead.
+        self.selected_2d.clear();
+        for &guid in doc.selection() {
+            if self.guid_to_id.contains_key(&guid) {
+                continue;
+            }
+            let Some(entity) = world.entity_of(guid) else {
+                continue;
+            };
+            let affine = w
+                .get::<GlobalTransform>(entity)
+                .map(|g| g.0)
+                .unwrap_or(glam::DAffine3::IDENTITY);
+            let (scale, rotation, translation) = affine.to_scale_rotation_translation();
+            let extent = w
+                .get::<Sprite>(entity)
+                .map(|s| (s.size.x.max(s.size.y) * 0.5).max(0.25))
+                .unwrap_or(0.5);
+            self.selected_2d.insert(
+                guid,
+                Sel2D {
+                    translation,
+                    rotation,
+                    scale,
+                    extent,
+                },
+            );
+        }
+
         self.scene.hovered = None;
         self.scene.mark_dirty();
     }
@@ -561,21 +672,28 @@ fn project_text(text: &Text2D, translation: DVec3) -> Option<PrebatchedRun> {
 #[cfg_attr(not(windows), allow(dead_code))]
 impl EngineHost {
     /// Set the hovered instance (drives the weak outline). `None` clears it.
-    pub fn set_hover(&mut self, camera: &EditorCamera, px: u32, py: u32) {
+    pub fn set_hover(&mut self, view: &RenderView, px: u32, py: u32) {
         // Don't recompute hover mid-drag (keeps the outline stable).
         if self.gizmo_drag.is_some() {
             return;
         }
-        let view = self.view_for(camera);
-        self.scene.hovered = self.picker.pick(&self.gpu, &self.scene, &view, px, py);
+        self.scene.hovered = self.picker.pick(&self.gpu, &self.scene, view, px, py);
     }
 
     /// Pick the entity GUID under the cursor (`None` = empty space). Selection
     /// itself lives in the document — the caller applies the pick to it.
-    pub fn pick_guid(&mut self, camera: &EditorCamera, px: u32, py: u32) -> Option<Uuid> {
-        let view = self.view_for(camera);
-        let id = self.picker.pick(&self.gpu, &self.scene, &view, px, py)?;
+    pub fn pick_guid(&mut self, view: &RenderView, px: u32, py: u32) -> Option<Uuid> {
+        let id = self.picker.pick(&self.gpu, &self.scene, view, px, py)?;
         self.id_to_guid.get(&id).copied()
+    }
+
+    /// Screen-constant gizmo world size for the current view (perspective uses
+    /// distance × fov; ortho uses the zoom half-height).
+    fn gizmo_size(&self, view: &RenderView, origin_local: Vec3) -> f32 {
+        match view.ortho {
+            Some(o) => gizmo::gizmo_world_size_ortho(o.half_height),
+            None => gizmo::gizmo_world_size(origin_local, view.eye_local(), self.fov_y),
+        }
     }
 
     /// World-space transforms of the current selection after a gizmo drag, keyed
@@ -583,7 +701,8 @@ impl EngineHost {
     /// (Local == world for the roots/identity-parent objects the gizmo edits;
     /// full parent-relative solve lands with nested transforms.)
     pub fn selected_world_transforms(&self) -> Vec<(Uuid, EcsTransform)> {
-        self.scene
+        let mut out: Vec<(Uuid, EcsTransform)> = self
+            .scene
             .selected
             .iter()
             .filter_map(|id| {
@@ -594,7 +713,15 @@ impl EngineHost {
                 t.scale = Vec3d::from_dvec3(inst.scale.as_dvec3());
                 Some((*guid, t))
             })
-            .collect()
+            .collect();
+        // Selected 2D (non-mesh) entities the gizmo moved (P8.2c).
+        for (guid, s) in &self.selected_2d {
+            let mut t = EcsTransform::from_translation(s.translation);
+            t.set_quat(s.rotation);
+            t.scale = Vec3d::from_dvec3(s.scale);
+            out.push((*guid, t));
+        }
+        out
     }
 
     pub fn set_gizmo_mode(&mut self, mode: GizmoMode) {
@@ -612,17 +739,21 @@ impl EngineHost {
                 radius = radius.max((inst.translation - center).length() + extent);
             }
         }
+        for s in self.selected_2d.values() {
+            radius = radius.max((s.translation - center).length() + s.extent);
+        }
         Some((center, radius))
     }
 
-    /// If the cursor is over a gizmo handle, begin a drag and return true.
-    pub fn try_begin_gizmo(&mut self, camera: &EditorCamera, px: u32, py: u32) -> bool {
+    /// If the cursor is over a gizmo handle, begin a drag and return true. The
+    /// handle set is constrained to the sprite plane in 2D (ortho `view`).
+    pub fn try_begin_gizmo(&mut self, view: &RenderView, px: u32, py: u32) -> bool {
         let Some(center) = self.selection_center() else {
             return false;
         };
-        let view = self.view_for(camera);
         let origin_local = self.origin.to_render(center);
-        let size = gizmo::gizmo_world_size(origin_local, view.eye_local(), self.fov_y);
+        let size = self.gizmo_size(view, origin_local);
+        let two_d = view.ortho.is_some();
         let cursor = Vec2::new(px as f32, py as f32);
         let Some(axis) = gizmo::pick_axis(
             self.gizmo_mode,
@@ -632,6 +763,7 @@ impl EngineHost {
             cursor,
             view.width as f32,
             view.height as f32,
+            two_d,
         ) else {
             return false;
         };
@@ -651,11 +783,10 @@ impl EngineHost {
     }
 
     /// Apply a gizmo drag update from the cursor. `snap` > 0 quantizes.
-    pub fn update_gizmo(&mut self, camera: &EditorCamera, px: u32, py: u32, snap: f32) {
+    pub fn update_gizmo(&mut self, view: &RenderView, px: u32, py: u32, snap: f32) {
         let Some(drag) = self.gizmo_drag else {
             return;
         };
-        let view = self.view_for(camera);
         let (ro, rd) = view.pixel_ray(px as f32, py as f32);
         let delta = drag.update(ro, rd, snap);
         self.apply_delta(delta, drag.origin);
@@ -683,6 +814,19 @@ impl EngineHost {
                 }
             }
         }
+        // Selected 2D (non-mesh) entities move the same way, in f64 (P8.2c).
+        for s in self.selected_2d.values_mut() {
+            match delta {
+                GizmoDelta::Translate(t) => s.translation += t,
+                GizmoDelta::Rotate { axis, radians } => {
+                    let q = DQuat::from_axis_angle(axis.as_dvec3(), radians as f64);
+                    s.rotation = q * s.rotation;
+                    let rel = s.translation - pivot;
+                    s.translation = pivot + q * rel;
+                }
+                GizmoDelta::Scale(sc) => s.scale *= sc.as_dvec3(),
+            }
+        }
         self.scene.mark_dirty();
     }
 
@@ -692,10 +836,11 @@ impl EngineHost {
 }
 
 impl EngineHost {
-    /// Render one frame from `camera`'s point of view. Handles floating-origin
-    /// rebases and crash-safe device-lost recovery internally; only errors
+    /// Render one frame for the resolved [`RenderView`] (the platform loop
+    /// builds it from whichever camera is active and rebases the floating origin
+    /// first). Handles crash-safe device-lost recovery internally; only errors
     /// that survive a full stack rebuild are returned.
-    pub fn render_frame(&mut self, camera: &EditorCamera) -> Result<(), String> {
+    pub fn render_frame(&mut self, view: &RenderView) -> Result<(), String> {
         if self.gpu.is_lost() {
             tracing::warn!("inf-viewport: device lost — rebuilding GPU stack");
             let (w, h) = self.chain.requested_size();
@@ -705,19 +850,16 @@ impl EngineHost {
             self.renderer = renderer;
         }
 
-        self.origin.maybe_rebase(camera.pos);
-
-        let view = self.view_for(camera);
-
         // Per-frame debug primitives: world-origin axes tripod, plus the
-        // transform gizmo at the selection center (screen-constant size).
+        // transform gizmo at the selection center (screen-constant size). In 2D
+        // the gizmo shows only the sprite-plane handles (X/Y, Z ring).
         self.scene.debug.clear();
         self.scene
             .debug
             .axes(self.origin.to_render(glam::DVec3::ZERO), 1.0);
         if let Some(center) = self.selection_center() {
             let origin_local = self.origin.to_render(center);
-            let size = gizmo::gizmo_world_size(origin_local, view.eye_local(), self.fov_y);
+            let size = self.gizmo_size(view, origin_local);
             let active = self.gizmo_drag.map(|d| d.axis);
             gizmo::build_geometry(
                 &mut self.scene.debug,
@@ -725,6 +867,7 @@ impl EngineHost {
                 origin_local,
                 size,
                 active,
+                view.ortho.is_some(),
             );
         }
         // 2D collider outlines for the current selection (P8.3b).
@@ -741,7 +884,7 @@ impl EngineHost {
         self.renderer.render(
             &self.gpu,
             &self.scene,
-            &view,
+            view,
             &out_view,
             self.chain.configured_size(),
         );

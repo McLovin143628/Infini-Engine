@@ -10,10 +10,11 @@ use std::path::Path;
 use inf_editor_core::ipc::{
     AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot, ComponentDto, DataAssetDto,
     DataFieldDto, DeleteResult, DetailsDto, FileEntryDto, GitFileDto, GitStatusDto, ImportEventDto,
-    LayoutSummary, LogLine, ProjectInfoDto, ProjectTemplateDto, PropFieldDto, PropValueDto,
-    RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot, SearchHitDto, SearchOptsDto,
-    SortingLayerDto, SpawnKind, SpriteGridDto, SpriteRectDto, SpriteSheetDto, TilemapCellDto,
-    TilemapDto, ViewportDrop, ViewportKey, ViewportRect,
+    LayoutSummary, LogLine, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto, PropFieldDto,
+    PropValueDto, RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot, SearchHitDto,
+    SearchOptsDto, Snap2DDto, SortingLayerDto, SpawnKind, SpriteGridDto, SpriteRectDto,
+    SpriteSheetDto, TilemapCellDto, TilemapDto, ViewportDrop, ViewportKey, ViewportModeDto,
+    ViewportRect,
 };
 use ts_rs::{Config, TS};
 
@@ -57,6 +58,9 @@ fn export_bindings() {
     SpriteRectDto::export_all(&cfg).expect("export SpriteRectDto");
     SpriteSheetDto::export_all(&cfg).expect("export SpriteSheetDto");
     SortingLayerDto::export_all(&cfg).expect("export SortingLayerDto");
+    ViewportModeDto::export_all(&cfg).expect("export ViewportModeDto");
+    Snap2DDto::export_all(&cfg).expect("export Snap2DDto");
+    ProjectSettingsDto::export_all(&cfg).expect("export ProjectSettingsDto");
     TilemapCellDto::export_all(&cfg).expect("export TilemapCellDto");
     TilemapDto::export_all(&cfg).expect("export TilemapDto");
 }

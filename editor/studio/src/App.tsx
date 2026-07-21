@@ -26,6 +26,7 @@ import { startLogListener } from "./stores/logStore";
 import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
 import { initAssetSync, registerAssetCommands } from "./stores/assetStore";
 import { initProjectSync, registerProjectCommands } from "./stores/projectStore";
+import { initViewportSync, registerViewportCommands } from "./stores/viewportStore";
 import { initEditorSync } from "./stores/editorStore";
 import { initLsp } from "./lib/editor/lspBridge";
 import { scene as sceneIpc } from "./lib/ipc";
@@ -35,6 +36,7 @@ registerDefaultKeybindings();
 registerSceneCommands();
 registerAssetCommands();
 registerProjectCommands();
+registerViewportCommands();
 
 export default function App() {
   useEffect(() => {
@@ -87,6 +89,10 @@ export default function App() {
       dispose?.();
     };
   }, []);
+
+  // Load per-project pixels-per-unit + apply 2D snap settings; reload on
+  // project change (P8.2c). StrictMode-safe.
+  useEffect(() => initViewportSync(), []);
 
   // Subscribe to infinity:open-file so the Code Editor opens tabs (P5.1).
   useEffect(() => initEditorSync(), []);

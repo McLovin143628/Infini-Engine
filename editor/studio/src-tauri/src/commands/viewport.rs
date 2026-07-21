@@ -8,8 +8,8 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use inf_editor_core::ipc::{ViewportDrop, ViewportKey, ViewportRect};
-use inf_viewport::ViewportEvent;
+use inf_editor_core::ipc::{Snap2DDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect};
+use inf_viewport::{Snap2DSettings, ViewportEvent, ViewportMode};
 use tauri::{Emitter, Manager};
 
 use super::scene::{emit_world_delta, SceneState};
@@ -137,6 +137,42 @@ pub async fn viewport_set_visible(
     let guard = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(handle) = guard.as_ref() {
         handle.set_visible(visible);
+    }
+    Ok(())
+}
+
+/// Switch the active viewport projection (Perspective ↔ 2D ortho) from the
+/// viewport toolbar (P8.2c).
+#[tauri::command]
+pub async fn viewport_set_mode(
+    mode: ViewportModeDto,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        handle.set_mode(match mode {
+            ViewportModeDto::Perspective => ViewportMode::Perspective,
+            ViewportModeDto::TwoD => ViewportMode::TwoD,
+        });
+    }
+    Ok(())
+}
+
+/// Push the 2D-mode snapping configuration (grid + pixel snap) to the viewport
+/// (P8.2c). The frontend folds the per-project pixels-per-unit into this.
+#[tauri::command]
+pub async fn viewport_set_snap2d(
+    snap: Snap2DDto,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        handle.set_snap_2d(Snap2DSettings {
+            grid_enabled: snap.grid_enabled,
+            grid_size: snap.grid_size,
+            pixel_enabled: snap.pixel_enabled,
+            pixels_per_unit: snap.pixels_per_unit,
+        });
     }
     Ok(())
 }

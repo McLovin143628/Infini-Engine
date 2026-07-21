@@ -13,6 +13,8 @@
 
 pub mod camera;
 
+pub use camera::{Camera2D, EditorCamera, Snap2DSettings, ViewportMode};
+
 use std::sync::{Arc, Mutex};
 
 use inf_editor_core::scene::SceneDoc;
@@ -145,5 +147,7 @@ impl ViewportHandle {
     pub fn set_rect(&self, _rect: ViewportRect) {}
     pub fn set_visible(&self, _visible: bool) {}
     pub fn drop_payload(&self, _x: f32, _y: f32, _payload: &str) {}
+    pub fn set_mode(&self, _mode: camera::ViewportMode) {}
+    pub fn set_snap_2d(&self, _snap: camera::Snap2DSettings) {}
     pub fn destroy(&self) {}
 }

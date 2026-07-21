@@ -23,7 +23,9 @@ pub mod renderer;
 pub mod scene;
 pub mod surface;
 
-pub use camera::{RenderView, DEPTH_CLEAR, DEPTH_COMPARE, DEPTH_FORMAT};
+pub use camera::{
+    ortho_reverse_z, OrthoParams, RenderView, DEPTH_CLEAR, DEPTH_COMPARE, DEPTH_FORMAT,
+};
 pub use debug_draw::{collider_outline_2d, ColliderOutline2D, DebugDraw, DebugVertex};
 pub use gizmo::{GizmoAxis, GizmoDelta, GizmoDrag, GizmoMode};
 pub use gpu::{create_instance, GpuContext};

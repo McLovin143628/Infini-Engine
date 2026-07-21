@@ -11,7 +11,7 @@
 //! The camera is a yaw/pitch/eye triple; orbit/focus derive a pivot on demand
 //! rather than storing one, so switching between fly and orbit is seamless.
 
-use glam::{DVec3, Vec3};
+use glam::{DVec2, DVec3, Vec3};
 
 /// Radians per raw mouse count.
 const LOOK_SENSITIVITY: f32 = 0.0032;
@@ -286,6 +286,153 @@ impl Bookmarks {
     }
 }
 
+/// Which projection the viewport is driving (P8.2c). Each mode keeps its own
+/// camera state so switching back and forth restores the exact pose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewportMode {
+    #[default]
+    Perspective,
+    /// Orthographic top-down 2D editing over the XY plane.
+    TwoD,
+}
+
+/// Eye height above the XY plane in 2D mode (world units). Large enough that the
+/// ortho near/far bracket typical sprite Z, small enough to keep f32 precision.
+pub const TWO_D_EYE_HEIGHT: f64 = 100.0;
+/// Ortho view-space near/far (see `inf_render::OrthoParams`): the world XY plane
+/// sits at distance `TWO_D_EYE_HEIGHT`, comfortably inside `[near, far]`.
+pub const TWO_D_NEAR: f32 = 1.0;
+pub const TWO_D_FAR: f32 = 200.0;
+/// Zoom (half-height) clamps in world units.
+pub const TWO_D_HALF_HEIGHT_MIN: f64 = 0.05;
+pub const TWO_D_HALF_HEIGHT_MAX: f64 = 5000.0;
+/// Exponential zoom factor per wheel detent.
+const TWO_D_ZOOM_STEP: f64 = 1.2;
+
+/// Orthographic 2D editor camera: looks straight down -Z onto the world XY
+/// plane, up = +Y, roll locked. Pan moves `center`; the wheel scales
+/// `half_height` about the cursor. World coordinates are f64 (architecture
+/// rule 3); the eye still rebases through the floating origin in the host.
+#[derive(Debug, Clone, Copy)]
+pub struct Camera2D {
+    /// World-space XY point the viewport is centered on.
+    pub center: DVec2,
+    /// Half the visible world-space height (zoom); smaller = more zoomed in.
+    pub half_height: f64,
+}
+
+impl Default for Camera2D {
+    fn default() -> Self {
+        Self {
+            center: DVec2::ZERO,
+            half_height: 8.0,
+        }
+    }
+}
+
+impl Camera2D {
+    /// World-space eye position: fixed height above the plane over `center`.
+    pub fn eye(&self) -> DVec3 {
+        DVec3::new(self.center.x, self.center.y, TWO_D_EYE_HEIGHT)
+    }
+
+    fn half_width(&self, aspect: f64) -> f64 {
+        self.half_height * aspect
+    }
+
+    /// World XY point under a viewport pixel (origin top-left).
+    pub fn world_at_pixel(&self, px: f64, py: f64, width: f64, height: f64) -> DVec2 {
+        let (w, h) = (width.max(1.0), height.max(1.0));
+        let aspect = w / h;
+        let nx = px / w * 2.0 - 1.0;
+        let ny = 1.0 - py / h * 2.0;
+        DVec2::new(
+            self.center.x + nx * self.half_width(aspect),
+            self.center.y + ny * self.half_height,
+        )
+    }
+
+    /// Zoom about the cursor: scale `half_height` exponentially by the wheel
+    /// steps (scroll up = zoom in) and shift `center` so the world point under
+    /// the cursor stays fixed — the zoom-to-cursor invariant.
+    pub fn zoom_at(&mut self, wheel_steps: i32, px: f64, py: f64, width: f64, height: f64) {
+        if wheel_steps == 0 {
+            return;
+        }
+        let (w, h) = (width.max(1.0), height.max(1.0));
+        let aspect = w / h;
+        let nx = px / w * 2.0 - 1.0;
+        let ny = 1.0 - py / h * 2.0;
+        let hh_old = self.half_height;
+        let hh_new = (hh_old * TWO_D_ZOOM_STEP.powi(-wheel_steps))
+            .clamp(TWO_D_HALF_HEIGHT_MIN, TWO_D_HALF_HEIGHT_MAX);
+        let delta = hh_old - hh_new;
+        self.center.x += nx * aspect * delta;
+        self.center.y += ny * delta;
+        self.half_height = hh_new;
+    }
+
+    /// Pan by a pixel drag (MMB/RMB): move `center` opposite the drag so the
+    /// grabbed point tracks the cursor.
+    pub fn pan(&mut self, dx: f64, dy: f64, width: f64, height: f64) {
+        let (w, h) = (width.max(1.0), height.max(1.0));
+        let aspect = w / h;
+        let wx_per_px = 2.0 * self.half_width(aspect) / w;
+        let wy_per_px = 2.0 * self.half_height / h;
+        self.center.x -= dx * wx_per_px;
+        self.center.y += dy * wy_per_px;
+    }
+
+    /// Frame an XY region (F): center on `center` and zoom so a
+    /// `half_extent` (world half-size in XY) box fits with padding. `aspect` =
+    /// width / height.
+    pub fn frame(&mut self, center: DVec2, half_extent: DVec2, aspect: f64) {
+        self.center = center;
+        let pad = 1.3;
+        let need_h = half_extent.y.max(half_extent.x / aspect.max(1e-3)).max(0.5) * pad;
+        self.half_height = need_h.clamp(TWO_D_HALF_HEIGHT_MIN, TWO_D_HALF_HEIGHT_MAX);
+    }
+}
+
+/// 2D-mode snapping configuration, pushed from the viewport toolbar (P8.2c).
+/// Grid snap quantizes a translate to `grid_size` world units; **pixel snap**
+/// (finer) quantizes to `1/pixels_per_unit` world units. Pixel snap takes
+/// precedence when both are on. Rotate/scale keep their Shift-drag defaults.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Snap2DSettings {
+    pub grid_enabled: bool,
+    pub grid_size: f32,
+    pub pixel_enabled: bool,
+    /// Per-project pixels-per-unit (default 100); a translate snaps to
+    /// multiples of `1/ppu` world units when pixel snap is on.
+    pub pixels_per_unit: f32,
+}
+
+impl Default for Snap2DSettings {
+    fn default() -> Self {
+        Self {
+            grid_enabled: false,
+            grid_size: 1.0,
+            pixel_enabled: false,
+            pixels_per_unit: 100.0,
+        }
+    }
+}
+
+impl Snap2DSettings {
+    /// Translate snap increment in world units (`0.0` ⇒ no snap). Pixel snap
+    /// wins over grid snap when both are enabled.
+    pub fn translate_snap(&self) -> f32 {
+        if self.pixel_enabled && self.pixels_per_unit > 0.0 {
+            1.0 / self.pixels_per_unit
+        } else if self.grid_enabled && self.grid_size > 0.0 {
+            self.grid_size
+        } else {
+            0.0
+        }
+    }
+}
+
 /// Shortest-path angular lerp (handles the ±π wrap).
 fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
     let mut d = (b - a) % std::f32::consts::TAU;
@@ -515,6 +662,127 @@ mod tests {
         bm.store(99, cam.pose());
         assert!(bm.recall(0).is_none());
         assert!(bm.recall(99).is_none());
+    }
+
+    #[test]
+    fn two_d_zoom_keeps_world_point_under_cursor() {
+        // The world point beneath the cursor must not move as we zoom in/out.
+        let (w, h) = (1600.0, 900.0);
+        let (px, py) = (1180.0, 300.0); // an off-center cursor
+        let mut cam = Camera2D {
+            center: DVec2::new(3.0, -2.0),
+            half_height: 8.0,
+        };
+        let before = cam.world_at_pixel(px, py, w, h);
+        cam.zoom_at(3, px, py, w, h); // zoom in three detents
+        let after = cam.world_at_pixel(px, py, w, h);
+        assert!(
+            (before - after).length() < 1e-9,
+            "zoom-to-cursor drifted: {before:?} -> {after:?}"
+        );
+        assert!(cam.half_height < 8.0, "scroll up should zoom in");
+        // And out again returns the invariant too.
+        cam.zoom_at(-5, px, py, w, h);
+        let out = cam.world_at_pixel(px, py, w, h);
+        assert!((before - out).length() < 1e-9, "zoom-out drifted");
+    }
+
+    #[test]
+    fn two_d_zoom_clamps_half_height() {
+        let (w, h) = (800.0, 600.0);
+        let mut cam = Camera2D::default();
+        cam.zoom_at(1000, 400.0, 300.0, w, h);
+        assert!(cam.half_height >= TWO_D_HALF_HEIGHT_MIN - 1e-9);
+        cam.zoom_at(-1000, 400.0, 300.0, w, h);
+        assert!(cam.half_height <= TWO_D_HALF_HEIGHT_MAX + 1e-9);
+    }
+
+    #[test]
+    fn two_d_pan_tracks_the_grabbed_point() {
+        // Panning by a pixel delta shifts the world under the cursor by exactly
+        // that many world units (so the grabbed point stays put visually).
+        let (w, h) = (1000.0, 500.0);
+        let mut cam = Camera2D {
+            center: DVec2::ZERO,
+            half_height: 5.0,
+        };
+        let p0 = cam.world_at_pixel(500.0, 250.0, w, h);
+        cam.pan(40.0, -20.0, w, h);
+        // The grabbed world point tracks the cursor: after panning by (dx, dy)
+        // it sits under the pixel that moved by (dx, dy).
+        let p1 = cam.world_at_pixel(500.0 + 40.0, 250.0 - 20.0, w, h);
+        assert!((p0 - p1).length() < 1e-9, "pan didn't track: {p0:?} {p1:?}");
+    }
+
+    #[test]
+    fn mode_switch_preserves_each_camera_pose() {
+        // The platform loop keeps a perspective `EditorCamera` and a `Camera2D`
+        // side by side and drives only the active one, so switching modes
+        // restores the exact pose. Model that independence directly.
+        let mut cam = EditorCamera::default();
+        let persp_pose = cam.pose();
+        let mut cam2d = Camera2D::default();
+
+        // "2D mode": pan + zoom the 2D camera — the flycam pose is untouched.
+        cam2d.pan(30.0, 10.0, 1600.0, 900.0);
+        cam2d.zoom_at(2, 800.0, 450.0, 1600.0, 900.0);
+        assert_eq!(cam.pose(), persp_pose, "flycam drifted during 2D nav");
+        let two_d_state = (cam2d.center, cam2d.half_height);
+
+        // "Perspective mode": fly the flycam — the 2D camera keeps its exact
+        // panned/zoomed state, so returning to 2D restores it.
+        cam.apply_fly(
+            &FlyInput {
+                forward: true,
+                ..Default::default()
+            },
+            0.2,
+        );
+        assert_ne!(cam.pose(), persp_pose, "flycam should have moved");
+        assert_eq!(
+            (cam2d.center, cam2d.half_height),
+            two_d_state,
+            "2D camera drifted during perspective nav"
+        );
+    }
+
+    #[test]
+    fn snap_2d_pixel_precedence_and_increments() {
+        // Default: no snap.
+        assert_eq!(Snap2DSettings::default().translate_snap(), 0.0);
+        // Grid only: snap to grid_size.
+        let grid = Snap2DSettings {
+            grid_enabled: true,
+            grid_size: 0.25,
+            ..Default::default()
+        };
+        assert_eq!(grid.translate_snap(), 0.25);
+        // Pixel snap: 1/ppu, and it wins over grid.
+        let pix = Snap2DSettings {
+            grid_enabled: true,
+            grid_size: 0.25,
+            pixel_enabled: true,
+            pixels_per_unit: 100.0,
+        };
+        assert!((pix.translate_snap() - 0.01).abs() < 1e-9);
+        // Zero/negative ppu degrades to no pixel snap (falls back to grid).
+        let bad = Snap2DSettings {
+            grid_enabled: true,
+            grid_size: 0.5,
+            pixel_enabled: true,
+            pixels_per_unit: 0.0,
+        };
+        assert_eq!(bad.translate_snap(), 0.5);
+    }
+
+    #[test]
+    fn two_d_frame_centers_and_fits() {
+        let mut cam = Camera2D::default();
+        cam.frame(DVec2::new(10.0, 5.0), DVec2::new(3.0, 2.0), 16.0 / 9.0);
+        assert_eq!(cam.center, DVec2::new(10.0, 5.0));
+        // Half-height must cover the taller of (y extent, x extent / aspect).
+        assert!(cam.half_height >= 2.0);
+        assert!(cam.half_height * (16.0 / 9.0) >= 3.0);
     }
 
     #[test]

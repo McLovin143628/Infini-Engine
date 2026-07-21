@@ -27,8 +27,63 @@ struct FsOut {
     @builtin(frag_depth) depth: f32,
 };
 
+// Orthographic 2D grid: lines/axes on the world XY plane (z = 0). Kept in a
+// separate branch so the perspective path below stays byte-identical.
+fn grid_xy(in: VsOut) -> FsOut {
+    var out: FsOut;
+    out.color = vec4<f32>(0.0);
+    out.depth = 0.0;
+
+    // Parallel rays: origin varies per pixel (near plane), direction is forward.
+    let ro = unproject(in.ndc, 1.0);
+    let rd = view_ray(in.ndc);
+    if (rd.z == 0.0) {
+        return out;
+    }
+    let t = -ro.z / rd.z;
+    let wp = ro + rd * t;
+
+    // Real depth of the plane point → correct occlusion against meshes/sprites.
+    let clip = view.view_proj * vec4<f32>(wp, 1.0);
+    out.depth = clip.z / clip.w;
+
+    // Anti-aliased 1 m / 10 m line mask in the XY plane. fwidth is constant
+    // across the screen in ortho, giving uniform line width at any zoom.
+    let coord = wp.xy;
+    let d = max(fwidth(coord), vec2<f32>(1e-6));
+    let g1 = abs(fract(coord - 0.5) - 0.5) / d;
+    let l1 = 1.0 - min(min(g1.x, g1.y), 1.0);
+    let g10 = abs(fract(coord / 10.0 - 0.5) - 0.5) / (d / 10.0);
+    let l10 = 1.0 - min(min(g10.x, g10.y), 1.0);
+
+    var col = vec3<f32>(0.30, 0.33, 0.38);
+    var a = max(l1 * 0.30, l10 * 0.75);
+
+    // World axes in the XY plane: the horizontal X axis (world y = 0) in red,
+    // the vertical Y axis (world x = 0) in green. Render-local positions come
+    // from the floating origin (x = -origin.x, y = -origin.y).
+    let ax = view.grid_axis_viewport.x; // render-local world x = 0
+    let ay = view.mode_axis.y;          // render-local world y = 0
+    if (abs(wp.y - ay) < d.y * 1.5) {
+        col = vec3<f32>(0.95, 0.28, 0.30);
+        a = max(a, 0.85);
+    }
+    if (abs(wp.x - ax) < d.x * 1.5) {
+        col = vec3<f32>(0.45, 0.85, 0.30);
+        a = max(a, 0.85);
+    }
+
+    out.color = vec4<f32>(col * a, a);
+    return out;
+}
+
 @fragment
 fn fs(in: VsOut) -> FsOut {
+    // 2D editor mode: grid on the XY plane (parallel to the sprite plane).
+    if (view.mode_axis.x > 0.5) {
+        return grid_xy(in);
+    }
+
     var out: FsOut;
     out.color = vec4<f32>(0.0);
     out.depth = 0.0; // infinity under reverse-Z

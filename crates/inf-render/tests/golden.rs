@@ -20,9 +20,11 @@ use inf_math::FloatingOrigin;
 use inf_render::gizmo::{self, GizmoAxis, GizmoMode};
 use inf_render::golden::{image_diff, within_tolerance};
 use inf_render::{
-    Ambient2D, EngineRenderer, GpuContext, HeadlessTarget, LightKind, MeshInstance, RenderChunk,
-    RenderLight, RenderLight2D, RenderScene, RenderTilemap, RenderView, SpriteInstance,
-    SpriteTextureUpload, TilemapParams, HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    expand_text, Ambient2D, EngineRenderer, GpuContext, HAlign, HeadlessTarget, LightKind,
+    MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D, RenderScene,
+    RenderTilemap, RenderView, SpriteInstance, SpriteTextureUpload, TextParams, TilemapParams,
+    BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE,
+    HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -56,6 +58,7 @@ fn overlook_view() -> RenderView {
         near: 0.05,
         width: W,
         height: H,
+        ortho: None,
     }
 }
 
@@ -200,6 +203,7 @@ fn golden_selection_gizmo() {
         origin_local,
         size,
         Some(GizmoAxis::X),
+        false,
     );
 
     let img = check_golden(&gpu, "selection_gizmo", &scene, &view);
@@ -287,6 +291,27 @@ fn front_view() -> RenderView {
         near: 0.05,
         width: W,
         height: H,
+        ortho: None,
+    }
+}
+
+/// A top-down orthographic view over the world XY plane (2D editor mode): eye at
+/// +Z looking down -Z, up = +Y. Half-height 4 world units frames a small patch.
+fn ortho_view() -> RenderView {
+    RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: DVec3::new(0.0, 0.0, 100.0),
+        forward: Vec3::NEG_Z,
+        up: Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 1.0,
+        width: W,
+        height: H,
+        ortho: Some(inf_render::OrthoParams {
+            half_height: 4.0,
+            near: 1.0,
+            far: 200.0,
+        }),
     }
 }
 
@@ -573,4 +598,113 @@ fn golden_2d_lit() {
     assert!(red, "expected the red 2D light glow");
     assert!(blue, "expected the blue 2D light glow");
     assert!(dark, "expected a dark region outside the light radii");
+}
+
+/// Orthographic 2D-editor golden (P8.2c): the ortho camera over a tile patch, a
+/// loose sprite, and a built-in-font text run, with the XY grid enabled. Proves
+/// the ortho projection + XY-grid shader path + the 2D content passes render
+/// coherently under a parallel projection (determinism gate via `check_golden`;
+/// strict pixel diff opt-in, blessed on a GPU host).
+#[test]
+fn golden_ortho_2d() {
+    let Some(gpu) = gpu_or_skip() else { return };
+
+    const ATLAS: u64 = 0x51;
+    // 1→red(TL), 2→green(TR), 3→blue(BL), 4→yellow(BR).
+    let atlas = quad_atlas(
+        64,
+        [[220, 40, 40], [40, 200, 60], [60, 90, 220], [230, 210, 40]],
+    );
+    let tile = 0.5_f64;
+    let params = TilemapParams {
+        origin: DVec3::new(-1.5, -1.5, 0.0),
+        tile_size: Vec2::new(tile as f32, tile as f32),
+        atlas_cols: 2,
+        atlas_rows: 2,
+        texture: ATLAS,
+        color: [1.0, 1.0, 1.0, 1.0],
+        sorting_layer: 0,
+        order: 0,
+    };
+    // A 6×6 patch of tiles in chunk (0,0), index cycling 1..=4.
+    let n = (TILE_CHUNK_DIM * TILE_CHUNK_DIM) as usize;
+    let mut chunk = vec![0u32; n];
+    for gy in 0..6i32 {
+        for gx in 0..6i32 {
+            let idx = (((gx + gy).rem_euclid(4)) + 1) as u32;
+            chunk[(gy * TILE_CHUNK_DIM + gx) as usize] = idx;
+        }
+    }
+
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        pending_texture_uploads: vec![SpriteTextureUpload {
+            handle: ATLAS,
+            width: 64,
+            height: 64,
+            rgba8: atlas,
+        }],
+        tilemaps: vec![RenderTilemap {
+            params,
+            chunks: vec![RenderChunk {
+                coord: (0, 0),
+                tiles: chunk,
+            }],
+        }],
+        ..Default::default()
+    };
+
+    // A loose magenta sprite over the tiles (higher sorting layer).
+    scene.sprites.push(SpriteInstance {
+        position: DVec3::new(0.4, 0.4, 0.0),
+        size: Vec2::new(1.0, 1.0),
+        color: [0.95, 0.15, 0.95, 1.0],
+        sorting_layer: 2,
+        ..Default::default()
+    });
+
+    // A short text run in the built-in 8×8 bitmap font (exercises the text path
+    // under ortho).
+    let text_params = TextParams {
+        position: DVec3::new(-2.4, 1.8, 0.0),
+        text: "2D",
+        glyph_cols: BUILTIN_FONT_COLS,
+        glyph_rows: BUILTIN_FONT_ROWS,
+        first_codepoint: BUILTIN_FONT_FIRST_CP,
+        glyph_size: Vec2::new(0.6, 0.6),
+        tracking: 0.1,
+        color: [1.0, 1.0, 1.0, 1.0],
+        texture: BUILTIN_FONT_TEXTURE,
+        sorting_layer: 1,
+        order: 0,
+        halign: HAlign::Left,
+    };
+    let glyphs = expand_text(&text_params);
+    if !glyphs.is_empty() {
+        scene.prebatched.push(PrebatchedRun {
+            texture: BUILTIN_FONT_TEXTURE,
+            sorting_layer: 1,
+            order: 0,
+            instances: glyphs,
+        });
+    }
+    scene.mark_dirty();
+
+    let img = check_golden(&gpu, "ortho_2d", &scene, &ortho_view());
+
+    // Under the ortho camera: a red tile cell and the magenta sprite are both
+    // visible (proving the parallel projection places 2D content correctly).
+    let mut red = false;
+    let mut magenta = false;
+    for chunk in img.chunks(4) {
+        let (r, g, b) = (chunk[0] as i32, chunk[1] as i32, chunk[2] as i32);
+        if r > 140 && r - g > 80 && r - b > 80 {
+            red = true;
+        }
+        if r > 150 && b > 150 && r - g > 60 && b - g > 60 {
+            magenta = true;
+        }
+    }
+    assert!(red, "expected a red tile under the ortho camera");
+    assert!(magenta, "expected the magenta sprite over the tiles");
 }

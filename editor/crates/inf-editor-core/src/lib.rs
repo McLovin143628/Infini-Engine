@@ -6,6 +6,7 @@ pub mod assets;
 pub mod ipc;
 pub mod layouts;
 pub mod pie;
+pub mod project_settings;
 pub mod scene;
 pub mod sorting;
 pub mod thumbnail;

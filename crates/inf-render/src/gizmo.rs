@@ -68,6 +68,14 @@ pub fn gizmo_world_size(pivot: Vec3, eye: Vec3, fov_y: f32) -> f32 {
     dist * (fov_y * 0.5).tan() * 2.0 * GIZMO_SCREEN_FRAC
 }
 
+/// Screen-constant gizmo size for the orthographic (2D) camera: the world size
+/// that fills `GIZMO_SCREEN_FRAC` of the viewport height. In ortho the on-screen
+/// size is independent of distance, so it depends only on the view half-height
+/// (the zoom).
+pub fn gizmo_world_size_ortho(half_height: f32) -> f32 {
+    half_height * 2.0 * GIZMO_SCREEN_FRAC
+}
+
 /// A drag in progress: the handle and the world-space anchor where it started.
 #[derive(Debug, Clone, Copy)]
 pub struct GizmoDrag {
@@ -212,6 +220,11 @@ fn project(p: Vec3, view_proj: Mat4, width: f32, height: f32) -> Option<Vec2> {
 /// Analytic hit-test: the handle whose screen projection is closest to the
 /// cursor within `PICK_PIXELS`, or `None`. `axes` are the handles to test in
 /// priority order (planes first — they sit near the center).
+///
+/// `two_d` restricts the handle set to the 2D editor gizmo: translate/scale
+/// expose X, Y and the screen-facing XY plane handle (`PlaneZ`); rotate exposes
+/// only the Z ring — matching [`build_geometry`].
+#[allow(clippy::too_many_arguments)]
 pub fn pick_axis(
     mode: GizmoMode,
     origin: Vec3,
@@ -220,6 +233,7 @@ pub fn pick_axis(
     cursor: Vec2,
     width: f32,
     height: f32,
+    two_d: bool,
 ) -> Option<GizmoAxis> {
     const PICK_PIXELS: f32 = 11.0;
     let o = project(origin, view_proj, width, height)?;
@@ -231,11 +245,21 @@ pub fn pick_axis(
         }
     };
 
-    let axes = [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z];
+    let axes: &[GizmoAxis] = if two_d {
+        &[GizmoAxis::X, GizmoAxis::Y]
+    } else {
+        &[GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z]
+    };
 
     if mode == GizmoMode::Rotate {
         // Rotate: distance to each axis circle (radius = size) in screen space.
-        for a in axes {
+        // 2D constrains to the Z ring (rotation in the XY plane).
+        let rings: &[GizmoAxis] = if two_d {
+            &[GizmoAxis::Z]
+        } else {
+            &[GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z]
+        };
+        for &a in rings {
             let d = circle_screen_distance(origin, a.dir(), size, view_proj, cursor, width, height);
             if let Some(d) = d {
                 consider(a, d);
@@ -245,18 +269,23 @@ pub fn pick_axis(
     }
 
     // Translate/scale: plane handles (small quad near center) then axis lines.
-    for (axis, plane) in [
-        (GizmoAxis::PlaneX, Vec3::X),
-        (GizmoAxis::PlaneY, Vec3::Y),
-        (GizmoAxis::PlaneZ, Vec3::Z),
-    ] {
+    let planes: &[(GizmoAxis, Vec3)] = if two_d {
+        &[(GizmoAxis::PlaneZ, Vec3::Z)]
+    } else {
+        &[
+            (GizmoAxis::PlaneX, Vec3::X),
+            (GizmoAxis::PlaneY, Vec3::Y),
+            (GizmoAxis::PlaneZ, Vec3::Z),
+        ]
+    };
+    for &(axis, plane) in planes {
         let (u, v) = plane_tangents(plane);
         let corner = origin + (u + v) * size * 0.35;
         if let Some(c) = project(corner, view_proj, width, height) {
             consider(axis, cursor.distance(c));
         }
     }
-    for a in axes {
+    for &a in axes {
         let tip = project(origin + a.dir() * size, view_proj, width, height);
         if let Some(tip) = tip {
             consider(a, point_segment_distance(cursor, o, tip));
@@ -321,6 +350,7 @@ pub fn build_geometry(
     origin: Vec3,
     size: f32,
     active: Option<GizmoAxis>,
+    two_d: bool,
 ) {
     let hi = |axis: GizmoAxis, base: [f32; 4]| -> [f32; 4] {
         if active == Some(axis) {
@@ -329,6 +359,11 @@ pub fn build_geometry(
             base
         }
     };
+
+    if two_d {
+        build_geometry_2d(draw, mode, origin, size, &hi);
+        return;
+    }
 
     match mode {
         GizmoMode::Translate | GizmoMode::Scale => {
@@ -380,6 +415,65 @@ pub fn build_geometry(
                     draw.line(prev, p, color);
                     prev = p;
                 }
+            }
+        }
+    }
+}
+
+/// 2D-mode gizmo geometry: translate/scale expose only the X and Y axes plus a
+/// single screen-facing XY plane handle (`PlaneZ`); rotate is the Z ring alone.
+/// The Z axis is intentionally absent (out of the sprite plane).
+fn build_geometry_2d(
+    draw: &mut DebugDraw,
+    mode: GizmoMode,
+    origin: Vec3,
+    size: f32,
+    hi: &impl Fn(GizmoAxis, [f32; 4]) -> [f32; 4],
+) {
+    match mode {
+        GizmoMode::Translate | GizmoMode::Scale => {
+            for axis in [GizmoAxis::X, GizmoAxis::Y] {
+                let d = axis.dir();
+                let color = hi(axis, axis.color());
+                draw.line(origin, origin + d * size, color);
+                if mode == GizmoMode::Scale {
+                    draw.wire_box(
+                        origin + d * size,
+                        Vec3::splat(size * 0.06),
+                        glam::Quat::IDENTITY,
+                        color,
+                    );
+                } else {
+                    let (u, v) = plane_tangents(d);
+                    let tip = origin + d * size;
+                    let back = tip - d * size * 0.12;
+                    draw.line(tip, back + u * size * 0.05, color);
+                    draw.line(tip, back - u * size * 0.05, color);
+                    draw.line(tip, back + v * size * 0.05, color);
+                    draw.line(tip, back - v * size * 0.05, color);
+                }
+            }
+            // XY plane handle (PlaneZ): an L in the XY plane near the origin —
+            // free move (translate) / uniform scale.
+            let pc = hi(GizmoAxis::PlaneZ, GizmoAxis::PlaneZ.color());
+            let (u, v) = (Vec3::X, Vec3::Y);
+            let a = origin + u * size * 0.35;
+            let b = origin + v * size * 0.35;
+            let corner = origin + (u + v) * size * 0.35;
+            draw.line(a, corner, pc);
+            draw.line(b, corner, pc);
+        }
+        GizmoMode::Rotate => {
+            let axis = GizmoAxis::Z;
+            let (u, v) = plane_tangents(axis.dir());
+            let color = hi(axis, axis.color());
+            let segments = 64;
+            let mut prev = origin + u * size;
+            for i in 1..=segments {
+                let a = i as f32 / segments as f32 * std::f32::consts::TAU;
+                let p = origin + (u * a.cos() + v * a.sin()) * size;
+                draw.line(prev, p, color);
+                prev = p;
             }
         }
     }
@@ -491,7 +585,7 @@ mod tests {
         let size = 2.0;
         // Screen position of the +X tip.
         let tip = project(Vec3::X * size, vp, w, h).unwrap();
-        let hit = pick_axis(GizmoMode::Translate, Vec3::ZERO, size, vp, tip, w, h);
+        let hit = pick_axis(GizmoMode::Translate, Vec3::ZERO, size, vp, tip, w, h, false);
         assert_eq!(hit, Some(GizmoAxis::X));
         // A click far away hits nothing.
         assert_eq!(
@@ -502,7 +596,8 @@ mod tests {
                 vp,
                 Vec2::new(5.0, 5.0),
                 w,
-                h
+                h,
+                false,
             ),
             None
         );
@@ -517,10 +612,63 @@ mod tests {
             Vec3::ZERO,
             1.0,
             Some(GizmoAxis::X),
+            false,
         );
         assert!(!d.verts.is_empty());
         let mut r = DebugDraw::default();
-        build_geometry(&mut r, GizmoMode::Rotate, Vec3::ZERO, 1.0, None);
+        build_geometry(&mut r, GizmoMode::Rotate, Vec3::ZERO, 1.0, None, false);
         assert!(r.verts.len() > 100); // three circles worth of segments
+    }
+
+    #[test]
+    fn two_d_pick_excludes_z_axis() {
+        // Look straight down -Z at the XY plane (the 2D editor view).
+        let eye = Vec3::new(0.0, 0.0, 10.0);
+        let view = glam::camera::rh::view::look_at_mat4(eye, Vec3::ZERO, Vec3::Y);
+        let proj = glam::camera::rh::proj::directx::perspective(1.0, 16.0 / 9.0, 0.1, 100.0);
+        let vp = proj * view;
+        let (w, h) = (1600.0, 900.0);
+        let size = 2.0;
+        // The Z tip projects onto the origin (dead-on view); in 2D mode it must
+        // never be picked — the nearby handle is the XY plane, not Z.
+        let z_tip = project(Vec3::Z * size, vp, w, h).unwrap();
+        let hit = pick_axis(
+            GizmoMode::Translate,
+            Vec3::ZERO,
+            size,
+            vp,
+            z_tip,
+            w,
+            h,
+            true,
+        );
+        assert_ne!(hit, Some(GizmoAxis::Z), "Z axis must be inert in 2D");
+        // The X tip still picks X.
+        let x_tip = project(Vec3::X * size, vp, w, h).unwrap();
+        assert_eq!(
+            pick_axis(
+                GizmoMode::Translate,
+                Vec3::ZERO,
+                size,
+                vp,
+                x_tip,
+                w,
+                h,
+                true
+            ),
+            Some(GizmoAxis::X)
+        );
+    }
+
+    #[test]
+    fn two_d_rotate_geometry_is_one_ring() {
+        // 2D rotate is a single Z ring; 3D rotate is three rings — so the 2D
+        // vertex count is about a third.
+        let mut two = DebugDraw::default();
+        build_geometry(&mut two, GizmoMode::Rotate, Vec3::ZERO, 1.0, None, true);
+        let mut three = DebugDraw::default();
+        build_geometry(&mut three, GizmoMode::Rotate, Vec3::ZERO, 1.0, None, false);
+        assert!(!two.verts.is_empty());
+        assert!(two.verts.len() < three.verts.len() / 2);
     }
 }

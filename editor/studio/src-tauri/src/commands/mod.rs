@@ -13,6 +13,7 @@ mod material;
 mod project;
 mod scene;
 mod search;
+mod settings;
 mod sorting;
 mod terminal;
 mod viewport;
@@ -55,6 +56,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         viewport::viewport_set_rect,
         viewport::viewport_set_visible,
         viewport::viewport_drop,
+        viewport::viewport_set_mode,
+        viewport::viewport_set_snap2d,
         scene::scene_snapshot,
         scene::scene_details,
         scene::scene_create,
@@ -94,6 +97,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         assets::texture_set_slices,
         sorting::layers_get,
         sorting::layers_set,
+        settings::project_settings_get,
+        settings::project_settings_set,
         project::project_templates,
         project::project_recent,
         project::project_current,

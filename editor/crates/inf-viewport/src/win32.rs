@@ -35,7 +35,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
-use crate::camera::{Bookmarks, EditorCamera, FlyInput, NavInput, NavMode};
+use glam::DVec2;
+
+use crate::camera::{
+    Bookmarks, Camera2D, EditorCamera, FlyInput, NavInput, NavMode, Snap2DSettings, ViewportMode,
+};
 use crate::host::EngineHost;
 use crate::{KeyChord, SharedScene, SurfaceTarget, ViewportEvent, ViewportEventSink, ViewportRect};
 use inf_render::GizmoMode;
@@ -43,7 +47,15 @@ use inf_render::GizmoMode;
 enum Cmd {
     SetRect(ViewportRect),
     SetVisible(bool),
-    Drop { x: f32, y: f32, payload: String },
+    Drop {
+        x: f32,
+        y: f32,
+        payload: String,
+    },
+    /// Switch the active projection (Perspective ↔ 2D ortho) from the toolbar.
+    SetMode(ViewportMode),
+    /// Replace the 2D-mode snapping configuration from the toolbar.
+    SetSnap2D(Snap2DSettings),
     Destroy,
 }
 
@@ -76,6 +88,16 @@ impl ViewportHandle {
             y,
             payload: payload.to_owned(),
         });
+    }
+
+    /// Switch the active viewport projection (Perspective ↔ 2D ortho).
+    pub fn set_mode(&self, mode: ViewportMode) {
+        let _ = self.tx.send(Cmd::SetMode(mode));
+    }
+
+    /// Replace the 2D-mode snapping configuration (grid + pixel snap).
+    pub fn set_snap_2d(&self, snap: Snap2DSettings) {
+        let _ = self.tx.send(Cmd::SetSnap2D(snap));
     }
 
     /// Tear down the viewport thread and its window.
@@ -550,6 +572,8 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
     tracing::info!("inf-viewport: child window + engine renderer up");
 
     let mut camera = EditorCamera::default();
+    // A separate 2D ortho camera; switching modes preserves both poses (P8.2c).
+    let mut camera_2d = Camera2D::default();
     let mut bookmarks = Bookmarks::default();
     // Active smooth-focus goal, cleared once the camera settles.
     let mut focus_goal = None;
@@ -572,6 +596,8 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                         "inf-viewport: drop '{payload}' at viewport-local ({x:.0}, {y:.0}) px"
                     );
                 }
+                Ok(Cmd::SetMode(m)) => host.set_mode(m),
+                Ok(Cmd::SetSnap2D(s)) => host.set_snap_2d(s),
                 Ok(Cmd::Destroy) | Err(TryRecvError::Disconnected) => break 'outer,
                 Err(TryRecvError::Empty) => break,
             }
@@ -610,6 +636,11 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
             sink(ViewportEvent::Key(KeyChord { chord }));
         }
 
+        // Active projection + surface size for this frame's camera/gizmo math.
+        let two_d = host.mode == ViewportMode::TwoD;
+        let (vw, vh) = host.surface_size();
+        let (vwf, vhf) = (vw as f64, vh.max(1) as f64);
+
         // Discrete actions: gizmo mode, focus, bookmarks. Focus/recall
         // interrupt an in-flight focus animation.
         for action in input.actions {
@@ -619,7 +650,16 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                     // Frame the selection, or the world origin if none.
                     let (center, radius) =
                         host.selection_focus().unwrap_or((glam::DVec3::ZERO, 4.0));
-                    focus_goal = Some(camera.focus_goal(center, radius));
+                    if two_d {
+                        // Frame the selection's XY bounds instantly.
+                        camera_2d.frame(
+                            DVec2::new(center.x, center.y),
+                            DVec2::splat(radius),
+                            vwf / vhf,
+                        );
+                    } else {
+                        focus_goal = Some(camera.focus_goal(center, radius));
+                    }
                 }
                 Action::StoreBookmark(n) => {
                     bookmarks.store(n, camera.pose());
@@ -643,14 +683,21 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
         if let Ok(mut doc) = scene.lock() {
             host.sync_from_doc(&doc);
 
+            // The render view for the ACTIVE mode drives picking + gizmo rays.
+            let interact_view = if two_d {
+                host.view_2d(&camera_2d)
+            } else {
+                host.view_for(&camera)
+            };
+
             // Plain LMB: a handle under the cursor begins a gizmo drag (one
             // undo transaction), otherwise it selects the picked entity.
             if let Some((x, y, ctrl)) = input.left_press {
                 let (px, py) = (x.max(0) as u32, y.max(0) as u32);
-                if host.try_begin_gizmo(&camera, px, py) {
+                if host.try_begin_gizmo(&interact_view, px, py) {
                     doc.begin_transaction("Move");
                 } else {
-                    match host.pick_guid(&camera, px, py) {
+                    match host.pick_guid(&interact_view, px, py) {
                         Some(guid) => {
                             doc.select(&[guid], ctrl);
                             world_changed = true;
@@ -667,8 +714,26 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
 
             if input.left_down && host.is_dragging_gizmo() {
                 let (x, y) = input.cursor;
-                // Shift-drag snaps (1 m / 15° / 0.1 ratio).
-                let snap = if key_down(0x10) {
+                // 2D: translate snaps to the toolbar's grid/pixel increment (or
+                // Shift for a 1 m fallback); rotate/scale keep the Shift snaps.
+                // Perspective keeps the Shift-drag snaps (1 m / 15° / 0.1 ratio).
+                let snap = if two_d {
+                    match host.gizmo_mode {
+                        GizmoMode::Translate => {
+                            let s = host.snap_2d_translate();
+                            if s > 0.0 {
+                                s
+                            } else if key_down(0x10) {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
+                        GizmoMode::Rotate if key_down(0x10) => 15f32.to_radians(),
+                        GizmoMode::Scale if key_down(0x10) => 0.1,
+                        _ => 0.0,
+                    }
+                } else if key_down(0x10) {
                     match host.gizmo_mode {
                         GizmoMode::Translate => 1.0,
                         GizmoMode::Rotate => 15f32.to_radians(),
@@ -677,7 +742,7 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 } else {
                     0.0
                 };
-                host.update_gizmo(&camera, x.max(0) as u32, y.max(0) as u32, snap);
+                host.update_gizmo(&interact_view, x.max(0) as u32, y.max(0) as u32, snap);
             }
 
             if input.left_release {
@@ -695,7 +760,7 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
             if input.cursor_moved && !input.left_down && input.capture == Capture::None {
                 let (x, y) = input.cursor;
                 if x >= 0 && y >= 0 {
-                    host.set_hover(&camera, x as u32, y as u32);
+                    host.set_hover(&interact_view, x as u32, y as u32);
                 }
             }
         }
@@ -709,60 +774,82 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
             focus_goal = None;
         }
 
-        match input.capture {
-            Capture::Fly => {
-                let fly = FlyInput {
-                    mouse_dx: input.dx,
-                    mouse_dy: input.dy,
-                    wheel_steps: input.wheel,
-                    forward: key_down(0x57), // W
-                    back: key_down(0x53),    // S
-                    right: key_down(0x44),   // D
-                    left: key_down(0x41),    // A
-                    up: key_down(0x45),      // E
-                    down: key_down(0x51),    // Q
-                    boost: key_down(0x10),   // Shift
-                };
-                camera.apply_fly(&fly, dt);
+        if two_d {
+            // 2D navigation: any drag capture pans in the plane; the wheel
+            // zooms to the cursor (exponential half-height with clamps).
+            match input.capture {
+                Capture::None => {
+                    if input.wheel != 0 {
+                        let (cx, cy) = input.cursor;
+                        camera_2d.zoom_at(input.wheel, cx as f64, cy as f64, vwf, vhf);
+                    }
+                }
+                _ => camera_2d.pan(input.dx as f64, input.dy as f64, vwf, vhf),
             }
-            Capture::Orbit | Capture::Pan | Capture::Dolly => {
-                let mode = match input.capture {
-                    Capture::Orbit => NavMode::Orbit,
-                    Capture::Pan => NavMode::Pan,
-                    _ => NavMode::Dolly,
-                };
-                let pivot = camera.pivot(None);
-                camera.apply_navigate(
-                    &NavInput {
-                        mode,
+        } else {
+            match input.capture {
+                Capture::Fly => {
+                    let fly = FlyInput {
                         mouse_dx: input.dx,
                         mouse_dy: input.dy,
                         wheel_steps: input.wheel,
-                    },
-                    pivot,
-                    dt,
-                );
-            }
-            Capture::None => {
-                // No button held: the wheel dollies toward the look point.
-                if input.wheel != 0 {
+                        forward: key_down(0x57), // W
+                        back: key_down(0x53),    // S
+                        right: key_down(0x44),   // D
+                        left: key_down(0x41),    // A
+                        up: key_down(0x45),      // E
+                        down: key_down(0x51),    // Q
+                        boost: key_down(0x10),   // Shift
+                    };
+                    camera.apply_fly(&fly, dt);
+                }
+                Capture::Orbit | Capture::Pan | Capture::Dolly => {
+                    let mode = match input.capture {
+                        Capture::Orbit => NavMode::Orbit,
+                        Capture::Pan => NavMode::Pan,
+                        _ => NavMode::Dolly,
+                    };
                     let pivot = camera.pivot(None);
-                    camera.dolly(input.wheel as f32 * 0.12, pivot);
+                    camera.apply_navigate(
+                        &NavInput {
+                            mode,
+                            mouse_dx: input.dx,
+                            mouse_dy: input.dy,
+                            wheel_steps: input.wheel,
+                        },
+                        pivot,
+                        dt,
+                    );
+                }
+                Capture::None => {
+                    // No button held: the wheel dollies toward the look point.
+                    if input.wheel != 0 {
+                        let pivot = camera.pivot(None);
+                        camera.dolly(input.wheel as f32 * 0.12, pivot);
+                    }
                 }
             }
         }
 
-        // Advance an in-flight focus animation.
+        // Advance an in-flight focus animation (perspective only).
         if let Some(goal) = focus_goal {
             if camera.advance_focus(&goal, dt) {
                 focus_goal = None;
             }
         }
 
-        // 4. Render one frame; FIFO present blocks at vsync and paces the
-        //    loop. render_frame recovers from device loss internally — an
-        //    error here means even the rebuild failed (driver truly gone).
-        if let Err(e) = host.render_frame(&camera) {
+        // 4. Rebase the floating origin on the active eye, build the view for
+        //    the current mode, and render. FIFO present blocks at vsync and
+        //    paces the loop. render_frame recovers from device loss internally —
+        //    an error here means even the rebuild failed (driver truly gone).
+        let eye = if two_d { camera_2d.eye() } else { camera.pos };
+        host.origin.maybe_rebase(eye);
+        let render_view = if two_d {
+            host.view_2d(&camera_2d)
+        } else {
+            host.view_for(&camera)
+        };
+        if let Err(e) = host.render_frame(&render_view) {
             tracing::error!("inf-viewport: unrecoverable render failure: {e}");
             break 'outer;
         }

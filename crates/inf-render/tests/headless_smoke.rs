@@ -56,6 +56,7 @@ fn renders_sky_grid_and_cube() {
         near: 0.05,
         width: W,
         height: H,
+        ortho: None,
     };
 
     renderer.render(&gpu, &scene, &view, &target.view, (W, H));
@@ -99,6 +100,7 @@ fn resize_recreates_targets_without_validation_errors() {
             near: 0.05,
             width: w,
             height: h,
+            ortho: None,
         };
         renderer.render(&gpu, &scene, &view, &target.view, (w, h));
         let rgba = target.read_rgba(&gpu).expect("readback");

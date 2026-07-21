@@ -724,6 +724,7 @@ mod tests {
             near: 0.05,
             width: 320,
             height: 180,
+            ortho: None,
         };
         let params = TilemapParams {
             origin: DVec3::new(-1.0, -1.0, 0.0),

@@ -14,6 +14,22 @@ pub const DEPTH_CLEAR: f32 = 0.0;
 pub const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::Greater;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// Orthographic projection parameters (2D editor mode). Reverse-Z over a
+/// *finite* `[near, far]` range (see [`ortho_reverse_z`]); when present on a
+/// [`RenderView`] it replaces the perspective projection while every other pass
+/// (grid, sky, meshes, sprites, debug, picking, gizmos) keeps working — depth
+/// still clears to 0 and compares `Greater`.
+#[derive(Debug, Clone, Copy)]
+pub struct OrthoParams {
+    /// Half the visible world-space height; the width follows from the aspect
+    /// ratio. Smaller = more zoomed in.
+    pub half_height: f32,
+    /// View-space near/far distances ahead of the eye (both positive,
+    /// `near < far`). Near maps to depth 1.0, far to depth 0.0 (reverse-Z).
+    pub near: f32,
+    pub far: f32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RenderView {
     pub origin: FloatingOrigin,
@@ -22,12 +38,36 @@ pub struct RenderView {
     /// translates).
     pub forward: Vec3,
     pub up: Vec3,
-    /// Vertical field of view, radians.
+    /// Vertical field of view, radians. Ignored when [`Self::ortho`] is set.
     pub fov_y: f32,
     pub near: f32,
     /// Scene render size in physical pixels.
     pub width: u32,
     pub height: u32,
+    /// `Some` ⇒ orthographic (2D editor mode); `None` ⇒ perspective
+    /// reverse-infinite-Z (the 3D default). Kept `Option` so every existing
+    /// perspective call-site and golden stays byte-identical.
+    pub ortho: Option<OrthoParams>,
+}
+
+/// Reverse-Z orthographic projection for a right-handed view space (looking
+/// down its own -Z), producing wgpu clip space (NDC z ∈ [0, 1], y up). The
+/// near plane maps to depth **1.0** and the far plane to **0.0** — the same
+/// convention as [`perspective_infinite_reverse`], so `DEPTH_CLEAR` (0.0) and
+/// `DEPTH_COMPARE` (`Greater`) drive every depth-testing pass unchanged in 2D.
+///
+/// [`perspective_infinite_reverse`]: glam::camera::rh::proj::directx::perspective_infinite_reverse
+pub fn ortho_reverse_z(half_height: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+    let half_w = (half_height * aspect).max(1e-6);
+    let hh = half_height.max(1e-6);
+    let inv_range = 1.0 / (far - near).max(1e-6);
+    // Column-major (glam): clip.z = ze·inv_range + far·inv_range, clip.w = 1.
+    Mat4::from_cols(
+        Vec4::new(1.0 / half_w, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, 1.0 / hh, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, inv_range, 0.0),
+        Vec4::new(0.0, 0.0, far * inv_range, 1.0),
+    )
 }
 
 impl RenderView {
@@ -41,11 +81,14 @@ impl RenderView {
 
     pub fn view_proj(&self) -> Mat4 {
         let view = glam::camera::rh::view::look_to_mat4(self.eye_local(), self.forward, self.up);
-        let proj = glam::camera::rh::proj::directx::perspective_infinite_reverse(
-            self.fov_y,
-            self.aspect(),
-            self.near,
-        );
+        let proj = match self.ortho {
+            None => glam::camera::rh::proj::directx::perspective_infinite_reverse(
+                self.fov_y,
+                self.aspect(),
+                self.near,
+            ),
+            Some(o) => ortho_reverse_z(o.half_height, self.aspect(), o.near, o.far),
+        };
         proj * view
     }
 
@@ -60,7 +103,15 @@ impl RenderView {
         let a = inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.9));
         let b = inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.4));
         let dir = (b - a).normalize_or_zero();
-        (self.eye_local(), dir)
+        let origin = if self.ortho.is_some() {
+            // Orthographic: rays are parallel (all share `dir`); the origin is
+            // the point on the near plane under the pixel (depth 1.0 = near in
+            // reverse-Z), not the eye.
+            inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0))
+        } else {
+            self.eye_local()
+        };
+        (origin, dir)
     }
 }
 
@@ -78,6 +129,10 @@ pub struct ViewUniforms {
     /// x = -origin.x, y = -origin.z as f32 (render-local position of the
     /// world X/Z axes for the grid shader), zw = viewport size in px.
     pub grid_axis_viewport: [f32; 4],
+    /// x = 1.0 in orthographic (2D) mode else 0.0; y = -origin.y as f32
+    /// (render-local position of the world Y axis, for the 2D XY grid);
+    /// zw reserved. Appended so pre-2D passes/goldens stay byte-identical.
+    pub mode_axis: [f32; 4],
 }
 
 /// Fixed editor sun for Phase 2 (light theory arrives with materials, P7).
@@ -99,6 +154,13 @@ impl ViewUniforms {
                 view.height as f32,
             )
             .to_array(),
+            mode_axis: Vec4::new(
+                if view.ortho.is_some() { 1.0 } else { 0.0 },
+                -origin.y as f32,
+                0.0,
+                0.0,
+            )
+            .to_array(),
         }
     }
 }
@@ -117,6 +179,27 @@ mod tests {
             near: 0.05,
             width: 1600,
             height: 900,
+            ortho: None,
+        }
+    }
+
+    /// A top-down orthographic view over the XY plane (2D editor mode): eye at
+    /// +Z looking down -Z, up = +Y, half-height 5 world units.
+    fn ortho_view() -> RenderView {
+        RenderView {
+            origin: FloatingOrigin::new(DVec3::ZERO),
+            eye_world: DVec3::new(0.0, 0.0, 100.0),
+            forward: Vec3::NEG_Z,
+            up: Vec3::Y,
+            fov_y: 60f32.to_radians(),
+            near: 1.0,
+            width: 1600,
+            height: 900,
+            ortho: Some(OrthoParams {
+                half_height: 5.0,
+                near: 1.0,
+                far: 200.0,
+            }),
         }
     }
 
@@ -167,7 +250,53 @@ mod tests {
         assert_eq!(u.grid_axis_viewport[1], 300.0);
         assert_eq!(
             std::mem::size_of::<ViewUniforms>(),
-            (16 + 16 + 4 + 4 + 4) * 4
+            (16 + 16 + 4 + 4 + 4 + 4) * 4
         );
+        // Perspective packs mode flag 0; the origin's Y still populates the 2D
+        // axis slot (only read by the grid shader in ortho).
+        assert_eq!(u.mode_axis[0], 0.0);
+    }
+
+    #[test]
+    fn ortho_projects_ndc_corners() {
+        let v = ortho_view();
+        let vp = v.view_proj();
+        let hh = 5.0_f32;
+        let hw = hh * v.aspect();
+        // A world point one half-extent right and up of the eye's XY lands at
+        // the +X/+Y NDC corner; the eye's XY lands at NDC center.
+        let center = vp.project_point3(Vec3::new(0.0, 0.0, 0.0));
+        assert!(center.x.abs() < 1e-4 && center.y.abs() < 1e-4, "{center:?}");
+        let corner = vp.project_point3(Vec3::new(hw, hh, 0.0));
+        assert!((corner.x - 1.0).abs() < 1e-4, "ndc x {corner:?}");
+        assert!((corner.y - 1.0).abs() < 1e-4, "ndc y {corner:?}");
+    }
+
+    #[test]
+    fn ortho_reverse_z_orders_depth() {
+        let v = ortho_view();
+        let vp = v.view_proj();
+        // Nearer to the eye (larger Z, since eye is at +Z looking -Z) ⇒ LARGER
+        // depth under reverse-Z, and depths stay within [0, 1].
+        let near_p = vp.project_point3(Vec3::new(0.0, 0.0, 10.0)); // dist 90
+        let far_p = vp.project_point3(Vec3::new(0.0, 0.0, -10.0)); // dist 110
+        assert!(near_p.z > far_p.z, "near {near_p:?} far {far_p:?}");
+        assert!(far_p.z >= 0.0 && near_p.z <= 1.0);
+    }
+
+    #[test]
+    fn ortho_pixel_ray_is_parallel_and_hits_plane() {
+        let v = ortho_view();
+        // Two different pixels give parallel rays (both point along -Z).
+        let (o0, d0) = v.pixel_ray(400.0, 300.0);
+        let (o1, d1) = v.pixel_ray(1200.0, 700.0);
+        assert!(d0.dot(Vec3::NEG_Z) > 0.9999, "ray0 {d0:?}");
+        assert!((d0 - d1).length() < 1e-4, "rays not parallel");
+        // The two ray origins differ (parallel projection: origin varies with
+        // the pixel, unlike perspective where all rays share the eye).
+        assert!((o0 - o1).length() > 1.0);
+        // Each ray hits the XY plane (z = 0) in front of its near-plane origin.
+        let t = -o0.z / d0.z;
+        assert!(t > 0.0, "plane behind origin");
     }
 }

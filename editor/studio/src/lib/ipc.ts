@@ -28,18 +28,21 @@ import type { FileEntryDto } from "../bindings/FileEntryDto";
 import type { GitStatusDto } from "../bindings/GitStatusDto";
 import type { LayoutSummary } from "../bindings/LayoutSummary";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
+import type { ProjectSettingsDto } from "../bindings/ProjectSettingsDto";
 import type { ProjectTemplateDto } from "../bindings/ProjectTemplateDto";
 import type { PropValueDto } from "../bindings/PropValueDto";
 import type { RecentProjectDto } from "../bindings/RecentProjectDto";
 import type { SearchHitDto } from "../bindings/SearchHitDto";
 import type { SearchOptsDto } from "../bindings/SearchOptsDto";
 import type { SceneSnapshot } from "../bindings/SceneSnapshot";
+import type { Snap2DDto } from "../bindings/Snap2DDto";
 import type { SortingLayerDto } from "../bindings/SortingLayerDto";
 import type { SpawnKind } from "../bindings/SpawnKind";
 import type { SpriteSheetDto } from "../bindings/SpriteSheetDto";
 import type { TilemapCellDto } from "../bindings/TilemapCellDto";
 import type { TilemapDto } from "../bindings/TilemapDto";
 import type { ViewportDrop } from "../bindings/ViewportDrop";
+import type { ViewportModeDto } from "../bindings/ViewportModeDto";
 import type { ViewportRect } from "../bindings/ViewportRect";
 
 export type {
@@ -54,17 +57,20 @@ export type {
   LayoutSummary,
   ProjectInfoDto,
   ProjectTemplateDto,
+  ProjectSettingsDto,
   PropValueDto,
   RecentProjectDto,
   SearchHitDto,
   SearchOptsDto,
   SceneSnapshot,
+  Snap2DDto,
   SortingLayerDto,
   SpawnKind,
   SpriteSheetDto,
   TilemapCellDto,
   TilemapDto,
   ViewportDrop,
+  ViewportModeDto,
   ViewportRect,
 };
 
@@ -114,6 +120,21 @@ export const viewport = {
    * die over the native window — the drop point crosses via IPC instead).
    */
   drop: (drop: ViewportDrop): Promise<void> => invoke("viewport_drop", { drop }),
+  /** Switch the active projection (Perspective ↔ 2D ortho) (P8.2c). */
+  setMode: (mode: ViewportModeDto): Promise<void> => invoke("viewport_set_mode", { mode }),
+  /** Push the 2D-mode grid/pixel snapping configuration to the viewport. */
+  setSnap2d: (snap: Snap2DDto): Promise<void> => invoke("viewport_set_snap2d", { snap }),
+};
+
+/**
+ * Per-project editor settings (P8.2c): pixels-per-unit for 2D pixel snapping,
+ * persisted under `<content-root>/.infinity/settings.toml`. `set` returns the
+ * normalized values.
+ */
+export const projectSettings = {
+  get: (): Promise<ProjectSettingsDto> => invoke<ProjectSettingsDto>("project_settings_get"),
+  set: (settings: ProjectSettingsDto): Promise<ProjectSettingsDto> =>
+    invoke<ProjectSettingsDto>("project_settings_set", { settings }),
 };
 
 /**

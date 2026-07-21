@@ -24,7 +24,7 @@ use objc2_app_kit::NSView;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
-use crate::camera::EditorCamera;
+use crate::camera::{Camera2D, EditorCamera, Snap2DSettings, ViewportMode};
 use crate::host::EngineHost;
 use crate::{SharedScene, SurfaceTarget, ViewportEventSink, ViewportRect};
 
@@ -32,6 +32,8 @@ enum Cmd {
     SetRect(ViewportRect),
     SetVisible(bool),
     Drop { x: f32, y: f32, payload: String },
+    SetMode(ViewportMode),
+    SetSnap2D(Snap2DSettings),
     Destroy,
 }
 
@@ -60,6 +62,16 @@ impl ViewportHandle {
             y,
             payload: payload.to_owned(),
         });
+    }
+
+    /// Switch the active viewport projection (Perspective ↔ 2D ortho).
+    pub fn set_mode(&self, mode: ViewportMode) {
+        let _ = self.tx.send(Cmd::SetMode(mode));
+    }
+
+    /// Replace the 2D-mode snapping configuration.
+    pub fn set_snap_2d(&self, snap: Snap2DSettings) {
+        let _ = self.tx.send(Cmd::SetSnap2D(snap));
     }
 
     /// Tear down the viewport thread and its layer.
@@ -156,6 +168,9 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedSce
     tracing::info!("inf-viewport: CAMetalLayer + engine renderer up");
 
     let camera = EditorCamera::default();
+    // A default 2D camera; macOS input isn't wired yet, so 2D mode renders a
+    // static top-down view (pan/zoom arrive with the macOS hardware pass).
+    let camera_2d = Camera2D::default();
 
     'outer: loop {
         let mut latest_rect: Option<ViewportRect> = None;
@@ -175,6 +190,8 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedSce
                         "inf-viewport: drop '{payload}' at viewport-local ({x:.0}, {y:.0}) px"
                     );
                 }
+                Ok(Cmd::SetMode(m)) => host.set_mode(m),
+                Ok(Cmd::SetSnap2D(s)) => host.set_snap_2d(s),
                 Ok(Cmd::Destroy) | Err(TryRecvError::Disconnected) => break 'outer,
                 Err(TryRecvError::Empty) => break,
             }
@@ -190,8 +207,17 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedSce
             host.sync_from_doc(&doc);
         }
 
-        // FIFO present blocks at vsync and paces the loop.
-        if let Err(e) = host.render_frame(&camera) {
+        // Rebase the floating origin on the active eye, build the view for the
+        // current mode, and render. FIFO present blocks at vsync.
+        let two_d = host.mode == ViewportMode::TwoD;
+        let eye = if two_d { camera_2d.eye() } else { camera.pos };
+        host.origin.maybe_rebase(eye);
+        let view = if two_d {
+            host.view_2d(&camera_2d)
+        } else {
+            host.view_for(&camera)
+        };
+        if let Err(e) = host.render_frame(&view) {
             tracing::error!("inf-viewport: unrecoverable render failure: {e}");
             break;
         }

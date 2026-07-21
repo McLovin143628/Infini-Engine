@@ -1,12 +1,17 @@
 import { useEffect, useRef } from "react";
 import { viewport } from "../lib/ipc";
 import { toPhysicalRect } from "../lib/viewportRect";
+import ViewportToolbar from "./ViewportToolbar";
 
 /**
  * The viewport "hole": an empty div whose rectangle is mirrored to the native
  * wgpu child window (Spike A). The native window sits ABOVE the webview, so
  * nothing rendered here is ever visible while the engine is attached — the
  * fallback text only shows if native attach fails.
+ *
+ * The viewport toolbar (P8.2c) renders as a strip ABOVE the hole — never over
+ * it, since the native child window would occlude any HTML crossing the hole
+ * (airspace rule). The measured hole excludes the toolbar automatically.
  */
 export default function ViewportPanel() {
   const holeRef = useRef<HTMLDivElement>(null);
@@ -59,14 +64,17 @@ export default function ViewportPanel() {
   }, []);
 
   return (
-    <div
-      ref={holeRef}
-      data-viewport-hole
-      className="flex flex-1 items-center justify-center rounded border border-(--ink-border) bg-(--ink-bg-0)"
-    >
-      <div className="text-center text-(--ink-text-dim)">
-        <div className="mb-2 text-3xl">∞</div>
-        <div>Native viewport unavailable — see Output Log</div>
+    <div className="flex flex-1 flex-col gap-1">
+      <ViewportToolbar />
+      <div
+        ref={holeRef}
+        data-viewport-hole
+        className="flex flex-1 items-center justify-center rounded border border-(--ink-border) bg-(--ink-bg-0)"
+      >
+        <div className="text-center text-(--ink-text-dim)">
+          <div className="mb-2 text-3xl">∞</div>
+          <div>Native viewport unavailable — see Output Log</div>
+        </div>
       </div>
     </div>
   );

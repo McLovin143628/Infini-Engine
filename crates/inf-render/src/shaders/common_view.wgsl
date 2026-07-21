@@ -12,6 +12,9 @@ struct View {
     // xy = render-local position of the world X/Z axes (-origin.xz),
     // zw = viewport size in physical px.
     grid_axis_viewport: vec4<f32>,
+    // x = 1.0 in orthographic (2D) mode else 0.0; y = -origin.y (render-local
+    // world Y axis, for the 2D XY grid); zw reserved.
+    mode_axis: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> view: View;
 
