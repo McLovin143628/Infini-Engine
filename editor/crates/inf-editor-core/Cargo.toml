@@ -9,6 +9,7 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+inf-core = { workspace = true }
 inf-runtime = { workspace = true }
 inf-ecs = { workspace = true }
 inf-math = { workspace = true }

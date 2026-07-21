@@ -1,6 +1,6 @@
 [package]
 name = "inf-core"
-description = "Core primitives: ids, errors, tracing setup, frame clock, job system facade."
+description = "Core primitives: the Ring-0 compute job system (rayon pool + flume), ids, errors, frame clock."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,15 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# The compute job system (§2.5): rayon = data-parallel worker pool; flume =
+# MPMC channels for work hand-off / result collection (sync-only tree — no
+# tokio/futures in Ring 0).
+rayon = { workspace = true }
+flume = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "job_pool"
+harness = false

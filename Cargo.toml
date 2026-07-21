@@ -120,11 +120,22 @@ portable-pty = "0.8"
 # for the search matcher.
 ignore = "0.4"
 regex = "1"
+# ── concurrency: the Ring-0 compute job system (Phase 7.0, §2.5) ──
+# rayon = the data-parallel worker pool (par_iter, join, scope). flume = MPMC
+# channels for work hand-off/results; default-features off keeps it sync-only
+# (no async/futures tree pulled into Ring 0). tokio stays in Ring 2 by rule.
+rayon = "1"
+flume = { version = "0.11", default-features = false }
 # ── editor↔frontend shared types → committed TS bindings (CI drift-checked) ──
 ts-rs = "12"
 # test-only (dev-dependencies in member crates)
 tempfile = "3"
 png = "0.18"
+# criterion = the workspace's bench harness (first used by the P7.0 job-pool
+# scaling bench). default-features off drops the plotters/gnuplot HTML-report
+# tree (and its heavier license surface); cargo_bench_support is all `harness =
+# false` targets need.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 
 # intra-workspace crates
 inf-core = { path = "crates/inf-core" }

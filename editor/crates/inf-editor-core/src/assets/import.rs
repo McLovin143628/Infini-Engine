@@ -118,23 +118,35 @@ fn import_gltf(
         }
     }
     let mut image_ids: Vec<Option<AssetId>> = vec![None; g.images.len()];
-    for (i, img) in g.images.iter().enumerate() {
-        let settings = if srgb[i] {
-            TextureImportSettings::default()
-        } else {
-            TextureImportSettings::data()
-        };
-        let tex =
-            inf_material::texture_from_rgba8(img.rgba8.clone(), img.width, img.height, settings)
-                .map_err(|e| AssetError::Import(e.to_string()))?;
-        let name = format!("{}_{}", file_stem(source), img.name);
+    // Decode + build mips + BC-compress every image *in parallel* — the CPU-bound,
+    // side-effect-free stage — then commit to the asset DB serially in input
+    // order below (so GUIDs and sidecar output stay deterministic regardless of
+    // pool size). This is the P7.0 job system's first real consumer (§2.5).
+    let settings: Vec<TextureImportSettings> = (0..g.images.len())
+        .map(|i| {
+            if srgb[i] {
+                TextureImportSettings::default()
+            } else {
+                TextureImportSettings::data()
+            }
+        })
+        .collect();
+    let decoded: Vec<std::result::Result<inf_material::TextureAsset, String>> =
+        inf_core::parallel_map((0..g.images.len()).collect(), |i| {
+            let img = &g.images[i];
+            inf_material::texture_from_rgba8(img.rgba8.clone(), img.width, img.height, settings[i])
+                .map_err(|e| e.to_string())
+        });
+    for (i, tex) in decoded.into_iter().enumerate() {
+        let tex = tex.map_err(AssetError::Import)?;
+        let name = format!("{}_{}", file_stem(source), g.images[i].name);
         let id = project.write_asset(
             dest_dir,
             &name,
             &tex,
             Some(source_rel.clone()),
             vec![],
-            settings_table(&settings),
+            settings_table(&settings[i]),
         )?;
         image_ids[i] = Some(id);
         produced.push(id);
