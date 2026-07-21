@@ -29,13 +29,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use glam::{DQuat, DVec3};
 use inf_ecs::components::{
-    BodyKind3D as SceneBodyKind3D, Collider3D, ColliderShape3DKind, RigidBody3D, Transform,
+    BodyKind3D as SceneBodyKind3D, Collider3D, ColliderShape3DKind,
+    CombineRule as SceneCombineRule, Joint3D, JointKind3D as SceneJointKind3D, RigidBody3D,
+    Transform,
 };
 use inf_ecs::{EcsWorld, Vec3d};
 use uuid::Uuid;
 
+use super::joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
 use super::world::{BodyKind3D, ColliderDesc3D, ColliderShape3D, PhysicsWorld3D};
 use super::{BodyId3D, ColliderId3D};
+use crate::filtering::{CollisionLayers, CombineRule};
 
 /// A rigid-body descriptor — the facade-local shape of the future `RigidBody3D`
 /// component (see the batch report for the ready-to-paste `inf-ecs` struct). The
@@ -52,6 +56,8 @@ pub struct BodyDesc3D {
     pub linear_damping: f64,
     /// Angular velocity decay per second.
     pub angular_damping: f64,
+    /// Continuous Collision Detection (P12.1).
+    pub ccd_enabled: bool,
 }
 
 impl Default for BodyDesc3D {
@@ -62,8 +68,20 @@ impl Default for BodyDesc3D {
             fixed_rotation: false,
             linear_damping: 0.0,
             angular_damping: 0.0,
+            ccd_enabled: false,
         }
     }
+}
+
+/// One entity's joint for a [`sync`](PhysicsBridge3D::sync) pass: the `Guid` of the
+/// OTHER body it links to, plus the facade joint descriptor. Reconciled after all
+/// bodies are spawned so the referenced body always exists.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JointSync3D {
+    /// The other body's entity `Guid`.
+    pub other: Uuid,
+    /// The joint family + anchors + params.
+    pub desc: JointDesc3D,
 }
 
 /// One entity's physics state for a [`sync`](PhysicsBridge3D::sync) pass: its
@@ -83,6 +101,8 @@ pub struct EntitySync3D {
     pub translation: DVec3,
     /// World-space orientation (from the entity's `Transform`).
     pub rotation: DQuat,
+    /// An optional joint to another body (P12.1), reconciled in a second pass.
+    pub joint: Option<JointSync3D>,
 }
 
 /// The pose the bridge wrote back for one dynamic body — the next-batch adapter
@@ -102,6 +122,17 @@ struct BodyRecord {
     kind: BodyKind3D,
     rb: Option<BodyDesc3D>,
     col: Option<ColliderDesc3D>,
+    /// The joint this entity owns (P12.1): its handle, the other body it was
+    /// built against, and the last-synced snapshot (for change detection).
+    joint: Option<JointBinding>,
+}
+
+/// A live joint binding tracked on the owning entity's record.
+#[derive(Clone, Copy)]
+struct JointBinding {
+    id: JointId3D,
+    other_body: BodyId3D,
+    sync: JointSync3D,
 }
 
 /// Owns a [`PhysicsWorld3D`] and keeps it in sync with a scene snapshot.
@@ -137,6 +168,11 @@ impl PhysicsBridge3D {
         self.entities.get(&guid).map(|r| r.body)
     }
 
+    /// The joint handle owned by `guid` (P12.1), if it has one.
+    pub fn joint_of(&self, guid: Uuid) -> Option<JointId3D> {
+        self.entities.get(&guid).and_then(|r| r.joint).map(|b| b.id)
+    }
+
     /// The collider handle mirroring `guid`, if it has one.
     pub fn collider_of(&self, guid: Uuid) -> Option<ColliderId3D> {
         self.entities.get(&guid).and_then(|r| r.collider)
@@ -161,6 +197,7 @@ impl PhysicsBridge3D {
             };
             let rb = entity.get::<RigidBody3D>().copied();
             let col = entity.get::<Collider3D>().copied();
+            let joint = entity.get::<Joint3D>().copied();
             if rb.is_none() && col.is_none() {
                 continue;
             }
@@ -174,6 +211,7 @@ impl PhysicsBridge3D {
                 collider: col.as_ref().map(collider_desc),
                 translation: transform.translation.to_dvec3(),
                 rotation: transform.quat(),
+                joint: joint.and_then(joint_sync),
             });
         }
         // `sync` sorts by Guid internally, so the gather order here is irrelevant.
@@ -193,10 +231,13 @@ impl PhysicsBridge3D {
             .collect();
         live.sort_by_key(|e| e.guid);
 
-        // 2. Spawn / update.
+        // 2. Spawn / update. (Joints are reconciled in a second pass, below, once
+        //    every body exists, so a joint can always resolve its other body.)
         let mut seen: BTreeSet<Uuid> = BTreeSet::new();
+        let mut joint_desires: Vec<(Uuid, Option<JointSync3D>)> = Vec::new();
         for snap in live {
             seen.insert(snap.guid);
+            joint_desires.push((snap.guid, snap.joint));
             let kind = snap.body.map(|b| b.kind).unwrap_or(BodyKind3D::Static);
             let pos = snap.translation;
             let rot = snap.rotation;
@@ -259,12 +300,16 @@ impl PhysicsBridge3D {
                         kind,
                         rb: snap.body,
                         col: snap.collider.clone(),
+                        joint: None,
                     },
                 );
             }
         }
 
-        // 3. Despawn: any tracked guid not seen this sync is gone.
+        // 3. Despawn: any tracked guid not seen this sync is gone. Removing the
+        //    body drops its colliders AND any joints attached to it (rapier), so a
+        //    joint whose endpoint despawns is cleaned up here; the owning record's
+        //    stale handle is reconciled to `None` in pass 4.
         let gone: Vec<Uuid> = self
             .entities
             .keys()
@@ -273,8 +318,61 @@ impl PhysicsBridge3D {
             .collect();
         for guid in gone {
             if let Some(rec) = self.entities.remove(&guid) {
-                // Removing the body drops its colliders too.
                 self.world.remove_body(rec.body);
+            }
+        }
+
+        // 4. Reconcile joints (P12.1), now that every body exists. In Guid order.
+        for (guid, desire) in joint_desires {
+            self.reconcile_joint(guid, desire);
+        }
+    }
+
+    /// Bring one entity's joint in line with its desired snapshot. Resolves the
+    /// other body from the tracked entity map; rebuilds the joint if the snapshot,
+    /// the resolved other body, or its very existence changed; removes it if the
+    /// desire is `None` or the other body is missing/despawned.
+    fn reconcile_joint(&mut self, guid: Uuid, desire: Option<JointSync3D>) {
+        // The self body must still exist.
+        let Some(self_body) = self.entities.get(&guid).map(|r| r.body) else {
+            return;
+        };
+        let existing = self.entities.get(&guid).and_then(|r| r.joint);
+        // Resolve the desired other body (skip self-links and dangling refs).
+        let target = desire.and_then(|d| {
+            if d.other == guid {
+                return None;
+            }
+            self.entities.get(&d.other).map(|r| (r.body, d))
+        });
+
+        match target {
+            Some((other_body, sync)) => {
+                let up_to_date = existing.is_some_and(|b| {
+                    b.other_body == other_body && b.sync == sync && self.world.contains_joint(b.id)
+                });
+                if up_to_date {
+                    return;
+                }
+                if let Some(b) = existing {
+                    self.world.remove_joint(b.id);
+                }
+                let id = self.world.add_joint(self_body, other_body, sync.desc);
+                if let Some(r) = self.entities.get_mut(&guid) {
+                    r.joint = id.map(|id| JointBinding {
+                        id,
+                        other_body,
+                        sync,
+                    });
+                }
+            }
+            None => {
+                if let Some(b) = existing {
+                    self.world.remove_joint(b.id);
+                    if let Some(r) = self.entities.get_mut(&guid) {
+                        r.joint = None;
+                    }
+                }
             }
         }
     }
@@ -343,6 +441,7 @@ fn apply_rb_props(world: &mut PhysicsWorld3D, body: BodyId3D, rb: &BodyDesc3D) {
     world.set_body_gravity_scale(body, rb.gravity_scale);
     world.set_body_damping(body, rb.linear_damping, rb.angular_damping);
     world.set_body_locked_rotations(body, rb.fixed_rotation);
+    world.set_body_ccd(body, rb.ccd_enabled);
 }
 
 fn to_phys_kind(k: SceneBodyKind3D) -> BodyKind3D {
@@ -361,6 +460,16 @@ fn body_desc(rb: RigidBody3D) -> BodyDesc3D {
         fixed_rotation: rb.fixed_rotation,
         linear_damping: rb.linear_damping,
         angular_damping: rb.angular_damping,
+        ccd_enabled: rb.ccd_enabled,
+    }
+}
+
+fn to_phys_combine(r: SceneCombineRule) -> CombineRule {
+    match r {
+        SceneCombineRule::Average => CombineRule::Average,
+        SceneCombineRule::Min => CombineRule::Min,
+        SceneCombineRule::Multiply => CombineRule::Multiply,
+        SceneCombineRule::Max => CombineRule::Max,
     }
 }
 
@@ -382,4 +491,45 @@ fn collider_desc(col: &Collider3D) -> ColliderDesc3D {
         .density(col.density)
         .sensor(col.sensor)
         .local_translation(col.offset.to_dvec3())
+        .layers(CollisionLayers::new(
+            col.collision_memberships,
+            col.collision_filter,
+        ))
+        .friction_combine(to_phys_combine(col.friction_combine))
+        .restitution_combine(to_phys_combine(col.restitution_combine))
+}
+
+/// Map a scene [`Joint3D`] onto a facade [`JointSync3D`]; `None` if it is unbound
+/// (no `other` entity set).
+fn joint_sync(j: Joint3D) -> Option<JointSync3D> {
+    let other = j.other?;
+    let motor = j.motor_enabled.then_some(JointMotor3D {
+        target_pos: j.motor_target_pos,
+        target_vel: j.motor_target_vel,
+        stiffness: j.motor_stiffness,
+        damping: j.motor_damping,
+        max_force: j.motor_max_force,
+    });
+    let limits = j.limits_enabled.then_some([j.limit_min, j.limit_max]);
+    let kind = match j.kind {
+        SceneJointKind3D::Fixed => JointKind3D::Fixed,
+        SceneJointKind3D::Revolute => JointKind3D::Revolute {
+            axis: j.axis.to_dvec3(),
+            limits,
+            motor,
+        },
+        SceneJointKind3D::Prismatic => JointKind3D::Prismatic {
+            axis: j.axis.to_dvec3(),
+            limits,
+            motor,
+        },
+        SceneJointKind3D::Spherical => JointKind3D::Spherical,
+        SceneJointKind3D::Distance => JointKind3D::Distance {
+            max_distance: j.max_distance,
+        },
+    };
+    let desc = JointDesc3D::new(kind)
+        .local_anchor1(j.local_anchor.to_dvec3())
+        .local_anchor2(j.other_anchor.to_dvec3());
+    Some(JointSync3D { other, desc })
 }

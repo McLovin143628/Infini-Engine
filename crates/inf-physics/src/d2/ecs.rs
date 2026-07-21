@@ -29,12 +29,27 @@
 use std::collections::BTreeMap;
 
 use glam::DVec2;
-use inf_ecs::components::{BodyKind2D, Collider2D, ColliderShape2DKind, RigidBody2D, Transform};
+use inf_ecs::components::{
+    BodyKind2D, Collider2D, ColliderShape2DKind, CombineRule as SceneCombineRule, Joint2D,
+    JointKind2D as SceneJointKind2D, RigidBody2D, Transform,
+};
 use inf_ecs::EcsWorld;
 use uuid::Uuid;
 
+use super::joint::{JointDesc2D, JointId2D, JointKind2D, JointMotor2D};
 use super::world::{BodyKind, ColliderDesc2D, ColliderShape2D};
 use super::{BodyId, ColliderId, PhysicsWorld2D};
+use crate::filtering::{CollisionLayers, CombineRule};
+
+/// A joint another entity's body is linked to (P12.1): the other body's `Guid`
+/// plus the facade descriptor. Reconciled after all bodies exist.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JointSync2D {
+    /// The other body's entity `Guid`.
+    pub other: Uuid,
+    /// The joint family + anchors + params.
+    pub desc: JointDesc2D,
+}
 
 /// One tracked entity: its rapier body/collider handles plus the last-synced
 /// component snapshots (for cheap change detection — the component structs are
@@ -45,6 +60,16 @@ struct BodyRecord {
     kind: BodyKind,
     rb: Option<RigidBody2D>,
     col: Option<Collider2D>,
+    /// The joint this entity owns (P12.1): handle + other body + last snapshot.
+    joint: Option<JointBinding>,
+}
+
+/// A live joint binding tracked on the owning entity's record.
+#[derive(Clone, Copy)]
+struct JointBinding {
+    id: JointId2D,
+    other_body: BodyId,
+    sync: JointSync2D,
 }
 
 /// Owns a [`PhysicsWorld2D`] and keeps it in sync with an [`EcsWorld`].
@@ -85,6 +110,11 @@ impl PhysicsBridge2D {
         self.entities.get(&guid).and_then(|r| r.collider)
     }
 
+    /// The joint handle owned by `guid` (P12.1), if it has one.
+    pub fn joint_of(&self, guid: Uuid) -> Option<JointId2D> {
+        self.entities.get(&guid).and_then(|r| r.joint).map(|b| b.id)
+    }
+
     /// Advance the simulation by `dt` seconds (the caller's fixed step).
     pub fn step(&mut self, dt: f64) {
         self.world.step(dt);
@@ -103,6 +133,7 @@ impl PhysicsBridge2D {
             };
             let rb = entity.get::<RigidBody2D>().copied();
             let col = entity.get::<Collider2D>().copied();
+            let joint = entity.get::<Joint2D>().copied();
             if rb.is_none() && col.is_none() {
                 continue;
             }
@@ -110,14 +141,25 @@ impl PhysicsBridge2D {
                 .get::<Transform>()
                 .copied()
                 .unwrap_or(Transform::IDENTITY);
-            live.push((guid, EntitySnapshot { rb, col, transform }));
+            live.push((
+                guid,
+                EntitySnapshot {
+                    rb,
+                    col,
+                    transform,
+                    joint: joint.and_then(joint_sync),
+                },
+            ));
         }
         live.sort_by_key(|(g, _)| *g);
 
-        // 2. Spawn / update.
+        // 2. Spawn / update. (Joints reconciled in a second pass, once every body
+        //    exists, so a joint can always resolve its other body.)
         let mut seen: Vec<Uuid> = Vec::with_capacity(live.len());
+        let mut joint_desires: Vec<(Uuid, Option<JointSync2D>)> = Vec::new();
         for (guid, snap) in live {
             seen.push(guid);
+            joint_desires.push((guid, snap.joint));
             let kind = to_phys_kind(snap.rb.map(|r| r.kind).unwrap_or(BodyKind2D::Static));
             let (pos, rot) = transform_pose(&snap.transform);
 
@@ -179,12 +221,14 @@ impl PhysicsBridge2D {
                         kind,
                         rb: snap.rb,
                         col: snap.col,
+                        joint: None,
                     },
                 );
             }
         }
 
-        // 3. Despawn: any tracked guid not seen this sync is gone.
+        // 3. Despawn: any tracked guid not seen this sync is gone. Removing the
+        //    body drops its colliders AND any joints attached to it (rapier).
         let seen: std::collections::BTreeSet<Uuid> = seen.into_iter().collect();
         let gone: Vec<Uuid> = self
             .entities
@@ -194,8 +238,59 @@ impl PhysicsBridge2D {
             .collect();
         for guid in gone {
             if let Some(rec) = self.entities.remove(&guid) {
-                // Removing the body drops its colliders too.
                 self.world.remove_body(rec.body);
+            }
+        }
+
+        // 4. Reconcile joints (P12.1), now that every body exists. In Guid order.
+        for (guid, desire) in joint_desires {
+            self.reconcile_joint(guid, desire);
+        }
+    }
+
+    /// Bring one entity's joint in line with its desired snapshot (the `d2`
+    /// mirror of [`crate::d3::PhysicsBridge3D`]'s reconcile). Resolves the other
+    /// body from the tracked map; rebuilds on any change; removes when the desire
+    /// is `None` or the other body is missing.
+    fn reconcile_joint(&mut self, guid: Uuid, desire: Option<JointSync2D>) {
+        let Some(self_body) = self.entities.get(&guid).map(|r| r.body) else {
+            return;
+        };
+        let existing = self.entities.get(&guid).and_then(|r| r.joint);
+        let target = desire.and_then(|d| {
+            if d.other == guid {
+                return None;
+            }
+            self.entities.get(&d.other).map(|r| (r.body, d))
+        });
+
+        match target {
+            Some((other_body, sync)) => {
+                let up_to_date = existing.is_some_and(|b| {
+                    b.other_body == other_body && b.sync == sync && self.world.contains_joint(b.id)
+                });
+                if up_to_date {
+                    return;
+                }
+                if let Some(b) = existing {
+                    self.world.remove_joint(b.id);
+                }
+                let id = self.world.add_joint(self_body, other_body, sync.desc);
+                if let Some(r) = self.entities.get_mut(&guid) {
+                    r.joint = id.map(|id| JointBinding {
+                        id,
+                        other_body,
+                        sync,
+                    });
+                }
+            }
+            None => {
+                if let Some(b) = existing {
+                    self.world.remove_joint(b.id);
+                    if let Some(r) = self.entities.get_mut(&guid) {
+                        r.joint = None;
+                    }
+                }
             }
         }
     }
@@ -239,6 +334,7 @@ struct EntitySnapshot {
     rb: Option<RigidBody2D>,
     col: Option<Collider2D>,
     transform: Transform,
+    joint: Option<JointSync2D>,
 }
 
 fn to_phys_kind(k: BodyKind2D) -> BodyKind {
@@ -261,6 +357,45 @@ fn apply_rb_props(world: &mut PhysicsWorld2D, body: BodyId, rb: &RigidBody2D) {
     world.set_body_gravity_scale(body, rb.gravity_scale);
     world.set_body_damping(body, rb.linear_damping, rb.angular_damping);
     world.set_body_locked_rotations(body, rb.fixed_rotation);
+    world.set_body_ccd(body, rb.ccd_enabled);
+}
+
+fn to_phys_combine(r: SceneCombineRule) -> CombineRule {
+    match r {
+        SceneCombineRule::Average => CombineRule::Average,
+        SceneCombineRule::Min => CombineRule::Min,
+        SceneCombineRule::Multiply => CombineRule::Multiply,
+        SceneCombineRule::Max => CombineRule::Max,
+    }
+}
+
+/// Map a scene [`Joint2D`] onto a facade [`JointSync2D`]; `None` if unbound.
+fn joint_sync(j: Joint2D) -> Option<JointSync2D> {
+    let other = j.other?;
+    let motor = j.motor_enabled.then_some(JointMotor2D {
+        target_pos: j.motor_target_pos,
+        target_vel: j.motor_target_vel,
+        stiffness: j.motor_stiffness,
+        damping: j.motor_damping,
+        max_force: j.motor_max_force,
+    });
+    let limits = j.limits_enabled.then_some([j.limit_min, j.limit_max]);
+    let kind = match j.kind {
+        SceneJointKind2D::Fixed => JointKind2D::Fixed,
+        SceneJointKind2D::Revolute => JointKind2D::Revolute { limits, motor },
+        SceneJointKind2D::Prismatic => JointKind2D::Prismatic {
+            axis: DVec2::new(j.axis.x, j.axis.y),
+            limits,
+            motor,
+        },
+        SceneJointKind2D::Distance => JointKind2D::Distance {
+            max_distance: j.max_distance,
+        },
+    };
+    let desc = JointDesc2D::new(kind)
+        .local_anchor1(DVec2::new(j.local_anchor.x, j.local_anchor.y))
+        .local_anchor2(DVec2::new(j.other_anchor.x, j.other_anchor.y));
+    Some(JointSync2D { other, desc })
 }
 
 fn collider_desc(col: &Collider2D) -> ColliderDesc2D {
@@ -281,4 +416,10 @@ fn collider_desc(col: &Collider2D) -> ColliderDesc2D {
         .density(col.density)
         .sensor(col.sensor)
         .local_translation(DVec2::new(col.offset.x, col.offset.y))
+        .layers(CollisionLayers::new(
+            col.collision_memberships,
+            col.collision_filter,
+        ))
+        .friction_combine(to_phys_combine(col.friction_combine))
+        .restitution_combine(to_phys_combine(col.restitution_combine))
 }

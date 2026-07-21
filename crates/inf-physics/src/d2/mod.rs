@@ -10,12 +10,14 @@ use rapier2d_f64::prelude::{ColliderHandle, RigidBodyHandle};
 mod character;
 mod ecs;
 mod events;
+mod joint;
 mod query;
 mod world;
 
 pub use character::{CharacterMove2D, CharacterMover2D};
-pub use ecs::PhysicsBridge2D;
+pub use ecs::{JointSync2D, PhysicsBridge2D};
 pub use events::{ContactEvent2D, ContactPhase};
+pub use joint::{JointDesc2D, JointId2D, JointKind2D, JointMotor2D};
 pub use query::RayHit2D;
 pub use world::{BodyKind, ColliderDesc2D, ColliderShape2D, PhysicsWorld2D};
 

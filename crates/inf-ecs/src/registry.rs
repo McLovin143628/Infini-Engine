@@ -11,11 +11,12 @@ use bevy_ecs::reflect::ReflectComponent;
 use bevy_reflect::{TypePath, TypeRegistry};
 
 use crate::components::{
-    AnimPlayer, AnimStateMachine, AtlasRect, BillboardMode, BodyKind2D, BodyKind3D, Camera,
-    CharacterController2D, CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind,
-    ColliderShape3DKind, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice, PcgVolume,
-    Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, Sprite, Terrain, Text2D, TextAlign, Tilemap,
-    Transform, Visibility,
+    AnimPlayer, AnimStateMachine, AtlasRect, AudioListener, AudioSource, BillboardMode, BodyKind2D,
+    BodyKind3D, Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D,
+    ColliderShape2DKind, ColliderShape3DKind, CombineRule, DistanceModel, Joint2D, Joint3D,
+    JointKind2D, JointKind3D, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice,
+    PcgVolume, Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, Sprite, Terrain, Text2D,
+    TextAlign, Tilemap, Transform, Visibility,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -58,8 +59,12 @@ impl ComponentRegistry {
         types.register::<ColliderShape2DKind>();
         types.register::<BodyKind3D>();
         types.register::<ColliderShape3DKind>();
+        types.register::<CombineRule>();
+        types.register::<JointKind2D>();
+        types.register::<JointKind3D>();
         types.register::<BillboardMode>();
         types.register::<AtlasRect>();
+        types.register::<DistanceModel>();
         types.register::<String>();
 
         // `Name` is reflected (for completeness) but edited via a dedicated
@@ -100,6 +105,10 @@ impl ComponentRegistry {
             RigidBody3D => "Rigid Body 3D",
             Collider3D => "Collider 3D",
             CharacterController3D => "Character Controller 3D",
+            Joint2D => "Joint 2D",
+            Joint3D => "Joint 3D",
+            AudioSource => "Audio Source",
+            AudioListener => "Audio Listener",
         }
 
         Self { types, editable }
@@ -147,7 +156,7 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        assert_eq!(reg.editable().len(), 22);
+        assert_eq!(reg.editable().len(), 26);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

@@ -1,6 +1,8 @@
 //! [`PhysicsWorld2D`]: the fixed-step 2D rigid-body world.
 
 use glam::DVec2;
+use rapier2d_f64::dynamics::CoefficientCombineRule;
+use rapier2d_f64::geometry::{Group, InteractionGroups, InteractionTestMode};
 use rapier2d_f64::prelude::{
     Aabb, ActiveCollisionTypes, ActiveEvents, BroadPhaseBvh, CCDSolver, ColliderBuilder,
     ColliderSet, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet,
@@ -10,8 +12,29 @@ use rapier2d_f64::prelude::{
 
 use super::character::{CharacterMove2D, CharacterMover2D};
 use super::events::{ContactEvent2D, EventCollector};
+use super::joint::{JointDesc2D, JointId2D};
 use super::query::RayHit2D;
 use super::{BodyId, ColliderId};
+use crate::filtering::{CollisionLayers, CombineRule};
+
+/// Map facade collision layers onto rapier's symmetric interaction groups.
+pub(crate) fn to_interaction_groups(layers: CollisionLayers) -> InteractionGroups {
+    InteractionGroups::new(
+        Group::from_bits_truncate(layers.memberships),
+        Group::from_bits_truncate(layers.filter),
+        InteractionTestMode::And,
+    )
+}
+
+/// Map a facade combine rule onto rapier's `CoefficientCombineRule`.
+pub(crate) fn to_combine_rule(rule: CombineRule) -> CoefficientCombineRule {
+    match rule {
+        CombineRule::Average => CoefficientCombineRule::Average,
+        CombineRule::Min => CoefficientCombineRule::Min,
+        CombineRule::Multiply => CoefficientCombineRule::Multiply,
+        CombineRule::Max => CoefficientCombineRule::Max,
+    }
+}
 
 /// The kind of a rigid body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,11 +105,17 @@ pub struct ColliderDesc2D {
     pub sensor: bool,
     /// Offset of the collider from its parent body's origin, in the body frame.
     pub local_translation: DVec2,
+    /// Bitmask collision layers (P12.1). Default = interact with everything.
+    pub layers: CollisionLayers,
+    /// How this collider's friction combines with a contacting collider's (P12.1).
+    pub friction_combine: CombineRule,
+    /// How this collider's restitution combines with a contacting collider's.
+    pub restitution_combine: CombineRule,
 }
 
 impl ColliderDesc2D {
     /// A solid collider with engine-default material (friction 0.5, no
-    /// restitution, unit density).
+    /// restitution, unit density, all layers, `Average` combine rules).
     pub fn new(shape: ColliderShape2D) -> Self {
         Self {
             shape,
@@ -95,6 +124,9 @@ impl ColliderDesc2D {
             density: 1.0,
             sensor: false,
             local_translation: DVec2::ZERO,
+            layers: CollisionLayers::default(),
+            friction_combine: CombineRule::default(),
+            restitution_combine: CombineRule::default(),
         }
     }
 
@@ -121,6 +153,21 @@ impl ColliderDesc2D {
     /// Offset the collider from its body's origin, in the body frame.
     pub fn local_translation(mut self, offset: DVec2) -> Self {
         self.local_translation = offset;
+        self
+    }
+    /// Set the collision layers (membership + filter masks).
+    pub fn layers(mut self, layers: CollisionLayers) -> Self {
+        self.layers = layers;
+        self
+    }
+    /// Set the friction combine rule.
+    pub fn friction_combine(mut self, rule: CombineRule) -> Self {
+        self.friction_combine = rule;
+        self
+    }
+    /// Set the restitution combine rule.
+    pub fn restitution_combine(mut self, rule: CombineRule) -> Self {
+        self.restitution_combine = rule;
         self
     }
 }
@@ -430,6 +477,69 @@ impl PhysicsWorld2D {
         }
     }
 
+    /// Enable/disable Continuous Collision Detection for this body (P12.1). CCD
+    /// stops a fast small body from tunnelling through a thin static wall in a
+    /// single step, at extra solver cost — enable it for bullets/projectiles.
+    pub fn set_body_ccd(&mut self, body: BodyId, enabled: bool) -> bool {
+        if let Some(rb) = self.bodies.get_mut(body.0) {
+            rb.enable_ccd(enabled);
+            true
+        } else {
+            false
+        }
+    }
+
+    // ── Joints (P12.1) ────────────────────────────────────────────────────────
+
+    /// Create a joint linking `body1` and `body2` per `desc`. Returns `None` if
+    /// either body handle is invalid. Both bodies are woken.
+    pub fn add_joint(
+        &mut self,
+        body1: BodyId,
+        body2: BodyId,
+        desc: JointDesc2D,
+    ) -> Option<JointId2D> {
+        if !self.bodies.contains(body1.0) || !self.bodies.contains(body2.0) {
+            return None;
+        }
+        let handle = self
+            .impulse_joints
+            .insert(body1.0, body2.0, desc.to_generic(), true);
+        Some(JointId2D(handle))
+    }
+
+    /// Destroy a joint. Returns `false` if the handle was already invalid.
+    pub fn remove_joint(&mut self, joint: JointId2D) -> bool {
+        self.impulse_joints.remove(joint.0, true).is_some()
+    }
+
+    /// Does this joint still exist?
+    pub fn contains_joint(&self, joint: JointId2D) -> bool {
+        self.impulse_joints.get(joint.0).is_some()
+    }
+
+    /// Every live joint handle, sorted deterministically by handle.
+    pub fn joint_ids(&self) -> Vec<JointId2D> {
+        let mut ids: Vec<JointId2D> = self
+            .impulse_joints
+            .iter()
+            .map(|(h, _)| JointId2D(h))
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The two bodies a joint connects (canonicalized `body_a <= body_b`), or
+    /// `None` if the handle is invalid.
+    pub fn joint_bodies(&self, joint: JointId2D) -> Option<(BodyId, BodyId)> {
+        let j = self.impulse_joints.get(joint.0)?;
+        let (mut a, mut b) = (BodyId(j.body1()), BodyId(j.body2()));
+        if b < a {
+            std::mem::swap(&mut a, &mut b);
+        }
+        Some((a, b))
+    }
+
     // ── Colliders ─────────────────────────────────────────────────────────────
 
     /// Attach a collider to a body. Returns `None` if the body handle is invalid.
@@ -443,6 +553,9 @@ impl PhysicsWorld2D {
             .density(desc.density)
             .sensor(desc.sensor)
             .translation(desc.local_translation)
+            .collision_groups(to_interaction_groups(desc.layers))
+            .friction_combine_rule(to_combine_rule(desc.friction_combine))
+            .restitution_combine_rule(to_combine_rule(desc.restitution_combine))
             .active_events(ActiveEvents::COLLISION_EVENTS)
             // Report every body-type pairing, not just rapier's dynamic-involving
             // default — game triggers routinely involve kinematic-vs-static and

@@ -54,6 +54,22 @@ use crate::scene::SceneDoc;
 ///   `skeletal_components_serde_round_trip` guard pinned the gap); v5 is where
 ///   they first persist. Older v1..v4 payloads load with all five slots
 ///   defaulted (see [`decode`] + [`SceneFileV4`]).
+///
+/// # v6 persistence gap (P12.1 — joints, DEFERRED)
+///
+/// P12.1 added the `Joint2D` / `Joint3D` components ([`inf_ecs::components::Joint3D`]).
+/// They are **not** yet slots on [`EntityRecord`] — persisting them is a pure
+/// **append** (a `joint_2d` / `joint_3d` `Option<_>` slot, both `#[serde(default)]`,
+/// exactly like the v3 physics slots) that will bump this constant to **v6**. It is
+/// deliberately deferred this batch: joints round-trip through the **live** ECS and
+/// the physics bridge (so Simulate/PIE joints work in-session), but a saved
+/// `.inf_lvl` does not yet carry them. The component's own serialization is already
+/// disk-ready — including the `#[reflect(ignore)]` `other` entity ref, which serde
+/// **does** persist — and is pinned by the `joint_3d_serde_round_trip_including_entity_ref`
+/// guard test in `inf-ecs`, so the eventual v6 slot is a mechanical append with no
+/// format churn. The collision-layer / combine-rule / CCD fields added in the same
+/// batch are `#[serde(default)]` extensions of the **existing** `Collider*` /
+/// `RigidBody*` slots, so they persist today with no version bump.
 pub const SCHEMA_VERSION: u32 = 5;
 
 /// File-level simulation settings (P9.5 · schema v3). Replaces the player's

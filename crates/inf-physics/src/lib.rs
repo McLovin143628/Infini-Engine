@@ -60,9 +60,15 @@
 
 pub mod d2;
 pub mod d3;
+mod filtering;
 mod stepper;
 
+pub use filtering::{CollisionLayers, CombineRule};
 pub use stepper::FixedStepper;
+
+// The pure ragdoll-setup helper (P12.1): a humanoid skeleton → body/collider/
+// joint descriptors the caller (or a future editor tool) can spawn.
+pub mod ragdoll;
 
 // Ergonomic re-exports of the 2D facade at the crate root. These are safe to hoist
 // because every 2D type is `*2D`/`*2`-suffixed or clearly 2D-named; the `d3`
@@ -76,6 +82,9 @@ pub use d2::{
 // `ContactPhase` is shared with d2 and hoisted once, above.
 pub use d3::{
     BodyDesc3D, BodyId3D, BodyKind3D, CharacterMove3D, CharacterMover3D, ColliderDesc3D,
-    ColliderId3D, ColliderShape3D, ContactEvent3D, EntitySync3D, PhysicsBridge3D, PhysicsWorld3D,
-    PoseWriteback3D, RayHit3D,
+    ColliderId3D, ColliderShape3D, ContactEvent3D, EntitySync3D, JointDesc3D, JointId3D,
+    JointKind3D, JointMotor3D, PhysicsBridge3D, PhysicsWorld3D, PoseWriteback3D, RayHit3D,
 };
+
+// Ergonomic re-exports of the 2D joint facade (`*2D`-suffixed).
+pub use d2::{JointDesc2D, JointId2D, JointKind2D, JointMotor2D};

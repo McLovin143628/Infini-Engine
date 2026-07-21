@@ -15,12 +15,14 @@ use rapier3d_f64::prelude::{ColliderHandle, RigidBodyHandle};
 mod character;
 mod ecs;
 mod events;
+mod joint;
 mod query;
 mod world;
 
 pub use character::{CharacterMove3D, CharacterMover3D};
-pub use ecs::{BodyDesc3D, EntitySync3D, PhysicsBridge3D, PoseWriteback3D};
+pub use ecs::{BodyDesc3D, EntitySync3D, JointSync3D, PhysicsBridge3D, PoseWriteback3D};
 pub use events::ContactEvent3D;
+pub use joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
 pub use query::RayHit3D;
 pub use world::{BodyKind3D, ColliderDesc3D, ColliderShape3D, PhysicsWorld3D};
 

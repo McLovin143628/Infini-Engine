@@ -838,6 +838,11 @@ pub struct RigidBody2D {
     /// Angular velocity decay per second.
     #[serde(default)]
     pub angular_damping: f64,
+    /// Continuous Collision Detection (P12.1): stops a fast body from tunnelling
+    /// through thin geometry in one step, at extra solver cost. Enable for
+    /// bullets/projectiles.
+    #[serde(default)]
+    pub ccd_enabled: bool,
 }
 
 fn default_gravity_scale() -> f64 {
@@ -852,6 +857,7 @@ impl Default for RigidBody2D {
             fixed_rotation: false,
             linear_damping: 0.0,
             angular_damping: 0.0,
+            ccd_enabled: false,
         }
     }
 }
@@ -873,6 +879,26 @@ pub enum ColliderShape2DKind {
     /// Vertical capsule; segment half-length = `half_extents.y`, swept by
     /// [`Collider2D::radius`] (half_extents.x ignored).
     Capsule,
+}
+
+/// How two colliders' friction (or restitution) coefficients combine into the
+/// effective value for their contact (P12.1). A flat reflected enum (Details
+/// surfaces it as a dropdown), mirroring [`inf_physics::CombineRule`].
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CombineRule {
+    /// `(a + b) / 2` — the default, balanced and intuitive.
+    #[default]
+    Average,
+    /// `min(a, b)` — "slippery wins".
+    Min,
+    /// `a * b` — both must be high.
+    Multiply,
+    /// `max(a, b)` — "sticky/bouncy wins".
+    Max,
+}
+
+fn default_collision_mask() -> u32 {
+    u32::MAX
 }
 
 /// A 2D collider (P8.3b). Attaches to the entity's [`RigidBody2D`] (or, if the
@@ -907,6 +933,23 @@ pub struct Collider2D {
     /// A trigger volume: detects overlaps but generates no contact force.
     #[serde(default)]
     pub sensor: bool,
+    /// Collision-layer membership bitmask (P12.1): which of the 32 named layers
+    /// this collider belongs to. Default = all (`u32::MAX`). Raw `u32` in Details
+    /// (a named-bitmask widget is a follow-up); layers are named per-project in
+    /// `.infinity/collision_layers.toml`.
+    #[serde(default = "default_collision_mask")]
+    pub collision_memberships: u32,
+    /// Collision-layer filter bitmask (P12.1): which layers this collider will
+    /// interact with. Default = all. Two colliders touch iff each is in the
+    /// other's filter.
+    #[serde(default = "default_collision_mask")]
+    pub collision_filter: u32,
+    /// How this collider's friction combines with a contacting collider's (P12.1).
+    #[serde(default)]
+    pub friction_combine: CombineRule,
+    /// How this collider's restitution combines with a contacting collider's.
+    #[serde(default)]
+    pub restitution_combine: CombineRule,
 }
 
 fn default_half_extents() -> Vec2d {
@@ -933,6 +976,10 @@ impl Default for Collider2D {
             restitution: 0.0,
             density: default_density(),
             sensor: false,
+            collision_memberships: default_collision_mask(),
+            collision_filter: default_collision_mask(),
+            friction_combine: CombineRule::Average,
+            restitution_combine: CombineRule::Average,
         }
     }
 }
@@ -1017,6 +1064,11 @@ pub struct RigidBody3D {
     /// Angular velocity decay per second.
     #[serde(default)]
     pub angular_damping: f64,
+    /// Continuous Collision Detection (P12.1): stops a fast body from tunnelling
+    /// through thin geometry in one step, at extra solver cost. Enable for
+    /// bullets/projectiles.
+    #[serde(default)]
+    pub ccd_enabled: bool,
 }
 
 impl Default for RigidBody3D {
@@ -1027,6 +1079,7 @@ impl Default for RigidBody3D {
             fixed_rotation: false,
             linear_damping: 0.0,
             angular_damping: 0.0,
+            ccd_enabled: false,
         }
     }
 }
@@ -1083,6 +1136,23 @@ pub struct Collider3D {
     /// A trigger volume: detects overlaps but generates no contact force.
     #[serde(default)]
     pub sensor: bool,
+    /// Collision-layer membership bitmask (P12.1): which of the 32 named layers
+    /// this collider belongs to. Default = all (`u32::MAX`). Raw `u32` in Details
+    /// (a named-bitmask widget is a follow-up); layers are named per-project in
+    /// `.infinity/collision_layers.toml`.
+    #[serde(default = "default_collision_mask")]
+    pub collision_memberships: u32,
+    /// Collision-layer filter bitmask (P12.1): which layers this collider will
+    /// interact with. Default = all. Two colliders touch iff each is in the
+    /// other's filter.
+    #[serde(default = "default_collision_mask")]
+    pub collision_filter: u32,
+    /// How this collider's friction combines with a contacting collider's (P12.1).
+    #[serde(default)]
+    pub friction_combine: CombineRule,
+    /// How this collider's restitution combines with a contacting collider's.
+    #[serde(default)]
+    pub restitution_combine: CombineRule,
 }
 
 fn default_half_extents_3d() -> Vec3d {
@@ -1100,6 +1170,10 @@ impl Default for Collider3D {
             restitution: 0.0,
             density: default_density(),
             sensor: false,
+            collision_memberships: default_collision_mask(),
+            collision_filter: default_collision_mask(),
+            friction_combine: CombineRule::Average,
+            restitution_combine: CombineRule::Average,
         }
     }
 }
@@ -1131,6 +1205,222 @@ impl Default for CharacterController3D {
             max_slope_deg: default_max_slope_deg(),
             snap_to_ground: default_snap_to_ground(),
             offset: default_mover_offset(),
+        }
+    }
+}
+
+// ── Joints (P12.1) ──────────────────────────────────────────────────────────
+//
+// A `Joint2D`/`Joint3D` links its entity's body to ANOTHER entity's body,
+// mirroring the flat-struct precedent of the collider components (a `kind` enum
+// selects the family; sibling fields carry the per-family numeric params, so the
+// reflection Details grid can edit them). The other body is referenced by its
+// stable `Guid` in `other`, which is `#[reflect(ignore)]` (no entity-ref widget
+// yet — a documented follow-up) but still serde-persisted.
+
+fn default_joint_axis() -> Vec3d {
+    Vec3d::new(0.0, 1.0, 0.0)
+}
+fn default_joint_axis_2d() -> Vec2d {
+    Vec2d::new(1.0, 0.0)
+}
+fn default_motor_damping() -> f64 {
+    1.0
+}
+fn default_motor_max_force() -> f64 {
+    f64::MAX
+}
+fn default_rope_length() -> f64 {
+    1.0
+}
+
+/// The joint family for a [`Joint3D`]. A flat reflected enum (Details dropdown),
+/// mirroring [`inf_physics::JointKind3D`].
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum JointKind3D {
+    /// Weld the two bodies rigidly.
+    #[default]
+    Fixed,
+    /// A hinge about `axis` (angle limits + motor optional).
+    Revolute,
+    /// A slider along `axis` (distance limits + motor optional).
+    Prismatic,
+    /// A ball-and-socket (3-DOF rotation).
+    Spherical,
+    /// A rope: anchors kept within `max_distance`.
+    Distance,
+}
+
+/// A 3D joint (P12.1) linking this entity's [`RigidBody3D`] to `other`'s. The
+/// `PhysicsBridge3D` spawns/despawns it alongside the bodies.
+///
+/// Additive component: every field carries `#[serde(default)]`. **NOTE (v6
+/// persistence gap):** `Joint3D` is NOT yet in the `.inf_lvl` `EntityRecord`
+/// (that needs a schema bump to v6) — it round-trips through the live ECS and the
+/// physics bridge, but is not persisted to disk this batch. See
+/// `inf-editor-core::scene::serialize` (SCHEMA_VERSION doc + guard-test comment).
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Joint3D {
+    /// The OTHER body's entity `Guid`. `None` → the joint is unbound and the
+    /// bridge skips it. `#[reflect(ignore)]` (no ref-picker widget yet), still
+    /// serde-persisted.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub other: Option<Uuid>,
+    /// Fixed / Revolute / Prismatic / Spherical / Distance.
+    #[serde(default)]
+    pub kind: JointKind3D,
+    /// Anchor on this body, in its local frame.
+    #[serde(default)]
+    pub local_anchor: Vec3d,
+    /// Anchor on the other body, in its local frame.
+    #[serde(default)]
+    pub other_anchor: Vec3d,
+    /// Hinge/slider axis (Revolute/Prismatic), body-local. Default `+Y`.
+    #[serde(default = "default_joint_axis")]
+    pub axis: Vec3d,
+    /// Enable the `[limit_min, limit_max]` limits.
+    #[serde(default)]
+    pub limits_enabled: bool,
+    /// Lower limit (radians for Revolute, world units for Prismatic).
+    #[serde(default)]
+    pub limit_min: f64,
+    /// Upper limit.
+    #[serde(default)]
+    pub limit_max: f64,
+    /// Enable the motor (Revolute/Prismatic).
+    #[serde(default)]
+    pub motor_enabled: bool,
+    /// Motor target position (angle/distance).
+    #[serde(default)]
+    pub motor_target_pos: f64,
+    /// Motor target velocity.
+    #[serde(default)]
+    pub motor_target_vel: f64,
+    /// Motor stiffness (spring constant; `0` → a pure velocity motor).
+    #[serde(default)]
+    pub motor_stiffness: f64,
+    /// Motor damping.
+    #[serde(default = "default_motor_damping")]
+    pub motor_damping: f64,
+    /// Maximum motor force/torque.
+    #[serde(default = "default_motor_max_force")]
+    pub motor_max_force: f64,
+    /// Rope max length (Distance kind).
+    #[serde(default = "default_rope_length")]
+    pub max_distance: f64,
+}
+
+impl Default for Joint3D {
+    fn default() -> Self {
+        Self {
+            other: None,
+            kind: JointKind3D::Fixed,
+            local_anchor: Vec3d::ZERO,
+            other_anchor: Vec3d::ZERO,
+            axis: default_joint_axis(),
+            limits_enabled: false,
+            limit_min: 0.0,
+            limit_max: 0.0,
+            motor_enabled: false,
+            motor_target_pos: 0.0,
+            motor_target_vel: 0.0,
+            motor_stiffness: 0.0,
+            motor_damping: default_motor_damping(),
+            motor_max_force: default_motor_max_force(),
+            max_distance: default_rope_length(),
+        }
+    }
+}
+
+/// The joint family for a [`Joint2D`]. In 2D the only hinge is Revolute (about
+/// the implicit Z axis); Spherical does not exist. Mirrors
+/// [`inf_physics::JointKind2D`].
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum JointKind2D {
+    /// Weld the two bodies rigidly.
+    #[default]
+    Fixed,
+    /// A hinge about the Z axis (angle limits + motor optional).
+    Revolute,
+    /// A slider along `axis` (distance limits + motor optional).
+    Prismatic,
+    /// A rope: anchors kept within `max_distance`.
+    Distance,
+}
+
+/// A 2D joint (P12.1) linking this entity's [`RigidBody2D`] to `other`'s. The
+/// `d2` mirror of [`Joint3D`] (same v6 persistence-gap note applies).
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Joint2D {
+    /// The OTHER body's entity `Guid`. `None` → unbound (skipped).
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub other: Option<Uuid>,
+    /// Fixed / Revolute / Prismatic / Distance.
+    #[serde(default)]
+    pub kind: JointKind2D,
+    /// Anchor on this body (local, XY).
+    #[serde(default)]
+    pub local_anchor: Vec2d,
+    /// Anchor on the other body (local, XY).
+    #[serde(default)]
+    pub other_anchor: Vec2d,
+    /// Slider axis (Prismatic), body-local. Default `+X`.
+    #[serde(default = "default_joint_axis_2d")]
+    pub axis: Vec2d,
+    /// Enable the `[limit_min, limit_max]` limits.
+    #[serde(default)]
+    pub limits_enabled: bool,
+    /// Lower limit (radians for Revolute, world units for Prismatic).
+    #[serde(default)]
+    pub limit_min: f64,
+    /// Upper limit.
+    #[serde(default)]
+    pub limit_max: f64,
+    /// Enable the motor.
+    #[serde(default)]
+    pub motor_enabled: bool,
+    /// Motor target position.
+    #[serde(default)]
+    pub motor_target_pos: f64,
+    /// Motor target velocity.
+    #[serde(default)]
+    pub motor_target_vel: f64,
+    /// Motor stiffness (`0` → velocity motor).
+    #[serde(default)]
+    pub motor_stiffness: f64,
+    /// Motor damping.
+    #[serde(default = "default_motor_damping")]
+    pub motor_damping: f64,
+    /// Maximum motor force/torque.
+    #[serde(default = "default_motor_max_force")]
+    pub motor_max_force: f64,
+    /// Rope max length (Distance kind).
+    #[serde(default = "default_rope_length")]
+    pub max_distance: f64,
+}
+
+impl Default for Joint2D {
+    fn default() -> Self {
+        Self {
+            other: None,
+            kind: JointKind2D::Fixed,
+            local_anchor: Vec2d::ZERO,
+            other_anchor: Vec2d::ZERO,
+            axis: default_joint_axis_2d(),
+            limits_enabled: false,
+            limit_min: 0.0,
+            limit_max: 0.0,
+            motor_enabled: false,
+            motor_target_pos: 0.0,
+            motor_target_vel: 0.0,
+            motor_stiffness: 0.0,
+            motor_damping: default_motor_damping(),
+            motor_max_force: default_motor_max_force(),
+            max_distance: default_rope_length(),
         }
     }
 }
@@ -1702,6 +1992,138 @@ impl AttachedTo {
     }
 }
 
+// ── Audio (P12.3) ───────────────────────────────────────────────────────────
+
+/// How an [`AudioSource`]'s loudness falls off with distance from the listener.
+/// Mirrors `inf_audio::AttenuationModel` 1:1 (the sim translates this to the
+/// engine model); kept local so the ECS crate does not depend on the audio crate.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DistanceModel {
+    /// Linear ramp from full volume at `min_distance` to silence at `max_distance`.
+    #[default]
+    Linear,
+    /// Inverse-distance falloff (`min_distance / distance`).
+    Inverse,
+    /// Exponential falloff (`(min_distance / distance)^rolloff`), steeper than
+    /// inverse for `rolloff > 1`.
+    Exponential,
+}
+
+/// A spatialized sound emitter (P12.3). Playback is **output-only** and lives
+/// outside the deterministic world: the sim reads this component to emit audio
+/// commands (autoplay on the first tick, or Blueprint `audio.*` nodes), which are
+/// drained host-side into the long-lived `inf_audio::AudioEngine`. Nothing here is
+/// a device handle — only the authoring intent.
+///
+/// Additive component: every field carries `#[serde(default)]`. Like the anim
+/// components it is **not yet an `EntityRecord` slot** — the v6 `.inf_lvl`
+/// migration is pinned (`audio_components_serde_round_trip` documents the gap); no
+/// schema bump is made here.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct AudioSource {
+    /// The `.inf_audio` clip GUID to play; `None` → silent. `#[reflect(ignore)]`
+    /// + serde-persisted (assigned by drag), like [`AnimPlayer::clip`].
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub clip: Option<Uuid>,
+    /// Named mixer bus (see `inf_audio::MixerConfig`). Defaults to `"sfx"`.
+    #[serde(default = "default_audio_bus")]
+    pub bus: String,
+    /// Base linear volume before bus/master/spatial/occlusion scaling.
+    #[serde(default = "default_audio_volume")]
+    pub volume: f64,
+    /// Playback-rate factor (`1.0` = normal pitch).
+    #[serde(default = "default_audio_pitch")]
+    pub pitch: f64,
+    /// Loop the whole clip (`true`) or play once (`false`).
+    #[serde(default)]
+    pub looping: bool,
+    /// Spatialize (`true`) using the emitter's world transform, or play 2D
+    /// (`false`).
+    #[serde(default = "default_audio_spatial")]
+    pub spatial: bool,
+    /// At/within this distance the emitter is at full volume.
+    #[serde(default = "default_audio_min_distance")]
+    pub min_distance: f64,
+    /// At/beyond this distance the emitter is silent.
+    #[serde(default = "default_audio_max_distance")]
+    pub max_distance: f64,
+    /// Distance-attenuation curve.
+    #[serde(default = "default_audio_distance_model")]
+    pub distance_model: DistanceModel,
+    /// Falloff exponent for [`DistanceModel::Exponential`] (ignored otherwise).
+    #[serde(default = "default_audio_rolloff")]
+    pub rolloff: f64,
+    /// Apply a physics-raycast occlusion cut when the listener's line of sight to
+    /// this emitter is obstructed (the sim's audio step does one 3D ray).
+    #[serde(default)]
+    pub occlusion: bool,
+    /// Start playing automatically on the first tick after BeginPlay.
+    #[serde(default)]
+    pub autoplay: bool,
+}
+
+fn default_audio_bus() -> String {
+    "sfx".to_string()
+}
+fn default_audio_volume() -> f64 {
+    1.0
+}
+fn default_audio_pitch() -> f64 {
+    1.0
+}
+fn default_audio_spatial() -> bool {
+    true
+}
+fn default_audio_min_distance() -> f64 {
+    1.0
+}
+fn default_audio_max_distance() -> f64 {
+    100.0
+}
+fn default_audio_rolloff() -> f64 {
+    1.0
+}
+fn default_audio_distance_model() -> DistanceModel {
+    DistanceModel::Inverse
+}
+
+impl Default for AudioSource {
+    fn default() -> Self {
+        Self {
+            clip: None,
+            bus: default_audio_bus(),
+            volume: 1.0,
+            pitch: 1.0,
+            looping: false,
+            spatial: true,
+            min_distance: 1.0,
+            max_distance: 100.0,
+            distance_model: DistanceModel::Inverse,
+            rolloff: 1.0,
+            occlusion: false,
+            autoplay: false,
+        }
+    }
+}
+
+/// The active spatial-audio listener (P12.3). The sim picks the **first active**
+/// listener each tick to place the audio listener pose; with none active it falls
+/// back to the editor/play camera pose (documented in the sim audio step). Only
+/// one should be active at a time.
+///
+/// Additive component; shares the pinned v6 persistence gap with [`AudioSource`].
+#[derive(
+    Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
+#[reflect(Component, Default)]
+pub struct AudioListener {
+    /// Whether this entity is the active listener.
+    #[serde(default)]
+    pub active: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1981,6 +2403,7 @@ mod tests {
             fixed_rotation: true,
             linear_damping: 0.1,
             angular_damping: 0.2,
+            ccd_enabled: true,
         };
         let json = serde_json::to_string(&rb).unwrap();
         let back: RigidBody2D = serde_json::from_str(&json).unwrap();
@@ -2003,6 +2426,10 @@ mod tests {
             restitution: 0.2,
             density: 2.0,
             sensor: true,
+            collision_memberships: 0b1010,
+            collision_filter: 0b0110,
+            friction_combine: CombineRule::Min,
+            restitution_combine: CombineRule::Max,
         };
         let json = serde_json::to_string(&c).unwrap();
         let back: Collider2D = serde_json::from_str(&json).unwrap();
@@ -2039,6 +2466,7 @@ mod tests {
             fixed_rotation: true,
             linear_damping: 0.1,
             angular_damping: 0.2,
+            ccd_enabled: true,
         };
         let json = serde_json::to_string(&rb).unwrap();
         let back: RigidBody3D = serde_json::from_str(&json).unwrap();
@@ -2061,6 +2489,10 @@ mod tests {
             restitution: 0.2,
             density: 2.0,
             sensor: true,
+            collision_memberships: 0b1010,
+            collision_filter: 0b0110,
+            friction_combine: CombineRule::Min,
+            restitution_combine: CombineRule::Max,
         };
         let json = serde_json::to_string(&c).unwrap();
         let back: Collider3D = serde_json::from_str(&json).unwrap();
@@ -2087,6 +2519,52 @@ mod tests {
         let d: CharacterController3D = serde_json::from_str("{}").unwrap();
         assert_eq!(d, CharacterController3D::default());
         assert_eq!(d.max_slope_deg, 45.0);
+    }
+
+    #[test]
+    fn joint_3d_serde_round_trips_including_entity_ref() {
+        // GUARD (v6 persistence gap): `Joint3D` round-trips through serde — the
+        // `other` entity ref (which is `#[reflect(ignore)]`) IS serde-persisted, so
+        // the component itself is disk-ready. It is NOT yet wired into the
+        // `.inf_lvl` `EntityRecord` (that is the deferred v6 schema bump); this test
+        // pins that the component's own serialization is stable so the eventual
+        // record slot is a pure append. See `inf-editor-core::scene::serialize`.
+        let j = Joint3D {
+            other: Some(Uuid::from_u128(42)),
+            kind: JointKind3D::Revolute,
+            axis: Vec3d::new(0.0, 0.0, 1.0),
+            limits_enabled: true,
+            limit_min: -1.0,
+            limit_max: 1.0,
+            motor_enabled: true,
+            motor_target_vel: 3.0,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&j).unwrap();
+        let back: Joint3D = serde_json::from_str(&json).unwrap();
+        assert_eq!(j, back);
+        assert_eq!(back.other, Some(Uuid::from_u128(42)));
+        // Defaults: a Fixed, unbound joint.
+        let d: Joint3D = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, Joint3D::default());
+        assert_eq!(d.kind, JointKind3D::Fixed);
+        assert_eq!(d.other, None);
+        assert_eq!(d.motor_max_force, f64::MAX);
+    }
+
+    #[test]
+    fn joint_2d_serde_round_trips() {
+        let j = Joint2D {
+            other: Some(Uuid::from_u128(7)),
+            kind: JointKind2D::Distance,
+            max_distance: 3.5,
+            ..Default::default()
+        };
+        let back: Joint2D = serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
+        assert_eq!(j, back);
+        let d: Joint2D = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, Joint2D::default());
+        assert_eq!(d.kind, JointKind2D::Fixed);
     }
 
     #[test]
@@ -2164,6 +2642,48 @@ mod tests {
         assert!(d.looping && d.playing);
         let d: SkeletalMesh = serde_json::from_str("{}").unwrap();
         assert_eq!(d, SkeletalMesh::default());
+    }
+
+    #[test]
+    fn audio_components_serde_round_trip() {
+        // NOTE: like Terrain/PcgVolume and the anim components, `AudioSource`/
+        // `AudioListener` are NOT yet slots in the `.inf_lvl` `EntityRecord` — this
+        // component-level round-trip is all the persistence they have until the
+        // schema-v6 migration. This test pins that gap; no schema bump is made.
+        let src = AudioSource {
+            clip: Some(Uuid::from_u128(0x5000D)),
+            bus: "music".into(),
+            volume: 0.5,
+            pitch: 1.5,
+            looping: true,
+            spatial: true,
+            min_distance: 2.0,
+            max_distance: 40.0,
+            distance_model: DistanceModel::Exponential,
+            rolloff: 2.0,
+            occlusion: true,
+            autoplay: true,
+        };
+        let back: AudioSource =
+            serde_json::from_str(&serde_json::to_string(&src).unwrap()).unwrap();
+        assert_eq!(src, back);
+
+        let lis = AudioListener { active: true };
+        let back: AudioListener =
+            serde_json::from_str(&serde_json::to_string(&lis).unwrap()).unwrap();
+        assert_eq!(lis, back);
+
+        // A minimal payload fills the additive defaults (bus "sfx", unity volume/
+        // pitch, spatial, inverse falloff).
+        let d: AudioSource = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, AudioSource::default());
+        assert_eq!(d.bus, "sfx");
+        assert_eq!(d.volume, 1.0);
+        assert!(d.spatial);
+        assert_eq!(d.distance_model, DistanceModel::Inverse);
+        let d: AudioListener = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, AudioListener::default());
+        assert!(!d.active);
     }
 
     #[test]

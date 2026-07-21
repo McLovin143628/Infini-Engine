@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use glam::{DQuat, DVec2, DVec3, Vec2, Vec3};
 use inf_ecs::components::{
     Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, ComputedVisibility,
-    GlobalTransform, Light, Light2D, LightKind as EcsLightKind, Material, MeshRef, NineSlice,
-    PcgVolume, SkeletalMesh, Sprite, Terrain, Text2D, TextAlign, Tilemap,
+    GlobalTransform, Joint2D, Joint3D, Light, Light2D, LightKind as EcsLightKind, Material,
+    MeshRef, NineSlice, PcgVolume, SkeletalMesh, Sprite, Terrain, Text2D, TextAlign, Tilemap,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::scene::SceneDoc;
@@ -59,6 +59,9 @@ pub struct EngineHost {
     /// World-space 3D collider wireframes by GUID (P9.1), rebuilt each projection.
     /// Rendered as debug lines for the current selection only.
     collider_outlines_3d: HashMap<Uuid, ColliderDebug3D>,
+    /// World-space joint debug segments by GUID (P12.1), rebuilt each projection.
+    /// Rendered as debug lines for the current selection only (2D + 3D joints).
+    joint_lines: HashMap<Uuid, JointDebug>,
     /// GUIDs of the document's current selection (for collider debug draw —
     /// covers every selected entity, not just the mesh instances).
     selected_guids: Vec<Uuid>,
@@ -158,6 +161,12 @@ struct ColliderDebug3D {
     rotation: DQuat,
 }
 
+/// A selected entity's joint (P12.1), resolved to world-space debug segments: the
+/// anchor-to-anchor link plus a small cross marking each anchor.
+struct JointDebug {
+    segments: Vec<[DVec3; 2]>,
+}
+
 impl EngineHost {
     pub fn new(target: SurfaceTarget, width: u32, height: u32) -> Result<Self, String> {
         let (gpu, chain, renderer) = Self::build_gpu_stack(target, width, height)?;
@@ -180,6 +189,7 @@ impl EngineHost {
             guid_to_id: HashMap::new(),
             collider_outlines: HashMap::new(),
             collider_outlines_3d: HashMap::new(),
+            joint_lines: HashMap::new(),
             selected_guids: Vec::new(),
             synced_version: None,
             mode: ViewportMode::Perspective,
@@ -338,6 +348,7 @@ impl EngineHost {
         self.guid_to_id.clear();
         self.collider_outlines.clear();
         self.collider_outlines_3d.clear();
+        self.joint_lines.clear();
 
         let world = doc.world();
         let w = world.world();
@@ -503,6 +514,43 @@ impl EngineHost {
                 let (_, rotation, translation) = affine.to_scale_rotation_translation();
                 self.collider_outlines_3d
                     .insert(guid, project_collider_3d(col, translation, rotation));
+            }
+
+            // Joints cache world-space debug segments (P12.1): the anchor→anchor
+            // link + a cross at each anchor. Resolves the OTHER body's world pose
+            // via the doc's guid index. Drawn for the selection only.
+            let self_pose = || {
+                let affine = w
+                    .get::<GlobalTransform>(entity)
+                    .map(|g| g.0)
+                    .unwrap_or(glam::DAffine3::IDENTITY);
+                let (_, rot, tr) = affine.to_scale_rotation_translation();
+                (tr, rot)
+            };
+            let other_pose = |other: Uuid| -> Option<(DVec3, DQuat)> {
+                let oe = world.entity_of(other)?;
+                let affine = w.get::<GlobalTransform>(oe).map(|g| g.0)?;
+                let (_, rot, tr) = affine.to_scale_rotation_translation();
+                Some((tr, rot))
+            };
+            if let Some(j) = w.get::<Joint3D>(entity) {
+                if let Some(other) = j.other {
+                    if let Some((op, orot)) = other_pose(other) {
+                        let (sp, srot) = self_pose();
+                        let a = sp + srot * j.local_anchor.to_dvec3();
+                        let b = op + orot * j.other_anchor.to_dvec3();
+                        self.joint_lines.insert(guid, project_joint(a, b));
+                    }
+                }
+            } else if let Some(j) = w.get::<Joint2D>(entity) {
+                if let Some(other) = j.other {
+                    if let Some((op, orot)) = other_pose(other) {
+                        let (sp, srot) = self_pose();
+                        let a = sp + srot * DVec3::new(j.local_anchor.x, j.local_anchor.y, 0.0);
+                        let b = op + orot * DVec3::new(j.other_anchor.x, j.other_anchor.y, 0.0);
+                        self.joint_lines.insert(guid, project_joint(a, b));
+                    }
+                }
             }
 
             // Skeletal meshes (P11.1): the interactive viewport can't upload asset
@@ -694,6 +742,29 @@ fn project_collider_3d(col: &Collider3D, world_pos: DVec3, rotation: DQuat) -> C
         offset: col.offset.to_dvec3(),
         world_pos,
         rotation,
+    }
+}
+
+/// Build joint debug segments (world space): the anchor-to-anchor link plus a
+/// small axis cross at each anchor so the joint reads even when the anchors
+/// coincide with the body origins.
+fn project_joint(anchor_a: DVec3, anchor_b: DVec3) -> JointDebug {
+    const CROSS: f64 = 0.12;
+    let mut segments = vec![[anchor_a, anchor_b]];
+    for anchor in [anchor_a, anchor_b] {
+        for axis in [DVec3::X, DVec3::Y, DVec3::Z] {
+            segments.push([anchor - axis * CROSS, anchor + axis * CROSS]);
+        }
+    }
+    JointDebug { segments }
+}
+
+/// Stroke joint debug segments into the debug-line layer, rebasing each endpoint
+/// through the floating origin.
+fn draw_joint_lines(debug: &mut DebugDraw, origin: &FloatingOrigin, jd: &JointDebug) {
+    const JOINT_COLOR: [f32; 4] = [0.95, 0.75, 0.20, 1.0];
+    for [a, b] in &jd.segments {
+        debug.line(origin.to_render(*a), origin.to_render(*b), JOINT_COLOR);
     }
 }
 
@@ -1439,6 +1510,9 @@ impl EngineHost {
             }
             if let Some(cd) = self.collider_outlines_3d.get(guid) {
                 draw_collider_outline_3d(&mut self.scene.debug, &self.origin, cd);
+            }
+            if let Some(jd) = self.joint_lines.get(guid) {
+                draw_joint_lines(&mut self.scene.debug, &self.origin, jd);
             }
         }
 

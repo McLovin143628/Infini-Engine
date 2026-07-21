@@ -245,8 +245,13 @@ struct SceneFileV5 {
 }
 
 /// A frozen schema-v4 entity record (pre-P11.4: 3D + 2D + physics + actor +
-/// terrain + pcg, no anim/character components). Never changes.
-#[derive(Deserialize)]
+/// terrain + pcg, no anim/character components). The FIELD SET never changes;
+/// note the pre-1.0 caveat: these records embed the LIVE component types, so a
+/// component-layout change re-blesses the committed fixtures (the sanctioned
+/// `INF_BLESS_FIXTURES=1` path below) — true loads-forever begins when 1.0
+/// freezes component snapshots inside the versioned records.
+/// `Serialize` exists solely for that bless path (downgrade-writing fixtures).
+#[derive(Serialize, Deserialize)]
 struct EntityRecordV4 {
     guid: Uuid,
     name: String,
@@ -288,7 +293,7 @@ struct EntityRecordV4 {
 }
 
 /// A frozen schema-v4 file layout (carries the v3 file-level settings record).
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct SceneFileV4 {
     #[allow(dead_code)]
     schema_version: u32,
@@ -299,8 +304,9 @@ struct SceneFileV4 {
 }
 
 /// A frozen schema-v3 entity record (pre-P10.6: 3D + 2D + physics + actor, no
-/// terrain/pcg). Never changes.
-#[derive(Deserialize)]
+/// terrain/pcg). Field set frozen; same pre-1.0 embed-live-components caveat
+/// (and bless-path `Serialize`) as [`EntityRecordV4`].
+#[derive(Serialize, Deserialize)]
 struct EntityRecordV3 {
     guid: Uuid,
     name: String,
@@ -338,7 +344,7 @@ struct EntityRecordV3 {
 }
 
 /// A frozen schema-v3 file layout (carries the v3 file-level settings record).
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct SceneFileV3 {
     #[allow(dead_code)]
     schema_version: u32,
@@ -718,6 +724,93 @@ mod tests {
         let level = RuntimeLevel::decode(&original).unwrap();
         let reencoded = level.encode().unwrap();
         assert_eq!(original, reencoded, "v5 round trip must be byte-identical");
+    }
+
+    /// Re-bless the v3/v4 platformer fixtures after a (pre-1.0-sanctioned)
+    /// component-layout change: downgrade the committed v5 sample through the
+    /// frozen record types. Run with `INF_BLESS_FIXTURES=1`; inert otherwise.
+    #[test]
+    fn bless_downgraded_platformer_fixtures() {
+        if std::env::var("INF_BLESS_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let v5 = read_committed("samples/platformer-2d/Platformer.inf_lvl");
+        let level = RuntimeLevel::decode(&v5).unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+
+        let v4 = SceneFileV4 {
+            schema_version: 4,
+            title: level.title.clone(),
+            entities: level
+                .entities
+                .iter()
+                .map(|e| EntityRecordV4 {
+                    guid: e.guid,
+                    name: e.name.clone(),
+                    parent: e.parent,
+                    transform: e.transform,
+                    visible: e.visible,
+                    mesh: e.mesh,
+                    material: e.material,
+                    light: e.light,
+                    camera: e.camera,
+                    sprite: e.sprite.clone(),
+                    tilemap: e.tilemap.clone(),
+                    nine_slice: e.nine_slice.clone(),
+                    text2d: e.text2d.clone(),
+                    light_2d: e.light_2d,
+                    rigid_body_2d: e.rigid_body_2d,
+                    collider_2d: e.collider_2d,
+                    character_controller_2d: e.character_controller_2d,
+                    rigid_body_3d: e.rigid_body_3d,
+                    collider_3d: e.collider_3d,
+                    character_controller_3d: e.character_controller_3d,
+                    actor: e.actor,
+                    terrain: e.terrain.clone(),
+                    pcg_volume: e.pcg_volume.clone(),
+                })
+                .collect(),
+            settings: level.settings,
+        };
+        let bytes = bincode::serde::encode_to_vec(&v4, bincode_config()).unwrap();
+        assert_eq!(bytes[0], 4);
+        std::fs::write(fixtures.join("platformer_v4.inf_lvl"), &bytes).unwrap();
+
+        let v3 = SceneFileV3 {
+            schema_version: 3,
+            title: level.title.clone(),
+            entities: v4
+                .entities
+                .iter()
+                .map(|e| EntityRecordV3 {
+                    guid: e.guid,
+                    name: e.name.clone(),
+                    parent: e.parent,
+                    transform: e.transform,
+                    visible: e.visible,
+                    mesh: e.mesh,
+                    material: e.material,
+                    light: e.light,
+                    camera: e.camera,
+                    sprite: e.sprite.clone(),
+                    tilemap: e.tilemap.clone(),
+                    nine_slice: e.nine_slice.clone(),
+                    text2d: e.text2d.clone(),
+                    light_2d: e.light_2d,
+                    rigid_body_2d: e.rigid_body_2d,
+                    collider_2d: e.collider_2d,
+                    character_controller_2d: e.character_controller_2d,
+                    rigid_body_3d: e.rigid_body_3d,
+                    collider_3d: e.collider_3d,
+                    character_controller_3d: e.character_controller_3d,
+                    actor: e.actor,
+                })
+                .collect(),
+            settings: level.settings,
+        };
+        let bytes = bincode::serde::encode_to_vec(&v3, bincode_config()).unwrap();
+        assert_eq!(bytes[0], 3);
+        std::fs::write(fixtures.join("platformer_v3.inf_lvl"), &bytes).unwrap();
     }
 
     /// The frozen pre-P11.4 (schema v4) platformer, load-tested forever so v4

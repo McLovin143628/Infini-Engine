@@ -4,6 +4,7 @@
 
 mod app;
 mod assets;
+mod collision_layers;
 mod files;
 mod git;
 mod graph;
@@ -148,6 +149,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         assets::texture_set_slices,
         sorting::layers_get,
         sorting::layers_set,
+        collision_layers::collision_layers_get,
+        collision_layers::collision_layers_set,
         settings::project_settings_get,
         settings::project_settings_set,
         project::project_templates,

@@ -30,6 +30,7 @@ fn entity(guid: u128, kind: BodyKind3D, collider: ColliderDesc3D, pos: DVec3) ->
         collider: Some(collider),
         translation: pos,
         rotation: DQuat::IDENTITY,
+        joint: None,
     }
 }
 
@@ -86,6 +87,7 @@ fn kinematic_body_follows_externally_set_transform() {
         })),
         translation: DVec3::ZERO,
         rotation: DQuat::IDENTITY,
+        joint: None,
     };
 
     let mut bridge = PhysicsBridge3D::new(DVec3::ZERO);
