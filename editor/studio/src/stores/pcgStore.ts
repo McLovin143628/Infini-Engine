@@ -27,6 +27,7 @@ interface PcgState {
   lastEval: PcgEvaluateResult | null;
 
   init: () => Promise<void>;
+  close: () => Promise<void>;
   apply: (edits: BpEdit[], label: string) => Promise<void>;
   previewMove: (id: number, x: number, y: number) => void;
   nextId: () => number;
@@ -62,6 +63,29 @@ export const usePcgStore = create<PcgState>((set, get) => ({
       void get().compile();
     } catch (e) {
       console.error("pcg.init failed", e);
+    }
+  },
+
+  // Discard the editing surface: free the backend document (+ journal) and reset
+  // to an un-inited state so a later re-open starts fresh instead of leaking the
+  // old doc for the session. Called when the canvas panel unmounts (panel close).
+  close: async () => {
+    const doc = get().doc;
+    set({
+      doc: null,
+      ready: false,
+      issues: [],
+      canUndo: false,
+      canRedo: false,
+      compileResult: null,
+      lastEval: null,
+    });
+    if (doc) {
+      try {
+        await pcgIpc.close(doc.id);
+      } catch (e) {
+        console.error("pcg.close failed", e);
+      }
     }
   },
 

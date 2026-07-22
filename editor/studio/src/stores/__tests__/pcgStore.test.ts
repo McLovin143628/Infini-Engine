@@ -12,6 +12,7 @@ vi.mock("../../lib/ipc", () => ({
     list: vi.fn(),
     create: vi.fn(),
     get: vi.fn(),
+    close: vi.fn(),
     apply: vi.fn(),
     undo: vi.fn(),
     redo: vi.fn(),
@@ -71,6 +72,7 @@ beforeEach(() => {
   vi.mocked(pcg.registry).mockResolvedValue([scatterDef]);
   vi.mocked(pcg.list).mockResolvedValue([]);
   vi.mocked(pcg.create).mockResolvedValue(makeDoc());
+  vi.mocked(pcg.close).mockResolvedValue(undefined);
   vi.mocked(pcg.apply).mockResolvedValue({ issues: [], canUndo: true, canRedo: false });
   vi.mocked(pcg.compile).mockResolvedValue(compileResult);
   vi.mocked(pcg.evaluate).mockResolvedValue({ entity: "abc", placed: 42, issues: [], ok: true });
@@ -144,5 +146,23 @@ describe("save", () => {
     const file = await usePcgStore.getState().save("PCG Graph");
     expect(vi.mocked(pcg.save)).toHaveBeenCalledWith("pcg:1", "PCG Graph");
     expect(file).toBe("PCG_Graph.inf_pcg");
+  });
+});
+
+describe("close", () => {
+  it("frees the backend document and resets to an un-inited state", async () => {
+    await usePcgStore.getState().init();
+    expect(usePcgStore.getState().doc?.id).toBe("pcg:1");
+    await usePcgStore.getState().close();
+    expect(vi.mocked(pcg.close)).toHaveBeenCalledWith("pcg:1");
+    const s = usePcgStore.getState();
+    expect(s.doc).toBeNull();
+    expect(s.ready).toBe(false);
+    expect(s.compileResult).toBeNull();
+  });
+
+  it("is a no-op with no open document (never calls the backend)", async () => {
+    await usePcgStore.getState().close();
+    expect(vi.mocked(pcg.close)).not.toHaveBeenCalled();
   });
 });

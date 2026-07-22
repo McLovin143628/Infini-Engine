@@ -134,6 +134,17 @@ impl MaterialState {
         let mut store = self.inner.lock().map_err(|e| e.to_string())?;
         f(&mut store)
     }
+
+    /// Drop a document + its undo journal from the workspace. Idempotent
+    /// (closing an unknown id is a no-op). The shared preview `Thumbnailer` is
+    /// not per-doc, so it is left intact.
+    fn close(&self, id: &str) -> Result<(), String> {
+        self.with(|s| {
+            s.docs.remove(id);
+            s.journals.remove(id);
+            Ok(())
+        })
+    }
 }
 
 /// The material node palette.
@@ -200,6 +211,14 @@ pub async fn material_get(id: String, state: State<'_, MaterialState>) -> Result
             .cloned()
             .ok_or_else(|| format!("no material `{id}`"))
     })
+}
+
+/// Close a document: free its graph + undo journal so open material graphs don't
+/// accumulate for the life of the session. Called when the editing surface is
+/// discarded.
+#[tauri::command]
+pub async fn material_close(id: String, state: State<'_, MaterialState>) -> Result<(), String> {
+    state.close(&id)
 }
 
 /// Apply an edit batch; records one undo entry and re-validates.
@@ -377,4 +396,44 @@ pub async fn material_bake(
     };
     let asset_id = assets.write_texture_asset(&name, &tex)?;
     Ok(asset_id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Insert a bare document + journal directly (mimics `material_create`, which
+    /// needs a Tauri `State`/`AppHandle` we can't build in a unit test).
+    fn seed(state: &MaterialState, id: &str) {
+        state
+            .with(|s| {
+                s.docs.insert(
+                    id.to_string(),
+                    GraphDoc {
+                        id: id.to_string(),
+                        name: "T".into(),
+                        graph: inf_graph::Graph::empty(),
+                        viewport: None,
+                        modified_ms: 0,
+                    },
+                );
+                s.journals.insert(id.to_string(), GraphJournal::new(8));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn close_frees_the_doc_and_journal() {
+        let state = MaterialState::default();
+        seed(&state, "mat:1");
+        state.close("mat:1").unwrap();
+        state
+            .with(|s| {
+                assert!(s.docs.is_empty(), "doc freed");
+                assert!(s.journals.is_empty(), "journal freed");
+                Ok(())
+            })
+            .unwrap();
+    }
 }

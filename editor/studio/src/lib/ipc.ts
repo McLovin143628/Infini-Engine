@@ -437,6 +437,8 @@ export const graph = {
   list: (): Promise<BpDoc[]> => invoke<BpDoc[]>("graph_list"),
   create: (name: string): Promise<BpDoc> => invoke<BpDoc>("graph_create", { name }),
   get: (id: string): Promise<BpDoc> => invoke<BpDoc>("graph_get", { id }),
+  /** Free a document + its undo journal from the backend (leak fix). */
+  close: (id: string): Promise<void> => invoke("graph_close", { id }),
   apply: (id: string, edits: BpEdit[], label: string): Promise<GraphApplyResult> =>
     invoke<GraphApplyResult>("graph_apply", { id, edits, label }),
   undo: (id: string): Promise<BpDoc | null> => invoke<BpDoc | null>("graph_undo", { id }),
@@ -457,6 +459,8 @@ export const material = {
   list: (): Promise<BpDoc[]> => invoke<BpDoc[]>("material_list"),
   create: (name: string): Promise<BpDoc> => invoke<BpDoc>("material_create", { name }),
   get: (id: string): Promise<BpDoc> => invoke<BpDoc>("material_get", { id }),
+  /** Free a document + its undo journal from the backend (leak fix). */
+  close: (id: string): Promise<void> => invoke("material_close", { id }),
   apply: (id: string, edits: BpEdit[], label: string): Promise<GraphApplyResult> =>
     invoke<GraphApplyResult>("material_apply", { id, edits, label }),
   undo: (id: string): Promise<BpDoc | null> => invoke<BpDoc | null>("material_undo", { id }),
@@ -481,6 +485,8 @@ export const pcg = {
   list: (): Promise<BpDoc[]> => invoke<BpDoc[]>("pcg_list"),
   create: (name: string): Promise<BpDoc> => invoke<BpDoc>("pcg_create", { name }),
   get: (id: string): Promise<BpDoc> => invoke<BpDoc>("pcg_get", { id }),
+  /** Free a document + its undo journal from the backend (leak fix). */
+  close: (id: string): Promise<void> => invoke("pcg_close", { id }),
   apply: (id: string, edits: BpEdit[], label: string): Promise<GraphApplyResult> =>
     invoke<GraphApplyResult>("pcg_apply", { id, edits, label }),
   undo: (id: string): Promise<BpDoc | null> => invoke<BpDoc | null>("pcg_undo", { id }),
@@ -505,6 +511,8 @@ export const sm = {
   list: (): Promise<SmDoc[]> => invoke<SmDoc[]>("sm_list"),
   create: (name: string): Promise<SmDoc> => invoke<SmDoc>("sm_create", { name }),
   get: (id: string): Promise<SmDoc> => invoke<SmDoc>("sm_get", { id }),
+  /** Free a document from the backend workspace (leak fix). */
+  close: (id: string): Promise<void> => invoke("sm_close", { id }),
   /** Persist `doc` to a `.inf_sm` asset; returns the written file name. */
   save: (id: string, doc: SmDoc, name: string): Promise<string> =>
     invoke<string>("sm_save", { id, doc, name }),

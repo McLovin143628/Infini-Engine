@@ -28,6 +28,7 @@ interface BlueprintState {
   ready: boolean;
 
   init: () => Promise<void>;
+  close: () => Promise<void>;
   apply: (edits: BpEdit[], label: string) => Promise<void>;
   previewMove: (id: number, x: number, y: number) => void;
   nextId: () => number;
@@ -61,6 +62,29 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
       set({ registry, registryById, doc, ready: true });
     } catch (e) {
       console.error("blueprint.init failed", e);
+    }
+  },
+
+  // Discard the editing surface: free the backend document (+ journal) and reset
+  // to an un-inited state so a later re-open starts fresh instead of leaking the
+  // old doc for the session. Called when the canvas panel unmounts (panel close).
+  close: async () => {
+    const doc = get().doc;
+    set({
+      doc: null,
+      ready: false,
+      issues: [],
+      canUndo: false,
+      canRedo: false,
+      runResult: null,
+      generated: null,
+    });
+    if (doc) {
+      try {
+        await graphIpc.close(doc.id);
+      } catch (e) {
+        console.error("graph.close failed", e);
+      }
     }
   },
 

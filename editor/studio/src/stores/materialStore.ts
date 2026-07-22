@@ -25,6 +25,7 @@ interface MaterialState {
   showWgsl: boolean;
 
   init: () => Promise<void>;
+  close: () => Promise<void>;
   apply: (edits: BpEdit[], label: string) => Promise<void>;
   previewMove: (id: number, x: number, y: number) => void;
   nextId: () => number;
@@ -59,6 +60,28 @@ export const useMaterialStore = create<MaterialState>((set, get) => ({
       void get().compile();
     } catch (e) {
       console.error("material.init failed", e);
+    }
+  },
+
+  // Discard the editing surface: free the backend document (+ journal) and reset
+  // to an un-inited state so a later re-open starts fresh instead of leaking the
+  // old doc for the session. Called when the canvas panel unmounts (panel close).
+  close: async () => {
+    const doc = get().doc;
+    set({
+      doc: null,
+      ready: false,
+      issues: [],
+      canUndo: false,
+      canRedo: false,
+      compileResult: null,
+    });
+    if (doc) {
+      try {
+        await materialIpc.close(doc.id);
+      } catch (e) {
+        console.error("material.close failed", e);
+      }
     }
   },
 

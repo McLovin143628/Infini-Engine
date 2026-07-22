@@ -298,10 +298,16 @@ function compatible(a: PortType, b: PortType): boolean {
 
 export function PcgCanvas() {
   const init = usePcgStore((s) => s.init);
+  const close = usePcgStore((s) => s.close);
   const ready = usePcgStore((s) => s.ready);
+  // Init on mount; free the backend document on unmount (panel close) so open
+  // graphs don't accumulate for the session.
   useEffect(() => {
     void init();
-  }, [init]);
+    return () => {
+      void close();
+    };
+  }, [init, close]);
   if (!ready) return <div className="bp-canvas bp-canvas--loading">Loading PCG…</div>;
   return (
     <ReactFlowProvider>

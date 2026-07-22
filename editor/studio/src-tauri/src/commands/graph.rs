@@ -77,6 +77,16 @@ impl GraphState {
         let mut store = self.inner.lock().map_err(|e| e.to_string())?;
         f(&mut store)
     }
+
+    /// Drop a document + its undo journal from the workspace. Idempotent
+    /// (closing an unknown id is a no-op).
+    fn close(&self, id: &str) -> Result<(), String> {
+        self.with(|s| {
+            s.docs.remove(id);
+            s.journals.remove(id);
+            Ok(())
+        })
+    }
 }
 
 /// The node palette (registry) in insertion order.
@@ -129,6 +139,14 @@ pub async fn graph_get(id: String, state: State<'_, GraphState>) -> Result<Graph
             .cloned()
             .ok_or_else(|| format!("no graph `{id}`"))
     })
+}
+
+/// Close a document: free its graph + undo journal (the whole memory an open
+/// blueprint holds). Called when the editing surface is discarded so documents
+/// don't accumulate for the life of the session.
+#[tauri::command]
+pub async fn graph_close(id: String, state: State<'_, GraphState>) -> Result<(), String> {
+    state.close(&id)
 }
 
 /// Apply an edit batch (optimistic frontend already mirrored it). Records one
@@ -349,4 +367,66 @@ fn fmt_args(args: &[Value]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Insert a bare document + journal directly (mimics `graph_create`, which
+    /// needs a Tauri `State`/`AppHandle` we can't build in a unit test).
+    fn seed(state: &GraphState, id: &str) {
+        state
+            .with(|s| {
+                s.docs.insert(
+                    id.to_string(),
+                    GraphDoc {
+                        id: id.to_string(),
+                        name: "T".into(),
+                        graph: inf_graph::Graph::empty(),
+                        viewport: None,
+                        modified_ms: 0,
+                    },
+                );
+                s.journals.insert(id.to_string(), GraphJournal::new(8));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn close_frees_the_doc_and_journal() {
+        let state = GraphState::default();
+        seed(&state, "bp:1");
+        state
+            .with(|s| {
+                assert_eq!(s.docs.len(), 1);
+                assert_eq!(s.journals.len(), 1);
+                Ok(())
+            })
+            .unwrap();
+
+        state.close("bp:1").unwrap();
+
+        state
+            .with(|s| {
+                assert!(s.docs.is_empty(), "doc freed");
+                assert!(s.journals.is_empty(), "journal freed");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn close_unknown_id_is_a_noop() {
+        let state = GraphState::default();
+        seed(&state, "bp:1");
+        state.close("bp:does-not-exist").unwrap();
+        state
+            .with(|s| {
+                assert_eq!(s.docs.len(), 1, "unrelated doc untouched");
+                Ok(())
+            })
+            .unwrap();
+    }
 }

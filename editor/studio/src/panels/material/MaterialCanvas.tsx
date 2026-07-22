@@ -323,10 +323,16 @@ function compatible(a: PortType, b: PortType): boolean {
 
 export function MaterialCanvas() {
   const init = useMaterialStore((s) => s.init);
+  const close = useMaterialStore((s) => s.close);
   const ready = useMaterialStore((s) => s.ready);
+  // Init on mount; free the backend document on unmount (panel close) so open
+  // graphs don't accumulate for the session.
   useEffect(() => {
     void init();
-  }, [init]);
+    return () => {
+      void close();
+    };
+  }, [init, close]);
   if (!ready) return <div className="bp-canvas bp-canvas--loading">Loading material…</div>;
   return (
     <ReactFlowProvider>

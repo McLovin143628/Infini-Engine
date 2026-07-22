@@ -268,10 +268,16 @@ function compatible(a: PortType, b: PortType): boolean {
 
 export function BlueprintCanvas() {
   const init = useBlueprintStore((s) => s.init);
+  const close = useBlueprintStore((s) => s.close);
   const ready = useBlueprintStore((s) => s.ready);
+  // Init on mount; free the backend document on unmount (panel close) so open
+  // graphs don't accumulate for the session.
   useEffect(() => {
     void init();
-  }, [init]);
+    return () => {
+      void close();
+    };
+  }, [init, close]);
   if (!ready) return <div className="bp-canvas bp-canvas--loading">Loading blueprint…</div>;
   return (
     <ReactFlowProvider>

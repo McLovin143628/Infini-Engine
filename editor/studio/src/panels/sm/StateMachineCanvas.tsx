@@ -355,10 +355,16 @@ function CanvasInner() {
 
 export function StateMachineCanvas() {
   const init = useSmStore((s) => s.init);
+  const close = useSmStore((s) => s.close);
   const ready = useSmStore((s) => s.ready);
+  // Init on mount; free the backend document on unmount (panel close) so open
+  // state machines don't accumulate for the session.
   useEffect(() => {
     void init();
-  }, [init]);
+    return () => {
+      void close();
+    };
+  }, [init, close]);
   if (!ready) return <div className="bp-canvas bp-canvas--loading">Loading State Machine…</div>;
   return (
     <ReactFlowProvider>

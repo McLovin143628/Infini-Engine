@@ -11,6 +11,7 @@ vi.mock("../../lib/ipc", () => ({
     list: vi.fn(),
     create: vi.fn(),
     get: vi.fn(),
+    close: vi.fn(),
     save: vi.fn(),
     listClips: vi.fn(),
   },
@@ -35,6 +36,7 @@ function makeDoc(): SmDoc {
 const mockSm = sm as unknown as {
   list: ReturnType<typeof vi.fn>;
   create: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof vi.fn>;
   save: ReturnType<typeof vi.fn>;
   listClips: ReturnType<typeof vi.fn>;
 };
@@ -44,6 +46,7 @@ beforeEach(async () => {
   mockSm.list.mockResolvedValue([makeDoc()]);
   mockSm.listClips.mockResolvedValue([{ id: "c1", name: "Walk" }]);
   mockSm.save.mockResolvedValue("Main.inf_sm");
+  mockSm.close.mockResolvedValue(undefined);
   // Reset the store to a fresh, un-inited state.
   useSmStore.setState({ doc: null, clips: [], selectedTransition: null, ready: false, saving: false });
   await useSmStore.getState().init();
@@ -120,5 +123,13 @@ describe("smStore", () => {
     const file = await s.save("Hero");
     expect(file).toBe("Main.inf_sm");
     expect(mockSm.save).toHaveBeenCalledWith("sm1", useSmStore.getState().doc, "Hero");
+  });
+
+  it("close frees the backend document and resets to an un-inited state", async () => {
+    await useSmStore.getState().close();
+    expect(mockSm.close).toHaveBeenCalledWith("sm1");
+    const s = useSmStore.getState();
+    expect(s.doc).toBeNull();
+    expect(s.ready).toBe(false);
   });
 });

@@ -13,6 +13,7 @@ vi.mock("../../lib/ipc", () => ({
     list: vi.fn(),
     create: vi.fn(),
     get: vi.fn(),
+    close: vi.fn(),
     apply: vi.fn(),
     undo: vi.fn(),
     redo: vi.fn(),
@@ -94,6 +95,7 @@ beforeEach(() => {
   vi.mocked(material.registry).mockResolvedValue([slabDef]);
   vi.mocked(material.list).mockResolvedValue([]);
   vi.mocked(material.create).mockResolvedValue(makeDoc());
+  vi.mocked(material.close).mockResolvedValue(undefined);
   vi.mocked(material.apply).mockResolvedValue({ issues: [], canUndo: true, canRedo: false });
   vi.mocked(material.compile).mockResolvedValue(compileResult);
 });
@@ -164,5 +166,23 @@ describe("apply", () => {
     await useMaterialStore.getState().apply([{ kind: "move-node", id: 1, x: 99, y: 99 }], "Move");
     expect(vi.mocked(material.apply)).toHaveBeenCalled();
     expect(vi.mocked(material.compile)).not.toHaveBeenCalled();
+  });
+});
+
+describe("close", () => {
+  it("frees the backend document and resets to an un-inited state", async () => {
+    await useMaterialStore.getState().init();
+    expect(useMaterialStore.getState().doc?.id).toBe("mat:1");
+    await useMaterialStore.getState().close();
+    expect(vi.mocked(material.close)).toHaveBeenCalledWith("mat:1");
+    const s = useMaterialStore.getState();
+    expect(s.doc).toBeNull();
+    expect(s.ready).toBe(false);
+    expect(s.compileResult).toBeNull();
+  });
+
+  it("is a no-op with no open document (never calls the backend)", async () => {
+    await useMaterialStore.getState().close();
+    expect(vi.mocked(material.close)).not.toHaveBeenCalled();
   });
 });

@@ -28,6 +28,7 @@ interface SmStore {
   saving: boolean;
 
   init: () => Promise<void>;
+  close: () => Promise<void>;
   clipName: (id: string | null) => string;
 
   // ── state edits (all local) ──
@@ -81,6 +82,21 @@ export const useSmStore = create<SmStore>((set, get) => ({
       set({ doc, clips, ready: true });
     } catch (e) {
       console.error("sm.init failed", e);
+    }
+  },
+
+  // Discard the editing surface: free the backend document and reset to an
+  // un-inited state so a later re-open starts fresh instead of leaking the old
+  // doc for the session. Called when the canvas panel unmounts (panel close).
+  close: async () => {
+    const doc = get().doc;
+    set({ doc: null, ready: false, selectedTransition: null });
+    if (doc) {
+      try {
+        await smIpc.close(doc.id);
+      } catch (e) {
+        console.error("sm.close failed", e);
+      }
     }
   },
 
