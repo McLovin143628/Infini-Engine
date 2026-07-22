@@ -36,60 +36,66 @@ fn is_repo(repo: &str) -> bool {
 /// Working-tree status via `--porcelain=v2 --branch`.
 #[tauri::command]
 pub async fn git_status(repo: String) -> Result<GitStatusDto, String> {
-    if !is_repo(&repo) {
-        return Ok(GitStatusDto {
-            is_repo: false,
-            branch: String::new(),
+    // Shelling out to git can block for a long time on a big repo — keep the
+    // blocking work off the async workers (mirrors package.rs).
+    tauri::async_runtime::spawn_blocking(move || {
+        if !is_repo(&repo) {
+            return Ok(GitStatusDto {
+                is_repo: false,
+                branch: String::new(),
+                ahead: 0,
+                behind: 0,
+                files: vec![],
+            });
+        }
+        let out = run_git(&repo, &["status", "--porcelain=v2", "--branch"], &[])?;
+        let mut status = GitStatusDto {
+            is_repo: true,
+            branch: "(detached)".into(),
             ahead: 0,
             behind: 0,
             files: vec![],
-        });
-    }
-    let out = run_git(&repo, &["status", "--porcelain=v2", "--branch"], &[])?;
-    let mut status = GitStatusDto {
-        is_repo: true,
-        branch: "(detached)".into(),
-        ahead: 0,
-        behind: 0,
-        files: vec![],
-    };
+        };
 
-    for line in out.lines() {
-        if let Some(rest) = line.strip_prefix("# branch.head ") {
-            status.branch = rest.to_string();
-        } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
-            // "+<ahead> -<behind>"
-            for tok in rest.split_whitespace() {
-                if let Some(a) = tok.strip_prefix('+') {
-                    status.ahead = a.parse().unwrap_or(0);
-                } else if let Some(b) = tok.strip_prefix('-') {
-                    status.behind = b.parse().unwrap_or(0);
+        for line in out.lines() {
+            if let Some(rest) = line.strip_prefix("# branch.head ") {
+                status.branch = rest.to_string();
+            } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
+                // "+<ahead> -<behind>"
+                for tok in rest.split_whitespace() {
+                    if let Some(a) = tok.strip_prefix('+') {
+                        status.ahead = a.parse().unwrap_or(0);
+                    } else if let Some(b) = tok.strip_prefix('-') {
+                        status.behind = b.parse().unwrap_or(0);
+                    }
                 }
-            }
-        } else if let Some(rest) = line.strip_prefix("1 ") {
-            // ordinary: XY sub mH mI mW hH hI path
-            push_xy(&mut status.files, rest, 8, false);
-        } else if let Some(rest) = line.strip_prefix("2 ") {
-            // rename/copy: XY sub mH mI mW hH hI Xscore path\torig
-            push_xy(&mut status.files, rest, 9, true);
-        } else if let Some(path) = line.strip_prefix("? ") {
-            status.files.push(GitFileDto {
-                path: path.replace('\\', "/"),
-                status: "?".into(),
-                staged: false,
-            });
-        } else if let Some(rest) = line.strip_prefix("u ") {
-            // unmerged (conflict): XY ... path
-            if let Some(path) = rest.rsplit(' ').next() {
+            } else if let Some(rest) = line.strip_prefix("1 ") {
+                // ordinary: XY sub mH mI mW hH hI path
+                push_xy(&mut status.files, rest, 8, false);
+            } else if let Some(rest) = line.strip_prefix("2 ") {
+                // rename/copy: XY sub mH mI mW hH hI Xscore path\torig
+                push_xy(&mut status.files, rest, 9, true);
+            } else if let Some(path) = line.strip_prefix("? ") {
                 status.files.push(GitFileDto {
                     path: path.replace('\\', "/"),
-                    status: "U".into(),
+                    status: "?".into(),
                     staged: false,
                 });
+            } else if let Some(rest) = line.strip_prefix("u ") {
+                // unmerged (conflict): XY ... path
+                if let Some(path) = rest.rsplit(' ').next() {
+                    status.files.push(GitFileDto {
+                        path: path.replace('\\', "/"),
+                        status: "U".into(),
+                        staged: false,
+                    });
+                }
             }
         }
-    }
-    Ok(status)
+        Ok(status)
+    })
+    .await
+    .map_err(|e| format!("git_status task failed to run: {e}"))?
 }
 
 /// Parse an ordinary/rename porcelain-v2 entry into staged/unstaged file rows.
@@ -127,60 +133,84 @@ fn push_xy(files: &mut Vec<GitFileDto>, rest: &str, field_count: usize, rename: 
 
 #[tauri::command]
 pub async fn git_stage(repo: String, paths: Vec<String>) -> Result<(), String> {
-    let mut args = vec!["add", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    run_git(&repo, &args, &[]).map(|_| ())
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut args = vec!["add", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        run_git(&repo, &args, &[]).map(|_| ())
+    })
+    .await
+    .map_err(|e| format!("git_stage task failed to run: {e}"))?
 }
 
 #[tauri::command]
 pub async fn git_unstage(repo: String, paths: Vec<String>) -> Result<(), String> {
-    let mut args = vec!["restore", "--staged", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    run_git(&repo, &args, &[]).map(|_| ())
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut args = vec!["restore", "--staged", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        run_git(&repo, &args, &[]).map(|_| ())
+    })
+    .await
+    .map_err(|e| format!("git_unstage task failed to run: {e}"))?
 }
 
 /// Discard working-tree changes (unstage + restore from HEAD). Untracked files
 /// are removed.
 #[tauri::command]
 pub async fn git_discard(repo: String, paths: Vec<String>) -> Result<(), String> {
-    let mut args = vec!["restore", "--staged", "--worktree", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    // Ignore code 1 (a purely-untracked path isn't known to restore).
-    run_git(&repo, &args, &[1])?;
-    // Sweep any still-present untracked paths.
-    let mut clean = vec!["clean", "-fq", "--"];
-    clean.extend(paths.iter().map(String::as_str));
-    run_git(&repo, &clean, &[]).map(|_| ())
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut args = vec!["restore", "--staged", "--worktree", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        // Ignore code 1 (a purely-untracked path isn't known to restore).
+        run_git(&repo, &args, &[1])?;
+        // Sweep any still-present untracked paths.
+        let mut clean = vec!["clean", "-fq", "--"];
+        clean.extend(paths.iter().map(String::as_str));
+        run_git(&repo, &clean, &[]).map(|_| ())
+    })
+    .await
+    .map_err(|e| format!("git_discard task failed to run: {e}"))?
 }
 
 #[tauri::command]
 pub async fn git_commit(repo: String, message: String) -> Result<String, String> {
-    run_git(&repo, &["commit", "-m", &message], &[])
+    tauri::async_runtime::spawn_blocking(move || run_git(&repo, &["commit", "-m", &message], &[]))
+        .await
+        .map_err(|e| format!("git_commit task failed to run: {e}"))?
 }
 
 /// Unified diff of a single file (worktree vs index, or index vs HEAD if staged).
 #[tauri::command]
 pub async fn git_file_diff(repo: String, path: String, staged: bool) -> Result<String, String> {
-    let mut args = vec!["diff"];
-    if staged {
-        args.push("--cached");
-    }
-    args.push("--");
-    args.push(&path);
-    run_git(&repo, &args, &[])
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut args = vec!["diff"];
+        if staged {
+            args.push("--cached");
+        }
+        args.push("--");
+        args.push(&path);
+        run_git(&repo, &args, &[])
+    })
+    .await
+    .map_err(|e| format!("git_file_diff task failed to run: {e}"))?
 }
 
 #[tauri::command]
 pub async fn git_branches(repo: String) -> Result<Vec<String>, String> {
-    let out = run_git(&repo, &["branch", "--format=%(refname:short)"], &[])?;
-    Ok(out
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect())
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = run_git(&repo, &["branch", "--format=%(refname:short)"], &[])?;
+        Ok(out
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("git_branches task failed to run: {e}"))?
 }
 
 #[tauri::command]
 pub async fn git_init(repo: String) -> Result<(), String> {
-    run_git(&repo, &["init"], &[]).map(|_| ())
+    tauri::async_runtime::spawn_blocking(move || run_git(&repo, &["init"], &[]).map(|_| ()))
+        .await
+        .map_err(|e| format!("git_init task failed to run: {e}"))?
 }

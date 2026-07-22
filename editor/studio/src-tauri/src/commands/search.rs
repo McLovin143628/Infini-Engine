@@ -23,66 +23,72 @@ pub async fn search_workspace(
     if query.is_empty() {
         return Ok(vec![]);
     }
-    let pattern = if opts.regex {
-        query.clone()
-    } else {
-        regex::escape(&query)
-    };
-    let re = RegexBuilder::new(&pattern)
-        .case_insensitive(!opts.case_sensitive)
-        .build()
-        .map_err(|e| format!("bad pattern: {e}"))?;
-
-    let root_path = std::path::Path::new(&root);
-    if !root_path.is_dir() {
-        return Err(format!("{root} is not a directory"));
-    }
-
-    let mut hits = Vec::new();
-    let walker = WalkBuilder::new(root_path)
-        .hidden(false)
-        .git_ignore(true)
-        .filter_entry(|e| e.file_name() != ".git")
-        .build();
-
-    'files: for dent in walker.flatten() {
-        if hits.len() >= MAX_HITS {
-            break;
-        }
-        if !dent.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let path = dent.path();
-        if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > MAX_FILE {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue; // binary / non-UTF-8
+    // The ignore-walk + per-file read is heavy synchronous IO — run it off the
+    // async workers so a broad query can't starve the runtime (mirrors package.rs).
+    tauri::async_runtime::spawn_blocking(move || {
+        let pattern = if opts.regex {
+            query.clone()
+        } else {
+            regex::escape(&query)
         };
-        let rel = path
-            .strip_prefix(root_path)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let re = RegexBuilder::new(&pattern)
+            .case_insensitive(!opts.case_sensitive)
+            .build()
+            .map_err(|e| format!("bad pattern: {e}"))?;
 
-        for (i, line) in content.lines().enumerate() {
-            if let Some(m) = re.find(line) {
-                let mut text = line.trim_end().to_string();
-                if text.len() > MAX_LINE {
-                    text.truncate(MAX_LINE);
-                }
-                hits.push(SearchHitDto {
-                    path: rel.clone(),
-                    line: (i + 1) as u32,
-                    column: (m.start() + 1) as u32,
-                    text,
-                });
-                if hits.len() >= MAX_HITS {
-                    tracing::info!("search capped at {MAX_HITS} hits");
-                    break 'files;
+        let root_path = std::path::Path::new(&root);
+        if !root_path.is_dir() {
+            return Err(format!("{root} is not a directory"));
+        }
+
+        let mut hits = Vec::new();
+        let walker = WalkBuilder::new(root_path)
+            .hidden(false)
+            .git_ignore(true)
+            .filter_entry(|e| e.file_name() != ".git")
+            .build();
+
+        'files: for dent in walker.flatten() {
+            if hits.len() >= MAX_HITS {
+                break;
+            }
+            if !dent.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let path = dent.path();
+            if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > MAX_FILE {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(path) else {
+                continue; // binary / non-UTF-8
+            };
+            let rel = path
+                .strip_prefix(root_path)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            for (i, line) in content.lines().enumerate() {
+                if let Some(m) = re.find(line) {
+                    let mut text = line.trim_end().to_string();
+                    if text.len() > MAX_LINE {
+                        text.truncate(MAX_LINE);
+                    }
+                    hits.push(SearchHitDto {
+                        path: rel.clone(),
+                        line: (i + 1) as u32,
+                        column: (m.start() + 1) as u32,
+                        text,
+                    });
+                    if hits.len() >= MAX_HITS {
+                        tracing::info!("search capped at {MAX_HITS} hits");
+                        break 'files;
+                    }
                 }
             }
         }
-    }
-    Ok(hits)
+        Ok(hits)
+    })
+    .await
+    .map_err(|e| format!("search_workspace task failed to run: {e}"))?
 }
