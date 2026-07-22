@@ -270,6 +270,10 @@ pub enum SpawnKind {
     /// A movement-blocking region: a solid box collider + `Volume`, invisible
     /// in PIE (no mesh) but outlined in the editor.
     BlockingVolume,
+    // ── Utility (E-P5) ────────────────────────────────────────────────────
+    /// A control-point spline (camera rail / patrol route / placement path):
+    /// a default `Spline` component, drawn as a polyline in the editor viewport.
+    Spline,
 }
 
 // ── Asset system / Content Drawer (Phase 4) ──────────────────────────────

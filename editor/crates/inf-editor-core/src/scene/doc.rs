@@ -13,7 +13,7 @@
 use glam::{DVec2, DVec3};
 use inf_ecs::components::{
     AtlasRect, Camera, Collider3D, ColliderShape3DKind, GlobalTransform, Light, Light2D, LightKind,
-    Material, MeshRef, NineSlice, Primitive, Sprite, Terrain, Text2D, Tilemap, Transform,
+    Material, MeshRef, NineSlice, Primitive, Spline, Sprite, Terrain, Text2D, Tilemap, Transform,
     Visibility, Volume, VolumeKind,
 };
 use inf_ecs::{Color, ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d, Vec3d};
@@ -1473,6 +1473,9 @@ impl SceneDoc {
     /// component as one undo step (Content-Drawer apply-by-drag / "Apply to
     /// Selection", P7.1). Targets without a `Material` are skipped. Returns how
     /// many entities were updated.
+    // A flat PBR-block + blend forwarding seam (mirrors the ECS `Material`
+    // fields); bundling them into a struct would just move the noise.
+    #[allow(clippy::too_many_arguments)]
     pub fn edit_apply_material(
         &mut self,
         targets: &[Uuid],
@@ -1480,6 +1483,12 @@ impl SceneDoc {
         metallic: f32,
         roughness: f32,
         emissive: [f32; 3],
+        // R-P5: the material's blend mode, as the ECS `BlendMode` **variant name**
+        // ("Opaque" / "Masked" / "Translucent"). The Ring-2 glue maps the
+        // inf-material `MatBlend` enum onto this string (inf-material does not
+        // depend on inf-ecs), and it's written through the enum reflection path.
+        blend: &str,
+        alpha_cutoff: f32,
     ) -> usize {
         let Some(tp) = self.world.registry().type_path_for("Material") else {
             return 0;
@@ -1499,6 +1508,21 @@ impl SceneDoc {
                 tp,
                 "emissive",
                 &PropValue::Color([emissive[0], emissive[1], emissive[2], 1.0]),
+            );
+            self.edit_set_prop(
+                g,
+                tp,
+                "blend",
+                &PropValue::Enum {
+                    value: blend.to_string(),
+                    options: Vec::new(),
+                },
+            );
+            self.edit_set_prop(
+                g,
+                tp,
+                "alpha_cutoff",
+                &PropValue::Number(alpha_cutoff as f64),
             );
             applied += 1;
         }
@@ -1856,6 +1880,7 @@ fn default_name(kind: SpawnKind) -> String {
         SpawnKind::Terrain => "Terrain",
         SpawnKind::TriggerVolume => "TriggerVolume",
         SpawnKind::BlockingVolume => "BlockingVolume",
+        SpawnKind::Spline => "Spline",
     }
     .to_string()
 }
@@ -1958,6 +1983,12 @@ fn attach_kind(world: &mut EcsWorld, entity: Entity, kind: SpawnKind) {
                 },
             ));
         }
+        // ── Utility (E-P5): a default control-point spline. The component
+        //    Default supplies the two-point starter path; the viewport draws it
+        //    as a polyline and the Details List editor edits the points. ──
+        SpawnKind::Spline => {
+            w.entity_mut(entity).insert(Spline::default());
+        }
         SpawnKind::Empty
         | SpawnKind::Cube
         | SpawnKind::Sphere
@@ -2002,8 +2033,15 @@ mod tests {
         let cube = doc.create(SpawnKind::Cube, "Cube", None);
         let tp = doc.world().registry().type_path_for("Material").unwrap();
 
-        let applied =
-            doc.edit_apply_material(&[cube], [1.0, 0.0, 0.0, 1.0], 1.0, 0.2, [0.5, 0.0, 0.0]);
+        let applied = doc.edit_apply_material(
+            &[cube],
+            [1.0, 0.0, 0.0, 1.0],
+            1.0,
+            0.2,
+            [0.5, 0.0, 0.0],
+            "Translucent",
+            0.25,
+        );
         assert_eq!(applied, 1);
         assert_eq!(
             doc.prop_value(cube, tp, "metallic"),
@@ -2013,8 +2051,17 @@ mod tests {
             doc.prop_value(cube, tp, "base_color"),
             Some(PropValue::Color([1.0, 0.0, 0.0, 1.0]))
         );
+        // R-P5: blend + alpha_cutoff apply through the same undo step.
+        assert!(matches!(
+            doc.prop_value(cube, tp, "blend"),
+            Some(PropValue::Enum { value, .. }) if value == "Translucent"
+        ));
+        assert_eq!(
+            doc.prop_value(cube, tp, "alpha_cutoff"),
+            Some(PropValue::Number(0.25))
+        );
 
-        // The four field writes collapse into one undo step (back to defaults).
+        // The field writes collapse into one undo step (back to defaults).
         assert!(doc.undo());
         assert_eq!(
             doc.prop_value(cube, tp, "metallic"),

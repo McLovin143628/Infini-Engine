@@ -55,6 +55,10 @@ export const SPAWNABLE_SECTIONS: SpawnableSection[] = [
       { kind: "blocking_volume", label: "Blocking Volume" },
     ],
   },
+  {
+    heading: "Utility",
+    items: [{ kind: "spline", label: "Spline" }],
+  },
   { heading: "Other", items: [{ kind: "empty", label: "Empty (Folder)" }] },
 ];
 

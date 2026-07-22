@@ -6,16 +6,16 @@ use std::collections::HashMap;
 
 use glam::{DQuat, DVec2, DVec3, Vec2, Vec3};
 use inf_ecs::components::{
-    Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, ComputedVisibility,
-    GlobalTransform, Joint2D, Joint3D, Light, Light2D, LightKind as EcsLightKind, Material,
-    MeshRef, NineSlice, PcgVolume, Primitive, SkeletalMesh, Sprite, Terrain, Text2D, TextAlign,
-    Tilemap, Volume,
+    BlendMode, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
+    ComputedVisibility, GlobalTransform, Joint2D, Joint3D, Light, Light2D,
+    LightKind as EcsLightKind, Material, MeshRef, NineSlice, PcgVolume, Primitive, SkeletalMesh,
+    Spline, SplineInterp as EcsSplineInterp, Sprite, Terrain, Text2D, TextAlign, Tilemap, Volume,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::ipc::SpawnKind;
 use inf_editor_core::scene::serialize::RenderSettingsRecord;
 use inf_editor_core::scene::SceneDoc;
-use inf_math::FloatingOrigin;
+use inf_math::{FloatingOrigin, SplineInterp};
 // R-P4: scene-persisted post/exposure/lighting settings applied to the live
 // renderer (see `apply_record` + `sync_from_doc`).
 use inf_render::{
@@ -55,6 +55,16 @@ fn prim_mesh(p: Primitive) -> PrimMesh {
         Primitive::Plane => PrimMesh::Plane,
         Primitive::Cylinder => PrimMesh::Cylinder,
         Primitive::Cone => PrimMesh::Cone,
+    }
+}
+
+/// Project the ECS [`BlendMode`] into the renderer's packed `blend` code (R-P5):
+/// 0 opaque, 1 masked, 2 translucent. Mirrored in the player's `render.rs`.
+fn blend_code(b: BlendMode) -> u8 {
+    match b {
+        BlendMode::Opaque => 0,
+        BlendMode::Masked => 1,
+        BlendMode::Translucent => 2,
     }
 }
 
@@ -134,6 +144,10 @@ pub struct EngineHost {
     /// Spot-light cone gizmos by GUID (R-P3), rebuilt each projection. Drawn as
     /// debug lines for the current selection only.
     spot_lights: HashMap<Uuid, SpotDebug>,
+    /// World-space `Spline` polylines by GUID (E-P5), rebuilt each projection.
+    /// The sampled curve is drawn ALWAYS (neutral cyan); a selected spline
+    /// additionally shows a 3-axis cross at each control point.
+    spline_polylines: HashMap<Uuid, SplineDebug>,
     /// GUIDs of the document's current selection (for collider debug draw —
     /// covers every selected entity, not just the mesh instances).
     selected_guids: Vec<Uuid>,
@@ -306,6 +320,18 @@ struct VolumeDebug {
     tint: [f32; 4],
 }
 
+/// A [`Spline`]'s editor visualization (E-P5): the sampled curve as a world-space
+/// polyline plus the world-space control points (for the selected-only markers).
+/// Points are cached in world space (the entity transform already applied) and
+/// rebased through the floating origin at draw time.
+struct SplineDebug {
+    /// Sampled curve vertices in world space (consecutive pairs form segments).
+    line: Vec<DVec3>,
+    /// Control points in world space (a 3-axis cross is drawn at each when the
+    /// spline is selected).
+    control: Vec<DVec3>,
+}
+
 /// A spot [`Light`]'s editor cone gizmo (R-P3): the beam apex, its world-space
 /// emission axis, the outer half-angle, an effective draw distance, and the
 /// light's colour. Drawn for the current selection only (cheap, per-selection).
@@ -351,6 +377,7 @@ impl EngineHost {
             joint_lines: HashMap::new(),
             volume_outlines: HashMap::new(),
             spot_lights: HashMap::new(),
+            spline_polylines: HashMap::new(),
             selected_guids: Vec::new(),
             synced_version: None,
             mode: ViewportMode::Perspective,
@@ -544,6 +571,7 @@ impl EngineHost {
         self.joint_lines.clear();
         self.volume_outlines.clear();
         self.spot_lights.clear();
+        self.spline_polylines.clear();
 
         let world = doc.world();
         let w = world.world();
@@ -701,6 +729,9 @@ impl EngineHost {
                             // PCG scatter stays a placeholder cube (same documented
                             // gap as mesh-asset viewport rendering).
                             mesh: PrimMesh::Cube,
+                            // R-P5: PCG scatter placeholders are opaque.
+                            blend: 0,
+                            cutoff: 0.5,
                         });
                         // Pick a scattered cube → select the owning volume.
                         self.id_to_guid.insert(id, guid);
@@ -754,6 +785,44 @@ impl EngineHost {
                             tint: vol.tint.to_array(),
                         },
                     );
+                }
+            }
+
+            // Splines (E-P5) cache a world-space polyline sampled from the
+            // control points, drawn ALWAYS (the curve is the only editor cue) so
+            // long as the entity is visible. Points are entity-local, so they are
+            // lifted through the entity's world transform first; Catmull-Rom /
+            // linear are both affine combinations, so transforming the control
+            // points then sampling is identical to sampling then transforming (and
+            // cheaper). 16 samples per segment. The selected-only control markers
+            // reuse the same world control points.
+            if visible {
+                if let Some(spline) = w.get::<Spline>(entity) {
+                    let n = spline.points.len();
+                    if n >= 2 {
+                        let affine = w
+                            .get::<GlobalTransform>(entity)
+                            .map(|g| g.0)
+                            .unwrap_or(glam::DAffine3::IDENTITY);
+                        let control: Vec<DVec3> = spline
+                            .points
+                            .iter()
+                            .map(|p| affine.transform_point3(p.to_dvec3()))
+                            .collect();
+                        let interp = match spline.interp {
+                            EcsSplineInterp::Linear => SplineInterp::Linear,
+                            EcsSplineInterp::CatmullRom => SplineInterp::CatmullRom,
+                        };
+                        let seg_count = if spline.closed { n } else { n - 1 };
+                        let steps = seg_count * 16;
+                        let mut line = Vec::with_capacity(steps + 1);
+                        for i in 0..=steps {
+                            let t = i as f64 / steps as f64;
+                            line.push(inf_math::eval_spline(&control, spline.closed, interp, t));
+                        }
+                        self.spline_polylines
+                            .insert(guid, SplineDebug { line, control });
+                    }
                 }
             }
 
@@ -823,6 +892,9 @@ impl EngineHost {
                         id,
                         // Skeletal placeholder is always a cube (no primitive kind).
                         mesh: PrimMesh::Cube,
+                        // R-P5: skeletal placeholders are opaque.
+                        blend: 0,
+                        cutoff: 0.5,
                     });
                     self.id_to_guid.insert(id, guid);
                     self.guid_to_id.insert(guid, id);
@@ -837,7 +909,10 @@ impl EngineHost {
                 .map(|g| g.0)
                 .unwrap_or(glam::DAffine3::IDENTITY);
             let (scale, rot, translation) = affine.to_scale_rotation_translation();
-            let (color, metallic, roughness, emissive) = w
+            // MIRROR: this Material→MeshInstance projection is duplicated in the
+            // player's `render.rs` (inf-player) — keep the two in sync, R-P5 blend
+            // + cutoff included.
+            let (color, metallic, roughness, emissive, blend, cutoff) = w
                 .get::<Material>(entity)
                 .map(|m| {
                     let e = m.emissive.to_array();
@@ -846,9 +921,11 @@ impl EngineHost {
                         m.metallic,
                         m.roughness,
                         [e[0], e[1], e[2]],
+                        blend_code(m.blend),
+                        m.alpha_cutoff,
                     )
                 })
-                .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3]));
+                .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3], 0, 0.5));
             // R-P1: project the MeshRef's built-in primitive kind so Sphere/Plane/
             // Cylinder/Cone render as real geometry (not everything as a cube).
             let mesh = w
@@ -867,6 +944,8 @@ impl EngineHost {
                 emissive,
                 id,
                 mesh,
+                blend,
+                cutoff,
             });
             self.id_to_guid.insert(id, guid);
             self.guid_to_id.insert(guid, id);
@@ -2052,6 +2131,28 @@ impl EngineHost {
         for (guid, vd) in &self.volume_outlines {
             let selected = self.selected_guids.contains(guid);
             draw_volume_outline(&mut self.scene.debug, &self.origin, vd, selected);
+        }
+
+        // Spline polylines (E-P5) draw ALWAYS in a neutral cyan; a selected
+        // spline additionally shows a brighter 3-axis cross at each control point.
+        for (guid, sd) in &self.spline_polylines {
+            const SPLINE_COLOR: [f32; 4] = [0.25, 0.85, 0.95, 1.0];
+            const SPLINE_MARKER: [f32; 4] = [0.6, 1.0, 1.0, 1.0];
+            const MARKER_ARM: f64 = 0.15; // world-metre half-length of a cross arm
+            for pair in sd.line.windows(2) {
+                let a = self.origin.to_render(pair[0]);
+                let b = self.origin.to_render(pair[1]);
+                self.scene.debug.line(a, b, SPLINE_COLOR);
+            }
+            if self.selected_guids.contains(guid) {
+                for &p in &sd.control {
+                    for axis in [DVec3::X, DVec3::Y, DVec3::Z] {
+                        let a = self.origin.to_render(p - axis * MARKER_ARM);
+                        let b = self.origin.to_render(p + axis * MARKER_ARM);
+                        self.scene.debug.line(a, b, SPLINE_MARKER);
+                    }
+                }
+            }
         }
 
         // Sculpt brush ring (P10.2b): a closed loop following the terrain height

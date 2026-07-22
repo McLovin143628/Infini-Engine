@@ -3,4 +3,4 @@
 /**
  * The kind of entity to create (`scene_create` command).
  */
-export type SpawnKind = "empty" | "cube" | "sphere" | "plane" | "cylinder" | "cone" | "directional_light" | "point_light" | "spot_light" | "camera" | "sprite" | "tilemap" | "text2d" | "nine_slice" | "light2d" | "terrain" | "trigger_volume" | "blocking_volume";
+export type SpawnKind = "empty" | "cube" | "sphere" | "plane" | "cylinder" | "cone" | "directional_light" | "point_light" | "spot_light" | "camera" | "sprite" | "tilemap" | "text2d" | "nine_slice" | "light2d" | "terrain" | "trigger_volume" | "blocking_volume" | "spline";
