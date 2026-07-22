@@ -531,6 +531,121 @@ mod tests {
         }
     }
 
+    /// Extract the X component of a translate delta (test helper).
+    fn tx(d: GizmoDelta) -> f64 {
+        match d {
+            GizmoDelta::Translate(t) => t.x,
+            _ => panic!("expected translate"),
+        }
+    }
+
+    #[test]
+    fn translate_snap_is_cumulative_not_per_frame() {
+        // The host no longer re-anchors the drag each frame (M2): update() is
+        // called repeatedly on the SAME drag and measures from the original grab,
+        // so snapping quantizes the CUMULATIVE displacement. A slow sub-snap drag
+        // that per-frame rounding would freeze at 0 forever instead crosses the
+        // snap boundary and jumps exactly one step.
+        let origin = Vec3::ZERO;
+        let drag = GizmoDrag::begin(
+            GizmoMode::Translate,
+            GizmoAxis::X,
+            origin,
+            Vec3::new(0.0, 5.0, 0.0),
+            Vec3::NEG_Y,
+        );
+        let snap = 1.0;
+        // Cumulative 0.3 → below the half-step boundary → still 0.
+        assert_eq!(
+            tx(drag.update(Vec3::new(0.3, 5.0, 0.0), Vec3::NEG_Y, snap)),
+            0.0
+        );
+        // Cumulative 0.4 (another sub-snap increment) → still 0.
+        assert_eq!(
+            tx(drag.update(Vec3::new(0.4, 5.0, 0.0), Vec3::NEG_Y, snap)),
+            0.0
+        );
+        // Cumulative 0.6 → crosses 0.5 → snaps to exactly one step.
+        assert_eq!(
+            tx(drag.update(Vec3::new(0.6, 5.0, 0.0), Vec3::NEG_Y, snap)),
+            1.0
+        );
+    }
+
+    #[test]
+    fn translate_snapped_total_is_multiple_of_step() {
+        let origin = Vec3::ZERO;
+        let drag = GizmoDrag::begin(
+            GizmoMode::Translate,
+            GizmoAxis::X,
+            origin,
+            Vec3::new(0.0, 5.0, 0.0),
+            Vec3::NEG_Y,
+        );
+        let snap = 0.25;
+        for &x in &[0.1_f32, 0.4, 0.7, 1.15, 2.02, 3.9] {
+            let t = tx(drag.update(Vec3::new(x, 5.0, 0.0), Vec3::NEG_Y, snap));
+            let steps = t / snap as f64;
+            assert!(
+                (steps - steps.round()).abs() < 1e-4,
+                "x={x} → {t} is not a multiple of {snap}"
+            );
+        }
+    }
+
+    #[test]
+    fn rotate_snapped_total_is_multiple_of_step() {
+        // Cumulative rotate about Y; every snapped angle is a multiple of 15°.
+        let origin = Vec3::ZERO;
+        let step = 15f32.to_radians();
+        let drag = GizmoDrag::begin(
+            GizmoMode::Rotate,
+            GizmoAxis::Y,
+            origin,
+            Vec3::new(1.0, 5.0, 0.0),
+            Vec3::NEG_Y,
+        );
+        for &(x, z) in &[(0.9_f32, -0.2_f32), (0.5, -0.5), (0.0, -1.0), (-0.7, -0.7)] {
+            match drag.update(Vec3::new(x, 5.0, z), Vec3::NEG_Y, step) {
+                GizmoDelta::Rotate { radians, .. } => {
+                    let k = radians / step;
+                    assert!(
+                        (k - k.round()).abs() < 1e-3,
+                        "angle {radians} is not a multiple of 15°"
+                    );
+                }
+                _ => panic!("expected rotate"),
+            }
+        }
+    }
+
+    #[test]
+    fn scale_snapped_total_is_multiple_of_step() {
+        // Cumulative scale on X; every snapped ratio is a multiple of 0.1.
+        let origin = Vec3::ZERO;
+        let step = 0.1;
+        let drag = GizmoDrag::begin(
+            GizmoMode::Scale,
+            GizmoAxis::X,
+            origin,
+            Vec3::new(2.0, 5.0, 0.0),
+            Vec3::NEG_Y,
+        );
+        for &x in &[2.1_f32, 2.5, 3.0, 4.3, 1.2] {
+            match drag.update(Vec3::new(x, 5.0, 0.0), Vec3::NEG_Y, step) {
+                GizmoDelta::Scale(s) => {
+                    let k = s.x / step;
+                    assert!(
+                        (k - k.round()).abs() < 1e-3,
+                        "scale {} is not a multiple of 0.1",
+                        s.x
+                    );
+                }
+                _ => panic!("expected scale"),
+            }
+        }
+    }
+
     #[test]
     fn rotate_drag_measures_signed_angle() {
         // Rotate about Y. Grab at +X, move to +Z → -90° about Y (right-handed:

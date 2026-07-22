@@ -13,10 +13,11 @@
 
 use std::cell::RefCell;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::core::w;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_MENU,
@@ -28,12 +29,12 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetWindowLongPtrW,
-    PeekMessageW, RegisterClassW, SetCursorPos, SetParent, SetWindowLongPtrW, SetWindowPos,
-    ShowCursor, ShowWindow, TranslateMessage, GWL_STYLE, HWND_TOP, MSG, PM_REMOVE, SWP_NOACTIVATE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_ERASEBKGND, WM_INPUT,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD,
-    WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    GetWindowRect, IsWindow, PeekMessageW, RegisterClassW, SetCursorPos, SetParent,
+    SetWindowLongPtrW, SetWindowPos, ShowCursor, ShowWindow, TranslateMessage, GWL_STYLE, HWND_TOP,
+    MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE,
+    WM_CAPTURECHANGED, WM_ERASEBKGND, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 use glam::DVec2;
@@ -359,6 +360,16 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         WM_LBUTTONDOWN => {
             if modifier(VK_MENU) {
                 begin_capture(hwnd, Capture::Orbit);
+            } else if INPUT.with(|s| {
+                matches!(
+                    s.borrow().capture,
+                    Capture::Fly | Capture::Pan | Capture::Dolly
+                )
+            }) {
+                // A navigation gesture (RMB fly, MMB pan, Alt+RMB dolly) already
+                // owns the mouse. A plain LMB must NOT hijack it for pick/gizmo:
+                // don't SetCapture, don't record a press — let the gesture
+                // continue uninterrupted (L1).
             } else {
                 let x = (lparam.0 & 0xffff) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
@@ -425,17 +436,25 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         // Capture can be stolen (alt-tab, other SetCapture); un-hide cleanly
         // and drop any in-flight gizmo/selection drag.
         WM_CAPTURECHANGED => {
-            let was = INPUT.with(|s| {
+            // Capture only carries a hidden/moved cursor for the Fly/Orbit/Pan/
+            // Dolly gestures (begin_capture stored the restore point); the plain-
+            // LMB path leaves `capture == None`, so `was` gates the cursor
+            // restore to exactly the gestures that need it.
+            let restore = INPUT.with(|s| {
                 let mut s = s.borrow_mut();
                 if s.left_down {
                     s.left_down = false;
                     s.left_release = true;
                 }
-                std::mem::replace(&mut s.capture, Capture::None) != Capture::None
+                let was = std::mem::replace(&mut s.capture, Capture::None) != Capture::None;
+                was.then_some(s.restore_cursor)
             });
-            if was {
+            if let Some(pt) = restore {
+                // Mirror end_capture: on a stolen capture, restore cursor
+                // visibility AND position to where the gesture grabbed it (L2).
                 unsafe {
                     ShowCursor(true);
+                    let _ = SetCursorPos(pt.x, pt.y);
                 }
             }
             LRESULT(0)
@@ -551,6 +570,29 @@ fn embed_foreign_window(parent_hwnd: isize, foreign: isize, rect: Option<Viewpor
             );
         }
         let _ = ShowWindow(child, SW_SHOWNA);
+    }
+}
+
+/// Our child window's rectangle expressed in `parent`-client (physical) pixels —
+/// the same coordinate space `Cmd::SetRect` uses. Used as the initial position
+/// for an embedded PIE window when it is adopted before any `SetRect` has
+/// arrived (L3). `GetWindowRect` yields screen coordinates, so the top-left is
+/// mapped back into the parent's client area.
+fn child_rect_in_parent(parent: HWND, child: HWND) -> Option<ViewportRect> {
+    unsafe {
+        let mut r = RECT::default();
+        GetWindowRect(child, &mut r).ok()?;
+        let mut tl = POINT {
+            x: r.left,
+            y: r.top,
+        };
+        let _ = ScreenToClient(parent, &mut tl);
+        Some(ViewportRect {
+            x: tl.x,
+            y: tl.y,
+            width: (r.right - r.left).max(1) as u32,
+            height: (r.bottom - r.top).max(1) as u32,
+        })
     }
 }
 
@@ -689,20 +731,45 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
     // rect, so rect changes follow the embedded window while our own child hides.
     let mut embedded: Option<HWND> = None;
     let mut last_rect: Option<ViewportRect> = None;
+    // Whether our own child should be presenting. Hidden while an HTML overlay is
+    // up (Cmd::SetVisible(false)) or while a PIE window is embedded; when it isn't
+    // presenting, the loop sleeps instead of busy-spinning on a dead surface (M3).
+    let mut visible = true;
 
     'outer: loop {
+        // Recover from an embedded PIE window that vanished without a
+        // ReleaseForeign (the player crashed/exited): our child is hidden behind
+        // a now-dead foreign HWND. Drop the embed and re-show our child so the
+        // viewport keeps working (L3).
+        if let Some(foreign) = embedded {
+            if !unsafe { IsWindow(Some(foreign)) }.as_bool() {
+                embedded = None;
+                if visible {
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_SHOWNA);
+                    }
+                }
+                tracing::info!(
+                    "inf-viewport: embedded PIE window vanished — restored viewport child"
+                );
+            }
+        }
+
         // 1. Apply pending commands (coalesce rect updates to the latest).
         let mut latest_rect: Option<ViewportRect> = None;
         loop {
             match rx.try_recv() {
                 Ok(Cmd::SetRect(r)) => latest_rect = Some(r),
-                Ok(Cmd::SetVisible(v)) => unsafe {
+                Ok(Cmd::SetVisible(v)) => {
+                    visible = v;
                     // While a PIE window is embedded, keep our own child hidden.
                     if embedded.is_none() {
-                        // SW_SHOWNA: show without stealing focus from the webview.
-                        let _ = ShowWindow(hwnd, if v { SW_SHOWNA } else { SW_HIDE });
+                        unsafe {
+                            // SW_SHOWNA: show without stealing focus from the webview.
+                            let _ = ShowWindow(hwnd, if v { SW_SHOWNA } else { SW_HIDE });
+                        }
                     }
-                },
+                }
                 Ok(Cmd::Drop { x, y, payload }) => {
                     // Spike A handoff stub: Phase 3 turns this into a pick
                     // ray + actor spawn. Logging proves the coordinate path.
@@ -715,7 +782,17 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 Ok(Cmd::SetToolMode(m)) => host.set_tool_mode(m),
                 Ok(Cmd::SetSculpt(s)) => host.set_sculpt(s),
                 Ok(Cmd::EmbedForeign(foreign)) => {
-                    embed_foreign_window(parent_hwnd, foreign, last_rect);
+                    // Position the foreign window at the hole immediately. If no
+                    // SetRect has arrived yet, fall back to our child's current
+                    // rect so the player isn't left at 0,0 until the first
+                    // SetRect (L3). Subsequent SetRects follow it (target =
+                    // embedded), so this only bridges the initial gap.
+                    let rect = last_rect
+                        .or_else(|| child_rect_in_parent(HWND(parent_hwnd as *mut _), hwnd));
+                    if last_rect.is_none() {
+                        last_rect = rect;
+                    }
+                    embed_foreign_window(parent_hwnd, foreign, rect);
                     unsafe {
                         let _ = ShowWindow(hwnd, SW_HIDE);
                     }
@@ -823,117 +900,140 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
         // a gizmo drag writes transforms back as one undo entry, and both
         // signal Ring 2 (WorldChanged) so the Outliner/Details re-sync. The
         // lock is held only for this short section, never across the render.
-        let mut world_changed = false;
-        if let Ok(mut doc) = scene.lock() {
-            host.sync_from_doc(&doc);
+        // Guard the pointer-interaction block (pick / gizmo / sculpt) with the
+        // same crash-safety net as the render (H1). Picking drives the GPU
+        // ID-buffer Picker, so a device-lost TDR between frames could surface a
+        // validation panic HERE — outside the render's catch_unwind — which would
+        // otherwise kill this thread and leave the scene mutex poisoned. Catch it,
+        // write a crash report, and exit the loop with the same semantics as a
+        // render panic. (render_frame rebuilds the picker on the fresh device, so
+        // the normal recovery path stays lossless; this only backstops a panic.)
+        let interaction = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut world_changed = false;
+            if let Ok(mut doc) = scene.lock() {
+                host.sync_from_doc(&doc);
 
-            // The render view for the ACTIVE mode drives picking + gizmo rays.
-            let interact_view = if two_d {
-                host.view_2d(&camera_2d)
-            } else {
-                host.view_for(&camera)
-            };
+                // The render view for the ACTIVE mode drives picking + gizmo rays.
+                let interact_view = if two_d {
+                    host.view_2d(&camera_2d)
+                } else {
+                    host.view_for(&camera)
+                };
 
-            // Sculpt mode (perspective only): plain LMB paints a terrain height
-            // stroke instead of selecting/gizmo-dragging. The stroke lives on the
-            // viewport thread (like a gizmo drag) and commits one undo step at
-            // mouse-up (P10.2b). 2D mode keeps Select regardless of the tool.
-            let sculpting = host.tool_mode() == ToolMode::Sculpt && !two_d;
-            if sculpting {
-                if let Some((x, y, ctrl)) = input.left_press {
-                    let (px, py) = (x.max(0) as u32, y.max(0) as u32);
-                    host.begin_sculpt(&mut doc, &interact_view, px, py, ctrl);
-                }
-                if input.left_down && host.is_sculpting() {
-                    let (x, y) = input.cursor;
-                    host.update_sculpt(&mut doc, &interact_view, x.max(0) as u32, y.max(0) as u32);
-                }
-                if input.left_release && host.is_sculpting() && host.finish_sculpt(&mut doc) {
-                    world_changed = true;
-                }
-                // Idle hover: the brush ring follows the cursor over terrain.
-                if !input.left_down && input.capture == Capture::None && input.cursor_moved {
-                    let (x, y) = input.cursor;
-                    if x >= 0 && y >= 0 {
-                        host.update_sculpt_hover(&doc, &interact_view, x as u32, y as u32);
+                // Sculpt mode (perspective only): plain LMB paints a terrain height
+                // stroke instead of selecting/gizmo-dragging. The stroke lives on the
+                // viewport thread (like a gizmo drag) and commits one undo step at
+                // mouse-up (P10.2b). 2D mode keeps Select regardless of the tool.
+                let sculpting = host.tool_mode() == ToolMode::Sculpt && !two_d;
+                if sculpting {
+                    if let Some((x, y, ctrl)) = input.left_press {
+                        let (px, py) = (x.max(0) as u32, y.max(0) as u32);
+                        host.begin_sculpt(&mut doc, &interact_view, px, py, ctrl);
                     }
-                }
-            } else {
-                // Plain LMB: a handle under the cursor begins a gizmo drag (one
-                // undo transaction), otherwise it selects the picked entity.
-                if let Some((x, y, ctrl)) = input.left_press {
-                    let (px, py) = (x.max(0) as u32, y.max(0) as u32);
-                    if host.try_begin_gizmo(&interact_view, px, py) {
-                        doc.begin_transaction("Move");
-                    } else {
-                        match host.pick_guid(&interact_view, px, py) {
-                            Some(guid) => {
-                                doc.select(&[guid], ctrl);
-                                world_changed = true;
-                            }
-                            None if !ctrl => {
-                                doc.clear_selection();
-                                world_changed = true;
-                            }
-                            None => {}
-                        }
-                        host.sync_from_doc(&doc); // reflect the new selection now
+                    if input.left_down && host.is_sculpting() {
+                        let (x, y) = input.cursor;
+                        host.update_sculpt(
+                            &mut doc,
+                            &interact_view,
+                            x.max(0) as u32,
+                            y.max(0) as u32,
+                        );
                     }
-                }
-
-                if input.left_down && host.is_dragging_gizmo() {
-                    let (x, y) = input.cursor;
-                    // 2D: translate snaps to the toolbar's grid/pixel increment (or
-                    // Shift for a 1 m fallback); rotate/scale keep the Shift snaps.
-                    // Perspective keeps the Shift-drag snaps (1 m / 15° / 0.1 ratio).
-                    let snap = if two_d {
-                        match host.gizmo_mode {
-                            GizmoMode::Translate => {
-                                let s = host.snap_2d_translate();
-                                if s > 0.0 {
-                                    s
-                                } else if key_down(0x10) {
-                                    1.0
-                                } else {
-                                    0.0
-                                }
-                            }
-                            GizmoMode::Rotate if key_down(0x10) => 15f32.to_radians(),
-                            GizmoMode::Scale if key_down(0x10) => 0.1,
-                            _ => 0.0,
-                        }
-                    } else if key_down(0x10) {
-                        match host.gizmo_mode {
-                            GizmoMode::Translate => 1.0,
-                            GizmoMode::Rotate => 15f32.to_radians(),
-                            GizmoMode::Scale => 0.1,
-                        }
-                    } else {
-                        0.0
-                    };
-                    host.update_gizmo(&interact_view, x.max(0) as u32, y.max(0) as u32, snap);
-                }
-
-                if input.left_release {
-                    if host.is_dragging_gizmo() {
-                        for (guid, transform) in host.selected_world_transforms() {
-                            doc.edit_set_transform(guid, transform);
-                        }
-                        doc.commit_transaction();
+                    if input.left_release && host.is_sculpting() && host.finish_sculpt(&mut doc) {
                         world_changed = true;
                     }
-                    host.end_gizmo();
-                }
-
-                // Hover highlight when idle (not dragging, not flying).
-                if input.cursor_moved && !input.left_down && input.capture == Capture::None {
-                    let (x, y) = input.cursor;
-                    if x >= 0 && y >= 0 {
-                        host.set_hover(&interact_view, x as u32, y as u32);
+                    // Idle hover: the brush ring follows the cursor over terrain.
+                    if !input.left_down && input.capture == Capture::None && input.cursor_moved {
+                        let (x, y) = input.cursor;
+                        if x >= 0 && y >= 0 {
+                            host.update_sculpt_hover(&doc, &interact_view, x as u32, y as u32);
+                        }
                     }
-                }
-            } // end Select-tool interaction (else of `if sculpting`)
-        }
+                } else {
+                    // Plain LMB: a handle under the cursor begins a gizmo drag (one
+                    // undo transaction), otherwise it selects the picked entity.
+                    if let Some((x, y, ctrl)) = input.left_press {
+                        let (px, py) = (x.max(0) as u32, y.max(0) as u32);
+                        if host.try_begin_gizmo(&interact_view, px, py) {
+                            doc.begin_transaction("Move");
+                        } else {
+                            match host.pick_guid(&interact_view, px, py) {
+                                Some(guid) => {
+                                    doc.select(&[guid], ctrl);
+                                    world_changed = true;
+                                }
+                                None if !ctrl => {
+                                    doc.clear_selection();
+                                    world_changed = true;
+                                }
+                                None => {}
+                            }
+                            host.sync_from_doc(&doc); // reflect the new selection now
+                        }
+                    }
+
+                    if input.left_down && host.is_dragging_gizmo() {
+                        let (x, y) = input.cursor;
+                        // 2D: translate snaps to the toolbar's grid/pixel increment (or
+                        // Shift for a 1 m fallback); rotate/scale keep the Shift snaps.
+                        // Perspective keeps the Shift-drag snaps (1 m / 15° / 0.1 ratio).
+                        let snap = if two_d {
+                            match host.gizmo_mode {
+                                GizmoMode::Translate => {
+                                    let s = host.snap_2d_translate();
+                                    if s > 0.0 {
+                                        s
+                                    } else if key_down(0x10) {
+                                        1.0
+                                    } else {
+                                        0.0
+                                    }
+                                }
+                                GizmoMode::Rotate if key_down(0x10) => 15f32.to_radians(),
+                                GizmoMode::Scale if key_down(0x10) => 0.1,
+                                _ => 0.0,
+                            }
+                        } else if key_down(0x10) {
+                            match host.gizmo_mode {
+                                GizmoMode::Translate => 1.0,
+                                GizmoMode::Rotate => 15f32.to_radians(),
+                                GizmoMode::Scale => 0.1,
+                            }
+                        } else {
+                            0.0
+                        };
+                        host.update_gizmo(&interact_view, x.max(0) as u32, y.max(0) as u32, snap);
+                    }
+
+                    if input.left_release {
+                        if host.is_dragging_gizmo() {
+                            for (guid, transform) in host.selected_world_transforms() {
+                                doc.edit_set_transform(guid, transform);
+                            }
+                            doc.commit_transaction();
+                            world_changed = true;
+                        }
+                        host.end_gizmo();
+                    }
+
+                    // Hover highlight when idle (not dragging, not flying).
+                    if input.cursor_moved && !input.left_down && input.capture == Capture::None {
+                        let (x, y) = input.cursor;
+                        if x >= 0 && y >= 0 {
+                            host.set_hover(&interact_view, x as u32, y as u32);
+                        }
+                    }
+                } // end Select-tool interaction (else of `if sculpting`)
+            }
+            world_changed
+        }));
+        let world_changed = match interaction {
+            Ok(wc) => wc,
+            Err(payload) => {
+                report_viewport_panic("<viewport interaction>", &*payload);
+                break 'outer;
+            }
+        };
         if world_changed {
             sink(ViewportEvent::WorldChanged);
         }
@@ -1012,30 +1112,49 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
         //    the current mode, and render. FIFO present blocks at vsync and
         //    paces the loop. render_frame recovers from device loss internally —
         //    an error here means even the rebuild failed (driver truly gone).
-        let eye = if two_d { camera_2d.eye() } else { camera.pos };
-        host.origin.maybe_rebase(eye);
-        let render_view = if two_d {
-            host.view_2d(&camera_2d)
-        } else {
-            host.view_for(&camera)
-        };
-        // Guard the render against a panic in engine code (P15.2). Rather than let
-        // it unwind across the OS thread boundary, we catch it, write a crash
-        // report, log a graceful message, and exit the render loop — the editor
-        // process (and its webview) survive instead of the whole app dying.
-        let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            host.render_frame(&render_view)
-        }));
-        match render_result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::error!("inf-viewport: unrecoverable render failure: {e}");
-                break 'outer;
+        //
+        //    We only render when our own child is actually presenting: hidden
+        //    (an HTML overlay is up) or embedded (a PIE window covers the hole)
+        //    means the surface never presents, so there is no vsync to pace us.
+        //    In that case — and when a visible present nonetheless acquired no
+        //    image (minimized/occluded child) — sleep ~10 ms so the loop drains
+        //    commands and stays responsive without pinning a CPU core (M3). The
+        //    quantum is short enough that a SetVisible(true)/SetRect wakes within
+        //    one sleep.
+        let should_render = visible && embedded.is_none();
+        let mut presented = false;
+        if should_render {
+            let eye = if two_d { camera_2d.eye() } else { camera.pos };
+            host.origin.maybe_rebase(eye);
+            let render_view = if two_d {
+                host.view_2d(&camera_2d)
+            } else {
+                host.view_for(&camera)
+            };
+            // Guard the render against a panic in engine code (P15.2). Rather than
+            // let it unwind across the OS thread boundary, we catch it, write a
+            // crash report, log a graceful message, and exit the render loop — the
+            // editor process (and its webview) survive instead of the whole app
+            // dying.
+            let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                host.render_frame(&render_view)
+            }));
+            match render_result {
+                Ok(Ok(p)) => presented = p,
+                Ok(Err(e)) => {
+                    tracing::error!("inf-viewport: unrecoverable render failure: {e}");
+                    break 'outer;
+                }
+                Err(payload) => {
+                    report_viewport_panic("<viewport render thread>", &*payload);
+                    break 'outer;
+                }
             }
-            Err(payload) => {
-                report_viewport_panic("<viewport render thread>", &*payload);
-                break 'outer;
-            }
+        }
+        // Nothing presented this iteration (hidden, embedded, or acquire-None):
+        // throttle so the loop doesn't busy-spin at 100% CPU.
+        if !presented {
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 

@@ -48,6 +48,14 @@ pub struct EngineHost {
     /// Active transform-gizmo mode; the gizmo shows only with a selection.
     pub gizmo_mode: GizmoMode,
     gizmo_drag: Option<GizmoDrag>,
+    /// Mesh-instance transforms captured at gizmo-drag start, keyed by instance
+    /// id. The cumulative gizmo delta (measured from the ORIGINAL grab anchor,
+    /// see [`EngineHost::update_gizmo`]) is applied to THESE each frame — the
+    /// live instances are never accumulated frame-to-frame — so snapping
+    /// quantizes total displacement, not per-frame deltas (M2).
+    gizmo_initial: HashMap<u32, InstanceXform>,
+    /// Same as [`Self::gizmo_initial`] for selected 2D (non-mesh) entities.
+    gizmo_initial_2d: HashMap<Uuid, Sel2D>,
     fov_y: f32,
     /// Render-instance id → entity GUID, rebuilt each projection (P3.2). Lets a
     /// pick resolve to a scene entity and a gizmo write back to the document.
@@ -139,6 +147,15 @@ struct Sel2D {
     extent: f64,
 }
 
+/// A mesh instance's transform captured at gizmo-drag start (M2). The cumulative
+/// gizmo delta is applied to this snapshot each frame so snapping is exact.
+#[derive(Debug, Clone, Copy)]
+struct InstanceXform {
+    translation: DVec3,
+    rotation: glam::Quat,
+    scale: Vec3,
+}
+
 /// A selected entity's collider, resolved to world space for debug outlining.
 struct ColliderDebug {
     shape: ColliderOutline2D,
@@ -184,6 +201,8 @@ impl EngineHost {
             origin: FloatingOrigin::default(),
             gizmo_mode: GizmoMode::Translate,
             gizmo_drag: None,
+            gizmo_initial: HashMap::new(),
+            gizmo_initial_2d: HashMap::new(),
             fov_y: 60f32.to_radians(),
             id_to_guid: HashMap::new(),
             guid_to_id: HashMap::new(),
@@ -215,6 +234,11 @@ impl EngineHost {
         // destroys the host before the window/layer).
         let surface = unsafe { target.create_surface(&instance) }?;
         let gpu = GpuContext::for_surface(instance, &surface)?;
+        // Interactive viewport: DEGRADE on GPU validation/OOM errors (log +
+        // count, keep rendering) instead of aborting the whole editor process,
+        // which is wgpu's default. The headless golden/thumbnail paths keep that
+        // fatal default so CI still fails hard on validation bugs (M1).
+        gpu.install_lenient_error_handler();
         let chain = SurfaceChain::new(&gpu, surface, width, height)?;
         let renderer = EngineRenderer::new(&gpu, chain.target_format());
         Ok((gpu, chain, renderer))
@@ -1152,6 +1176,23 @@ impl EngineHost {
             ro,
             rd,
         ));
+        // Snapshot the selection's transforms at drag start (M2): every frame's
+        // cumulative delta is applied to these, not accumulated onto the live
+        // instances, so snapping quantizes total displacement.
+        self.gizmo_initial.clear();
+        for id in &self.scene.selected {
+            if let Some(inst) = self.scene.instances.iter().find(|i| i.id == *id) {
+                self.gizmo_initial.insert(
+                    *id,
+                    InstanceXform {
+                        translation: inst.translation,
+                        rotation: inst.rotation,
+                        scale: inst.scale,
+                    },
+                );
+            }
+        }
+        self.gizmo_initial_2d = self.selected_2d.clone();
         true
     }
 
@@ -1160,6 +1201,14 @@ impl EngineHost {
     }
 
     /// Apply a gizmo drag update from the cursor. `snap` > 0 quantizes.
+    ///
+    /// The drag is NOT re-anchored between frames: [`GizmoDrag::update`] measures
+    /// the delta from the original grab point, so `delta` is the CUMULATIVE
+    /// motion since the gesture began. Snapping therefore quantizes the total
+    /// displacement (a slow sub-snap drag holds still until it crosses a snap
+    /// boundary, then jumps exactly one step; total motion is always a multiple
+    /// of the step). The cumulative delta is applied to the drag-start snapshot
+    /// (`gizmo_initial`), never accumulated onto the live instances (M2).
     pub fn update_gizmo(&mut self, view: &RenderView, px: u32, py: u32, snap: f32) {
         let Some(drag) = self.gizmo_drag else {
             return;
@@ -1167,41 +1216,47 @@ impl EngineHost {
         let (ro, rd) = view.pixel_ray(px as f32, py as f32);
         let delta = drag.update(ro, rd, snap);
         self.apply_delta(delta, drag.origin);
-        // Re-anchor the drag so deltas are incremental frame-to-frame.
-        if let Some(d) = self.gizmo_drag.as_mut() {
-            *d = GizmoDrag::begin(d.mode, d.axis, d.origin, ro, rd);
-        }
     }
 
+    /// Apply the cumulative gizmo `delta` to the drag-start snapshot, writing the
+    /// result onto the live selection. `pivot_local` is the gizmo origin at drag
+    /// start (render-local) — fixed for the whole gesture so cumulative rotation
+    /// orbits about a stable point.
     fn apply_delta(&mut self, delta: GizmoDelta, pivot_local: Vec3) {
         let pivot = self.origin.to_world(pivot_local);
         let selected = self.scene.selected.clone();
         for id in &selected {
+            let Some(init) = self.gizmo_initial.get(id).copied() else {
+                continue;
+            };
             if let Some(inst) = self.scene.instances.iter_mut().find(|i| i.id == *id) {
                 match delta {
-                    GizmoDelta::Translate(t) => inst.translation += t,
+                    GizmoDelta::Translate(t) => inst.translation = init.translation + t,
                     GizmoDelta::Rotate { axis, radians } => {
                         let q = glam::Quat::from_axis_angle(axis, radians);
-                        inst.rotation = q * inst.rotation;
+                        inst.rotation = q * init.rotation;
                         // Orbit the translation about the pivot too.
-                        let rel = (inst.translation - pivot).as_vec3();
+                        let rel = (init.translation - pivot).as_vec3();
                         inst.translation = pivot + (q * rel).as_dvec3();
                     }
-                    GizmoDelta::Scale(s) => inst.scale *= s,
+                    GizmoDelta::Scale(s) => inst.scale = init.scale * s,
                 }
             }
         }
         // Selected 2D (non-mesh) entities move the same way, in f64 (P8.2c).
-        for s in self.selected_2d.values_mut() {
+        for (guid, s) in self.selected_2d.iter_mut() {
+            let Some(init) = self.gizmo_initial_2d.get(guid).copied() else {
+                continue;
+            };
             match delta {
-                GizmoDelta::Translate(t) => s.translation += t,
+                GizmoDelta::Translate(t) => s.translation = init.translation + t,
                 GizmoDelta::Rotate { axis, radians } => {
                     let q = DQuat::from_axis_angle(axis.as_dvec3(), radians as f64);
-                    s.rotation = q * s.rotation;
-                    let rel = s.translation - pivot;
+                    s.rotation = q * init.rotation;
+                    let rel = init.translation - pivot;
                     s.translation = pivot + q * rel;
                 }
-                GizmoDelta::Scale(sc) => s.scale *= sc.as_dvec3(),
+                GizmoDelta::Scale(sc) => s.scale = init.scale * sc.as_dvec3(),
             }
         }
         self.scene.mark_dirty();
@@ -1209,6 +1264,8 @@ impl EngineHost {
 
     pub fn end_gizmo(&mut self) {
         self.gizmo_drag = None;
+        self.gizmo_initial.clear();
+        self.gizmo_initial_2d.clear();
     }
 
     // ── terrain sculpting (P10.2b) ────────────────────────────────────────
@@ -1470,7 +1527,13 @@ impl EngineHost {
     /// builds it from whichever camera is active and rebases the floating origin
     /// first). Handles crash-safe device-lost recovery internally; only errors
     /// that survive a full stack rebuild are returned.
-    pub fn render_frame(&mut self, view: &RenderView) -> Result<(), String> {
+    ///
+    /// Returns `Ok(true)` when a frame was presented and `Ok(false)` when the
+    /// swapchain had no image to acquire (surface occluded/minimized/hidden) so
+    /// nothing was drawn. The caller uses this to pace itself: a presented FIFO
+    /// frame blocks at vsync, but a non-present must be throttled by the loop or
+    /// it busy-spins the CPU (M3).
+    pub fn render_frame(&mut self, view: &RenderView) -> Result<bool, String> {
         // Remember the camera eye for PCG draw-distance culling on the next
         // projection (see `last_eye_world`).
         self.last_eye_world = view.eye_world;
@@ -1481,6 +1544,15 @@ impl EngineHost {
             self.gpu = gpu;
             self.chain = chain;
             self.renderer = renderer;
+            // The picker holds its own device-scoped GPU resources (pipeline,
+            // ID-buffer target, readback buffer) created against the OLD device.
+            // Rebuild it on the fresh device too — otherwise the next pick (which
+            // runs in the interaction block, OUTSIDE the render catch_unwind)
+            // hits a device-mismatch validation error and kills the thread with
+            // the scene mutex poisoned (H1). The `renderer` was already the only
+            // other GPU-resource field; every remaining field on `self` is plain
+            // CPU/scene data and survives a device loss untouched.
+            self.picker = Picker::new(&self.gpu);
         }
 
         // Per-frame debug primitives: world-origin axes tripod, plus the
@@ -1528,7 +1600,7 @@ impl EngineHost {
         }
 
         let Some(frame) = self.chain.acquire(&self.gpu) else {
-            return Ok(()); // transient (occluded/timeout) — skip the frame
+            return Ok(false); // transient (occluded/timeout) — nothing presented
         };
         let out_view = self.chain.target_view(&frame);
         self.renderer.render(
@@ -1539,6 +1611,6 @@ impl EngineHost {
             self.chain.configured_size(),
         );
         self.gpu.queue.present(frame);
-        Ok(())
+        Ok(true)
     }
 }

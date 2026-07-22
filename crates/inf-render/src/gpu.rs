@@ -5,7 +5,7 @@
 //! driver dies; the host is expected to drop everything GPU-side and rebuild
 //! from a fresh context (see `inf-viewport`'s render loop).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 /// Create the shared wgpu instance. Vulkan/Metal only: the dx12 backend is
@@ -28,6 +28,13 @@ pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     lost: Arc<AtomicBool>,
+    /// Count of uncaptured (validation/OOM/internal) GPU errors observed since a
+    /// lenient error handler was installed. Stays `0` in headless/test contexts,
+    /// which deliberately keep wgpu's fatal default so CI fails hard on
+    /// validation bugs (see [`GpuContext::install_lenient_error_handler`] and
+    /// [`GpuContext::headless`]). Interactive hosts can poll it to surface a
+    /// "renderer degraded" state.
+    uncaptured_errors: Arc<AtomicU32>,
 }
 
 impl GpuContext {
@@ -48,6 +55,12 @@ impl GpuContext {
     /// Headless context (golden tests, thumbnails). Falls back to a software
     /// adapter (WARP / lavapipe) when no hardware one exists, and reports a
     /// descriptive error when there is no adapter at all so callers can skip.
+    ///
+    /// This path intentionally does **not** install a lenient uncaptured-error
+    /// handler: it keeps wgpu's fatal default so any validation/OOM error aborts
+    /// the process. That is what CI wants — a shader/pipeline regression must
+    /// fail the build loudly, not degrade silently. Interactive editor hosts opt
+    /// into leniency via [`GpuContext::install_lenient_error_handler`].
     pub fn headless() -> Result<Self, String> {
         let instance = create_instance();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -89,6 +102,7 @@ impl GpuContext {
             device,
             queue,
             lost,
+            uncaptured_errors: Arc::new(AtomicU32::new(0)),
         })
     }
 
@@ -96,5 +110,37 @@ impl GpuContext {
     /// the whole GPU stack from a fresh context.
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Acquire)
+    }
+
+    /// Install a lenient uncaptured-error handler for interactive/editor
+    /// contexts. wgpu's default handler **aborts the process** on any
+    /// validation, out-of-memory, or internal error; that is correct for CI and
+    /// the headless golden/thumbnail paths (a validation bug must fail hard —
+    /// see [`GpuContext::headless`]), but wrong for a live editor viewport,
+    /// where a single bad draw should DEGRADE — get logged and counted, with
+    /// rendering continuing — rather than kill the whole editor.
+    ///
+    /// Errors are counted (read via [`GpuContext::uncaptured_error_count`]) and
+    /// logged via `tracing::error`, rate-limited so a bad pipeline that repeats
+    /// every frame doesn't flood the log. Call this exactly once, on the editor
+    /// host's context; never call it from [`GpuContext::headless`].
+    pub fn install_lenient_error_handler(&self) {
+        let count = self.uncaptured_errors.clone();
+        self.device
+            .on_uncaptured_error(Arc::new(move |err: wgpu::Error| {
+                let n = count.fetch_add(1, Ordering::Relaxed);
+                // Log the first few, then every 256th, to bound log spam when a
+                // bad draw recurs each frame.
+                if n < 4 || n.is_multiple_of(256) {
+                    tracing::error!("inf-render uncaptured GPU error (#{}): {err}", n + 1);
+                }
+            }));
+    }
+
+    /// Number of uncaptured GPU errors seen since the lenient handler was
+    /// installed. Always `0` in headless/test contexts (which keep wgpu's fatal
+    /// default and therefore never reach this counter).
+    pub fn uncaptured_error_count(&self) -> u32 {
+        self.uncaptured_errors.load(Ordering::Acquire)
     }
 }
