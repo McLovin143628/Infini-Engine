@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use inf_graph::{Graph, NodeId, NodeRegistry, ParamValue, PortType};
+use inf_graph::{Graph, Node, NodeId, NodeRegistry, ParamValue, PortType};
 
 use crate::nodekit::{NodeRole, EXEC_THEN};
 use crate::semantics::EventKind;
@@ -99,18 +99,33 @@ pub fn lower_graph(graph: &Graph, reg: &NodeRegistry) -> Result<Vec<BlueprintFn>
     let mut out = Vec::new();
     for (id, node) in &graph.nodes {
         if node.type_id.starts_with("event.") {
-            let event = event_of(&node.type_id);
+            let event = event_of(node);
             out.push(lower_event(graph, reg, *id, &event)?);
         }
     }
     Ok(out)
 }
 
-fn event_of(type_id: &str) -> EventKind {
-    match type_id {
+/// The [`EventKind`] an `event.*` node denotes. **Param-aware** (Wave 3):
+/// `event.input` reads its `action` param, `event.custom` its `name` param;
+/// `event.collision` is param-less. The legacy `event.<name>` shape still maps to
+/// `Custom("<name>")` so older graphs keep lowering.
+fn event_of(node: &Node) -> EventKind {
+    match node.type_id.as_str() {
         "event.begin_play" => EventKind::BeginPlay,
         "event.tick" => EventKind::Tick,
+        "event.collision" => EventKind::Collision,
+        "event.input" => EventKind::Input(node_text_param(node, "action")),
+        "event.custom" => EventKind::Custom(node_text_param(node, "name")),
         other => EventKind::Custom(other.trim_start_matches("event.").to_string()),
+    }
+}
+
+/// A node's `Text`/`Enum` param by key, or the empty string when absent.
+fn node_text_param(node: &Node, key: &str) -> String {
+    match node.params.get(key) {
+        Some(ParamValue::Text(s)) | Some(ParamValue::Enum(s)) => s.clone(),
+        _ => String::new(),
     }
 }
 
@@ -130,13 +145,25 @@ pub fn lower_event(
     };
     let body = lw.exec_from(event_node, EXEC_THEN)?;
     let params: Vec<Param> = event.signature();
+    let key = event.key();
     Ok(BlueprintFn {
-        id: event.key(),
-        name: event.key(),
+        // `id` keeps the raw key (`input:jump`, `custom:foo`) as the stable
+        // identity; `name` is the sanitized Rust ident (`:`/`.` → `_`) the
+        // transpiler's `generate_fn` needs — a raw key with a colon is not a
+        // valid ident and would fail `emit::ident`.
+        name: sanitize_ident(&key),
+        id: key,
         params,
         ret: Ty::Unit,
         body,
     })
+}
+
+/// Turn an event key into a valid Rust identifier for the generated `fn` name:
+/// the `:` in `input:jump` / `custom:foo` and any `.` become `_`
+/// (`input_jump`, `custom_foo`). `begin_play`/`tick`/`collision` are unchanged.
+fn sanitize_ident(key: &str) -> String {
+    key.replace([':', '.'], "_")
 }
 
 struct Lowerer<'a> {
@@ -456,7 +483,7 @@ impl Lowerer<'_> {
         type_id: &str,
         prelude: &mut Vec<Stmt>,
     ) -> Result<Expr, LowerError> {
-        let path: Vec<String> = type_id.split('.').map(str::to_string).collect();
+        let path: Vec<String> = host_call_path(type_id);
         let ports = self.data_input_ports(node);
         let mut args = Vec::new();
         for port in ports {
@@ -654,6 +681,21 @@ impl Lowerer<'_> {
         self.next_local += 1;
         id
     }
+}
+
+/// The host-call path an action node's `type_id` lowers to. Almost always the
+/// dotted segments (`engine.spawn → engine::spawn`), but the Wave-3 dispatcher
+/// nodes remap onto the shared `event::*` host surface (`dispatch.call →
+/// event::dispatch`, `dispatch.bind → event::bind`, `dispatch.unbind →
+/// event::unbind`) so the sim's one dispatcher implementation backs all three.
+fn host_call_path(type_id: &str) -> Vec<String> {
+    let mapped = match type_id {
+        "dispatch.call" => "event.dispatch",
+        "dispatch.bind" => "event.bind",
+        "dispatch.unbind" => "event.unbind",
+        other => other,
+    };
+    mapped.split('.').map(str::to_string).collect()
 }
 
 fn default_literal(ty: PortType) -> Expr {
@@ -1458,6 +1500,86 @@ mod tests {
         eval_fn(&f, &HashMap::new(), &mut host).unwrap();
         assert_eq!(host.vars.get("n"), Some(&Value::Int(0)));
         assert!(host.logs.is_empty(), "no runaway for a terminating loop");
+    }
+
+    #[test]
+    fn input_event_lowers_with_sanitized_name_and_pressed_param() {
+        // event.input(action="jump") → debug.print("hi")
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let ev = g.insert("event.input", NodeUi::default());
+        g.node_mut(ev)
+            .unwrap()
+            .params
+            .insert("action".into(), ParamValue::Text("jump".into()));
+        let pr = g.insert("debug.print", NodeUi::default());
+        g.node_mut(pr)
+            .unwrap()
+            .params
+            .insert("message".into(), ParamValue::Text("hi".into()));
+        wire(&mut g, ev, EXEC_THEN, pr, "exec");
+
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        // id keeps the raw key; name is the Rust-safe ident.
+        assert_eq!(f.id, "input:jump");
+        assert_eq!(f.name, "input_jump");
+        assert_eq!(f.params.len(), 1);
+        assert_eq!(f.params[0].name, "pressed");
+    }
+
+    #[test]
+    fn collision_and_custom_events_lower() {
+        let reg = blueprint_registry();
+        // event.collision → carries an `other: Int` param.
+        let mut g = Graph::empty();
+        let ev = g.insert("event.collision", NodeUi::default());
+        let pr = g.insert("debug.print", NodeUi::default());
+        wire(&mut g, ev, EXEC_THEN, pr, "exec");
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        assert_eq!(f.id, "collision");
+        assert_eq!(f.name, "collision");
+        assert_eq!(f.params[0].name, "other");
+
+        // event.custom(name="ping") → id "custom:ping", sanitized name.
+        let mut g = Graph::empty();
+        let ev = g.insert("event.custom", NodeUi::default());
+        g.node_mut(ev)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("ping".into()));
+        let pr = g.insert("debug.print", NodeUi::default());
+        wire(&mut g, ev, EXEC_THEN, pr, "exec");
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        assert_eq!(f.id, "custom:ping");
+        assert_eq!(f.name, "custom_ping");
+        assert!(f.params.is_empty());
+    }
+
+    #[test]
+    fn dispatch_nodes_lower_to_event_host_calls() {
+        // begin_play → dispatch.call(target=5, name="ping")
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let target = lit_int(&mut g, 5);
+        let name = g.insert("lit.str", NodeUi::default());
+        g.node_mut(name)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Text("ping".into()));
+        let call = g.insert("dispatch.call", NodeUi::default());
+        wire(&mut g, target, "value", call, "target");
+        wire(&mut g, name, "value", call, "name");
+        wire(&mut g, bp, EXEC_THEN, call, "exec");
+
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        // The one statement is an `event::dispatch(5, "ping")` host call.
+        assert_eq!(f.body.len(), 1);
+        let Stmt::ExprStmt(Expr::Call { path, args }) = &f.body[0] else {
+            panic!("expected a call statement, got {:?}", f.body[0]);
+        };
+        assert_eq!(path, &["event".to_string(), "dispatch".to_string()]);
+        assert_eq!(args.len(), 2);
     }
 
     #[test]

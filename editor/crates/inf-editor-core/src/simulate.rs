@@ -32,7 +32,7 @@
 //! `entity` member variable with it, so `var.get("entity")` feeds
 //! `physics2d.*` nodes. [`SimHost`]/the adapter map `i64 → Guid → body handle`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use glam::{DQuat, DVec2, DVec3};
 use uuid::Uuid;
@@ -55,8 +55,8 @@ use inf_ecs::components::{
 };
 use inf_ecs::{update_attachments, EcsWorld, Entity, Guid};
 use inf_physics::{
-    CharacterMover2D, CharacterMover3D, ColliderShape2D, ColliderShape3D, FixedStepper,
-    PhysicsBridge2D, PhysicsBridge3D,
+    CharacterMover2D, CharacterMover3D, ColliderShape2D, ColliderShape3D, ContactPhase,
+    FixedStepper, PhysicsBridge2D, PhysicsBridge3D,
 };
 
 use crate::scene::serialize::{apply_to_doc, to_scene_file, SceneFile};
@@ -64,6 +64,38 @@ use crate::scene::SceneDoc;
 
 /// The default Simulate/physics rate (fixed updates per second).
 pub const SIM_HZ: f64 = 60.0;
+
+/// The per-step cap on chained event dispatches (Wave 3). Once this many
+/// `dispatch.call`s have been processed in one drain, the remainder is dropped
+/// with a log line — a deterministic guard against an unbounded dispatch cycle
+/// (the event-graph analogue of the `flow.while` loop guard).
+const DISPATCH_ROUND_CAP: u32 = 64;
+
+/// Whether a trigger-volume (sensor) overlap began or ended this step — the
+/// gameplay-facing phase of a drained [`OverlapEvent`] (Wave 3, E-P4 sim half).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OverlapPhase {
+    /// The two sensor colliders started overlapping this step.
+    Begin,
+    /// They stopped overlapping this step.
+    End,
+}
+
+/// A drained **sensor-pair** overlap for one fixed step: the two entity `Guid`s
+/// (canonical `a < b`) and the phase. This is the seam trigger-volume gameplay +
+/// the parity tests pin — [`SimSession::drained_overlaps`] exposes the list, which
+/// is rebuilt (cleared then filled) every fixed step. Only sensor↔sensor and
+/// sensor↔solid pairs where at least one collider is a sensor appear here; solid
+/// contacts drive Blueprint `Collision` events instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OverlapEvent {
+    /// The lower-`Guid` entity of the overlapping pair.
+    pub a: Uuid,
+    /// The higher-`Guid` entity of the overlapping pair.
+    pub b: Uuid,
+    /// Begin (started overlapping) or End (stopped).
+    pub phase: OverlapPhase,
+}
 
 /// A snapshot of the keyboard/action state for one tick: the set of currently
 /// **held** keys/actions (e.g. `"left"`, `"jump"`). Rising edges
@@ -140,6 +172,18 @@ pub struct SimSession {
     prev_down: BTreeSet<String>,
     /// Rising edges pending this fixed step (consumed after the first step).
     just_pressed: BTreeSet<String>,
+    /// Falling edges pending this fixed step (Wave 3 input events): actions
+    /// released since the previous tick (`prev_down − down`).
+    just_released: BTreeSet<String>,
+    /// Wave 3 event dispatchers: `(source entity, event name) → {listener entity
+    /// → handler custom-event name}`. Deterministic (`BTreeMap` throughout).
+    bindings: BTreeMap<(i64, String), BTreeMap<i64, String>>,
+    /// FIFO queue of pending `(target entity, event name)` dispatches, drained
+    /// after each event pass (Wave 3).
+    dispatch_queue: VecDeque<(i64, String)>,
+    /// Sensor-pair overlaps drained this fixed step (canonical `a < b`, sorted).
+    /// Cleared and refilled every step; the trigger-volume gameplay seam.
+    drained_overlaps: Vec<OverlapEvent>,
     /// Accumulated `debug.print` output (surfaced to the log panel).
     logs: Vec<String>,
     /// Last `move_and_slide` grounded result per actor (a debug/telemetry read).
@@ -213,6 +257,10 @@ impl SimSession {
             input: SimInput::default(),
             prev_down: BTreeSet::new(),
             just_pressed: BTreeSet::new(),
+            just_released: BTreeSet::new(),
+            bindings: BTreeMap::new(),
+            dispatch_queue: VecDeque::new(),
+            drained_overlaps: Vec::new(),
             logs: Vec::new(),
             grounded: BTreeMap::new(),
             audio: AudioEngine::new(),
@@ -226,6 +274,7 @@ impl SimSession {
         session.bridge.sync_from_world(doc.world());
         session.bridge3d.sync_from_world(doc.world()); // P11.3 3D bridge
         session.run_all(doc, &EventKind::BeginPlay);
+        session.drain_dispatch(doc); // Wave 3: BeginPlay may dispatch custom events.
         session
     }
 
@@ -316,11 +365,22 @@ impl SimSession {
         self.grounded.get(&guid).copied().unwrap_or(false)
     }
 
+    /// The trigger-volume (sensor) overlaps drained during the most recent fixed
+    /// step (Wave 3, E-P4 sim half): each a canonical `a < b` entity-`Guid` pair
+    /// with a Begin/End phase, sorted ascending. Rebuilt every step (cleared then
+    /// filled), so read it right after a [`step_once`](Self::step_once). This is
+    /// the seam trigger-volume gameplay + the editor/runtime parity tests consume.
+    pub fn drained_overlaps(&self) -> &[OverlapEvent] {
+        &self.drained_overlaps
+    }
+
     // ── internal ──────────────────────────────────────────────────────────
 
-    /// Latch the new input and compute rising edges vs. the previous tick.
+    /// Latch the new input and compute rising **and** falling edges vs. the
+    /// previous tick (Wave 3 adds the falling edge for `Input` release events).
     fn set_input(&mut self, input: SimInput) {
         self.just_pressed = input.down.difference(&self.prev_down).cloned().collect();
+        self.just_released = self.prev_down.difference(&input.down).cloned().collect();
         self.prev_down = input.down.clone();
         self.input = input;
     }
@@ -331,14 +391,23 @@ impl SimSession {
         // 1. ECS → physics.
         self.bridge.sync_from_world(doc.world());
         self.bridge3d.sync_from_world(doc.world()); // ── P11.3 3D bridge: sync ──
-                                                    // 2. Blueprint Tick for every actor (Guid order).
+                                                    // ── Wave 3 input events ── fire Input(action) edges BEFORE the Tick pass,
+                                                    //    then drain any dispatches they queued.
+        self.fire_input_events(doc);
+        self.drain_dispatch(doc);
+        // 2. Blueprint Tick for every actor (Guid order).
         let tick_args: BTreeMap<String, Value> = [("dt".to_string(), Value::Float(dt))].into();
         let args: std::collections::HashMap<String, Value> = tick_args.into_iter().collect();
         self.run_all_with_args(doc, &EventKind::Tick, &args);
-        // 3. Solver.
+        self.drain_dispatch(doc); // Wave 3: Tick may dispatch custom events.
+                                  // 3. Solver.
         self.bridge.step(dt);
         self.bridge3d.step(dt); // ── P11.3 3D bridge: step ──
-                                // 4. Physics → ECS.
+                                // ── Wave 3 collision + overlap drain ── between the solver and write-back:
+                                //    fire Blueprint `Collision` events + collect sensor OverlapEvents.
+        self.drain_collisions(doc);
+        self.drain_dispatch(doc);
+        // 4. Physics → ECS.
         self.bridge.write_back(doc.world_mut());
         self.bridge3d.write_back_into(doc.world_mut()); // ── P11.3 3D bridge: write-back ──
         doc.world_mut().propagate();
@@ -519,9 +588,7 @@ impl SimSession {
         self.run_all_with_args(doc, event, &args);
     }
 
-    /// Fire `event` on every actor in `Guid` order, each through a fresh
-    /// [`SimHost`]. Actors are lifted out of the map during their run so the
-    /// per-actor borrow doesn't alias the session's other fields.
+    /// Fire `event` on every actor in `Guid` order (each via [`run_on_guid`]).
     fn run_all_with_args(
         &mut self,
         doc: &mut SceneDoc,
@@ -530,33 +597,210 @@ impl SimSession {
     ) {
         let guids: Vec<Uuid> = self.actors.keys().copied().collect();
         for guid in guids {
-            let Some(mut state) = self.actors.remove(&guid) else {
-                continue;
+            self.run_on_guid(doc, guid, event, args);
+        }
+    }
+
+    /// Fire `event` on the single actor `guid` through a fresh [`SimHost`]. The
+    /// actor is lifted out of the map during its run so the per-actor borrow
+    /// doesn't alias the session's other fields; its `entity` id is threaded into
+    /// the host as `current_entity` so `event::bind` knows the calling listener.
+    fn run_on_guid(
+        &mut self,
+        doc: &mut SceneDoc,
+        guid: Uuid,
+        event: &EventKind,
+        args: &std::collections::HashMap<String, Value>,
+    ) {
+        let Some(mut state) = self.actors.remove(&guid) else {
+            return;
+        };
+        let current_entity = match state.instance.get("entity") {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        };
+        {
+            let mut host = SimHost {
+                bridge: &mut self.bridge,
+                bridge3d: &mut self.bridge3d,
+                world: doc.world_mut(),
+                input: &self.input,
+                just_pressed: &self.just_pressed,
+                entities: &self.entities,
+                logs: &mut self.logs,
+                grounded: &mut self.grounded,
+                audio_cmds: &mut self.audio_cmds,
+                current_entity,
+                bindings: &mut self.bindings,
+                dispatch_queue: &mut self.dispatch_queue,
             };
-            {
-                let mut host = SimHost {
-                    bridge: &mut self.bridge,
-                    bridge3d: &mut self.bridge3d,
-                    world: doc.world_mut(),
-                    input: &self.input,
-                    just_pressed: &self.just_pressed,
-                    entities: &self.entities,
-                    logs: &mut self.logs,
-                    grounded: &mut self.grounded,
-                    audio_cmds: &mut self.audio_cmds,
-                };
-                if let Err(e) = run_event(
-                    &state.class,
-                    &mut state.instance,
-                    event,
-                    args,
-                    &mut host,
-                    &InterpDebug::default(),
-                ) {
-                    self.logs.push(format!("{}: {e}", event.key()));
+            if let Err(e) = run_event(
+                &state.class,
+                &mut state.instance,
+                event,
+                args,
+                &mut host,
+                &InterpDebug::default(),
+            ) {
+                self.logs.push(format!("{}: {e}", event.key()));
+            }
+        }
+        self.actors.insert(guid, state);
+    }
+
+    /// Fire `event` on whatever actor owns blueprint entity id `entity_id`, if
+    /// any (the dispatch drain's target/listener resolver).
+    fn fire_on_entity(
+        &mut self,
+        doc: &mut SceneDoc,
+        entity_id: i64,
+        event: &EventKind,
+        args: &std::collections::HashMap<String, Value>,
+    ) {
+        if let Some(&guid) = self.entities.get(&entity_id) {
+            self.run_on_guid(doc, guid, event, args);
+        }
+    }
+
+    /// The blueprint `i64` entity id assigned to `guid`, if it is a mapped entity.
+    fn entity_id_of(&self, guid: Uuid) -> Option<i64> {
+        self.entities
+            .iter()
+            .find(|(_, g)| **g == guid)
+            .map(|(id, _)| *id)
+    }
+
+    /// Fire this step's `Input(action)` events (Wave 3): presses first, then
+    /// releases, each set in `BTreeSet`-ascending action order, on every actor
+    /// (handlers without a matching `Input` binding no-op). `pressed` carries
+    /// `true` for a press edge, `false` for a release edge.
+    fn fire_input_events(&mut self, doc: &mut SceneDoc) {
+        if self.just_pressed.is_empty() && self.just_released.is_empty() {
+            return;
+        }
+        let pressed: Vec<String> = self.just_pressed.iter().cloned().collect();
+        let released: Vec<String> = self.just_released.iter().cloned().collect();
+        for action in pressed {
+            let args: std::collections::HashMap<String, Value> =
+                [("pressed".to_string(), Value::Bool(true))].into();
+            self.run_all_with_args(doc, &EventKind::Input(action), &args);
+        }
+        for action in released {
+            let args: std::collections::HashMap<String, Value> =
+                [("pressed".to_string(), Value::Bool(false))].into();
+            self.run_all_with_args(doc, &EventKind::Input(action), &args);
+        }
+    }
+
+    /// Drain this step's 2D **then** 3D contact events once, feeding two consumers
+    /// (Wave 3): (a) Blueprint `Collision` events — `Started` phase only, sensors
+    /// included — fired on each side that is an actor with the other side's entity
+    /// id (0 if none), canonical `a ≤ b` and both sides ascending; (b) the
+    /// `drained_overlaps` list — **sensor pairs only**, canonical `a < b`,
+    /// Begin/End, sorted. Called between the solver step and write-back.
+    fn drain_collisions(&mut self, doc: &mut SceneDoc) {
+        self.drained_overlaps.clear();
+        // Resolve both worlds' events to canonical (guid_a ≤ guid_b, phase, sensor)
+        // tuples, dropping any pair with an untracked collider.
+        let events2d = self.bridge.world_mut().drain_contact_events();
+        let events3d = self.bridge3d.world_mut().drain_contact_events();
+        let mut resolved: Vec<(Uuid, Uuid, ContactPhase, bool)> = Vec::new();
+        for ev in &events2d {
+            if let (Some(a), Some(b)) = (
+                self.bridge.guid_of_collider(ev.collider_a),
+                self.bridge.guid_of_collider(ev.collider_b),
+            ) {
+                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                resolved.push((lo, hi, ev.phase, ev.sensor));
+            }
+        }
+        for ev in &events3d {
+            if let (Some(a), Some(b)) = (
+                self.bridge3d.guid_of_collider(ev.collider_a),
+                self.bridge3d.guid_of_collider(ev.collider_b),
+            ) {
+                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                resolved.push((lo, hi, ev.phase, ev.sensor));
+            }
+        }
+
+        // (b) Sensor-pair overlaps → the public `drained_overlaps` list.
+        for &(a, b, phase, sensor) in &resolved {
+            if !sensor {
+                continue;
+            }
+            self.drained_overlaps.push(OverlapEvent {
+                a,
+                b,
+                phase: match phase {
+                    ContactPhase::Started => OverlapPhase::Begin,
+                    ContactPhase::Stopped => OverlapPhase::End,
+                },
+            });
+        }
+        self.drained_overlaps.sort();
+        self.drained_overlaps.dedup();
+
+        // (a) Blueprint `Collision` events — Started only, sensors INCLUDED. Build
+        // the fire list (canonical, sorted, both sides ascending) before firing so
+        // no borrow of `resolved` outlives the actor runs.
+        let mut pairs: Vec<(Uuid, Uuid)> = resolved
+            .iter()
+            .filter(|(_, _, phase, _)| *phase == ContactPhase::Started)
+            .map(|&(a, b, _, _)| (a, b))
+            .collect();
+        pairs.sort();
+        pairs.dedup();
+        let mut fires: Vec<(Uuid, i64)> = Vec::new();
+        for (a, b) in pairs {
+            if self.actors.contains_key(&a) {
+                fires.push((a, self.entity_id_of(b).unwrap_or(0)));
+            }
+            if self.actors.contains_key(&b) {
+                fires.push((b, self.entity_id_of(a).unwrap_or(0)));
+            }
+        }
+        for (guid, other_id) in fires {
+            let args: std::collections::HashMap<String, Value> =
+                [("other".to_string(), Value::Int(other_id))].into();
+            self.run_on_guid(doc, guid, &EventKind::Collision, &args);
+        }
+    }
+
+    /// Drain the FIFO dispatch queue (Wave 3): for each popped `(target, name)`,
+    /// fire `Custom(name)` on the target actor, then `Custom(handler)` on every
+    /// listener bound to `(target, name)` in ascending listener-id order. Nested
+    /// dispatches append to the queue and are processed in turn; once
+    /// [`DISPATCH_ROUND_CAP`] dispatches have run the remainder is logged + dropped
+    /// (a deterministic cycle guard). No-op when the queue is empty.
+    fn drain_dispatch(&mut self, doc: &mut SceneDoc) {
+        let mut rounds = 0u32;
+        loop {
+            if self.dispatch_queue.is_empty() {
+                break;
+            }
+            if rounds >= DISPATCH_ROUND_CAP {
+                self.logs.push(format!(
+                    "event dispatch cap ({DISPATCH_ROUND_CAP}) exceeded; dropping {} pending",
+                    self.dispatch_queue.len()
+                ));
+                self.dispatch_queue.clear();
+                break;
+            }
+            let (target, name) = self.dispatch_queue.pop_front().unwrap();
+            rounds += 1;
+            // Build the fire list under an immutable borrow of `bindings`, then
+            // fire (each run may itself append to the queue).
+            let mut fires: Vec<(i64, String)> = vec![(target, name.clone())];
+            if let Some(listeners) = self.bindings.get(&(target, name)) {
+                for (listener, handler) in listeners {
+                    fires.push((*listener, handler.clone()));
                 }
             }
-            self.actors.insert(guid, state);
+            for (entity_id, ev_name) in fires {
+                let args = std::collections::HashMap::new();
+                self.fire_on_entity(doc, entity_id, &EventKind::Custom(ev_name), &args);
+            }
         }
     }
 }
@@ -805,6 +1049,14 @@ struct SimHost<'a> {
     /// The P12.3 audio command sink: `audio.*` nodes enqueue here; drained after
     /// the step in [`SimSession::audio_step`].
     audio_cmds: &'a mut Vec<AudioCommand>,
+    /// The blueprint entity id of the actor currently running (Wave 3): the
+    /// listener `event::bind`/`event::unbind` register against.
+    current_entity: i64,
+    /// The session's event-dispatcher bindings (Wave 3), mutated by
+    /// `event::bind`/`event::unbind`.
+    bindings: &'a mut BTreeMap<(i64, String), BTreeMap<i64, String>>,
+    /// The session's FIFO dispatch queue (Wave 3); `event::dispatch` appends here.
+    dispatch_queue: &'a mut VecDeque<(i64, String)>,
 }
 
 impl Host for SimHost<'_> {
@@ -820,6 +1072,34 @@ impl Host for SimHost<'_> {
             (Some("input"), Some("just_pressed")) => {
                 let key = arg_str(args, 0);
                 Ok(Value::Bool(self.just_pressed.contains(&key)))
+            }
+            // ── Wave 3 event dispatchers ── `dispatch.*` nodes lower to these.
+            (Some("event"), Some("dispatch")) => {
+                self.dispatch_queue
+                    .push_back((arg_i64(args, 0), arg_str(args, 1)));
+                Ok(Value::Unit)
+            }
+            (Some("event"), Some("bind")) => {
+                let source = arg_i64(args, 0);
+                let name = arg_str(args, 1);
+                let handler = arg_str(args, 2);
+                self.bindings
+                    .entry((source, name))
+                    .or_default()
+                    .insert(self.current_entity, handler);
+                Ok(Value::Unit)
+            }
+            (Some("event"), Some("unbind")) => {
+                let source = arg_i64(args, 0);
+                let name = arg_str(args, 1);
+                let handler = arg_str(args, 2);
+                if let Some(listeners) = self.bindings.get_mut(&(source, name)) {
+                    // Remove the caller's subscription iff the handler matches.
+                    if listeners.get(&self.current_entity) == Some(&handler) {
+                        listeners.remove(&self.current_entity);
+                    }
+                }
+                Ok(Value::Unit)
             }
             (Some("debug"), Some("print")) => {
                 self.logs.push(arg_str(args, 0));
@@ -1245,6 +1525,16 @@ fn arg_str(args: &[Value], i: usize) -> String {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// Coerce a positional blueprint arg to `i64` (`Float` truncates; else `0`) — the
+/// entity-id / target argument coercion for the Wave 3 `event::*` host arms.
+fn arg_i64(args: &[Value], i: usize) -> i64 {
+    match args.get(i) {
+        Some(Value::Int(n)) => *n,
+        Some(Value::Float(f)) => *f as i64,
+        _ => 0,
+    }
 }
 
 /// Coerce a positional blueprint arg to `f64` (`Int` widens; else `0.0`).

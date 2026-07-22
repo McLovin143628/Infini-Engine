@@ -347,6 +347,16 @@ impl Host for RunHost {
                 self.logs.push(msg);
                 Ok(Value::Unit)
             }
+            // Wave 3 event dispatchers (`dispatch.*` → `event::*`): the graph
+            // preview run has no live actor world or dispatch queue, so they are
+            // log-only here (the real firing happens in the sim's `drain_dispatch`).
+            (Some("event"), Some("dispatch"))
+            | (Some("event"), Some("bind"))
+            | (Some("event"), Some("unbind")) => {
+                self.logs
+                    .push(format!("{}({})", path.join("::"), fmt_args(args)));
+                Ok(Value::Unit)
+            }
             _ => {
                 self.logs
                     .push(format!("{}({})", path.join("::"), fmt_args(args)));

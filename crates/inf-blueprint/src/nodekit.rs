@@ -43,6 +43,7 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(variable_nodes());
     reg.register_all(flow_nodes());
     reg.register_all(action_nodes());
+    reg.register_all(dispatch_nodes());
     reg.register_all(physics_nodes());
     reg.register_all(physics3d_nodes());
     reg.register_all(input_nodes());
@@ -61,6 +62,77 @@ fn event_nodes() -> Vec<NodeDef> {
                 exec_out(EXEC_THEN),
                 PortDef::new("dt", PortType::Float),
             ]),
+        // Wave 3 event entry points. `event.input` fires on the rising/falling
+        // edge of the named action (`pressed` = true on press, false on release);
+        // `event.collision` fires when a solid contact (or a sensor overlap)
+        // begins, carrying the other entity's id; `event.custom` is invoked
+        // explicitly (by name) via the dispatcher nodes below. Their `action` /
+        // `name` params drive the lowerer's [`EventKind`](crate::EventKind).
+        NodeDef::new("event.input", "Input Action", "events")
+            .described("Fires on the named input action's edge; `pressed` is true on press, false on release.")
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("pressed", PortType::Bool),
+            ])
+            .with_params(vec![ParamDef::text("action", "")]),
+        NodeDef::new("event.collision", "On Collision", "events")
+            .described("Fires when a contact/overlap begins; `other` is the other entity's id (0 if none).")
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("other", PortType::Int),
+            ]),
+        NodeDef::new("event.custom", "Custom Event", "events")
+            .described("A user-named event, invoked explicitly through the dispatcher nodes.")
+            .with_outputs(vec![exec_out(EXEC_THEN)])
+            .with_params(vec![ParamDef::text("name", "")]),
+    ]
+}
+
+/// The event-dispatcher palette (Wave 3, B-P3). These are impure exec actions the
+/// lowerer routes — via the generic [`NodeRole::Action`] path — to the
+/// `event::dispatch` / `event::bind` / `event::unbind` host calls the sim
+/// implements. `name`/`handler` are **`Str` data input pins** (wire a `lit.str`),
+/// mirroring the `input.is_down` key precedent, so they lower with no special
+/// casing beyond the `dispatch.* → event::*` path remap in [`crate::lower`].
+///
+/// - `dispatch.call(target, name)` — announce that entity `target` fired the
+///   custom event `name`; the target's own `Custom(name)` handler runs and every
+///   bound listener's handler is invoked.
+/// - `dispatch.bind(source, name, handler)` — the calling actor subscribes: when
+///   `source` fires `name`, run the calling actor's `Custom(handler)` event.
+/// - `dispatch.unbind(source, name, handler)` — remove that subscription.
+///
+/// Dispatchers are **raise-excluded** (like the stateful `flow.*` nodes): they
+/// have no single-node inverse in the round-trip image, so hand-edited Rust in
+/// that shape stays a snippet. See [`crate::raise`].
+fn dispatch_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("dispatch.call", "Call Event", "dispatch")
+            .described("Fire the custom event `name` on `target` (and its bound listeners).")
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("target", PortType::Int).required(),
+                PortDef::new("name", PortType::Str).required(),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
+        NodeDef::new("dispatch.bind", "Bind Event", "dispatch")
+            .described("Subscribe this actor's `handler` custom event to `source`'s `name` event.")
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("source", PortType::Int).required(),
+                PortDef::new("name", PortType::Str).required(),
+                PortDef::new("handler", PortType::Str).required(),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
+        NodeDef::new("dispatch.unbind", "Unbind Event", "dispatch")
+            .described("Remove this actor's `handler` subscription to `source`'s `name` event.")
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("source", PortType::Int).required(),
+                PortDef::new("name", PortType::Str).required(),
+                PortDef::new("handler", PortType::Str).required(),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
     ]
 }
 
@@ -681,6 +753,31 @@ mod tests {
         assert_eq!(down.output("down").unwrap().ty, PortType::Bool);
         let jp = reg.get("input.just_pressed").expect("input.just_pressed");
         assert_eq!(jp.output("pressed").unwrap().ty, PortType::Bool);
+    }
+
+    #[test]
+    fn wave3_event_and_dispatch_nodes_registered() {
+        let reg = blueprint_registry();
+        // New event entry points with their param + data-output shape.
+        let input = reg.get("event.input").expect("event.input");
+        assert!(
+            input.param("action").is_some(),
+            "input carries an action param"
+        );
+        assert_eq!(input.output("pressed").unwrap().ty, PortType::Bool);
+        let coll = reg.get("event.collision").expect("event.collision");
+        assert_eq!(coll.output("other").unwrap().ty, PortType::Int);
+        let custom = reg.get("event.custom").expect("event.custom");
+        assert!(custom.param("name").is_some());
+        // Dispatchers are exec actions whose name/handler are Str data input pins.
+        let call = reg.get("dispatch.call").expect("dispatch.call");
+        assert!(call.input(EXEC_IN).is_some());
+        assert_eq!(call.input("target").unwrap().ty, PortType::Int);
+        assert_eq!(call.input("name").unwrap().ty, PortType::Str);
+        assert!(call.input("name").unwrap().required);
+        let bind = reg.get("dispatch.bind").expect("dispatch.bind");
+        assert_eq!(bind.input("handler").unwrap().ty, PortType::Str);
+        assert!(reg.get("dispatch.unbind").is_some());
     }
 
     #[test]

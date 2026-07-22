@@ -141,6 +141,12 @@ pub struct PhysicsBridge3D {
     /// `Guid` → its rapier handles. `BTreeMap` gives sorted (deterministic)
     /// iteration for the despawn + write-back passes.
     entities: BTreeMap<Uuid, BodyRecord>,
+    /// Reverse map `collider handle → owning entity Guid`, rebuilt at the end of
+    /// every [`sync`](Self::sync) (Wave 3). The collision-event drain resolves
+    /// rapier's `ContactEvent3D` collider handles back to entity `Guid`s through
+    /// it — the inverse of [`collider_of`](Self::collider_of). Deterministic
+    /// (`BTreeMap`, sorted keys).
+    collider_to_guid: BTreeMap<ColliderId3D, Uuid>,
 }
 
 impl PhysicsBridge3D {
@@ -150,6 +156,7 @@ impl PhysicsBridge3D {
         Self {
             world: PhysicsWorld3D::new(gravity),
             entities: BTreeMap::new(),
+            collider_to_guid: BTreeMap::new(),
         }
     }
 
@@ -176,6 +183,15 @@ impl PhysicsBridge3D {
     /// The collider handle mirroring `guid`, if it has one.
     pub fn collider_of(&self, guid: Uuid) -> Option<ColliderId3D> {
         self.entities.get(&guid).and_then(|r| r.collider)
+    }
+
+    /// The entity `Guid` owning `collider`, if tracked — the inverse of
+    /// [`collider_of`](Self::collider_of), maintained each [`sync`](Self::sync)
+    /// (Wave 3). The seam the collision-event drain uses to map a rapier
+    /// [`ContactEvent3D`](crate::d3::ContactEvent3D) collider handle back to the
+    /// entity it belongs to.
+    pub fn guid_of_collider(&self, collider: ColliderId3D) -> Option<Uuid> {
+        self.collider_to_guid.get(&collider).copied()
     }
 
     /// Advance the simulation by `dt` seconds (the caller's fixed step).
@@ -326,6 +342,15 @@ impl PhysicsBridge3D {
         for (guid, desire) in joint_desires {
             self.reconcile_joint(guid, desire);
         }
+
+        // 5. Rebuild the reverse collider→Guid map for this step's event drain
+        //    (Wave 3). Cheap (one pass over the tracked entities) and always
+        //    consistent with the handles just reconciled above.
+        self.collider_to_guid = self
+            .entities
+            .iter()
+            .filter_map(|(g, r)| r.collider.map(|c| (c, *g)))
+            .collect();
     }
 
     /// Bring one entity's joint in line with its desired snapshot. Resolves the

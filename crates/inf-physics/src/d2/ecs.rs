@@ -78,6 +78,12 @@ pub struct PhysicsBridge2D {
     /// `Guid` → its rapier handles. `BTreeMap` gives sorted (deterministic)
     /// iteration for the despawn + write-back passes.
     entities: BTreeMap<Uuid, BodyRecord>,
+    /// Reverse map `collider handle → owning entity Guid`, rebuilt at the end of
+    /// every [`sync_from_world`](Self::sync_from_world) (Wave 3). The
+    /// collision-event drain resolves rapier's `ContactEvent2D` collider handles
+    /// back to entity `Guid`s through it — the inverse of
+    /// [`collider_of`](Self::collider_of). Deterministic (`BTreeMap`).
+    collider_to_guid: BTreeMap<ColliderId, Uuid>,
 }
 
 impl PhysicsBridge2D {
@@ -87,6 +93,7 @@ impl PhysicsBridge2D {
         Self {
             world: PhysicsWorld2D::new(gravity),
             entities: BTreeMap::new(),
+            collider_to_guid: BTreeMap::new(),
         }
     }
 
@@ -108,6 +115,16 @@ impl PhysicsBridge2D {
     /// The collider handle mirroring `guid`, if it has one.
     pub fn collider_of(&self, guid: Uuid) -> Option<ColliderId> {
         self.entities.get(&guid).and_then(|r| r.collider)
+    }
+
+    /// The entity `Guid` owning `collider`, if tracked — the inverse of
+    /// [`collider_of`](Self::collider_of), maintained each
+    /// [`sync_from_world`](Self::sync_from_world) (Wave 3). The seam the
+    /// collision-event drain uses to map a rapier
+    /// [`ContactEvent2D`](crate::d2::ContactEvent2D) collider handle back to the
+    /// entity it belongs to.
+    pub fn guid_of_collider(&self, collider: ColliderId) -> Option<Uuid> {
+        self.collider_to_guid.get(&collider).copied()
     }
 
     /// The joint handle owned by `guid` (P12.1), if it has one.
@@ -246,6 +263,14 @@ impl PhysicsBridge2D {
         for (guid, desire) in joint_desires {
             self.reconcile_joint(guid, desire);
         }
+
+        // 5. Rebuild the reverse collider→Guid map for this step's event drain
+        //    (Wave 3), consistent with the handles just reconciled above.
+        self.collider_to_guid = self
+            .entities
+            .iter()
+            .filter_map(|(g, r)| r.collider.map(|c| (c, *g)))
+            .collect();
     }
 
     /// Bring one entity's joint in line with its desired snapshot (the `d2`

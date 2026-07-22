@@ -3,7 +3,7 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { memo } from "react";
 
-import type { BpValue, PortDef } from "../../lib/blueprintTypes";
+import type { BpValue, ParamDef, PortDef } from "../../lib/blueprintTypes";
 import { isExec } from "../../lib/blueprintTypes";
 import { useBlueprintStore } from "../../stores/blueprintStore";
 import { categoryColor, pinColor } from "./pinTheme";
@@ -90,6 +90,41 @@ function LiteralField({ nodeId, typeId, value }: { nodeId: number; typeId: strin
   );
 }
 
+/** A generic inline editor for a text-kind node param (Wave 3): covers
+ *  `event.input`'s `action` and `event.custom`'s `name`. Value derives from the
+ *  store; the edit commits through the same `set-param` action `LiteralField`
+ *  uses (no local React state, so no set-state-in-effect). */
+function ParamTextField({
+  nodeId,
+  param,
+  value,
+}: {
+  nodeId: number;
+  param: ParamDef;
+  value?: BpValue;
+}) {
+  const apply = useBlueprintStore((s) => s.apply);
+  const current = value?.type === "text" || value?.type === "enum" ? value.value : "";
+  return (
+    <label className="bp-node__param">
+      <span className="bp-node__param-label">{param.label}</span>
+      <input
+        className="bp-input"
+        // Keyed by the store value so an external change re-syncs the field
+        // without a controlled-input effect.
+        key={current}
+        defaultValue={current}
+        onBlur={(e) =>
+          void apply(
+            [{ kind: "set-param", id: nodeId, name: param.name, value: { type: "text", value: e.target.value } }],
+            `Edit ${param.label}`,
+          )
+        }
+      />
+    </label>
+  );
+}
+
 function BpNodeInner({ id, data, selected }: NodeProps) {
   const typeId = (data as BpNodeData).typeId;
   const def = useBlueprintStore((s) => s.registryById[typeId]);
@@ -123,6 +158,16 @@ function BpNodeInner({ id, data, selected }: NodeProps) {
           <LiteralField nodeId={nodeId} typeId={typeId} value={node?.params.value} />
         </div>
       )}
+      {/* Wave 3: generic inline editors for any text-kind param on a non-literal
+          node (event.input `action`, event.custom `name`). */}
+      {!isLiteral &&
+        def.params
+          .filter((p) => p.ui === "text")
+          .map((p) => (
+            <div className="bp-node__field" key={`param:${p.name}`}>
+              <ParamTextField nodeId={nodeId} param={p} value={node?.params[p.name]} />
+            </div>
+          ))}
     </div>
   );
 }

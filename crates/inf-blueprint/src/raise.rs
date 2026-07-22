@@ -50,28 +50,55 @@ pub fn raise_fn(f: &BlueprintFn) -> Result<Graph, RaiseError> {
         params: HashMap::new(),
         y: 0.0,
     };
-    let event_type = event_type_id(&f.id);
+    let (event_type, param) = event_node_spec(&f.id);
     let event = r.add(&event_type, 0.0);
-    // The event node's data outputs are the handler params (e.g. `dt`).
+    // Wave 3: an `event.input`/`event.custom` node carries its action/name as a
+    // param, restored here so a re-lower reproduces the same `EventKind`.
+    if let Some((key, val)) = param {
+        r.set_text(event, key, &val);
+    }
+    // The event node's data outputs are the handler params (e.g. `dt`, `pressed`,
+    // `other`).
     r.params = f.params.iter().map(|p| (p.name.clone(), event)).collect();
     r.raise_chain(&f.body, Some((event, EXEC_THEN.to_string())))?;
     Ok(r.graph)
 }
 
-fn event_type_id(fn_id: &str) -> String {
+/// The `event.*` node type + optional (`param key`, value) a handler id raises to.
+/// The inverse of the lowerer's `event_of`: `input:jump → (event.input, action=
+/// jump)`, `custom:foo → (event.custom, name=foo)`, `collision → event.collision`.
+fn event_node_spec(fn_id: &str) -> (String, Option<(&'static str, String)>) {
     match fn_id {
-        "begin_play" => "event.begin_play".into(),
-        "tick" => "event.tick".into(),
-        other => format!("event.{}", other.trim_start_matches("custom:")),
+        "begin_play" => ("event.begin_play".into(), None),
+        "tick" => ("event.tick".into(), None),
+        "collision" => ("event.collision".into(), None),
+        other => {
+            if let Some(action) = other.strip_prefix("input:") {
+                ("event.input".into(), Some(("action", action.to_string())))
+            } else if let Some(name) = other.strip_prefix("custom:") {
+                ("event.custom".into(), Some(("name", name.to_string())))
+            } else {
+                // Legacy `event.<name>` custom-event fallback (param-less node).
+                (format!("event.{other}"), None)
+            }
+        }
     }
 }
 
-/// The [`EventKind`] a handler id denotes (for pairing with a class).
+/// The [`EventKind`] a handler id denotes (for pairing with a class). Wave 3
+/// extends it to `input:`/`collision` ids.
 pub fn event_kind_of(fn_id: &str) -> EventKind {
     match fn_id {
         "begin_play" => EventKind::BeginPlay,
         "tick" => EventKind::Tick,
-        other => EventKind::Custom(other.trim_start_matches("custom:").to_string()),
+        "collision" => EventKind::Collision,
+        other => {
+            if let Some(action) = other.strip_prefix("input:") {
+                EventKind::Input(action.to_string())
+            } else {
+                EventKind::Custom(other.trim_start_matches("custom:").to_string())
+            }
+        }
     }
 }
 
@@ -589,6 +616,68 @@ mod tests {
                 ty: Ty::Float,
             },
         );
+        assert_round_trips(&f);
+    }
+
+    #[test]
+    fn input_event_round_trips() {
+        use crate::{Param, Ty};
+        // input:jump handler branching on `pressed` — round-trips through the
+        // param-carrying `event.input` node (action restored on raise).
+        let f = BlueprintFn {
+            id: "input:jump".into(),
+            name: "input_jump".into(),
+            params: vec![Param {
+                name: "pressed".into(),
+                ty: Ty::Bool,
+            }],
+            ret: Ty::Unit,
+            body: vec![Stmt::If {
+                cond: Expr::Param("pressed".into()),
+                then_body: vec![Stmt::ExprStmt(Expr::Call {
+                    path: vec!["debug".into(), "print".into()],
+                    args: vec![Expr::Lit(Lit::Str("jumped".into()))],
+                })],
+                else_body: vec![],
+            }],
+        };
+        assert_round_trips(&f);
+    }
+
+    #[test]
+    fn collision_event_round_trips() {
+        use crate::{Param, Ty};
+        let f = BlueprintFn {
+            id: "collision".into(),
+            name: "collision".into(),
+            params: vec![Param {
+                name: "other".into(),
+                ty: Ty::Int,
+            }],
+            ret: Ty::Unit,
+            body: vec![Stmt::ExprStmt(Expr::Call {
+                path: vec!["debug".into(), "print".into()],
+                args: vec![Expr::Lit(Lit::Str("hit".into()))],
+            })],
+        };
+        assert_round_trips(&f);
+    }
+
+    #[test]
+    fn custom_event_round_trips() {
+        use crate::Ty;
+        // custom:ping handler — round-trips through the `event.custom` node whose
+        // `name` param is restored on raise.
+        let f = BlueprintFn {
+            id: "custom:ping".into(),
+            name: "custom_ping".into(),
+            params: vec![],
+            ret: Ty::Unit,
+            body: vec![Stmt::ExprStmt(Expr::Call {
+                path: vec!["debug".into(), "print".into()],
+                args: vec![Expr::Lit(Lit::Str("pong".into()))],
+            })],
+        };
         assert_round_trips(&f);
     }
 
