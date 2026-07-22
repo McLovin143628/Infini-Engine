@@ -4,6 +4,7 @@
 
 mod app;
 mod assets;
+mod audio;
 mod collections;
 mod collision_layers;
 mod diagnostics;
@@ -58,6 +59,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         graph::graph_undo,
         graph::graph_redo,
         graph::graph_run,
+        graph::graph_debug_run,
         graph::graph_generate,
         material::material_registry,
         material::material_list,
@@ -123,6 +125,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         scene::scene_select,
         scene::scene_set_property,
         scene::scene_reset_property,
+        scene::scene_list_addable_components,
+        scene::scene_add_component,
+        scene::scene_remove_component,
+        scene::scene_list_default,
         scene::scene_undo,
         scene::scene_redo,
         scene::scene_save,
@@ -135,6 +141,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         shell::shell_reveal,
         sim::sim_start,
         sim::sim_tick,
+        sim::sim_step_fixed,
+        sim::sim_set_debug,
         sim::sim_stop,
         sim::sim_is_running,
         sequencer::seq_list,
@@ -170,6 +178,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         assets::asset_rust_source,
         assets::texture_get_slices,
         assets::texture_set_slices,
+        audio::mixer_get,
+        audio::mixer_save,
         collections::collections_list,
         collections::collections_create,
         collections::collections_rename,

@@ -15,8 +15,10 @@ import {
   SlidersHorizontal,
   Sprout,
   SquareTerminal,
+  Volume2,
   Workflow,
 } from "lucide-react";
+import AudioMixerPanel from "./audio/AudioMixerPanel";
 import DetailsPanel from "./DetailsPanel";
 import EditorPanel from "./EditorPanel";
 import FileExplorerPanel from "./FileExplorerPanel";
@@ -85,6 +87,16 @@ registerPanelType({
   singleton: true,
   defaultLocation: "right",
   defaultSize: { w: 320, h: 420 },
+});
+
+registerPanelType({
+  type: "audioMixer",
+  title: () => "Audio Mixer",
+  icon: Volume2,
+  component: AudioMixerPanel,
+  singleton: true,
+  defaultLocation: "right",
+  defaultSize: { w: 340, h: 460 },
 });
 
 registerPanelType({
