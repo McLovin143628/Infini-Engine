@@ -23,6 +23,9 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 png = { workspace = true }
+# Validates every composed WGSL variant (scene_shader / lit_scene_shader ×
+# each pass source) without a GPU — the pick-shader composition regression gate.
+naga = { workspace = true }
 # Drives the skinned golden from a real clip (pose eval → skinning palette).
 # Dev-only: keeps the shipping renderer free of an anim dependency (Ring 0
 # discipline) while proving the GPU-skinning path against inf-anim end to end.

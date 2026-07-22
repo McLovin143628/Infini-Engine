@@ -44,9 +44,7 @@ impl SsaoNode {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("ssao"),
-                source: wgpu::ShaderSource::Wgsl(
-                    super::scene_shader(include_str!("../shaders/ssao.wgsl")).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(super::shader_source("ssao").into()),
             });
 
         // group(1) for fs_ssao: depth texture + params.

@@ -295,9 +295,7 @@ impl TerrainNode {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("terrain"),
-                source: wgpu::ShaderSource::Wgsl(
-                    super::lit_scene_shader(include_str!("../shaders/terrain.wgsl"), 3).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(super::shader_source("terrain").into()),
             });
 
         // Per-tile bind group (@group(1)): the R32Float height texture (binding 0)

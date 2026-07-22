@@ -42,9 +42,7 @@ impl MaskNode {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("mask"),
-                source: wgpu::ShaderSource::Wgsl(
-                    super::scene_shader(include_str!("../shaders/mask.wgsl")).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(super::shader_source("mask").into()),
             });
 
         let mask_bgl = gpu

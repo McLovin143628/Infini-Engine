@@ -229,9 +229,7 @@ impl ClassicVgeomNode {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("classic-vgeom"),
-                source: wgpu::ShaderSource::Wgsl(
-                    super::lit_scene_shader(include_str!("../shaders/mesh.wgsl"), 2).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(super::shader_source("mesh").into()),
             });
 
         let lights_bgl = gpu

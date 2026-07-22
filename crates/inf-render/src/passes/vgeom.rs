@@ -814,9 +814,7 @@ impl VgeomNode {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("vgeom-mesh"),
-                source: wgpu::ShaderSource::Wgsl(
-                    super::scene_shader(include_str!("../shaders/vgeom_mesh.wgsl")).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(super::shader_source("vgeom_mesh").into()),
             });
 
         // Lights (@group(1)) — shared model with the rigid mesh pass.

@@ -26,9 +26,7 @@ impl SkyNode {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("sky"),
-                source: wgpu::ShaderSource::Wgsl(
-                    super::scene_shader(include_str!("../shaders/sky.wgsl")).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(super::shader_source("sky").into()),
             });
 
         let uniforms = gpu.device.create_buffer(&wgpu::BufferDescriptor {

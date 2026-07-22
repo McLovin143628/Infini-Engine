@@ -32,9 +32,7 @@ impl DepthPrepassNode {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("depth-prepass"),
-                source: wgpu::ShaderSource::Wgsl(
-                    super::scene_shader(include_str!("../shaders/depth_prepass.wgsl")).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(super::shader_source("depth_prepass").into()),
             });
 
         let (verts, idx) = cube_geometry();

@@ -19,9 +19,7 @@ impl DebugNode {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("debug-lines"),
-                source: wgpu::ShaderSource::Wgsl(
-                    super::scene_shader(include_str!("../shaders/debug.wgsl")).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(super::shader_source("debug").into()),
             });
 
         let layout = gpu

@@ -361,9 +361,7 @@ impl SpriteNode {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("sprite"),
-                source: wgpu::ShaderSource::Wgsl(
-                    super::scene_shader(include_str!("../shaders/sprite.wgsl")).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(super::shader_source("sprite").into()),
             });
 
         let tex_bgl = gpu

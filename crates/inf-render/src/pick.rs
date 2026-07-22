@@ -35,9 +35,7 @@ impl Picker {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("pick"),
-                source: wgpu::ShaderSource::Wgsl(
-                    crate::passes::scene_shader(include_str!("shaders/mesh.wgsl")).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(crate::passes::shader_source("mesh").into()),
             });
 
         let view_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {

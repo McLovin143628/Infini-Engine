@@ -35,9 +35,7 @@ impl TaaNode {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("taa"),
-                source: wgpu::ShaderSource::Wgsl(
-                    super::scene_shader(include_str!("../shaders/taa.wgsl")).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(super::shader_source("taa").into()),
             });
         let float_tex = |binding| wgpu::BindGroupLayoutEntry {
             binding,

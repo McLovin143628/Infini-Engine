@@ -3288,6 +3288,7 @@ dependencies = [
  "inf-math",
  "inf-render-2d",
  "inf-vgeom",
+ "naga",
  "png 0.18.1",
  "pollster",
  "tracing",

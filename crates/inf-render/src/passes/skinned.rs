@@ -190,9 +190,7 @@ impl SkinnedMeshNode {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("skinned-mesh"),
-                source: wgpu::ShaderSource::Wgsl(
-                    super::lit_scene_shader(include_str!("../shaders/skinned_mesh.wgsl"), 2).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(super::shader_source("skinned").into()),
             });
 
         // @group(1) lights (same layout/contents as the rigid mesh pass).
