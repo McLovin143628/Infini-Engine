@@ -215,12 +215,21 @@ pub async fn scene_apply_material(
                 .collect(),
             None => doc.selection().to_vec(),
         };
+        // Map the inf-material blend enum onto the ECS `BlendMode` variant name
+        // (inf-material has no inf-ecs dep — the mapping lives here, R-P5).
+        let blend = match mat.blend {
+            inf_material::MatBlend::Opaque => "Opaque",
+            inf_material::MatBlend::Masked => "Masked",
+            inf_material::MatBlend::Translucent => "Translucent",
+        };
         doc.edit_apply_material(
             &targets,
             mat.base_color,
             mat.metallic,
             mat.roughness,
             mat.emissive,
+            blend,
+            mat.alpha_cutoff,
         )
     };
     if applied > 0 {

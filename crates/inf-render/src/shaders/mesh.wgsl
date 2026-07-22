@@ -122,6 +122,14 @@ fn point_attenuation(dist: f32, range: f32) -> f32 {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    // R-P5 masked alpha-test: blend code 1 (pbr.w) discards fragments whose base
+    // color alpha is below the cutoff (pbr.z). Opaque (code 0) and translucent
+    // (code 2) never take this branch, so every pre-R-P5 golden stays
+    // byte-identical (the branch is present but always false for them). Runs
+    // before the unlit short-circuit so masked cutouts show in every view mode.
+    if (in.pbr.w > 0.5 && in.pbr.w < 1.5 && in.color.a < in.pbr.z) {
+        discard;
+    }
     // Unlit view mode (R-P2): return albedo + emissive directly, skipping the
     // light loop entirely. Drives both Unlit and Wireframe; `flags.x` is 0 in the
     // default Lit mode so this branch is never taken there (goldens byte-stable).

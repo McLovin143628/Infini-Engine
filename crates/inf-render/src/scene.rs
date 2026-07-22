@@ -56,11 +56,21 @@ pub struct MeshInstance {
     /// [`PrimMesh::Cube`], so a caller that doesn't set it — and every pre-R-P1
     /// scene — renders exactly as before.
     pub mesh: PrimMesh,
+    /// Blend mode (R-P5): `0` opaque, `1` masked (alpha-test), `2` translucent
+    /// (alpha-blend). Defaults to `0` so every pre-R-P5 scene renders exactly as
+    /// before. Projected from the ECS `Material::blend` at the seams; drives both
+    /// the bucketing partition ([`crate::passes::mesh::pack_bucketed`]) and the
+    /// packed `pbr.w` the shader reads for the masked discard.
+    pub blend: u8,
+    /// Alpha-test threshold used when `blend == 1` (masked): fragments with base
+    /// color alpha below this are discarded. Defaults to `0.5`. Packed into
+    /// `pbr.z`.
+    pub cutoff: f32,
 }
 
 impl MeshInstance {
-    /// A plain lit **cube** instance (metallic 0, roughness 0.5, no emission) — the
-    /// common case for tests and simple callers.
+    /// A plain lit **cube** instance (metallic 0, roughness 0.5, no emission,
+    /// opaque) — the common case for tests and simple callers.
     pub fn lit(translation: DVec3, rotation: Quat, scale: Vec3, color: [f32; 4], id: u32) -> Self {
         Self {
             translation,
@@ -72,6 +82,8 @@ impl MeshInstance {
             emissive: [0.0; 3],
             id,
             mesh: PrimMesh::Cube,
+            blend: 0,
+            cutoff: 0.5,
         }
     }
 }

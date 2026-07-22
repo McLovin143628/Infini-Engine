@@ -339,6 +339,8 @@ fn golden_primitives() {
             emissive: [0.0; 3],
             id: i as u32 + 1,
             mesh: kind,
+            blend: 0,
+            cutoff: 0.5,
         });
     }
     scene.mark_dirty();
@@ -441,6 +443,8 @@ fn golden_pbr_materials() {
             emissive,
             id: i as u32 + 1,
             mesh: PrimMesh::Cube,
+            blend: 0,
+            cutoff: 0.5,
         });
     }
     scene.lights.push(RenderLight {
@@ -469,6 +473,133 @@ fn golden_pbr_materials() {
     assert!(lit, "expected a lit PBR pixel");
 }
 
+/// Translucency golden (R-P5): opaque cubes behind, TWO overlapping tinted
+/// translucent panes (`blend == 2`, 50% alpha) in front — proving alpha blending +
+/// the deterministic back-to-front sort — plus one **masked** cube (`blend == 1`)
+/// whose uniform alpha is below its cutoff, so the alpha-test discards it entirely
+/// (a "cutout" hole; per-fragment texture opacity is deferred). Determinism gate
+/// via `check_golden`; strict pixel diff opt-in, blessed on a GPU host. Structural
+/// gates prove that (a) the panes genuinely blend (vs the same scene made opaque)
+/// and (b) the masked instance is genuinely alpha-tested away (vs made opaque).
+#[test]
+fn golden_translucency() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        ..Default::default()
+    };
+    // A directional key so the panes + cubes are lit.
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.9],
+        intensity: 3.0,
+        direction: Vec3::new(0.4, 0.8, 0.4).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    // Two opaque cubes at the back (−z).
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(-1.4, 0.5, -0.6),
+        Quat::from_rotation_y(0.3),
+        Vec3::ONE,
+        [0.85, 0.22, 0.22, 1.0],
+        1,
+    ));
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(1.4, 0.5, -0.6),
+        Quat::from_rotation_y(0.3),
+        Vec3::ONE,
+        [0.22, 0.72, 0.32, 1.0],
+        2,
+    ));
+    // A masked cube up front whose uniform alpha (0.3) is below its cutoff (0.5)
+    // → the mesh fs discards every fragment (the visible cutout: when drawn opaque
+    // it would occlude the panes + cubes behind it; masked, it vanishes).
+    scene.instances.push(MeshInstance {
+        translation: DVec3::new(0.0, 0.9, 3.2),
+        rotation: Quat::from_rotation_y(0.3),
+        scale: Vec3::splat(1.3),
+        color: [0.90, 0.85, 0.20, 0.30],
+        metallic: 0.0,
+        roughness: 0.5,
+        emissive: [0.0; 3],
+        id: 3,
+        mesh: PrimMesh::Cube,
+        blend: 1,
+        cutoff: 0.5,
+    });
+    // Two overlapping translucent panes (thin cubes) in front (+z, toward the
+    // camera), tinted blue then orange at 50% alpha. The farther one draws first.
+    scene.instances.push(MeshInstance {
+        translation: DVec3::new(-0.4, 0.9, 1.2),
+        rotation: Quat::IDENTITY,
+        scale: Vec3::new(2.4, 2.4, 0.06),
+        color: [0.25, 0.45, 1.0, 0.5],
+        metallic: 0.0,
+        roughness: 0.5,
+        emissive: [0.0; 3],
+        id: 4,
+        mesh: PrimMesh::Cube,
+        blend: 2,
+        cutoff: 0.5,
+    });
+    scene.instances.push(MeshInstance {
+        translation: DVec3::new(0.5, 0.7, 2.1),
+        rotation: Quat::IDENTITY,
+        scale: Vec3::new(2.4, 2.4, 0.06),
+        color: [1.0, 0.5, 0.15, 0.5],
+        metallic: 0.0,
+        roughness: 0.5,
+        emissive: [0.0; 3],
+        id: 5,
+        mesh: PrimMesh::Cube,
+        blend: 2,
+        cutoff: 0.5,
+    });
+    scene.mark_dirty();
+
+    let img = check_golden(&gpu, "translucency", &scene, &overlook_view());
+
+    // The scene renders lit + blended content.
+    let lit = img.chunks(4).any(|p| p[0] > 60 || p[1] > 60 || p[2] > 60);
+    assert!(lit, "expected a lit/blended pixel");
+
+    // (a) The translucent panes genuinely blend: making them opaque changes the
+    // frame (an opaque pane would fully hide what's behind it).
+    let mut solid_panes = scene.clone();
+    for inst in &mut solid_panes.instances {
+        if inst.blend == 2 {
+            inst.blend = 0;
+            inst.color[3] = 1.0;
+        }
+    }
+    solid_panes.mark_dirty();
+    let solid_panes_img = render(&gpu, &solid_panes, &overlook_view());
+    let (mean, _max) = image_diff(&img, &solid_panes_img, W, H);
+    assert!(
+        mean > 0.002,
+        "translucent blending should differ from opaque panes (mean {mean})"
+    );
+
+    // (b) The masked instance is genuinely alpha-tested away: making it opaque
+    // (fully drawn) changes the frame.
+    let mut solid_mask = scene.clone();
+    for inst in &mut solid_mask.instances {
+        if inst.blend == 1 {
+            inst.blend = 0;
+            inst.color[3] = 1.0;
+        }
+    }
+    solid_mask.mark_dirty();
+    let solid_mask_img = render(&gpu, &solid_mask, &overlook_view());
+    let (m2, _max) = image_diff(&img, &solid_mask_img, W, H);
+    assert!(
+        m2 > 0.001,
+        "masked discard should differ from an opaque instance (mean {m2})"
+    );
+}
+
 /// Spot-light golden (R-P3): a ground plane + a few cubes lit by a single spot
 /// aimed obliquely, so the cone's lit ellipse and its soft outer-cone falloff are
 /// both on screen. No directional light — the spot shapes the frame. Exercises
@@ -495,6 +626,8 @@ fn golden_spot_lights() {
         emissive: [0.0; 3],
         id: 1,
         mesh: PrimMesh::Plane,
+        blend: 0,
+        cutoff: 0.5,
     });
     // A few cubes standing in and around the beam.
     for (i, (x, z)) in [(1.5, 1.5), (3.0, 0.5), (-1.0, 2.5)]
@@ -1474,6 +1607,8 @@ fn golden_hdr_bloom() {
             emissive,
             id: i as u32 + 1,
             mesh: PrimMesh::Cube,
+            blend: 0,
+            cutoff: 0.5,
         });
     }
     scene.mark_dirty();

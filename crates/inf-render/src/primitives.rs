@@ -349,6 +349,35 @@ impl PrimGpu {
             );
         }
     }
+
+    /// Draw `kinds.len()` instances **in explicit order**, one `draw_indexed` per
+    /// instance, each with its own primitive kind. Used by the translucent pass
+    /// (R-P5), whose back-to-front sort mixes kinds so per-kind batching (see
+    /// [`draw`](Self::draw)) can't apply — `kinds[i]` is the [`PrimMesh::index`]
+    /// of the instance packed at slot `i` of `instances`. Translucent counts are
+    /// small, so the per-instance draw is acceptable (documented).
+    pub fn draw_sorted<'p>(
+        &'p self,
+        pass: &mut wgpu::RenderPass<'p>,
+        instances: &'p wgpu::Buffer,
+        kinds: &[usize],
+    ) {
+        if kinds.is_empty() {
+            return;
+        }
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.set_vertex_buffer(1, instances.slice(..));
+        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
+        for (i, &k) in kinds.iter().enumerate() {
+            let r = &self.ranges[k];
+            let inst = i as u32;
+            pass.draw_indexed(
+                r.index_start..r.index_start + r.index_count,
+                r.base_vertex,
+                inst..inst + 1,
+            );
+        }
+    }
 }
 
 #[cfg(test)]

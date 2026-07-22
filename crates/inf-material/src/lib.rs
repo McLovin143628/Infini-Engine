@@ -24,7 +24,7 @@ pub use graph::{
     ComplexityReport, MatIssue, MatType, MaterialBudget, MaterialCompile, TextureCompile,
 };
 pub use instance::{MatOverrides, MaterialInstance};
-pub use material::MaterialAsset;
+pub use material::{MatBlend, MaterialAsset};
 pub use texture::{
     import_texture_bytes, texture_from_rgba8, TextureAsset, TextureCompression, TextureFormat,
     TextureImportSettings, TextureMip,

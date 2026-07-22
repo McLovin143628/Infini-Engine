@@ -39,7 +39,10 @@ pub struct InstanceRaw {
     pub color: [f32; 4],
     /// x = pick id.
     pub misc: [u32; 4],
-    /// PBR params: x = metallic, y = roughness (z, w reserved).
+    /// PBR + blend params: x = metallic, y = roughness, z = alpha_cutoff (R-P5),
+    /// w = blend code (R-P5: 0 opaque, 1 masked, 2 translucent). z/w were reserved
+    /// (always 0) before R-P5; the opaque path never reads them, so all-opaque
+    /// scenes stay image-identical.
     pub pbr: [f32; 4],
     /// Emissive color: rgb (w reserved).
     pub emissive: [f32; 4],
@@ -61,7 +64,12 @@ impl InstanceRaw {
             ],
             color: inst.color,
             misc: [inst.id, 0, 0, 0],
-            pbr: [inst.metallic, inst.roughness, 0.0, 0.0],
+            pbr: [
+                inst.metallic,
+                inst.roughness,
+                inst.cutoff,
+                inst.blend as f32,
+            ],
             emissive: [inst.emissive[0], inst.emissive[1], inst.emissive[2], 0.0],
         }
     }
@@ -153,36 +161,53 @@ pub fn vertex_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
     ]
 }
 
-/// Pack scene instances into GPU [`InstanceRaw`], **bucketed by primitive kind**
-/// (stable within each kind), and return the per-kind sub-ranges of the packed
-/// vector (indexed by [`PrimMesh::index`]). Because `Cube` is kind 0 and the
-/// partition preserves original order within a kind, an all-cube scene produces a
-/// `Vec<InstanceRaw>` byte-identical (and same-ordered) to a naïve linear pack —
-/// the byte-stability guarantee for every pre-R-P1 golden.
+/// Pack scene instances into GPU [`InstanceRaw`], **bucketed by (translucent?,
+/// primitive kind)** (stable within each bucket), and return TWO per-kind range
+/// sets over the single packed vector (each indexed by [`PrimMesh::index`]):
+///
+/// * `.1` — the **opaque+masked** ranges (`blend != 2`): drawn by the mesh /
+///   depth-prepass / shadow passes;
+/// * `.2` — the **translucent** ranges (`blend == 2`): excluded from those passes,
+///   drawn (sorted) by [`crate::passes::translucent`], and included alongside the
+///   opaque set by the mask + pick passes.
+///
+/// Layout: the ten kind buckets are laid out non-translucent-first
+/// (`kind 0..5`), then translucent (`kind 0..5`). Because `Cube` is kind 0 and the
+/// partition preserves original order within a bucket, an **all-opaque(+masked)**
+/// scene produces a `Vec<InstanceRaw>` byte-identical (and same-ordered) to the
+/// pre-R-P5 pack, with the translucent ranges all empty — the byte-stability
+/// guarantee for every pre-R-P5 golden.
 pub(crate) fn pack_bucketed(
     origin: &FloatingOrigin,
     instances: &[MeshInstance],
-) -> (Vec<InstanceRaw>, [Range<u32>; 5]) {
-    let mut counts = [0u32; 5];
+) -> (Vec<InstanceRaw>, [Range<u32>; 5], [Range<u32>; 5]) {
+    // Bucket index: non-translucent kinds 0..5, translucent kinds 5..10.
+    let bucket = |inst: &MeshInstance| -> usize {
+        let base = if inst.blend == 2 { 5 } else { 0 };
+        base + inst.mesh.index()
+    };
+    let mut counts = [0u32; 10];
     for inst in instances {
-        counts[inst.mesh.index()] += 1;
+        counts[bucket(inst)] += 1;
     }
-    let mut starts = [0u32; 5];
+    let mut starts = [0u32; 10];
     let mut acc = 0u32;
-    for k in 0..5 {
+    for k in 0..10 {
         starts[k] = acc;
         acc += counts[k];
     }
-    let ranges: [Range<u32>; 5] = std::array::from_fn(|k| starts[k]..starts[k] + counts[k]);
+    let opaque: [Range<u32>; 5] = std::array::from_fn(|k| starts[k]..starts[k] + counts[k]);
+    let translucent: [Range<u32>; 5] =
+        std::array::from_fn(|k| starts[5 + k]..starts[5 + k] + counts[5 + k]);
 
     let mut raw = vec![InstanceRaw::zeroed(); instances.len()];
     let mut cursor = starts;
     for inst in instances {
-        let k = inst.mesh.index();
-        raw[cursor[k] as usize] = InstanceRaw::pack(origin, inst);
-        cursor[k] += 1;
+        let b = bucket(inst);
+        raw[cursor[b] as usize] = InstanceRaw::pack(origin, inst);
+        cursor[b] += 1;
     }
-    (raw, ranges)
+    (raw, opaque, translucent)
 }
 
 /// An empty per-kind range set (no draws) — the initial state before any upload.
@@ -424,7 +449,10 @@ impl MeshNode {
         gpu.queue
             .write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lights));
 
-        let (raw, ranges) = pack_bucketed(&frame.view.origin, &frame.scene.instances);
+        // The mesh pass draws only the opaque+masked ranges; translucent
+        // instances are packed into the same buffer's tail but drawn (sorted) by
+        // the translucent pass, so they're excluded here.
+        let (raw, ranges, _translucent) = pack_bucketed(&frame.view.origin, &frame.scene.instances);
         self.ranges = ranges;
         self.instance_count = raw.len() as u32;
 
@@ -639,7 +667,7 @@ mod tests {
             .iter()
             .map(|i| InstanceRaw::pack(&origin, i))
             .collect();
-        let (bucketed, ranges) = pack_bucketed(&origin, &insts);
+        let (bucketed, ranges, translucent) = pack_bucketed(&origin, &insts);
         // Byte-identical to the old linear pack (the golden byte-stability gate).
         assert_eq!(
             bytemuck::cast_slice::<InstanceRaw, u8>(&naive),
@@ -649,6 +677,46 @@ mod tests {
         for r in &ranges[1..] {
             assert!(r.is_empty());
         }
+        // No translucent instances → every translucent range is empty.
+        for r in &translucent {
+            assert!(r.is_empty());
+        }
+    }
+
+    /// R-P5: translucent instances (`blend == 2`) partition into the SEPARATE
+    /// translucent range set (packed after every opaque+masked bucket), while
+    /// opaque (0) and masked (1) share the opaque set. An all-opaque(+masked)
+    /// scene keeps the translucent set empty (byte-stability proof).
+    #[test]
+    fn pack_bucketed_splits_translucent_from_opaque_and_masked() {
+        let origin = FloatingOrigin::new(DVec3::ZERO);
+        let mk = |mesh: PrimMesh, id: u32, blend: u8| MeshInstance {
+            blend,
+            ..inst(mesh, id)
+        };
+        // Two opaque cubes, one masked cube, two translucent (a cube + a sphere).
+        let insts = vec![
+            mk(PrimMesh::Cube, 1, 0),
+            mk(PrimMesh::Cube, 2, 2),   // translucent
+            mk(PrimMesh::Cube, 3, 1),   // masked
+            mk(PrimMesh::Sphere, 4, 2), // translucent
+            mk(PrimMesh::Cube, 5, 0),
+        ];
+        let (raw, opaque, translucent) = pack_bucketed(&origin, &insts);
+        assert_eq!(raw.len(), 5);
+        // Opaque+masked cubes (ids 1, 3, 5) occupy the head cube bucket in order.
+        assert_eq!(opaque[PrimMesh::Cube.index()], 0..3);
+        assert_eq!(raw[0].misc[0], 1);
+        assert_eq!(raw[1].misc[0], 3);
+        assert_eq!(raw[2].misc[0], 5);
+        // The masked cube carries blend code 1 + its cutoff in pbr.z/.w.
+        assert_eq!(raw[1].pbr[3], 1.0);
+        // Translucent cube (id 2) then translucent sphere (id 4) tail the buffer.
+        assert_eq!(translucent[PrimMesh::Cube.index()], 3..4);
+        assert_eq!(translucent[PrimMesh::Sphere.index()], 4..5);
+        assert_eq!(raw[3].misc[0], 2);
+        assert_eq!(raw[3].pbr[3], 2.0);
+        assert_eq!(raw[4].misc[0], 4);
     }
 
     #[test]
@@ -662,7 +730,7 @@ mod tests {
             inst(PrimMesh::Cone, 30),
             inst(PrimMesh::Cube, 21),
         ];
-        let (raw, ranges) = pack_bucketed(&origin, &insts);
+        let (raw, ranges, _translucent) = pack_bucketed(&origin, &insts);
 
         // Cube bucket first (ids 20, 21 in original order).
         assert_eq!(ranges[PrimMesh::Cube.index()], 0..2);

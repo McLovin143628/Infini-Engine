@@ -21,8 +21,9 @@ use glam::{DVec3, Vec2, Vec3};
 use uuid::Uuid;
 
 use inf_ecs::components::{
-    ComputedVisibility, GlobalTransform, Light, Light2D, LightKind as EcsLightKind, Material,
-    MeshRef, NineSlice, PcgVolume, Primitive, Sprite, Terrain, Text2D, TextAlign, Tilemap,
+    BlendMode, ComputedVisibility, GlobalTransform, Light, Light2D, LightKind as EcsLightKind,
+    Material, MeshRef, NineSlice, PcgVolume, Primitive, Sprite, Terrain, Text2D, TextAlign,
+    Tilemap,
 };
 use inf_ecs::Guid;
 use inf_math::FloatingOrigin;
@@ -278,6 +279,9 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
                     id: next_id,
                     // PCG scatter placeholders are always cubes (no primitive kind).
                     mesh: PrimMesh::Cube,
+                    // R-P5: PCG scatter placeholders are opaque.
+                    blend: 0,
+                    cutoff: 0.5,
                 });
                 next_id += 1;
             }
@@ -288,7 +292,11 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
                 .map(|g| g.0)
                 .unwrap_or(glam::DAffine3::IDENTITY);
             let (scale, rot, _t) = affine.to_scale_rotation_translation();
-            let (color, metallic, roughness, emissive) = w
+            // MIRROR: this Material→MeshInstance projection is duplicated in the
+            // editor viewport's `host.rs` (inf-viewport) — keep the two in sync,
+            // R-P5 blend + cutoff included. (The vgeom path below is opaque-only —
+            // vgeom translucency is deferred.)
+            let (color, metallic, roughness, emissive, blend, cutoff) = w
                 .get::<Material>(entity)
                 .map(|m| {
                     let e = m.emissive.to_array();
@@ -297,9 +305,11 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
                         m.metallic,
                         m.roughness,
                         [e[0], e[1], e[2]],
+                        blend_code(m.blend),
+                        m.alpha_cutoff,
                     )
                 })
-                .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3]));
+                .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3], 0, 0.5));
 
             // P13.4: a MeshRef.asset with a cook-derived vmesh renders REAL geometry
             // — the GPU meshlet path (vgeom on) or the classic discrete-LOD fallback
@@ -335,6 +345,8 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
                     emissive,
                     id: next_id,
                     mesh: prim_mesh(mesh_ref.primitive),
+                    blend,
+                    cutoff,
                 });
             }
             next_id += 1;
@@ -356,6 +368,16 @@ fn prim_mesh(p: Primitive) -> PrimMesh {
         Primitive::Plane => PrimMesh::Plane,
         Primitive::Cylinder => PrimMesh::Cylinder,
         Primitive::Cone => PrimMesh::Cone,
+    }
+}
+
+/// Project the ECS [`BlendMode`] into the renderer's packed `blend` code (R-P5):
+/// 0 opaque, 1 masked, 2 translucent. Mirrored in the editor viewport's `host.rs`.
+fn blend_code(b: BlendMode) -> u8 {
+    match b {
+        BlendMode::Opaque => 0,
+        BlendMode::Masked => 1,
+        BlendMode::Translucent => 2,
     }
 }
 

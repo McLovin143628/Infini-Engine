@@ -20,6 +20,10 @@ use crate::settings::RenderSettings;
 
 pub struct DepthPrepassNode {
     pipeline: wgpu::RenderPipeline,
+    /// R-P5 masked variant (`vs_masked` + `fs_masked`, alpha-test discard). Used
+    /// only when the scene carries masked instances; otherwise the fragment-less
+    /// `pipeline` above draws (byte-identical to the pre-R-P5 fast path).
+    pipeline_masked: wgpu::RenderPipeline,
     prim: PrimGpu,
     instances: Option<wgpu::Buffer>,
     instance_capacity: usize,
@@ -46,36 +50,52 @@ impl DepthPrepassNode {
                 bind_group_layouts: &[Some(view_bgl)],
                 immediate_size: 0,
             });
-        let pipeline = gpu
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("depth-prepass"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &vertex_layouts(),
-                },
-                fragment: None, // depth-only
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: Some(wgpu::Face::Back),
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(DEPTH_COMPARE),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(), // single-sample
-                multiview_mask: None,
-                cache: None,
-            });
+        let depth_stencil = wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(DEPTH_COMPARE),
+            stencil: Default::default(),
+            bias: Default::default(),
+        };
+        // The fragment-less fast pipeline (opaque scenes) + the R-P5 masked variant
+        // sharing everything but their vertex/fragment stages.
+        let make = |label: &str, vs: &str, fs: Option<wgpu::FragmentState>| {
+            gpu.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some(vs),
+                        compilation_options: Default::default(),
+                        buffers: &vertex_layouts(),
+                    },
+                    fragment: fs,
+                    primitive: wgpu::PrimitiveState {
+                        cull_mode: Some(wgpu::Face::Back),
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(depth_stencil.clone()),
+                    multisample: wgpu::MultisampleState::default(), // single-sample
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
+        let pipeline = make("depth-prepass", "vs", None);
+        let pipeline_masked = make(
+            "depth-prepass-masked",
+            "vs_masked",
+            Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_masked"),
+                compilation_options: Default::default(),
+                targets: &[], // depth-only discard; no colour target
+            }),
+        );
 
         Self {
             pipeline,
+            pipeline_masked,
             prim,
             instances: None,
             instance_capacity: 0,
@@ -90,7 +110,8 @@ impl DepthPrepassNode {
         if self.uploaded_version == Some(key) {
             return;
         }
-        let (raw, ranges) = pack_bucketed(&frame.view.origin, &frame.scene.instances);
+        // Opaque+masked geometry only (translucent doesn't write depth here).
+        let (raw, ranges, _translucent) = pack_bucketed(&frame.view.origin, &frame.scene.instances);
         self.ranges = ranges;
         self.instance_count = raw.len() as u32;
         if !raw.is_empty() {
@@ -148,7 +169,16 @@ impl RenderNode for DepthPrepassNode {
         let Some(instances) = self.instances.as_ref() else {
             return;
         };
-        pass.set_pipeline(&self.pipeline);
+        // Only pay for the alpha-test fragment when the scene actually has masked
+        // instances; otherwise the fragment-less fast pipeline draws (opaque
+        // instances are unaffected by the discard, so this is purely a perf gate).
+        let masked = frame.scene.instances.iter().any(|i| i.blend == 1);
+        let pipeline = if masked {
+            &self.pipeline_masked
+        } else {
+            &self.pipeline
+        };
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
         self.prim.draw(&mut pass, instances, &self.ranges);
     }

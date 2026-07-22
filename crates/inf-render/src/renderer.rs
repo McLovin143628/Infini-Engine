@@ -300,6 +300,12 @@ impl EngineRenderer {
         graph.add(passes::classic_vgeom::ClassicVgeomNode::new(gpu, &view_bgl));
         graph.add(passes::skinned::SkinnedMeshNode::new(gpu, &view_bgl));
         graph.add(passes::terrain::TerrainNode::new(gpu, &view_bgl));
+        // Translucent forward pass (R-P5): alpha-blended, depth-tested but not
+        // depth-writing, back-to-front sorted. Draws after all opaque geometry +
+        // terrain, into the same MSAA scene target, before the grid. A no-op unless
+        // the scene carries translucent instances (so opaque scenes stay
+        // byte-identical).
+        graph.add(passes::translucent::TranslucentNode::new(gpu, &view_bgl));
         graph.add(passes::grid::GridNode::new(gpu, &view_bgl));
         graph.add(passes::sprite::SpriteNode::new(gpu, &view_bgl));
         graph.add(passes::debug::DebugNode::new(gpu, &view_bgl));

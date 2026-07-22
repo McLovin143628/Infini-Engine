@@ -81,6 +81,10 @@ fn pack_vgeom_instance(origin: &FloatingOrigin, inst: &VgeomInstance) -> Instanc
             // The classic vgeom path draws the real meshlet geometry, not a
             // primitive; the field is inert here (InstanceRaw::pack ignores it).
             mesh: crate::primitives::PrimMesh::Cube,
+            // R-P5: vgeom translucency is deferred — the classic vgeom fallback
+            // always draws opaque.
+            blend: 0,
+            cutoff: 0.5,
         },
     )
 }

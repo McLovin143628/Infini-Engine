@@ -286,7 +286,18 @@ fn output_node() -> NodeDef {
             port("roughness", MatType::Float),
             port("emissive", MatType::Vec3),
             port("surface", MatType::Slab).labeled("Surface (Slab)"),
+            // R-P5 translucency: fragment opacity (1 = opaque). Feeds the preview's
+            // alpha; the `blend` param below picks how the material composites.
+            port("opacity", MatType::Float).labeled("Opacity"),
         ])
+        .with_params(vec![ParamDef::choice(
+            "blend",
+            vec!["Opaque".into(), "Masked".into(), "Translucent".into()],
+            "Opaque",
+        )
+        .described(
+            "How this material composites (R-P5). Masked alpha-tests, Translucent alpha-blends",
+        )])
         .with_flags(SINK)
 }
 
@@ -299,13 +310,21 @@ mod tests {
         let reg = material_registry();
         let out = reg.get("output.surface").expect("output node");
         assert!(out.has(SINK));
-        // P13.2: the four legacy scalar channels + the new Slab input.
-        assert_eq!(out.inputs.len(), 5);
+        // P13.2: the four legacy scalar channels + the Slab input; R-P5: + opacity.
+        assert_eq!(out.inputs.len(), 6);
         assert!(out.input("surface").is_some());
         // The legacy scalar channels are unchanged (back-compat).
         for ch in ["base_color", "metallic", "roughness", "emissive"] {
             assert!(out.input(ch).is_some(), "missing legacy channel {ch}");
         }
+        // R-P5: the opacity pin (default 1.0) + a blend-mode dropdown param.
+        assert!(out.input("opacity").is_some());
+        let blend = out
+            .params
+            .iter()
+            .find(|p| p.name == "blend")
+            .expect("blend param");
+        assert_eq!(blend.options, ["Opaque", "Masked", "Translucent"]);
     }
 
     #[test]

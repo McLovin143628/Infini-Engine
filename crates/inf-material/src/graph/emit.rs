@@ -59,9 +59,9 @@ pub struct MaterialCompile {
 /// Compile a material graph to WGSL and validate it.
 pub fn emit_wgsl(graph: &Graph, reg: &NodeRegistry) -> MaterialCompile {
     let mut em = Emitter::new(graph, reg);
-    let (base, metallic, roughness, emissive) = em.emit_surface();
+    let (base, metallic, roughness, emissive, opacity) = em.emit_surface();
 
-    let surface_wgsl = em.assemble_surface(&base, &metallic, &roughness, &emissive);
+    let surface_wgsl = em.assemble_surface(&base, &metallic, &roughness, &emissive, &opacity);
     let module_wgsl = format!("{surface_wgsl}\n{VALIDATION_ENTRY}");
 
     let mut issues = std::mem::take(&mut em.issues);
@@ -220,8 +220,8 @@ impl<'a> Emitter<'a> {
         owner
     }
 
-    /// Resolve the four PBR channels from the output node (or defaults).
-    fn emit_surface(&mut self) -> (String, String, String, String) {
+    /// Resolve the four PBR channels + opacity from the output node (or defaults).
+    fn emit_surface(&mut self) -> (String, String, String, String, String) {
         let Some(out_id) = self.find_output() else {
             self.issues.push(MatIssue {
                 node: None,
@@ -233,8 +233,14 @@ impl<'a> Emitter<'a> {
                 "0.0".into(),
                 "0.5".into(),
                 "vec3<f32>(0.0)".into(),
+                "1.0".into(),
             );
         };
+        // R-P5: fragment opacity rides beside the PBR channels (default 1.0 =
+        // fully opaque). Resolved for both the Slab and the scalar path.
+        let opacity = self
+            .resolve_input_typed(out_id, "opacity", MatType::Float, "1.0")
+            .0;
         // P13.2 Slab path: a single Slab wire drives all four channels. It is
         // exclusive with the legacy scalar inputs.
         if self.graph.link_into(out_id, "surface").is_some() {
@@ -260,6 +266,7 @@ impl<'a> Emitter<'a> {
                 format!("{name}.metallic"),
                 format!("{name}.roughness"),
                 format!("{name}.emissive"),
+                opacity,
             );
         }
 
@@ -268,7 +275,7 @@ impl<'a> Emitter<'a> {
         let roughness = self.resolve_input_typed(out_id, "roughness", MatType::Float, "0.5");
         let emissive =
             self.resolve_input_typed(out_id, "emissive", MatType::Vec3, "vec3<f32>(0.0)");
-        (base.0, metallic.0, roughness.0, emissive.0)
+        (base.0, metallic.0, roughness.0, emissive.0, opacity)
     }
 
     fn find_output(&self) -> Option<NodeId> {
@@ -749,6 +756,7 @@ impl<'a> Emitter<'a> {
         metallic: &str,
         roughness: &str,
         emissive: &str,
+        opacity: &str,
     ) -> String {
         let mut out = String::new();
         out.push_str(PREAMBLE);
@@ -777,6 +785,7 @@ impl<'a> Emitter<'a> {
         out.push_str(&format!("    surf.metallic = {metallic};\n"));
         out.push_str(&format!("    surf.roughness = {roughness};\n"));
         out.push_str(&format!("    surf.emissive = {emissive};\n"));
+        out.push_str(&format!("    surf.opacity = {opacity};\n"));
         out.push_str("    return surf;\n}\n");
         out
     }
@@ -795,6 +804,7 @@ struct Surface {
     metallic: f32,
     roughness: f32,
     emissive: vec3<f32>,
+    opacity: f32,
 };
 ";
 
@@ -947,6 +957,38 @@ mod tests {
         assert!(c.module_wgsl.contains("material_surface"));
         // A no-output graph warns but does not error.
         assert!(c.issues.iter().all(|i| i.severity == MatSeverity::Warning));
+    }
+
+    /// R-P5: the Surface struct carries `opacity`, defaulting to 1.0 when the
+    /// output node's opacity pin is unconnected, and taking a wired value when
+    /// connected — both validate through naga.
+    #[test]
+    fn opacity_pin_defaults_to_one_and_wires() {
+        let reg = material_registry();
+
+        // Unconnected → surf.opacity = 1.0.
+        let mut g = Graph::empty();
+        assert_eq!(apply_edits(&mut g, &reg, &[add(1, "output.surface")]), 1);
+        let c = emit_wgsl(&g, &reg);
+        assert!(c.ok, "issues: {:?}", c.issues);
+        assert!(
+            c.surface_wgsl.contains("opacity: f32"),
+            "Surface has opacity"
+        );
+        assert!(c.surface_wgsl.contains("surf.opacity = 1.0"));
+
+        // Wired const 0.4 → surf.opacity reads it.
+        let mut g2 = Graph::empty();
+        let edits = vec![
+            add(1, "output.surface"),
+            add(2, "const.float"),
+            set(2, "value", 0.4),
+            wire(2, "out", 1, "opacity"),
+        ];
+        assert_eq!(apply_edits(&mut g2, &reg, &edits), edits.len());
+        let c2 = emit_wgsl(&g2, &reg);
+        assert!(c2.ok, "issues: {:?}", c2.issues);
+        assert!(c2.surface_wgsl.contains("surf.opacity = 0.4"));
     }
 
     #[test]

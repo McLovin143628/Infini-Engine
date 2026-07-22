@@ -141,6 +141,11 @@ struct CascadeGpu {
 
 pub struct ShadowNode {
     pipeline: wgpu::RenderPipeline,
+    /// R-P5 masked caster variant (`vs_masked` + `fs_masked`, alpha-test discard)
+    /// so a masked object casts a cut-out shadow. Used only when the scene carries
+    /// masked instances; otherwise the fragment-less `pipeline` draws
+    /// (byte-identical to the pre-R-P5 shadow path).
+    pipeline_masked: wgpu::RenderPipeline,
     prim: PrimGpu,
     /// One tiny uniform + bind group per cascade (distinct buffers so the
     /// per-cascade writes don't collide before the passes run).
@@ -193,40 +198,54 @@ impl ShadowNode {
                 bind_group_layouts: &[Some(&cascade_bgl)],
                 immediate_size: 0,
             });
-        let pipeline = gpu
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("shadow-depth"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &vertex_layouts(),
-                },
-                fragment: None, // depth-only
-                primitive: wgpu::PrimitiveState {
-                    // Front-face culling reduces peter-panning/acne on the classic
-                    // box casters (shadow depth from back faces).
-                    cull_mode: Some(wgpu::Face::Front),
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(SHADOW_DEPTH_COMPARE),
-                    stencil: Default::default(),
-                    // A slope-scaled hardware depth bias further reduces acne.
-                    bias: wgpu::DepthBiasState {
-                        constant: 2,
-                        slope_scale: 2.0,
-                        clamp: 0.0,
+        let primitive = wgpu::PrimitiveState {
+            // Front-face culling reduces peter-panning/acne on the classic box
+            // casters (shadow depth from back faces).
+            cull_mode: Some(wgpu::Face::Front),
+            ..Default::default()
+        };
+        let depth_stencil = wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(SHADOW_DEPTH_COMPARE),
+            stencil: Default::default(),
+            // A slope-scaled hardware depth bias further reduces acne.
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.0,
+                clamp: 0.0,
+            },
+        };
+        let make = |label: &str, vs: &str, fs: Option<wgpu::FragmentState>| {
+            gpu.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some(vs),
+                        compilation_options: Default::default(),
+                        buffers: &vertex_layouts(),
                     },
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
+                    fragment: fs,
+                    primitive,
+                    depth_stencil: Some(depth_stencil.clone()),
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
+        let pipeline = make("shadow-depth", "vs", None);
+        let pipeline_masked = make(
+            "shadow-depth-masked",
+            "vs_masked",
+            Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_masked"),
+                compilation_options: Default::default(),
+                targets: &[], // depth-only discard; no colour target
+            }),
+        );
 
         let cascade_bufs: Vec<wgpu::Buffer> = (0..SHADOW_CASCADES)
             .map(|c| {
@@ -254,6 +273,7 @@ impl ShadowNode {
 
         Self {
             pipeline,
+            pipeline_masked,
             prim,
             cascade_bufs,
             cascade_bgs,
@@ -273,7 +293,9 @@ impl ShadowNode {
         if self.uploaded_version == Some(key) {
             return;
         }
-        let (raw, ranges) = pack_bucketed(&frame.view.origin, &frame.scene.instances);
+        // Opaque+masked casters only (translucent geometry doesn't cast; folding
+        // translucent shadows in is a documented follow-up).
+        let (raw, ranges, _translucent) = pack_bucketed(&frame.view.origin, &frame.scene.instances);
         self.ranges = ranges;
         self.instance_count = raw.len() as u32;
         if !raw.is_empty() {
@@ -358,6 +380,13 @@ impl RenderNode for ShadowNode {
 
         self.sync(gpu, frame);
 
+        // Only pay for the alpha-test fragment when the scene has masked casters.
+        let caster_pipeline = if frame.scene.instances.iter().any(|i| i.blend == 1) {
+            &self.pipeline_masked
+        } else {
+            &self.pipeline
+        };
+
         // Cascade splits across the shadow range.
         let near = frame.view.near.max(0.05);
         let far = s.max_distance.max(near + 1.0);
@@ -415,7 +444,7 @@ impl RenderNode for ShadowNode {
             let Some(instances) = self.instances.as_ref() else {
                 continue;
             };
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(caster_pipeline);
             pass.set_bind_group(0, &self.cascade_bgs[c], &[]);
             self.prim.draw(&mut pass, instances, &self.ranges);
         }

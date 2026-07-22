@@ -232,6 +232,9 @@ fn import_mesh_container(
             base_color_texture: m.base_color_image.and_then(|i| image_ids[i]),
             normal_texture: m.normal_image.and_then(|i| image_ids[i]),
             metallic_roughness_texture: m.metallic_roughness_image.and_then(|i| image_ids[i]),
+            // R-P5 additive fields (blend/alpha_cutoff): imported glTF materials are
+            // opaque by default.
+            ..Default::default()
         };
         let deps = mat.texture_dependencies();
         let name = format!("{}_{}", file_stem(source), m.name);

@@ -28,7 +28,10 @@ struct Batch {
     capacity: usize,
     count: u32,
     /// Per-primitive-kind sub-ranges of this batch's packed instance buffer.
+    /// The selection outline covers translucent objects too (R-P5), so the mask
+    /// draws BOTH the opaque+masked ranges and the translucent ranges.
     ranges: [Range<u32>; 5],
+    translucent_ranges: [Range<u32>; 5],
 }
 
 pub struct MaskNode {
@@ -101,6 +104,7 @@ impl MaskNode {
                 capacity: 0,
                 count: 0,
                 ranges: EMPTY_RANGES,
+                translucent_ranges: EMPTY_RANGES,
             }
         };
 
@@ -161,9 +165,11 @@ impl MaskNode {
         batch: &mut Batch,
         raw: &[InstanceRaw],
         ranges: [Range<u32>; 5],
+        translucent_ranges: [Range<u32>; 5],
     ) {
         batch.count = raw.len() as u32;
         batch.ranges = ranges;
+        batch.translucent_ranges = translucent_ranges;
         if raw.is_empty() {
             return;
         }
@@ -234,10 +240,10 @@ impl MaskNode {
             .iter()
             .filter_map(|id| self.id_index.get(id).map(|&i| scene.instances[i]))
             .collect();
-        let (sel_raw, sel_ranges) = pack_bucketed(origin, &sel_insts);
-        let (hov_raw, hov_ranges) = pack_bucketed(origin, &hov_insts);
-        Self::upload_batch(gpu, &mut self.selected, &sel_raw, sel_ranges);
-        Self::upload_batch(gpu, &mut self.hovered, &hov_raw, hov_ranges);
+        let (sel_raw, sel_ranges, sel_tr) = pack_bucketed(origin, &sel_insts);
+        let (hov_raw, hov_ranges, hov_tr) = pack_bucketed(origin, &hov_insts);
+        Self::upload_batch(gpu, &mut self.selected, &sel_raw, sel_ranges, sel_tr);
+        Self::upload_batch(gpu, &mut self.hovered, &hov_raw, hov_ranges, hov_tr);
     }
 }
 
@@ -278,6 +284,9 @@ impl RenderNode for MaskNode {
             };
             pass.set_bind_group(1, &batch.uniform_bg, &[]);
             self.prim.draw(&mut pass, instances, &batch.ranges);
+            // Translucent instances in the selection/hover set get an outline too.
+            self.prim
+                .draw(&mut pass, instances, &batch.translucent_ranges);
         }
     }
 }

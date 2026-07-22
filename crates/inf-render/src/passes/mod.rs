@@ -20,6 +20,7 @@ pub mod ssao;
 pub mod taa;
 pub mod terrain;
 pub mod tonemap;
+pub mod translucent;
 pub mod vgeom;
 
 use crate::gpu::GpuContext;

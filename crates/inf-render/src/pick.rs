@@ -27,6 +27,9 @@ pub struct Picker {
     instances: Option<wgpu::Buffer>,
     instance_capacity: usize,
     ranges: [Range<u32>; 5],
+    /// Translucent per-kind ranges (R-P5): picking covers translucent objects too,
+    /// so both range sets are drawn into the id buffer.
+    translucent_ranges: [Range<u32>; 5],
     target: Option<(u32, u32, wgpu::Texture, wgpu::TextureView)>,
     depth: Option<(u32, u32, wgpu::TextureView)>,
 }
@@ -125,6 +128,7 @@ impl Picker {
             instances: None,
             instance_capacity: 0,
             ranges: EMPTY_RANGES,
+            translucent_ranges: EMPTY_RANGES,
             target: None,
             depth: None,
         }
@@ -180,8 +184,9 @@ impl Picker {
     }
 
     fn upload_instances(&mut self, gpu: &GpuContext, origin: &FloatingOrigin, scene: &RenderScene) {
-        let (raw, ranges) = pack_bucketed(origin, &scene.instances);
+        let (raw, ranges, translucent) = pack_bucketed(origin, &scene.instances);
         self.ranges = ranges;
+        self.translucent_ranges = translucent;
         if raw.is_empty() {
             return;
         }
@@ -266,6 +271,9 @@ impl Picker {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.view_bg, &[]);
             self.prim.draw(&mut pass, instances, &self.ranges);
+            // Translucent objects are pickable too (R-P5).
+            self.prim
+                .draw(&mut pass, instances, &self.translucent_ranges);
         }
 
         // Copy just the one texel. R32Uint = 4 bytes; bytes_per_row must be
