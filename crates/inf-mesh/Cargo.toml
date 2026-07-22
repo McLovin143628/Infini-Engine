@@ -18,6 +18,10 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 gltf = { workspace = true }
 meshopt = { workspace = true }
+# Decode `map_Kd` sidecar textures for OBJ import → RGBA8 `RawImage` (the glTF
+# path gets decoded images from the `gltf` crate; OBJ references loose files).
+# Workspace pin — no new version enters the tree (already used by inf-material).
+image = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -178,7 +178,7 @@ impl AssetKind {
 /// to the [`AssetKind`] they produce as their primary output.
 pub fn importable_source_kind(ext: &str) -> Option<AssetKind> {
     match ext.to_ascii_lowercase().as_str() {
-        "gltf" | "glb" => Some(AssetKind::Mesh),
+        "gltf" | "glb" | "obj" => Some(AssetKind::Mesh),
         "png" | "jpg" | "jpeg" | "tga" | "bmp" | "hdr" | "exr" => Some(AssetKind::Texture),
         "wav" | "ogg" | "mp3" | "flac" => Some(AssetKind::Audio),
         "csv" | "json" => Some(AssetKind::Table),
@@ -216,6 +216,8 @@ mod tests {
     #[test]
     fn source_extensions_route_to_kinds() {
         assert_eq!(importable_source_kind("GLB"), Some(AssetKind::Mesh));
+        assert_eq!(importable_source_kind("obj"), Some(AssetKind::Mesh));
+        assert_eq!(importable_source_kind("OBJ"), Some(AssetKind::Mesh));
         assert_eq!(importable_source_kind("png"), Some(AssetKind::Texture));
         assert_eq!(importable_source_kind("csv"), Some(AssetKind::Table));
         assert_eq!(importable_source_kind("xyz"), None);

@@ -56,6 +56,7 @@ pub fn import_file(
 
     let outcome = match ext.as_str() {
         "gltf" | "glb" => import_gltf(project, source, dest_dir)?,
+        "obj" => import_obj(project, source, dest_dir)?,
         "png" | "jpg" | "jpeg" | "tga" | "bmp" | "hdr" | "exr" => {
             import_image(project, source, &bytes, dest_dir)?
         }
@@ -152,6 +153,25 @@ fn import_gltf(
 ) -> Result<ImportOutcome> {
     let g: GltfImport =
         inf_mesh::import_gltf(source).map_err(|e| AssetError::Import(e.to_string()))?;
+    import_mesh_container(project, source, dest_dir, g)
+}
+
+/// Wavefront OBJ → the **same** container the glTF path yields (skeletons/clips
+/// empty), so it reuses the identical textures → materials → meshes orchestration.
+fn import_obj(project: &mut AssetProject, source: &Path, dest_dir: &Path) -> Result<ImportOutcome> {
+    let g: GltfImport =
+        inf_mesh::import_obj(source).map_err(|e| AssetError::Import(e.to_string()))?;
+    import_mesh_container(project, source, dest_dir, g)
+}
+
+/// Fan a decoded mesh-import container (glTF or OBJ) out into textures +
+/// materials + skeletons + clips + meshes, wired by GUID dependency edges.
+fn import_mesh_container(
+    project: &mut AssetProject,
+    source: &Path,
+    dest_dir: &Path,
+    g: GltfImport,
+) -> Result<ImportOutcome> {
     let source_rel = rel_source(project, source);
     let mut produced = Vec::new();
 
@@ -515,6 +535,57 @@ mod tests {
         let mut expected = vec![mesh_id, clip_id];
         expected.sort();
         assert_eq!(referrers, expected);
+    }
+
+    /// A small OBJ + MTL written to a temp dir, imported end-to-end through the
+    /// shared orchestrator. Proves an `.inf_mesh` lands as the primary asset,
+    /// carries a `usemtl`-derived material dependency edge, and — since the
+    /// source had no `vn` — that normals were generated (the meshopt weld also
+    /// runs; a flat quad's four corners survive). (`map_Kd` → texture wiring is
+    /// unit-tested in `inf-mesh`; `inf-editor-core` has no `image` dep to author
+    /// a PNG here.)
+    #[test]
+    fn obj_import_lands_mesh_with_material_edge_and_normals() {
+        let src = tempfile::tempdir().unwrap();
+        let proj_dir = tempfile::tempdir().unwrap();
+
+        std::fs::write(
+            src.path().join("quad.mtl"),
+            "newmtl painted\nKd 0.2 0.4 0.8\n",
+        )
+        .unwrap();
+        // A quad (fan → 2 tris) with no normals — exercises generation + optimize.
+        std::fs::write(
+            src.path().join("quad.obj"),
+            "mtllib quad.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nusemtl painted\nf 1 2 3 4\n",
+        )
+        .unwrap();
+
+        let mut proj = AssetProject::open(proj_dir.path()).unwrap();
+        let dest = proj.content_dir("imported").unwrap();
+        let out = proj
+            .import_file(&src.path().join("quad.obj"), &dest)
+            .unwrap();
+
+        let mesh_id = out.primary.unwrap();
+        assert_eq!(proj.db().get(mesh_id).unwrap().kind(), AssetKind::Mesh);
+
+        // The mesh → material edge exists (from usemtl).
+        let mat_deps = proj.db().references_of(mesh_id).unwrap();
+        assert_eq!(mat_deps.len(), 1);
+        assert_eq!(
+            proj.db().get(mat_deps[0]).unwrap().kind(),
+            AssetKind::Material
+        );
+
+        // Re-decode the container directly to confirm generated normals survived.
+        let g = inf_mesh::import_obj(&src.path().join("quad.obj")).unwrap();
+        let m = &g.meshes[0].mesh;
+        assert_eq!(m.triangle_count(), 2);
+        assert_eq!(m.vertex_count(), 4, "weld keeps 4 unique corners");
+        for v in &m.submeshes[0].vertices {
+            assert!(v.normal[2] > 0.9, "generated flat normal faces +Z");
+        }
     }
 
     #[test]
