@@ -331,6 +331,16 @@ impl Default for SmEditorState {
     }
 }
 
+impl SmEditorState {
+    /// Drop a document from the workspace. Idempotent (closing an unknown id is a
+    /// no-op).
+    fn close(&self, id: &str) -> Result<(), String> {
+        let mut s = self.inner.lock().map_err(|e| e.to_string())?;
+        s.docs.remove(id);
+        Ok(())
+    }
+}
+
 // ── commands ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -391,10 +401,23 @@ pub async fn sm_save(
     let root = assets
         .content_root()
         .ok_or("open a project before saving a state machine")?;
-    let dir = root.join("StateMachines");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join(&file_name), &bytes).map_err(|e| e.to_string())?;
-    Ok(file_name)
+    // Filesystem write is blocking — keep it off the async workers.
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = root.join("StateMachines");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(&file_name), &bytes).map_err(|e| e.to_string())?;
+        Ok::<_, String>(file_name)
+    })
+    .await
+    .map_err(|e| format!("sm_save task failed to run: {e}"))?
+}
+
+/// Close a document: free it from the workspace so open state machines don't
+/// accumulate for the life of the session. Called when the editing surface is
+/// discarded.
+#[tauri::command]
+pub async fn sm_close(id: String, state: State<'_, SmEditorState>) -> Result<(), String> {
+    state.close(&id)
 }
 
 /// The imported `.inf_anim` clips (for a Clip motion's picker).
@@ -476,5 +499,17 @@ mod tests {
             d.machine.states[0].motion,
             SmMotionDto::Clip { .. }
         ));
+    }
+
+    #[test]
+    fn close_frees_the_doc() {
+        let state = SmEditorState::default();
+        {
+            let mut s = state.inner.lock().unwrap();
+            s.docs
+                .insert("sm1".into(), default_doc("sm1".into(), "Test".into()));
+        }
+        state.close("sm1").unwrap();
+        assert!(state.inner.lock().unwrap().docs.is_empty(), "doc freed");
     }
 }

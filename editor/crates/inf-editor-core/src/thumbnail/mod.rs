@@ -13,6 +13,7 @@
 mod scene_render;
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use inf_asset::{AssetId, AssetKind};
 use inf_material::{MaterialAsset, TextureAsset};
@@ -69,28 +70,55 @@ impl Thumbnailer {
 
     /// Render an asset to a square RGBA8 image. Returns `None` when the asset
     /// kind has no visual preview or the GPU is unavailable for a 3D kind.
-    pub fn render_rgba(&mut self, project: &AssetProject, id: AssetId) -> Option<Vec<u8>> {
-        let entry = project.db().get(id)?;
-        match entry.kind() {
-            AssetKind::Texture => {
-                let tex: TextureAsset = load_payload(&entry.path).ok()?;
+    ///
+    /// The `project` lock is taken only briefly to resolve *what* to draw (kind,
+    /// on-disk payload path, and — for meshes — a base-color hint from the first
+    /// material dependency); the payload file read + GPU render then run with the
+    /// lock released, so a thumbnail render never blocks other asset commands on
+    /// the project mutex.
+    pub fn render_rgba(
+        &mut self,
+        project: &Arc<Mutex<AssetProject>>,
+        id: AssetId,
+    ) -> Option<Vec<u8>> {
+        enum Draw {
+            Texture(PathBuf),
+            Mesh(PathBuf, [f32; 4]),
+            Material(PathBuf),
+        }
+        // Resolve the draw job under a short project lock, then release it.
+        let draw = {
+            let proj = project.lock().ok()?;
+            let entry = proj.db().get(id)?;
+            match entry.kind() {
+                AssetKind::Texture => Draw::Texture(entry.path.clone()),
+                AssetKind::Mesh => {
+                    let base = mesh_base_color(&proj, entry.sidecar.dependencies.as_slice());
+                    Draw::Mesh(entry.path.clone(), base)
+                }
+                AssetKind::Material => Draw::Material(entry.path.clone()),
+                _ => return None,
+            }
+        };
+        match draw {
+            Draw::Texture(path) => {
+                let tex: TextureAsset = load_payload(&path).ok()?;
                 Some(texture_thumbnail(&tex, self.size))
             }
-            AssetKind::Mesh => {
-                let mesh: MeshAsset = load_payload(&entry.path).ok()?;
-                let base = mesh_base_color(project, entry.sidecar.dependencies.as_slice());
+            Draw::Mesh(path, base) => {
+                let mesh: MeshAsset = load_payload(&path).ok()?;
                 let (verts, indices) = combined_geometry(&mesh);
+                let bounds = mesh.bounds;
                 let size = self.size;
                 let gpu = self.gpu()?;
-                scene_render::render_mesh(gpu, size, &verts, &indices, mesh.bounds, base).ok()
+                scene_render::render_mesh(gpu, size, &verts, &indices, bounds, base).ok()
             }
-            AssetKind::Material => {
-                let mat: MaterialAsset = load_payload(&entry.path).ok()?;
+            Draw::Material(path) => {
+                let mat: MaterialAsset = load_payload(&path).ok()?;
                 let size = self.size;
                 let gpu = self.gpu()?;
                 scene_render::render_sphere(gpu, size, mat.base_color).ok()
             }
-            _ => None,
         }
     }
 
@@ -143,14 +171,20 @@ impl ThumbnailCache {
 
     /// Return the cached PNG path for `id`, rendering + caching it on a miss.
     /// Returns `None` if the asset has no preview (or a 3D kind with no GPU).
+    ///
+    /// Locks `project` only to key by content hash (and, on a miss, for the
+    /// render's brief metadata resolve) — never across the GPU render or the
+    /// PNG-encode/file-write.
     pub fn get_or_render(
         &self,
-        project: &AssetProject,
+        project: &Arc<Mutex<AssetProject>>,
         id: AssetId,
         thumbnailer: &mut Thumbnailer,
     ) -> Option<PathBuf> {
-        let entry = project.db().get(id)?;
-        let hash = entry.sidecar.content_hash.to_hex();
+        let hash = {
+            let proj = project.lock().ok()?;
+            proj.db().get(id)?.sidecar.content_hash.to_hex()
+        };
         let path = self.path_for(&hash);
         if path.exists() {
             return Some(path);
@@ -169,6 +203,55 @@ impl ThumbnailCache {
             .map(|e| self.path_for(&e.sidecar.content_hash.to_hex()).exists())
             .unwrap_or(false)
     }
+
+    /// Evict orphaned thumbnails: delete every cached PNG whose content hash no
+    /// longer matches any live asset (each re-import/edit re-keys the thumbnail
+    /// by a fresh hash, orphaning the old one). Called at a non-hot moment — a
+    /// project open/rescan — never on a render path.
+    ///
+    /// Safe against the cache dir not existing (returns 0), and only ever touches
+    /// files matching the cache's own `<32-hex>.png` naming scheme, so foreign
+    /// files dropped in the directory are never deleted. Returns the number of
+    /// orphaned PNGs removed.
+    pub fn sweep(&self, project: &AssetProject) -> usize {
+        use std::collections::HashSet;
+        let live: HashSet<String> = project
+            .db()
+            .iter()
+            .map(|e| e.content_hash().to_hex())
+            .collect();
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return 0; // cache dir absent → nothing to sweep
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Only our own `<hash>.png` files are candidates; skip everything else.
+            let Some(hash) = cache_hash_stem(&path) else {
+                continue;
+            };
+            if !live.contains(&hash) && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+}
+
+/// The content-hash stem of a path that matches the cache's own
+/// `<32-lowercase-hex>.png` naming scheme (see [`ThumbnailCache::path_for`]), or
+/// `None` for any other file — the guard that keeps [`ThumbnailCache::sweep`]
+/// from deleting foreign files.
+fn cache_hash_stem(path: &Path) -> Option<String> {
+    if path.extension().and_then(|e| e.to_str()) != Some("png") {
+        return None;
+    }
+    let stem = path.file_stem().and_then(|s| s.to_str())?;
+    let is_lower_hex = stem.len() == 32
+        && stem
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    is_lower_hex.then(|| stem.to_string())
 }
 
 // ── payload loading ───────────────────────────────────────────────────────
@@ -268,7 +351,7 @@ mod tests {
     use super::*;
     use inf_material::{texture_from_rgba8, TextureImportSettings};
 
-    fn project_with_texture() -> (tempfile::TempDir, AssetProject, AssetId) {
+    fn project_with_texture() -> (tempfile::TempDir, Arc<Mutex<AssetProject>>, AssetId) {
         let dir = tempfile::tempdir().unwrap();
         let mut proj = AssetProject::open(dir.path()).unwrap();
         let d = proj.content_dir("tex").unwrap();
@@ -287,7 +370,7 @@ mod tests {
         let id = proj
             .write_asset(&d, "Checker", &tex, None, vec![], None)
             .unwrap();
-        (dir, proj, id)
+        (dir, Arc::new(Mutex::new(proj)), id)
     }
 
     #[test]
@@ -306,13 +389,49 @@ mod tests {
         let (dir, proj, id) = project_with_texture();
         let cache = ThumbnailCache::open(dir.path().join(".inf/thumbnails")).unwrap();
         let mut thumb = Thumbnailer::new(64);
-        assert!(!cache.is_cached(&proj, id));
+        assert!(!cache.is_cached(&proj.lock().unwrap(), id));
         let path = cache.get_or_render(&proj, id, &mut thumb).unwrap();
         assert!(path.exists(), "PNG written");
-        assert!(cache.is_cached(&proj, id));
+        assert!(cache.is_cached(&proj.lock().unwrap(), id));
         // Second call is a cache hit (same path).
         let again = cache.get_or_render(&proj, id, &mut thumb).unwrap();
         assert_eq!(path, again);
+    }
+
+    #[test]
+    fn sweep_removes_only_orphaned_thumbnails() {
+        let (dir, proj, id) = project_with_texture();
+        let cache = ThumbnailCache::open(dir.path().join(".inf/thumbnails")).unwrap();
+        let mut thumb = Thumbnailer::new(64);
+
+        // Cache a live thumbnail (the texture renders without a GPU).
+        let live_path = cache.get_or_render(&proj, id, &mut thumb).unwrap();
+        // Plant an orphan whose hash matches no live asset, and a foreign file.
+        let orphan = cache.dir.join(format!("{:032x}.png", 0xdead_beef_u128));
+        std::fs::write(&orphan, b"stale png").unwrap();
+        let foreign = cache.dir.join("notes.txt");
+        std::fs::write(&foreign, b"keep me").unwrap();
+
+        let removed = cache.sweep(&proj.lock().unwrap());
+
+        assert_eq!(removed, 1, "only the orphan is swept");
+        assert!(live_path.exists(), "the live thumbnail survives");
+        assert!(!orphan.exists(), "the orphaned PNG is deleted");
+        assert!(foreign.exists(), "a non-cache file is never touched");
+    }
+
+    #[test]
+    fn sweep_is_safe_when_the_cache_dir_is_absent() {
+        let (_dir, proj, _id) = project_with_texture();
+        // A directory that was never created (bypass `open`, which would make it).
+        let cache = ThumbnailCache {
+            dir: std::env::temp_dir().join("inf-thumb-cache-does-not-exist-xyz"),
+        };
+        assert_eq!(
+            cache.sweep(&proj.lock().unwrap()),
+            0,
+            "missing cache dir sweeps nothing"
+        );
     }
 
     #[test]
@@ -345,6 +464,7 @@ mod tests {
         let id = proj
             .write_asset(&d, "Quad", &mesh, None, vec![], None)
             .unwrap();
+        let proj = Arc::new(Mutex::new(proj));
 
         let mut thumb = Thumbnailer::new(64);
         if thumb.gpu().is_none() {

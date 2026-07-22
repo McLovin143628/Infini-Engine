@@ -228,14 +228,24 @@ pub async fn lsp_start(
         return Ok(()); // already running
     }
 
-    let bin = resolve_rust_analyzer(&app)?;
-    let mut child = Command::new(bin)
-        .current_dir(&workspace)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn rust-analyzer: {e}"))?;
+    // The PATH probe (`rust-analyzer --version`) and the child spawn both block
+    // on process creation — keep them off the async workers (mirrors git.rs /
+    // package.rs). Everything they need is `Send + 'static` (AppHandle clone +
+    // workspace string); `Child` is `Send`, so it comes back out.
+    let app_probe = app.clone();
+    let workspace_spawn = workspace.clone();
+    let mut child = tauri::async_runtime::spawn_blocking(move || {
+        let bin = resolve_rust_analyzer(&app_probe)?;
+        Command::new(bin)
+            .current_dir(&workspace_spawn)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawn rust-analyzer: {e}"))
+    })
+    .await
+    .map_err(|e| format!("lsp_start task failed to run: {e}"))??;
 
     let stdin = Arc::new(Mutex::new(child.stdin.take().ok_or("no stdin")?));
     let stdout = child.stdout.take().ok_or("no stdout")?;

@@ -36,6 +36,14 @@ struct AssetInner {
     project: Arc<Mutex<AssetProject>>,
     queue: ImportQueue,
     watcher: Option<AssetWatcher>,
+    /// The thumbnail renderer + its disk cache, behind their own mutex so a slow
+    /// headless-GPU render + PNG/file IO serializes only against *other*
+    /// thumbnail renders — never behind the whole asset state (the `inner` lock).
+    thumbs: Arc<Mutex<ThumbnailRig>>,
+}
+
+/// Thumbnail renderer + disk cache, guarded together (see [`AssetInner::thumbs`]).
+struct ThumbnailRig {
     thumb: Thumbnailer,
     cache: ThumbnailCache,
 }
@@ -197,9 +205,19 @@ impl AssetState {
     pub fn reroot(&self, app: &AppHandle, content_root: PathBuf) {
         match build_inner(app, &content_root) {
             Some(inner) => {
-                if let Ok(mut guard) = self.inner.lock() {
-                    *guard = Some(inner);
-                }
+                // Swap the new inner in and take the OLD one OUT within one short
+                // critical section, then drop the old inner *after* releasing the
+                // lock: dropping an `AssetInner` joins the import worker
+                // (`ImportQueue::drop`), which can block for seconds on an in-flight
+                // glTF import. Holding `self.inner` across that join would stall
+                // every asset command; taking it out first keeps the lock hold
+                // short and never exposes a `None` inner (`replace` is atomic under
+                // the lock, so no command observes a torn swap).
+                let old = match self.inner.lock() {
+                    Ok(mut guard) => guard.replace(inner),
+                    Err(_) => None,
+                };
+                drop(old); // joins the old worker with the lock released
                 tracing::info!("asset system re-rooted to {}", content_root.display());
             }
             None => tracing::error!("asset re-root failed for {}", content_root.display()),
@@ -233,12 +251,22 @@ fn build_inner(app: &AppHandle, content_root: &std::path::Path) -> Option<AssetI
             return None;
         }
     };
+    // Project open/rescan is a non-hot moment: evict thumbnails whose content
+    // hash no longer matches any live asset (orphaned by re-imports/edits).
+    if let Ok(proj) = project.lock() {
+        let removed = cache.sweep(&proj);
+        if removed > 0 {
+            tracing::info!("thumbnail cache: swept {removed} orphaned preview(s)");
+        }
+    }
     Some(AssetInner {
         project,
         queue,
         watcher,
-        thumb: Thumbnailer::default(),
-        cache,
+        thumbs: Arc::new(Mutex::new(ThumbnailRig {
+            thumb: Thumbnailer::default(),
+            cache,
+        })),
     })
 }
 
@@ -423,15 +451,32 @@ pub async fn asset_thumbnail(
     state: State<'_, AssetState>,
 ) -> Result<Option<String>, String> {
     let id = parse_id(&id)?;
-    let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
-    let inner = guard.as_mut().ok_or("assets not initialized")?;
-    let path = {
-        let proj = inner.project.lock().map_err(|e| e.to_string())?;
-        inner.cache.get_or_render(&proj, id, &mut inner.thumb)
+    // Clone the shared handles under a SHORT hold of the whole-asset-state lock,
+    // then release it: the (headless-GPU render + PNG encode + file IO) below
+    // must serialize only against *other* thumbnail renders (the `thumbs` mutex),
+    // never behind the rest of the asset commands. `get_or_render` itself locks
+    // `project` only briefly (to key by content hash + resolve what to draw) and
+    // releases it before the GPU work.
+    let (project, thumbs) = {
+        let guard = state.inner.lock().map_err(|e| e.to_string())?;
+        let inner = guard.as_ref().ok_or("assets not initialized")?;
+        (inner.project.clone(), inner.thumbs.clone())
     };
-    let Some(path) = path else { return Ok(None) };
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    Ok(Some(format!("data:image/png;base64,{}", base64(&bytes))))
+    // GPU render + PNG encode + file read are blocking — keep them off the async
+    // workers. Concurrent requests for the same *uncached* thumbnail serialize on
+    // `thumbs` (one renders, the next then hits the disk cache); we deliberately
+    // avoid per-key locking (last write wins, byte-identical content).
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut rig = thumbs.lock().map_err(|e| e.to_string())?;
+        let ThumbnailRig { thumb, cache } = &mut *rig;
+        let Some(path) = cache.get_or_render(&project, id, thumb) else {
+            return Ok(None);
+        };
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        Ok(Some(format!("data:image/png;base64,{}", base64(&bytes))))
+    })
+    .await
+    .map_err(|e| format!("asset_thumbnail task failed to run: {e}"))?
 }
 
 // ── mutations ───────────────────────────────────────────────────────────────

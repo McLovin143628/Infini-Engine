@@ -62,6 +62,16 @@ impl PcgState {
         let mut store = self.inner.lock().map_err(|e| e.to_string())?;
         f(&mut store)
     }
+
+    /// Drop a document + its undo journal from the workspace. Idempotent
+    /// (closing an unknown id is a no-op).
+    fn close(&self, id: &str) -> Result<(), String> {
+        self.with(|s| {
+            s.docs.remove(id);
+            s.journals.remove(id);
+            Ok(())
+        })
+    }
 }
 
 /// Result of applying an edit batch (mirrors `GraphApplyResult`).
@@ -221,6 +231,14 @@ pub async fn pcg_get(id: String, state: State<'_, PcgState>) -> Result<GraphDoc,
     })
 }
 
+/// Close a document: free its graph + undo journal so open PCG graphs don't
+/// accumulate for the life of the session. Called when the editing surface is
+/// discarded.
+#[tauri::command]
+pub async fn pcg_close(id: String, state: State<'_, PcgState>) -> Result<(), String> {
+    state.close(&id)
+}
+
 /// Apply an edit batch; records one undo entry and re-validates.
 #[tauri::command]
 pub async fn pcg_apply(
@@ -371,10 +389,15 @@ pub async fn pcg_save(
     let root = assets
         .content_root()
         .ok_or("open a project before saving a PCG graph")?;
-    let dir = root.join("PCG");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join(&file_name), &bytes).map_err(|e| e.to_string())?;
-    Ok(file_name)
+    // Filesystem write is blocking — keep it off the async workers.
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = root.join("PCG");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(&file_name), &bytes).map_err(|e| e.to_string())?;
+        Ok::<_, String>(file_name)
+    })
+    .await
+    .map_err(|e| format!("pcg_save task failed to run: {e}"))?
 }
 
 /// Lower the PCG graph and evaluate it over the scene terrain into the target
@@ -523,4 +546,44 @@ pub async fn pcg_evaluate(
         issues,
         ok: true,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Insert a bare document + journal directly (mimics `pcg_create`, which
+    /// needs a Tauri `State`/`AppHandle` we can't build in a unit test).
+    fn seed(state: &PcgState, id: &str) {
+        state
+            .with(|s| {
+                s.docs.insert(
+                    id.to_string(),
+                    GraphDoc {
+                        id: id.to_string(),
+                        name: "T".into(),
+                        graph: inf_graph::Graph::empty(),
+                        viewport: None,
+                        modified_ms: 0,
+                    },
+                );
+                s.journals.insert(id.to_string(), GraphJournal::new(8));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn close_frees_the_doc_and_journal() {
+        let state = PcgState::default();
+        seed(&state, "pcg:1");
+        state.close("pcg:1").unwrap();
+        state
+            .with(|s| {
+                assert!(s.docs.is_empty(), "doc freed");
+                assert!(s.journals.is_empty(), "journal freed");
+                Ok(())
+            })
+            .unwrap();
+    }
 }

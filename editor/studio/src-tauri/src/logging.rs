@@ -30,11 +30,18 @@ static CRASH_RING: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// The most recent formatted log lines (oldest first), for a crash report.
+///
+/// Called from the panic hook (`commands::diagnostics::install_crash_hook`).
+/// **Never blocks**: if a panic fires *inside* the log critical section on this
+/// thread, the `CRASH_RING` guard from `on_event` is still held when the hook
+/// runs (the hook executes before the panicking frame unwinds), so a blocking
+/// `lock()` here would deadlock the hook and *no crash file would be written*.
+/// `try_lock` returns whatever is available, or empty on contention/poison.
 pub fn recent_lines() -> Vec<String> {
-    CRASH_RING
-        .lock()
-        .map(|r| r.iter().cloned().collect())
-        .unwrap_or_default()
+    match CRASH_RING.try_lock() {
+        Ok(ring) => ring.iter().cloned().collect(),
+        Err(_) => Vec::new(), // WouldBlock (reentrant) or poisoned → best-effort empty
+    }
 }
 
 /// Install the app handle and flush everything buffered so far.
@@ -43,7 +50,8 @@ pub fn attach_app(app: tauri::AppHandle) {
         return;
     }
     let drained: Vec<LogLine> = {
-        let mut buf = BUFFER.lock().expect("log buffer poisoned");
+        // Recover from poison so a panicked logger can't wedge the startup flush.
+        let mut buf = BUFFER.lock().unwrap_or_else(|p| p.into_inner());
         buf.drain(..).collect()
     };
     for line in drained {
@@ -112,8 +120,11 @@ impl<S: Subscriber> Layer<S> for LogBridgeLayer {
             timestamp_ms: now_ms(),
         };
 
-        // Feed the crash-report ring (bounded, always on).
-        if let Ok(mut ring) = CRASH_RING.lock() {
+        // Feed the crash-report ring (bounded, always on). Recover from a
+        // poisoned lock (a prior panic mid-push) via `into_inner` so one panicked
+        // logger never disables the crash ring for the rest of the session.
+        {
+            let mut ring = CRASH_RING.lock().unwrap_or_else(|p| p.into_inner());
             if ring.len() >= CRASH_RING_CAP {
                 ring.pop_front();
             }
@@ -125,7 +136,9 @@ impl<S: Subscriber> Layer<S> for LogBridgeLayer {
 
         if let Some(app) = APP.get() {
             let _ = app.emit("log://line", &line);
-        } else if let Ok(mut buf) = BUFFER.lock() {
+        } else {
+            // Same poison recovery for the pre-webview buffer.
+            let mut buf = BUFFER.lock().unwrap_or_else(|p| p.into_inner());
             if buf.len() >= BUFFER_CAP {
                 buf.pop_front();
             }
