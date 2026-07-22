@@ -24,6 +24,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BpDoc, BpEdit, BpLink, PortType } from "../../lib/blueprintTypes";
 import { isExec } from "../../lib/blueprintTypes";
 import { useBlueprintStore } from "../../stores/blueprintStore";
+import { useSimStore } from "../../stores/simStore";
 import { BpNode } from "./BpNode";
 import { NodePalette, type PaletteAnchor } from "./NodePalette";
 import { wouldCycle } from "./reducer";
@@ -64,6 +65,18 @@ function CanvasInner() {
   const runResult = useBlueprintStore((s) => s.runResult);
   const generated = useBlueprintStore((s) => s.generated);
   const issues = useBlueprintStore((s) => s.issues);
+
+  // ── B-P4 debugger ──
+  const debugRun = useBlueprintStore((s) => s.debugRun);
+  const clearDebugValues = useBlueprintStore((s) => s.clearDebugValues);
+  const breakpointCount = useBlueprintStore((s) => s.debugBreakpoints.size);
+  // Live Simulate controls (tier A′): Pause/Resume/Step are only meaningful while
+  // a session is running. Step uses the fixed-step command (guaranteed one step).
+  const simRunning = useSimStore((s) => s.running);
+  const simPaused = useSimStore((s) => s.paused);
+  const simPause = useSimStore((s) => s.pause);
+  const simResume = useSimStore((s) => s.resume);
+  const simStep = useSimStore((s) => s.step);
 
   const { screenToFlowPosition } = useReactFlow();
   const previewMove = useBlueprintStore((s) => s.previewMove);
@@ -199,6 +212,45 @@ function CanvasInner() {
           + Add node
         </button>
         {problemCount > 0 && <span className="bp-toolbar__issues">{problemCount} issue(s)</span>}
+      </div>
+
+      <div className="bp-toolbar bp-toolbar--debug">
+        <button
+          className="bp-btn bp-btn--debug"
+          onClick={() => void debugRun()}
+          disabled={running}
+          title="Run under debug lowering with the current breakpoints (Alt-click a node header to set one)"
+        >
+          {"🐞 Debug Run"}
+        </button>
+        <button className="bp-btn" onClick={() => clearDebugValues()} title="Clear wire values + hit highlights">
+          Clear values
+        </button>
+        <span className="bp-toolbar__hint">
+          {breakpointCount} breakpoint{breakpointCount === 1 ? "" : "s"}
+        </span>
+        {simRunning && (
+          <>
+            <span className="bp-toolbar__sep" />
+            <span className="bp-toolbar__hint">Simulate</span>
+            {simPaused ? (
+              <button className="bp-btn" onClick={() => simResume()} title="Resume Simulate">
+                ▶ Resume
+              </button>
+            ) : (
+              <button className="bp-btn" onClick={() => simPause()} title="Pause Simulate">
+                ⏸ Pause
+              </button>
+            )}
+            <button
+              className="bp-btn"
+              onClick={() => void simStep()}
+              title="Advance one fixed step"
+            >
+              ⏭ Step
+            </button>
+          </>
+        )}
       </div>
 
       <div className="bp-flow">

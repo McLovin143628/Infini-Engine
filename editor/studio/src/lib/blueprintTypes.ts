@@ -138,6 +138,28 @@ export interface GraphRunResult {
   error?: string | null;
 }
 
+/** One inspected wire in a debug run (B-P4): source node/port + its value. */
+export interface DebugWire {
+  node: number;
+  port: string;
+  value: string;
+}
+
+/**
+ * Result of a debug preview run (`graph_debug_run`). A preview run is
+ * milliseconds, so there is no live pause: the graph runs to completion under
+ * the interpreter's trace and the debugger *displays* the collected hits + wire
+ * values. `hits` are canvas node ids a breakpoint paused on.
+ */
+export interface DebugRunResult {
+  hits: number[];
+  wires: DebugWire[];
+  logs: string[];
+  vars: Record<string, number>;
+  handlers: string[];
+  error?: string | null;
+}
+
 /** A pin's stable string key (for theming). */
 export function portKey(ty: PortType): string {
   return ty.kind === "named" ? ty.name : ty.kind;

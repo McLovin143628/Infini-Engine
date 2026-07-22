@@ -66,6 +66,22 @@
   min-height: 0;
 }
 
+/* B-P4 debugger toolbar row */
+.bp-toolbar--debug {
+  background: #1d2024;
+}
+.bp-toolbar__hint {
+  font-size: 11px;
+  color: #9aa0a6;
+}
+.bp-btn--debug {
+  background: #3a2f52;
+  border-color: #4a3d68;
+}
+.bp-btn--debug:hover {
+  background: #443860;
+}
+
 /* Node card */
 .bp-node {
   min-width: 150px;
@@ -92,6 +108,46 @@
   gap: 8px;
   padding: 5px 9px;
   color: #f4f6fa;
+  position: relative;
+}
+
+/* B-P4: breakpoint dot (top-left of the header) + hit pulse + wire chip */
+.bp-node__bp {
+  position: absolute;
+  top: 4px;
+  left: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e5484d;
+  box-shadow: 0 0 4px rgba(229, 72, 77, 0.9);
+}
+.bp-node--hit {
+  border-color: #e5484d;
+  animation: bp-hit-pulse 0.9s ease-out 2;
+}
+@keyframes bp-hit-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(229, 72, 77, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(229, 72, 77, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(229, 72, 77, 0);
+  }
+}
+.bp-pin__chip {
+  max-width: 74px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #14312a;
+  color: #7ee06e;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 10px;
 }
 .bp-node__title {
   font-weight: 600;

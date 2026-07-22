@@ -47,7 +47,9 @@ use inf_blueprint::interp::{
     AudioHost, MoveResult2d, MoveResult3d, Physics2dHost, Physics3dHost, RayHit2d, RayHit3d,
 };
 use inf_blueprint::semantics::run_event;
-use inf_blueprint::{ActorInstance, BlueprintClass, EventKind, Host, InterpDebug, RunError, Value};
+use inf_blueprint::{
+    ActorInstance, BlueprintClass, EventKind, Host, InterpDebug, RunError, Trace, Value,
+};
 use inf_ecs::components::{
     AnimPlayer, AnimStateMachine, AudioListener, AudioSource, CharacterController2D,
     CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
@@ -207,6 +209,39 @@ pub struct SimSession {
     audio_log: Vec<AudioCommand>,
     /// Total fixed steps run (a determinism/telemetry counter).
     steps: u64,
+    /// B-P4 tier A′ seam: per-class debugger config (breakpoints + wire capture),
+    /// keyed by [`BlueprintClass`] id. Empty by default — the shipped player never
+    /// populates this (its `RuntimeSim` has no debug setter), so Simulate is the
+    /// only path that can pause/inspect. Seeded via [`set_debug`](Self::set_debug).
+    debug: BTreeMap<String, InterpDebug>,
+    /// Debug hits/wire-values collected this step across every event pass, drained
+    /// by [`take_debug_events`](Self::take_debug_events) after a step. Non-empty
+    /// only when a class in `debug` carries breakpoints or wire capture.
+    debug_events: Vec<SimDebugHit>,
+}
+
+/// One handler's debug observation under Simulate (B-P4 tier A′): the actor's
+/// class + event, the handler fn, the breakpoint hits, and the captured wire
+/// values.
+///
+/// **Honest limitation** — because Simulate runs hand-built `.inf_act` IR (there
+/// is no graph→`.inf_act` authoring pipeline yet), these are keyed by the IR
+/// `LocalId` (`local`), not a canvas `NodeId`. The `NodeId` half activates the
+/// moment classes carry `LowerMap` graph provenance; until then the editor shows
+/// the raw locals. The pause-on-hit wiring already works (any non-empty `hits`
+/// pauses); only the node-level highlight awaits provenance.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SimDebugHit {
+    /// The actor class id whose handler produced these observations.
+    pub class_id: String,
+    /// The event key that fired (`begin_play`, `tick`, `input:jump`, …).
+    pub event: String,
+    /// The handler's function name.
+    pub fn_name: String,
+    /// Breakpoint hits, as IR `LocalId` values, in order hit.
+    pub hits: Vec<u32>,
+    /// Latest captured value per wire, as `(LocalId, stringified value)`.
+    pub wires: Vec<(u32, String)>,
 }
 
 /// The obstruction gain (linear) applied to an occluded spatial source — a −12 dB
@@ -269,6 +304,8 @@ impl SimSession {
             audio_started: BTreeSet::new(),
             audio_log: Vec::new(),
             steps: 0,
+            debug: BTreeMap::new(),
+            debug_events: Vec::new(),
         };
 
         session.bridge.sync_from_world(doc.world());
@@ -342,6 +379,25 @@ impl SimSession {
     /// tick against the actor's Blueprint variables.
     pub fn set_state_machines(&mut self, machines: BTreeMap<Uuid, StateMachine>) {
         self.state_machines = machines;
+    }
+
+    /// Install (or replace) the debugger config for a class (B-P4 tier A′): the
+    /// breakpoints to pause on + whether to capture wire values. Applies from the
+    /// next event pass. Passing `InterpDebug::default()` (empty) disables it.
+    ///
+    /// **Note** — for hand-built `.inf_act` classes the `breakpoints` are IR
+    /// `LocalId`s (there is no `NodeId` map yet); once a class carries graph
+    /// provenance the caller translates `NodeId → LocalId` before this call.
+    pub fn set_debug(&mut self, class_id: impl Into<String>, debug: InterpDebug) {
+        self.debug.insert(class_id.into(), debug);
+    }
+
+    /// Drain the debug hits/wire-values collected since the last drain (B-P4 tier
+    /// A′). The Ring-2 `sim_tick`/`sim_step_fixed` commands call this after a step
+    /// and, when non-empty, emit `sim://debug`. Empty unless a class is being
+    /// debugged.
+    pub fn take_debug_events(&mut self) -> Vec<SimDebugHit> {
+        std::mem::take(&mut self.debug_events)
     }
 
     /// The `debug.print` log accumulated so far.
@@ -619,6 +675,17 @@ impl SimSession {
             Some(Value::Int(i)) => *i,
             _ => 0,
         };
+        // B-P4 tier A′: the class's debugger config (default when the class isn't
+        // being debugged) + whether it observes anything, computed before the host
+        // borrow. The config is cheap to clone (a HashSet + bool).
+        let debug_cfg = self.debug.get(&state.class.id).cloned().unwrap_or_default();
+        let debug_active = !debug_cfg.breakpoints.is_empty() || debug_cfg.capture_wires;
+        let fn_name = state
+            .class
+            .handler(event)
+            .map(|b| b.body.name.clone())
+            .unwrap_or_default();
+        let mut recorded: Option<SimDebugHit> = None;
         {
             let mut host = SimHost {
                 bridge: &mut self.bridge,
@@ -634,16 +701,30 @@ impl SimSession {
                 bindings: &mut self.bindings,
                 dispatch_queue: &mut self.dispatch_queue,
             };
-            if let Err(e) = run_event(
+            match run_event(
                 &state.class,
                 &mut state.instance,
                 event,
                 args,
                 &mut host,
-                &InterpDebug::default(),
+                &debug_cfg,
             ) {
-                self.logs.push(format!("{}: {e}", event.key()));
+                Ok(trace) => {
+                    if debug_active && (!trace.hits.is_empty() || !trace.wires.is_empty()) {
+                        recorded = Some(SimDebugHit {
+                            class_id: state.class.id.clone(),
+                            event: event.key(),
+                            fn_name,
+                            hits: trace.hits.iter().map(|l| l.0).collect(),
+                            wires: latest_wire_values(&trace),
+                        });
+                    }
+                }
+                Err(e) => self.logs.push(format!("{}: {e}", event.key())),
             }
+        }
+        if let Some(hit) = recorded {
+            self.debug_events.push(hit);
         }
         self.actors.insert(guid, state);
     }
@@ -1518,6 +1599,28 @@ fn collider_shape(c: &Collider2D) -> ColliderShape2D {
     }
 }
 
+/// The latest captured value per wire in a [`Trace`], as `(LocalId, string)`
+/// pairs sorted by local id (B-P4 tier A′). A wire re-evaluated in a loop keeps
+/// only its most recent value.
+fn latest_wire_values(trace: &Trace) -> Vec<(u32, String)> {
+    let mut latest: BTreeMap<u32, String> = BTreeMap::new();
+    for (lid, v) in &trace.wires {
+        latest.insert(lid.0, debug_value_string(v));
+    }
+    latest.into_iter().collect()
+}
+
+/// Stringify a runtime [`Value`] for the debug wire inspector.
+fn debug_value_string(v: &Value) -> String {
+    match v {
+        Value::Float(f) => format!("{f}"),
+        Value::Int(i) => format!("{i}"),
+        Value::Bool(b) => format!("{b}"),
+        Value::Str(s) => format!("{s:?}"),
+        Value::Unit => "()".to_string(),
+    }
+}
+
 fn arg_str(args: &[Value], i: usize) -> String {
     args.get(i)
         .and_then(|v| match v {
@@ -1733,4 +1836,56 @@ where
         }
     }
     clips
+}
+
+#[cfg(test)]
+mod debug_tests {
+    //! B-P4 tier A′: the Simulate debug seam (per-class `InterpDebug` +
+    //! `take_debug_events`), exercised over the committed coyote platformer.
+    use super::*;
+    use crate::samples::{platformer_actors, platformer_scene};
+    use inf_blueprint::LocalId;
+
+    #[test]
+    fn debug_config_collects_hits_and_wires() {
+        let mut doc = platformer_scene();
+        let actors = platformer_actors();
+        let class_ids: Vec<String> = actors.iter().map(|(_, c)| c.id.clone()).collect();
+        let mut session = SimSession::enter(&mut doc, actors, DVec2::ZERO, SIM_HZ);
+        // Breakpoint on the player's `grounded` local (LocalId 2 in coyote_tick_fn)
+        // + capture all wires, for every actor class.
+        for id in &class_ids {
+            session.set_debug(
+                id.clone(),
+                InterpDebug {
+                    breakpoints: [LocalId(2)].into_iter().collect(),
+                    capture_wires: true,
+                },
+            );
+        }
+        session.step_once(&mut doc, SimInput::with_down(["right"]));
+        let events = session.take_debug_events();
+        let ev = events
+            .iter()
+            .find(|e| e.event == "tick" && e.hits.contains(&2))
+            .expect("a tick debug event that hit the `grounded` breakpoint");
+        assert!(!ev.wires.is_empty(), "wire capture should record values");
+        assert!(!ev.fn_name.is_empty(), "the handler fn name is recorded");
+        // Draining is one-shot.
+        assert!(
+            session.take_debug_events().is_empty(),
+            "take_debug_events drains"
+        );
+    }
+
+    #[test]
+    fn no_debug_config_collects_nothing() {
+        // Without set_debug, stepping records no debug events (the player path is
+        // debug-free by default; the shipped RuntimeSim has no setter at all).
+        let mut doc = platformer_scene();
+        let actors = platformer_actors();
+        let mut session = SimSession::enter(&mut doc, actors, DVec2::ZERO, SIM_HZ);
+        session.step_once(&mut doc, SimInput::with_down(["right"]));
+        assert!(session.take_debug_events().is_empty());
+    }
 }

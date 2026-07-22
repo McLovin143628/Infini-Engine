@@ -13,6 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   BpDoc,
   BpEdit,
+  DebugRunResult,
   GraphApplyResult,
   GraphRunResult,
   NodeDef,
@@ -25,9 +26,11 @@ import type { AssetSnapshot } from "../bindings/AssetSnapshot";
 import type { CollectionDto } from "../bindings/CollectionDto";
 import type { MaterialInstanceDto } from "../bindings/MaterialInstanceDto";
 import type { MatOverridesDto } from "../bindings/MatOverridesDto";
+import type { MixerConfigDto } from "../bindings/MixerConfigDto";
 import type { DataAssetDto } from "../bindings/DataAssetDto";
 import type { DataFieldDto } from "../bindings/DataFieldDto";
 import type { DeleteResult } from "../bindings/DeleteResult";
+import type { AddableComponentDto } from "../bindings/AddableComponentDto";
 import type { DetailsDto } from "../bindings/DetailsDto";
 import type { ErosionParamsDto } from "../bindings/ErosionParamsDto";
 import type { ErosionReportDto } from "../bindings/ErosionReportDto";
@@ -70,6 +73,7 @@ export type {
   CollectionDto,
   MaterialInstanceDto,
   MatOverridesDto,
+  MixerConfigDto,
   DataAssetDto,
   DataFieldDto,
   DeleteResult,
@@ -246,6 +250,18 @@ export const scene = {
     invoke<DetailsDto>("scene_set_property", { guids, typePath, field, value }),
   resetProperty: (guids: string[], typePath: string, field: string): Promise<DetailsDto> =>
     invoke<DetailsDto>("scene_reset_property", { guids, typePath, field }),
+  /** The components the user may "+ Add Component" (E-P1). */
+  listAddableComponents: (): Promise<AddableComponentDto[]> =>
+    invoke<AddableComponentDto[]>("scene_list_addable_components"),
+  /** Add a Default `typePath` component to `guids` (or the selection) as one undo step (E-P1). */
+  addComponent: (typePath: string, guids: string[] | null = null): Promise<DetailsDto> =>
+    invoke<DetailsDto>("scene_add_component", { guids, typePath }),
+  /** Remove `typePath` from a single entity (E-P1). */
+  removeComponent: (guid: string, typePath: string): Promise<DetailsDto> =>
+    invoke<DetailsDto>("scene_remove_component", { guid, typePath }),
+  /** The default element for the list at `path` on `typePath`'s component (ListField "add", E-P1). */
+  listDefault: (typePath: string, path: string): Promise<PropValueDto> =>
+    invoke<PropValueDto>("scene_list_default", { typePath, path }),
   undo: (): Promise<void> => invoke("scene_undo"),
   redo: (): Promise<void> => invoke("scene_redo"),
   /** Save to `path`, or a default quicksave when omitted. */
@@ -414,6 +430,18 @@ export const assets = {
 };
 
 /**
+ * Audio mixer (E-P9): the project's named-bus `inf_audio::MixerConfig`, persisted
+ * at `<project_root>/.infinity/mixer.toml`. `save` validates (unique non-empty
+ * names, a present + rootless `master`, existing parents, no cycles), persists,
+ * live-applies to a running Simulate session, and broadcasts on
+ * `audio://mixer-changed`. Arg name is camelCase (Tauri maps to snake_case).
+ */
+export const audio = {
+  mixerGet: (): Promise<MixerConfigDto> => invoke<MixerConfigDto>("mixer_get"),
+  mixerSave: (config: MixerConfigDto): Promise<void> => invoke("mixer_save", { config }),
+};
+
+/**
  * Named content collections (E-P8): user-defined, persisted groupings of assets
  * stored at `<project_root>/.infinity/collections.toml`. Every mutation returns
  * the full updated list and also broadcasts on `collections://changed`. Names
@@ -527,6 +555,13 @@ export const graph = {
   undo: (id: string): Promise<BpDoc | null> => invoke<BpDoc | null>("graph_undo", { id }),
   redo: (id: string): Promise<BpDoc | null> => invoke<BpDoc | null>("graph_redo", { id }),
   run: (id: string): Promise<GraphRunResult> => invoke<GraphRunResult>("graph_run", { id }),
+  /**
+   * B-P4 tier A: run the graph under debug lowering with `breakpoints` (canvas
+   * node ids) and optional wire `capture`. Returns the hits (node ids), captured
+   * wire values, logs, and final vars (run-to-completion trace, not a live pause).
+   */
+  debugRun: (id: string, breakpoints: number[], capture: boolean): Promise<DebugRunResult> =>
+    invoke<DebugRunResult>("graph_debug_run", { id, breakpoints, capture }),
   generate: (id: string): Promise<string> => invoke<string>("graph_generate", { id }),
 };
 
@@ -630,6 +665,19 @@ export const sim = {
    * whether a session was running (false = no-op). Arg name is camelCase.
    */
   tick: (keys: string[]): Promise<boolean> => invoke<boolean>("sim_tick", { keys }),
+  /**
+   * Advance **exactly one fixed step** with the held actions (B-P4 tier A′):
+   * bypasses the wall-clock accumulator, so Step is a guaranteed single step.
+   * Resolves to whether a session was running.
+   */
+  stepFixed: (keys: string[]): Promise<boolean> => invoke<boolean>("sim_step_fixed", { keys }),
+  /**
+   * Install the debugger config for an actor class (B-P4 tier A′): breakpoints
+   * (IR `LocalId`s for hand-built classes) + wire capture. When a step hits a
+   * breakpoint the backend emits `sim://debug`. No-op if no session is running.
+   */
+  setDebug: (classId: string, breakpoints: number[], capture: boolean): Promise<void> =>
+    invoke("sim_set_debug", { classId, breakpoints, capture }),
   /** Exit Simulate, restoring the pre-play world. */
   stop: (): Promise<void> => invoke("sim_stop"),
   /** Whether a Simulate session is currently running (mount-time sync). */

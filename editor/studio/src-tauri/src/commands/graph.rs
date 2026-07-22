@@ -11,11 +11,11 @@
 //! arrive as `inf_graph::GraphEdit` (the frontend hand-builds the kebab-case
 //! tagged JSON); Tauri deserializes them directly.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
 
-use inf_blueprint::interp::{eval_fn, Host, RunError, Value};
-use inf_blueprint::{blueprint_registry, lower_graph};
+use inf_blueprint::interp::{eval_fn, eval_fn_traced, Host, RunError, Trace, Value};
+use inf_blueprint::{blueprint_registry, lower_graph, lower_graph_debug, InterpDebug, LowerMap};
 use inf_graph::{
     apply_edits, compile::validate, GraphDoc, GraphEdit, GraphIssue, GraphJournal, NodeDef,
     NodeRegistry,
@@ -288,6 +288,176 @@ pub async fn graph_run(id: String, state: State<'_, GraphState>) -> Result<Graph
     })
 }
 
+/// One inspected wire in a debug run: the source `node`/`port` and its most
+/// recent value, stringified for display (the frontend shows it as a pin chip).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugWire {
+    /// The producer node id (`NodeId.0`).
+    pub node: u32,
+    /// The producer's output port.
+    pub port: String,
+    /// The captured value, stringified.
+    pub value: String,
+}
+
+/// Result of a **debug** preview run (B-P4 tier A): which nodes a breakpoint
+/// paused on, every captured wire value, plus the same logs/vars a normal run
+/// returns.
+///
+/// **Trace semantics** — a preview run is milliseconds, so there is no live
+/// "pause": the graph runs to completion (BeginPlay + 3× Tick) under the
+/// interpreter's trace, and the debugger *displays* the collected hits + wire
+/// values post-hoc. Live pause-on-hit is the Simulate seam (tier A′), not this.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugRunResult {
+    /// Node ids (canvas `NodeId`s) a breakpoint was hit on, ascending & unique.
+    pub hits: Vec<u32>,
+    /// Every captured wire's latest value (sorted by node then port).
+    pub wires: Vec<DebugWire>,
+    /// Log lines from `debug.print` and engine calls, in execution order.
+    pub logs: Vec<String>,
+    /// Final member-variable values after the run.
+    pub vars: BTreeMap<String, f64>,
+    /// Handlers that were lowered and executed (by event key).
+    pub handlers: Vec<String>,
+    /// A fatal error, if the graph could not be lowered or run.
+    pub error: Option<String>,
+}
+
+/// Stringify a runtime [`Value`] for wire-inspector display.
+fn value_display(v: &Value) -> String {
+    match v {
+        Value::Float(f) => format!("{f}"),
+        Value::Int(i) => format!("{i}"),
+        Value::Bool(b) => format!("{b}"),
+        Value::Str(s) => format!("{s:?}"),
+        Value::Unit => "()".to_string(),
+    }
+}
+
+/// The per-handler [`InterpDebug`] for a debug run: arm every `LocalId` whose
+/// originating `NodeId` is a requested breakpoint, and capture wires on request.
+fn per_fn_debug(map: &LowerMap, breakpoints: &HashSet<u32>, capture: bool) -> InterpDebug {
+    InterpDebug {
+        breakpoints: map
+            .locals
+            .iter()
+            .filter(|(_, (node, _))| breakpoints.contains(&node.0))
+            .map(|(lid, _)| *lid)
+            .collect(),
+        capture_wires: capture,
+    }
+}
+
+/// Project one handler's [`Trace`] back onto the canvas through its [`LowerMap`]:
+/// breakpoint hits → node ids, captured wires → latest `(node, port) → value`.
+fn project_trace(
+    map: &LowerMap,
+    trace: &Trace,
+    hits: &mut BTreeSet<u32>,
+    wires: &mut BTreeMap<(u32, String), String>,
+) {
+    for lid in &trace.hits {
+        if let Some((node, _)) = map.locals.get(lid) {
+            hits.insert(node.0);
+        }
+    }
+    for (lid, val) in &trace.wires {
+        if let Some((node, port)) = map.locals.get(lid) {
+            wires.insert((node.0, port.clone()), value_display(val));
+        }
+    }
+}
+
+/// The debug-run core (sync, testable without a Tauri `State`): lower the graph
+/// under **debug lowering** + provenance, run BeginPlay once then Tick 3×, and
+/// collect breakpoint hits + wire values translated back to canvas node ids.
+fn debug_run_store(
+    store: &GraphStore,
+    id: &str,
+    breakpoints: &[u32],
+    capture: bool,
+) -> Result<DebugRunResult, String> {
+    let doc = store
+        .docs
+        .get(id)
+        .ok_or_else(|| format!("no graph `{id}`"))?;
+    let lowered = match lower_graph_debug(&doc.graph, &store.registry) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(DebugRunResult {
+                error: Some(e.to_string()),
+                ..Default::default()
+            })
+        }
+    };
+    let bp: HashSet<u32> = breakpoints.iter().copied().collect();
+    let mut host = RunHost::default();
+    let mut handlers = Vec::new();
+    let mut error = None;
+    let mut hit_nodes: BTreeSet<u32> = BTreeSet::new();
+    let mut wire_latest: BTreeMap<(u32, String), String> = BTreeMap::new();
+
+    // BeginPlay once.
+    for (f, map) in lowered.iter().filter(|(f, _)| f.id == "begin_play") {
+        handlers.push(f.id.clone());
+        let dbg = per_fn_debug(map, &bp, capture);
+        match eval_fn_traced(f, &HashMap::new(), &mut host, &dbg) {
+            Ok((_v, trace)) => project_trace(map, &trace, &mut hit_nodes, &mut wire_latest),
+            Err(e) => error = Some(format!("begin_play: {e}")),
+        }
+    }
+    // Tick three frames at 1/60 s.
+    for (f, map) in lowered.iter().filter(|(f, _)| f.id == "tick") {
+        handlers.push(f.id.clone());
+        let dbg = per_fn_debug(map, &bp, capture);
+        for _ in 0..3 {
+            let args: HashMap<String, Value> =
+                [("dt".to_string(), Value::Float(1.0 / 60.0))].into();
+            match eval_fn_traced(f, &args, &mut host, &dbg) {
+                Ok((_v, trace)) => project_trace(map, &trace, &mut hit_nodes, &mut wire_latest),
+                Err(e) => {
+                    error = Some(format!("tick: {e}"));
+                    break;
+                }
+            }
+        }
+    }
+
+    let vars = host
+        .vars
+        .iter()
+        .filter_map(|(k, v)| value_as_f64(v).map(|f| (k.clone(), f)))
+        .collect();
+    let wires = wire_latest
+        .into_iter()
+        .map(|((node, port), value)| DebugWire { node, port, value })
+        .collect();
+    Ok(DebugRunResult {
+        hits: hit_nodes.into_iter().collect(),
+        wires,
+        logs: host.logs,
+        vars,
+        handlers,
+        error,
+    })
+}
+
+/// Run the graph under **debug lowering** with the given canvas-node breakpoints
+/// (B-P4 tier A). `breakpoints` are `NodeId`s; `capture` enables wire inspection.
+/// Returns the hits (as node ids), captured wire values, logs, and final vars.
+#[tauri::command]
+pub async fn graph_debug_run(
+    id: String,
+    breakpoints: Vec<u32>,
+    capture: bool,
+    state: State<'_, GraphState>,
+) -> Result<DebugRunResult, String> {
+    state.with(|s| debug_run_store(s, &id, &breakpoints, capture))
+}
+
 /// The Rust `inf-transpile` generates for this graph ("Open generated Rust").
 #[tauri::command]
 pub async fn graph_generate(id: String, state: State<'_, GraphState>) -> Result<String, String> {
@@ -454,5 +624,84 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    fn wire(
+        g: &mut inf_graph::Graph,
+        from: inf_graph::NodeId,
+        fp: &str,
+        to: inf_graph::NodeId,
+        tp: &str,
+    ) {
+        g.links.push(inf_graph::Link {
+            from,
+            from_port: fp.into(),
+            to,
+            to_port: tp.into(),
+        });
+    }
+
+    /// A debug run over `begin_play → var.set("out", get("x") + 1)`: breakpoint on
+    /// the `+` node, capture on. Its `LocalId` hit + wire value must translate back
+    /// to the `+` node id, and the run's vars/logs must still be produced.
+    #[test]
+    fn debug_run_translates_breakpoints_and_wires_to_node_ids() {
+        use inf_graph::{NodeUi, ParamValue};
+        let mut g = inf_graph::Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let getx = g.insert("var.get", NodeUi::default());
+        g.node_mut(getx)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("x".into()));
+        let one = g.insert("lit.int", NodeUi::default());
+        g.node_mut(one)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Int(1));
+        let add = g.insert("math.add", NodeUi::default());
+        let setv = g.insert("var.set", NodeUi::default());
+        g.node_mut(setv)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("out".into()));
+        wire(&mut g, getx, "value", add, "a");
+        wire(&mut g, one, "value", add, "b");
+        wire(&mut g, add, "out", setv, "value");
+        wire(&mut g, bp, "then", setv, "exec");
+
+        let state = GraphState::default();
+        state
+            .with(|s| {
+                s.docs.insert(
+                    "bp:1".into(),
+                    GraphDoc {
+                        id: "bp:1".into(),
+                        name: "T".into(),
+                        graph: g.clone(),
+                        viewport: None,
+                        modified_ms: 0,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        let res = state
+            .with(|s| debug_run_store(s, "bp:1", &[add.0], true))
+            .unwrap();
+        assert!(res.error.is_none(), "run error: {:?}", res.error);
+        assert!(
+            res.hits.contains(&add.0),
+            "breakpoint on `+` should hit: {:?}",
+            res.hits
+        );
+        let add_wire = res
+            .wires
+            .iter()
+            .find(|w| w.node == add.0 && w.port == "out");
+        assert!(add_wire.is_some(), "captured `+` wire: {:?}", res.wires);
+        assert_eq!(add_wire.unwrap().value, "1");
+        assert_eq!(res.vars.get("out"), Some(&1.0));
     }
 }

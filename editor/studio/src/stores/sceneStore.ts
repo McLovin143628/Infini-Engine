@@ -91,6 +91,10 @@ interface SceneState {
   toggleVisible: (guid: string) => void;
   setProperty: (typePath: string, field: string, value: PropValueDto) => Promise<void>;
   resetProperty: (typePath: string, field: string) => Promise<void>;
+  /** Add a Default component to the current selection (E-P1). */
+  addComponent: (typePath: string) => Promise<void>;
+  /** Remove a component from a single entity (E-P1). */
+  removeComponent: (guid: string, typePath: string) => Promise<void>;
   undo: () => void;
   redo: () => void;
 }
@@ -345,6 +349,32 @@ export const useSceneStore = create<SceneState>((set, get) => ({
     } catch (e) {
       console.error("scene.resetProperty failed", e);
       useShellStore.getState().pushStatus(`Property reset failed: ${errText(e)}`);
+    }
+  },
+
+  addComponent: async (typePath) => {
+    const sel = get().selection;
+    if (!sel.length) return;
+    const token = ++detailsToken;
+    try {
+      const details = await sceneIpc.addComponent(typePath, sel);
+      if (token !== detailsToken) return;
+      set({ details });
+    } catch (e) {
+      console.error("scene.addComponent failed", e);
+      useShellStore.getState().pushStatus(`Add component failed: ${errText(e)}`);
+    }
+  },
+
+  removeComponent: async (guid, typePath) => {
+    const token = ++detailsToken;
+    try {
+      const details = await sceneIpc.removeComponent(guid, typePath);
+      if (token !== detailsToken) return;
+      set({ details });
+    } catch (e) {
+      console.error("scene.removeComponent failed", e);
+      useShellStore.getState().pushStatus(`Remove component failed: ${errText(e)}`);
     }
   },
 

@@ -13,7 +13,16 @@ interface BpNodeData {
   [key: string]: unknown;
 }
 
-function PinRow({ port, side }: { port: PortDef; side: "target" | "source" }) {
+function PinRow({
+  port,
+  side,
+  value,
+}: {
+  port: PortDef;
+  side: "target" | "source";
+  /** Captured wire value (source data pins only) → shown as a hover chip. */
+  value?: string;
+}) {
   const color = pinColor(port.ty);
   const exec = isExec(port.ty);
   return (
@@ -43,6 +52,11 @@ function PinRow({ port, side }: { port: PortDef; side: "target" | "source" }) {
         {port.label}
         {port.required && !port.paramPin ? " *" : ""}
       </span>
+      {value !== undefined && (
+        <span className="bp-pin__chip" title={`${port.label} = ${value}`}>
+          {value}
+        </span>
+      )}
     </div>
   );
 }
@@ -129,15 +143,36 @@ function BpNodeInner({ id, data, selected }: NodeProps) {
   const typeId = (data as BpNodeData).typeId;
   const def = useBlueprintStore((s) => s.registryById[typeId]);
   const node = useBlueprintStore((s) => s.doc?.graph.nodes[id]);
+  const nodeId = Number(id);
+  // ── B-P4 debugger state for this node ──
+  const hasBreakpoint = useBlueprintStore((s) => s.debugBreakpoints.has(nodeId));
+  const isHit = useBlueprintStore((s) => s.debugHits.has(nodeId));
+  const wireValues = useBlueprintStore((s) => s.debugWireValues[nodeId]);
+  const toggleBreakpoint = useBlueprintStore((s) => s.toggleBreakpoint);
   if (!def) {
     return <div className="bp-node bp-node--unknown">Unknown node: {typeId}</div>;
   }
-  const nodeId = Number(id);
   const isLiteral = typeId.startsWith("lit.");
 
   return (
-    <div className={`bp-node${selected ? " bp-node--selected" : ""}`}>
-      <div className="bp-node__header" style={{ background: categoryColor(def.category) }}>
+    <div
+      className={`bp-node${selected ? " bp-node--selected" : ""}${isHit ? " bp-node--hit" : ""}`}
+    >
+      <div
+        className="bp-node__header"
+        style={{ background: categoryColor(def.category) }}
+        // Alt-click the header toggles a breakpoint (stop propagation so the
+        // node isn't selected/dragged by the same gesture).
+        onClickCapture={(e) => {
+          if (e.altKey) {
+            e.stopPropagation();
+            e.preventDefault();
+            toggleBreakpoint(nodeId);
+          }
+        }}
+        title="Alt-click to toggle a breakpoint"
+      >
+        {hasBreakpoint && <span className="bp-node__bp" aria-label="breakpoint" />}
         <span className="bp-node__title">{node?.ui.title || def.display}</span>
         <span className="bp-node__cat">{def.category}</span>
       </div>
@@ -149,7 +184,12 @@ function BpNodeInner({ id, data, selected }: NodeProps) {
         </div>
         <div className="bp-node__col bp-node__col--out">
           {def.outputs.map((p) => (
-            <PinRow key={`out:${p.name}`} port={p} side="source" />
+            <PinRow
+              key={`out:${p.name}`}
+              port={p}
+              side="source"
+              value={wireValues?.[p.name]}
+            />
           ))}
         </div>
       </div>

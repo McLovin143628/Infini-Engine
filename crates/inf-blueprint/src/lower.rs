@@ -9,7 +9,7 @@
 //! (e.g. `engine.spawn` → `entity`) bind it to a local so the side effect runs
 //! exactly once; unconsumed outputs stay bare `ExprStmt`s.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use inf_graph::{Graph, Node, NodeId, NodeRegistry, ParamValue, PortType};
 
@@ -93,6 +93,24 @@ fn binop_of(type_id: &str) -> Option<BinOp> {
     })
 }
 
+/// The provenance a **mapped** lowering records: for every `Let` binding the
+/// lowerer materializes, which `(NodeId, output port)` in the source graph it
+/// came from. This is the bridge the debugger needs — breakpoints and wire
+/// captures live on IR [`LocalId`]s, but the canvas speaks [`NodeId`]s, so a
+/// debug run translates `NodeId → its LocalId(s)` (this map, inverted) to arm
+/// breakpoints, then `LocalId → NodeId` (this map) to project the observed
+/// [`Trace`](crate::interp::Trace) back onto the canvas.
+///
+/// Only bindings with a graph origin appear here; purely-synthetic locals (loop
+/// counters, the `for` last-bound, the loop-guard) have no `NodeId` and are
+/// deliberately absent. So **every `LocalId` in this map refers to a live node**
+/// (a lowering invariant the tests pin).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LowerMap {
+    /// `LocalId → (producer node, its output port)`.
+    pub locals: BTreeMap<LocalId, (NodeId, String)>,
+}
+
 /// Lower every `event.*` node in the graph into one [`BlueprintFn`] each, in
 /// deterministic (`NodeId`) order.
 pub fn lower_graph(graph: &Graph, reg: &NodeRegistry) -> Result<Vec<BlueprintFn>, LowerError> {
@@ -101,6 +119,25 @@ pub fn lower_graph(graph: &Graph, reg: &NodeRegistry) -> Result<Vec<BlueprintFn>
         if node.type_id.starts_with("event.") {
             let event = event_of(node);
             out.push(lower_event(graph, reg, *id, &event)?);
+        }
+    }
+    Ok(out)
+}
+
+/// Lower every `event.*` node under **debug lowering** (every non-literal pure
+/// output is materialized into a `Let`, so it carries a `LocalId` a breakpoint /
+/// wire-inspector can address), returning each handler paired with its
+/// [`LowerMap`] provenance. Deterministic (`NodeId`) order, mirroring
+/// [`lower_graph`]. See [`lower_event_debug`] for the exact debug-lowering rules.
+pub fn lower_graph_debug(
+    graph: &Graph,
+    reg: &NodeRegistry,
+) -> Result<Vec<(BlueprintFn, LowerMap)>, LowerError> {
+    let mut out = Vec::new();
+    for (id, node) in &graph.nodes {
+        if node.type_id.starts_with("event.") {
+            let event = event_of(node);
+            out.push(lower_event_debug(graph, reg, *id, &event)?);
         }
     }
     Ok(out)
@@ -129,24 +166,82 @@ fn node_text_param(node: &Node, key: &str) -> String {
     }
 }
 
-/// Lower a single event node's exec chain into a handler function.
+/// Lower a single event node's exec chain into a handler function (normal
+/// lowering; the provenance map is discarded). Delegates to
+/// [`lower_event_mapped`].
 pub fn lower_event(
     graph: &Graph,
     reg: &NodeRegistry,
     event_node: NodeId,
     event: &EventKind,
 ) -> Result<BlueprintFn, LowerError> {
+    Ok(lower_event_mapped(graph, reg, event_node, event)?.0)
+}
+
+/// Lower a single event node's exec chain, returning the handler **and** a
+/// [`LowerMap`] recording each materialized `Let`'s originating `(NodeId, port)`.
+/// The emitted IR is byte-identical to [`lower_event`] — the only difference is
+/// that provenance is *retained* rather than dropped.
+pub fn lower_event_mapped(
+    graph: &Graph,
+    reg: &NodeRegistry,
+    event_node: NodeId,
+    event: &EventKind,
+) -> Result<(BlueprintFn, LowerMap), LowerError> {
+    lower_event_impl(graph, reg, event_node, event, false)
+}
+
+/// Lower a single event node under **debug lowering** + return its [`LowerMap`].
+///
+/// Debug lowering lowers the *same* graph but drops the materialization
+/// threshold to **1**: every non-literal pure output (a binary/unary op, a
+/// `var.get`, a pure call, …) is bound to its own `Let` so it carries a
+/// `LocalId` a breakpoint can pause on and the wire inspector can read — not
+/// only the fan-out ≥ 2 nodes normal lowering materializes.
+///
+/// Two evaluation-order-sensitive contexts are **exempt** so the debug run stays
+/// host-observably identical to a normal run:
+///
+/// - **`logic.and` / `logic.or` right-hand sides** — hoisting the RHS into a
+///   `Let` before the `&&`/`||` would evaluate it unconditionally, changing host
+///   call counts. Inside a short-circuit RHS, debug-forced materialization is
+///   suppressed (fan-out ≥ 2 hoisting still applies, exactly as in normal
+///   lowering).
+/// - **`flow.while` conditions** — the loop condition is re-evaluated every
+///   iteration; hoisting it before the loop would freeze it. Suppressed likewise.
+///
+/// Value-equivalence (same host log + result via the interpreter) is a test
+/// invariant; normal lowering is unaffected (the flag is `false` there).
+pub fn lower_event_debug(
+    graph: &Graph,
+    reg: &NodeRegistry,
+    event_node: NodeId,
+    event: &EventKind,
+) -> Result<(BlueprintFn, LowerMap), LowerError> {
+    lower_event_impl(graph, reg, event_node, event, true)
+}
+
+fn lower_event_impl(
+    graph: &Graph,
+    reg: &NodeRegistry,
+    event_node: NodeId,
+    event: &EventKind,
+    debug: bool,
+) -> Result<(BlueprintFn, LowerMap), LowerError> {
     let mut lw = Lowerer {
         graph,
         reg,
         next_local: 1,
         locals: HashMap::new(),
+        provenance: BTreeMap::new(),
         visiting: Vec::new(),
+        debug,
+        no_debug_hoist: 0,
     };
     let body = lw.exec_from(event_node, EXEC_THEN)?;
     let params: Vec<Param> = event.signature();
     let key = event.key();
-    Ok(BlueprintFn {
+    let f = BlueprintFn {
         // `id` keeps the raw key (`input:jump`, `custom:foo`) as the stable
         // identity; `name` is the sanitized Rust ident (`:`/`.` → `_`) the
         // transpiler's `generate_fn` needs — a raw key with a colon is not a
@@ -156,7 +251,13 @@ pub fn lower_event(
         params,
         ret: Ty::Unit,
         body,
-    })
+    };
+    Ok((
+        f,
+        LowerMap {
+            locals: lw.provenance,
+        },
+    ))
 }
 
 /// Turn an event key into a valid Rust identifier for the generated `fn` name:
@@ -172,10 +273,26 @@ struct Lowerer<'a> {
     next_local: u32,
     /// (producer node, output port) → the local it was bound to.
     locals: HashMap<(NodeId, String), LocalId>,
+    /// The inverse of `locals`, retained for the [`LowerMap`]: every graph-origin
+    /// `Let` id → its `(NodeId, port)`. Recorded alongside each `locals` insert.
+    provenance: BTreeMap<LocalId, (NodeId, String)>,
     visiting: Vec<NodeId>,
+    /// Debug lowering: materialize every non-literal pure output into a `Let`.
+    debug: bool,
+    /// Depth of the debug-materialization suppression scope (short-circuit RHS /
+    /// loop condition). While `> 0`, debug lowering does **not** force-materialize
+    /// (fan-out ≥ 2 hoisting still applies). Ignored when `debug` is `false`.
+    no_debug_hoist: u32,
 }
 
 impl Lowerer<'_> {
+    /// Bind `(node, port)` to `id` and record its provenance for the [`LowerMap`].
+    /// The single place `locals` is written, so provenance can never drift.
+    fn bind_local(&mut self, node: NodeId, port: String, id: LocalId) {
+        self.locals.insert((node, port.clone()), id);
+        self.provenance.insert(id, (node, port));
+    }
+
     fn type_id(&self, node: NodeId) -> Result<&str, LowerError> {
         self.graph
             .node(node)
@@ -269,7 +386,7 @@ impl Lowerer<'_> {
                 match self.consumed_output(node) {
                     Some(port) => {
                         let id = self.alloc_local();
-                        self.locals.insert((node, port), id);
+                        self.bind_local(node, port, id);
                         out.push(Stmt::Let {
                             id,
                             binding: Binding::Anon,
@@ -311,7 +428,12 @@ impl Lowerer<'_> {
     /// accepted edge-case limitation of the shared-value model, not the norm.
     fn lower_while(&mut self, node: NodeId, out: &mut Vec<Stmt>) -> Result<(), LowerError> {
         let counter = self.alloc_local();
-        let user_cond = self.resolve_input(node, "condition", out)?;
+        // The user condition re-evaluates every iteration: suppress debug-forced
+        // materialization so it isn't hoisted (and thus frozen) before the loop.
+        self.no_debug_hoist += 1;
+        let user_cond = self.resolve_input(node, "condition", out);
+        self.no_debug_hoist -= 1;
+        let user_cond = user_cond?;
         out.push(Stmt::Let {
             id: counter,
             binding: Binding::Anon,
@@ -336,7 +458,7 @@ impl Lowerer<'_> {
         let last_local = self.alloc_local();
         let counter = self.alloc_local();
         // Register the index output up front so `loop_body` reads see the local.
-        self.locals.insert((node, "index".to_string()), idx);
+        self.bind_local(node, "index".to_string(), idx);
         let first = self.resolve_input(node, "first", out)?;
         let last = self.resolve_input(node, "last", out)?;
         out.push(Stmt::Let {
@@ -419,7 +541,7 @@ impl Lowerer<'_> {
             value: nodestate_get_or(&key, Expr::Lit(Lit::Bool(true))),
         });
         // Register the `is_a` data output before lowering the branches.
-        self.locals.insert((node, "is_a".to_string()), is_a);
+        self.bind_local(node, "is_a".to_string(), is_a);
         out.push(nodestate_set(
             &key,
             Expr::Unary(UnOp::Not, Box::new(Expr::Local(is_a))),
@@ -559,8 +681,19 @@ impl Lowerer<'_> {
                 let op = binop_of(&type_id)
                     .ok_or_else(|| LowerError::Unsupported(node, type_id.clone()))?;
                 let a = self.resolve_input(node, "a", prelude)?;
-                let b = self.resolve_input(node, "b", prelude)?;
-                Expr::Binary(op, Box::new(a), Box::new(b))
+                // `&&`/`||` short-circuit their RHS: under debug lowering, suppress
+                // forced materialization of the `b` subtree so it isn't hoisted
+                // ahead of the operator (which would evaluate it unconditionally
+                // and change host call counts). Fan-out ≥ 2 hoisting still applies.
+                let short_circuit = matches!(op, BinOp::And | BinOp::Or);
+                if short_circuit {
+                    self.no_debug_hoist += 1;
+                }
+                let b = self.resolve_input(node, "b", prelude);
+                if short_circuit {
+                    self.no_debug_hoist -= 1;
+                }
+                Expr::Binary(op, Box::new(a), Box::new(b?))
             }
             NodeRole::NotOp => {
                 let a = self.resolve_input(node, "a", prelude)?;
@@ -608,11 +741,15 @@ impl Lowerer<'_> {
         };
 
         // Literals are constants — safe to inline even when shared. Every other
-        // pure node with fan-out ≥ 2 is materialized so it evaluates once.
+        // pure node with fan-out ≥ 2 is materialized so it evaluates once. Under
+        // debug lowering (outside a suppression scope) the threshold drops to 1,
+        // so every non-literal pure output gets a `Let` (and thus a `LocalId` the
+        // debugger can address).
         let shared = self.graph.links_from(node, port).count() >= 2;
-        if shared && role != NodeRole::Literal {
+        let debug_force = self.debug && self.no_debug_hoist == 0;
+        if (shared || debug_force) && role != NodeRole::Literal {
             let id = self.alloc_local();
-            self.locals.insert((node, port.to_string()), id);
+            self.bind_local(node, port.to_string(), id);
             prelude.push(Stmt::Let {
                 id,
                 binding: Binding::Anon,
@@ -1615,5 +1752,244 @@ mod tests {
         }
         // Fires exactly once despite three invocations.
         assert_eq!(host.vars.get("hits"), Some(&Value::Int(1)));
+    }
+
+    // ── B-P4 debug lowering + LowerMap provenance ───────────────────────────
+
+    /// Run a lowered handler over a fresh [`MapHost`] seeded with `seed`,
+    /// returning the host (for var/log inspection) and the run result.
+    fn eval_collect(
+        f: &BlueprintFn,
+        seed: &[(&str, Value)],
+    ) -> (MapHost, Result<Value, crate::RunError>) {
+        let mut host = MapHost::default();
+        for (k, v) in seed {
+            host.vars.insert((*k).to_string(), v.clone());
+        }
+        let r = eval_fn(f, &HashMap::new(), &mut host);
+        (host, r)
+    }
+
+    /// The single `begin_play` handler of a graph under normal / debug lowering.
+    fn lower_begin(g: &Graph, debug: bool) -> BlueprintFn {
+        let reg = blueprint_registry();
+        let ev = g
+            .nodes
+            .iter()
+            .find(|(_, n)| n.type_id == "event.begin_play")
+            .map(|(id, _)| *id)
+            .expect("a begin_play node");
+        if debug {
+            lower_event_debug(g, &reg, ev, &EventKind::BeginPlay)
+                .unwrap()
+                .0
+        } else {
+            lower_event(g, &reg, ev, &EventKind::BeginPlay).unwrap()
+        }
+    }
+
+    #[test]
+    fn lower_map_locals_all_reference_live_nodes() {
+        // Reuse the rotate-on-tick shape: it materializes `add.out` (fan-out 2).
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let tick = g.insert("event.tick", NodeUi::default());
+        let speed = g.insert("var.get", NodeUi::default());
+        g.node_mut(speed)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("speed".into()));
+        let mul = g.insert("math.mul", NodeUi::default());
+        let add = g.insert("math.add", NodeUi::default());
+        let setv = g.insert("var.set", NodeUi::default());
+        g.node_mut(setv)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("angle".into()));
+        let rot = g.insert("engine.set_rotation", NodeUi::default());
+        wire(&mut g, speed, "value", mul, "a");
+        wire(&mut g, tick, "dt", mul, "b");
+        wire(&mut g, mul, "out", add, "a");
+        wire(&mut g, add, "out", setv, "value");
+        wire(&mut g, add, "out", rot, "angle");
+        wire(&mut g, tick, EXEC_THEN, setv, "exec");
+        wire(&mut g, setv, EXEC_THEN, rot, "exec");
+
+        for debug in [false, true] {
+            let (_f, map) = if debug {
+                lower_event_debug(&g, &reg, tick, &EventKind::Tick).unwrap()
+            } else {
+                lower_event_mapped(&g, &reg, tick, &EventKind::Tick).unwrap()
+            };
+            assert!(!map.locals.is_empty(), "debug={debug}: expected provenance");
+            for (id, (node, port)) in &map.locals {
+                assert!(
+                    g.node(*node).is_some(),
+                    "debug={debug}: local {id:?} → dead node {node}"
+                );
+                assert!(!port.is_empty(), "debug={debug}: empty port for {id:?}");
+            }
+            // Debug lowering must record at least as many bindings as normal
+            // (it materializes strictly more pure outputs).
+            if debug {
+                let (_nf, nmap) = lower_event_mapped(&g, &reg, tick, &EventKind::Tick).unwrap();
+                assert!(
+                    map.locals.len() > nmap.locals.len(),
+                    "debug should materialize more locals: {} vs {}",
+                    map.locals.len(),
+                    nmap.locals.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lower_event_matches_mapped_fn() {
+        // `lower_event` must be byte-identical to `lower_event_mapped(..).0`.
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let a = lit_int(&mut g, 3);
+        let setv = g.insert("var.set", NodeUi::default());
+        g.node_mut(setv)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("out".into()));
+        wire(&mut g, a, "value", setv, "value");
+        wire(&mut g, bp, EXEC_THEN, setv, "exec");
+        let plain = lower_event(&g, &reg, bp, &EventKind::BeginPlay).unwrap();
+        let (mapped, _) = lower_event_mapped(&g, &reg, bp, &EventKind::BeginPlay).unwrap();
+        assert_eq!(
+            plain, mapped,
+            "normal lowering must be unchanged by mapping"
+        );
+    }
+
+    /// Build: begin_play → branch( (guard>0) && (10/divisor > 0) ) then set
+    /// hit=1 else set hit=2. With guard=0 the `&&` short-circuits, so the
+    /// division never runs — even with divisor=0. Debug lowering must preserve
+    /// that: hoisting the RHS would divide-by-zero and abort the whole run.
+    fn short_circuit_graph() -> Graph {
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let guard = g.insert("var.get", NodeUi::default());
+        g.node_mut(guard)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("guard".into()));
+        let zero = lit_int(&mut g, 0);
+        let gt_guard = g.insert("cmp.gt", NodeUi::default());
+        wire(&mut g, guard, "value", gt_guard, "a");
+        wire(&mut g, zero, "value", gt_guard, "b");
+
+        let ten = lit_int(&mut g, 10);
+        let divisor = g.insert("var.get", NodeUi::default());
+        g.node_mut(divisor)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("divisor".into()));
+        let div = g.insert("math.div", NodeUi::default());
+        wire(&mut g, ten, "value", div, "a");
+        wire(&mut g, divisor, "value", div, "b");
+        let zero2 = lit_int(&mut g, 0);
+        let gt_div = g.insert("cmp.gt", NodeUi::default());
+        wire(&mut g, div, "out", gt_div, "a");
+        wire(&mut g, zero2, "value", gt_div, "b");
+
+        let and = g.insert("logic.and", NodeUi::default());
+        wire(&mut g, gt_guard, "out", and, "a");
+        wire(&mut g, gt_div, "out", and, "b");
+
+        let br = g.insert("flow.branch", NodeUi::default());
+        wire(&mut g, and, "out", br, "condition");
+        wire(&mut g, bp, EXEC_THEN, br, "exec");
+
+        let set_t = g.insert("var.set", NodeUi::default());
+        g.node_mut(set_t)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("hit".into()));
+        let one = lit_int(&mut g, 1);
+        wire(&mut g, one, "value", set_t, "value");
+        wire(&mut g, br, "true", set_t, "exec");
+
+        let set_f = g.insert("var.set", NodeUi::default());
+        g.node_mut(set_f)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("hit".into()));
+        let two = lit_int(&mut g, 2);
+        wire(&mut g, two, "value", set_f, "value");
+        wire(&mut g, br, "false", set_f, "exec");
+        g
+    }
+
+    #[test]
+    fn debug_lowering_preserves_and_short_circuit() {
+        let g = short_circuit_graph();
+        let seed = [
+            ("guard", Value::Int(0)),
+            ("divisor", Value::Int(0)),
+            ("hit", Value::Int(0)),
+        ];
+        let (nh, nr) = eval_collect(&lower_begin(&g, false), &seed);
+        let (dh, dr) = eval_collect(&lower_begin(&g, true), &seed);
+        // Normal never divides (short-circuit) → Ok, hit=2 (else branch).
+        assert_eq!(nr, Ok(Value::Unit));
+        assert_eq!(nh.vars.get("hit"), Some(&Value::Int(2)));
+        // Debug must be identical — no divide-by-zero from a hoisted RHS.
+        assert_eq!(dr, nr, "debug run must not divide-by-zero");
+        assert_eq!(dh.vars.get("hit"), nh.vars.get("hit"));
+        assert_eq!(dh.logs, nh.logs);
+    }
+
+    #[test]
+    fn debug_lowering_preserves_while_condition() {
+        // begin_play → while(get(n) > 0){ set(n, get(n) - 1) }, n = 4.
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let getn = g.insert("var.get", NodeUi::default());
+        g.node_mut(getn)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("n".into()));
+        let zero = lit_int(&mut g, 0);
+        let gt = g.insert("cmp.gt", NodeUi::default());
+        wire(&mut g, getn, "value", gt, "a");
+        wire(&mut g, zero, "value", gt, "b");
+        let wh = g.insert("flow.while", NodeUi::default());
+        wire(&mut g, gt, "out", wh, "condition");
+        wire(&mut g, bp, EXEC_THEN, wh, "exec");
+        let getn2 = g.insert("var.get", NodeUi::default());
+        g.node_mut(getn2)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("n".into()));
+        let one = lit_int(&mut g, 1);
+        let sub = g.insert("math.sub", NodeUi::default());
+        wire(&mut g, getn2, "value", sub, "a");
+        wire(&mut g, one, "value", sub, "b");
+        let setn = g.insert("var.set", NodeUi::default());
+        g.node_mut(setn)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("n".into()));
+        wire(&mut g, sub, "out", setn, "value");
+        wire(&mut g, wh, "loop_body", setn, "exec");
+
+        let seed = [("n", Value::Int(4))];
+        let (nh, nr) = eval_collect(&lower_begin(&g, false), &seed);
+        let (dh, dr) = eval_collect(&lower_begin(&g, true), &seed);
+        assert_eq!(nr, Ok(Value::Unit));
+        assert_eq!(nh.vars.get("n"), Some(&Value::Int(0)));
+        assert!(
+            nh.logs.is_empty(),
+            "terminating loop must not report runaway"
+        );
+        // Debug must terminate identically — a frozen (hoisted) condition would
+        // run to the guard max and log RUNAWAY.
+        assert_eq!(dr, nr);
+        assert_eq!(dh.vars.get("n"), nh.vars.get("n"));
+        assert_eq!(dh.logs, nh.logs, "debug must not trip the loop guard");
     }
 }

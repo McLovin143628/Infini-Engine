@@ -10,6 +10,7 @@ vi.mock("../../lib/ipc", () => ({
   sim: {
     start: vi.fn(() => Promise.resolve()),
     tick: vi.fn(() => Promise.resolve(true)),
+    stepFixed: vi.fn(() => Promise.resolve(true)),
     stop: vi.fn(() => Promise.resolve()),
     isRunning: vi.fn(() => Promise.resolve(false)),
   },
@@ -48,6 +49,7 @@ beforeEach(() => {
   vi.mocked(sim.start).mockResolvedValue(undefined);
   vi.mocked(sim.stop).mockResolvedValue(undefined);
   vi.mocked(sim.tick).mockResolvedValue(true);
+  vi.mocked(sim.stepFixed).mockResolvedValue(true);
   vi.mocked(sim.isRunning).mockResolvedValue(false);
 });
 
@@ -170,11 +172,11 @@ describe("tick loop", () => {
     expect(vi.mocked(sim.tick)).toHaveBeenCalledWith(["right"]);
   });
 
-  it("step() advances exactly one tick and pauses", async () => {
+  it("step() advances exactly one fixed step and pauses", async () => {
     await useSimStore.getState().play();
-    vi.mocked(sim.tick).mockClear();
     await useSimStore.getState().step();
     expect(useSimStore.getState().paused).toBe(true);
-    expect(vi.mocked(sim.tick)).toHaveBeenCalledTimes(1);
+    // Step uses the fixed-step command (B-P4), not the accumulating tick.
+    expect(vi.mocked(sim.stepFixed)).toHaveBeenCalledTimes(1);
   });
 });

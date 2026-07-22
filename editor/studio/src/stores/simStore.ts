@@ -199,17 +199,15 @@ export const useSimStore = create<SimState>((set, get) => ({
       set({ paused: true });
       stopLoop();
     }
-    // NOTE (backend limitation): `sim_tick` has no explicit dt/step arg — it uses
-    // the wall-clock delta since the previous tick and accumulates fixed steps.
-    // Step therefore advances "one frame's worth" (0..N fixed steps depending on
-    // elapsed real time), not a guaranteed single fixed step. A dedicated
-    // fixed-dt step command is the documented backend follow-up.
+    // B-P4: `sim_step_fixed` advances EXACTLY one fixed step (bypassing the
+    // wall-clock accumulator), so Step is now a guaranteed single step — fixing
+    // the former "one frame's worth (0..N steps)" limitation.
     if (inFlight) return;
     inFlight = true;
     try {
-      await simIpc.tick([...held]);
+      await simIpc.stepFixed([...held]);
     } catch (e) {
-      console.error("sim.step tick failed", e);
+      console.error("sim.step stepFixed failed", e);
     } finally {
       inFlight = false;
     }
@@ -261,25 +259,40 @@ export function registerSimCommands(): void {
 }
 
 let unlisten: UnlistenFn | null = null;
+let unlistenDebug: UnlistenFn | null = null;
 
 /**
  * Sync running state from `sim_is_running()` on mount and subscribe to
- * `sim://state`. Idempotent (React StrictMode double-mounts); returns a disposer.
+ * `sim://state` + `sim://debug`. Idempotent (React StrictMode double-mounts);
+ * returns a disposer.
+ *
+ * The `sim://debug` listener pauses Simulate whenever a step hit a breakpoint
+ * (B-P4 tier A′). Node-level hit highlighting on the canvas activates once
+ * `.inf_act` classes carry graph provenance (the events currently carry IR
+ * `LocalId`s, not canvas `NodeId`s) — pausing already works and is harmless.
  */
 export async function initSimSync(): Promise<() => void> {
   if (unlisten) return () => {};
   unlisten = await listenTo("sim://state", (running) =>
     useSimStore.getState().syncRunning(running),
   );
+  unlistenDebug = await listenTo("sim://debug", (events) => {
+    if (events.some((e) => e.hits.length > 0)) {
+      useSimStore.getState().pause();
+    }
+  });
   try {
     useSimStore.getState().syncRunning(await simIpc.isRunning());
   } catch (e) {
     console.error("sim.isRunning failed", e);
   }
   const dispose = unlisten;
+  const disposeDebug = unlistenDebug;
   return () => {
     dispose?.();
+    disposeDebug?.();
     unlisten = null;
+    unlistenDebug = null;
   };
 }
 

@@ -38,6 +38,23 @@ export interface PieStateEvent {
   error: string | null;
 }
 
+/**
+ * One handler's Blueprint debug observation from a Simulate step (B-P4 tier A′),
+ * broadcast on `sim://debug`. Hand-mirrored from `simulate::SimDebugHit`.
+ *
+ * For hand-built `.inf_act` classes the `hits`/`wires` are keyed by IR `LocalId`
+ * (there is no canvas `NodeId` map yet — that activates with graph provenance).
+ */
+export interface SimDebugEvent {
+  classId: string;
+  event: string;
+  fnName: string;
+  /** Breakpoint hits, as IR `LocalId` values. */
+  hits: number[];
+  /** Latest captured value per wire, `[LocalId, stringified]`. */
+  wires: [number, string][];
+}
+
 /** Payload types per fixed channel. Extend as backends start emitting. */
 export interface EventPayloads {
   /** Structured tracing output → Output Log panel (P1.4). */
@@ -54,6 +71,8 @@ export interface EventPayloads {
   "assets://import": ImportEventDto;
   /** A named content collection changed (create/rename/delete/add/remove) → re-fetch (E-P8). */
   "collections://changed": null;
+  /** The project audio mixer was saved → re-fetch the Audio Mixer panel (E-P9). */
+  "audio://mixer-changed": null;
   /** A project was opened/created → leave the start screen, re-sync (P5.5). */
   "project://changed": ProjectInfoDto;
   /** A blueprint graph mutated (payload = graph id) → re-sync canvas (P6.2). */
@@ -62,6 +81,8 @@ export interface EventPayloads {
   "material://sync": string;
   /** Simulate started (`true`) / stopped (`false`) → sync the play toolbar (P8.4). */
   "sim://state": boolean;
+  /** Blueprint debug hits/wire-values from a Simulate step (B-P4 tier A′). */
+  "sim://debug": SimDebugEvent[];
   /** Play-In-Editor session state (running/paused/mode/frame/error) (P9.4). */
   "pie://state": PieStateEvent;
   /** A cook/package run started (`true`) / finished (`false`) (P9.2). */

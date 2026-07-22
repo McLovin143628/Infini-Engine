@@ -18,8 +18,10 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use glam::DVec2;
+use inf_blueprint::{InterpDebug, LocalId};
 use inf_editor_core::samples::bound_actors;
-use inf_editor_core::simulate::{SimInput, SimSession, SIM_HZ};
+use inf_editor_core::simulate::{SimDebugHit, SimInput, SimSession, SIM_HZ};
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use super::assets::AssetState;
@@ -41,6 +43,18 @@ impl SimState {
             .lock()
             .map(|inner| inner.session.is_some())
             .unwrap_or(false)
+    }
+
+    /// Live-apply a mixer to a running Simulate session (E-P9). A no-op when
+    /// stopped. Mirrors the mixer load in [`sim_start`] so the Audio Mixer panel's
+    /// save is heard immediately in an active Simulate. Poisoned lock is ignored
+    /// (the next `sim_start` reloads the mixer from disk regardless).
+    pub fn apply_mixer(&self, mixer: inf_audio::MixerConfig) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(session) = inner.session.as_mut() {
+                session.set_audio_mixer(mixer);
+            }
+        }
     }
 }
 
@@ -105,6 +119,7 @@ pub async fn sim_start(
 /// `["left","jump"]`). No-op when not running.
 #[tauri::command]
 pub async fn sim_tick(
+    app: AppHandle,
     scene: State<'_, SceneState>,
     sim: State<'_, SimState>,
     keys: Vec<String>,
@@ -126,6 +141,57 @@ pub async fn sim_tick(
     let session = inner.session.as_mut().expect("session present");
     session.tick(&mut doc, dt, SimInput::with_down(keys));
     doc.bump_version_for_runtime();
+    drop(doc);
+    emit_debug(&app, session);
+    Ok(true)
+}
+
+/// Advance Simulate by **exactly one fixed step** with the held keys (B-P4 tier
+/// A′) — bypasses the wall-clock accumulator, so Step is a guaranteed single
+/// step (fixes the documented `sim_step_fixed` gap). No-op when not running.
+#[tauri::command]
+pub async fn sim_step_fixed(
+    app: AppHandle,
+    scene: State<'_, SceneState>,
+    sim: State<'_, SimState>,
+    keys: Vec<String>,
+) -> Result<bool, String> {
+    let mut inner = sim.inner.lock().map_err(|_| "sim lock poisoned")?;
+    if inner.session.is_none() {
+        return Ok(false);
+    }
+    // A fixed step does not advance wall-clock time; reset `last` so the next
+    // free-running tick's delta starts fresh from now.
+    inner.last = Some(Instant::now());
+    let mut doc = scene.doc.lock().map_err(|_| "scene lock poisoned")?;
+    let session = inner.session.as_mut().expect("session present");
+    session.step_once(&mut doc, SimInput::with_down(keys));
+    doc.bump_version_for_runtime();
+    drop(doc);
+    emit_debug(&app, session);
+    Ok(true)
+}
+
+/// Install the debugger config for an actor class (B-P4 tier A′): `breakpoints`
+/// (IR `LocalId`s for hand-built classes) + wire `capture`. When a subsequent
+/// step hits a breakpoint or captures wires, the backend emits `sim://debug`.
+/// No-op (returns `false`) when no session is running.
+#[tauri::command]
+pub async fn sim_set_debug(
+    sim: State<'_, SimState>,
+    class_id: String,
+    breakpoints: Vec<u32>,
+    capture: bool,
+) -> Result<bool, String> {
+    let mut inner = sim.inner.lock().map_err(|_| "sim lock poisoned")?;
+    let Some(session) = inner.session.as_mut() else {
+        return Ok(false);
+    };
+    let debug = InterpDebug {
+        breakpoints: breakpoints.into_iter().map(LocalId).collect(),
+        capture_wires: capture,
+    };
+    session.set_debug(class_id, debug);
     Ok(true)
 }
 
@@ -159,4 +225,40 @@ pub async fn sim_is_running(sim: State<'_, SimState>) -> Result<bool, String> {
         .map_err(|_| "sim lock poisoned")?
         .session
         .is_some())
+}
+
+/// One handler's Blueprint debug observation emitted on `sim://debug` (B-P4 tier
+/// A′). The wire-inspector JSON shape (mirrors the frontend `SimDebugEvent`).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SimDebugEventDto {
+    class_id: String,
+    event: String,
+    fn_name: String,
+    hits: Vec<u32>,
+    wires: Vec<(u32, String)>,
+}
+
+impl From<SimDebugHit> for SimDebugEventDto {
+    fn from(h: SimDebugHit) -> Self {
+        Self {
+            class_id: h.class_id,
+            event: h.event,
+            fn_name: h.fn_name,
+            hits: h.hits,
+            wires: h.wires,
+        }
+    }
+}
+
+/// Drain the session's debug events and, when any were produced, broadcast them
+/// on `sim://debug` (the frontend pauses on hits + shows wire values). No-op when
+/// no class is being debugged.
+fn emit_debug(app: &AppHandle, session: &mut SimSession) {
+    let events = session.take_debug_events();
+    if events.is_empty() {
+        return;
+    }
+    let dto: Vec<SimDebugEventDto> = events.into_iter().map(Into::into).collect();
+    let _ = app.emit("sim://debug", dto);
 }

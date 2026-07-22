@@ -9,18 +9,19 @@ use std::path::Path;
 
 use inf_editor_core::ipc::CollisionLayerDto;
 use inf_editor_core::ipc::{
-    AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot, ComponentDto, DataAssetDto,
-    DataFieldDto, DeleteResult, DetailsDto, ErosionParamsDto, ErosionReportDto, FileEntryDto,
-    GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto, ImportEventDto, LayoutSummary,
-    LevelSettingsDto, LogLine, PackageErrorDto, PackageKindCountDto, PackageResultDto,
-    ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto,
-    RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto, SculptOpDto,
-    SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto, SeqTrackDto,
-    SequenceDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpriteGridDto, SpriteRectDto,
-    SpriteSheetDto, TilemapCellDto, TilemapDto, ToolModeDto, ViewModeDto, ViewportDrop,
-    ViewportKey, ViewportModeDto, ViewportRect,
+    AddableComponentDto, AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot,
+    ComponentDto, DataAssetDto, DataFieldDto, DeleteResult, DetailsDto, ErosionParamsDto,
+    ErosionReportDto, FileEntryDto, GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto,
+    ImportEventDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto, PackageKindCountDto,
+    PackageResultDto, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto, PropFieldDto,
+    PropValueDto, RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto,
+    SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto,
+    SeqTrackDto, SequenceDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpriteGridDto,
+    SpriteRectDto, SpriteSheetDto, TilemapCellDto, TilemapDto, ToolModeDto, ViewModeDto,
+    ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
+use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
 use ts_rs::{Config, TS};
 
 #[test]
@@ -42,6 +43,7 @@ fn export_bindings() {
     PropFieldDto::export_all(&cfg).expect("export PropFieldDto");
     ComponentDto::export_all(&cfg).expect("export ComponentDto");
     DetailsDto::export_all(&cfg).expect("export DetailsDto");
+    AddableComponentDto::export_all(&cfg).expect("export AddableComponentDto");
     AssetDto::export_all(&cfg).expect("export AssetDto");
     AssetFolderDto::export_all(&cfg).expect("export AssetFolderDto");
     AssetSnapshot::export_all(&cfg).expect("export AssetSnapshot");
@@ -91,4 +93,7 @@ fn export_bindings() {
     MatOverridesDto::export_all(&cfg).expect("export MatOverridesDto");
     MaterialInstanceDto::export_all(&cfg).expect("export MaterialInstanceDto");
     CollectionDto::export_all(&cfg).expect("export CollectionDto");
+    MixerEffectDto::export_all(&cfg).expect("export MixerEffectDto");
+    MixerBusDto::export_all(&cfg).expect("export MixerBusDto");
+    MixerConfigDto::export_all(&cfg).expect("export MixerConfigDto");
 }

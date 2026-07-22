@@ -43,7 +43,10 @@ pub use interp::{
     eval_fn, eval_fn_traced, AudioHost, Debug as InterpDebug, Host, MoveResult2d, MoveResult3d,
     Physics2dHost, Physics3dHost, RayHit2d, RayHit3d, RunError, Trace, Value,
 };
-pub use lower::{lower_event, lower_graph, LowerError};
+pub use lower::{
+    lower_event, lower_event_debug, lower_event_mapped, lower_graph, lower_graph_debug, LowerError,
+    LowerMap,
+};
 pub use nodekit::blueprint_registry;
 pub use raise::{event_kind_of, raise_fn, RaiseError};
 pub use semantics::{
