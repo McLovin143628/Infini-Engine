@@ -181,6 +181,18 @@ pub enum Primitive {
     Cone,
 }
 
+/// How a [`Material`] blends against the framebuffer (`.inf_lvl` schema v8). A
+/// flat reflected enum (Details dropdown, like [`LightKind`]): `Opaque` is the
+/// pre-v8 behaviour; `Masked` alpha-tests against [`Material::alpha_cutoff`];
+/// `Translucent` alpha-blends.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    #[default]
+    Opaque,
+    Masked,
+    Translucent,
+}
+
 /// A renderable mesh reference: a built-in [`Primitive`] and/or a mesh-**asset**
 /// GUID (P13.4).
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
@@ -222,6 +234,14 @@ pub struct Material {
     /// Self-emitted color (rgb; alpha ignored). Black = non-emissive.
     #[serde(default = "default_emissive")]
     pub emissive: Color,
+    /// Blend / transparency mode (schema v8). Additive field: `#[serde(default)]`
+    /// → [`BlendMode::Opaque`], the pre-v8 behaviour.
+    #[serde(default)]
+    pub blend: BlendMode,
+    /// Alpha-test threshold used when `blend == BlendMode::Masked`: fragments with
+    /// alpha below this are discarded (schema v8). Additive field.
+    #[serde(default = "default_alpha_cutoff")]
+    pub alpha_cutoff: f32,
 }
 
 fn default_metallic() -> f32 {
@@ -233,6 +253,9 @@ fn default_roughness() -> f32 {
 fn default_emissive() -> Color {
     Color::new(0.0, 0.0, 0.0, 1.0)
 }
+fn default_alpha_cutoff() -> f32 {
+    0.5
+}
 
 impl Default for Material {
     fn default() -> Self {
@@ -241,6 +264,8 @@ impl Default for Material {
             metallic: default_metallic(),
             roughness: default_roughness(),
             emissive: default_emissive(),
+            blend: BlendMode::Opaque,
+            alpha_cutoff: default_alpha_cutoff(),
         }
     }
 }
@@ -805,6 +830,31 @@ pub struct Light {
     pub kind: LightKind,
     pub color: Color,
     pub intensity: f32,
+    /// Falloff / influence radius in world units (schema v8). `0.0` = unbounded
+    /// (the pre-v8 behaviour: matches the current windowed inverse-square shader).
+    /// Additive field: `#[serde(default)]` → `0.0`.
+    #[serde(default)]
+    pub range: f32,
+    /// Spot inner cone half-angle in degrees (full brightness inside; schema v8).
+    #[serde(default = "default_inner_cone_deg")]
+    pub inner_cone_deg: f32,
+    /// Spot outer cone half-angle in degrees (falloff edge; schema v8).
+    #[serde(default = "default_outer_cone_deg")]
+    pub outer_cone_deg: f32,
+    /// Whether this light casts shadows (schema v8). Additive field:
+    /// `#[serde(default)]` → `true`.
+    #[serde(default = "default_cast_shadows")]
+    pub cast_shadows: bool,
+}
+
+fn default_inner_cone_deg() -> f32 {
+    30.0
+}
+fn default_outer_cone_deg() -> f32 {
+    40.0
+}
+fn default_cast_shadows() -> bool {
+    true
 }
 
 impl Default for Light {
@@ -813,6 +863,10 @@ impl Default for Light {
             kind: LightKind::Point,
             color: Color::WHITE,
             intensity: 1.0,
+            range: 0.0,
+            inner_cone_deg: default_inner_cone_deg(),
+            outer_cone_deg: default_outer_cone_deg(),
+            cast_shadows: default_cast_shadows(),
         }
     }
 }
@@ -2142,6 +2196,200 @@ pub struct AudioListener {
     pub active: bool,
 }
 
+// ── P-R0 world-decoration components (`.inf_lvl` schema v8) ──────────────────
+
+/// A projected decal (schema v8): a box-projected overlay (bullet holes, blood,
+/// signage) that stamps `color` onto surfaces within its oriented `size` box.
+/// Registered + reflected so the Details grid surfaces it; spawnable later (no
+/// `SpawnKind` yet).
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Decal {
+    /// Oriented projection-box extent in world units (centered on the entity's
+    /// [`Transform`]).
+    #[serde(default = "default_decal_size")]
+    pub size: Vec3d,
+    /// Linear tint multiplied into the projected surface.
+    #[serde(default)]
+    pub color: Color,
+    /// Overall opacity `[0, 1]`.
+    #[serde(default = "default_decal_opacity")]
+    pub opacity: f32,
+    /// Surfaces whose normal deviates from the projection axis by more than this
+    /// (degrees) fade out — kills stretching on grazing faces.
+    #[serde(default = "default_decal_fade_angle")]
+    pub fade_angle_deg: f32,
+}
+
+fn default_decal_size() -> Vec3d {
+    Vec3d::ONE
+}
+fn default_decal_opacity() -> f32 {
+    1.0
+}
+fn default_decal_fade_angle() -> f32 {
+    60.0
+}
+
+impl Default for Decal {
+    fn default() -> Self {
+        Self {
+            size: default_decal_size(),
+            color: Color::WHITE,
+            opacity: default_decal_opacity(),
+            fade_angle_deg: default_decal_fade_angle(),
+        }
+    }
+}
+
+/// The behaviour of a [`Volume`]: a flat reflected enum (Details dropdown, like
+/// [`LightKind`]).
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VolumeKind {
+    /// Detects overlaps (fires Blueprint events) but never blocks movement.
+    #[default]
+    Trigger,
+    /// A solid, movement-blocking region.
+    Blocking,
+}
+
+/// A rectangular gameplay volume (schema v8): a trigger or blocking region sized
+/// by the entity's [`Transform`] scale. Registered + reflected.
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Volume {
+    /// Trigger vs Blocking.
+    #[serde(default)]
+    pub kind: VolumeKind,
+    /// Editor gizmo tint (linear RGBA).
+    #[serde(default)]
+    pub tint: Color,
+}
+
+impl Default for Volume {
+    fn default() -> Self {
+        Self {
+            kind: VolumeKind::Trigger,
+            tint: Color::WHITE,
+        }
+    }
+}
+
+/// How a [`Spline`]'s control points are interpolated: a flat reflected enum
+/// (Details dropdown).
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SplineInterp {
+    /// Straight segments between points.
+    Linear,
+    /// Catmull-Rom smooth interpolation through the points.
+    #[default]
+    CatmullRom,
+}
+
+/// A control-point spline (schema v8): a path for camera rails, patrol routes,
+/// or procedural placement. `points` are entity-local (metres). Registered +
+/// reflected.
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Spline {
+    /// Control points in the entity's local frame (metres).
+    #[serde(default = "default_spline_points")]
+    pub points: Vec<Vec3d>,
+    /// Whether the last point connects back to the first (a loop).
+    #[serde(default)]
+    pub closed: bool,
+    /// Linear vs Catmull-Rom interpolation.
+    #[serde(default)]
+    pub interp: SplineInterp,
+}
+
+fn default_spline_points() -> Vec<Vec3d> {
+    vec![Vec3d::ZERO, Vec3d::new(0.0, 0.0, 5.0)]
+}
+
+impl Default for Spline {
+    fn default() -> Self {
+        Self {
+            points: default_spline_points(),
+            closed: false,
+            interp: SplineInterp::CatmullRom,
+        }
+    }
+}
+
+/// One palette entry of a [`Foliage`] component (schema v8): the primitive kind
+/// and tint an instance of that `kind` draws with. A nested reflected struct
+/// (like [`AtlasRect`]).
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Default)]
+pub struct FoliagePaletteEntry {
+    /// The primitive drawn for instances referencing this palette slot.
+    pub primitive: Primitive,
+    /// Linear tint for this palette slot.
+    pub tint: Color,
+}
+
+impl Default for FoliagePaletteEntry {
+    fn default() -> Self {
+        Self {
+            primitive: Primitive::Cube,
+            tint: Color::WHITE,
+        }
+    }
+}
+
+/// One scattered [`Foliage`] instance (schema v8). Rotation is stored as **euler
+/// degrees** (YXZ), matching the [`Transform`] house convention — no serde quat
+/// type is introduced. Serde-persisted but never reflected (the instance list is
+/// too large for the Details grid; see [`Foliage::instances`]).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct FoliageInstance {
+    /// Local position (metres).
+    pub position: Vec3d,
+    /// Local rotation as euler degrees (YXZ — the [`Transform`] convention).
+    pub rotation: Vec3d,
+    /// Uniform scale.
+    pub scale: f64,
+    /// Palette index (into [`Foliage::palette`]) selecting the mesh/tint.
+    pub kind: u32,
+}
+
+impl Default for FoliageInstance {
+    fn default() -> Self {
+        Self {
+            position: Vec3d::ZERO,
+            rotation: Vec3d::ZERO,
+            scale: 1.0,
+            kind: 0,
+        }
+    }
+}
+
+/// A foliage scatter (schema v8): a small palette of primitive kinds and a bulk
+/// list of placed instances (grass, rocks, trees). Registered + reflected — but
+/// only the `palette` is surfaced in Details; `instances` is `#[reflect(ignore)]`
+/// (too large for the grid, authored by a scatter tool) yet still serde-persisted.
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[reflect(Component, Default)]
+pub struct Foliage {
+    /// The palette of primitive kinds instances draw from.
+    #[serde(default)]
+    pub palette: Vec<FoliagePaletteEntry>,
+    /// The placed instances. `#[reflect(ignore)]` (bulk data, not a Details
+    /// scalar) + serde-persisted.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub instances: Vec<FoliageInstance>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2771,5 +3019,141 @@ mod tests {
         };
         p.advance(1.0);
         assert_eq!(p.t, 0.4);
+    }
+
+    #[test]
+    fn material_v8_fields_round_trip_and_default() {
+        let m = Material {
+            base_color: Color::new(0.1, 0.2, 0.3, 0.5),
+            metallic: 0.2,
+            roughness: 0.7,
+            emissive: Color::new(0.0, 0.0, 0.0, 1.0),
+            blend: BlendMode::Translucent,
+            alpha_cutoff: 0.25,
+        };
+        let back: Material = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(m, back);
+        // Defaults for the v8 fields.
+        let d = Material::default();
+        assert_eq!(d.blend, BlendMode::Opaque);
+        assert_eq!(d.alpha_cutoff, 0.5);
+        // A pre-v8 payload (no blend / alpha_cutoff) fills the additive defaults.
+        let pre = r#"{ "base_color": {"r":0.8,"g":0.8,"b":0.8,"a":1.0},
+            "metallic": 0.0, "roughness": 0.5,
+            "emissive": {"r":0.0,"g":0.0,"b":0.0,"a":1.0} }"#;
+        let old: Material = serde_json::from_str(pre).unwrap();
+        assert_eq!(old, Material::default());
+    }
+
+    #[test]
+    fn light_v8_fields_round_trip_and_default() {
+        let l = Light {
+            kind: LightKind::Spot,
+            color: Color::WHITE,
+            intensity: 2.0,
+            range: 12.0,
+            inner_cone_deg: 20.0,
+            outer_cone_deg: 35.0,
+            cast_shadows: false,
+        };
+        let back: Light = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        assert_eq!(l, back);
+        let d = Light::default();
+        assert_eq!(d.range, 0.0);
+        assert_eq!(d.inner_cone_deg, 30.0);
+        assert_eq!(d.outer_cone_deg, 40.0);
+        assert!(d.cast_shadows);
+        // A pre-v8 payload (kind/color/intensity only) fills the additive defaults.
+        let pre = r#"{ "kind": "Directional",
+            "color": {"r":1.0,"g":1.0,"b":1.0,"a":1.0}, "intensity": 1.0 }"#;
+        let old: Light = serde_json::from_str(pre).unwrap();
+        assert_eq!(old.range, 0.0);
+        assert_eq!(old.inner_cone_deg, 30.0);
+        assert_eq!(old.outer_cone_deg, 40.0);
+        assert!(old.cast_shadows);
+    }
+
+    #[test]
+    fn decal_serde_round_trips_and_defaults() {
+        let dc = Decal {
+            size: Vec3d::new(2.0, 3.0, 4.0),
+            color: Color::new(1.0, 0.0, 0.0, 1.0),
+            opacity: 0.5,
+            fade_angle_deg: 45.0,
+        };
+        let back: Decal = serde_json::from_str(&serde_json::to_string(&dc).unwrap()).unwrap();
+        assert_eq!(dc, back);
+        let d: Decal = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, Decal::default());
+        assert_eq!(d.size, Vec3d::ONE);
+        assert_eq!(d.opacity, 1.0);
+        assert_eq!(d.fade_angle_deg, 60.0);
+    }
+
+    #[test]
+    fn volume_serde_round_trips_and_defaults() {
+        let v = Volume {
+            kind: VolumeKind::Blocking,
+            tint: Color::new(0.2, 0.4, 0.6, 0.8),
+        };
+        let back: Volume = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+        assert_eq!(v, back);
+        let d: Volume = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, Volume::default());
+        assert_eq!(d.kind, VolumeKind::Trigger);
+    }
+
+    #[test]
+    fn spline_serde_round_trips_and_defaults() {
+        let s = Spline {
+            points: vec![
+                Vec3d::ZERO,
+                Vec3d::new(1.0, 2.0, 3.0),
+                Vec3d::new(4.0, 5.0, 6.0),
+            ],
+            closed: true,
+            interp: SplineInterp::Linear,
+        };
+        let back: Spline = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(s, back);
+        let d: Spline = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, Spline::default());
+        assert_eq!(d.points, vec![Vec3d::ZERO, Vec3d::new(0.0, 0.0, 5.0)]);
+        assert_eq!(d.interp, SplineInterp::CatmullRom);
+        assert!(!d.closed);
+    }
+
+    #[test]
+    fn foliage_serde_round_trips_and_defaults() {
+        let f = Foliage {
+            palette: vec![
+                FoliagePaletteEntry {
+                    primitive: Primitive::Sphere,
+                    tint: Color::new(0.1, 0.5, 0.1, 1.0),
+                },
+                FoliagePaletteEntry::default(),
+            ],
+            instances: vec![
+                FoliageInstance {
+                    position: Vec3d::new(1.0, 0.0, 2.0),
+                    rotation: Vec3d::new(0.0, 90.0, 0.0),
+                    scale: 1.5,
+                    kind: 1,
+                },
+                FoliageInstance {
+                    position: Vec3d::new(-3.0, 0.0, 4.0),
+                    rotation: Vec3d::ZERO,
+                    scale: 0.8,
+                    kind: 0,
+                },
+                FoliageInstance::default(),
+            ],
+        };
+        let back: Foliage = serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
+        assert_eq!(f, back);
+        assert_eq!(back.instances.len(), 3);
+        let d: Foliage = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, Foliage::default());
+        assert!(d.palette.is_empty() && d.instances.is_empty());
     }
 }

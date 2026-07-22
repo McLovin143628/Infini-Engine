@@ -11,12 +11,13 @@ use bevy_ecs::reflect::ReflectComponent;
 use bevy_reflect::{TypePath, TypeRegistry};
 
 use crate::components::{
-    AnimPlayer, AnimStateMachine, AtlasRect, AudioListener, AudioSource, BillboardMode, BodyKind2D,
-    BodyKind3D, Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D,
-    ColliderShape2DKind, ColliderShape3DKind, CombineRule, DistanceModel, Joint2D, Joint3D,
-    JointKind2D, JointKind3D, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice,
-    PcgVolume, Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, Sprite, Terrain, Text2D,
-    TextAlign, Tilemap, Transform, Visibility,
+    AnimPlayer, AnimStateMachine, AtlasRect, AudioListener, AudioSource, BillboardMode, BlendMode,
+    BodyKind2D, BodyKind3D, Camera, CharacterController2D, CharacterController3D, Collider2D,
+    Collider3D, ColliderShape2DKind, ColliderShape3DKind, CombineRule, Decal, DistanceModel,
+    Foliage, FoliagePaletteEntry, Joint2D, Joint3D, JointKind2D, JointKind3D, Light, Light2D,
+    LightKind, Material, MeshRef, Name, NineSlice, PcgVolume, Primitive, RigidBody2D, RigidBody3D,
+    SkeletalMesh, Spline, SplineInterp, Sprite, Terrain, Text2D, TextAlign, Tilemap, Transform,
+    Visibility, Volume, VolumeKind,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -65,6 +66,10 @@ impl ComponentRegistry {
         types.register::<BillboardMode>();
         types.register::<AtlasRect>();
         types.register::<DistanceModel>();
+        types.register::<BlendMode>();
+        types.register::<VolumeKind>();
+        types.register::<SplineInterp>();
+        types.register::<FoliagePaletteEntry>();
         types.register::<String>();
 
         // `Name` is reflected (for completeness) but edited via a dedicated
@@ -99,6 +104,10 @@ impl ComponentRegistry {
             Light => "Light",
             Light2D => "Light 2D",
             Camera => "Camera",
+            Decal => "Decal",
+            Volume => "Volume",
+            Spline => "Spline",
+            Foliage => "Foliage",
             RigidBody2D => "Rigid Body 2D",
             Collider2D => "Collider 2D",
             CharacterController2D => "Character Controller 2D",
@@ -156,7 +165,7 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        assert_eq!(reg.editable().len(), 26);
+        assert_eq!(reg.editable().len(), 30);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

@@ -50,22 +50,32 @@
 //!   entity slot was added — v7 differs from v6 only inside `MeshRef`.
 
 use inf_ecs::components::{
-    AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource, Camera,
-    CharacterController2D, CharacterController3D, Collider2D, Collider3D, Joint2D, Joint3D, Light,
-    Light2D, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D, RigidBody3D, RootMotion,
-    SkeletalMesh, Sprite, Terrain, Text2D, Tilemap, Transform,
+    AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource, BlendMode, Camera,
+    CharacterController2D, CharacterController3D, Collider2D, Collider3D, Decal, Foliage, Joint2D,
+    Joint3D, Light, Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D,
+    RigidBody3D, RootMotion, SkeletalMesh, Spline, Sprite, Terrain, Text2D, Tilemap, Transform,
+    Volume,
 };
-use inf_ecs::math::{Vec2d, Vec3d};
+use inf_ecs::math::{Color, Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// The current on-disk `.inf_lvl` schema (matches the editor's `SCHEMA_VERSION`).
-pub const SCHEMA_VERSION: u32 = 7;
+///
+/// * **v8** — R-P0: `Light` gained `range` / cone / `cast_shadows` fields;
+///   `Material` gained `blend` / `alpha_cutoff`; the entity record appended four
+///   world-decoration slots (`decal` / `volume` / `spline` / `foliage`); and the
+///   file settings gained a `render` ([`RenderSettingsRecord`]) block. The pre-v8
+///   `Light`/`Material`/settings shapes are frozen as [`LightV7`] / [`MaterialV7`]
+///   / [`RuntimeSettingsV7`]; every v1..v7 record carries `light`/`material`
+///   through those, and the v7→v8 lift fills the new fields at their defaults.
+pub const SCHEMA_VERSION: u32 = 8;
 
-/// File-level simulation settings (schema v3), mirroring the editor's
+/// File-level simulation settings (schema v3+), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
 /// 2D gravity **zero** (the character-self-gravity convention), 3D gravity
-/// `(0, -9.81, 0)`, and a 60 Hz fixed rate.
+/// `(0, -9.81, 0)`, and a 60 Hz fixed rate. Schema **v8** appends a `render`
+/// block (mirrors the editor's `LevelSettings::render`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeSettings {
     #[serde(default)]
@@ -74,6 +84,10 @@ pub struct RuntimeSettings {
     pub gravity_3d: Vec3d,
     #[serde(default = "default_sim_hz")]
     pub sim_hz: f64,
+    /// Renderer HDR / post / lighting configuration (schema v8). Additive:
+    /// `#[serde(default)]` → [`RenderSettingsRecord::default`].
+    #[serde(default)]
+    pub render: RenderSettingsRecord,
 }
 
 fn default_gravity_3d() -> Vec3d {
@@ -89,6 +103,57 @@ impl Default for RuntimeSettings {
             gravity_2d: Vec2d::ZERO,
             gravity_3d: default_gravity_3d(),
             sim_hz: default_sim_hz(),
+            render: RenderSettingsRecord::default(),
+        }
+    }
+}
+
+/// Persisted renderer HDR / post / lighting settings (schema v8) — a byte-for-byte
+/// mirror of the editor's `RenderSettingsRecord`. A flat, fully-explicit mirror of
+/// the fields of `inf_render::RenderSettings` (kept here so the Ring-0 runtime
+/// reader stays wgpu-free); the host applies it to the live `RenderSettings` at
+/// load. Every default equals `inf_render::RenderSettings::default()`
+/// field-for-field (see `crates/inf-render/src/settings.rs`):
+/// exposure 1.0, dither true; bloom off / threshold 1.0 / knee 0.5 / intensity
+/// 0.06; ssao off / radius 0.6 / intensity 1.0 / bias 0.025; taa off; shadows off
+/// / max_distance 60.0; gi off / intensity 1.0.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RenderSettingsRecord {
+    pub exposure: f32,
+    pub dither: bool,
+    pub bloom_enabled: bool,
+    pub bloom_threshold: f32,
+    pub bloom_knee: f32,
+    pub bloom_intensity: f32,
+    pub ssao_enabled: bool,
+    pub ssao_radius: f32,
+    pub ssao_intensity: f32,
+    pub ssao_bias: f32,
+    pub taa: bool,
+    pub shadows_enabled: bool,
+    pub shadows_max_distance: f32,
+    pub gi_enabled: bool,
+    pub gi_intensity: f32,
+}
+
+impl Default for RenderSettingsRecord {
+    fn default() -> Self {
+        Self {
+            exposure: 1.0,
+            dither: true,
+            bloom_enabled: false,
+            bloom_threshold: 1.0,
+            bloom_knee: 0.5,
+            bloom_intensity: 0.06,
+            ssao_enabled: false,
+            ssao_radius: 0.6,
+            ssao_intensity: 1.0,
+            ssao_bias: 0.025,
+            taa: false,
+            shadows_enabled: false,
+            shadows_max_distance: 60.0,
+            gi_enabled: false,
+            gi_intensity: 1.0,
         }
     }
 }
@@ -204,6 +269,19 @@ pub struct RuntimeEntity {
     /// The active spatial-audio listener flag.
     #[serde(default)]
     pub audio_listener: Option<AudioListener>,
+    // ── v8 (R-P0) world-decoration components ─────────────────────────────
+    /// A projected decal.
+    #[serde(default)]
+    pub decal: Option<Decal>,
+    /// A trigger / blocking gameplay volume.
+    #[serde(default)]
+    pub volume: Option<Volume>,
+    /// A control-point spline (path / rail).
+    #[serde(default)]
+    pub spline: Option<Spline>,
+    /// A foliage scatter (palette + bulk instances).
+    #[serde(default)]
+    pub foliage: Option<Foliage>,
 }
 
 /// A decoded level ready for the runtime to instantiate.
@@ -260,14 +338,130 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v7 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v8 file layout (current). `entities` reuses [`RuntimeEntity`].
 #[derive(Serialize, Deserialize)]
-struct SceneFileV7 {
+struct SceneFileV8 {
     schema_version: u32,
     title: String,
     entities: Vec<RuntimeEntity>,
     #[serde(default)]
     settings: RuntimeSettings,
+}
+
+/// The **pre-v8** `Light` byte layout (schema v8 froze this when `Light` gained
+/// its `range` / cone / `cast_shadows` fields). Frozen entity records (v1..v7)
+/// carry `light` as `Option<LightV7>`; [`LightV7::into_current`] lifts it.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct LightV7 {
+    kind: LightKind,
+    color: Color,
+    intensity: f32,
+}
+
+impl LightV7 {
+    fn into_current(self) -> Light {
+        Light {
+            kind: self.kind,
+            color: self.color,
+            intensity: self.intensity,
+            range: 0.0,
+            inner_cone_deg: 30.0,
+            outer_cone_deg: 40.0,
+            cast_shadows: true,
+        }
+    }
+
+    /// Downgrade a live [`Light`] to the pre-v8 layout (fixture bless path).
+    #[cfg(test)]
+    fn from_current(l: Light) -> Self {
+        Self {
+            kind: l.kind,
+            color: l.color,
+            intensity: l.intensity,
+        }
+    }
+}
+
+/// The **pre-v8** `Material` byte layout (schema v8 froze this when `Material`
+/// gained its `blend` / `alpha_cutoff` fields). Frozen entity records (v1..v7)
+/// carry `material` as `Option<MaterialV7>`; [`MaterialV7::into_current`] lifts it.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct MaterialV7 {
+    base_color: Color,
+    #[serde(default)]
+    metallic: f32,
+    #[serde(default)]
+    roughness: f32,
+    #[serde(default)]
+    emissive: Color,
+}
+
+impl MaterialV7 {
+    fn into_current(self) -> Material {
+        Material {
+            base_color: self.base_color,
+            metallic: self.metallic,
+            roughness: self.roughness,
+            emissive: self.emissive,
+            blend: BlendMode::Opaque,
+            alpha_cutoff: 0.5,
+        }
+    }
+
+    /// Downgrade a live [`Material`] to the pre-v8 layout (fixture bless path).
+    #[cfg(test)]
+    fn from_current(m: Material) -> Self {
+        Self {
+            base_color: m.base_color,
+            metallic: m.metallic,
+            roughness: m.roughness,
+            emissive: m.emissive,
+        }
+    }
+}
+
+/// The **pre-v8** file-settings byte layout (schema v8 froze this when the file
+/// settings gained a `render` block). Frozen file records (v3..v7) carry
+/// `settings` as [`RuntimeSettingsV7`]; [`RuntimeSettingsV7::into_current`] lifts it.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct RuntimeSettingsV7 {
+    #[serde(default)]
+    gravity_2d: Vec2d,
+    #[serde(default = "default_gravity_3d")]
+    gravity_3d: Vec3d,
+    #[serde(default = "default_sim_hz")]
+    sim_hz: f64,
+}
+
+impl RuntimeSettingsV7 {
+    fn into_current(self) -> RuntimeSettings {
+        RuntimeSettings {
+            gravity_2d: self.gravity_2d,
+            gravity_3d: self.gravity_3d,
+            sim_hz: self.sim_hz,
+            render: RenderSettingsRecord::default(),
+        }
+    }
+
+    /// Downgrade live [`RuntimeSettings`] to the pre-v8 layout (fixture bless path).
+    #[cfg(test)]
+    fn from_current(s: RuntimeSettings) -> Self {
+        Self {
+            gravity_2d: s.gravity_2d,
+            gravity_3d: s.gravity_3d,
+            sim_hz: s.sim_hz,
+        }
+    }
+}
+
+impl Default for RuntimeSettingsV7 {
+    fn default() -> Self {
+        Self {
+            gravity_2d: Vec2d::ZERO,
+            gravity_3d: default_gravity_3d(),
+            sim_hz: default_sim_hz(),
+        }
+    }
 }
 
 /// The **pre-v7** `MeshRef` byte layout (P13.4 froze this when `MeshRef` gained
@@ -308,8 +502,8 @@ struct EntityRecordV6 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRefV6>,
-    material: Option<Material>,
-    light: Option<Light>,
+    material: Option<MaterialV7>,
+    light: Option<LightV7>,
     camera: Option<Camera>,
     #[serde(default)]
     sprite: Option<Sprite>,
@@ -367,7 +561,7 @@ struct SceneFileV6 {
     title: String,
     entities: Vec<EntityRecordV6>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV7,
 }
 
 /// A frozen schema-v5 entity record (pre-P12.4: 3D + 2D + physics + actor +
@@ -382,8 +576,8 @@ struct EntityRecordV5 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRefV6>,
-    material: Option<Material>,
-    light: Option<Light>,
+    material: Option<MaterialV7>,
+    light: Option<LightV7>,
     camera: Option<Camera>,
     #[serde(default)]
     sprite: Option<Sprite>,
@@ -433,7 +627,7 @@ struct SceneFileV5 {
     title: String,
     entities: Vec<EntityRecordV5>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV7,
 }
 
 /// A frozen schema-v4 entity record (pre-P11.4: 3D + 2D + physics + actor +
@@ -451,8 +645,8 @@ struct EntityRecordV4 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRefV6>,
-    material: Option<Material>,
-    light: Option<Light>,
+    material: Option<MaterialV7>,
+    light: Option<LightV7>,
     camera: Option<Camera>,
     #[serde(default)]
     sprite: Option<Sprite>,
@@ -492,7 +686,7 @@ struct SceneFileV4 {
     title: String,
     entities: Vec<EntityRecordV4>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV7,
 }
 
 /// A frozen schema-v3 entity record (pre-P10.6: 3D + 2D + physics + actor, no
@@ -506,8 +700,8 @@ struct EntityRecordV3 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRefV6>,
-    material: Option<Material>,
-    light: Option<Light>,
+    material: Option<MaterialV7>,
+    light: Option<LightV7>,
     camera: Option<Camera>,
     #[serde(default)]
     sprite: Option<Sprite>,
@@ -543,7 +737,7 @@ struct SceneFileV3 {
     title: String,
     entities: Vec<EntityRecordV3>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV7,
 }
 
 /// A frozen schema-v1 entity record (pre-P8.2b, 3D only). Never changes.
@@ -555,8 +749,8 @@ struct EntityRecordV1 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRefV6>,
-    material: Option<Material>,
-    light: Option<Light>,
+    material: Option<MaterialV7>,
+    light: Option<LightV7>,
     camera: Option<Camera>,
 }
 
@@ -579,8 +773,8 @@ struct EntityRecordV2 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRefV6>,
-    material: Option<Material>,
-    light: Option<Light>,
+    material: Option<MaterialV7>,
+    light: Option<LightV7>,
     camera: Option<Camera>,
     #[serde(default)]
     sprite: Option<Sprite>,
@@ -612,8 +806,8 @@ impl EntityRecordV1 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh.map(MeshRefV6::into_current),
-            material: self.material,
-            light: self.light,
+            material: self.material.map(MaterialV7::into_current),
+            light: self.light.map(LightV7::into_current),
             camera: self.camera,
             sprite: None,
             tilemap: None,
@@ -638,6 +832,10 @@ impl EntityRecordV1 {
             joint_3d: None,
             audio_source: None,
             audio_listener: None,
+            decal: None,
+            volume: None,
+            spline: None,
+            foliage: None,
         }
     }
 }
@@ -651,8 +849,8 @@ impl EntityRecordV2 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh.map(MeshRefV6::into_current),
-            material: self.material,
-            light: self.light,
+            material: self.material.map(MaterialV7::into_current),
+            light: self.light.map(LightV7::into_current),
             camera: self.camera,
             sprite: self.sprite,
             tilemap: self.tilemap,
@@ -677,6 +875,10 @@ impl EntityRecordV2 {
             joint_3d: None,
             audio_source: None,
             audio_listener: None,
+            decal: None,
+            volume: None,
+            spline: None,
+            foliage: None,
         }
     }
 }
@@ -690,8 +892,8 @@ impl EntityRecordV3 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh.map(MeshRefV6::into_current),
-            material: self.material,
-            light: self.light,
+            material: self.material.map(MaterialV7::into_current),
+            light: self.light.map(LightV7::into_current),
             camera: self.camera,
             sprite: self.sprite,
             tilemap: self.tilemap,
@@ -716,6 +918,10 @@ impl EntityRecordV3 {
             joint_3d: None,
             audio_source: None,
             audio_listener: None,
+            decal: None,
+            volume: None,
+            spline: None,
+            foliage: None,
         }
     }
 }
@@ -729,8 +935,8 @@ impl EntityRecordV4 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh.map(MeshRefV6::into_current),
-            material: self.material,
-            light: self.light,
+            material: self.material.map(MaterialV7::into_current),
+            light: self.light.map(LightV7::into_current),
             camera: self.camera,
             sprite: self.sprite,
             tilemap: self.tilemap,
@@ -755,6 +961,10 @@ impl EntityRecordV4 {
             joint_3d: None,
             audio_source: None,
             audio_listener: None,
+            decal: None,
+            volume: None,
+            spline: None,
+            foliage: None,
         }
     }
 }
@@ -768,8 +978,8 @@ impl EntityRecordV5 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh.map(MeshRefV6::into_current),
-            material: self.material,
-            light: self.light,
+            material: self.material.map(MaterialV7::into_current),
+            light: self.light.map(LightV7::into_current),
             camera: self.camera,
             sprite: self.sprite,
             tilemap: self.tilemap,
@@ -794,6 +1004,10 @@ impl EntityRecordV5 {
             joint_3d: None,
             audio_source: None,
             audio_listener: None,
+            decal: None,
+            volume: None,
+            spline: None,
+            foliage: None,
         }
     }
 }
@@ -810,8 +1024,8 @@ impl EntityRecordV6 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh.map(MeshRefV6::into_current),
-            material: self.material,
-            light: self.light,
+            material: self.material.map(MaterialV7::into_current),
+            light: self.light.map(LightV7::into_current),
             camera: self.camera,
             sprite: self.sprite,
             tilemap: self.tilemap,
@@ -836,6 +1050,130 @@ impl EntityRecordV6 {
             joint_3d: self.joint_3d,
             audio_source: self.audio_source,
             audio_listener: self.audio_listener,
+            decal: None,
+            volume: None,
+            spline: None,
+            foliage: None,
+        }
+    }
+}
+
+/// A frozen schema-v7 entity record (pre-R-P0): the live [`MeshRef`] mesh slot,
+/// but the pre-v8 [`MaterialV7`] / [`LightV7`] slots and none of the four v8
+/// world-decoration slots. v8 changed only `Light`/`Material` and appended those
+/// four slots, so this differs from the live [`RuntimeEntity`] only there.
+#[derive(Serialize, Deserialize)]
+struct EntityRecordV7 {
+    guid: Uuid,
+    name: String,
+    parent: Option<Uuid>,
+    transform: Transform,
+    visible: bool,
+    mesh: Option<MeshRef>,
+    material: Option<MaterialV7>,
+    light: Option<LightV7>,
+    camera: Option<Camera>,
+    #[serde(default)]
+    sprite: Option<Sprite>,
+    #[serde(default)]
+    tilemap: Option<Tilemap>,
+    #[serde(default)]
+    nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    text2d: Option<Text2D>,
+    #[serde(default)]
+    light_2d: Option<Light2D>,
+    #[serde(default)]
+    rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    actor: Option<Uuid>,
+    #[serde(default)]
+    terrain: Option<Terrain>,
+    #[serde(default)]
+    pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    root_motion: Option<RootMotion>,
+    #[serde(default)]
+    attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    audio_source: Option<AudioSource>,
+    #[serde(default)]
+    audio_listener: Option<AudioListener>,
+}
+
+/// A frozen schema-v7 file layout.
+#[derive(Serialize, Deserialize)]
+struct SceneFileV7 {
+    #[allow(dead_code)]
+    schema_version: u32,
+    title: String,
+    entities: Vec<EntityRecordV7>,
+    #[serde(default)]
+    settings: RuntimeSettingsV7,
+}
+
+impl EntityRecordV7 {
+    /// Lift a frozen v7 record to the live (v8) [`RuntimeEntity`]: `material`/
+    /// `light` gain their v8 fields at the documented defaults; the four
+    /// world-decoration slots default to `None`.
+    fn into_runtime(self) -> RuntimeEntity {
+        RuntimeEntity {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material.map(MaterialV7::into_current),
+            light: self.light.map(LightV7::into_current),
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: None,
+            volume: None,
+            spline: None,
+            foliage: None,
         }
     }
 }
@@ -884,7 +1222,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV3::into_runtime)
                     .collect(),
-                settings: v3.settings,
+                settings: v3.settings.into_current(),
             })
         }
         4 => {
@@ -898,7 +1236,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV4::into_runtime)
                     .collect(),
-                settings: v4.settings,
+                settings: v4.settings.into_current(),
             })
         }
         5 => {
@@ -912,7 +1250,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV5::into_runtime)
                     .collect(),
-                settings: v5.settings,
+                settings: v5.settings.into_current(),
             })
         }
         6 => {
@@ -926,7 +1264,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV6::into_runtime)
                     .collect(),
-                settings: v6.settings,
+                settings: v6.settings.into_current(),
             })
         }
         7 => {
@@ -935,8 +1273,22 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v7: {e}")))?;
             Ok(RuntimeLevel {
                 title: v7.title,
-                entities: v7.entities,
-                settings: v7.settings,
+                entities: v7
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV7::into_runtime)
+                    .collect(),
+                settings: v7.settings.into_current(),
+            })
+        }
+        8 => {
+            let (v8, _): (SceneFileV8, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v8: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v8.title,
+                entities: v8.entities,
+                settings: v8.settings,
             })
         }
         found => Err(SceneError::SchemaTooNew {
@@ -946,9 +1298,9 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     }
 }
 
-/// Encode a level to the current schema (v7) as a deterministic bincode payload.
+/// Encode a level to the current schema (v8) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV7 {
+    let file = SceneFileV8 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -1032,15 +1384,22 @@ mod tests {
     }
 
     #[test]
-    fn current_decode_encode_is_byte_identical_for_committed_bytes() {
-        // The committed platformer is now a schema-v6 level; decode/encode is a
-        // lossless identity on current-schema content (so the cook's runtime
-        // rewrite of an already-current level is a no-op, and deterministic).
+    fn editor_encoded_current_sample_decodes_and_round_trips_byte_identical() {
+        // The committed platformer is an **editor-encoded** current-schema (v8)
+        // level. This is the editor→runtime cross-decode: the Ring-0 reader parses
+        // the editor's bytes field-for-field, and re-encoding is byte-identical
+        // (the cook's runtime rewrite of an already-current level is a no-op).
         let original = read_committed("samples/platformer-2d/Platformer.inf_lvl");
-        assert_eq!(original[0], 7, "committed platformer is schema v7");
+        assert_eq!(
+            original[0], SCHEMA_VERSION as u8,
+            "committed platformer is the current schema (v8)"
+        );
         let level = RuntimeLevel::decode(&original).unwrap();
         let reencoded = level.encode().unwrap();
-        assert_eq!(original, reencoded, "v7 round trip must be byte-identical");
+        assert_eq!(
+            original, reencoded,
+            "current-schema round trip must be byte-identical"
+        );
     }
 
     /// Re-bless the v3/v4 platformer fixtures after a (pre-1.0-sanctioned)
@@ -1068,8 +1427,8 @@ mod tests {
                     transform: e.transform,
                     visible: e.visible,
                     mesh: e.mesh.map(MeshRefV6::from_current),
-                    material: e.material,
-                    light: e.light,
+                    material: e.material.map(MaterialV7::from_current),
+                    light: e.light.map(LightV7::from_current),
                     camera: e.camera,
                     sprite: e.sprite.clone(),
                     tilemap: e.tilemap.clone(),
@@ -1087,7 +1446,7 @@ mod tests {
                     pcg_volume: e.pcg_volume.clone(),
                 })
                 .collect(),
-            settings: level.settings,
+            settings: RuntimeSettingsV7::from_current(level.settings),
         };
         let bytes = bincode::serde::encode_to_vec(&v4, bincode_config()).unwrap();
         assert_eq!(bytes[0], 4);
@@ -1124,7 +1483,7 @@ mod tests {
                     actor: e.actor,
                 })
                 .collect(),
-            settings: level.settings,
+            settings: RuntimeSettingsV7::from_current(level.settings),
         };
         let bytes = bincode::serde::encode_to_vec(&v3, bincode_config()).unwrap();
         assert_eq!(bytes[0], 3);
@@ -1145,8 +1504,8 @@ mod tests {
                     transform: e.transform,
                     visible: e.visible,
                     mesh: e.mesh.map(MeshRefV6::from_current),
-                    material: e.material,
-                    light: e.light,
+                    material: e.material.map(MaterialV7::from_current),
+                    light: e.light.map(LightV7::from_current),
                     camera: e.camera,
                     sprite: e.sprite.clone(),
                     tilemap: e.tilemap.clone(),
@@ -1169,7 +1528,7 @@ mod tests {
                     attached_to: e.attached_to.clone(),
                 })
                 .collect(),
-            settings: level.settings,
+            settings: RuntimeSettingsV7::from_current(level.settings),
         };
         let bytes = bincode::serde::encode_to_vec(&v5, bincode_config()).unwrap();
         assert_eq!(bytes[0], 5);
@@ -1339,5 +1698,288 @@ mod tests {
             RuntimeLevel::decode(&bytes),
             Err(SceneError::SchemaTooNew { .. })
         ));
+    }
+
+    // ── v7 forever-load fixture + v8 (R-P0) world-decoration decode ─────────
+
+    /// A minimal all-`None` frozen v7 entity record, filled via struct-update
+    /// syntax by [`v7_scene_reference`].
+    fn v7_rec(guid: Uuid, name: &str, parent: Option<Uuid>) -> EntityRecordV7 {
+        EntityRecordV7 {
+            guid,
+            name: name.into(),
+            parent,
+            transform: Transform::IDENTITY,
+            visible: true,
+            mesh: None,
+            material: None,
+            light: None,
+            camera: None,
+            sprite: None,
+            tilemap: None,
+            nine_slice: None,
+            text2d: None,
+            light_2d: None,
+            rigid_body_2d: None,
+            collider_2d: None,
+            character_controller_2d: None,
+            rigid_body_3d: None,
+            collider_3d: None,
+            character_controller_3d: None,
+            actor: None,
+            terrain: None,
+            pcg_volume: None,
+            skeletal_mesh: None,
+            anim_player: None,
+            anim_state_machine: None,
+            root_motion: None,
+            attached_to: None,
+            joint_2d: None,
+            joint_3d: None,
+            audio_source: None,
+            audio_listener: None,
+        }
+    }
+
+    /// A representative frozen schema-v7 scene (mesh, materials, each light kind,
+    /// a joint, non-default settings) — the provenance source for the committed
+    /// `scene_v7.inf_lvl`. Byte-identical to an editor-encoded v7 file (same
+    /// inf_ecs wire types).
+    fn v7_scene_reference() -> SceneFileV7 {
+        use inf_ecs::components::Primitive;
+        let g = uuid::Uuid::from_u128;
+        let cube = g(0x7002);
+        SceneFileV7 {
+            schema_version: 7,
+            title: "V7 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV7 {
+                    mesh: Some(MeshRef {
+                        primitive: Primitive::Plane,
+                        asset: None,
+                    }),
+                    material: Some(MaterialV7 {
+                        base_color: Color::new(0.3, 0.32, 0.35, 1.0),
+                        metallic: 0.0,
+                        roughness: 0.5,
+                        emissive: Color::new(0.0, 0.0, 0.0, 1.0),
+                    }),
+                    ..v7_rec(g(0x7001), "Ground", None)
+                },
+                EntityRecordV7 {
+                    mesh: Some(MeshRef {
+                        primitive: Primitive::Cube,
+                        asset: None,
+                    }),
+                    joint_3d: Some(Joint3D {
+                        other: Some(g(0x7001)),
+                        ..Default::default()
+                    }),
+                    ..v7_rec(cube, "Cube", None)
+                },
+                EntityRecordV7 {
+                    light: Some(LightV7 {
+                        kind: LightKind::Directional,
+                        color: Color::WHITE,
+                        intensity: 1.0,
+                    }),
+                    ..v7_rec(g(0x7006), "Sun", None)
+                },
+                EntityRecordV7 {
+                    light: Some(LightV7 {
+                        kind: LightKind::Spot,
+                        color: Color::WHITE,
+                        intensity: 3.0,
+                    }),
+                    ..v7_rec(g(0x7008), "Spot", Some(cube))
+                },
+            ],
+            settings: RuntimeSettingsV7 {
+                gravity_2d: Vec2d::new(0.0, -20.0),
+                gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+                sim_hz: 120.0,
+            },
+        }
+    }
+
+    /// Bless the committed `scene_v7.inf_lvl` from [`v7_scene_reference`] under
+    /// `INF_BLESS_FIXTURES=1` (inert otherwise), mirroring the platformer-fixture
+    /// bless discipline this crate already uses.
+    #[test]
+    fn bless_scene_v7_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v7_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 7);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v7.inf_lvl");
+        std::fs::write(&path, &bytes).unwrap();
+        eprintln!("blessed scene_v7 fixture: {}", path.display());
+    }
+
+    /// The committed schema-v7 fixture decodes here with every new v8 light /
+    /// material field lifted to its default and the four world-decoration slots
+    /// defaulted to `None` (the frozen-record + `into_runtime` lift).
+    #[test]
+    fn scene_v7_fixture_decodes_with_v8_defaults() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v7.inf_lvl");
+        if !path.exists() {
+            eprintln!(
+                "SKIP: scene_v7 fixture not blessed yet ({})",
+                path.display()
+            );
+            return;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes[0], 7, "fixture is a genuine schema-v7 payload");
+        // Reproducibility lock (matches the frozen writer byte-for-byte).
+        let rebuilt =
+            bincode::serde::encode_to_vec(v7_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "committed v7 fixture matches the frozen writer"
+        );
+
+        let level = RuntimeLevel::decode(&bytes).expect("v7 fixture decodes");
+        assert_eq!(level.title, "V7 Fixture Level");
+        let by_name = |n: &str| level.entities.iter().find(|e| e.name == n).unwrap();
+        // Material/light lift to the v8 defaults.
+        let m = by_name("Ground").material.unwrap();
+        assert_eq!(m.blend, inf_ecs::components::BlendMode::Opaque);
+        assert_eq!(m.alpha_cutoff, 0.5);
+        let l = by_name("Spot").light.unwrap();
+        assert_eq!(l.range, 0.0);
+        assert_eq!(l.inner_cone_deg, 30.0);
+        assert_eq!(l.outer_cone_deg, 40.0);
+        assert!(l.cast_shadows);
+        // The four world-decoration slots default to None; render block defaults.
+        for e in &level.entities {
+            assert!(e.decal.is_none() && e.volume.is_none());
+            assert!(e.spline.is_none() && e.foliage.is_none());
+        }
+        assert_eq!(level.settings.sim_hz, 120.0);
+        assert_eq!(level.settings.render, RenderSettingsRecord::default());
+        // Rewriting lifts to the current schema (v8) and re-decodes equal.
+        let out = level.encode().unwrap();
+        assert_eq!(out[0], SCHEMA_VERSION as u8);
+        assert_eq!(RuntimeLevel::decode(&out).unwrap(), level);
+    }
+
+    /// A v8 level carrying every new component (spot light with cones+range,
+    /// translucent material, decal, volume, spline, 3-instance foliage) and
+    /// non-default render settings encodes (v8) and decodes with identical
+    /// values. The inf-scene encode path is byte-identical to the editor's (same
+    /// inf_ecs wire types), so this doubles as the editor↔runtime cross-decode.
+    #[test]
+    fn v8_world_decoration_components_round_trip() {
+        use inf_ecs::components::{
+            BlendMode, Decal, Foliage, FoliageInstance, FoliagePaletteEntry, Primitive, Spline,
+            SplineInterp, Volume, VolumeKind,
+        };
+        // Start from the v7 reference (decoded → lifted to a v8 RuntimeLevel), then
+        // author the new v8 components onto it.
+        let v7_bytes =
+            bincode::serde::encode_to_vec(v7_scene_reference(), bincode_config()).unwrap();
+        let mut base = RuntimeLevel::decode(&v7_bytes).unwrap();
+        base.settings.render = RenderSettingsRecord {
+            exposure: 1.4,
+            dither: false,
+            bloom_enabled: true,
+            bloom_threshold: 0.8,
+            bloom_knee: 0.3,
+            bloom_intensity: 0.12,
+            ssao_enabled: true,
+            ssao_radius: 0.9,
+            ssao_intensity: 0.75,
+            ssao_bias: 0.03,
+            taa: true,
+            shadows_enabled: true,
+            shadows_max_distance: 80.0,
+            gi_enabled: true,
+            gi_intensity: 1.25,
+        };
+        // Give the spot light its v8 cone/range/shadow fields.
+        if let Some(spot) = base.entities.iter_mut().find(|e| e.name == "Spot") {
+            let l = spot.light.as_mut().unwrap();
+            l.range = 25.0;
+            l.inner_cone_deg = 18.0;
+            l.outer_cone_deg = 32.0;
+            l.cast_shadows = false;
+        }
+        // A translucent material on the Cube.
+        if let Some(cube) = base.entities.iter_mut().find(|e| e.name == "Cube") {
+            cube.material = Some(Material {
+                base_color: Color::new(0.2, 0.5, 0.9, 0.4),
+                metallic: 0.0,
+                roughness: 0.1,
+                emissive: Color::new(0.0, 0.0, 0.0, 1.0),
+                blend: BlendMode::Translucent,
+                alpha_cutoff: 0.3,
+            });
+            cube.decal = Some(Decal {
+                size: Vec3d::new(3.0, 1.0, 3.0),
+                color: Color::new(0.1, 0.1, 0.1, 1.0),
+                opacity: 0.8,
+                fade_angle_deg: 50.0,
+            });
+            cube.volume = Some(Volume {
+                kind: VolumeKind::Blocking,
+                tint: Color::new(0.9, 0.2, 0.2, 0.5),
+            });
+            cube.spline = Some(Spline {
+                points: vec![
+                    Vec3d::ZERO,
+                    Vec3d::new(2.0, 0.0, 1.0),
+                    Vec3d::new(4.0, 1.0, 0.0),
+                ],
+                closed: true,
+                interp: SplineInterp::Linear,
+            });
+            cube.foliage = Some(Foliage {
+                palette: vec![
+                    FoliagePaletteEntry {
+                        primitive: Primitive::Cone,
+                        tint: Color::new(0.1, 0.6, 0.1, 1.0),
+                    },
+                    FoliagePaletteEntry::default(),
+                ],
+                instances: vec![
+                    FoliageInstance {
+                        position: Vec3d::new(1.0, 0.0, 2.0),
+                        rotation: Vec3d::new(0.0, 45.0, 0.0),
+                        scale: 1.2,
+                        kind: 0,
+                    },
+                    FoliageInstance {
+                        position: Vec3d::new(-2.0, 0.0, 3.0),
+                        rotation: Vec3d::ZERO,
+                        scale: 0.8,
+                        kind: 1,
+                    },
+                    FoliageInstance::default(),
+                ],
+            });
+        }
+
+        let bytes = base.encode().unwrap();
+        assert_eq!(bytes[0], 8, "v8 content writes a genuine schema-v8 payload");
+        let back = RuntimeLevel::decode(&bytes).expect("v8 decodes");
+        assert_eq!(back, base, "v8 round trip preserves every new component");
+        // Re-encode is deterministic (byte-identical).
+        assert_eq!(back.encode().unwrap(), bytes);
+
+        // Spot-check the decoded values.
+        let by_name = |n: &str| back.entities.iter().find(|e| e.name == n).unwrap();
+        let l = by_name("Spot").light.unwrap();
+        assert_eq!(l.range, 25.0);
+        assert!(!l.cast_shadows);
+        let cube = by_name("Cube");
+        assert_eq!(cube.material.unwrap().blend, BlendMode::Translucent);
+        assert_eq!(cube.decal.unwrap().opacity, 0.8);
+        assert_eq!(cube.volume.unwrap().kind, VolumeKind::Blocking);
+        assert_eq!(cube.spline.as_ref().unwrap().points.len(), 3);
+        assert_eq!(cube.foliage.as_ref().unwrap().instances.len(), 3);
+        assert_eq!(back.settings.render.exposure, 1.4);
+        assert!(back.settings.render.gi_enabled);
     }
 }

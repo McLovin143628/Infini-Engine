@@ -378,6 +378,10 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
             joint_3d,
             audio_source,
             audio_listener,
+            decal,
+            volume,
+            spline,
+            foliage,
         } = e;
 
         let entity = world.spawn_with_guid(guid, &name, None);
@@ -472,6 +476,19 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
                 em.insert(c);
             }
             if let Some(c) = audio_listener {
+                em.insert(c);
+            }
+            // ── v8 world components (decal slot + volumes + splines + foliage) ──
+            if let Some(c) = decal {
+                em.insert(c);
+            }
+            if let Some(c) = volume {
+                em.insert(c);
+            }
+            if let Some(c) = spline {
+                em.insert(c);
+            }
+            if let Some(c) = foliage {
                 em.insert(c);
             }
         }
@@ -1116,6 +1133,10 @@ mod tests {
             joint_3d: None,
             audio_source: None,
             audio_listener: None,
+            decal: None,
+            volume: None,
+            spline: None,
+            foliage: None,
         };
         parent.sprite = Some(Sprite {
             size: Vec2d::new(1.0, 1.0),

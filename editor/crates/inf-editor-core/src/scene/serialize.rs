@@ -14,12 +14,13 @@
 use std::path::{Path, PathBuf};
 
 use inf_ecs::components::{
-    ActorClass, AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource, Camera,
-    CharacterController2D, CharacterController3D, Collider2D, Collider3D, Joint2D, Joint3D, Light,
-    Light2D, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D, RigidBody3D, RootMotion,
-    SkeletalMesh, Sprite, Terrain, Text2D, Tilemap, Transform, Visibility,
+    ActorClass, AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource, BlendMode,
+    Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D, Decal, Foliage,
+    Joint2D, Joint3D, Light, Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume,
+    RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, Spline, Sprite, Terrain, Text2D, Tilemap,
+    Transform, Visibility, Volume,
 };
-use inf_ecs::math::{Vec2d, Vec3d};
+use inf_ecs::math::{Color, Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -76,7 +77,21 @@ use crate::scene::SceneDoc;
 ///   hop lifts it with `asset: None`. No new entity slot was added — v7 differs
 ///   from v6 only inside `MeshRef`. Older v1..v6 payloads load with `asset`
 ///   defaulted to `None` (see [`decode`] + [`SceneFileV6`]).
-pub const SCHEMA_VERSION: u32 = 7;
+///
+/// * v8 — R-P0: `Light` gained `range` / `inner_cone_deg` / `outer_cone_deg` /
+///   `cast_shadows`; `Material` gained `blend` / `alpha_cutoff`; the
+///   [`EntityRecord`] appended four world-decoration slots — `decal`
+///   ([`Decal`]), `volume` ([`Volume`]), `spline` ([`Spline`]) and `foliage`
+///   ([`Foliage`]); and [`LevelSettings`] gained a `render`
+///   ([`RenderSettingsRecord`]) block. `Light`/`Material` changed byte layout, so
+///   the pre-v8 shapes are frozen as [`LightV7`] / [`MaterialV7`] (and the file
+///   settings as [`LevelSettingsV7`]); every v1..v7 record carries its
+///   `light`/`material` slots through those frozen types, and the
+///   [`EntityRecordV7::into_current`] hop lifts them (new light/material fields at
+///   their documented defaults) and appends the four v8 slots defaulted to
+///   `None`. Older v1..v7 payloads load with all the new fields/slots defaulted
+///   (see [`decode`] + [`SceneFileV7`]).
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// File-level simulation settings (P9.5 · schema v3). Replaces the player's
 /// hard-coded `DEFAULT_GRAVITY`/`DEFAULT_HZ`. The serde defaults **preserve the
@@ -95,6 +110,12 @@ pub struct LevelSettings {
     pub gravity_3d: Vec3d,
     #[serde(default = "default_sim_hz")]
     pub sim_hz: f64,
+    /// Renderer HDR / post / lighting configuration (schema v8). Additive field:
+    /// `#[serde(default)]` → [`RenderSettingsRecord::default`], which mirrors
+    /// `inf_render::RenderSettings::default()` field-for-field, so a pre-v8 level
+    /// (and every existing fixture) loads with the stable default look.
+    #[serde(default)]
+    pub render: RenderSettingsRecord,
 }
 
 fn default_gravity_3d() -> Vec3d {
@@ -110,6 +131,68 @@ impl Default for LevelSettings {
             gravity_2d: Vec2d::ZERO,
             gravity_3d: default_gravity_3d(),
             sim_hz: default_sim_hz(),
+            render: RenderSettingsRecord::default(),
+        }
+    }
+}
+
+/// Persisted renderer HDR / post / lighting settings (schema v8). A **flat,
+/// fully-explicit** mirror of the fields of `inf_render::RenderSettings` (and its
+/// nested `BloomSettings` / `SsaoSettings` / `ShadowSettings` / `GiSettings`) that
+/// a level authors; the host applies it to the live `RenderSettings` at load.
+/// Kept here (not a dependency on `inf-render`) so this Ring-1 codec, its Ring-0
+/// runtime mirror (`inf_scene::RenderSettingsRecord`), and the CLI stay
+/// wgpu-free — the field defaults below are asserted against `inf-render`.
+///
+/// Every default equals `inf_render::RenderSettings::default()` field-for-field
+/// (sourced from `crates/inf-render/src/settings.rs`):
+/// * `exposure = 1.0` (settings.rs `RenderSettings::default`, l.221)
+/// * `dither = true` (l.222)
+/// * `bloom_enabled = false`, `bloom_threshold = 1.0`, `bloom_knee = 0.5`,
+///   `bloom_intensity = 0.06` (`BloomSettings::default`, l.24-27)
+/// * `ssao_enabled = false`, `ssao_radius = 0.6`, `ssao_intensity = 1.0`,
+///   `ssao_bias = 0.025` (`SsaoSettings::default`, l.48-51)
+/// * `taa = false` (l.225)
+/// * `shadows_enabled = false`, `shadows_max_distance = 60.0`
+///   (`ShadowSettings::default`, l.133/136)
+/// * `gi_enabled = false`, `gi_intensity = 1.0` (`GiSettings::default`, l.171/174)
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RenderSettingsRecord {
+    pub exposure: f32,
+    pub dither: bool,
+    pub bloom_enabled: bool,
+    pub bloom_threshold: f32,
+    pub bloom_knee: f32,
+    pub bloom_intensity: f32,
+    pub ssao_enabled: bool,
+    pub ssao_radius: f32,
+    pub ssao_intensity: f32,
+    pub ssao_bias: f32,
+    pub taa: bool,
+    pub shadows_enabled: bool,
+    pub shadows_max_distance: f32,
+    pub gi_enabled: bool,
+    pub gi_intensity: f32,
+}
+
+impl Default for RenderSettingsRecord {
+    fn default() -> Self {
+        Self {
+            exposure: 1.0,
+            dither: true,
+            bloom_enabled: false,
+            bloom_threshold: 1.0,
+            bloom_knee: 0.5,
+            bloom_intensity: 0.06,
+            ssao_enabled: false,
+            ssao_radius: 0.6,
+            ssao_intensity: 1.0,
+            ssao_bias: 0.025,
+            taa: false,
+            shadows_enabled: false,
+            shadows_max_distance: 60.0,
+            gi_enabled: false,
+            gi_intensity: 1.0,
         }
     }
 }
@@ -229,6 +312,122 @@ pub struct EntityRecord {
     /// The active spatial-audio listener flag.
     #[serde(default)]
     pub audio_listener: Option<AudioListener>,
+    // ── v8 (R-P0) world-decoration components ─────────────────────────────
+    /// A projected decal.
+    #[serde(default)]
+    pub decal: Option<Decal>,
+    /// A trigger / blocking gameplay volume.
+    #[serde(default)]
+    pub volume: Option<Volume>,
+    /// A control-point spline (path / rail).
+    #[serde(default)]
+    pub spline: Option<Spline>,
+    /// A foliage scatter (palette + bulk instances).
+    #[serde(default)]
+    pub foliage: Option<Foliage>,
+}
+
+/// The pre-v8 `Light` byte layout (schema v8 froze this when `Light` gained its
+/// `range` / cone / `cast_shadows` fields). Every frozen entity record (v1..v7)
+/// carries its `light` slot as `Option<LightV7>`; [`LightV7::into_current`] lifts
+/// it to the live [`Light`] with the new fields at their documented defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LightV7 {
+    pub kind: LightKind,
+    pub color: Color,
+    pub intensity: f32,
+}
+
+impl LightV7 {
+    /// Lift to the current [`Light`] (range unbounded, default cones, casts).
+    fn into_current(self) -> Light {
+        Light {
+            kind: self.kind,
+            color: self.color,
+            intensity: self.intensity,
+            range: 0.0,
+            inner_cone_deg: 30.0,
+            outer_cone_deg: 40.0,
+            cast_shadows: true,
+        }
+    }
+}
+
+/// The pre-v8 `Material` byte layout (schema v8 froze this when `Material` gained
+/// its `blend` / `alpha_cutoff` fields). Every frozen entity record (v1..v7)
+/// carries its `material` slot as `Option<MaterialV7>`; [`MaterialV7::into_current`]
+/// lifts it to the live [`Material`] with the new fields at their defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MaterialV7 {
+    pub base_color: Color,
+    #[serde(default)]
+    pub metallic: f32,
+    #[serde(default)]
+    pub roughness: f32,
+    #[serde(default)]
+    pub emissive: Color,
+}
+
+impl MaterialV7 {
+    /// Lift to the current [`Material`] (opaque blend, 0.5 alpha cutoff).
+    fn into_current(self) -> Material {
+        Material {
+            base_color: self.base_color,
+            metallic: self.metallic,
+            roughness: self.roughness,
+            emissive: self.emissive,
+            blend: BlendMode::Opaque,
+            alpha_cutoff: 0.5,
+        }
+    }
+}
+
+impl Default for MaterialV7 {
+    fn default() -> Self {
+        // Mirrors the pre-v8 `Material::default()` exactly (byte-stable fixtures).
+        Self {
+            base_color: Color::new(0.8, 0.8, 0.8, 1.0),
+            metallic: 0.0,
+            roughness: 0.5,
+            emissive: Color::new(0.0, 0.0, 0.0, 1.0),
+        }
+    }
+}
+
+/// The pre-v8 file-level settings byte layout (schema v8 froze this when
+/// [`LevelSettings`] gained its `render` block). Frozen entity/file records
+/// (v3..v7) carry `settings` as [`LevelSettingsV7`]; [`LevelSettingsV7::into_current`]
+/// lifts it with a default [`RenderSettingsRecord`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LevelSettingsV7 {
+    #[serde(default)]
+    pub gravity_2d: Vec2d,
+    #[serde(default = "default_gravity_3d")]
+    pub gravity_3d: Vec3d,
+    #[serde(default = "default_sim_hz")]
+    pub sim_hz: f64,
+}
+
+impl LevelSettingsV7 {
+    /// Lift to the current [`LevelSettings`] (default render block).
+    fn into_current(self) -> LevelSettings {
+        LevelSettings {
+            gravity_2d: self.gravity_2d,
+            gravity_3d: self.gravity_3d,
+            sim_hz: self.sim_hz,
+            render: RenderSettingsRecord::default(),
+        }
+    }
+}
+
+impl Default for LevelSettingsV7 {
+    fn default() -> Self {
+        Self {
+            gravity_2d: Vec2d::ZERO,
+            gravity_3d: default_gravity_3d(),
+            sim_hz: default_sim_hz(),
+        }
+    }
 }
 
 /// The **pre-v7** `MeshRef` byte layout (P13.4 froze this when `MeshRef` gained
@@ -263,8 +462,8 @@ pub struct EntityRecordV1 {
     pub transform: Transform,
     pub visible: bool,
     pub mesh: Option<MeshRefV6>,
-    pub material: Option<Material>,
-    pub light: Option<Light>,
+    pub material: Option<MaterialV7>,
+    pub light: Option<LightV7>,
     pub camera: Option<Camera>,
 }
 
@@ -325,8 +524,8 @@ pub struct EntityRecordV2 {
     pub transform: Transform,
     pub visible: bool,
     pub mesh: Option<MeshRefV6>,
-    pub material: Option<Material>,
-    pub light: Option<Light>,
+    pub material: Option<MaterialV7>,
+    pub light: Option<LightV7>,
     pub camera: Option<Camera>,
     #[serde(default)]
     pub sprite: Option<Sprite>,
@@ -389,7 +588,7 @@ impl SceneFileV2 {
                 .into_iter()
                 .map(EntityRecordV2::into_v3)
                 .collect(),
-            settings: LevelSettings::default(),
+            settings: LevelSettingsV7::default(),
         }
     }
 }
@@ -406,8 +605,8 @@ pub struct EntityRecordV3 {
     pub transform: Transform,
     pub visible: bool,
     pub mesh: Option<MeshRefV6>,
-    pub material: Option<Material>,
-    pub light: Option<Light>,
+    pub material: Option<MaterialV7>,
+    pub light: Option<LightV7>,
     pub camera: Option<Camera>,
     #[serde(default)]
     pub sprite: Option<Sprite>,
@@ -475,7 +674,7 @@ pub struct SceneFileV3 {
     pub title: String,
     pub entities: Vec<EntityRecordV3>,
     #[serde(default)]
-    pub settings: LevelSettings,
+    pub settings: LevelSettingsV7,
 }
 
 impl SceneFileV3 {
@@ -506,8 +705,8 @@ pub struct EntityRecordV4 {
     pub transform: Transform,
     pub visible: bool,
     pub mesh: Option<MeshRefV6>,
-    pub material: Option<Material>,
-    pub light: Option<Light>,
+    pub material: Option<MaterialV7>,
+    pub light: Option<LightV7>,
     pub camera: Option<Camera>,
     #[serde(default)]
     pub sprite: Option<Sprite>,
@@ -583,7 +782,7 @@ pub struct SceneFileV4 {
     pub title: String,
     pub entities: Vec<EntityRecordV4>,
     #[serde(default)]
-    pub settings: LevelSettings,
+    pub settings: LevelSettingsV7,
 }
 
 impl SceneFileV4 {
@@ -614,8 +813,8 @@ pub struct EntityRecordV5 {
     pub transform: Transform,
     pub visible: bool,
     pub mesh: Option<MeshRefV6>,
-    pub material: Option<Material>,
-    pub light: Option<Light>,
+    pub material: Option<MaterialV7>,
+    pub light: Option<LightV7>,
     pub camera: Option<Camera>,
     #[serde(default)]
     pub sprite: Option<Sprite>,
@@ -705,7 +904,7 @@ pub struct SceneFileV5 {
     pub title: String,
     pub entities: Vec<EntityRecordV5>,
     #[serde(default)]
-    pub settings: LevelSettings,
+    pub settings: LevelSettingsV7,
 }
 
 impl SceneFileV5 {
@@ -737,8 +936,8 @@ pub struct EntityRecordV6 {
     pub transform: Transform,
     pub visible: bool,
     pub mesh: Option<MeshRefV6>,
-    pub material: Option<Material>,
-    pub light: Option<Light>,
+    pub material: Option<MaterialV7>,
+    pub light: Option<LightV7>,
     pub camera: Option<Camera>,
     #[serde(default)]
     pub sprite: Option<Sprite>,
@@ -789,11 +988,12 @@ pub struct EntityRecordV6 {
 }
 
 impl EntityRecordV6 {
-    /// Lift a v6 record to the current (v7) shape: the `mesh` slot's pre-v7
-    /// [`MeshRefV6`] gains a `None` asset reference; every other slot carries
-    /// through unchanged (v7 added no new entity slots).
-    fn into_current(self) -> EntityRecord {
-        EntityRecord {
+    /// Lift a v6 record to the **v7** shape: the `mesh` slot's pre-v7
+    /// [`MeshRefV6`] gains a `None` asset reference; every other slot (including
+    /// the frozen `material`/`light`) carries through unchanged (v7 added no new
+    /// entity slots — only the `MeshRef` layout changed).
+    fn into_v7(self) -> EntityRecordV7 {
+        EntityRecordV7 {
             guid: self.guid,
             name: self.name,
             parent: self.parent,
@@ -837,11 +1037,151 @@ pub struct SceneFileV6 {
     pub title: String,
     pub entities: Vec<EntityRecordV6>,
     #[serde(default)]
-    pub settings: LevelSettings,
+    pub settings: LevelSettingsV7,
 }
 
 impl SceneFileV6 {
-    /// Lift a v6 file to the current (v7) shape (settings carry through).
+    /// Lift a v6 file to the **v7** shape (settings carry through).
+    fn into_v7(self) -> SceneFileV7 {
+        SceneFileV7 {
+            schema_version: 7,
+            title: self.title,
+            entities: self
+                .entities
+                .into_iter()
+                .map(EntityRecordV6::into_v7)
+                .collect(),
+            settings: self.settings,
+        }
+    }
+}
+
+/// A schema-**v7** [`EntityRecord`] (pre-R-P0) — the exact byte layout written by
+/// P13.4..P14 editors (all component slots through the P12 joints/audio, with the
+/// live [`MeshRef`] mesh slot, but the pre-v8 [`MaterialV7`] / [`LightV7`] slots).
+/// Frozen forever so the committed v7 fixture (and any level saved before R-P0)
+/// loads. v8 changed only `Light`/`Material` (added fields) and appended the four
+/// world-decoration slots, so this record differs from the live [`EntityRecord`]
+/// only in its `material`/`light` types and the absence of those four slots.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityRecordV7 {
+    pub guid: Uuid,
+    pub name: String,
+    pub parent: Option<Uuid>,
+    pub transform: Transform,
+    pub visible: bool,
+    pub mesh: Option<MeshRef>,
+    pub material: Option<MaterialV7>,
+    pub light: Option<LightV7>,
+    pub camera: Option<Camera>,
+    #[serde(default)]
+    pub sprite: Option<Sprite>,
+    #[serde(default)]
+    pub tilemap: Option<Tilemap>,
+    #[serde(default)]
+    pub nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    pub text2d: Option<Text2D>,
+    #[serde(default)]
+    pub light_2d: Option<Light2D>,
+    #[serde(default)]
+    pub rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    pub collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    pub character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    pub rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    pub collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    pub character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    pub actor: Option<Uuid>,
+    #[serde(default)]
+    pub terrain: Option<Terrain>,
+    #[serde(default)]
+    pub pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    pub skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    pub anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    pub anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    pub root_motion: Option<RootMotion>,
+    #[serde(default)]
+    pub attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    pub joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    pub joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    pub audio_source: Option<AudioSource>,
+    #[serde(default)]
+    pub audio_listener: Option<AudioListener>,
+}
+
+impl EntityRecordV7 {
+    /// Lift a v7 record to the current (v8) shape: `material`/`light` gain their
+    /// new v8 fields at the documented defaults ([`MaterialV7::into_current`] /
+    /// [`LightV7::into_current`]); the four world-decoration slots default to
+    /// `None`; every other slot carries through unchanged.
+    fn into_current(self) -> EntityRecord {
+        EntityRecord {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material.map(MaterialV7::into_current),
+            light: self.light.map(LightV7::into_current),
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: None,
+            volume: None,
+            spline: None,
+            foliage: None,
+        }
+    }
+}
+
+/// A schema-v7 [`SceneFile`] (frozen layout for legacy decode).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneFileV7 {
+    pub schema_version: u32,
+    pub title: String,
+    pub entities: Vec<EntityRecordV7>,
+    #[serde(default)]
+    pub settings: LevelSettingsV7,
+}
+
+impl SceneFileV7 {
+    /// Lift a v7 file to the current (v8) shape (the frozen settings lift to the
+    /// live [`LevelSettings`] with a default render block).
     fn into_current(self) -> SceneFile {
         SceneFile {
             schema_version: SCHEMA_VERSION,
@@ -849,9 +1189,9 @@ impl SceneFileV6 {
             entities: self
                 .entities
                 .into_iter()
-                .map(EntityRecordV6::into_current)
+                .map(EntityRecordV7::into_current)
                 .collect(),
-            settings: self.settings,
+            settings: self.settings.into_current(),
         }
     }
 }
@@ -937,6 +1277,10 @@ pub fn record_of(doc: &SceneDoc, guid: Uuid) -> Option<EntityRecord> {
         joint_3d: w.get::<Joint3D>(e).copied(),
         audio_source: w.get::<AudioSource>(e).cloned(),
         audio_listener: w.get::<AudioListener>(e).copied(),
+        decal: w.get::<Decal>(e).copied(),
+        volume: w.get::<Volume>(e).copied(),
+        spline: w.get::<Spline>(e).cloned(),
+        foliage: w.get::<Foliage>(e).cloned(),
     })
 }
 
@@ -979,6 +1323,7 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
                     .into_v4()
                     .into_v5()
                     .into_v6()
+                    .into_v7()
                     .into_current(),
             )
         }
@@ -986,33 +1331,46 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
             let (v2, _): (SceneFileV2, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v2: {e}"))?;
-            migrate(v2.into_v3().into_v4().into_v5().into_v6().into_current())
+            migrate(
+                v2.into_v3()
+                    .into_v4()
+                    .into_v5()
+                    .into_v6()
+                    .into_v7()
+                    .into_current(),
+            )
         }
         3 => {
             let (v3, _): (SceneFileV3, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v3: {e}"))?;
-            migrate(v3.into_v4().into_v5().into_v6().into_current())
+            migrate(v3.into_v4().into_v5().into_v6().into_v7().into_current())
         }
         4 => {
             let (v4, _): (SceneFileV4, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v4: {e}"))?;
-            migrate(v4.into_v5().into_v6().into_current())
+            migrate(v4.into_v5().into_v6().into_v7().into_current())
         }
         5 => {
             let (v5, _): (SceneFileV5, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v5: {e}"))?;
-            migrate(v5.into_v6().into_current())
+            migrate(v5.into_v6().into_v7().into_current())
         }
         6 => {
             let (v6, _): (SceneFileV6, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v6: {e}"))?;
-            migrate(v6.into_current())
+            migrate(v6.into_v7().into_current())
         }
         7 => {
+            let (v7, _): (SceneFileV7, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| format!("decode v7: {e}"))?;
+            migrate(v7.into_current())
+        }
+        8 => {
             let (file, _): (SceneFile, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode: {e}"))?;
@@ -1034,7 +1392,7 @@ pub fn migrate(file: SceneFile) -> Result<SceneFile, String> {
         ));
     }
     // Records are already lifted to the current shape by the versioned decode
-    // (v1→v2→v3→v4→v5→v6→v7); nothing more to do here. Future upgrades chain in `decode`.
+    // (v1→…→v7→v8); nothing more to do here. Future upgrades chain in `decode`.
     Ok(file)
 }
 
@@ -1139,6 +1497,18 @@ pub fn apply_to_doc(doc: &mut SceneDoc, file: &SceneFile) {
         }
         if let Some(c) = &rec.audio_listener {
             w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.decal {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.volume {
+            w.entity_mut(e).insert(*c);
+        }
+        if let Some(c) = &rec.spline {
+            w.entity_mut(e).insert(c.clone());
+        }
+        if let Some(c) = &rec.foliage {
+            w.entity_mut(e).insert(c.clone());
         }
     }
     // Second pass: now that every GUID exists, re-attach any child whose parent
@@ -1496,7 +1866,7 @@ mod tests {
 
         // save → load → save is byte-identical.
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 7, "authored payload is a genuine schema-v7 file");
+        assert_eq!(bytes1[0], 8, "authored payload is a genuine schema-v8 file");
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
         let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
@@ -1939,7 +2309,7 @@ mod tests {
                     mesh: Some(super::MeshRefV6 {
                         primitive: inf_ecs::components::Primitive::Plane,
                     }),
-                    material: Some(inf_ecs::components::Material {
+                    material: Some(MaterialV7 {
                         base_color: Color::new(0.3, 0.32, 0.35, 1.0),
                         ..Default::default()
                     }),
@@ -1955,7 +2325,7 @@ mod tests {
                     mesh: Some(super::MeshRefV6 {
                         primitive: inf_ecs::components::Primitive::Cube,
                     }),
-                    material: Some(inf_ecs::components::Material::default()),
+                    material: Some(MaterialV7::default()),
                     light: None,
                     camera: None,
                 },
@@ -1967,7 +2337,7 @@ mod tests {
                     visible: true,
                     mesh: None,
                     material: None,
-                    light: Some(inf_ecs::components::Light {
+                    light: Some(LightV7 {
                         kind: inf_ecs::components::LightKind::Directional,
                         color: Color::WHITE,
                         intensity: 1.0,
@@ -2063,6 +2433,7 @@ mod tests {
             gravity_2d: Vec2d::new(0.0, -20.0),
             gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
             sim_hz: 120.0,
+            render: RenderSettingsRecord::default(),
         });
 
         let ground = doc.create(SpawnKind::Empty, "Ground", None);
@@ -2116,8 +2487,8 @@ mod tests {
         let (doc, actor_guid) = authored_v3_scene();
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
         assert_eq!(
-            bytes1[0], 7,
-            "the physics/actor content now writes as a schema-v7 file"
+            bytes1[0], 8,
+            "the physics/actor content now writes as a schema-v8 file"
         );
 
         let mut doc2 = SceneDoc::new();
@@ -2196,7 +2567,7 @@ mod tests {
                     mesh: Some(super::MeshRefV6 {
                         primitive: inf_ecs::components::Primitive::Plane,
                     }),
-                    material: Some(inf_ecs::components::Material::default()),
+                    material: Some(MaterialV7::default()),
                     light: None,
                     camera: None,
                     sprite: None,
@@ -2351,7 +2722,7 @@ mod tests {
                     actor: Some(g(0x3ACC)),
                 },
             ],
-            settings: LevelSettings {
+            settings: LevelSettingsV7 {
                 gravity_2d: Vec2d::new(0.0, -20.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 120.0,
@@ -2469,8 +2840,8 @@ mod tests {
 
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
         assert_eq!(
-            bytes1[0], 7,
-            "anim content writes as a genuine schema-v7 file"
+            bytes1[0], 8,
+            "anim content writes as a genuine schema-v8 file"
         );
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
@@ -2632,7 +3003,7 @@ mod tests {
                     }),
                 },
             ],
-            settings: LevelSettings::default(),
+            settings: LevelSettingsV7::default(),
         }
     }
 
@@ -2757,7 +3128,7 @@ mod tests {
         let _ = g_anchor;
 
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 7, "joints/audio content writes a schema-v7 file");
+        assert_eq!(bytes1[0], 8, "joints/audio content writes a schema-v8 file");
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
         let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
@@ -2905,7 +3276,7 @@ mod tests {
                     attached_to: None,
                 },
             ],
-            settings: LevelSettings::default(),
+            settings: LevelSettingsV7::default(),
         }
     }
 
@@ -2964,5 +3335,399 @@ mod tests {
             assert!(r.audio_source.is_none());
             assert!(r.audio_listener.is_none());
         }
+    }
+
+    // ── v7 (pre-R-P0) forever-load fixture discipline ──────────────────────
+
+    use inf_ecs::components::{LightKind, MeshRef, Primitive};
+
+    /// A minimal all-`None` frozen v7 record, filled in via struct-update syntax
+    /// by [`v7_reference`] (`EntityRecordV7` intentionally has no `Default`, like
+    /// the other frozen records — this local helper stands in).
+    fn v7_base(guid: uuid::Uuid, name: &str, parent: Option<uuid::Uuid>) -> EntityRecordV7 {
+        EntityRecordV7 {
+            guid,
+            name: name.into(),
+            parent,
+            transform: EcsTransform::IDENTITY,
+            visible: true,
+            mesh: None,
+            material: None,
+            light: None,
+            camera: None,
+            sprite: None,
+            tilemap: None,
+            nine_slice: None,
+            text2d: None,
+            light_2d: None,
+            rigid_body_2d: None,
+            collider_2d: None,
+            character_controller_2d: None,
+            rigid_body_3d: None,
+            collider_3d: None,
+            character_controller_3d: None,
+            actor: None,
+            terrain: None,
+            pcg_volume: None,
+            skeletal_mesh: None,
+            anim_player: None,
+            anim_state_machine: None,
+            root_motion: None,
+            attached_to: None,
+            joint_2d: None,
+            joint_3d: None,
+            audio_source: None,
+            audio_listener: None,
+        }
+    }
+
+    /// Rebuild the exact schema-v7 `SceneFile` the v7 fixture was generated from,
+    /// from the frozen [`EntityRecordV7`]/[`SceneFileV7`] types (the provenance
+    /// lock). Covers every current requirement: a `Material` (frozen [`MaterialV7`]),
+    /// a `Light` of each kind (frozen [`LightV7`]), a `MeshRef` of each primitive,
+    /// a parent link (Cone under Cube), a `Joint3D`, and non-default settings.
+    fn v7_reference() -> SceneFileV7 {
+        let g = uuid::Uuid::from_u128;
+        let cube = g(0x7002);
+        let mesh = |p| {
+            Some(MeshRef {
+                primitive: p,
+                asset: None,
+            })
+        };
+        SceneFileV7 {
+            schema_version: 7,
+            title: "V7 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV7 {
+                    transform: EcsTransform {
+                        translation: inf_ecs::math::Vec3d::ZERO,
+                        rotation: inf_ecs::math::Vec3d::ZERO,
+                        scale: inf_ecs::math::Vec3d::new(20.0, 1.0, 20.0),
+                    },
+                    mesh: mesh(Primitive::Plane),
+                    material: Some(MaterialV7 {
+                        base_color: Color::new(0.3, 0.32, 0.35, 1.0),
+                        ..Default::default()
+                    }),
+                    ..v7_base(g(0x7001), "Ground", None)
+                },
+                EntityRecordV7 {
+                    mesh: mesh(Primitive::Cube),
+                    material: Some(MaterialV7::default()),
+                    ..v7_base(cube, "Cube", None)
+                },
+                EntityRecordV7 {
+                    mesh: mesh(Primitive::Sphere),
+                    ..v7_base(g(0x7003), "Sphere", None)
+                },
+                EntityRecordV7 {
+                    mesh: mesh(Primitive::Cylinder),
+                    ..v7_base(g(0x7004), "Cylinder", None)
+                },
+                // Cone parented under Cube (parent link) + a Joint3D to the cube.
+                EntityRecordV7 {
+                    mesh: mesh(Primitive::Cone),
+                    joint_3d: Some(Joint3D {
+                        other: Some(cube),
+                        kind: JointKind3D::Revolute,
+                        ..Default::default()
+                    }),
+                    ..v7_base(g(0x7005), "Cone", Some(cube))
+                },
+                EntityRecordV7 {
+                    light: Some(LightV7 {
+                        kind: LightKind::Directional,
+                        color: Color::WHITE,
+                        intensity: 1.0,
+                    }),
+                    ..v7_base(g(0x7006), "Sun", None)
+                },
+                EntityRecordV7 {
+                    light: Some(LightV7 {
+                        kind: LightKind::Point,
+                        color: Color::new(1.0, 0.9, 0.8, 1.0),
+                        intensity: 2.0,
+                    }),
+                    ..v7_base(g(0x7007), "Lamp", None)
+                },
+                EntityRecordV7 {
+                    light: Some(LightV7 {
+                        kind: LightKind::Spot,
+                        color: Color::WHITE,
+                        intensity: 3.0,
+                    }),
+                    ..v7_base(g(0x7008), "Spot", None)
+                },
+            ],
+            settings: LevelSettingsV7 {
+                gravity_2d: Vec2d::new(0.0, -20.0),
+                gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+                sim_hz: 120.0,
+            },
+        }
+    }
+
+    /// Write the committed v7 fixture from [`v7_reference`] under
+    /// `INF_BLESS_FIXTURES=1` (the temporary-writer discipline).
+    #[test]
+    fn bless_v7_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").is_err() {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v7_reference(), bincode_config()).unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v7.inf_lvl");
+        std::fs::write(&path, &bytes).expect("write v7 fixture");
+        eprintln!("blessed v7 fixture: {}", path.display());
+    }
+
+    #[test]
+    fn v7_fixture_is_reproducible_and_genuinely_v7() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v7.inf_lvl");
+        if !path.exists() {
+            eprintln!("SKIP: v7 fixture not blessed yet ({})", path.display());
+            return;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes[0], 7, "fixture must be a genuine schema-v7 payload");
+        let rebuilt = bincode::serde::encode_to_vec(v7_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v7 fixture must match our frozen v7 writer"
+        );
+    }
+
+    #[test]
+    fn v7_fixture_loads_forever_and_lifts_to_v8() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v7.inf_lvl");
+        if !path.exists() {
+            eprintln!("SKIP: v7 fixture not blessed yet ({})", path.display());
+            return;
+        }
+        let file = decode(&std::fs::read(&path).unwrap()).expect("v7 fixture decodes");
+        assert_eq!(file.schema_version, SCHEMA_VERSION);
+        assert_eq!(file.title, "V7 Fixture Level");
+        assert_eq!(file.entities.len(), 8);
+        let by_name = |n: &str| file.entities.iter().find(|r| r.name == n).unwrap();
+        // v7 data preserved through the v7→v8 lift.
+        assert!(by_name("Ground").material.is_some());
+        assert!(by_name("Cone").joint_3d.is_some());
+        assert_eq!(by_name("Cone").parent, Some(uuid::Uuid::from_u128(0x7002)));
+        // Every new v8 material/light field lifts to its documented default …
+        let m = by_name("Ground").material.unwrap();
+        assert_eq!(m.blend, BlendMode::Opaque);
+        assert_eq!(m.alpha_cutoff, 0.5);
+        for name in ["Sun", "Lamp", "Spot"] {
+            let l = by_name(name).light.unwrap();
+            assert_eq!(l.range, 0.0);
+            assert_eq!(l.inner_cone_deg, 30.0);
+            assert_eq!(l.outer_cone_deg, 40.0);
+            assert!(l.cast_shadows);
+        }
+        // … the four new entity slots default to None …
+        for r in &file.entities {
+            assert!(r.decal.is_none());
+            assert!(r.volume.is_none());
+            assert!(r.spline.is_none());
+            assert!(r.foliage.is_none());
+        }
+        // … the non-default file settings carry through, and the render block
+        // lifts to its default.
+        assert_eq!(file.settings.gravity_2d, Vec2d::new(0.0, -20.0));
+        assert_eq!(file.settings.sim_hz, 120.0);
+        assert_eq!(file.settings.render, RenderSettingsRecord::default());
+    }
+
+    // ── v8 (R-P0) world-decoration + render-settings persistence ───────────
+
+    /// A spot light with cones + range, a translucent material, a Decal, a Volume,
+    /// a Spline, a 3-instance Foliage, and non-default render settings all persist
+    /// across save → load and re-encode byte-identically.
+    #[test]
+    fn round_trip_with_v8_components_is_byte_identical() {
+        use inf_ecs::components::{
+            BlendMode, Decal, Foliage, FoliageInstance, FoliagePaletteEntry, Light, LightKind,
+            Material, Spline, SplineInterp, Volume, VolumeKind,
+        };
+
+        let mut doc = SceneDoc::new();
+        doc.set_title("V8 Level");
+        // Non-default render settings on the file.
+        doc.set_settings(LevelSettings {
+            gravity_2d: Vec2d::new(0.0, -18.0),
+            gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+            sim_hz: 90.0,
+            render: RenderSettingsRecord {
+                exposure: 1.4,
+                dither: false,
+                bloom_enabled: true,
+                bloom_threshold: 0.8,
+                bloom_knee: 0.3,
+                bloom_intensity: 0.12,
+                ssao_enabled: true,
+                ssao_radius: 0.9,
+                ssao_intensity: 0.75,
+                ssao_bias: 0.03,
+                taa: true,
+                shadows_enabled: true,
+                shadows_max_distance: 80.0,
+                gi_enabled: true,
+                gi_intensity: 1.25,
+            },
+        });
+
+        let spot = doc.create(SpawnKind::Empty, "Spot", None);
+        insert!(
+            doc,
+            spot,
+            Light {
+                kind: LightKind::Spot,
+                color: Color::new(1.0, 0.8, 0.6, 1.0),
+                intensity: 4.0,
+                range: 25.0,
+                inner_cone_deg: 18.0,
+                outer_cone_deg: 32.0,
+                cast_shadows: false,
+            }
+        );
+
+        let surf = doc.create(SpawnKind::Cube, "Glass", None);
+        insert!(
+            doc,
+            surf,
+            Material {
+                base_color: Color::new(0.2, 0.5, 0.9, 0.4),
+                metallic: 0.0,
+                roughness: 0.1,
+                emissive: Color::new(0.0, 0.0, 0.0, 1.0),
+                blend: BlendMode::Translucent,
+                alpha_cutoff: 0.3,
+            }
+        );
+
+        let deco = doc.create(SpawnKind::Empty, "Decals", None);
+        insert!(
+            doc,
+            deco,
+            Decal {
+                size: Vec3d::new(3.0, 1.0, 3.0),
+                color: Color::new(0.1, 0.1, 0.1, 1.0),
+                opacity: 0.8,
+                fade_angle_deg: 50.0,
+            }
+        );
+        insert!(
+            doc,
+            deco,
+            Volume {
+                kind: VolumeKind::Blocking,
+                tint: Color::new(0.9, 0.2, 0.2, 0.5),
+            }
+        );
+
+        let path = doc.create(SpawnKind::Empty, "Rail", None);
+        insert!(
+            doc,
+            path,
+            Spline {
+                points: vec![
+                    Vec3d::ZERO,
+                    Vec3d::new(2.0, 0.0, 1.0),
+                    Vec3d::new(4.0, 1.0, 0.0),
+                ],
+                closed: true,
+                interp: SplineInterp::Linear,
+            }
+        );
+
+        let scatter = doc.create(SpawnKind::Empty, "Grass", None);
+        insert!(
+            doc,
+            scatter,
+            Foliage {
+                palette: vec![
+                    FoliagePaletteEntry {
+                        primitive: Primitive::Cone,
+                        tint: Color::new(0.1, 0.6, 0.1, 1.0),
+                    },
+                    FoliagePaletteEntry::default(),
+                ],
+                instances: vec![
+                    FoliageInstance {
+                        position: Vec3d::new(1.0, 0.0, 2.0),
+                        rotation: Vec3d::new(0.0, 45.0, 0.0),
+                        scale: 1.2,
+                        kind: 0,
+                    },
+                    FoliageInstance {
+                        position: Vec3d::new(-2.0, 0.0, 3.0),
+                        rotation: Vec3d::ZERO,
+                        scale: 0.8,
+                        kind: 1,
+                    },
+                    FoliageInstance::default(),
+                ],
+            }
+        );
+
+        doc.world_mut().propagate();
+
+        let bytes1 = encode(&to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], 8, "v8 content writes a genuine schema-v8 file");
+        let mut loaded = SceneDoc::new();
+        apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
+        let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
+        assert_eq!(bytes1, bytes2, "v8 save→load→save must be byte-identical");
+
+        // Spot-check the reloaded values.
+        let file = to_scene_file(&loaded);
+        let by_name = |n: &str| file.entities.iter().find(|r| r.name == n).unwrap();
+        let l = by_name("Spot").light.unwrap();
+        assert_eq!(l.range, 25.0);
+        assert_eq!(l.inner_cone_deg, 18.0);
+        assert!(!l.cast_shadows);
+        let m = by_name("Glass").material.unwrap();
+        assert_eq!(m.blend, BlendMode::Translucent);
+        assert_eq!(m.alpha_cutoff, 0.3);
+        assert_eq!(by_name("Decals").decal.unwrap().opacity, 0.8);
+        assert_eq!(by_name("Decals").volume.unwrap().kind, VolumeKind::Blocking);
+        let sp = by_name("Rail").spline.as_ref().unwrap();
+        assert_eq!(sp.points.len(), 3);
+        assert!(sp.closed);
+        let fo = by_name("Grass").foliage.as_ref().unwrap();
+        assert_eq!(fo.instances.len(), 3);
+        assert_eq!(fo.palette.len(), 2);
+        assert_eq!(loaded.settings().render.exposure, 1.4);
+        assert!(loaded.settings().render.gi_enabled);
+    }
+
+    /// The v8 scene also survives TOML/JSON (the dual-format rule) — the new
+    /// components + render block must round-trip in the human-readable codec too.
+    #[test]
+    fn v8_render_settings_are_dual_format_serde_safe() {
+        let mut s = LevelSettings::default();
+        s.render.exposure = 2.0;
+        s.render.shadows_enabled = true;
+        let toml_s = toml::to_string(&s).unwrap();
+        let back: LevelSettings = toml::from_str(&toml_s).unwrap();
+        assert_eq!(back, s);
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(serde_json::from_str::<LevelSettings>(&json).unwrap(), s);
+        // The default record equals inf-render's RenderSettings::default() mapping.
+        let d = RenderSettingsRecord::default();
+        assert_eq!(d.exposure, 1.0);
+        assert!(d.dither && !d.bloom_enabled && !d.ssao_enabled && !d.taa);
+        assert_eq!(d.bloom_threshold, 1.0);
+        assert_eq!(d.bloom_knee, 0.5);
+        assert_eq!(d.bloom_intensity, 0.06);
+        assert_eq!(d.ssao_radius, 0.6);
+        assert_eq!(d.ssao_intensity, 1.0);
+        assert_eq!(d.ssao_bias, 0.025);
+        assert!(!d.shadows_enabled && !d.gi_enabled);
+        assert_eq!(d.shadows_max_distance, 60.0);
+        assert_eq!(d.gi_intensity, 1.0);
     }
 }

@@ -545,6 +545,7 @@ pub fn hybrid_scene() -> SceneDoc {
             kind: LightKind::Directional,
             color: Color::WHITE,
             intensity: 2.0,
+            ..Default::default()
         }
     );
 
@@ -694,6 +695,7 @@ pub fn firstperson_scene() -> SceneDoc {
             kind: LightKind::Directional,
             color: Color::new(1.0, 0.97, 0.9, 1.0),
             intensity: 2.5,
+            ..Default::default()
         }
     );
 
@@ -1014,6 +1016,7 @@ pub fn terrain_demo_scene() -> SceneDoc {
             kind: LightKind::Directional,
             color: Color::new(1.0, 0.97, 0.9, 1.0),
             intensity: 2.5,
+            ..Default::default()
         }
     );
 
@@ -1563,6 +1566,7 @@ pub fn character_demo_scene() -> SceneDoc {
             kind: LightKind::Directional,
             color: Color::new(1.0, 0.97, 0.9, 1.0),
             intensity: 2.5,
+            ..Default::default()
         }
     );
 
@@ -2376,6 +2380,7 @@ pub fn physics_playground_scene() -> SceneDoc {
             kind: LightKind::Directional,
             color: Color::new(1.0, 0.97, 0.9, 1.0),
             intensity: 2.5,
+            ..Default::default()
         }
     );
 
@@ -2385,6 +2390,7 @@ pub fn physics_playground_scene() -> SceneDoc {
         gravity_2d: Vec2d::new(0.0, -9.81),
         gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
         sim_hz: 60.0,
+        ..Default::default()
     });
 
     doc.world_mut().propagate();
@@ -2612,6 +2618,7 @@ pub fn vgeom_demo_scene() -> SceneDoc {
             kind: LightKind::Directional,
             color: Color::WHITE,
             intensity: 3.0,
+            ..Default::default()
         }
     );
 
@@ -2658,6 +2665,7 @@ pub fn vgeom_demo_scene() -> SceneDoc {
                     metallic: 0.0,
                     roughness: 0.7,
                     emissive: Color::new(0.0, 0.0, 0.0, 1.0),
+                    ..Default::default()
                 }
             );
         }
@@ -2836,7 +2844,7 @@ mod tests {
         let doc = vgeom_demo_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 7, "vgeom-demo writes as a schema-v7 file");
+        assert_eq!(bytes1[0], 8, "vgeom-demo writes as a schema-v8 file");
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(
@@ -3050,7 +3058,7 @@ mod tests {
         let doc = character_demo_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 7, "character-demo writes as a schema-v7 file");
+        assert_eq!(bytes1[0], 8, "character-demo writes as a schema-v8 file");
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(
@@ -3112,7 +3120,7 @@ mod tests {
         let doc = terrain_demo_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 7, "terrain-demo writes as a schema-v7 file");
+        assert_eq!(bytes1[0], 8, "terrain-demo writes as a schema-v8 file");
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(
@@ -3198,7 +3206,7 @@ mod tests {
         let doc = physics_playground_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 7, "physics-playground writes a schema-v7 file");
+        assert_eq!(bytes1[0], 8, "physics-playground writes a schema-v8 file");
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(

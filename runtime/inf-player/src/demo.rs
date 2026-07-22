@@ -104,6 +104,7 @@ pub fn build() -> BuiltWorld {
         kind: LightKind::Directional,
         color: Color::WHITE,
         intensity: 1.0,
+        ..Light::default()
     });
 
     // ── the player: kinematic character running the Coyote blueprint ──
