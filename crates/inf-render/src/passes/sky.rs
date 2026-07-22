@@ -18,6 +18,9 @@ pub struct SkyNode {
     pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// The sky params the uniform buffer currently holds; skip the re-upload while
+    /// unchanged (the buffer is created empty, so the first frame always writes).
+    uploaded: Option<crate::scene::SkyParams>,
 }
 
 impl SkyNode {
@@ -109,6 +112,7 @@ impl SkyNode {
             pipeline,
             uniforms,
             bind_group,
+            uploaded: None,
         }
     }
 }
@@ -120,16 +124,20 @@ impl RenderNode for SkyNode {
 
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
         let sky = &frame.scene.sky;
-        let pad = |c: [f32; 3]| [c[0], c[1], c[2], 1.0];
-        gpu.queue.write_buffer(
-            &self.uniforms,
-            0,
-            bytemuck::bytes_of(&SkyUniforms {
-                zenith: pad(sky.zenith),
-                horizon: pad(sky.horizon),
-                ground: pad(sky.ground),
-            }),
-        );
+        // Re-upload only when the sky params changed (byte-identical bytes otherwise).
+        if self.uploaded != Some(*sky) {
+            let pad = |c: [f32; 3]| [c[0], c[1], c[2], 1.0];
+            gpu.queue.write_buffer(
+                &self.uniforms,
+                0,
+                bytemuck::bytes_of(&SkyUniforms {
+                    zenith: pad(sky.zenith),
+                    horizon: pad(sky.horizon),
+                    ground: pad(sky.ground),
+                }),
+            );
+            self.uploaded = Some(*sky);
+        }
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("sky"),

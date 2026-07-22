@@ -191,6 +191,11 @@ impl AoBinding {
     }
 
     /// The AO bind group for this frame, rebuilt when the targets change.
+    ///
+    /// This binds only the size-dependent AO view, so keying on
+    /// `frame.targets.generation` is complete. (Its sibling [`EnvBinding`] additionally
+    /// embeds shadow/GI resources under the same key — sound only because those are
+    /// created once; see that method's invariant.)
     pub fn bind_group(&mut self, gpu: &GpuContext, frame: &FrameData) -> &wgpu::BindGroup {
         if self
             .bg
@@ -337,6 +342,14 @@ impl EnvBinding {
     }
 
     /// The env bind group for this frame, rebuilt when the frame targets change.
+    ///
+    /// INVARIANT: this cache is keyed **only** on `frame.targets.generation`, yet the
+    /// bind group also embeds the shadow (`frame.shadow.array_view`, `.uniform`) and
+    /// GI (`frame.gi.sh`, `.uniform`) resources. That is sound only because those
+    /// shadow/GI resources are created **once** (in `EngineRenderer::new`) and never
+    /// recreated — the AO view is the sole size-dependent resource. If shadow/GI
+    /// resources ever become resizable, this key MUST incorporate their generation,
+    /// or the bind group will hold a stale view.
     pub fn bind_group(&mut self, gpu: &GpuContext, frame: &FrameData) -> &wgpu::BindGroup {
         if self
             .bg

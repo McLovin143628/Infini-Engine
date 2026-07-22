@@ -204,6 +204,30 @@ pub fn batch_scene(sprites: &[SpriteInstance], prebatched: &[PrebatchedRun]) -> 
     let mut loose = sprites.to_vec();
     loose.sort_by_key(sort_key);
 
+    let mut out = BatchedSprites::default();
+    merge_batches(&loose, prebatched, &mut out);
+    out
+}
+
+/// Merge **already-sorted** loose sprites with prebatched runs into final draw
+/// order, writing into `out` (its buffers are cleared and reused, so a per-frame
+/// caller can keep one [`BatchedSprites`] scratch across frames instead of
+/// allocating a fresh output — and the [`SpriteInstance`]-sized instance buffer is
+/// the dominant allocation once tilemaps expand).
+///
+/// `sorted_loose` MUST already be in the stable `(sorting_layer, order, texture)`
+/// order that sorting `sprites` by [`sort_key`] produces. Splitting the loose sort
+/// out of the merge lets a caller cache it — the sort depends only on the loose
+/// sprite set (it is independent of the camera and floating origin), whereas the
+/// prebatched runs (e.g. camera-culled tilemap chunks) change every frame. The
+/// merge and batch results are identical to [`batch_scene`] given the same inputs.
+pub fn merge_batches(
+    sorted_loose: &[SpriteInstance],
+    prebatched: &[PrebatchedRun],
+    out: &mut BatchedSprites,
+) {
+    let loose = sorted_loose;
+
     // Prebatched runs ordered by (layer, order); a stable sort preserves the
     // caller's (tilemap-entity) order for equal keys.
     let mut runs: Vec<&PrebatchedRun> = prebatched.iter().collect();
@@ -211,8 +235,9 @@ pub fn batch_scene(sprites: &[SpriteInstance], prebatched: &[PrebatchedRun]) -> 
 
     // Merge: walk both sequences, emitting the lower (layer, order) first and,
     // on a tie, all equal-key loose sprites before the prebatched runs.
-    let mut instances: Vec<SpriteInstance> =
-        Vec::with_capacity(loose.len() + runs.iter().map(|r| r.instances.len()).sum::<usize>());
+    let instances = &mut out.instances;
+    instances.clear();
+    instances.reserve(loose.len() + runs.iter().map(|r| r.instances.len()).sum::<usize>());
     let mut li = 0;
     let mut ri = 0;
     while li < loose.len() || ri < runs.len() {
@@ -237,7 +262,8 @@ pub fn batch_scene(sprites: &[SpriteInstance], prebatched: &[PrebatchedRun]) -> 
     }
 
     // Maximal equal-texture runs over the final order.
-    let mut batches = Vec::new();
+    let batches = &mut out.batches;
+    batches.clear();
     let mut i = 0;
     while i < instances.len() {
         let texture = instances[i].texture;
@@ -251,7 +277,6 @@ pub fn batch_scene(sprites: &[SpriteInstance], prebatched: &[PrebatchedRun]) -> 
             count: (i - start) as u32,
         });
     }
-    BatchedSprites { instances, batches }
 }
 
 /// Unit-quad corner `(x, y)` in `{0,1}²` for a triangle-strip vertex index

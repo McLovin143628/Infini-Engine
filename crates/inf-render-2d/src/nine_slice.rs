@@ -80,8 +80,27 @@ pub fn expand_nine_slice(p: &NineSliceParams) -> [SpriteInstance; 9] {
     let min_y = p.position.y - p.pivot.y as f64 * h as f64;
     let z = p.position.z;
 
+    // Clamp the UV border fractions the same way the world borders are clamped
+    // above: each into `[0,1]`, then opposite pairs scaled down proportionally so
+    // `left+right ≤ 1` and `top+bottom ≤ 1`. Otherwise `1 - right < left` inverts
+    // the center column's UV rect (a negative-extent source region). Valid inputs
+    // (the common case) pass through unchanged — byte-identical.
+    let mut left = p.border_uv[0].clamp(0.0, 1.0);
+    let mut right = p.border_uv[1].clamp(0.0, 1.0);
+    let mut top = p.border_uv[2].clamp(0.0, 1.0);
+    let mut bottom = p.border_uv[3].clamp(0.0, 1.0);
+    let hsum = left + right;
+    if hsum > 1.0 {
+        left /= hsum;
+        right /= hsum;
+    }
+    let vsum = top + bottom;
+    if vsum > 1.0 {
+        top /= vsum;
+        bottom /= vsum;
+    }
+
     // Per-column: (x-offset from min_x, width, u_min, u_max).
-    let [left, right, top, bottom] = p.border_uv;
     let center_w = (w - 2.0 * bw).max(0.0);
     let cols: [(f32, f32, f32, f32); 3] = [
         (0.0, bw, 0.0, left),              // left
@@ -200,6 +219,28 @@ mod tests {
         assert_eq!(right.size.x, 0.5);
         // Still exactly nine instances.
         assert_eq!(cells.len(), 9);
+    }
+
+    #[test]
+    fn oversized_uv_borders_are_clamped_proportionally() {
+        // left+right = 1.6 > 1: without clamping the center column's u rect would be
+        // [0.8, 0.2] (inverted). Scaling the pair by 1/1.6 → 0.5 each keeps every
+        // rect well-formed. top+bottom = 0.6 ≤ 1 is left untouched.
+        let mut p = params();
+        p.border_uv = [0.8, 0.8, 0.3, 0.3];
+        let cells = expand_nine_slice(&p);
+        // Bottom-left corner: left column u ∈ [0, 0.5].
+        assert_eq!(cells[0].uv_min.x, 0.0);
+        assert_eq!(cells[0].uv_max.x, 0.5);
+        // Bottom-right corner: right column u ∈ [0.5, 1.0].
+        assert_eq!(cells[2].uv_min.x, 0.5);
+        assert_eq!(cells[2].uv_max.x, 1.0);
+        // Center cell (row 1, col 1): non-inverted u rect (here zero-width).
+        let center = cells[4];
+        assert!(center.uv_max.x >= center.uv_min.x, "u rect must not invert");
+        assert!(center.uv_max.y >= center.uv_min.y, "v rect must not invert");
+        // Untouched vertical borders keep their fractions.
+        assert_eq!(cells[0].uv_min.y, 1.0 - 0.3); // bottom row v_min = 1 - bottom
     }
 
     #[test]

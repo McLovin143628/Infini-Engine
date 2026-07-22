@@ -140,6 +140,10 @@ pub struct GiNode {
     probe_bgl: wgpu::BindGroupLayout,
     instances: wgpu::Buffer,
     instance_cap: usize,
+    /// Whether the disabled-GI uniform is already published to the (stable,
+    /// created-once) `frame.gi.uniform`. Gates the constant re-write while GI stays
+    /// off; the enabled path clears it so a later disable re-publishes.
+    published_disabled: bool,
 }
 
 impl GiNode {
@@ -236,6 +240,7 @@ impl GiNode {
             probe_bgl,
             instances,
             instance_cap: 16,
+            published_disabled: false,
         }
     }
 }
@@ -244,13 +249,21 @@ impl RenderNode for GiNode {
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
         let s = &frame.settings.gi;
         if !s.enabled {
-            gpu.queue.write_buffer(
-                &frame.gi.uniform,
-                0,
-                bytemuck::bytes_of(&GiDataGpu::disabled()),
-            );
+            // Publish the disabled uniform once; the buffer is created once and only
+            // this node writes it, so re-writing the constant every frame is redundant.
+            if !self.published_disabled {
+                gpu.queue.write_buffer(
+                    &frame.gi.uniform,
+                    0,
+                    bytemuck::bytes_of(&GiDataGpu::disabled()),
+                );
+                self.published_disabled = true;
+            }
             return;
         }
+        // The enabled path writes the real uniform below, so a later disable must
+        // re-publish the disabled block.
+        self.published_disabled = false;
 
         let origin = &frame.view.origin;
         let eye = frame.view.eye_local();

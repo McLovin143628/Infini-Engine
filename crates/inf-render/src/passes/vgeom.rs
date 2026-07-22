@@ -1054,7 +1054,13 @@ impl RenderNode for VgeomNode {
                 .draws
                 .entry(*asset_id)
                 .or_insert_with(|| AssetDraw::new(gpu));
-            draw.ensure(gpu, instance_count, geom.meshlet_count);
+            // `ensure` returns whether it grew (and thus reallocated) the instance /
+            // visible buffers. We intentionally discard that signal: every consumer of
+            // those buffers below is rebound from `draw` this same frame (the storage
+            // bind groups are rebuilt per draw), so a grow is already reflected. If a
+            // future change caches a bind group across frames, it MUST observe this
+            // rebuilt flag and invalidate that cache.
+            let _rebuilt = draw.ensure(gpu, instance_count, geom.meshlet_count);
 
             // Pack instances (per-frame; the LOD threshold tracks the camera).
             let packed: Vec<VgeomInstanceGpu> = insts

@@ -88,12 +88,22 @@ pub fn expand_text(params: &TextParams) -> Vec<SpriteInstance> {
     let mut out = Vec::new();
     for (line_index, line) in params.text.split('\n').enumerate() {
         let chars: Vec<char> = line.chars().collect();
-        let n = chars.len();
-        // Visual line width: last glyph is `gw` wide, the rest are `advance`.
-        let line_w = if n > 0 {
-            (n as f32 - 1.0) * advance + gw
-        } else {
-            0.0
+        // Visual line width for alignment must count only glyphs that actually
+        // render, using the SAME skip rules as the emit loop below — otherwise a
+        // trailing skipped codepoint (e.g. a stray '\r', or an out-of-atlas char)
+        // would widen the line and drift the centered/right-aligned offset. Skipped
+        // codepoints still consume their column for positioning, so the width is the
+        // right edge of the *last rendered* glyph (`last_col · advance + gw`); a line
+        // with no rendered glyph has zero width. For lines without skipped
+        // codepoints `last_col == n - 1`, so this is byte-identical to the old
+        // `(n - 1) · advance + gw`.
+        let renders = |ch: &char| {
+            let cp = *ch as u32;
+            cp >= params.first_codepoint && (cp - params.first_codepoint) < cell_count
+        };
+        let line_w = match chars.iter().rposition(renders) {
+            Some(last_col) => last_col as f32 * advance + gw,
+            None => 0.0,
         };
         let x_off = match params.halign {
             HAlign::Left => 0.0,
@@ -344,6 +354,17 @@ mod tests {
         let out = expand_text(&params("AB", HAlign::Right));
         assert_eq!(out[0].position.x, -2.0);
         assert_eq!(out[1].position.x, -1.0); // right edge = -1 + gw(1) = 0
+    }
+
+    #[test]
+    fn center_align_ignores_trailing_skipped_codepoint() {
+        // "A\r": 'A' renders at column 0; '\r' (13, below first_codepoint) is skipped
+        // and must NOT widen the line. Width = gw = 1 → centered offset -0.5, so 'A'
+        // sits symmetric about the anchor. (The buggy width of `advance + gw = 2`
+        // would have shifted it to x = -1.)
+        let out = expand_text(&params("A\r", HAlign::Center));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].position.x, -0.5);
     }
 
     #[test]

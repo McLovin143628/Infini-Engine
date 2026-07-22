@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 
 use inf_math::FloatingOrigin;
 use inf_render_2d::{
-    aabb_visible, batch_scene, builtin_font_rgba8, chunk_world_aabb, expand_chunk, PrebatchedRun,
-    SpriteBatch, SpriteInstance, TextureHandle, BUILTIN_FONT_TEXTURE,
+    aabb_visible, builtin_font_rgba8, chunk_world_aabb, expand_chunk, merge_batches, sort_key,
+    BatchedSprites, PrebatchedRun, SpriteInstance, TextureHandle, BUILTIN_FONT_TEXTURE,
 };
 
 use crate::camera::{RenderView, DEPTH_COMPARE, DEPTH_FORMAT};
@@ -348,7 +348,18 @@ pub struct SpriteNode {
     textures: SpriteTextures,
     instances: Option<wgpu::Buffer>,
     instance_capacity: usize,
-    batches: Vec<SpriteBatch>,
+    /// Reused batcher output (draw order + per-texture runs). Cleared and refilled
+    /// on each re-batch so the potentially large instance list (tilemaps expand to
+    /// many quads) isn't reallocated every frame.
+    scratch: BatchedSprites,
+    /// Loose sprites in stable painter order, cached per `loose_version`. The sort
+    /// depends only on the sprite set — not the camera or floating origin — so it is
+    /// reused across the frames where only the camera moved (only tilemap culling
+    /// then re-runs).
+    loose_sorted: Vec<SpriteInstance>,
+    loose_version: Option<u64>,
+    /// Reused packed-instance staging buffer (avoids a fresh `Vec` per frame).
+    raw_scratch: Vec<SpriteRaw>,
     /// (scene version, floating origin) the current instance buffer reflects.
     uploaded_key: Option<(u64, glam::DVec3)>,
     lights2d_buf: wgpu::Buffer,
@@ -486,7 +497,10 @@ impl SpriteNode {
             textures: SpriteTextures::new(gpu, tex_bgl),
             instances: None,
             instance_capacity: 0,
-            batches: Vec::new(),
+            scratch: BatchedSprites::default(),
+            loose_sorted: Vec::new(),
+            loose_version: None,
+            raw_scratch: Vec::new(),
             uploaded_key: None,
             lights2d_buf,
             lights2d_bg,
@@ -516,18 +530,34 @@ impl SpriteNode {
         gpu.queue
             .write_buffer(&self.lights2d_buf, 0, bytemuck::bytes_of(&lights2d));
 
+        // Cache the loose-sprite painter sort per scene version. `sort_key` ignores
+        // position, so the order is independent of the camera and floating origin —
+        // it only changes when the sprite set does. Reusing it means a frame where
+        // only the camera moved re-runs tilemap culling but not this sort.
+        if self.loose_version != Some(frame.scene.version) {
+            self.loose_sorted.clear();
+            self.loose_sorted.extend_from_slice(&frame.scene.sprites);
+            self.loose_sorted.sort_by_key(sort_key);
+            self.loose_version = Some(frame.scene.version);
+        }
+
         // Tilemap chunks (culled + expanded per frame) plus the host's
-        // already-expanded 9-slice / text runs, all merged in one painter sort.
+        // already-expanded 9-slice / text runs, merged with the cached loose sort in
+        // one painter order — into the reused scratch buffers. Identical order/batches
+        // to a fresh `batch_scene(&sprites, &runs)`, so the goldens are byte-stable.
         let mut runs = build_tilemap_runs(frame.scene, frame.view);
         runs.extend(frame.scene.prebatched.iter().cloned());
-        let batched = batch_scene(&frame.scene.sprites, &runs);
-        self.batches = batched.batches;
+        merge_batches(&self.loose_sorted, &runs, &mut self.scratch);
 
-        let raw: Vec<SpriteRaw> = batched
-            .instances
-            .iter()
-            .map(|s| SpriteRaw::pack(&frame.view.origin, s))
-            .collect();
+        // Pack (origin-dependent) into the reused staging buffer.
+        self.raw_scratch.clear();
+        self.raw_scratch.extend(
+            self.scratch
+                .instances
+                .iter()
+                .map(|s| SpriteRaw::pack(&frame.view.origin, s)),
+        );
+        let raw = &self.raw_scratch;
 
         if !raw.is_empty() {
             if self.instances.is_none() || self.instance_capacity < raw.len() {
@@ -543,7 +573,7 @@ impl SpriteNode {
             gpu.queue.write_buffer(
                 self.instances.as_ref().unwrap(),
                 0,
-                bytemuck::cast_slice(&raw),
+                bytemuck::cast_slice(raw),
             );
         }
     }
@@ -556,7 +586,7 @@ impl RenderNode for SpriteNode {
 
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
         self.sync(gpu, frame);
-        if self.batches.is_empty() {
+        if self.scratch.batches.is_empty() {
             return;
         }
         let Some(instances) = self.instances.as_ref() else {
@@ -591,7 +621,7 @@ impl RenderNode for SpriteNode {
         pass.set_bind_group(0, frame.view_bg, &[]);
         pass.set_bind_group(2, &self.lights2d_bg, &[]);
         pass.set_vertex_buffer(0, instances.slice(..));
-        for batch in &self.batches {
+        for batch in &self.scratch.batches {
             pass.set_bind_group(1, self.textures.bind_group(batch.texture), &[]);
             let end = batch.start + batch.count;
             pass.draw(0..4, batch.start..end);

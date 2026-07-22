@@ -149,6 +149,10 @@ pub struct ShadowNode {
     instance_capacity: usize,
     instance_count: u32,
     uploaded_version: Option<(u64, glam::DVec3)>,
+    /// Whether the disabled-shadows uniform is already published to the (stable,
+    /// created-once) `frame.shadow.uniform`. Gates the constant re-write while
+    /// shadows stay off; the enabled path clears it so a later disable re-publishes.
+    published_disabled: bool,
 }
 
 impl ShadowNode {
@@ -273,6 +277,7 @@ impl ShadowNode {
             instance_capacity: 0,
             instance_count: 0,
             uploaded_version: None,
+            published_disabled: false,
         }
     }
 
@@ -319,14 +324,22 @@ impl RenderNode for ShadowNode {
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
         let s = &frame.settings.shadows;
         if !s.enabled {
-            // Publish the disabled uniform (valid enabled=0 flag) and render nothing.
-            gpu.queue.write_buffer(
-                &frame.shadow.uniform,
-                0,
-                bytemuck::bytes_of(&ShadowDataGpu::disabled()),
-            );
+            // Publish the disabled uniform (valid enabled=0 flag) once and render
+            // nothing; the buffer is created once and only this node writes it, so
+            // re-publishing the same constant every frame is redundant.
+            if !self.published_disabled {
+                gpu.queue.write_buffer(
+                    &frame.shadow.uniform,
+                    0,
+                    bytemuck::bytes_of(&ShadowDataGpu::disabled()),
+                );
+                self.published_disabled = true;
+            }
             return;
         }
+        // The enabled path overwrites the uniform below, so a later disable must
+        // re-publish the disabled block.
+        self.published_disabled = false;
         self.sync(gpu, frame);
 
         // Shadow light: the first directional light's direction-to-light, else the

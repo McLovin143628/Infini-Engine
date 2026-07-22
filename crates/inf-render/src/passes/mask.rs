@@ -6,13 +6,12 @@
 //! whole object even where nearer geometry would occlude it. Instance subsets
 //! are small (the selection), so they're re-packed each frame.
 
-use inf_math::FloatingOrigin;
+use std::collections::HashMap;
 
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
 use crate::passes::mesh::{cube_geometry, vertex_layouts, InstanceRaw};
 use crate::renderer::{FrameData, MASK_FORMAT};
-use crate::scene::{MeshInstance, RenderScene};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -34,6 +33,16 @@ pub struct MaskNode {
     index_count: u32,
     selected: Batch,
     hovered: Batch,
+    /// Instance id → index into `scene.instances`, rebuilt once per scene version
+    /// (replaces a per-selected-id linear scan of the whole instance list). First
+    /// match wins, matching the previous `find`.
+    id_index: HashMap<u32, usize>,
+    /// Scene version the `id_index` reflects.
+    index_version: Option<u64>,
+    /// (scene version, origin, selection, hover) the packed batches reflect. The
+    /// selection and hover change **without** bumping `scene.version`, so they ride
+    /// in the gate key alongside the version + origin.
+    uploaded_key: Option<(u64, glam::DVec3, Vec<u32>, Option<u32>)>,
 }
 
 impl MaskNode {
@@ -152,16 +161,16 @@ impl MaskNode {
             index_count: idx.len() as u32,
             selected: batch(1.0, "mask-selected"),
             hovered: batch(0.5, "mask-hovered"),
+            id_index: HashMap::new(),
+            index_version: None,
+            uploaded_key: None,
         }
     }
 
-    fn sync_batch(
-        gpu: &GpuContext,
-        batch: &mut Batch,
-        origin: &FloatingOrigin,
-        picks: impl Iterator<Item = MeshInstance>,
-    ) {
-        let raw: Vec<InstanceRaw> = picks.map(|i| InstanceRaw::pack(origin, &i)).collect();
+    /// Upload the packed instances into `batch`, growing (never shrinking) its
+    /// buffer. An empty `raw` leaves the buffer intact and sets `count = 0`, so the
+    /// draw loop skips it.
+    fn upload_batch(gpu: &GpuContext, batch: &mut Batch, raw: &[InstanceRaw]) {
         batch.count = raw.len() as u32;
         if raw.is_empty() {
             return;
@@ -179,17 +188,68 @@ impl MaskNode {
         gpu.queue.write_buffer(
             batch.instances.as_ref().unwrap(),
             0,
-            bytemuck::cast_slice(&raw),
+            bytemuck::cast_slice(raw),
         );
     }
 
-    /// Look up the full instance for each id (selection stores ids only).
-    fn instances_for<'a>(
-        scene: &'a RenderScene,
-        ids: &'a [u32],
-    ) -> impl Iterator<Item = MeshInstance> + 'a {
-        ids.iter()
-            .filter_map(move |id| scene.instances.iter().find(|i| i.id == *id).copied())
+    /// Rebuild the id→index map (once per scene version) and re-pack the selected /
+    /// hovered instance buffers — but only when the `(version, origin, selection,
+    /// hover)` gate key changed. `run` still executes the pass every frame to clear
+    /// the mask; only the CPU packing + buffer upload is gated here.
+    fn sync(&mut self, gpu: &GpuContext, frame: &FrameData) {
+        let scene = frame.scene;
+        let origin = &frame.view.origin;
+
+        // Rebuild the id→index map once per scene version (first match wins, matching
+        // the previous linear `find`), so selection lookups are O(1) instead of a
+        // full instance scan per selected id.
+        if self.index_version != Some(scene.version) {
+            self.id_index.clear();
+            for (idx, inst) in scene.instances.iter().enumerate() {
+                self.id_index.entry(inst.id).or_insert(idx);
+            }
+            self.index_version = Some(scene.version);
+        }
+
+        // Don't double-draw an object that's both hovered and selected.
+        let hovered = scene.hovered.filter(|h| !scene.selected.contains(h));
+
+        // Gate re-packing; only clone the selection into the key when it changed.
+        let unchanged = self.uploaded_key.as_ref().is_some_and(|(v, o, sel, hov)| {
+            *v == scene.version
+                && *o == origin.origin()
+                && sel.as_slice() == scene.selected.as_slice()
+                && *hov == hovered
+        });
+        if unchanged {
+            return;
+        }
+        self.uploaded_key = Some((
+            scene.version,
+            origin.origin(),
+            scene.selected.clone(),
+            hovered,
+        ));
+
+        let sel_raw: Vec<InstanceRaw> = scene
+            .selected
+            .iter()
+            .filter_map(|id| {
+                self.id_index
+                    .get(id)
+                    .map(|&i| InstanceRaw::pack(origin, &scene.instances[i]))
+            })
+            .collect();
+        let hov_raw: Vec<InstanceRaw> = hovered
+            .iter()
+            .filter_map(|id| {
+                self.id_index
+                    .get(id)
+                    .map(|&i| InstanceRaw::pack(origin, &scene.instances[i]))
+            })
+            .collect();
+        Self::upload_batch(gpu, &mut self.selected, &sel_raw);
+        Self::upload_batch(gpu, &mut self.hovered, &hov_raw);
     }
 }
 
@@ -199,26 +259,7 @@ impl RenderNode for MaskNode {
     }
 
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
-        let origin = &frame.view.origin;
-        MaskNode::sync_batch(
-            gpu,
-            &mut self.selected,
-            origin,
-            MaskNode::instances_for(frame.scene, &frame.scene.selected),
-        );
-        // Don't double-draw an object that's both hovered and selected.
-        let hovered: Vec<u32> = frame
-            .scene
-            .hovered
-            .filter(|h| !frame.scene.selected.contains(h))
-            .into_iter()
-            .collect();
-        MaskNode::sync_batch(
-            gpu,
-            &mut self.hovered,
-            origin,
-            MaskNode::instances_for(frame.scene, &hovered),
-        );
+        self.sync(gpu, frame);
 
         // Always run the pass to clear the mask (stale outline otherwise).
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

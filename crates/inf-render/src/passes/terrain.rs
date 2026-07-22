@@ -250,6 +250,10 @@ pub struct TerrainNode {
     lod_meshes: Vec<LodMesh>,
     /// Per-tile height + weight textures, keyed by tile coord (deterministic).
     textures: BTreeMap<(i32, i32), TileTextures>,
+    /// Tile coord → index into `terrain.tiles`, rebuilt once per terrain version
+    /// (replaces a per-patch linear scan of the tile list). First match wins,
+    /// matching the previous `find`.
+    tile_index: BTreeMap<(i32, i32), usize>,
     /// Terrain splat material uniform (`@group(2)`) + its bind group.
     material_buffer: wgpu::Buffer,
     material_bg: wgpu::BindGroup,
@@ -467,6 +471,7 @@ impl TerrainNode {
             tile_bgl,
             lod_meshes,
             textures: BTreeMap::new(),
+            tile_index: BTreeMap::new(),
             material_buffer,
             material_bg,
             env,
@@ -484,6 +489,15 @@ impl TerrainNode {
             return;
         }
         self.uploaded_version = Some(terrain.version);
+
+        // Rebuild the coord→index map alongside the texture cache (same version
+        // gate), so the per-patch tile lookup in `run` is O(log n) instead of a
+        // linear scan per patch. First insert wins, matching the previous `find`.
+        self.tile_index.clear();
+        for (i, tile) in terrain.tiles.iter().enumerate() {
+            self.tile_index.entry(tile.coord).or_insert(i);
+        }
+
         let res = terrain.tile_resolution.max(2);
         let expect = (res * res) as usize;
 
@@ -642,7 +656,7 @@ impl RenderNode for TerrainNode {
         let origin = &frame.view.origin;
         let mut raw: Vec<PatchRaw> = Vec::with_capacity(patches.len());
         for p in &patches {
-            let Some(tile) = terrain.tiles.iter().find(|t| t.coord == p.coord) else {
+            let Some(tile) = self.tile_index.get(&p.coord).map(|&i| &terrain.tiles[i]) else {
                 continue;
             };
             let o = origin.to_render(tile.origin);

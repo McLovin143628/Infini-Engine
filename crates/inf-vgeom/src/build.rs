@@ -19,13 +19,16 @@
 //!
 //! ## Error metric & the cut invariant
 //!
-//! A group's error is `max(child errors) + max(simplify error, ε)` — a
-//! *cumulative, strictly increasing* object-space error. Strictness (the `ε`
-//! bump) guarantees every meshlet has `error < parent_error`, so the runtime cut
-//! `error ≤ t < parent_error` never sees an empty interval. Combined with the
-//! shared-boundary construction (see [`crate::model`]) this makes the cut select
-//! exactly one meshlet per root-to-leaf path — a complete, non-overlapping
-//! surface at every threshold.
+//! A group's error is `max(child errors) + simplify error`, forced **strictly
+//! greater** than every child error (see [`monotone_group_error`]: when the
+//! increment is too small to change the `f32` — a near-zero measured error, or
+//! any increment absorbed by rounding at a coarse magnitude — it steps to the
+//! next representable float instead). This *cumulative, strictly increasing*
+//! object-space error guarantees every meshlet has `error < parent_error`, so
+//! the runtime cut `error ≤ t < parent_error` never sees an empty interval.
+//! Combined with the shared-boundary construction (see [`crate::model`]) this
+//! makes the cut select exactly one meshlet per root-to-leaf path — a complete,
+//! non-overlapping surface at every threshold.
 //!
 //! ## Determinism
 //!
@@ -50,9 +53,25 @@ use crate::model::{Group, LevelRange, Meshlet, VgeomMesh, VgeomVertex};
 /// stride.
 const VERTEX_STRIDE: usize = std::mem::size_of::<VgeomVertex>();
 
-/// The minimum per-level error increment, guaranteeing strict monotonicity of the
-/// DAG errors even when a simplification step incurs (near-)zero measured error.
-const ERROR_EPS: f32 = 1.0e-6;
+/// Combine a group's max child error with its measured simplify error into a
+/// **strictly increasing** cumulative error. Returns `max_child_error +
+/// simplify_error`, except that when the sum does not actually exceed
+/// `max_child_error` — the increment is zero, or is absorbed by `f32` rounding at
+/// a coarse magnitude (where the old absolute `1e-6` ε vanished entirely) — it
+/// steps to the next representable float above `max_child_error`. This guarantees
+/// `result > max_child_error`, so the DAG cut interval `[error, parent_error)` is
+/// never empty even at the coarsest LOD levels.
+fn monotone_group_error(max_child_error: f32, simplify_error: f32) -> f32 {
+    let raw = max_child_error + simplify_error;
+    if raw > max_child_error {
+        raw
+    } else {
+        // `next_up` is stable since Rust 1.86 (workspace toolchain is newer). It
+        // handles the finite, non-negative errors we produce; the guard above
+        // means we only reach here when `raw == max_child_error`.
+        f32::next_up(max_child_error)
+    }
+}
 
 /// Tunable parameters for [`build_vgeom`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -235,7 +254,6 @@ pub fn build_vgeom(
                 // No coarser replacement for this region: members stay roots.
                 continue;
             }
-            any_progress = true;
             let new_meshlets = clusterize(
                 &vertices,
                 &res.simplified_index,
@@ -243,6 +261,23 @@ pub fn build_vgeom(
                 (level + 1) as u8,
                 res.group_error,
             );
+            // A progressed group that clusterizes to *nothing* (e.g. the simplified
+            // soup degenerated) must be treated as NOT progressed: creating a group
+            // with `produced_count == 0` and linking the members to it would set
+            // their `parent_error` finite while no parent meshlet exists, orphaning
+            // them (a member with `error ≤ t < parent_error` and no covering coarser
+            // meshlet leaves a hole in the cut). Skipping keeps the members roots
+            // (`parent_error` stays `+∞`), honoring the model.rs `produced_count ≥ 1`
+            // invariant.
+            if new_meshlets.is_empty() {
+                debug_assert!(
+                    false,
+                    "progressed group produced zero meshlets (simplified_index len = {})",
+                    res.simplified_index.len()
+                );
+                continue;
+            }
+            any_progress = true;
             let produced_start_within = next.len();
             let produced_count = new_meshlets.len();
             next.extend(new_meshlets);
@@ -479,9 +514,9 @@ fn simplify_group(vertices: &[VgeomVertex], job: GroupJob) -> GroupResult {
 
     let progressed =
         simplified_index.len() >= 3 && simplified_index.len() < job.combined_index.len();
-    // Cumulative, strictly increasing object-space error (the ε keeps intervals
-    // non-empty even when meshopt reports ~0 error).
-    let group_error = job.max_child_error + simplify_error.max(ERROR_EPS);
+    // Cumulative, strictly increasing object-space error (kept non-empty even when
+    // meshopt reports ~0 error, or the increment rounds away at coarse magnitudes).
+    let group_error = monotone_group_error(job.max_child_error, simplify_error);
 
     GroupResult {
         simplified_index,
@@ -611,4 +646,35 @@ fn bounding_sphere(vertices: &[VgeomVertex]) -> ([f32; 3], f32) {
         r2 = r2.max(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     }
     (center, r2.sqrt())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_error_strictly_exceeds_children_at_coarse_magnitudes() {
+        // At a large child error, a zero (or sub-ulp) simplify error is absorbed by
+        // f32 addition — `16.0 + 1e-6 == 16.0` — which the old absolute-ε bump did
+        // NOT survive, collapsing the cut interval `[error, parent_error)`. The
+        // monotone construction must still yield a strictly greater value.
+        let e = monotone_group_error(16.0, 0.0);
+        assert!(e > 16.0, "zero simplify error must still advance: got {e}");
+        assert_eq!(e, f32::next_up(16.0));
+
+        // A sub-ulp increment (below one ulp at 16.0 ≈ 1.9e-6) is also absorbed and
+        // must be bumped to the next representable float.
+        let tiny = monotone_group_error(16.0, 1e-9);
+        assert!(tiny > 16.0, "absorbed increment must advance: got {tiny}");
+
+        // A measurable simplify error passes straight through (no bump needed).
+        assert_eq!(monotone_group_error(16.0, 0.5), 16.5);
+
+        // The interval is non-empty even at LOD 0 (child error 0).
+        let z = monotone_group_error(0.0, 0.0);
+        assert!(
+            z > 0.0,
+            "zero child + zero simplify must still be > 0: got {z}"
+        );
+    }
 }
