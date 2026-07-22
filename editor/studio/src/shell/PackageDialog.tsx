@@ -274,8 +274,8 @@ export default function PackageDialog() {
                   )}
 
                   <p className="mt-2 text-[10px] text-(--ink-text-faint)">
-                    Reveal in Explorer arrives with an audited shell-open command (follow-up); copy
-                    a path above for now.
+                    Revealing a path in the OS file browser needs an audited shell-open command,
+                    which isn’t available yet — copy a path above instead.
                   </p>
                 </div>
               )}

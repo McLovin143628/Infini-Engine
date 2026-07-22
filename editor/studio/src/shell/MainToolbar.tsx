@@ -7,6 +7,7 @@ import { useState } from "react";
 import {
   ChevronDown,
   Hammer,
+  Mountain,
   MousePointer2,
   Pause,
   Play,
@@ -19,6 +20,7 @@ import {
 import { executeCommand } from "../lib/commands";
 import { useSimStore } from "../stores/simStore";
 import { usePieStore } from "../stores/pieStore";
+import { useViewportStore } from "../stores/viewportStore";
 
 function ToolButton(props: {
   label: string;
@@ -165,8 +167,12 @@ function PlayCluster() {
 }
 
 export default function MainToolbar() {
-  // Selection-mode segmented control is a visual stub until P2.4 gizmos.
-  const [mode, setMode] = useState<"select" | "landscape" | "foliage">("select");
+  // Editor tool mode, two-way synced with the native viewport via
+  // `viewport_set_tool_mode` (Select = pick/gizmo, Sculpt = terrain/"Landscape").
+  // The W/E/R translate/rotate/scale gizmo switch is handled inside the native
+  // viewport and is not (yet) settable from the webview — see report.
+  const toolMode = useViewportStore((s) => s.toolMode);
+  const setToolMode = useViewportStore((s) => s.setToolMode);
   return (
     <div className="flex h-10 shrink-0 items-center gap-1 border-b border-(--ink-border) bg-(--ink-bg-2) px-2">
       <ToolButton label="Save Current Level (Ctrl+S)" command="file.saveLevel">
@@ -176,21 +182,21 @@ export default function MainToolbar() {
       <div className="flex items-center rounded bg-(--ink-bg-1) p-0.5">
         {(
           [
-            ["select", "Select"],
-            ["landscape", "Landscape"],
-            ["foliage", "Foliage"],
+            ["Select", "Select"],
+            ["Sculpt", "Landscape"],
           ] as const
         ).map(([id, label]) => (
           <button
             key={id}
+            title={id === "Sculpt" ? "Landscape (terrain sculpt)" : "Select / gizmo"}
             className={`flex h-6 items-center gap-1 rounded px-2 ${
-              mode === id
+              toolMode === id
                 ? "bg-(--ink-bg-3) text-(--ink-text)"
                 : "text-(--ink-text-dim) hover:text-(--ink-text)"
             }`}
-            onClick={() => setMode(id)}
+            onClick={() => setToolMode(id)}
           >
-            {id === "select" && <MousePointer2 size={13} />}
+            {id === "Select" ? <MousePointer2 size={13} /> : <Mountain size={13} />}
             {label}
           </button>
         ))}

@@ -6,36 +6,51 @@
  * the unhandled-command hook.
  */
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import type { SpawnKind } from "../bindings/SpawnKind";
 import { setCommandHandler, setUnhandledCommandHook } from "../lib/commands";
 import { app } from "../lib/ipc";
 import { DISCIPLINE_LABEL } from "../lib/disciplines";
 import { registerMenuCommands } from "../lib/menus";
 import { applyDisciplineLayout, useDockLayout } from "../panels/dock/dockLayoutStore";
+import { useProjectStore } from "../stores/projectStore";
+import { useSceneStore } from "../stores/sceneStore";
 import { useShellStore } from "../stores/shellStore";
 import { useTourStore } from "../stores/tourStore";
 
-/** Which phase delivers each stubbed command family (status-toast hint). */
-const PHASE_HINTS: [RegExp, string][] = [
-  [/^(file\.(newLevel|openLevel|saveLevel|saveLevelAs|saveAll)|edit\.(undo|redo|undoHistory))/, "Phase 3 (scene model & undo)"],
-  [/^file\.(openAsset|importIntoLevel|exportAll|exportSelected)/, "Phase 4 (asset system)"],
-  [/^file\.(newProject|openProject|recentProjects)/, "Phase 5 (project system)"],
-  [/^edit\.(cut|copy|paste|duplicate|delete)/, "Phase 3 (scene model)"],
-  [/^edit\.(editorPreferences|projectSettings|plugins)/, "Phase 5"],
-  [/^window\.viewport/, "Phase 2–3"],
-  [/^tools\.(newRustSystem|openIde|refreshIdeProject)/, "Phase 5 (IDE integration)"],
-  [/^tools\.(findInBlueprints|blueprintDebugger)/, "Phase 6 (Blueprints)"],
-  [/^tools\.profiler/, "Phase 15"],
-  [/^build\./, "Phase 9 (cook & package)"],
-  [/^platforms\./, "Phase 9 (desktop export)"],
-  [/^select\./, "Phase 3 (selection service)"],
-  [/^actor\./, "Phase 3 (scene model)"],
-  [/^play\./, "Phase 9 (play-in-editor)"],
-  [/^help\.(documentation|reportBug)/, "Phase 15 (docs site)"],
+/**
+ * Honest, phase-free status messages for command families that are enumerated
+ * (the full UE-parity menu tree) but genuinely NOT implemented yet. Anything not
+ * matched here falls through to a generic "… is not implemented yet."
+ *
+ * The old "arrives with Phase N" hints were removed once those phases shipped —
+ * most of those families are now live (wired by the scene/project/viewport
+ * stores or below) and never reach the unhandled hook at all. This table is kept
+ * as the mechanism for the handful that remain genuinely unbuilt.
+ */
+const STUB_HINTS: [RegExp, string][] = [
+  [/^edit\.(cut|copy|paste)$/, "Clipboard for scene objects isn’t implemented yet."],
+  [/^(edit|actor)\.duplicate$/, "Duplicating scene objects isn’t implemented yet."],
 ];
 
-function phaseHint(id: string): string | undefined {
-  return PHASE_HINTS.find(([re]) => re.test(id))?.[1];
+export function stubHint(id: string): string | undefined {
+  return STUB_HINTS.find(([re]) => re.test(id))?.[1];
 }
+
+/**
+ * Maps each `actor.place.*` menu command (and the toolbar "Add" button, which
+ * dispatches `actor.place.empty`) to the `SpawnKind` the scene store creates.
+ * The set mirrors `lib/spawnables` — asserted by the wiring-table test.
+ */
+export const ACTOR_PLACE_KINDS: Record<string, SpawnKind> = {
+  "actor.place.empty": "empty",
+  "actor.place.cube": "cube",
+  "actor.place.sphere": "sphere",
+  "actor.place.cylinder": "cylinder",
+  "actor.place.plane": "plane",
+  "actor.place.pointLight": "point_light",
+  "actor.place.directionalLight": "directional_light",
+  "actor.place.camera": "camera",
+};
 
 export function bootstrapShellCommands(): void {
   registerMenuCommands();
@@ -44,10 +59,7 @@ export function bootstrapShellCommands(): void {
   // family registered by `registerSimCommands()` (stores/simStore) — P8.4.
 
   setUnhandledCommandHook((cmd) => {
-    const hint = phaseHint(cmd.id);
-    useShellStore
-      .getState()
-      .pushStatus(hint ? `“${cmd.title}” arrives with ${hint}.` : `“${cmd.title}” is not implemented yet.`);
+    useShellStore.getState().pushStatus(stubHint(cmd.id) ?? `“${cmd.title}” is not implemented yet.`);
   });
 
   // Live now: window/application controls.
@@ -86,6 +98,42 @@ export function bootstrapShellCommands(): void {
   const openPackageDialog = () => useShellStore.getState().setPackageDialogOpen(true);
   setCommandHandler("build.package", openPackageDialog);
   setCommandHandler("build.cook", openPackageDialog);
+
+  // ── Scene editing: selection + actor placement ─────────────────────────────
+  // The scene store already owns edit.undo/redo/delete + file new/open/save
+  // (registerSceneCommands) and project new/open (registerProjectCommands); the
+  // handlers below wire the remaining enumerated commands to the same live
+  // capabilities. Genuinely-unbuilt actions (duplicate, clipboard, attach/group,
+  // rename-via-menu, etc.) stay stubbed and surface an honest message.
+  const sceneState = () => useSceneStore.getState();
+
+  // Select menu → the selection service (client-side over the live scene tree).
+  setCommandHandler("select.all", () => {
+    const s = sceneState();
+    s.select(Object.keys(s.nodes), false);
+  });
+  setCommandHandler("select.none", () => sceneState().select([], false));
+  setCommandHandler("select.invert", () => {
+    const s = sceneState();
+    const sel = new Set(s.selection);
+    s.select(
+      Object.keys(s.nodes).filter((g) => !sel.has(g)),
+      false,
+    );
+  });
+
+  // Actor ▸ Place Actor (and the toolbar "Add" button, which dispatches
+  // actor.place.empty) → scene_create the mapped kind at the world origin.
+  for (const [id, kind] of Object.entries(ACTOR_PLACE_KINDS)) {
+    setCommandHandler(id, () => void sceneState().createEntity(kind, null));
+  }
+  // Actor ▸ Delete mirrors Edit ▸ Delete (both drop the current selection).
+  setCommandHandler("actor.delete", () => sceneState().deleteSelected());
+
+  // File ▸ Recent Projects placeholder → open the Start screen (lists recents).
+  setCommandHandler("file.recentProjects.none", () =>
+    useProjectStore.getState().setShowStartScreen(true),
+  );
 
   // Command palette + Content Drawer (P1.4).
   setCommandHandler("tools.commandPalette", () => {

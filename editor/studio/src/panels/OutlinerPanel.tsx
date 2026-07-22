@@ -16,41 +16,9 @@ import {
 import type { SpawnKind } from "../bindings/SpawnKind";
 import { cn } from "../lib/utils";
 import { fuzzyMatch } from "../lib/fuzzy";
+import { SPAWNABLE_SECTIONS } from "../lib/spawnables";
 import { useDockLayout } from "./dock/dockLayoutStore";
 import { outlinerRows, useSceneStore } from "../stores/sceneStore";
-
-const ADD_SECTIONS: Array<{ heading?: string; items: Array<{ kind: SpawnKind; label: string }> }> = [
-  {
-    items: [
-      { kind: "cube", label: "Cube" },
-      { kind: "sphere", label: "Sphere" },
-      { kind: "plane", label: "Plane" },
-      { kind: "cylinder", label: "Cylinder" },
-      { kind: "cone", label: "Cone" },
-      { kind: "terrain", label: "Terrain" },
-    ],
-  },
-  {
-    heading: "Lights & Camera",
-    items: [
-      { kind: "point_light", label: "Point Light" },
-      { kind: "directional_light", label: "Directional Light" },
-      { kind: "spot_light", label: "Spot Light" },
-      { kind: "camera", label: "Camera" },
-    ],
-  },
-  {
-    heading: "2D",
-    items: [
-      { kind: "sprite", label: "Sprite" },
-      { kind: "tilemap", label: "Tilemap" },
-      { kind: "text2d", label: "Text" },
-      { kind: "nine_slice", label: "Nine-Slice" },
-      { kind: "light2d", label: "2D Light" },
-    ],
-  },
-  { heading: "Other", items: [{ kind: "empty", label: "Empty (Folder)" }] },
-];
 
 export default function OutlinerPanel() {
   const nodes = useSceneStore((s) => s.nodes);
@@ -109,7 +77,7 @@ export default function OutlinerPanel() {
           </button>
           {addOpen && (
             <div className="absolute left-0 top-7 z-10 max-h-96 w-44 overflow-auto rounded border border-(--ink-border) bg-(--ink-bg-1) py-1 shadow-lg">
-              {ADD_SECTIONS.map((section, si) => (
+              {SPAWNABLE_SECTIONS.map((section, si) => (
                 <div key={si} className={si > 0 ? "mt-1 border-t border-(--ink-border) pt-1" : ""}>
                   {section.heading && (
                     <div className="px-3 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-(--ink-text-faint)">
