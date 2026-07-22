@@ -608,6 +608,33 @@ fn drain_input() -> FrameInput {
     })
 }
 
+/// Write a viewport crash report for a caught panic and log where it landed.
+/// Shared by the init and per-frame guards; the editor process survives either.
+fn report_viewport_panic(location: &str, payload: &(dyn std::any::Any + Send)) {
+    let msg = inf_editor_core::diagnostics::panic_message(payload);
+    let report = inf_editor_core::diagnostics::CrashReport {
+        app: "inf-viewport".into(),
+        engine_version: env!("CARGO_PKG_VERSION").into(),
+        os: std::env::consts::OS.into(),
+        arch: std::env::consts::ARCH.into(),
+        location: location.into(),
+        message: msg.clone(),
+        adapter: None,
+        log_tail: Vec::new(),
+    };
+    let dir = std::env::temp_dir().join("InfinityEngine").join("crashes");
+    match inf_editor_core::diagnostics::write_crash_report(&dir, &report) {
+        Ok(path) => tracing::error!(
+            "inf-viewport: {location} panicked ({msg}); crash report at {} — \
+             viewport stopped, editor still running",
+            path.display()
+        ),
+        Err(werr) => tracing::error!(
+            "inf-viewport: {location} panicked ({msg}); failed to write crash report: {werr}"
+        ),
+    }
+}
+
 fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, scene: SharedScene) {
     let hwnd = match create_child_window(parent_hwnd) {
         Ok(h) => h,
@@ -630,10 +657,21 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
         hwnd: hwnd.0 as isize,
         hinstance,
     };
-    let mut host = match EngineHost::new(target, 64, 64) {
-        Ok(h) => h,
-        Err(e) => {
+    // Engine init compiles every pass shader up-front; guard it the same way as
+    // the per-frame render so a validation panic degrades to "viewport
+    // unavailable" instead of silently killing this thread (the pick-shader
+    // composition bug did exactly that).
+    let init = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        EngineHost::new(target, 64, 64)
+    }));
+    let mut host = match init {
+        Ok(Ok(h)) => h,
+        Ok(Err(e)) => {
             tracing::error!("inf-viewport: engine init failed: {e}");
+            return;
+        }
+        Err(payload) => {
+            report_viewport_panic("<viewport engine init>", &*payload);
             return;
         }
     };
@@ -995,29 +1033,7 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 break 'outer;
             }
             Err(payload) => {
-                let msg = inf_editor_core::diagnostics::panic_message(&*payload);
-                let report = inf_editor_core::diagnostics::CrashReport {
-                    app: "inf-viewport".into(),
-                    engine_version: env!("CARGO_PKG_VERSION").into(),
-                    os: std::env::consts::OS.into(),
-                    arch: std::env::consts::ARCH.into(),
-                    location: "<viewport render thread>".into(),
-                    message: msg.clone(),
-                    adapter: None,
-                    log_tail: Vec::new(),
-                };
-                let dir = std::env::temp_dir().join("InfinityEngine").join("crashes");
-                match inf_editor_core::diagnostics::write_crash_report(&dir, &report) {
-                    Ok(path) => tracing::error!(
-                        "inf-viewport: render thread panicked ({msg}); crash report at {} — \
-                         viewport stopped, editor still running",
-                        path.display()
-                    ),
-                    Err(werr) => tracing::error!(
-                        "inf-viewport: render thread panicked ({msg}); \
-                         failed to write crash report: {werr}"
-                    ),
-                }
+                report_viewport_panic("<viewport render thread>", &*payload);
                 break 'outer;
             }
         }
