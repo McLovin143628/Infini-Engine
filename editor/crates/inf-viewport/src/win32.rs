@@ -40,12 +40,48 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use glam::DVec2;
 
 use crate::camera::{
-    Bookmarks, Camera2D, EditorCamera, FlyInput, NavInput, NavMode, SculptSettings, Snap2DSettings,
-    ToolMode, ViewportMode,
+    Bookmarks, Camera2D, EditorCamera, FlyInput, GizmoSpace, NavInput, NavMode, SculptSettings,
+    Snap2DSettings, SnapSettings, ToolMode, ViewportMode,
 };
 use crate::host::EngineHost;
 use crate::{KeyChord, SharedScene, SurfaceTarget, ViewportEvent, ViewportEventSink, ViewportRect};
+use inf_editor_core::ipc::GizmoModeDto;
 use inf_render::GizmoMode;
+
+/// Map the IPC gizmo-mode DTO to the renderer enum (Wave 2). Kept next to the
+/// reverse map so the two stay in lockstep.
+fn to_gizmo_mode(d: GizmoModeDto) -> GizmoMode {
+    match d {
+        GizmoModeDto::Translate => GizmoMode::Translate,
+        GizmoModeDto::Rotate => GizmoMode::Rotate,
+        GizmoModeDto::Scale => GizmoMode::Scale,
+    }
+}
+
+/// Map the renderer gizmo enum back to the IPC DTO for the `viewport://gizmo`
+/// echo (so a W/E/R keypress updates the toolbar).
+fn from_gizmo_mode(m: GizmoMode) -> GizmoModeDto {
+    match m {
+        GizmoMode::Translate => GizmoModeDto::Translate,
+        GizmoMode::Rotate => GizmoModeDto::Rotate,
+        GizmoMode::Scale => GizmoModeDto::Scale,
+    }
+}
+
+/// Depth of an entity in the hierarchy (0 = root), for sorting a multi-select
+/// gizmo writeback parents-first (Wave 2). Walks parent links via the ECS world.
+fn hierarchy_depth(doc: &inf_editor_core::scene::SceneDoc, guid: uuid::Uuid) -> usize {
+    let world = doc.world();
+    let Some(mut e) = world.entity_of(guid) else {
+        return 0;
+    };
+    let mut depth = 0;
+    while let Some(p) = world.parent_of(e) {
+        depth += 1;
+        e = p;
+    }
+    depth
+}
 
 enum Cmd {
     SetRect(ViewportRect),
@@ -63,6 +99,14 @@ enum Cmd {
     SetToolMode(ToolMode),
     /// Replace the sculpt brush configuration from the toolbar (P10.2b).
     SetSculpt(SculptSettings),
+    /// Set the transform-gizmo mode (translate/rotate/scale) from the toolbar or
+    /// palette (Wave 2). The viewport echoes changes back on `viewport://gizmo`.
+    SetGizmo(GizmoMode),
+    /// Switch the gizmo orientation frame (World ↔ Local) from the toolbar
+    /// (Wave 2).
+    SetGizmoSpace(GizmoSpace),
+    /// Replace the 3D transform-gizmo snap increments from the toolbar (Wave 2).
+    SetSnap3D(SnapSettings),
     /// Adopt a foreign (PIE player) window into the viewport slot: reparent it
     /// to our parent, position it at the hole, and hide our own child (embedded
     /// PIE, P9.4). The `isize` is the foreign HWND.
@@ -121,6 +165,23 @@ impl ViewportHandle {
     /// Replace the sculpt brush configuration (op / radius / strength / falloff).
     pub fn set_sculpt(&self, sculpt: SculptSettings) {
         let _ = self.tx.send(Cmd::SetSculpt(sculpt));
+    }
+
+    /// Set the transform-gizmo mode (translate/rotate/scale) from the toolbar or
+    /// command palette (Wave 2). Takes the IPC DTO so Ring 2 needn't name the
+    /// platform-gated `inf_render::GizmoMode`.
+    pub fn set_gizmo_mode(&self, mode: GizmoModeDto) {
+        let _ = self.tx.send(Cmd::SetGizmo(to_gizmo_mode(mode)));
+    }
+
+    /// Switch the gizmo orientation frame (World ↔ Local) (Wave 2).
+    pub fn set_gizmo_space(&self, space: GizmoSpace) {
+        let _ = self.tx.send(Cmd::SetGizmoSpace(space));
+    }
+
+    /// Replace the 3D transform-gizmo snap increments (Wave 2).
+    pub fn set_snap_3d(&self, snap: SnapSettings) {
+        let _ = self.tx.send(Cmd::SetSnap3D(snap));
     }
 
     /// Adopt a foreign (PIE player) window into the viewport slot (embedded PIE,
@@ -757,6 +818,10 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
 
         // 1. Apply pending commands (coalesce rect updates to the latest).
         let mut latest_rect: Option<ViewportRect> = None;
+        // Drag-drops handled this frame (Wave 2, feature A): buffered here and
+        // resolved in the interaction block, where the scene is locked and the
+        // active render view (for the pick ray) is built.
+        let mut pending_drops: Vec<(f32, f32, String)> = Vec::new();
         loop {
             match rx.try_recv() {
                 Ok(Cmd::SetRect(r)) => latest_rect = Some(r),
@@ -771,16 +836,21 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                     }
                 }
                 Ok(Cmd::Drop { x, y, payload }) => {
-                    // Spike A handoff stub: Phase 3 turns this into a pick
-                    // ray + actor spawn. Logging proves the coordinate path.
-                    tracing::info!(
-                        "inf-viewport: drop '{payload}' at viewport-local ({x:.0}, {y:.0}) px"
-                    );
+                    // Buffer for the interaction block (needs the scene lock + the
+                    // active view to raycast the world point under the cursor).
+                    pending_drops.push((x, y, payload));
                 }
                 Ok(Cmd::SetMode(m)) => host.set_mode(m),
                 Ok(Cmd::SetSnap2D(s)) => host.set_snap_2d(s),
                 Ok(Cmd::SetToolMode(m)) => host.set_tool_mode(m),
                 Ok(Cmd::SetSculpt(s)) => host.set_sculpt(s),
+                Ok(Cmd::SetGizmo(m)) => {
+                    host.set_gizmo_mode(m);
+                    // Echo so the toolbar reflects an IPC-driven change too.
+                    sink(ViewportEvent::GizmoModeChanged(from_gizmo_mode(m)));
+                }
+                Ok(Cmd::SetGizmoSpace(s)) => host.set_gizmo_space(s),
+                Ok(Cmd::SetSnap3D(s)) => host.set_snap_3d(s),
                 Ok(Cmd::EmbedForeign(foreign)) => {
                     // Position the foreign window at the hole immediately. If no
                     // SetRect has arrived yet, fall back to our child's current
@@ -866,7 +936,12 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
         // interrupt an in-flight focus animation.
         for action in input.actions {
             match action {
-                Action::SetGizmo(mode) => host.set_gizmo_mode(mode),
+                Action::SetGizmo(mode) => {
+                    host.set_gizmo_mode(mode);
+                    // A W/E/R keypress over the viewport must update the toolbar
+                    // (two-way sync, Wave 2).
+                    sink(ViewportEvent::GizmoModeChanged(from_gizmo_mode(mode)));
+                }
                 Action::Focus => {
                     // Frame the selection, or the world origin if none.
                     let (center, radius) =
@@ -919,6 +994,15 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 } else {
                     host.view_for(&camera)
                 };
+
+                // Drag-drops (Wave 2, feature A): spawn at the world point under
+                // the cursor as one undo step, regardless of the active tool.
+                for (dx, dy, payload) in pending_drops.drain(..) {
+                    let (px, py) = (dx.max(0.0) as u32, dy.max(0.0) as u32);
+                    if host.spawn_drop(&mut doc, &interact_view, px, py, &payload) {
+                        world_changed = true;
+                    }
+                }
 
                 // Sculpt mode (perspective only): plain LMB paints a terrain height
                 // stroke instead of selecting/gizmo-dragging. The stroke lives on the
@@ -974,30 +1058,35 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
 
                     if input.left_down && host.is_dragging_gizmo() {
                         let (x, y) = input.cursor;
-                        // 2D: translate snaps to the toolbar's grid/pixel increment (or
-                        // Shift for a 1 m fallback); rotate/scale keep the Shift snaps.
-                        // Perspective keeps the Shift-drag snaps (1 m / 15° / 0.1 ratio).
+                        // 3D snap increments come from the toolbar (Wave 2): every
+                        // drag snaps when `always_on`, else Shift-gated (preserving
+                        // the old feel). 2D translate still uses the 2D grid/pixel
+                        // snap; 2D rotate/scale reuse the 3D increments.
+                        let cfg = host.snap_3d();
+                        let snap_on = cfg.always_on || key_down(0x10); // Shift
                         let snap = if two_d {
                             match host.gizmo_mode {
                                 GizmoMode::Translate => {
                                     let s = host.snap_2d_translate();
                                     if s > 0.0 {
                                         s
-                                    } else if key_down(0x10) {
-                                        1.0
+                                    } else if snap_on {
+                                        cfg.translate.max(0.0)
                                     } else {
                                         0.0
                                     }
                                 }
-                                GizmoMode::Rotate if key_down(0x10) => 15f32.to_radians(),
-                                GizmoMode::Scale if key_down(0x10) => 0.1,
+                                GizmoMode::Rotate if snap_on => {
+                                    cfg.rotate_deg.max(0.0).to_radians()
+                                }
+                                GizmoMode::Scale if snap_on => cfg.scale.max(0.0),
                                 _ => 0.0,
                             }
-                        } else if key_down(0x10) {
+                        } else if snap_on {
                             match host.gizmo_mode {
-                                GizmoMode::Translate => 1.0,
-                                GizmoMode::Rotate => 15f32.to_radians(),
-                                GizmoMode::Scale => 0.1,
+                                GizmoMode::Translate => cfg.translate.max(0.0),
+                                GizmoMode::Rotate => cfg.rotate_deg.max(0.0).to_radians(),
+                                GizmoMode::Scale => cfg.scale.max(0.0),
                             }
                         } else {
                             0.0
@@ -1007,8 +1096,15 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
 
                     if input.left_release {
                         if host.is_dragging_gizmo() {
-                            for (guid, transform) in host.selected_world_transforms() {
-                                doc.edit_set_transform(guid, transform);
+                            // Write the gizmo's WORLD transforms back as parent-
+                            // relative locals (Wave 2 nested-transform fix). Sort
+                            // parents-first so a child composes against its
+                            // parent's already-written pose (edit_set_world_transform
+                            // propagates between writes).
+                            let mut writes = host.selected_world_transforms();
+                            writes.sort_by_key(|(guid, _)| hierarchy_depth(&doc, *guid));
+                            for (guid, transform) in writes {
+                                doc.edit_set_world_transform(guid, transform);
                             }
                             doc.commit_transaction();
                             world_changed = true;

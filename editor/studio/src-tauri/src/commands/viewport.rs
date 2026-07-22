@@ -9,11 +9,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use inf_editor_core::ipc::{
-    SculptFalloffDto, SculptOpDto, SculptSettingsDto, Snap2DDto, ToolModeDto, ViewportDrop,
-    ViewportKey, ViewportModeDto, ViewportRect,
+    GizmoModeDto, GizmoSpaceDto, SculptFalloffDto, SculptOpDto, SculptSettingsDto, Snap2DDto,
+    Snap3DDto, ToolModeDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
 };
 use inf_viewport::{
-    SculptFalloff, SculptOp, SculptSettings, Snap2DSettings, ToolMode, ViewportEvent, ViewportMode,
+    GizmoSpace, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings, SnapSettings, ToolMode,
+    ViewportEvent, ViewportMode,
 };
 use tauri::{Emitter, Manager};
 
@@ -84,6 +85,13 @@ fn event_sink(app: tauri::AppHandle) -> inf_viewport::ViewportEventSink {
         ViewportEvent::WorldChanged => {
             if let Some(state) = app.try_state::<SceneState>() {
                 emit_world_delta(&app, &state);
+            }
+        }
+        // The gizmo mode changed on the viewport side (a W/E/R keypress or an IPC
+        // set); forward it so the toolbar stays in sync (two-way, Wave 2).
+        ViewportEvent::GizmoModeChanged(mode) => {
+            if let Err(e) = app.emit("viewport://gizmo", mode) {
+                tracing::warn!("viewport://gizmo emit failed: {e}");
             }
         }
     })
@@ -273,6 +281,56 @@ pub async fn viewport_drop(
     let guard = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(handle) = guard.as_ref() {
         handle.drop_payload(drop.x as f32, drop.y as f32, &drop.payload);
+    }
+    Ok(())
+}
+
+/// Set the transform-gizmo mode (translate/rotate/scale) from the toolbar or
+/// command palette (Wave 2). The viewport echoes mode changes (including W/E/R
+/// keypresses over the viewport) back on the `viewport://gizmo` event.
+#[tauri::command]
+pub async fn viewport_set_gizmo_mode(
+    mode: GizmoModeDto,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        handle.set_gizmo_mode(mode);
+    }
+    Ok(())
+}
+
+/// Switch the gizmo orientation frame (World ↔ Local) from the toolbar (Wave 2).
+#[tauri::command]
+pub async fn viewport_set_gizmo_space(
+    space: GizmoSpaceDto,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        handle.set_gizmo_space(match space {
+            GizmoSpaceDto::World => GizmoSpace::World,
+            GizmoSpaceDto::Local => GizmoSpace::Local,
+        });
+    }
+    Ok(())
+}
+
+/// Push the 3D transform-gizmo snap increments (translate/rotate/scale +
+/// always-on) from the toolbar (Wave 2).
+#[tauri::command]
+pub async fn viewport_set_snap3d(
+    snap: Snap3DDto,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        handle.set_snap_3d(SnapSettings {
+            translate: snap.translate.max(0.0),
+            rotate_deg: snap.rotate_deg.max(0.0),
+            scale: snap.scale.max(0.0),
+            always_on: snap.always_on,
+        });
     }
     Ok(())
 }

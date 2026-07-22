@@ -12,6 +12,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { AssetChanged } from "../bindings/AssetChanged";
+import type { GizmoModeDto } from "../bindings/GizmoModeDto";
 import type { ImportEventDto } from "../bindings/ImportEventDto";
 import type { LogLine } from "../bindings/LogLine";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
@@ -43,6 +44,8 @@ export interface EventPayloads {
   "log://line": LogLine;
   /** Global-shortcut chord forwarded from the native viewport (P2.3.4). */
   "viewport://key": ViewportKey;
+  /** Transform-gizmo mode echoed from the viewport (W/E/R or IPC) → toolbar (Wave 2). */
+  "viewport://gizmo": GizmoModeDto;
   /** Incremental world change after any mutation (P3.2). */
   "world://delta": SceneDelta;
   /** Content changed (import/delete/rename/watcher) → re-fetch snapshot (P4.4). */

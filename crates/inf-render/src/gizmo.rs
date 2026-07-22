@@ -7,7 +7,7 @@
 //! rather than an ID-buffer pass: thin handles pick far more reliably that way,
 //! and it keeps picking on the CPU where the drag math already lives.
 
-use glam::{DVec3, Mat4, Vec2, Vec3, Vec4Swizzles};
+use glam::{DVec3, Mat4, Quat, Vec2, Vec3, Vec4Swizzles};
 
 use crate::debug_draw::DebugDraw;
 
@@ -81,6 +81,11 @@ pub fn gizmo_world_size_ortho(half_height: f32) -> f32 {
 pub struct GizmoDrag {
     pub mode: GizmoMode,
     pub axis: GizmoAxis,
+    /// Orientation basis for the gizmo axes: `IDENTITY` = world-aligned, or the
+    /// selection's world rotation for a local-space gizmo. Captured at drag
+    /// start and held fixed for the whole gesture so a rotate drag doesn't chase
+    /// its own basis. Every consumer of [`GizmoAxis::dir`] applies `basis * dir`.
+    pub basis: Quat,
     /// Pivot (selection center) at drag start, render-local.
     pub origin: Vec3,
     /// The point on the constraint line/plane under the cursor at drag start.
@@ -131,24 +136,40 @@ fn ray_plane(o: Vec3, rd: Vec3, p: Vec3, n: Vec3) -> Option<Vec3> {
     Some(o + rd * s)
 }
 
-/// Where the cursor ray grabs a handle at drag start.
-pub fn grab_point(mode: GizmoMode, axis: GizmoAxis, origin: Vec3, ro: Vec3, rd: Vec3) -> Vec3 {
+/// Where the cursor ray grabs a handle at drag start. `basis` rotates the axis
+/// directions (world-aligned when `IDENTITY`, the selection's rotation in local
+/// mode).
+pub fn grab_point(
+    mode: GizmoMode,
+    axis: GizmoAxis,
+    basis: Quat,
+    origin: Vec3,
+    ro: Vec3,
+    rd: Vec3,
+) -> Vec3 {
+    let dir = basis * axis.dir();
     match (mode, axis.is_plane()) {
-        (GizmoMode::Rotate, _) => {
-            ray_plane(ro, rd, origin, axis.dir()).unwrap_or(origin + axis.dir())
-        }
-        (_, true) => ray_plane(ro, rd, origin, axis.dir()).unwrap_or(origin),
-        (_, false) => closest_on_line(origin, axis.dir(), ro, rd),
+        (GizmoMode::Rotate, _) => ray_plane(ro, rd, origin, dir).unwrap_or(origin + dir),
+        (_, true) => ray_plane(ro, rd, origin, dir).unwrap_or(origin),
+        (_, false) => closest_on_line(origin, dir, ro, rd),
     }
 }
 
 impl GizmoDrag {
-    pub fn begin(mode: GizmoMode, axis: GizmoAxis, origin: Vec3, ro: Vec3, rd: Vec3) -> Self {
-        let grab = grab_point(mode, axis, origin, ro, rd);
+    pub fn begin(
+        mode: GizmoMode,
+        axis: GizmoAxis,
+        basis: Quat,
+        origin: Vec3,
+        ro: Vec3,
+        rd: Vec3,
+    ) -> Self {
+        let grab = grab_point(mode, axis, basis, origin, ro, rd);
         let rot_ref = (grab - origin).normalize_or_zero();
         Self {
             mode,
             axis,
+            basis,
             origin,
             grab,
             rot_ref,
@@ -160,11 +181,12 @@ impl GizmoDrag {
     pub fn update(&self, ro: Vec3, rd: Vec3, snap: f32) -> GizmoDelta {
         match self.mode {
             GizmoMode::Translate => {
-                let now = grab_point(self.mode, self.axis, self.origin, ro, rd);
+                let now = grab_point(self.mode, self.axis, self.basis, self.origin, ro, rd);
                 let mut delta = now - self.grab;
                 if !self.axis.is_plane() {
-                    // Constrain to the single axis.
-                    delta = self.axis.dir() * delta.dot(self.axis.dir());
+                    // Constrain to the single (basis-rotated) axis.
+                    let d = self.basis * self.axis.dir();
+                    delta = d * delta.dot(d);
                 }
                 if snap > 0.0 {
                     delta = (delta / snap).round() * snap;
@@ -172,7 +194,7 @@ impl GizmoDrag {
                 GizmoDelta::Translate(delta.as_dvec3())
             }
             GizmoMode::Rotate => {
-                let n = self.axis.dir();
+                let n = self.basis * self.axis.dir();
                 let now = ray_plane(ro, rd, self.origin, n).unwrap_or(self.origin + self.rot_ref);
                 let cur = (now - self.origin).normalize_or_zero();
                 let mut ang = self.rot_ref.cross(cur).dot(n).atan2(self.rot_ref.dot(cur));
@@ -185,7 +207,14 @@ impl GizmoDrag {
                 }
             }
             GizmoMode::Scale => {
-                let now = grab_point(GizmoMode::Translate, self.axis, self.origin, ro, rd);
+                let now = grab_point(
+                    GizmoMode::Translate,
+                    self.axis,
+                    self.basis,
+                    self.origin,
+                    ro,
+                    rd,
+                );
                 let start_len = (self.grab - self.origin).length().max(1e-4);
                 let now_len = (now - self.origin).length();
                 let mut ratio = now_len / start_len;
@@ -193,6 +222,9 @@ impl GizmoDrag {
                     ratio = (ratio / snap).round() * snap;
                 }
                 ratio = ratio.max(0.01);
+                // Scale is applied component-wise in the object's LOCAL frame, so
+                // the factor uses the un-rotated axis; only the drag measurement
+                // (above) follows the basis-rotated handle direction.
                 let factor = if self.axis.is_plane() {
                     Vec3::splat(ratio) // plane handle = uniform scale
                 } else {
@@ -228,6 +260,7 @@ fn project(p: Vec3, view_proj: Mat4, width: f32, height: f32) -> Option<Vec2> {
 pub fn pick_axis(
     mode: GizmoMode,
     origin: Vec3,
+    basis: Quat,
     size: f32,
     view_proj: Mat4,
     cursor: Vec2,
@@ -237,6 +270,11 @@ pub fn pick_axis(
 ) -> Option<GizmoAxis> {
     const PICK_PIXELS: f32 = 11.0;
     let o = project(origin, view_proj, width, height)?;
+    // Basis-rotated tangents for a plane whose local normal is `axis.dir()`.
+    let tangents = |axis: GizmoAxis| {
+        let (u, v) = plane_tangents(axis.dir());
+        (basis * u, basis * v)
+    };
 
     let mut best: Option<(GizmoAxis, f32)> = None;
     let mut consider = |axis: GizmoAxis, dist: f32| {
@@ -260,7 +298,8 @@ pub fn pick_axis(
             &[GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z]
         };
         for &a in rings {
-            let d = circle_screen_distance(origin, a.dir(), size, view_proj, cursor, width, height);
+            let (u, v) = tangents(a);
+            let d = circle_screen_distance(origin, u, v, size, view_proj, cursor, width, height);
             if let Some(d) = d {
                 consider(a, d);
             }
@@ -269,24 +308,20 @@ pub fn pick_axis(
     }
 
     // Translate/scale: plane handles (small quad near center) then axis lines.
-    let planes: &[(GizmoAxis, Vec3)] = if two_d {
-        &[(GizmoAxis::PlaneZ, Vec3::Z)]
+    let planes: &[GizmoAxis] = if two_d {
+        &[GizmoAxis::PlaneZ]
     } else {
-        &[
-            (GizmoAxis::PlaneX, Vec3::X),
-            (GizmoAxis::PlaneY, Vec3::Y),
-            (GizmoAxis::PlaneZ, Vec3::Z),
-        ]
+        &[GizmoAxis::PlaneX, GizmoAxis::PlaneY, GizmoAxis::PlaneZ]
     };
-    for &(axis, plane) in planes {
-        let (u, v) = plane_tangents(plane);
+    for &axis in planes {
+        let (u, v) = tangents(axis);
         let corner = origin + (u + v) * size * 0.35;
         if let Some(c) = project(corner, view_proj, width, height) {
             consider(axis, cursor.distance(c));
         }
     }
     for &a in axes {
-        let tip = project(origin + a.dir() * size, view_proj, width, height);
+        let tip = project(origin + (basis * a.dir()) * size, view_proj, width, height);
         if let Some(tip) = tip {
             consider(a, point_segment_distance(cursor, o, tip));
         }
@@ -312,16 +347,17 @@ fn point_segment_distance(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     p.distance(a + ab * t)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn circle_screen_distance(
     center: Vec3,
-    normal: Vec3,
+    u: Vec3,
+    v: Vec3,
     radius: f32,
     view_proj: Mat4,
     cursor: Vec2,
     width: f32,
     height: f32,
 ) -> Option<f32> {
-    let (u, v) = plane_tangents(normal);
     let mut best = f32::MAX;
     let mut any = false;
     let segments = 48;
@@ -348,6 +384,7 @@ pub fn build_geometry(
     draw: &mut DebugDraw,
     mode: GizmoMode,
     origin: Vec3,
+    basis: Quat,
     size: f32,
     active: Option<GizmoAxis>,
     two_d: bool,
@@ -361,6 +398,8 @@ pub fn build_geometry(
     };
 
     if two_d {
+        // The 2D editor gizmo is always world-aligned (basis forced to identity
+        // by the host in 2D mode).
         build_geometry_2d(draw, mode, origin, size, &hi);
         return;
     }
@@ -372,20 +411,16 @@ pub fn build_geometry(
                 (GizmoAxis::Y, GizmoAxis::PlaneY),
                 (GizmoAxis::Z, GizmoAxis::PlaneZ),
             ] {
-                let d = axis.dir();
+                let d = basis * axis.dir();
+                let (u, v) = plane_tangents(axis.dir());
+                let (u, v) = (basis * u, basis * v);
                 let color = hi(axis, axis.color());
                 draw.line(origin, origin + d * size, color);
                 if mode == GizmoMode::Scale {
                     // Small box at the tip.
-                    draw.wire_box(
-                        origin + d * size,
-                        Vec3::splat(size * 0.06),
-                        glam::Quat::IDENTITY,
-                        color,
-                    );
+                    draw.wire_box(origin + d * size, Vec3::splat(size * 0.06), basis, color);
                 } else {
                     // Arrowhead as a little cross near the tip.
-                    let (u, v) = plane_tangents(d);
                     let tip = origin + d * size;
                     let back = tip - d * size * 0.12;
                     draw.line(tip, back + u * size * 0.05, color);
@@ -394,7 +429,6 @@ pub fn build_geometry(
                     draw.line(tip, back - v * size * 0.05, color);
                 }
                 // Plane handle: an L near the origin in this axis's plane.
-                let (u, v) = plane_tangents(d);
                 let pc = hi(plane_axis, plane_axis.color());
                 let a = origin + u * size * 0.35;
                 let b = origin + v * size * 0.35;
@@ -406,6 +440,7 @@ pub fn build_geometry(
         GizmoMode::Rotate => {
             for axis in [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z] {
                 let (u, v) = plane_tangents(axis.dir());
+                let (u, v) = (basis * u, basis * v);
                 let color = hi(axis, axis.color());
                 let segments = 64;
                 let mut prev = origin + u * size;
@@ -499,6 +534,7 @@ mod tests {
         let drag = GizmoDrag::begin(
             GizmoMode::Translate,
             GizmoAxis::X,
+            Quat::IDENTITY,
             origin,
             Vec3::new(2.0, 5.0, 0.0),
             Vec3::NEG_Y,
@@ -520,6 +556,7 @@ mod tests {
         let drag = GizmoDrag::begin(
             GizmoMode::Translate,
             GizmoAxis::X,
+            Quat::IDENTITY,
             origin,
             Vec3::new(0.0, 5.0, 0.0),
             Vec3::NEG_Y,
@@ -550,6 +587,7 @@ mod tests {
         let drag = GizmoDrag::begin(
             GizmoMode::Translate,
             GizmoAxis::X,
+            Quat::IDENTITY,
             origin,
             Vec3::new(0.0, 5.0, 0.0),
             Vec3::NEG_Y,
@@ -578,6 +616,7 @@ mod tests {
         let drag = GizmoDrag::begin(
             GizmoMode::Translate,
             GizmoAxis::X,
+            Quat::IDENTITY,
             origin,
             Vec3::new(0.0, 5.0, 0.0),
             Vec3::NEG_Y,
@@ -601,6 +640,7 @@ mod tests {
         let drag = GizmoDrag::begin(
             GizmoMode::Rotate,
             GizmoAxis::Y,
+            Quat::IDENTITY,
             origin,
             Vec3::new(1.0, 5.0, 0.0),
             Vec3::NEG_Y,
@@ -627,6 +667,7 @@ mod tests {
         let drag = GizmoDrag::begin(
             GizmoMode::Scale,
             GizmoAxis::X,
+            Quat::IDENTITY,
             origin,
             Vec3::new(2.0, 5.0, 0.0),
             Vec3::NEG_Y,
@@ -654,6 +695,7 @@ mod tests {
         let drag = GizmoDrag::begin(
             GizmoMode::Rotate,
             GizmoAxis::Y,
+            Quat::IDENTITY,
             origin,
             Vec3::new(1.0, 5.0, 0.0),
             Vec3::NEG_Y,
@@ -675,6 +717,7 @@ mod tests {
         let drag = GizmoDrag::begin(
             GizmoMode::Scale,
             GizmoAxis::X,
+            Quat::IDENTITY,
             origin,
             Vec3::new(2.0, 5.0, 0.0),
             Vec3::NEG_Y,
@@ -700,13 +743,24 @@ mod tests {
         let size = 2.0;
         // Screen position of the +X tip.
         let tip = project(Vec3::X * size, vp, w, h).unwrap();
-        let hit = pick_axis(GizmoMode::Translate, Vec3::ZERO, size, vp, tip, w, h, false);
+        let hit = pick_axis(
+            GizmoMode::Translate,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            size,
+            vp,
+            tip,
+            w,
+            h,
+            false,
+        );
         assert_eq!(hit, Some(GizmoAxis::X));
         // A click far away hits nothing.
         assert_eq!(
             pick_axis(
                 GizmoMode::Translate,
                 Vec3::ZERO,
+                Quat::IDENTITY,
                 size,
                 vp,
                 Vec2::new(5.0, 5.0),
@@ -725,13 +779,22 @@ mod tests {
             &mut d,
             GizmoMode::Translate,
             Vec3::ZERO,
+            Quat::IDENTITY,
             1.0,
             Some(GizmoAxis::X),
             false,
         );
         assert!(!d.verts.is_empty());
         let mut r = DebugDraw::default();
-        build_geometry(&mut r, GizmoMode::Rotate, Vec3::ZERO, 1.0, None, false);
+        build_geometry(
+            &mut r,
+            GizmoMode::Rotate,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            1.0,
+            None,
+            false,
+        );
         assert!(r.verts.len() > 100); // three circles worth of segments
     }
 
@@ -750,6 +813,7 @@ mod tests {
         let hit = pick_axis(
             GizmoMode::Translate,
             Vec3::ZERO,
+            Quat::IDENTITY,
             size,
             vp,
             z_tip,
@@ -764,6 +828,7 @@ mod tests {
             pick_axis(
                 GizmoMode::Translate,
                 Vec3::ZERO,
+                Quat::IDENTITY,
                 size,
                 vp,
                 x_tip,
@@ -780,10 +845,104 @@ mod tests {
         // 2D rotate is a single Z ring; 3D rotate is three rings — so the 2D
         // vertex count is about a third.
         let mut two = DebugDraw::default();
-        build_geometry(&mut two, GizmoMode::Rotate, Vec3::ZERO, 1.0, None, true);
+        build_geometry(
+            &mut two,
+            GizmoMode::Rotate,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            1.0,
+            None,
+            true,
+        );
         let mut three = DebugDraw::default();
-        build_geometry(&mut three, GizmoMode::Rotate, Vec3::ZERO, 1.0, None, false);
+        build_geometry(
+            &mut three,
+            GizmoMode::Rotate,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            1.0,
+            None,
+            false,
+        );
         assert!(!two.verts.is_empty());
         assert!(two.verts.len() < three.verts.len() / 2);
+    }
+
+    #[test]
+    fn local_basis_translate_follows_rotated_axis() {
+        // A 90° yaw about +Y maps the local +X handle onto world -Z. Dragging
+        // that handle must translate along world -Z (its length), with no world-X
+        // component — proving the basis rotates the constraint axis.
+        let origin = Vec3::ZERO;
+        let basis = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2); // +X → -Z
+                                                                        // Ray from above (looking down -Y) grabbing the rotated X handle at z=-2.
+        let drag = GizmoDrag::begin(
+            GizmoMode::Translate,
+            GizmoAxis::X,
+            basis,
+            origin,
+            Vec3::new(0.0, 5.0, -2.0),
+            Vec3::NEG_Y,
+        );
+        let d = drag.update(Vec3::new(0.0, 5.0, -5.0), Vec3::NEG_Y, 0.0);
+        match d {
+            GizmoDelta::Translate(t) => {
+                assert!(t.x.abs() < 1e-3, "should not move in world X: {t:?}");
+                assert!((t.z + 3.0).abs() < 1e-3, "should move -3 in world Z: {t:?}");
+                assert!(t.y.abs() < 1e-6, "off-axis {t:?}");
+            }
+            _ => panic!("expected translate"),
+        }
+    }
+
+    #[test]
+    fn local_basis_rotate_is_about_rotated_axis() {
+        // With a basis that maps local +X onto world +Y, a rotate drag on the X
+        // ring must report its rotation axis as world +Y (the basis-rotated axis).
+        let origin = Vec3::ZERO;
+        let basis = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2); // +X → +Y
+                                                                        // The X ring's world normal is +Y, so it lies in the XZ plane; grab/move
+                                                                        // it with rays coming straight down -Y (which cross that plane).
+        let drag = GizmoDrag::begin(
+            GizmoMode::Rotate,
+            GizmoAxis::X,
+            basis,
+            origin,
+            Vec3::new(1.0, 5.0, 0.0),
+            Vec3::NEG_Y,
+        );
+        match drag.update(Vec3::new(0.0, 5.0, 1.0), Vec3::NEG_Y, 0.0) {
+            GizmoDelta::Rotate { axis, radians } => {
+                assert!(
+                    (axis - Vec3::Y).length() < 1e-5,
+                    "rotate axis should be world +Y, got {axis:?}"
+                );
+                assert!(radians.abs() > 1e-3, "a real rotation should be measured");
+            }
+            _ => panic!("expected rotate"),
+        }
+    }
+
+    #[test]
+    fn world_basis_matches_pre_basis_behaviour() {
+        // Regression: an identity basis must reproduce the exact world-space
+        // delta the gizmo produced before basis threading landed.
+        let origin = Vec3::ZERO;
+        let drag = GizmoDrag::begin(
+            GizmoMode::Translate,
+            GizmoAxis::X,
+            Quat::IDENTITY,
+            origin,
+            Vec3::new(2.0, 5.0, 0.0),
+            Vec3::NEG_Y,
+        );
+        let d = drag.update(Vec3::new(5.0, 5.0, 0.0), Vec3::NEG_Y, 0.0);
+        match d {
+            GizmoDelta::Translate(t) => {
+                assert!((t.x - 3.0).abs() < 1e-3, "x delta {t:?}");
+                assert!(t.y.abs() < 1e-6 && t.z.abs() < 1e-6, "off-axis {t:?}");
+            }
+            _ => panic!("expected translate"),
+        }
     }
 }

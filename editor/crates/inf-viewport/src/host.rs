@@ -12,8 +12,12 @@ use inf_ecs::components::{
     Tilemap,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
+use inf_editor_core::ipc::SpawnKind;
+use inf_editor_core::scene::serialize::RenderSettingsRecord;
 use inf_editor_core::scene::SceneDoc;
 use inf_math::FloatingOrigin;
+// R-P4: scene-persisted post/exposure/lighting settings applied to the live
+// renderer (see `apply_record` + `sync_from_doc`).
 use inf_render::{
     collider_outline_2d, collider_outline_3d, expand_nine_slice, expand_text, gizmo,
     handle_from_guid, ColliderOutline2D, ColliderOutline3D, DebugDraw, EngineRenderer, GizmoDelta,
@@ -21,6 +25,10 @@ use inf_render::{
     OrthoParams, Picker, PrebatchedRun, PrimMesh, RenderChunk, RenderLight, RenderLight2D,
     RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView,
     SpriteInstance, SurfaceChain, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
+};
+use inf_render::{
+    detect_tier, BloomSettings, GiSettings, RenderSettings, RenderTier, ShadowSettings,
+    SsaoSettings,
 };
 use uuid::Uuid;
 
@@ -30,8 +38,8 @@ use inf_terrain::{
 };
 
 use crate::camera::{
-    Camera2D, EditorCamera, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings, ToolMode,
-    ViewportMode, TWO_D_FAR, TWO_D_NEAR,
+    Camera2D, EditorCamera, GizmoSpace, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings,
+    SnapSettings, ToolMode, ViewportMode, TWO_D_FAR, TWO_D_NEAR,
 };
 use crate::SurfaceTarget;
 
@@ -50,6 +58,31 @@ fn prim_mesh(p: Primitive) -> PrimMesh {
     }
 }
 
+/// Parse a [`SpawnKind`] from its snake_case wire string (the tail of a
+/// `"spawn:<kind>"` drop payload). Mirrors the `serde(rename_all = "snake_case")`
+/// on the DTO — kept as an explicit match so the drop path stays serde-free.
+fn spawn_kind_from_str(s: &str) -> Option<SpawnKind> {
+    Some(match s {
+        "empty" => SpawnKind::Empty,
+        "cube" => SpawnKind::Cube,
+        "sphere" => SpawnKind::Sphere,
+        "plane" => SpawnKind::Plane,
+        "cylinder" => SpawnKind::Cylinder,
+        "cone" => SpawnKind::Cone,
+        "directional_light" => SpawnKind::DirectionalLight,
+        "point_light" => SpawnKind::PointLight,
+        "spot_light" => SpawnKind::SpotLight,
+        "camera" => SpawnKind::Camera,
+        "sprite" => SpawnKind::Sprite,
+        "tilemap" => SpawnKind::Tilemap,
+        "text2d" => SpawnKind::Text2d,
+        "nine_slice" => SpawnKind::NineSlice,
+        "light2d" => SpawnKind::Light2d,
+        "terrain" => SpawnKind::Terrain,
+        _ => return None,
+    })
+}
+
 pub struct EngineHost {
     target: SurfaceTarget,
     gpu: GpuContext,
@@ -63,6 +96,14 @@ pub struct EngineHost {
     pub origin: FloatingOrigin,
     /// Active transform-gizmo mode; the gizmo shows only with a selection.
     pub gizmo_mode: GizmoMode,
+    /// Gizmo orientation frame (Wave 2): world-aligned handles or local
+    /// (selection-rotation) handles. 2D mode always draws/edits in World.
+    gizmo_space: GizmoSpace,
+    /// 3D transform-gizmo snap increments pushed from the toolbar (Wave 2),
+    /// replacing the previously-hardcoded 1 m / 15° / 0.1 constants. Only the
+    /// Windows input layer applies it (via [`EngineHost::snap_3d`]).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    snap_3d: SnapSettings,
     gizmo_drag: Option<GizmoDrag>,
     /// Mesh-instance transforms captured at gizmo-drag start, keyed by instance
     /// id. The cumulative gizmo delta (measured from the ORIGINAL grab anchor,
@@ -124,6 +165,56 @@ pub struct EngineHost {
     /// whenever the document changes (a `pcg_evaluate` bumps the version) rather
     /// than continuously as the camera moves — a documented v1 simplification.
     last_eye_world: DVec3,
+    /// The GPU capability tier detected once from the adapter (R-P4). `None` until
+    /// the first `sync_from_doc` probes it; it clamps the scene-persisted render
+    /// settings down (never up) via [`RenderTier::apply`], exactly like the player.
+    render_tier: Option<RenderTier>,
+    /// The last [`RenderSettings`] pushed to the renderer (R-P4), so a redundant
+    /// `set_settings` (which would reset TAA history) is skipped when the mapped
+    /// value is unchanged.
+    applied_render: Option<RenderSettings>,
+}
+
+/// Map the scene-persisted [`RenderSettingsRecord`] onto a live
+/// [`RenderSettings`] (R-P4). The record carries the authorable subset; every
+/// other field (hdr, vgeom, tier_override, and the shadow/GI tuning knobs the
+/// panel doesn't expose) stays at `RenderSettings::default()`, so
+/// `apply_record(&RenderSettingsRecord::default()) == RenderSettings::default()`
+/// — the mapping is pinned by a unit test on both sides.
+///
+/// MIRROR: keep identical to `inf_player::render::apply_record` (the player's
+/// copy over `inf_scene::RenderSettingsRecord`). Both seams must agree so the
+/// editor viewport and the shipped player apply a level's render block the same.
+fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
+    let d = RenderSettings::default();
+    RenderSettings {
+        exposure: r.exposure,
+        dither: r.dither,
+        bloom: BloomSettings {
+            enabled: r.bloom_enabled,
+            threshold: r.bloom_threshold,
+            knee: r.bloom_knee,
+            intensity: r.bloom_intensity,
+        },
+        ssao: SsaoSettings {
+            enabled: r.ssao_enabled,
+            radius: r.ssao_radius,
+            intensity: r.ssao_intensity,
+            bias: r.ssao_bias,
+        },
+        taa: r.taa,
+        shadows: ShadowSettings {
+            enabled: r.shadows_enabled,
+            max_distance: r.shadows_max_distance,
+            ..d.shadows
+        },
+        gi: GiSettings {
+            enabled: r.gi_enabled,
+            intensity: r.gi_intensity,
+            ..d.gi
+        },
+        ..d
+    }
 }
 
 /// An in-flight sculpt gesture (P10.2b): the mouse-down→up stroke accumulating
@@ -216,6 +307,8 @@ impl EngineHost {
             },
             origin: FloatingOrigin::default(),
             gizmo_mode: GizmoMode::Translate,
+            gizmo_space: GizmoSpace::World,
+            snap_3d: SnapSettings::default(),
             gizmo_drag: None,
             gizmo_initial: HashMap::new(),
             gizmo_initial_2d: HashMap::new(),
@@ -237,6 +330,8 @@ impl EngineHost {
             sculpt_ring: Vec::new(),
             sculpt_ring_color: [1.0; 4],
             last_eye_world: DVec3::ZERO,
+            render_tier: None,
+            applied_render: None,
         })
     }
 
@@ -373,6 +468,24 @@ impl EngineHost {
         }
         self.synced_version = Some(version);
         self.rebuild_scene(doc);
+        self.apply_render_settings(doc);
+    }
+
+    /// Apply the scene-persisted render block (post/exposure/lighting) to the live
+    /// renderer (R-P4). The tier is probed once from the adapter and clamps the
+    /// mapped settings down (never up), mirroring the player. A redundant push is
+    /// skipped (cached in `applied_render`) so an unrelated document edit doesn't
+    /// needlessly reset TAA history. Runs from `sync_from_doc` (version-gated), so
+    /// an `edit_settings` — which bumps the version — flows straight through.
+    fn apply_render_settings(&mut self, doc: &SceneDoc) {
+        let tier = *self
+            .render_tier
+            .get_or_insert_with(|| detect_tier(&self.gpu, &RenderSettings::default()));
+        let mapped = tier.apply(apply_record(&doc.settings().render));
+        if self.applied_render != Some(mapped) {
+            self.renderer.set_settings(mapped);
+            self.applied_render = Some(mapped);
+        }
     }
 
     fn rebuild_scene(&mut self, doc: &SceneDoc) {
@@ -1157,6 +1270,121 @@ impl EngineHost {
         self.gizmo_mode = mode;
     }
 
+    /// Switch the gizmo orientation frame (World ↔ Local) from the toolbar
+    /// (Wave 2).
+    pub fn set_gizmo_space(&mut self, space: GizmoSpace) {
+        self.gizmo_space = space;
+    }
+
+    /// Replace the 3D transform-gizmo snap increments (from the toolbar, Wave 2).
+    pub fn set_snap_3d(&mut self, snap: SnapSettings) {
+        self.snap_3d = snap;
+    }
+
+    /// The active 3D snap settings (read by the Windows input layer during a
+    /// gizmo drag).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn snap_3d(&self) -> SnapSettings {
+        self.snap_3d
+    }
+
+    /// The gizmo's orientation basis for the current selection: `IDENTITY` in
+    /// World space (or 2D, which is always world-aligned), otherwise the primary
+    /// selection's world rotation for Local space. The "primary" is the first
+    /// selected mesh instance, else the first selected 2D entity (Wave 2).
+    fn gizmo_basis(&self) -> glam::Quat {
+        if self.mode == ViewportMode::TwoD || self.gizmo_space == GizmoSpace::World {
+            return glam::Quat::IDENTITY;
+        }
+        if let Some(id) = self.scene.selected.first() {
+            if let Some(inst) = self.scene.instances.iter().find(|i| i.id == *id) {
+                return inst.rotation;
+            }
+        }
+        if let Some(s) = self.selected_2d.values().next() {
+            return s.rotation.as_quat();
+        }
+        glam::Quat::IDENTITY
+    }
+
+    /// World-space point under a viewport pixel for drag-spawn (Wave 2, feature
+    /// A). UE-like precedence: the terrain surface under the cursor (if a terrain
+    /// exists), else the ground plane `y = 0`, else — looking at the sky /
+    /// near-parallel — a fixed 10 m down the ray from the eye. In 2D mode the
+    /// point lands on the `z = 0` sprite plane. Deterministic (no randomness).
+    pub fn pick_world_point(&self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) -> DVec3 {
+        let (ro, rd) = view.pixel_ray(px as f32, py as f32);
+        let ro_w = self.origin.to_world(ro);
+        let rd = rd.as_dvec3();
+        // 2D editor: intersect the sprite plane z = 0.
+        if view.ortho.is_some() {
+            if rd.z.abs() > 1e-9 {
+                let t = -ro_w.z / rd.z;
+                if t.is_finite() {
+                    return ro_w + rd * t;
+                }
+            }
+            return ro_w;
+        }
+        // Terrain surface under the cursor (reuses the sculpt raycast pattern).
+        if let Some(guid) = self.terrain_guid {
+            if let Some((data, translation)) = doc.terrain_data_and_origin(guid) {
+                let local_origin = ro_w - translation;
+                if let Some(hit) = raycast_terrain(data, local_origin, rd, 1.0e6) {
+                    return translation + hit.point;
+                }
+            }
+        }
+        // Ground plane y = 0 (in front of the eye).
+        if rd.y.abs() > 1e-6 {
+            let t = -ro_w.y / rd.y;
+            if (0.0..1.0e6).contains(&t) {
+                return ro_w + rd * t;
+            }
+        }
+        // Sky / near-parallel: place 10 m down the ray.
+        ro_w + rd * 10.0
+    }
+
+    /// Handle a drag-drop that ended over the viewport (Wave 2, feature A): pick
+    /// the world point under the cursor and spawn there as ONE undo step, then
+    /// select the new entity. Returns `true` when something was spawned (the
+    /// caller emits `WorldChanged`).
+    ///
+    /// Payload convention: `"spawn:<snake_case SpawnKind>"` (Place Actors drag)
+    /// spawns that primitive/light/etc.; any other payload is treated as a
+    /// Content-Drawer asset drop and spawns a placeholder cube (the viewport
+    /// thread has no asset DB, mirroring `scene_spawn_asset`'s placeholder — an
+    /// optional `"asset:"` prefix is accepted).
+    pub fn spawn_drop(
+        &self,
+        doc: &mut SceneDoc,
+        view: &RenderView,
+        px: u32,
+        py: u32,
+        payload: &str,
+    ) -> bool {
+        let kind = if let Some(rest) = payload.strip_prefix("spawn:") {
+            match spawn_kind_from_str(rest) {
+                Some(k) => k,
+                None => {
+                    tracing::warn!("inf-viewport: unknown drop spawn kind '{rest}'");
+                    return false;
+                }
+            }
+        } else {
+            // Asset drop (or a bare/legacy payload) → placeholder cube.
+            SpawnKind::Cube
+        };
+        let point = self.pick_world_point(doc, view, px, py);
+        doc.begin_transaction("Spawn");
+        let guid = doc.edit_create(kind, "", None);
+        doc.edit_set_transform(guid, EcsTransform::from_translation(point));
+        doc.select(&[guid], false);
+        doc.commit_transaction();
+        true
+    }
+
     /// Focus target for the current selection: its center and a radius that
     /// bounds every selected object. `None` when nothing is selected.
     pub fn selection_focus(&self) -> Option<(DVec3, f64)> {
@@ -1183,10 +1411,12 @@ impl EngineHost {
         let origin_local = self.origin.to_render(center);
         let size = self.gizmo_size(view, origin_local);
         let two_d = view.ortho.is_some();
+        let basis = self.gizmo_basis();
         let cursor = Vec2::new(px as f32, py as f32);
         let Some(axis) = gizmo::pick_axis(
             self.gizmo_mode,
             origin_local,
+            basis,
             size,
             view.view_proj(),
             cursor,
@@ -1200,6 +1430,7 @@ impl EngineHost {
         self.gizmo_drag = Some(GizmoDrag::begin(
             self.gizmo_mode,
             axis,
+            basis,
             origin_local,
             ro,
             rd,
@@ -1594,10 +1825,17 @@ impl EngineHost {
             let origin_local = self.origin.to_render(center);
             let size = self.gizmo_size(view, origin_local);
             let active = self.gizmo_drag.map(|d| d.axis);
+            // Draw with the in-flight drag's fixed basis, else recompute from the
+            // current selection (so idle Local-mode handles track selection).
+            let basis = self
+                .gizmo_drag
+                .map(|d| d.basis)
+                .unwrap_or_else(|| self.gizmo_basis());
             gizmo::build_geometry(
                 &mut self.scene.debug,
                 self.gizmo_mode,
                 origin_local,
+                basis,
                 size,
                 active,
                 view.ortho.is_some(),
@@ -1640,5 +1878,50 @@ impl EngineHost {
         );
         self.gpu.queue.present(frame);
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod render_settings_tests {
+    use super::{apply_record, RenderSettings, RenderSettingsRecord};
+
+    /// The default record maps to the byte-stable renderer default — this pins the
+    /// mapping so the editor viewport starts identical to today's pure defaults
+    /// (and identical to the player's mirror).
+    #[test]
+    fn default_record_maps_to_default_settings() {
+        assert_eq!(
+            apply_record(&RenderSettingsRecord::default()),
+            RenderSettings::default()
+        );
+    }
+
+    /// A non-default record flows each authored field onto the live settings.
+    #[test]
+    fn non_default_fields_map_through() {
+        let rec = RenderSettingsRecord {
+            exposure: 2.0,
+            dither: false,
+            bloom_enabled: true,
+            bloom_intensity: 0.3,
+            ssao_enabled: true,
+            taa: true,
+            shadows_enabled: true,
+            shadows_max_distance: 120.0,
+            gi_enabled: true,
+            gi_intensity: 1.5,
+            ..RenderSettingsRecord::default()
+        };
+        let s = apply_record(&rec);
+        assert_eq!(s.exposure, 2.0);
+        assert!(!s.dither);
+        assert!(s.bloom.enabled && (s.bloom.intensity - 0.3).abs() < 1e-6);
+        assert!(s.ssao.enabled);
+        assert!(s.taa);
+        assert!(s.shadows.enabled && (s.shadows.max_distance - 120.0).abs() < 1e-6);
+        assert!(s.gi.enabled && (s.gi.intensity - 1.5).abs() < 1e-6);
+        // Untouched tuning knobs stay at their defaults.
+        assert_eq!(s.shadows.lambda, RenderSettings::default().shadows.lambda);
+        assert_eq!(s.gi.extent, RenderSettings::default().gi.extent);
     }
 }

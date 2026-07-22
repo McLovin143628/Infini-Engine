@@ -10,12 +10,18 @@ import { create } from "zustand";
 import { getCommand, registerCommands, setCommandHandler } from "../lib/commands";
 import { listenTo } from "../lib/events";
 import { projectSettings, viewport } from "../lib/ipc";
+import type { GizmoModeDto } from "../bindings/GizmoModeDto";
+import type { GizmoSpaceDto } from "../bindings/GizmoSpaceDto";
 import type { SculptFalloffDto } from "../bindings/SculptFalloffDto";
 import type { SculptOpDto } from "../bindings/SculptOpDto";
 import type { SculptSettingsDto } from "../bindings/SculptSettingsDto";
 import type { Snap2DDto } from "../bindings/Snap2DDto";
+import type { Snap3DDto } from "../bindings/Snap3DDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
+
+/** localStorage key for the persisted 3D gizmo snap settings (Wave 2). */
+const SNAP3D_KEY = "inf.viewport.snap3d";
 
 /** Radius clamp (world metres) and the multiplicative `[` / `]` nudge factor. */
 export const SCULPT_RADIUS_MIN = 0.5;
@@ -52,6 +58,16 @@ interface ViewportUiState {
   /** Target splat layer `0..=3` for the Paint op (P10.4). */
   sculptPaintLayer: number;
 
+  /** Transform-gizmo mode (translate/rotate/scale), two-way synced (Wave 2). */
+  gizmoMode: GizmoModeDto;
+  /** Gizmo orientation frame (World ↔ Local). */
+  gizmoSpace: GizmoSpaceDto;
+  /** 3D snap: when enabled, drags always snap; else Shift-gated in the viewport. */
+  snap3dEnabled: boolean;
+  snap3dTranslate: number;
+  snap3dRotate: number;
+  snap3dScale: number;
+
   setMode: (mode: ViewportModeDto) => void;
   toggleMode: () => void;
   setGridSnapEnabled: (v: boolean) => void;
@@ -68,6 +84,17 @@ interface ViewportUiState {
   setSculptStrength: (s: number) => void;
   setSculptFalloff: (f: SculptFalloffDto) => void;
   setSculptPaintLayer: (n: number) => void;
+
+  /** Set the gizmo mode + push to the viewport (Wave 2). */
+  setGizmoMode: (mode: GizmoModeDto) => void;
+  /** Toggle World ↔ Local gizmo space + push. */
+  toggleGizmoSpace: () => void;
+  setGizmoSpace: (space: GizmoSpaceDto) => void;
+  /** Enable/disable always-on 3D snap + persist + push. */
+  setSnap3dEnabled: (v: boolean) => void;
+  setSnap3dTranslate: (v: number) => void;
+  setSnap3dRotate: (v: number) => void;
+  setSnap3dScale: (v: number) => void;
 }
 
 /** Number of splat layers (matches inf_terrain::SPLAT_LAYERS / TERRAIN_LAYERS). */
@@ -96,6 +123,27 @@ function pushSnap(s: ViewportUiState): void {
   void viewport.setSnap2d(dto).catch(() => {});
 }
 
+/** Build the 3D snap DTO from the store state (Wave 2). */
+function snap3dDto(s: ViewportUiState): Snap3DDto {
+  return {
+    translate: s.snap3dTranslate,
+    rotate_deg: s.snap3dRotate,
+    scale: s.snap3dScale,
+    always_on: s.snap3dEnabled,
+  };
+}
+
+/** Push the 3D snap settings to the viewport and persist them (Wave 2). */
+function pushSnap3d(s: ViewportUiState): void {
+  const dto = snap3dDto(s);
+  void viewport.setSnap3d(dto).catch(() => {});
+  try {
+    localStorage.setItem(SNAP3D_KEY, JSON.stringify(dto));
+  } catch {
+    // ignore quota / privacy-mode failures
+  }
+}
+
 export const useViewportStore = create<ViewportUiState>((set, get) => ({
   mode: "Perspective",
   gridSnapEnabled: false,
@@ -108,6 +156,12 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   sculptStrength: 0.5,
   sculptFalloff: "Smooth",
   sculptPaintLayer: 0,
+  gizmoMode: "Translate",
+  gizmoSpace: "World",
+  snap3dEnabled: false,
+  snap3dTranslate: 1,
+  snap3dRotate: 15,
+  snap3dScale: 0.1,
 
   setMode: (mode) => {
     set({ mode });
@@ -168,6 +222,34 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
       : 0;
     set({ sculptPaintLayer });
     pushSculpt(get());
+  },
+
+  setGizmoMode: (gizmoMode) => {
+    set({ gizmoMode });
+    void viewport.setGizmoMode(gizmoMode).catch(() => {});
+  },
+  setGizmoSpace: (gizmoSpace) => {
+    set({ gizmoSpace });
+    void viewport.setGizmoSpace(gizmoSpace).catch(() => {});
+  },
+  toggleGizmoSpace: () => {
+    get().setGizmoSpace(get().gizmoSpace === "Local" ? "World" : "Local");
+  },
+  setSnap3dEnabled: (snap3dEnabled) => {
+    set({ snap3dEnabled });
+    pushSnap3d(get());
+  },
+  setSnap3dTranslate: (v) => {
+    set({ snap3dTranslate: Number.isFinite(v) ? Math.max(v, 0) : 0 });
+    pushSnap3d(get());
+  },
+  setSnap3dRotate: (v) => {
+    set({ snap3dRotate: Number.isFinite(v) ? Math.max(v, 0) : 0 });
+    pushSnap3d(get());
+  },
+  setSnap3dScale: (v) => {
+    set({ snap3dScale: Number.isFinite(v) ? Math.max(v, 0) : 0 });
+    pushSnap3d(get());
   },
 }));
 
@@ -237,14 +319,44 @@ export function initViewportSync(): () => void {
   };
   reload();
 
+  // Restore the persisted 3D gizmo snap settings and push them to the viewport
+  // (Wave 2). Malformed / absent storage falls back to the store defaults.
+  try {
+    const raw = localStorage.getItem(SNAP3D_KEY);
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<Snap3DDto>;
+      useViewportStore.setState({
+        snap3dEnabled: typeof p.always_on === "boolean" ? p.always_on : false,
+        snap3dTranslate: typeof p.translate === "number" ? p.translate : 1,
+        snap3dRotate: typeof p.rotate_deg === "number" ? p.rotate_deg : 15,
+        snap3dScale: typeof p.scale === "number" ? p.scale : 0.1,
+      });
+    }
+  } catch {
+    // ignore parse / access failures
+  }
+  void viewport.setSnap3d(snap3dDto(useViewportStore.getState())).catch(() => {});
+
   let disposed = false;
-  let unlisten: (() => void) | undefined;
-  listenTo("project://changed", () => reload()).then((fn) => {
-    if (disposed) fn();
-    else unlisten = fn;
-  });
+  const unlisteners: Array<() => void> = [];
+  const track = (p: Promise<() => void>) => {
+    p.then((fn) => {
+      if (disposed) fn();
+      else unlisteners.push(fn);
+    }).catch(() => {});
+  };
+  track(listenTo("project://changed", () => reload()));
+  // The viewport echoes gizmo-mode changes (W/E/R keypress or an IPC set); mirror
+  // them into the store WITHOUT calling back into IPC (no loop).
+  track(
+    listenTo("viewport://gizmo", (mode) => {
+      if (useViewportStore.getState().gizmoMode !== mode) {
+        useViewportStore.setState({ gizmoMode: mode });
+      }
+    }),
+  );
   return () => {
     disposed = true;
-    unlisten?.();
+    for (const fn of unlisteners) fn();
   };
 }

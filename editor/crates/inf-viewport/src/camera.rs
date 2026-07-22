@@ -433,6 +433,44 @@ impl Snap2DSettings {
     }
 }
 
+/// The gizmo's orientation frame (Wave 2). `World` aligns the transform handles
+/// to the world axes; `Local` aligns them to the primary selection's own
+/// rotation. 2D mode forces `World` (the handles live in the sprite plane).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GizmoSpace {
+    #[default]
+    World,
+    Local,
+}
+
+/// 3D transform-gizmo snap increments pushed from the toolbar (Wave 2). Replaces
+/// the previously-hardcoded 1 m / 15° / 0.1 constants. When `always_on` is set,
+/// every drag snaps; otherwise snapping is Shift-gated (holding Shift snaps,
+/// preserving the pre-Wave-2 feel).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapSettings {
+    /// Translate increment, world metres (`<= 0` ⇒ no translate snap).
+    pub translate: f32,
+    /// Rotate increment, degrees (`<= 0` ⇒ no rotate snap).
+    pub rotate_deg: f32,
+    /// Scale ratio increment (`<= 0` ⇒ no scale snap).
+    pub scale: f32,
+    /// Snap without holding Shift.
+    pub always_on: bool,
+}
+
+impl Default for SnapSettings {
+    fn default() -> Self {
+        // The pre-Wave-2 Shift-drag defaults (1 m / 15° / 0.1 ratio), Shift-gated.
+        Self {
+            translate: 1.0,
+            rotate_deg: 15.0,
+            scale: 0.1,
+            always_on: false,
+        }
+    }
+}
+
 /// Which viewport tool owns the left mouse button (P10.2b). `Select` is the
 /// default pick + transform-gizmo interaction; `Sculpt` turns an LMB-drag over a
 /// terrain entity into a height brush. Orthogonal to [`ViewportMode`] — sculpting

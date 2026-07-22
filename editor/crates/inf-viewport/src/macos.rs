@@ -25,10 +25,22 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
 use crate::camera::{
-    Camera2D, EditorCamera, SculptSettings, Snap2DSettings, ToolMode, ViewportMode,
+    Camera2D, EditorCamera, GizmoSpace, SculptSettings, Snap2DSettings, SnapSettings, ToolMode,
+    ViewportMode,
 };
 use crate::host::EngineHost;
 use crate::{SharedScene, SurfaceTarget, ViewportEventSink, ViewportRect};
+use inf_editor_core::ipc::GizmoModeDto;
+use inf_render::GizmoMode;
+
+/// Map the IPC gizmo-mode DTO to the renderer enum (Wave 2; mirrors win32).
+fn to_gizmo_mode(d: GizmoModeDto) -> GizmoMode {
+    match d {
+        GizmoModeDto::Translate => GizmoMode::Translate,
+        GizmoModeDto::Rotate => GizmoMode::Rotate,
+        GizmoModeDto::Scale => GizmoMode::Scale,
+    }
+}
 
 enum Cmd {
     SetRect(ViewportRect),
@@ -38,6 +50,9 @@ enum Cmd {
     SetSnap2D(Snap2DSettings),
     SetToolMode(ToolMode),
     SetSculpt(SculptSettings),
+    SetGizmo(GizmoMode),
+    SetGizmoSpace(GizmoSpace),
+    SetSnap3D(SnapSettings),
     Destroy,
 }
 
@@ -88,6 +103,22 @@ impl ViewportHandle {
     /// Replace the sculpt brush configuration.
     pub fn set_sculpt(&self, sculpt: SculptSettings) {
         let _ = self.tx.send(Cmd::SetSculpt(sculpt));
+    }
+
+    /// Set the transform-gizmo mode (Wave 2). macOS input isn't wired yet, so
+    /// this only sets the host state (the gizmo draws once input lands).
+    pub fn set_gizmo_mode(&self, mode: GizmoModeDto) {
+        let _ = self.tx.send(Cmd::SetGizmo(to_gizmo_mode(mode)));
+    }
+
+    /// Switch the gizmo orientation frame (World ↔ Local) (Wave 2).
+    pub fn set_gizmo_space(&self, space: GizmoSpace) {
+        let _ = self.tx.send(Cmd::SetGizmoSpace(space));
+    }
+
+    /// Replace the 3D transform-gizmo snap increments (Wave 2).
+    pub fn set_snap_3d(&self, snap: SnapSettings) {
+        let _ = self.tx.send(Cmd::SetSnap3D(snap));
     }
 
     /// Adopt a foreign PIE player window (no-op on macOS: cross-process view
@@ -218,6 +249,9 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedSce
                 Ok(Cmd::SetSnap2D(s)) => host.set_snap_2d(s),
                 Ok(Cmd::SetToolMode(m)) => host.set_tool_mode(m),
                 Ok(Cmd::SetSculpt(s)) => host.set_sculpt(s),
+                Ok(Cmd::SetGizmo(m)) => host.set_gizmo_mode(m),
+                Ok(Cmd::SetGizmoSpace(s)) => host.set_gizmo_space(s),
+                Ok(Cmd::SetSnap3D(s)) => host.set_snap_3d(s),
                 Ok(Cmd::Destroy) | Err(TryRecvError::Disconnected) => break 'outer,
                 Err(TryRecvError::Empty) => break,
             }

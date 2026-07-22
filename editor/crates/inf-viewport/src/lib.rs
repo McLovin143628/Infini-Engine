@@ -14,8 +14,8 @@
 pub mod camera;
 
 pub use camera::{
-    Camera2D, EditorCamera, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings, ToolMode,
-    ViewportMode,
+    Camera2D, EditorCamera, GizmoSpace, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings,
+    SnapSettings, ToolMode, ViewportMode,
 };
 
 use std::sync::{Arc, Mutex};
@@ -54,6 +54,12 @@ pub enum ViewportEvent {
     /// The viewport mutated the shared scene (a pick-select or a gizmo drag);
     /// Ring 2 responds by emitting a `world://delta` so the panels re-sync.
     WorldChanged,
+    /// The transform-gizmo mode changed on the viewport side (a W/E/R keypress
+    /// or an IPC set); Ring 2 forwards it on `viewport://gizmo` so the toolbar
+    /// stays in sync (two-way, Wave 2). Carries the IPC DTO directly so the enum
+    /// stays free of the platform-gated `inf_render::GizmoMode` (Linux builds
+    /// this file too).
+    GizmoModeChanged(inf_editor_core::ipc::GizmoModeDto),
 }
 
 /// Sink the host installs to receive [`ViewportEvent`]s. `Arc` so the render
@@ -154,6 +160,9 @@ impl ViewportHandle {
     pub fn set_snap_2d(&self, _snap: camera::Snap2DSettings) {}
     pub fn set_tool_mode(&self, _mode: camera::ToolMode) {}
     pub fn set_sculpt(&self, _sculpt: camera::SculptSettings) {}
+    pub fn set_gizmo_mode(&self, _mode: inf_editor_core::ipc::GizmoModeDto) {}
+    pub fn set_gizmo_space(&self, _space: camera::GizmoSpace) {}
+    pub fn set_snap_3d(&self, _snap: camera::SnapSettings) {}
     pub fn embed_foreign(&self, _hwnd: isize) {}
     pub fn release_foreign(&self) {}
     pub fn destroy(&self) {}
