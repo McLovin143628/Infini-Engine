@@ -12,6 +12,10 @@ publish = false
 serde = { workspace = true }
 thiserror = { workspace = true }
 inf-graph = { workspace = true }
+# Portable trig (psin64/pcos64) — `math.sin`/`math.cos` route here so committed
+# blueprint math stays bit-identical across platforms (std trig is not; see
+# inf_math::portable house law).
+inf-math = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

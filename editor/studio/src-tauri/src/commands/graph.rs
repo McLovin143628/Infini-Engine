@@ -326,6 +326,22 @@ impl Host for RunHost {
                 }
                 Ok(Value::Unit)
             }
+            // `nodestate::*` backs the stateful flow nodes (do_once/flip_flop/
+            // gate) with the same reserved `__bp_<kind>_<NodeId>` keys the
+            // lowerer emits, stored in this run's var map. `get_or` returns the
+            // stored value or the supplied default on a miss.
+            (Some("nodestate"), Some("get_or")) => {
+                let key = args.first().and_then(as_str).unwrap_or_default();
+                let default = args.get(1).cloned().unwrap_or(Value::Unit);
+                Ok(self.vars.get(&key).cloned().unwrap_or(default))
+            }
+            (Some("nodestate"), Some("set")) => {
+                let key = args.first().and_then(as_str).unwrap_or_default();
+                if let Some(v) = args.get(1) {
+                    self.vars.insert(key, v.clone());
+                }
+                Ok(Value::Unit)
+            }
             (Some("debug"), Some("print")) => {
                 let msg = args.first().and_then(as_str).unwrap_or_default();
                 self.logs.push(msg);

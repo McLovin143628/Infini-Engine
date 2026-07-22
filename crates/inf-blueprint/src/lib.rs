@@ -25,9 +25,19 @@ use serde::{Deserialize, Serialize};
 
 pub mod interp;
 pub mod lower;
+pub mod math_builtins;
 pub mod nodekit;
 pub mod raise;
 pub mod semantics;
+
+/// Hard iteration cap the lowerer bakes into every `flow.while` / `flow.for`
+/// loop guard so a runaway blueprint loop can never hang the interpreter or the
+/// shipped game. The generated loop condition is
+/// `user_cond && counter < LOOP_GUARD_MAX`; when the cap is what stopped the
+/// loop the lowered body emits a `debug.print("Runaway loop stopped (…)")`.
+/// A single source of truth so the interpreter, the transpiled Rust, and the
+/// `raise` recognizer all agree on the exact bound.
+pub const LOOP_GUARD_MAX: i64 = 1_000_000;
 
 pub use interp::{
     eval_fn, eval_fn_traced, AudioHost, Debug as InterpDebug, Host, MoveResult2d, MoveResult3d,

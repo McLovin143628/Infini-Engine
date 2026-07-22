@@ -15,7 +15,9 @@ use inf_graph::{Graph, NodeId, NodeRegistry, ParamValue, PortType};
 
 use crate::nodekit::{NodeRole, EXEC_THEN};
 use crate::semantics::EventKind;
-use crate::{BinOp, Binding, BlueprintFn, Expr, Lit, LocalId, Param, Stmt, Ty, UnOp};
+use crate::{
+    BinOp, Binding, BlueprintFn, Expr, Lit, LocalId, Param, Stmt, Ty, UnOp, LOOP_GUARD_MAX,
+};
 
 /// A failure while lowering a graph to IR.
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
@@ -36,11 +38,12 @@ pub fn role_of(type_id: &str, has_exec_input: bool) -> NodeRole {
         NodeRole::Event
     } else if type_id.starts_with("lit.") {
         NodeRole::Literal
-    } else if type_id.starts_with("math.")
-        || type_id.starts_with("cmp.")
-        || type_id == "logic.and"
-        || type_id == "logic.or"
-    {
+    } else if type_id == "math.neg" {
+        // `math.neg` is a unary IR node (`-a`), not a `math::neg` call.
+        NodeRole::NegOp
+    } else if binop_of(type_id).is_some() {
+        // Exactly the arith `math.add…rem`, the `cmp.*`, and `logic.and/or`.
+        // Every other `math.*` (abs/min/pow/clamp/…) falls through to PureCall.
         NodeRole::BinaryOp
     } else if type_id == "logic.not" {
         NodeRole::NotOp
@@ -54,6 +57,16 @@ pub fn role_of(type_id: &str, has_exec_input: bool) -> NodeRole {
         NodeRole::Sequence
     } else if type_id == "flow.return" {
         NodeRole::Return
+    } else if type_id == "flow.while" {
+        NodeRole::WhileLoop
+    } else if type_id == "flow.for" {
+        NodeRole::ForLoop
+    } else if type_id == "flow.do_once" {
+        NodeRole::DoOnce
+    } else if type_id == "flow.flip_flop" {
+        NodeRole::FlipFlop
+    } else if type_id == "flow.gate" {
+        NodeRole::Gate
     } else if has_exec_input {
         NodeRole::Action
     } else {
@@ -154,27 +167,35 @@ impl Lowerer<'_> {
     }
 
     /// Follow the exec wire out of `(node, out_port)` and lower the chain it
-    /// leads to. An unconnected exec output ends the chain.
+    /// leads to. An unconnected exec output ends the chain. The **input** port
+    /// the wire lands on is carried through as the next node's `entry_port`, so
+    /// multi-entry nodes (`flow.gate`, `flow.do_once`) can lower per entry.
     fn exec_from(&mut self, node: NodeId, out_port: &str) -> Result<Vec<Stmt>, LowerError> {
         // Exec flow is single-threaded: take the one node this output leads to.
-        match self.graph.links_from(node, out_port).next().map(|l| l.to) {
-            Some(next) => self.exec_node(next),
+        match self.graph.links_from(node, out_port).next() {
+            Some(link) => {
+                // The consumed node is `link.to`, entered at `link.to_port`.
+                let (to, entry_port) = (link.to, link.to_port.clone());
+                self.exec_node(to, &entry_port)
+            }
             None => Ok(Vec::new()),
         }
     }
 
-    /// Lower an exec node plus everything downstream of it.
-    fn exec_node(&mut self, node: NodeId) -> Result<Vec<Stmt>, LowerError> {
+    /// Lower an exec node plus everything downstream of it, entered at
+    /// `entry_port` (the input port the incoming exec wire landed on; `"exec"`
+    /// for the single-entry nodes, which ignore it).
+    fn exec_node(&mut self, node: NodeId, entry_port: &str) -> Result<Vec<Stmt>, LowerError> {
         if self.visiting.contains(&node) {
             return Err(LowerError::ExecCycle(node));
         }
         self.visiting.push(node);
-        let result = self.exec_node_inner(node);
+        let result = self.exec_node_inner(node, entry_port);
         self.visiting.pop();
         result
     }
 
-    fn exec_node_inner(&mut self, node: NodeId) -> Result<Vec<Stmt>, LowerError> {
+    fn exec_node_inner(&mut self, node: NodeId, entry_port: &str) -> Result<Vec<Stmt>, LowerError> {
         let type_id = self.type_id(node)?.to_string();
         // `out` collects any `let`s that materialize shared pure nodes (the
         // prelude) followed by this node's own statement(s).
@@ -235,11 +256,186 @@ impl Lowerer<'_> {
                 out.extend(self.exec_from(node, EXEC_THEN)?);
                 Ok(out)
             }
+            NodeRole::WhileLoop => self.lower_while(node, &mut out).map(|()| out),
+            NodeRole::ForLoop => self.lower_for(node, &mut out).map(|()| out),
+            NodeRole::DoOnce => self.lower_do_once(node, entry_port, &mut out).map(|()| out),
+            NodeRole::FlipFlop => self.lower_flip_flop(node, &mut out).map(|()| out),
+            NodeRole::Gate => self.lower_gate(node, entry_port, &mut out).map(|()| out),
             other => Err(LowerError::Unsupported(
                 node,
                 format!("{type_id} ({other:?})"),
             )),
         }
+    }
+
+    /// `flow.while`: a counter-guarded loop.
+    ///
+    /// ```text
+    /// let mut counter = 0;
+    /// while (user_cond && counter < LOOP_GUARD_MAX) { <body>; counter = counter + 1; }
+    /// if counter >= LOOP_GUARD_MAX { debug::print("Runaway loop stopped (<node>)"); }
+    /// <completed continuation>
+    /// ```
+    ///
+    /// The guard lives **in the IR** so the interpreter and the transpiled Rust
+    /// share the exact same bound. NOTE: the user condition is resolved fresh so
+    /// it re-evaluates each iteration; a condition node that *also* fans out
+    /// (≥2 consumers) materializes into a `let` hoisted before the loop — an
+    /// accepted edge-case limitation of the shared-value model, not the norm.
+    fn lower_while(&mut self, node: NodeId, out: &mut Vec<Stmt>) -> Result<(), LowerError> {
+        let counter = self.alloc_local();
+        let user_cond = self.resolve_input(node, "condition", out)?;
+        out.push(Stmt::Let {
+            id: counter,
+            binding: Binding::Anon,
+            ty: None,
+            mutable: true,
+            value: Expr::Lit(Lit::Int(0)),
+        });
+        let cond = Expr::Binary(BinOp::And, Box::new(user_cond), Box::new(guard_lt(counter)));
+        let mut body = self.exec_from(node, "loop_body")?;
+        body.push(increment(counter));
+        out.push(Stmt::While { cond, body });
+        out.push(runaway_report(counter));
+        out.extend(self.exec_from(node, "completed")?);
+        Ok(())
+    }
+
+    /// `flow.for`: `index in first..=last`, counter-guarded. `first`/`last` are
+    /// snapshotted into locals (evaluated once) and the `index` output is
+    /// registered **before** the body is lowered so body reads resolve to it.
+    fn lower_for(&mut self, node: NodeId, out: &mut Vec<Stmt>) -> Result<(), LowerError> {
+        let idx = self.alloc_local();
+        let last_local = self.alloc_local();
+        let counter = self.alloc_local();
+        // Register the index output up front so `loop_body` reads see the local.
+        self.locals.insert((node, "index".to_string()), idx);
+        let first = self.resolve_input(node, "first", out)?;
+        let last = self.resolve_input(node, "last", out)?;
+        out.push(Stmt::Let {
+            id: idx,
+            binding: Binding::Anon,
+            ty: None,
+            mutable: true,
+            value: first,
+        });
+        out.push(Stmt::Let {
+            id: last_local,
+            binding: Binding::Anon,
+            ty: None,
+            mutable: false,
+            value: last,
+        });
+        out.push(Stmt::Let {
+            id: counter,
+            binding: Binding::Anon,
+            ty: None,
+            mutable: true,
+            value: Expr::Lit(Lit::Int(0)),
+        });
+        let cond = Expr::Binary(
+            BinOp::And,
+            Box::new(Expr::Binary(
+                BinOp::Le,
+                Box::new(Expr::Local(idx)),
+                Box::new(Expr::Local(last_local)),
+            )),
+            Box::new(guard_lt(counter)),
+        );
+        let mut body = self.exec_from(node, "loop_body")?;
+        body.push(increment(idx));
+        body.push(increment(counter));
+        out.push(Stmt::While { cond, body });
+        out.push(runaway_report(counter));
+        out.extend(self.exec_from(node, "completed")?);
+        Ok(())
+    }
+
+    /// `flow.do_once`: entered at `exec` it fires `then` the first time only;
+    /// entered at `reset` it re-arms. State is a `Bool` in `nodestate::*`.
+    fn lower_do_once(
+        &mut self,
+        node: NodeId,
+        entry_port: &str,
+        out: &mut Vec<Stmt>,
+    ) -> Result<(), LowerError> {
+        let key = format!("__bp_once_{node}");
+        if entry_port == "reset" {
+            out.push(nodestate_set(&key, Expr::Lit(Lit::Bool(false))));
+            return Ok(());
+        }
+        // exec entry: if !fired { fired = true; <then> }
+        let mut then_body = vec![nodestate_set(&key, Expr::Lit(Lit::Bool(true)))];
+        then_body.extend(self.exec_from(node, EXEC_THEN)?);
+        out.push(Stmt::If {
+            cond: Expr::Unary(
+                UnOp::Not,
+                Box::new(nodestate_get_or(&key, Expr::Lit(Lit::Bool(false)))),
+            ),
+            then_body,
+            else_body: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// `flow.flip_flop`: alternate `a`/`b` on each entry. The state read is
+    /// materialized into a `let` first (so `is_a` and the branch agree on *this*
+    /// invocation), then the stored value is toggled for next time.
+    fn lower_flip_flop(&mut self, node: NodeId, out: &mut Vec<Stmt>) -> Result<(), LowerError> {
+        let key = format!("__bp_flip_{node}");
+        let is_a = self.alloc_local();
+        out.push(Stmt::Let {
+            id: is_a,
+            binding: Binding::Anon,
+            ty: None,
+            mutable: false,
+            value: nodestate_get_or(&key, Expr::Lit(Lit::Bool(true))),
+        });
+        // Register the `is_a` data output before lowering the branches.
+        self.locals.insert((node, "is_a".to_string()), is_a);
+        out.push(nodestate_set(
+            &key,
+            Expr::Unary(UnOp::Not, Box::new(Expr::Local(is_a))),
+        ));
+        let then_body = self.exec_from(node, "a")?;
+        let else_body = self.exec_from(node, "b")?;
+        out.push(Stmt::If {
+            cond: Expr::Local(is_a),
+            then_body,
+            else_body,
+        });
+        Ok(())
+    }
+
+    /// `flow.gate`: `enter` reaches `exit` only while open; `open`/`close`/
+    /// `toggle` mutate the stored `Bool` (default = the `start_open` param).
+    fn lower_gate(
+        &mut self,
+        node: NodeId,
+        entry_port: &str,
+        out: &mut Vec<Stmt>,
+    ) -> Result<(), LowerError> {
+        let key = format!("__bp_gate_{node}");
+        let start_open = self.bool_param(node, "start_open");
+        let default = || Expr::Lit(Lit::Bool(start_open));
+        match entry_port {
+            "open" => out.push(nodestate_set(&key, Expr::Lit(Lit::Bool(true)))),
+            "close" => out.push(nodestate_set(&key, Expr::Lit(Lit::Bool(false)))),
+            "toggle" => out.push(nodestate_set(
+                &key,
+                Expr::Unary(UnOp::Not, Box::new(nodestate_get_or(&key, default()))),
+            )),
+            _ => {
+                // "enter": if open { <exit chain> }
+                let then_body = self.exec_from(node, "exit")?;
+                out.push(Stmt::If {
+                    cond: nodestate_get_or(&key, default()),
+                    then_body,
+                    else_body: Vec::new(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// The first output data port of `node` that some link consumes, if any.
@@ -343,6 +539,10 @@ impl Lowerer<'_> {
                 let a = self.resolve_input(node, "a", prelude)?;
                 Expr::Unary(UnOp::Not, Box::new(a))
             }
+            NodeRole::NegOp => {
+                let a = self.resolve_input(node, "a", prelude)?;
+                Expr::Unary(UnOp::Neg, Box::new(a))
+            }
             NodeRole::VarGet => {
                 let name = self.string_param(node, "name");
                 Expr::Call {
@@ -425,6 +625,21 @@ impl Lowerer<'_> {
         }
     }
 
+    /// A `Bool` param override, defaulting to the registry default (fetched from
+    /// the def) or `false` when the node/param is unknown.
+    fn bool_param(&self, node: NodeId, name: &str) -> bool {
+        if let Some(ParamValue::Bool(b)) = self.graph.node(node).and_then(|n| n.params.get(name)) {
+            return *b;
+        }
+        // No stored override → the registry default (e.g. gate.start_open = true).
+        self.graph
+            .node(node)
+            .and_then(|n| self.reg.get(&n.type_id))
+            .and_then(|def| def.param(name))
+            .map(|pd| matches!(pd.default, ParamValue::Bool(true)))
+            .unwrap_or(false)
+    }
+
     fn input_type(&self, node: NodeId, port: &str) -> PortType {
         self.graph
             .node(node)
@@ -447,6 +662,69 @@ fn default_literal(ty: PortType) -> Expr {
         PortType::Bool => Lit::Bool(false),
         PortType::Str => Lit::Str(String::new()),
         _ => Lit::Float(0.0),
+    })
+}
+
+/// The loop-guard sub-condition `counter < LOOP_GUARD_MAX`.
+fn guard_lt(counter: LocalId) -> Expr {
+    Expr::Binary(
+        BinOp::Lt,
+        Box::new(Expr::Local(counter)),
+        Box::new(Expr::Lit(Lit::Int(LOOP_GUARD_MAX))),
+    )
+}
+
+/// `counter = counter + 1;`
+fn increment(counter: LocalId) -> Stmt {
+    Stmt::Assign {
+        target: counter,
+        value: Expr::Binary(
+            BinOp::Add,
+            Box::new(Expr::Local(counter)),
+            Box::new(Expr::Lit(Lit::Int(1))),
+        ),
+    }
+}
+
+/// `if counter >= LOOP_GUARD_MAX { debug::print(RUNAWAY_MSG); }` — the after-loop
+/// report emitted when the guard, not the user condition, stopped the loop.
+///
+/// The message is a **constant**, deliberately node-agnostic: it is a synthetic
+/// statement `raise` discards and re-lowering regenerates, so embedding the
+/// (raise-renumbered, non-user-facing) `NodeId` would break `lower(raise(f)) ==
+/// f`. A stable string keeps the loop guarded *and* round-trippable.
+fn runaway_report(counter: LocalId) -> Stmt {
+    Stmt::If {
+        cond: Expr::Binary(
+            BinOp::Ge,
+            Box::new(Expr::Local(counter)),
+            Box::new(Expr::Lit(Lit::Int(LOOP_GUARD_MAX))),
+        ),
+        then_body: vec![Stmt::ExprStmt(Expr::Call {
+            path: vec!["debug".into(), "print".into()],
+            args: vec![Expr::Lit(Lit::Str(RUNAWAY_MSG.to_string()))],
+        })],
+        else_body: Vec::new(),
+    }
+}
+
+/// The exact message the loop guard prints when it trips (constant so it
+/// round-trips through `raise`).
+pub const RUNAWAY_MSG: &str = "Runaway loop stopped (blueprint loop guard exceeded)";
+
+/// `nodestate::get_or(key, default)` — read persisted node state or a default.
+fn nodestate_get_or(key: &str, default: Expr) -> Expr {
+    Expr::Call {
+        path: vec!["nodestate".into(), "get_or".into()],
+        args: vec![Expr::Lit(Lit::Str(key.to_string())), default],
+    }
+}
+
+/// `nodestate::set(key, value);` — persist node state across invocations.
+fn nodestate_set(key: &str, value: Expr) -> Stmt {
+    Stmt::ExprStmt(Expr::Call {
+        path: vec!["nodestate".into(), "set".into()],
+        args: vec![Expr::Lit(Lit::Str(key.to_string())), value],
     })
 }
 
@@ -920,5 +1198,300 @@ mod tests {
         let f = &fns[0];
         assert_eq!(f.body.len(), 1);
         assert!(matches!(f.body[0], Stmt::If { .. }));
+    }
+
+    /// A host backing `vars::*`, `nodestate::*`, and `debug.print` over maps —
+    /// enough to run the math + flow palettes end to end.
+    #[derive(Default)]
+    struct MapHost {
+        vars: HashMap<String, Value>,
+        state: HashMap<String, Value>,
+        logs: Vec<String>,
+    }
+
+    impl crate::interp::Host for MapHost {
+        fn call(&mut self, path: &[String], args: &[Value]) -> Result<Value, crate::RunError> {
+            match (
+                path.first().map(String::as_str),
+                path.get(1).map(String::as_str),
+            ) {
+                (Some("vars"), Some("get")) => Ok(self
+                    .vars
+                    .get(args[0].as_str().unwrap())
+                    .cloned()
+                    .unwrap_or(Value::Float(0.0))),
+                (Some("vars"), Some("set")) => {
+                    self.vars
+                        .insert(args[0].as_str().unwrap().to_string(), args[1].clone());
+                    Ok(Value::Unit)
+                }
+                (Some("nodestate"), Some("get_or")) => Ok(self
+                    .state
+                    .get(args[0].as_str().unwrap())
+                    .cloned()
+                    .unwrap_or_else(|| args[1].clone())),
+                (Some("nodestate"), Some("set")) => {
+                    self.state
+                        .insert(args[0].as_str().unwrap().to_string(), args[1].clone());
+                    Ok(Value::Unit)
+                }
+                (Some("debug"), Some("print")) => {
+                    self.logs.push(args[0].as_str().unwrap().to_string());
+                    Ok(Value::Unit)
+                }
+                _ => Ok(Value::Unit),
+            }
+        }
+    }
+
+    fn lit_float(g: &mut Graph, v: f64) -> NodeId {
+        let n = g.insert("lit.float", NodeUi::default());
+        g.node_mut(n)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Float(v));
+        n
+    }
+
+    fn lit_int(g: &mut Graph, v: i64) -> NodeId {
+        let n = g.insert("lit.int", NodeUi::default());
+        g.node_mut(n)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Int(v));
+        n
+    }
+
+    /// Lower `begin_play → var.set("out", <math node fed by `ins`>)` and run it,
+    /// returning the stored `out` value. `ins` are (port, node) wires.
+    fn run_math_node(type_id: &str, ins: &[(&str, NodeId)], g: &mut Graph) -> Value {
+        let reg = blueprint_registry();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let op = g.insert(type_id, NodeUi::default());
+        let setv = g.insert("var.set", NodeUi::default());
+        g.node_mut(setv)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("out".into()));
+        for (port, src) in ins {
+            wire(g, *src, "value", op, port);
+        }
+        wire(g, op, "out", setv, "value");
+        wire(g, bp, EXEC_THEN, setv, "exec");
+        let f = lower_graph(g, &reg).unwrap().pop().unwrap();
+        let mut host = MapHost::default();
+        eval_fn(&f, &HashMap::new(), &mut host).unwrap();
+        host.vars.get("out").cloned().unwrap()
+    }
+
+    #[test]
+    fn lowers_and_runs_math_palette() {
+        // A representative sweep across the unary/binary/ternary/convert families.
+        let mut g = Graph::empty();
+        let a = lit_float(&mut g, -9.0);
+        assert_eq!(
+            run_math_node("math.neg", &[("a", a)], &mut g),
+            Value::Float(9.0)
+        );
+
+        let mut g = Graph::empty();
+        let a = lit_float(&mut g, -3.5);
+        assert_eq!(
+            run_math_node("math.abs", &[("a", a)], &mut g),
+            Value::Float(3.5)
+        );
+
+        let mut g = Graph::empty();
+        let a = lit_float(&mut g, 16.0);
+        assert_eq!(
+            run_math_node("math.sqrt", &[("a", a)], &mut g),
+            Value::Float(4.0)
+        );
+
+        let mut g = Graph::empty();
+        let a = lit_float(&mut g, 2.0);
+        let b = lit_float(&mut g, 10.0);
+        assert_eq!(
+            run_math_node("math.pow", &[("a", a), ("b", b)], &mut g),
+            Value::Float(1024.0)
+        );
+
+        let mut g = Graph::empty();
+        let a = lit_float(&mut g, 3.0);
+        let b = lit_float(&mut g, 7.0);
+        assert_eq!(
+            run_math_node("math.min", &[("a", a), ("b", b)], &mut g),
+            Value::Float(3.0)
+        );
+
+        let mut g = Graph::empty();
+        let x = lit_float(&mut g, 99.0);
+        let lo = lit_float(&mut g, 0.0);
+        let hi = lit_float(&mut g, 10.0);
+        assert_eq!(
+            run_math_node("math.clamp", &[("x", x), ("min", lo), ("max", hi)], &mut g),
+            Value::Float(10.0)
+        );
+
+        let mut g = Graph::empty();
+        let a = lit_float(&mut g, 0.0);
+        let b = lit_float(&mut g, 10.0);
+        let t = lit_float(&mut g, 0.25);
+        assert_eq!(
+            run_math_node("math.lerp", &[("a", a), ("b", b), ("t", t)], &mut g),
+            Value::Float(2.5)
+        );
+
+        let mut g = Graph::empty();
+        let a = lit_float(&mut g, 3.9);
+        assert_eq!(
+            run_math_node("math.to_int", &[("a", a)], &mut g),
+            Value::Int(3)
+        );
+
+        let mut g = Graph::empty();
+        let a = lit_int(&mut g, 5);
+        assert_eq!(
+            run_math_node("math.to_float", &[("a", a)], &mut g),
+            Value::Float(5.0)
+        );
+    }
+
+    #[test]
+    fn math_neg_lowers_to_unary() {
+        // math.neg is a NegOp → Expr::Unary(Neg), not a math::neg call.
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let a = lit_float(&mut g, 2.0);
+        let neg = g.insert("math.neg", NodeUi::default());
+        let setv = g.insert("var.set", NodeUi::default());
+        g.node_mut(setv)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("out".into()));
+        wire(&mut g, a, "value", neg, "a");
+        wire(&mut g, neg, "out", setv, "value");
+        wire(&mut g, bp, EXEC_THEN, setv, "exec");
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        let src = format!("{:?}", f.body);
+        assert!(src.contains("Unary(Neg"), "body: {src}");
+        assert!(!src.contains("math"), "neg must not be a math call: {src}");
+    }
+
+    #[test]
+    fn lowers_and_runs_for_loop_sum() {
+        // begin_play → for(0..=5) { sum = sum + index }
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let first = lit_int(&mut g, 0);
+        let last = lit_int(&mut g, 5);
+        let forn = g.insert("flow.for", NodeUi::default());
+        let getsum = g.insert("var.get", NodeUi::default());
+        g.node_mut(getsum)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("sum".into()));
+        let add = g.insert("math.add", NodeUi::default());
+        let setsum = g.insert("var.set", NodeUi::default());
+        g.node_mut(setsum)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("sum".into()));
+
+        wire(&mut g, first, "value", forn, "first");
+        wire(&mut g, last, "value", forn, "last");
+        wire(&mut g, getsum, "value", add, "a");
+        wire(&mut g, forn, "index", add, "b");
+        wire(&mut g, add, "out", setsum, "value");
+        wire(&mut g, bp, EXEC_THEN, forn, "exec");
+        wire(&mut g, forn, "loop_body", setsum, "exec");
+
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        let mut host = MapHost::default();
+        host.vars.insert("sum".into(), Value::Int(0));
+        eval_fn(&f, &HashMap::new(), &mut host).unwrap();
+        // 0+1+2+3+4+5 = 15.
+        assert_eq!(host.vars.get("sum"), Some(&Value::Int(15)));
+    }
+
+    #[test]
+    fn lowers_and_runs_while_countdown() {
+        // begin_play → while(n > 0) { n = n - 1 }, n starts 5.
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let getn = g.insert("var.get", NodeUi::default());
+        g.node_mut(getn)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("n".into()));
+        let zero = lit_int(&mut g, 0);
+        let gt = g.insert("cmp.gt", NodeUi::default());
+        let wh = g.insert("flow.while", NodeUi::default());
+        let getn2 = g.insert("var.get", NodeUi::default());
+        g.node_mut(getn2)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("n".into()));
+        let one = lit_int(&mut g, 1);
+        let sub = g.insert("math.sub", NodeUi::default());
+        let setn = g.insert("var.set", NodeUi::default());
+        g.node_mut(setn)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("n".into()));
+
+        wire(&mut g, getn, "value", gt, "a");
+        wire(&mut g, zero, "value", gt, "b");
+        wire(&mut g, gt, "out", wh, "condition");
+        wire(&mut g, getn2, "value", sub, "a");
+        wire(&mut g, one, "value", sub, "b");
+        wire(&mut g, sub, "out", setn, "value");
+        wire(&mut g, bp, EXEC_THEN, wh, "exec");
+        wire(&mut g, wh, "loop_body", setn, "exec");
+
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        let mut host = MapHost::default();
+        host.vars.insert("n".into(), Value::Int(5));
+        eval_fn(&f, &HashMap::new(), &mut host).unwrap();
+        assert_eq!(host.vars.get("n"), Some(&Value::Int(0)));
+        assert!(host.logs.is_empty(), "no runaway for a terminating loop");
+    }
+
+    #[test]
+    fn lowers_and_runs_do_once() {
+        // A custom event → do_once → var.set("hits", hits + 1). Fire 3×.
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let ev = g.insert("event.begin_play", NodeUi::default());
+        let once = g.insert("flow.do_once", NodeUi::default());
+        let geth = g.insert("var.get", NodeUi::default());
+        g.node_mut(geth)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("hits".into()));
+        let one = lit_int(&mut g, 1);
+        let add = g.insert("math.add", NodeUi::default());
+        let seth = g.insert("var.set", NodeUi::default());
+        g.node_mut(seth)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("hits".into()));
+        wire(&mut g, geth, "value", add, "a");
+        wire(&mut g, one, "value", add, "b");
+        wire(&mut g, add, "out", seth, "value");
+        wire(&mut g, ev, EXEC_THEN, once, "exec");
+        wire(&mut g, once, EXEC_THEN, seth, "exec");
+
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        let mut host = MapHost::default();
+        host.vars.insert("hits".into(), Value::Int(0));
+        for _ in 0..3 {
+            eval_fn(&f, &HashMap::new(), &mut host).unwrap();
+        }
+        // Fires exactly once despite three invocations.
+        assert_eq!(host.vars.get("hits"), Some(&Value::Int(1)));
     }
 }

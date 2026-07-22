@@ -6,8 +6,20 @@
 //! The round-trip pivot is the IR, exactly as the transpiler's pivot is Rust:
 //! **`lower(raise(f)) == f`** for every `f` in lowering's image (linear exec
 //! chains + terminal branches — the subset the node kit produces). Structural
-//! sugar with no faithful graph form (e.g. `while`, `flow.sequence` flattening)
-//! is out of scope and reported, mirroring the transpiler's snippet fallback.
+//! sugar with no faithful graph form is out of scope and reported, mirroring the
+//! transpiler's snippet fallback.
+//!
+//! Raise coverage of the B-P2 flow palette:
+//! - **`flow.while`** *is* inverted — [`Raiser::try_raise_while`] recognizes the
+//!   exact counter-guarded pattern the lowerer emits (`let counter = 0; while
+//!   (cond && counter < CAP) { …; counter += 1; } if counter >= CAP { … }`) and
+//!   rebuilds the node, so `lower(raise(f)) == f` holds for while-loops too.
+//! - **`flow.for` / `flow.do_once` / `flow.flip_flop` / `flow.gate` are
+//!   raise-excluded** (like `flow.sequence`'s flattening): their lowered form is
+//!   a multi-statement / stateful expansion (`nodestate::*` calls, index/last
+//!   snapshots) with no unambiguous single-node inverse. Hand-edited Rust in
+//!   those shapes stays a `Stmt::Snippet` on lift rather than a graph node — the
+//!   documented, lossless fallback.
 
 use std::collections::HashMap;
 
@@ -15,7 +27,7 @@ use inf_graph::{Graph, Link, NodeId, NodeUi, ParamValue};
 
 use crate::nodekit::EXEC_THEN;
 use crate::semantics::EventKind;
-use crate::{BinOp, BlueprintFn, Expr, Lit, LocalId, Stmt, UnOp};
+use crate::{BinOp, Binding, BlueprintFn, Expr, Lit, LocalId, Stmt, UnOp, LOOP_GUARD_MAX};
 
 /// A failure while raising IR to a graph (the IR is outside lowering's image).
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
@@ -109,7 +121,15 @@ impl Raiser {
         body: &[Stmt],
         mut prev: Option<(NodeId, String)>,
     ) -> Result<(), RaiseError> {
-        for (i, stmt) in body.iter().enumerate() {
+        let mut i = 0;
+        while i < body.len() {
+            // Recognize the canonical guarded `flow.while` expansion first; it
+            // spans three statements and continues from the loop's `completed`.
+            if let Some(consumed) = self.try_raise_while(body, i, &mut prev)? {
+                i += consumed;
+                continue;
+            }
+            let stmt = &body[i];
             let is_last = i + 1 == body.len();
             match stmt {
                 Stmt::Let { id, value, .. } => {
@@ -172,11 +192,78 @@ impl Raiser {
                 }
                 Stmt::ExprStmt(_) => return Err(RaiseError::UnsupportedStmt("non-call expr stmt")),
                 Stmt::Assign { .. } => return Err(RaiseError::UnsupportedStmt("assign")),
+                // A `While` that isn't the recognized guarded pattern (e.g. a
+                // hand-written raw loop) has no faithful single-node inverse.
                 Stmt::While { .. } => return Err(RaiseError::UnsupportedStmt("while")),
                 Stmt::Snippet(_) => return Err(RaiseError::UnsupportedStmt("snippet")),
             }
+            i += 1;
         }
         Ok(())
+    }
+
+    /// Recognize the exact counter-guarded `flow.while` expansion the lowerer
+    /// emits at `body[i..i+3]` and rebuild the node, threading the outer chain on
+    /// from its `completed` output. Returns `Some(3)` (statements consumed) on a
+    /// match, `None` otherwise (the statement is handled by the normal chain).
+    ///
+    /// The recognized shape is precisely
+    /// [`crate::lower::Lowerer::lower_while`]'s output:
+    /// ```text
+    /// let mut counter = 0;                                  // Anon, Int(0)
+    /// while (user_cond && counter < LOOP_GUARD_MAX) { <body>; counter = counter + 1; }
+    /// if counter >= LOOP_GUARD_MAX { debug::print(_); }
+    /// ```
+    fn try_raise_while(
+        &mut self,
+        body: &[Stmt],
+        i: usize,
+        prev: &mut Option<(NodeId, String)>,
+    ) -> Result<Option<usize>, RaiseError> {
+        let (Some(s0), Some(s1), Some(s2)) = (body.get(i), body.get(i + 1), body.get(i + 2)) else {
+            return Ok(None);
+        };
+        // s0: `let mut counter = 0;` (an anonymous, mutable Int-zero binding).
+        let Stmt::Let {
+            id: counter,
+            binding: Binding::Anon,
+            mutable: true,
+            value: Expr::Lit(Lit::Int(0)),
+            ..
+        } = s0
+        else {
+            return Ok(None);
+        };
+        let counter = *counter;
+        // s1: the guarded `while` whose body ends with `counter = counter + 1;`.
+        let Stmt::While { cond, body: wbody } = s1 else {
+            return Ok(None);
+        };
+        let Expr::Binary(BinOp::And, user_cond, guard) = cond else {
+            return Ok(None);
+        };
+        if !is_guard_lt(guard, counter) {
+            return Ok(None);
+        }
+        let Some((Stmt::Assign { target, value }, inner)) = wbody.split_last() else {
+            return Ok(None);
+        };
+        if *target != counter || !is_increment(value, counter) {
+            return Ok(None);
+        }
+        // s2: the runaway `if counter >= CAP { debug::print(_) }`.
+        if !is_runaway_if(s2, counter) {
+            return Ok(None);
+        }
+
+        // Rebuild the node.
+        let node = self.add("flow.while", 0.0);
+        self.wire_prev(prev, node);
+        let c = self.raise_expr(user_cond)?;
+        self.wire(c.0, &c.1, node, "condition");
+        self.raise_chain(inner, Some((node, "loop_body".into())))?;
+        *prev = Some((node, "completed".into()));
+        Ok(Some(3))
     }
 
     fn wire_prev(&mut self, prev: &Option<(NodeId, String)>, into: NodeId) {
@@ -258,17 +345,11 @@ impl Raiser {
                 Ok((node, "out".into()))
             }
             Expr::Unary(UnOp::Neg, inner) => {
-                // -x is sugar for 0 - x in the node kit.
-                let node = self.add("math.sub", -160.0);
-                let zero = self.add("lit.float", -320.0);
-                self.graph
-                    .node_mut(zero)
-                    .unwrap()
-                    .params
-                    .insert("value".into(), ParamValue::Float(0.0));
-                self.wire(zero, "value", node, "a");
-                let b = self.raise_expr(inner)?;
-                self.wire(b.0, &b.1, node, "b");
+                // `-x` is the `math.neg` unary node (round-trips with the lowerer's
+                // NegOp), not the old `0 - x` sugar.
+                let node = self.add("math.neg", -160.0);
+                let a = self.raise_expr(inner)?;
+                self.wire(a.0, &a.1, node, "a");
                 Ok((node, "out".into()))
             }
             Expr::Binary(op, a, b) => {
@@ -285,6 +366,18 @@ impl Raiser {
                 let node = self.add("var.get", -160.0);
                 self.set_text(node, "name", &name);
                 Ok((node, "value".into()))
+            }
+            // Pure `math::<name>(..)` calls raise back to their `math.<name>`
+            // node (the PureCall inverse). Data ports match the node kit's
+            // declared input order so a re-lower reproduces the same call.
+            Expr::Call { path, args } if path.first().map(String::as_str) == Some("math") => {
+                let type_id = path.join(".");
+                let node = self.add(&type_id, -160.0);
+                for (arg, port) in args.iter().zip(math_data_ports(&type_id)) {
+                    let v = self.raise_expr(arg)?;
+                    self.wire(v.0, &v.1, node, &port);
+                }
+                Ok((node, "out".into()))
             }
             Expr::Call { .. } => Err(RaiseError::UnsupportedExpr("pure call")),
         }
@@ -321,6 +414,54 @@ fn is_action_path(path: &[String]) -> bool {
         path.first().map(String::as_str),
         Some("engine") | Some("debug")
     )
+}
+
+/// The declared data-input ports of a `math.*` node, in the node kit's order —
+/// so a raised call re-lowers to the identical argument list.
+fn math_data_ports(type_id: &str) -> Vec<String> {
+    match type_id {
+        "math.clamp" => vec!["x".into(), "min".into(), "max".into()],
+        "math.lerp" => vec!["a".into(), "b".into(), "t".into()],
+        "math.min" | "math.max" | "math.pow" => vec!["a".into(), "b".into()],
+        // abs/floor/ceil/round/sqrt/sin/cos/to_int/to_float are single-input.
+        _ => vec!["a".into()],
+    }
+}
+
+/// `counter < LOOP_GUARD_MAX` — the loop-guard sub-condition.
+fn is_guard_lt(e: &Expr, counter: LocalId) -> bool {
+    matches!(e, Expr::Binary(BinOp::Lt, l, r)
+        if matches!(l.as_ref(), Expr::Local(id) if *id == counter)
+        && matches!(r.as_ref(), Expr::Lit(Lit::Int(v)) if *v == LOOP_GUARD_MAX))
+}
+
+/// `counter + 1` — the loop-counter increment expression.
+fn is_increment(e: &Expr, counter: LocalId) -> bool {
+    matches!(e, Expr::Binary(BinOp::Add, l, r)
+        if matches!(l.as_ref(), Expr::Local(id) if *id == counter)
+        && matches!(r.as_ref(), Expr::Lit(Lit::Int(1))))
+}
+
+/// The after-loop `if counter >= LOOP_GUARD_MAX { debug::print(_) }` report.
+fn is_runaway_if(s: &Stmt, counter: LocalId) -> bool {
+    let Stmt::If {
+        cond,
+        then_body,
+        else_body,
+    } = s
+    else {
+        return false;
+    };
+    if !else_body.is_empty() {
+        return false;
+    }
+    let ge_ok = matches!(cond, Expr::Binary(BinOp::Ge, l, r)
+        if matches!(l.as_ref(), Expr::Local(id) if *id == counter)
+        && matches!(r.as_ref(), Expr::Lit(Lit::Int(v)) if *v == LOOP_GUARD_MAX));
+    ge_ok
+        && matches!(then_body.as_slice(),
+            [Stmt::ExprStmt(Expr::Call { path, .. })]
+                if path.as_slice() == ["debug".to_string(), "print".to_string()])
 }
 
 fn str_arg(arg: Option<&Expr>) -> Result<String, RaiseError> {
@@ -452,8 +593,10 @@ mod tests {
     }
 
     #[test]
-    fn while_is_unsupported() {
+    fn bare_while_is_still_unsupported() {
         use crate::Ty;
+        // A raw `while` that is NOT the guarded pattern (no counter let / runaway
+        // if) has no faithful node form — still reported, unchanged.
         let f = BlueprintFn {
             id: "begin_play".into(),
             name: "begin_play".into(),
@@ -465,5 +608,182 @@ mod tests {
             }],
         };
         assert_eq!(raise_fn(&f), Err(RaiseError::UnsupportedStmt("while")));
+    }
+
+    fn wire(g: &mut Graph, from: NodeId, fp: &str, to: NodeId, tp: &str) {
+        g.links.push(Link {
+            from,
+            from_port: fp.into(),
+            to,
+            to_port: tp.into(),
+        });
+    }
+
+    #[test]
+    fn math_calls_round_trip() {
+        use inf_graph::{Graph, NodeUi, ParamValue};
+        // begin_play → var.set("out", clamp(lerp(sqrt(x), 10, t), lo, hi))
+        // exercises unary, ternary, and nested pure math calls.
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let mk = |g: &mut Graph, v: f64| {
+            let n = g.insert("lit.float", NodeUi::default());
+            g.node_mut(n)
+                .unwrap()
+                .params
+                .insert("value".into(), ParamValue::Float(v));
+            n
+        };
+        let x = mk(&mut g, 16.0);
+        let t = mk(&mut g, 0.5);
+        let ten = mk(&mut g, 10.0);
+        let lo = mk(&mut g, 0.0);
+        let hi = mk(&mut g, 6.0);
+        let sqrt = g.insert("math.sqrt", NodeUi::default());
+        let lerp = g.insert("math.lerp", NodeUi::default());
+        let clamp = g.insert("math.clamp", NodeUi::default());
+        let setv = g.insert("var.set", NodeUi::default());
+        g.node_mut(setv)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("out".into()));
+        wire(&mut g, x, "value", sqrt, "a");
+        wire(&mut g, sqrt, "out", lerp, "a");
+        wire(&mut g, ten, "value", lerp, "b");
+        wire(&mut g, t, "value", lerp, "t");
+        wire(&mut g, lerp, "out", clamp, "x");
+        wire(&mut g, lo, "value", clamp, "min");
+        wire(&mut g, hi, "value", clamp, "max");
+        wire(&mut g, clamp, "out", setv, "value");
+        wire(&mut g, bp, EXEC_THEN, setv, "exec");
+
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        assert_round_trips(&f);
+    }
+
+    #[test]
+    fn neg_round_trips() {
+        use inf_graph::{Graph, NodeUi, ParamValue};
+        // begin_play → var.set("out", neg(x))
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let x = g.insert("lit.float", NodeUi::default());
+        g.node_mut(x)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Float(3.0));
+        let neg = g.insert("math.neg", NodeUi::default());
+        let setv = g.insert("var.set", NodeUi::default());
+        g.node_mut(setv)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("out".into()));
+        wire(&mut g, x, "value", neg, "a");
+        wire(&mut g, neg, "out", setv, "value");
+        wire(&mut g, bp, EXEC_THEN, setv, "exec");
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        assert_round_trips(&f);
+    }
+
+    #[test]
+    fn while_loop_round_trips() {
+        use inf_graph::{Graph, NodeUi, ParamValue};
+        // begin_play → while(n > 0) { n = n - 1 }; the guarded expansion must
+        // raise back to a single flow.while and re-lower identically.
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let getn = g.insert("var.get", NodeUi::default());
+        g.node_mut(getn)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("n".into()));
+        let zero = g.insert("lit.int", NodeUi::default());
+        let gt = g.insert("cmp.gt", NodeUi::default());
+        let wh = g.insert("flow.while", NodeUi::default());
+        let getn2 = g.insert("var.get", NodeUi::default());
+        g.node_mut(getn2)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("n".into()));
+        let one = g.insert("lit.int", NodeUi::default());
+        g.node_mut(one)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Int(1));
+        let sub = g.insert("math.sub", NodeUi::default());
+        let setn = g.insert("var.set", NodeUi::default());
+        g.node_mut(setn)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("n".into()));
+        wire(&mut g, getn, "value", gt, "a");
+        wire(&mut g, zero, "value", gt, "b");
+        wire(&mut g, gt, "out", wh, "condition");
+        wire(&mut g, getn2, "value", sub, "a");
+        wire(&mut g, one, "value", sub, "b");
+        wire(&mut g, sub, "out", setn, "value");
+        wire(&mut g, bp, EXEC_THEN, wh, "exec");
+        wire(&mut g, wh, "loop_body", setn, "exec");
+
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        // Sanity: it really lowered to the guarded shape.
+        assert!(matches!(
+            f.body.as_slice(),
+            [Stmt::Let { .. }, Stmt::While { .. }, Stmt::If { .. }]
+        ));
+        assert_round_trips(&f);
+    }
+
+    #[test]
+    fn while_with_completed_continuation_round_trips() {
+        use inf_graph::{Graph, NodeUi, ParamValue};
+        // begin_play → while(n > 0) { n = n - 1 } → debug.print("done")
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let getn = g.insert("var.get", NodeUi::default());
+        g.node_mut(getn)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("n".into()));
+        let zero = g.insert("lit.int", NodeUi::default());
+        let gt = g.insert("cmp.gt", NodeUi::default());
+        let wh = g.insert("flow.while", NodeUi::default());
+        let getn2 = g.insert("var.get", NodeUi::default());
+        g.node_mut(getn2)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("n".into()));
+        let one = g.insert("lit.int", NodeUi::default());
+        g.node_mut(one)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Int(1));
+        let sub = g.insert("math.sub", NodeUi::default());
+        let setn = g.insert("var.set", NodeUi::default());
+        g.node_mut(setn)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("n".into()));
+        let done = g.insert("debug.print", NodeUi::default());
+        g.node_mut(done)
+            .unwrap()
+            .params
+            .insert("message".into(), ParamValue::Text("done".into()));
+        wire(&mut g, getn, "value", gt, "a");
+        wire(&mut g, zero, "value", gt, "b");
+        wire(&mut g, gt, "out", wh, "condition");
+        wire(&mut g, getn2, "value", sub, "a");
+        wire(&mut g, one, "value", sub, "b");
+        wire(&mut g, sub, "out", setn, "value");
+        wire(&mut g, bp, EXEC_THEN, wh, "exec");
+        wire(&mut g, wh, "loop_body", setn, "exec");
+        wire(&mut g, wh, "completed", done, "exec");
+
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        assert_round_trips(&f);
     }
 }

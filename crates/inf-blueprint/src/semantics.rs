@@ -249,6 +249,33 @@ impl Host for ActorHost<'_> {
                 _ => {}
             }
         }
+        // `nodestate::get_or(key, default)` / `nodestate::set(key, value)` back
+        // the stateful flow nodes (do_once/flip_flop/gate). State lives in the
+        // same `instance.vars` map under reserved `__bp_<kind>_<NodeId>` keys
+        // (the lowerer's format), which never collide with user variable names.
+        // `get_or` returns the stored value or the supplied default on a miss —
+        // so a never-fired node reads its initial state cleanly.
+        if path.len() == 2 && path[0] == "nodestate" {
+            let key = args
+                .first()
+                .ok_or_else(|| RunError::Host(path.join("::"), "missing state key".into()))?
+                .as_str()?
+                .to_string();
+            match path[1].as_str() {
+                "get_or" => {
+                    let default = args.get(1).cloned().unwrap_or(Value::Unit);
+                    return Ok(self.actor.vars.get(&key).cloned().unwrap_or(default));
+                }
+                "set" => {
+                    let value = args.get(1).cloned().ok_or_else(|| {
+                        RunError::Host("nodestate::set".into(), "missing value".into())
+                    })?;
+                    self.actor.vars.insert(key, value);
+                    return Ok(Value::Unit);
+                }
+                _ => {}
+            }
+        }
         self.inner.call(path, args)
     }
 

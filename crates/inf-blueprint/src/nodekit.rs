@@ -90,13 +90,68 @@ fn binary_math(id: &str, display: &str) -> NodeDef {
         .with_outputs(vec![PortDef::new("out", PortType::Float)])
 }
 
+/// A single-input `math.*` op (`a` → `out`, both `Float`).
+fn unary_math(id: &str, display: &str) -> NodeDef {
+    NodeDef::new(id, display, "math")
+        .with_inputs(vec![PortDef::new("a", PortType::Float)])
+        .with_outputs(vec![PortDef::new("out", PortType::Float)])
+}
+
+/// The math palette (ROADMAP B-P1). The five arithmetic ops + the six unary
+/// functions + `min`/`max`/`pow`/`clamp`/`lerp` lower onto the IR: `math.add…rem`
+/// and `math.min/max/pow…` that the lowerer recognizes as binary/unary IR nodes
+/// stay [`Expr::Binary`](crate::Expr)/[`Expr::Unary`](crate::Expr); everything
+/// else lowers to a pure `math::<name>(..)` [`Call`](crate::Expr::Call) backed by
+/// [`crate::math_builtins`] (the interpreter and the transpiled Rust share that
+/// one implementation — parity by construction). `math.neg` is the unary-negate
+/// IR node (`-a`); `to_int`/`to_float` are the scalar type converters.
 fn math_nodes() -> Vec<NodeDef> {
     vec![
+        // Arithmetic (IR `BinOp`).
         binary_math("math.add", "Add (+)"),
         binary_math("math.sub", "Subtract (−)"),
         binary_math("math.mul", "Multiply (×)"),
         binary_math("math.div", "Divide (÷)"),
         binary_math("math.rem", "Remainder (%)"),
+        // Unary functions.
+        unary_math("math.neg", "Negate (−)"),
+        unary_math("math.abs", "Absolute"),
+        unary_math("math.floor", "Floor"),
+        unary_math("math.ceil", "Ceil"),
+        unary_math("math.round", "Round"),
+        unary_math("math.sqrt", "Square Root"),
+        unary_math("math.sin", "Sine"),
+        unary_math("math.cos", "Cosine"),
+        // Binary functions.
+        binary_math("math.min", "Min"),
+        binary_math("math.max", "Max"),
+        binary_math("math.pow", "Power (xʸ)"),
+        // Ternary helpers.
+        NodeDef::new("math.clamp", "Clamp", "math")
+            .described("Constrain x to [min, max] (non-panicking; inverted range yields max).")
+            .with_inputs(vec![
+                PortDef::new("x", PortType::Float),
+                PortDef::new("min", PortType::Float),
+                PortDef::new("max", PortType::Float),
+            ])
+            .with_outputs(vec![PortDef::new("out", PortType::Float)]),
+        NodeDef::new("math.lerp", "Lerp", "math")
+            .described("Linear interpolation a + (b − a) · t (unclamped t).")
+            .with_inputs(vec![
+                PortDef::new("a", PortType::Float),
+                PortDef::new("b", PortType::Float),
+                PortDef::new("t", PortType::Float),
+            ])
+            .with_outputs(vec![PortDef::new("out", PortType::Float)]),
+        // Scalar type converters.
+        NodeDef::new("math.to_int", "To Integer", "math")
+            .described("Truncate a Float toward zero to an Integer (saturating).")
+            .with_inputs(vec![PortDef::new("a", PortType::Float)])
+            .with_outputs(vec![PortDef::new("out", PortType::Int)]),
+        NodeDef::new("math.to_float", "To Float", "math")
+            .described("Widen an Integer to a Float.")
+            .with_inputs(vec![PortDef::new("a", PortType::Int)])
+            .with_outputs(vec![PortDef::new("out", PortType::Float)]),
     ]
 }
 
@@ -154,6 +209,16 @@ fn variable_nodes() -> Vec<NodeDef> {
     ]
 }
 
+/// The control-flow palette (branch/sequence/return + the B-P2 loops and
+/// stateful gates). Loops lower with a hard iteration cap
+/// ([`LOOP_GUARD_MAX`](crate::LOOP_GUARD_MAX)) baked into the IR guard, so a
+/// runaway blueprint loop can never hang the interpreter or the shipped game.
+/// The stateful nodes (`do_once`/`flip_flop`/`gate`) persist across invocations
+/// via the reserved `nodestate::*` host namespace, keyed `__bp_<kind>_<NodeId>`.
+///
+/// **Delay is out of scope here** (a time-based `flow.delay` needs the sim
+/// scheduler's timer wheel + a suspend/resume exec model the pure IR does not
+/// yet express) — see ROADMAP for the deferred latent-action follow-up.
 fn flow_nodes() -> Vec<NodeDef> {
     vec![
         NodeDef::new("flow.branch", "Branch (if)", "flow")
@@ -168,6 +233,47 @@ fn flow_nodes() -> Vec<NodeDef> {
         NodeDef::new("flow.return", "Return", "flow")
             .with_inputs(vec![exec_in(), PortDef::new("value", PortType::Wildcard)])
             .with_flags(SINK),
+        NodeDef::new("flow.while", "While Loop", "flow")
+            .described("Run `loop_body` while `condition` holds, then `completed` (guarded).")
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("condition", PortType::Bool).required(),
+            ])
+            .with_outputs(vec![exec_out("loop_body"), exec_out("completed")]),
+        NodeDef::new("flow.for", "For Loop", "flow")
+            .described("Run `loop_body` for `index` in first..=last, then `completed` (guarded).")
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("first", PortType::Int),
+                PortDef::new("last", PortType::Int),
+            ])
+            .with_outputs(vec![
+                exec_out("loop_body"),
+                PortDef::new("index", PortType::Int),
+                exec_out("completed"),
+            ]),
+        NodeDef::new("flow.do_once", "Do Once", "flow")
+            .described("Fire `then` on the first entry only; `reset` re-arms it.")
+            .with_inputs(vec![exec_in(), exec_out("reset")])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
+        NodeDef::new("flow.flip_flop", "Flip Flop", "flow")
+            .described("Alternate between `a` and `b` on each entry; `is_a` is the branch taken.")
+            .with_inputs(vec![exec_in()])
+            .with_outputs(vec![
+                exec_out("a"),
+                exec_out("b"),
+                PortDef::new("is_a", PortType::Bool),
+            ]),
+        NodeDef::new("flow.gate", "Gate", "flow")
+            .described("`enter` reaches `exit` only while open; open/close/toggle set the state.")
+            .with_inputs(vec![
+                exec_out("enter"),
+                exec_out("open"),
+                exec_out("close"),
+                exec_out("toggle"),
+            ])
+            .with_outputs(vec![exec_out("exit")])
+            .with_params(vec![ParamDef::toggle("start_open", true)]),
     ]
 }
 
@@ -443,11 +549,23 @@ pub enum NodeRole {
     BinaryOp,
     /// `logic.not` — unary.
     NotOp,
+    /// `math.neg` — unary negate (`-a`).
+    NegOp,
     VarGet,
     VarSet,
     Branch,
     Sequence,
     Return,
+    /// `flow.while` — guarded condition loop.
+    WhileLoop,
+    /// `flow.for` — guarded `index in first..=last` loop.
+    ForLoop,
+    /// `flow.do_once` — fire once until reset (state in `nodestate::*`).
+    DoOnce,
+    /// `flow.flip_flop` — alternate `a`/`b` (state in `nodestate::*`).
+    FlipFlop,
+    /// `flow.gate` — open/closed exec gate (state in `nodestate::*`).
+    Gate,
     /// A pure data-producing call (has outputs, no exec).
     PureCall,
     /// An impure exec action → `ExprStmt(Call)`.
@@ -571,5 +689,71 @@ mod tests {
         let b = reg.get("flow.branch").unwrap();
         assert!(b.output("true").is_some() && b.output("false").is_some());
         assert!(b.input("condition").unwrap().required);
+    }
+
+    #[test]
+    fn math_palette_is_registered() {
+        let reg = blueprint_registry();
+        for id in [
+            "math.neg",
+            "math.abs",
+            "math.floor",
+            "math.ceil",
+            "math.round",
+            "math.sqrt",
+            "math.sin",
+            "math.cos",
+            "math.min",
+            "math.max",
+            "math.pow",
+            "math.clamp",
+            "math.lerp",
+            "math.to_int",
+            "math.to_float",
+        ] {
+            assert!(reg.get(id).is_some(), "missing math node {id}");
+        }
+        // Converters carry the right pin types.
+        assert_eq!(
+            reg.get("math.to_int").unwrap().output("out").unwrap().ty,
+            PortType::Int
+        );
+        assert_eq!(
+            reg.get("math.to_float").unwrap().input("a").unwrap().ty,
+            PortType::Int
+        );
+        // Ternaries expose their three inputs.
+        let clamp = reg.get("math.clamp").unwrap();
+        assert!(
+            clamp.input("x").is_some()
+                && clamp.input("min").is_some()
+                && clamp.input("max").is_some()
+        );
+    }
+
+    #[test]
+    fn flow_palette_is_registered() {
+        let reg = blueprint_registry();
+        let wh = reg.get("flow.while").expect("flow.while");
+        assert!(wh.input("condition").unwrap().required);
+        assert!(wh.output("loop_body").is_some() && wh.output("completed").is_some());
+
+        let forn = reg.get("flow.for").expect("flow.for");
+        assert_eq!(forn.output("index").unwrap().ty, PortType::Int);
+        assert!(forn.output("loop_body").is_some() && forn.output("completed").is_some());
+
+        let once = reg.get("flow.do_once").expect("flow.do_once");
+        assert!(once.input("reset").is_some());
+
+        let ff = reg.get("flow.flip_flop").expect("flow.flip_flop");
+        assert_eq!(ff.output("is_a").unwrap().ty, PortType::Bool);
+
+        // The gate is entirely entry-port driven (enter/open/close/toggle → exit).
+        let gate = reg.get("flow.gate").expect("flow.gate");
+        for p in ["enter", "open", "close", "toggle"] {
+            assert!(gate.input(p).is_some(), "gate missing input {p}");
+        }
+        assert!(gate.output("exit").is_some());
+        assert!(gate.param("start_open").is_some());
     }
 }

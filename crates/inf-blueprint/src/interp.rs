@@ -434,6 +434,56 @@ pub(crate) fn dispatch_audio(
     }
 }
 
+/// Evaluate a `math.*` [`Expr::Call`] against [`crate::math_builtins`] (B-P1).
+///
+/// This is **hostless**: the math palette is pure, so the interpreter computes
+/// it directly from the same functions the transpiled Rust calls
+/// (`math::<name>` resolves to `math_builtins::<name>`), which is what makes the
+/// math palette pass interpreter-vs-compiled parity by construction.
+///
+/// `abs`/`min`/`max` preserve `Int` when every operand is `Int` (mirroring the
+/// [`Interp::arith`] promotion rule); every other op works in `f64`. Argument
+/// coercion follows [`Value::as_float`]/[`Value::as_int`], so a missing arg
+/// defaults to `0`.
+pub(crate) fn dispatch_math(path: &[String], args: &[Value]) -> Result<Value, RunError> {
+    use crate::math_builtins as m;
+    let key = path.join("::");
+    let op = path.get(1).map(String::as_str).unwrap_or("");
+    let f = |i: usize| args.get(i).map_or(Ok(0.0), Value::as_float);
+    let i = |k: usize| args.get(k).map_or(Ok(0), Value::as_int);
+    Ok(match op {
+        "abs" => match args.first() {
+            Some(Value::Int(x)) => Value::Int(m::abs_i64(*x)),
+            _ => Value::Float(m::abs(f(0)?)),
+        },
+        "min" => match (args.first(), args.get(1)) {
+            (Some(Value::Int(a)), Some(Value::Int(b))) => Value::Int(m::min_i64(*a, *b)),
+            _ => Value::Float(m::min(f(0)?, f(1)?)),
+        },
+        "max" => match (args.first(), args.get(1)) {
+            (Some(Value::Int(a)), Some(Value::Int(b))) => Value::Int(m::max_i64(*a, *b)),
+            _ => Value::Float(m::max(f(0)?, f(1)?)),
+        },
+        "floor" => Value::Float(m::floor(f(0)?)),
+        "ceil" => Value::Float(m::ceil(f(0)?)),
+        "round" => Value::Float(m::round(f(0)?)),
+        "sqrt" => Value::Float(m::sqrt(f(0)?)),
+        "sin" => Value::Float(m::sin(f(0)?)),
+        "cos" => Value::Float(m::cos(f(0)?)),
+        "pow" => Value::Float(m::pow(f(0)?, f(1)?)),
+        "clamp" => Value::Float(m::clamp(f(0)?, f(1)?, f(2)?)),
+        "lerp" => Value::Float(m::lerp(f(0)?, f(1)?, f(2)?)),
+        "to_int" => Value::Int(m::to_int(f(0)?)),
+        "to_float" => Value::Float(m::to_float(i(0)?)),
+        _ => {
+            return Err(RunError::Host(
+                key.clone(),
+                format!("unknown math node `{key}`"),
+            ))
+        }
+    })
+}
+
 /// A [`Host`] that knows nothing — every call errors. Useful for pure fns.
 pub struct PureHost;
 impl Host for PureHost {
@@ -633,6 +683,12 @@ impl Interp<'_> {
                     // `audio.*` nodes route to the host's `AudioHost` (P12.3),
                     // same no-IR-change pattern.
                     dispatch_audio(self.host, path, &argv)
+                } else if path.first().map(String::as_str) == Some("math") {
+                    // `math.*` pure builtins (B-P1) are **hostless** — evaluated
+                    // right here from `crate::math_builtins`, the same functions
+                    // the transpiled Rust calls, so preview == compiled. Checked
+                    // before the Host fallthrough so a host cannot shadow them.
+                    dispatch_math(path, &argv)
                 } else {
                     self.host.call(path, &argv)
                 }
