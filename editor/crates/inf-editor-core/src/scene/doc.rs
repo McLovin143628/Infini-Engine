@@ -12,10 +12,11 @@
 
 use glam::{DVec2, DVec3};
 use inf_ecs::components::{
-    AtlasRect, Camera, GlobalTransform, Light, Light2D, LightKind, Material, MeshRef, NineSlice,
-    Primitive, Sprite, Terrain, Text2D, Tilemap, Transform, Visibility,
+    AtlasRect, Camera, Collider3D, ColliderShape3DKind, GlobalTransform, Light, Light2D, LightKind,
+    Material, MeshRef, NineSlice, Primitive, Sprite, Terrain, Text2D, Tilemap, Transform,
+    Visibility, Volume, VolumeKind,
 };
-use inf_ecs::{ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d};
+use inf_ecs::{Color, ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d, Vec3d};
 use inf_terrain::{
     BrushOp, BrushParams, HeightDelta, SplatDelta, SplatStroke, Stroke, TerrainData,
 };
@@ -1705,6 +1706,13 @@ fn kind_of(world: &EcsWorld, e: Entity) -> String {
     if w.get::<Terrain>(e).is_some() {
         return "Terrain".to_string();
     }
+    if let Some(vol) = w.get::<Volume>(e) {
+        return match vol.kind {
+            VolumeKind::Trigger => "Trigger Volume",
+            VolumeKind::Blocking => "Blocking Volume",
+        }
+        .to_string();
+    }
     // No renderable payload: a folder if it has children, else a plain actor.
     if !world.children_of(e).is_empty() {
         "Folder".to_string()
@@ -1731,6 +1739,8 @@ fn default_name(kind: SpawnKind) -> String {
         SpawnKind::NineSlice => "NineSlice",
         SpawnKind::Light2d => "Light2D",
         SpawnKind::Terrain => "Terrain",
+        SpawnKind::TriggerVolume => "TriggerVolume",
+        SpawnKind::BlockingVolume => "BlockingVolume",
     }
     .to_string()
 }
@@ -1812,6 +1822,26 @@ fn attach_kind(world: &mut EcsWorld, entity: Entity, kind: SpawnKind) {
                     2.0 * (x * 0.1).sin() * (z * 0.1).cos()
                 });
             w.entity_mut(entity).insert(terrain);
+        }
+        // ── Gameplay volumes (E-P4): a box Volume + implicit-static box collider,
+        //    NO MeshRef so they stay invisible in PIE by construction. Trigger =
+        //    sensor (overlaps only); Blocking = solid. Distinct default tints. ──
+        SpawnKind::TriggerVolume | SpawnKind::BlockingVolume => {
+            let is_trigger = matches!(kind, SpawnKind::TriggerVolume);
+            let (vkind, tint) = if is_trigger {
+                (VolumeKind::Trigger, Color::new(1.0, 0.6, 0.1, 1.0))
+            } else {
+                (VolumeKind::Blocking, Color::new(0.2, 0.5, 1.0, 1.0))
+            };
+            w.entity_mut(entity).insert((
+                Volume { kind: vkind, tint },
+                Collider3D {
+                    shape_kind: ColliderShape3DKind::Box,
+                    half_extents: Vec3d::splat(1.0),
+                    sensor: is_trigger,
+                    ..Collider3D::default()
+                },
+            ));
         }
         SpawnKind::Empty
         | SpawnKind::Cube
@@ -1967,6 +1997,53 @@ mod tests {
         // Undo the spawn → the terrain entity is gone.
         assert!(doc.undo(), "undo removes the spawned terrain");
         assert!(doc.entity_of(g).is_none(), "terrain despawned by undo");
+    }
+
+    #[test]
+    fn spawns_trigger_and_blocking_volumes() {
+        // E-P4: each volume kind gets a Volume + box Collider3D (sensor iff
+        // Trigger), the expected default name/label, and NO MeshRef (invisible in
+        // PIE). Distinct default tints per kind.
+        let mut doc = SceneDoc::new();
+        let cases = [
+            (
+                SpawnKind::TriggerVolume,
+                "TriggerVolume",
+                "Trigger Volume",
+                VolumeKind::Trigger,
+                true,
+                Color::new(1.0, 0.6, 0.1, 1.0),
+            ),
+            (
+                SpawnKind::BlockingVolume,
+                "BlockingVolume",
+                "Blocking Volume",
+                VolumeKind::Blocking,
+                false,
+                Color::new(0.2, 0.5, 1.0, 1.0),
+            ),
+        ];
+        for (kind, name, label, vkind, sensor, tint) in cases {
+            let g = doc.create(kind, "", None);
+            assert_eq!(doc.display_name(g), name, "default name for {kind:?}");
+            assert_eq!(doc.kind_of_guid(g), label, "type label for {kind:?}");
+
+            let e = doc.entity_of(g).unwrap();
+            let w = doc.world().world();
+            let vol = w.get::<Volume>(e).expect("Volume component present");
+            assert_eq!(vol.kind, vkind, "volume kind for {kind:?}");
+            assert_eq!(vol.tint, tint, "default tint for {kind:?}");
+
+            let col = w.get::<Collider3D>(e).expect("Collider3D present");
+            assert_eq!(col.shape_kind, ColliderShape3DKind::Box);
+            assert_eq!(col.half_extents, Vec3d::splat(1.0));
+            assert_eq!(col.sensor, sensor, "sensor flag for {kind:?}");
+
+            assert!(
+                w.get::<MeshRef>(e).is_none(),
+                "volumes carry no MeshRef (invisible in PIE) for {kind:?}"
+            );
+        }
     }
 
     #[test]

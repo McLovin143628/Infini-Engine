@@ -224,6 +224,13 @@ pub enum SpawnKind {
     // ── 3D terrain (P10) ──────────────────────────────────────────────────
     /// A heightfield terrain (starter sine-hill; sculpt/import tooling edits it).
     Terrain,
+    // ── Gameplay volumes (E-P4) ───────────────────────────────────────────
+    /// An overlap-sensing trigger region: a sensor box collider + `Volume`,
+    /// invisible in PIE (no mesh) but outlined in the editor.
+    TriggerVolume,
+    /// A movement-blocking region: a solid box collider + `Volume`, invisible
+    /// in PIE (no mesh) but outlined in the editor.
+    BlockingVolume,
 }
 
 // ── Asset system / Content Drawer (Phase 4) ──────────────────────────────
@@ -508,6 +515,16 @@ pub struct CollisionLayerDto {
 pub enum ViewportModeDto {
     Perspective,
     TwoD,
+}
+
+/// Viewport shading view mode (R-P2; `viewport_set_view_mode`). Serializes as the
+/// tag string `"Lit"`/`"Unlit"`/`"Wireframe"`. `Wireframe` degrades to `Unlit` in
+/// the renderer when the adapter lacks `POLYGON_MODE_LINE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum ViewModeDto {
+    Lit,
+    Unlit,
+    Wireframe,
 }
 
 /// 2D-mode snapping configuration pushed from the viewport toolbar
@@ -1006,4 +1023,96 @@ impl LevelSettingsDto {
             render: self.render.to_record(),
         }
     }
+}
+
+// ── Material-instance override editor (E-P2) ─────────────────────────────────
+//
+// A `.inf_mati` inherits a parent material and overrides a sparse subset of its
+// PBR parameters. The editor reads a `MaterialInstanceDto` (parent identity +
+// the parent's resolved baseline + the current sparse overrides) via
+// `asset_get_material_instance`, and writes edited overrides back via
+// `asset_save_material_instance`. `resolved` is the inherited baseline shown
+// grayed for each unset override; each `overrides` field is `null` when inherited.
+
+/// Concrete resolved PBR values (the parent chain resolved) — the inherited
+/// baseline the editor shows grayed under each unset override.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct MatValuesDto {
+    pub base_color: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub emissive: [f32; 3],
+}
+
+impl MatValuesDto {
+    /// Project the resolved parent material's PBR block.
+    pub fn from_material(m: &inf_material::MaterialAsset) -> Self {
+        Self {
+            base_color: m.base_color,
+            metallic: m.metallic,
+            roughness: m.roughness,
+            emissive: m.emissive,
+        }
+    }
+}
+
+/// The sparse overrides an instance carries (`null` = inherit the parent value).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct MatOverridesDto {
+    pub base_color: Option<[f32; 4]>,
+    pub metallic: Option<f32>,
+    pub roughness: Option<f32>,
+    pub emissive: Option<[f32; 3]>,
+}
+
+impl MatOverridesDto {
+    /// Project the Ring-0 sparse overrides.
+    pub fn from_overrides(o: &inf_material::MatOverrides) -> Self {
+        Self {
+            base_color: o.base_color,
+            metallic: o.metallic,
+            roughness: o.roughness,
+            emissive: o.emissive,
+        }
+    }
+
+    /// Convert back into the Ring-0 sparse overrides.
+    pub fn to_overrides(self) -> inf_material::MatOverrides {
+        inf_material::MatOverrides {
+            base_color: self.base_color,
+            metallic: self.metallic,
+            roughness: self.roughness,
+            emissive: self.emissive,
+        }
+    }
+}
+
+/// A material instance projected for the override editor
+/// (`asset_get_material_instance`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct MaterialInstanceDto {
+    /// Parent material/instance GUID (string form).
+    pub parent: String,
+    /// Parent display name (editor caption).
+    pub parent_name: String,
+    /// The parent's resolved PBR baseline (inherited, grayed under unset overrides).
+    pub resolved: MatValuesDto,
+    /// This instance's sparse overrides.
+    pub overrides: MatOverridesDto,
+}
+
+// ── Named content collections (E-P8) ─────────────────────────────────────────
+//
+// User-defined, persisted groupings of assets (the durable successor to the
+// frontend-only Favorites), stored at `<project_root>/.infinity/collections.toml`.
+// The Content Drawer reads the list via `collections_list` and re-fetches on the
+// `collections://changed` event; mutations go through the `collections_*`
+// commands. Ids are asset GUID strings (matching `AssetDto.id`).
+
+/// One named collection (`collections_list`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CollectionDto {
+    pub name: String,
+    /// Member asset GUID strings, in insertion order (dangling ids pruned).
+    pub ids: Vec<String>,
 }

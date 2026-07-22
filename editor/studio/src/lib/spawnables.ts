@@ -48,6 +48,13 @@ export const SPAWNABLE_SECTIONS: SpawnableSection[] = [
       { kind: "light2d", label: "2D Light" },
     ],
   },
+  {
+    heading: "Volumes",
+    items: [
+      { kind: "trigger_volume", label: "Trigger Volume" },
+      { kind: "blocking_volume", label: "Blocking Volume" },
+    ],
+  },
   { heading: "Other", items: [{ kind: "empty", label: "Empty (Folder)" }] },
 ];
 

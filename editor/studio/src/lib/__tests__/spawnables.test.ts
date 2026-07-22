@@ -21,6 +21,8 @@ const ALL_KINDS: SpawnKind[] = [
   "nine_slice",
   "light2d",
   "terrain",
+  "trigger_volume",
+  "blocking_volume",
 ];
 
 describe("spawnables catalog", () => {
@@ -47,5 +49,13 @@ describe("spawnables catalog", () => {
   it("looks up by kind", () => {
     expect(spawnableByKind("cube")?.label).toBe("Cube");
     expect(spawnableByKind("point_light")?.label).toBe("Point Light");
+  });
+
+  it("exposes the trigger/blocking volumes in a Volumes section (E-P4)", () => {
+    const volumes = SPAWNABLE_SECTIONS.find((s) => s.heading === "Volumes");
+    expect(volumes).toBeDefined();
+    expect(volumes?.items.map((i) => i.kind)).toEqual(["trigger_volume", "blocking_volume"]);
+    expect(spawnableByKind("trigger_volume")?.label).toBe("Trigger Volume");
+    expect(spawnableByKind("blocking_volume")?.label).toBe("Blocking Volume");
   });
 });
