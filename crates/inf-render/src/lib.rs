@@ -22,6 +22,7 @@ pub mod headless;
 pub mod passes;
 pub mod pick;
 pub mod pipeline;
+pub mod primitives;
 pub mod renderer;
 pub mod scene;
 pub mod settings;
@@ -44,6 +45,7 @@ pub use passes::terrain::{
     TERRAIN_BASE_CELLS, TERRAIN_LOD_COUNT,
 };
 pub use pick::Picker;
+pub use primitives::{PrimGpu, PrimMesh, PrimRange};
 pub use renderer::{
     EngineRenderer, AO_FORMAT, HDR_FORMAT, LDR_FORMAT, MASK_FORMAT, SCENE_FORMAT, SCENE_SAMPLES,
 };

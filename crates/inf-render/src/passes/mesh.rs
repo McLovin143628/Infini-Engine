@@ -3,14 +3,22 @@
 //! against the floating origin, version-gated uploads, the 10k-at-vsync
 //! target — is production-shaped.
 
+use std::ops::Range;
+
+use bytemuck::Zeroable;
 use glam::Mat3;
 use inf_math::FloatingOrigin;
 
 use crate::camera::{DEPTH_COMPARE, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
+use crate::primitives::PrimGpu;
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
 use crate::scene::{LightKind, MeshInstance, RenderScene};
+
+/// The five built-in primitive geometries live in one packed GPU buffer pair
+/// (`passes::mesh` re-exports the cube generator for existing call sites).
+pub use crate::primitives::cube_geometry;
 
 /// Vertex: position + normal.
 #[repr(C)]
@@ -145,35 +153,40 @@ pub fn vertex_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
     ]
 }
 
-/// Unit cube centered at the origin (extent ±0.5), 24 verts / 36 indices.
-pub fn cube_geometry() -> (Vec<MeshVertex>, Vec<u16>) {
-    let faces: [([f32; 3], [f32; 3], [f32; 3]); 6] = [
-        // (normal, tangent u, tangent v)
-        ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
-        ([0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
-        ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]),
-        ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
-        ([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
-        ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
-    ];
-    let mut verts = Vec::with_capacity(24);
-    let mut indices = Vec::with_capacity(36);
-    for (n, u, v) in faces {
-        let n3 = glam::Vec3::from(n);
-        let u3 = glam::Vec3::from(u);
-        let v3 = glam::Vec3::from(v);
-        let base = verts.len() as u16;
-        for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-            let p = (n3 + u3 * su + v3 * sv) * 0.5;
-            verts.push(MeshVertex {
-                pos: p.to_array(),
-                normal: n,
-            });
-        }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+/// Pack scene instances into GPU [`InstanceRaw`], **bucketed by primitive kind**
+/// (stable within each kind), and return the per-kind sub-ranges of the packed
+/// vector (indexed by [`PrimMesh::index`]). Because `Cube` is kind 0 and the
+/// partition preserves original order within a kind, an all-cube scene produces a
+/// `Vec<InstanceRaw>` byte-identical (and same-ordered) to a naïve linear pack —
+/// the byte-stability guarantee for every pre-R-P1 golden.
+pub(crate) fn pack_bucketed(
+    origin: &FloatingOrigin,
+    instances: &[MeshInstance],
+) -> (Vec<InstanceRaw>, [Range<u32>; 5]) {
+    let mut counts = [0u32; 5];
+    for inst in instances {
+        counts[inst.mesh.index()] += 1;
     }
-    (verts, indices)
+    let mut starts = [0u32; 5];
+    let mut acc = 0u32;
+    for k in 0..5 {
+        starts[k] = acc;
+        acc += counts[k];
+    }
+    let ranges: [Range<u32>; 5] = std::array::from_fn(|k| starts[k]..starts[k] + counts[k]);
+
+    let mut raw = vec![InstanceRaw::zeroed(); instances.len()];
+    let mut cursor = starts;
+    for inst in instances {
+        let k = inst.mesh.index();
+        raw[cursor[k] as usize] = InstanceRaw::pack(origin, inst);
+        cursor[k] += 1;
+    }
+    (raw, ranges)
 }
+
+/// An empty per-kind range set (no draws) — the initial state before any upload.
+pub(crate) const EMPTY_RANGES: [Range<u32>; 5] = [0..0, 0..0, 0..0, 0..0, 0..0];
 
 /// Max scene lights uploaded per frame (must match `MAX_LIGHTS` in mesh.wgsl).
 pub const MAX_LIGHTS: usize = 16;
@@ -236,13 +249,13 @@ impl LightsUniform {
 
 pub struct MeshNode {
     pipeline: wgpu::RenderPipeline,
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
-    index_count: u32,
+    prim: PrimGpu,
     instances: Option<wgpu::Buffer>,
     instance_capacity: usize,
     uploaded_version: Option<(u64, glam::DVec3)>,
     instance_count: u32,
+    /// Per-primitive-kind sub-ranges of the packed instance buffer.
+    ranges: [Range<u32>; 5],
     lights_buf: wgpu::Buffer,
     lights_bg: wgpu::BindGroup,
     env: super::EnvBinding,
@@ -257,23 +270,7 @@ impl MeshNode {
                 source: wgpu::ShaderSource::Wgsl(super::shader_source("mesh").into()),
             });
 
-        let (verts, idx) = cube_geometry();
-        let vertices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cube-vertices"),
-            size: std::mem::size_of_val(verts.as_slice()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        gpu.queue
-            .write_buffer(&vertices, 0, bytemuck::cast_slice(&verts));
-        let indices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cube-indices"),
-            size: std::mem::size_of_val(idx.as_slice()) as u64,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        gpu.queue
-            .write_buffer(&indices, 0, bytemuck::cast_slice(&idx));
+        let prim = PrimGpu::new(gpu, "mesh");
 
         // Lights uniform block (@group(1)).
         let lights_bgl = gpu
@@ -357,13 +354,12 @@ impl MeshNode {
 
         Self {
             pipeline,
-            vertices,
-            indices,
-            index_count: idx.len() as u32,
+            prim,
             instances: None,
             instance_capacity: 0,
             uploaded_version: None,
             instance_count: 0,
+            ranges: EMPTY_RANGES,
             lights_buf,
             lights_bg,
             env,
@@ -384,12 +380,8 @@ impl MeshNode {
         gpu.queue
             .write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lights));
 
-        let raw: Vec<InstanceRaw> = frame
-            .scene
-            .instances
-            .iter()
-            .map(|i| InstanceRaw::pack(&frame.view.origin, i))
-            .collect();
+        let (raw, ranges) = pack_bucketed(&frame.view.origin, &frame.scene.instances);
+        self.ranges = ranges;
         self.instance_count = raw.len() as u32;
 
         if !raw.is_empty() {
@@ -413,7 +405,8 @@ impl MeshNode {
         self.uploaded_version = Some(key);
     }
 
-    /// Shared by the ID pass: bind cube + instances and draw everything.
+    /// Bind the shared primitive geometry + instances and draw every kind's
+    /// bucket (≤5 `draw_indexed` calls).
     pub fn draw_all<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) {
         if self.instance_count == 0 {
             return;
@@ -421,10 +414,7 @@ impl MeshNode {
         let Some(instances) = self.instances.as_ref() else {
             return;
         };
-        pass.set_vertex_buffer(0, self.vertices.slice(..));
-        pass.set_vertex_buffer(1, instances.slice(..));
-        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
-        pass.draw_indexed(0..self.index_count, 0, 0..self.instance_count);
+        self.prim.draw(pass, instances, &self.ranges);
     }
 }
 
@@ -475,6 +465,7 @@ impl RenderNode for MeshNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::primitives::PrimMesh;
     use glam::{DVec3, Quat, Vec3};
 
     #[test]
@@ -520,5 +511,67 @@ mod tests {
         // Translation column is origin-relative.
         assert_eq!(&raw.model[12..15], &[1.0, 2.0, 3.0]);
         assert_eq!(raw.misc[0], 7);
+    }
+
+    fn inst(mesh: PrimMesh, id: u32) -> MeshInstance {
+        MeshInstance {
+            mesh,
+            id,
+            ..MeshInstance::lit(
+                DVec3::new(id as f64, 0.0, 0.0),
+                Quat::IDENTITY,
+                Vec3::ONE,
+                [1.0; 4],
+                id,
+            )
+        }
+    }
+
+    #[test]
+    fn pack_bucketed_all_cube_matches_linear() {
+        let origin = FloatingOrigin::new(DVec3::ZERO);
+        let insts: Vec<MeshInstance> = (1..=5).map(|i| inst(PrimMesh::Cube, i)).collect();
+        let naive: Vec<InstanceRaw> = insts
+            .iter()
+            .map(|i| InstanceRaw::pack(&origin, i))
+            .collect();
+        let (bucketed, ranges) = pack_bucketed(&origin, &insts);
+        // Byte-identical to the old linear pack (the golden byte-stability gate).
+        assert_eq!(
+            bytemuck::cast_slice::<InstanceRaw, u8>(&naive),
+            bytemuck::cast_slice::<InstanceRaw, u8>(&bucketed),
+        );
+        assert_eq!(ranges[0], 0..5);
+        for r in &ranges[1..] {
+            assert!(r.is_empty());
+        }
+    }
+
+    #[test]
+    fn pack_bucketed_stable_within_kind() {
+        let origin = FloatingOrigin::new(DVec3::ZERO);
+        // Interleaved kinds; ids encode original order.
+        let insts = vec![
+            inst(PrimMesh::Sphere, 10),
+            inst(PrimMesh::Cube, 20),
+            inst(PrimMesh::Sphere, 11),
+            inst(PrimMesh::Cone, 30),
+            inst(PrimMesh::Cube, 21),
+        ];
+        let (raw, ranges) = pack_bucketed(&origin, &insts);
+
+        // Cube bucket first (ids 20, 21 in original order).
+        assert_eq!(ranges[PrimMesh::Cube.index()], 0..2);
+        assert_eq!(raw[0].misc[0], 20);
+        assert_eq!(raw[1].misc[0], 21);
+        // Sphere next (10, 11).
+        assert_eq!(ranges[PrimMesh::Sphere.index()], 2..4);
+        assert_eq!(raw[2].misc[0], 10);
+        assert_eq!(raw[3].misc[0], 11);
+        // Cone last (30); plane + cylinder empty.
+        assert_eq!(ranges[PrimMesh::Cone.index()], 4..5);
+        assert_eq!(raw[4].misc[0], 30);
+        assert!(ranges[PrimMesh::Plane.index()].is_empty());
+        assert!(ranges[PrimMesh::Cylinder.index()].is_empty());
     }
 }

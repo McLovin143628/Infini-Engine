@@ -7,11 +7,14 @@
 //! are small (the selection), so they're re-packed each frame.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
-use crate::passes::mesh::{cube_geometry, vertex_layouts, InstanceRaw};
+use crate::passes::mesh::{pack_bucketed, vertex_layouts, InstanceRaw, EMPTY_RANGES};
+use crate::primitives::PrimGpu;
 use crate::renderer::{FrameData, MASK_FORMAT};
+use crate::scene::MeshInstance;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -24,13 +27,13 @@ struct Batch {
     instances: Option<wgpu::Buffer>,
     capacity: usize,
     count: u32,
+    /// Per-primitive-kind sub-ranges of this batch's packed instance buffer.
+    ranges: [Range<u32>; 5],
 }
 
 pub struct MaskNode {
     pipeline: wgpu::RenderPipeline,
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
-    index_count: u32,
+    prim: PrimGpu,
     selected: Batch,
     hovered: Batch,
     /// Instance id → index into `scene.instances`, rebuilt once per scene version
@@ -97,26 +100,11 @@ impl MaskNode {
                 instances: None,
                 capacity: 0,
                 count: 0,
+                ranges: EMPTY_RANGES,
             }
         };
 
-        let (verts, idx) = cube_geometry();
-        let vertices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mask-cube-vertices"),
-            size: std::mem::size_of_val(verts.as_slice()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        gpu.queue
-            .write_buffer(&vertices, 0, bytemuck::cast_slice(&verts));
-        let indices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mask-cube-indices"),
-            size: std::mem::size_of_val(idx.as_slice()) as u64,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        gpu.queue
-            .write_buffer(&indices, 0, bytemuck::cast_slice(&idx));
+        let prim = PrimGpu::new(gpu, "mask");
 
         let layout = gpu
             .device
@@ -156,9 +144,7 @@ impl MaskNode {
 
         Self {
             pipeline,
-            vertices,
-            indices,
-            index_count: idx.len() as u32,
+            prim,
             selected: batch(1.0, "mask-selected"),
             hovered: batch(0.5, "mask-hovered"),
             id_index: HashMap::new(),
@@ -167,11 +153,17 @@ impl MaskNode {
         }
     }
 
-    /// Upload the packed instances into `batch`, growing (never shrinking) its
-    /// buffer. An empty `raw` leaves the buffer intact and sets `count = 0`, so the
-    /// draw loop skips it.
-    fn upload_batch(gpu: &GpuContext, batch: &mut Batch, raw: &[InstanceRaw]) {
+    /// Upload the bucket-packed instances into `batch`, growing (never shrinking)
+    /// its buffer. An empty `raw` leaves the buffer intact and sets `count = 0`, so
+    /// the draw loop skips it.
+    fn upload_batch(
+        gpu: &GpuContext,
+        batch: &mut Batch,
+        raw: &[InstanceRaw],
+        ranges: [Range<u32>; 5],
+    ) {
         batch.count = raw.len() as u32;
+        batch.ranges = ranges;
         if raw.is_empty() {
             return;
         }
@@ -231,25 +223,21 @@ impl MaskNode {
             hovered,
         ));
 
-        let sel_raw: Vec<InstanceRaw> = scene
+        // Gather each subset's instances (preserving primitive kind), then
+        // bucket-pack so the outline draws each kind's real geometry.
+        let sel_insts: Vec<MeshInstance> = scene
             .selected
             .iter()
-            .filter_map(|id| {
-                self.id_index
-                    .get(id)
-                    .map(|&i| InstanceRaw::pack(origin, &scene.instances[i]))
-            })
+            .filter_map(|id| self.id_index.get(id).map(|&i| scene.instances[i]))
             .collect();
-        let hov_raw: Vec<InstanceRaw> = hovered
+        let hov_insts: Vec<MeshInstance> = hovered
             .iter()
-            .filter_map(|id| {
-                self.id_index
-                    .get(id)
-                    .map(|&i| InstanceRaw::pack(origin, &scene.instances[i]))
-            })
+            .filter_map(|id| self.id_index.get(id).map(|&i| scene.instances[i]))
             .collect();
-        Self::upload_batch(gpu, &mut self.selected, &sel_raw);
-        Self::upload_batch(gpu, &mut self.hovered, &hov_raw);
+        let (sel_raw, sel_ranges) = pack_bucketed(origin, &sel_insts);
+        let (hov_raw, hov_ranges) = pack_bucketed(origin, &hov_insts);
+        Self::upload_batch(gpu, &mut self.selected, &sel_raw, sel_ranges);
+        Self::upload_batch(gpu, &mut self.hovered, &hov_raw, hov_ranges);
     }
 }
 
@@ -280,8 +268,6 @@ impl RenderNode for MaskNode {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
-        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
-        pass.set_vertex_buffer(0, self.vertices.slice(..));
 
         for batch in [&self.hovered, &self.selected] {
             if batch.count == 0 {
@@ -291,8 +277,7 @@ impl RenderNode for MaskNode {
                 continue;
             };
             pass.set_bind_group(1, &batch.uniform_bg, &[]);
-            pass.set_vertex_buffer(1, instances.slice(..));
-            pass.draw_indexed(0..self.index_count, 0, 0..batch.count);
+            self.prim.draw(&mut pass, instances, &batch.ranges);
         }
     }
 }

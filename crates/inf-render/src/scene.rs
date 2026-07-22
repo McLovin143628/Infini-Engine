@@ -9,6 +9,7 @@ use std::sync::Arc;
 use glam::{DVec3, Mat4, Quat, Vec3};
 
 use crate::debug_draw::DebugDraw;
+use crate::primitives::PrimMesh;
 
 pub use inf_vgeom::VgeomMesh;
 
@@ -51,10 +52,14 @@ pub struct MeshInstance {
     /// Stable pick id; `ID_NONE` is reserved, ids ≥ `ID_GIZMO_BASE` are
     /// reserved for gizmo parts.
     pub id: u32,
+    /// Which built-in primitive geometry to draw (R-P1). Defaults to
+    /// [`PrimMesh::Cube`], so a caller that doesn't set it — and every pre-R-P1
+    /// scene — renders exactly as before.
+    pub mesh: PrimMesh,
 }
 
 impl MeshInstance {
-    /// A plain lit instance (metallic 0, roughness 0.5, no emission) — the
+    /// A plain lit **cube** instance (metallic 0, roughness 0.5, no emission) — the
     /// common case for tests and simple callers.
     pub fn lit(translation: DVec3, rotation: Quat, scale: Vec3, color: [f32; 4], id: u32) -> Self {
         Self {
@@ -66,6 +71,7 @@ impl MeshInstance {
             roughness: 0.5,
             emissive: [0.0; 3],
             id,
+            mesh: PrimMesh::Cube,
         }
     }
 }

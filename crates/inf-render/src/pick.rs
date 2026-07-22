@@ -7,11 +7,14 @@
 //! covers scene objects, whose silhouettes make a pixel-exact id buffer the
 //! right tool.
 
+use std::ops::Range;
+
 use inf_math::FloatingOrigin;
 
 use crate::camera::RenderView;
 use crate::gpu::GpuContext;
-use crate::passes::mesh::{cube_geometry, vertex_layouts, InstanceRaw};
+use crate::passes::mesh::{pack_bucketed, vertex_layouts, InstanceRaw, EMPTY_RANGES};
+use crate::primitives::PrimGpu;
 use crate::scene::{RenderScene, ID_NONE};
 
 const ID_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
@@ -20,11 +23,10 @@ pub struct Picker {
     pipeline: wgpu::RenderPipeline,
     view_buf: wgpu::Buffer,
     view_bg: wgpu::BindGroup,
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
-    index_count: u32,
+    prim: PrimGpu,
     instances: Option<wgpu::Buffer>,
     instance_capacity: usize,
+    ranges: [Range<u32>; 5],
     target: Option<(u32, u32, wgpu::Texture, wgpu::TextureView)>,
     depth: Option<(u32, u32, wgpu::TextureView)>,
 }
@@ -68,23 +70,7 @@ impl Picker {
             }],
         });
 
-        let (verts, idx) = cube_geometry();
-        let vertices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pick-cube-vertices"),
-            size: std::mem::size_of_val(verts.as_slice()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        gpu.queue
-            .write_buffer(&vertices, 0, bytemuck::cast_slice(&verts));
-        let indices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pick-cube-indices"),
-            size: std::mem::size_of_val(idx.as_slice()) as u64,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        gpu.queue
-            .write_buffer(&indices, 0, bytemuck::cast_slice(&idx));
+        let prim = PrimGpu::new(gpu, "pick");
 
         let layout = gpu
             .device
@@ -135,11 +121,10 @@ impl Picker {
             pipeline,
             view_buf,
             view_bg,
-            vertices,
-            indices,
-            index_count: idx.len() as u32,
+            prim,
             instances: None,
             instance_capacity: 0,
+            ranges: EMPTY_RANGES,
             target: None,
             depth: None,
         }
@@ -195,11 +180,8 @@ impl Picker {
     }
 
     fn upload_instances(&mut self, gpu: &GpuContext, origin: &FloatingOrigin, scene: &RenderScene) {
-        let raw: Vec<InstanceRaw> = scene
-            .instances
-            .iter()
-            .map(|i| InstanceRaw::pack(origin, i))
-            .collect();
+        let (raw, ranges) = pack_bucketed(origin, &scene.instances);
+        self.ranges = ranges;
         if raw.is_empty() {
             return;
         }
@@ -283,10 +265,7 @@ impl Picker {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.view_bg, &[]);
-            pass.set_vertex_buffer(0, self.vertices.slice(..));
-            pass.set_vertex_buffer(1, instances.slice(..));
-            pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
-            pass.draw_indexed(0..self.index_count, 0, 0..scene.instances.len() as u32);
+            self.prim.draw(&mut pass, instances, &self.ranges);
         }
 
         // Copy just the one texel. R32Uint = 4 bytes; bytes_per_row must be

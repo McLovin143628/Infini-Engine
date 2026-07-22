@@ -8,7 +8,8 @@ use glam::{DQuat, DVec2, DVec3, Vec2, Vec3};
 use inf_ecs::components::{
     Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, ComputedVisibility,
     GlobalTransform, Joint2D, Joint3D, Light, Light2D, LightKind as EcsLightKind, Material,
-    MeshRef, NineSlice, PcgVolume, SkeletalMesh, Sprite, Terrain, Text2D, TextAlign, Tilemap,
+    MeshRef, NineSlice, PcgVolume, Primitive, SkeletalMesh, Sprite, Terrain, Text2D, TextAlign,
+    Tilemap,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::scene::SceneDoc;
@@ -17,8 +18,8 @@ use inf_render::{
     collider_outline_2d, collider_outline_3d, expand_nine_slice, expand_text, gizmo,
     handle_from_guid, ColliderOutline2D, ColliderOutline3D, DebugDraw, EngineRenderer, GizmoDelta,
     GizmoDrag, GizmoMode, GpuContext, HAlign, LightKind, MeshInstance, NineSliceParams,
-    OrthoParams, Picker, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D, RenderScene,
-    RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView,
+    OrthoParams, Picker, PrebatchedRun, PrimMesh, RenderChunk, RenderLight, RenderLight2D,
+    RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView,
     SpriteInstance, SurfaceChain, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
 };
 use uuid::Uuid;
@@ -33,6 +34,21 @@ use crate::camera::{
     ViewportMode, TWO_D_FAR, TWO_D_NEAR,
 };
 use crate::SurfaceTarget;
+
+/// Map an ECS [`Primitive`] to the renderer's [`PrimMesh`] (R-P1).
+///
+/// MIRROR: keep identical to `inf_player::render::prim_mesh` (the player's
+/// ECS→RenderScene projection). Both seams must agree so the editor viewport and
+/// the shipped player draw the same geometry for a given primitive.
+fn prim_mesh(p: Primitive) -> PrimMesh {
+    match p {
+        Primitive::Cube => PrimMesh::Cube,
+        Primitive::Sphere => PrimMesh::Sphere,
+        Primitive::Plane => PrimMesh::Plane,
+        Primitive::Cylinder => PrimMesh::Cylinder,
+        Primitive::Cone => PrimMesh::Cone,
+    }
+}
 
 pub struct EngineHost {
     target: SurfaceTarget,
@@ -507,6 +523,9 @@ impl EngineHost {
                             roughness: 0.75,
                             emissive: [0.0; 3],
                             id,
+                            // PCG scatter stays a placeholder cube (same documented
+                            // gap as mesh-asset viewport rendering).
+                            mesh: PrimMesh::Cube,
                         });
                         // Pick a scattered cube → select the owning volume.
                         self.id_to_guid.insert(id, guid);
@@ -604,6 +623,8 @@ impl EngineHost {
                         roughness: 0.6,
                         emissive: [0.0; 3],
                         id,
+                        // Skeletal placeholder is always a cube (no primitive kind).
+                        mesh: PrimMesh::Cube,
                     });
                     self.id_to_guid.insert(id, guid);
                     self.guid_to_id.insert(guid, id);
@@ -630,6 +651,12 @@ impl EngineHost {
                     )
                 })
                 .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3]));
+            // R-P1: project the MeshRef's built-in primitive kind so Sphere/Plane/
+            // Cylinder/Cone render as real geometry (not everything as a cube).
+            let mesh = w
+                .get::<MeshRef>(entity)
+                .map(|r| prim_mesh(r.primitive))
+                .unwrap_or(PrimMesh::Cube);
             let id = next_id;
             next_id += 1;
             self.scene.instances.push(MeshInstance {
@@ -641,6 +668,7 @@ impl EngineHost {
                 roughness,
                 emissive,
                 id,
+                mesh,
             });
             self.id_to_guid.insert(id, guid);
             self.guid_to_id.insert(guid, id);

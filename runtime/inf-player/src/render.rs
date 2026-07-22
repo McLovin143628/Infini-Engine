@@ -22,14 +22,14 @@ use uuid::Uuid;
 
 use inf_ecs::components::{
     ComputedVisibility, GlobalTransform, Light, Light2D, LightKind as EcsLightKind, Material,
-    MeshRef, NineSlice, PcgVolume, Sprite, Terrain, Text2D, TextAlign, Tilemap,
+    MeshRef, NineSlice, PcgVolume, Primitive, Sprite, Terrain, Text2D, TextAlign, Tilemap,
 };
 use inf_ecs::Guid;
 use inf_math::FloatingOrigin;
 use inf_render::{
     detect_tier, expand_nine_slice, expand_text, handle_from_guid, EngineRenderer, GpuContext,
-    HAlign, LightKind, MeshInstance, NineSliceParams, PrebatchedRun, RenderChunk, RenderLight,
-    RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
+    HAlign, LightKind, MeshInstance, NineSliceParams, PrebatchedRun, PrimMesh, RenderChunk,
+    RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
     RenderTerrainTile, RenderTilemap, RenderView, SurfaceChain, TextParams, TilemapParams,
     VgeomAsset, VgeomInstance, BUILTIN_FONT_TEXTURE,
 };
@@ -266,6 +266,8 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
                     roughness: 0.75,
                     emissive: [0.0; 3],
                     id: next_id,
+                    // PCG scatter placeholders are always cubes (no primitive kind).
+                    mesh: PrimMesh::Cube,
                 });
                 next_id += 1;
             }
@@ -311,6 +313,8 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
                     id: next_id,
                 });
             } else {
+                // R-P1: an unresolved / primitive-only MeshRef draws its built-in
+                // primitive kind (Sphere/Plane/Cylinder/Cone), not always a cube.
                 scene.instances.push(MeshInstance {
                     translation,
                     rotation: rot.as_quat(),
@@ -320,6 +324,7 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
                     roughness,
                     emissive,
                     id: next_id,
+                    mesh: prim_mesh(mesh_ref.primitive),
                 });
             }
             next_id += 1;
@@ -327,6 +332,21 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
     }
 
     scene.mark_dirty();
+}
+
+/// Map an ECS [`Primitive`] to the renderer's [`PrimMesh`] (R-P1).
+///
+/// MIRROR: keep identical to `inf_viewport::host::prim_mesh` (the editor
+/// viewport's ECS→RenderScene projection). Both seams must agree so the shipped
+/// player and the editor viewport draw the same geometry for a given primitive.
+fn prim_mesh(p: Primitive) -> PrimMesh {
+    match p {
+        Primitive::Cube => PrimMesh::Cube,
+        Primitive::Sphere => PrimMesh::Sphere,
+        Primitive::Plane => PrimMesh::Plane,
+        Primitive::Cylinder => PrimMesh::Cylinder,
+        Primitive::Cone => PrimMesh::Cone,
+    }
 }
 
 /// Terrain is static in the player's sim v1, so a fixed version keeps the terrain

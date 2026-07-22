@@ -24,7 +24,7 @@ use inf_render::passes::vgeom::{cpu_visible_set, cull_flags, frustum_planes, lod
 use inf_render::{
     assemble_patches, cull_visible, expand_text, Ambient2D, BloomSettings, EngineRenderer,
     GiSettings, GpuContext, HAlign, HeadlessTarget, LightKind, MeshInstance, PrebatchedRun,
-    RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
+    PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
     RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings,
     SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance, SpriteTextureUpload,
     SsaoSettings, TextParams, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings,
@@ -207,6 +207,68 @@ fn golden_cubes() {
     );
 }
 
+/// Primitive-geometry golden (R-P1): one of each of the five built-in kinds
+/// (Cube, Sphere, Plane, Cylinder, Cone) in a row on the ground grid, each a
+/// distinct colour. Proves every kind renders as its real shape through the whole
+/// mesh path. Structural gate: swapping all kinds to Cube changes the frame (so
+/// the per-kind geometry genuinely varies) and the row is lit. Determinism gate
+/// via `check_golden`; strict pixel diff opt-in.
+#[test]
+fn golden_primitives() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        ..Default::default()
+    };
+    let kinds = [
+        PrimMesh::Cube,
+        PrimMesh::Sphere,
+        PrimMesh::Plane,
+        PrimMesh::Cylinder,
+        PrimMesh::Cone,
+    ];
+    let colors = [
+        [0.85, 0.25, 0.25],
+        [0.25, 0.75, 0.35],
+        [0.30, 0.45, 0.95],
+        [0.85, 0.75, 0.30],
+        [0.75, 0.35, 0.85],
+    ];
+    for (i, (&kind, c)) in kinds.iter().zip(colors).enumerate() {
+        scene.instances.push(MeshInstance {
+            translation: DVec3::new(-4.0 + i as f64 * 2.0, 0.5, 0.0),
+            rotation: Quat::from_rotation_y(0.3),
+            scale: Vec3::ONE,
+            color: [c[0], c[1], c[2], 1.0],
+            metallic: 0.0,
+            roughness: 0.5,
+            emissive: [0.0; 3],
+            id: i as u32 + 1,
+            mesh: kind,
+        });
+    }
+    scene.mark_dirty();
+
+    let img = check_golden(&gpu, "primitives", &scene, &overlook_view());
+
+    // Swapping every kind to Cube must change the image — proof the per-kind
+    // geometry (not just the cube) actually reaches the rasterizer.
+    let mut cubes = scene.clone();
+    for inst in &mut cubes.instances {
+        inst.mesh = PrimMesh::Cube;
+    }
+    cubes.mark_dirty();
+    let cube_img = render(&gpu, &cubes, &overlook_view());
+    let (mean, _max) = image_diff(&img, &cube_img, W, H);
+    assert!(
+        mean > 0.002,
+        "primitive kinds should differ from an all-cube row (mean {mean})"
+    );
+
+    let lit = img.chunks(4).any(|p| p[0] > 60 || p[1] > 60 || p[2] > 60);
+    assert!(lit, "expected a lit primitive pixel");
+}
+
 #[test]
 fn golden_selection_gizmo() {
     let Some(gpu) = gpu_or_skip() else { return };
@@ -283,6 +345,7 @@ fn golden_pbr_materials() {
             roughness: rough,
             emissive,
             id: i as u32 + 1,
+            mesh: PrimMesh::Cube,
         });
     }
     scene.lights.push(RenderLight {
@@ -1238,6 +1301,7 @@ fn golden_hdr_bloom() {
             roughness: 0.5,
             emissive,
             id: i as u32 + 1,
+            mesh: PrimMesh::Cube,
         });
     }
     scene.mark_dirty();

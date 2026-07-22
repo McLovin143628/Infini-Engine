@@ -8,21 +8,23 @@
 //! It re-packs its own instance buffer (mirroring [`super::mesh`]) so the pass is
 //! self-contained — a small duplicate upload paid only on the opt-in SSAO/TAA path.
 
+use std::ops::Range;
+
 use crate::camera::{DEPTH_COMPARE, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
-use crate::passes::mesh::{cube_geometry, vertex_layouts, InstanceRaw};
+use crate::passes::mesh::{pack_bucketed, vertex_layouts, InstanceRaw, EMPTY_RANGES};
+use crate::primitives::PrimGpu;
 use crate::renderer::FrameData;
 use crate::settings::RenderSettings;
 
 pub struct DepthPrepassNode {
     pipeline: wgpu::RenderPipeline,
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
-    index_count: u32,
+    prim: PrimGpu,
     instances: Option<wgpu::Buffer>,
     instance_capacity: usize,
     instance_count: u32,
+    ranges: [Range<u32>; 5],
     uploaded_version: Option<(u64, glam::DVec3)>,
 }
 
@@ -35,23 +37,7 @@ impl DepthPrepassNode {
                 source: wgpu::ShaderSource::Wgsl(super::shader_source("depth_prepass").into()),
             });
 
-        let (verts, idx) = cube_geometry();
-        let vertices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("prepass-cube-vertices"),
-            size: std::mem::size_of_val(verts.as_slice()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        gpu.queue
-            .write_buffer(&vertices, 0, bytemuck::cast_slice(&verts));
-        let indices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("prepass-cube-indices"),
-            size: std::mem::size_of_val(idx.as_slice()) as u64,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        gpu.queue
-            .write_buffer(&indices, 0, bytemuck::cast_slice(&idx));
+        let prim = PrimGpu::new(gpu, "prepass");
 
         let layout = gpu
             .device
@@ -90,12 +76,11 @@ impl DepthPrepassNode {
 
         Self {
             pipeline,
-            vertices,
-            indices,
-            index_count: idx.len() as u32,
+            prim,
             instances: None,
             instance_capacity: 0,
             instance_count: 0,
+            ranges: EMPTY_RANGES,
             uploaded_version: None,
         }
     }
@@ -105,12 +90,8 @@ impl DepthPrepassNode {
         if self.uploaded_version == Some(key) {
             return;
         }
-        let raw: Vec<InstanceRaw> = frame
-            .scene
-            .instances
-            .iter()
-            .map(|i| InstanceRaw::pack(&frame.view.origin, i))
-            .collect();
+        let (raw, ranges) = pack_bucketed(&frame.view.origin, &frame.scene.instances);
+        self.ranges = ranges;
         self.instance_count = raw.len() as u32;
         if !raw.is_empty() {
             if self.instances.is_none() || self.instance_capacity < raw.len() {
@@ -169,9 +150,6 @@ impl RenderNode for DepthPrepassNode {
         };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
-        pass.set_vertex_buffer(0, self.vertices.slice(..));
-        pass.set_vertex_buffer(1, instances.slice(..));
-        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
-        pass.draw_indexed(0..self.index_count, 0, 0..self.instance_count);
+        self.prim.draw(&mut pass, instances, &self.ranges);
     }
 }

@@ -9,6 +9,9 @@
 
 pub use glam;
 
+pub mod portable;
+pub use portable::{pcos, pcos64, psin, psin64};
+
 use glam::{DVec3, Mat4, Quat, Vec3};
 
 /// Rebase when the focus (camera) strays further than this from the origin.

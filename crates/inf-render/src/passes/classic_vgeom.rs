@@ -78,6 +78,9 @@ fn pack_vgeom_instance(origin: &FloatingOrigin, inst: &VgeomInstance) -> Instanc
             roughness: inst.roughness,
             emissive: inst.emissive,
             id: inst.id,
+            // The classic vgeom path draws the real meshlet geometry, not a
+            // primitive; the field is inert here (InstanceRaw::pack ignores it).
+            mesh: crate::primitives::PrimMesh::Cube,
         },
     )
 }
