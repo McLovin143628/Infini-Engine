@@ -20,6 +20,8 @@
 //! thread when active — that is acceptable Ring-0 IO, the same category as a GPU
 //! queue, and it is documented as such at the crate root.
 
+use std::collections::BTreeMap;
+
 use crate::sound::SoundData;
 
 /// The engine's opaque per-sound id, shared with [`crate::AudioEngine`].
@@ -29,6 +31,12 @@ pub(crate) type VoiceId = u64;
 pub(crate) struct Backend {
     #[cfg(feature = "cpal")]
     inner: Option<cpal_impl::Inner>,
+    /// No-device voice tracking for the reap seam (`id → looping`). Populated only
+    /// when there is no live device (the `cpal` feature is off, or it is on but no
+    /// device opened): a non-looping voice is reported finished on the next
+    /// [`drain_finished`](Self::drain_finished), a looping one never. Under an
+    /// active device kira's real handle state is authoritative and this stays empty.
+    null_voices: BTreeMap<VoiceId, bool>,
 }
 
 impl Backend {
@@ -39,11 +47,14 @@ impl Backend {
         {
             Self {
                 inner: cpal_impl::Inner::try_new(),
+                null_voices: BTreeMap::new(),
             }
         }
         #[cfg(not(feature = "cpal"))]
         {
-            Self {}
+            Self {
+                null_voices: BTreeMap::new(),
+            }
         }
     }
 
@@ -52,11 +63,16 @@ impl Backend {
     pub(crate) fn disabled() -> Self {
         #[cfg(feature = "cpal")]
         {
-            Self { inner: None }
+            Self {
+                inner: None,
+                null_voices: BTreeMap::new(),
+            }
         }
         #[cfg(not(feature = "cpal"))]
         {
-            Self {}
+            Self {
+                null_voices: BTreeMap::new(),
+            }
         }
     }
 
@@ -88,7 +104,10 @@ impl Backend {
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
             inner.play(id, data, gain, panning, rate, looping);
+            return;
         }
+        // No live device: track the voice so the reap seam can complete it.
+        self.null_voices.insert(id, looping);
     }
 
     /// Push updated mix parameters onto a live voice. No-op when disabled or the
@@ -120,12 +139,35 @@ impl Backend {
     }
 
     /// Stop and forget a voice. No-op when disabled.
-    #[allow(unused_variables)]
     pub(crate) fn stop(&mut self, id: VoiceId) {
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
             inner.stop(id);
         }
+        self.null_voices.remove(&id);
+    }
+
+    /// Voices that finished playing on their own since the last call (natural
+    /// end-of-sound), so the engine can reap them and their `sources` mappings.
+    /// Under an active device this is kira's real playback state; in the no-device
+    /// fallback a non-looping voice is reported finished immediately (there is no
+    /// clock to observe an end) and a looping one never — the deterministic choice
+    /// the reap tests pin.
+    pub(crate) fn drain_finished(&mut self) -> Vec<VoiceId> {
+        #[cfg(feature = "cpal")]
+        if let Some(inner) = self.inner.as_mut() {
+            return inner.drain_finished();
+        }
+        let done: Vec<VoiceId> = self
+            .null_voices
+            .iter()
+            .filter(|(_, looping)| !**looping)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &done {
+            self.null_voices.remove(id);
+        }
+        done
     }
 }
 
@@ -135,6 +177,7 @@ mod cpal_impl {
 
     use kira::backend::cpal::CpalBackend;
     use kira::sound::static_sound::StaticSoundHandle;
+    use kira::sound::PlaybackState;
     use kira::{AudioManager, AudioManagerSettings, Decibels, Panning, PlaybackRate, Tween};
 
     use super::VoiceId;
@@ -227,6 +270,23 @@ mod cpal_impl {
             if let Some(mut h) = self.voices.remove(&id) {
                 h.stop(instant());
             }
+        }
+
+        /// Voices kira reports as `Stopped` (a one-shot ran to its end): drop the
+        /// handles and return their ids so the engine reaps its own bookkeeping.
+        /// An explicitly-stopped voice is already gone from `voices`, so this only
+        /// ever reports natural completion.
+        pub(super) fn drain_finished(&mut self) -> Vec<VoiceId> {
+            let done: Vec<VoiceId> = self
+                .voices
+                .iter()
+                .filter(|(_, h)| h.state() == PlaybackState::Stopped)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in &done {
+                self.voices.remove(id);
+            }
+            done
         }
     }
 }

@@ -457,18 +457,21 @@ impl RuntimeSim {
             self.audio_cmds.push(AudioCommand::SetListener(l));
         }
 
-        // Autoplay once per not-yet-started `AudioSource` (Guid order).
+        // Autoplay once per not-yet-started `AudioSource`, plus the set of live
+        // emitter Guids (for despawn pruning below).
         let mut autoplay: Vec<(Uuid, AudioSource, DVec3)> = Vec::new();
+        let mut live: BTreeSet<Uuid> = BTreeSet::new();
         for e in self.world.world().iter_entities() {
+            let Some(guid) = e.get::<Guid>().map(|g| g.0) else {
+                continue;
+            };
+            live.insert(guid);
             let Some(src) = e.get::<AudioSource>() else {
                 continue;
             };
             if !src.autoplay {
                 continue;
             }
-            let Some(guid) = e.get::<Guid>().map(|g| g.0) else {
-                continue;
-            };
             if self.audio_started.contains(&guid) {
                 continue;
             }
@@ -479,6 +482,9 @@ impl RuntimeSim {
                 .unwrap_or(DVec3::ZERO);
             autoplay.push((guid, src.clone(), pos));
         }
+        // Emit in Guid order (the iteration above is archetype order, not Guid
+        // order — the deterministic contract is the sort, not the scan).
+        autoplay.sort_by_key(|(guid, _, _)| *guid);
         for (guid, src, pos) in autoplay {
             self.audio_started.insert(guid);
             let mut cmd = play_command_for(guid_source_key(guid), &src, src.spatial.then_some(pos));
@@ -486,6 +492,22 @@ impl RuntimeSim {
                 cmd.occlusion_gain = self.occlusion_gain(listener_pos, pos);
             }
             self.audio_cmds.push(AudioCommand::Play(cmd));
+        }
+
+        // Despawn → Stop: any started emitter whose entity is gone this step gets a
+        // Stop (ascending Guid order — `audio_started` is a BTreeSet) and is
+        // forgotten, so a shipped game never leaks a voice per despawned emitter.
+        let despawned: Vec<Uuid> = self
+            .audio_started
+            .iter()
+            .filter(|g| !live.contains(*g))
+            .copied()
+            .collect();
+        for guid in despawned {
+            self.audio_started.remove(&guid);
+            self.audio_cmds.push(AudioCommand::Stop {
+                source: guid_source_key(guid),
+            });
         }
 
         // Occlusion for Blueprint-queued Plays (source = actor entity id).
@@ -516,6 +538,9 @@ impl RuntimeSim {
         let clips = &self.audio_clips;
         self.audio
             .drain(&cmds, &|g| clips.get(&g).and_then(|a| a.decode().ok()));
+        // Host-side reap of naturally-finished voices (device bookkeeping only —
+        // not sim state, so the command stream above is untouched).
+        self.audio.reap();
     }
 
     /// One occlusion raycast from `listener` toward `emitter` (the shipped mirror
@@ -1271,7 +1296,10 @@ fn attenuation_of(src: &AudioSource) -> Attenuation {
 
 fn terrain_height_at(world: &EcsWorld, x: f64, z: f64) -> f64 {
     let w = world.world();
-    let mut picked: Option<(Uuid, DVec3, inf_terrain::TerrainData)> = None;
+    // Pick the lowest-Guid non-empty terrain, remembering only its entity + origin —
+    // never a clone of the (multi-MB) heightfield. The component is re-fetched after
+    // the scan (all EntityRef borrows released) and sampled in place.
+    let mut picked: Option<(Uuid, DVec3, Entity)> = None;
     for e in w.iter_entities() {
         let Some(guid) = e.get::<Guid>().map(|g| g.0) else {
             continue;
@@ -1288,11 +1316,12 @@ fn terrain_height_at(world: &EcsWorld, x: f64, z: f64) -> f64 {
             .or_else(|| e.get::<Transform>().map(|t| t.translation.to_dvec3()))
             .unwrap_or(DVec3::ZERO);
         if picked.as_ref().map(|(g, _, _)| guid < *g).unwrap_or(true) {
-            picked = Some((guid, origin, t.data.clone()));
+            picked = Some((guid, origin, e.id()));
         }
     }
-    match picked {
-        Some((_, origin, data)) => data
+    match picked.and_then(|(_, origin, e)| w.get::<Terrain>(e).map(|t| (origin, t))) {
+        Some((origin, t)) => t
+            .data
             .height_at(DVec2::new(x - origin.x, z - origin.z))
             .map(|h| h + origin.y)
             .unwrap_or(0.0),

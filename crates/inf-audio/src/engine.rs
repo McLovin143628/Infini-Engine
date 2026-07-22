@@ -407,12 +407,24 @@ impl AudioEngine {
         }
     }
 
-    /// Whether the handle names a live voice (from `play` until `stop`). This
-    /// tracks the **facade lifecycle**, not natural end-of-sound — wiring kira's
-    /// completion signal so a finished one-shot auto-reaps is a documented
-    /// follow-up (it needs a per-frame poll the runtime loop will own).
+    /// Whether the handle names a live voice (from `play` until `stop`, or until a
+    /// one-shot ends and [`reap`](Self::reap) removes it). The per-frame
+    /// [`reap`](Self::reap) is what turns natural end-of-sound into "not playing".
     pub fn is_playing(&self, handle: SoundHandle) -> bool {
         self.voices.contains_key(&handle.0)
+    }
+
+    /// Drop voices that have finished playing on their own and any `sources`
+    /// mapping that pointed at them. The **host** calls this once per frame after
+    /// [`drain`](Self::drain): it touches only device-side bookkeeping (the same
+    /// side as the backend), never the command stream, so the deterministic sim
+    /// contract is untouched. Without it, finished one-shots would accumulate for
+    /// the whole life of the process (and every listener move would re-mix them).
+    pub fn reap(&mut self) {
+        for id in self.backend.drain_finished() {
+            self.voices.remove(&id);
+            self.sources.retain(|_, h| h.0 != id);
+        }
     }
 
     /// Whether the handle is a live, currently-paused voice.

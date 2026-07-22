@@ -44,6 +44,15 @@ impl EcsWorld {
         &self.world
     }
 
+    /// Raw mutable access to the underlying bevy `World`.
+    ///
+    /// INVARIANT: this does **not** set the dirty flag. Any mutation made through
+    /// the returned `&mut World` that changes a transform, visibility, or the
+    /// hierarchy leaves [`propagate`](Self::propagate) believing nothing changed —
+    /// stale `GlobalTransform`/`ComputedVisibility` until something else dirties the
+    /// world. Callers that mutate such state MUST call [`mark_dirty`](Self::mark_dirty)
+    /// afterwards. (The typed mutators — `spawn`/`despawn`/`reparent`/`set_visible`/
+    /// `write_prop` — set it for you; this escape hatch cannot.)
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.world
     }

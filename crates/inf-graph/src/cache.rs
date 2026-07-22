@@ -61,6 +61,11 @@ struct Entry<V> {
 
 struct Inner<V> {
     map: BTreeMap<u64, Entry<V>>,
+    /// LRU index: `last_use → key`. `last_use` is a process-unique monotonic
+    /// counter (bumped on every `get`/`insert`), so this is a bijection with the
+    /// live entries and the eviction victim is always its first pair — O(log n)
+    /// eviction instead of the old O(n) min-scan, with the identical victim.
+    lru: BTreeMap<u64, u64>,
     ram_total: usize,
     tick: u64,
 }
@@ -78,6 +83,7 @@ impl<V: GraphValue> NodeCache<V> {
         Self {
             inner: Mutex::new(Inner {
                 map: BTreeMap::new(),
+                lru: BTreeMap::new(),
                 ram_total: 0,
                 tick: 0,
             }),
@@ -90,9 +96,16 @@ impl<V: GraphValue> NodeCache<V> {
         let mut inner = self.inner.lock().unwrap();
         inner.tick += 1;
         let tick = inner.tick;
-        let entry = inner.map.get_mut(&key)?;
-        entry.last_use = tick;
-        Some(entry.value.clone())
+        let (old_use, value) = {
+            let entry = inner.map.get_mut(&key)?;
+            let old_use = entry.last_use;
+            entry.last_use = tick;
+            (old_use, entry.value.clone())
+        };
+        // Re-key the LRU index to the new recency.
+        inner.lru.remove(&old_use);
+        inner.lru.insert(tick, key);
+        Some(value)
     }
 
     /// Store an output. A value larger than the whole cap is skipped (never
@@ -107,6 +120,7 @@ impl<V: GraphValue> NodeCache<V> {
         let tick = inner.tick;
         if let Some(old) = inner.map.remove(&key) {
             inner.ram_total = inner.ram_total.saturating_sub(old.ram);
+            inner.lru.remove(&old.last_use);
         }
         inner.map.insert(
             key,
@@ -116,12 +130,16 @@ impl<V: GraphValue> NodeCache<V> {
                 last_use: tick,
             },
         );
+        inner.lru.insert(tick, key);
         inner.ram_total += ram;
         while inner.ram_total > self.ram_cap {
-            let Some((&victim, _)) = inner.map.iter().min_by_key(|(_, e)| e.last_use) else {
+            // Evict the least-recently-used entry (smallest `last_use`) — the first
+            // pair in the index. O(log n) remove, same victim as the min-scan.
+            let Some((&victim_use, &victim_key)) = inner.lru.iter().next() else {
                 break;
             };
-            if let Some(e) = inner.map.remove(&victim) {
+            inner.lru.remove(&victim_use);
+            if let Some(e) = inner.map.remove(&victim_key) {
                 inner.ram_total = inner.ram_total.saturating_sub(e.ram);
             }
         }
@@ -131,6 +149,7 @@ impl<V: GraphValue> NodeCache<V> {
     pub fn clear(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.map.clear();
+        inner.lru.clear();
         inner.ram_total = 0;
     }
 
@@ -186,5 +205,22 @@ mod tests {
         assert_eq!(cache.get(1), Some(10));
         assert_eq!(cache.get(3), Some(30));
         assert_eq!(cache.get(2), None);
+    }
+
+    #[test]
+    fn eviction_victim_tracks_most_recent_touch() {
+        let cache: NodeCache<i64> = NodeCache::new(128); // 2 entries at 64B
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        // Re-touch in the order 1 then 2 → key 2 is now most-recently-used, so key
+        // 1 is the LRU victim (the opposite victim from `cache_stores_and_evicts_lru`,
+        // proving recency is re-keyed on every `get`).
+        assert_eq!(cache.get(1), Some(10));
+        assert_eq!(cache.get(2), Some(20));
+        cache.insert(3, 30);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get(1), None, "key 1 was least-recently-used");
+        assert_eq!(cache.get(2), Some(20));
+        assert_eq!(cache.get(3), Some(30));
     }
 }

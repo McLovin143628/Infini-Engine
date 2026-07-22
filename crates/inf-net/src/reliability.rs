@@ -76,6 +76,27 @@ pub fn decode_packet(bytes: &[u8]) -> Result<Packet, crate::NetError> {
     Ok(packet)
 }
 
+/// Exact serialized size of one reliable slot `(id, msg)` as it rides a packet —
+/// the byte cost [`poll_send`](Endpoint::poll_send) charges against the budget. An
+/// (impossible for our types) encode failure counts as oversize so the message
+/// still ships alone rather than wedging the queue.
+fn reliable_entry_size(id: u64, msg: &Message) -> usize {
+    bincode::serde::encode_to_vec((id, msg), bincode::config::standard())
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX)
+}
+
+/// Conservative per-packet **reliable** payload budget, in serialized bytes. A
+/// [`Packet`] is one datagram (module doc), so its reliable messages must fit a
+/// safe MTU; [`poll_send`](Endpoint::poll_send) fills each packet with due reliable
+/// messages up to this budget (oldest-first) and leaves the rest for the next poll.
+/// Sizes are measured exactly with bincode `serialized_size`, so this is a real
+/// byte budget, not a message count. It is kept well under a 1200-byte safe MTU to
+/// leave headroom for the ack header, an unreliable piggyback, and IP/UDP overhead.
+/// A single message larger than the budget still ships alone (oversize-single — its
+/// datagram size is then the transport's problem, e.g. IP fragmentation).
+const RELIABLE_PAYLOAD_BUDGET: usize = 1100;
+
 /// Endpoint tuning.
 #[derive(Clone, Copy, Debug)]
 pub struct EndpointConfig {
@@ -83,6 +104,11 @@ pub struct EndpointConfig {
     pub resend_timeout: f64,
     /// Cap on retained sent-packet ack records (memory bound).
     pub sent_history: usize,
+    /// Max reliable messages **in flight** (assigned an id, awaiting an ack) at
+    /// once. Sends beyond this are held in a FIFO backlog (`pending_reliable`) and
+    /// promoted into flight as acks free slots, so the in-flight set — and thus the
+    /// per-packet resend volume — is bounded under sustained loss.
+    pub max_in_flight: usize,
 }
 
 impl Default for EndpointConfig {
@@ -90,6 +116,7 @@ impl Default for EndpointConfig {
         Self {
             resend_timeout: 0.1,
             sent_history: 1024,
+            max_in_flight: 256,
         }
     }
 }
@@ -114,6 +141,10 @@ pub struct Endpoint {
     next_reliable_id: u64,
     next_unreliable_id: u64,
     reliable_unacked: BTreeMap<u64, ReliableEntry>,
+    /// Reliable messages queued behind the in-flight cap, oldest-first. They get a
+    /// reliable id only on promotion into `reliable_unacked` (which happens after
+    /// every earlier send already took its id), so global send order is preserved.
+    pending_reliable: VecDeque<Message>,
     pending_unreliable: Vec<(u64, Message)>,
     sent_packets: BTreeMap<u64, SentInfo>,
 
@@ -143,6 +174,7 @@ impl Endpoint {
             next_reliable_id: 1,
             next_unreliable_id: 1,
             reliable_unacked: BTreeMap::new(),
+            pending_reliable: VecDeque::new(),
             pending_unreliable: Vec::new(),
             sent_packets: BTreeMap::new(),
             recv_highest: 0,
@@ -161,17 +193,43 @@ impl Endpoint {
         self.now = now;
     }
 
-    /// Queue a reliable, ordered message. Retransmitted until acked.
+    /// Queue a reliable, ordered message. Retransmitted until acked. If the
+    /// in-flight cap ([`EndpointConfig::max_in_flight`]) is reached — or a backlog
+    /// already exists — it waits in the FIFO backlog and enters flight as acks free
+    /// slots, so a burst never inflates the in-flight (resend) set.
     pub fn send_reliable(&mut self, channel: ChannelId, payload: Vec<u8>) {
+        let msg = Message { channel, payload };
+        // Preserve order: only send directly when nothing is already queued ahead.
+        if self.pending_reliable.is_empty() && self.reliable_unacked.len() < self.cfg.max_in_flight
+        {
+            self.push_in_flight(msg);
+        } else {
+            self.pending_reliable.push_back(msg);
+        }
+    }
+
+    /// Assign the next reliable id and put a message in flight.
+    fn push_in_flight(&mut self, msg: Message) {
         let id = self.next_reliable_id;
         self.next_reliable_id += 1;
         self.reliable_unacked.insert(
             id,
             ReliableEntry {
-                msg: Message { channel, payload },
+                msg,
                 last_sent: None,
             },
         );
+    }
+
+    /// Promote backlog into flight while there is room under the cap (FIFO — the
+    /// oldest queued message takes the next id, keeping delivery order intact).
+    fn promote_pending(&mut self) {
+        while self.reliable_unacked.len() < self.cfg.max_in_flight {
+            let Some(msg) = self.pending_reliable.pop_front() else {
+                break;
+            };
+            self.push_in_flight(msg);
+        }
     }
 
     /// Queue a best-effort message. Sent once; dropped if lost.
@@ -200,7 +258,8 @@ impl Endpoint {
     /// included reliable messages as sent-at-`now` and records the packet for ack
     /// resolution.
     pub fn poll_send(&mut self) -> Option<Packet> {
-        // Reliable messages due for (re)send.
+        // Reliable messages due for (re)send, oldest-first (BTreeMap key = id =
+        // send order).
         let due_ids: Vec<u64> = self
             .reliable_unacked
             .iter()
@@ -214,22 +273,34 @@ impl Endpoint {
             return None;
         }
 
-        let mut reliable = Vec::with_capacity(due_ids.len());
+        // Fill this packet's reliable slot up to the payload budget, oldest-first.
+        // The rest of the due set rides the next poll_send call (the one-packet-per-
+        // call contract is preserved — callers poll repeatedly). The first message
+        // is always included, so a single oversize message still ships (alone).
+        let mut reliable = Vec::new();
+        let mut used = 0usize;
         for id in &due_ids {
+            let Some(sz) = self
+                .reliable_unacked
+                .get(id)
+                .map(|e| reliable_entry_size(*id, &e.msg))
+            else {
+                continue;
+            };
+            if !reliable.is_empty() && used + sz > RELIABLE_PAYLOAD_BUDGET {
+                break; // defer the remaining due messages to the next poll
+            }
+            used += sz;
             if let Some(e) = self.reliable_unacked.get_mut(id) {
                 e.last_sent = Some(self.now);
                 reliable.push((*id, e.msg.clone()));
             }
         }
+        let reliable_ids: Vec<u64> = reliable.iter().map(|(id, _)| *id).collect();
 
         let seq = self.next_packet_seq;
         self.next_packet_seq += 1;
-        self.sent_packets.insert(
-            seq,
-            SentInfo {
-                reliable_ids: due_ids,
-            },
-        );
+        self.sent_packets.insert(seq, SentInfo { reliable_ids });
         // Bound the ack-record history.
         while self.sent_packets.len() > self.cfg.sent_history {
             let lowest = *self.sent_packets.keys().next().unwrap();
@@ -272,9 +343,16 @@ impl Endpoint {
         self.incoming.pop_front()
     }
 
-    /// Count of reliable messages still awaiting an ack (0 ⇒ everything delivered).
+    /// Count of reliable messages **in flight** (sent, awaiting an ack). Bounded by
+    /// [`EndpointConfig::max_in_flight`]. `0` with an empty backlog ⇒ all delivered.
     pub fn unacked_reliable(&self) -> usize {
         self.reliable_unacked.len()
+    }
+
+    /// Count of reliable messages waiting in the backlog behind the in-flight cap
+    /// (not yet assigned an id / put on the wire).
+    pub fn pending_reliable(&self) -> usize {
+        self.pending_reliable.len()
     }
 
     // ── internals ──
@@ -320,6 +398,8 @@ impl Endpoint {
                 }
             }
         }
+        // Acks freed in-flight slots; pull backlog forward to fill them.
+        self.promote_pending();
     }
 
     fn ack_one(&mut self, seq: u64) {
@@ -599,5 +679,110 @@ mod tests {
         };
         let bytes = encode_packet(&p);
         assert_eq!(decode_packet(&bytes).unwrap(), p);
+    }
+
+    #[test]
+    fn oversized_reliable_backlog_splits_across_packets_by_budget() {
+        // A backlog whose combined size far exceeds one packet's budget must not be
+        // packed into a single oversized datagram — poll_send fills to the budget
+        // and defers the rest.
+        let cfg = EndpointConfig {
+            max_in_flight: 1000,
+            ..Default::default()
+        };
+        let mut a = Endpoint::new(cfg);
+        let n = 50usize;
+        for _ in 0..n {
+            a.send_reliable(ch(), vec![0u8; 200]); // ~200 B each ⇒ budget hit in ~5
+        }
+        a.update(0.0);
+        let p = a.poll_send().expect("a packet is produced");
+        assert!(
+            p.reliable.len() < n,
+            "budget splits the backlog ({} of {n})",
+            p.reliable.len()
+        );
+        assert!(
+            encode_packet(&p).len() <= 1400,
+            "one datagram stays near a safe MTU"
+        );
+    }
+
+    #[test]
+    fn a_single_oversize_reliable_message_still_ships_alone() {
+        let mut a = Endpoint::new(EndpointConfig::default());
+        a.send_reliable(ch(), vec![7u8; 4000]); // larger than the whole budget
+        a.update(0.0);
+        let p = a.poll_send().expect("a packet is produced");
+        assert_eq!(
+            p.reliable.len(),
+            1,
+            "an oversize message goes alone rather than wedging the queue forever"
+        );
+    }
+
+    #[test]
+    fn sustained_loss_bounds_in_flight_and_delivers_all_after_recovery() {
+        // The M1 gate: under total loss the in-flight (resend) set stays ≤ cap while
+        // the backlog holds the rest; once loss clears, every message is delivered
+        // exactly once, in order.
+        let cfg = EndpointConfig {
+            max_in_flight: 8,
+            ..Default::default()
+        };
+        let mut a = Endpoint::new(cfg);
+        let mut b = Endpoint::new(cfg);
+
+        let n = 100u32;
+        for i in 0..n {
+            a.send_reliable(ch(), i.to_le_bytes().to_vec());
+        }
+        assert!(a.unacked_reliable() <= 8, "cap holds from the first send");
+        assert_eq!(
+            a.pending_reliable(),
+            n as usize - 8,
+            "the rest is backlogged"
+        );
+
+        let mut t = 0.0;
+        // Phase 1 — total loss a→b: nothing acks, so in-flight is pinned at the cap.
+        for _ in 0..50 {
+            t += 0.01;
+            a.update(t);
+            b.update(t);
+            while a.poll_send().is_some() { /* dropped */ }
+            assert!(a.unacked_reliable() <= 8, "in-flight never exceeds the cap");
+        }
+
+        // Phase 2 — loss clears: pump both directions to completion.
+        let mut got = Vec::new();
+        for _ in 0..10_000 {
+            t += 0.01;
+            a.update(t);
+            b.update(t);
+            while let Some(p) = a.poll_send() {
+                b.recv(&p);
+            }
+            while let Some(p) = b.poll_send() {
+                a.recv(&p);
+            }
+            while let Some(m) = b.poll_recv() {
+                got.push(u32::from_le_bytes(m.payload.clone().try_into().unwrap()));
+            }
+            assert!(
+                a.unacked_reliable() <= 8,
+                "in-flight stays bounded throughout"
+            );
+            if a.unacked_reliable() == 0 && a.pending_reliable() == 0 {
+                break;
+            }
+        }
+        assert_eq!(a.unacked_reliable(), 0, "everything acked");
+        assert_eq!(a.pending_reliable(), 0, "backlog drained");
+        assert_eq!(
+            got,
+            (0..n).collect::<Vec<_>>(),
+            "exactly-once, in order after recovery"
+        );
     }
 }

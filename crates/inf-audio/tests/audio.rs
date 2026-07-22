@@ -253,3 +253,37 @@ fn command_queue_drives_one_voice_per_source_with_replace_and_stop() {
     assert_eq!(engine.voice_count(), 1);
     assert!(engine.source_handle(2).is_some());
 }
+
+#[test]
+fn reap_removes_finished_one_shots_and_their_source_mappings() {
+    // In the no-device fallback a non-looping voice is reported finished on the
+    // next reap; a looping one is not. `reap` is the host's per-frame call — it
+    // never runs implicitly, so the other lifecycle tests are unaffected by it.
+    let mut engine = AudioEngine::disabled();
+    let sound = test_sound();
+
+    // A one-shot and a loop played directly.
+    let one = engine.play(&sound, PlaySettings::default());
+    let loops = engine.play(&sound, PlaySettings::default().looping(true));
+    assert_eq!(engine.voice_count(), 2);
+
+    engine.reap();
+    assert!(!engine.is_playing(one), "finished one-shot is reaped");
+    assert!(engine.is_playing(loops), "looping voice is not reaped");
+    assert_eq!(engine.voice_count(), 1);
+
+    // A command-queue one-shot: reap drops its `sources` mapping too.
+    engine.drain(
+        &[AudioCommand::Play(PlayCommand::new(9, Uuid::nil(), "sfx"))],
+        &clip_stream(sound),
+    );
+    assert!(engine.source_handle(9).is_some());
+    engine.reap();
+    assert!(
+        engine.source_handle(9).is_none(),
+        "reaping a finished voice clears its source id"
+    );
+    // Reaping again is a no-op (only the loop remains).
+    engine.reap();
+    assert_eq!(engine.voice_count(), 1);
+}
