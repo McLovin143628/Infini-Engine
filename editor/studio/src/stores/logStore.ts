@@ -25,6 +25,8 @@ interface LogState {
   setSearch: (s: string) => void;
   toggleLevel: (level: LogLevel) => void;
   setPaused: (paused: boolean) => void;
+  /** Append a whole batch in ONE store update (the batched stream path). */
+  appendMany: (lines: LogLine[]) => void;
 }
 
 export const useLogStore = create<LogState>((set) => ({
@@ -43,22 +45,66 @@ export const useLogStore = create<LogState>((set) => ({
   toggleLevel: (level) =>
     set((s) => ({ enabled: { ...s.enabled, [level]: !s.enabled[level] } })),
   setPaused: (paused) => set({ paused }),
+  appendMany: (incoming) =>
+    set((s) => {
+      if (s.paused || incoming.length === 0) return s;
+      const combined = s.lines.length ? [...s.lines, ...incoming] : incoming.slice();
+      // Cap-trim once, after the merge — O(batch) per flush instead of the old
+      // O(N) whole-array copy PER line.
+      const lines =
+        combined.length > LOG_CAP ? combined.slice(combined.length - LOG_CAP) : combined;
+      return { lines };
+    }),
 }));
+
+/**
+ * Coalesces a high-rate `log://line` stream into periodic batch flushes, so
+ * the store (and the cross-window bridge that mirrors it) update at most once
+ * per `intervalMs` instead of once per line. Pure + timer-injectable → unit-
+ * testable with fake timers.
+ */
+export function createLogBatcher(flush: (lines: LogLine[]) => void, intervalMs = 60) {
+  let buffer: LogLine[] = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const fire = () => {
+    timer = null;
+    if (buffer.length === 0) return;
+    const batch = buffer;
+    buffer = [];
+    flush(batch);
+  };
+  return {
+    push(line: LogLine) {
+      buffer.push(line);
+      if (timer === null) timer = setTimeout(fire, intervalMs);
+    },
+    /** Cancel the pending flush and drop any buffered lines. */
+    dispose() {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      buffer = [];
+    },
+  };
+}
 
 registerBridgedStore("log", useLogStore);
 
-/** Main window only: subscribe the store to the `log://line` stream. */
+/** Main window only: subscribe the store to the `log://line` stream. Lines are
+ *  batched (~60 ms) into one store update to keep append O(batch), not O(N)
+ *  per line. */
 export function startLogListener(): () => void {
   let disposed = false;
   let unlisten: (() => void) | undefined;
-  void listenTo("log://line", (line) => {
-    useLogStore.getState().append(line);
-  }).then((u) => {
+  const batcher = createLogBatcher((lines) => useLogStore.getState().appendMany(lines));
+  void listenTo("log://line", (line) => batcher.push(line)).then((u) => {
     if (disposed) u();
     else unlisten = u;
   });
   return () => {
     disposed = true;
+    batcher.dispose();
     unlisten?.();
   };
 }

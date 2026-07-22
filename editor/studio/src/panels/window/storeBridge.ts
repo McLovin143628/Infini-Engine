@@ -39,7 +39,20 @@ export function registerBridgedStore(name: string, store: unknown): void {
   BRIDGED.set(name, store as AnyStore);
 }
 
-/** The serializable slice of a store's state (drop the actions). */
+/**
+ * The serializable slice of a store's state (drop the actions).
+ *
+ * SCALING NOTE (latent, documented — not a bug today): every bridged mutation
+ * ships the store's WHOLE data slice, not a diff. For today's small stores
+ * (shell status, scene selection/labels, log lines) that is cheap and the
+ * self-healing simplicity is worth it. If a large/hot store is ever bridged
+ * (e.g. the full scene node map), the scaling path is diff-sync: emit only
+ * changed keys (or a structural patch) instead of the full snapshot. Emission
+ * is already gated on `panelWindowCount > 0` (see `setPanelWindowCount` and the
+ * `subscribe` guard below), so with NO detached window open the main window
+ * pays nothing regardless of store size — the cost only appears once a panel is
+ * torn off. That gating is the cheap high-value trim; diff-sync is the rest.
+ */
 function dataSlice(state: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(state)) {
@@ -158,6 +171,15 @@ export function startStoreBridgeHost(): () => void {
 export async function startStoreBridgeMirror(): Promise<() => void> {
   // Replace every action with a forwarder BEFORE any UI renders, so no
   // stray local mutation can run against the mirror.
+  //
+  // WARNING (latent, documented): the forwarder is fire-and-forget — it emits
+  // the action to the main window and returns `undefined`, DROPPING whatever
+  // the real action returns (a value or a Promise). In a detached panel window
+  // any action that normally returns something (e.g. `createEntity`'s new guid,
+  // or any `async` action you'd `await`) yields `undefined`/an un-awaitable
+  // no-op. Callers in bridged panels MUST NOT rely on a bridged action's return
+  // value or awaiting it. Round-tripping results would need a request/response
+  // correlation id over `panel://action` (out of scope; note only).
   for (const [name, store] of BRIDGED) {
     const wrapped: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(store.getState())) {

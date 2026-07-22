@@ -3,6 +3,7 @@ import { layouts } from "../../lib/ipc";
 import type { Discipline } from "../../lib/disciplines";
 import { clampPanelRect, type ContainerSize, type PanelRect } from "../panelRect";
 import { panelDefFor, panelTypeOf } from "../panelRegistry";
+import { notifyPanelClosed } from "./panelLifecycle";
 import {
   clampRegionSize,
   fromDockDoc,
@@ -612,6 +613,10 @@ export const useDockLayout = create<DockLayoutStore>((set, get) => {
       delete panels[id];
       next = { ...next, panels };
       commitTx(next);
+      // Explicit close (instance destroyed) → let resource owners free up
+      // (e.g. the terminal's PTY). A location move goes through `applyDrop`,
+      // which never notifies, so a drag keeps the resource alive.
+      notifyPanelClosed(id);
     },
 
     applyDrop: (id, target) => {
@@ -642,6 +647,9 @@ export const useDockLayout = create<DockLayoutStore>((set, get) => {
         },
       };
       commitTx(next);
+      // Hiding (the singleton "close" path) is an explicit close from the
+      // user's view — free panel-owned resources. Moves use `applyDrop`.
+      notifyPanelClosed(id);
     },
 
     showPanel: (id) => {

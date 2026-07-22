@@ -20,8 +20,21 @@ import { getCommand, setCommandHandler } from "../lib/commands";
 import { listenTo, type UnlistenFn } from "../lib/events";
 import { scene as sceneIpc } from "../lib/ipc";
 import { registerBridgedStore } from "../panels/window/storeBridge";
+import { useShellStore } from "./shellStore";
 
 export type { SceneNode };
+
+function errText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Monotonic token guarding async Details fetches. `refreshDetails`,
+ * `setProperty`, and `resetProperty` all bump it before their await and only
+ * apply their result if still newest — so a slow response for a stale
+ * selection can't clobber the Details pane for the current one.
+ */
+let detailsToken = 0;
 
 interface SceneState {
   nodes: Record<string, SceneNode>;
@@ -134,10 +147,15 @@ export const useSceneStore = create<SceneState>((set, get) => ({
     })),
 
   refreshDetails: async () => {
+    const token = ++detailsToken;
     try {
-      set({ details: await sceneIpc.details() });
+      const details = await sceneIpc.details();
+      if (token !== detailsToken) return; // superseded by a newer selection
+      set({ details });
     } catch (e) {
-      console.error("scene.details failed", e);
+      // Kept as console-only: this fires on every selection change, so a
+      // persistent failure would spam the status bar.
+      if (token === detailsToken) console.error("scene.details failed", e);
     }
   },
 
@@ -171,22 +189,30 @@ export const useSceneStore = create<SceneState>((set, get) => ({
   setProperty: async (typePath, field, value) => {
     const sel = get().selection;
     if (!sel.length) return;
+    const token = ++detailsToken;
     try {
       const details = await sceneIpc.setProperty(sel, typePath, field, value);
+      if (token !== detailsToken) return; // selection moved on
       set({ details });
     } catch (e) {
+      // Details-panel edit, not command-initiated → surface here (commands.ts
+      // handles command-initiated failures, so no double-toast).
       console.error("scene.setProperty failed", e);
+      useShellStore.getState().pushStatus(`Property edit failed: ${errText(e)}`);
     }
   },
 
   resetProperty: async (typePath, field) => {
     const sel = get().selection;
     if (!sel.length) return;
+    const token = ++detailsToken;
     try {
       const details = await sceneIpc.resetProperty(sel, typePath, field);
+      if (token !== detailsToken) return; // selection moved on
       set({ details });
     } catch (e) {
       console.error("scene.resetProperty failed", e);
+      useShellStore.getState().pushStatus(`Property reset failed: ${errText(e)}`);
     }
   },
 

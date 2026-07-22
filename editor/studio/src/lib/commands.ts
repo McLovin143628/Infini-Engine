@@ -27,6 +27,10 @@ type Listener = () => void;
 const registry = new Map<string, CommandDef>();
 const listeners = new Set<Listener>();
 
+function errText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 let unhandledHook: (cmd: CommandDef) => void = (cmd) => {
   console.warn(`command not implemented yet: ${cmd.id}`);
 };
@@ -76,7 +80,25 @@ export function executeCommand(id: string): boolean {
     unhandledHook(cmd);
     return true;
   }
-  void cmd.run();
+  // Run SYNCHRONOUSLY (callers + keybindings rely on it), but surface a
+  // rejected/throwing handler that used to vanish silently (e.g. a failed scene
+  // save) in the status bar with the command title. Handles both a synchronous
+  // throw and an async rejection.
+  const surface = (e: unknown) => {
+    console.error(`command ${cmd.id} failed`, e);
+    // Lazy import avoids a module-load cycle (shellStore ⇄ command wiring).
+    void import("../stores/shellStore").then(({ useShellStore }) =>
+      useShellStore.getState().pushStatus(`${cmd.title} failed: ${errText(e)}`),
+    );
+  };
+  try {
+    const result = cmd.run();
+    if (result && typeof (result as Promise<void>).then === "function") {
+      void (result as Promise<void>).catch(surface);
+    }
+  } catch (e) {
+    surface(e);
+  }
   return true;
 }
 

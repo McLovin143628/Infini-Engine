@@ -40,6 +40,7 @@ import { initPieSync, registerPieCommands } from "./stores/pieStore";
 import { initEditorSync } from "./stores/editorStore";
 import { initLsp } from "./lib/editor/lspBridge";
 import { scene as sceneIpc } from "./lib/ipc";
+import { useShellStore } from "./stores/shellStore";
 
 bootstrapShellCommands();
 registerDefaultKeybindings();
@@ -162,8 +163,28 @@ export default function App() {
   }, []);
 
   // Debounced crash-recovery autosave (P3.5.4): flush unsaved work every 5 s.
+  // Autosave isn't command-initiated, so its failures surface here — but
+  // rate-limited: a persistent failure re-toasts only when the message changes
+  // or once a minute (every 12th tick), never every 5 s.
   useEffect(() => {
-    const id = window.setInterval(() => void sceneIpc.autosave(), 5000);
+    let lastErr: string | null = null;
+    let failCount = 0;
+    const id = window.setInterval(() => {
+      void sceneIpc.autosave().then(
+        () => {
+          lastErr = null;
+          failCount = 0;
+        },
+        (e: unknown) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          failCount += 1;
+          if (msg !== lastErr || failCount % 12 === 0) {
+            lastErr = msg;
+            useShellStore.getState().pushStatus(`Autosave failed: ${msg}`);
+          }
+        },
+      );
+    }, 5000);
     return () => window.clearInterval(id);
   }, []);
 

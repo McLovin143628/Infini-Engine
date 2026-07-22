@@ -16,10 +16,12 @@ const TASKS: { label: string; cmd: string }[] = [
   { label: "cargo build", cmd: "cargo build" },
 ];
 
-export default function TerminalPanel() {
+export default function TerminalPanel({ panelId }: { panelId: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cwd = useProjectStore((s) => s.current?.root ?? null);
-  const { runCommand, focus } = usePty(containerRef, cwd);
+  // Key the PTY session on the panel id so a dock/float re-parent adopts the
+  // same live session (keeping a running build alive) instead of respawning.
+  const { runCommand, focus } = usePty(containerRef, cwd, panelId);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#0e0f13]">

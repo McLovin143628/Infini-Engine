@@ -5,6 +5,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, Ban, Pause, Play, Search } from "lucide-react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import type { LogLevel } from "../bindings/LogLevel";
 import { stripAnsi } from "../lib/ansi";
 import { cn } from "../lib/utils";
@@ -40,11 +41,26 @@ export default function OutputLogPanel() {
     });
   }, [lines, enabled, search]);
 
+  // Row virtualization: only the visible window of rows is in the DOM, so the
+  // panel's render cost is bounded by viewport size, not the 5k-line ring —
+  // even while it's a hidden tab still subscribed to the store.
+  // TanStack Virtual returns non-memoizable functions; none are passed to
+  // memoized children, so the React-Compiler warning is moot.
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const rowVirt = useVirtualizer({
+    count: visible.length,
+    getScrollElement: () => scrollRef.current,
+    // Lines wrap (break-all), so heights vary — estimate one row, then let
+    // `measureElement` correct each mounted row.
+    estimateSize: () => 16,
+    overscan: 16,
+  });
+
+  // Follow-tail: keep pinned to the newest line unless the user scrolled up.
   useEffect(() => {
-    if (!follow) return;
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [visible, follow]);
+    if (!follow || visible.length === 0) return;
+    rowVirt.scrollToIndex(visible.length - 1, { align: "end" });
+  }, [visible.length, follow, rowVirt]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -109,23 +125,41 @@ export default function OutputLogPanel() {
       <div
         ref={scrollRef}
         className="min-h-0 flex-1 select-text overflow-auto px-2 py-1 font-mono text-[11px] leading-4"
-        onWheel={() => setFollow(false)}
+        // Scrolling UP unpins the tail; scrolling down (or the "scroll to end"
+        // button) leaves follow intact. Preserves the old pause-on-scroll intent.
+        onWheel={(e) => {
+          if (e.deltaY < 0) setFollow(false);
+        }}
       >
-        {visible.length === 0 && (
+        {visible.length === 0 ? (
           <div className="p-2 font-sans text-(--ink-text-faint)">
             {lines.length === 0 ? "Waiting for log output…" : "No lines match the filters."}
           </div>
-        )}
-        {visible.map((l) => (
-          <div key={l.seq} className="flex gap-2 whitespace-pre-wrap break-all">
-            <span className="shrink-0 text-(--ink-text-faint)">
-              {new Date(l.timestamp_ms).toLocaleTimeString(undefined, { hour12: false })}
-            </span>
-            <span className={cn("w-10 shrink-0 uppercase", LEVEL_STYLE[l.level])}>{l.level}</span>
-            <span className="shrink-0 text-(--ink-text-faint)">{l.target}</span>
-            <span>{stripAnsi(l.message)}</span>
+        ) : (
+          <div style={{ height: rowVirt.getTotalSize(), position: "relative", width: "100%" }}>
+            {rowVirt.getVirtualItems().map((vr) => {
+              const l = visible[vr.index]!;
+              return (
+                <div
+                  key={l.seq}
+                  data-index={vr.index}
+                  ref={rowVirt.measureElement}
+                  className="absolute left-0 flex w-full gap-2 whitespace-pre-wrap break-all"
+                  style={{ top: 0, transform: `translateY(${vr.start}px)` }}
+                >
+                  <span className="shrink-0 text-(--ink-text-faint)">
+                    {new Date(l.timestamp_ms).toLocaleTimeString(undefined, { hour12: false })}
+                  </span>
+                  <span className={cn("w-10 shrink-0 uppercase", LEVEL_STYLE[l.level])}>
+                    {l.level}
+                  </span>
+                  <span className="shrink-0 text-(--ink-text-faint)">{l.target}</span>
+                  <span>{stripAnsi(l.message)}</span>
+                </div>
+              );
+            })}
           </div>
-        ))}
+        )}
       </div>
     </div>
   );
