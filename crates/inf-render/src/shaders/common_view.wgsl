@@ -20,6 +20,10 @@ struct View {
     // declare the shorter View struct are unaffected.
     cam_right: vec4<f32>,
     cam_up: vec4<f32>,
+    // View-mode flags (R-P2): x = unlit (1.0 ⇒ the lit passes return albedo+emissive
+    // and skip lighting — drives Unlit and Wireframe); yzw reserved. Appended last;
+    // 0 for the default Lit mode so every pre-R-P2 golden stays byte-identical.
+    flags: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> view: View;
 

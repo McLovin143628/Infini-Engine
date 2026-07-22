@@ -28,7 +28,7 @@ use inf_render::{
     RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings,
     SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance, SpriteTextureUpload,
     SsaoSettings, TextParams, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings,
-    BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
+    ViewMode, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
     BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT,
     TILE_CHUNK_DIM,
 };
@@ -204,6 +204,100 @@ fn golden_cubes() {
     assert!(
         center[0] > center[2] && center[0] > 40,
         "expected the red cube at center: {center:?}"
+    );
+}
+
+/// Render one frame in a given [`ViewMode`] (R-P2), default post settings.
+fn render_view_mode(
+    gpu: &GpuContext,
+    scene: &RenderScene,
+    view: &RenderView,
+    mode: ViewMode,
+) -> Vec<u8> {
+    let target = HeadlessTarget::new(gpu, W, H);
+    let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
+    renderer.set_view_mode(mode);
+    renderer.render(gpu, scene, view, &target.view, (W, H));
+    target.read_rgba(gpu).expect("readback")
+}
+
+/// Unlit view-mode golden (R-P2): the same three cubes as [`golden_cubes`], but
+/// rendered with `set_view_mode(Unlit)` so the lit passes short-circuit to
+/// albedo+emissive (no lighting). Determinism gate (render twice), a new committed
+/// golden `unlit.png` (bless with `INF_BLESS_GOLDENS=1`), and a structural gate:
+/// the unlit frame must differ from the lit one (proving the flag actually flipped
+/// the shading), each cube still shows its flat base colour, and — crucially — the
+/// *lit* frame stays byte-identical to `golden_cubes` (view mode never perturbs the
+/// default Lit path; every pre-R-P2 golden is unaffected). Wireframe is NOT
+/// goldened — line raster is adapter-fragile (feature-gated + AA-dependent) — so it
+/// is covered by the naga compose test + the caps/degrade unit tests instead.
+#[test]
+fn golden_unlit() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        ..Default::default()
+    };
+    for (i, (x, z, c)) in [
+        (0.0, 0.0, [0.80, 0.20, 0.20]),
+        (2.5, -1.0, [0.20, 0.70, 0.30]),
+        (-2.0, 1.5, [0.25, 0.45, 0.95]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        scene.instances.push(MeshInstance::lit(
+            DVec3::new(x, 0.5, z),
+            Quat::from_rotation_y(0.3),
+            Vec3::ONE,
+            [c[0], c[1], c[2], 1.0],
+            i as u32 + 1,
+        ));
+    }
+    scene.mark_dirty();
+    let view = overlook_view();
+
+    // Determinism + golden write/compare for the Unlit render.
+    let a = render_view_mode(&gpu, &scene, &view, ViewMode::Unlit);
+    let b = render_view_mode(&gpu, &scene, &view, ViewMode::Unlit);
+    let (mean, max) = image_diff(&a, &b, W, H);
+    assert!(
+        mean < 0.005 && max < 0.05,
+        "unlit: renderer not deterministic (mean {mean}, max {max})"
+    );
+    let path = goldens_dir().join("unlit.png");
+    if std::env::var("INF_BLESS_GOLDENS").is_ok() || read_png(&path).is_none() {
+        write_png(&path, &a);
+        eprintln!("golden unlit: wrote {}", path.display());
+    } else if std::env::var("INF_GOLDEN_STRICT").is_ok() {
+        let golden = read_png(&path).expect("golden png");
+        let (m, mx) = image_diff(&a, &golden, W, H);
+        assert!(
+            within_tolerance(m, mx),
+            "unlit: differs from golden (mean {m}, max {mx})"
+        );
+    }
+
+    // The unlit render differs from the lit one (the flag genuinely changed the
+    // shading — unlit is flatter/brighter, no GGX/ambient/haze).
+    let lit = render_view_mode(&gpu, &scene, &view, ViewMode::Lit);
+    let (dmean, _dmax) = image_diff(&a, &lit, W, H);
+    assert!(dmean > 0.002, "unlit should differ from lit (mean {dmean})");
+
+    // The default Lit path is byte-stable vs the plain-renderer `golden_cubes`
+    // frame — view mode never perturbs Lit (the byte-identical guarantee).
+    let plain = render(&gpu, &scene, &view);
+    let (lmean, lmax) = image_diff(&lit, &plain, W, H);
+    assert!(
+        lmean < 1e-6 && lmax < 1e-6,
+        "Lit view mode must match the default renderer exactly (mean {lmean}, max {lmax})"
+    );
+
+    // The central red cube still reads as red under unlit shading.
+    let center = px(&a, W / 2, H / 2);
+    assert!(
+        center[0] > center[2] && center[0] > 40,
+        "expected the red cube at center (unlit): {center:?}"
     );
 }
 

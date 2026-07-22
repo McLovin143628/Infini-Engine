@@ -171,6 +171,10 @@ struct GpuSkinnedInstance {
 
 pub struct SkinnedMeshNode {
     pipeline: wgpu::RenderPipeline,
+    /// Wireframe (`PolygonMode::Line`) variant (R-P2), present only with the
+    /// `POLYGON_MODE_LINE` feature; selected when the frame's view mode is
+    /// [`ViewMode::Wireframe`](crate::renderer::ViewMode::Wireframe).
+    pipeline_wire: Option<wgpu::RenderPipeline>,
     joints_bgl: wgpu::BindGroupLayout,
     /// AO + shadows + GI env bind at `@group(2)` (P13.3b; was the AO-only bind).
     env: super::EnvBinding,
@@ -257,48 +261,70 @@ impl SkinnedMeshNode {
                 immediate_size: 0,
             });
 
-        let pipeline = gpu
+        // Fill + (feature-gated) R-P2 wireframe variants, identical but for the
+        // primitive state — see the rigid `mesh` pass for the same shape.
+        let make_pipeline = |label: &str, primitive: wgpu::PrimitiveState| {
+            gpu.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs"),
+                        compilation_options: Default::default(),
+                        buffers: &vertex_layouts(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: SCENE_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive,
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(DEPTH_COMPARE),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: SCENE_SAMPLES,
+                        ..Default::default()
+                    },
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
+
+        let pipeline = make_pipeline(
+            "skinned-mesh",
+            wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+        );
+        let pipeline_wire = gpu
             .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("skinned-mesh"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &vertex_layouts(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: SCENE_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: Some(wgpu::Face::Back),
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(DEPTH_COMPARE),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: SCENE_SAMPLES,
-                    ..Default::default()
-                },
-                multiview_mask: None,
-                cache: None,
+            .features()
+            .contains(wgpu::Features::POLYGON_MODE_LINE)
+            .then(|| {
+                make_pipeline(
+                    "skinned-mesh-wire",
+                    wgpu::PrimitiveState {
+                        polygon_mode: wgpu::PolygonMode::Line,
+                        ..Default::default()
+                    },
+                )
             });
 
         Self {
             pipeline,
+            pipeline_wire,
             joints_bgl,
             env,
             lights_buf,
@@ -452,7 +478,12 @@ impl RenderNode for SkinnedMeshNode {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        // Wireframe view mode (R-P2) selects the line-raster variant when present.
+        let pipeline = match &self.pipeline_wire {
+            Some(wire) if frame.view_mode.wireframe() => wire,
+            _ => &self.pipeline,
+        };
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
         pass.set_bind_group(1, &self.lights_bg, &[]);
         pass.set_bind_group(2, &env_bg, &[]);

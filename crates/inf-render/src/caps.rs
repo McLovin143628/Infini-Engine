@@ -131,6 +131,12 @@ pub struct AdapterCaps {
     /// (WARP/lavapipe) — never High even if the limits nominally qualify, since
     /// the meshlet path would be unusably slow.
     pub is_cpu: bool,
+    /// Whether the adapter exposes `POLYGON_MODE_LINE` (R-P2 wireframe view mode).
+    /// Independent of the render tier — a low-tier GPU may still raster lines, and
+    /// a high-tier one may lack the feature — so [`choose_tier`] ignores it; it is
+    /// surfaced only so a host can decide whether the wireframe view mode is
+    /// offerable before the renderer would otherwise clamp it.
+    pub polygon_mode_line: bool,
 }
 
 impl AdapterCaps {
@@ -150,6 +156,10 @@ impl AdapterCaps {
             max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size,
             max_compute_workgroups_per_dim: limits.max_compute_workgroups_per_dimension,
             is_cpu: info.device_type == wgpu::DeviceType::Cpu,
+            polygon_mode_line: gpu
+                .adapter
+                .features()
+                .contains(wgpu::Features::POLYGON_MODE_LINE),
         }
     }
 
@@ -220,6 +230,7 @@ mod tests {
             max_storage_buffer_binding_size: VGEOM_MIN_STORAGE_BINDING_SIZE,
             max_compute_workgroups_per_dim: VGEOM_MIN_WORKGROUPS_PER_DIM,
             is_cpu: false,
+            polygon_mode_line: true,
         }
     }
 
@@ -258,8 +269,31 @@ mod tests {
             max_storage_buffer_binding_size: 0,
             max_compute_workgroups_per_dim: 0,
             is_cpu: false,
+            polygon_mode_line: false,
         };
         assert_eq!(choose_tier(&c), RenderTier::Low);
+    }
+
+    #[test]
+    fn polygon_mode_line_is_orthogonal_to_tier() {
+        // Wireframe support (R-P2) is a separate GPU feature from the meshlet-path
+        // tier decision: toggling it must never change the chosen tier, in either
+        // direction. A High GPU without line raster is still High; a Low GPU with
+        // it is still Low.
+        let mut high = high_caps();
+        high.polygon_mode_line = false;
+        assert_eq!(choose_tier(&high), RenderTier::High);
+
+        let low = AdapterCaps {
+            compute_shaders: false,
+            indirect_execution: false,
+            max_storage_buffers_per_stage: 0,
+            max_storage_buffer_binding_size: 0,
+            max_compute_workgroups_per_dim: 0,
+            is_cpu: false,
+            polygon_mode_line: true,
+        };
+        assert_eq!(choose_tier(&low), RenderTier::Low);
     }
 
     #[test]

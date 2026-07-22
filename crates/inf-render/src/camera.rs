@@ -141,6 +141,12 @@ pub struct ViewUniforms {
     pub cam_right: [f32; 4],
     /// Camera **up** basis vector (render-local), xyz; w unused. See `cam_right`.
     pub cam_up: [f32; 4],
+    /// View-mode flags (R-P2): `x` = unlit (1.0 ⇒ the lit scene passes return
+    /// albedo+emissive directly, skipping the light loop — drives both the Unlit
+    /// and Wireframe view modes); `yzw` reserved. Appended last so every pass that
+    /// declares the shorter `View` struct is unaffected and every pre-R-P2 golden
+    /// stays byte-identical (the renderer writes 0 here for the default Lit mode).
+    pub flags: [f32; 4],
 }
 
 /// Fixed editor sun for Phase 2 (light theory arrives with materials, P7).
@@ -176,6 +182,9 @@ impl ViewUniforms {
             .to_array(),
             cam_right: cam_right.extend(0.0).to_array(),
             cam_up: cam_up.extend(0.0).to_array(),
+            // Default Lit: no unlit flag. The renderer overwrites `flags[0]` per
+            // frame from its active view mode (Unlit/Wireframe set it to 1.0).
+            flags: [0.0; 4],
         }
     }
 }
@@ -265,8 +274,11 @@ mod tests {
         assert_eq!(u.grid_axis_viewport[1], 300.0);
         assert_eq!(
             std::mem::size_of::<ViewUniforms>(),
-            (16 + 16 + 4 + 4 + 4 + 4 + 4 + 4) * 4
+            (16 + 16 + 4 + 4 + 4 + 4 + 4 + 4 + 4) * 4
         );
+        // The view-mode flags default to Lit (all zero) — this is what keeps every
+        // pre-R-P2 golden byte-identical (the shaders branch only on `flags.x`).
+        assert_eq!(u.flags, [0.0; 4]);
         // Perspective packs mode flag 0; the origin's Y still populates the 2D
         // axis slot (only read by the grid shader in ortho).
         assert_eq!(u.mode_axis[0], 0.0);

@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use inf_editor_core::ipc::{
     GizmoModeDto, GizmoSpaceDto, SculptFalloffDto, SculptOpDto, SculptSettingsDto, Snap2DDto,
-    Snap3DDto, ToolModeDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
+    Snap3DDto, ToolModeDto, ViewModeDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
 };
 use inf_viewport::{
     GizmoSpace, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings, SnapSettings, ToolMode,
@@ -312,6 +312,22 @@ pub async fn viewport_set_gizmo_space(
             GizmoSpaceDto::World => GizmoSpace::World,
             GizmoSpaceDto::Local => GizmoSpace::Local,
         });
+    }
+    Ok(())
+}
+
+/// Set the shading view mode (Lit / Unlit / Wireframe) from the viewport toolbar
+/// (R-P2). `Wireframe` degrades to `Unlit` in the renderer when the adapter lacks
+/// `POLYGON_MODE_LINE`. Editor-transient (never persisted; the player never sets
+/// it).
+#[tauri::command]
+pub async fn viewport_set_view_mode(
+    mode: ViewModeDto,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        handle.set_view_mode(mode);
     }
     Ok(())
 }

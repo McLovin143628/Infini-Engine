@@ -18,6 +18,7 @@ import type { SculptSettingsDto } from "../bindings/SculptSettingsDto";
 import type { Snap2DDto } from "../bindings/Snap2DDto";
 import type { Snap3DDto } from "../bindings/Snap3DDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
+import type { ViewModeDto } from "../bindings/ViewModeDto";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
 
 /** localStorage key for the persisted 3D gizmo snap settings (Wave 2). */
@@ -45,6 +46,9 @@ interface ViewportUiState {
   /** Per-project pixels-per-unit (persisted). */
   pixelsPerUnit: number;
 
+  /** Shading view mode (Lit / Unlit / Wireframe), perspective only (R-P2). */
+  viewMode: ViewModeDto;
+
   /** Active tool: pick/gizmo (`Select`) or terrain sculpt (`Sculpt`). (P10.2b) */
   toolMode: ToolModeDto;
   /** Sculpt brush operation. */
@@ -70,6 +74,8 @@ interface ViewportUiState {
 
   setMode: (mode: ViewportModeDto) => void;
   toggleMode: () => void;
+  /** Set the shading view mode + push to the viewport (R-P2). */
+  setViewMode: (mode: ViewModeDto) => void;
   setGridSnapEnabled: (v: boolean) => void;
   setGridSnapSize: (v: number) => void;
   setPixelSnapEnabled: (v: boolean) => void;
@@ -150,6 +156,7 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   gridSnapSize: 1,
   pixelSnapEnabled: false,
   pixelsPerUnit: 100,
+  viewMode: "Lit",
   toolMode: "Select",
   sculptOp: "Raise",
   sculptRadius: 8,
@@ -169,6 +176,10 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   },
   toggleMode: () => {
     get().setMode(get().mode === "TwoD" ? "Perspective" : "TwoD");
+  },
+  setViewMode: (viewMode) => {
+    set({ viewMode });
+    void viewport.setViewMode(viewMode).catch(() => {});
   },
   setGridSnapEnabled: (gridSnapEnabled) => {
     set({ gridSnapEnabled });
@@ -259,6 +270,9 @@ export function registerViewportCommands(): void {
     { id: "view.toggle2D", title: "Toggle 2D / Perspective Viewport", category: "View" },
     { id: "view.perspective", title: "Viewport: Perspective", category: "View" },
     { id: "view.2d", title: "Viewport: 2D (Orthographic)", category: "View" },
+    { id: "view.lit", title: "View Mode: Lit", category: "View" },
+    { id: "view.unlit", title: "View Mode: Unlit", category: "View" },
+    { id: "view.wireframe", title: "View Mode: Wireframe", category: "View" },
     { id: "tool.select", title: "Tool: Select", category: "Tools" },
     { id: "tool.sculpt", title: "Tool: Sculpt Terrain", category: "Tools" },
   ]);
@@ -270,6 +284,17 @@ export function registerViewportCommands(): void {
   }
   if (getCommand("view.2d")) {
     setCommandHandler("view.2d", () => useViewportStore.getState().setMode("TwoD"));
+  }
+  if (getCommand("view.lit")) {
+    setCommandHandler("view.lit", () => useViewportStore.getState().setViewMode("Lit"));
+  }
+  if (getCommand("view.unlit")) {
+    setCommandHandler("view.unlit", () => useViewportStore.getState().setViewMode("Unlit"));
+  }
+  if (getCommand("view.wireframe")) {
+    setCommandHandler("view.wireframe", () =>
+      useViewportStore.getState().setViewMode("Wireframe"),
+    );
   }
   if (getCommand("tool.select")) {
     setCommandHandler("tool.select", () => useViewportStore.getState().setToolMode("Select"));

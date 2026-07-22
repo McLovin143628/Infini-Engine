@@ -10,11 +10,21 @@ import { useShellStore } from "../stores/shellStore";
 import type { SculptFalloffDto } from "../bindings/SculptFalloffDto";
 import type { SculptOpDto } from "../bindings/SculptOpDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
+import type { ViewModeDto } from "../bindings/ViewModeDto";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
 
 const MODES: [ViewportModeDto, string][] = [
   ["Perspective", "Perspective"],
   ["TwoD", "2D"],
+];
+
+/** Shading view modes (R-P2): [id, label, tooltip]. Wireframe is optimistically
+ * enabled — the renderer clamps it to Unlit on GPUs without line-polygon raster
+ * (POLYGON_MODE_LINE), so we don't gate the button on a caps query. */
+const VIEW_MODES: [ViewModeDto, string, string][] = [
+  ["Lit", "Lit", "Full lighting (default)"],
+  ["Unlit", "Unlit", "Flat albedo + emissive (no lighting)"],
+  ["Wireframe", "Wireframe", "Edge wireframe (falls back to Unlit if the GPU can't raster lines)"],
 ];
 
 const TOOLS: [ToolModeDto, string, string][] = [
@@ -56,6 +66,8 @@ export default function ViewportToolbar() {
   const setPixelsPerUnit = useViewportStore((s) => s.setPixelsPerUnit);
   const toolMode = useViewportStore((s) => s.toolMode);
   const setToolMode = useViewportStore((s) => s.setToolMode);
+  const viewMode = useViewportStore((s) => s.viewMode);
+  const setViewMode = useViewportStore((s) => s.setViewMode);
 
   return (
     <div className="flex h-8 shrink-0 items-center gap-3 rounded border border-(--ink-border) bg-(--ink-bg-1) px-2 text-xs">
@@ -119,6 +131,30 @@ export default function ViewportToolbar() {
           3D-terrain tool). */}
       {mode === "Perspective" && (
         <>
+          {/* Shading view mode (Lit / Unlit / Wireframe), perspective only (R-P2). */}
+          <div className="h-4 w-px bg-(--ink-border)" />
+          <div
+            className="flex items-center rounded bg-(--ink-bg-0) p-0.5"
+            role="group"
+            aria-label="Viewport shading"
+          >
+            {VIEW_MODES.map(([id, label, title]) => (
+              <button
+                key={id}
+                type="button"
+                aria-pressed={viewMode === id}
+                title={title}
+                className={`flex h-6 items-center rounded px-2 ${
+                  viewMode === id
+                    ? "bg-(--ink-bg-3) text-(--ink-text)"
+                    : "text-(--ink-text-dim) hover:text-(--ink-text)"
+                }`}
+                onClick={() => setViewMode(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <div className="h-4 w-px bg-(--ink-border)" />
           <div
             className="flex items-center rounded bg-(--ink-bg-0) p-0.5"

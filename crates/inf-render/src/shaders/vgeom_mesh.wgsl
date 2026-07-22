@@ -203,6 +203,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         // Flat per-meshlet debug colouring (LOD/cluster structure proof).
         return vec4<f32>(meshlet_color(in.meshlet), 1.0);
     }
+    // Unlit view mode (R-P2): albedo + emissive, no lighting (Unlit + Wireframe).
+    if (view.flags.x > 0.5) {
+        return vec4<f32>(in.color.rgb + in.emissive, in.color.a);
+    }
 
     let n = normalize(in.normal);
     let v = normalize(view.eye.xyz - in.world_pos);

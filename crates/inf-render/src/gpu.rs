@@ -81,9 +81,16 @@ impl GpuContext {
 
     fn from_adapter(instance: wgpu::Instance, adapter: wgpu::Adapter) -> Result<Self, String> {
         tracing::info!("inf-render adapter: {:?}", adapter.get_info());
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-                .map_err(|e| format!("request_device: {e}"))?;
+        // Request POLYGON_MODE_LINE *only when the adapter exposes it* (R-P2
+        // wireframe view mode). Request-if-available: device creation NEVER fails
+        // for lack of it — the renderer degrades wireframe to unlit instead — so
+        // headless/test/downlevel contexts keep working unchanged.
+        let optional_features = adapter.features() & wgpu::Features::POLYGON_MODE_LINE;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: optional_features,
+            ..Default::default()
+        }))
+        .map_err(|e| format!("request_device: {e}"))?;
 
         let lost = Arc::new(AtomicBool::new(false));
         let lost_flag = lost.clone();
@@ -110,6 +117,16 @@ impl GpuContext {
     /// the whole GPU stack from a fresh context.
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Acquire)
+    }
+
+    /// Whether line-polygon-mode raster is available on this device (R-P2), i.e.
+    /// the `POLYGON_MODE_LINE` feature was requested-and-granted at creation. The
+    /// renderer/host query this to build the wireframe pipeline variant (and to
+    /// clamp a Wireframe view-mode request to Unlit when it's absent).
+    pub fn supports_polygon_mode_line(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::POLYGON_MODE_LINE)
     }
 
     /// Install a lenient uncaptured-error handler for interactive/editor

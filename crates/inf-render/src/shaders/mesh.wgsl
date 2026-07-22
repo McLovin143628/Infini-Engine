@@ -121,6 +121,12 @@ fn point_attenuation(dist: f32, range: f32) -> f32 {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    // Unlit view mode (R-P2): return albedo + emissive directly, skipping the
+    // light loop entirely. Drives both Unlit and Wireframe; `flags.x` is 0 in the
+    // default Lit mode so this branch is never taken there (goldens byte-stable).
+    if (view.flags.x > 0.5) {
+        return vec4<f32>(in.color.rgb + in.emissive, in.color.a);
+    }
     let n = normalize(in.normal);
     let v = normalize(view.eye.xyz - in.world_pos);
     let albedo = in.color.rgb;

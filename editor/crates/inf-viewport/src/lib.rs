@@ -163,6 +163,7 @@ impl ViewportHandle {
     pub fn set_gizmo_mode(&self, _mode: inf_editor_core::ipc::GizmoModeDto) {}
     pub fn set_gizmo_space(&self, _space: camera::GizmoSpace) {}
     pub fn set_snap_3d(&self, _snap: camera::SnapSettings) {}
+    pub fn set_view_mode(&self, _mode: inf_editor_core::ipc::ViewModeDto) {}
     pub fn embed_foreign(&self, _hwnd: isize) {}
     pub fn release_foreign(&self) {}
     pub fn destroy(&self) {}

@@ -30,8 +30,8 @@ use crate::camera::{
 };
 use crate::host::EngineHost;
 use crate::{SharedScene, SurfaceTarget, ViewportEventSink, ViewportRect};
-use inf_editor_core::ipc::GizmoModeDto;
-use inf_render::GizmoMode;
+use inf_editor_core::ipc::{GizmoModeDto, ViewModeDto};
+use inf_render::{GizmoMode, ViewMode};
 
 /// Map the IPC gizmo-mode DTO to the renderer enum (Wave 2; mirrors win32).
 fn to_gizmo_mode(d: GizmoModeDto) -> GizmoMode {
@@ -39,6 +39,15 @@ fn to_gizmo_mode(d: GizmoModeDto) -> GizmoMode {
         GizmoModeDto::Translate => GizmoMode::Translate,
         GizmoModeDto::Rotate => GizmoMode::Rotate,
         GizmoModeDto::Scale => GizmoMode::Scale,
+    }
+}
+
+/// Map the IPC view-mode DTO to the renderer enum (R-P2; mirrors win32).
+fn to_view_mode(d: ViewModeDto) -> ViewMode {
+    match d {
+        ViewModeDto::Lit => ViewMode::Lit,
+        ViewModeDto::Unlit => ViewMode::Unlit,
+        ViewModeDto::Wireframe => ViewMode::Wireframe,
     }
 }
 
@@ -53,6 +62,7 @@ enum Cmd {
     SetGizmo(GizmoMode),
     SetGizmoSpace(GizmoSpace),
     SetSnap3D(SnapSettings),
+    SetViewMode(ViewMode),
     Destroy,
 }
 
@@ -119,6 +129,12 @@ impl ViewportHandle {
     /// Replace the 3D transform-gizmo snap increments (Wave 2).
     pub fn set_snap_3d(&self, snap: SnapSettings) {
         let _ = self.tx.send(Cmd::SetSnap3D(snap));
+    }
+
+    /// Set the shading view mode (Lit / Unlit / Wireframe) (R-P2). macOS input
+    /// isn't wired yet, but the mode still drives the renderer (it's not input).
+    pub fn set_view_mode(&self, mode: ViewModeDto) {
+        let _ = self.tx.send(Cmd::SetViewMode(to_view_mode(mode)));
     }
 
     /// Adopt a foreign PIE player window (no-op on macOS: cross-process view
@@ -252,6 +268,7 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedSce
                 Ok(Cmd::SetGizmo(m)) => host.set_gizmo_mode(m),
                 Ok(Cmd::SetGizmoSpace(s)) => host.set_gizmo_space(s),
                 Ok(Cmd::SetSnap3D(s)) => host.set_snap_3d(s),
+                Ok(Cmd::SetViewMode(m)) => host.set_view_mode(m),
                 Ok(Cmd::Destroy) | Err(TryRecvError::Disconnected) => break 'outer,
                 Err(TryRecvError::Empty) => break,
             }

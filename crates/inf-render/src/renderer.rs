@@ -29,6 +29,40 @@ use crate::passes::shadow::ShadowResources;
 use crate::scene::RenderScene;
 use crate::settings::{halton_jitter, mip_chain_sizes, RenderSettings};
 
+/// Viewport shading view mode (R-P2). Editor-transient renderer state — never
+/// persisted, never touched by the player, so it lives on [`EngineRenderer`] and
+/// NOT in [`RenderSettings`] (the parity law is not implicated).
+///
+/// * `Lit` — the full PBR/lit path (the default; every golden except `unlit`).
+/// * `Unlit` — the lit scene passes short-circuit to albedo+emissive (no lighting);
+///   driven by the `flags.x` uniform, so no pipeline swap is needed.
+/// * `Wireframe` — Unlit shading rendered through a `PolygonMode::Line` pipeline
+///   variant. Requires [`wgpu::Features::POLYGON_MODE_LINE`]; when the adapter
+///   lacks it, [`EngineRenderer::set_view_mode`] degrades this to `Unlit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    #[default]
+    Lit,
+    Unlit,
+    Wireframe,
+}
+
+impl ViewMode {
+    /// The `View.flags.x` uniform value: `1.0` when the lit passes must skip
+    /// lighting (Unlit **and** Wireframe both shade unlit), else `0.0`.
+    pub fn unlit_flag(self) -> f32 {
+        match self {
+            ViewMode::Lit => 0.0,
+            ViewMode::Unlit | ViewMode::Wireframe => 1.0,
+        }
+    }
+
+    /// Whether the mesh passes should select their `PolygonMode::Line` pipeline.
+    pub fn wireframe(self) -> bool {
+        matches!(self, ViewMode::Wireframe)
+    }
+}
+
 /// Offscreen HDR scene-colour format: linear `Rgba16Float`. All scene passes
 /// render into this (MSAA) target; the tonemap post pass converts to the LDR
 /// swapchain format. Fixed regardless of the output format so shading + goldens
@@ -175,6 +209,10 @@ pub struct FrameData<'a> {
     pub taa_prev_view_proj: [f32; 16],
     /// False on the first frame / after a resize (history has nothing usable).
     pub taa_history_valid: bool,
+    /// Active shading view mode (R-P2). The lit scene passes select their
+    /// wireframe pipeline variant on [`ViewMode::wireframe`]; the unlit branch is
+    /// driven by the `View.flags.x` uniform instead (so no swap for Unlit).
+    pub view_mode: ViewMode,
 }
 
 pub struct EngineRenderer {
@@ -186,6 +224,14 @@ pub struct EngineRenderer {
     graph: RenderGraph,
     out_format: wgpu::TextureFormat,
     settings: RenderSettings,
+    /// Active shading view mode (R-P2); editor-transient, never persisted.
+    view_mode: ViewMode,
+    /// Whether the device has `POLYGON_MODE_LINE` (probed once at construction).
+    /// Gates the wireframe pipeline variants + clamps a Wireframe request down to
+    /// Unlit when absent.
+    polygon_mode_line: bool,
+    /// Latched so the "wireframe unsupported → Unlit" degrade logs exactly once.
+    wireframe_warned: bool,
     frame_index: u64,
     /// Jittered view-proj we rendered last frame (TAA reprojection source).
     prev_view_proj: Option<[f32; 16]>,
@@ -276,6 +322,12 @@ impl EngineRenderer {
             graph,
             out_format,
             settings: RenderSettings::default(),
+            view_mode: ViewMode::default(),
+            polygon_mode_line: gpu
+                .device
+                .features()
+                .contains(wgpu::Features::POLYGON_MODE_LINE),
+            wireframe_warned: false,
             frame_index: 0,
             prev_view_proj: None,
             shadow: ShadowResources::new(gpu),
@@ -296,6 +348,32 @@ impl EngineRenderer {
             self.prev_view_proj = None;
         }
         self.settings = settings;
+    }
+
+    /// The active shading view mode (R-P2).
+    pub fn view_mode(&self) -> ViewMode {
+        self.view_mode
+    }
+
+    /// Set the shading view mode (Lit / Unlit / Wireframe). A `Wireframe` request
+    /// on an adapter without `POLYGON_MODE_LINE` is clamped to `Unlit` (logged once
+    /// via `tracing`) — wireframe is a hard GPU-feature requirement, so we degrade
+    /// gracefully rather than fail. The editor viewport + goldens set this; it is
+    /// never persisted and the player never touches it.
+    pub fn set_view_mode(&mut self, mode: ViewMode) {
+        let effective = if mode == ViewMode::Wireframe && !self.polygon_mode_line {
+            if !self.wireframe_warned {
+                tracing::warn!(
+                    "inf-render: wireframe view mode unavailable (adapter lacks \
+                     POLYGON_MODE_LINE) — falling back to Unlit"
+                );
+                self.wireframe_warned = true;
+            }
+            ViewMode::Unlit
+        } else {
+            mode
+        };
+        self.view_mode = effective;
     }
 
     /// Render one frame of `scene` into `out_view` (`out_size` = the output
@@ -337,6 +415,10 @@ impl EngineRenderer {
         };
 
         let mut uniforms = ViewUniforms::from_view(view);
+        // R-P2 view mode: the unlit flag drives the lit passes' albedo+emissive
+        // short-circuit (Unlit AND Wireframe both shade unlit). Lit writes 0, so
+        // every pre-R-P2 golden stays byte-identical.
+        uniforms.flags[0] = self.view_mode.unlit_flag();
         if self.settings.taa {
             uniforms.view_proj = jvp.to_cols_array();
             uniforms.inv_view_proj = jvp.inverse().to_cols_array();
@@ -378,6 +460,7 @@ impl EngineRenderer {
             taa_history_valid: history_valid,
             shadow: &self.shadow,
             gi: &self.gi,
+            view_mode: self.view_mode,
         };
         self.graph.run(gpu, &mut encoder, &frame);
         gpu.queue.submit([encoder.finish()]);

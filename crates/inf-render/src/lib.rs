@@ -47,7 +47,8 @@ pub use passes::terrain::{
 pub use pick::Picker;
 pub use primitives::{PrimGpu, PrimMesh, PrimRange};
 pub use renderer::{
-    EngineRenderer, AO_FORMAT, HDR_FORMAT, LDR_FORMAT, MASK_FORMAT, SCENE_FORMAT, SCENE_SAMPLES,
+    EngineRenderer, ViewMode, AO_FORMAT, HDR_FORMAT, LDR_FORMAT, MASK_FORMAT, SCENE_FORMAT,
+    SCENE_SAMPLES,
 };
 pub use scene::{
     Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D,

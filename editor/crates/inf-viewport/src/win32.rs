@@ -45,8 +45,8 @@ use crate::camera::{
 };
 use crate::host::EngineHost;
 use crate::{KeyChord, SharedScene, SurfaceTarget, ViewportEvent, ViewportEventSink, ViewportRect};
-use inf_editor_core::ipc::GizmoModeDto;
-use inf_render::GizmoMode;
+use inf_editor_core::ipc::{GizmoModeDto, ViewModeDto};
+use inf_render::{GizmoMode, ViewMode};
 
 /// Map the IPC gizmo-mode DTO to the renderer enum (Wave 2). Kept next to the
 /// reverse map so the two stay in lockstep.
@@ -55,6 +55,16 @@ fn to_gizmo_mode(d: GizmoModeDto) -> GizmoMode {
         GizmoModeDto::Translate => GizmoMode::Translate,
         GizmoModeDto::Rotate => GizmoMode::Rotate,
         GizmoModeDto::Scale => GizmoMode::Scale,
+    }
+}
+
+/// Map the IPC view-mode DTO to the renderer enum (R-P2). The renderer clamps
+/// Wireframe→Unlit when the adapter lacks `POLYGON_MODE_LINE`.
+fn to_view_mode(d: ViewModeDto) -> ViewMode {
+    match d {
+        ViewModeDto::Lit => ViewMode::Lit,
+        ViewModeDto::Unlit => ViewMode::Unlit,
+        ViewModeDto::Wireframe => ViewMode::Wireframe,
     }
 }
 
@@ -107,6 +117,9 @@ enum Cmd {
     SetGizmoSpace(GizmoSpace),
     /// Replace the 3D transform-gizmo snap increments from the toolbar (Wave 2).
     SetSnap3D(SnapSettings),
+    /// Set the shading view mode (Lit / Unlit / Wireframe) from the toolbar
+    /// (R-P2). The renderer clamps Wireframe→Unlit if unsupported.
+    SetViewMode(ViewMode),
     /// Adopt a foreign (PIE player) window into the viewport slot: reparent it
     /// to our parent, position it at the hole, and hide our own child (embedded
     /// PIE, P9.4). The `isize` is the foreign HWND.
@@ -182,6 +195,12 @@ impl ViewportHandle {
     /// Replace the 3D transform-gizmo snap increments (Wave 2).
     pub fn set_snap_3d(&self, snap: SnapSettings) {
         let _ = self.tx.send(Cmd::SetSnap3D(snap));
+    }
+
+    /// Set the shading view mode (Lit / Unlit / Wireframe) from the toolbar
+    /// (R-P2). Takes the IPC DTO so Ring 2 needn't name the renderer enum.
+    pub fn set_view_mode(&self, mode: ViewModeDto) {
+        let _ = self.tx.send(Cmd::SetViewMode(to_view_mode(mode)));
     }
 
     /// Adopt a foreign (PIE player) window into the viewport slot (embedded PIE,
@@ -851,6 +870,7 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 }
                 Ok(Cmd::SetGizmoSpace(s)) => host.set_gizmo_space(s),
                 Ok(Cmd::SetSnap3D(s)) => host.set_snap_3d(s),
+                Ok(Cmd::SetViewMode(m)) => host.set_view_mode(m),
                 Ok(Cmd::EmbedForeign(foreign)) => {
                     // Position the foreign window at the hole immediately. If no
                     // SetRect has arrived yet, fall back to our child's current

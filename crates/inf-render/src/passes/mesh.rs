@@ -249,6 +249,10 @@ impl LightsUniform {
 
 pub struct MeshNode {
     pipeline: wgpu::RenderPipeline,
+    /// Wireframe (`PolygonMode::Line`) variant, present only when the device has
+    /// `POLYGON_MODE_LINE` (R-P2). Selected in [`RenderNode::run`] when the frame's
+    /// view mode is [`ViewMode::Wireframe`](crate::renderer::ViewMode::Wireframe).
+    pipeline_wire: Option<wgpu::RenderPipeline>,
     prim: PrimGpu,
     instances: Option<wgpu::Buffer>,
     instance_capacity: usize,
@@ -312,48 +316,75 @@ impl MeshNode {
                 immediate_size: 0,
             });
 
-        let pipeline = gpu
+        // Both the fill pipeline and (when the device supports line raster) the
+        // R-P2 wireframe variant share everything but their primitive state — the
+        // wire variant uses `PolygonMode::Line` and drops back-face culling so
+        // every edge of a primitive draws. A closure keeps the two byte-identical
+        // apart from that state (so the fill pipeline stays exactly as before).
+        let make_pipeline = |label: &str, primitive: wgpu::PrimitiveState| {
+            gpu.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs"),
+                        compilation_options: Default::default(),
+                        buffers: &vertex_layouts(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: SCENE_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive,
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(DEPTH_COMPARE),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: SCENE_SAMPLES,
+                        ..Default::default()
+                    },
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
+
+        let pipeline = make_pipeline(
+            "mesh",
+            wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+        );
+        // Wireframe variant (R-P2): only when the adapter granted POLYGON_MODE_LINE
+        // (else the renderer clamps Wireframe→Unlit and this is never selected).
+        let pipeline_wire = gpu
             .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("mesh"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &vertex_layouts(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: SCENE_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: Some(wgpu::Face::Back),
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(DEPTH_COMPARE),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: SCENE_SAMPLES,
-                    ..Default::default()
-                },
-                multiview_mask: None,
-                cache: None,
+            .features()
+            .contains(wgpu::Features::POLYGON_MODE_LINE)
+            .then(|| {
+                make_pipeline(
+                    "mesh-wire",
+                    wgpu::PrimitiveState {
+                        polygon_mode: wgpu::PolygonMode::Line,
+                        ..Default::default()
+                    },
+                )
             });
 
         Self {
             pipeline,
+            pipeline_wire,
             prim,
             instances: None,
             instance_capacity: 0,
@@ -454,7 +485,14 @@ impl RenderNode for MeshNode {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        // Wireframe view mode (R-P2) uses the line-raster pipeline when it exists;
+        // any other mode (and a wireframe request on a device without the feature —
+        // already clamped to Unlit upstream) uses the fill pipeline.
+        let pipeline = match &self.pipeline_wire {
+            Some(wire) if frame.view_mode.wireframe() => wire,
+            _ => &self.pipeline,
+        };
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
         pass.set_bind_group(1, &self.lights_bg, &[]);
         pass.set_bind_group(2, &env_bg, &[]);

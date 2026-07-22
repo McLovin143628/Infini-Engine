@@ -69,7 +69,15 @@ fn frame_stays_under_budget() {
         return;
     };
     let info = gpu.adapter.get_info();
-    let software = info.device_type == wgpu::DeviceType::Cpu;
+    // Software rasterizers (llvmpipe/WARP) and virtualized GPUs (the CI macOS
+    // runner reports "Apple Paravirtual device") have non-representative,
+    // run-to-run-noisy timing — smoke-only for both. The strict budget is a
+    // REAL-hardware gate and still only ratchets down.
+    let virtualized = {
+        let n = info.name.to_ascii_lowercase();
+        n.contains("paravirtual") || n.contains("virtualbox") || n.contains("vmware")
+    };
+    let software = info.device_type == wgpu::DeviceType::Cpu || virtualized;
 
     // ~22x22 = 484 cubes.
     let scene = cube_field(11);

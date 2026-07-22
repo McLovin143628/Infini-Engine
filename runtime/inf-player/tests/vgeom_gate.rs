@@ -290,6 +290,7 @@ fn gate_d_low_tier_disables_vgeom() {
         max_storage_buffer_binding_size: 0,
         max_compute_workgroups_per_dim: 0,
         is_cpu: true,
+        polygon_mode_line: false,
     };
     assert_eq!(choose_tier(&low_caps), RenderTier::Low);
 

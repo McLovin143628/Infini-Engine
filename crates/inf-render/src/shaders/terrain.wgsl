@@ -233,6 +233,13 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     albedo = clamp(albedo, vec3<f32>(0.0), vec3<f32>(1.0));
     // ───────────────────────────────────────────────────────────────────────
 
+    // Unlit view mode (R-P2): return the splat-blended albedo directly, skipping
+    // the sun/ambient/spec lighting below. Terrain carries no emissive term. The
+    // flag is 0 in the default Lit mode, so the terrain golden stays byte-stable.
+    if (view.flags.x > 0.5) {
+        return vec4<f32>(albedo, 1.0);
+    }
+
     let sun = normalize(view.sun_dir.xyz);
     let ndl = max(dot(n, sun), 0.0);
     // Hemispheric ambient (sky above / ground below), or the dynamic-GI probe
