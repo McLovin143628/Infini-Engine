@@ -187,16 +187,34 @@ pub struct SkinnedInstance {
     pub palette: Vec<Mat4>,
 }
 
-/// Directional vs point light (spot is projected as point for now).
+/// Directional, point, or spot light (R-P3). Spot is a point light with a cone
+/// mask; its emission axis is `-direction` (see [`RenderLight`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightKind {
     Directional,
     Point,
+    Spot,
 }
 
-/// A scene light in world space. The mesh pass converts point positions to
+/// A scene light in world space. The mesh pass converts point/spot positions to
 /// render-local (floating-origin-relative) space at upload, exactly like
 /// instance transforms.
+///
+/// ## Direction conventions
+///
+/// * [`direction`](Self::direction) is the unit vector *toward* the light for
+///   [`Directional`](LightKind::Directional) — the existing convention.
+/// * For [`Spot`](LightKind::Spot) the same "toward-the-light" vector is stored
+///   in `direction`; the beam **emission** axis is therefore `-direction`. The
+///   seams project an entity whose forward is `-Z` as `direction = rot * +Z`, so
+///   emission = `-direction = rot * -Z`.
+///
+/// ## Shadows (R-P3 scope)
+///
+/// [`cast_shadows`](Self::cast_shadows) is honoured only for
+/// [`Directional`](LightKind::Directional) lights, where it gates CSM caster
+/// selection (see [`crate::passes::shadow`]). Point/spot shadow maps are
+/// **deferred**, so the flag is inert (stored, never sampled) for those kinds.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderLight {
     pub kind: LightKind,
@@ -204,12 +222,39 @@ pub struct RenderLight {
     pub color: [f32; 3],
     /// Radiant intensity multiplier.
     pub intensity: f32,
-    /// Unit direction *toward* the light (directional only).
+    /// Unit direction *toward* the light (directional + spot; see the type docs
+    /// — spot emission is `-direction`).
     pub direction: Vec3,
-    /// World-space position (point only).
+    /// World-space position (point + spot).
     pub position: DVec3,
-    /// Influence radius in metres (point only); 0 ⇒ unbounded.
+    /// Influence radius in metres (point + spot); 0 ⇒ unbounded.
     pub range: f32,
+    /// Spot inner-cone cosine (full brightness where `cos(angle) ≥ inner_cos`).
+    /// Unused for directional/point. Default = `cos(30°)`.
+    pub inner_cos: f32,
+    /// Spot outer-cone cosine (zero where `cos(angle) ≤ outer_cos`; `outer_cos <
+    /// inner_cos`). Unused for directional/point. Default = `cos(40°)`.
+    pub outer_cos: f32,
+    /// Whether this light casts shadows. Honoured for directional (CSM caster
+    /// selection); inert for point/spot (shadow maps deferred).
+    pub cast_shadows: bool,
+}
+
+impl Default for RenderLight {
+    fn default() -> Self {
+        Self {
+            kind: LightKind::Directional,
+            color: [1.0, 1.0, 1.0],
+            intensity: 1.0,
+            direction: Vec3::Y,
+            position: DVec3::ZERO,
+            range: 0.0,
+            // 30° / 40° half-angles, mirroring the ECS `Light` cone defaults.
+            inner_cos: 0.866_025_4,  // cos(30°)
+            outer_cos: 0.766_044_44, // cos(40°)
+            cast_shadows: true,
+        }
+    }
 }
 
 /// A minimal 2D light (P8.1c): a soft radial falloff in the sprite plane. The

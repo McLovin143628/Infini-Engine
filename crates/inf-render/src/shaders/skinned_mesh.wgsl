@@ -66,8 +66,9 @@ const MAX_LIGHTS: u32 = 16u;
 
 struct GpuLight {
     color: vec4<f32>,
-    pos_dir: vec4<f32>,
-    params: vec4<f32>,
+    pos_dir: vec4<f32>, // w = kind (0 dir, 1 point, 2 spot)
+    params: vec4<f32>,  // x = range, y = spot inner_cos, z = spot outer_cos
+    spot_dir: vec4<f32>, // xyz = normalized spot emission direction (spot only)
 };
 struct Lights {
     count: vec4<u32>,
@@ -168,11 +169,18 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
                 }
                 lo += d;
             } else {
+                // Point (w == 1) / spot (w == 2); `cone` stays 1.0 for a point
+                // light, so the point path is byte-stable.
                 let to_light = light.pos_dir.xyz - in.world_pos;
                 let dist = length(to_light);
                 let l = to_light / max(dist, 1e-4);
                 let att = point_attenuation(dist, light.params.x);
-                lo += shade_light(n, v, l, radiance_base * att,
+                var cone = 1.0;
+                if (light.pos_dir.w > 1.5) {
+                    let cos_dir = dot(l, -light.spot_dir.xyz);
+                    cone = smoothstep(light.params.z, light.params.y, cos_dir);
+                }
+                lo += shade_light(n, v, l, radiance_base * att * cone,
                                  albedo, metallic, rough, f0);
             }
         }

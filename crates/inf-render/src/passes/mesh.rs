@@ -191,15 +191,18 @@ pub(crate) const EMPTY_RANGES: [Range<u32>; 5] = [0..0, 0..0, 0..0, 0..0, 0..0];
 /// Max scene lights uploaded per frame (must match `MAX_LIGHTS` in mesh.wgsl).
 pub const MAX_LIGHTS: usize = 16;
 
-/// One GPU light, std140-friendly (all vec4). `pos_dir.w` = kind (0 directional,
-/// 1 point); for directional, `pos_dir.xyz` is the unit direction toward the
-/// light; for point, the render-local position. `color.a` = intensity.
+/// One GPU light, std140-friendly (all vec4 → 64 B). `pos_dir.w` = kind
+/// (0 directional, 1 point, 2 spot); for directional, `pos_dir.xyz` is the unit
+/// direction toward the light; for point/spot, the render-local position.
+/// `color.a` = intensity. `spot_dir.xyz` is the normalized beam **emission**
+/// direction (spot only; unused otherwise).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct GpuLight {
     color: [f32; 4],
     pos_dir: [f32; 4],
-    params: [f32; 4], // x = range
+    params: [f32; 4],   // x = range, y = spot inner_cos, z = spot outer_cos
+    spot_dir: [f32; 4], // xyz = normalized spot emission direction (spot only)
 }
 
 /// The lights uniform block bound at `@group(1)`. Shared by the rigid mesh pass
@@ -218,6 +221,7 @@ impl LightsUniform {
             color: [0.0; 4],
             pos_dir: [0.0; 4],
             params: [0.0; 4],
+            spot_dir: [0.0; 4],
         }; MAX_LIGHTS];
         let count = scene.lights.len().min(MAX_LIGHTS);
         for (slot, light) in items.iter_mut().zip(scene.lights.iter()).take(count) {
@@ -237,6 +241,15 @@ impl LightsUniform {
                     let p = (light.position - origin.origin()).as_vec3();
                     slot.pos_dir = [p.x, p.y, p.z, 1.0];
                     slot.params[0] = light.range;
+                }
+                LightKind::Spot => {
+                    // Render-local position (origin-relative), like point lights,
+                    // plus the cone data + the beam emission axis (= -direction).
+                    let p = (light.position - origin.origin()).as_vec3();
+                    slot.pos_dir = [p.x, p.y, p.z, 2.0];
+                    slot.params = [light.range, light.inner_cos, light.outer_cos, 0.0];
+                    let emit = (-light.direction).normalize_or_zero();
+                    slot.spot_dir = [emit.x, emit.y, emit.z, 0.0];
                 }
             }
         }
@@ -519,6 +532,59 @@ mod tests {
         assert_eq!(&v.misc as *const _ as usize - base, 128);
         assert_eq!(&v.pbr as *const _ as usize - base, 144);
         assert_eq!(&v.emissive as *const _ as usize - base, 160);
+    }
+
+    #[test]
+    fn gpu_light_layout_is_std140_64_bytes() {
+        // Four vec4 per light, all 16-byte aligned (std140-safe), 64 B total.
+        let l = GpuLight::zeroed();
+        let base = &l as *const GpuLight as usize;
+        assert_eq!(std::mem::size_of::<GpuLight>(), 64);
+        assert_eq!(&l.color as *const _ as usize - base, 0);
+        assert_eq!(&l.pos_dir as *const _ as usize - base, 16);
+        assert_eq!(&l.params as *const _ as usize - base, 32);
+        assert_eq!(&l.spot_dir as *const _ as usize - base, 48);
+    }
+
+    #[test]
+    fn from_scene_packs_kind_codes_and_spot_cone() {
+        use crate::scene::{RenderLight, RenderScene};
+        let origin = FloatingOrigin::new(DVec3::ZERO);
+        let mut scene = RenderScene::default();
+        // A directional (w=0), a point (w=1), a spot (w=2).
+        scene.lights.push(RenderLight {
+            kind: LightKind::Directional,
+            direction: Vec3::new(0.0, 1.0, 0.0),
+            ..RenderLight::default()
+        });
+        scene.lights.push(RenderLight {
+            kind: LightKind::Point,
+            position: DVec3::new(1.0, 2.0, 3.0),
+            range: 8.0,
+            ..RenderLight::default()
+        });
+        scene.lights.push(RenderLight {
+            kind: LightKind::Spot,
+            // "toward-the-light" +Z ⇒ emission = -Z.
+            direction: Vec3::Z,
+            position: DVec3::new(4.0, 5.0, 6.0),
+            range: 12.0,
+            inner_cos: 0.9,
+            outer_cos: 0.8,
+            ..RenderLight::default()
+        });
+        let u = LightsUniform::from_scene(&scene, &origin);
+        assert_eq!(u.count[0], 3);
+        // Kind codes.
+        assert_eq!(u.items[0].pos_dir[3], 0.0);
+        assert_eq!(u.items[1].pos_dir[3], 1.0);
+        assert_eq!(u.items[2].pos_dir[3], 2.0);
+        // Point carries range only.
+        assert_eq!(u.items[1].params, [8.0, 0.0, 0.0, 0.0]);
+        // Spot carries range + cone cosines + emission axis (-Z).
+        assert_eq!(u.items[2].params, [12.0, 0.9, 0.8, 0.0]);
+        assert!((u.items[2].spot_dir[2] + 1.0).abs() < 1e-6);
+        assert!(u.items[2].spot_dir[0].abs() < 1e-6 && u.items[2].spot_dir[1].abs() < 1e-6);
     }
 
     #[test]

@@ -321,18 +321,42 @@ impl RenderNode for ShadowNode {
         // The enabled path overwrites the uniform below, so a later disable must
         // re-publish the disabled block.
         self.published_disabled = false;
-        self.sync(gpu, frame);
 
-        // Shadow light: the first directional light's direction-to-light, else the
-        // editor fallback sun (matches the receiver shaders' fallback).
-        let light_dir_to = frame
+        // Shadow caster: the first directional light that **casts shadows** (R-P3
+        // honours `cast_shadows` for directional CSM; point/spot shadow maps are
+        // deferred, so their flag is inert). Fallbacks:
+        //  * no directional light at all → the editor sun (a point/spot-only scene
+        //    still gets grounded shadows, matching the receiver shaders' fallback);
+        //  * directional lights exist but none casts → no CSM this frame (publish
+        //    the disabled uniform so receivers read a valid `enabled = 0`, render
+        //    nothing).
+        let caster = frame
             .scene
             .lights
             .iter()
-            .find(|l| l.kind == LightKind::Directional)
+            .find(|l| l.kind == LightKind::Directional && l.cast_shadows)
             .map(|l| l.direction.normalize_or_zero())
-            .filter(|d| d.length_squared() > 1e-6)
-            .unwrap_or(SUN_DIR.normalize());
+            .filter(|d| d.length_squared() > 1e-6);
+        let any_directional = frame
+            .scene
+            .lights
+            .iter()
+            .any(|l| l.kind == LightKind::Directional);
+        let light_dir_to = match caster {
+            Some(d) => d,
+            None if !any_directional => SUN_DIR.normalize(),
+            None => {
+                gpu.queue.write_buffer(
+                    &frame.shadow.uniform,
+                    0,
+                    bytemuck::bytes_of(&ShadowDataGpu::disabled()),
+                );
+                self.published_disabled = true;
+                return;
+            }
+        };
+
+        self.sync(gpu, frame);
 
         // Cascade splits across the shadow range.
         let near = frame.view.near.max(0.05);

@@ -131,6 +131,9 @@ pub struct EngineHost {
     /// Unlike collider outlines these are drawn ALWAYS (not selection-gated), in
     /// the volume's tint, so trigger/blocking regions stay visible while editing.
     volume_outlines: HashMap<Uuid, VolumeDebug>,
+    /// Spot-light cone gizmos by GUID (R-P3), rebuilt each projection. Drawn as
+    /// debug lines for the current selection only.
+    spot_lights: HashMap<Uuid, SpotDebug>,
     /// GUIDs of the document's current selection (for collider debug draw —
     /// covers every selected entity, not just the mesh instances).
     selected_guids: Vec<Uuid>,
@@ -303,6 +306,22 @@ struct VolumeDebug {
     tint: [f32; 4],
 }
 
+/// A spot [`Light`]'s editor cone gizmo (R-P3): the beam apex, its world-space
+/// emission axis, the outer half-angle, an effective draw distance, and the
+/// light's colour. Drawn for the current selection only (cheap, per-selection).
+struct SpotDebug {
+    /// Beam apex (the light's world position).
+    apex: DVec3,
+    /// Normalized world emission direction (`rot · −Z`).
+    axis: DVec3,
+    /// Outer-cone half-angle (radians) — the drawn rim.
+    outer_rad: f64,
+    /// Draw distance: the light's `range`, or 5 m when unbounded (`range == 0`).
+    dist: f64,
+    /// The light's colour (rgb, opaque).
+    color: [f32; 4],
+}
+
 impl EngineHost {
     pub fn new(target: SurfaceTarget, width: u32, height: u32) -> Result<Self, String> {
         let (gpu, chain, renderer) = Self::build_gpu_stack(target, width, height)?;
@@ -331,6 +350,7 @@ impl EngineHost {
             collider_outlines_3d: HashMap::new(),
             joint_lines: HashMap::new(),
             volume_outlines: HashMap::new(),
+            spot_lights: HashMap::new(),
             selected_guids: Vec::new(),
             synced_version: None,
             mode: ViewportMode::Perspective,
@@ -523,6 +543,7 @@ impl EngineHost {
         self.collider_outlines_3d.clear();
         self.joint_lines.clear();
         self.volume_outlines.clear();
+        self.spot_lights.clear();
 
         let world = doc.world();
         let w = world.world();
@@ -544,6 +565,26 @@ impl EngineHost {
                         .map(|g| g.0)
                         .unwrap_or(glam::DAffine3::IDENTITY);
                     self.scene.lights.push(project_light(light, &affine));
+                    // Cache a cone gizmo for spot lights (R-P3), drawn for the
+                    // selection only in `render_frame`.
+                    if light.kind == EcsLightKind::Spot {
+                        let (_, rot, translation) = affine.to_scale_rotation_translation();
+                        let c = light.color.to_array();
+                        self.spot_lights.insert(
+                            guid,
+                            SpotDebug {
+                                apex: translation,
+                                axis: (rot * -DVec3::Z).normalize(),
+                                outer_rad: light.outer_cone_deg.to_radians() as f64,
+                                dist: if light.range > 0.0 {
+                                    light.range as f64
+                                } else {
+                                    5.0
+                                },
+                                color: [c[0], c[1], c[2], 1.0],
+                            },
+                        );
+                    }
                 }
             }
 
@@ -734,7 +775,7 @@ impl EngineHost {
                 Some((tr, rot))
             };
             if let Some(j) = w.get::<Joint3D>(entity) {
-                if let Some(other) = j.other {
+                if let Some(other) = j.other.get() {
                     if let Some((op, orot)) = other_pose(other) {
                         let (sp, srot) = self_pose();
                         let a = sp + srot * j.local_anchor.to_dvec3();
@@ -743,7 +784,7 @@ impl EngineHost {
                     }
                 }
             } else if let Some(j) = w.get::<Joint2D>(entity) {
-                if let Some(other) = j.other {
+                if let Some(other) = j.other.get() {
                     if let Some((op, orot)) = other_pose(other) {
                         let (sp, srot) = self_pose();
                         let a = sp + srot * DVec3::new(j.local_anchor.x, j.local_anchor.y, 0.0);
@@ -977,6 +1018,39 @@ fn draw_joint_lines(debug: &mut DebugDraw, origin: &FloatingOrigin, jd: &JointDe
     }
 }
 
+/// Stroke a spot-light cone gizmo into the debug-line layer (R-P3): an 8-segment
+/// rim circle at the beam's outer-cone radius, plus four apex→rim spokes, in the
+/// light's colour. The rim sits at distance `dist` down the emission `axis`, with
+/// radius `dist · tan(outer_rad)`. Rebased through the floating origin.
+fn draw_spot_cone(debug: &mut DebugDraw, origin: &FloatingOrigin, sd: &SpotDebug) {
+    const SEGMENTS: usize = 8;
+    let axis = sd.axis;
+    // Two axis-perpendicular basis vectors for the rim plane.
+    let seed = if axis.x.abs() < 0.9 {
+        DVec3::X
+    } else {
+        DVec3::Y
+    };
+    let t1 = axis.cross(seed).normalize();
+    let t2 = axis.cross(t1); // already unit (axis ⟂ t1, both unit)
+    let center = sd.apex + axis * sd.dist;
+    let radius = sd.dist * sd.outer_rad.tan();
+
+    let rim = |i: usize| -> DVec3 {
+        let a = std::f64::consts::TAU * i as f64 / SEGMENTS as f64;
+        center + (t1 * a.cos() + t2 * a.sin()) * radius
+    };
+    let apex_local = origin.to_render(sd.apex);
+    for i in 0..SEGMENTS {
+        let a = origin.to_render(rim(i));
+        let b = origin.to_render(rim((i + 1) % SEGMENTS));
+        debug.line(a, b, sd.color); // rim
+        if i % (SEGMENTS / 4) == 0 {
+            debug.line(apex_local, a, sd.color); // apex → rim spoke (×4)
+        }
+    }
+}
+
 /// Stroke a 3D collider wireframe into the debug-line layer, rebasing through the
 /// floating origin. Segments are generated in the collider's local frame, offset
 /// in the body frame, rotated by the body's world orientation, and lifted onto
@@ -1048,8 +1122,19 @@ fn pcg_kind_color(kind: u32) -> [f32; 4] {
     PALETTE[(kind as usize) % PALETTE.len()]
 }
 
-/// Project an ECS `Light` (+ its world transform) into a renderer light. Spot is
-/// approximated as point until P11 adds cones.
+/// Project an ECS `Light` (+ its world transform) into a renderer light (R-P3).
+///
+/// Direction conventions (**mirrored byte-for-byte** in the player's
+/// `inf_player::render::project_light` — the parity tests in both crates pin
+/// them so the classic mirror bug can never drift):
+///  * Directional/spot store the vector *toward* the light = `rot * +Z` (an
+///    entity's forward is `-Z`, so this is the anti-emission direction);
+///  * the renderer derives a spot's beam emission as `-direction = rot * -Z`.
+///
+/// Cone half-angles convert to cosines CPU-side (std trig is fine — this is not
+/// committed content). `range` and `cast_shadows` pass through for all kinds
+/// (fixing the earlier point-range-hardcoded-0 bug); `cast_shadows` is inert for
+/// point/spot (shadow maps deferred).
 fn project_light(light: &Light, affine: &glam::DAffine3) -> RenderLight {
     let (_, rot, translation) = affine.to_scale_rotation_translation();
     let c = light.color.to_array();
@@ -1063,14 +1148,30 @@ fn project_light(light: &Light, affine: &glam::DAffine3) -> RenderLight {
             direction: (rot * DVec3::Z).as_vec3(),
             position: DVec3::ZERO,
             range: 0.0,
+            cast_shadows: light.cast_shadows,
+            ..RenderLight::default()
         },
-        EcsLightKind::Point | EcsLightKind::Spot => RenderLight {
+        EcsLightKind::Point => RenderLight {
             kind: LightKind::Point,
             color,
             intensity: light.intensity,
             direction: Vec3::ZERO,
             position: translation,
-            range: 0.0,
+            range: light.range,
+            cast_shadows: light.cast_shadows,
+            ..RenderLight::default()
+        },
+        EcsLightKind::Spot => RenderLight {
+            kind: LightKind::Spot,
+            color,
+            intensity: light.intensity,
+            // Toward-the-light (like directional); emission = -direction = rot·−Z.
+            direction: (rot * DVec3::Z).as_vec3(),
+            position: translation,
+            range: light.range,
+            inner_cos: light.inner_cone_deg.to_radians().cos(),
+            outer_cos: light.outer_cone_deg.to_radians().cos(),
+            cast_shadows: light.cast_shadows,
         },
     }
 }
@@ -1941,6 +2042,9 @@ impl EngineHost {
             if let Some(jd) = self.joint_lines.get(guid) {
                 draw_joint_lines(&mut self.scene.debug, &self.origin, jd);
             }
+            if let Some(sd) = self.spot_lights.get(guid) {
+                draw_spot_cone(&mut self.scene.debug, &self.origin, sd);
+            }
         }
 
         // Volume wireframes (E-P4) draw ALWAYS in the volume's tint (invisible in
@@ -2019,5 +2123,56 @@ mod render_settings_tests {
         // Untouched tuning knobs stay at their defaults.
         assert_eq!(s.shadows.lambda, RenderSettings::default().shadows.lambda);
         assert_eq!(s.gi.extent, RenderSettings::default().gi.extent);
+    }
+}
+
+/// Spot-light seam parity (R-P3). The **identical** fixture + hardcoded
+/// expectations live in `inf_player::render`'s mirror test; both must agree so
+/// the toward-the-light / emission direction convention can never drift between
+/// the editor viewport and the player.
+#[cfg(test)]
+mod project_light_parity {
+    use super::{project_light, EcsLightKind, Light, LightKind};
+    use glam::{DAffine3, DQuat, DVec3};
+
+    #[test]
+    fn spot_projects_with_shared_convention() {
+        let light = Light {
+            kind: EcsLightKind::Spot,
+            intensity: 2.0,
+            range: 12.0,
+            inner_cone_deg: 20.0,
+            outer_cone_deg: 35.0,
+            cast_shadows: false,
+            ..Light::default()
+        };
+        // Rotate 30° about X at (1, 2, 3).
+        let affine = DAffine3::from_rotation_translation(
+            DQuat::from_rotation_x(30f64.to_radians()),
+            DVec3::new(1.0, 2.0, 3.0),
+        );
+        let rl = project_light(&light, &affine);
+
+        assert!(matches!(rl.kind, LightKind::Spot));
+        // Direction is *toward* the light = rot · +Z = (0, -sin30, cos30).
+        let d = rl.direction;
+        assert!((d.x - 0.0).abs() < 1e-5, "dir.x {}", d.x);
+        assert!((d.y - (-0.5)).abs() < 1e-5, "dir.y {}", d.y);
+        assert!((d.z - 0.866_025_4).abs() < 1e-5, "dir.z {}", d.z);
+        assert!((rl.position.x - 1.0).abs() < 1e-9);
+        assert!((rl.position.y - 2.0).abs() < 1e-9);
+        assert!((rl.position.z - 3.0).abs() < 1e-9);
+        assert!((rl.range - 12.0).abs() < 1e-6);
+        assert!(
+            (rl.inner_cos - 0.939_692_6).abs() < 1e-5,
+            "inner {}",
+            rl.inner_cos
+        );
+        assert!(
+            (rl.outer_cos - 0.819_152).abs() < 1e-5,
+            "outer {}",
+            rl.outer_cos
+        );
+        assert!(!rl.cast_shadows);
     }
 }

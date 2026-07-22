@@ -51,8 +51,9 @@ const MAX_LIGHTS: u32 = 16u;
 
 struct GpuLight {
     color: vec4<f32>,   // rgb = color, a = intensity
-    pos_dir: vec4<f32>, // xyz = dir-to-light (dir) or render-local pos (point); w = kind
-    params: vec4<f32>,  // x = range
+    pos_dir: vec4<f32>, // xyz = dir-to-light (dir) or render-local pos (point/spot); w = kind (0 dir, 1 point, 2 spot)
+    params: vec4<f32>,  // x = range, y = spot inner_cos, z = spot outer_cos
+    spot_dir: vec4<f32>, // xyz = normalized spot emission direction (spot only)
 };
 struct Lights {
     count: vec4<u32>,   // x = active count
@@ -161,12 +162,22 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
                 }
                 lo += d;
             } else {
-                // Point.
+                // Point (w == 1) / spot (w == 2): shared windowed inverse-square
+                // attenuation; a spot additionally masks by its cone. `cone` stays
+                // 1.0 for a point light, so `* 1.0` leaves the point path exactly
+                // as before (byte-stable goldens).
                 let to_light = light.pos_dir.xyz - in.world_pos;
                 let dist = length(to_light);
                 let l = to_light / max(dist, 1e-4);
                 let att = point_attenuation(dist, light.params.x);
-                lo += shade_light(n, v, l, radiance_base * att,
+                var cone = 1.0;
+                if (light.pos_dir.w > 1.5) {
+                    // Cosine of the angle between frag→light and the beam axis
+                    // (-spot_dir = toward-the-light), faded outer_cos→inner_cos.
+                    let cos_dir = dot(l, -light.spot_dir.xyz);
+                    cone = smoothstep(light.params.z, light.params.y, cos_dir);
+                }
+                lo += shade_light(n, v, l, radiance_base * att * cone,
                                  albedo, metallic, rough, f0);
             }
         }

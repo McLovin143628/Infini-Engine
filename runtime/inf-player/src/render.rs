@@ -463,6 +463,15 @@ fn pcg_kind_color(kind: u32) -> [f32; 4] {
     PALETTE[(kind as usize) % PALETTE.len()]
 }
 
+/// Project an ECS `Light` (+ its world transform) into a renderer light (R-P3).
+///
+/// **MIRROR** of `inf_viewport::host::project_light` — kept byte-for-byte
+/// identical (the parity tests in both crates pin the shared conventions):
+///  * directional/spot store the vector *toward* the light = `rot · +Z` (forward
+///    is `−Z`, so this is the anti-emission direction); the renderer derives a
+///    spot's beam emission as `−direction = rot · −Z`;
+///  * cone half-angles → cosines CPU-side; `range`/`cast_shadows` pass through
+///    for all kinds (`cast_shadows` inert for point/spot — shadow maps deferred).
 fn project_light(light: &Light, affine: &glam::DAffine3) -> RenderLight {
     let (_, rot, translation) = affine.to_scale_rotation_translation();
     let c = light.color.to_array();
@@ -475,14 +484,30 @@ fn project_light(light: &Light, affine: &glam::DAffine3) -> RenderLight {
             direction: (rot * DVec3::Z).as_vec3(),
             position: DVec3::ZERO,
             range: 0.0,
+            cast_shadows: light.cast_shadows,
+            ..RenderLight::default()
         },
-        EcsLightKind::Point | EcsLightKind::Spot => RenderLight {
+        EcsLightKind::Point => RenderLight {
             kind: LightKind::Point,
             color,
             intensity: light.intensity,
             direction: Vec3::ZERO,
             position: translation,
-            range: 0.0,
+            range: light.range,
+            cast_shadows: light.cast_shadows,
+            ..RenderLight::default()
+        },
+        EcsLightKind::Spot => RenderLight {
+            kind: LightKind::Spot,
+            color,
+            intensity: light.intensity,
+            // Toward-the-light (like directional); emission = -direction = rot·−Z.
+            direction: (rot * DVec3::Z).as_vec3(),
+            position: translation,
+            range: light.range,
+            inner_cos: light.inner_cone_deg.to_radians().cos(),
+            outer_cos: light.outer_cone_deg.to_radians().cos(),
+            cast_shadows: light.cast_shadows,
         },
     }
 }
@@ -663,5 +688,56 @@ mod render_settings_tests {
         // Untouched tuning knobs stay at their defaults.
         assert_eq!(s.shadows.lambda, RenderSettings::default().shadows.lambda);
         assert_eq!(s.gi.extent, RenderSettings::default().gi.extent);
+    }
+}
+
+/// Spot-light seam parity (R-P3). This is the **byte-identical mirror** of
+/// `inf_viewport::host`'s `project_light_parity` test — same fixture, same
+/// hardcoded expectations — so the toward-the-light / emission direction
+/// convention can never drift between the player and the editor viewport.
+#[cfg(test)]
+mod project_light_parity {
+    use super::{project_light, EcsLightKind, Light, LightKind};
+    use glam::{DAffine3, DQuat, DVec3};
+
+    #[test]
+    fn spot_projects_with_shared_convention() {
+        let light = Light {
+            kind: EcsLightKind::Spot,
+            intensity: 2.0,
+            range: 12.0,
+            inner_cone_deg: 20.0,
+            outer_cone_deg: 35.0,
+            cast_shadows: false,
+            ..Light::default()
+        };
+        // Rotate 30° about X at (1, 2, 3).
+        let affine = DAffine3::from_rotation_translation(
+            DQuat::from_rotation_x(30f64.to_radians()),
+            DVec3::new(1.0, 2.0, 3.0),
+        );
+        let rl = project_light(&light, &affine);
+
+        assert!(matches!(rl.kind, LightKind::Spot));
+        // Direction is *toward* the light = rot · +Z = (0, -sin30, cos30).
+        let d = rl.direction;
+        assert!((d.x - 0.0).abs() < 1e-5, "dir.x {}", d.x);
+        assert!((d.y - (-0.5)).abs() < 1e-5, "dir.y {}", d.y);
+        assert!((d.z - 0.866_025_4).abs() < 1e-5, "dir.z {}", d.z);
+        assert!((rl.position.x - 1.0).abs() < 1e-9);
+        assert!((rl.position.y - 2.0).abs() < 1e-9);
+        assert!((rl.position.z - 3.0).abs() < 1e-9);
+        assert!((rl.range - 12.0).abs() < 1e-6);
+        assert!(
+            (rl.inner_cos - 0.939_692_6).abs() < 1e-5,
+            "inner {}",
+            rl.inner_cos
+        );
+        assert!(
+            (rl.outer_cos - 0.819_152).abs() < 1e-5,
+            "outer {}",
+            rl.outer_cos
+        );
+        assert!(!rl.cast_shadows);
     }
 }

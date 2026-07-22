@@ -450,6 +450,7 @@ fn golden_pbr_materials() {
         direction: Vec3::new(0.4, 0.8, 0.4).normalize(),
         position: DVec3::ZERO,
         range: 0.0,
+        ..RenderLight::default()
     });
     scene.lights.push(RenderLight {
         kind: LightKind::Point,
@@ -458,6 +459,7 @@ fn golden_pbr_materials() {
         direction: Vec3::ZERO,
         position: DVec3::new(0.0, 2.5, 2.0),
         range: 12.0,
+        ..RenderLight::default()
     });
     scene.mark_dirty();
 
@@ -465,6 +467,81 @@ fn golden_pbr_materials() {
     // The scene is lit: some pixel is clearly brighter than the dark backdrop.
     let lit = img.chunks(4).any(|p| p[0] > 90 || p[1] > 90 || p[2] > 90);
     assert!(lit, "expected a lit PBR pixel");
+}
+
+/// Spot-light golden (R-P3): a ground plane + a few cubes lit by a single spot
+/// aimed obliquely, so the cone's lit ellipse and its soft outer-cone falloff are
+/// both on screen. No directional light — the spot shapes the frame. Exercises
+/// the shaders' `w == 2` branch (cone `smoothstep` × windowed inverse-square)
+/// through the mesh path headlessly (determinism gate via `check_golden`; strict
+/// pixel diff opt-in, blessed on a GPU host). Structural gate: the spot frame
+/// differs from the same scene lit by a plain point light — proving the cone mask
+/// actually clips the illumination (a point light would light the plane broadly).
+#[test]
+fn golden_spot_lights() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        ..Default::default()
+    };
+    // A large ground plane to catch the cone.
+    scene.instances.push(MeshInstance {
+        translation: DVec3::new(0.0, 0.0, 0.0),
+        rotation: Quat::IDENTITY,
+        scale: Vec3::new(20.0, 1.0, 20.0),
+        color: [0.60, 0.60, 0.62, 1.0],
+        metallic: 0.0,
+        roughness: 0.7,
+        emissive: [0.0; 3],
+        id: 1,
+        mesh: PrimMesh::Plane,
+    });
+    // A few cubes standing in and around the beam.
+    for (i, (x, z)) in [(1.5, 1.5), (3.0, 0.5), (-1.0, 2.5)]
+        .into_iter()
+        .enumerate()
+    {
+        scene.instances.push(MeshInstance::lit(
+            DVec3::new(x, 0.5, z),
+            Quat::from_rotation_y(0.3),
+            Vec3::ONE,
+            [0.80, 0.75, 0.70, 1.0],
+            i as u32 + 2,
+        ));
+    }
+    // One spot high above, aimed obliquely toward (2, 0, 2). `direction` is the
+    // toward-the-light vector; the emission axis is its negation.
+    let emit = Vec3::new(2.0, -5.0, 2.0).normalize();
+    scene.lights.push(RenderLight {
+        kind: LightKind::Spot,
+        color: [1.0, 0.95, 0.8],
+        intensity: 60.0,
+        direction: -emit,
+        position: DVec3::new(0.0, 5.0, 0.0),
+        range: 20.0,
+        inner_cos: 15f32.to_radians().cos(),
+        outer_cos: 25f32.to_radians().cos(),
+        cast_shadows: false,
+    });
+    scene.mark_dirty();
+
+    let img = check_golden(&gpu, "spot_lights", &scene, &overlook_view());
+
+    // The cone lights a bright patch.
+    let bright = img.chunks(4).any(|p| p[0] > 90 || p[1] > 90 || p[2] > 90);
+    assert!(bright, "expected a lit spot pixel");
+
+    // Swapping the spot for a plain point light (same position/intensity) lights
+    // the ground far more broadly — the frames must differ, proving the cone mask.
+    let mut point = scene.clone();
+    point.lights[0].kind = LightKind::Point;
+    point.mark_dirty();
+    let point_img = render(&gpu, &point, &overlook_view());
+    let (mean, _max) = image_diff(&img, &point_img, W, H);
+    assert!(
+        mean > 0.002,
+        "spot cone should differ from a point light (mean {mean})"
+    );
 }
 
 /// 2.5D billboard golden (P8.4a): an **angled perspective** camera over a row of
@@ -1472,6 +1549,7 @@ fn golden_ssao() {
         direction: Vec3::new(0.3, 0.9, 0.3).normalize(),
         position: DVec3::ZERO,
         range: 0.0,
+        ..RenderLight::default()
     });
     scene.mark_dirty();
     let view = look_view(DVec3::new(3.0, 2.6, 4.2), DVec3::new(0.0, 0.6, 0.0));
@@ -1639,6 +1717,7 @@ fn vgeom_scene(mesh: Arc<VgeomMesh>, scale: f32) -> RenderScene {
         direction: Vec3::new(0.35, 0.85, 0.4).normalize(),
         position: DVec3::ZERO,
         range: 0.0,
+        ..RenderLight::default()
     });
     scene.mark_dirty();
     scene
@@ -1852,6 +1931,7 @@ fn golden_csm() {
         direction: Vec3::new(0.55, 0.32, 0.45).normalize(),
         position: DVec3::ZERO,
         range: 0.0,
+        ..RenderLight::default()
     });
     scene.mark_dirty();
     let view = look_view(DVec3::new(5.0, 5.5, 8.5), DVec3::new(0.0, 0.5, 0.0));
@@ -1946,6 +2026,7 @@ fn golden_gi_bleed() {
         direction: Vec3::new(0.0, 0.5, 1.0).normalize(),
         position: DVec3::ZERO,
         range: 0.0,
+        ..RenderLight::default()
     });
     scene.mark_dirty();
 
