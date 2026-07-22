@@ -4,6 +4,7 @@
 
 mod app;
 mod assets;
+mod collections;
 mod collision_layers;
 mod diagnostics;
 mod files;
@@ -101,6 +102,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         viewport::viewport_set_gizmo_mode,
         viewport::viewport_set_gizmo_space,
         viewport::viewport_set_snap3d,
+        viewport::viewport_set_view_mode,
         scene::scene_snapshot,
         scene::scene_details,
         scene::scene_create,
@@ -156,6 +158,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         assets::asset_import,
         assets::asset_create,
         assets::asset_create_material_instance,
+        assets::asset_get_material_instance,
+        assets::asset_save_material_instance,
         assets::asset_delete,
         assets::asset_rename,
         assets::asset_duplicate,
@@ -166,6 +170,12 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         assets::asset_rust_source,
         assets::texture_get_slices,
         assets::texture_set_slices,
+        collections::collections_list,
+        collections::collections_create,
+        collections::collections_rename,
+        collections::collections_delete,
+        collections::collections_add,
+        collections::collections_remove,
         sorting::layers_get,
         sorting::layers_set,
         collision_layers::collision_layers_get,

@@ -9,7 +9,7 @@ use inf_ecs::components::{
     Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, ComputedVisibility,
     GlobalTransform, Joint2D, Joint3D, Light, Light2D, LightKind as EcsLightKind, Material,
     MeshRef, NineSlice, PcgVolume, Primitive, SkeletalMesh, Sprite, Terrain, Text2D, TextAlign,
-    Tilemap,
+    Tilemap, Volume,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::ipc::SpawnKind;
@@ -127,6 +127,10 @@ pub struct EngineHost {
     /// World-space joint debug segments by GUID (P12.1), rebuilt each projection.
     /// Rendered as debug lines for the current selection only (2D + 3D joints).
     joint_lines: HashMap<Uuid, JointDebug>,
+    /// World-space `Volume` wireframes by GUID (E-P4), rebuilt each projection.
+    /// Unlike collider outlines these are drawn ALWAYS (not selection-gated), in
+    /// the volume's tint, so trigger/blocking regions stay visible while editing.
+    volume_outlines: HashMap<Uuid, VolumeDebug>,
     /// GUIDs of the document's current selection (for collider debug draw —
     /// covers every selected entity, not just the mesh instances).
     selected_guids: Vec<Uuid>,
@@ -291,6 +295,14 @@ struct JointDebug {
     segments: Vec<[DVec3; 2]>,
 }
 
+/// A [`Volume`]'s editor wireframe (E-P4): the entity's box collider resolved to
+/// world space plus the volume's tint. Drawn ALWAYS (not selection-gated) so
+/// trigger/blocking regions read while editing; the selection just brightens it.
+struct VolumeDebug {
+    collider: ColliderDebug3D,
+    tint: [f32; 4],
+}
+
 impl EngineHost {
     pub fn new(target: SurfaceTarget, width: u32, height: u32) -> Result<Self, String> {
         let (gpu, chain, renderer) = Self::build_gpu_stack(target, width, height)?;
@@ -318,6 +330,7 @@ impl EngineHost {
             collider_outlines: HashMap::new(),
             collider_outlines_3d: HashMap::new(),
             joint_lines: HashMap::new(),
+            volume_outlines: HashMap::new(),
             selected_guids: Vec::new(),
             synced_version: None,
             mode: ViewportMode::Perspective,
@@ -407,6 +420,13 @@ impl EngineHost {
     /// keeps a separate camera pose per mode, so switching preserves both.
     pub fn set_mode(&mut self, mode: ViewportMode) {
         self.mode = mode;
+    }
+
+    /// Set the renderer's shading view mode (Lit / Unlit / Wireframe, R-P2). Pure
+    /// passthrough to the renderer, which clamps Wireframe→Unlit if the adapter
+    /// lacks `POLYGON_MODE_LINE`. Editor-transient (never persisted).
+    pub fn set_view_mode(&mut self, mode: inf_render::ViewMode) {
+        self.renderer.set_view_mode(mode);
     }
 
     /// Replace the 2D-mode snapping configuration (from the toolbar).
@@ -502,6 +522,7 @@ impl EngineHost {
         self.collider_outlines.clear();
         self.collider_outlines_3d.clear();
         self.joint_lines.clear();
+        self.volume_outlines.clear();
 
         let world = doc.world();
         let w = world.world();
@@ -670,6 +691,29 @@ impl EngineHost {
                 let (_, rotation, translation) = affine.to_scale_rotation_translation();
                 self.collider_outlines_3d
                     .insert(guid, project_collider_3d(col, translation, rotation));
+            }
+
+            // Volumes (E-P4) cache a tinted box wireframe drawn ALWAYS (not
+            // selection-gated) so trigger/blocking regions stay visible while
+            // editing. Reuses the entity's Collider3D projection; skipped when the
+            // entity is hidden (respect the visibility flag).
+            if visible {
+                if let (Some(vol), Some(col)) =
+                    (w.get::<Volume>(entity), w.get::<Collider3D>(entity))
+                {
+                    let affine = w
+                        .get::<GlobalTransform>(entity)
+                        .map(|g| g.0)
+                        .unwrap_or(glam::DAffine3::IDENTITY);
+                    let (_, rotation, translation) = affine.to_scale_rotation_translation();
+                    self.volume_outlines.insert(
+                        guid,
+                        VolumeDebug {
+                            collider: project_collider_3d(col, translation, rotation),
+                            tint: vol.tint.to_array(),
+                        },
+                    );
+                }
             }
 
             // Joints cache world-space debug segments (P12.1): the anchor→anchor
@@ -950,6 +994,43 @@ fn draw_collider_outline_3d(debug: &mut DebugDraw, origin: &FloatingOrigin, cd: 
     };
     for [a, b] in collider_outline_3d(cd.shape, CIRCLE_SEGMENTS) {
         debug.line(to_local(a), to_local(b), COLLIDER_COLOR);
+    }
+}
+
+/// Stroke a [`Volume`]'s box wireframe into the debug-line layer in its tint,
+/// rebasing through the floating origin. Drawn unconditionally (the region is
+/// invisible in PIE, so the editor outline is the only cue). The debug-line API
+/// has no width, so a selected volume gets a second inset ring in a brightened
+/// tint to read as "thicker/highlighted".
+fn draw_volume_outline(
+    debug: &mut DebugDraw,
+    origin: &FloatingOrigin,
+    vd: &VolumeDebug,
+    selected: bool,
+) {
+    const CIRCLE_SEGMENTS: u32 = 32;
+    let cd = &vd.collider;
+    // Local (optionally scaled) collider point → render-local: offset in the body
+    // frame, rotate by the body orientation, translate onto the entity.
+    let stroke = |debug: &mut DebugDraw, scale: f64, color: [f32; 4]| {
+        let to_local = |p: Vec3| {
+            let local = DVec3::new(p.x as f64, p.y as f64, p.z as f64) * scale + cd.offset;
+            origin.to_render(cd.world_pos + cd.rotation * local)
+        };
+        for [a, b] in collider_outline_3d(cd.shape, CIRCLE_SEGMENTS) {
+            debug.line(to_local(a), to_local(b), color);
+        }
+    };
+    stroke(debug, 1.0, vd.tint);
+    if selected {
+        let brighten = |c: f32| (c * 1.5).min(1.0);
+        let bright = [
+            brighten(vd.tint[0]),
+            brighten(vd.tint[1]),
+            brighten(vd.tint[2]),
+            vd.tint[3],
+        ];
+        stroke(debug, 0.9, bright);
     }
 }
 
@@ -1364,6 +1445,7 @@ impl EngineHost {
         py: u32,
         payload: &str,
     ) -> bool {
+        let mut name = "";
         let kind = if let Some(rest) = payload.strip_prefix("spawn:") {
             match spawn_kind_from_str(rest) {
                 Some(k) => k,
@@ -1373,12 +1455,19 @@ impl EngineHost {
                 }
             }
         } else {
-            // Asset drop (or a bare/legacy payload) → placeholder cube.
+            // Asset drop (or a bare/legacy payload) → placeholder cube. An
+            // `asset:<id>:<name>` payload carries the display name so the
+            // placeholder is named like `scene_spawn_asset`'s would be.
+            if let Some(rest) = payload.strip_prefix("asset:") {
+                if let Some((_id, n)) = rest.split_once(':') {
+                    name = n;
+                }
+            }
             SpawnKind::Cube
         };
         let point = self.pick_world_point(doc, view, px, py);
         doc.begin_transaction("Spawn");
-        let guid = doc.edit_create(kind, "", None);
+        let guid = doc.edit_create(kind, name, None);
         doc.edit_set_transform(guid, EcsTransform::from_translation(point));
         doc.select(&[guid], false);
         doc.commit_transaction();
@@ -1852,6 +1941,13 @@ impl EngineHost {
             if let Some(jd) = self.joint_lines.get(guid) {
                 draw_joint_lines(&mut self.scene.debug, &self.origin, jd);
             }
+        }
+
+        // Volume wireframes (E-P4) draw ALWAYS in the volume's tint (invisible in
+        // PIE — this is the only editor cue); a selected volume brightens.
+        for (guid, vd) in &self.volume_outlines {
+            let selected = self.selected_guids.contains(guid);
+            draw_volume_outline(&mut self.scene.debug, &self.origin, vd, selected);
         }
 
         // Sculpt brush ring (P10.2b): a closed loop following the terrain height

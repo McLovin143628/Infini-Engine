@@ -52,6 +52,8 @@ export interface EventPayloads {
   "assets://changed": AssetChanged;
   /** Import-job progress (P4.2.4). */
   "assets://import": ImportEventDto;
+  /** A named content collection changed (create/rename/delete/add/remove) → re-fetch (E-P8). */
+  "collections://changed": null;
   /** A project was opened/created → leave the start screen, re-sync (P5.5). */
   "project://changed": ProjectInfoDto;
   /** A blueprint graph mutated (payload = graph id) → re-sync canvas (P6.2). */

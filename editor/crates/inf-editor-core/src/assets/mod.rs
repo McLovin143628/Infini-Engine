@@ -6,8 +6,10 @@
 //! dependency edges the importer discovers, and enforces the
 //! delete-with-references safety check that is the Phase 4 gate.
 
+pub mod collections;
 pub mod data;
 pub mod import;
+pub mod material_instance;
 pub mod queue;
 pub mod snapshot;
 pub mod sprite_sheet;

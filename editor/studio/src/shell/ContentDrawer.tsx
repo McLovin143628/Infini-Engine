@@ -21,11 +21,14 @@ import {
   FileText,
   Folder,
   FolderOpen,
+  FolderPlus,
   FolderSearch,
   Image,
   Import,
   Layers,
+  Library,
   Link2,
+  Minus,
   Music2,
   Paintbrush,
   Pencil,
@@ -41,7 +44,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { cn } from "../lib/utils";
 import { executeCommand } from "../lib/commands";
-import { scene as sceneIpc, shell } from "../lib/ipc";
+import { scene as sceneIpc, shell, viewport } from "../lib/ipc";
 import { useDockLayout } from "../panels/dock/dockLayoutStore";
 import { useShellStore } from "../stores/shellStore";
 import { useSpriteSheetStore } from "../stores/spriteSheetStore";
@@ -53,6 +56,7 @@ import {
   type AssetDto,
 } from "../stores/assetStore";
 import DataAssetEditor from "./DataAssetEditor";
+import MaterialInstanceEditor from "./MaterialInstanceEditor";
 
 const DATA_KINDS = new Set(["struct", "enum", "table"]);
 
@@ -114,6 +118,9 @@ export default function ContentDrawer() {
   const imports = useAssetStore((s) => s.imports);
 
   const editing = useAssetStore((s) => s.editing);
+  const editingInstance = useAssetStore((s) => s.editingInstance);
+  const collections = useAssetStore((s) => s.collections);
+  const activeCollection = useAssetStore((s) => s.activeCollection);
 
   const setFolder = useAssetStore((s) => s.setFolder);
   const setSearch = useAssetStore((s) => s.setSearch);
@@ -122,11 +129,18 @@ export default function ContentDrawer() {
   const toggleFavorite = useAssetStore((s) => s.toggleFavorite);
   const openEditor = useAssetStore((s) => s.openEditor);
   const closeEditor = useAssetStore((s) => s.closeEditor);
+  const openInstanceEditor = useAssetStore((s) => s.openInstanceEditor);
+  const closeInstanceEditor = useAssetStore((s) => s.closeInstanceEditor);
   const createAsset = useAssetStore((s) => s.createAsset);
 
+  // The active collection's member id set (cross-folder grid scope).
+  const activeIds = useMemo(
+    () => collections.find((c) => c.name === activeCollection)?.ids ?? null,
+    [collections, activeCollection],
+  );
   const items = useMemo(
-    () => visibleAssets(assetsById, folder, kindFilter, search),
-    [assetsById, folder, kindFilter, search],
+    () => visibleAssets(assetsById, folder, kindFilter, search, activeCollection ? activeIds : null),
+    [assetsById, folder, kindFilter, search, activeCollection, activeIds],
   );
 
   const [menu, setMenu] = useState<{ x: number; y: number; asset: AssetDto } | null>(null);
@@ -134,6 +148,7 @@ export default function ContentDrawer() {
 
   const onCellOpen = (asset: AssetDto) => {
     if (DATA_KINDS.has(asset.kind)) openEditor(asset.id);
+    else if (asset.kind === "material_instance") openInstanceEditor(asset.id); // E-P2
     else if (asset.kind === "material")
       useDockLayout.getState().openPanel("material"); // P7.2 material editor
     else if (asset.kind === "pcg")
@@ -264,6 +279,7 @@ export default function ContentDrawer() {
               />
             ))
           )}
+          <CollectionsSection />
           <div className="px-1 pt-1 pb-1 text-[11px] font-semibold text-(--ink-text-dim)">
             Content
           </div>
@@ -294,6 +310,12 @@ export default function ContentDrawer() {
         <div className="min-h-0 flex-1">
           {editing ? (
             <DataAssetEditor key={editing} id={editing} onClose={closeEditor} />
+          ) : editingInstance ? (
+            <MaterialInstanceEditor
+              key={editingInstance}
+              id={editingInstance}
+              onClose={closeInstanceEditor}
+            />
           ) : !ready ? (
             <div className="p-4 text-xs text-(--ink-text-faint)">Loading content…</div>
           ) : items.length === 0 ? (
@@ -372,6 +394,87 @@ function FolderRow({
       )}
       <span className="truncate">{label}</span>
     </button>
+  );
+}
+
+/** The persisted named-collections list (E-P8): click a collection to scope the
+ *  grid to its members; "+" creates one; hover-X deletes; double-click renames. */
+function CollectionsSection() {
+  const collections = useAssetStore((s) => s.collections);
+  const active = useAssetStore((s) => s.activeCollection);
+  const setActive = useAssetStore((s) => s.setActiveCollection);
+  const create = useAssetStore((s) => s.createCollection);
+  const rename = useAssetStore((s) => s.renameCollection);
+  const del = useAssetStore((s) => s.deleteCollection);
+
+  const onNew = async () => {
+    const name = window.prompt("New collection name");
+    if (!name || !name.trim()) return;
+    try {
+      await create(name.trim());
+    } catch (e) {
+      window.alert(String(e));
+    }
+  };
+  const onRename = async (old: string) => {
+    const name = window.prompt("Rename collection", old);
+    if (!name || !name.trim() || name.trim() === old) return;
+    try {
+      await rename(old, name.trim());
+    } catch (e) {
+      window.alert(String(e));
+    }
+  };
+  const onDelete = async (name: string) => {
+    if (window.confirm(`Delete collection "${name}"? (The assets themselves are not deleted.)`))
+      await del(name);
+  };
+
+  return (
+    <>
+      <div className="flex items-center justify-between px-1 pt-2 pb-1 text-[11px] font-semibold text-(--ink-text-dim)">
+        <span className="flex items-center gap-1">
+          <Library size={11} /> Collections
+        </span>
+        <button
+          className="rounded p-0.5 hover:bg-(--ink-bg-3)"
+          onClick={() => void onNew()}
+          title="New collection"
+        >
+          <Plus size={12} />
+        </button>
+      </div>
+      {collections.length === 0 ? (
+        <div className="px-1 pb-1 text-[11px] text-(--ink-text-faint)">None yet</div>
+      ) : (
+        collections.map((c) => (
+          <div key={c.name} className="group flex items-center">
+            <button
+              className={cn(
+                "flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-0.5 text-left text-xs",
+                active === c.name ? "bg-(--ink-selection)" : "hover:bg-(--ink-bg-3)",
+              )}
+              onClick={() => setActive(c.name)}
+              onDoubleClick={() => void onRename(c.name)}
+              title="Click to filter the grid; double-click to rename"
+            >
+              <Library size={13} className="shrink-0 text-(--ink-accent)" />
+              <span className="truncate">{c.name}</span>
+              <span className="ml-auto shrink-0 text-[10px] text-(--ink-text-faint)">
+                {c.ids.length}
+              </span>
+            </button>
+            <button
+              className="shrink-0 rounded p-0.5 text-(--ink-text-faint) opacity-0 hover:bg-(--ink-bg-3) hover:text-(--ink-danger) group-hover:opacity-100"
+              onClick={() => void onDelete(c.name)}
+              title="Delete collection"
+            >
+              <Minus size={12} />
+            </button>
+          </div>
+        ))
+      )}
+    </>
   );
 }
 
@@ -556,9 +659,21 @@ function AssetCell({
           .applyActor(asset.id)
           .catch((err) => console.error("bind actor failed", err));
       } else {
-        sceneIpc
-          .spawnAsset(asset.id)
-          .catch((err) => console.error("spawn asset failed", err));
+        // Place-by-drag (C): route through the wave-2 viewport drop so the
+        // placeholder spawns at the cursor's world point (not the origin, as the
+        // old direct `scene_spawn_asset` did). Coordinates are physical pixels
+        // relative to the hole's top-left (the native-window contract). The
+        // `asset:<id>:<name>` payload carries the name so the backend can name
+        // the placeholder; today `EngineHost::spawn_drop` places a cube at the
+        // pick point (naming it from the payload is a flagged host-side follow-up).
+        const dpr = window.devicePixelRatio || 1;
+        viewport
+          .drop({
+            x: (e.clientX - r.left) * dpr,
+            y: (e.clientY - r.top) * dpr,
+            payload: `asset:${asset.id}:${asset.name}`,
+          })
+          .catch((err) => console.error("asset drop failed", err));
       }
     }
   };
@@ -628,6 +743,13 @@ function AssetContextMenu({
 }) {
   const pushStatus = useShellStore((s) => s.pushStatus);
   const rootPath = useAssetStore((s) => s.rootPath);
+  const openInstanceEditor = useAssetStore((s) => s.openInstanceEditor);
+  const collections = useAssetStore((s) => s.collections);
+  const activeCollection = useAssetStore((s) => s.activeCollection);
+  const addToCollection = useAssetStore((s) => s.addToCollection);
+  const removeFromCollection = useAssetStore((s) => s.removeFromCollection);
+  const createCollection = useAssetStore((s) => s.createCollection);
+  const [subOpen, setSubOpen] = useState(false);
   const store = {
     rename: useAssetStore((s) => s.rename),
     duplicate: useAssetStore((s) => s.duplicate),
@@ -697,6 +819,27 @@ function AssetContextMenu({
         : "Select an entity first, then bind the blueprint.",
     );
   };
+  // ── collections (E-P8) ────────────────────────────────────────────────────
+  const addTo = async (name: string) => {
+    await addToCollection(name, asset.id);
+    pushStatus(`Added "${asset.name}" to "${name}".`);
+    onClose();
+  };
+  const newCollectionAndAdd = async () => {
+    const name = window.prompt("New collection name");
+    if (!name || !name.trim()) return;
+    try {
+      await createCollection(name.trim());
+      await addTo(name.trim());
+    } catch (e) {
+      window.alert(String(e));
+    }
+  };
+  const removeFrom = async () => {
+    if (!activeCollection) return;
+    await removeFromCollection(activeCollection, asset.id);
+    pushStatus(`Removed "${asset.name}" from "${activeCollection}".`);
+  };
 
   return (
     <div
@@ -706,6 +849,8 @@ function AssetContextMenu({
     >
       {isMaterialLike &&
         item("Apply to Selection", <Paintbrush size={13} />, () => void applyToSelection())}
+      {asset.kind === "material_instance" &&
+        item("Edit Instance", <Pencil size={13} />, () => openInstanceEditor(asset.id))}
       {asset.kind === "blueprint" &&
         item("Bind to Selection", <Link2 size={13} />, () => void bindToSelection())}
       {asset.kind === "material" &&
@@ -714,6 +859,39 @@ function AssetContextMenu({
       {item("Duplicate", <Copy size={13} />, () => void store.duplicate(asset.id))}
       {item("Show References", <Link2 size={13} />, () => void showRefs())}
       {item("Reveal in Explorer", <FolderSearch size={13} />, () => void doReveal())}
+      <div className="my-1 h-px bg-(--ink-border)" />
+      {/* Add to Collection ▸ (E-P8): a click-to-expand inline submenu. */}
+      <button
+        className="flex w-full items-center gap-2 px-2.5 py-1 text-left text-xs hover:bg-(--ink-bg-3)"
+        onClick={(e) => {
+          e.stopPropagation();
+          setSubOpen((v) => !v);
+        }}
+      >
+        <FolderPlus size={13} /> Add to Collection
+        <ChevronRight size={12} className={cn("ml-auto transition-transform", subOpen && "rotate-90")} />
+      </button>
+      {subOpen && (
+        <div className="border-y border-(--ink-border) bg-(--ink-bg-1) py-0.5">
+          {collections.map((c) => (
+            <button
+              key={c.name}
+              className="flex w-full items-center gap-2 px-2.5 py-1 pl-6 text-left text-xs hover:bg-(--ink-bg-3)"
+              onClick={() => void addTo(c.name)}
+            >
+              <Library size={12} className="text-(--ink-accent)" /> {c.name}
+            </button>
+          ))}
+          <button
+            className="flex w-full items-center gap-2 px-2.5 py-1 pl-6 text-left text-xs text-(--ink-text-dim) hover:bg-(--ink-bg-3)"
+            onClick={() => void newCollectionAndAdd()}
+          >
+            <Plus size={12} /> New Collection…
+          </button>
+        </div>
+      )}
+      {activeCollection &&
+        item("Remove from Collection", <Minus size={13} />, () => void removeFrom())}
       <div className="my-1 h-px bg-(--ink-border)" />
       {item("Delete", <Trash2 size={13} />, () => void doDelete(), true)}
     </div>

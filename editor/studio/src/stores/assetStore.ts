@@ -13,14 +13,15 @@ import { create } from "zustand";
 import type { AssetDto } from "../bindings/AssetDto";
 import type { AssetFolderDto } from "../bindings/AssetFolderDto";
 import type { AssetSnapshot } from "../bindings/AssetSnapshot";
+import type { CollectionDto } from "../bindings/CollectionDto";
 import type { DeleteResult } from "../bindings/DeleteResult";
 import type { ImportEventDto } from "../bindings/ImportEventDto";
 import { getCommand, setCommandHandler } from "../lib/commands";
 import { listenTo, type UnlistenFn } from "../lib/events";
 import { fuzzyMatch } from "../lib/fuzzy";
-import { assets as assetsIpc } from "../lib/ipc";
+import { assets as assetsIpc, collections as collectionsIpc } from "../lib/ipc";
 
-export type { AssetDto, AssetFolderDto };
+export type { AssetDto, AssetFolderDto, CollectionDto };
 
 /** A live/finished import job, for the progress strip. */
 export interface ImportJob {
@@ -44,7 +45,13 @@ interface AssetState {
   selected: string | null;
   /** Id of the data asset open in the inline editor, or null. */
   editing: string | null;
+  /** Id of the material instance open in the override editor, or null (E-P2). */
+  editingInstance: string | null;
   favorites: string[]; // favorited folder paths
+  /** Named content collections (persisted backend state) (E-P8). */
+  collections: CollectionDto[];
+  /** Name of the collection whose members filter the grid, or null (E-P8). */
+  activeCollection: string | null;
   /** Thumbnail data-URLs by asset id ("" = requested/none). */
   thumbnails: Record<string, string>;
   /** Active/recent import jobs by job id. */
@@ -60,7 +67,18 @@ interface AssetState {
   setSelected: (id: string | null) => void;
   openEditor: (id: string) => void;
   closeEditor: () => void;
+  openInstanceEditor: (id: string) => void;
+  closeInstanceEditor: () => void;
   toggleFavorite: (path: string) => void;
+
+  // ── collections (E-P8) ─────────────────────────────────────────────────
+  fetchCollections: () => Promise<void>;
+  setActiveCollection: (name: string | null) => void;
+  createCollection: (name: string) => Promise<void>;
+  renameCollection: (oldName: string, newName: string) => Promise<void>;
+  deleteCollection: (name: string) => Promise<void>;
+  addToCollection: (name: string, id: string) => Promise<void>;
+  removeFromCollection: (name: string, id: string) => Promise<void>;
 
   loadThumbnail: (id: string) => void;
   importFiles: (sources: string[], dest?: string | null) => Promise<void>;
@@ -93,7 +111,10 @@ export const useAssetStore = create<AssetState>((set, get) => ({
   kindFilter: null,
   selected: null,
   editing: null,
+  editingInstance: null,
   favorites: [],
+  collections: [],
+  activeCollection: null,
   thumbnails: {},
   imports: {},
 
@@ -133,12 +154,16 @@ export const useAssetStore = create<AssetState>((set, get) => ({
     }
   },
 
-  setFolder: (path) => set({ folder: path }),
+  // Selecting a folder leaves any active collection view (they're alternate
+  // scopes for the grid).
+  setFolder: (path) => set({ folder: path, activeCollection: null }),
   setSearch: (q) => set({ search: q }),
   setKindFilter: (kind) => set((s) => ({ kindFilter: s.kindFilter === kind ? null : kind })),
   setSelected: (id) => set({ selected: id }),
-  openEditor: (id) => set({ editing: id, selected: id }),
+  openEditor: (id) => set({ editing: id, editingInstance: null, selected: id }),
   closeEditor: () => set({ editing: null }),
+  openInstanceEditor: (id) => set({ editingInstance: id, editing: null, selected: id }),
+  closeInstanceEditor: () => set({ editingInstance: null }),
 
   toggleFavorite: (path) =>
     set((s) => ({
@@ -146,6 +171,71 @@ export const useAssetStore = create<AssetState>((set, get) => ({
         ? s.favorites.filter((f) => f !== path)
         : [...s.favorites, path],
     })),
+
+  fetchCollections: async () => {
+    try {
+      const list = await collectionsIpc.list();
+      set((s) => ({
+        collections: list,
+        // Clear the active filter if its collection vanished (deleted/renamed).
+        activeCollection:
+          s.activeCollection && list.some((c) => c.name === s.activeCollection)
+            ? s.activeCollection
+            : null,
+      }));
+    } catch (e) {
+      console.error("collections.list failed", e);
+    }
+  },
+  // Toggle: clicking the active collection clears it. Entering a collection
+  // leaves the folder-scoped view (folder stays, but the collection wins).
+  setActiveCollection: (name) =>
+    set((s) => ({ activeCollection: s.activeCollection === name ? null : name })),
+  createCollection: async (name) => {
+    try {
+      set({ collections: await collectionsIpc.create(name) });
+    } catch (e) {
+      console.error("collections.create failed", e);
+      throw e;
+    }
+  },
+  renameCollection: async (oldName, newName) => {
+    try {
+      const list = await collectionsIpc.rename(oldName, newName);
+      set((s) => ({
+        collections: list,
+        activeCollection: s.activeCollection === oldName ? newName : s.activeCollection,
+      }));
+    } catch (e) {
+      console.error("collections.rename failed", e);
+      throw e;
+    }
+  },
+  deleteCollection: async (name) => {
+    try {
+      const list = await collectionsIpc.delete(name);
+      set((s) => ({
+        collections: list,
+        activeCollection: s.activeCollection === name ? null : s.activeCollection,
+      }));
+    } catch (e) {
+      console.error("collections.delete failed", e);
+    }
+  },
+  addToCollection: async (name, id) => {
+    try {
+      set({ collections: await collectionsIpc.add(name, id) });
+    } catch (e) {
+      console.error("collections.add failed", e);
+    }
+  },
+  removeFromCollection: async (name, id) => {
+    try {
+      set({ collections: await collectionsIpc.remove(name, id) });
+    } catch (e) {
+      console.error("collections.remove failed", e);
+    }
+  },
 
   loadThumbnail: (id) => {
     if (get().thumbnails[id] !== undefined) return; // already requested
@@ -202,23 +292,31 @@ export const useAssetStore = create<AssetState>((set, get) => ({
 }));
 
 /**
- * Assets visible under the current folder + kind + search filters. A pure
- * function of its inputs (call inside `useMemo`, not as a store selector — it
- * returns a fresh array each call).
+ * Assets visible under the current filters. A pure function of its inputs (call
+ * inside `useMemo`, not as a store selector — it returns a fresh array each
+ * call).
+ *
+ * When `collectionIds` is provided (a named collection is active) the grid is
+ * scoped to that id set instead of the folder tree — collections are a
+ * cross-folder view. The kind + search filters still apply in both modes.
  */
 export function visibleAssets(
   assets: Record<string, AssetDto>,
   folder: string,
   kindFilter: string | null,
   search: string,
+  collectionIds: string[] | null = null,
 ): AssetDto[] {
   const q = search.trim();
+  const idSet = collectionIds ? new Set(collectionIds) : null;
   return Object.values(assets)
     .filter((a) => {
-      const inFolder = folder === "" || a.folder === folder || a.folder.startsWith(folder + "/");
+      const inScope = idSet
+        ? idSet.has(a.id)
+        : folder === "" || a.folder === folder || a.folder.startsWith(folder + "/");
       const matchesKind = kindFilter === null || a.kind === kindFilter;
       const matchesSearch = !q || fuzzyMatch(q, a.name) !== null;
-      return inFolder && matchesKind && matchesSearch;
+      return inScope && matchesKind && matchesSearch;
     })
     .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 }
@@ -264,10 +362,14 @@ export async function importViaDialog(): Promise<void> {
 
 let unlistenChanged: UnlistenFn | null = null;
 let unlistenImport: UnlistenFn | null = null;
+let unlistenCollections: UnlistenFn | null = null;
+let unlistenProject: UnlistenFn | null = null;
 
 /**
- * Load the initial snapshot and subscribe to `assets://changed` +
- * `assets://import`. Idempotent (StrictMode double-mounts); returns a disposer.
+ * Load the initial snapshot + collections and subscribe to `assets://changed`,
+ * `assets://import`, `collections://changed`, and `project://changed` (the last
+ * re-roots content → re-fetch collections). Idempotent (StrictMode
+ * double-mounts); returns a disposer.
  */
 export async function initAssetSync(): Promise<() => void> {
   if (unlistenChanged) return () => {};
@@ -277,11 +379,24 @@ export async function initAssetSync(): Promise<() => void> {
   unlistenImport = await listenTo("assets://import", (e) =>
     useAssetStore.getState().applyImportEvent(e),
   );
-  await useAssetStore.getState().refresh();
+  unlistenCollections = await listenTo("collections://changed", () =>
+    void useAssetStore.getState().fetchCollections(),
+  );
+  unlistenProject = await listenTo("project://changed", () =>
+    void useAssetStore.getState().fetchCollections(),
+  );
+  await Promise.all([
+    useAssetStore.getState().refresh(),
+    useAssetStore.getState().fetchCollections(),
+  ]);
   return () => {
     unlistenChanged?.();
     unlistenImport?.();
+    unlistenCollections?.();
+    unlistenProject?.();
     unlistenChanged = null;
     unlistenImport = null;
+    unlistenCollections = null;
+    unlistenProject = null;
   };
 }

@@ -22,6 +22,9 @@ import type { PcgCompileResult, PcgEvaluateResult } from "./pcgTypes";
 import type { SmClipDto, SmDoc } from "./smTypes";
 import type { AssetRefDto } from "../bindings/AssetRefDto";
 import type { AssetSnapshot } from "../bindings/AssetSnapshot";
+import type { CollectionDto } from "../bindings/CollectionDto";
+import type { MaterialInstanceDto } from "../bindings/MaterialInstanceDto";
+import type { MatOverridesDto } from "../bindings/MatOverridesDto";
 import type { DataAssetDto } from "../bindings/DataAssetDto";
 import type { DataFieldDto } from "../bindings/DataFieldDto";
 import type { DeleteResult } from "../bindings/DeleteResult";
@@ -56,6 +59,7 @@ import type { SpriteSheetDto } from "../bindings/SpriteSheetDto";
 import type { TilemapCellDto } from "../bindings/TilemapCellDto";
 import type { TilemapDto } from "../bindings/TilemapDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
+import type { ViewModeDto } from "../bindings/ViewModeDto";
 import type { ViewportDrop } from "../bindings/ViewportDrop";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
 import type { ViewportRect } from "../bindings/ViewportRect";
@@ -63,6 +67,9 @@ import type { ViewportRect } from "../bindings/ViewportRect";
 export type {
   AssetRefDto,
   AssetSnapshot,
+  CollectionDto,
+  MaterialInstanceDto,
+  MatOverridesDto,
   DataAssetDto,
   DataFieldDto,
   DeleteResult,
@@ -162,6 +169,12 @@ export const viewport = {
     invoke("viewport_set_gizmo_space", { space }),
   /** Push the 3D transform-gizmo snap increments (Wave 2). */
   setSnap3d: (snap: Snap3DDto): Promise<void> => invoke("viewport_set_snap3d", { snap }),
+  /**
+   * Set the shading view mode (Lit / Unlit / Wireframe) (R-P2). `Wireframe`
+   * degrades to `Unlit` in the renderer when the GPU lacks line-polygon raster.
+   */
+  setViewMode: (mode: ViewModeDto): Promise<void> =>
+    invoke("viewport_set_view_mode", { mode }),
 };
 
 /**
@@ -378,6 +391,12 @@ export const assets = {
   /** Create a material instance overriding a parent material (P7.4). */
   createMaterialInstance: (parentId: string, name: string | null = null): Promise<string> =>
     invoke<string>("asset_create_material_instance", { parentId, name }),
+  /** Load a material instance for the override editor (parent + resolved baseline + overrides) (E-P2). */
+  getMaterialInstance: (id: string): Promise<MaterialInstanceDto> =>
+    invoke<MaterialInstanceDto>("asset_get_material_instance", { id }),
+  /** Save edited overrides onto a material instance (E-P2). */
+  saveMaterialInstance: (id: string, overrides: MatOverridesDto): Promise<void> =>
+    invoke("asset_save_material_instance", { id, overrides }),
   /** Delete; when still referenced (and not forced) returns the blockers. */
   delete: (id: string, force = false): Promise<DeleteResult> =>
     invoke<DeleteResult>("asset_delete", { id, force }),
@@ -392,6 +411,26 @@ export const assets = {
   tableImport: (id: string, source: string): Promise<void> =>
     invoke("asset_table_import", { id, source }),
   rustSource: (id: string): Promise<string> => invoke<string>("asset_rust_source", { id }),
+};
+
+/**
+ * Named content collections (E-P8): user-defined, persisted groupings of assets
+ * stored at `<project_root>/.infinity/collections.toml`. Every mutation returns
+ * the full updated list and also broadcasts on `collections://changed`. Names
+ * are unique + non-empty (the backend validates). Arg names are camelCase.
+ */
+export const collections = {
+  list: (): Promise<CollectionDto[]> => invoke<CollectionDto[]>("collections_list"),
+  create: (name: string): Promise<CollectionDto[]> =>
+    invoke<CollectionDto[]>("collections_create", { name }),
+  rename: (oldName: string, newName: string): Promise<CollectionDto[]> =>
+    invoke<CollectionDto[]>("collections_rename", { old: oldName, new: newName }),
+  delete: (name: string): Promise<CollectionDto[]> =>
+    invoke<CollectionDto[]>("collections_delete", { name }),
+  add: (name: string, id: string): Promise<CollectionDto[]> =>
+    invoke<CollectionDto[]>("collections_add", { name, id }),
+  remove: (name: string, id: string): Promise<CollectionDto[]> =>
+    invoke<CollectionDto[]>("collections_remove", { name, id }),
 };
 
 /**

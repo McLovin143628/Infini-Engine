@@ -12,11 +12,11 @@ use std::time::Duration;
 
 use inf_asset::{AssetChange, AssetId, AssetKind, AssetWatcher};
 use inf_editor_core::assets::{
-    data, snapshot, sprite_sheet, AssetProject, ImportProgress, ImportQueue,
+    data, material_instance, snapshot, sprite_sheet, AssetProject, ImportProgress, ImportQueue,
 };
 use inf_editor_core::ipc::{
     AssetChanged, AssetRefDto, AssetSnapshot, DataAssetDto, DeleteResult, ImportEventDto,
-    SpriteSheetDto,
+    MatOverridesDto, MatValuesDto, MaterialInstanceDto, SpriteSheetDto,
 };
 use inf_editor_core::thumbnail::{ThumbnailCache, Thumbnailer};
 use inf_material::MaterialAsset;
@@ -557,6 +557,45 @@ pub async fn asset_create_material_instance(
     let id = state.create_material_instance(pid, &name)?;
     emit_changed(&app, &state);
     Ok(id.to_string())
+}
+
+/// Load a material instance for the override editor (E-P2): the parent identity,
+/// the parent's resolved PBR baseline (inherited values), and this instance's
+/// sparse overrides.
+#[tauri::command]
+pub async fn asset_get_material_instance(
+    id: String,
+    state: State<'_, AssetState>,
+) -> Result<MaterialInstanceDto, String> {
+    let id = parse_id(&id)?;
+    state.with_project(|p| {
+        let view = material_instance::get_material_instance(p, id).map_err(|e| e.to_string())?;
+        Ok(MaterialInstanceDto {
+            parent: view.parent.to_string(),
+            parent_name: view.parent_name,
+            resolved: MatValuesDto::from_material(&view.resolved_parent),
+            overrides: MatOverridesDto::from_overrides(&view.overrides),
+        })
+    })
+}
+
+/// Save edited overrides onto a material instance (E-P2). Re-encodes the payload
+/// through the standard rewrite path; the content-hash change invalidates the
+/// thumbnail via `assets://changed`.
+#[tauri::command]
+pub async fn asset_save_material_instance(
+    app: AppHandle,
+    id: String,
+    overrides: MatOverridesDto,
+    state: State<'_, AssetState>,
+) -> Result<(), String> {
+    let id = parse_id(&id)?;
+    let overrides = overrides.to_overrides();
+    state.with_project(|p| {
+        material_instance::save_material_instance(p, id, overrides).map_err(|e| e.to_string())
+    })?;
+    emit_changed(&app, &state);
+    Ok(())
 }
 
 /// Load a data asset (struct/enum/table) for editing. `null` if not a data kind.

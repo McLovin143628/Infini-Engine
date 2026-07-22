@@ -17,9 +17,10 @@ use inf_editor_core::ipc::{
     RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto, SculptOpDto,
     SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto, SeqTrackDto,
     SequenceDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpriteGridDto, SpriteRectDto,
-    SpriteSheetDto, TilemapCellDto, TilemapDto, ToolModeDto, ViewportDrop, ViewportKey,
-    ViewportModeDto, ViewportRect,
+    SpriteSheetDto, TilemapCellDto, TilemapDto, ToolModeDto, ViewModeDto, ViewportDrop,
+    ViewportKey, ViewportModeDto, ViewportRect,
 };
+use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use ts_rs::{Config, TS};
 
 #[test]
@@ -64,6 +65,7 @@ fn export_bindings() {
     SortingLayerDto::export_all(&cfg).expect("export SortingLayerDto");
     CollisionLayerDto::export_all(&cfg).expect("export CollisionLayerDto");
     ViewportModeDto::export_all(&cfg).expect("export ViewportModeDto");
+    ViewModeDto::export_all(&cfg).expect("export ViewModeDto");
     Snap2DDto::export_all(&cfg).expect("export Snap2DDto");
     GizmoModeDto::export_all(&cfg).expect("export GizmoModeDto");
     GizmoSpaceDto::export_all(&cfg).expect("export GizmoSpaceDto");
@@ -85,4 +87,8 @@ fn export_bindings() {
     SeqKeyDto::export_all(&cfg).expect("export SeqKeyDto");
     SeqInterpDto::export_all(&cfg).expect("export SeqInterpDto");
     LevelSettingsDto::export_all(&cfg).expect("export LevelSettingsDto");
+    MatValuesDto::export_all(&cfg).expect("export MatValuesDto");
+    MatOverridesDto::export_all(&cfg).expect("export MatOverridesDto");
+    MaterialInstanceDto::export_all(&cfg).expect("export MaterialInstanceDto");
+    CollectionDto::export_all(&cfg).expect("export CollectionDto");
 }
