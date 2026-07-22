@@ -51,6 +51,12 @@ pub struct SceneDoc {
     /// (schema v3). Defaults preserve pre-v3 behaviour.
     settings: LevelSettings,
     history: EditHistory,
+    /// The pre-preview authored scalars captured when a sequencer scrub arms a
+    /// live preview — `(target, reflection-path, authored-value)` — or `None`
+    /// when no preview is active. A save mid-scrub temporarily rolls the world
+    /// back to these so the file carries the AUTHORED values, then re-applies
+    /// the preview (see [`Self::with_authored_scene`]).
+    preview: Option<Vec<(Uuid, String, f64)>>,
 }
 
 impl Default for SceneDoc {
@@ -70,6 +76,7 @@ impl SceneDoc {
             title: "Untitled".to_string(),
             settings: LevelSettings::default(),
             history: EditHistory::default(),
+            preview: None,
         }
     }
 
@@ -180,6 +187,29 @@ impl SceneDoc {
         entity
     }
 
+    /// Loader / undo parent fix-up: re-attach `guid` under `parent` WITHOUT
+    /// dirtying the document or bumping the version (mirrors [`Self::spawn_bare`]).
+    /// A no-op when `guid` is already correctly parented — so an already-valid,
+    /// parents-precede-children file re-attaches nothing and re-saves
+    /// byte-identically. The two-pass spawn paths (loader + delete→undo) call
+    /// this after every GUID exists, so a child recorded BEFORE its parent (a
+    /// node reparented under a later-created one) lands under the right parent
+    /// instead of silently falling back to the root.
+    pub(crate) fn raw_fixup_parent(&mut self, guid: Uuid, parent: Option<Uuid>) {
+        let Some(child) = self.world.entity_of(guid) else {
+            return;
+        };
+        let current = self
+            .world
+            .parent_of(child)
+            .and_then(|p| self.world.guid_of(p));
+        if current == parent {
+            return;
+        }
+        let parent_entity = parent.and_then(|p| self.world.entity_of(p));
+        self.world.reparent(child, parent_entity);
+    }
+
     /// Empty the document (before a load). Keeps title/version bookkeeping to
     /// the caller.
     pub(crate) fn reset(&mut self) {
@@ -187,6 +217,7 @@ impl SceneDoc {
         self.order.clear();
         self.selection.clear();
         self.settings = LevelSettings::default();
+        self.preview = None;
     }
 
     /// Read one entity's editable component properties (Details, P3.3).
@@ -266,6 +297,64 @@ impl SceneDoc {
             self.bump_version_for_runtime();
         }
         ok
+    }
+
+    // ── sequencer preview guard (P11.4) ──────────────────────────────────────
+    //
+    // A scrub writes interpolated values into the live world through
+    // `write_prop_preview` (non-dirtying). While that preview is live the world
+    // no longer holds the AUTHORED scene, so a save mid-scrub would persist the
+    // interpolated values. These seams let the scrub arm a guard holding the
+    // pre-preview authored scalars; [`Self::with_authored_scene`] rolls the world
+    // back to them for the duration of a serialize, then re-applies the preview.
+
+    /// Whether a non-dirtying sequencer preview (scrub) is currently live.
+    pub fn is_previewing(&self) -> bool {
+        self.preview.is_some()
+    }
+
+    /// Arm the preview guard with the pre-preview authored scalars to restore on
+    /// save — `(target, reflection-path, authored-value)`. Called by the scrub
+    /// seam ([`crate::sequencer::apply_sequence_at`]) as it starts writing
+    /// interpolated values; [`Self::end_preview`] disarms it.
+    pub fn begin_preview(&mut self, authored: Vec<(Uuid, String, f64)>) {
+        self.preview = Some(authored);
+    }
+
+    /// Disarm the preview guard (the scrub restored the authored values). Called
+    /// by [`crate::sequencer::restore_snapshot`].
+    pub fn end_preview(&mut self) {
+        self.preview = None;
+    }
+
+    /// Run `f` against the AUTHORED scene while a sequencer preview is live: the
+    /// world holds interpolated scrub scalars, so this rolls the previewed
+    /// scalars back to their pre-preview authored values, runs `f` (e.g.
+    /// serialize), then re-applies the preview — leaving the editor still showing
+    /// the preview. A plain passthrough when no preview is armed, so a normal
+    /// save is byte-for-byte unchanged.
+    pub fn with_authored_scene<R>(&mut self, f: impl FnOnce(&SceneDoc) -> R) -> R {
+        let Some(authored) = self.preview.take() else {
+            return f(self);
+        };
+        // Remember the live preview scalars so we can re-apply them after `f`.
+        let live: Vec<(Uuid, String, f64)> = authored
+            .iter()
+            .filter_map(|(t, p, _)| {
+                crate::sequencer::read_scalar(self, *t, p).map(|v| (*t, p.clone(), v))
+            })
+            .collect();
+        // Roll the world back to the authored values, run `f`, then restore the
+        // preview so the editor keeps showing it.
+        for (t, p, v) in &authored {
+            crate::sequencer::write_scalar_preview(self, *t, p, *v);
+        }
+        let out = f(self);
+        for (t, p, v) in &live {
+            crate::sequencer::write_scalar_preview(self, *t, p, *v);
+        }
+        self.preview = Some(authored);
+        out
     }
 
     pub fn rename(&mut self, guid: Uuid, name: &str) {

@@ -70,7 +70,21 @@ pub fn emit_world_delta(app: &AppHandle, state: &SceneState) {
         Ok(mut doc) => doc.snapshot(),
         Err(_) => return,
     };
+    // Hold `last` across the compare-store so two emitters (a command thread and
+    // the viewport thread firing `WorldChanged`) can't interleave and ship a
+    // backward delta. The snapshot's monotonically-increasing `version` is the
+    // guard: if what we snapshotted is STRICTLY older than the last emitted
+    // state, a newer emit already won the race — drop this one, leaving `last`
+    // un-regressed. (Equal versions still emit: a save clears `dirty` without
+    // bumping the version, and that flag change must reach the frontend.
+    // `scene_open` / `scene_new` reset `last` to `None`, so a fresh,
+    // lower-versioned document still emits its full delta.)
     let mut last = state.last.lock().expect("last snapshot lock");
+    if let Some(prev) = last.as_ref() {
+        if next.version < prev.version {
+            return;
+        }
+    }
     let delta = match last.as_ref() {
         Some(prev) => diff(prev, &next),
         None => diff(&empty_snapshot(), &next),
@@ -492,11 +506,16 @@ pub async fn scene_save(
     path: Option<String>,
 ) -> Result<(), String> {
     let path = resolve_path(&app, path)?;
-    {
+    // Encode under the doc lock (with any live sequencer scrub rolled back to the
+    // authored values), then write the files AFTER releasing the lock — the
+    // viewport locks the same doc every frame, so disk IO must not be held under it.
+    let enc = {
         let mut doc = lock(&state.doc)?;
-        serialize::save(&doc, &path, None)?;
+        let enc = doc.with_authored_scene(|d| serialize::encode_scene(d, None))?;
         doc.mark_saved();
-    }
+        enc
+    };
+    serialize::write_encoded(&enc, &path)?;
     // A clean save invalidates the crash-recovery file.
     if let Ok(dir) = data_dir(&app) {
         serialize::clear_recovery(&dir);
@@ -518,6 +537,10 @@ pub async fn scene_open(
         *doc = loaded;
         doc.snapshot()
     };
+    // A fresh document restarts the version counter (lower than the doc we just
+    // replaced), so drop the stale baseline — otherwise the version-monotonic
+    // guard in `emit_world_delta` would suppress this scene's full delta.
+    *state.last.lock().map_err(|e| e.to_string())? = None;
     emit_world_delta(&app, &state);
     Ok(snap)
 }
@@ -527,10 +550,15 @@ pub async fn scene_open(
 #[tauri::command]
 pub async fn scene_autosave(app: AppHandle, state: State<'_, SceneState>) -> Result<(), String> {
     let dir = data_dir(&app)?;
-    let doc = lock(&state.doc)?;
-    if doc.is_dirty() {
-        serialize::write_recovery(&doc, &dir)?;
-    }
+    // Encode under the lock (authored values if a scrub is live), write outside it.
+    let payload = {
+        let mut doc = lock(&state.doc)?;
+        if !doc.is_dirty() {
+            return Ok(());
+        }
+        doc.with_authored_scene(|d| serialize::encode(&serialize::to_scene_file(d)))?
+    };
+    serialize::write_recovery_bytes(&payload, &dir)?;
     Ok(())
 }
 
@@ -544,6 +572,10 @@ pub async fn scene_new(
         *doc = SceneDoc::new();
         doc.snapshot()
     };
+    // Reset the delta baseline: the fresh document's version counter restarts
+    // below the replaced one, which the version-monotonic guard would otherwise
+    // treat as a stale (backward) emit and drop.
+    *state.last.lock().map_err(|e| e.to_string())? = None;
     emit_world_delta(&app, &state);
     Ok(snap)
 }

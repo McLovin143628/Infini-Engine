@@ -869,7 +869,9 @@ struct SceneFileHeader {
 pub struct SceneFile {
     pub schema_version: u32,
     pub title: String,
-    /// Entities in creation order (parents precede children).
+    /// Entities in creation order. Parent links are resolved by GUID on load
+    /// (see [`apply_to_doc`]), so a child may appear before its parent here (a
+    /// node reparented under a later-created one) without losing the hierarchy.
     pub entities: Vec<EntityRecord>,
     /// File-level simulation settings (schema v3). `#[serde(default)]` keeps the
     /// dual-format (TOML/JSON) round trip working for older, settings-less docs.
@@ -1036,8 +1038,16 @@ pub fn migrate(file: SceneFile) -> Result<SceneFile, String> {
     Ok(file)
 }
 
-/// Rebuild a document from a decoded [`SceneFile`]. Entities are recreated in
-/// file order, so parents always exist before their children.
+/// Rebuild a document from a decoded [`SceneFile`].
+///
+/// Two passes, so the hierarchy survives regardless of the file's entity order:
+/// the first spawns every entity with its components (resolving each parent by
+/// GUID where it already exists), and the second re-attaches any child whose
+/// parent appeared LATER in the file — a node reparented under a later-created
+/// one, which a single in-order pass would silently drop to the root
+/// (`spawn_bare` resolves an unspawned parent GUID to `None`). The file still
+/// writes entities in `doc.order` (creation) sequence and `doc.order` mirrors
+/// the file sequence after load, so `save→load→save` stays byte-identical.
 pub fn apply_to_doc(doc: &mut SceneDoc, file: &SceneFile) {
     doc.reset();
     for rec in &file.entities {
@@ -1131,6 +1141,13 @@ pub fn apply_to_doc(doc: &mut SceneDoc, file: &SceneFile) {
             w.entity_mut(e).insert(*c);
         }
     }
+    // Second pass: now that every GUID exists, re-attach any child whose parent
+    // didn't resolve in the first pass (a reparent under a later-created node).
+    // A no-op for the common parents-precede-children ordering — `doc.order` is
+    // untouched, so an already-valid file re-saves byte-identically.
+    for rec in &file.entities {
+        doc.raw_fixup_parent(rec.guid, rec.parent);
+    }
     doc.set_title(&file.title);
     doc.set_settings(file.settings);
     doc.world_mut().mark_dirty();
@@ -1174,21 +1191,53 @@ pub fn sidecar_path(payload_path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Save `doc` to `path` (payload) + its `.toml` sidecar. Returns the level GUID
-/// written (fresh if `guid` is `None`).
-pub fn save(doc: &SceneDoc, path: &Path, guid: Option<Uuid>) -> Result<Uuid, String> {
+/// A scene encoded to memory: the bincode payload + its TOML sidecar text +
+/// the level GUID written. Splitting the encode (which needs the doc) from the
+/// file writes lets a caller hold the doc lock only for the encode and do disk
+/// IO after releasing it (the viewport locks the same doc every frame) — see
+/// [`encode_scene`] / [`write_encoded`].
+pub struct EncodedScene {
+    pub guid: Uuid,
+    pub payload: Vec<u8>,
+    pub sidecar_toml: String,
+}
+
+/// Encode `doc` to its payload + sidecar TOML in memory (no file IO). Pair with
+/// [`write_encoded`] to persist outside the doc lock. `guid` reuses an existing
+/// level GUID or mints a fresh one when `None`.
+pub fn encode_scene(doc: &SceneDoc, guid: Option<Uuid>) -> Result<EncodedScene, String> {
     let file = to_scene_file(doc);
     let payload = encode(&file)?;
     let guid = guid.unwrap_or_else(Uuid::new_v4);
     let side = sidecar(doc, guid, &payload);
-    let toml = toml::to_string_pretty(&side).map_err(|e| format!("sidecar toml: {e}"))?;
+    let sidecar_toml = toml::to_string_pretty(&side).map_err(|e| format!("sidecar toml: {e}"))?;
+    Ok(EncodedScene {
+        guid,
+        payload,
+        sidecar_toml,
+    })
+}
 
+/// Write a pre-[`encode_scene`]d scene to `path` (payload) + its `.toml` sidecar
+/// — the file-IO half of [`save`], callable after the doc lock is released.
+pub fn write_encoded(enc: &EncodedScene, path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
-    std::fs::write(path, &payload).map_err(|e| format!("write payload: {e}"))?;
-    std::fs::write(sidecar_path(path), toml).map_err(|e| format!("write sidecar: {e}"))?;
-    Ok(guid)
+    std::fs::write(path, &enc.payload).map_err(|e| format!("write payload: {e}"))?;
+    std::fs::write(sidecar_path(path), &enc.sidecar_toml)
+        .map_err(|e| format!("write sidecar: {e}"))?;
+    Ok(())
+}
+
+/// Save `doc` to `path` (payload) + its `.toml` sidecar. Returns the level GUID
+/// written (fresh if `guid` is `None`). Encode + write are the same bytes in the
+/// same order as before — the `encode_scene` / `write_encoded` split is a seam,
+/// not a behaviour change.
+pub fn save(doc: &SceneDoc, path: &Path, guid: Option<Uuid>) -> Result<Uuid, String> {
+    let enc = encode_scene(doc, guid)?;
+    write_encoded(&enc, path)?;
+    Ok(enc.guid)
 }
 
 /// Load a `.inf_lvl` payload into a fresh document.
@@ -1210,8 +1259,15 @@ pub fn recovery_path(dir: &Path) -> PathBuf {
 
 /// Write the document to the recovery file (called on a debounced autosave).
 pub fn write_recovery(doc: &SceneDoc, dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?;
     let payload = encode(&to_scene_file(doc))?;
+    write_recovery_bytes(&payload, dir)
+}
+
+/// Write a pre-encoded recovery payload to `dir` — the file-IO half of
+/// [`write_recovery`], callable after the doc lock is released (the autosave
+/// command encodes under the lock, then writes outside it).
+pub fn write_recovery_bytes(payload: &[u8], dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?;
     std::fs::write(recovery_path(dir), payload).map_err(|e| format!("write recovery: {e}"))
 }
 
@@ -1290,6 +1346,79 @@ mod tests {
         let bytes2 = encode(&to_scene_file(&doc2)).unwrap();
 
         assert_eq!(bytes1, bytes2, "save→load→save must be byte-identical");
+    }
+
+    /// Order-independent parent lookup by GUID.
+    fn parent_guid(doc: &SceneDoc, g: Uuid) -> Option<Uuid> {
+        let e = doc.entity_of(g)?;
+        doc.world()
+            .parent_of(e)
+            .and_then(|p| doc.world().guid_of(p))
+    }
+
+    /// A node reparented under a LATER-created node survives save→load with its
+    /// hierarchy intact, and the reload re-saves byte-identically. Repro of the
+    /// "drag Cube under a later Empty, reopen → Cube silently became a root" bug:
+    /// `doc.order` is creation order (A before B), but A's parent (B) is created
+    /// after A, so a single in-order spawn pass can't resolve it — the two-pass
+    /// parent fix-up in [`apply_to_doc`] closes the gap.
+    #[test]
+    fn reparent_under_later_created_node_survives_round_trip() {
+        let mut doc = SceneDoc::new();
+        let a = doc.create(SpawnKind::Cube, "A", None);
+        let b = doc.create(SpawnKind::Empty, "B", None); // created AFTER A
+        assert!(doc.reparent(a, Some(b)), "A reparented under B");
+
+        // The child A precedes its parent B in the file's entity sequence.
+        let file1 = to_scene_file(&doc);
+        let a_at = file1.entities.iter().position(|r| r.guid == a).unwrap();
+        let b_at = file1.entities.iter().position(|r| r.guid == b).unwrap();
+        assert!(a_at < b_at, "child A is written before its parent B");
+
+        let bytes1 = encode(&file1).unwrap();
+        let mut loaded = SceneDoc::new();
+        apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
+
+        // Hierarchy intact: A is still parented under B (not silently a root).
+        assert_eq!(
+            parent_guid(&loaded, a),
+            Some(b),
+            "A stays under B across save→load"
+        );
+        // And the reload re-saves byte-identically.
+        let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "reparented hierarchy save→load→save is byte-identical"
+        );
+    }
+
+    /// A deeper case: a grandchild written before both its parent and grandparent
+    /// (creation order C, B, A with A←B←C parenting) still rebuilds the full
+    /// chain across the round trip.
+    #[test]
+    fn deep_reparent_chain_survives_round_trip() {
+        let mut doc = SceneDoc::new();
+        // Create so every child precedes its parent in creation order.
+        let c = doc.create(SpawnKind::Cube, "C", None);
+        let b = doc.create(SpawnKind::Empty, "B", None);
+        let a = doc.create(SpawnKind::Empty, "A", None);
+        assert!(doc.reparent(b, Some(a)));
+        assert!(doc.reparent(c, Some(b)));
+
+        let bytes1 = encode(&to_scene_file(&doc)).unwrap();
+        let mut loaded = SceneDoc::new();
+        apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
+
+        assert_eq!(parent_guid(&loaded, c), Some(b), "C under B");
+        assert_eq!(parent_guid(&loaded, b), Some(a), "B under A");
+        assert_eq!(parent_guid(&loaded, a), None, "A is a root");
+
+        let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "deep reparented chain is byte-identical on re-save"
+        );
     }
 
     #[test]

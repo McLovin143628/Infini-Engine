@@ -142,12 +142,20 @@ impl EditCommand {
         match self {
             EditCommand::Create { record, .. } => doc.raw_delete(&[record.guid]),
             EditCommand::Delete { items, .. } => {
-                // Recreate in ascending original-slot order so parents precede
-                // children (creation order guarantees that).
+                // Two passes so the hierarchy survives regardless of the order
+                // slots: (1) respawn every record at its slot — a record whose
+                // parent sits at a LATER slot (a reparent under a later-created
+                // node) spawns to the root because its parent isn't back yet;
+                // (2) fix up every parent link now that all GUIDs exist again.
+                // The second pass is a no-op for the common parents-precede-
+                // children ordering.
                 let mut items: Vec<&(usize, EntityRecord)> = items.iter().collect();
                 items.sort_by_key(|(at, _)| *at);
-                for (at, record) in items {
+                for (at, record) in &items {
                     doc.raw_spawn_record(record, *at);
+                }
+                for (_, record) in &items {
+                    doc.raw_fixup_parent(record.guid, record.parent);
                 }
             }
             EditCommand::Rename { guid, before, .. } => doc.raw_rename(*guid, before),
@@ -196,6 +204,10 @@ pub struct EditHistory {
     undo: Vec<Transaction>,
     redo: Vec<Transaction>,
     open: Option<Transaction>,
+    /// Open-transaction nesting depth. `begin` increments it, `commit`
+    /// decrements it; the transaction closes only when the OUTERMOST commit
+    /// brings this back to zero, so begin/begin/commit/commit nests correctly.
+    depth: u32,
     limit: usize,
 }
 
@@ -205,6 +217,7 @@ impl Default for EditHistory {
             undo: Vec::new(),
             redo: Vec::new(),
             open: None,
+            depth: 0,
             limit: HISTORY_LIMIT,
         }
     }
@@ -240,13 +253,15 @@ impl EditHistory {
     }
 
     pub(crate) fn begin(&mut self, label: &str) {
-        // Nested begins fold into the outer transaction.
+        // Nested begins fold into the outer transaction; the depth counter tracks
+        // the nesting so only the matching outermost commit closes it.
         if self.open.is_none() {
             self.open = Some(Transaction {
                 label: label.to_string(),
                 commands: Vec::new(),
             });
         }
+        self.depth += 1;
     }
 
     /// Record a command: append to the open transaction, or commit it as a
@@ -264,6 +279,13 @@ impl EditHistory {
     }
 
     pub(crate) fn commit(&mut self) {
+        // Only the outermost commit closes the transaction; inner commits just
+        // unwind one level of nesting.
+        if self.depth > 1 {
+            self.depth -= 1;
+            return;
+        }
+        self.depth = 0;
         if let Some(txn) = self.open.take() {
             if !txn.commands.is_empty() {
                 self.push(txn);
@@ -299,6 +321,7 @@ impl EditHistory {
         self.undo.clear();
         self.redo.clear();
         self.open = None;
+        self.depth = 0;
     }
 }
 
@@ -430,5 +453,64 @@ mod tests {
             full,
             "deleted subtree must round-trip"
         );
+    }
+
+    /// Deleting a reparented pair together and undoing restores the hierarchy
+    /// even when the child sits at an EARLIER order slot than its parent (A
+    /// created before B, then A reparented under B). The two-pass respawn
+    /// (spawn-all, then fix-up-parents) re-attaches A under B instead of
+    /// silently rooting it.
+    #[test]
+    fn delete_undo_restores_reparent_under_later_node() {
+        let mut doc = SceneDoc::new();
+        let a = doc.edit_create(SpawnKind::Cube, "A", None);
+        let b = doc.edit_create(SpawnKind::Empty, "B", None); // later order slot
+        assert!(doc.edit_reparent(a, Some(b)));
+
+        doc.edit_delete(&[a, b]);
+        assert!(doc.snapshot().nodes.is_empty(), "both deleted");
+        assert!(doc.undo());
+
+        // A is restored UNDER B (not as a root).
+        let ea = doc.entity_of(a).expect("A restored by undo");
+        let parent = doc
+            .world()
+            .parent_of(ea)
+            .and_then(|p| doc.world().guid_of(p));
+        assert_eq!(parent, Some(b), "A stays under B after delete→undo");
+        assert!(doc.entity_of(b).is_some(), "B restored by undo");
+    }
+
+    /// Nested `begin`/`commit` collapse into ONE undo step: an inner commit must
+    /// not close the outer transaction (only the outermost commit does).
+    #[test]
+    fn nested_transactions_close_on_outermost_commit() {
+        let mut doc = SceneDoc::new();
+        let a = doc.edit_create(SpawnKind::Cube, "A", None);
+
+        let at = |x: f64| Transform {
+            translation: Vec3d::new(x, 0.0, 0.0),
+            ..Transform::IDENTITY
+        };
+        doc.begin_transaction("outer");
+        doc.edit_set_transform(a, at(1.0));
+        doc.begin_transaction("inner");
+        doc.edit_set_transform(a, at(2.0));
+        doc.commit_transaction(); // inner: must NOT close the transaction
+        doc.edit_set_transform(a, at(3.0));
+        doc.commit_transaction(); // outer: closes now
+        assert_eq!(translation_x(&doc, a), 3.0);
+
+        // One undo reverts all three edits (a single grouped step), not just the
+        // last — the discriminator against the old fold-on-first-commit bug.
+        assert!(doc.undo());
+        assert_eq!(
+            translation_x(&doc, a),
+            0.0,
+            "nested begins collapse into one undo step"
+        );
+        // The remaining entry is the create.
+        assert!(doc.undo());
+        assert!(!doc.can_undo());
     }
 }

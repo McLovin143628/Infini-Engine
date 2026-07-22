@@ -507,6 +507,15 @@ pub fn capture_snapshot(doc: &SceneDoc, seq: &Sequence) -> ScrubSnapshot {
 
 /// Apply a sequence's sampled values at time `t` as a non-dirtying live preview.
 pub fn apply_sequence_at(doc: &mut SceneDoc, seq: &Sequence, t: f64) {
+    // Arm the preview guard the first time a scrub gesture touches the scene, so
+    // a save mid-scrub persists the AUTHORED values, not these interpolated ones
+    // (see [`SceneDoc::with_authored_scene`]). The guard holds the same
+    // pre-preview snapshot the Ring-2 scrub session restores on stop; it is
+    // disarmed by [`restore_snapshot`].
+    if !doc.is_previewing() {
+        let authored = capture_snapshot(doc, seq).saved;
+        doc.begin_preview(authored);
+    }
     for (target, path, value) in sample(seq, t) {
         write_scalar_preview(doc, target, &path, value);
     }
@@ -518,6 +527,8 @@ pub fn restore_snapshot(doc: &mut SceneDoc, snapshot: &ScrubSnapshot) {
     for (target, path, value) in &snapshot.saved {
         write_scalar_preview(doc, *target, path, *value);
     }
+    // The scrub restored the authored values — disarm the save-time guard.
+    doc.end_preview();
 }
 
 #[cfg(test)]
@@ -787,5 +798,61 @@ mod tests {
         let snap = capture_snapshot(&doc, &seq);
         assert_eq!(snap.saved.len(), 1);
         assert_eq!(snap.saved[0].2, 7.0);
+    }
+
+    #[test]
+    fn saving_mid_scrub_persists_authored_value_not_preview() {
+        use crate::scene::serialize;
+
+        let mut doc = SceneDoc::new();
+        let cube = doc.create(SpawnKind::Cube, "Cube", None);
+        // Author x = 1.0 as the real (persisted) scene value.
+        let tp = doc
+            .world()
+            .registry()
+            .type_path_for("Transform")
+            .unwrap()
+            .to_string();
+        doc.write_prop(cube, &tp, "translation", &PropValue::Vec3([1.0, 0.0, 0.0]));
+
+        // Scrub a track that previews x = 5.0.
+        let mut seq = Sequence::new("s");
+        seq.set_key(cube, "Transform.translation.x", 0.0, 5.0, Interp::Linear);
+        seq.set_key(cube, "Transform.translation.x", 2.0, 9.0, Interp::Linear);
+        let snap = capture_snapshot(&doc, &seq);
+        apply_sequence_at(&mut doc, &seq, 0.0);
+        assert_eq!(
+            read_scalar(&doc, cube, "Transform.translation.x"),
+            Some(5.0)
+        );
+        assert!(doc.is_previewing(), "the scrub armed the preview guard");
+
+        // Save mid-scrub: the file must carry the AUTHORED 1.0, not the preview.
+        let bytes = doc
+            .with_authored_scene(|d| serialize::encode(&serialize::to_scene_file(d)))
+            .unwrap();
+        let mut reloaded = SceneDoc::new();
+        serialize::apply_to_doc(&mut reloaded, &serialize::decode(&bytes).unwrap());
+        assert_eq!(
+            read_scalar(&reloaded, cube, "Transform.translation.x"),
+            Some(1.0),
+            "the saved file carries the authored value, not the scrub preview"
+        );
+
+        // The editor still shows the preview after the save.
+        assert_eq!(
+            read_scalar(&doc, cube, "Transform.translation.x"),
+            Some(5.0),
+            "the live scene keeps showing the preview after saving"
+        );
+        assert!(doc.is_previewing());
+
+        // Stopping the scrub restores the authored value and disarms the guard.
+        restore_snapshot(&mut doc, &snap);
+        assert_eq!(
+            read_scalar(&doc, cube, "Transform.translation.x"),
+            Some(1.0)
+        );
+        assert!(!doc.is_previewing());
     }
 }
