@@ -11,6 +11,7 @@
 import { create } from "zustand";
 
 import type { DetailsDto } from "../bindings/DetailsDto";
+import type { LevelSettingsDto } from "../bindings/LevelSettingsDto";
 import type { PropValueDto } from "../bindings/PropValueDto";
 import type { SceneDelta } from "../bindings/SceneDelta";
 import type { SceneNode } from "../bindings/SceneNode";
@@ -37,6 +38,17 @@ function errText(e: unknown): string {
  */
 let detailsToken = 0;
 
+/**
+ * Debounce + in-flight guard for World Settings writes (R-P4). The panel edits
+ * fire rapidly (typing / dragging); we coalesce them into one `scene.setSettings`
+ * ~300 ms after the last change. While a local edit is pending, `world://delta`
+ * refetches are suppressed so an echoing delta can't clobber the value the user
+ * is still editing.
+ */
+let settingsWriteTimer: ReturnType<typeof setTimeout> | null = null;
+let settingsWritePending = false;
+const SETTINGS_WRITE_DEBOUNCE_MS = 300;
+
 interface SceneState {
   nodes: Record<string, SceneNode>;
   roots: string[];
@@ -51,6 +63,9 @@ interface SceneState {
   undoLabel: string | null;
   redoLabel: string | null;
   details: DetailsDto | null;
+  /** The level's file-level settings (gravity / sim rate / render block), or null
+   * until the first `loadLevelSettings` resolves (World Settings panel, R-P4). */
+  levelSettings: LevelSettingsDto | null;
   /** True once the first snapshot has loaded. */
   ready: boolean;
 
@@ -58,6 +73,10 @@ interface SceneState {
   applyDelta: (d: SceneDelta) => void;
   toggleCollapsed: (guid: string) => void;
   refreshDetails: () => Promise<void>;
+  /** Fetch the level settings from the backend (skipped while a local edit is pending). */
+  loadLevelSettings: () => Promise<void>;
+  /** Optimistically set the level settings + debounce a `scene.setSettings` write. */
+  setLevelSettings: (next: LevelSettingsDto) => void;
 
   select: (guids: string[], additive?: boolean) => void;
   createEntity: (kind: SpawnKind, parent?: string | null) => Promise<string>;
@@ -101,6 +120,7 @@ export const useSceneStore = create<SceneState>((set, get) => ({
   undoLabel: null,
   redoLabel: null,
   details: null,
+  levelSettings: null,
   ready: false,
 
   applySnapshot: (s) => {
@@ -118,10 +138,12 @@ export const useSceneStore = create<SceneState>((set, get) => ({
       ready: true,
     });
     void get().refreshDetails();
+    void get().loadLevelSettings();
   },
 
   applyDelta: (d) => {
     const prevSelection = get().selection;
+    const prevVersion = get().version;
     set((state) => {
       const nodes = { ...state.nodes };
       for (const guid of d.removed) delete nodes[guid];
@@ -143,6 +165,10 @@ export const useSceneStore = create<SceneState>((set, get) => ({
     // Re-fetch Details only when the selection set changed (property edits
     // update it directly from their command result).
     if (!sameSet(prevSelection, d.selection)) void get().refreshDetails();
+    // Re-fetch level settings on any real document change (undo/redo of a
+    // settings edit, a fresh load) — cheap, and guarded against clobbering an
+    // in-flight local edit inside `loadLevelSettings`.
+    if (Number(d.version) !== prevVersion) void get().loadLevelSettings();
   },
 
   toggleCollapsed: (guid) =>
@@ -163,6 +189,36 @@ export const useSceneStore = create<SceneState>((set, get) => ({
       // persistent failure would spam the status bar.
       if (token === detailsToken) console.error("scene.details failed", e);
     }
+  },
+
+  loadLevelSettings: async () => {
+    // Don't clobber a value the user is actively editing (a debounced write is
+    // queued/in-flight); the write's own delta will refetch once settled.
+    if (settingsWritePending) return;
+    try {
+      const s = await sceneIpc.getSettings();
+      if (settingsWritePending) return; // an edit started during the await
+      set({ levelSettings: s });
+    } catch (e) {
+      console.error("scene.getSettings failed", e);
+    }
+  },
+
+  setLevelSettings: (next) => {
+    set({ levelSettings: next }); // optimistic — the panel reflects it instantly
+    settingsWritePending = true;
+    if (settingsWriteTimer) clearTimeout(settingsWriteTimer);
+    settingsWriteTimer = setTimeout(() => {
+      settingsWriteTimer = null;
+      void sceneIpc
+        .setSettings(next)
+        .catch((e) =>
+          useShellStore.getState().pushStatus(`World settings edit failed: ${errText(e)}`),
+        )
+        .finally(() => {
+          settingsWritePending = false;
+        });
+    }, SETTINGS_WRITE_DEBOUNCE_MS);
   },
 
   select: (guids, additive = false) => {

@@ -15,11 +15,14 @@
  */
 import type { ReactNode } from "react";
 
+import type { LevelSettingsDto } from "../../bindings/LevelSettingsDto";
+import type { RenderSettingsRecordDto } from "../../bindings/RenderSettingsRecordDto";
 import {
   CheckboxField,
   NumberField,
   PropertyRow,
   PropertySection,
+  Vec3Field,
 } from "../../components/propertyRows";
 import { useProjectStore } from "../../stores/projectStore";
 import { useSceneStore } from "../../stores/sceneStore";
@@ -40,6 +43,13 @@ export default function WorldSettingsPanel() {
   const selCount = useSceneStore((s) => s.selection.length);
 
   const project = useProjectStore((s) => s.current);
+
+  const settings = useSceneStore((s) => s.levelSettings);
+  const setLevelSettings = useSceneStore((s) => s.setLevelSettings);
+  const patchWorld = (patch: Partial<LevelSettingsDto>) =>
+    settings && setLevelSettings({ ...settings, ...patch });
+  const patchRender = (patch: Partial<RenderSettingsRecordDto>) =>
+    settings && setLevelSettings({ ...settings, render: { ...settings.render, ...patch } });
 
   const mode = useViewportStore((s) => s.mode);
   const setMode = useViewportStore((s) => s.setMode);
@@ -80,6 +90,154 @@ export default function WorldSettingsPanel() {
           <ReadOnly>{version}</ReadOnly>
         </PropertyRow>
       </PropertySection>
+
+      {settings && (
+        <>
+          <PropertySection title="World">
+            <PropertyRow label="Gravity 2D">
+              <div className="flex min-w-0 flex-1 gap-1">
+                <NumberField
+                  value={settings.gravity_2d[0]}
+                  step={0.1}
+                  onChange={(v) => patchWorld({ gravity_2d: [v, settings.gravity_2d[1]] })}
+                />
+                <NumberField
+                  value={settings.gravity_2d[1]}
+                  step={0.1}
+                  onChange={(v) => patchWorld({ gravity_2d: [settings.gravity_2d[0], v] })}
+                />
+              </div>
+            </PropertyRow>
+            <PropertyRow label="Gravity 3D">
+              <Vec3Field
+                value={settings.gravity_3d}
+                onChange={(v) => patchWorld({ gravity_3d: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Sim Rate (Hz)">
+              <NumberField
+                value={settings.sim_hz}
+                step={1}
+                onChange={(v) => patchWorld({ sim_hz: v })}
+              />
+            </PropertyRow>
+          </PropertySection>
+
+          <PropertySection title="Rendering">
+            <PropertyRow label="Exposure">
+              <NumberField
+                value={settings.render.exposure}
+                step={0.1}
+                onChange={(v) => patchRender({ exposure: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Dither">
+              <CheckboxField
+                value={settings.render.dither}
+                onChange={(v) => patchRender({ dither: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Temporal AA">
+              <CheckboxField
+                value={settings.render.taa}
+                onChange={(v) => patchRender({ taa: v })}
+              />
+            </PropertyRow>
+          </PropertySection>
+
+          <PropertySection title="Bloom">
+            <PropertyRow label="Enabled">
+              <CheckboxField
+                value={settings.render.bloom_enabled}
+                onChange={(v) => patchRender({ bloom_enabled: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Threshold">
+              <NumberField
+                value={settings.render.bloom_threshold}
+                step={0.05}
+                onChange={(v) => patchRender({ bloom_threshold: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Knee">
+              <NumberField
+                value={settings.render.bloom_knee}
+                step={0.05}
+                onChange={(v) => patchRender({ bloom_knee: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Intensity">
+              <NumberField
+                value={settings.render.bloom_intensity}
+                step={0.01}
+                onChange={(v) => patchRender({ bloom_intensity: v })}
+              />
+            </PropertyRow>
+          </PropertySection>
+
+          <PropertySection title="SSAO">
+            <PropertyRow label="Enabled">
+              <CheckboxField
+                value={settings.render.ssao_enabled}
+                onChange={(v) => patchRender({ ssao_enabled: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Radius">
+              <NumberField
+                value={settings.render.ssao_radius}
+                step={0.05}
+                onChange={(v) => patchRender({ ssao_radius: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Intensity">
+              <NumberField
+                value={settings.render.ssao_intensity}
+                step={0.05}
+                onChange={(v) => patchRender({ ssao_intensity: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Bias">
+              <NumberField
+                value={settings.render.ssao_bias}
+                step={0.005}
+                onChange={(v) => patchRender({ ssao_bias: v })}
+              />
+            </PropertyRow>
+          </PropertySection>
+
+          <PropertySection title="Shadows">
+            <PropertyRow label="Enabled">
+              <CheckboxField
+                value={settings.render.shadows_enabled}
+                onChange={(v) => patchRender({ shadows_enabled: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Max Distance">
+              <NumberField
+                value={settings.render.shadows_max_distance}
+                step={5}
+                onChange={(v) => patchRender({ shadows_max_distance: v })}
+              />
+            </PropertyRow>
+          </PropertySection>
+
+          <PropertySection title="Global Illumination">
+            <PropertyRow label="Enabled">
+              <CheckboxField
+                value={settings.render.gi_enabled}
+                onChange={(v) => patchRender({ gi_enabled: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Intensity">
+              <NumberField
+                value={settings.render.gi_intensity}
+                step={0.05}
+                onChange={(v) => patchRender({ gi_intensity: v })}
+              />
+            </PropertyRow>
+          </PropertySection>
+        </>
+      )}
 
       <PropertySection title="Project">
         {project ? (

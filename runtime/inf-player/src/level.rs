@@ -53,7 +53,7 @@ use inf_ecs::components::{
 use inf_ecs::{EcsWorld, Guid};
 use inf_pcg::height::FnHeight;
 use inf_pcg::{PcgAssetPayload, Region};
-use inf_scene::RuntimeEntity;
+use inf_scene::{RenderSettingsRecord, RuntimeEntity};
 
 /// The cook's default pack file name (kept in sync with
 /// `inf_packager::DEFAULT_PACK_NAME`; duplicated here so the shipped player does
@@ -82,6 +82,10 @@ pub struct BuiltWorld {
     pub gravity: DVec2,
     /// Fixed update rate (Hz).
     pub hz: f64,
+    /// The level's scene-persisted render block (R-P4 · schema v8): post /
+    /// exposure / lighting the render host maps onto the live `RenderSettings`
+    /// (see `crate::render::apply_record`). Defaults for a settings-less level.
+    pub render: RenderSettingsRecord,
     /// A human label for logs / the window title.
     pub label: String,
     /// Resolved `.inf_sm` state machines keyed by asset GUID (P11.4) — the map
@@ -323,6 +327,7 @@ impl WorldBuilder for InfSceneWorldBuilder {
             actors,
             gravity,
             hz,
+            render: settings.render,
             label: if title.is_empty() {
                 "level".to_string()
             } else {

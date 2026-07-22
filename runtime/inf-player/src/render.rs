@@ -27,12 +27,13 @@ use inf_ecs::components::{
 use inf_ecs::Guid;
 use inf_math::FloatingOrigin;
 use inf_render::{
-    detect_tier, expand_nine_slice, expand_text, handle_from_guid, EngineRenderer, GpuContext,
-    HAlign, LightKind, MeshInstance, NineSliceParams, PrebatchedRun, PrimMesh, RenderChunk,
-    RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
-    RenderTerrainTile, RenderTilemap, RenderView, SurfaceChain, TextParams, TilemapParams,
-    VgeomAsset, VgeomInstance, BUILTIN_FONT_TEXTURE,
+    detect_tier, expand_nine_slice, expand_text, handle_from_guid, BloomSettings, EngineRenderer,
+    GiSettings, GpuContext, HAlign, LightKind, MeshInstance, NineSliceParams, PrebatchedRun,
+    PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
+    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings, SsaoSettings,
+    SurfaceChain, TextParams, TilemapParams, VgeomAsset, VgeomInstance, BUILTIN_FONT_TEXTURE,
 };
+use inf_scene::RenderSettingsRecord;
 
 use crate::runtime_sim::RuntimeSim;
 use crate::vmesh::VmeshRegistry;
@@ -57,12 +58,16 @@ pub struct PlayerRenderHost {
 
 impl PlayerRenderHost {
     /// Build the render host over an already-created surface + GPU context (the
-    /// window module owns the winit window and makes the surface from it).
+    /// window module owns the winit window and makes the surface from it). `record`
+    /// is the loaded level's scene-persisted render block (R-P4) — post / exposure
+    /// / lighting — mapped onto the base [`RenderSettings`]; pass
+    /// [`RenderSettingsRecord::default`] for content with no authored block.
     pub fn new(
         gpu: GpuContext,
         surface: wgpu::Surface<'static>,
         width: u32,
         height: u32,
+        record: RenderSettingsRecord,
     ) -> Result<Self, String> {
         let chain = SurfaceChain::new(&gpu, surface, width, height)?;
         // Record the GPU adapter for the crash report (P15.2) as a first-class
@@ -70,18 +75,23 @@ impl PlayerRenderHost {
         crate::log::set_adapter_info(format!("{:?}", gpu.adapter.get_info()));
         let mut renderer = EngineRenderer::new(&gpu, chain.target_format());
 
+        // R-P4: start from the level's persisted render block (exposure / dither /
+        // bloom / ssao / taa / shadows / gi) instead of pure defaults, so the
+        // shipped player looks like the authored scene — the mirror of the editor
+        // viewport's `apply_render_settings`.
+        //
         // Auto-tier (P13.4.2): probe the adapter, pick a render tier, and apply it
         // to the renderer's settings. High enables the GPU meshlet path; Medium/Low
         // fall back to the classic discrete-LOD path (and Low drops the expensive
         // post effects). The decision is logged by `detect_tier`.
-        let base = RenderSettings::default();
+        let base = apply_record(&record);
         let tier = detect_tier(&gpu, &base);
         // Desktop requests the meshlet path (the tier clamps it on Medium/Low);
-        // mobile/web (P14.1) starts from the clamped `mobile_default` profile
-        // instead — no vgeom, no SSAO/GI/TAA/bloom/shadows — then the live-adapter
-        // tier applies on top (Low still drops what little remains).
+        // mobile/web (P14.1) clamps the level's block down to the mobile ceiling —
+        // no vgeom, no SSAO/GI/TAA/bloom/shadows — then the live-adapter tier
+        // applies on top (Low still drops what little remains).
         #[cfg(any(target_arch = "wasm32", target_os = "android"))]
-        let requested = inf_render::RenderTier::mobile_default();
+        let requested = inf_render::RenderTier::clamp_mobile(base);
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         let requested = RenderSettings {
             vgeom: inf_render::VgeomSettings {
@@ -349,6 +359,49 @@ fn prim_mesh(p: Primitive) -> PrimMesh {
     }
 }
 
+/// Map the level's scene-persisted [`RenderSettingsRecord`] onto a live
+/// [`RenderSettings`] (R-P4). The record carries the authorable subset; every
+/// other field (hdr, vgeom, tier_override, and the shadow/GI tuning knobs) stays
+/// at `RenderSettings::default()`, so
+/// `apply_record(&RenderSettingsRecord::default()) == RenderSettings::default()`
+/// — pinned by the unit test below.
+///
+/// MIRROR: keep identical to `inf_viewport::host::apply_record` (the editor
+/// viewport's copy over the editor-core `RenderSettingsRecord`). Both seams must
+/// agree so the shipped player and the editor viewport apply a level's render
+/// block the same way (preview == shipping).
+fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
+    let d = RenderSettings::default();
+    RenderSettings {
+        exposure: r.exposure,
+        dither: r.dither,
+        bloom: BloomSettings {
+            enabled: r.bloom_enabled,
+            threshold: r.bloom_threshold,
+            knee: r.bloom_knee,
+            intensity: r.bloom_intensity,
+        },
+        ssao: SsaoSettings {
+            enabled: r.ssao_enabled,
+            radius: r.ssao_radius,
+            intensity: r.ssao_intensity,
+            bias: r.ssao_bias,
+        },
+        taa: r.taa,
+        shadows: ShadowSettings {
+            enabled: r.shadows_enabled,
+            max_distance: r.shadows_max_distance,
+            ..d.shadows
+        },
+        gi: GiSettings {
+            enabled: r.gi_enabled,
+            intensity: r.gi_intensity,
+            ..d.gi
+        },
+        ..d
+    }
+}
+
 /// Terrain is static in the player's sim v1, so a fixed version keeps the terrain
 /// pass from re-uploading the height/weight textures every frame.
 const TERRAIN_VERSION: u64 = 1;
@@ -566,4 +619,49 @@ fn project_text(text: &Text2D, translation: DVec3) -> Option<PrebatchedRun> {
         order: text.order,
         instances,
     })
+}
+
+#[cfg(test)]
+mod render_settings_tests {
+    use super::{apply_record, RenderSettings, RenderSettingsRecord};
+
+    /// The default record maps to the byte-stable renderer default — this pins the
+    /// mapping so a settings-less level renders exactly as today's defaults (and
+    /// identical to the editor viewport's mirror `apply_record`).
+    #[test]
+    fn default_record_maps_to_default_settings() {
+        assert_eq!(
+            apply_record(&RenderSettingsRecord::default()),
+            RenderSettings::default()
+        );
+    }
+
+    /// A non-default record flows each authored field onto the live settings.
+    #[test]
+    fn non_default_fields_map_through() {
+        let rec = RenderSettingsRecord {
+            exposure: 2.0,
+            dither: false,
+            bloom_enabled: true,
+            bloom_intensity: 0.3,
+            ssao_enabled: true,
+            taa: true,
+            shadows_enabled: true,
+            shadows_max_distance: 120.0,
+            gi_enabled: true,
+            gi_intensity: 1.5,
+            ..RenderSettingsRecord::default()
+        };
+        let s = apply_record(&rec);
+        assert_eq!(s.exposure, 2.0);
+        assert!(!s.dither);
+        assert!(s.bloom.enabled && (s.bloom.intensity - 0.3).abs() < 1e-6);
+        assert!(s.ssao.enabled);
+        assert!(s.taa);
+        assert!(s.shadows.enabled && (s.shadows.max_distance - 120.0).abs() < 1e-6);
+        assert!(s.gi.enabled && (s.gi.intensity - 1.5).abs() < 1e-6);
+        // Untouched tuning knobs stay at their defaults.
+        assert_eq!(s.shadows.lambda, RenderSettings::default().shadows.lambda);
+        assert_eq!(s.gi.extent, RenderSettings::default().gi.extent);
+    }
 }

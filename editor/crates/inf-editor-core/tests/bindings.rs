@@ -11,13 +11,14 @@ use inf_editor_core::ipc::CollisionLayerDto;
 use inf_editor_core::ipc::{
     AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot, ComponentDto, DataAssetDto,
     DataFieldDto, DeleteResult, DetailsDto, ErosionParamsDto, ErosionReportDto, FileEntryDto,
-    GitFileDto, GitStatusDto, ImportEventDto, LayoutSummary, LogLine, PackageErrorDto,
-    PackageKindCountDto, PackageResultDto, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto,
-    PropFieldDto, PropValueDto, RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot,
-    SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto,
-    SeqKeyDto, SeqTrackDto, SequenceDto, Snap2DDto, SortingLayerDto, SpawnKind, SpriteGridDto,
-    SpriteRectDto, SpriteSheetDto, TilemapCellDto, TilemapDto, ToolModeDto, ViewportDrop,
-    ViewportKey, ViewportModeDto, ViewportRect,
+    GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto, ImportEventDto, LayoutSummary,
+    LevelSettingsDto, LogLine, PackageErrorDto, PackageKindCountDto, PackageResultDto,
+    ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto,
+    RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto, SculptOpDto,
+    SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto, SeqTrackDto,
+    SequenceDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpriteGridDto, SpriteRectDto,
+    SpriteSheetDto, TilemapCellDto, TilemapDto, ToolModeDto, ViewportDrop, ViewportKey,
+    ViewportModeDto, ViewportRect,
 };
 use ts_rs::{Config, TS};
 
@@ -64,6 +65,9 @@ fn export_bindings() {
     CollisionLayerDto::export_all(&cfg).expect("export CollisionLayerDto");
     ViewportModeDto::export_all(&cfg).expect("export ViewportModeDto");
     Snap2DDto::export_all(&cfg).expect("export Snap2DDto");
+    GizmoModeDto::export_all(&cfg).expect("export GizmoModeDto");
+    GizmoSpaceDto::export_all(&cfg).expect("export GizmoSpaceDto");
+    Snap3DDto::export_all(&cfg).expect("export Snap3DDto");
     ToolModeDto::export_all(&cfg).expect("export ToolModeDto");
     SculptOpDto::export_all(&cfg).expect("export SculptOpDto");
     SculptFalloffDto::export_all(&cfg).expect("export SculptFalloffDto");
@@ -80,4 +84,5 @@ fn export_bindings() {
     SeqTrackDto::export_all(&cfg).expect("export SeqTrackDto");
     SeqKeyDto::export_all(&cfg).expect("export SeqKeyDto");
     SeqInterpDto::export_all(&cfg).expect("export SeqInterpDto");
+    LevelSettingsDto::export_all(&cfg).expect("export LevelSettingsDto");
 }

@@ -522,6 +522,45 @@ pub struct Snap2DDto {
     pub pixels_per_unit: f32,
 }
 
+// ── Transform gizmo: mode + space + 3D snap (Wave 2) ─────────────────────
+//
+// The transform gizmo mode (translate/rotate/scale) is two-way synced with the
+// native viewport: `viewport_set_gizmo_mode` pushes toolbar/keyboard changes in,
+// and the viewport emits the current mode back on `viewport://gizmo` (a W/E/R
+// keypress over the viewport updates the toolbar). The gizmo space toggle
+// (`viewport_set_gizmo_space`) and the 3D snap increments
+// (`viewport_set_snap3d`) are one-way pushes from the toolbar.
+
+/// Transform-gizmo mode (`viewport_set_gizmo_mode`; also the `viewport://gizmo`
+/// event payload). Serializes as the tag string `"Translate"`/`"Rotate"`/
+/// `"Scale"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum GizmoModeDto {
+    Translate,
+    Rotate,
+    Scale,
+}
+
+/// Gizmo orientation frame (`viewport_set_gizmo_space`). `World` aligns handles
+/// to the world axes; `Local` aligns them to the selection's own rotation.
+/// Serializes as the tag string `"World"`/`"Local"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum GizmoSpaceDto {
+    World,
+    Local,
+}
+
+/// 3D transform-gizmo snap increments (`viewport_set_snap3d`). `translate` is
+/// world metres, `rotate_deg` is degrees, `scale` is a ratio step. When
+/// `always_on` is false, snapping is Shift-gated (matching the pre-Wave-2 feel).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct Snap3DDto {
+    pub translate: f32,
+    pub rotate_deg: f32,
+    pub scale: f32,
+    pub always_on: bool,
+}
+
 // ── Terrain sculpt tool (P10.2b) ─────────────────────────────────────────
 //
 // The viewport toolbar switches between the Select tool (pick/gizmo) and the
@@ -850,4 +889,121 @@ pub struct SequenceDto {
     #[ts(type = "number")]
     pub fps_hint: u32,
     pub tracks: Vec<SeqTrackDto>,
+}
+
+// ── World settings (R-P4 · schema v8) ────────────────────────────────────────
+//
+// The editable World Settings panel reads the level's [`LevelSettings`] via
+// `scene_get_settings` and writes it back (debounced) via `scene_set_settings`
+// (one undo step). A flat, fully-explicit DTO mirroring
+// [`crate::scene::serialize::LevelSettings`]; the nested `render` object mirrors
+// [`crate::scene::serialize::RenderSettingsRecord`] field-for-field. Gravity
+// vectors cross as fixed `[f64; N]` arrays (→ `[number, number]` in TS).
+
+/// The persisted renderer HDR / post / lighting settings, as the World Settings
+/// panel edits them (`scene_get_settings` / `scene_set_settings`). Mirrors
+/// [`crate::scene::serialize::RenderSettingsRecord`] field-for-field.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct RenderSettingsRecordDto {
+    pub exposure: f32,
+    pub dither: bool,
+    pub bloom_enabled: bool,
+    pub bloom_threshold: f32,
+    pub bloom_knee: f32,
+    pub bloom_intensity: f32,
+    pub ssao_enabled: bool,
+    pub ssao_radius: f32,
+    pub ssao_intensity: f32,
+    pub ssao_bias: f32,
+    pub taa: bool,
+    pub shadows_enabled: bool,
+    pub shadows_max_distance: f32,
+    pub gi_enabled: bool,
+    pub gi_intensity: f32,
+}
+
+impl RenderSettingsRecordDto {
+    fn from_record(r: &crate::scene::serialize::RenderSettingsRecord) -> Self {
+        Self {
+            exposure: r.exposure,
+            dither: r.dither,
+            bloom_enabled: r.bloom_enabled,
+            bloom_threshold: r.bloom_threshold,
+            bloom_knee: r.bloom_knee,
+            bloom_intensity: r.bloom_intensity,
+            ssao_enabled: r.ssao_enabled,
+            ssao_radius: r.ssao_radius,
+            ssao_intensity: r.ssao_intensity,
+            ssao_bias: r.ssao_bias,
+            taa: r.taa,
+            shadows_enabled: r.shadows_enabled,
+            shadows_max_distance: r.shadows_max_distance,
+            gi_enabled: r.gi_enabled,
+            gi_intensity: r.gi_intensity,
+        }
+    }
+
+    fn to_record(self) -> crate::scene::serialize::RenderSettingsRecord {
+        crate::scene::serialize::RenderSettingsRecord {
+            exposure: self.exposure,
+            dither: self.dither,
+            bloom_enabled: self.bloom_enabled,
+            bloom_threshold: self.bloom_threshold,
+            bloom_knee: self.bloom_knee,
+            bloom_intensity: self.bloom_intensity,
+            ssao_enabled: self.ssao_enabled,
+            ssao_radius: self.ssao_radius,
+            ssao_intensity: self.ssao_intensity,
+            ssao_bias: self.ssao_bias,
+            taa: self.taa,
+            shadows_enabled: self.shadows_enabled,
+            shadows_max_distance: self.shadows_max_distance,
+            gi_enabled: self.gi_enabled,
+            gi_intensity: self.gi_intensity,
+        }
+    }
+}
+
+/// The level's file-level settings, as the World Settings panel edits them
+/// (`scene_get_settings` / `scene_set_settings`). Mirrors
+/// [`crate::scene::serialize::LevelSettings`]; `render` nests
+/// [`RenderSettingsRecordDto`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct LevelSettingsDto {
+    /// 2D world gravity (m/s²) — `[x, y]`.
+    pub gravity_2d: [f64; 2],
+    /// 3D world gravity (m/s²) — `[x, y, z]`.
+    pub gravity_3d: [f64; 3],
+    /// Fixed simulation update rate (Hz).
+    pub sim_hz: f64,
+    /// Renderer HDR / post / lighting block.
+    pub render: RenderSettingsRecordDto,
+}
+
+impl LevelSettingsDto {
+    /// Project the authoritative [`LevelSettings`](crate::scene::serialize::LevelSettings)
+    /// into the DTO the panel reads.
+    pub fn from_settings(s: &crate::scene::serialize::LevelSettings) -> Self {
+        Self {
+            gravity_2d: [s.gravity_2d.x, s.gravity_2d.y],
+            gravity_3d: [s.gravity_3d.x, s.gravity_3d.y, s.gravity_3d.z],
+            sim_hz: s.sim_hz,
+            render: RenderSettingsRecordDto::from_record(&s.render),
+        }
+    }
+
+    /// Convert an edited DTO back into the authoritative
+    /// [`LevelSettings`](crate::scene::serialize::LevelSettings).
+    pub fn to_settings(self) -> crate::scene::serialize::LevelSettings {
+        crate::scene::serialize::LevelSettings {
+            gravity_2d: inf_ecs::math::Vec2d::new(self.gravity_2d[0], self.gravity_2d[1]),
+            gravity_3d: inf_ecs::math::Vec3d::new(
+                self.gravity_3d[0],
+                self.gravity_3d[1],
+                self.gravity_3d[2],
+            ),
+            sim_hz: self.sim_hz,
+            render: self.render.to_record(),
+        }
+    }
 }

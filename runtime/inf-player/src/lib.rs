@@ -209,9 +209,12 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     // P13.4: load the cook-derived vmesh DAGs so `MeshRef.asset` entities render
     // real geometry (meshlet path / classic fallback per the renderer's auto-tier).
     let vmeshes = std::sync::Arc::new(load_vmeshes(args));
+    // R-P4: the level's scene-persisted render block (post/exposure/lighting),
+    // captured before `built` is consumed, applied by the render host.
+    let render = built.render;
     let mut sim = sim_from_built(built);
     attach_mods(&mut sim, args);
-    match window::run(title, args.width, args.height, sim, map, vmeshes) {
+    match window::run(title, args.width, args.height, sim, map, vmeshes, render) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("inf-player: {e}");

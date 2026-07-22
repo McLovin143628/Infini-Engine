@@ -31,6 +31,7 @@ import type { ErosionReportDto } from "../bindings/ErosionReportDto";
 import type { FileEntryDto } from "../bindings/FileEntryDto";
 import type { GitStatusDto } from "../bindings/GitStatusDto";
 import type { LayoutSummary } from "../bindings/LayoutSummary";
+import type { LevelSettingsDto } from "../bindings/LevelSettingsDto";
 import type { PackageErrorDto } from "../bindings/PackageErrorDto";
 import type { PackageResultDto } from "../bindings/PackageResultDto";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
@@ -45,6 +46,9 @@ import type { SceneSnapshot } from "../bindings/SceneSnapshot";
 import type { SeqInterpDto } from "../bindings/SeqInterpDto";
 import type { SequenceDto } from "../bindings/SequenceDto";
 import type { Snap2DDto } from "../bindings/Snap2DDto";
+import type { Snap3DDto } from "../bindings/Snap3DDto";
+import type { GizmoModeDto } from "../bindings/GizmoModeDto";
+import type { GizmoSpaceDto } from "../bindings/GizmoSpaceDto";
 import type { SortingLayerDto } from "../bindings/SortingLayerDto";
 import type { CollisionLayerDto } from "../bindings/CollisionLayerDto";
 import type { SpawnKind } from "../bindings/SpawnKind";
@@ -147,6 +151,17 @@ export const viewport = {
   /** Push the sculpt brush configuration (op / radius / strength / falloff). */
   setSculpt: (sculpt: SculptSettingsDto): Promise<void> =>
     invoke("viewport_set_sculpt", { sculpt }),
+  /**
+   * Set the transform-gizmo mode (translate/rotate/scale) (Wave 2). The viewport
+   * echoes mode changes (incl. W/E/R keypresses over it) on `viewport://gizmo`.
+   */
+  setGizmoMode: (mode: GizmoModeDto): Promise<void> =>
+    invoke("viewport_set_gizmo_mode", { mode }),
+  /** Switch the gizmo orientation frame (World ↔ Local) (Wave 2). */
+  setGizmoSpace: (space: GizmoSpaceDto): Promise<void> =>
+    invoke("viewport_set_gizmo_space", { space }),
+  /** Push the 3D transform-gizmo snap increments (Wave 2). */
+  setSnap3d: (snap: Snap3DDto): Promise<void> => invoke("viewport_set_snap3d", { snap }),
 };
 
 /**
@@ -225,6 +240,11 @@ export const scene = {
   open: (path: string | null = null): Promise<SceneSnapshot> =>
     invoke<SceneSnapshot>("scene_open", { path }),
   newScene: (): Promise<SceneSnapshot> => invoke<SceneSnapshot>("scene_new"),
+  /** The level's file-level settings (gravity / sim rate / render block) for the World Settings panel. */
+  getSettings: (): Promise<LevelSettingsDto> => invoke<LevelSettingsDto>("scene_get_settings"),
+  /** Replace the level settings as one undo step (World Settings panel; debounced). */
+  setSettings: (settings: LevelSettingsDto): Promise<void> =>
+    invoke("scene_set_settings", { settings }),
   /** Write the crash-recovery file if there are unsaved changes. */
   autosave: (): Promise<void> => invoke("scene_autosave"),
   /** Spawn a Content-Drawer asset dropped over the viewport (P4.4). */

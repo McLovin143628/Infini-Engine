@@ -5,18 +5,25 @@
  */
 import { useState } from "react";
 import {
+  Box,
   ChevronDown,
+  Globe,
   Hammer,
+  Magnet,
+  Maximize2,
   Mountain,
   MousePointer2,
+  Move,
   Pause,
   Play,
   Plus,
+  RotateCw,
   Save,
   Settings,
   SkipForward,
   Square,
 } from "lucide-react";
+import type { GizmoModeDto } from "../bindings/GizmoModeDto";
 import { executeCommand } from "../lib/commands";
 import { useSimStore } from "../stores/simStore";
 import { usePieStore } from "../stores/pieStore";
@@ -166,11 +173,134 @@ function PlayCluster() {
   );
 }
 
+/** Per-mode glyph for the transform-gizmo segmented control (static component,
+ *  a switch — same idiom as the Place Actors panel — to satisfy react-hooks). */
+function GizmoModeGlyph({ mode }: { mode: GizmoModeDto }) {
+  switch (mode) {
+    case "Translate":
+      return <Move size={13} />;
+    case "Rotate":
+      return <RotateCw size={13} />;
+    case "Scale":
+      return <Maximize2 size={13} />;
+  }
+}
+
+/**
+ * Transform-gizmo controls (Wave 2): a Translate/Rotate/Scale segmented control
+ * (two-way synced with the native viewport — W/E/R over the viewport updates it
+ * here, via `viewport://gizmo`), a World/Local space toggle, and the 3D snap
+ * toggle + increment dropdowns (persisted through `viewportStore`).
+ */
+function GizmoCluster() {
+  const gizmoMode = useViewportStore((s) => s.gizmoMode);
+  const setGizmoMode = useViewportStore((s) => s.setGizmoMode);
+  const gizmoSpace = useViewportStore((s) => s.gizmoSpace);
+  const toggleGizmoSpace = useViewportStore((s) => s.toggleGizmoSpace);
+  const snapEnabled = useViewportStore((s) => s.snap3dEnabled);
+  const setSnapEnabled = useViewportStore((s) => s.setSnap3dEnabled);
+  const snapT = useViewportStore((s) => s.snap3dTranslate);
+  const setSnapT = useViewportStore((s) => s.setSnap3dTranslate);
+  const snapR = useViewportStore((s) => s.snap3dRotate);
+  const setSnapR = useViewportStore((s) => s.setSnap3dRotate);
+  const snapS = useViewportStore((s) => s.snap3dScale);
+  const setSnapS = useViewportStore((s) => s.setSnap3dScale);
+
+  const selectCls =
+    "h-6 rounded border border-(--ink-border) bg-(--ink-bg-2) px-1 text-xs text-(--ink-text) outline-none hover:border-(--ink-accent) disabled:opacity-40";
+
+  return (
+    <>
+      {/* Gizmo mode: Translate / Rotate / Scale (W / E / R). */}
+      <div className="flex items-center rounded bg-(--ink-bg-1) p-0.5">
+        {(["Translate", "Rotate", "Scale"] as const).map((mode, i) => (
+          <button
+            key={mode}
+            title={`${mode} (${["W", "E", "R"][i]})`}
+            aria-label={mode}
+            className={`flex h-6 items-center rounded px-2 ${
+              gizmoMode === mode
+                ? "bg-(--ink-bg-3) text-(--ink-text)"
+                : "text-(--ink-text-dim) hover:text-(--ink-text)"
+            }`}
+            onClick={() => setGizmoMode(mode)}
+          >
+            <GizmoModeGlyph mode={mode} />
+          </button>
+        ))}
+      </div>
+      {/* World / Local space toggle. */}
+      <button
+        title={`Gizmo space: ${gizmoSpace} — click to toggle World / Local`}
+        aria-label={`Gizmo space: ${gizmoSpace}`}
+        className="flex h-6 items-center gap-1 rounded px-2 text-(--ink-text-dim) hover:bg-(--ink-bg-3) hover:text-(--ink-text)"
+        onClick={() => toggleGizmoSpace()}
+      >
+        {gizmoSpace === "Local" ? <Box size={13} /> : <Globe size={13} />}
+        <span className="text-xs">{gizmoSpace}</span>
+      </button>
+      {/* Snap toggle + increment dropdowns. */}
+      <button
+        title={`Snapping ${snapEnabled ? "on" : "off (hold Shift to snap)"}`}
+        aria-label="Toggle snapping"
+        aria-pressed={snapEnabled}
+        className={`flex h-6 items-center rounded px-2 ${
+          snapEnabled
+            ? "bg-(--ink-bg-3) text-(--ink-accent)"
+            : "text-(--ink-text-dim) hover:bg-(--ink-bg-3) hover:text-(--ink-text)"
+        }`}
+        onClick={() => setSnapEnabled(!snapEnabled)}
+      >
+        <Magnet size={13} />
+      </button>
+      <select
+        title="Move snap (metres)"
+        aria-label="Move snap"
+        className={selectCls}
+        value={String(snapT)}
+        onChange={(e) => setSnapT(Number(e.target.value))}
+      >
+        {[0.1, 0.5, 1, 5].map((v) => (
+          <option key={v} value={v}>
+            {v} m
+          </option>
+        ))}
+      </select>
+      <select
+        title="Rotate snap (degrees)"
+        aria-label="Rotate snap"
+        className={selectCls}
+        value={String(snapR)}
+        onChange={(e) => setSnapR(Number(e.target.value))}
+      >
+        {[5, 15, 45, 90].map((v) => (
+          <option key={v} value={v}>
+            {v}°
+          </option>
+        ))}
+      </select>
+      <select
+        title="Scale snap (ratio)"
+        aria-label="Scale snap"
+        className={selectCls}
+        value={String(snapS)}
+        onChange={(e) => setSnapS(Number(e.target.value))}
+      >
+        {[0.05, 0.1, 0.25].map((v) => (
+          <option key={v} value={v}>
+            {v}
+          </option>
+        ))}
+      </select>
+    </>
+  );
+}
+
 export default function MainToolbar() {
   // Editor tool mode, two-way synced with the native viewport via
   // `viewport_set_tool_mode` (Select = pick/gizmo, Sculpt = terrain/"Landscape").
-  // The W/E/R translate/rotate/scale gizmo switch is handled inside the native
-  // viewport and is not (yet) settable from the webview — see report.
+  // The transform-gizmo mode/space + 3D snap controls (GizmoCluster below) are
+  // two-way synced too (`viewport_set_gizmo_*` / `viewport://gizmo`, Wave 2).
   const toolMode = useViewportStore((s) => s.toolMode);
   const setToolMode = useViewportStore((s) => s.setToolMode);
   return (
@@ -201,6 +331,9 @@ export default function MainToolbar() {
           </button>
         ))}
       </div>
+      <Divider />
+      {/* Transform gizmo: mode + space + 3D snap (Wave 2). */}
+      <GizmoCluster />
       <Divider />
       <ToolButton label="Add Actor" command="actor.place.empty">
         <Plus size={16} />

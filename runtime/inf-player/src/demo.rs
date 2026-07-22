@@ -143,6 +143,7 @@ pub fn build() -> BuiltWorld {
         actors: vec![(player_guid, coyote_class())],
         gravity: DVec2::ZERO,
         hz: 60.0,
+        render: inf_scene::RenderSettingsRecord::default(),
         label: "platformer-demo".to_string(),
         state_machines: std::collections::BTreeMap::new(),
         root_clips: Vec::new(),

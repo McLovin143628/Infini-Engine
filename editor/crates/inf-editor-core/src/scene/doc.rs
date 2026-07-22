@@ -112,8 +112,29 @@ impl SceneDoc {
     }
 
     /// Replace the level settings (the loader + a settings editor call this).
+    /// Loader-only: does **not** dirty the document or bump the version.
     pub fn set_settings(&mut self, settings: LevelSettings) {
         self.settings = settings;
+    }
+
+    /// Raw (non-recording) level-settings write for the undo layer + [`Self::edit_settings`].
+    /// Marks the document dirty + bumps the version (a settings change is a real edit),
+    /// unlike the loader-only [`Self::set_settings`].
+    pub(crate) fn raw_set_settings(&mut self, settings: LevelSettings) {
+        self.settings = settings;
+        self.touch();
+    }
+
+    /// Edit the level settings (the World Settings panel), recorded as one undo
+    /// step. No-op (and records nothing) when `new` equals the current settings.
+    pub fn edit_settings(&mut self, new: LevelSettings) {
+        let old = self.settings;
+        if old == new {
+            return;
+        }
+        self.raw_set_settings(new);
+        self.history
+            .record("World Settings", EditCommand::SetLevelSettings { old, new });
     }
 
     pub fn selection(&self) -> &[Uuid] {
@@ -1268,6 +1289,40 @@ impl SceneDoc {
         );
     }
 
+    /// Write a **world-space** TRS back onto an entity, composing the correct
+    /// local transform for its parent (Wave 2). `world_trs` is a [`Transform`]
+    /// whose euler-deg rotation / translation / scale describe the world pose the
+    /// gizmo produced; this recovers `local = parent_global⁻¹ · world` so a child
+    /// of a rotated/scaled parent keeps its edited world pose (the previous
+    /// writeback wrote world TRS straight into the local `Transform`, which was
+    /// only correct for roots / identity parents — the documented P3 bug).
+    ///
+    /// Records a `SetTransform` undo entry via [`Self::edit_set_transform`], so a
+    /// gizmo drag stays one undo step inside the enclosing transaction. Parent
+    /// `GlobalTransform`s are refreshed (`propagate`) up front so a **multi-select
+    /// drag applied parents-first** composes each child against its parent's
+    /// already-written pose.
+    pub fn edit_set_world_transform(&mut self, guid: Uuid, world_trs: Transform) {
+        // Ensure parent GlobalTransforms reflect any earlier writebacks in this
+        // batch (and the committed scene). Cheap when nothing is dirty.
+        self.world.propagate();
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        let parent_global = self
+            .world
+            .parent_of(e)
+            .and_then(|p| self.world.world().get::<GlobalTransform>(p).map(|g| g.0))
+            .unwrap_or(glam::DAffine3::IDENTITY);
+        // World matrix from the incoming TRS → parent-relative local matrix.
+        let local_affine = parent_global.inverse() * world_trs.affine();
+        let (scale, rotation, translation) = local_affine.to_scale_rotation_translation();
+        let mut local = Transform::from_translation(translation);
+        local.set_quat(rotation);
+        local.scale = inf_ecs::Vec3d::from_dvec3(scale);
+        self.edit_set_transform(guid, local);
+    }
+
     pub fn edit_set_prop(
         &mut self,
         guid: Uuid,
@@ -2203,5 +2258,81 @@ mod tests {
         let bn = snap.nodes.iter().find(|n| n.guid == b.to_string()).unwrap();
         assert!(bn.visible, "b's own toggle is still on");
         assert!(!bn.effective_visible, "b hidden because A is hidden");
+    }
+}
+
+/// Wave 2: world-space gizmo writeback (`edit_set_world_transform`) — verifies a
+/// child of a rotated/scaled parent keeps its edited world pose, and roots are
+/// unchanged from the old world-as-local behaviour.
+#[cfg(test)]
+mod wave2_world_transform_tests {
+    use super::*;
+
+    fn v3(x: f64, y: f64, z: f64) -> inf_ecs::Vec3d {
+        inf_ecs::Vec3d::from_dvec3(DVec3::new(x, y, z))
+    }
+
+    #[test]
+    fn child_of_rotated_scaled_parent_keeps_world_position() {
+        let mut doc = SceneDoc::new();
+        let parent = doc.create(SpawnKind::Empty, "Parent", None);
+        let child = doc.create(SpawnKind::Cube, "Child", Some(parent));
+
+        // Parent: translated, yawed 90°, uniformly scaled 2×.
+        let mut pt = Transform::from_translation(DVec3::new(10.0, 0.0, 4.0));
+        pt.rotation = v3(0.0, 90.0, 0.0);
+        pt.scale = v3(2.0, 2.0, 2.0);
+        doc.edit_set_transform(parent, pt);
+
+        // Ask the gizmo writeback to place the child at a specific WORLD point.
+        let target = DVec3::new(5.0, 1.0, -3.0);
+        doc.edit_set_world_transform(child, Transform::from_translation(target));
+
+        doc.world_mut().propagate();
+        let ce = doc.world().entity_of(child).unwrap();
+        let wp = doc.world().world_translation(ce).unwrap();
+        assert!(
+            (wp - target).length() < 1e-6,
+            "child world pos {wp:?} should equal target {target:?}"
+        );
+    }
+
+    #[test]
+    fn root_writeback_is_world_as_local() {
+        let mut doc = SceneDoc::new();
+        let e = doc.create(SpawnKind::Cube, "Root", None);
+        let target = DVec3::new(3.0, 4.0, 5.0);
+        doc.edit_set_world_transform(e, Transform::from_translation(target));
+
+        // A root's local translation is exactly the world translation.
+        let ent = doc.world().entity_of(e).unwrap();
+        let local = doc.world().world().get::<Transform>(ent).copied().unwrap();
+        assert!((local.translation.to_dvec3() - target).length() < 1e-9);
+
+        doc.world_mut().propagate();
+        let wp = doc.world().world_translation(ent).unwrap();
+        assert!((wp - target).length() < 1e-9);
+    }
+
+    #[test]
+    fn multi_select_parents_first_preserves_child_world() {
+        // Move BOTH a parent and its child in one drag: applied parents-first,
+        // the child's local is composed against the parent's already-written
+        // pose, so both land at their target world points.
+        let mut doc = SceneDoc::new();
+        let parent = doc.create(SpawnKind::Empty, "Parent", None);
+        let child = doc.create(SpawnKind::Cube, "Child", Some(parent));
+
+        let parent_target = DVec3::new(7.0, 2.0, 0.0);
+        let child_target = DVec3::new(9.0, 2.0, 1.0);
+        // Parents-first order (as the win32 writeback sorts).
+        doc.edit_set_world_transform(parent, Transform::from_translation(parent_target));
+        doc.edit_set_world_transform(child, Transform::from_translation(child_target));
+
+        doc.world_mut().propagate();
+        let pe = doc.world().entity_of(parent).unwrap();
+        let ce = doc.world().entity_of(child).unwrap();
+        assert!((doc.world().world_translation(pe).unwrap() - parent_target).length() < 1e-6);
+        assert!((doc.world().world_translation(ce).unwrap() - child_target).length() < 1e-6);
     }
 }

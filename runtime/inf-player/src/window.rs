@@ -95,6 +95,10 @@ pub struct PlayerApp {
     /// the render host so asset meshes render real geometry. Empty for
     /// primitive-only / PIE worlds.
     vmeshes: Arc<VmeshRegistry>,
+    /// The loaded level's scene-persisted render block (R-P4); the render host
+    /// maps it onto the live `RenderSettings` at build (and device-loss rebuild).
+    /// `default` for content with no authored block (PIE / web / android v1).
+    render: inf_scene::RenderSettingsRecord,
     /// The HTML canvas the winit window binds to (web only). Set by [`run_web`];
     /// applied to the window attributes in `resumed`.
     #[cfg(target_arch = "wasm32")]
@@ -106,6 +110,7 @@ pub struct PlayerApp {
 }
 
 impl PlayerApp {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         title: String,
         width: u32,
@@ -113,6 +118,7 @@ impl PlayerApp {
         sim: RuntimeSim,
         map: InputMap,
         vmeshes: Arc<VmeshRegistry>,
+        render: inf_scene::RenderSettingsRecord,
     ) -> Self {
         Self {
             title,
@@ -124,6 +130,7 @@ impl PlayerApp {
             pie: None,
             paused: false,
             vmeshes,
+            render,
             #[cfg(target_arch = "wasm32")]
             canvas: None,
             #[cfg(any(target_arch = "wasm32", target_os = "android"))]
@@ -181,18 +188,21 @@ impl PlayerApp {
         }
     }
 
-    /// Build (or rebuild, on device loss) the GPU stack from the window.
+    /// Build (or rebuild, on device loss) the GPU stack from the window. `render`
+    /// is the level's scene-persisted render block (R-P4), applied to the fresh
+    /// renderer so a device-loss rebuild keeps the authored look.
     fn build_host(
         window: &Arc<Window>,
         width: u32,
         height: u32,
+        render: inf_scene::RenderSettingsRecord,
     ) -> Result<PlayerRenderHost, String> {
         let instance = create_instance();
         let surface = instance
             .create_surface(window.clone())
             .map_err(|e| format!("create_surface: {e}"))?;
         let gpu = GpuContext::for_surface(instance, &surface)?;
-        PlayerRenderHost::new(gpu, surface, width.max(1), height.max(1))
+        PlayerRenderHost::new(gpu, surface, width.max(1), height.max(1), render)
     }
 
     /// Build the render view for the current sim + surface (an ortho follow-cam).
@@ -243,7 +253,7 @@ impl PlayerApp {
         };
         if live.host.is_lost() {
             tracing::warn!("inf-player: device lost — rebuilding GPU stack");
-            match Self::build_host(&live.window, self.width, self.height) {
+            match Self::build_host(&live.window, self.width, self.height, self.render) {
                 Ok(mut host) => {
                     host.set_vmeshes(self.vmeshes.clone());
                     live.host = host;
@@ -289,7 +299,7 @@ impl ApplicationHandler for PlayerApp {
         let size = window.inner_size();
         self.width = size.width.max(1);
         self.height = size.height.max(1);
-        match Self::build_host(&window, self.width, self.height) {
+        match Self::build_host(&window, self.width, self.height, self.render) {
             Ok(mut host) => {
                 // Attach the vmesh registry so `MeshRef.asset` entities render real
                 // geometry (meshlet path / classic fallback per the auto-tier).
@@ -387,10 +397,11 @@ pub fn run(
     sim: RuntimeSim,
     map: InputMap,
     vmeshes: Arc<VmeshRegistry>,
+    render: inf_scene::RenderSettingsRecord,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = PlayerApp::new(title, width, height, sim, map, vmeshes);
+    let mut app = PlayerApp::new(title, width, height, sim, map, vmeshes, render);
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("run_app: {e}"))
@@ -413,6 +424,8 @@ pub fn run_pie(
     event_loop.set_control_flow(ControlFlow::Poll);
     // PIE streams no vmesh assets yet (a documented follow-up); asset meshes render
     // as placeholder cubes in PIE until the payload carries the vmesh index.
+    // PIE also starts from the default render block (the streamed scene payload
+    // carries no settings yet — a documented follow-up mirroring the vmesh gap).
     let mut app = PlayerApp::new(
         title,
         width,
@@ -420,6 +433,7 @@ pub fn run_pie(
         sim,
         map,
         Arc::new(VmeshRegistry::new()),
+        inf_scene::RenderSettingsRecord::default(),
     );
     app.pie = Some(PieLink {
         control,
@@ -452,7 +466,15 @@ pub fn run_android(
     event_loop.set_control_flow(ControlFlow::Poll);
     // Portrait-ish default; the surface reconfigures to the real window size on
     // the first `Resized`.
-    let mut app = PlayerApp::new(title, 1080, 1920, sim, map, Arc::new(VmeshRegistry::new()));
+    let mut app = PlayerApp::new(
+        title,
+        1080,
+        1920,
+        sim,
+        map,
+        Arc::new(VmeshRegistry::new()),
+        inf_scene::RenderSettingsRecord::default(),
+    );
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("run_app: {e}"))
@@ -483,6 +505,7 @@ pub fn run_web(
         sim,
         map,
         Arc::new(VmeshRegistry::new()),
+        inf_scene::RenderSettingsRecord::default(),
     );
     app.canvas = Some(canvas);
     event_loop.spawn_app(app);

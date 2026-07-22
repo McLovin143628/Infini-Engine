@@ -12,7 +12,7 @@ use inf_ecs::PropValue;
 use inf_terrain::{HeightDelta, SplatDelta};
 use uuid::Uuid;
 
-use crate::scene::serialize::EntityRecord;
+use crate::scene::serialize::{EntityRecord, LevelSettings};
 use crate::scene::SceneDoc;
 
 /// The default history depth (well past the phase gate's 50 steps).
@@ -88,6 +88,13 @@ pub(crate) enum EditCommand {
     /// stroke authored from nothing). Boxed so the (potentially large) delta
     /// doesn't bloat every other command variant.
     SculptTerrain { guid: Uuid, delta: Box<HeightDelta> },
+    /// A whole-file level-settings swap (R-P4): gravity / sim rate / the persisted
+    /// render (post/exposure/lighting) block round-trip as one value. `Copy` +
+    /// small, so this variant is stored inline (no boxing).
+    SetLevelSettings {
+        old: LevelSettings,
+        new: LevelSettings,
+    },
     /// One terrain splat-paint stroke (P10.4): a sparse before/after weight-sample
     /// record ([`SplatDelta`]). Like [`SculptTerrain`](EditCommand::SculptTerrain)
     /// the live stroke already mutated the weights, so `apply`/`revert` are pure
@@ -127,6 +134,9 @@ impl EditCommand {
             }
             EditCommand::SetActor { guid, after, .. } => {
                 doc.raw_set_actor(*guid, *after);
+            }
+            EditCommand::SetLevelSettings { new, .. } => {
+                doc.raw_set_settings(*new);
             }
             EditCommand::SculptTerrain { guid, delta } => {
                 doc.raw_apply_terrain_delta(*guid, delta);
@@ -183,6 +193,9 @@ impl EditCommand {
             }
             EditCommand::SetActor { guid, before, .. } => {
                 doc.raw_set_actor(*guid, *before);
+            }
+            EditCommand::SetLevelSettings { old, .. } => {
+                doc.raw_set_settings(*old);
             }
             EditCommand::SculptTerrain { guid, delta } => {
                 doc.raw_revert_terrain_delta(*guid, delta);
@@ -479,6 +492,41 @@ mod tests {
             .and_then(|p| doc.world().guid_of(p));
         assert_eq!(parent, Some(b), "A stays under B after delete→undo");
         assert!(doc.entity_of(b).is_some(), "B restored by undo");
+    }
+
+    /// Editing the level settings dirties + bumps the version, and undo/redo
+    /// round-trip the whole settings block (gravity + render/post) exactly (R-P4).
+    #[test]
+    fn level_settings_edit_undo_redo_round_trips() {
+        use crate::scene::serialize::LevelSettings;
+
+        let mut doc = SceneDoc::new();
+        let base = doc.settings();
+        let v0 = doc.version();
+        assert!(!doc.is_dirty());
+
+        let mut edited = base;
+        edited.render.exposure = 2.5;
+        edited.render.bloom_enabled = true;
+        edited.sim_hz = 120.0;
+        doc.edit_settings(edited);
+
+        assert!(doc.is_dirty(), "a settings edit dirties the document");
+        assert!(doc.version() > v0, "a settings edit bumps the version");
+        assert_eq!(doc.settings(), edited);
+
+        // Undo restores the original settings exactly …
+        assert!(doc.undo());
+        assert_eq!(doc.settings(), base);
+        // … and redo re-applies the edited block.
+        assert!(doc.redo());
+        assert_eq!(doc.settings(), edited);
+
+        // An idempotent edit (same value) records nothing.
+        let before_len = doc.undo_len();
+        doc.edit_settings(edited);
+        assert_eq!(doc.undo_len(), before_len, "no-op edit records nothing");
+        assert_eq!(doc.settings(), LevelSettings { ..edited });
     }
 
     /// Nested `begin`/`commit` collapse into ONE undo step: an inner commit must

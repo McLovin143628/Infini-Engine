@@ -293,6 +293,7 @@ fn golden_selection_gizmo() {
         &mut scene.debug,
         GizmoMode::Translate,
         origin_local,
+        glam::Quat::IDENTITY,
         size,
         Some(GizmoAxis::X),
         false,
