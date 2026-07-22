@@ -8,6 +8,7 @@
 //! editor see and change".
 
 use bevy_ecs::reflect::ReflectComponent;
+use bevy_reflect::std_traits::ReflectDefault;
 use bevy_reflect::{TypePath, TypeRegistry};
 
 use crate::components::{
@@ -53,6 +54,14 @@ impl ComponentRegistry {
         types.register::<Vec3d>();
         types.register::<Vec2d>();
         types.register::<Color>();
+        // These value types derive `Reflect` without `#[reflect(Default)]` (their
+        // `Default` lives in `math.rs`). E-P1 list editing rebuilds a collection
+        // from the element type's `ReflectDefault`, so register that type-data
+        // here (without touching `math.rs`) for the value types that can be list
+        // elements — e.g. `Spline::points: Vec<Vec3d>`.
+        types.register_type_data::<Vec3d, ReflectDefault>();
+        types.register_type_data::<Vec2d, ReflectDefault>();
+        types.register_type_data::<Color, ReflectDefault>();
         types.register::<Primitive>();
         types.register::<LightKind>();
         types.register::<TextAlign>();
@@ -70,6 +79,9 @@ impl ComponentRegistry {
         types.register::<VolumeKind>();
         types.register::<SplineInterp>();
         types.register::<FoliagePaletteEntry>();
+        // Opaque entity reference (E-P1) — joint `other` fields; surfaced by the
+        // Details walker as an entity-picker widget.
+        types.register::<crate::refs::EntityRef>();
         types.register::<String>();
 
         // `Name` is reflected (for completeness) but edited via a dedicated
@@ -142,6 +154,35 @@ impl ComponentRegistry {
         &self.editable
     }
 
+    /// The components the user may **add** to an entity via "+ Add Component"
+    /// (E-P1), in canonical order. This is the editable list minus the components
+    /// every entity structurally owns and cannot gain or lose:
+    ///
+    /// * `Transform` — spawned on every entity; the hierarchy + gizmo assume it.
+    /// * `Name` — already excluded from `editable` (edited via rename).
+    ///
+    /// Computed components (`GlobalTransform`, `ComputedVisibility`) are not in
+    /// `editable` at all, so they are already absent here. `Visibility` stays
+    /// addable/removable (it is a plain optional flag).
+    pub fn addable(&self) -> impl Iterator<Item = &ComponentInfo> {
+        let transform = <Transform as TypePath>::type_path();
+        self.editable
+            .iter()
+            .filter(move |c| c.type_path != transform)
+    }
+
+    /// The `ReflectDefault` handle for a registered `type_path`, if it carries
+    /// that type-data — powers add-component (insert a `Default` instance) and
+    /// per-property reset. Kept behind the facade like `reflect_component`.
+    pub fn reflect_default(
+        &self,
+        type_path: &str,
+    ) -> Option<&bevy_reflect::std_traits::ReflectDefault> {
+        self.types
+            .get_with_type_path(type_path)?
+            .data::<bevy_reflect::std_traits::ReflectDefault>()
+    }
+
     /// The `ReflectComponent` handle for a registered component `type_path`.
     pub fn reflect_component(&self, type_path: &str) -> Option<&ReflectComponent> {
         self.types
@@ -175,5 +216,25 @@ mod tests {
             );
         }
         assert_eq!(reg.display_name(Transform::type_path()), Some("Transform"));
+    }
+
+    #[test]
+    fn addable_excludes_transform_and_every_entry_has_reflect_default() {
+        let reg = ComponentRegistry::new();
+        let addable: Vec<_> = reg.addable().collect();
+        // Transform is excluded; everything else editable stays.
+        assert_eq!(addable.len(), reg.editable().len() - 1);
+        assert!(addable
+            .iter()
+            .all(|c| c.type_path != Transform::type_path()));
+        // Add-component inserts a Default instance, so every addable component
+        // must carry ReflectDefault.
+        for c in &addable {
+            assert!(
+                reg.reflect_default(c.type_path).is_some(),
+                "{} missing ReflectDefault",
+                c.display
+            );
+        }
     }
 }

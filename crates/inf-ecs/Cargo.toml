@@ -35,3 +35,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Byte-identity proof for the `#[serde(transparent)]` EntityRef (E-P1): the wire
+# stream must match `Option<Uuid>`. Same bincode 2.x the scene serializer uses.
+bincode = { workspace = true }

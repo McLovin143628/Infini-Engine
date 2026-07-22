@@ -1406,110 +1406,95 @@ pub fn migrate(file: SceneFile) -> Result<SceneFile, String> {
 /// (`spawn_bare` resolves an unspawned parent GUID to `None`). The file still
 /// writes entities in `doc.order` (creation) sequence and `doc.order` mirrors
 /// the file sequence after load, so `save→load→save` stays byte-identical.
+/// Write every component an [`EntityRecord`] carries onto entity `e`, treating
+/// the record as the full truth for the component set.
+///
+/// * `remove_absent = false` — insert only (fresh entities in [`apply_to_doc`]).
+/// * `remove_absent = true` — also *remove* every optional component the record
+///   leaves `None` (E-P1 add/remove-component undo via `SwapComponents`: reverting
+///   to a snapshot must delete components gained since). `Transform` /
+///   `Visibility` are structural (always present) and never removed; computed
+///   components, `Guid`, `Name`, and hierarchy links are outside the record and
+///   left untouched.
+pub(crate) fn write_record_components(
+    ecs: &mut inf_ecs::EcsWorld,
+    e: inf_ecs::Entity,
+    rec: &EntityRecord,
+    remove_absent: bool,
+) {
+    let w = ecs.world_mut();
+    // Structural components — always present.
+    w.entity_mut(e).insert((
+        rec.transform,
+        Visibility {
+            visible: rec.visible,
+        },
+    ));
+
+    // Each optional slot: insert when present, else (when reverting) remove.
+    // `copy_slot`/`clone_slot` keep the binding inside the macro (hygiene).
+    macro_rules! copy_slot {
+        ($opt:expr, $ty:ty) => {
+            if let Some(c) = $opt {
+                w.entity_mut(e).insert(*c);
+            } else if remove_absent {
+                w.entity_mut(e).remove::<$ty>();
+            }
+        };
+    }
+    macro_rules! clone_slot {
+        ($opt:expr, $ty:ty) => {
+            if let Some(c) = $opt {
+                w.entity_mut(e).insert(c.clone());
+            } else if remove_absent {
+                w.entity_mut(e).remove::<$ty>();
+            }
+        };
+    }
+    copy_slot!(&rec.mesh, MeshRef);
+    copy_slot!(&rec.material, Material);
+    copy_slot!(&rec.light, Light);
+    copy_slot!(&rec.camera, Camera);
+    clone_slot!(&rec.sprite, Sprite);
+    clone_slot!(&rec.tilemap, Tilemap);
+    clone_slot!(&rec.nine_slice, NineSlice);
+    clone_slot!(&rec.text2d, Text2D);
+    copy_slot!(&rec.light_2d, Light2D);
+    copy_slot!(&rec.rigid_body_2d, RigidBody2D);
+    copy_slot!(&rec.collider_2d, Collider2D);
+    copy_slot!(&rec.character_controller_2d, CharacterController2D);
+    copy_slot!(&rec.rigid_body_3d, RigidBody3D);
+    copy_slot!(&rec.collider_3d, Collider3D);
+    copy_slot!(&rec.character_controller_3d, CharacterController3D);
+    // `actor` is stored bare (`Option<Uuid>`) and wraps into `ActorClass`.
+    if let Some(actor) = rec.actor {
+        w.entity_mut(e).insert(ActorClass(actor));
+    } else if remove_absent {
+        w.entity_mut(e).remove::<ActorClass>();
+    }
+    clone_slot!(&rec.terrain, Terrain);
+    clone_slot!(&rec.pcg_volume, PcgVolume);
+    copy_slot!(&rec.skeletal_mesh, SkeletalMesh);
+    copy_slot!(&rec.anim_player, AnimPlayer);
+    copy_slot!(&rec.anim_state_machine, AnimStateMachine);
+    copy_slot!(&rec.root_motion, RootMotion);
+    clone_slot!(&rec.attached_to, AttachedTo);
+    copy_slot!(&rec.joint_2d, Joint2D);
+    copy_slot!(&rec.joint_3d, Joint3D);
+    clone_slot!(&rec.audio_source, AudioSource);
+    copy_slot!(&rec.audio_listener, AudioListener);
+    copy_slot!(&rec.decal, Decal);
+    copy_slot!(&rec.volume, Volume);
+    clone_slot!(&rec.spline, Spline);
+    clone_slot!(&rec.foliage, Foliage);
+}
+
 pub fn apply_to_doc(doc: &mut SceneDoc, file: &SceneFile) {
     doc.reset();
     for rec in &file.entities {
         let e = doc.spawn_bare(rec.guid, &rec.name, rec.parent);
-        let w = doc.world_mut().world_mut();
-        w.entity_mut(e).insert((
-            rec.transform,
-            Visibility {
-                visible: rec.visible,
-            },
-        ));
-        if let Some(m) = rec.mesh {
-            w.entity_mut(e).insert(m);
-        }
-        if let Some(m) = rec.material {
-            w.entity_mut(e).insert(m);
-        }
-        if let Some(l) = rec.light {
-            w.entity_mut(e).insert(l);
-        }
-        if let Some(c) = rec.camera {
-            w.entity_mut(e).insert(c);
-        }
-        if let Some(s) = &rec.sprite {
-            w.entity_mut(e).insert(s.clone());
-        }
-        if let Some(t) = &rec.tilemap {
-            w.entity_mut(e).insert(t.clone());
-        }
-        if let Some(n) = &rec.nine_slice {
-            w.entity_mut(e).insert(n.clone());
-        }
-        if let Some(t) = &rec.text2d {
-            w.entity_mut(e).insert(t.clone());
-        }
-        if let Some(l) = &rec.light_2d {
-            w.entity_mut(e).insert(*l);
-        }
-        if let Some(c) = &rec.rigid_body_2d {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.collider_2d {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.character_controller_2d {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.rigid_body_3d {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.collider_3d {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.character_controller_3d {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(actor) = rec.actor {
-            w.entity_mut(e).insert(ActorClass(actor));
-        }
-        if let Some(t) = &rec.terrain {
-            w.entity_mut(e).insert(t.clone());
-        }
-        if let Some(v) = &rec.pcg_volume {
-            w.entity_mut(e).insert(v.clone());
-        }
-        if let Some(c) = &rec.skeletal_mesh {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.anim_player {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.anim_state_machine {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.root_motion {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.attached_to {
-            w.entity_mut(e).insert(c.clone());
-        }
-        if let Some(c) = &rec.joint_2d {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.joint_3d {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.audio_source {
-            w.entity_mut(e).insert(c.clone());
-        }
-        if let Some(c) = &rec.audio_listener {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.decal {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.volume {
-            w.entity_mut(e).insert(*c);
-        }
-        if let Some(c) = &rec.spline {
-            w.entity_mut(e).insert(c.clone());
-        }
-        if let Some(c) = &rec.foliage {
-            w.entity_mut(e).insert(c.clone());
-        }
+        // Fresh entity → only the insert half (nothing to remove).
+        write_record_components(doc.world_mut(), e, rec, false);
     }
     // Second pass: now that every GUID exists, re-attach any child whose parent
     // didn't resolve in the first pass (a reparent under a later-created node).
@@ -3085,7 +3070,7 @@ mod tests {
             let e = doc.entity_of(g).unwrap();
             let w = doc.world_mut().world_mut();
             w.entity_mut(e).insert(Joint3D {
-                other: Some(other_guid),
+                other: inf_ecs::EntityRef::new(other_guid),
                 kind: JointKind3D::Revolute,
                 axis: Vec3d::new(0.0, 0.0, 1.0),
                 limits_enabled: true,
@@ -3096,7 +3081,7 @@ mod tests {
                 ..Default::default()
             });
             w.entity_mut(e).insert(Joint2D {
-                other: Some(other_guid),
+                other: inf_ecs::EntityRef::new(other_guid),
                 kind: JointKind2D::Distance,
                 max_distance: 1.5,
                 ..Default::default()
@@ -3141,12 +3126,12 @@ mod tests {
         let e2 = loaded.entity_of(g).expect("body persists");
         let w = loaded.world().world();
         let j3 = w.get::<Joint3D>(e2).expect("joint_3d persists");
-        assert_eq!(j3.other, Some(other_guid));
+        assert_eq!(j3.other, inf_ecs::EntityRef::new(other_guid));
         assert_eq!(j3.kind, JointKind3D::Revolute);
         assert!(j3.motor_enabled);
         assert_eq!(j3.motor_target_vel, 8.0);
         let j2 = w.get::<Joint2D>(e2).expect("joint_2d persists");
-        assert_eq!(j2.other, Some(other_guid));
+        assert_eq!(j2.other, inf_ecs::EntityRef::new(other_guid));
         assert_eq!(j2.kind, JointKind2D::Distance);
         let src = w.get::<AudioSource>(e2).expect("audio_source persists");
         assert_eq!(src.clip, Some(clip_guid));
@@ -3173,7 +3158,7 @@ mod tests {
             let e = doc.entity_of(g).unwrap();
             let w = doc.world_mut().world_mut();
             w.entity_mut(e).insert(Joint3D {
-                other: Some(uuid::Uuid::from_u128(0x12_A0)),
+                other: inf_ecs::EntityRef::new(uuid::Uuid::from_u128(0x12_A0)),
                 kind: JointKind3D::Spherical,
                 ..Default::default()
             });
@@ -3429,7 +3414,7 @@ mod tests {
                 EntityRecordV7 {
                     mesh: mesh(Primitive::Cone),
                     joint_3d: Some(Joint3D {
-                        other: Some(cube),
+                        other: inf_ecs::EntityRef::new(cube),
                         kind: JointKind3D::Revolute,
                         ..Default::default()
                     }),

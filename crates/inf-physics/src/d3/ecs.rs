@@ -527,7 +527,7 @@ fn collider_desc(col: &Collider3D) -> ColliderDesc3D {
 /// Map a scene [`Joint3D`] onto a facade [`JointSync3D`]; `None` if it is unbound
 /// (no `other` entity set).
 fn joint_sync(j: Joint3D) -> Option<JointSync3D> {
-    let other = j.other?;
+    let other = j.other.get()?;
     let motor = j.motor_enabled.then_some(JointMotor3D {
         target_pos: j.motor_target_pos,
         target_vel: j.motor_target_vel,

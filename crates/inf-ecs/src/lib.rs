@@ -17,6 +17,7 @@ pub mod components;
 pub mod hierarchy;
 pub mod math;
 pub mod props;
+pub mod refs;
 pub mod registry;
 pub mod schedule;
 pub mod sim;
@@ -39,7 +40,8 @@ pub use math::{Color, Vec2d, Vec3d};
 // Terrain heightfield types re-exported so downstream editor crates (e.g. the
 // viewport host) reach them through the ECS facade without a direct dep.
 pub use inf_terrain::{HeightSource, TerrainData, TerrainTile};
-pub use props::{default_field, ComponentProps, PropField, PropValue};
+pub use props::{default_field, default_list_element, ComponentProps, PropField, PropValue};
+pub use refs::EntityRef;
 pub use registry::{ComponentInfo, ComponentRegistry};
 pub use schedule::{
     ecs_task_pool_threads, init_ecs_task_pool, ScheduleMode, SimSchedule, SimScheduleBuilder,

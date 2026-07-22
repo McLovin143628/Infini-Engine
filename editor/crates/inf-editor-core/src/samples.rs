@@ -1777,7 +1777,7 @@ fn joint3d_from_ragdoll(
     use inf_ecs::components::{Joint3D, JointKind3D as EK};
     use inf_physics::d3::JointKind3D as PK;
     let mut j = Joint3D {
-        other: Some(other),
+        other: inf_ecs::EntityRef::new(other),
         local_anchor: desc.local_anchor1.into(),
         other_anchor: desc.local_anchor2.into(),
         ..Default::default()
@@ -1988,7 +1988,7 @@ pub fn physics_playground_scene() -> SceneDoc {
         doc,
         PLAYGROUND_SPINNER_WHEEL_GUID,
         Joint3D {
-            other: Some(PLAYGROUND_SPINNER_HUB_GUID),
+            other: inf_ecs::EntityRef::new(PLAYGROUND_SPINNER_HUB_GUID),
             kind: JointKind3D::Revolute,
             axis: Vec3d::new(0.0, 0.0, 1.0),
             motor_enabled: true,
@@ -2069,7 +2069,7 @@ pub fn physics_playground_scene() -> SceneDoc {
         doc,
         PLAYGROUND_PENDULUM_BOB_GUID,
         Joint3D {
-            other: Some(PLAYGROUND_PENDULUM_ANCHOR_GUID),
+            other: inf_ecs::EntityRef::new(PLAYGROUND_PENDULUM_ANCHOR_GUID),
             kind: JointKind3D::Distance,
             max_distance: 1.5,
             ..Default::default()
@@ -2123,7 +2123,7 @@ pub fn physics_playground_scene() -> SceneDoc {
         doc,
         PLAYGROUND_SLIDER_GUID,
         Joint3D {
-            other: Some(PLAYGROUND_SLIDER_RAIL_GUID),
+            other: inf_ecs::EntityRef::new(PLAYGROUND_SLIDER_RAIL_GUID),
             kind: JointKind3D::Prismatic,
             axis: Vec3d::new(0.0, 1.0, 0.0),
             limits_enabled: true,
@@ -3226,7 +3226,10 @@ mod tests {
         let we = doc2.entity_of(PLAYGROUND_SPINNER_WHEEL_GUID).unwrap();
         let sj = w.get::<Joint3D>(we).expect("spinner joint persists");
         assert_eq!(sj.kind, JointKind3D::Revolute);
-        assert_eq!(sj.other, Some(PLAYGROUND_SPINNER_HUB_GUID));
+        assert_eq!(
+            sj.other,
+            inf_ecs::EntityRef::new(PLAYGROUND_SPINNER_HUB_GUID)
+        );
         assert!(sj.motor_enabled);
         assert_eq!(sj.motor_target_vel, 8.0);
         // The spinner's autoplay/looping/occluded AudioSource persists.

@@ -155,12 +155,42 @@ pub struct SceneDelta {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PropValueDto {
-    Bool { value: bool },
-    Number { value: f64 },
-    Text { value: String },
-    Vec3 { value: Vec<f64> },
-    Color { value: Vec<f32> },
-    Enum { value: String, options: Vec<String> },
+    Bool {
+        value: bool,
+    },
+    Number {
+        value: f64,
+    },
+    Text {
+        value: String,
+    },
+    Vec3 {
+        value: Vec<f64>,
+    },
+    Color {
+        value: Vec<f32>,
+    },
+    Enum {
+        value: String,
+        options: Vec<String>,
+    },
+    // ── E-P1 deep editing ─────────────────────────────────────────────────
+    /// A homogeneous list. The ListField edits it as a whole (add/remove/reorder
+    /// or per-element) and writes the entire `value` back through set-property.
+    List {
+        value: Vec<PropValueDto>,
+    },
+    /// A nested struct — rendered as indented child rows. Each child's `name` is
+    /// the relative field key; the frontend joins it onto the parent path
+    /// (`parent.child`) when writing a leaf.
+    Struct {
+        fields: Vec<PropFieldDto>,
+    },
+    /// A reference to another entity by GUID string (`None` → unbound). Surfaced
+    /// as an entity-picker widget.
+    EntityRef {
+        value: Option<String>,
+    },
 }
 
 /// One editable field row.
@@ -194,6 +224,15 @@ pub struct DetailsDto {
     /// Component sections shared by every selected object.
     pub components: Vec<ComponentDto>,
     pub multi: bool,
+}
+
+/// One entry in the "+ Add Component" menu (E-P1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AddableComponentDto {
+    /// Stable reflect type path — the key passed to `scene_add_component`.
+    pub type_path: String,
+    /// Human-readable menu label.
+    pub display: String,
 }
 
 /// The kind of entity to create (`scene_create` command).
@@ -1115,4 +1154,260 @@ pub struct CollectionDto {
     pub name: String,
     /// Member asset GUID strings, in insertion order (dangling ids pruned).
     pub ids: Vec<String>,
+}
+
+// ── Audio mixer editor (E-P9) ─────────────────────────────────────────────────
+//
+// The named-bus mixer is `inf_audio::MixerConfig` (hierarchical buses + per-bus
+// volume + an effect chain), persisted at `<project_root>/.infinity/mixer.toml`.
+// The Audio Mixer panel reads it via `mixer_get`, edits a draft, and writes it
+// back via `mixer_save` (which validates, persists, live-applies to a running
+// Simulate session, and emits `audio://mixer-changed`). These DTOs mirror the
+// Ring-0 shapes faithfully so a load→edit→save round-trips any effect chain.
+
+/// One effect in a bus's chain, mirroring [`inf_audio::Effect`]. `Gain` is
+/// fully engine-side and editable (a dB trim folded into the bus's linear gain);
+/// `Lowpass` is a device-side DSP effect the editor shows read-only (its cutoff
+/// is modelled + folded, but audible filtering needs the cpal sub-track wiring —
+/// a documented follow-up). The tag mirrors [`PropValueDto`]'s `kind` convention.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MixerEffectDto {
+    /// A gain trim in decibels (`0` = unity). Editable in the panel.
+    Gain { db: f64 },
+    /// A low-pass cutoff in hertz. Shown read-only (device-side follow-up).
+    Lowpass { cutoff_hz: f64 },
+}
+
+impl MixerEffectDto {
+    fn from_effect(e: &inf_audio::Effect) -> Self {
+        match *e {
+            inf_audio::Effect::Gain { db } => Self::Gain { db },
+            inf_audio::Effect::Lowpass { cutoff_hz } => Self::Lowpass { cutoff_hz },
+        }
+    }
+
+    fn to_effect(self) -> inf_audio::Effect {
+        match self {
+            Self::Gain { db } => inf_audio::Effect::Gain { db },
+            Self::Lowpass { cutoff_hz } => inf_audio::Effect::Lowpass { cutoff_hz },
+        }
+    }
+}
+
+/// One mixer bus (mirrors [`inf_audio::Bus`]): a unique name, an optional parent
+/// for the routing hierarchy, a linear volume, and an ordered effect chain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct MixerBusDto {
+    /// Unique bus name — the key an entity's free-form `AudioSource.bus` matches.
+    pub name: String,
+    /// Parent bus name; `None` for a root (`"master"` is the undeletable root).
+    pub parent: Option<String>,
+    /// Linear volume (`1.0` = unity).
+    pub volume: f64,
+    /// Ordered effect chain (Gain editable, Lowpass read-only).
+    pub effects: Vec<MixerEffectDto>,
+}
+
+/// The project mixer configuration (mirrors [`inf_audio::MixerConfig`], minus the
+/// on-disk `schema_version`, which `mixer_save` stamps with the current version).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct MixerConfigDto {
+    /// The buses, in declaration order (order is preserved on save).
+    pub buses: Vec<MixerBusDto>,
+}
+
+impl MixerConfigDto {
+    /// Project a Ring-0 [`inf_audio::MixerConfig`] into the editor DTO.
+    pub fn from_config(c: &inf_audio::MixerConfig) -> Self {
+        Self {
+            buses: c
+                .buses
+                .iter()
+                .map(|b| MixerBusDto {
+                    name: b.name.clone(),
+                    parent: b.parent.clone(),
+                    volume: b.volume,
+                    effects: b.effects.iter().map(MixerEffectDto::from_effect).collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Convert the edited DTO back into a Ring-0 [`inf_audio::MixerConfig`],
+    /// stamping the current schema version. Does NOT validate — the command layer
+    /// runs [`validate_mixer`](crate::ipc::validate_mixer) before persisting.
+    pub fn to_config(&self) -> inf_audio::MixerConfig {
+        inf_audio::MixerConfig {
+            schema_version: inf_audio::mixer::MIXER_SCHEMA_VERSION,
+            buses: self
+                .buses
+                .iter()
+                .map(|b| inf_audio::mixer::Bus {
+                    name: b.name.clone(),
+                    parent: b.parent.clone(),
+                    volume: b.volume,
+                    effects: b.effects.iter().map(|e| e.to_effect()).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Validate a mixer config before persisting it (pure; unit-tested without Tauri).
+/// The rules keep the file loadable + the hierarchy sane:
+///
+/// 1. at least one bus;
+/// 2. every name non-empty (trimmed);
+/// 3. names unique;
+/// 4. a bus named `"master"` is present and is a root (no parent) — it is the
+///    undeletable mix root every voice ultimately folds through;
+/// 5. every non-`None` parent references an existing bus;
+/// 6. no routing cycles (walk each bus's parent chain with a visited set).
+pub fn validate_mixer(cfg: &inf_audio::MixerConfig) -> Result<(), String> {
+    use std::collections::BTreeSet;
+
+    if cfg.buses.is_empty() {
+        return Err("mixer must have at least one bus".into());
+    }
+
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for b in &cfg.buses {
+        let name = b.name.trim();
+        if name.is_empty() {
+            return Err("bus names must not be empty".into());
+        }
+        if !seen.insert(b.name.as_str()) {
+            return Err(format!("duplicate bus name: {}", b.name));
+        }
+    }
+
+    let names: BTreeSet<&str> = cfg.buses.iter().map(|b| b.name.as_str()).collect();
+    let master = cfg
+        .buses
+        .iter()
+        .find(|b| b.name == "master")
+        .ok_or("the master bus must exist and cannot be deleted")?;
+    if master.parent.is_some() {
+        return Err("the master bus must be a root (it cannot have a parent)".into());
+    }
+
+    for b in &cfg.buses {
+        if let Some(p) = &b.parent {
+            if !names.contains(p.as_str()) {
+                return Err(format!("bus {} has an unknown parent: {p}", b.name));
+            }
+        }
+    }
+
+    // Cycle check: follow each bus up its parent chain; a revisit or a walk longer
+    // than the bus count is a cycle.
+    let index: std::collections::BTreeMap<&str, &inf_audio::mixer::Bus> =
+        cfg.buses.iter().map(|b| (b.name.as_str(), b)).collect();
+    for start in &cfg.buses {
+        let mut visited: BTreeSet<&str> = BTreeSet::new();
+        let mut cur = Some(start.name.as_str());
+        while let Some(name) = cur {
+            if !visited.insert(name) {
+                return Err(format!("routing cycle through bus: {name}"));
+            }
+            cur = index
+                .get(name)
+                .and_then(|b| b.parent.as_deref())
+                .filter(|p| index.contains_key(*p));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod mixer_tests {
+    use super::*;
+    use inf_audio::mixer::{Bus, MIXER_SCHEMA_VERSION};
+    use inf_audio::{Effect, MixerConfig};
+
+    fn cfg(buses: Vec<Bus>) -> MixerConfig {
+        MixerConfig {
+            schema_version: MIXER_SCHEMA_VERSION,
+            buses,
+        }
+    }
+
+    #[test]
+    fn default_config_validates() {
+        assert!(validate_mixer(&MixerConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn rejects_missing_master() {
+        let c = cfg(vec![Bus::new("sfx", None)]);
+        assert!(validate_mixer(&c).unwrap_err().contains("master"));
+    }
+
+    #[test]
+    fn rejects_master_with_parent() {
+        let c = cfg(vec![
+            Bus::new("root", None),
+            Bus::new("master", Some("root")),
+        ]);
+        assert!(validate_mixer(&c).unwrap_err().contains("master"));
+    }
+
+    #[test]
+    fn rejects_duplicate_name() {
+        let c = cfg(vec![
+            Bus::new("master", None),
+            Bus::new("sfx", Some("master")),
+            Bus::new("sfx", Some("master")),
+        ]);
+        assert!(validate_mixer(&c).unwrap_err().contains("duplicate"));
+    }
+
+    #[test]
+    fn rejects_empty_name() {
+        let c = cfg(vec![
+            Bus::new("master", None),
+            Bus::new("   ", Some("master")),
+        ]);
+        assert!(validate_mixer(&c).unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn rejects_unknown_parent() {
+        let c = cfg(vec![
+            Bus::new("master", None),
+            Bus::new("sfx", Some("ghost")),
+        ]);
+        assert!(validate_mixer(&c).unwrap_err().contains("unknown parent"));
+    }
+
+    #[test]
+    fn rejects_cycle() {
+        // a → b → a (both non-root), plus a valid master.
+        let c = cfg(vec![
+            Bus::new("master", None),
+            Bus::new("a", Some("b")),
+            Bus::new("b", Some("a")),
+        ]);
+        assert!(validate_mixer(&c).unwrap_err().contains("cycle"));
+    }
+
+    #[test]
+    fn dto_round_trips_effects() {
+        let c = cfg(vec![
+            Bus::new("master", None),
+            Bus {
+                name: "sfx".into(),
+                parent: Some("master".into()),
+                volume: 0.5,
+                effects: vec![
+                    Effect::Gain { db: -6.0 },
+                    Effect::Lowpass { cutoff_hz: 800.0 },
+                ],
+            },
+        ]);
+        let dto = MixerConfigDto::from_config(&c);
+        assert_eq!(dto.to_config(), c);
+    }
 }

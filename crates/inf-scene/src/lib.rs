@@ -1772,7 +1772,7 @@ mod tests {
                         asset: None,
                     }),
                     joint_3d: Some(Joint3D {
-                        other: Some(g(0x7001)),
+                        other: inf_ecs::EntityRef::new(g(0x7001)),
                         ..Default::default()
                     }),
                     ..v7_rec(cube, "Cube", None)

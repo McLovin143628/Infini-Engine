@@ -1354,6 +1354,121 @@ impl SceneDoc {
         ok
     }
 
+    /// The default value for a single **element** of the list at `path` on
+    /// `type_path`'s component (E-P1 ListField "add element"). `None` if the path
+    /// is not a list.
+    pub fn list_default(&self, type_path: &str, path: &str) -> Option<PropValue> {
+        inf_ecs::default_list_element(self.world.registry(), type_path, path)
+    }
+
+    /// Add a `Default` instance of `type_path`'s component to `guid` (E-P1),
+    /// recorded as one `SwapComponents` undo step. Returns `false` (no-op) when
+    /// the component is not addable, is already present, or the entity is gone.
+    pub fn edit_add_component(&mut self, guid: Uuid, type_path: &str) -> bool {
+        if !self.is_addable(type_path) {
+            return false;
+        }
+        // Idempotent: adding a component that already exists is a no-op.
+        if self
+            .entity_props(guid)
+            .iter()
+            .any(|c| c.type_path == type_path)
+        {
+            return false;
+        }
+        let Some(before) = crate::scene::serialize::record_of(self, guid) else {
+            return false;
+        };
+        let Some(e) = self.world.entity_of(guid) else {
+            return false;
+        };
+        if !self.world.insert_default_component(e, type_path) {
+            return false;
+        }
+        let Some(after) = crate::scene::serialize::record_of(self, guid) else {
+            return false;
+        };
+        self.touch();
+        self.world.mark_dirty();
+        self.world.propagate();
+        self.history.record(
+            "Add Component",
+            EditCommand::SwapComponents {
+                guid,
+                before: Box::new(before),
+                after: Box::new(after),
+            },
+        );
+        true
+    }
+
+    /// Remove `type_path`'s component from `guid` (E-P1), recorded as one
+    /// `SwapComponents` undo step. Returns `false` when the component is
+    /// structural (only the addable set may be removed — so `Transform` is
+    /// rejected), absent, or the entity is gone.
+    pub fn edit_remove_component(&mut self, guid: Uuid, type_path: &str) -> bool {
+        if !self.is_addable(type_path) {
+            return false; // structural (Transform) / unknown → refuse
+        }
+        if !self
+            .entity_props(guid)
+            .iter()
+            .any(|c| c.type_path == type_path)
+        {
+            return false; // not present
+        }
+        let Some(before) = crate::scene::serialize::record_of(self, guid) else {
+            return false;
+        };
+        let Some(e) = self.world.entity_of(guid) else {
+            return false;
+        };
+        if !self.world.remove_component(e, type_path) {
+            return false;
+        }
+        let Some(after) = crate::scene::serialize::record_of(self, guid) else {
+            return false;
+        };
+        self.touch();
+        self.world.mark_dirty();
+        self.world.propagate();
+        self.history.record(
+            "Remove Component",
+            EditCommand::SwapComponents {
+                guid,
+                before: Box::new(before),
+                after: Box::new(after),
+            },
+        );
+        true
+    }
+
+    /// Whether `type_path` is a user-addable/removable component (the editable
+    /// set minus the structural `Transform`).
+    fn is_addable(&self, type_path: &str) -> bool {
+        self.world
+            .registry()
+            .addable()
+            .any(|c| c.type_path == type_path)
+    }
+
+    /// Re-apply an [`EntityRecord`]'s full component set onto `guid`, removing any
+    /// optional component the record leaves `None` (E-P1 add/remove-component
+    /// undo — [`EditCommand::SwapComponents`]). The record is the complete truth.
+    pub(crate) fn raw_apply_record_components(
+        &mut self,
+        guid: Uuid,
+        rec: &crate::scene::serialize::EntityRecord,
+    ) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        crate::scene::serialize::write_record_components(self.world_mut(), e, rec, true);
+        self.touch();
+        self.world.mark_dirty();
+        self.world.propagate();
+    }
+
     /// Apply a material's PBR parameters to each target entity's `Material`
     /// component as one undo step (Content-Drawer apply-by-drag / "Apply to
     /// Selection", P7.1). Targets without a `Material` are skipped. Returns how
@@ -2411,5 +2526,120 @@ mod wave2_world_transform_tests {
         let ce = doc.world().entity_of(child).unwrap();
         assert!((doc.world().world_translation(pe).unwrap() - parent_target).length() < 1e-6);
         assert!((doc.world().world_translation(ce).unwrap() - child_target).length() < 1e-6);
+    }
+
+    // ── E-P1 add / remove component ─────────────────────────────────────────
+
+    fn has_component(doc: &SceneDoc, guid: Uuid, type_path: &str) -> bool {
+        doc.entity_props(guid)
+            .iter()
+            .any(|c| c.type_path == type_path)
+    }
+
+    #[test]
+    fn add_remove_component_round_trips_and_undoes() {
+        let mut doc = SceneDoc::new();
+        let g = doc.create(SpawnKind::Cube, "Body", None);
+        let joint_tp = doc.world().registry().type_path_for("Joint 3D").unwrap();
+
+        // Absent to start.
+        assert!(!has_component(&doc, g, joint_tp));
+
+        // Add → present; undo → absent; redo → present.
+        assert!(doc.edit_add_component(g, joint_tp));
+        assert!(has_component(&doc, g, joint_tp));
+        assert!(doc.undo());
+        assert!(!has_component(&doc, g, joint_tp));
+        assert!(doc.redo());
+        assert!(has_component(&doc, g, joint_tp));
+
+        // Remove → absent; undo → present.
+        assert!(doc.edit_remove_component(g, joint_tp));
+        assert!(!has_component(&doc, g, joint_tp));
+        assert!(doc.undo());
+        assert!(has_component(&doc, g, joint_tp));
+
+        // Idempotency: adding a present component / removing an absent one no-op.
+        assert!(!doc.edit_add_component(g, joint_tp)); // already there
+        assert!(doc.edit_remove_component(g, joint_tp));
+        assert!(!doc.edit_remove_component(g, joint_tp)); // already gone
+    }
+
+    #[test]
+    fn removing_transform_is_rejected() {
+        let mut doc = SceneDoc::new();
+        let g = doc.create(SpawnKind::Cube, "Body", None);
+        let transform_tp = doc.world().registry().type_path_for("Transform").unwrap();
+        assert!(has_component(&doc, g, transform_tp));
+        // Transform is structural — not addable/removable.
+        assert!(!doc.edit_remove_component(g, transform_tp));
+        assert!(has_component(&doc, g, transform_tp));
+        assert!(!doc.edit_add_component(g, transform_tp));
+    }
+
+    #[test]
+    fn fifty_add_remove_steps_undo_and_redo_cleanly() {
+        let mut doc = SceneDoc::new();
+        let g = doc.create(SpawnKind::Cube, "Body", None);
+        // Two independent components toggled across 50 recorded steps.
+        let joint = doc.world().registry().type_path_for("Joint 3D").unwrap();
+        let audio = doc
+            .world()
+            .registry()
+            .type_path_for("Audio Source")
+            .unwrap();
+        let comps = [joint, audio];
+        let mut steps = 0usize;
+        // Build 50 add/remove edits (each component toggled 25 times → ends present).
+        while steps < 50 {
+            for tp in comps {
+                if steps >= 50 {
+                    break;
+                }
+                if has_component(&doc, g, tp) {
+                    assert!(doc.edit_remove_component(g, tp));
+                } else {
+                    assert!(doc.edit_add_component(g, tp));
+                }
+                steps += 1;
+            }
+        }
+        // Post-50-step state: 25 toggles each (odd) → both present.
+        assert!(has_component(&doc, g, joint));
+        assert!(has_component(&doc, g, audio));
+        // Undo everything → both absent (started absent).
+        while doc.undo() {}
+        assert!(!has_component(&doc, g, joint));
+        assert!(!has_component(&doc, g, audio));
+        // Redo everything → back to the post-50-step state (both present).
+        while doc.redo() {}
+        assert!(has_component(&doc, g, joint));
+        assert!(has_component(&doc, g, audio));
+    }
+
+    #[test]
+    fn add_component_defaults_and_swap_preserves_other_components() {
+        // Adding/removing a component must not disturb sibling components.
+        let mut doc = SceneDoc::new();
+        let g = doc.create(SpawnKind::Cube, "Body", None);
+        let mat_tp = doc.world().registry().type_path_for("Material").unwrap();
+        let joint_tp = doc.world().registry().type_path_for("Joint 3D").unwrap();
+        // The cube already has a Material; edit it, then add a Joint and undo.
+        assert!(has_component(&doc, g, mat_tp));
+        doc.edit_set_prop(g, mat_tp, "metallic", &PropValue::Number(0.5));
+        assert!(doc.edit_add_component(g, joint_tp));
+        assert!(doc.undo()); // undo the joint add
+                             // Material (and its edited value) survives the swap-revert.
+        assert!(has_component(&doc, g, mat_tp));
+        let m = doc.entity_props(g);
+        let metallic = m
+            .iter()
+            .find(|c| c.type_path == mat_tp)
+            .unwrap()
+            .fields
+            .iter()
+            .find(|f| f.name == "metallic")
+            .unwrap();
+        assert_eq!(metallic.value, PropValue::Number(0.5));
     }
 }

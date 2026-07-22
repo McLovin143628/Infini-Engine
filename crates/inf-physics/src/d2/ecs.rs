@@ -396,7 +396,7 @@ fn to_phys_combine(r: SceneCombineRule) -> CombineRule {
 
 /// Map a scene [`Joint2D`] onto a facade [`JointSync2D`]; `None` if unbound.
 fn joint_sync(j: Joint2D) -> Option<JointSync2D> {
-    let other = j.other?;
+    let other = j.other.get()?;
     let motor = j.motor_enabled.then_some(JointMotor2D {
         target_pos: j.motor_target_pos,
         target_vel: j.motor_target_vel,

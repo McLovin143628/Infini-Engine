@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::math::{Color, Vec2d, Vec3d};
+use crate::refs::EntityRef;
 
 /// Stable, save-surviving identity. Bevy `Entity` ids are reused across
 /// spawn/despawn and never persisted; the `Guid` is what `.inf_lvl` stores and
@@ -1287,8 +1288,9 @@ impl Default for CharacterController3D {
 // mirroring the flat-struct precedent of the collider components (a `kind` enum
 // selects the family; sibling fields carry the per-family numeric params, so the
 // reflection Details grid can edit them). The other body is referenced by its
-// stable `Guid` in `other`, which is `#[reflect(ignore)]` (no entity-ref widget
-// yet — a documented follow-up) but still serde-persisted.
+// stable `Guid` in `other`, now an `EntityRef` (E-P1) — reflected opaquely so
+// the Details panel surfaces an entity-picker, serde-transparent so the wire is
+// byte-identical to the old `Option<Uuid>`.
 
 fn default_joint_axis() -> Vec3d {
     Vec3d::new(0.0, 1.0, 0.0)
@@ -1335,11 +1337,12 @@ pub enum JointKind3D {
 #[reflect(Component, Default)]
 pub struct Joint3D {
     /// The OTHER body's entity `Guid`. `None` → the joint is unbound and the
-    /// bridge skips it. `#[reflect(ignore)]` (no ref-picker widget yet), still
-    /// serde-persisted.
+    /// bridge skips it. An [`EntityRef`](crate::refs::EntityRef) (E-P1): reflected
+    /// opaquely so the Details panel shows an entity-picker widget;
+    /// serde-transparent, so the on-disk stream is byte-identical to the old
+    /// `Option<Uuid>`.
     #[serde(default)]
-    #[reflect(ignore)]
-    pub other: Option<Uuid>,
+    pub other: EntityRef,
     /// Fixed / Revolute / Prismatic / Spherical / Distance.
     #[serde(default)]
     pub kind: JointKind3D,
@@ -1387,7 +1390,7 @@ pub struct Joint3D {
 impl Default for Joint3D {
     fn default() -> Self {
         Self {
-            other: None,
+            other: EntityRef::NONE,
             kind: JointKind3D::Fixed,
             local_anchor: Vec3d::ZERO,
             other_anchor: Vec3d::ZERO,
@@ -1427,10 +1430,10 @@ pub enum JointKind2D {
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[reflect(Component, Default)]
 pub struct Joint2D {
-    /// The OTHER body's entity `Guid`. `None` → unbound (skipped).
+    /// The OTHER body's entity `Guid`. `None` → unbound (skipped). An
+    /// [`EntityRef`] (E-P1) — see [`Joint3D::other`].
     #[serde(default)]
-    #[reflect(ignore)]
-    pub other: Option<Uuid>,
+    pub other: EntityRef,
     /// Fixed / Revolute / Prismatic / Distance.
     #[serde(default)]
     pub kind: JointKind2D,
@@ -1478,7 +1481,7 @@ pub struct Joint2D {
 impl Default for Joint2D {
     fn default() -> Self {
         Self {
-            other: None,
+            other: EntityRef::NONE,
             kind: JointKind2D::Fixed,
             local_anchor: Vec2d::ZERO,
             other_anchor: Vec2d::ZERO,
@@ -2790,13 +2793,14 @@ mod tests {
     #[test]
     fn joint_3d_serde_round_trips_including_entity_ref() {
         // GUARD (v6 persistence gap): `Joint3D` round-trips through serde — the
-        // `other` entity ref (which is `#[reflect(ignore)]`) IS serde-persisted, so
-        // the component itself is disk-ready. It is NOT yet wired into the
-        // `.inf_lvl` `EntityRecord` (that is the deferred v6 schema bump); this test
-        // pins that the component's own serialization is stable so the eventual
-        // record slot is a pure append. See `inf-editor-core::scene::serialize`.
+        // `other` entity ref (now an `EntityRef`, serde-transparent) IS
+        // serde-persisted, so the component itself is disk-ready. It is NOT yet
+        // wired into the `.inf_lvl` `EntityRecord` (that is the deferred v6 schema
+        // bump); this test pins that the component's own serialization is stable so
+        // the eventual record slot is a pure append. See
+        // `inf-editor-core::scene::serialize`.
         let j = Joint3D {
-            other: Some(Uuid::from_u128(42)),
+            other: EntityRef::new(Uuid::from_u128(42)),
             kind: JointKind3D::Revolute,
             axis: Vec3d::new(0.0, 0.0, 1.0),
             limits_enabled: true,
@@ -2809,19 +2813,19 @@ mod tests {
         let json = serde_json::to_string(&j).unwrap();
         let back: Joint3D = serde_json::from_str(&json).unwrap();
         assert_eq!(j, back);
-        assert_eq!(back.other, Some(Uuid::from_u128(42)));
+        assert_eq!(back.other, EntityRef::new(Uuid::from_u128(42)));
         // Defaults: a Fixed, unbound joint.
         let d: Joint3D = serde_json::from_str("{}").unwrap();
         assert_eq!(d, Joint3D::default());
         assert_eq!(d.kind, JointKind3D::Fixed);
-        assert_eq!(d.other, None);
+        assert_eq!(d.other, EntityRef::NONE);
         assert_eq!(d.motor_max_force, f64::MAX);
     }
 
     #[test]
     fn joint_2d_serde_round_trips() {
         let j = Joint2D {
-            other: Some(Uuid::from_u128(7)),
+            other: EntityRef::new(Uuid::from_u128(7)),
             kind: JointKind2D::Distance,
             max_distance: 3.5,
             ..Default::default()

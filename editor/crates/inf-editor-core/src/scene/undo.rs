@@ -101,6 +101,18 @@ pub(crate) enum EditCommand {
     /// redo/undo — redo replays `after` weights, undo replays `before` (and drops
     /// any weight buffers the stroke materialized from the sparse default). Boxed.
     PaintSplat { guid: Uuid, delta: Box<SplatDelta> },
+    /// Add / remove a whole component (E-P1). `before`/`after` are full entity
+    /// component snapshots ([`EntityRecord`] via `record_of`) — the record is the
+    /// complete truth, so replaying either side re-inserts what it holds and
+    /// removes every optional component it leaves `None`
+    /// (`raw_apply_record_components`). Boxed so the (large) record doesn't bloat
+    /// the other variants. Covers add (`before` lacks the component, `after` has
+    /// it) and remove (the reverse) with one code path.
+    SwapComponents {
+        guid: Uuid,
+        before: Box<EntityRecord>,
+        after: Box<EntityRecord>,
+    },
 }
 
 impl EditCommand {
@@ -143,6 +155,9 @@ impl EditCommand {
             }
             EditCommand::PaintSplat { guid, delta } => {
                 doc.raw_apply_splat_delta(*guid, delta);
+            }
+            EditCommand::SwapComponents { guid, after, .. } => {
+                doc.raw_apply_record_components(*guid, after);
             }
         }
     }
@@ -202,6 +217,9 @@ impl EditCommand {
             }
             EditCommand::PaintSplat { guid, delta } => {
                 doc.raw_revert_splat_delta(*guid, delta);
+            }
+            EditCommand::SwapComponents { guid, before, .. } => {
+                doc.raw_apply_record_components(*guid, before);
             }
         }
     }

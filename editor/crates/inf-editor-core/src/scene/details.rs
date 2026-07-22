@@ -91,6 +91,26 @@ pub fn to_dto(v: &PropValue) -> PropValueDto {
             value: value.clone(),
             options: options.clone(),
         },
+        // E-P1 deep editing.
+        PropValue::List(elems) => PropValueDto::List {
+            value: elems.iter().map(to_dto).collect(),
+        },
+        PropValue::Struct(pairs) => PropValueDto::Struct {
+            fields: pairs
+                .iter()
+                .map(|(name, value)| PropFieldDto {
+                    label: prettify(name),
+                    name: name.clone(),
+                    value: to_dto(value),
+                    // Nested struct rows are single-value; multi-select complex
+                    // rows render read-only, so `same` is not consulted here.
+                    same: true,
+                })
+                .collect(),
+        },
+        PropValue::EntityRef(guid) => PropValueDto::EntityRef {
+            value: guid.map(|g| g.to_string()),
+        },
     }
 }
 
@@ -109,7 +129,33 @@ pub fn from_dto(v: &PropValueDto) -> PropValue {
             value: value.clone(),
             options: Vec::new(),
         },
+        PropValueDto::List { value } => PropValue::List(value.iter().map(from_dto).collect()),
+        PropValueDto::Struct { fields } => PropValue::Struct(
+            fields
+                .iter()
+                .map(|f| (f.name.clone(), from_dto(&f.value)))
+                .collect(),
+        ),
+        PropValueDto::EntityRef { value } => {
+            PropValue::EntityRef(value.as_deref().and_then(|s| s.parse().ok()))
+        }
     }
+}
+
+/// `base_color` → `Base Color` (nested-struct child labels).
+fn prettify(field: &str) -> String {
+    field
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().chain(c).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -141,6 +187,40 @@ mod tests {
             PropValue::Color([0.1, 0.2, 0.3, 1.0]),
         ] {
             assert_eq!(from_dto(&to_dto(&v)), v);
+        }
+    }
+
+    #[test]
+    fn dto_round_trips_deep_editing_kinds() {
+        let guid = uuid::Uuid::from_u128(0xBEEF);
+        for v in [
+            PropValue::EntityRef(Some(guid)),
+            PropValue::EntityRef(None),
+            PropValue::List(vec![
+                PropValue::Vec3([1.0, 2.0, 3.0]),
+                PropValue::Vec3([4.0, 5.0, 6.0]),
+            ]),
+            PropValue::Struct(vec![
+                ("base_color".into(), PropValue::Color([1.0, 0.0, 0.0, 1.0])),
+                ("metallic".into(), PropValue::Number(0.5)),
+            ]),
+        ] {
+            assert_eq!(from_dto(&to_dto(&v)), v);
+        }
+    }
+
+    #[test]
+    fn struct_dto_prettifies_child_labels() {
+        let dto = to_dto(&PropValue::Struct(vec![(
+            "base_color".into(),
+            PropValue::Number(1.0),
+        )]));
+        match dto {
+            PropValueDto::Struct { fields } => {
+                assert_eq!(fields[0].name, "base_color");
+                assert_eq!(fields[0].label, "Base Color");
+            }
+            other => panic!("expected struct dto, got {other:?}"),
         }
     }
 }

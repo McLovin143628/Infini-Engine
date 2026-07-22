@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use inf_editor_core::ipc::{
-    DetailsDto, LevelSettingsDto, PropValueDto, SceneSnapshot, SpawnKind, TilemapCellDto,
-    TilemapDto,
+    AddableComponentDto, DetailsDto, LevelSettingsDto, PropValueDto, SceneSnapshot, SpawnKind,
+    TilemapCellDto, TilemapDto,
 };
 use inf_editor_core::scene::serialize::EntityRecord;
 use inf_editor_core::scene::{details, diff, serialize, tilemap, SceneDoc};
@@ -580,6 +580,82 @@ pub async fn scene_reset_property(
     };
     emit_world_delta(&app, &state);
     Ok(details)
+}
+
+// ── add / remove component (E-P1) ──────────────────────────────────────────
+
+/// The components the user may add via "+ Add Component" (registry order).
+#[tauri::command]
+pub async fn scene_list_addable_components(
+    state: State<'_, SceneState>,
+) -> Result<Vec<AddableComponentDto>, String> {
+    let doc = lock(&state.doc)?;
+    Ok(doc
+        .world()
+        .registry()
+        .addable()
+        .map(|c| AddableComponentDto {
+            type_path: c.type_path.to_string(),
+            display: c.display.to_string(),
+        })
+        .collect())
+}
+
+/// Add a `Default` instance of `type_path` to every target (selected or given)
+/// entity in one undo transaction. Returns the refreshed Details view.
+#[tauri::command]
+pub async fn scene_add_component(
+    app: AppHandle,
+    state: State<'_, SceneState>,
+    guids: Option<Vec<String>>,
+    type_path: String,
+) -> Result<DetailsDto, String> {
+    let details = {
+        let mut doc = lock(&state.doc)?;
+        let targets = targets_or_selection(&doc, guids);
+        doc.begin_transaction("Add Component");
+        for g in &targets {
+            doc.edit_add_component(*g, &type_path);
+        }
+        doc.commit_transaction();
+        doc.details()
+    };
+    emit_world_delta(&app, &state);
+    Ok(details)
+}
+
+/// Remove `type_path` from a single entity (one undo step). Returns the refreshed
+/// Details view.
+#[tauri::command]
+pub async fn scene_remove_component(
+    app: AppHandle,
+    state: State<'_, SceneState>,
+    guid: String,
+    type_path: String,
+) -> Result<DetailsDto, String> {
+    let g = Uuid::parse_str(&guid).map_err(|e| e.to_string())?;
+    let details = {
+        let mut doc = lock(&state.doc)?;
+        doc.edit_remove_component(g, &type_path);
+        doc.details()
+    };
+    emit_world_delta(&app, &state);
+    Ok(details)
+}
+
+/// The default value for a single element of the list at `path` on `type_path`'s
+/// component — powers the ListField "add element" button. Errors if the path is
+/// not a list.
+#[tauri::command]
+pub async fn scene_list_default(
+    state: State<'_, SceneState>,
+    type_path: String,
+    path: String,
+) -> Result<PropValueDto, String> {
+    let doc = lock(&state.doc)?;
+    doc.list_default(&type_path, &path)
+        .map(|v| details::to_dto(&v))
+        .ok_or_else(|| format!("{path} on {type_path} is not a list"))
 }
 
 // ── world settings (R-P4) ───────────────────────────────────────────────────

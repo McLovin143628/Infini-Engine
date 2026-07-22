@@ -5,24 +5,38 @@
  * Phase 1 uses them with mock values.
  */
 import { useId, useState, type ReactNode } from "react";
-import { RotateCcw } from "lucide-react";
+import { ChevronDown, ChevronUp, Plus, RotateCcw, X } from "lucide-react";
 import { cn } from "../lib/utils";
+import type { PropValueDto } from "../bindings/PropValueDto";
+import type { PropFieldDto } from "../bindings/PropFieldDto";
 
-export function PropertySection({ title, children }: { title: string; children: ReactNode }) {
+export function PropertySection({
+  title,
+  action,
+  children,
+}: {
+  title: string;
+  /** Optional control rendered at the right of the header (e.g. E-P1 overflow). */
+  action?: ReactNode;
+  children: ReactNode;
+}) {
   const [open, setOpen] = useState(true);
   return (
     <div className="border-b border-(--ink-border)">
-      <button
-        className="flex w-full items-center gap-1 bg-(--ink-bg-2) px-2 py-1 text-left text-xs font-semibold hover:bg-(--ink-bg-3)"
-        onClick={() => setOpen((o) => !o)}
-      >
-        <span
-          className={cn("inline-block transition-transform", open ? "rotate-90" : "rotate-0")}
+      <div className="flex items-center bg-(--ink-bg-2) hover:bg-(--ink-bg-3)">
+        <button
+          className="flex min-w-0 flex-1 items-center gap-1 px-2 py-1 text-left text-xs font-semibold"
+          onClick={() => setOpen((o) => !o)}
         >
-          ▸
-        </span>
-        {title}
-      </button>
+          <span
+            className={cn("inline-block transition-transform", open ? "rotate-90" : "rotate-0")}
+          >
+            ▸
+          </span>
+          <span className="truncate">{title}</span>
+        </button>
+        {action && <div className="shrink-0 pr-1">{action}</div>}
+      </div>
       {open && <div className="py-0.5">{children}</div>}
     </div>
   );
@@ -193,6 +207,126 @@ export function ColorField({
         className="h-6 w-10 cursor-pointer rounded border border-(--ink-border) bg-(--ink-bg-2)"
       />
       <span className="text-xs text-(--ink-text-dim)">{value}</span>
+    </div>
+  );
+}
+
+// ── E-P1 deep editing ──────────────────────────────────────────────────────
+
+const iconBtn =
+  "flex size-5 shrink-0 items-center justify-center rounded-sm text-(--ink-text-faint) hover:bg-(--ink-bg-3) hover:text-(--ink-text) disabled:cursor-not-allowed disabled:opacity-30";
+
+// Pure list-mutation helpers (E-P1) — exported so the ListField wiring is unit
+// testable without a DOM. Each returns a NEW array (the whole list is sent back).
+export function listSetAt(list: PropValueDto[], i: number, v: PropValueDto): PropValueDto[] {
+  const next = list.slice();
+  next[i] = v;
+  return next;
+}
+export function listRemoveAt(list: PropValueDto[], i: number): PropValueDto[] {
+  return list.filter((_, j) => j !== i);
+}
+export function listMove(list: PropValueDto[], i: number, dir: -1 | 1): PropValueDto[] {
+  const j = i + dir;
+  if (j < 0 || j >= list.length) return list;
+  const next = list.slice();
+  [next[i], next[j]] = [next[j], next[i]];
+  return next;
+}
+
+/**
+ * A homogeneous list (E-P1). Each row renders one element via the injected
+ * `renderElement`; per-row remove / move-up / move-down and an "add" button
+ * mutate the list and send the WHOLE list back through `onChange` (the backend
+ * List write arm rebuilds the reflected collection). `onAdd` appends a default
+ * element (the caller fetches it via `scene_list_default`).
+ */
+export function ListField({
+  value,
+  onChange,
+  onAdd,
+  renderElement,
+}: {
+  value: PropValueDto[];
+  onChange: (next: PropValueDto[]) => void;
+  onAdd: () => void;
+  renderElement: (element: PropValueDto, index: number, set: (v: PropValueDto) => void) => ReactNode;
+}) {
+  const setAt = (i: number, e: PropValueDto) => onChange(listSetAt(value, i, e));
+  const remove = (i: number) => onChange(listRemoveAt(value, i));
+  const move = (i: number, dir: -1 | 1) => onChange(listMove(value, i, dir));
+  return (
+    <div className="flex min-w-0 flex-1 flex-col gap-1">
+      {value.length === 0 && (
+        <span className="text-[11px] text-(--ink-text-faint)">(empty)</span>
+      )}
+      {value.map((elem, i) => (
+        <div key={i} className="flex min-w-0 items-center gap-1">
+          <span className="w-4 shrink-0 text-right text-[10px] text-(--ink-text-faint)">{i}</span>
+          <div className="flex min-w-0 flex-1 items-center gap-1">
+            {renderElement(elem, i, (e) => setAt(i, e))}
+          </div>
+          <button
+            className={iconBtn}
+            aria-label={`Move element ${i} up`}
+            disabled={i === 0}
+            onClick={() => move(i, -1)}
+          >
+            <ChevronUp size={12} />
+          </button>
+          <button
+            className={iconBtn}
+            aria-label={`Move element ${i} down`}
+            disabled={i === value.length - 1}
+            onClick={() => move(i, 1)}
+          >
+            <ChevronDown size={12} />
+          </button>
+          <button className={iconBtn} aria-label={`Remove element ${i}`} onClick={() => remove(i)}>
+            <X size={12} />
+          </button>
+        </div>
+      ))}
+      <button
+        className="flex h-5 items-center gap-1 self-start rounded-sm px-1 text-[11px] text-(--ink-text-dim) hover:bg-(--ink-bg-3) hover:text-(--ink-text)"
+        onClick={onAdd}
+      >
+        <Plus size={11} /> Add
+      </button>
+    </div>
+  );
+}
+
+/**
+ * A nested struct (E-P1): indented child rows. Editing a child updates that
+ * child and sends the WHOLE struct back through `onChange`; the child control is
+ * rendered by the injected `renderChild`.
+ */
+export function StructField({
+  fields,
+  onChange,
+  renderChild,
+}: {
+  fields: PropFieldDto[];
+  onChange: (next: PropFieldDto[]) => void;
+  renderChild: (value: PropValueDto, set: (v: PropValueDto) => void) => ReactNode;
+}) {
+  return (
+    <div className="flex min-w-0 flex-1 flex-col gap-0.5 border-l border-(--ink-border) pl-1.5">
+      {fields.map((f, i) => (
+        <div key={f.name} className="flex min-w-0 items-center gap-2">
+          <span className="w-20 shrink-0 truncate text-[11px] text-(--ink-text-dim)">
+            {f.label}
+          </span>
+          <div className="flex min-w-0 flex-1 items-center gap-1">
+            {renderChild(f.value, (v) => {
+              const next = fields.slice();
+              next[i] = { ...f, value: v };
+              onChange(next);
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

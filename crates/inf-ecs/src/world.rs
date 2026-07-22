@@ -91,6 +91,31 @@ impl EcsWorld {
         ok
     }
 
+    /// Insert a `Default` instance of `type_path`'s component onto `entity`
+    /// (E-P1 add-component). Returns whether it applied. Sets the dirty flag.
+    pub fn insert_default_component(&mut self, entity: Entity, type_path: &str) -> bool {
+        let ok = crate::props::insert_default_component(
+            &mut self.world,
+            &self.registry,
+            entity,
+            type_path,
+        );
+        if ok {
+            self.dirty = true;
+        }
+        ok
+    }
+
+    /// Remove `type_path`'s component from `entity` (E-P1 remove-component).
+    /// Returns whether the component type is known. Sets the dirty flag.
+    pub fn remove_component(&mut self, entity: Entity, type_path: &str) -> bool {
+        let ok = crate::props::remove_component(&mut self.world, &self.registry, entity, type_path);
+        if ok {
+            self.dirty = true;
+        }
+        ok
+    }
+
     // ── spawn / despawn ──────────────────────────────────────────────────
 
     /// Spawn an empty editor entity (Guid + Name + identity Transform +
