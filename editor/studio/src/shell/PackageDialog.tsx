@@ -6,19 +6,18 @@
  * counts, total pack size, output paths, and warnings. A cook failure shows a
  * structured error panel — blueprint failures are anchored to their class +
  * handler. Mirrors SortingLayersDialog: driven by `shellStore.packageDialogOpen`
- * and hides the native viewport while open (airspace rule).
+ * and hides the native viewport while open (airspace rule). Output paths carry
+ * Reveal (open in the OS file browser) + Copy affordances.
  *
- * Deferred (honest scope): a native "Reveal in Explorer" needs an audited
- * shell-open command (none exists yet), so output paths are shown as selectable
- * text with a Copy affordance. Per-stage progress is not surfaced — the cook API
- * has no progress callback, so the state area shows a start→finish spinner only.
+ * Honest scope: per-stage progress is not surfaced — the cook API has no progress
+ * callback, so the state area shows a start→finish spinner only.
  */
 import { useEffect, useState } from "react";
-import { AlertTriangle, Copy, FolderOpen, Loader2, Package, X } from "lucide-react";
+import { AlertTriangle, Copy, FolderOpen, FolderSearch, Loader2, Package, X } from "lucide-react";
 
 import type { PackageErrorDto } from "../bindings/PackageErrorDto";
 import type { PackageResultDto } from "../bindings/PackageResultDto";
-import { packaging } from "../lib/ipc";
+import { packaging, shell } from "../lib/ipc";
 import { useViewportOverlay } from "../lib/viewportOverlay";
 import { useProjectStore } from "../stores/projectStore";
 import { useShellStore } from "../stores/shellStore";
@@ -123,6 +122,10 @@ export default function PackageDialog() {
   const copy = (text: string) => {
     void navigator.clipboard?.writeText(text);
     pushStatus("Path copied to clipboard.");
+  };
+
+  const reveal = (text: string) => {
+    void shell.reveal(text).catch((e) => pushStatus(`Reveal failed: ${String(e)}`));
   };
 
   return (
@@ -256,8 +259,13 @@ export default function PackageDialog() {
                     </div>
                   )}
 
-                  <PathRow label="Pack" path={result.pack_path} onCopy={copy} />
-                  <PathRow label="Manifest" path={result.manifest_path} onCopy={copy} />
+                  <PathRow label="Pack" path={result.pack_path} onCopy={copy} onReveal={reveal} />
+                  <PathRow
+                    label="Manifest"
+                    path={result.manifest_path}
+                    onCopy={copy}
+                    onReveal={reveal}
+                  />
 
                   {result.warnings.length > 0 && (
                     <div className="mt-2">
@@ -272,11 +280,6 @@ export default function PackageDialog() {
                       </ul>
                     </div>
                   )}
-
-                  <p className="mt-2 text-[10px] text-(--ink-text-faint)">
-                    Revealing a path in the OS file browser needs an audited shell-open command,
-                    which isn’t available yet — copy a path above instead.
-                  </p>
                 </div>
               )}
             </>
@@ -318,10 +321,12 @@ function PathRow({
   label,
   path,
   onCopy,
+  onReveal,
 }: {
   label: string;
   path: string;
   onCopy: (text: string) => void;
+  onReveal: (text: string) => void;
 }) {
   return (
     <div className="mt-1 flex items-center gap-2">
@@ -333,6 +338,13 @@ function PathRow({
         onFocus={(e) => e.currentTarget.select()}
         className="min-w-0 flex-1 rounded border border-(--ink-border) bg-(--ink-bg-1) px-1.5 py-0.5 font-mono text-[11px] outline-none"
       />
+      <button
+        aria-label={`Reveal ${label} in file browser`}
+        onClick={() => onReveal(path)}
+        className="rounded p-1 text-(--ink-text-faint) hover:bg-(--ink-bg-3) hover:text-(--ink-text)"
+      >
+        <FolderSearch size={12} />
+      </button>
       <button
         aria-label={`Copy ${label} path`}
         onClick={() => onCopy(path)}

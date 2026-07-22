@@ -20,6 +20,7 @@ mod scene;
 mod search;
 mod sequencer;
 mod settings;
+mod shell;
 mod sim;
 mod sm;
 mod sorting;
@@ -107,6 +108,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         scene::tilemap_get,
         scene::tilemap_paint,
         scene::scene_delete,
+        scene::scene_duplicate,
+        scene::scene_copy,
+        scene::scene_cut,
+        scene::scene_paste,
         scene::scene_rename,
         scene::scene_reparent,
         scene::scene_set_visible,
@@ -119,6 +124,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         scene::scene_open,
         scene::scene_new,
         scene::scene_autosave,
+        scene::scene_current_path,
+        shell::shell_reveal,
         sim::sim_start,
         sim::sim_tick,
         sim::sim_stop,

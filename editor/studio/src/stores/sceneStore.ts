@@ -20,6 +20,7 @@ import { getCommand, setCommandHandler } from "../lib/commands";
 import { listenTo, type UnlistenFn } from "../lib/events";
 import { scene as sceneIpc } from "../lib/ipc";
 import { registerBridgedStore } from "../panels/window/storeBridge";
+import { useProjectStore } from "./projectStore";
 import { useShellStore } from "./shellStore";
 
 export type { SceneNode };
@@ -61,6 +62,11 @@ interface SceneState {
   select: (guids: string[], additive?: boolean) => void;
   createEntity: (kind: SpawnKind, parent?: string | null) => Promise<string>;
   deleteSelected: () => void;
+  duplicateSelected: () => void;
+  copySelected: () => void;
+  cutSelected: () => void;
+  paste: () => void;
+  saveLevelAs: () => Promise<void>;
   rename: (guid: string, name: string) => void;
   reparent: (guid: string, parent: string | null) => void;
   toggleVisible: (guid: string) => void;
@@ -178,6 +184,76 @@ export const useSceneStore = create<SceneState>((set, get) => ({
     if (sel.length) void sceneIpc.delete(sel);
   },
 
+  duplicateSelected: () => {
+    const sel = get().selection;
+    if (!sel.length) return;
+    void sceneIpc.duplicate(sel).catch((e) =>
+      useShellStore.getState().pushStatus(`Duplicate failed: ${errText(e)}`),
+    );
+  },
+
+  copySelected: () => {
+    const sel = get().selection;
+    if (!sel.length) return;
+    void sceneIpc
+      .copy(sel)
+      .then((n) => {
+        if (n > 0) useShellStore.getState().pushStatus(`Copied ${n} object${n > 1 ? "s" : ""}.`);
+      })
+      .catch((e) => useShellStore.getState().pushStatus(`Copy failed: ${errText(e)}`));
+  },
+
+  cutSelected: () => {
+    const sel = get().selection;
+    if (!sel.length) return;
+    void sceneIpc
+      .cut(sel)
+      .then((n) => {
+        if (n > 0) useShellStore.getState().pushStatus(`Cut ${n} object${n > 1 ? "s" : ""}.`);
+      })
+      .catch((e) => useShellStore.getState().pushStatus(`Cut failed: ${errText(e)}`));
+  },
+
+  paste: () => {
+    void sceneIpc
+      .paste()
+      .then((roots) =>
+        useShellStore
+          .getState()
+          .pushStatus(
+            roots.length ? `Pasted ${roots.length} object${roots.length > 1 ? "s" : ""}.` : "Clipboard is empty.",
+          ),
+      )
+      .catch((e) => useShellStore.getState().pushStatus(`Paste failed: ${errText(e)}`));
+  },
+
+  saveLevelAs: async () => {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    // Seed the dialog from the current level path, else the project's Levels dir.
+    let defaultPath: string | undefined;
+    try {
+      defaultPath = (await sceneIpc.currentPath()) ?? undefined;
+    } catch {
+      // No current path — fall through to the project dir.
+    }
+    if (!defaultPath) {
+      const proj = useProjectStore.getState().current;
+      if (proj) defaultPath = `${proj.root}/${proj.levels_dir}`;
+    }
+    const path = await save({
+      title: "Save Current Level As",
+      defaultPath,
+      filters: [{ name: "Infinity Level", extensions: ["inf_lvl"] }],
+    });
+    if (!path) return; // cancelled
+    try {
+      await sceneIpc.save(path);
+      useShellStore.getState().pushStatus("Level saved.");
+    } catch (e) {
+      useShellStore.getState().pushStatus(`Save As failed: ${errText(e)}`);
+    }
+  },
+
   rename: (guid, name) => void sceneIpc.rename(guid, name),
   reparent: (guid, parent) => void sceneIpc.reparent(guid, parent),
 
@@ -261,7 +337,13 @@ export function registerSceneCommands(): void {
   wire("edit.undo", () => s().undo());
   wire("edit.redo", () => s().redo());
   wire("edit.delete", () => s().deleteSelected());
+  wire("edit.duplicate", () => s().duplicateSelected());
+  wire("actor.duplicate", () => s().duplicateSelected());
+  wire("edit.copy", () => s().copySelected());
+  wire("edit.cut", () => s().cutSelected());
+  wire("edit.paste", () => s().paste());
   wire("file.saveLevel", () => sceneIpc.save());
+  wire("file.saveLevelAs", () => s().saveLevelAs());
   wire("file.saveAll", () => sceneIpc.save());
   wire("file.newLevel", async () => s().applySnapshot(await sceneIpc.newScene()));
   wire("file.openLevel", async () => s().applySnapshot(await sceneIpc.open()));

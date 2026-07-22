@@ -24,13 +24,11 @@ import { useTourStore } from "../stores/tourStore";
  *
  * The old "arrives with Phase N" hints were removed once those phases shipped —
  * most of those families are now live (wired by the scene/project/viewport
- * stores or below) and never reach the unhandled hook at all. This table is kept
+ * stores or below) and never reach the unhandled hook at all. Cut/copy/paste and
+ * duplicate are now live too (scene clipboard, editor seams). This table is kept
  * as the mechanism for the handful that remain genuinely unbuilt.
  */
-const STUB_HINTS: [RegExp, string][] = [
-  [/^edit\.(cut|copy|paste)$/, "Clipboard for scene objects isn’t implemented yet."],
-  [/^(edit|actor)\.duplicate$/, "Duplicating scene objects isn’t implemented yet."],
-];
+const STUB_HINTS: [RegExp, string][] = [];
 
 export function stubHint(id: string): string | undefined {
   return STUB_HINTS.find(([re]) => re.test(id))?.[1];

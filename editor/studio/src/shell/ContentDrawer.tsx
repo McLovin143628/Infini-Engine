@@ -21,6 +21,7 @@ import {
   FileText,
   Folder,
   FolderOpen,
+  FolderSearch,
   Image,
   Import,
   Layers,
@@ -40,7 +41,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { cn } from "../lib/utils";
 import { executeCommand } from "../lib/commands";
-import { scene as sceneIpc } from "../lib/ipc";
+import { scene as sceneIpc, shell } from "../lib/ipc";
 import { useDockLayout } from "../panels/dock/dockLayoutStore";
 import { useShellStore } from "../stores/shellStore";
 import { useSpriteSheetStore } from "../stores/spriteSheetStore";
@@ -626,6 +627,7 @@ function AssetContextMenu({
   onClose: () => void;
 }) {
   const pushStatus = useShellStore((s) => s.pushStatus);
+  const rootPath = useAssetStore((s) => s.rootPath);
   const store = {
     rename: useAssetStore((s) => s.rename),
     duplicate: useAssetStore((s) => s.duplicate),
@@ -665,6 +667,14 @@ function AssetContextMenu({
     if (refs.length === 0) pushStatus(`"${asset.name}" is not referenced by anything.`);
     else pushStatus(`${asset.name} ← ${refs.map((r) => r.name).join(", ")}`);
   };
+  // The asset's absolute payload path = content root + its content-relative path.
+  const doReveal = async () => {
+    try {
+      await shell.reveal(`${rootPath}/${asset.path}`);
+    } catch (e) {
+      pushStatus(`Reveal failed: ${String(e)}`);
+    }
+  };
   const applyToSelection = async () => {
     const n = await sceneIpc.applyMaterial(asset.id);
     pushStatus(
@@ -703,6 +713,7 @@ function AssetContextMenu({
       {item("Rename", <Pencil size={13} />, doRename)}
       {item("Duplicate", <Copy size={13} />, () => void store.duplicate(asset.id))}
       {item("Show References", <Link2 size={13} />, () => void showRefs())}
+      {item("Reveal in Explorer", <FolderSearch size={13} />, () => void doReveal())}
       <div className="my-1 h-px bg-(--ink-border)" />
       {item("Delete", <Trash2 size={13} />, () => void doDelete(), true)}
     </div>

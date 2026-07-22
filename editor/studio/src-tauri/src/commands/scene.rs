@@ -7,20 +7,32 @@
 //! full [`SceneSnapshot`] (`scene_snapshot`) plus incremental `world://delta`
 //! events after every mutation.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use inf_editor_core::ipc::{
     DetailsDto, PropValueDto, SceneSnapshot, SpawnKind, TilemapCellDto, TilemapDto,
 };
+use inf_editor_core::scene::serialize::EntityRecord;
 use inf_editor_core::scene::{details, diff, serialize, tilemap, SceneDoc};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 /// Shared scene state: the document (also handed to the viewport thread) plus
-/// the last snapshot we emitted, so mutations can ship a minimal delta.
+/// the last snapshot we emitted, so mutations can ship a minimal delta. Also
+/// holds the entity clipboard (copy / cut → paste) and the path the current
+/// level last saved to (so a plain Save overwrites it and Save As can seed its
+/// dialog).
 pub struct SceneState {
     pub doc: Arc<Mutex<SceneDoc>>,
     last: Mutex<Option<SceneSnapshot>>,
+    /// Backend-held entity clipboard — a forest of records (parents-first). Does
+    /// not cross a process boundary, so it needn't serialize.
+    clipboard: Mutex<Vec<EntityRecord>>,
+    /// The `.inf_lvl` path the level was last opened from / saved to (`None` for
+    /// an untitled or freshly-`New`ed scene). A Save-with-explicit-path records
+    /// it; a plain Save (no path) writes here when set, else the quicksave.
+    current_level_path: Mutex<Option<PathBuf>>,
 }
 
 impl Default for SceneState {
@@ -34,6 +46,8 @@ impl SceneState {
         Self {
             doc: Arc::new(Mutex::new(SceneDoc::with_demo())),
             last: Mutex::new(None),
+            clipboard: Mutex::new(Vec::new()),
+            current_level_path: Mutex::new(None),
         }
     }
 }
@@ -359,6 +373,108 @@ pub async fn scene_delete(
     Ok(())
 }
 
+/// Resolve the targets for a duplicate/copy/cut command: the given guids, or the
+/// current selection when omitted (mirrors `scene_apply_material`).
+fn targets_or_selection(doc: &SceneDoc, guids: Option<Vec<String>>) -> Vec<Uuid> {
+    match guids {
+        Some(list) => parse_guids(&list),
+        None => doc.selection().to_vec(),
+    }
+}
+
+/// Duplicate the selected (or explicitly-given) roots as one undo step: fresh
+/// GUIDs, internal hierarchy preserved, each copy a sibling, root names
+/// " Copy"-suffixed. Selects and returns the new root GUIDs.
+#[tauri::command]
+pub async fn scene_duplicate(
+    app: AppHandle,
+    state: State<'_, SceneState>,
+    guids: Option<Vec<String>>,
+) -> Result<Vec<String>, String> {
+    let new_roots = {
+        let mut doc = lock(&state.doc)?;
+        let targets = targets_or_selection(&doc, guids);
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let new_roots = doc.edit_duplicate(&targets);
+        if !new_roots.is_empty() {
+            doc.select(&new_roots, false);
+        }
+        new_roots
+    };
+    if !new_roots.is_empty() {
+        emit_world_delta(&app, &state);
+    }
+    Ok(new_roots.iter().map(|g| g.to_string()).collect())
+}
+
+/// Copy the selected (or given) roots into the backend clipboard. Returns how
+/// many entity records were captured (subtree-expanded, nested-selection deduped).
+#[tauri::command]
+pub async fn scene_copy(
+    state: State<'_, SceneState>,
+    guids: Option<Vec<String>>,
+) -> Result<usize, String> {
+    let records = {
+        let doc = lock(&state.doc)?;
+        let targets = targets_or_selection(&doc, guids);
+        doc.collect_subtree_records(&targets)
+    };
+    let n = records.len();
+    *state.clipboard.lock().map_err(|e| e.to_string())? = records;
+    Ok(n)
+}
+
+/// Cut = copy into the clipboard + delete the originals (the delete is the
+/// undoable half — one Delete step). Returns how many records were captured.
+#[tauri::command]
+pub async fn scene_cut(
+    app: AppHandle,
+    state: State<'_, SceneState>,
+    guids: Option<Vec<String>>,
+) -> Result<usize, String> {
+    let n = {
+        let mut doc = lock(&state.doc)?;
+        let targets = targets_or_selection(&doc, guids);
+        let records = doc.collect_subtree_records(&targets);
+        if records.is_empty() {
+            return Ok(0);
+        }
+        let n = records.len();
+        *state.clipboard.lock().map_err(|e| e.to_string())? = records;
+        doc.edit_delete(&targets);
+        n
+    };
+    emit_world_delta(&app, &state);
+    Ok(n)
+}
+
+/// Paste the clipboard's records with fresh GUIDs as one undo step; selects and
+/// returns the new root GUIDs (empty when the clipboard is empty).
+#[tauri::command]
+pub async fn scene_paste(
+    app: AppHandle,
+    state: State<'_, SceneState>,
+) -> Result<Vec<String>, String> {
+    let records = state.clipboard.lock().map_err(|e| e.to_string())?.clone();
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let new_roots = {
+        let mut doc = lock(&state.doc)?;
+        let new_roots = doc.edit_paste_records(&records);
+        if !new_roots.is_empty() {
+            doc.select(&new_roots, false);
+        }
+        new_roots
+    };
+    if !new_roots.is_empty() {
+        emit_world_delta(&app, &state);
+    }
+    Ok(new_roots.iter().map(|g| g.to_string()).collect())
+}
+
 #[tauri::command]
 pub async fn scene_rename(
     app: AppHandle,
@@ -499,13 +615,41 @@ fn resolve_path(app: &AppHandle, path: Option<String>) -> Result<std::path::Path
     }
 }
 
+/// Resolve where a Save writes and whether it should update the stored
+/// current-level path. Precedence: an explicit path wins (and BECOMES the new
+/// current, i.e. Save As); otherwise the stored current path (a plain Save
+/// overwrites the level in place); otherwise the quicksave fallback. Returns
+/// `(target, new_current)` where `new_current` is `Some` only when the explicit
+/// path should replace the stored one. Pure (no `AppHandle`) so it is unit-tested.
+fn resolve_save_target(
+    explicit: Option<&std::path::Path>,
+    current: Option<&std::path::Path>,
+    quicksave: &std::path::Path,
+) -> (PathBuf, Option<PathBuf>) {
+    match explicit {
+        Some(p) => (p.to_path_buf(), Some(p.to_path_buf())),
+        None => (current.unwrap_or(quicksave).to_path_buf(), None),
+    }
+}
+
 #[tauri::command]
 pub async fn scene_save(
     app: AppHandle,
     state: State<'_, SceneState>,
     path: Option<String>,
 ) -> Result<(), String> {
-    let path = resolve_path(&app, path)?;
+    // Route the target: an explicit path (Save As) writes there and becomes the
+    // current level; a plain Save (no path) overwrites the current level, else
+    // the quicksave fallback.
+    let explicit = match &path {
+        Some(p) if !p.is_empty() => Some(std::path::PathBuf::from(p)),
+        _ => None,
+    };
+    let quicksave = data_dir(&app)?.join("quicksave.inf_lvl");
+    let (target, new_current) = {
+        let current = state.current_level_path.lock().map_err(|e| e.to_string())?;
+        resolve_save_target(explicit.as_deref(), current.as_deref(), &quicksave)
+    };
     // Encode under the doc lock (with any live sequencer scrub rolled back to the
     // authored values), then write the files AFTER releasing the lock — the
     // viewport locks the same doc every frame, so disk IO must not be held under it.
@@ -515,13 +659,29 @@ pub async fn scene_save(
         doc.mark_saved();
         enc
     };
-    serialize::write_encoded(&enc, &path)?;
+    serialize::write_encoded(&enc, &target)?;
     // A clean save invalidates the crash-recovery file.
     if let Ok(dir) = data_dir(&app) {
         serialize::clear_recovery(&dir);
     }
+    // Save As adopts the written path as the current level.
+    if let Some(p) = new_current {
+        *state.current_level_path.lock().map_err(|e| e.to_string())? = Some(p);
+    }
     emit_world_delta(&app, &state);
     Ok(())
+}
+
+/// The path the current level last opened from / saved to (`null` when
+/// untitled). The Save As dialog seeds its default path from this.
+#[tauri::command]
+pub async fn scene_current_path(state: State<'_, SceneState>) -> Result<Option<String>, String> {
+    Ok(state
+        .current_level_path
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .map(|p| p.to_string_lossy().to_string()))
 }
 
 #[tauri::command]
@@ -537,6 +697,8 @@ pub async fn scene_open(
         *doc = loaded;
         doc.snapshot()
     };
+    // The opened file becomes the current level (a later plain Save overwrites it).
+    *state.current_level_path.lock().map_err(|e| e.to_string())? = Some(path);
     // A fresh document restarts the version counter (lower than the doc we just
     // replaced), so drop the stale baseline — otherwise the version-monotonic
     // guard in `emit_world_delta` would suppress this scene's full delta.
@@ -572,10 +734,40 @@ pub async fn scene_new(
         *doc = SceneDoc::new();
         doc.snapshot()
     };
+    // A brand-new scene is untitled — forget any current-level path.
+    *state.current_level_path.lock().map_err(|e| e.to_string())? = None;
     // Reset the delta baseline: the fresh document's version counter restarts
     // below the replaced one, which the version-monotonic guard would otherwise
     // treat as a stale (backward) emit and drop.
     *state.last.lock().map_err(|e| e.to_string())? = None;
     emit_world_delta(&app, &state);
     Ok(snap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_save_target;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn save_target_precedence_explicit_current_quicksave() {
+        let quicksave = Path::new("/data/quicksave.inf_lvl");
+        let current = Path::new("/proj/Levels/main.inf_lvl");
+        let explicit = Path::new("/proj/Levels/copy.inf_lvl");
+
+        // Save As: an explicit path wins AND becomes the new current level.
+        let (target, new_current) = resolve_save_target(Some(explicit), Some(current), quicksave);
+        assert_eq!(target, explicit.to_path_buf());
+        assert_eq!(new_current, Some(explicit.to_path_buf()));
+
+        // Plain Save with a current level set: overwrite it, don't change current.
+        let (target, new_current) = resolve_save_target(None, Some(current), quicksave);
+        assert_eq!(target, current.to_path_buf());
+        assert_eq!(new_current, None);
+
+        // Plain Save with no current level (fresh/untitled): fall back to quicksave.
+        let (target, new_current): (PathBuf, _) = resolve_save_target(None, None, quicksave);
+        assert_eq!(target, quicksave.to_path_buf());
+        assert_eq!(new_current, None);
+    }
 }

@@ -8,6 +8,7 @@
  * "coming in Phase N" status message via the unhandled-command hook.
  */
 
+import type { RecentProjectDto } from "../bindings/RecentProjectDto";
 import type { CommandDef } from "./commands";
 import { registerCommands } from "./commands";
 import { BUILTIN_THEMES, setTheme } from "./theme";
@@ -17,6 +18,10 @@ export interface MenuAction {
   command: string; // command registry id
   label: string;
   shortcut?: string;
+  /** Secondary text (tooltip) — e.g. the full path on a Recent Projects entry. */
+  detail?: string;
+  /** Rendered but non-interactive (e.g. the "(none yet)" placeholder). */
+  disabled?: boolean;
 }
 
 export interface MenuSubmenu {
@@ -224,6 +229,46 @@ export const MENU_BAR: TopMenu[] = [
 
 function themeMenuItems(): MenuNode[] {
   return BUILTIN_THEMES.map((t) => act(`theme.${t.id}`, t.name));
+}
+
+/** How many recent projects the File ▸ Recent Projects submenu lists. */
+export const RECENT_PROJECTS_MAX = 10;
+
+/**
+ * Build the File ▸ Recent Projects submenu items from the live recent list:
+ * `file.recentProjects.{i}` per entry (label = name, tooltip = path, capped),
+ * or a single disabled "(none yet)" placeholder when the list is empty. The
+ * per-index command ids are wired to open-by-path in `projectStore`.
+ */
+export function recentProjectsItems(recent: RecentProjectDto[]): MenuNode[] {
+  if (recent.length === 0) {
+    return [{ kind: "action", command: "file.recentProjects.none", label: "(none yet)", disabled: true }];
+  }
+  return recent.slice(0, RECENT_PROJECTS_MAX).map((entry, i) => ({
+    kind: "action",
+    command: `file.recentProjects.${i}`,
+    label: entry.name,
+    detail: entry.path,
+  }));
+}
+
+/**
+ * The menu bar with the (otherwise static) File ▸ Recent Projects submenu filled
+ * in from `recent`. Every other menu passes through untouched — this is the one
+ * dynamic section (`MenuBar` recomputes it from the project store's recent list).
+ */
+export function buildMenuBar(recent: RecentProjectDto[]): TopMenu[] {
+  return MENU_BAR.map((menu) => {
+    if (menu.id !== "file") return menu;
+    return {
+      ...menu,
+      items: menu.items.map((node) =>
+        node.kind === "submenu" && node.label === "Recent Projects"
+          ? { ...node, items: recentProjectsItems(recent) }
+          : node,
+      ),
+    };
+  });
 }
 
 /** Category shown in the command palette per top-level menu. */

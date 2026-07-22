@@ -53,9 +53,16 @@ export function registerDefaultKeybindings(): void {
   bindKey({ chord: "Ctrl+Space", command: "window.contentDrawer" });
   bindKey({ chord: "F11", command: "window.fullscreen" });
   bindKey({ chord: "Ctrl+S", command: "file.saveLevel" });
+  bindKey({ chord: "Ctrl+Alt+S", command: "file.saveLevelAs" });
   bindKey({ chord: "Ctrl+Shift+S", command: "file.saveAll" });
   bindKey({ chord: "Ctrl+Z", command: "edit.undo" });
   bindKey({ chord: "Ctrl+Y", command: "edit.redo" });
+  // Scene clipboard + duplicate (editor seams). The listener skips editable
+  // targets, so these never steal Ctrl+C/X/V from text fields.
+  bindKey({ chord: "Ctrl+D", command: "edit.duplicate" });
+  bindKey({ chord: "Ctrl+C", command: "edit.copy" });
+  bindKey({ chord: "Ctrl+X", command: "edit.cut" });
+  bindKey({ chord: "Ctrl+V", command: "edit.paste" });
 }
 
 /**

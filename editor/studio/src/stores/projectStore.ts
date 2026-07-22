@@ -11,9 +11,10 @@ import { create } from "zustand";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
 import type { ProjectTemplateDto } from "../bindings/ProjectTemplateDto";
 import type { RecentProjectDto } from "../bindings/RecentProjectDto";
-import { getCommand, setCommandHandler } from "../lib/commands";
+import { getCommand, registerCommand, setCommandHandler } from "../lib/commands";
 import { listenTo, type UnlistenFn } from "../lib/events";
 import { project as projectIpc } from "../lib/ipc";
+import { RECENT_PROJECTS_MAX } from "../lib/menus";
 import { useAssetStore } from "./assetStore";
 
 export type { ProjectInfoDto, RecentProjectDto, ProjectTemplateDto };
@@ -130,6 +131,22 @@ export function registerProjectCommands(): void {
   };
   wire("file.newProject", () => useProjectStore.getState().setShowStartScreen(true));
   wire("file.openProject", () => useProjectStore.getState().openViaDialog());
+
+  // Dynamic File ▸ Recent Projects entries. The submenu (built in MenuBar from
+  // the live recent list) dispatches `file.recentProjects.{i}`; register one
+  // handler per slot that opens the recent entry at that index by path, reusing
+  // the standard open flow (start-screen guard + error surfacing).
+  for (let i = 0; i < RECENT_PROJECTS_MAX; i++) {
+    registerCommand({
+      id: `file.recentProjects.${i}`,
+      title: `Open Recent Project ${i + 1}`,
+      category: "File",
+      run: () => {
+        const entry = useProjectStore.getState().recent[i];
+        if (entry) void useProjectStore.getState().openProject(entry.path);
+      },
+    });
+  }
 }
 
 let unlisten: UnlistenFn | null = null;

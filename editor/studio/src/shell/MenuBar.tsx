@@ -4,16 +4,22 @@
  * closes; submenus fly out on hover. Every action dispatches through the
  * command registry.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { executeCommand } from "../lib/commands";
 import type { MenuNode, TopMenu } from "../lib/menus";
-import { MENU_BAR } from "../lib/menus";
+import { buildMenuBar } from "../lib/menus";
 import { useViewportOverlay } from "../lib/viewportOverlay";
+import { useProjectStore } from "../stores/projectStore";
 
 export default function MenuBar() {
   const [openId, setOpenId] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // The File ▸ Recent Projects submenu is filled from the live recent list; every
+  // other menu is static. Recompute only when the recent list changes.
+  const recent = useProjectStore((s) => s.recent);
+  const menuBar = useMemo(() => buildMenuBar(recent), [recent]);
 
   // Dropdowns extend over the native viewport hole — hide it while open.
   useViewportOverlay(openId !== null);
@@ -38,7 +44,7 @@ export default function MenuBar() {
 
   return (
     <div ref={rootRef} className="flex h-full items-stretch">
-      {MENU_BAR.map((menu) => (
+      {menuBar.map((menu) => (
         <MenuButton
           key={menu.id}
           menu={menu}
@@ -120,16 +126,28 @@ function MenuList(props: { items: MenuNode[]; onAction: () => void }) {
             </div>
           );
         }
+        if (node.disabled) {
+          return (
+            <div
+              key={i}
+              title={node.detail}
+              className="mx-1 flex items-center gap-6 rounded px-2 py-1 text-(--ink-text-faint)"
+            >
+              <span className="flex-1">{node.label}</span>
+            </div>
+          );
+        }
         return (
           <button
             key={i}
+            title={node.detail}
             className="mx-1 flex w-[calc(100%-0.5rem)] items-center gap-6 rounded px-2 py-1 text-left hover:bg-(--ink-bg-3)"
             onClick={() => {
               onAction();
               executeCommand(node.command);
             }}
           >
-            <span className="flex-1">{node.label}</span>
+            <span className="flex-1 truncate">{node.label}</span>
             {node.shortcut && (
               <span className="text-xs text-(--ink-text-faint)">{node.shortcut}</span>
             )}

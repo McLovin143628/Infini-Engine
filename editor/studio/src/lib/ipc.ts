@@ -187,6 +187,21 @@ export const scene = {
   create: (kind: SpawnKind, parent: string | null): Promise<string> =>
     invoke<string>("scene_create", { kind, parent }),
   delete: (guids: string[]): Promise<void> => invoke("scene_delete", { guids }),
+  /**
+   * Duplicate roots (defaults to the current selection) as one undo step — fresh
+   * GUIDs, hierarchy preserved, copies placed as siblings. Resolves to the new
+   * root GUIDs (already selected backend-side).
+   */
+  duplicate: (guids: string[] | null = null): Promise<string[]> =>
+    invoke<string[]>("scene_duplicate", { guids }),
+  /** Copy roots (defaults to selection) into the backend clipboard; resolves to the count. */
+  copy: (guids: string[] | null = null): Promise<number> => invoke<number>("scene_copy", { guids }),
+  /** Cut = copy + delete (one Delete undo step); resolves to the count captured. */
+  cut: (guids: string[] | null = null): Promise<number> => invoke<number>("scene_cut", { guids }),
+  /** Paste the clipboard with fresh GUIDs; resolves to the new root GUIDs (selected). */
+  paste: (): Promise<string[]> => invoke<string[]>("scene_paste"),
+  /** The path the current level last opened from / saved to (null = untitled). */
+  currentPath: (): Promise<string | null> => invoke<string | null>("scene_current_path"),
   rename: (guid: string, name: string): Promise<void> => invoke("scene_rename", { guid, name }),
   reparent: (guid: string, parent: string | null): Promise<boolean> =>
     invoke<boolean>("scene_reparent", { guid, parent }),
@@ -373,6 +388,15 @@ export const project = {
     invoke<ProjectInfoDto>("project_new", { parent, name, template }),
   open: (root: string): Promise<ProjectInfoDto> => invoke<ProjectInfoDto>("project_open", { root }),
   close: (): Promise<void> => invoke("project_close"),
+};
+
+/**
+ * Native OS shell integration (editor seams). `reveal` opens the platform file
+ * browser at `path`, selecting the entry when it's a file. The backend validates
+ * the path is inside the open project or app-data dir before shelling out.
+ */
+export const shell = {
+  reveal: (path: string): Promise<void> => invoke("shell_reveal", { path }),
 };
 
 /** Project file surface (P5.4): read/write + a gitignore-aware listing. */

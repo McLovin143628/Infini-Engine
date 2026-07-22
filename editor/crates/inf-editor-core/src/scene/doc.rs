@@ -858,6 +858,15 @@ impl SceneDoc {
             let at = at.min(self.order.len());
             self.order.insert(at, g);
         }
+        self.apply_record_components(e, rec);
+        self.touch();
+    }
+
+    /// Insert every component carried by a serialized [`EntityRecord`] onto `e`.
+    /// Shared by [`Self::raw_spawn_record`] (delete→undo) and the duplicate /
+    /// paste spawn path — both re-materialize an entity from a record. Does not
+    /// dirty the document; the caller `touch()`es.
+    fn apply_record_components(&mut self, e: Entity, rec: &EntityRecord) {
         let w = self.world.world_mut();
         w.entity_mut(e).insert((
             rec.transform,
@@ -954,7 +963,6 @@ impl SceneDoc {
         if let Some(c) = &rec.audio_listener {
             w.entity_mut(e).insert(*c);
         }
-        self.touch();
     }
 
     fn prop_value(&self, guid: Uuid, type_path: &str, field: &str) -> Option<PropValue> {
@@ -1015,6 +1023,159 @@ impl SceneDoc {
         self.delete(&tops);
         self.history
             .record("Delete", EditCommand::Delete { items, tops });
+    }
+
+    // ── duplicate / clipboard (editor seams) ─────────────────────────────
+    //
+    // Duplicate and copy/cut/paste share one core: snapshot a forest of subtree
+    // records (parents-first via `world.subtree`, nested selection de-duped),
+    // mint fresh GUIDs, remap internal parent links to the new GUIDs (a parent
+    // OUTSIDE the copied set keeps its ORIGINAL GUID so the copy lands as a
+    // sibling), then re-spawn them as ONE transaction of `Create` commands (so a
+    // duplicate / paste is a single undo step). Clipboard records never cross a
+    // process boundary — Ring 2 holds the `Vec<EntityRecord>` directly.
+
+    /// Snapshot the subtree records for `roots`, **parents-first**, with nested
+    /// selection de-duped (a root whose ancestor is also selected is skipped, so
+    /// its subtree isn't copied twice) and repeated GUIDs collapsed. This is what
+    /// the clipboard stores for copy / cut, and what [`Self::edit_duplicate`]
+    /// re-spawns.
+    pub fn collect_subtree_records(&self, roots: &[Uuid]) -> Vec<EntityRecord> {
+        use std::collections::HashSet;
+        let root_set: HashSet<Uuid> = roots.iter().copied().collect();
+        let mut seen: HashSet<Uuid> = HashSet::new();
+        let mut out = Vec::new();
+        for &g in roots {
+            if !seen.insert(g) {
+                continue; // a repeated root in the input
+            }
+            let Some(e) = self.world.entity_of(g) else {
+                continue;
+            };
+            // Skip if an ancestor is also selected — that ancestor's copy already
+            // carries this node, so copying it again would double it.
+            let mut anc = self.world.parent_of(e);
+            let mut nested = false;
+            while let Some(p) = anc {
+                if self
+                    .world
+                    .guid_of(p)
+                    .is_some_and(|pg| root_set.contains(&pg))
+                {
+                    nested = true;
+                    break;
+                }
+                anc = self.world.parent_of(p);
+            }
+            if nested {
+                continue;
+            }
+            for se in self.world.subtree(e) {
+                if let Some(sg) = self.world.guid_of(se) {
+                    if let Some(rec) = crate::scene::serialize::record_of(self, sg) {
+                        out.push(rec);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Re-spawn a forest of `records` with fresh GUIDs, recording one `Create`
+    /// per entity (the caller opens the enclosing transaction so the whole thing
+    /// is one undo step). Internal parent links remap to the new GUIDs; a parent
+    /// outside the set keeps its original GUID (sibling placement, or the scene
+    /// root if that parent no longer exists). When `rename_roots`, each root
+    /// record's name gets a unique " Copy" suffix. Returns the new root GUIDs.
+    /// `records` MUST be parents-first (as [`Self::collect_subtree_records`]
+    /// produces) so each child's remapped parent already exists on redo.
+    fn spawn_records_remapped(
+        &mut self,
+        records: &[EntityRecord],
+        rename_roots: bool,
+    ) -> Vec<Uuid> {
+        use std::collections::{HashMap, HashSet};
+        let old_ids: HashSet<Uuid> = records.iter().map(|r| r.guid).collect();
+        let idmap: HashMap<Uuid, Uuid> = records.iter().map(|r| (r.guid, Uuid::new_v4())).collect();
+        let mut new_roots = Vec::new();
+        for rec in records {
+            let is_root = match rec.parent {
+                Some(p) => !old_ids.contains(&p),
+                None => true,
+            };
+            let mut nr = rec.clone();
+            nr.guid = idmap[&rec.guid];
+            nr.parent = match rec.parent {
+                Some(p) if old_ids.contains(&p) => Some(idmap[&p]),
+                other => other,
+            };
+            if is_root {
+                if rename_roots {
+                    nr.name = self.unique_copy_name(&nr.name);
+                }
+                new_roots.push(nr.guid);
+            }
+            let at = self.order.len();
+            self.raw_spawn_record(&nr, at);
+            self.history.record(
+                "Create",
+                EditCommand::Create {
+                    at,
+                    record: Box::new(nr),
+                },
+            );
+        }
+        new_roots
+    }
+
+    /// Duplicate each selected root's subtree: fresh GUIDs, internal parent links
+    /// preserved, each copy a sibling of its original, root names " Copy"-suffixed
+    /// — all one undo step. Nested selection is de-duped. Returns the new root
+    /// GUIDs (Ring 2 selects them).
+    pub fn edit_duplicate(&mut self, roots: &[Uuid]) -> Vec<Uuid> {
+        let records = self.collect_subtree_records(roots);
+        if records.is_empty() {
+            return Vec::new();
+        }
+        self.begin_transaction("Duplicate");
+        let new_roots = self.spawn_records_remapped(&records, true);
+        self.commit_transaction();
+        new_roots
+    }
+
+    /// Paste a forest of clipboard `records` (from [`Self::collect_subtree_records`]):
+    /// fresh GUIDs, internal parent links preserved; a record whose parent isn't
+    /// in the set becomes a root, landing under its original parent if that still
+    /// exists, else at the scene root — one undo step. Returns the new root GUIDs.
+    pub fn edit_paste_records(&mut self, records: &[EntityRecord]) -> Vec<Uuid> {
+        if records.is_empty() {
+            return Vec::new();
+        }
+        self.begin_transaction("Paste");
+        let new_roots = self.spawn_records_remapped(records, false);
+        self.commit_transaction();
+        new_roots
+    }
+
+    /// A unique " Copy" / " Copy N" suffixed variant of `base` not already used
+    /// by a live entity (UE-style duplicate naming; see [`default_name`]).
+    fn unique_copy_name(&self, base: &str) -> String {
+        let first = format!("{base} Copy");
+        if !self.name_in_use(&first) {
+            return first;
+        }
+        let mut n = 2;
+        loop {
+            let candidate = format!("{base} Copy {n}");
+            if !self.name_in_use(&candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    fn name_in_use(&self, name: &str) -> bool {
+        self.order.iter().any(|&g| self.display_name(g) == name)
     }
 
     pub fn edit_rename(&mut self, guid: Uuid, name: &str) {
@@ -1872,6 +2033,143 @@ mod tests {
         let redone =
             serde_json::to_string(&doc.world().world().get::<Terrain>(e).unwrap().data).unwrap();
         assert_eq!(redone, painted, "redo replayed the paint stroke");
+    }
+
+    // ── duplicate / clipboard (editor seams) ─────────────────────────────
+
+    #[test]
+    fn duplicate_single_entity_copies_components_fresh_guid_sibling_and_suffix() {
+        let mut doc = SceneDoc::new();
+        let parent = doc.edit_create(SpawnKind::Empty, "Parent", None);
+        let cube = doc.edit_create(SpawnKind::Cube, "Box", Some(parent));
+
+        let copies = doc.edit_duplicate(&[cube]);
+        assert_eq!(copies.len(), 1);
+        let copy = copies[0];
+        assert_ne!(copy, cube, "fresh guid");
+
+        // The copy is a SIBLING under the same parent as the original.
+        let ce = doc.entity_of(copy).unwrap();
+        let cp = doc
+            .world()
+            .parent_of(ce)
+            .and_then(|p| doc.world().guid_of(p));
+        assert_eq!(cp, Some(parent), "copy sits under the same parent");
+
+        // Components copied → still a Static Mesh; name " Copy"-suffixed.
+        assert_eq!(doc.kind_of_guid(copy), "Static Mesh");
+        assert_eq!(doc.display_name(copy), "Box Copy");
+
+        // A second duplicate bumps the suffix number.
+        let more = doc.edit_duplicate(&[cube]);
+        assert_eq!(doc.display_name(more[0]), "Box Copy 2");
+    }
+
+    #[test]
+    fn duplicate_subtree_preserves_internal_links_with_remapped_guids() {
+        let mut doc = SceneDoc::new();
+        let a = doc.edit_create(SpawnKind::Empty, "A", None);
+        let b = doc.edit_create(SpawnKind::Cube, "B", Some(a));
+        let c = doc.edit_create(SpawnKind::Sphere, "C", Some(b));
+
+        let roots = doc.edit_duplicate(&[a]);
+        assert_eq!(roots.len(), 1);
+        let a2 = roots[0].to_string();
+        let snap = doc.snapshot();
+
+        // Copied root "A Copy" has one child "B".
+        let a2n = snap.nodes.iter().find(|n| n.guid == a2).unwrap();
+        assert_eq!(a2n.name, "A Copy");
+        assert_eq!(a2n.children.len(), 1);
+        let b2 = a2n.children[0].clone();
+        let b2n = snap.nodes.iter().find(|n| n.guid == b2).unwrap();
+        assert_eq!(b2n.name, "B");
+
+        // The copied C hangs off the copied B — the internal link was remapped.
+        assert_eq!(b2n.children.len(), 1);
+        let c2 = b2n.children[0].clone();
+        let c2n = snap.nodes.iter().find(|n| n.guid == c2).unwrap();
+        assert_eq!(c2n.name, "C");
+        assert_eq!(c2n.parent.as_deref(), Some(b2.as_str()));
+
+        // Fresh guids throughout.
+        assert_ne!(b2, b.to_string());
+        assert_ne!(c2, c.to_string());
+    }
+
+    #[test]
+    fn duplicate_is_one_undo_step() {
+        let mut doc = SceneDoc::new();
+        let a = doc.edit_create(SpawnKind::Empty, "A", None);
+        let _b = doc.edit_create(SpawnKind::Cube, "B", Some(a));
+        assert_eq!(doc.snapshot().nodes.len(), 2);
+
+        let roots = doc.edit_duplicate(&[a]);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(doc.snapshot().nodes.len(), 4, "root + child duplicated");
+
+        assert!(doc.undo(), "one undo removes the whole duplicate");
+        assert_eq!(doc.snapshot().nodes.len(), 2, "back to the original two");
+        assert!(doc.redo(), "redo restores all copies in one step");
+        assert_eq!(doc.snapshot().nodes.len(), 4);
+    }
+
+    #[test]
+    fn nested_selection_is_deduped_on_duplicate() {
+        // Selecting BOTH a parent and its child duplicates the subtree once.
+        let mut doc = SceneDoc::new();
+        let a = doc.edit_create(SpawnKind::Empty, "A", None);
+        let b = doc.edit_create(SpawnKind::Cube, "B", Some(a));
+
+        let roots = doc.edit_duplicate(&[a, b]);
+        assert_eq!(roots.len(), 1, "nested child folds into the parent copy");
+        assert_eq!(doc.snapshot().nodes.len(), 4, "exactly one extra subtree");
+    }
+
+    #[test]
+    fn copy_delete_paste_restores_equivalent_subtree_with_fresh_guids() {
+        let mut doc = SceneDoc::new();
+        let a = doc.edit_create(SpawnKind::Empty, "A", None);
+        let b = doc.edit_create(SpawnKind::Cube, "B", Some(a));
+
+        // Copy snapshots the clipboard records; delete then removes the originals.
+        let clip = doc.collect_subtree_records(&[a]);
+        assert_eq!(clip.len(), 2);
+        doc.edit_delete(&[a]);
+        assert!(doc.snapshot().nodes.is_empty());
+
+        // Paste re-materializes an equivalent subtree with fresh guids.
+        let roots = doc.edit_paste_records(&clip);
+        assert_eq!(roots.len(), 1);
+        let snap = doc.snapshot();
+        assert_eq!(snap.nodes.len(), 2, "subtree restored");
+        assert!(
+            snap.nodes
+                .iter()
+                .all(|n| n.guid != a.to_string() && n.guid != b.to_string()),
+            "every pasted node has a fresh guid"
+        );
+        // Names preserved (paste does NOT add a Copy suffix).
+        assert!(snap.nodes.iter().any(|n| n.name == "A"));
+        assert!(snap.nodes.iter().any(|n| n.name == "B"));
+    }
+
+    #[test]
+    fn cut_then_paste_is_move_with_fresh_guids() {
+        let mut doc = SceneDoc::new();
+        let a = doc.edit_create(SpawnKind::Cube, "A", None);
+
+        // Cut = snapshot clipboard + delete.
+        let clip = doc.collect_subtree_records(&[a]);
+        doc.edit_delete(&[a]);
+        assert!(doc.entity_of(a).is_none());
+
+        // Paste = re-spawn with a fresh guid (a move, identity not preserved).
+        let roots = doc.edit_paste_records(&clip);
+        assert_eq!(roots.len(), 1);
+        assert_ne!(roots[0], a, "pasted entity has a fresh guid");
+        assert_eq!(doc.display_name(roots[0]), "A");
+        assert_eq!(doc.snapshot().nodes.len(), 1);
     }
 
     #[test]

@@ -23,20 +23,21 @@ describe("actor.place wiring table", () => {
 });
 
 describe("stubHint — honest, phase-free messages", () => {
-  it("returns a clipboard message for cut/copy/paste", () => {
-    for (const id of ["edit.cut", "edit.copy", "edit.paste"]) {
-      expect(stubHint(id)).toMatch(/clipboard/i);
-      expect(stubHint(id)).not.toMatch(/phase/i);
-    }
-  });
-
-  it("returns a duplicate message for edit/actor duplicate", () => {
-    expect(stubHint("edit.duplicate")).toMatch(/duplicat/i);
-    expect(stubHint("actor.duplicate")).toMatch(/duplicat/i);
-  });
-
   it("has no hint for commands that are actually wired", () => {
-    for (const id of ["file.saveLevel", "edit.undo", "actor.place.cube", "select.all"]) {
+    // Cut/copy/paste + duplicate are now live (scene clipboard, editor seams),
+    // so they no longer surface a stub hint.
+    for (const id of [
+      "file.saveLevel",
+      "file.saveLevelAs",
+      "edit.undo",
+      "edit.cut",
+      "edit.copy",
+      "edit.paste",
+      "edit.duplicate",
+      "actor.duplicate",
+      "actor.place.cube",
+      "select.all",
+    ]) {
       expect(stubHint(id)).toBeUndefined();
     }
   });

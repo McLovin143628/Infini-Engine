@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Minimal capability set for the main Studio window. All privileged operations route through audited #[tauri::command] modules, never raw plugin permissions. The core:window allowances exist solely for the custom chrome (decorations off — see P1.1). dialog:allow-open is the one plugin permission: the native file picker for asset import (P4.4) — read-only file selection, not filesystem access.",
+  "description": "Minimal capability set for the main Studio window. All privileged operations route through audited #[tauri::command] modules, never raw plugin permissions. The core:window allowances exist solely for the custom chrome (decorations off — see P1.1). The dialog plugin permissions are the native pickers: dialog:allow-open (read-only file selection for asset import, P4.4) and dialog:allow-save (the Save Level As destination picker) — neither grants filesystem access; the chosen path is handed to an audited command.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -14,6 +14,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-set-fullscreen",
     "core:window:allow-is-fullscreen",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "dialog:allow-save"
   ]
 }
