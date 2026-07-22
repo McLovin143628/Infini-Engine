@@ -480,6 +480,51 @@ pub enum ToolMode {
     #[default]
     Select,
     Sculpt,
+    /// Scatter foliage instances onto the terrain under an LMB-drag brush (E-P6,
+    /// terrain-only placement v1). Perspective-only, like [`ToolMode::Sculpt`].
+    Foliage,
+}
+
+/// Foliage-brush configuration pushed from the viewport toolbar (E-P6). The host
+/// reads it when starting/continuing a scatter stroke. `radius` is world metres,
+/// `density` is target instances per m² of brush area, `kind` selects the palette
+/// slot instances draw from, `scale_jitter` is the ± fractional scale spread, and
+/// `seed` makes a stroke's scatter deterministically reproducible (with the
+/// stroke index) — no wall-clock / thread-rng, per the determinism law.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FoliageSettings {
+    /// Brush radius, world metres.
+    pub radius: f64,
+    /// Target instances per m² of brush area (before min-spacing rejection).
+    pub density: f64,
+    /// Erase mode: an LMB-drag removes instances within the radius instead of
+    /// placing them. (Alt is reserved for the Alt-orbit gesture, so erase is a
+    /// toolbar toggle in v1, not an Alt modifier.)
+    pub erase: bool,
+    /// Palette index (into `Foliage::palette`) new instances reference.
+    pub kind: u32,
+    /// Uniform-scale jitter: each instance scales `1 ± scale_jitter` (clamped ≥ 0).
+    pub scale_jitter: f64,
+    /// Align new instances to the terrain normal (v1: false — yaw-only; normal
+    /// alignment is a documented follow-up).
+    pub align_to_normal: bool,
+    /// Deterministic scatter seed (folded with the per-stroke index + sample
+    /// index through xxh3).
+    pub seed: u32,
+}
+
+impl Default for FoliageSettings {
+    fn default() -> Self {
+        Self {
+            radius: 3.0,
+            density: 0.4,
+            erase: false,
+            kind: 0,
+            scale_jitter: 0.2,
+            align_to_normal: false,
+            seed: 1,
+        }
+    }
 }
 
 /// The sculpt brush operation, mirrored from the toolbar. A flat, transport-

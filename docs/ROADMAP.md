@@ -1073,5 +1073,35 @@ terrain/erosion, PCG runtime, animation, physics/audio integration, transpiler, 
 
 ---
 
+## 11. Post-plan status — UE-Parity Wave 1 (2026-07-22, COMPLETE)
+
+Six CI-gated waves after the master plan closed the tracked follow-ups and lifted the most
+user-visible "simplified" subsystems toward Unreal parity. Schema bumped v7→v8 once (frozen V7
+records in both codecs; downgrade-blessed).
+
+**Shipped:** per-kind primitive geometry (sphere/plane/cylinder/cone across mesh/depth/shadow/
+mask/pick, editor+player mirrored); entity duplicate/copy/cut/paste; drag-spawn at the cursor's
+world point; two-way gizmo-mode sync + local/world space + nested-transform writeback fix +
+configurable snap; Reveal in Explorer; Save Level As + current-level path; live Recent Projects;
+editable World Settings (gravity/sim-rate + scene-persisted exposure/bloom/SSAO/TAA/shadows/GI,
+applied in-editor and in the player); real spot lights (cone falloff, per-light cast_shadows,
+range bugfix); lit/unlit/wireframe view modes; translucent + masked materials (sorted pass,
+opacity pin on the material graph); blueprint math palette completion + While/For with IR-level
+runaway guard + DoOnce/FlipFlop/Gate; input/collision/custom events firing in both sims + event
+dispatchers; blueprint debugger (breakpoints, wire values, debug runs, Simulate seams,
+sim_step_fixed); Details deep editing (lists/structs/EntityRef pickers — joints authorable —
+add/remove component with undo); material-instance override editor; trigger/blocking volumes
+(overlap events parity-gated); splines (Catmull-Rom math + viewport polyline); foliage painting
+(deterministic stroke-seeded brush, sparse undo, player-mirrored); OBJ import; named content
+collections; Audio Mixer panel.
+
+**Deferred (next parity waves):** particles/VFX, FBX/USD, level streaming/world partition,
+decal render pass (component slot shipped), point/spot shadow maps, Delay node + ForEach/vector
+pins, graph→.inf_act authoring (prerequisite for live-Simulate breakpoint highlighting),
+spline meshes + per-point gizmo, mesh-asset foliage palettes, vgeom/skinned translucency,
+material functions, multi-viewport, PIE player options.
+
+---
+
 *This roadmap is a living document. Each phase completion updates it; decision memos land in
 `docs/memos/`; deviations require a memo, not silence.*

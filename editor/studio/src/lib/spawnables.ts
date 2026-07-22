@@ -57,7 +57,10 @@ export const SPAWNABLE_SECTIONS: SpawnableSection[] = [
   },
   {
     heading: "Utility",
-    items: [{ kind: "spline", label: "Spline" }],
+    items: [
+      { kind: "spline", label: "Spline" },
+      { kind: "foliage", label: "Foliage" },
+    ],
   },
   { heading: "Other", items: [{ kind: "empty", label: "Empty (Folder)" }] },
 ];

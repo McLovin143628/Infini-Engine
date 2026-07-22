@@ -23,6 +23,11 @@ inf-ecs = { workspace = true }
 # a general dependency even though only the windowed hosts drive sculpting.
 inf-terrain = { workspace = true }
 uuid = { workspace = true }
+# Deterministic foliage-scatter RNG (E-P6): the brush seeds an xxh3 hash from
+# (seed, stroke index, sample index) so a stroke reproduces identical instances —
+# no wall-clock / thread-rng (the determinism law). Same hash the graph/asset
+# crates already use.
+xxhash-rust = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 inf-render = { workspace = true }

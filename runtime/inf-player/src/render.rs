@@ -21,11 +21,11 @@ use glam::{DVec3, Vec2, Vec3};
 use uuid::Uuid;
 
 use inf_ecs::components::{
-    BlendMode, ComputedVisibility, GlobalTransform, Light, Light2D, LightKind as EcsLightKind,
-    Material, MeshRef, NineSlice, PcgVolume, Primitive, Sprite, Terrain, Text2D, TextAlign,
-    Tilemap,
+    BlendMode, ComputedVisibility, Foliage, GlobalTransform, Light, Light2D,
+    LightKind as EcsLightKind, Material, MeshRef, NineSlice, PcgVolume, Primitive, Sprite, Terrain,
+    Text2D, TextAlign, Tilemap,
 };
-use inf_ecs::Guid;
+use inf_ecs::{Guid, Vec3d};
 use inf_math::FloatingOrigin;
 use inf_render::{
     detect_tier, expand_nine_slice, expand_text, handle_from_guid, BloomSettings, EngineRenderer,
@@ -286,6 +286,12 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
                 next_id += 1;
             }
         }
+        // Foliage scatter (E-P6): project every placed instance into the mesh path.
+        // MIRROR: `push_foliage` matches `inf_viewport::host`'s Foliage projection
+        // so the shipped player and the editor viewport draw the same scatter.
+        if let Some(fol) = w.get::<Foliage>(entity) {
+            push_foliage(scene, fol, translation, &mut next_id);
+        }
         if let Some(mesh_ref) = w.get::<MeshRef>(entity) {
             let affine = w
                 .get::<GlobalTransform>(entity)
@@ -369,6 +375,57 @@ fn prim_mesh(p: Primitive) -> PrimMesh {
         Primitive::Cylinder => PrimMesh::Cylinder,
         Primitive::Cone => PrimMesh::Cone,
     }
+}
+
+/// Project a [`Foliage`] component's instances into the render scene's mesh path
+/// (E-P6): mesh + tint from the referenced palette slot, each instance lifted by
+/// the entity's world `translation` (instances are entity-local). Every instance
+/// takes a fresh id (`next_id`). MIRROR: keep identical to the editor viewport's
+/// `inf_viewport::host` Foliage projection (minus its pick-id map).
+fn push_foliage(scene: &mut RenderScene, fol: &Foliage, translation: DVec3, next_id: &mut u32) {
+    if fol.instances.is_empty() {
+        return;
+    }
+    if fol.instances.len() > 50_000 {
+        tracing::warn!(
+            "inf-player: Foliage entity has {} instances (>50k) — instanced-draw perf \
+             path is a follow-up",
+            fol.instances.len()
+        );
+    }
+    for fi in &fol.instances {
+        let (mesh, color) = fol
+            .palette
+            .get(fi.kind as usize)
+            .map(|p| (prim_mesh(p.primitive), p.tint.to_array()))
+            .unwrap_or((PrimMesh::Cube, [0.28, 0.52, 0.24, 1.0]));
+        scene.instances.push(MeshInstance {
+            translation: translation + fi.position.to_dvec3(),
+            rotation: foliage_rot_quat(fi.rotation),
+            scale: Vec3::splat(fi.scale as f32),
+            color,
+            metallic: 0.0,
+            roughness: 0.85,
+            emissive: [0.0; 3],
+            id: *next_id,
+            mesh,
+            blend: 0,
+            cutoff: 0.5,
+        });
+        *next_id += 1;
+    }
+}
+
+/// Euler-degrees (YXZ) → quaternion for a foliage instance's stored rotation,
+/// matching `inf_ecs::Transform::quat` (and the editor viewport's mirror) exactly.
+fn foliage_rot_quat(rot: Vec3d) -> glam::Quat {
+    glam::DQuat::from_euler(
+        glam::EulerRot::YXZ,
+        rot.y.to_radians(),
+        rot.x.to_radians(),
+        rot.z.to_radians(),
+    )
+    .as_quat()
 }
 
 /// Project the ECS [`BlendMode`] into the renderer's packed `blend` code (R-P5):
@@ -761,5 +818,80 @@ mod project_light_parity {
             rl.outer_cos
         );
         assert!(!rl.cast_shadows);
+    }
+}
+
+/// Foliage projection mirror (E-P6): a `Foliage` component's instances survive a
+/// serde round-trip and project 1:1 into render mesh instances — the property the
+/// shipped player relies on so a level with painted foliage draws in PIE ==
+/// shipping (the editor viewport runs the identical projection).
+#[cfg(test)]
+mod foliage_projection {
+    use super::{push_foliage, PrimMesh, RenderScene};
+    use glam::DVec3;
+    use inf_ecs::components::{Foliage, FoliageInstance, FoliagePaletteEntry, Primitive};
+    use inf_ecs::{Color, Vec3d};
+
+    fn demo_foliage() -> Foliage {
+        Foliage {
+            palette: vec![
+                FoliagePaletteEntry {
+                    primitive: Primitive::Cone,
+                    tint: Color::new(0.3, 0.6, 0.28, 1.0),
+                },
+                FoliagePaletteEntry {
+                    primitive: Primitive::Sphere,
+                    tint: Color::new(0.6, 0.5, 0.2, 1.0),
+                },
+            ],
+            instances: (0..7)
+                .map(|i| FoliageInstance {
+                    position: Vec3d::new(i as f64, 0.0, (i % 3) as f64),
+                    rotation: Vec3d::new(0.0, 20.0 * i as f64, 0.0),
+                    scale: 1.0 + 0.05 * i as f64,
+                    kind: (i % 2) as u32,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn foliage_round_trips_and_projects_to_matching_instance_count() {
+        let fol = demo_foliage();
+        // Round-trip the whole component (instances are serde-persisted).
+        let bytes = serde_json::to_string(&fol).unwrap();
+        let back: Foliage = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(
+            back.instances, fol.instances,
+            "instances survive round-trip"
+        );
+
+        // Project into a fresh scene: one render instance per foliage instance.
+        let mut scene = RenderScene::default();
+        let mut next_id = 1u32;
+        push_foliage(&mut scene, &back, DVec3::new(10.0, 0.0, -5.0), &mut next_id);
+        assert_eq!(scene.instances.len(), back.instances.len());
+        assert_eq!(
+            next_id,
+            1 + back.instances.len() as u32,
+            "ids advance per instance"
+        );
+
+        // Palette drives mesh + tint; entity translation offsets the local position.
+        let first = &scene.instances[0];
+        assert!(matches!(first.mesh, PrimMesh::Cone));
+        assert_eq!(first.color, [0.3, 0.6, 0.28, 1.0]);
+        assert!((first.translation - DVec3::new(10.0, 0.0, -5.0)).length() < 1e-9);
+        // Kind 1 → the second palette slot (Sphere).
+        assert!(matches!(scene.instances[1].mesh, PrimMesh::Sphere));
+    }
+
+    #[test]
+    fn empty_foliage_projects_nothing() {
+        let mut scene = RenderScene::default();
+        let mut next_id = 1u32;
+        push_foliage(&mut scene, &Foliage::default(), DVec3::ZERO, &mut next_id);
+        assert!(scene.instances.is_empty());
+        assert_eq!(next_id, 1);
     }
 }

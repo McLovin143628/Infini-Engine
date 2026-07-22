@@ -12,9 +12,9 @@
 
 use glam::{DVec2, DVec3};
 use inf_ecs::components::{
-    AtlasRect, Camera, Collider3D, ColliderShape3DKind, GlobalTransform, Light, Light2D, LightKind,
-    Material, MeshRef, NineSlice, Primitive, Spline, Sprite, Terrain, Text2D, Tilemap, Transform,
-    Visibility, Volume, VolumeKind,
+    AtlasRect, Camera, Collider3D, ColliderShape3DKind, Foliage, FoliageInstance,
+    FoliagePaletteEntry, GlobalTransform, Light, Light2D, LightKind, Material, MeshRef, NineSlice,
+    Primitive, Spline, Sprite, Terrain, Text2D, Tilemap, Transform, Visibility, Volume, VolumeKind,
 };
 use inf_ecs::{Color, ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d, Vec3d};
 use inf_terrain::{
@@ -773,6 +773,159 @@ impl SceneDoc {
         };
         if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
             terrain.data.revert_splat_delta(delta);
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    // ── foliage painting (E-P6) ──────────────────────────────────────────
+    //
+    // The foliage brush mirrors the sculpt seam one component over: the viewport
+    // thread accumulates a mouse-down→up scatter gesture, live-mutating the target
+    // `Foliage` component's instance list per tick (so the render projection
+    // refreshes mid-stroke on the version bump), then commits ONE `PaintFoliage`
+    // undo step. A stroke either APPENDS (`added`) or ERASES (`removed`) — never
+    // both — so apply/revert stay exact inverses.
+
+    /// Whether `guid` names a `Foliage` entity (the brush's target-resolution rule
+    /// paints into the selected foliage entity, else auto-creates one).
+    pub fn has_foliage(&self, guid: Uuid) -> bool {
+        self.world
+            .entity_of(guid)
+            .map(|e| self.world.world().get::<Foliage>(e).is_some())
+            .unwrap_or(false)
+    }
+
+    /// The foliage entity's world translation (instances are entity-local, so the
+    /// brush converts world hit points through this). `None` if no `Foliage`.
+    pub fn foliage_origin(&self, guid: Uuid) -> Option<DVec3> {
+        let e = self.world.entity_of(guid)?;
+        let w = self.world.world();
+        w.get::<Foliage>(e)?;
+        Some(
+            w.get::<GlobalTransform>(e)
+                .map(|g| g.translation())
+                .unwrap_or(DVec3::ZERO),
+        )
+    }
+
+    /// A clone of the entity's current foliage instances (the brush snapshots this
+    /// at stroke start for min-spacing + erase). `None` if no `Foliage`.
+    pub fn foliage_instances(&self, guid: Uuid) -> Option<Vec<FoliageInstance>> {
+        let e = self.world.entity_of(guid)?;
+        Some(self.world.world().get::<Foliage>(e)?.instances.clone())
+    }
+
+    /// Append instances to the entity's `Foliage` in place (non-recording; the
+    /// brush drives it per tick, the merged set is recorded at commit). Bumps the
+    /// version so the render projection refreshes. No-op without a `Foliage`.
+    pub fn foliage_append(&mut self, guid: Uuid, instances: &[FoliageInstance]) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut fol) = self.world.world_mut().get_mut::<Foliage>(e) {
+            fol.instances.extend_from_slice(instances);
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    /// Replace the entity's foliage instance list in place (non-recording; the
+    /// erase brush rebuilds it per tick). No-op without a `Foliage`.
+    pub fn foliage_set_instances(&mut self, guid: Uuid, instances: Vec<FoliageInstance>) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut fol) = self.world.world_mut().get_mut::<Foliage>(e) {
+            fol.instances = instances;
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    /// Finish a foliage stroke and record it as ONE `PaintFoliage` undo step. The
+    /// live instances already changed (via [`Self::foliage_append`] /
+    /// [`Self::foliage_set_instances`]), so this only records — `apply` replays the
+    /// net add/remove, `revert` inverts it. An empty stroke records nothing.
+    /// Returns whether an undo entry was recorded.
+    pub fn edit_commit_foliage(
+        &mut self,
+        guid: Uuid,
+        added: Vec<FoliageInstance>,
+        removed: Vec<(usize, FoliageInstance)>,
+    ) -> bool {
+        if added.is_empty() && removed.is_empty() {
+            return false;
+        }
+        self.history.record(
+            "Paint Foliage",
+            EditCommand::PaintFoliage {
+                guid,
+                added,
+                removed,
+            },
+        );
+        self.touch();
+        true
+    }
+
+    /// Redo a foliage stroke: remove the `removed` indices (descending, so earlier
+    /// indices stay valid) then push the `added`. Non-recording; the undo layer
+    /// drives it. The live instances already hold this state when first committed,
+    /// so this only matters on an actual redo.
+    pub(crate) fn raw_apply_foliage(
+        &mut self,
+        guid: Uuid,
+        added: &[FoliageInstance],
+        removed: &[(usize, FoliageInstance)],
+    ) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut fol) = self.world.world_mut().get_mut::<Foliage>(e) {
+            let mut idx: Vec<usize> = removed.iter().map(|(i, _)| *i).collect();
+            idx.sort_unstable();
+            for &i in idx.iter().rev() {
+                if i < fol.instances.len() {
+                    fol.instances.remove(i);
+                }
+            }
+            fol.instances.extend_from_slice(added);
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    /// Undo a foliage stroke: pop the `added` (they were appended last) then re-
+    /// insert the `removed` at their original indices (ascending), restoring the
+    /// pre-stroke instance list exactly. Non-recording; the undo layer drives it.
+    pub(crate) fn raw_revert_foliage(
+        &mut self,
+        guid: Uuid,
+        added: &[FoliageInstance],
+        removed: &[(usize, FoliageInstance)],
+    ) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut fol) = self.world.world_mut().get_mut::<Foliage>(e) {
+            for _ in 0..added.len() {
+                fol.instances.pop();
+            }
+            let mut pairs: Vec<(usize, FoliageInstance)> = removed.to_vec();
+            pairs.sort_by_key(|(i, _)| *i);
+            for (i, inst) in pairs {
+                let at = i.min(fol.instances.len());
+                fol.instances.insert(at, inst);
+            }
         } else {
             return;
         }
@@ -1881,6 +2034,7 @@ fn default_name(kind: SpawnKind) -> String {
         SpawnKind::TriggerVolume => "TriggerVolume",
         SpawnKind::BlockingVolume => "BlockingVolume",
         SpawnKind::Spline => "Spline",
+        SpawnKind::Foliage => "Foliage",
     }
     .to_string()
 }
@@ -1988,6 +2142,19 @@ fn attach_kind(world: &mut EcsWorld, entity: Entity, kind: SpawnKind) {
         //    as a polyline and the Details List editor edits the points. ──
         SpawnKind::Spline => {
             w.entity_mut(entity).insert(Spline::default());
+        }
+        // ── Utility (E-P6): a Foliage scatter seeded with a 1-entry palette so
+        //    the brush places something immediately. A green-tinted Cone reads as
+        //    a stand-in "tree/shrub" (real mesh-asset palettes are the follow-up);
+        //    instances start empty (the brush fills them). ──
+        SpawnKind::Foliage => {
+            w.entity_mut(entity).insert(Foliage {
+                palette: vec![FoliagePaletteEntry {
+                    primitive: Primitive::Cone,
+                    tint: Color::new(0.30, 0.62, 0.28, 1.0),
+                }],
+                instances: Vec::new(),
+            });
         }
         SpawnKind::Empty
         | SpawnKind::Cube
@@ -2269,6 +2436,90 @@ mod tests {
             .height_at(center)
             .unwrap();
         assert!((redone - raised).abs() < 1e-6, "redo replayed the stroke");
+    }
+
+    #[test]
+    fn foliage_paint_undo_redo_restores_exact_instances() {
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Foliage, "Foliage", None);
+        assert!(doc.has_foliage(g));
+        assert!(
+            doc.foliage_instances(g).unwrap().is_empty(),
+            "seeded with an empty instance list"
+        );
+
+        // Simulate a scatter stroke: live-append, then commit as ONE undo step.
+        let added: Vec<FoliageInstance> = (0..4)
+            .map(|i| FoliageInstance {
+                position: Vec3d::new(i as f64, 0.0, 0.0),
+                rotation: Vec3d::new(0.0, 10.0 * i as f64, 0.0),
+                scale: 1.0,
+                kind: 0,
+            })
+            .collect();
+        doc.foliage_append(g, &added);
+        assert_eq!(doc.foliage_instances(g).unwrap(), added);
+        assert!(doc.edit_commit_foliage(g, added.clone(), Vec::new()));
+
+        assert!(doc.undo(), "one undo step for the stroke");
+        assert!(
+            doc.foliage_instances(g).unwrap().is_empty(),
+            "undo pops the whole scatter"
+        );
+        assert!(doc.redo(), "redo replays the stroke");
+        assert_eq!(
+            doc.foliage_instances(g).unwrap(),
+            added,
+            "redo restores the exact instance vec"
+        );
+    }
+
+    #[test]
+    fn foliage_erase_round_trips_exact_order() {
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Foliage, "Foliage", None);
+        let original: Vec<FoliageInstance> = (0..5)
+            .map(|i| FoliageInstance {
+                position: Vec3d::new(i as f64, 0.0, 0.0),
+                rotation: Vec3d::ZERO,
+                scale: 1.0,
+                kind: 0,
+            })
+            .collect();
+        doc.foliage_set_instances(g, original.clone());
+
+        // Erase indices 1 and 3: rebuild the live list + record the removed pairs
+        // (against the ORIGINAL indices, as the brush does).
+        let removed = vec![(1usize, original[1]), (3usize, original[3])];
+        let kept: Vec<FoliageInstance> = original
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 1 && *i != 3)
+            .map(|(_, x)| *x)
+            .collect();
+        doc.foliage_set_instances(g, kept.clone());
+        assert!(doc.edit_commit_foliage(g, Vec::new(), removed));
+
+        assert_eq!(doc.foliage_instances(g).unwrap(), kept);
+        assert!(doc.undo(), "undo the erase");
+        assert_eq!(
+            doc.foliage_instances(g).unwrap(),
+            original,
+            "erase undo restores the pre-stroke list in exact order"
+        );
+        assert!(doc.redo(), "redo the erase");
+        assert_eq!(doc.foliage_instances(g).unwrap(), kept);
+    }
+
+    #[test]
+    fn edit_commit_foliage_ignores_empty_strokes() {
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Foliage, "Foliage", None);
+        assert!(!doc.edit_commit_foliage(g, Vec::new(), Vec::new()));
+        // The only undo entry is the entity Create — the empty stroke recorded
+        // none, so a second undo has nothing to pop.
+        assert!(doc.undo(), "undo the create");
+        assert!(!doc.undo(), "an empty stroke records nothing");
     }
 
     #[test]

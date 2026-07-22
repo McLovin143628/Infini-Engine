@@ -7,7 +7,7 @@
 //! commits a single undo entry (P3.4.2). Structural inverses (create/delete)
 //! reuse the P3.5 [`EntityRecord`] so a deleted subtree round-trips exactly.
 
-use inf_ecs::components::{Sprite, Transform};
+use inf_ecs::components::{FoliageInstance, Sprite, Transform};
 use inf_ecs::PropValue;
 use inf_terrain::{HeightDelta, SplatDelta};
 use uuid::Uuid;
@@ -113,6 +113,17 @@ pub(crate) enum EditCommand {
         before: Box<EntityRecord>,
         after: Box<EntityRecord>,
     },
+    /// One foliage scatter stroke (E-P6): the instances added and/or the
+    /// `(index, instance)` pairs removed. Like the terrain deltas the live stroke
+    /// already mutated the component, so `apply`/`revert` are pure redo/undo — redo
+    /// removes the `removed` indices (descending) then pushes `added`; undo pops
+    /// `added` off the end then re-inserts `removed` at their original indices.
+    /// A stroke is add-XOR-erase, so one vector is always empty.
+    PaintFoliage {
+        guid: Uuid,
+        added: Vec<FoliageInstance>,
+        removed: Vec<(usize, FoliageInstance)>,
+    },
 }
 
 impl EditCommand {
@@ -158,6 +169,13 @@ impl EditCommand {
             }
             EditCommand::SwapComponents { guid, after, .. } => {
                 doc.raw_apply_record_components(*guid, after);
+            }
+            EditCommand::PaintFoliage {
+                guid,
+                added,
+                removed,
+            } => {
+                doc.raw_apply_foliage(*guid, added, removed);
             }
         }
     }
@@ -220,6 +238,13 @@ impl EditCommand {
             }
             EditCommand::SwapComponents { guid, before, .. } => {
                 doc.raw_apply_record_components(*guid, before);
+            }
+            EditCommand::PaintFoliage {
+                guid,
+                added,
+                removed,
+            } => {
+                doc.raw_revert_foliage(*guid, added, removed);
             }
         }
     }

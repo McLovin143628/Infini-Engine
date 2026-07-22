@@ -24,6 +24,7 @@ const ALL_KINDS: SpawnKind[] = [
   "trigger_volume",
   "blocking_volume",
   "spline",
+  "foliage",
 ];
 
 describe("spawnables catalog", () => {
@@ -60,10 +61,11 @@ describe("spawnables catalog", () => {
     expect(spawnableByKind("blocking_volume")?.label).toBe("Blocking Volume");
   });
 
-  it("exposes the spline in a Utility section (E-P5)", () => {
+  it("exposes the spline + foliage in a Utility section (E-P5 / E-P6)", () => {
     const utility = SPAWNABLE_SECTIONS.find((s) => s.heading === "Utility");
     expect(utility).toBeDefined();
-    expect(utility?.items.map((i) => i.kind)).toEqual(["spline"]);
+    expect(utility?.items.map((i) => i.kind)).toEqual(["spline", "foliage"]);
     expect(spawnableByKind("spline")?.label).toBe("Spline");
+    expect(spawnableByKind("foliage")?.label).toBe("Foliage");
   });
 });

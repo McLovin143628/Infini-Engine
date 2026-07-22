@@ -9,12 +9,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use inf_editor_core::ipc::{
-    GizmoModeDto, GizmoSpaceDto, SculptFalloffDto, SculptOpDto, SculptSettingsDto, Snap2DDto,
-    Snap3DDto, ToolModeDto, ViewModeDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
+    FoliageSettingsDto, GizmoModeDto, GizmoSpaceDto, SculptFalloffDto, SculptOpDto,
+    SculptSettingsDto, Snap2DDto, Snap3DDto, ToolModeDto, ViewModeDto, ViewportDrop, ViewportKey,
+    ViewportModeDto, ViewportRect,
 };
 use inf_viewport::{
-    GizmoSpace, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings, SnapSettings, ToolMode,
-    ViewportEvent, ViewportMode,
+    FoliageSettings, GizmoSpace, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings,
+    SnapSettings, ToolMode, ViewportEvent, ViewportMode,
 };
 use tauri::{Emitter, Manager};
 
@@ -231,6 +232,7 @@ pub async fn viewport_set_tool_mode(
         handle.set_tool_mode(match mode {
             ToolModeDto::Select => ToolMode::Select,
             ToolModeDto::Sculpt => ToolMode::Sculpt,
+            ToolModeDto::Foliage => ToolMode::Foliage,
         });
     }
     Ok(())
@@ -263,6 +265,28 @@ pub async fn viewport_set_sculpt(
                 SculptFalloffDto::Sharp => SculptFalloff::Sharp,
             },
             paint_layer: sculpt.paint_layer.min(3),
+        });
+    }
+    Ok(())
+}
+
+/// Push the foliage brush configuration (radius / density / kind / …) to the
+/// viewport (E-P6).
+#[tauri::command]
+pub async fn viewport_set_foliage(
+    foliage: FoliageSettingsDto,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        handle.set_foliage(FoliageSettings {
+            radius: foliage.radius.max(0.0),
+            density: foliage.density.max(0.0),
+            erase: foliage.erase,
+            kind: foliage.kind,
+            scale_jitter: foliage.scale_jitter.max(0.0),
+            align_to_normal: foliage.align_to_normal,
+            seed: foliage.seed,
         });
     }
     Ok(())

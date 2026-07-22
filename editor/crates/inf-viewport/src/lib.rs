@@ -14,8 +14,8 @@
 pub mod camera;
 
 pub use camera::{
-    Camera2D, EditorCamera, GizmoSpace, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings,
-    SnapSettings, ToolMode, ViewportMode,
+    Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptFalloff, SculptOp, SculptSettings,
+    Snap2DSettings, SnapSettings, ToolMode, ViewportMode,
 };
 
 use std::sync::{Arc, Mutex};
@@ -160,6 +160,7 @@ impl ViewportHandle {
     pub fn set_snap_2d(&self, _snap: camera::Snap2DSettings) {}
     pub fn set_tool_mode(&self, _mode: camera::ToolMode) {}
     pub fn set_sculpt(&self, _sculpt: camera::SculptSettings) {}
+    pub fn set_foliage(&self, _foliage: camera::FoliageSettings) {}
     pub fn set_gizmo_mode(&self, _mode: inf_editor_core::ipc::GizmoModeDto) {}
     pub fn set_gizmo_space(&self, _space: camera::GizmoSpace) {}
     pub fn set_snap_3d(&self, _snap: camera::SnapSettings) {}

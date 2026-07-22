@@ -3427,6 +3427,7 @@ dependencies = [
  "uuid",
  "wgpu",
  "windows 0.62.2",
+ "xxhash-rust",
 ]
 
 [[package]]

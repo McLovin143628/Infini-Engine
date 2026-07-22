@@ -30,6 +30,7 @@ const VIEW_MODES: [ViewModeDto, string, string][] = [
 const TOOLS: [ToolModeDto, string, string][] = [
   ["Select", "Select", "Pick + transform (Q/W/E/R gizmos)"],
   ["Sculpt", "Sculpt", "Terrain height brush (perspective only)"],
+  ["Foliage", "Foliage", "Scatter foliage onto the terrain (perspective only)"],
 ];
 
 const SCULPT_OPS: [SculptOpDto, string][] = [
@@ -179,9 +180,96 @@ export default function ViewportToolbar() {
             ))}
           </div>
           {toolMode === "Sculpt" && <SculptControls />}
+          {toolMode === "Foliage" && <FoliageControls />}
         </>
       )}
     </div>
+  );
+}
+
+/** Radius / density / kind / jitter / seed + erase toggle for the Foliage tool
+ * (E-P6). Painting scatters the selected `Foliage` entity, or auto-creates one. */
+function FoliageControls() {
+  const radius = useViewportStore((s) => s.foliageRadius);
+  const density = useViewportStore((s) => s.foliageDensity);
+  const erase = useViewportStore((s) => s.foliageErase);
+  const kind = useViewportStore((s) => s.foliageKind);
+  const scaleJitter = useViewportStore((s) => s.foliageScaleJitter);
+  const seed = useViewportStore((s) => s.foliageSeed);
+  const setRadius = useViewportStore((s) => s.setFoliageRadius);
+  const setDensity = useViewportStore((s) => s.setFoliageDensity);
+  const setErase = useViewportStore((s) => s.setFoliageErase);
+  const setKind = useViewportStore((s) => s.setFoliageKind);
+  const setScaleJitter = useViewportStore((s) => s.setFoliageScaleJitter);
+  const setSeed = useViewportStore((s) => s.setFoliageSeed);
+
+  return (
+    <>
+      <button
+        type="button"
+        aria-pressed={erase}
+        title="Erase: an LMB-drag removes foliage within the brush instead of placing it"
+        className={`flex h-6 items-center rounded px-2 ${
+          erase
+            ? "bg-(--ink-accent) text-(--ink-bg-0)"
+            : "bg-(--ink-bg-0) text-(--ink-text-dim) hover:text-(--ink-text)"
+        }`}
+        onClick={() => setErase(!erase)}
+      >
+        Erase
+      </button>
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Radius
+        <NumberField
+          value={Math.round(radius * 100) / 100}
+          min={0.1}
+          step={0.5}
+          onChange={setRadius}
+          title="Brush radius (world metres)"
+          suffix="m"
+        />
+      </label>
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Density
+        <NumberField
+          value={density}
+          min={0}
+          step={0.1}
+          onChange={setDensity}
+          title="Target instances per m² of brush area (before min-spacing rejection)"
+        />
+      </label>
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Kind
+        <NumberField
+          value={kind}
+          min={0}
+          step={1}
+          onChange={setKind}
+          title="Palette slot new instances draw from (edit the palette in Details)"
+        />
+      </label>
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Jitter
+        <NumberField
+          value={scaleJitter}
+          min={0}
+          step={0.05}
+          onChange={setScaleJitter}
+          title="± fractional scale spread per instance"
+        />
+      </label>
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Seed
+        <NumberField
+          value={seed}
+          min={0}
+          step={1}
+          onChange={setSeed}
+          title="Deterministic scatter seed (same stroke reproduces identical instances)"
+        />
+      </label>
+    </>
   );
 }
 

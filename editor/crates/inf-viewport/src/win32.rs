@@ -40,8 +40,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use glam::DVec2;
 
 use crate::camera::{
-    Bookmarks, Camera2D, EditorCamera, FlyInput, GizmoSpace, NavInput, NavMode, SculptSettings,
-    Snap2DSettings, SnapSettings, ToolMode, ViewportMode,
+    Bookmarks, Camera2D, EditorCamera, FlyInput, FoliageSettings, GizmoSpace, NavInput, NavMode,
+    SculptSettings, Snap2DSettings, SnapSettings, ToolMode, ViewportMode,
 };
 use crate::host::EngineHost;
 use crate::{KeyChord, SharedScene, SurfaceTarget, ViewportEvent, ViewportEventSink, ViewportRect};
@@ -109,6 +109,8 @@ enum Cmd {
     SetToolMode(ToolMode),
     /// Replace the sculpt brush configuration from the toolbar (P10.2b).
     SetSculpt(SculptSettings),
+    /// Replace the foliage brush configuration from the toolbar (E-P6).
+    SetFoliage(FoliageSettings),
     /// Set the transform-gizmo mode (translate/rotate/scale) from the toolbar or
     /// palette (Wave 2). The viewport echoes changes back on `viewport://gizmo`.
     SetGizmo(GizmoMode),
@@ -178,6 +180,11 @@ impl ViewportHandle {
     /// Replace the sculpt brush configuration (op / radius / strength / falloff).
     pub fn set_sculpt(&self, sculpt: SculptSettings) {
         let _ = self.tx.send(Cmd::SetSculpt(sculpt));
+    }
+
+    /// Replace the foliage brush configuration (radius / density / kind / …).
+    pub fn set_foliage(&self, foliage: FoliageSettings) {
+        let _ = self.tx.send(Cmd::SetFoliage(foliage));
     }
 
     /// Set the transform-gizmo mode (translate/rotate/scale) from the toolbar or
@@ -863,6 +870,7 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 Ok(Cmd::SetSnap2D(s)) => host.set_snap_2d(s),
                 Ok(Cmd::SetToolMode(m)) => host.set_tool_mode(m),
                 Ok(Cmd::SetSculpt(s)) => host.set_sculpt(s),
+                Ok(Cmd::SetFoliage(f)) => host.set_foliage(f),
                 Ok(Cmd::SetGizmo(m)) => {
                     host.set_gizmo_mode(m);
                     // Echo so the toolbar reflects an IPC-driven change too.
@@ -1029,6 +1037,7 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 // viewport thread (like a gizmo drag) and commits one undo step at
                 // mouse-up (P10.2b). 2D mode keeps Select regardless of the tool.
                 let sculpting = host.tool_mode() == ToolMode::Sculpt && !two_d;
+                let foliage = host.tool_mode() == ToolMode::Foliage && !two_d;
                 if sculpting {
                     if let Some((x, y, ctrl)) = input.left_press {
                         let (px, py) = (x.max(0) as u32, y.max(0) as u32);
@@ -1051,6 +1060,37 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                         let (x, y) = input.cursor;
                         if x >= 0 && y >= 0 {
                             host.update_sculpt_hover(&doc, &interact_view, x as u32, y as u32);
+                        }
+                    }
+                } else if foliage {
+                    // Foliage mode (perspective only): plain LMB scatters (or
+                    // erases) instances onto the terrain under the brush, exactly
+                    // mirroring the sculpt seam — the stroke lives on the viewport
+                    // thread and commits ONE undo step at mouse-up (E-P6).
+                    if let Some((x, y, _ctrl)) = input.left_press {
+                        let (px, py) = (x.max(0) as u32, y.max(0) as u32);
+                        host.begin_foliage(&mut doc, &interact_view, px, py);
+                    }
+                    if input.left_down && host.is_painting_foliage() {
+                        let (x, y) = input.cursor;
+                        host.update_foliage(
+                            &mut doc,
+                            &interact_view,
+                            x.max(0) as u32,
+                            y.max(0) as u32,
+                        );
+                    }
+                    if input.left_release
+                        && host.is_painting_foliage()
+                        && host.finish_foliage(&mut doc)
+                    {
+                        world_changed = true;
+                    }
+                    // Idle hover: the brush ring follows the cursor.
+                    if !input.left_down && input.capture == Capture::None && input.cursor_moved {
+                        let (x, y) = input.cursor;
+                        if x >= 0 && y >= 0 {
+                            host.update_foliage_hover(&doc, &interact_view, x as u32, y as u32);
                         }
                     }
                 } else {

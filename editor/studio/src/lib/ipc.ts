@@ -46,6 +46,7 @@ import type { ProjectTemplateDto } from "../bindings/ProjectTemplateDto";
 import type { PropValueDto } from "../bindings/PropValueDto";
 import type { RecentProjectDto } from "../bindings/RecentProjectDto";
 import type { SearchHitDto } from "../bindings/SearchHitDto";
+import type { FoliageSettingsDto } from "../bindings/FoliageSettingsDto";
 import type { SculptSettingsDto } from "../bindings/SculptSettingsDto";
 import type { SearchOptsDto } from "../bindings/SearchOptsDto";
 import type { SceneSnapshot } from "../bindings/SceneSnapshot";
@@ -162,6 +163,9 @@ export const viewport = {
   /** Push the sculpt brush configuration (op / radius / strength / falloff). */
   setSculpt: (sculpt: SculptSettingsDto): Promise<void> =>
     invoke("viewport_set_sculpt", { sculpt }),
+  /** Push the foliage brush configuration (radius / density / kind / …) (E-P6). */
+  setFoliage: (foliage: FoliageSettingsDto): Promise<void> =>
+    invoke("viewport_set_foliage", { foliage }),
   /**
    * Set the transform-gizmo mode (translate/rotate/scale) (Wave 2). The viewport
    * echoes mode changes (incl. W/E/R keypresses over it) on `viewport://gizmo`.

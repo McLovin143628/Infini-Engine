@@ -274,6 +274,10 @@ pub enum SpawnKind {
     /// A control-point spline (camera rail / patrol route / placement path):
     /// a default `Spline` component, drawn as a polyline in the editor viewport.
     Spline,
+    // ── Utility (E-P6) ────────────────────────────────────────────────────
+    /// A foliage scatter (grass/rocks/trees): a `Foliage` component seeded with a
+    /// 1-entry palette, populated by the viewport's foliage brush.
+    Foliage,
 }
 
 // ── Asset system / Content Drawer (Phase 4) ──────────────────────────────
@@ -634,6 +638,8 @@ pub struct Snap3DDto {
 pub enum ToolModeDto {
     Select,
     Sculpt,
+    /// Scatter foliage onto the terrain under a brush (E-P6). Perspective-only.
+    Foliage,
 }
 
 /// The sculpt brush operation. Serializes as its tag string. `Paint` is the
@@ -670,6 +676,27 @@ pub struct SculptSettingsDto {
     /// Target splat layer `0..=3` for the `Paint` op (P10.4). Ignored by the
     /// height ops.
     pub paint_layer: u8,
+}
+
+// ── Foliage brush (E-P6) ─────────────────────────────────────────────────
+//
+// The viewport toolbar's Foliage tool scatters (or erases) `Foliage` instances
+// onto the terrain under an LMB-drag brush, pushed via `viewport_set_foliage`.
+// Perspective-only, like the sculpt tool.
+
+/// Foliage-brush configuration (`viewport_set_foliage`). `radius` is world
+/// metres; `density` is target instances per m² of brush area; `kind` selects the
+/// palette slot; `scale_jitter` is the ± fractional scale spread; `seed` makes a
+/// stroke's scatter deterministically reproducible.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct FoliageSettingsDto {
+    pub radius: f64,
+    pub density: f64,
+    pub erase: bool,
+    pub kind: u32,
+    pub scale_jitter: f64,
+    pub align_to_normal: bool,
+    pub seed: u32,
 }
 
 // ── Terrain erosion bake (P10.3b) ────────────────────────────────────────

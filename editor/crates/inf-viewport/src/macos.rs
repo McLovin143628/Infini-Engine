@@ -25,8 +25,8 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
 use crate::camera::{
-    Camera2D, EditorCamera, GizmoSpace, SculptSettings, Snap2DSettings, SnapSettings, ToolMode,
-    ViewportMode,
+    Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptSettings, Snap2DSettings,
+    SnapSettings, ToolMode, ViewportMode,
 };
 use crate::host::EngineHost;
 use crate::{SharedScene, SurfaceTarget, ViewportEventSink, ViewportRect};
@@ -59,6 +59,7 @@ enum Cmd {
     SetSnap2D(Snap2DSettings),
     SetToolMode(ToolMode),
     SetSculpt(SculptSettings),
+    SetFoliage(FoliageSettings),
     SetGizmo(GizmoMode),
     SetGizmoSpace(GizmoSpace),
     SetSnap3D(SnapSettings),
@@ -113,6 +114,12 @@ impl ViewportHandle {
     /// Replace the sculpt brush configuration.
     pub fn set_sculpt(&self, sculpt: SculptSettings) {
         let _ = self.tx.send(Cmd::SetSculpt(sculpt));
+    }
+
+    /// Replace the foliage brush configuration (E-P6). macOS input isn't wired
+    /// yet, so this only sets the host state (the brush drives once input lands).
+    pub fn set_foliage(&self, foliage: FoliageSettings) {
+        let _ = self.tx.send(Cmd::SetFoliage(foliage));
     }
 
     /// Set the transform-gizmo mode (Wave 2). macOS input isn't wired yet, so
@@ -265,6 +272,7 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedSce
                 Ok(Cmd::SetSnap2D(s)) => host.set_snap_2d(s),
                 Ok(Cmd::SetToolMode(m)) => host.set_tool_mode(m),
                 Ok(Cmd::SetSculpt(s)) => host.set_sculpt(s),
+                Ok(Cmd::SetFoliage(f)) => host.set_foliage(f),
                 Ok(Cmd::SetGizmo(m)) => host.set_gizmo_mode(m),
                 Ok(Cmd::SetGizmoSpace(s)) => host.set_gizmo_space(s),
                 Ok(Cmd::SetSnap3D(s)) => host.set_snap_3d(s),

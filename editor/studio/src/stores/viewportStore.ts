@@ -10,6 +10,7 @@ import { create } from "zustand";
 import { getCommand, registerCommands, setCommandHandler } from "../lib/commands";
 import { listenTo } from "../lib/events";
 import { projectSettings, viewport } from "../lib/ipc";
+import type { FoliageSettingsDto } from "../bindings/FoliageSettingsDto";
 import type { GizmoModeDto } from "../bindings/GizmoModeDto";
 import type { GizmoSpaceDto } from "../bindings/GizmoSpaceDto";
 import type { SculptFalloffDto } from "../bindings/SculptFalloffDto";
@@ -23,6 +24,9 @@ import type { ViewportModeDto } from "../bindings/ViewportModeDto";
 
 /** localStorage key for the persisted 3D gizmo snap settings (Wave 2). */
 const SNAP3D_KEY = "inf.viewport.snap3d";
+
+/** localStorage key for the persisted foliage brush settings (E-P6). */
+const FOLIAGE_KEY = "inf.viewport.foliage";
 
 /** Radius clamp (world metres) and the multiplicative `[` / `]` nudge factor. */
 export const SCULPT_RADIUS_MIN = 0.5;
@@ -62,6 +66,16 @@ interface ViewportUiState {
   /** Target splat layer `0..=3` for the Paint op (P10.4). */
   sculptPaintLayer: number;
 
+  /** Foliage brush (E-P6). Radius (world m); density (instances per m²); erase
+   * removes within the radius; kind = palette slot; scaleJitter = ± scale spread;
+   * seed makes a stroke's scatter deterministic. */
+  foliageRadius: number;
+  foliageDensity: number;
+  foliageErase: boolean;
+  foliageKind: number;
+  foliageScaleJitter: number;
+  foliageSeed: number;
+
   /** Transform-gizmo mode (translate/rotate/scale), two-way synced (Wave 2). */
   gizmoMode: GizmoModeDto;
   /** Gizmo orientation frame (World ↔ Local). */
@@ -91,6 +105,13 @@ interface ViewportUiState {
   setSculptFalloff: (f: SculptFalloffDto) => void;
   setSculptPaintLayer: (n: number) => void;
 
+  setFoliageRadius: (r: number) => void;
+  setFoliageDensity: (d: number) => void;
+  setFoliageErase: (v: boolean) => void;
+  setFoliageKind: (n: number) => void;
+  setFoliageScaleJitter: (v: number) => void;
+  setFoliageSeed: (n: number) => void;
+
   /** Set the gizmo mode + push to the viewport (Wave 2). */
   setGizmoMode: (mode: GizmoModeDto) => void;
   /** Toggle World ↔ Local gizmo space + push. */
@@ -116,6 +137,31 @@ function pushSculpt(s: ViewportUiState): void {
     paint_layer: s.sculptPaintLayer,
   };
   void viewport.setSculpt(dto).catch(() => {});
+}
+
+/** Build the foliage brush DTO from the store state (E-P6). `align_to_normal` is
+ * off in v1 (yaw-only) — the seam carries it for the forthcoming normal-align. */
+function foliageDto(s: ViewportUiState): FoliageSettingsDto {
+  return {
+    radius: s.foliageRadius,
+    density: s.foliageDensity,
+    erase: s.foliageErase,
+    kind: s.foliageKind,
+    scale_jitter: s.foliageScaleJitter,
+    align_to_normal: false,
+    seed: s.foliageSeed,
+  };
+}
+
+/** Send + persist the current foliage brush settings (E-P6). */
+function pushFoliage(s: ViewportUiState): void {
+  const dto = foliageDto(s);
+  void viewport.setFoliage(dto).catch(() => {});
+  try {
+    localStorage.setItem(FOLIAGE_KEY, JSON.stringify(dto));
+  } catch {
+    // ignore quota / privacy-mode failures
+  }
 }
 
 /** Send the current snap settings to the native viewport. */
@@ -163,6 +209,12 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   sculptStrength: 0.5,
   sculptFalloff: "Smooth",
   sculptPaintLayer: 0,
+  foliageRadius: 3,
+  foliageDensity: 0.4,
+  foliageErase: false,
+  foliageKind: 0,
+  foliageScaleJitter: 0.2,
+  foliageSeed: 1,
   gizmoMode: "Translate",
   gizmoSpace: "World",
   snap3dEnabled: false,
@@ -203,8 +255,9 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   setToolMode: (toolMode) => {
     set({ toolMode });
     void viewport.setToolMode(toolMode).catch(() => {});
-    // Sync the brush config whenever we enter Sculpt so the viewport is armed.
+    // Sync the brush config whenever we enter a brush tool so it's armed.
     if (toolMode === "Sculpt") pushSculpt(get());
+    if (toolMode === "Foliage") pushFoliage(get());
   },
   setSculptOp: (sculptOp) => {
     set({ sculptOp });
@@ -233,6 +286,31 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
       : 0;
     set({ sculptPaintLayer });
     pushSculpt(get());
+  },
+
+  setFoliageRadius: (r) => {
+    set({ foliageRadius: Number.isFinite(r) ? Math.max(r, 0.1) : 0.1 });
+    pushFoliage(get());
+  },
+  setFoliageDensity: (d) => {
+    set({ foliageDensity: Number.isFinite(d) ? Math.max(d, 0) : 0 });
+    pushFoliage(get());
+  },
+  setFoliageErase: (foliageErase) => {
+    set({ foliageErase });
+    pushFoliage(get());
+  },
+  setFoliageKind: (n) => {
+    set({ foliageKind: Number.isFinite(n) ? Math.max(Math.round(n), 0) : 0 });
+    pushFoliage(get());
+  },
+  setFoliageScaleJitter: (v) => {
+    set({ foliageScaleJitter: Number.isFinite(v) ? Math.min(Math.max(v, 0), 1) : 0 });
+    pushFoliage(get());
+  },
+  setFoliageSeed: (n) => {
+    set({ foliageSeed: Number.isFinite(n) ? Math.max(Math.round(n), 0) : 0 });
+    pushFoliage(get());
   },
 
   setGizmoMode: (gizmoMode) => {
@@ -275,6 +353,7 @@ export function registerViewportCommands(): void {
     { id: "view.wireframe", title: "View Mode: Wireframe", category: "View" },
     { id: "tool.select", title: "Tool: Select", category: "Tools" },
     { id: "tool.sculpt", title: "Tool: Sculpt Terrain", category: "Tools" },
+    { id: "tool.foliage", title: "Tool: Paint Foliage", category: "Tools" },
   ]);
   if (getCommand("view.toggle2D")) {
     setCommandHandler("view.toggle2D", () => useViewportStore.getState().toggleMode());
@@ -301,6 +380,9 @@ export function registerViewportCommands(): void {
   }
   if (getCommand("tool.sculpt")) {
     setCommandHandler("tool.sculpt", () => useViewportStore.getState().setToolMode("Sculpt"));
+  }
+  if (getCommand("tool.foliage")) {
+    setCommandHandler("tool.foliage", () => useViewportStore.getState().setToolMode("Foliage"));
   }
 }
 
@@ -361,6 +443,26 @@ export function initViewportSync(): () => void {
     // ignore parse / access failures
   }
   void viewport.setSnap3d(snap3dDto(useViewportStore.getState())).catch(() => {});
+
+  // Restore the persisted foliage brush settings (E-P6). Malformed / absent
+  // storage falls back to the store defaults.
+  try {
+    const raw = localStorage.getItem(FOLIAGE_KEY);
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<FoliageSettingsDto>;
+      useViewportStore.setState({
+        foliageRadius: typeof p.radius === "number" ? p.radius : 3,
+        foliageDensity: typeof p.density === "number" ? p.density : 0.4,
+        foliageErase: typeof p.erase === "boolean" ? p.erase : false,
+        foliageKind: typeof p.kind === "number" ? p.kind : 0,
+        foliageScaleJitter: typeof p.scale_jitter === "number" ? p.scale_jitter : 0.2,
+        foliageSeed: typeof p.seed === "number" ? p.seed : 1,
+      });
+    }
+  } catch {
+    // ignore parse / access failures
+  }
+  void viewport.setFoliage(foliageDto(useViewportStore.getState())).catch(() => {});
 
   let disposed = false;
   const unlisteners: Array<() => void> = [];

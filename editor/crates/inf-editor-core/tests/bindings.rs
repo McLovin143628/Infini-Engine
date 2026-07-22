@@ -11,14 +11,14 @@ use inf_editor_core::ipc::CollisionLayerDto;
 use inf_editor_core::ipc::{
     AddableComponentDto, AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot,
     ComponentDto, DataAssetDto, DataFieldDto, DeleteResult, DetailsDto, ErosionParamsDto,
-    ErosionReportDto, FileEntryDto, GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto,
-    ImportEventDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto, PackageKindCountDto,
-    PackageResultDto, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto, PropFieldDto,
-    PropValueDto, RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto,
-    SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto,
-    SeqTrackDto, SequenceDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpriteGridDto,
-    SpriteRectDto, SpriteSheetDto, TilemapCellDto, TilemapDto, ToolModeDto, ViewModeDto,
-    ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
+    ErosionReportDto, FileEntryDto, FoliageSettingsDto, GitFileDto, GitStatusDto, GizmoModeDto,
+    GizmoSpaceDto, ImportEventDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto,
+    PackageKindCountDto, PackageResultDto, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto,
+    PropFieldDto, PropValueDto, RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot,
+    SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto,
+    SeqKeyDto, SeqTrackDto, SequenceDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind,
+    SpriteGridDto, SpriteRectDto, SpriteSheetDto, TilemapCellDto, TilemapDto, ToolModeDto,
+    ViewModeDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -76,6 +76,7 @@ fn export_bindings() {
     SculptOpDto::export_all(&cfg).expect("export SculptOpDto");
     SculptFalloffDto::export_all(&cfg).expect("export SculptFalloffDto");
     SculptSettingsDto::export_all(&cfg).expect("export SculptSettingsDto");
+    FoliageSettingsDto::export_all(&cfg).expect("export FoliageSettingsDto");
     ProjectSettingsDto::export_all(&cfg).expect("export ProjectSettingsDto");
     ErosionParamsDto::export_all(&cfg).expect("export ErosionParamsDto");
     ErosionReportDto::export_all(&cfg).expect("export ErosionReportDto");

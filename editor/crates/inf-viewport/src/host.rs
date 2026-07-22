@@ -2,14 +2,15 @@
 //! renderer), the render scene, and the floating origin. The per-OS modules
 //! (win32, macos) own the native window/layer + input and drive this.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use glam::{DQuat, DVec2, DVec3, Vec2, Vec3};
 use inf_ecs::components::{
     BlendMode, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
-    ComputedVisibility, GlobalTransform, Joint2D, Joint3D, Light, Light2D,
-    LightKind as EcsLightKind, Material, MeshRef, NineSlice, PcgVolume, Primitive, SkeletalMesh,
-    Spline, SplineInterp as EcsSplineInterp, Sprite, Terrain, Text2D, TextAlign, Tilemap, Volume,
+    ComputedVisibility, Foliage, FoliageInstance, GlobalTransform, Joint2D, Joint3D, Light,
+    Light2D, LightKind as EcsLightKind, Material, MeshRef, NineSlice, PcgVolume, Primitive,
+    SkeletalMesh, Spline, SplineInterp as EcsSplineInterp, Sprite, Terrain, Text2D, TextAlign,
+    Tilemap, Volume,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::ipc::SpawnKind;
@@ -38,8 +39,8 @@ use inf_terrain::{
 };
 
 use crate::camera::{
-    Camera2D, EditorCamera, GizmoSpace, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings,
-    SnapSettings, ToolMode, ViewportMode, TWO_D_FAR, TWO_D_NEAR,
+    Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptFalloff, SculptOp, SculptSettings,
+    Snap2DSettings, SnapSettings, ToolMode, ViewportMode, TWO_D_FAR, TWO_D_NEAR,
 };
 use crate::SurfaceTarget;
 
@@ -89,6 +90,10 @@ fn spawn_kind_from_str(s: &str) -> Option<SpawnKind> {
         "nine_slice" => SpawnKind::NineSlice,
         "light2d" => SpawnKind::Light2d,
         "terrain" => SpawnKind::Terrain,
+        "spline" => SpawnKind::Spline,
+        "foliage" => SpawnKind::Foliage,
+        "trigger_volume" => SpawnKind::TriggerVolume,
+        "blocking_volume" => SpawnKind::BlockingVolume,
         _ => return None,
     })
 }
@@ -177,9 +182,18 @@ pub struct EngineHost {
     sculpt_drag: Option<SculptDrag>,
     /// World-space brush-ring loop points (following terrain height), rebuilt as
     /// the cursor hovers/sculpts terrain; drawn as debug lines in Sculpt mode.
+    /// Shared with the Foliage brush (same hover-ring buffer, different colour).
     sculpt_ring: Vec<DVec3>,
-    /// Colour of the brush ring (encodes the active op).
+    /// Colour of the brush ring (encodes the active op / foliage brush).
     sculpt_ring_color: [f32; 4],
+    /// Foliage-brush configuration pushed from the toolbar (E-P6).
+    foliage: FoliageSettings,
+    /// In-flight foliage scatter stroke (`None` = idle).
+    foliage_drag: Option<FoliageDrag>,
+    /// Monotonic per-session stroke counter: folded into the scatter RNG so each
+    /// stroke is independent yet the same input sequence reproduces identical
+    /// instances (determinism law — no wall-clock / thread-rng).
+    foliage_stroke_seq: u32,
     /// Camera eye captured on the last rendered frame (P10.5b). PCG scatter
     /// instances are draw-distance-culled against it at projection time; because
     /// projection is doc-version-gated (not per-frame), the cull set refreshes
@@ -259,6 +273,151 @@ struct SculptDrag {
 enum DragStroke {
     Height(Stroke),
     Splat(SplatStroke),
+}
+
+/// An in-flight foliage scatter gesture (E-P6): the mouse-down→up stroke that
+/// live-mutates the target [`Foliage`] component per tick and, on release,
+/// commits ONE `PaintFoliage` undo step. Either adds (`added`) or erases
+/// (`removed`) — never both in one stroke.
+struct FoliageDrag {
+    /// Target foliage entity (selected, or auto-created at stroke start).
+    guid: Uuid,
+    /// Erase (remove within radius) vs place.
+    erase: bool,
+    /// This stroke's index, folded into the scatter RNG for determinism.
+    stroke_seq: u32,
+    /// Running scatter-sample index (monotonic across the whole stroke) so every
+    /// candidate draws a distinct deterministic RNG draw.
+    next_sample: u64,
+    /// Entity world translation captured at stroke start — foliage instances are
+    /// entity-local, so world hit points convert through this.
+    origin: DVec3,
+    /// Local XZ of every instance known this stroke (pre-existing + added), for
+    /// O(n) min-spacing rejection (add mode). A v1 simplification — fine at brush
+    /// scale; a spatial hash is the follow-up for very dense components.
+    positions: Vec<DVec2>,
+    /// Instances placed this stroke, in push order (append-only; the undo record
+    /// pops exactly these off the end on revert).
+    added: Vec<FoliageInstance>,
+    /// Snapshot of the component's instances at stroke start (erase mode only).
+    original: Vec<FoliageInstance>,
+    /// Original-vector indices removed so far this stroke (erase mode).
+    removed: BTreeSet<usize>,
+}
+
+/// One deterministic scatter candidate produced by [`foliage_samples`]: a world
+/// XZ position within the brush disk plus a yaw + uniform scale. The host lifts it
+/// to the terrain (or ground) height and converts to entity-local before placing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FoliageCandidate {
+    /// World-space XZ (the `y`/height is resolved by the host against the terrain).
+    pos_xz: DVec2,
+    /// Yaw about +Y, degrees (euler-deg YXZ, the `Transform` convention).
+    yaw_deg: f64,
+    /// Uniform scale (`1 ± scale_jitter`).
+    scale: f64,
+    /// Palette slot.
+    kind: u32,
+}
+
+/// Hard cap on candidate samples placed per brush tick (keeps a huge-radius
+/// high-density brush from stalling the interaction thread).
+const FOLIAGE_MAX_PER_TICK: u32 = 64;
+
+/// Deterministic disk sampler for one foliage brush tick (E-P6). **Pure** — the
+/// output is a function of the inputs alone (no wall-clock / thread-rng), so the
+/// same stroke input sequence reproduces identical instances (unit-tested). Each
+/// candidate `i` derives its uniforms from `xxh3_64(seed, stroke_seq,
+/// base_index + i)`; the disk sample is area-uniform (`r = R·√u`).
+#[allow(clippy::too_many_arguments)] // brush params are a flat list; a struct here would just shuffle them
+fn foliage_samples(
+    center_xz: DVec2,
+    radius: f64,
+    count: u32,
+    seed: u32,
+    stroke_seq: u32,
+    base_index: u64,
+    scale_jitter: f64,
+    kind: u32,
+) -> Vec<FoliageCandidate> {
+    let jitter = scale_jitter.max(0.0);
+    (0..count)
+        .map(|i| {
+            let h = foliage_hash(seed, stroke_seq, base_index + i as u64);
+            // Split the 64-bit hash into four independent [0,1) uniforms.
+            let u0 = unit_from_bits(h);
+            let u1 = unit_from_bits(h.rotate_left(16).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let u2 = unit_from_bits(h.rotate_left(32).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));
+            let u3 = unit_from_bits(h.rotate_left(48).wrapping_mul(0x1656_67B1_9E37_79F9));
+            let r = radius * u0.sqrt();
+            let theta = std::f64::consts::TAU * u1;
+            let pos_xz = center_xz + DVec2::new(r * theta.cos(), r * theta.sin());
+            let yaw_deg = 360.0 * u2;
+            let scale = (1.0 + (u3 * 2.0 - 1.0) * jitter).max(0.01);
+            FoliageCandidate {
+                pos_xz,
+                yaw_deg,
+                scale,
+                kind,
+            }
+        })
+        .collect()
+}
+
+/// xxh3-64 of the three-word RNG key `(seed, stroke_seq, sample_index)`, packed
+/// little-endian. Shared hash family with `inf-graph`/`inf-asset`.
+fn foliage_hash(seed: u32, stroke_seq: u32, sample_index: u64) -> u64 {
+    let mut bytes = [0u8; 16];
+    bytes[0..4].copy_from_slice(&seed.to_le_bytes());
+    bytes[4..8].copy_from_slice(&stroke_seq.to_le_bytes());
+    bytes[8..16].copy_from_slice(&sample_index.to_le_bytes());
+    xxhash_rust::xxh3::xxh3_64(&bytes)
+}
+
+/// Map 64 hash bits to a `[0, 1)` uniform (53-bit mantissa, exactly like the
+/// canonical `u64 → f64` construction).
+fn unit_from_bits(bits: u64) -> f64 {
+    (bits >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+}
+
+/// Min-spacing (world metres) below which a candidate is rejected against an
+/// existing instance: derived from the target density so a denser brush packs
+/// tighter. `area/instance = 1/density`, so nominal spacing ≈ √(1/density); a
+/// 0.7 factor lets the disk fill without a hard grid look. Clamped to a small
+/// floor so `density → ∞` can't reject everything.
+fn foliage_min_spacing(density: f64) -> f64 {
+    if density <= 0.0 {
+        return 0.05;
+    }
+    (0.7 * (1.0 / density).sqrt()).max(0.05)
+}
+
+/// Euler-degrees (YXZ) → quaternion, matching `inf_ecs::Transform::quat` exactly
+/// so a foliage instance's stored rotation reads the same everywhere.
+fn foliage_rot_quat(rot: Vec3d) -> glam::Quat {
+    DQuat::from_euler(
+        glam::EulerRot::YXZ,
+        rot.y.to_radians(),
+        rot.x.to_radians(),
+        rot.z.to_radians(),
+    )
+    .as_quat()
+}
+
+/// Sample a flat brush ring at `y = 0` around a world XZ centre (the foliage
+/// brush's ground-plane fallback when there's no terrain under the cursor).
+fn ground_ring(center_xz: DVec2, radius: f64) -> Vec<DVec3> {
+    const SEGMENTS: u32 = 32;
+    (0..SEGMENTS)
+        .map(|i| {
+            let a = std::f64::consts::TAU * (i as f64) / (SEGMENTS as f64);
+            DVec3::new(
+                center_xz.x + radius * a.cos(),
+                0.0,
+                center_xz.y + radius * a.sin(),
+            )
+        })
+        .collect()
 }
 
 /// A selected 2D (non-mesh) entity's working transform for the gizmo. World
@@ -389,6 +548,9 @@ impl EngineHost {
             sculpt_drag: None,
             sculpt_ring: Vec::new(),
             sculpt_ring_color: [1.0; 4],
+            foliage: FoliageSettings::default(),
+            foliage_drag: None,
+            foliage_stroke_seq: 0,
             last_eye_world: DVec3::ZERO,
             render_tier: None,
             applied_render: None,
@@ -481,11 +643,11 @@ impl EngineHost {
         self.snap_2d = snap;
     }
 
-    /// Switch the active tool (Select ↔ Sculpt) from the toolbar (P10.2b).
-    /// Leaving Sculpt drops any hovered brush ring.
+    /// Switch the active tool (Select / Sculpt / Foliage) from the toolbar.
+    /// Leaving the brush tools drops any hovered brush ring.
     pub fn set_tool_mode(&mut self, mode: ToolMode) {
         self.tool_mode = mode;
-        if mode != ToolMode::Sculpt {
+        if mode != ToolMode::Sculpt && mode != ToolMode::Foliage {
             self.sculpt_ring.clear();
         }
     }
@@ -493,6 +655,11 @@ impl EngineHost {
     /// Replace the sculpt brush configuration (from the toolbar).
     pub fn set_sculpt(&mut self, sculpt: SculptSettings) {
         self.sculpt = sculpt;
+    }
+
+    /// Replace the foliage brush configuration (from the toolbar, E-P6).
+    pub fn set_foliage(&mut self, foliage: FoliageSettings) {
+        self.foliage = foliage;
     }
 
     /// Translate snap increment (world units) for 2D mode, `0.0` ⇒ none. Only
@@ -734,6 +901,54 @@ impl EngineHost {
                             cutoff: 0.5,
                         });
                         // Pick a scattered cube → select the owning volume.
+                        self.id_to_guid.insert(id, guid);
+                    }
+                }
+            }
+
+            // Foliage scatter (E-P6): project every placed instance into the
+            // mesh-instance path, mesh + tint taken from the referenced palette
+            // slot. Instances are entity-LOCAL, so lift them by the entity's world
+            // translation (the auto-created container sits at the origin; applying
+            // the container's rotation/scale to instances is a documented v1
+            // follow-up). A pick on any instance selects the owning Foliage entity
+            // (id→guid), so the scatter is selectable by clicking its content.
+            // MIRROR: the player's `render.rs` runs the same projection (no pick).
+            if let Some(fol) = w.get::<Foliage>(entity) {
+                if visible && !fol.instances.is_empty() {
+                    if fol.instances.len() > 50_000 {
+                        tracing::warn!(
+                            "inf-viewport: Foliage entity has {} instances (>50k) — \
+                             instanced-draw perf path is a follow-up",
+                            fol.instances.len()
+                        );
+                    }
+                    let base = w
+                        .get::<GlobalTransform>(entity)
+                        .map(|g| g.translation())
+                        .unwrap_or(DVec3::ZERO);
+                    for fi in &fol.instances {
+                        let (mesh, color) = fol
+                            .palette
+                            .get(fi.kind as usize)
+                            .map(|p| (prim_mesh(p.primitive), p.tint.to_array()))
+                            .unwrap_or((PrimMesh::Cube, [0.28, 0.52, 0.24, 1.0]));
+                        let id = next_id;
+                        next_id += 1;
+                        self.scene.instances.push(MeshInstance {
+                            translation: base + fi.position.to_dvec3(),
+                            rotation: foliage_rot_quat(fi.rotation),
+                            scale: Vec3::splat(fi.scale as f32),
+                            color,
+                            metallic: 0.0,
+                            roughness: 0.85,
+                            emissive: [0.0; 3],
+                            id,
+                            mesh,
+                            blend: 0,
+                            cutoff: 0.5,
+                        });
+                        // Pick a foliage instance → select the owning entity.
                         self.id_to_guid.insert(id, guid);
                     }
                 }
@@ -1952,6 +2167,241 @@ impl EngineHost {
             DragStroke::Splat(stroke) => doc.edit_commit_paint(drag.guid, stroke),
         }
     }
+
+    // ── foliage painting (E-P6) ───────────────────────────────────────────
+
+    /// `true` while a foliage scatter stroke is in progress.
+    pub fn is_painting_foliage(&self) -> bool {
+        self.foliage_drag.is_some()
+    }
+
+    /// The world point under the cursor for the foliage brush centre: the terrain
+    /// surface (reusing [`Self::pick_world_point`]'s terrain-then-ground rule).
+    fn foliage_center(&self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) -> DVec3 {
+        self.pick_world_point(doc, view, px, py)
+    }
+
+    /// Rebuild the foliage brush ring around a world-space cursor point (terrain
+    /// height when over terrain, else a flat ground-plane ring), coloured green.
+    fn refresh_foliage_ring(&mut self, doc: &SceneDoc, center: DVec3) {
+        const FOLIAGE_RING: [f32; 4] = [0.35, 0.85, 0.40, 1.0];
+        self.sculpt_ring_color = FOLIAGE_RING;
+        let center_xz = DVec2::new(center.x, center.z);
+        if let Some(g) = self.terrain_guid {
+            if let Some((data, t)) = doc.terrain_data_and_origin(g) {
+                let local = DVec2::new(center_xz.x - t.x, center_xz.y - t.z);
+                self.sculpt_ring = build_ring(data, t, local, self.foliage.radius);
+                return;
+            }
+        }
+        self.sculpt_ring = ground_ring(center_xz, self.foliage.radius);
+    }
+
+    /// Hover update (idle Foliage mode): move the brush ring to the cursor.
+    pub fn update_foliage_hover(&mut self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) {
+        let center = self.foliage_center(doc, view, px, py);
+        self.refresh_foliage_ring(doc, center);
+    }
+
+    /// Begin a foliage scatter stroke. Resolves the target Foliage entity — the
+    /// first SELECTED foliage entity, or a new one auto-created at the origin and
+    /// selected — inside one undo transaction, then lays the first tick. Returns
+    /// `true` (a stroke always starts; an empty result just records nothing).
+    pub fn begin_foliage(
+        &mut self,
+        doc: &mut SceneDoc,
+        view: &RenderView,
+        px: u32,
+        py: u32,
+    ) -> bool {
+        let target = doc
+            .selection()
+            .iter()
+            .copied()
+            .find(|g| doc.has_foliage(*g));
+        // One undo entry for the whole stroke (auto-create + scatter, or scatter).
+        doc.begin_transaction("Paint Foliage");
+        let guid = match target {
+            Some(g) => g,
+            None => {
+                let g = doc.edit_create(SpawnKind::Foliage, "Foliage", None);
+                doc.select(&[g], false);
+                g
+            }
+        };
+        let origin = doc.foliage_origin(guid).unwrap_or(DVec3::ZERO);
+        let original = doc.foliage_instances(guid).unwrap_or_default();
+        let stroke_seq = self.foliage_stroke_seq;
+        self.foliage_stroke_seq = self.foliage_stroke_seq.wrapping_add(1);
+        let positions = original
+            .iter()
+            .map(|i| DVec2::new(i.position.x, i.position.z))
+            .collect();
+        self.foliage_drag = Some(FoliageDrag {
+            guid,
+            erase: self.foliage.erase,
+            stroke_seq,
+            next_sample: 0,
+            origin,
+            positions,
+            added: Vec::new(),
+            original,
+            removed: BTreeSet::new(),
+        });
+        let center = self.foliage_center(doc, view, px, py);
+        self.foliage_dab(doc, center);
+        self.refresh_foliage_ring(doc, center);
+        true
+    }
+
+    /// Continue the stroke: lay a tick at the current cursor. (Per-tick placement;
+    /// path resampling for very fast strokes is a documented follow-up — min-
+    /// spacing rejection keeps a held cursor from stacking.)
+    pub fn update_foliage(&mut self, doc: &mut SceneDoc, view: &RenderView, px: u32, py: u32) {
+        if self.foliage_drag.is_none() {
+            return;
+        }
+        let center = self.foliage_center(doc, view, px, py);
+        self.foliage_dab(doc, center);
+        self.refresh_foliage_ring(doc, center);
+    }
+
+    /// One brush tick: place (or erase) instances around `center` (world). Live-
+    /// mutates the target component so the scatter renders immediately.
+    fn foliage_dab(&mut self, doc: &mut SceneDoc, center: DVec3) {
+        let Some(drag) = self.foliage_drag.as_ref() else {
+            return;
+        };
+        let (guid, erase, origin, stroke_seq, base) = (
+            drag.guid,
+            drag.erase,
+            drag.origin,
+            drag.stroke_seq,
+            drag.next_sample,
+        );
+        let s = self.foliage;
+        let center_xz = DVec2::new(center.x, center.z);
+
+        if erase {
+            let r2 = s.radius * s.radius;
+            let mut newly: Vec<usize> = Vec::new();
+            for (i, inst) in drag.original.iter().enumerate() {
+                if drag.removed.contains(&i) {
+                    continue;
+                }
+                let wx = origin.x + inst.position.x;
+                let wz = origin.z + inst.position.z;
+                let d2 = (wx - center_xz.x).powi(2) + (wz - center_xz.y).powi(2);
+                if d2 <= r2 {
+                    newly.push(i);
+                }
+            }
+            if newly.is_empty() {
+                return;
+            }
+            let kept = {
+                let d = self.foliage_drag.as_mut().unwrap();
+                for i in newly {
+                    d.removed.insert(i);
+                }
+                d.original
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !d.removed.contains(i))
+                    .map(|(_, x)| *x)
+                    .collect::<Vec<_>>()
+            };
+            doc.foliage_set_instances(guid, kept);
+            return;
+        }
+
+        // Place: target count = density × brush area, capped per tick.
+        let area = std::f64::consts::PI * s.radius * s.radius;
+        let target =
+            ((s.density * area).round() as i64).clamp(0, FOLIAGE_MAX_PER_TICK as i64) as u32;
+        if target == 0 {
+            return;
+        }
+        let cands = foliage_samples(
+            center_xz,
+            s.radius,
+            target,
+            s.seed,
+            stroke_seq,
+            base,
+            s.scale_jitter,
+            s.kind,
+        );
+        if let Some(d) = self.foliage_drag.as_mut() {
+            d.next_sample += target as u64;
+        }
+        // Lift each candidate to the terrain (scoped immutable doc borrow).
+        let heights: Vec<f64> = {
+            let terrain = self
+                .terrain_guid
+                .and_then(|g| doc.terrain_data_and_origin(g));
+            cands
+                .iter()
+                .map(|c| match terrain {
+                    Some((data, t)) => {
+                        let local = DVec2::new(c.pos_xz.x - t.x, c.pos_xz.y - t.z);
+                        data.height_at(local).map(|h| t.y + h).unwrap_or(0.0)
+                    }
+                    None => 0.0,
+                })
+                .collect()
+        };
+        let ms2 = foliage_min_spacing(s.density).powi(2);
+        let mut accepted: Vec<FoliageInstance> = Vec::new();
+        {
+            let d = self.foliage_drag.as_mut().unwrap();
+            for (c, y) in cands.iter().zip(heights) {
+                let local = DVec3::new(c.pos_xz.x - origin.x, y - origin.y, c.pos_xz.y - origin.z);
+                let lxz = DVec2::new(local.x, local.z);
+                if d.positions
+                    .iter()
+                    .any(|p| (p.x - lxz.x).powi(2) + (p.y - lxz.y).powi(2) < ms2)
+                {
+                    continue;
+                }
+                let inst = FoliageInstance {
+                    position: Vec3d::new(local.x, local.y, local.z),
+                    rotation: Vec3d::new(0.0, c.yaw_deg, 0.0),
+                    scale: c.scale,
+                    kind: c.kind,
+                };
+                d.positions.push(lxz);
+                d.added.push(inst);
+                accepted.push(inst);
+            }
+        }
+        if !accepted.is_empty() {
+            doc.foliage_append(guid, &accepted);
+        }
+    }
+
+    /// Finish the stroke: commit ONE `PaintFoliage` undo step (added or removed)
+    /// and close the transaction opened in [`Self::begin_foliage`]. Returns `true`
+    /// if the stroke changed anything (so the caller emits `WorldChanged`).
+    pub fn finish_foliage(&mut self, doc: &mut SceneDoc) -> bool {
+        let Some(drag) = self.foliage_drag.take() else {
+            return false;
+        };
+        let changed = if drag.erase {
+            let removed: Vec<(usize, FoliageInstance)> = drag
+                .removed
+                .iter()
+                .map(|&i| (i, drag.original[i]))
+                .collect();
+            doc.edit_commit_foliage(drag.guid, Vec::new(), removed)
+        } else {
+            doc.edit_commit_foliage(drag.guid, drag.added, Vec::new())
+        };
+        // Always close the transaction begin_foliage opened (a Create may have
+        // been recorded even when the scatter itself was empty).
+        doc.commit_transaction();
+        changed
+    }
 }
 
 /// Effective op after a Ctrl modifier: Ctrl temporarily inverts Raise↔Lower (UE
@@ -2155,9 +2605,11 @@ impl EngineHost {
             }
         }
 
-        // Sculpt brush ring (P10.2b): a closed loop following the terrain height
-        // under the cursor, coloured by the active op. Only in Sculpt mode.
-        if self.tool_mode == ToolMode::Sculpt && self.sculpt_ring.len() >= 2 {
+        // Sculpt / foliage brush ring: a closed loop following the terrain height
+        // under the cursor, coloured by the active op (Sculpt) or green (Foliage).
+        if matches!(self.tool_mode, ToolMode::Sculpt | ToolMode::Foliage)
+            && self.sculpt_ring.len() >= 2
+        {
             let n = self.sculpt_ring.len();
             for i in 0..n {
                 let a = self.origin.to_render(self.sculpt_ring[i]);
@@ -2275,5 +2727,55 @@ mod project_light_parity {
             rl.outer_cos
         );
         assert!(!rl.cast_shadows);
+    }
+}
+
+/// The deterministic foliage scatter sampler (E-P6): a pure function of its
+/// inputs, so the same stroke input sequence reproduces identical instances (the
+/// determinism law — no wall-clock / thread-rng).
+#[cfg(test)]
+mod foliage_sampler {
+    use super::{foliage_min_spacing, foliage_samples, FOLIAGE_MAX_PER_TICK};
+    use glam::DVec2;
+
+    #[test]
+    fn sampler_is_pure_and_reproducible() {
+        let c = DVec2::new(5.0, -3.0);
+        let a = foliage_samples(c, 3.0, 32, 1, 7, 0, 0.2, 2);
+        let b = foliage_samples(c, 3.0, 32, 1, 7, 0, 0.2, 2);
+        assert_eq!(a, b, "identical inputs must reproduce identical candidates");
+        assert_eq!(a.len(), 32);
+    }
+
+    #[test]
+    fn candidates_stay_in_disk_and_carry_kind_and_jitter() {
+        let c = DVec2::new(0.0, 0.0);
+        let radius = 4.0;
+        let jitter = 0.25;
+        let cs = foliage_samples(c, radius, FOLIAGE_MAX_PER_TICK, 42, 3, 100, jitter, 5);
+        for s in &cs {
+            let d = (s.pos_xz - c).length();
+            assert!(d <= radius + 1e-9, "sample outside brush disk: {d}");
+            assert!((0.0..=360.0).contains(&s.yaw_deg));
+            assert!((1.0 - jitter - 1e-9..=1.0 + jitter + 1e-9).contains(&s.scale));
+            assert_eq!(s.kind, 5);
+        }
+    }
+
+    #[test]
+    fn different_strokes_and_indices_diverge() {
+        let c = DVec2::new(1.0, 1.0);
+        let s0 = foliage_samples(c, 2.0, 8, 1, 0, 0, 0.2, 0);
+        let s_stroke = foliage_samples(c, 2.0, 8, 1, 1, 0, 0.2, 0);
+        let s_index = foliage_samples(c, 2.0, 8, 1, 0, 8, 0.2, 0);
+        assert_ne!(s0, s_stroke, "a new stroke re-seeds the scatter");
+        assert_ne!(s0, s_index, "advancing the sample index draws fresh values");
+    }
+
+    #[test]
+    fn min_spacing_tightens_with_density_and_has_a_floor() {
+        assert!(foliage_min_spacing(0.1) > foliage_min_spacing(4.0));
+        assert!(foliage_min_spacing(0.0) >= 0.05);
+        assert!(foliage_min_spacing(1e9) >= 0.05);
     }
 }
