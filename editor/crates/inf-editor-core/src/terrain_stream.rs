@@ -25,15 +25,22 @@
 //! neutral, GPU free — means the unit tests below run on all three OSes and the
 //! host is left with nothing but the call sites.
 //!
-//! # Editing a streamed terrain
+//! # Editing a streamed terrain (P16.4b)
 //!
-//! Not yet supported: sculpt/paint against an asset-backed terrain would have to
-//! write tiles back through the residency dirty set and re-emit the `.inf_terrain`,
-//! which arrives with the P16.4 import-wizard work. Until then the tools reject
-//! the stroke with a status message rather than silently editing a page that is
-//! about to be evicted — see [`STREAMED_TERRAIN_EDIT_REJECTION`].
+//! Supported, and the authority lives in the **document**, not here: a brush dab
+//! pages its footprint into the ECS component's `TerrainData`
+//! ([`page_brush_footprint`](EditorTerrainStreams::page_brush_footprint)) and
+//! sculpts it exactly as it sculpts an inline terrain, while
+//! [`overlay_document_edits`](EditorTerrainStreams::overlay_document_edits) pins
+//! the edited tiles into *this* render working set so the stroke is visible while
+//! it is made. The whole design note — why the component and not the streamer,
+//! what it costs, and what undo/save do — is at the top of
+//! [`crate::terrain_edit`], which also owns the save-time write-back.
+//!
+//! Note the doctrine above is unchanged by that: the **camera** still never
+//! writes the document. Only an edit gesture pages into it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -41,15 +48,38 @@ use glam::{DVec2, DVec3};
 use inf_ecs::components::Terrain;
 use inf_terrain::stream::{StreamBudget, TerrainStreamStats, TerrainStreamer};
 use inf_terrain::wants::{RenderWantsParams, TileCatalog, TileGrid, TileIndex};
-use inf_terrain::{FileTileStore, TerrainData};
+use inf_terrain::{FileTileStore, TerrainData, TileKey};
 use uuid::Uuid;
 
+use crate::scene::SceneDoc;
+
 /// The status message the sculpt/paint tools surface when a stroke targets an
-/// asset-backed (streamed) terrain. Public so the tools and their tests name one
-/// string.
-pub const STREAMED_TERRAIN_EDIT_REJECTION: &str =
-    "Sculpt and Paint cannot edit a streamed (.inf_terrain) terrain yet — \
-     editing streamed terrain arrives with the Terrain Import wizard (P16.4).";
+/// asset-backed terrain whose `.inf_terrain` cannot be written (a read-only file,
+/// or an asset that is not in the content root at all). Public so the tools and
+/// their tests name one string.
+///
+/// Replaces P16.3b2's blanket "streamed terrain — tools disabled": a streamed
+/// terrain *is* editable now, so the only remaining refusal is the honest one —
+/// there is nowhere to save the edits to.
+pub const STREAMED_TERRAIN_READONLY_REJECTION: &str =
+    "This terrain's .inf_terrain asset is read-only, so Sculpt and Paint have \
+     nowhere to save to. Make the file writable (or reimport it into the project's \
+     Content folder) and try again.";
+
+/// The status message a brush surfaces when the cursor is over **real streamed
+/// ground that is only paged at coarse detail**.
+///
+/// A stroke needs a resident level-0 page: that is what the brush writes and what
+/// the undo record is taken against. Distant terrain is covered by a coarse
+/// pyramid tile instead, so the raycast finds nothing and the stroke silently
+/// does not start — which reads as a broken tool. Saying why (and that it is
+/// fixed by flying closer) costs one line and turns a mystery into an instruction.
+/// Only raised when the asset really does have ground there
+/// ([`covers_level0`](EditorTerrainStreams::covers_level0)); clicking past the
+/// edge of the terrain stays silent.
+pub const STREAMED_TERRAIN_COARSE_REJECTION: &str =
+    "That ground is streamed in at low detail right now, so there is no full-resolution \
+     page under the cursor to sculpt. Fly closer and try again.";
 
 /// Refinement radius of a level-0 node, in level-0 tile spans.
 ///
@@ -62,6 +92,9 @@ pub const RENDER_LOD0_RADIUS_TILES: f64 = 2.5;
 struct EditorStream {
     /// The `.inf_terrain` asset GUID.
     asset: Uuid,
+    /// The loose file the store was opened from — kept so a save can refresh the
+    /// store **in place** without re-resolving the asset (P16.4b).
+    path: PathBuf,
     store: Arc<FileTileStore>,
     streamer: TerrainStreamer,
     /// The entity's world translation at the last projection.
@@ -70,6 +103,10 @@ struct EditorStream {
     /// the layers + macro variation a re-projection needs without the document.
     /// Cheap: a streamed terrain's `data` carries no tiles.
     component: Terrain,
+    /// Which document tiles are currently mirrored into the render set, and at
+    /// what document stamp — so [`EditorTerrainStreams::overlay_document_edits`]
+    /// can run every frame and copy nothing when nothing changed.
+    overlaid: BTreeMap<TileKey, u64>,
 }
 
 /// Every streamed terrain the viewport is currently drawing.
@@ -283,14 +320,30 @@ impl EditorTerrainStreams {
             entity,
             EditorStream {
                 asset,
+                path,
                 store,
                 streamer,
                 translation,
                 component: lightweight_component(terrain),
+                overlaid: BTreeMap::new(),
             },
         );
         self.refresh_stats();
         true
+    }
+
+    /// Release **every** stream: its resident pages, its edit pins, and its
+    /// `Arc<FileTileStore>` (i.e. the whole `.inf_terrain` payload it holds).
+    ///
+    /// The document-switch door. `File ▸ Open` / `File ▸ New` replace the document
+    /// wholesale, so every stream keyed on the *old* document's entity GUIDs is
+    /// dead memory — and any tile pinned for an unsaved edit in the old document
+    /// would otherwise stay pinned forever, immune to eviction, holding a payload
+    /// nothing references. Unlike [`set_content_root`](Self::set_content_root)
+    /// this keeps the loose-asset index, because the project has not changed.
+    pub fn clear(&mut self) {
+        self.streams.clear();
+        self.stats = TerrainStreamStats::default();
     }
 
     /// Drop every stream except `keep` (the terrain the viewport is drawing).
@@ -329,6 +382,184 @@ impl EditorTerrainStreams {
         }
         self.refresh_stats();
         changed
+    }
+
+    // ── editing (P16.4b) ─────────────────────────────────────────────────
+    //
+    // See `crate::terrain_edit` for the design note. These three are the only
+    // places the streamer and the document meet, and each one is one-directional:
+    // `page_brush_footprint` moves store → document, `overlay_document_edits`
+    // moves document → render set, and `reload_store` re-points the cold side at
+    // the file a save just rewrote.
+
+    /// The loose `.inf_terrain` `entity` streams from.
+    pub fn asset_path(&self, entity: Uuid) -> Option<&Path> {
+        self.streams.get(&entity).map(|s| s.path.as_path())
+    }
+
+    /// Whether `entity`'s terrain can be **edited**: it streams, and its
+    /// `.inf_terrain` is a writable file.
+    ///
+    /// The tools gate on this rather than on "is it streamed" (P16.4b): a
+    /// streamed terrain is editable, but one whose asset is read-only has nowhere
+    /// to save to, and refusing the stroke up front beats letting the user sculpt
+    /// for ten minutes and discover it at Ctrl+S. A missing file also reads as
+    /// not-writable — the same honest refusal.
+    pub fn is_editable(&self, entity: Uuid) -> bool {
+        let Some(s) = self.streams.get(&entity) else {
+            return false;
+        };
+        match std::fs::metadata(&s.path) {
+            Ok(m) => !m.permissions().readonly(),
+            Err(_) => false,
+        }
+    }
+
+    /// **Page a brush footprint into the document, synchronously, before the dab.**
+    ///
+    /// The wants are [`inf_terrain::brush_wants`] — the disk plus a one-tile
+    /// margin, i.e. literally the sim-wants shape, because an edit is the
+    /// editor's fixed-step boundary and must not depend on what the camera
+    /// happened to have paged in. Loading is **additive**: the document's working
+    /// set only ever grows within a session, so an undo step can always be
+    /// replayed against tiles that are still resident.
+    ///
+    /// Returns how many tiles were newly paged in, or `None` when `entity` is not
+    /// streamed (an inline terrain needs no paging and the caller should just
+    /// sculpt).
+    pub fn page_brush_footprint(
+        &mut self,
+        entity: Uuid,
+        doc: &mut SceneDoc,
+        center_local: DVec2,
+        radius: f64,
+    ) -> Option<usize> {
+        let s = self.streams.get_mut(&entity)?;
+        let wants = inf_terrain::brush_wants(s.streamer.grid(), center_local, radius);
+        let store = s.store.clone();
+        let streamer = &mut s.streamer;
+        let loaded = doc.with_terrain_data_mut(entity, |data| {
+            streamer.page_in(data, &wants, store.as_ref()).loaded.len()
+        })?;
+        self.refresh_stats();
+        Some(loaded)
+    }
+
+    /// **Mirror the document's *unsaved* level-0 tiles into the render working
+    /// set**, so a live stroke is visible while it is being made.
+    ///
+    /// The document is the authority; this set is what the viewport draws. A
+    /// mirrored tile is *pinned*, so the camera cannot evict it and the store can
+    /// never re-page pre-edit bytes over an unsaved edit.
+    ///
+    /// Deliberately keyed on the **dirty** set rather than the whole working set:
+    /// a clean document tile is byte-identical to the store's, so mirroring it
+    /// would pin a page the streamer is perfectly capable of managing and grow
+    /// render residency by everything the user has ever brushed. Dirty tiles are
+    /// exactly the ones where the document and the disk disagree.
+    ///
+    /// Cheap to call every frame: a tile is only copied when its document stamp
+    /// changed, and stamps only move when something actually wrote to the tile.
+    /// Returns how many tiles were (re)mirrored.
+    pub fn overlay_document_edits(&mut self, entity: Uuid, doc: &SceneDoc) -> usize {
+        let Some((data, _)) = doc.terrain_data_and_origin(entity) else {
+            return 0;
+        };
+        let Some(s) = self.streams.get_mut(&entity) else {
+            return 0;
+        };
+        let mut mirrored = 0;
+        for key in data.dirty_tiles() {
+            if !key.is_lod0() {
+                continue;
+            }
+            // A dirty key with no resident tile is an authoring DELETE — either a
+            // `remove_tile` or the undo of a brush that authored new ground from
+            // nothing. The page must be **dropped and unpinned**, not merely
+            // forgotten: leaving it resident leaves a phantom tile the camera can
+            // never evict, because the store has nothing to page over it.
+            let Some(tile) = data.get_tile(key.coord) else {
+                if s.overlaid.remove(&key).is_some() || s.streamer.is_pinned(key) {
+                    s.streamer.unpin_and_evict(key);
+                    mirrored += 1;
+                }
+                continue;
+            };
+            let stamp = data.tile_version(key);
+            if s.overlaid.get(&key) == Some(&stamp) && s.streamer.is_pinned(key) {
+                continue;
+            }
+            s.streamer.pin_tile(key, tile.clone());
+            s.overlaid.insert(key, stamp);
+            mirrored += 1;
+        }
+        if mirrored > 0 {
+            self.refresh_stats();
+        }
+        mirrored
+    }
+
+    /// Whether the **asset** has authored level-0 ground at terrain-local `xz`,
+    /// regardless of what is currently resident.
+    ///
+    /// The discriminator behind the "fly closer" tool status (P16.4b): a brush
+    /// raycast that misses can mean two very different things, and the tools must
+    /// only nag about one of them. `true` = there is real ground here, it is just
+    /// paged at coarse detail, so the stroke can succeed after the camera closes
+    /// in. `false` = the user clicked past the edge of the terrain, which is not a
+    /// problem and must not produce a message.
+    pub fn covers_level0(&self, entity: Uuid, xz: DVec2) -> bool {
+        let Some(s) = self.streams.get(&entity) else {
+            return false;
+        };
+        let coord = s.streamer.grid().coord_at(0, xz);
+        s.streamer.catalog().has(TileKey::lod0(coord))
+    }
+
+    /// Number of tiles currently pinned into `entity`'s render set because they
+    /// carry unsaved edits (diagnostics + tests).
+    pub fn pinned_tiles(&self, entity: Uuid) -> usize {
+        self.streams
+            .get(&entity)
+            .map(|s| s.streamer.pinned_len())
+            .unwrap_or(0)
+    }
+
+    /// **Refresh a stream's cold store in place** after a save rewrote its
+    /// `.inf_terrain` — the live stream keeps flying.
+    ///
+    /// Reopens the loose file, adopts its new catalog (the rewrite may have added
+    /// or removed tiles), clears the "this blob is corrupt" verdicts — they
+    /// describe bytes that no longer exist — and releases the edit pins, because
+    /// the store now *is* the edits. Deliberately not
+    /// [`set_content_root`](Self::set_content_root): that drops every stream and
+    /// re-pages the terrain the user is looking at, which is a visible hitch for
+    /// no reason. This is the `refresh_index` idea one level down.
+    pub fn reload_store(&mut self, entity: Uuid) -> Result<(), String> {
+        let Some(s) = self.streams.get_mut(&entity) else {
+            return Ok(()); // not streamed — nothing to refresh
+        };
+        let store = inf_terrain::open_file_tile_store(&s.path)
+            .map_err(|e| format!("reopen {}: {e}", s.path.display()))?;
+        s.streamer.refresh_catalog(TileCatalog::from_store(&store));
+        s.streamer.clear_failed();
+        s.streamer.unpin_tiles();
+        s.overlaid.clear();
+        s.store = Arc::new(store);
+        self.refresh_stats();
+        Ok(())
+    }
+
+    /// [`reload_store`](Self::reload_store) for every live stream, logging rather
+    /// than failing the save when one cannot be reopened.
+    pub fn reload_stores(&mut self) {
+        let mut keys: Vec<Uuid> = self.streams.keys().copied().collect();
+        keys.sort();
+        for k in keys {
+            if let Err(e) = self.reload_store(k) {
+                tracing::warn!("inf-editor-core: terrain store refresh failed: {e}");
+            }
+        }
     }
 
     fn refresh_stats(&mut self) {
@@ -727,6 +958,342 @@ mod tests {
         s.refresh_index();
         assert_eq!(s.len(), 1, "refresh_index must not drop live streams");
         assert!(s.is_streamed(STREAMED_TERRAIN_TERRAIN_GUID));
+    }
+
+    // ── editing (P16.4b) ─────────────────────────────────────────────────
+
+    /// A live stream over the generated asset, plus its document.
+    fn edit_fixture() -> (
+        tempfile::TempDir,
+        crate::scene::SceneDoc,
+        EditorTerrainStreams,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_streamed_terrain_asset(dir.path()).unwrap();
+        let doc = streamed_terrain_scene();
+        let terrain = {
+            let world = doc.world();
+            let e = world.entity_of(STREAMED_TERRAIN_TERRAIN_GUID).unwrap();
+            world.world().get::<Terrain>(e).unwrap().clone()
+        };
+        let mut s = EditorTerrainStreams::new();
+        s.set_content_root(Some(dir.path().to_path_buf()));
+        assert!(s.ensure(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &terrain,
+            DVec3::ZERO,
+            DVec3::new(64.0, 40.0, 64.0)
+        ));
+        (dir, doc, s)
+    }
+
+    /// **Tool enablement.** A streamed terrain whose asset is writable is
+    /// editable; the same terrain with a read-only asset is not.
+    #[test]
+    fn editability_follows_the_assets_write_permission() {
+        let (dir, _doc, s) = edit_fixture();
+        assert!(
+            s.is_editable(STREAMED_TERRAIN_TERRAIN_GUID),
+            "a normal loose asset must be editable"
+        );
+        assert!(
+            !s.is_editable(Uuid::from_u128(0xDEAD)),
+            "a non-streamed entity is never 'editable' here"
+        );
+        assert_eq!(
+            s.asset_path(STREAMED_TERRAIN_TERRAIN_GUID)
+                .and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new("World.inf_terrain"))
+        );
+
+        // Flip the file read-only: the tools must refuse rather than let a stroke
+        // be lost at save time.
+        let path = dir.path().join("World.inf_terrain");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+        assert!(!s.is_editable(STREAMED_TERRAIN_TERRAIN_GUID));
+        // Restore so the tempdir can be removed on every platform.
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&path, perms).unwrap();
+    }
+
+    /// **Footprint paging.** A dab's wants land in the DOCUMENT, not in the
+    /// streamer's render set, and paging alone dirties nothing.
+    #[test]
+    fn paging_a_footprint_fills_the_document_without_dirtying_it() {
+        let (_dir, mut doc, mut s) = edit_fixture();
+        assert!(!doc.is_dirty());
+        let center = DVec2::new(100.0, 100.0);
+        let loaded = s
+            .page_brush_footprint(STREAMED_TERRAIN_TERRAIN_GUID, &mut doc, center, 6.0)
+            .expect("streamed");
+        assert!(loaded > 0, "nothing paged in");
+
+        let (data, _) = doc
+            .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+            .unwrap();
+        assert_eq!(data.tile_count(), loaded);
+        assert!(!data.has_dirty_tiles(), "paging is not authoring");
+        assert!(!doc.is_dirty(), "paging must not dirty the document");
+
+        // Idempotent: paging the same footprint again loads nothing.
+        assert_eq!(
+            s.page_brush_footprint(STREAMED_TERRAIN_TERRAIN_GUID, &mut doc, center, 6.0),
+            Some(0)
+        );
+        // …and the working set only GROWS: a footprint elsewhere adds tiles
+        // without dropping the first one's.
+        let far = DVec2::new(180.0, 60.0);
+        assert!(
+            s.page_brush_footprint(STREAMED_TERRAIN_TERRAIN_GUID, &mut doc, far, 6.0)
+                .unwrap()
+                > 0
+        );
+        let (data, _) = doc
+            .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+            .unwrap();
+        assert!(data.tile_count() > loaded);
+        assert!(data.is_resident(inf_terrain::TileKey::lod0(
+            data.tile_coord_of(center.x, center.y)
+        )));
+    }
+
+    /// **The live-stroke overlay.** An edited tile is mirrored into the render set
+    /// and **pinned**, so a camera move cannot evict the stroke back to the
+    /// on-disk bytes.
+    #[test]
+    fn an_edited_tile_is_pinned_into_the_render_set() {
+        let (_dir, mut doc, mut s) = edit_fixture();
+        let center = DVec2::new(100.0, 100.0);
+        s.page_brush_footprint(STREAMED_TERRAIN_TERRAIN_GUID, &mut doc, center, 6.0);
+        assert_eq!(
+            s.overlay_document_edits(STREAMED_TERRAIN_TERRAIN_GUID, &doc),
+            0
+        );
+        assert_eq!(s.pinned_tiles(STREAMED_TERRAIN_TERRAIN_GUID), 0);
+
+        let mut stroke = inf_terrain::Stroke::begin();
+        doc.sculpt_apply_dab(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &mut stroke,
+            inf_terrain::BrushOp::Raise,
+            inf_terrain::BrushParams::new(center, 6.0, 25.0),
+        );
+        let mirrored = s.overlay_document_edits(STREAMED_TERRAIN_TERRAIN_GUID, &doc);
+        assert!(mirrored > 0, "the edit was not mirrored");
+        assert_eq!(s.pinned_tiles(STREAMED_TERRAIN_TERRAIN_GUID), mirrored);
+
+        let key = inf_terrain::TileKey::lod0(
+            doc.terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+                .unwrap()
+                .0
+                .tile_coord_of(center.x, center.y),
+        );
+        let edited = s
+            .render_data(STREAMED_TERRAIN_TERRAIN_GUID)
+            .unwrap()
+            .height_at(center);
+        assert_eq!(
+            edited,
+            doc.terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+                .unwrap()
+                .0
+                .height_at(center),
+            "the render set does not show the edit"
+        );
+
+        // Fly far away for a long time: the cut moves, but the pinned page holds.
+        for step in 0..40 {
+            s.sync_render(streamed_terrain_camera_a(step));
+        }
+        assert!(s
+            .render_data(STREAMED_TERRAIN_TERRAIN_GUID)
+            .unwrap()
+            .is_resident(key));
+        assert_eq!(
+            s.render_data(STREAMED_TERRAIN_TERRAIN_GUID)
+                .unwrap()
+                .height_at(center),
+            edited,
+            "the camera paged the pre-edit bytes back over an unsaved edit"
+        );
+        // A second overlay pass with nothing new copies nothing.
+        assert_eq!(
+            s.overlay_document_edits(STREAMED_TERRAIN_TERRAIN_GUID, &doc),
+            0
+        );
+    }
+
+    /// **In-place store refresh (gate f).** Reopening the store after a save keeps
+    /// the live stream flying: its cut survives, its untouched resident tiles are
+    /// byte-stable, and the pins are released.
+    #[test]
+    fn refreshing_a_store_in_place_keeps_untouched_tiles_byte_stable() {
+        let (dir, mut doc, mut s) = edit_fixture();
+        for step in 0..24 {
+            s.sync_render(streamed_terrain_camera_a(step));
+        }
+        let before_cut = s.cut(STREAMED_TERRAIN_TERRAIN_GUID).unwrap().clone();
+        let before: Vec<(inf_terrain::TileKey, Vec<u8>)> = {
+            let data = s.render_data(STREAMED_TERRAIN_TERRAIN_GUID).unwrap();
+            data.resident_keys()
+                .into_iter()
+                .filter_map(|k| {
+                    data.resident_tile(k)
+                        .map(|t| (k, inf_terrain::asset::encode_tile(t).unwrap()))
+                })
+                .collect()
+        };
+        assert!(before.len() > 1);
+
+        // Edit ONE tile far from the camera and save it back.
+        let center = DVec2::new(200.0, 200.0);
+        s.page_brush_footprint(STREAMED_TERRAIN_TERRAIN_GUID, &mut doc, center, 6.0);
+        let mut stroke = inf_terrain::Stroke::begin();
+        doc.sculpt_apply_dab(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &mut stroke,
+            inf_terrain::BrushOp::Raise,
+            inf_terrain::BrushParams::new(center, 6.0, 20.0),
+        );
+        doc.edit_commit_sculpt(STREAMED_TERRAIN_TERRAIN_GUID, stroke);
+        s.overlay_document_edits(STREAMED_TERRAIN_TERRAIN_GUID, &doc);
+        let edited_keys: Vec<inf_terrain::TileKey> = doc
+            .terrain_dirty_tiles(STREAMED_TERRAIN_TERRAIN_GUID)
+            .into_iter()
+            .collect();
+        assert!(!edited_keys.is_empty());
+        crate::terrain_edit::flush_terrain_edits(&mut doc, dir.path());
+
+        // THE REFRESH: the stream survives it.
+        s.reload_store(STREAMED_TERRAIN_TERRAIN_GUID).unwrap();
+        assert_eq!(s.len(), 1, "the live stream must not be dropped");
+        assert_eq!(
+            s.cut(STREAMED_TERRAIN_TERRAIN_GUID).unwrap(),
+            &before_cut,
+            "the published cut moved"
+        );
+        assert_eq!(
+            s.pinned_tiles(STREAMED_TERRAIN_TERRAIN_GUID),
+            0,
+            "the store carries the edits now; the pins must be released"
+        );
+
+        // …and every tile the edit did not touch is byte-identical.
+        let data = s.render_data(STREAMED_TERRAIN_TERRAIN_GUID).unwrap();
+        for (key, bytes) in &before {
+            if edited_keys.contains(key) {
+                continue;
+            }
+            let tile = data.resident_tile(*key).expect("still resident");
+            assert_eq!(
+                &inf_terrain::asset::encode_tile(tile).unwrap(),
+                bytes,
+                "{key:?} changed across an in-place store refresh"
+            );
+        }
+        // A further camera pass still works against the new bytes.
+        for step in 24..40 {
+            s.sync_render(streamed_terrain_camera_a(step));
+        }
+        assert!(s.stats().failed == 0);
+    }
+
+    /// **The document-switch leak (P16.4b audit).** Opening another level while a
+    /// streamed terrain carries unsaved edits must release the stream, its pins
+    /// and its `.inf_terrain` payload — nothing else ever would: `retain_only`
+    /// keys on the *live* terrain GUID, and a pin is only released by a successful
+    /// save of a terrain still in the document.
+    #[test]
+    fn replacing_the_document_releases_streams_and_pins() {
+        let (_dir, mut doc, mut s) = edit_fixture();
+        let center = DVec2::new(100.0, 100.0);
+        s.page_brush_footprint(STREAMED_TERRAIN_TERRAIN_GUID, &mut doc, center, 6.0);
+        let mut stroke = inf_terrain::Stroke::begin();
+        doc.sculpt_apply_dab(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &mut stroke,
+            inf_terrain::BrushOp::Raise,
+            inf_terrain::BrushParams::new(center, 6.0, 20.0),
+        );
+        assert!(s.overlay_document_edits(STREAMED_TERRAIN_TERRAIN_GUID, &doc) > 0);
+        assert!(s.pinned_tiles(STREAMED_TERRAIN_TERRAIN_GUID) > 0);
+        assert_eq!(s.len(), 1);
+
+        // File ▸ Open / File ▸ New: the document is replaced wholesale.
+        s.clear();
+        assert!(s.is_empty(), "the dead stream still holds its payload");
+        assert_eq!(s.pinned_tiles(STREAMED_TERRAIN_TERRAIN_GUID), 0);
+        assert!(s.render_data(STREAMED_TERRAIN_TERRAIN_GUID).is_none());
+        assert_eq!(s.stats(), &TerrainStreamStats::default());
+        // The loose-asset index survives (the PROJECT did not change), so the new
+        // document's terrains resolve without a rescan.
+        assert_eq!(s.index_len(), 1);
+
+        // …and the viewport's per-projection retention does the same for a terrain
+        // that simply stopped being the drawn one.
+        let (_dir2, mut doc2, mut s2) = edit_fixture();
+        s2.page_brush_footprint(STREAMED_TERRAIN_TERRAIN_GUID, &mut doc2, center, 6.0);
+        s2.retain_only(Some(Uuid::from_u128(0xFEED)));
+        assert!(s2.is_empty());
+        assert_eq!(s2.pinned_tiles(STREAMED_TERRAIN_TERRAIN_GUID), 0);
+    }
+
+    /// **The phantom tile (P16.4b audit).** Undoing a brush that authored ground
+    /// from nothing removes the tile from the document — the render set must drop
+    /// **and unpin** it, or it stays drawn forever (nothing in the store can page
+    /// over a tile the store does not have).
+    #[test]
+    fn undoing_an_authoring_op_drops_the_phantom_tile() {
+        let (_dir, mut doc, mut s) = edit_fixture();
+        // Well outside the generated 16×16-tile (256 m) extent.
+        let center = DVec2::new(300.0, 300.0);
+        s.page_brush_footprint(STREAMED_TERRAIN_TERRAIN_GUID, &mut doc, center, 8.0);
+        let mut stroke = inf_terrain::Stroke::begin();
+        doc.sculpt_apply_dab(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &mut stroke,
+            inf_terrain::BrushOp::Raise,
+            inf_terrain::BrushParams::new(center, 8.0, 20.0),
+        );
+        assert!(doc.edit_commit_sculpt(STREAMED_TERRAIN_TERRAIN_GUID, stroke));
+        s.overlay_document_edits(STREAMED_TERRAIN_TERRAIN_GUID, &doc);
+
+        let authored: Vec<inf_terrain::TileKey> = doc
+            .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+            .unwrap()
+            .0
+            .tiles()
+            .map(|(&c, _)| inf_terrain::TileKey::lod0(c))
+            .filter(|k| k.coord.0 >= 16 || k.coord.1 >= 16)
+            .collect();
+        assert!(!authored.is_empty(), "Raise must author new ground");
+        let render = s.render_data(STREAMED_TERRAIN_TERRAIN_GUID).unwrap();
+        for &k in &authored {
+            assert!(render.is_resident(k), "new ground {k:?} was not mirrored");
+        }
+
+        // UNDO: the tiles the stroke created are removed from the document.
+        assert!(doc.undo());
+        s.overlay_document_edits(STREAMED_TERRAIN_TERRAIN_GUID, &doc);
+        let render = s.render_data(STREAMED_TERRAIN_TERRAIN_GUID).unwrap();
+        for &k in &authored {
+            assert!(
+                !render.is_resident(k),
+                "{k:?} is a phantom: undone in the document, still drawn"
+            );
+        }
+        assert_eq!(
+            s.pinned_tiles(STREAMED_TERRAIN_TERRAIN_GUID),
+            0,
+            "a removed tile must not stay pinned"
+        );
+        for &k in &authored {
+            assert!(!s.cut(STREAMED_TERRAIN_TERRAIN_GUID).unwrap().contains(&k));
+        }
     }
 
     /// A terrain streamed out of a content SUBFOLDER pages exactly like one in

@@ -50,7 +50,7 @@ use inf_asset::{AssetId, PackReader};
 use crate::asset::{TerrainAssetError, TerrainAssetHeader, TerrainAssetReader, TileDirEntry};
 use crate::data::TerrainData;
 use crate::residency::{ResidencyReport, TileStore};
-use crate::tile::TileKey;
+use crate::tile::{TerrainTile, TileKey};
 use crate::wants::{
     advance_cut, clamp_cut, render_wants, RenderWantsParams, TileCatalog, TileGrid, TileIndex,
 };
@@ -303,6 +303,10 @@ pub struct TerrainStreamer {
     /// Keys whose blob failed to decode, **excluded from every subsequent want**
     /// until [`clear_failed`](Self::clear_failed) — see there for why.
     blocked: BTreeSet<TileKey>,
+    /// Keys the editor has pinned into the render set because they carry unsaved
+    /// edits ([`pin_tile`](Self::pin_tile)) — never evicted, never re-read from
+    /// the store. Empty in the shipped player, which never edits anything.
+    pinned: BTreeSet<TileKey>,
     stats: TerrainStreamStats,
 }
 
@@ -362,6 +366,7 @@ impl TerrainStreamer {
             cut,
             sim_bytes: 0,
             blocked: BTreeSet::new(),
+            pinned: BTreeSet::new(),
             stats: TerrainStreamStats::default(),
         }
     }
@@ -466,6 +471,136 @@ impl TerrainStreamer {
         report
     }
 
+    /// **EDIT (editor-only, additive).** Page `wants` into an external working set
+    /// without evicting anything, and count the loads.
+    ///
+    /// The editor's sculpt/paint path (P16.4b) drives this from
+    /// [`brush_wants`](crate::wants::brush_wants) before every dab: the target is
+    /// the ECS component's `TerrainData` — the **authoritative editable working
+    /// set** for an asset-backed terrain — and it must only ever grow, because the
+    /// undo record of a stroke can only be replayed against tiles that are still
+    /// resident (see [`TerrainData::request_tiles`]).
+    ///
+    /// Synchronous and serial, like [`sync_sim`](Self::sync_sim), and for the same
+    /// reason: an edit must see the same bytes whatever the camera has paged in.
+    /// Keys known to be corrupt are dropped from `wants` first, so a bad blob
+    /// costs one doomed decode rather than one per dab.
+    pub fn page_in(
+        &mut self,
+        data: &mut TerrainData,
+        wants: &BTreeSet<TileKey>,
+        store: &dyn TileStore,
+    ) -> ResidencyReport {
+        let wants: BTreeSet<TileKey> = if self.blocked.is_empty() {
+            wants.clone()
+        } else {
+            wants.difference(&self.blocked).copied().collect()
+        };
+        let report = data.request_tiles(&wants, store);
+        self.stats.loads += report.loaded.len() as u64;
+        for (key, err) in &report.failed {
+            self.block(*key, err, "edit");
+        }
+        self.stats.sim_resident_level0 = data.tile_count();
+        self.refresh_bytes(data);
+        report
+    }
+
+    /// **Pin an edited tile into the render working set** so a live sculpt stroke
+    /// is visible while it is being made (P16.4b).
+    ///
+    /// The document's `TerrainData` is the authority for an asset-backed terrain's
+    /// edits, but the render projection draws *this* working set, which is paged
+    /// from the store and therefore still holds the pre-edit bytes. Pushing the
+    /// authored tile in here — and **pinning** it, so the camera cannot evict the
+    /// tile the user is currently painting on — is what closes that gap without
+    /// giving the renderer a second heightfield to reason about.
+    ///
+    /// A pinned tile is never re-read from the store either (residency skips
+    /// tiles it already holds), so disk content can never win over an unsaved
+    /// edit. Release them with [`unpin_tiles`](Self::unpin_tiles) once the store
+    /// itself carries the edits — i.e. after a successful save.
+    pub fn pin_tile(&mut self, key: TileKey, tile: TerrainTile) {
+        self.render.insert_resident_tile(key, tile);
+        self.pinned.insert(key);
+    }
+
+    /// Whether `key` is pinned against eviction.
+    pub fn is_pinned(&self, key: TileKey) -> bool {
+        self.pinned.contains(&key)
+    }
+
+    /// Number of pinned (edited, unsaved) tiles.
+    pub fn pinned_len(&self) -> usize {
+        self.pinned.len()
+    }
+
+    /// Release every pin, so the camera may page those tiles normally again.
+    ///
+    /// The tiles stay resident until the next sync decides otherwise — dropping
+    /// them here would blink a hole into the terrain the user just saved.
+    pub fn unpin_tiles(&mut self) {
+        self.pinned.clear();
+    }
+
+    /// Unpin **and drop** one tile: the page no longer exists as authored ground.
+    ///
+    /// The delete case — an authoring `remove_tile`, or the undo of a brush that
+    /// authored new ground from nothing. `unpin_tiles` alone would leave the tile
+    /// resident and drawn, a phantom the camera can never evict because the store
+    /// has nothing to page over it. Returns whether it was resident.
+    pub fn unpin_and_evict(&mut self, key: TileKey) -> bool {
+        self.pinned.remove(&key);
+        let had = self.render.evict_tile(key);
+        self.cut.remove(&key);
+        had
+    }
+
+    /// Adopt a new tile catalog for a store that was **refreshed in place** — the
+    /// P16.4b save write-back, which rewrites the `.inf_terrain` a live stream is
+    /// pointed at and then reopens it.
+    ///
+    /// The published cut is intersected with the new catalog (a tile the rewrite
+    /// dropped must stop being published), and reseeded from the coarsest level if
+    /// that empties it. Everything else — resident pages, budget, params — is
+    /// deliberately kept, so the terrain the user is flying over does not re-page
+    /// just because it was saved. Pair with [`clear_failed`](Self::clear_failed):
+    /// the old "this blob is corrupt" verdicts describe bytes that no longer exist.
+    pub fn refresh_catalog(&mut self, catalog: TileCatalog) {
+        self.cut.retain(|k| catalog.has(*k));
+        if self.cut.is_empty() {
+            self.cut = catalog.keys_at_lod(catalog.max_lod()).into_iter().collect();
+        }
+        self.target.clone_from(&self.cut);
+        self.catalog = catalog;
+    }
+
+    /// The tile ceiling the **cut** may spend, given the pins that will be
+    /// resident beside it.
+    ///
+    /// `max_resident_tiles` is documented (P16.3b2) as a hard bound on render
+    /// residency, and pinned tiles are render-resident — so the pins have to come
+    /// out of the same allowance rather than sitting outside it. Only pins that
+    /// are *not* already in `cut` are charged; a pinned tile the cut also wants is
+    /// paid for once.
+    ///
+    /// Two documented edges:
+    /// * `0` means unlimited and stays unlimited (subtracting from it would turn
+    ///   "no ceiling" into "a tiny one").
+    /// * When the pins alone meet or exceed the ceiling, the cut still gets **1**
+    ///   tile rather than none — a terrain with no published cut draws nothing at
+    ///   all. Residency is then `pins + 1`, which is the one place the bound is
+    ///   exceeded, and it is exceeded by unsaved authoring the editor must not
+    ///   drop. Pins only ever exist in the editor; the shipped player never pins.
+    fn pin_ceiling(&self, cut: &BTreeSet<TileKey>) -> usize {
+        let max = self.budget.max_resident_tiles;
+        if max == 0 || self.pinned.is_empty() {
+            return max;
+        }
+        let charged = self.pinned.iter().filter(|k| !cut.contains(k)).count();
+        max.saturating_sub(charged).max(1)
+    }
+
     /// Record `key` as undecodable: warn **once**, count it once, and hide it from
     /// every future want.
     ///
@@ -543,13 +678,12 @@ impl TerrainStreamer {
             blocked: &self.blocked,
         };
         let raw = render_wants(camera_xz, self.grid, &self.params, &index, &self.cut);
-        let target = clamp_cut(
-            &raw,
-            self.grid,
-            camera_xz,
-            &index,
-            self.budget.max_resident_tiles,
-        );
+        // Pinned tiles are resident and cannot be evicted, so the ceiling the CUT
+        // may spend is the budget MINUS the pins that are not already in it (see
+        // `pin_ceiling`). Without this the pins would sit outside the budget and
+        // `max_resident_tiles` would stop being the hard bound B2 documents.
+        let ceiling = self.pin_ceiling(&raw);
+        let target = clamp_cut(&raw, self.grid, camera_xz, &index, ceiling);
         self.stats.budget_clamped = target.len() < raw.len();
         // (the published-cut clamp below can also set this)
 
@@ -568,6 +702,7 @@ impl TerrainStreamer {
         // inside the ceiling. Clamping here (farthest-first, so the detail the
         // camera is looking at survives) makes the ceiling a hard invariant rather
         // than a steady-state aspiration.
+        let ceiling = self.pin_ceiling(&stepped);
         let next = clamp_cut(
             &stepped,
             self.grid,
@@ -576,7 +711,7 @@ impl TerrainStreamer {
                 inner: &self.catalog,
                 blocked: &self.blocked,
             },
-            self.budget.max_resident_tiles,
+            ceiling,
         );
         self.stats.budget_clamped |= next.len() < stepped.len();
 
@@ -586,6 +721,11 @@ impl TerrainStreamer {
         // the leading ones (peak residency stays at the cut size) — the same order
         // `sync_residency` documents.
         for key in self.render.resident_keys() {
+            // A pinned tile carries an unsaved edit (P16.4b): evicting it would
+            // blink the stroke the user is making back to the on-disk bytes.
+            if self.pinned.contains(&key) {
+                continue;
+            }
             if !next.contains(&key) && self.render.evict_tile(key) {
                 report.evicted.push(key);
             }
@@ -1059,6 +1199,118 @@ mod tests {
             }
         }
         assert!(settled.iter().any(|k| k.lod > 0), "clamping should coarsen");
+    }
+
+    /// **Pins are inside the budget (P16.4b audit).** An editor pinning unsaved
+    /// tiles into the render set must not silently turn `max_resident_tiles` from
+    /// a hard bound into an aspiration: the cut's allowance shrinks by the pins it
+    /// does not already contain, so total residency stays under the ceiling.
+    #[test]
+    fn pinned_tiles_are_charged_against_the_residency_budget() {
+        let (t, store) = fixture();
+        const CEILING: usize = 10;
+        let mut s = TerrainStreamer::from_store(
+            &store,
+            5,
+            2.0,
+            RenderWantsParams::geometric(12.0, 4),
+            StreamBudget {
+                max_resident_tiles: CEILING,
+                max_loads_per_sync: 3,
+            },
+        );
+        let cam = DVec2::new(24.0, 24.0);
+        for _ in 0..60 {
+            s.sync_render(cam, &store);
+        }
+        let unpinned_resident = s.render_data().resident_keys().len();
+        assert!(unpinned_resident <= CEILING);
+
+        // Pin four edited tiles far from the camera (so the cut never wants them).
+        let pins: Vec<TileKey> = [(0, 0), (1, 0), (0, 1), (1, 1)]
+            .into_iter()
+            .map(TileKey::lod0)
+            .collect();
+        for &k in &pins {
+            let tile = t.get_tile(k.coord).expect("fixture tile").clone();
+            s.pin_tile(k, tile);
+        }
+        assert_eq!(s.pinned_len(), pins.len());
+
+        for _ in 0..60 {
+            s.sync_render(cam, &store);
+            let resident = s.render_data().resident_keys().len();
+            assert!(
+                resident <= CEILING,
+                "pins pushed residency to {resident} over the {CEILING} ceiling"
+            );
+        }
+        // The pins survived every sync — they are unsaved authoring.
+        for &k in &pins {
+            assert!(s.render_data().is_resident(k), "{k:?} was evicted");
+            assert!(s.is_pinned(k));
+        }
+        // …and the cut really did give ground for them.
+        assert!(s.cut().len() < unpinned_resident + pins.len());
+
+        // Releasing the pins hands the allowance back.
+        s.unpin_tiles();
+        assert_eq!(s.pinned_len(), 0);
+        for _ in 0..60 {
+            s.sync_render(cam, &store);
+        }
+        assert!(s.render_data().resident_keys().len() <= CEILING);
+
+        // A ceiling of 0 still means UNLIMITED even with pins outstanding.
+        let mut open = TerrainStreamer::from_store(
+            &store,
+            5,
+            2.0,
+            RenderWantsParams::geometric(12.0, 4),
+            StreamBudget {
+                max_resident_tiles: 0,
+                max_loads_per_sync: 3,
+            },
+        );
+        for &k in &pins {
+            open.pin_tile(k, t.get_tile(k.coord).unwrap().clone());
+        }
+        for _ in 0..60 {
+            open.sync_render(cam, &store);
+        }
+        assert!(
+            !open.stats().budget_clamped,
+            "an unlimited budget must never clamp, pins or not"
+        );
+        assert!(
+            open.render_data().resident_keys().len() >= s.render_data().resident_keys().len(),
+            "the unlimited streamer paged less than the clamped one"
+        );
+        for &k in &pins {
+            assert!(open.is_pinned(k));
+        }
+    }
+
+    /// A deleted tile is unpinned **and dropped**: `unpin_tiles` alone would leave
+    /// a phantom page the camera can never evict (nothing in the store pages over
+    /// it) — the undo-of-an-authoring-op case.
+    #[test]
+    fn unpin_and_evict_drops_a_deleted_tile() {
+        let (t, store) = fixture();
+        let mut s = streamer(&store);
+        let key = TileKey::lod0((0, 0));
+        s.pin_tile(key, t.get_tile(key.coord).unwrap().clone());
+        assert!(s.render_data().is_resident(key) && s.is_pinned(key));
+
+        assert!(s.unpin_and_evict(key));
+        assert!(
+            !s.render_data().is_resident(key),
+            "phantom tile left behind"
+        );
+        assert!(!s.is_pinned(key));
+        assert!(!s.cut().contains(&key), "a dropped tile stays published");
+        // Idempotent.
+        assert!(!s.unpin_and_evict(key));
     }
 
     #[test]

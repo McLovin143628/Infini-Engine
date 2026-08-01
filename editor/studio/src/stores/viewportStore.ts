@@ -58,11 +58,21 @@ interface ViewportUiState {
   toolMode: ToolModeDto;
   /**
    * The terrain the viewport is drawing streams from a `.inf_terrain` (P16.4a).
-   * Read-only, pushed on `viewport://tool-status`: a streamed terrain has no
-   * editable working set in the document, so sculpt/paint are disabled until the
-   * write-back path lands (P16.4b).
+   * Read-only, pushed on `viewport://tool-status`.
    */
   terrainStreamed: boolean;
+  /**
+   * That `.inf_terrain` is writable, so Sculpt/Paint may edit it (P16.4b). Only
+   * meaningful with `terrainStreamed`: streamed && !editable is the one case the
+   * brush tools are disabled.
+   */
+  terrainEditable: boolean;
+  /**
+   * The terrain carries sculpt/paint edits not yet written back to its asset
+   * (P16.4b). Terrain edits are only written by an explicit save — autosave does
+   * not touch assets — so this is the reminder that Ctrl+S is owed.
+   */
+  terrainUnsavedEdits: boolean;
   /** Sculpt brush operation. */
   sculptOp: SculptOpDto;
   /** Brush radius (world metres). */
@@ -213,6 +223,8 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   viewMode: "Lit",
   toolMode: "Select",
   terrainStreamed: false,
+  terrainEditable: false,
+  terrainUnsavedEdits: false,
   sculptOp: "Raise",
   sculptRadius: 8,
   sculptStrength: 0.5,
@@ -491,12 +503,21 @@ export function initViewportSync(): () => void {
       }
     }),
   );
-  // Tool rejections + the streamed-terrain flag (P16.4a). The message is a
-  // one-shot toast; the flag is standing state the toolbar reads.
+  // Tool rejections + the standing terrain flags (P16.4a/b). The message is a
+  // one-shot toast; the flags are standing state the toolbar reads.
   track(
     listenTo("viewport://tool-status", (status) => {
-      if (useViewportStore.getState().terrainStreamed !== status.terrain_streamed) {
-        useViewportStore.setState({ terrainStreamed: status.terrain_streamed });
+      const s = useViewportStore.getState();
+      if (
+        s.terrainStreamed !== status.terrain_streamed ||
+        s.terrainEditable !== status.terrain_editable ||
+        s.terrainUnsavedEdits !== status.terrain_unsaved_edits
+      ) {
+        useViewportStore.setState({
+          terrainStreamed: status.terrain_streamed,
+          terrainEditable: status.terrain_editable,
+          terrainUnsavedEdits: status.terrain_unsaved_edits,
+        });
       }
       if (status.message) useShellStore.getState().pushStatus(status.message, 6000);
     }),

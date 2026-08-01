@@ -3,11 +3,25 @@
 /**
  * The viewport's tool-state notice (`viewport://tool-status`, P16.4).
  *
- * One channel for both halves of the B2 status seam, because they change for
- * the same reason and land in the same corner of the UI: `message` is the
- * one-shot rejection a tool raised (drained from the host's `take_tool_status`)
- * and goes to the status bar; `terrain_streamed` is the standing fact that the
- * projected terrain pages from a `.inf_terrain` and therefore cannot be
- * sculpted yet, and disables the brush tools in the viewport toolbar.
+ * One channel for every half of the status seam, because they change for the
+ * same reason and land in the same corner of the UI: `message` is the one-shot
+ * rejection a tool raised (drained from the host's `take_tool_status`) and goes
+ * to the status bar; the three booleans are standing facts, published only when
+ * one of them changes.
  */
-export type ViewportToolStatusDto = { message: string | null, terrain_streamed: boolean, };
+export type ViewportToolStatusDto = { message: string | null, 
+/**
+ * The projected terrain pages from a `.inf_terrain` asset.
+ */
+terrain_streamed: boolean, 
+/**
+ * That asset is writable, so Sculpt/Paint may edit it (P16.4b). Only
+ * meaningful together with `terrain_streamed`: *streamed && !editable* is
+ * the one case the brush tools are disabled.
+ */
+terrain_editable: boolean, 
+/**
+ * The terrain carries tiles not yet written back to its asset — the
+ * toolbar's "unsaved terrain edits" chip and the save reminder.
+ */
+terrain_unsaved_edits: boolean, };

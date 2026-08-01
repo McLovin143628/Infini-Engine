@@ -526,6 +526,42 @@ impl TerrainData {
         had
     }
 
+    /// Make every key in `wants` resident, **evicting nothing** — the additive
+    /// half of [`sync_residency`](Self::sync_residency).
+    ///
+    /// The editor's edit working set (P16.4b) pages this way rather than through
+    /// `sync_residency`: a brush footprint is a *different* set on every dab, so
+    /// reconciling against it would evict the tiles the previous dab just edited
+    /// and, worse, would leave the tiles an undo step has to write `before` into
+    /// non-resident — where `revert_delta` would recreate them **flat** and lose
+    /// every sample outside the recorded patch. Growing the set and never
+    /// shrinking it is what makes undo across a stroke exact; the working set is
+    /// released wholesale when the document closes.
+    ///
+    /// Reports only `loaded` / `missing` / `failed` (nothing is ever evicted or
+    /// retained), and an already-resident tile is never re-read over live edits.
+    pub fn request_tiles<S: TileStore + ?Sized>(
+        &mut self,
+        wants: &BTreeSet<TileKey>,
+        store: &S,
+    ) -> ResidencyReport {
+        let mut report = ResidencyReport::default();
+        for &key in wants {
+            if self.is_resident(key) {
+                continue;
+            }
+            match store.load_tile(key) {
+                Ok(Some(tile)) => {
+                    self.insert_resident(key, tile);
+                    report.loaded.push(key);
+                }
+                Ok(None) => report.missing.push(key),
+                Err(e) => report.failed.push((key, e)),
+            }
+        }
+        report
+    }
+
     /// Reconcile residency against an explicit set of wanted `(coord, lod)` keys.
     ///
     /// Loads every want the store can serve, drops every resident tile that is no
@@ -590,6 +626,27 @@ impl TerrainData {
     /// Clear the dirty set **without** reading it (a fresh load is not an edit).
     pub fn clear_dirty(&mut self) {
         self.dirty.clear();
+    }
+
+    /// Clear `key`'s write-back mark **only if** its stamp still equals
+    /// `version` — the concurrent-edit guard for a write-back that ran with the
+    /// document unlocked.
+    ///
+    /// Returns whether the mark was cleared. A save stages the dirty tiles, drops
+    /// the document lock for a multi-second whole-payload rewrite, and re-locks to
+    /// clear the marks; anything the user sculpted in that window has a *newer*
+    /// stamp than the bytes that actually reached disk, so clearing it would drop
+    /// an edit on the floor. `false` therefore means "still dirty, deliberately" —
+    /// the next save writes it.
+    ///
+    /// A deleted tile is handled by the same rule: it holds no stamp
+    /// ([`tile_version`](Self::tile_version) reports `0`), so staging records `0`
+    /// and a re-creation in the write window bumps it to something non-zero.
+    pub fn clear_dirty_if_unchanged(&mut self, key: TileKey, version: u64) -> bool {
+        if self.tile_version(key) != version {
+            return false;
+        }
+        self.dirty.remove(&key)
     }
 }
 

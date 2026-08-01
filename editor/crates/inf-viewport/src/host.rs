@@ -189,15 +189,25 @@ pub struct EngineHost {
     /// ([`rebuild_scene`](Self::rebuild_scene)) and at the render-sync point
     /// ([`render_frame`](Self::render_frame)).
     ///
-    /// **The determinism seam.** Its pages land in the streamer's own working set,
-    /// never in the document's `Terrain.data`, so moving the editor camera cannot
-    /// dirty the document, change a `height_at` answer, or desync a Simulate
-    /// session from a shipped run. Disabled until a content root is set, which
-    /// makes inline terrain behaviour bit-identical to before.
+    /// **The determinism seam.** Its *camera-driven* pages land in the streamer's
+    /// own working set, never in the document's `Terrain.data`, so moving the
+    /// editor camera cannot dirty the document, change a `height_at` answer, or
+    /// desync a Simulate session from a shipped run. (An **edit** does page into
+    /// the document — synchronously, footprint-shaped — which is a different
+    /// thing entirely; see `inf_editor_core::terrain_edit`.) Disabled until a
+    /// content root is set, which makes inline terrain behaviour bit-identical to
+    /// before.
     terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams,
-    /// Whether the terrain currently projected is asset-backed (streamed). Sculpt
-    /// and paint reject a stroke against one — see [`Self::take_tool_status`].
+    /// Whether the terrain currently projected is asset-backed (streamed).
     terrain_streamed: bool,
+    /// Whether the projected streamed terrain can be edited, i.e. its
+    /// `.inf_terrain` is writable (P16.4b). Always `false` for an inline terrain,
+    /// which needs no asset to save to. Refreshed each projection.
+    terrain_editable: bool,
+    /// Whether the projected terrain carries tiles not yet written back to its
+    /// asset — what flips the toolbar's status chip. Refreshed each projection and
+    /// after every dab/commit.
+    terrain_unsaved_edits: bool,
     /// The last tool-rejection message, for a Ring-2 caller to surface. Drained by
     /// [`take_tool_status`](Self::take_tool_status).
     tool_status: Option<String>,
@@ -573,6 +583,8 @@ impl EngineHost {
             terrain_guid: None,
             terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams::new(),
             terrain_streamed: false,
+            terrain_editable: false,
+            terrain_unsaved_edits: false,
             tool_status: None,
             stream_log_countdown: STREAM_LOG_INTERVAL_FRAMES,
             sculpt_drag: None,
@@ -762,6 +774,8 @@ impl EngineHost {
         self.scene.terrain = None;
         self.terrain_guid = None;
         self.terrain_streamed = false;
+        self.terrain_editable = false;
+        self.terrain_unsaved_edits = false;
         self.id_to_guid.clear();
         self.guid_to_id.clear();
         self.collider_outlines.clear();
@@ -904,6 +918,13 @@ impl EngineHost {
                             translation,
                             self.last_eye_world,
                         );
+                        // P16.4b — the document's authored tiles are the authority
+                        // for a streamed terrain, so mirror them into the render
+                        // set (pinned) before projecting. Copies nothing when
+                        // nothing was edited.
+                        if streamed {
+                            self.terrain_streams.overlay_document_edits(guid, doc);
+                        }
                         let projected = if streamed {
                             self.terrain_streams
                                 .render_data(guid)
@@ -918,6 +939,9 @@ impl EngineHost {
                             self.scene.terrain = Some(rt);
                             self.terrain_guid = Some(guid);
                             self.terrain_streamed = streamed;
+                            self.terrain_editable =
+                                streamed && self.terrain_streams.is_editable(guid);
+                            self.terrain_unsaved_edits = streamed && terrain.data.has_dirty_tiles();
                         }
                     }
                 }
@@ -1261,6 +1285,15 @@ impl EngineHost {
                 },
             );
         }
+
+        // Release every terrain stream the projection did not just use (P16.4b
+        // audit). The viewport draws ONE terrain, so a stream keyed on any other
+        // entity — a terrain that became invisible, was deleted, or belonged to a
+        // document that has since been replaced — is dead memory holding a whole
+        // `.inf_terrain` payload, plus any tile it pinned for an unsaved edit
+        // (which nothing would ever unpin). This is the only place that knows
+        // which terrain is live, so it is the only place that can do it.
+        self.terrain_streams.retain_only(self.terrain_guid);
 
         self.scene.hovered = None;
         self.scene.mark_dirty();
@@ -2131,10 +2164,56 @@ impl EngineHost {
     /// Whether the projected terrain streams from a `.inf_terrain` asset.
     ///
     /// Polled each frame by the platform loop and published on
-    /// `viewport://tool-status`, which is what greys the sculpt/paint tools out
-    /// (they cannot edit a streamed terrain until P16.4b).
+    /// `viewport://tool-status`, where the shell uses it to label the terrain.
+    /// As of P16.4b it no longer greys the brush tools out — see
+    /// [`terrain_is_editable`](Self::terrain_is_editable), which does.
     pub fn terrain_is_streamed(&self) -> bool {
         self.terrain_streamed
+    }
+
+    /// Whether the projected **streamed** terrain can be sculpted/painted, i.e.
+    /// its `.inf_terrain` is a writable file the save path can fold edits into.
+    ///
+    /// `false` for an inline terrain (which is always editable and needs no
+    /// asset) — read it together with [`terrain_is_streamed`](Self::terrain_is_streamed):
+    /// *streamed && !editable* is the one case the tools refuse.
+    pub fn terrain_is_editable(&self) -> bool {
+        self.terrain_editable
+    }
+
+    /// Whether the projected terrain carries tiles not yet written back to its
+    /// `.inf_terrain` — the toolbar's "unsaved terrain edits" chip.
+    pub fn terrain_has_unsaved_edits(&self) -> bool {
+        self.terrain_unsaved_edits
+    }
+
+    /// Release every terrain stream — its resident pages, its edit pins, and its
+    /// `.inf_terrain` payload.
+    ///
+    /// Pushed by `File ▸ Open` / `File ▸ New` (P16.4b audit): those replace the
+    /// document wholesale, so every stream is keyed on entity GUIDs that no longer
+    /// exist. Without this the old document's payload and any tile it pinned for
+    /// an unsaved edit stay alive for the life of the process.
+    pub fn clear_terrain_streams(&mut self) {
+        self.terrain_streams.clear();
+        self.terrain_streamed = false;
+        self.terrain_editable = false;
+        self.terrain_unsaved_edits = false;
+        self.terrain_guid = None;
+        self.synced_version = None; // force a re-projection against the new doc
+    }
+
+    /// Refresh the cold store of every live terrain stream **in place** — called
+    /// after a save rewrote the `.inf_terrain` files.
+    ///
+    /// Live streams keep their resident pages and their published cut, so saving
+    /// does not blink the terrain the user is looking at; only the bytes behind
+    /// them, the catalog, and the edit pins change. See
+    /// `EditorTerrainStreams::reload_store`.
+    pub fn reload_terrain_stores(&mut self) {
+        self.terrain_streams.reload_stores();
+        self.terrain_unsaved_edits = false;
+        self.synced_version = None; // re-project from the refreshed store
     }
 
     /// Terrain-streaming counters, for the diagnostics path.
@@ -2195,6 +2274,34 @@ impl EngineHost {
         self.sculpt_drag.is_some()
     }
 
+    /// The heightfield the cursor is actually looking at, plus the terrain's world
+    /// translation.
+    ///
+    /// For an **inline** terrain that is the document's own `TerrainData`. For a
+    /// **streamed** one (P16.4b) it is the streamer's render working set — the
+    /// surface being drawn, with the document's unsaved edits already mirrored in
+    /// (`overlay_document_edits`). Raycasting the document's set instead would
+    /// find nothing until something had already been sculpted, which is
+    /// unusable: you cannot click ground the document has not paged in yet, and
+    /// paging is what a click is *for*.
+    ///
+    /// The consequence, stated plainly: a stroke can only start where a level-0
+    /// page is resident — i.e. within the render cut's fine ring around the
+    /// camera. Aiming at distant terrain that is only covered by a coarse page
+    /// finds no hit and starts no stroke. Fly closer; the ring follows.
+    fn terrain_probe<'a>(
+        &'a self,
+        doc: &'a SceneDoc,
+        guid: Uuid,
+    ) -> Option<(&'a inf_terrain::TerrainData, DVec3)> {
+        if self.terrain_streamed {
+            if let Some((_, data, translation)) = self.terrain_streams.projection_inputs(guid) {
+                return Some((data, translation));
+            }
+        }
+        doc.terrain_data_and_origin(guid)
+    }
+
     /// Raycast the cursor against the target terrain, returning the hit centre in
     /// terrain-local XZ and the local surface height there. Reuses the same
     /// screen→world ray as picking/gizmo drags, rebased through the floating
@@ -2207,12 +2314,42 @@ impl EngineHost {
         py: u32,
     ) -> Option<(Uuid, DVec2, f64)> {
         let guid = self.terrain_guid?;
-        let (data, translation) = doc.terrain_data_and_origin(guid)?;
+        let (data, translation) = self.terrain_probe(doc, guid)?;
         let (ro, rd) = view.pixel_ray(px as f32, py as f32);
         // Render-local ray → world → terrain-local (render axes == world axes).
         let local_origin = self.origin.to_world(ro) - translation;
         let hit = raycast_terrain(data, local_origin, rd.as_dvec3(), 1.0e6)?;
         Some((guid, DVec2::new(hit.point.x, hit.point.z), hit.point.y))
+    }
+
+    /// Page the level-0 tiles a dab at `center` needs into the **document's**
+    /// working set, synchronously, before the dab runs (P16.4b).
+    ///
+    /// A no-op for an inline terrain, whose tiles are all already there. See
+    /// `inf_editor_core::terrain_edit` for why the document — and not this
+    /// host's streamer — owns the tiles a brush writes.
+    fn page_brush_footprint(&mut self, doc: &mut SceneDoc, guid: Uuid, center: DVec2) {
+        if !self.terrain_streamed {
+            return;
+        }
+        self.terrain_streams
+            .page_brush_footprint(guid, doc, center, self.sculpt.radius);
+    }
+
+    /// Mirror the document's edited tiles into the render set and refresh the
+    /// unsaved-edits flag — run after every dab so the stroke is visible as it is
+    /// made and the status chip lights up on the first sample changed.
+    fn after_terrain_edit(&mut self, doc: &SceneDoc, guid: Uuid) {
+        if !self.terrain_streamed {
+            return;
+        }
+        self.terrain_streams.overlay_document_edits(guid, doc);
+        self.terrain_unsaved_edits = !doc.terrain_dirty_tiles(guid).is_empty();
+        if let Some((component, data, translation)) = self.terrain_streams.projection_inputs(guid) {
+            if data.tile_count() + data.coarse_tile_count() > 0 {
+                self.scene.terrain = Some(project_terrain(component, data, translation));
+            }
+        }
     }
 
     /// Rebuild the brush-ring loop points from the current terrain around
@@ -2236,8 +2373,9 @@ impl EngineHost {
         };
         self.sculpt_ring_color = color;
         if let Some(guid) = self.terrain_guid {
-            if let Some((data, translation)) = doc.terrain_data_and_origin(guid) {
-                self.sculpt_ring = build_ring(data, translation, center, self.sculpt.radius);
+            if let Some((data, translation)) = self.terrain_probe(doc, guid) {
+                let ring = build_ring(data, translation, center, self.sculpt.radius);
+                self.sculpt_ring = ring;
                 return;
             }
         }
@@ -2247,10 +2385,10 @@ impl EngineHost {
     /// Update the hovered brush ring (idle Sculpt mode): raycast the cursor and
     /// rebuild the ring, or clear it off-terrain.
     pub fn update_sculpt_hover(&mut self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) {
-        // A streamed terrain has no editable working set in the document, so the
-        // brush ring would follow a heightfield the tools cannot touch. Show no
-        // ring rather than an inviting one (P16.3b2; see `begin_sculpt`).
-        if self.terrain_streamed {
+        // A streamed terrain whose asset cannot be written has nowhere to save a
+        // stroke to, so showing an inviting ring would be a lie (P16.4b — an
+        // editable streamed terrain rings exactly like an inline one).
+        if self.terrain_streamed && !self.terrain_editable {
             self.sculpt_ring.clear();
             return;
         }
@@ -2271,22 +2409,40 @@ impl EngineHost {
         py: u32,
         ctrl: bool,
     ) -> bool {
-        // P16.3b2: reject gracefully on an asset-backed (streamed) terrain.
-        //
-        // The tools edit the document's `TerrainData` and commit a `HeightDelta` /
-        // `SplatDelta` undo step against it. A streamed terrain's document data is
-        // empty — the pages live in the streamer, are camera-driven, and are
-        // evicted the moment the camera moves — so a stroke would either no-op or,
-        // worse, author tiles into the document that shadow the asset and then
-        // silently disagree with it. Write-back through the residency dirty set
-        // (and re-emitting the `.inf_terrain`) arrives with the P16.4 wizard work.
-        if self.terrain_streamed {
-            self.reject_tool(inf_editor_core::terrain_stream::STREAMED_TERRAIN_EDIT_REJECTION);
+        // P16.4b: a streamed terrain IS editable — its tiles page into the
+        // document on demand and the save path writes them back. The only refusal
+        // left is the honest one: an asset the editor cannot write, where a stroke
+        // would be lost at Ctrl+S rather than saved.
+        if self.terrain_streamed && !self.terrain_editable {
+            self.reject_tool(inf_editor_core::terrain_stream::STREAMED_TERRAIN_READONLY_REJECTION);
             return false;
         }
         let Some((guid, center, height)) = self.sculpt_pick(doc, view, px, py) else {
+            // A miss on a streamed terrain has two very different causes. If the
+            // asset really has ground under the cursor, it is simply paged at
+            // coarse detail and there is no level-0 page to sculpt — say so
+            // (P16.4b audit: a silent no-op reads as a broken tool). Clicking past
+            // the edge of the terrain is not a problem and stays silent.
+            if self.terrain_streamed {
+                if let Some(g) = self.terrain_guid {
+                    let p = self.pick_world_point(doc, view, px, py);
+                    let local = self
+                        .terrain_streams
+                        .projection_inputs(g)
+                        .map(|(_, _, t)| DVec2::new(p.x - t.x, p.z - t.z))
+                        .unwrap_or(DVec2::new(p.x, p.z));
+                    if self.terrain_streams.covers_level0(g, local) {
+                        self.reject_tool(
+                            inf_editor_core::terrain_stream::STREAMED_TERRAIN_COARSE_REJECTION,
+                        );
+                    }
+                }
+            }
             return false;
         };
+        // Make the footprint resident in the DOCUMENT before the first dab — the
+        // brush must never author over ground it has not actually read.
+        self.page_brush_footprint(doc, guid, center);
         let op = effective_op(self.sculpt.op, ctrl);
         let settings = self.sculpt;
         let kind = if op == SculptOp::Paint {
@@ -2299,6 +2455,7 @@ impl EngineHost {
             doc.sculpt_apply_dab(guid, &mut stroke, brush, params);
             DragStroke::Height(stroke)
         };
+        self.after_terrain_edit(doc, guid);
         self.sculpt_drag = Some(SculptDrag {
             guid,
             kind,
@@ -2328,6 +2485,9 @@ impl EngineHost {
         let dabs = dab_positions(&[last, cur], spacing);
         let mut new_last = last;
         for &c in dabs.iter().skip(1) {
+            // Every dab pages its own footprint: a drag walks across tiles, and a
+            // dab must never write ground it has not read (P16.4b).
+            self.page_brush_footprint(doc, guid, c);
             if let Some(d) = self.sculpt_drag.as_mut() {
                 match &mut d.kind {
                     DragStroke::Height(stroke) => {
@@ -2344,6 +2504,7 @@ impl EngineHost {
         if let Some(d) = self.sculpt_drag.as_mut() {
             d.last_local = new_last;
         }
+        self.after_terrain_edit(doc, guid);
         self.refresh_ring(doc, cur);
     }
 
@@ -2354,10 +2515,12 @@ impl EngineHost {
         let Some(drag) = self.sculpt_drag.take() else {
             return false;
         };
-        match drag.kind {
+        let recorded = match drag.kind {
             DragStroke::Height(stroke) => doc.edit_commit_sculpt(drag.guid, stroke),
             DragStroke::Splat(stroke) => doc.edit_commit_paint(drag.guid, stroke),
-        }
+        };
+        self.after_terrain_edit(doc, drag.guid);
+        recorded
     }
 
     // ── foliage painting (E-P6) ───────────────────────────────────────────

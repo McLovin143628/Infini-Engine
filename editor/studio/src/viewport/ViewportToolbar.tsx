@@ -54,9 +54,19 @@ const LAYER_SWATCHES: [string, string][] = [
   ["#eef1f8", "Snow"],
 ];
 
-/** Why the brush tools are off while a streamed terrain is projected. */
+/** Why the brush tools are off on a streamed terrain whose asset is read-only. */
+const READONLY_TERRAIN_HINT =
+  "This terrain's .inf_terrain asset is read-only, so sculpt and paint have nowhere to save to.";
+
+/** The chip's tooltip while a streamed terrain is projected and clean. */
 const STREAMED_TERRAIN_HINT =
-  "This terrain streams from a .inf_terrain asset — sculpt and paint cannot edit it yet.";
+  "This terrain streams from a .inf_terrain asset. Sculpt and paint page tiles in as you brush; " +
+  "Ctrl+S writes them back into the asset.";
+
+/** …and once it carries edits that only an explicit save will persist. */
+const UNSAVED_TERRAIN_HINT =
+  "Unsaved terrain edits. Terrain is written into its .inf_terrain asset by Ctrl+S only — " +
+  "autosave does not save terrain, so a crash would lose these.";
 
 export default function ViewportToolbar() {
   const mode = useViewportStore((s) => s.mode);
@@ -72,6 +82,8 @@ export default function ViewportToolbar() {
   const toolMode = useViewportStore((s) => s.toolMode);
   const setToolMode = useViewportStore((s) => s.setToolMode);
   const terrainStreamed = useViewportStore((s) => s.terrainStreamed);
+  const terrainEditable = useViewportStore((s) => s.terrainEditable);
+  const terrainUnsavedEdits = useViewportStore((s) => s.terrainUnsavedEdits);
   const viewMode = useViewportStore((s) => s.viewMode);
   const setViewMode = useViewportStore((s) => s.setViewMode);
 
@@ -168,18 +180,19 @@ export default function ViewportToolbar() {
             aria-label="Viewport tool"
           >
             {TOOLS.map(([id, label, title]) => {
-              // A streamed (.inf_terrain) terrain has no editable working set in
-              // the document, so the brush tools are refused by the viewport
-              // host. Say so up front rather than letting the stroke bounce
-              // (P16.4a; write-back is P16.4b).
-              const blocked = terrainStreamed && id === "Sculpt";
+              // A streamed terrain IS editable (P16.4b) — tiles page into the
+              // document as you brush and Ctrl+S writes them back. The only
+              // refusal left is an asset the editor cannot write, which the
+              // viewport host also rejects; say so up front rather than letting
+              // the stroke bounce.
+              const blocked = terrainStreamed && !terrainEditable && id === "Sculpt";
               return (
                 <button
                   key={id}
                   type="button"
                   aria-pressed={toolMode === id}
                   disabled={blocked}
-                  title={blocked ? STREAMED_TERRAIN_HINT : title}
+                  title={blocked ? READONLY_TERRAIN_HINT : title}
                   className={`flex h-6 items-center rounded px-2 ${
                     toolMode === id
                       ? "bg-(--ink-bg-3) text-(--ink-text)"
@@ -194,10 +207,24 @@ export default function ViewportToolbar() {
           </div>
           {terrainStreamed && (
             <span
-              className="rounded bg-(--ink-bg-0) px-2 py-0.5 text-(--ink-text-faint)"
-              title={STREAMED_TERRAIN_HINT}
+              className={`rounded px-2 py-0.5 ${
+                terrainUnsavedEdits
+                  ? "bg-(--ink-bg-0) text-(--ink-warning)"
+                  : "bg-(--ink-bg-0) text-(--ink-text-faint)"
+              }`}
+              title={
+                terrainUnsavedEdits
+                  ? UNSAVED_TERRAIN_HINT
+                  : terrainEditable
+                    ? STREAMED_TERRAIN_HINT
+                    : READONLY_TERRAIN_HINT
+              }
             >
-              Streamed terrain
+              {terrainUnsavedEdits
+                ? "Unsaved terrain edits"
+                : terrainEditable
+                  ? "Streamed terrain"
+                  : "Streamed terrain (read-only)"}
             </span>
           )}
           {toolMode === "Sculpt" && <SculptControls />}

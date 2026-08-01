@@ -119,3 +119,51 @@ describe("viewportStore sculpt actions", () => {
     );
   });
 });
+
+/**
+ * P16.4b — the three standing terrain flags the `viewport://tool-status` channel
+ * carries. The chip and the Sculpt gate read only these, so the rule they encode
+ * lives here: a streamed terrain is EDITABLE (P16.4a disabled it; the write-back
+ * path enabled it), and only a read-only asset disables the brush tools.
+ */
+describe("terrain tool-status flags", () => {
+  beforeEach(() => {
+    useViewportStore.setState({
+      terrainStreamed: false,
+      terrainEditable: false,
+      terrainUnsavedEdits: false,
+    });
+  });
+
+  it("defaults to an inline, unedited terrain", () => {
+    const s = useViewportStore.getState();
+    expect(s.terrainStreamed).toBe(false);
+    expect(s.terrainEditable).toBe(false);
+    expect(s.terrainUnsavedEdits).toBe(false);
+  });
+
+  it("a streamed, writable terrain does NOT block the brush tools", () => {
+    useViewportStore.setState({ terrainStreamed: true, terrainEditable: true });
+    const s = useViewportStore.getState();
+    // The toolbar's gate, verbatim.
+    expect(s.terrainStreamed && !s.terrainEditable).toBe(false);
+  });
+
+  it("a streamed, read-only terrain blocks them", () => {
+    useViewportStore.setState({ terrainStreamed: true, terrainEditable: false });
+    const s = useViewportStore.getState();
+    expect(s.terrainStreamed && !s.terrainEditable).toBe(true);
+  });
+
+  it("unsaved edits are independent of editability and survive a tool switch", () => {
+    useViewportStore.setState({
+      terrainStreamed: true,
+      terrainEditable: true,
+      terrainUnsavedEdits: true,
+    });
+    useViewportStore.getState().setToolMode("Select");
+    const s = useViewportStore.getState();
+    expect(s.terrainUnsavedEdits).toBe(true);
+    expect(s.toolMode).toBe("Select");
+  });
+});

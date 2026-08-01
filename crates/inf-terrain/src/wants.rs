@@ -403,6 +403,30 @@ pub fn sim_wants(grid: TileGrid, positions: &[DVec2], margin_m: f64) -> BTreeSet
     out
 }
 
+/// The **level-0** tiles one brush dab needs resident before it may run: the
+/// brush disk's footprint plus a **one-tile margin** (P16.4b).
+///
+/// Literally [`sim_wants`] with `margin_m = radius + one level-0 tile span`, and
+/// deliberately so — an edit is the editor's fixed-step boundary. A dab must see
+/// the same bytes whatever the camera happens to have paged in, so it names its
+/// footprint the same deterministic, camera-free way the simulation names its
+/// own, and the caller loads the result **synchronously before applying**.
+///
+/// # Why a whole tile of margin and not one sample
+///
+/// The disk's own AABB is not enough for the neighbourhood ops. `Smooth` extracts
+/// a [`HeightRegion`](crate::HeightRegion) with a one-ring margin and reads a
+/// 3 × 3 neighbourhood per sample; `normal_at` central-differences one sample
+/// either side; and `height_at` resolves a point exactly on a shared edge onto
+/// the *previous* tile. Any of those can reach a sample outside the footprint,
+/// and a non-resident neighbour reads as **unauthored ground**, which silently
+/// turns a slope into a one-sided one or excludes a real neighbour from a mean.
+/// A tile is the granularity residency actually has, so one tile is the smallest
+/// honest margin — and it is what the sim uses for the same reason.
+pub fn brush_wants(grid: TileGrid, center: DVec2, radius: f64) -> BTreeSet<TileKey> {
+    sim_wants(grid, &[center], radius.max(0.0) + grid.level0_span())
+}
+
 // ── budget clamp ────────────────────────────────────────────────────────────
 
 /// Bring a cut under a tile budget by **collapsing its finest groups into their
@@ -920,6 +944,36 @@ mod tests {
         let b = sim_wants(g, &[DVec2::new(40.0, 8.0), DVec2::new(8.0, 8.0)], 1.0);
         assert_eq!(a, b);
         assert_eq!(a.len(), 2);
+    }
+
+    /// A brush dab wants its footprint **plus one whole tile** — the sim-wants
+    /// shape, so a neighbourhood op (Smooth's 3 × 3 read, `normal_at`'s central
+    /// difference, `height_at`'s shared-edge fallback) can never reach a
+    /// non-resident tile and read it as unauthored ground (P16.4b).
+    #[test]
+    fn brush_wants_is_the_footprint_plus_one_tile() {
+        let g = grid(); // 16 m tiles
+                        // A dab well inside tile (1,1) with a tiny radius still pulls the ring of
+                        // neighbours in, because the margin is a full tile span.
+        let w = brush_wants(g, DVec2::new(24.0, 24.0), 0.5);
+        assert_eq!(w, tile_range(0, (0, 0), (2, 2)));
+        assert!(w.iter().all(|k| k.is_lod0()), "level 0 only");
+
+        // A radius spanning two tiles widens the range by exactly that much.
+        let w = brush_wants(g, DVec2::new(24.0, 24.0), 32.0);
+        assert_eq!(w, tile_range(0, (-2, -2), (4, 4)));
+
+        // It IS sim_wants with a one-tile-widened margin — the shapes must not
+        // drift apart.
+        assert_eq!(
+            brush_wants(g, DVec2::new(-7.0, 40.0), 5.0),
+            sim_wants(g, &[DVec2::new(-7.0, 40.0)], 5.0 + g.level0_span())
+        );
+        // A degenerate radius still asks for the tile under the cursor + its ring.
+        assert_eq!(
+            brush_wants(g, DVec2::new(24.0, 24.0), -3.0),
+            tile_range(0, (0, 0), (2, 2))
+        );
     }
 
     #[test]

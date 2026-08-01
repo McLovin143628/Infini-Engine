@@ -72,6 +72,11 @@ enum Cmd {
     SetTerrainContentRoot(Option<std::path::PathBuf>),
     /// Rebuild the loose `.inf_terrain` index in place (a terrain import landed).
     RefreshTerrainIndex,
+    /// Reopen every live terrain stream's `.inf_terrain` in place after a save
+    /// wrote edits back (P16.4b).
+    ReloadTerrainStores,
+    /// Release every terrain stream — the document was replaced (P16.4b).
+    ClearTerrainStreams,
     Destroy,
 }
 
@@ -163,6 +168,19 @@ impl ViewportHandle {
     /// (P16.4a).
     pub fn refresh_terrain_index(&self) {
         let _ = self.tx.send(Cmd::RefreshTerrainIndex);
+    }
+
+    /// Reopen every live terrain stream's `.inf_terrain` in place after a save
+    /// wrote sculpt/paint edits back into it (P16.4b).
+    pub fn reload_terrain_stores(&self) {
+        let _ = self.tx.send(Cmd::ReloadTerrainStores);
+    }
+
+    /// Release every terrain stream (its pages, its edit pins and its
+    /// `.inf_terrain` payload) — pushed when the open document is replaced by
+    /// File ▸ Open / File ▸ New (P16.4b).
+    pub fn clear_terrain_streams(&self) {
+        let _ = self.tx.send(Cmd::ClearTerrainStreams);
     }
 
     /// Adopt a foreign PIE player window (no-op on macOS: cross-process view
@@ -302,6 +320,8 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedSce
                 Ok(Cmd::SetViewMode(m)) => host.set_view_mode(m),
                 Ok(Cmd::SetTerrainContentRoot(root)) => host.set_terrain_content_root(root),
                 Ok(Cmd::RefreshTerrainIndex) => host.refresh_terrain_index(),
+                Ok(Cmd::ReloadTerrainStores) => host.reload_terrain_stores(),
+                Ok(Cmd::ClearTerrainStreams) => host.clear_terrain_streams(),
                 Ok(Cmd::Destroy) | Err(TryRecvError::Disconnected) => break 'outer,
                 Err(TryRecvError::Empty) => break,
             }

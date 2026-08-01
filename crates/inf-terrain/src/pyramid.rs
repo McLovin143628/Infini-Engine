@@ -115,6 +115,75 @@ impl PyramidLevel {
     }
 }
 
+/// The **shape** of one pyramid level: which coarse tiles exist and at what
+/// spacing, with no tile data.
+///
+/// [`plan_pyramid`] computes the whole shape from the level-0 *coordinate set*
+/// alone, which is what lets a partial rebuild ([`crate::writeback`]) know
+/// exactly which levels and which tiles a full [`build_pyramid`] would have
+/// produced without decimating a single sample.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PyramidPlanLevel {
+    /// The level index (`1` for the first coarse level).
+    pub lod: u32,
+    /// World units between adjacent samples at this level (`level0 · 2^lod`).
+    pub meters_per_sample: f64,
+    /// The level's tile coordinates.
+    pub coords: BTreeSet<(i32, i32)>,
+}
+
+/// The coarse coordinates one level up from `coords` (floor-halved, deduplicated).
+///
+/// The *only* place the fine→coarse grouping rule lives, so
+/// [`downsample_tiles`], [`plan_pyramid`] and the partial rebuild cannot drift
+/// apart about which fine tiles share a parent.
+pub fn coarsen_coords(coords: &BTreeSet<(i32, i32)>) -> BTreeSet<(i32, i32)> {
+    coords
+        .iter()
+        .map(|&(tx, tz)| (tx.div_euclid(2), tz.div_euclid(2)))
+        .collect()
+}
+
+/// Plan the pyramid a [`build_pyramid`] over this level-0 coordinate set would
+/// produce: which levels exist, their spacing, and their tile coordinates.
+///
+/// Coordinates alone decide the shape — the stop conditions
+/// ([`PyramidOptions::min_tiles`] / [`max_levels`](PyramidOptions::max_levels))
+/// are counts, and the fine→coarse grouping is pure arithmetic — so this is a
+/// cheap, allocation-light mirror of the real build. [`build_pyramid`] is
+/// implemented *on top of it*, which is what makes the mirror exact rather than a
+/// second implementation that has to be kept in sync.
+pub fn plan_pyramid(
+    level0: &BTreeSet<(i32, i32)>,
+    meters_per_sample: f64,
+    opts: PyramidOptions,
+) -> Vec<PyramidPlanLevel> {
+    let mut out = Vec::new();
+    if level0.len() <= opts.min_tiles || opts.max_levels == 0 {
+        return out;
+    }
+    let mut cur = coarsen_coords(level0);
+    let mut mps = meters_per_sample;
+    for lod in 1..=opts.max_levels {
+        mps *= 2.0;
+        let stop = cur.len() <= opts.min_tiles || lod == opts.max_levels;
+        let next = if stop {
+            BTreeSet::new()
+        } else {
+            coarsen_coords(&cur)
+        };
+        out.push(PyramidPlanLevel {
+            lod,
+            meters_per_sample: mps,
+            coords: std::mem::replace(&mut cur, next),
+        });
+        if stop {
+            break;
+        }
+    }
+    out
+}
+
 /// Build the coarse LOD levels of `data`, from level 1 upward.
 ///
 /// Returns levels in ascending `lod` order (never including level 0 — that *is*
@@ -127,31 +196,31 @@ impl PyramidLevel {
 pub fn build_pyramid(data: &TerrainData, opts: PyramidOptions) -> Vec<PyramidLevel> {
     let res = data.tile_resolution();
     let level0: BTreeMap<(i32, i32), &TerrainTile> = data.tiles().map(|(&c, t)| (c, t)).collect();
-    let mut levels = Vec::new();
-    if level0.len() <= opts.min_tiles || opts.max_levels == 0 {
-        return levels;
-    }
+    let coords: BTreeSet<(i32, i32)> = level0.keys().copied().collect();
+    let plan = plan_pyramid(&coords, data.meters_per_sample(), opts);
+    let mut levels: Vec<PyramidLevel> = Vec::with_capacity(plan.len());
 
     // Level 1 decimates the borrowed level-0 map; every level after decimates the
     // owned one it just produced (moved out, never cloned).
-    let mut mps = data.meters_per_sample();
-    let mut cur = downsample_tiles(res, mps, &level0);
-    for lod in 1..=opts.max_levels {
-        mps *= 2.0;
-        let stop = cur.len() <= opts.min_tiles || lod == opts.max_levels;
-        let next = if stop {
-            BTreeMap::new()
-        } else {
-            downsample_tiles(res, mps, &cur)
+    for step in plan {
+        // The *input* level's spacing: level 0's for the first step, else the
+        // previous level's (this level's, halved).
+        let src_mps = step.meters_per_sample * 0.5;
+        let tiles = match levels.last() {
+            None => downsample_tiles(res, src_mps, &level0),
+            Some(prev) => downsample_tiles(res, src_mps, &prev.tiles),
         };
+        debug_assert_eq!(
+            tiles.keys().copied().collect::<BTreeSet<_>>(),
+            step.coords,
+            "plan_pyramid disagreed with downsample_tiles at lod {}",
+            step.lod
+        );
         levels.push(PyramidLevel {
-            lod,
-            meters_per_sample: mps,
-            tiles: std::mem::replace(&mut cur, next),
+            lod: step.lod,
+            meters_per_sample: step.meters_per_sample,
+            tiles,
         });
-        if stop {
-            break;
-        }
     }
     levels
 }
@@ -167,39 +236,53 @@ pub fn downsample_tiles<T: std::borrow::Borrow<TerrainTile>>(
     mps: f64,
     tiles: &BTreeMap<(i32, i32), T>,
 ) -> BTreeMap<(i32, i32), TerrainTile> {
+    let coarse_coords = coarsen_coords(&tiles.keys().copied().collect());
+    coarse_coords
+        .into_iter()
+        .map(|c| (c, downsample_block(res, mps, c, tiles)))
+        .collect()
+}
+
+/// Decimate the single 2 × 2 fine block under coarse coordinate `coarse` into one
+/// coarse tile — **the** reduction kernel, and the reason a partial pyramid
+/// rebuild is byte-equal to a full one.
+///
+/// `tiles` needs only to answer for the block's four members
+/// `(2·cx + a, 2·cz + b), a,b ∈ {0,1}`; anything else in the map is ignored. So a
+/// full rebuild passes the whole level ([`downsample_tiles`]) and a write-back
+/// passes a four-entry map ([`crate::writeback`]) — same code, same bytes.
+///
+/// `mps` is the **input** level's metres-per-sample (the output's is `2 · mps`).
+/// A block with no present tile at all yields a flat tile anchored at `0`.
+pub fn downsample_block<T: std::borrow::Borrow<TerrainTile>>(
+    res: u32,
+    mps: f64,
+    coarse: (i32, i32),
+    tiles: &BTreeMap<(i32, i32), T>,
+) -> TerrainTile {
     let res = res.max(2);
     let coarse_span = (res as f64 - 1.0) * mps * 2.0;
-
-    // Every coarse coordinate touched by at least one fine tile, in sorted order.
-    let coarse_coords: BTreeSet<(i32, i32)> = tiles
-        .keys()
-        .map(|&(tx, tz)| (tx.div_euclid(2), tz.div_euclid(2)))
-        .collect();
-
-    let mut out = BTreeMap::new();
-    for (cx, cz) in coarse_coords {
-        // The `f64` height anchor: the first present tile of the 2×2 block in a
-        // fixed scan order, so the choice is deterministic and the coarse `f32`
-        // offsets stay in the same numeric neighbourhood as the fine ones (the
-        // precision doctrine — never rebase a planetary anchor onto 0).
-        let anchor_y = BLOCK_SCAN
-            .iter()
-            .find_map(|&(a, b)| tiles.get(&(2 * cx + a, 2 * cz + b)))
-            .map(|t| t.borrow().origin.y)
-            .unwrap_or(0.0);
-        let mut coarse = TerrainTile::flat(
-            res,
-            DVec3::new(cx as f64 * coarse_span, anchor_y, cz as f64 * coarse_span),
-        );
-        for j in 0..res {
-            for i in 0..res {
-                // Coarse sample (i, j) is combined fine index (2i, 2j).
-                let h = combined_sample(tiles, res, (cx, cz), 2 * i, 2 * j);
-                let off = h.map(|h| h - anchor_y).unwrap_or(0.0);
-                coarse.set_sample(res, i, j, off as f32);
-            }
+    let (cx, cz) = coarse;
+    // The `f64` height anchor: the first present tile of the 2×2 block in a
+    // fixed scan order, so the choice is deterministic and the coarse `f32`
+    // offsets stay in the same numeric neighbourhood as the fine ones (the
+    // precision doctrine — never rebase a planetary anchor onto 0).
+    let anchor_y = BLOCK_SCAN
+        .iter()
+        .find_map(|&(a, b)| tiles.get(&(2 * cx + a, 2 * cz + b)))
+        .map(|t| t.borrow().origin.y)
+        .unwrap_or(0.0);
+    let mut out = TerrainTile::flat(
+        res,
+        DVec3::new(cx as f64 * coarse_span, anchor_y, cz as f64 * coarse_span),
+    );
+    for j in 0..res {
+        for i in 0..res {
+            // Coarse sample (i, j) is combined fine index (2i, 2j).
+            let h = combined_sample(tiles, res, (cx, cz), 2 * i, 2 * j);
+            let off = h.map(|h| h - anchor_y).unwrap_or(0.0);
+            out.set_sample(res, i, j, off as f32);
         }
-        out.insert((cx, cz), coarse);
     }
     out
 }
@@ -389,6 +472,70 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// [`plan_pyramid`] must describe **exactly** the levels [`build_pyramid`]
+    /// produces — the invariant the partial write-back rebuild leans on to know
+    /// which coarse tiles a full rebuild would have emitted without emitting them.
+    #[test]
+    fn the_plan_matches_the_built_pyramid() {
+        for n in [1, 2, 3, 5, 8, 9, 16] {
+            for opts in [
+                PyramidOptions::default(),
+                PyramidOptions {
+                    max_levels: 1,
+                    min_tiles: 4,
+                },
+                PyramidOptions {
+                    max_levels: 8,
+                    min_tiles: 1,
+                },
+                PyramidOptions {
+                    max_levels: 0,
+                    min_tiles: 4,
+                },
+            ] {
+                let t = poly_terrain(5, 2.0, n);
+                let built = build_pyramid(&t, opts);
+                let coords: BTreeSet<(i32, i32)> = t.tiles().map(|(&c, _)| c).collect();
+                let plan = plan_pyramid(&coords, t.meters_per_sample(), opts);
+                assert_eq!(plan.len(), built.len(), "{n}×{n} tiles, {opts:?}");
+                for (p, b) in plan.iter().zip(&built) {
+                    assert_eq!(p.lod, b.lod);
+                    assert_eq!(p.meters_per_sample, b.meters_per_sample);
+                    assert_eq!(
+                        p.coords,
+                        b.tiles.keys().copied().collect::<BTreeSet<_>>(),
+                        "lod {} coords disagree for {n}×{n}",
+                        p.lod
+                    );
+                }
+            }
+        }
+    }
+
+    /// The reduction kernel is shared: decimating one block in isolation is
+    /// **bit-identical** to the same tile inside a whole-level decimation.
+    #[test]
+    fn one_block_decimates_identically_to_a_whole_level() {
+        let t = poly_terrain(5, 2.0, 4);
+        let fine: BTreeMap<(i32, i32), &TerrainTile> = t.tiles().map(|(&c, ti)| (c, ti)).collect();
+        let whole = downsample_tiles(5, 2.0, &fine);
+        for (&coarse, expect) in &whole {
+            // Feed the kernel ONLY the four block members, as a write-back does.
+            let block: BTreeMap<(i32, i32), TerrainTile> = BLOCK_SCAN
+                .iter()
+                .filter_map(|&(a, b)| {
+                    let c = (2 * coarse.0 + a, 2 * coarse.1 + b);
+                    fine.get(&c).map(|t| (c, (*t).clone()))
+                })
+                .collect();
+            assert_eq!(
+                &downsample_block(5, 2.0, coarse, &block),
+                expect,
+                "block {coarse:?} differs from the whole-level reduction"
+            );
         }
     }
 

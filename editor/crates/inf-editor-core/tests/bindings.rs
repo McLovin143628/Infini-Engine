@@ -15,12 +15,12 @@ use inf_editor_core::ipc::{
     ErosionReportDto, FileEntryDto, FoliageSettingsDto, GitFileDto, GitStatusDto, GizmoModeDto,
     GizmoSpaceDto, ImportEventDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto,
     PackageKindCountDto, PackageResultDto, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto,
-    PropFieldDto, PropValueDto, RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot,
-    SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto,
-    SeqKeyDto, SeqTrackDto, SequenceDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind,
-    SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainImportPlanDto, TerrainImportResultDto,
-    TerrainImportSettingsDto, TilemapCellDto, TilemapDto, ToolModeDto, ViewModeDto, ViewportDrop,
-    ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto,
+    PropFieldDto, PropValueDto, RecentProjectDto, SaveResultDto, SceneDelta, SceneNode,
+    SceneSnapshot, SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto,
+    SeqInterpDto, SeqKeyDto, SeqTrackDto, SequenceDto, Snap2DDto, Snap3DDto, SortingLayerDto,
+    SpawnKind, SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainImportPlanDto,
+    TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto, TilemapDto, ToolModeDto,
+    ViewModeDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -53,6 +53,7 @@ fn export_bindings() {
     DeleteResult::export_all(&cfg).expect("export DeleteResult");
     ImportEventDto::export_all(&cfg).expect("export ImportEventDto");
     ViewportToolStatusDto::export_all(&cfg).expect("export ViewportToolStatusDto");
+    SaveResultDto::export_all(&cfg).expect("export SaveResultDto");
     HeightmapProbeDto::export_all(&cfg).expect("export HeightmapProbeDto");
     TerrainImportSettingsDto::export_all(&cfg).expect("export TerrainImportSettingsDto");
     TerrainImportPlanDto::export_all(&cfg).expect("export TerrainImportPlanDto");

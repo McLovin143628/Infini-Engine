@@ -1502,12 +1502,86 @@ pub fn record_of(doc: &SceneDoc, guid: Uuid) -> Option<EntityRecord> {
     })
 }
 
-/// Project the document into a serializable [`SceneFile`].
+/// Drop a **streamed** terrain's working set before it is written to a file.
+///
+/// The `.inf_terrain` is the authority for an asset-backed terrain (P16.4b), and
+/// the level is a *reference* to it — so the level must never persist the tiles
+/// the editor paged in to sculpt. Without this, a session that brushed a few
+/// square kilometres would silently grow the `.inf_lvl` by every page it touched
+/// and, worse, that copy would shadow the asset on the next load: two authorities
+/// for the same ground, disagreeing the moment either is edited.
+///
+/// A no-op for an inline terrain (`asset: None`), whose `data` *is* the
+/// authority, and a no-op for a streamed terrain that was never edited (its
+/// working set is already empty) — so no existing level's bytes move.
+///
+/// Deliberately applied in [`to_scene_file`] only, **not** in [`record_of`]:
+/// undo's delete/restore snapshots go through the same record type and must keep
+/// the working set, or undoing a terrain delete would resurrect the entity with
+/// its unsaved edits thrown away.
+///
+/// # It applies to the PIE handoff too, and that is the point
+///
+/// `crate::pie` ships the live scene to the player through this same function, so
+/// **PIE sees the last *saved* `.inf_terrain`, not the unsaved working set** — the
+/// player streams the file, exactly as a shipped build does. That is the PIE ==
+/// shipping invariant working as intended, not a gap: handing the player tiles
+/// that are not in any asset would make PIE show something no shipped run could
+/// ever reproduce. Save before playing to see terrain edits in PIE.
+fn strip_streamed_terrain(mut rec: EntityRecord) -> EntityRecord {
+    if let Some(t) = rec.terrain.as_mut() {
+        if t.asset.is_some() && !t.data.is_empty() {
+            t.data = inf_terrain::TerrainData::new(t.tile_resolution, t.meters_per_sample);
+        }
+    }
+    rec
+}
+
+/// Where a [`SceneFile`] projection is going, and therefore whether a streamed
+/// terrain's working set survives it (P16.4b).
+///
+/// The distinction is **load-bearing**, not cosmetic: the same projection feeds
+/// two very different consumers, and getting it wrong silently destroys work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScenePersist {
+    /// The projection becomes **bytes** — an `.inf_lvl`, an autosave payload, a
+    /// diagnostics dump, or the PIE handoff. A streamed terrain's working set is
+    /// stripped: the `.inf_terrain` is the authority, and the level must not
+    /// carry (or shadow) a second copy. See [`strip_streamed_terrain`].
+    File,
+    /// The projection stays **in this process** and will be applied back onto the
+    /// same document — Simulate's enter/exit snapshot. Nothing is stripped,
+    /// because "restore the document exactly as it was" has to include the
+    /// streamed terrain's unsaved working set and its write-back marks.
+    ///
+    /// Using [`File`](Self::File) here would destroy every unsaved terrain edit on
+    /// Play → Stop, *and* leave the undo stack replaying height deltas into tiles
+    /// `revert_delta` would recreate flat — the exact corruption the residency
+    /// design note warns about.
+    Memory,
+}
+
+/// Project the document into a serializable [`SceneFile`] **for a file**.
+///
+/// Shorthand for `to_scene_file_for(doc, ScenePersist::File)`. An in-process
+/// snapshot must use [`to_scene_file_for`] with
+/// [`ScenePersist::Memory`] — see there.
 pub fn to_scene_file(doc: &SceneDoc) -> SceneFile {
+    to_scene_file_for(doc, ScenePersist::File)
+}
+
+/// Project the document into a [`SceneFile`], choosing whether streamed-terrain
+/// working sets survive ([`ScenePersist`]).
+pub fn to_scene_file_for(doc: &SceneDoc, persist: ScenePersist) -> SceneFile {
     let entities = doc
         .order()
         .iter()
-        .filter_map(|&guid| record_of(doc, guid))
+        .filter_map(|&guid| {
+            record_of(doc, guid).map(|rec| match persist {
+                ScenePersist::File => strip_streamed_terrain(rec),
+                ScenePersist::Memory => rec,
+            })
+        })
         .collect();
     SceneFile {
         schema_version: SCHEMA_VERSION,
@@ -1859,6 +1933,56 @@ pub fn write_recovery_bytes(payload: &[u8], dir: &Path) -> Result<(), String> {
     std::fs::write(recovery_path(dir), payload).map_err(|e| format!("write recovery: {e}"))
 }
 
+// ── the streamed-terrain recovery note (P16.4b) ──────────────────────────
+
+/// The sidecar note recording that unsaved **terrain** edits existed when the
+/// recovery file was written.
+///
+/// A plain text file beside the recovery payload rather than a field inside it:
+/// the note is a *diagnostic about what was lost*, not document content, and the
+/// `.inf_lvl` schema has no business growing a slot for something no load can
+/// ever act on.
+pub fn recovery_terrain_note_path(dir: &Path) -> PathBuf {
+    dir.join("crash-recovery.terrain-edits.txt")
+}
+
+/// Record (or, with `None`, clear) the unsaved-terrain-edits note beside the
+/// recovery file.
+///
+/// Autosave calls this every time it writes recovery, because terrain edits are
+/// **not** autosaved: asset writes are explicit (see [`crate::terrain_edit`]), so
+/// a crash really does lose them and the recovered level's terrain really is the
+/// last saved asset. Saying so is the honest thing; silently restoring a level
+/// whose terrain is older than the rest of it is not.
+pub fn write_recovery_terrain_note(dir: &Path, note: Option<&str>) -> Result<(), String> {
+    let path = recovery_terrain_note_path(dir);
+    match note {
+        Some(text) => {
+            std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?;
+            std::fs::write(&path, text).map_err(|e| format!("write terrain note: {e}"))
+        }
+        None => {
+            let _ = std::fs::remove_file(&path);
+            Ok(())
+        }
+    }
+}
+
+/// Take the unsaved-terrain-edits note, consuming it (like the recovery file).
+///
+/// `None` when the last session had no unsaved terrain edits — or none at all,
+/// which is the same thing from a recovery's point of view.
+pub fn take_recovery_terrain_note(dir: &Path) -> Option<String> {
+    let path = recovery_terrain_note_path(dir);
+    let note = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    if note.trim().is_empty() {
+        None
+    } else {
+        Some(note)
+    }
+}
+
 /// If a recovery file exists, load it and delete it (consumed on startup so a
 /// clean exit removes it). Returns `None` when there's nothing to recover.
 ///
@@ -1870,6 +1994,11 @@ pub fn take_recovery(dir: &Path) -> Option<SceneDoc> {
     let path = recovery_path(dir);
     if !path.exists() {
         return None;
+    }
+    // Whatever happens to the payload, the terrain note is consumed and reported
+    // exactly once — a recovery that silently kept it would warn again next boot.
+    if let Some(note) = take_recovery_terrain_note(dir) {
+        tracing::warn!("crash recovery: {note}");
     }
     match load(&path) {
         Ok(doc) => {
@@ -1892,9 +2021,11 @@ pub fn take_recovery(dir: &Path) -> Option<SceneDoc> {
     }
 }
 
-/// Remove the recovery file (called on a clean save / exit).
+/// Remove the recovery file (called on a clean save / exit), and its
+/// unsaved-terrain-edits note with it — a clean save wrote the terrain too.
 pub fn clear_recovery(dir: &Path) {
     let _ = std::fs::remove_file(recovery_path(dir));
+    let _ = std::fs::remove_file(recovery_terrain_note_path(dir));
 }
 
 #[cfg(test)]
@@ -2279,6 +2410,40 @@ mod tests {
             !recovery_path(dir.path()).exists(),
             "the recovery file is consumed on successful recovery"
         );
+    }
+
+    /// P16.4b: the recovery **terrain note** is written beside the payload,
+    /// consumed exactly once by a recovery, and cleared by a clean save — so the
+    /// user is warned about lost terrain edits once and never again.
+    #[test]
+    fn the_terrain_note_rides_beside_recovery_and_is_consumed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = SceneDoc::with_demo();
+        assert!(take_recovery_terrain_note(dir.path()).is_none(), "no note");
+
+        write_recovery(&doc, dir.path()).unwrap();
+        write_recovery_terrain_note(dir.path(), Some("42 unsaved terrain tile(s)")).unwrap();
+        assert!(recovery_terrain_note_path(dir.path()).exists());
+
+        // Recovering consumes the note (and logs it).
+        assert!(take_recovery(dir.path()).is_some());
+        assert!(
+            !recovery_terrain_note_path(dir.path()).exists(),
+            "the note must be consumed with the recovery"
+        );
+        assert!(take_recovery_terrain_note(dir.path()).is_none());
+
+        // A clean save clears both, so the next boot warns about nothing.
+        write_recovery(&doc, dir.path()).unwrap();
+        write_recovery_terrain_note(dir.path(), Some("still unsaved")).unwrap();
+        clear_recovery(dir.path());
+        assert!(!recovery_path(dir.path()).exists());
+        assert!(!recovery_terrain_note_path(dir.path()).exists());
+
+        // `None` clears rather than writing an empty note.
+        write_recovery_terrain_note(dir.path(), Some("x")).unwrap();
+        write_recovery_terrain_note(dir.path(), None).unwrap();
+        assert!(take_recovery_terrain_note(dir.path()).is_none());
     }
 
     /// P15.2: a corrupt / truncated recovery file is handled gracefully — no
@@ -4024,8 +4189,9 @@ mod tests {
     // ── v9 (P16.3) terrain asset reference ─────────────────────────────────
 
     /// A `.inf_terrain` asset reference on a `Terrain` persists across
-    /// save → load and re-encodes byte-identically, with the inline tile data
-    /// riding alongside it (both paths legal — the editor still authors inline).
+    /// save → load and re-encodes byte-identically — and (P16.4b) the level
+    /// **does not** carry the working set beside it: the asset is the authority,
+    /// so the tiles the editor paged in to sculpt are stripped on write.
     #[test]
     fn terrain_asset_reference_persists_across_save_load_v9() {
         let asset_guid = uuid::Uuid::from_u128(0x1603_00AA);
@@ -4056,11 +4222,21 @@ mod tests {
         assert_eq!(t.asset, Some(asset_guid), "the asset ref survives the trip");
         assert_eq!(
             t.data.tile_count(),
-            2,
-            "inline tiles ride alongside the ref"
+            0,
+            "a streamed terrain's working set must never reach the .inf_lvl"
         );
+        // The grid configuration still does — a streamed terrain still needs to
+        // know its own resolution/spacing before the first page arrives.
+        assert_eq!(t.tile_resolution, fixture_terrain().tile_resolution);
+        assert_eq!(t.meters_per_sample, fixture_terrain().meters_per_sample);
+
+        // The IN-MEMORY component is untouched by the write: stripping is a
+        // serialization rule, not a mutation (the working set is still there to
+        // sculpt and still there to write back).
+        let live = doc.terrain_data_and_origin(e).expect("terrain in the doc");
+        assert_eq!(live.0.tile_count(), 2, "the write must not mutate the doc");
         assert_eq!(
-            t.data.get_tile((0, 0)).unwrap().weight_sample(4, 1, 2),
+            live.0.get_tile((0, 0)).unwrap().weight_sample(4, 1, 2),
             [40, 100, 80, 35]
         );
 

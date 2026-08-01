@@ -16,6 +16,8 @@ pub mod scene;
 pub mod sequencer;
 pub mod simulate;
 pub mod sorting;
+/// Editing an asset-backed terrain + the save write-back (P16.4b).
+pub mod terrain_edit;
 /// Editor-side camera-driven terrain streaming (P16.3b2).
 pub mod terrain_stream;
 pub mod thumbnail;

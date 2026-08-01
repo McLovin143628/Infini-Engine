@@ -11,11 +11,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use inf_editor_core::ipc::{
-    AddableComponentDto, DetailsDto, LevelSettingsDto, PropValueDto, SceneSnapshot, SpawnKind,
-    TilemapCellDto, TilemapDto,
+    AddableComponentDto, DetailsDto, LevelSettingsDto, PropValueDto, SaveResultDto, SceneSnapshot,
+    SpawnKind, TilemapCellDto, TilemapDto,
 };
 use inf_editor_core::scene::serialize::EntityRecord;
 use inf_editor_core::scene::{details, diff, serialize, tilemap, SceneDoc};
+use inf_editor_core::terrain_edit;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
@@ -748,7 +749,7 @@ pub async fn scene_save(
     app: AppHandle,
     state: State<'_, SceneState>,
     path: Option<String>,
-) -> Result<(), String> {
+) -> Result<SaveResultDto, String> {
     // Route the target: an explicit path (Save As) writes there and becomes the
     // current level; a plain Save (no path) overwrites the current level, else
     // the quicksave fallback.
@@ -764,23 +765,89 @@ pub async fn scene_save(
     // Encode under the doc lock (with any live sequencer scrub rolled back to the
     // authored values), then write the files AFTER releasing the lock — the
     // viewport locks the same doc every frame, so disk IO must not be held under it.
-    let enc = {
+    //
+    // Streamed-terrain edits are staged in the same window and written in the same
+    // "outside the lock" phase (P16.4b): a `.inf_terrain` rewrite is a
+    // whole-payload operation and must never happen under the doc lock.
+    let (enc, staged) = {
         let mut doc = lock(&state.doc)?;
         let enc = doc.with_authored_scene(|d| serialize::encode_scene(d, None))?;
+        let staged = terrain_edit::stage_terrain_edits(&doc);
         doc.mark_saved();
-        enc
+        (enc, staged)
     };
     serialize::write_encoded(&enc, &target)?;
-    // A clean save invalidates the crash-recovery file.
+
+    // Fold this session's sculpt/paint into the `.inf_terrain` assets, then clear
+    // the write-back marks for the ones that really landed and re-point the
+    // viewport's streams at the rewritten files. A failure here surfaces AFTER the
+    // level is on disk and leaves the terrain edits dirty, so the next save retries
+    // them rather than losing them.
+    let mut result = SaveResultDto {
+        path: target.to_string_lossy().to_string(),
+        terrain_assets_written: 0,
+        terrain_tiles_written: 0,
+        terrain_failures: Vec::new(),
+    };
+    if !staged.is_empty() {
+        let content_root = app
+            .try_state::<crate::commands::ProjectState>()
+            .and_then(|p| p.current_content_root());
+        match content_root {
+            Some(root) => {
+                let report = terrain_edit::write_terrain_edits(&staged, &root);
+                if !report.is_empty() {
+                    let mut doc = lock(&state.doc)?;
+                    terrain_edit::mark_terrain_edits_saved(&mut doc, &report);
+                    drop(doc);
+                    tracing::info!("{}", report.summary());
+                }
+                result.terrain_assets_written = report.written.len() as u32;
+                result.terrain_tiles_written = report.tiles() as u32;
+                result.terrain_failures = report
+                    .unwritten
+                    .iter()
+                    .map(|u| format!("terrain {}: {}", u.entity, u.reason))
+                    .collect();
+                if !report.written.is_empty() {
+                    if let Some(viewport) = app.try_state::<crate::commands::ViewportState>() {
+                        viewport.reload_terrain_stores();
+                    }
+                }
+            }
+            None => {
+                let msg = format!(
+                    "{} terrain(s) have unsaved edits but no project is open, so there is no \
+                     content root to write the .inf_terrain into — the edits stay in memory",
+                    staged.len()
+                );
+                tracing::warn!("scene_save: {msg}");
+                result.terrain_failures.push(msg);
+            }
+        }
+    }
+    // A clean save invalidates the crash-recovery file — but ONLY when the save
+    // really was clean (P16.4b audit). Terrain edits that could not be written are
+    // still in memory and nowhere else, so dropping the recovery file would leave
+    // them with no backstop at all; keeping it (and the note beside it) is the
+    // whole point of the note.
     if let Ok(dir) = data_dir(&app) {
-        serialize::clear_recovery(&dir);
+        let terrain_still_dirty = lock(&state.doc)?.has_unsaved_terrain_edits();
+        if terrain_still_dirty {
+            tracing::warn!(
+                "scene_save: unsaved terrain edits survived the save — keeping the \
+                 crash-recovery file and its note"
+            );
+        } else {
+            serialize::clear_recovery(&dir);
+        }
     }
     // Save As adopts the written path as the current level.
     if let Some(p) = new_current {
         *state.current_level_path.lock().map_err(|e| e.to_string())? = Some(p);
     }
     emit_world_delta(&app, &state);
-    Ok(())
+    Ok(result)
 }
 
 /// The path the current level last opened from / saved to (`null` when
@@ -808,6 +875,13 @@ pub async fn scene_open(
         *doc = loaded;
         doc.snapshot()
     };
+    // The document was replaced wholesale, so every terrain stream is keyed on
+    // the OLD document's entity GUIDs: dead memory holding a whole `.inf_terrain`
+    // payload, plus any tile it pinned for an unsaved edit (which nothing would
+    // ever unpin). Release them (P16.4b).
+    if let Some(viewport) = app.try_state::<crate::commands::ViewportState>() {
+        viewport.clear_terrain_streams();
+    }
     // The opened file becomes the current level (a later plain Save overwrites it).
     *state.current_level_path.lock().map_err(|e| e.to_string())? = Some(path);
     // A fresh document restarts the version counter (lower than the doc we just
@@ -824,14 +898,25 @@ pub async fn scene_open(
 pub async fn scene_autosave(app: AppHandle, state: State<'_, SceneState>) -> Result<(), String> {
     let dir = data_dir(&app)?;
     // Encode under the lock (authored values if a scrub is live), write outside it.
-    let payload = {
+    let (payload, terrain_note) = {
         let mut doc = lock(&state.doc)?;
-        if !doc.is_dirty() {
+        // A document can be CLEAN and still carry unsaved terrain edits — a save
+        // whose `.inf_terrain` write failed marks the level saved but leaves the
+        // tiles dirty. Gating autosave on `is_dirty()` alone would then starve the
+        // one mechanism that records those edits ever existed (P16.4b audit).
+        if !doc.is_dirty() && !doc.has_unsaved_terrain_edits() {
             return Ok(());
         }
-        doc.with_authored_scene(|d| serialize::encode(&serialize::to_scene_file(d)))?
+        let payload =
+            doc.with_authored_scene(|d| serialize::encode(&serialize::to_scene_file(d)))?;
+        (payload, terrain_edit::unsaved_terrain_note(&doc))
     };
     serialize::write_recovery_bytes(&payload, &dir)?;
+    // Autosave deliberately does NOT rewrite `.inf_terrain` assets — asset writes
+    // are explicit (P16.4b). Record that unsaved terrain edits existed instead, so
+    // a recovery can say honestly that the terrain it restores is the last SAVED
+    // one rather than pretending the level is whole.
+    serialize::write_recovery_terrain_note(&dir, terrain_note.as_deref())?;
     Ok(())
 }
 
@@ -845,6 +930,13 @@ pub async fn scene_new(
         *doc = SceneDoc::new();
         doc.snapshot()
     };
+    // The document was replaced wholesale, so every terrain stream is keyed on
+    // the OLD document's entity GUIDs: dead memory holding a whole `.inf_terrain`
+    // payload, plus any tile it pinned for an unsaved edit (which nothing would
+    // ever unpin). Release them (P16.4b).
+    if let Some(viewport) = app.try_state::<crate::commands::ViewportState>() {
+        viewport.clear_terrain_streams();
+    }
     // A brand-new scene is untitled — forget any current-level path.
     *state.current_level_path.lock().map_err(|e| e.to_string())? = None;
     // Reset the delta baseline: the fresh document's version counter restarts

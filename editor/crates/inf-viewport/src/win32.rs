@@ -127,6 +127,11 @@ enum Cmd {
     SetTerrainContentRoot(Option<std::path::PathBuf>),
     /// Rebuild the loose `.inf_terrain` index in place (a terrain import landed).
     RefreshTerrainIndex,
+    /// Reopen every live terrain stream's `.inf_terrain` in place — a save just
+    /// wrote sculpt/paint edits back into it (P16.4b).
+    ReloadTerrainStores,
+    /// Release every terrain stream — the document was replaced (P16.4b).
+    ClearTerrainStreams,
     /// Adopt a foreign (PIE player) window into the viewport slot: reparent it
     /// to our parent, position it at the hole, and hide our own child (embedded
     /// PIE, P9.4). The `isize` is the foreign HWND.
@@ -226,6 +231,20 @@ impl ViewportHandle {
     /// pushed when a terrain import finishes (P16.4a).
     pub fn refresh_terrain_index(&self) {
         let _ = self.tx.send(Cmd::RefreshTerrainIndex);
+    }
+
+    /// Reopen every live terrain stream's `.inf_terrain` in place — pushed when a
+    /// save wrote sculpt/paint edits back into the asset (P16.4b). Live streams
+    /// keep their resident pages, so saving does not blink the terrain.
+    pub fn reload_terrain_stores(&self) {
+        let _ = self.tx.send(Cmd::ReloadTerrainStores);
+    }
+
+    /// Release every terrain stream (its pages, its edit pins and its
+    /// `.inf_terrain` payload) — pushed when the open document is replaced by
+    /// File ▸ Open / File ▸ New (P16.4b).
+    pub fn clear_terrain_streams(&self) {
+        let _ = self.tx.send(Cmd::ClearTerrainStreams);
     }
 
     /// Adopt a foreign (PIE player) window into the viewport slot (embedded PIE,
@@ -841,9 +860,9 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
     // presenting, the loop sleeps instead of busy-spinning on a dead surface (M3).
     let mut visible = true;
 
-    // Last published streamed-terrain state, so the status event only fires on
-    // a change (see the drain below).
-    let mut last_terrain_streamed = false;
+    // Last published terrain tool-state, so the status event only fires on a
+    // change (see the drain below).
+    let mut last_terrain_state = (false, false, false);
 
     'outer: loop {
         // Recover from an embedded PIE window that vanished without a
@@ -903,6 +922,8 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 Ok(Cmd::SetViewMode(m)) => host.set_view_mode(m),
                 Ok(Cmd::SetTerrainContentRoot(root)) => host.set_terrain_content_root(root),
                 Ok(Cmd::RefreshTerrainIndex) => host.refresh_terrain_index(),
+                Ok(Cmd::ReloadTerrainStores) => host.reload_terrain_stores(),
+                Ok(Cmd::ClearTerrainStreams) => host.clear_terrain_streams(),
                 Ok(Cmd::EmbedForeign(foreign)) => {
                     // Position the foreign window at the hole immediately. If no
                     // SetRect has arrived yet, fall back to our child's current
@@ -1222,12 +1243,18 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
         // streamed flag is a standing fact, so it is published only on change —
         // an event per frame would flood the webview for no information.
         let status = host.take_tool_status();
-        let streamed = host.terrain_is_streamed();
-        if status.is_some() || streamed != last_terrain_streamed {
-            last_terrain_streamed = streamed;
+        let terrain_state = (
+            host.terrain_is_streamed(),
+            host.terrain_is_editable(),
+            host.terrain_has_unsaved_edits(),
+        );
+        if status.is_some() || terrain_state != last_terrain_state {
+            last_terrain_state = terrain_state;
             sink(ViewportEvent::ToolStatus(ViewportToolStatusDto {
                 message: status,
-                terrain_streamed: streamed,
+                terrain_streamed: terrain_state.0,
+                terrain_editable: terrain_state.1,
+                terrain_unsaved_edits: terrain_state.2,
             }));
         }
 

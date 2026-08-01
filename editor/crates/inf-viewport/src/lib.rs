@@ -173,6 +173,8 @@ impl ViewportHandle {
     pub fn set_view_mode(&self, _mode: inf_editor_core::ipc::ViewModeDto) {}
     pub fn set_terrain_content_root(&self, _root: Option<std::path::PathBuf>) {}
     pub fn refresh_terrain_index(&self) {}
+    pub fn reload_terrain_stores(&self) {}
+    pub fn clear_terrain_streams(&self) {}
     pub fn embed_foreign(&self, _hwnd: isize) {}
     pub fn release_foreign(&self) {}
     pub fn destroy(&self) {}

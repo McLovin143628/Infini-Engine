@@ -606,6 +606,99 @@ impl SceneDoc {
         Some((data, translation))
     }
 
+    // ── streamed-terrain editing (P16.4b) ────────────────────────────────
+    //
+    // An asset-backed terrain's `Terrain.data` is its **editable working set**:
+    // tiles page into it on demand from the `.inf_terrain`, brushes sculpt them
+    // exactly as they sculpt an inline terrain's, and the dirty set is what a
+    // save writes back. See `crate::terrain_edit` for the whole design note —
+    // these are only the document's half of the seam.
+
+    /// The `.inf_terrain` asset `guid`'s terrain streams from, or `None` for an
+    /// inline terrain (or a non-terrain entity).
+    pub fn terrain_asset_of(&self, guid: Uuid) -> Option<Uuid> {
+        let e = self.world.entity_of(guid)?;
+        self.world.world().get::<Terrain>(e)?.asset
+    }
+
+    /// Every asset-backed terrain entity in the document, in creation order.
+    pub fn streamed_terrain_entities(&self) -> Vec<Uuid> {
+        self.order
+            .iter()
+            .copied()
+            .filter(|&g| self.terrain_asset_of(g).is_some())
+            .collect()
+    }
+
+    /// The tiles of `guid`'s terrain awaiting write-back to its `.inf_terrain`.
+    pub fn terrain_dirty_tiles(&self, guid: Uuid) -> Vec<inf_terrain::TileKey> {
+        let Some(e) = self.world.entity_of(guid) else {
+            return Vec::new();
+        };
+        match self.world.world().get::<Terrain>(e) {
+            Some(t) => t.data.dirty_tiles(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether **any** streamed terrain carries unsaved edits — what flips the
+    /// viewport's status chip and what the crash-recovery note reports.
+    pub fn has_unsaved_terrain_edits(&self) -> bool {
+        self.streamed_terrain_entities()
+            .into_iter()
+            .any(|g| !self.terrain_dirty_tiles(g).is_empty())
+    }
+
+    /// Run `f` against `guid`'s live `TerrainData` — the raw residency door the
+    /// streamer pages a brush footprint through.
+    ///
+    /// Deliberately **non-touching**: `f` is a residency operation, not an edit
+    /// (the brush that follows does its own touching), so this neither dirties the
+    /// document nor bumps its version. `None` when the entity has no `Terrain`.
+    pub(crate) fn with_terrain_data_mut<R>(
+        &mut self,
+        guid: Uuid,
+        f: impl FnOnce(&mut TerrainData) -> R,
+    ) -> Option<R> {
+        let e = self.world.entity_of(guid)?;
+        let mut terrain = self.world.world_mut().get_mut::<Terrain>(e)?;
+        Some(f(&mut terrain.data))
+    }
+
+    /// Clear the write-back marks of the tiles a save actually wrote, returning
+    /// how many were cleared.
+    ///
+    /// `written` is `(key, stamp-at-staging)`. A mark is cleared **only** when the
+    /// tile still carries that stamp: the rewrite ran with the document unlocked,
+    /// so anything sculpted during it is newer than the bytes that reached disk
+    /// and must stay dirty for the next save
+    /// ([`TerrainData::clear_dirty_if_unchanged`](inf_terrain::TerrainData::clear_dirty_if_unchanged)).
+    ///
+    /// Bumps the version **without** dirtying (like the Simulate loop), so the
+    /// viewport re-reads the "unsaved terrain edits" state on the next frame while
+    /// the freshly saved document stays clean.
+    pub fn terrain_mark_written_back(
+        &mut self,
+        guid: Uuid,
+        written: &[(inf_terrain::TileKey, u64)],
+    ) -> usize {
+        let Some(e) = self.world.entity_of(guid) else {
+            return 0;
+        };
+        let mut cleared = 0;
+        if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
+            for &(key, stamp) in written {
+                if terrain.data.clear_dirty_if_unchanged(key, stamp) {
+                    cleared += 1;
+                }
+            }
+        }
+        if cleared > 0 {
+            self.bump_version_for_runtime();
+        }
+        cleared
+    }
+
     /// Apply one brush dab into an ongoing `stroke`, mutating the entity's live
     /// `TerrainData`, and bump the version so the render terrain cache re-uploads
     /// the dirtied tiles next frame (live sculpt feedback). No-op without a

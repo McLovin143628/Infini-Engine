@@ -61,7 +61,7 @@ use inf_physics::{
     FixedStepper, PhysicsBridge2D, PhysicsBridge3D,
 };
 
-use crate::scene::serialize::{apply_to_doc, to_scene_file, SceneFile};
+use crate::scene::serialize::{apply_to_doc, to_scene_file_for, SceneFile, ScenePersist};
 use crate::scene::SceneDoc;
 
 /// The default Simulate/physics rate (fixed updates per second).
@@ -261,7 +261,13 @@ impl SimSession {
         gravity: DVec2,
         hz: f64,
     ) -> Self {
-        let snapshot = to_scene_file(doc);
+        // ScenePersist::Memory, NOT the file projection (P16.4b): this snapshot
+        // is applied straight back onto the same document on `exit`, so it must
+        // carry a streamed terrain's unsaved working set and write-back marks.
+        // The file projection strips them — Play → Stop would then delete every
+        // unsaved terrain edit and leave the undo stack replaying height deltas
+        // into tiles `revert_delta` recreates flat.
+        let snapshot = to_scene_file_for(doc, ScenePersist::Memory);
         let bridge = PhysicsBridge2D::new(gravity);
         // P11.3: a 3D bridge alongside the 2D one. The 2D vertical gravity maps to
         // world −Y; a character applies its own gravity through move_and_slide.

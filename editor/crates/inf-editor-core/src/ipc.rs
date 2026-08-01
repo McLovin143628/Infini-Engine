@@ -387,16 +387,45 @@ pub struct ImportEventDto {
 
 /// The viewport's tool-state notice (`viewport://tool-status`, P16.4).
 ///
-/// One channel for both halves of the B2 status seam, because they change for
-/// the same reason and land in the same corner of the UI: `message` is the
-/// one-shot rejection a tool raised (drained from the host's `take_tool_status`)
-/// and goes to the status bar; `terrain_streamed` is the standing fact that the
-/// projected terrain pages from a `.inf_terrain` and therefore cannot be
-/// sculpted yet, and disables the brush tools in the viewport toolbar.
+/// One channel for every half of the status seam, because they change for the
+/// same reason and land in the same corner of the UI: `message` is the one-shot
+/// rejection a tool raised (drained from the host's `take_tool_status`) and goes
+/// to the status bar; the three booleans are standing facts, published only when
+/// one of them changes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct ViewportToolStatusDto {
     pub message: Option<String>,
+    /// The projected terrain pages from a `.inf_terrain` asset.
     pub terrain_streamed: bool,
+    /// That asset is writable, so Sculpt/Paint may edit it (P16.4b). Only
+    /// meaningful together with `terrain_streamed`: *streamed && !editable* is
+    /// the one case the brush tools are disabled.
+    pub terrain_editable: bool,
+    /// The terrain carries tiles not yet written back to its asset — the
+    /// toolbar's "unsaved terrain edits" chip and the save reminder.
+    pub terrain_unsaved_edits: bool,
+}
+
+/// What one `scene_save` actually accomplished (P16.4b).
+///
+/// A level save is no longer a single all-or-nothing act: the `.inf_lvl` and the
+/// `.inf_terrain` assets its streamed terrains reference are **separate files**,
+/// and one can land while another does not. Returning this instead of `()` is
+/// what lets the shell say "the level saved, this terrain did not" rather than
+/// reporting a clean save that quietly did less than the user asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SaveResultDto {
+    /// Absolute path of the `.inf_lvl` payload written.
+    pub path: String,
+    /// How many `.inf_terrain` assets were rewritten with sculpt/paint edits.
+    pub terrain_assets_written: u32,
+    /// How many level-0 tiles were folded into those assets.
+    pub terrain_tiles_written: u32,
+    /// One line per terrain whose edits could **not** be written. Empty on a
+    /// fully clean save. These edits are still in memory, still marked unsaved,
+    /// and are retried by the next save — nothing was lost, but nothing was
+    /// persisted either, and the user has to be told.
+    pub terrain_failures: Vec<String>,
 }
 
 // ── Terrain import wizard (P16.4) ────────────────────────────────────────

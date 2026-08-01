@@ -61,6 +61,11 @@ export default function WorldSettingsPanel() {
   const setPixelSnapEnabled = useViewportStore((s) => s.setPixelSnapEnabled);
   const pixelsPerUnit = useViewportStore((s) => s.pixelsPerUnit);
   const setPixelsPerUnit = useViewportStore((s) => s.setPixelsPerUnit);
+  // Terrain edits live in the `.inf_terrain` asset and are written ONLY by an
+  // explicit save (autosave never touches assets — P16.4b), so the level's
+  // "Unsaved" row above does not cover them. Say so here, next to it.
+  const terrainStreamed = useViewportStore((s) => s.terrainStreamed);
+  const terrainUnsavedEdits = useViewportStore((s) => s.terrainUnsavedEdits);
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">
@@ -74,6 +79,19 @@ export default function WorldSettingsPanel() {
               <span className="text-(--ink-warning)">Yes — unsaved changes</span>
             ) : (
               "No"
+            )}
+          </ReadOnly>
+        </PropertyRow>
+        <PropertyRow label="Terrain">
+          <ReadOnly>
+            {terrainUnsavedEdits ? (
+              <span className="text-(--ink-warning)">
+                Unsaved edits — Ctrl+S writes them into the .inf_terrain asset
+              </span>
+            ) : terrainStreamed ? (
+              "Streamed (.inf_terrain)"
+            ) : (
+              "Inline"
             )}
           </ReadOnly>
         </PropertyRow>

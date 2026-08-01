@@ -57,6 +57,7 @@ mod splat;
 pub mod stream;
 mod tile;
 pub mod wants;
+pub mod writeback;
 
 use glam::DVec3;
 
@@ -76,7 +77,10 @@ pub use import::{
     HeightmapImport, HeightmapProbe, TerrainError,
 };
 pub use noise::fbm_signed;
-pub use pyramid::{build_pyramid, PyramidLevel, PyramidOptions};
+pub use pyramid::{
+    build_pyramid, coarsen_coords, downsample_block, plan_pyramid, PyramidLevel, PyramidOptions,
+    PyramidPlanLevel,
+};
 pub use raycast::{raycast_terrain, TerrainHit};
 pub use region::HeightRegion;
 pub use residency::{tile_range, MemoryTileStore, ResidencyReport, TileStore};
@@ -87,9 +91,10 @@ pub use stream::{
 };
 pub use tile::{TerrainTile, TileKey, DEFAULT_WEIGHT};
 pub use wants::{
-    advance_cut, clamp_cut, render_wants, sim_wants, RenderWantsParams, TileCatalog, TileGrid,
-    TileIndex, DEFAULT_HYSTERESIS,
+    advance_cut, brush_wants, clamp_cut, render_wants, sim_wants, RenderWantsParams, TileCatalog,
+    TileGrid, TileIndex, DEFAULT_HYSTERESIS,
 };
+pub use writeback::{rewrite_terrain_asset, TerrainEdits};
 
 /// The minimal world-space height query seam downstream systems code against
 /// (PCG scatter, sculpt brushes). Kept deliberately small: a paged heightfield,

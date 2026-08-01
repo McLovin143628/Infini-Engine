@@ -13,6 +13,7 @@ import { create } from "zustand";
 import type { DetailsDto } from "../bindings/DetailsDto";
 import type { LevelSettingsDto } from "../bindings/LevelSettingsDto";
 import type { PropValueDto } from "../bindings/PropValueDto";
+import type { SaveResultDto } from "../bindings/SaveResultDto";
 import type { SceneDelta } from "../bindings/SceneDelta";
 import type { SceneNode } from "../bindings/SceneNode";
 import type { SceneSnapshot } from "../bindings/SceneSnapshot";
@@ -307,8 +308,7 @@ export const useSceneStore = create<SceneState>((set, get) => ({
     });
     if (!path) return; // cancelled
     try {
-      await sceneIpc.save(path);
-      useShellStore.getState().pushStatus("Level saved.");
+      reportSaveResult(await sceneIpc.save(path), "Level");
     } catch (e) {
       useShellStore.getState().pushStatus(`Save As failed: ${errText(e)}`);
     }
@@ -414,6 +414,35 @@ export function isEffectivelyVisible(nodes: Record<string, SceneNode>, guid: str
   return nodes[guid]?.effective_visible ?? true;
 }
 
+/**
+ * Report what a save actually accomplished (P16.4b).
+ *
+ * A level save is no longer all-or-nothing: the `.inf_lvl` and the
+ * `.inf_terrain` assets its streamed terrains reference are separate files, and
+ * a terrain write can fail while the level lands. Those edits are NOT lost —
+ * they stay dirty and the next save retries them — but the user has to be told,
+ * or a failed terrain write reads as a clean save.
+ */
+export function reportSaveResult(res: SaveResultDto, what = "Level"): void {
+  const status = useShellStore.getState().pushStatus;
+  if (res.terrain_failures.length > 0) {
+    status(
+      `${what} saved, but terrain edits were NOT written: ${res.terrain_failures.join("; ")}. ` +
+        "They are still unsaved — fix the cause and save again.",
+      10000,
+    );
+    return;
+  }
+  if (res.terrain_assets_written > 0) {
+    status(
+      `${what} saved (${res.terrain_tiles_written} terrain tile(s) written to ` +
+        `${res.terrain_assets_written} asset(s)).`,
+    );
+    return;
+  }
+  status(`${what} saved.`);
+}
+
 /** Attach scene handlers to the enumerated Edit/File menu commands (P3.4/P3.5). */
 export function registerSceneCommands(): void {
   const s = () => useSceneStore.getState();
@@ -428,9 +457,9 @@ export function registerSceneCommands(): void {
   wire("edit.copy", () => s().copySelected());
   wire("edit.cut", () => s().cutSelected());
   wire("edit.paste", () => s().paste());
-  wire("file.saveLevel", () => sceneIpc.save());
+  wire("file.saveLevel", async () => reportSaveResult(await sceneIpc.save()));
   wire("file.saveLevelAs", () => s().saveLevelAs());
-  wire("file.saveAll", () => sceneIpc.save());
+  wire("file.saveAll", async () => reportSaveResult(await sceneIpc.save(), "All"));
   wire("file.newLevel", async () => s().applySnapshot(await sceneIpc.newScene()));
   wire("file.openLevel", async () => s().applySnapshot(await sceneIpc.open()));
 }

@@ -50,6 +50,7 @@ import type { SearchHitDto } from "../bindings/SearchHitDto";
 import type { FoliageSettingsDto } from "../bindings/FoliageSettingsDto";
 import type { SculptSettingsDto } from "../bindings/SculptSettingsDto";
 import type { SearchOptsDto } from "../bindings/SearchOptsDto";
+import type { SaveResultDto } from "../bindings/SaveResultDto";
 import type { SceneSnapshot } from "../bindings/SceneSnapshot";
 import type { SeqInterpDto } from "../bindings/SeqInterpDto";
 import type { SequenceDto } from "../bindings/SequenceDto";
@@ -320,7 +321,8 @@ export const scene = {
   undo: (): Promise<void> => invoke("scene_undo"),
   redo: (): Promise<void> => invoke("scene_redo"),
   /** Save to `path`, or a default quicksave when omitted. */
-  save: (path: string | null = null): Promise<void> => invoke("scene_save", { path }),
+  save: (path: string | null = null): Promise<SaveResultDto> =>
+    invoke("scene_save", { path }),
   open: (path: string | null = null): Promise<SceneSnapshot> =>
     invoke<SceneSnapshot>("scene_open", { path }),
   newScene: (): Promise<SceneSnapshot> => invoke<SceneSnapshot>("scene_new"),

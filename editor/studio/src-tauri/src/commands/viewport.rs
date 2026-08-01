@@ -66,6 +66,30 @@ impl ViewportState {
         }
     }
 
+    /// Reopen every live terrain stream's `.inf_terrain` in place — pushed by the
+    /// save path once it has written sculpt/paint edits back into the assets
+    /// (P16.4b). Live streams keep their resident pages and published cut, so a
+    /// save never blinks the terrain the user is looking at.
+    pub fn reload_terrain_stores(&self) {
+        if let Ok(guard) = self.0.lock() {
+            if let Some(handle) = guard.as_ref() {
+                handle.reload_terrain_stores();
+            }
+        }
+    }
+
+    /// Release every terrain stream — pushed when the open document is replaced
+    /// (File ▸ Open / File ▸ New, P16.4b). The streams are keyed on the previous
+    /// document's entity GUIDs, so keeping them leaks a whole `.inf_terrain`
+    /// payload plus any tile it pinned for an unsaved edit.
+    pub fn clear_terrain_streams(&self) {
+        if let Ok(guard) = self.0.lock() {
+            if let Some(handle) = guard.as_ref() {
+                handle.clear_terrain_streams();
+            }
+        }
+    }
+
     /// Release an embedded foreign window and restore the native viewport child.
     pub fn release_foreign(&self) {
         if let Ok(guard) = self.0.lock() {
