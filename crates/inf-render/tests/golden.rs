@@ -22,16 +22,17 @@ use inf_render::gizmo::{self, GizmoAxis, GizmoMode};
 use inf_render::golden::{image_diff, within_tolerance};
 use inf_render::passes::vgeom::{cpu_visible_set, cull_flags, frustum_planes, lod_threshold};
 use inf_render::{
-    assemble_patches, cull_visible, expand_text, Ambient2D, AtmosphereParams, AtmosphereQuality,
-    BloomSettings, EngineRenderer, GiSettings, GpuContext, HAlign, HeadlessTarget, HeightFog,
-    LightKind, MeshInstance, PrebatchedRun, PrimMesh, RenderChunk, RenderLight, RenderLight2D,
-    RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer, RenderTerrainTile,
-    RenderTilemap, RenderView, ShadowSettings, SkinnedInstance, SkinnedMeshData, SkinnedVertex,
-    SpriteInstance, SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey, TextParams,
-    TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode,
-    BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
-    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT,
-    TILE_CHUNK_DIM,
+    assemble_patches, cull_visible, detail_texel, expand_text, shape_texel, Ambient2D,
+    AtmosphereParams, AtmosphereQuality, BloomSettings, CloudParams, CloudQuality, CloudVolumes,
+    EngineRenderer, GiSettings, GpuContext, HAlign, HeadlessTarget, HeightFog, LightKind,
+    MeshInstance, PrebatchedRun, PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene,
+    RenderSettings, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap,
+    RenderView, ShadowSettings, SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance,
+    SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey, TextParams, TilemapParams,
+    VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode, BILLBOARD_CYLINDRICAL,
+    BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP,
+    BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, CPU_GPU_EXACT_FRACTION, CPU_GPU_SHADOW_TOLERANCE,
+    CPU_GPU_TEXEL_TOLERANCE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -3025,6 +3026,16 @@ fn golden_editor_default() {
         "the default clock should put the sun ~55° up, got {elevation:.1}°"
     );
     scene.grid_enabled = true;
+    // P17.3: a new level now boots with CLOUDS. This is the one golden P17.3
+    // re-blessed, and this line is the reason — `inf_editor_core::scene::demo`
+    // sets `clouds_enabled = true` on the default scene's `SkyAtmosphere` while
+    // the *component* default stays false (which is what every existing v12 level
+    // lifts to). Everything else stays at `CloudParams::default()`, so what this
+    // pictures is the documented defaults rather than a private tuning.
+    scene.atmosphere.clouds = CloudParams {
+        enabled: true,
+        ..CloudParams::default()
+    };
 
     // Ground plane + the three props, at the default scene's placements/colours.
     let mut push = |mesh, t: DVec3, s: Vec3, c: [f32; 3], id| {
@@ -3121,5 +3132,868 @@ fn golden_editor_default() {
             H * 92 / 100
         )) > 0.15,
         "the ground and props are too dark under the default sun"
+    );
+
+    // P17.3: and the default level really does have clouds in it. Without this,
+    // the golden's one re-bless would be justified by a code comment alone — this
+    // is what makes "the new-level look changed" a measured claim. (Declared
+    // after the cloud helpers below, which is fine: Rust does not care, and
+    // keeping this assertion beside the rest of `editor_default` does.)
+    let mut cloudless = scene.clone();
+    cloudless.atmosphere.clouds = CloudParams::default();
+    cloudless.mark_dirty();
+    let bare = render(&gpu, &cloudless, &view);
+    let covered = changed_fraction(&img, &bare, H / 2);
+    eprintln!("editor_default cloud cover {covered:.3}");
+    assert!(
+        covered > 0.05,
+        "the default level's sky has no clouds in it ({covered:.3}) — the \
+         `editor_default` re-bless would then have no reason"
+    );
+}
+
+// ── P17.3 volumetric clouds ──────────────────────────────────────────────────
+//
+// The cloud goldens extend the P17.2 time-of-day sweep rather than inventing a
+// scene: `tod_scene` builds the sun from `inf_math::solar` at the component
+// defaults, and each test flips ONLY the cloud fields. What the images show is
+// therefore what a level actually gets when it ticks the Clouds box, not a
+// hand-tuned demo of the raymarch.
+//
+// None of the 29 pre-P17.3 goldens moves: clouds default to disabled, the bake
+// and raymarch nodes dispatch nothing, and the lit shaders' cloud-shadow multiply
+// sits inside a guarded branch. That was verified the P17.2 way — running the
+// whole suite under `INF_BLESS_GOLDENS=1` and confirming `git status` reports
+// zero changed PNGs — not merely asserted.
+
+/// A cloud layer over the P17.2 sky. `coverage`/`cloud_type` are the two knobs a
+/// level actually reaches for; everything else stays at `CloudParams::default()`.
+fn cloud_scene(
+    seconds: f64,
+    coverage: f32,
+    cloud_type: f32,
+) -> (RenderScene, inf_math::solar::SkyBodies) {
+    let (mut scene, bodies) = tod_scene(seconds);
+    scene.atmosphere.clouds = CloudParams {
+        enabled: true,
+        coverage,
+        cloud_type,
+        ..CloudParams::default()
+    };
+    (scene, bodies)
+}
+
+/// The same scene with clouds switched back off — the off-path control every
+/// cloud golden compares against, so "the feature drew something" is measured
+/// rather than assumed.
+fn without_clouds(scene: &RenderScene) -> RenderScene {
+    let mut s = scene.clone();
+    s.atmosphere.clouds = CloudParams::default();
+    s.mark_dirty();
+    s
+}
+
+/// Fraction of the given screen band that a cloud layer **perceptibly** changed.
+///
+/// Perceptibly, not at all: with premultiplied compositing plus aerial
+/// perspective, an alpha of a thousandth still moves the low bit of a pixel, so
+/// an exact-inequality count reports 100 % coverage for any sky that has a wisp
+/// anywhere. The threshold (8/255 summed over RGB, ~1 % of range) is what makes
+/// "covered" mean what an author means by it.
+fn changed_fraction(a: &[u8], b: &[u8], rows: u32) -> f32 {
+    let mut n = 0u32;
+    for y in 0..rows {
+        for x in 0..W {
+            let p = px(a, x, y);
+            let q = px(b, x, y);
+            let d: i32 = (0..3).map(|c| (p[c] as i32 - q[c] as i32).abs()).sum();
+            if d > 8 {
+                n += 1;
+            }
+        }
+    }
+    n as f32 / (W * rows) as f32
+}
+
+/// Standard deviation of luma over the top `rows` of the frame — the measure that
+/// tells broken cloud apart from a flat wash.
+fn luma_spread(img: &[u8], rows: u32) -> f32 {
+    let n = (W * rows) as f32;
+    let mut sum = 0.0;
+    let mut sum2 = 0.0;
+    for y in 0..rows {
+        for x in 0..W {
+            let p = px(img, x, y);
+            let l = luma([
+                p[0] as f32 / 255.0,
+                p[1] as f32 / 255.0,
+                p[2] as f32 / 255.0,
+            ]);
+            sum += l;
+            sum2 += l * l;
+        }
+    }
+    (sum2 / n - (sum / n) * (sum / n)).max(0.0).sqrt()
+}
+
+/// **Overcast noon.** Solid coverage of a low stratus sheet: the sky must be
+/// mostly cloud, and the cloud must be *bright* — an overcast sky is the single
+/// hardest case for a single-scattering march, which renders it as soot. The
+/// assertion on absolute luminance is the one that catches that.
+#[test]
+fn golden_clouds_overcast() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = cloud_scene(43_200.0, 1.0, 0.15);
+    // Stratus geometry: a thinner sheet, lower down.
+    scene.atmosphere.clouds.bottom = 900.0;
+    scene.atmosphere.clouds.top = 2200.0;
+    scene.mark_dirty();
+    let view = horizon_view(bodies.sun, 30.0);
+    let img = check_golden(&gpu, "clouds_overcast", &scene, &view);
+
+    let bare = render(&gpu, &without_clouds(&scene), &view);
+    let sky = mean_rgb(&img, 0, 0, W, H / 2);
+    let clear = mean_rgb(&bare, 0, 0, W, H / 2);
+    let covered = changed_fraction(&img, &bare, H / 2);
+    eprintln!("clouds_overcast sky {sky:?} vs clear {clear:?}; covered {covered:.3}");
+
+    // An overcast sky is bright, and grey rather than blue: the droplets' albedo
+    // is neutral, so the sky's blue excess must collapse.
+    assert!(luma(sky) > 0.30, "overcast sky is soot: {sky:?}");
+    assert!(
+        sky[2] - sky[0] < (clear[2] - clear[0]) * 0.7,
+        "overcast did not de-blue the sky: {sky:?} vs {clear:?}"
+    );
+    assert!(
+        covered > 0.9,
+        "coverage 1.0 left {:.1}% of the sky untouched",
+        100.0 * (1.0 - covered)
+    );
+}
+
+/// **Scattered cumulus at noon** — the default look, and the one that proves the
+/// field has *structure*: broken cloud with real gaps, not a uniform haze. The
+/// assertion is on the spread of luma across the sky band, which a flat wash
+/// cannot pass, plus a floor on how much clear sky survives.
+#[test]
+fn golden_clouds_scattered() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    // The *component default* coverage, so this golden pictures what a level
+    // actually gets rather than a tuned demo — the P17.2 doctrine.
+    let (scene, bodies) = cloud_scene(43_200.0, CloudParams::default().coverage, 0.9);
+    let view = horizon_view(bodies.sun, 28.0);
+    let img = check_golden(&gpu, "clouds_scattered", &scene, &view);
+
+    let bare = render(&gpu, &without_clouds(&scene), &view);
+    let rows = H / 3;
+    let cloudy = luma_spread(&img, rows);
+    let clear = luma_spread(&bare, rows);
+    let covered = changed_fraction(&img, &bare, rows);
+    eprintln!("clouds_scattered luma sd {cloudy:.4} vs clear {clear:.4}; covered {covered:.3}");
+    assert!(
+        cloudy > clear * 1.8,
+        "scattered clouds have no structure: sd {cloudy:.4} vs clear sky {clear:.4}"
+    );
+    // Both ends, which is the whole meaning of "scattered": the clouds are really
+    // there, and so are the gaps.
+    assert!(
+        covered > 0.2,
+        "the default coverage drew almost nothing ({covered:.3})"
+    );
+    assert!(
+        covered < 0.9,
+        "no clear sky survives at the default coverage ({covered:.3}) — that is          overcast, and the default is meant to be broken cumulus"
+    );
+}
+
+/// **Dusk clouds.** A cloud's lit top is lit by *the sun's transmittance through
+/// the atmosphere*, so at 19:45 it must be measurably warmer than the same cloud
+/// at noon. This is the single assertion that would catch clouds being lit by a
+/// hard-coded white sun instead of by the transmittance LUT.
+#[test]
+fn golden_clouds_dusk() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, bodies) = cloud_scene(71_100.0, 0.6, 0.85);
+    assert!(
+        bodies.sun.y > 0.0 && bodies.sun.y < 0.2,
+        "19:45 should put the sun just above the horizon"
+    );
+    let view = horizon_view(bodies.sun, 14.0);
+    let img = check_golden(&gpu, "clouds_dusk", &scene, &view);
+
+    // The same clouds under a noon sun, from the same relative viewpoint.
+    let (noon_scene, noon_bodies) = cloud_scene(43_200.0, 0.6, 0.85);
+    let noon = render(&gpu, &noon_scene, &horizon_view(noon_bodies.sun, 14.0));
+
+    let dusk_rgb = mean_rgb(&img, 0, 0, W, H / 2);
+    let noon_rgb = mean_rgb(&noon, 0, 0, W, H / 2);
+    let warm = |c: [f32; 3]| c[0] / c[2].max(1e-4);
+    eprintln!(
+        "clouds_dusk {dusk_rgb:?} (r/b {:.3}) vs noon {noon_rgb:?} (r/b {:.3})",
+        warm(dusk_rgb),
+        warm(noon_rgb)
+    );
+    assert!(
+        warm(dusk_rgb) > warm(noon_rgb) + 0.15,
+        "dusk clouds are not warmer than noon clouds: {dusk_rgb:?} vs {noon_rgb:?}"
+    );
+}
+
+/// **Night clouds.** Stars stay visible through the gaps while being occluded
+/// where a cloud is. The cloud pass composites over the sky pass, so this is the
+/// test that the premultiplied alpha is doing its job rather than the clouds
+/// being drawn behind everything.
+#[test]
+fn golden_clouds_night() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, bodies) = cloud_scene(84_600.0, 0.45, 0.8);
+    assert!(bodies.sun.y < -0.2, "23:30 should be deep night");
+    let view = horizon_view(-bodies.sun, 35.0);
+    let img = check_golden(&gpu, "clouds_night", &scene, &view);
+
+    let bare = render(&gpu, &without_clouds(&scene), &view);
+
+    // Stars survive the gaps. Asserted by REMOVING them: a contrast-against-the-
+    // mean test would also be satisfied by a bright cloud edge, whereas the only
+    // thing that can make the peak drop when `star_intensity` goes to zero is a
+    // star that was visible. This is the same reasoning `sky_night` uses, taken
+    // one step further because there is now something else bright in frame.
+    let mut starless = scene.clone();
+    starless.atmosphere.star_intensity = 0.0;
+    starless.mark_dirty();
+    let no_stars = render(&gpu, &starless, &view);
+
+    let m = mean_rgb(&img, 0, 0, W, H / 2);
+    let field = (m[0] + m[1] + m[2]) / 3.0;
+    let peak = brightest(&img, 0, 0, W, H / 2);
+    let peak_starless = brightest(&no_stars, 0, 0, W, H / 2);
+    eprintln!("clouds_night field {field:.3} peak {peak:.3} (starless {peak_starless:.3})");
+    assert!(
+        peak > peak_starless + 0.04,
+        "no stars survive the gaps: the brightest pixel barely moves when the          starfield is switched off ({peak:.3} vs {peak_starless:.3})"
+    );
+    assert!(peak > field + 0.05, "no star contrast at all");
+    assert_ne!(img, bare, "night clouds drew nothing");
+
+    // ...and the clouds really do occlude: somewhere the frame got DARKER than
+    // the starfield alone, which only happens where a dim night cloud covered a
+    // star.
+    let mut occluded = 0u32;
+    for y in 0..H / 2 {
+        for x in 0..W {
+            let a = px(&img, x, y);
+            let b = px(&bare, x, y);
+            let sa = a[0] as i16 + a[1] as i16 + a[2] as i16;
+            let sb = b[0] as i16 + b[1] as i16 + b[2] as i16;
+            if sa < sb - 12 {
+                occluded += 1;
+            }
+        }
+    }
+    eprintln!("clouds_night occluded {occluded} px");
+    assert!(
+        occluded > 0,
+        "clouds never occluded a single star — is the alpha compositing backwards?"
+    );
+}
+
+/// The **depth** contract: geometry in front of the cloud layer occludes it.
+/// Without it the raymarch would hang in front of the world, which is exactly
+/// what drawing clouds inside the sky pass would have produced (that pass clears
+/// depth, so there is nothing to test against yet).
+#[test]
+fn clouds_are_occluded_by_geometry() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = cloud_scene(43_200.0, 1.0, 0.4);
+    let view = horizon_view(bodies.sun, 20.0);
+    let sky_only = render(&gpu, &scene, &view);
+
+    // A wall a few metres in front of the camera, filling the middle of the
+    // frame. Everything behind it — including a kilometre of overcast — must go.
+    let ahead = DVec3::new(bodies.sun.x, 0.36, bodies.sun.z).normalize();
+    scene.instances.push(MeshInstance::lit(
+        ahead * 12.0,
+        Quat::IDENTITY,
+        Vec3::new(60.0, 60.0, 0.5),
+        [0.5, 0.1, 0.1, 1.0],
+        1,
+    ));
+    scene.mark_dirty();
+    let walled = render(&gpu, &scene, &view);
+    let walled_clear = render(&gpu, &without_clouds(&scene), &view);
+
+    let centre = |img: &[u8]| -> Vec<u8> {
+        (H * 42 / 100..H * 58 / 100)
+            .flat_map(|y| (W * 42 / 100..W * 58 / 100).map(move |x| (x, y)))
+            .flat_map(|(x, y)| px(img, x, y))
+            .collect()
+    };
+    assert_ne!(
+        centre(&sky_only),
+        centre(&walled),
+        "the wall covers nothing in the sampled region — this test would pass vacuously"
+    );
+    assert_eq!(
+        centre(&walled),
+        centre(&walled_clear),
+        "clouds bled through solid geometry — the depth test is not rejecting them"
+    );
+}
+
+/// The **intersecting**-geometry contract, which the entry-depth test alone
+/// cannot satisfy: a summit that pokes *into* the cloud deck must not be veiled
+/// by the cloud physically behind it.
+///
+/// This is the case `clouds_are_occluded_by_geometry` does not reach. There the
+/// wall is entirely in front of the slab, so its fragments' depth beats the
+/// slab's entry plane and the hardware test rejects the cloud outright. A mesa
+/// whose top is 500 m inside a 1.5–4 km deck sits *beyond* that entry plane, so
+/// it passes a `Greater` test — and without the `t_far` clamp the shader would
+/// composite the whole marched span over it, including the five kilometres of
+/// cloud behind the mountain. On an 8 km terrain that is not an exotic case, it
+/// is Tuesday.
+///
+/// Measured as a **reduction**, not as an absence, because the correct answer is
+/// not zero: there really is ~1 km of cloud between the eye and the mesa's face,
+/// and it should still be visible. The reference for "the whole veil" is the same
+/// scene with the mesa removed, so the two numbers are produced by the same
+/// shader on the same pixels and the comparison needs no second build.
+///
+/// Mutation-verified: disabling the `t_far` clamp in `cloud.wgsl` moves the
+/// measured alpha over the mesa from **0.275 to 0.588** and fails the assertion.
+/// (It does not go to 1.0 because only ~1.4 km of this thin deck lies behind the
+/// mesa along the ray, and ACES compresses the top end — the veil is a doubling,
+/// not a wipe, which is exactly the sort of wrongness that ships unnoticed.)
+#[test]
+fn clouds_do_not_veil_geometry_inside_the_slab() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut open, bodies) = cloud_scene(43_200.0, 1.0, 0.3);
+    // A LOW, THIN deck rather than the default 1.5–4 km one, for a reason worth
+    // stating: at the default extinction a 2.5 km column saturates within the
+    // first kilometre, so the cloud *behind* a mountain contributes almost
+    // nothing and the bug hides itself. A 100–900 m deck at an optical depth
+    // around 1 is both real content (a valley stratus deck) and the regime where
+    // the veil is actually visible — which is exactly where a player would see it.
+    open.atmosphere.clouds.bottom = 100.0;
+    open.atmosphere.clouds.top = 900.0;
+    open.atmosphere.clouds.density = 0.0012;
+    open.mark_dirty();
+    // Looking up at ~10°, so the ray enters the deck ~580 m out and the mesa's
+    // face sits just past that — the correct span is short and the naive one is
+    // the rest of the deck.
+    let view = horizon_view(bodies.sun, 10.0);
+
+    // A mesa 800 m away rising to 250 m: its top 150 m are inside the deck.
+    let ahead = DVec3::new(bodies.sun.x, 0.0, bodies.sun.z).normalize();
+    let mut walled = open.clone();
+    walled.instances.push(MeshInstance::lit(
+        ahead * 800.0 + DVec3::new(0.0, 125.0, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(3000.0, 250.0, 200.0),
+        [0.42, 0.36, 0.30, 1.0],
+        1,
+    ));
+    walled.mark_dirty();
+
+    let open_clouds = render(&gpu, &open, &view);
+    let open_clear = render(&gpu, &without_clouds(&open), &view);
+    let walled_clouds = render(&gpu, &walled, &view);
+    let walled_clear = render(&gpu, &without_clouds(&walled), &view);
+
+    // The mesa's silhouette, derived rather than hard-coded: the pixels the mesa
+    // changed in the cloudless pair are exactly the ones it covers.
+    let mask: Vec<(u32, u32)> = (0..H)
+        .flat_map(|y| (0..W).map(move |x| (x, y)))
+        .filter(|&(x, y)| px(&walled_clear, x, y) != px(&open_clear, x, y))
+        .collect();
+    assert!(
+        mask.len() > (W * H) as usize / 20,
+        "the mesa covers only {} px — this test would prove nothing",
+        mask.len()
+    );
+
+    // Mean luminance over the mesa's pixels. Comparing RGB *deltas* would be a
+    // mistake here, and was the first thing tried: the cloud sits over a dark
+    // mesa in one frame and over a bright sky in the other, so the same alpha
+    // produces wildly different deltas and the metric reported 97 % either way.
+    // What is comparable is the composited **alpha**, and over a near-black
+    // surface that is directly recoverable.
+    let lum = |img: &[u8]| -> f32 {
+        let sum: f32 = mask
+            .iter()
+            .map(|&(x, y)| {
+                let p = px(img, x, y);
+                luma([
+                    p[0] as f32 / 255.0,
+                    p[1] as f32 / 255.0,
+                    p[2] as f32 / 255.0,
+                ])
+            })
+            .sum();
+        sum / mask.len() as f32
+    };
+    // `open_clouds` at these pixels is the same cloud seen at ~full alpha against
+    // the sky, so it stands in for the cloud's own radiance, and the dark mesa
+    // stands in for zero:
+    //   alpha = (L_composited − L_background) / (L_cloud − L_background)
+    let bg = lum(&walled_clear);
+    let cloud = lum(&open_clouds);
+    let composited = lum(&walled_clouds);
+    let alpha = (composited - bg) / (cloud - bg).max(1e-4);
+    eprintln!(
+        "veil over {} mesa px: background {bg:.4}, cloud {cloud:.4}, composited \
+         {composited:.4} => alpha {alpha:.3}",
+        mask.len()
+    );
+
+    assert!(
+        cloud > bg + 0.05,
+        "the cloud is not brighter than the mesa ({cloud:.4} vs {bg:.4}) — the \
+         alpha estimate below would be meaningless"
+    );
+    assert!(
+        alpha < 0.45,
+        "geometry inside the slab is still veiled at alpha {alpha:.3} — the whole \
+         deck behind the mesa is being composited over it, so the `t_far` depth \
+         clamp is not doing its job"
+    );
+    // ...and the correct answer is not zero: ~120 m of real cloud sits between the
+    // eye and the mesa's face and must still be visible. An over-eager clamp (one
+    // that stopped at the slab entry, say) would fail here.
+    assert!(
+        alpha > 0.02,
+        "the mesa shows no cloud at all (alpha {alpha:.3}) — the clamp went too far \
+         and removed the cloud that is genuinely in front of it"
+    );
+}
+
+/// Cloud **shadows on the world**: the layer darkens lit geometry softly and at a
+/// large scale, and is byte-neutral when off.
+#[test]
+fn cloud_shadows_darken_lit_geometry() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = cloud_scene(43_200.0, 1.0, 0.2);
+    // A big bright ground plane plus the sky's own key light, so what the ground
+    // band measures is dominated by the DIRECT term rather than by the sky.
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -1.0, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(4000.0, 1.0, 4000.0),
+        [0.8, 0.8, 0.8, 1.0],
+        1,
+    ));
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        position: DVec3::ZERO,
+        direction: bodies.sun.as_vec3(),
+        color: [1.0, 0.98, 0.95],
+        intensity: 3.0,
+        range: 0.0,
+        inner_cos: 1.0,
+        outer_cos: 0.0,
+        cast_shadows: false,
+    });
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(0.0, 3.0, 0.0), DVec3::new(0.0, 0.5, 60.0));
+
+    let shaded = render(&gpu, &scene, &view);
+    let mut unshadowed = scene.clone();
+    unshadowed.atmosphere.clouds.shadow_strength = 0.0;
+    unshadowed.mark_dirty();
+    let lit = render(&gpu, &unshadowed, &view);
+
+    let ground = |img: &[u8]| mean_rgb(img, 0, H * 78 / 100, W, H * 96 / 100);
+    let a = ground(&shaded);
+    let b = ground(&lit);
+    eprintln!("cloud shadow: ground {a:?} vs unshadowed {b:?}");
+    assert!(
+        luma(a) < luma(b) - 0.01,
+        "a solid overcast layer did not darken the ground: {a:?} vs {b:?}"
+    );
+
+    // Off ⇒ byte-identical to the same scene with clouds entirely absent, over
+    // the GROUND band (the sky above still has clouds in it either way). This is
+    // what the lit shaders' guarded branch exists for.
+    let mut no_clouds = scene.clone();
+    no_clouds.atmosphere.clouds = CloudParams::default();
+    no_clouds.mark_dirty();
+    let bare = render(&gpu, &no_clouds, &view);
+    let band = |img: &[u8]| -> Vec<u8> {
+        (H * 78 / 100..H * 96 / 100)
+            .flat_map(|y| (0..W).map(move |x| (x, y)))
+            .flat_map(|(x, y)| px(img, x, y))
+            .collect()
+    };
+    assert_eq!(
+        band(&lit),
+        band(&bare),
+        "shadow_strength = 0 is not byte-identical to no clouds at all — the \
+         off path is not off"
+    );
+}
+
+/// The bake-determinism gate, one level below the frame: two independent
+/// renderers must write byte-identical noise volumes and shadow maps. A
+/// nondeterministic bake surfaces here rather than as a flaky pixel three passes
+/// downstream — the same shape as `atmosphere_luts_are_deterministic`.
+#[test]
+fn cloud_bakes_are_deterministic() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, bodies) = cloud_scene(43_200.0, 0.7, 0.8);
+    let view = horizon_view(bodies.sun, 20.0);
+
+    let bake = || {
+        let target = HeadlessTarget::new(&gpu, W, H);
+        let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+        let a = renderer.atmosphere();
+        (
+            a.read_cloud_shape(&gpu).expect("shape readback"),
+            a.read_cloud_detail(&gpu).expect("detail readback"),
+            a.read_cloud_shadow(&gpu).expect("shadow readback"),
+        )
+    };
+    let (s1, d1, h1) = bake();
+    let (s2, d2, h2) = bake();
+    assert_eq!(s1, s2, "cloud shape volume is not deterministic");
+    assert_eq!(d1, d2, "cloud detail volume is not deterministic");
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&h1),
+        bits(&h2),
+        "cloud shadow map is not deterministic"
+    );
+
+    // ...and not trivially empty (an undispatched bake would also compare equal).
+    assert!(s1.iter().any(|&b| b != 0), "shape volume is empty");
+    assert!(d1.iter().any(|&b| b != 0), "detail volume is empty");
+    assert!(
+        h1.iter().any(|&v| v < 0.99),
+        "the shadow map is uniformly transparent — did the bake dispatch?"
+    );
+    let q = CloudQuality::High;
+    let r = q.shape_res() as usize;
+    assert_eq!(s1.len(), r * r * r * 4);
+    let r = q.detail_res() as usize;
+    assert_eq!(d1.len(), r * r * r * 4);
+    let r = q.shadow_res() as usize;
+    assert_eq!(h1.len(), r * r);
+}
+
+/// **CPU/GPU parity of the noise bake.** The GPU volumes must reproduce
+/// `inf_render::shape_texel` / `detail_texel` to within the documented envelope:
+/// at most `CPU_GPU_TEXEL_TOLERANCE` LSBs anywhere, and exactly equal for at
+/// least `CPU_GPU_EXACT_FRACTION` of texels.
+///
+/// The envelope exists because WGSL permits an implementation to contract
+/// `a*b + c` into an FMA, which shifts a result by ~1 ULP and, after the
+/// `* 255 + 0.5` quantization, by at most one LSB. Everything the field is built
+/// on that *could* diverge structurally — the hash, the gradient table, the
+/// lattice wrap — is pure integer arithmetic, and a mistake in any of those moves
+/// whole texels rather than last places, failing both halves of the gate at once.
+#[test]
+fn cloud_noise_bake_matches_the_cpu_reference() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, bodies) = cloud_scene(43_200.0, 0.7, 0.8);
+    let view = horizon_view(bodies.sun, 20.0);
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+    let res = renderer.atmosphere();
+    let q = res.cloud_quality;
+    let seed = scene.atmosphere.clouds.seed;
+
+    let compare =
+        |what: &str, data: &[u8], edge: u32, reference: &dyn Fn(u32, u32, u32) -> [u8; 4]| {
+            let mut exact = 0u64;
+            let mut total = 0u64;
+            let mut worst = 0u8;
+            let mut worst_at = (0, 0, 0);
+            for z in 0..edge {
+                for y in 0..edge {
+                    for x in 0..edge {
+                        let i = (((z * edge + y) * edge + x) * 4) as usize;
+                        let got = [data[i], data[i + 1], data[i + 2], data[i + 3]];
+                        let want = reference(x, y, z);
+                        total += 1;
+                        if got == want {
+                            exact += 1;
+                        }
+                        for c in 0..4 {
+                            let d = got[c].abs_diff(want[c]);
+                            if d > worst {
+                                worst = d;
+                                worst_at = (x, y, z);
+                            }
+                        }
+                    }
+                }
+            }
+            let frac = exact as f64 / total as f64;
+            eprintln!(
+            "{what} parity: {:.4}% exact, worst |d| = {worst} LSB at {worst_at:?} ({total} texels)",
+            frac * 100.0
+        );
+            assert!(
+                worst <= CPU_GPU_TEXEL_TOLERANCE,
+                "{what}: worst |d| = {worst} LSB at {worst_at:?} exceeds the \
+             {CPU_GPU_TEXEL_TOLERANCE}-LSB envelope — that is a port error, not FMA contraction"
+            );
+            assert!(
+                frac >= CPU_GPU_EXACT_FRACTION,
+                "{what}: only {:.2}% of texels are bit-exact (the envelope requires {:.0}%)",
+                frac * 100.0,
+                CPU_GPU_EXACT_FRACTION * 100.0
+            );
+        };
+
+    let shape = res.read_cloud_shape(&gpu).expect("shape readback");
+    compare("cloud shape", &shape, q.shape_res(), &|x, y, z| {
+        shape_texel(seed, x, y, z, q.shape_res())
+    });
+    let detail = res.read_cloud_detail(&gpu).expect("detail readback");
+    compare("cloud detail", &detail, q.detail_res(), &|x, y, z| {
+        detail_texel(seed, x, y, z, q.detail_res())
+    });
+}
+
+/// **CPU/GPU parity of the density function**, measured end-to-end through the
+/// cloud-shadow map.
+///
+/// The shadow map is the right probe: every texel is a Beer–Lambert march of
+/// `cloud_density` along the sun, so agreeing on it means agreeing on the whole
+/// density function — the weather bias, the height gradient, the Perlin–Worley
+/// remap, the coverage dissolve and the erosion, in the right order. The CPU
+/// reference evaluates against the **read-back** volumes rather than re-baking
+/// them, so any disagreement is attributable to the density function itself and
+/// not to the (separately gated) bake.
+///
+/// The envelope is relative and much looser than the bake's, for a stated reason:
+/// hardware trilinear filtering carries only ~8 bits of sub-texel precision while
+/// the reference filters in full f32, so exact agreement is not available at any
+/// price. `CPU_GPU_SHADOW_TOLERANCE` is far tighter than what a genuinely wrong
+/// march produces.
+#[test]
+fn cloud_density_matches_the_cpu_reference() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, bodies) = cloud_scene(43_200.0, 0.75, 0.8);
+    let view = horizon_view(bodies.sun, 20.0);
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+    let res = renderer.atmosphere();
+    let q = res.cloud_quality;
+
+    let volumes = CloudVolumes {
+        shape: res.read_cloud_shape(&gpu).expect("shape readback"),
+        shape_res: q.shape_res(),
+        detail: res.read_cloud_detail(&gpu).expect("detail readback"),
+        detail_res: q.detail_res(),
+    };
+    let gpu_map = res.read_cloud_shadow(&gpu).expect("shadow readback");
+    let params = scene.atmosphere.clouds;
+    let sun = bodies.sun.as_vec3().normalize();
+
+    // The map's parameterization, mirrored from `cs_cloud_shadow`.
+    let edge = q.shadow_res();
+    let extent = inf_render::passes::sky_lut::CLOUD_SHADOW_EXTENT_M;
+    let centre = inf_render::passes::sky_lut::AtmosphereGpu::cloud_shadow_centre(
+        [view.eye_world.x as f32, view.eye_world.z as f32],
+        q,
+    );
+
+    // A deterministic scatter of taps rather than every texel: the CPU march is
+    // orders of magnitude slower than the GPU's, and a few thousand taps is
+    // plenty to catch a structural disagreement.
+    let stride = (edge / 48).max(1);
+    let mut worst = 0.0f32;
+    let mut worst_at = (0, 0);
+    let mut sum = 0.0f64;
+    let mut n = 0u64;
+    let mut shadowed = 0u64;
+    for iy in (0..edge).step_by(stride as usize) {
+        for ix in (0..edge).step_by(stride as usize) {
+            let u = (ix as f32 + 0.5) / edge as f32;
+            let v = (iy as f32 + 0.5) / edge as f32;
+            let p = [
+                centre[0] + (u - 0.5) * extent,
+                params.bottom,
+                centre[1] + (v - 0.5) * extent,
+            ];
+            let want =
+                volumes.sun_transmittance(&params, p, [sun.x, sun.y, sun.z], q.shadow_steps());
+            let got = gpu_map[(iy * edge + ix) as usize];
+            let d = (got - want).abs();
+            if d > worst {
+                worst = d;
+                worst_at = (ix, iy);
+            }
+            sum += d as f64;
+            n += 1;
+            if want < 0.99 {
+                shadowed += 1;
+            }
+        }
+    }
+    let mean = sum / n as f64;
+    eprintln!(
+        "cloud density parity: {n} taps, mean |d| = {mean:.5}, worst = {worst:.5} at \
+         {worst_at:?}, {shadowed} taps genuinely shadowed"
+    );
+    // The gate must not pass by both sides finding an empty sky.
+    assert!(
+        shadowed > n / 10,
+        "only {shadowed}/{n} taps are shadowed at all — the fixture is too clear to \
+         test anything"
+    );
+    assert!(
+        worst <= CPU_GPU_SHADOW_TOLERANCE,
+        "worst |d| = {worst:.5} at {worst_at:?} exceeds the documented \
+         {CPU_GPU_SHADOW_TOLERANCE} envelope"
+    );
+    assert!(
+        (mean as f32) < CPU_GPU_SHADOW_TOLERANCE * 0.25,
+        "mean |d| = {mean:.5} is too large even if the worst case fits"
+    );
+}
+
+/// The cloud field drifts with the **level's clock**, not with a wall clock — the
+/// deterministic-wind law. Two renders at the same time of day are byte-identical;
+/// advancing the clock moves the sky; and a whole number of tile wraps is a no-op,
+/// which is what keeps an all-day session from quantizing into stair-steps.
+#[test]
+fn cloud_wind_follows_the_level_clock() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = cloud_scene(43_200.0, 0.6, 0.8);
+    let view = horizon_view(bodies.sun, 25.0);
+
+    scene.atmosphere.clouds.time_s = 600.0;
+    scene.mark_dirty();
+    let a = render(&gpu, &scene, &view);
+    let b = render(&gpu, &scene, &view);
+    assert_eq!(a, b, "the same clock rendered two different skies");
+
+    scene.atmosphere.clouds.time_s = 1200.0;
+    scene.mark_dirty();
+    let later = render(&gpu, &scene, &view);
+    assert_ne!(a, later, "ten minutes of wind moved nothing");
+
+    // One whole tile of drift is exactly a no-op, because the volumes tile. Both
+    // wind components are set to the same speed so they wrap in the same breath.
+    scene.atmosphere.clouds.wind_x = 8.0;
+    scene.atmosphere.clouds.wind_z = 8.0;
+    scene.atmosphere.clouds.time_s = 0.0;
+    scene.mark_dirty();
+    let t0 = render(&gpu, &scene, &view);
+    scene.atmosphere.clouds.time_s = (inf_render::clouds::SHAPE_TILE_M / 8.0) as f64;
+    scene.mark_dirty();
+    let wrapped = render(&gpu, &scene, &view);
+    let (mean, max) = image_diff(&t0, &wrapped, W, H);
+    eprintln!("one-tile wrap: mean {mean:.5} max {max:.5}");
+    assert!(
+        mean < 0.01 && max < 0.08,
+        "a whole tile of wind drift was not a no-op (mean {mean}, max {max}) — the \
+         field is not tiling"
+    );
+}
+
+/// The quality-switch seam, extended to the cloud resources. The three cloud
+/// textures live in `AtmosphereResources` and are recreated with the LUTs, so a
+/// bind group that missed the generation would keep sampling the previous tier's
+/// volumes — silently, exactly as the P17.2 `EnvBinding` comment warns.
+#[test]
+fn cloud_quality_switch_rebuilds_the_cloud_binds() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, bodies) = cloud_scene(43_200.0, 0.7, 0.85);
+    let view = horizon_view(bodies.sun, 25.0);
+
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    let mut settings = RenderSettings::default();
+    let mut frames = Vec::new();
+    let mut seen = Vec::new();
+    let mut sizes = Vec::new();
+    let seed = scene.atmosphere.clouds.seed;
+    for q in [
+        AtmosphereQuality::High,
+        AtmosphereQuality::Low,
+        AtmosphereQuality::Medium,
+        AtmosphereQuality::High,
+    ] {
+        settings.atmosphere.quality = q;
+        renderer.set_settings(settings);
+        renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+        frames.push(target.read_rgba(&gpu).expect("readback"));
+        let a = renderer.atmosphere();
+        seen.push(a.cloud_quality);
+
+        // ── the assertion that actually bites ──
+        //
+        // Every whole-frame comparison below can be satisfied by a STALE bind
+        // group, and that was the original version of this test's flaw: with the
+        // generation dropped from the bake's `GenCache` key, the bake keeps
+        // writing into the *previous* tier's texture views, the newly created
+        // ones stay at their zeroed initial contents, and the frames still differ
+        // by tier because the march step counts come from the uniform rather than
+        // from the bind group. So: read the freshly-created volume back and
+        // require it to carry the field. Zeros mean the bake wrote somewhere else.
+        //
+        // Mutation-verified: dropping `res.generation` from `CloudBakeNode`'s
+        // `noise_bg` key makes this fail on the second tier with an all-zero
+        // volume, while every other assertion in this test still passes.
+        let cq = a.cloud_quality;
+        let shape = a.read_cloud_shape(&gpu).expect("shape readback");
+        assert!(
+            shape.iter().any(|&b| b != 0),
+            "{q:?}: the volume is all zeros after the switch — the bake wrote into              a previous tier's texture, so a cloud bind group is stale"
+        );
+        // Stronger than "not zero": it must be the field this tier should hold, at
+        // this tier's resolution. A stale *render* bind group cannot be caught by
+        // a readback, but a stale bake one cannot survive this.
+        let res = cq.shape_res();
+        for &(x, y, z) in &[
+            (0u32, 0u32, 0u32),
+            (res / 3, res / 2, res / 5),
+            (res - 1, res - 1, res - 1),
+        ] {
+            let i = (((z * res + y) * res + x) * 4) as usize;
+            let got = [shape[i], shape[i + 1], shape[i + 2], shape[i + 3]];
+            let want = shape_texel(seed, x, y, z, res);
+            for c in 0..4 {
+                assert!(
+                    got[c].abs_diff(want[c]) <= CPU_GPU_TEXEL_TOLERANCE,
+                    "{q:?}: texel ({x},{y},{z}) channel {c} is {} not {} — the                      volume does not hold this tier's field",
+                    got[c],
+                    want[c]
+                );
+            }
+        }
+        sizes.push(shape.len());
+    }
+
+    // The tier followed the setting and the volumes really did resize.
+    assert_eq!(
+        seen,
+        vec![
+            CloudQuality::High,
+            CloudQuality::Low,
+            CloudQuality::Medium,
+            CloudQuality::High,
+        ],
+        "the cloud resources did not follow the atmosphere quality"
+    );
+    assert!(
+        sizes[1] < sizes[0],
+        "the Low volume is not smaller than High's"
+    );
+
+    assert_ne!(
+        frames[1], frames[0],
+        "Low and High rendered identically — the cloud tier had no visible effect"
+    );
+    assert_eq!(
+        frames[3], frames[0],
+        "returning to High did not reproduce the High frame — a cloud bind group is \
+         still holding a previous tier's volume"
     );
 }

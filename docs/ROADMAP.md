@@ -1549,6 +1549,278 @@ atmosphere, fog, cloud, or TOD code exists anywhere.
 > remains the artistic override at strength 0 by default. The visual pass — that the four sweep
 > images and the default level actually look good — is human-verified, as every GPU path here is.
 
+> **STATUS: P17.3 COMPLETE** (2026-08-01) — **local gates green; CI pending push.** The sky
+> has clouds. A **raymarched volumetric layer** between two authored altitudes, shaped by
+> hand-rolled seeded 3D noise, drifting with the level's clock, lit by the P17.2 sun through
+> the P17.2 atmosphere, occluding the sky/sun/moon/stars behind it, occluded by the terrain in
+> front of it, and casting a soft kilometre-scale shadow on the world. A **new level boots
+> with it on**.
+>
+> **Where the field lives.** `inf_render::clouds` is pure and GPU-free — the parameter block,
+> the noise generators, the weather field, the height profile, the two-lobe phase, and a CPU
+> **reference implementation of the density function**. So the field is unit-tested on every CI
+> leg, including the ones with no adapter where the golden harness skips: the noise is
+> seed-stable and bake-order-independent, it tiles seamlessly on all three axes, coverage is
+> monotone and genuinely reaches both ends, the height profile closes at the slab's floor *and*
+> its ceiling for every species, and the wind wraps into one tile however long the level has
+> been running. Every function names its WGSL mirror in its doc comment.
+>
+> **The noise is integer-hashed, and that is the whole portability story.** Lattice values come
+> from `cloud_hash`, a pure-integer avalanche — no trigonometry anywhere in the field, per the
+> psin/pcos law the P17.2 starfield established. Perlin's improved-noise gradients are ±1
+> cube-edge directions, so a gradient dot product is two adds and cannot round differently on a
+> different adapter. The shape volume is a Perlin–Worley base (Schneider's remap: dissolve
+> Perlin by inverted Worley fBm, which keeps Perlin's connected topology and Worley's rounded
+> billows) plus three single-octave Worley channels; the detail volume is three more. **Single
+> octaves, not fBm, is a real constraint and not a simplification**: three Worley fBms would
+> each reach 4× their base frequency, putting the alpha channel at 128 cells — past what even a
+> 128³ volume can store — so what got baked would be aliasing rather than detail. The tier
+> table is checked against that Nyquist relation by a test rather than by hand.
+>
+> **Committed values are pinned.** `committed_noise_values_are_bit_stable` asserts four
+> specific RGBA8 texels and three specific hash outputs as literals. If any of them ever moves,
+> a level's sky moved under it and a golden has to be re-blessed **on purpose** — which is the
+> difference between a deterministic field and one that merely happens to be stable today.
+>
+> **CPU/GPU parity, in two gates with two different envelopes.** The bake gate compares every
+> texel of both baked volumes against the CPU reference: measured on Windows/Vulkan, **88.0 %
+> of shape texels and 91.1 % of detail texels are bit-exact, with a worst case of exactly
+> 1 LSB**. The envelope is `≤ 1 LSB everywhere` plus a floor on the exact fraction, and the
+> reasoning is stated rather than fudged — WGSL explicitly permits contracting `a*b + c` into an
+> FMA, which shifts a result by ~1 ULP and, after the `×255 + 0.5` quantization, by at most one
+> LSB, while everything that *could* diverge structurally (the hash, the gradient table, the
+> lattice wrap) is pure integer arithmetic and would move whole texels, failing both halves at
+> once. The **density** gate is measured end-to-end through the cloud-shadow map, because a
+> shadow texel is a Beer–Lambert march of `cloud_density` along the sun and agreeing on it
+> means agreeing on the weather bias, the height gradient, the Perlin–Worley remap, the
+> coverage dissolve and the erosion, in the right order. It evaluates the CPU reference against
+> the **read-back** volumes rather than re-baking them, so a disagreement is attributable to the
+> density function and not to the separately-gated bake. Measured **mean |Δ| 4 × 10⁻⁵, worst
+> 1.1 × 10⁻³** over 2704 taps against a 2 % envelope; the envelope is wide because hardware
+> trilinear filtering carries only ~8 bits of sub-texel precision while the reference filters in
+> full f32, so exact agreement is not available at any price.
+>
+> **Pass placement, and why the obvious home is the wrong one.** Clouds are **not** in the sky
+> pass. `SkyNode` is the *first* scene pass — it clears colour and depth — so at the moment it
+> runs there is no geometry in the depth buffer to occlude anything, and a cloud drawn there
+> hangs in front of the terrain it is supposed to be behind. `CloudNode` is therefore its own
+> pass, after every opaque pass (mesh, vgeom, skinned, terrain) and before the translucent one:
+> after opaque so the hardware can reject cloud fragments behind the world, before translucent
+> so glass composites over cloud as it would over any other background, and inside the MSAA
+> scene target so the resolve → TAA → bloom → tonemap chain treats cloud radiance as ordinary
+> scene radiance — a cloud edge against the sun blooms without a line of code for it.
+>
+> **Occlusion takes two mechanisms, because one is not enough.** The fragment writes
+> `frag_depth` at the ray's **entry** into the slab with depth writes off and `Greater`
+> comparison, which rejects — per MSAA sample, so with antialiased silhouettes — every fragment
+> whose geometry is entirely in front of the layer. That is the common case, and
+> `clouds_are_occluded_by_geometry` proves it by asserting a walled frame is **byte-identical**
+> with and without clouds behind the wall. It is **not** the whole occlusion, and the first
+> draft's claim that it was is exactly the sort of thing that ships: a 2 km summit under a
+> 1.5–4 km deck is *inside* the slab, sits beyond the entry plane, passes a `Greater` test, and
+> would have the entire marched span — including the cloud physically behind the mountain —
+> composited over it as a veil. On an 8 km terrain that is not exotic, it is Tuesday. So the
+> shader also reads the scene depth for its pixel and clamps `t_far` to the nearest geometry,
+> stopping the march at the surface; the depth attachment is bound **read-only** and the same
+> view is additionally bound as a `texture_depth_multisampled_2d`, which is the one arrangement
+> WebGPU permits for reading the depth you are also testing against.
+> `clouds_do_not_veil_geometry_inside_the_slab` measures the composited **alpha** over a mesa
+> whose top pokes into a thin deck — an RGB-delta metric was tried first and reported 97 %
+> either way, because the cloud sits over a dark mesa in one frame and a bright sky in the
+> other and the same alpha then gives wildly different deltas. Mutation-verified: disabling the
+> clamp moves the measured alpha from **0.275 to 0.588**.
+>
+> **What stays approximate**, now that both are in place: the clamp reads MSAA sample 0 only, so
+> a pixel *partially* covered by intersecting geometry takes its march length from one sample
+> while the hardware test still resolves coverage per sample — a sub-pixel discrepancy at a
+> silhouette. And the pass runs before the translucent one, so cloud behind glass composites in
+> the right order but cloud *inside* a translucent volume does not; there is no pass ordering
+> that would fix that without a per-fragment sort.
+>
+> **Two calibrations that are unit conversions, not fudges.** A phase-function-only march
+> produces radiance ~1/4π of the sun's and renders an overcast noon as soot. The cloud's
+> in-scattered sun term is multiplied by the **sky exposure** (`params.y`) for exactly the
+> reason `SKY_EXPOSURE_CALIBRATION`'s own doc gives — it is the single calibration between the
+> engine's arbitrary light units and the exposure the renderer is tuned for, and it multiplies
+> sky radiance, which a cloud is — and by **π**, because the in-scatter source is `E · p(θ)`
+> where `E` is *irradiance* while the engine hands over the radiance-like number the PBR loop
+> divides by π for a Lambertian. Undoing that convention is what makes a sunlit cloud top
+> brighter than the ground under the same sun, which is the correct relationship.
+>
+> **The dusk fix that made the feature work.** Sun transmittance is sampled at the **layer's**
+> radius, not the camera's. With the sun two degrees up the path to a viewer on the ground is
+> opaque in every channel, while the path to a cloud three kilometres up is above a measurable
+> slice of the atmosphere and still carries red. Sampling at the camera made twilight clouds go
+> grey at exactly the moment they should be the brightest thing in the sky — measured r/b 0.33
+> before, **1.81** after, against a clear dusk sky's 0.67. The ambient is likewise interpolated
+> between the zenith (which a cloud's top sees) and the bright band around the horizon (which
+> its base sees), so a twilight deck is not lit as if it were noon. Both are pinned by
+> `golden_clouds_dusk`, which compares the same clouds under a noon sun.
+>
+> **The one approximation that is a diffusion model rather than an integral.** The ambient
+> inside a cloud is the sky *above* the layer, which the cloud above it has largely occluded — a
+> single-scattering march has nowhere to get that light back from. `CLOUD_AMBIENT_BASE` keeps
+> 45 % of the sky at the slab's base as an explicit stand-in for the multiple scattering that
+> really carries it there; on the sun side, Hillaire's three-octave multiple-scattering
+> approximation does the same job. Take either out and an overcast deck renders as soot, which
+> is the single most common failure of a correct-but-incomplete volumetric.
+>
+> **World shadowing, for one binding.** A low-resolution `rgba16float` cloud-shadow map (512²
+> over 20 km = 39 m/texel at High) stores the sun transmittance of the slab at each world-XZ
+> point, baked by compute and sampled in the lit passes beside the CSM. Deliberately *not* a
+> second cascaded shadow map: a cloud four kilometres up casts a penumbra hundreds of metres
+> wide, so a crisper map would only store detail that is physically wrong. The map's centre is
+> **snapped to a whole texel** — unsnapped it would both re-bake every frame a flycam breathes
+> and slide the pattern by a fraction of a texel each frame, making a *static* scene shimmer.
+> The receiver projects up the sun ray to the slab's mid-altitude and reads there, so the
+> projection happens at lookup time and the map itself never needs a light-space matrix and
+> cannot shear. `rgba16float` costs three wasted channels and buys the one thing that matters:
+> `r16float` is not a core WebGPU storage format and `r32float` is not *filterable* without an
+> optional feature, and a nearest-sampled cloud shadow is a grid of 39 m squares rather than a
+> penumbra. (That was found the way such things are found — a validation error on the first
+> golden run.)
+>
+> **The `EnvBinding` invariant, and why clouds add no key component.** The cloud shadow map is
+> the third resizable resource in that bind group, and the cache key is still the P17.2 pair.
+> That is correct rather than an oversight, and it takes **two** tests to say
+> why, because it is two claims — the first draft had only the first, and only the first is
+> about the mapping. `cloud_quality_is_a_total_function_of_atmosphere_quality` pins the
+> mapping: injective on the texture sizes (no two tiers share a cloud resource set) and
+> deterministic, so the atmosphere generation distinguishes every distinct set of cloud
+> textures that can exist. `cloud_quality_is_only_assigned_at_construction` pins the other half
+> by scanning the crate's own source: the field is written in exactly one place, `new`, which is
+> also the only place that takes a fresh generation — an injective mapping assigned in two
+> places would still let the textures change under an *unchanged* generation. Mutation-verified
+> (a `probe.cloud_quality = …` anywhere in the crate fails it).
+>
+> The golden `cloud_quality_switch_rebuilds_the_cloud_binds` pins the rule from outside, and its
+> first draft **did not bite**: every whole-frame assertion in it survived dropping the
+> generation from the bake's cache key, because with a stale bind group the bake keeps writing
+> into the previous tier's views while the frames still differ by tier (the march step counts
+> come from the uniform, not from the bind group). The fix is a content assertion — after each
+> switch the freshly-created volume is read back and required to match `shape_texel` at that
+> tier's resolution; zeros mean the bake wrote somewhere else, and dropping the generation now
+> fails on the second tier. Mutation-verified, and said so in the test. A GPU-free
+> `the_cloud_bake_key_rebuilds_on_a_generation_bump` mirrors the P17.2 pointer-identity property
+> at the cloud key type, so the contract is pinned on CI legs with no adapter too.
+>
+> **Version gating, two keys again.** The two noise volumes are a function of the **seed
+> alone**: coverage, type, wind, altitude and the sun all shape the field at *sample* time,
+> which is the entire reason it is worth baking, so dragging a coverage slider re-bakes nothing
+> and 8.4 MB of 3D noise is written once. The shadow map keys on everything that can move a
+> shadow — the layer geometry, the weather knobs, the wind's current displacement, the sun
+> direction, the march budget, the snapped centre — and on nothing that cannot: the camera's
+> *altitude* is absent, because the map is a property of the world and not of the viewer. Both
+> keys are `to_bits()` tuples, so a `NaN` parameter cannot make the cache thrash.
+>
+> **Determinism, in three places.** The wind drift is a **deterministic function of the level's
+> clock** (`ResolvedSky::cloud_time_s`, defined once in Ring 0 so the two projector MIRRORs
+> cannot disagree about it), never a wall clock or a frame counter — two runs at the same time
+> of day see the same sky, and `cloud_wind_follows_the_level_clock` asserts that a whole tile of
+> drift is a *no-op*, which is simultaneously the tileability proof and what keeps an all-day
+> session from quantizing into stair-steps. `cloud_bakes_are_deterministic` byte-compares two
+> independent bakes of both volumes and the shadow map, one level below the frame, so a
+> nondeterministic bake surfaces there instead of as a flaky pixel three passes downstream.
+> And **temporal jitter is off**: blue-noise-offsetting the first sample and letting TAA resolve
+> it is the standard way to buy back march steps and is the documented follow-up, but it is a
+> per-frame-index dependence, which is exactly what a byte-identical determinism gate forbids.
+>
+> **Byte-stability of the off path — measured, not asserted.** Clouds are **disabled by
+> default**, the bake and raymarch nodes dispatch nothing at all, and every lit shader's
+> cloud-shadow multiply sits inside a guarded branch beside the CSM's. Verified the P17.2 way:
+> `INF_BLESS_GOLDENS=1` was run over the whole suite and `git status` reported **zero** changes
+> to the 29 pre-P17.3 golden PNGs — byte-identical, not within-tolerance. That covers the three
+> new `SHADER_TABLE` entries, the six new `AtmosphereData` vec4s, the new `EnvBinding` binding
+> and the recomposed lit shaders. `cloud_shadows_darken_lit_geometry` pins the finer-grained
+> version: `shadow_strength = 0` is byte-identical *on the ground band* to a scene with no
+> clouds at all, while the sky above still has clouds in it.
+>
+> **Goldens added (4); `editor_default` re-blessed ONCE.** `clouds_overcast` (solid low
+> stratus — the case single scattering renders as soot, so the assertion is on absolute
+> luminance and on the collapse of the sky's blue excess), `clouds_scattered` (the *component
+> default* coverage, asserting both that the luma spread is far above a clear sky's smooth
+> gradient and that real gaps survive — "scattered" is a claim with two ends), `clouds_dusk`
+> (warmer than the same clouds at noon, which is the single assertion that would catch clouds
+> lit by a hard-coded white sun), `clouds_night` (stars still visible through the gaps, asserted
+> by *removing* the starfield and watching the peak drop — a contrast-against-the-mean test
+> would also be satisfied by a bright cloud edge). **`editor_default` is the one re-bless, and
+> the reason is one boolean**: `demo::build` sets `clouds_enabled = true` while the *component*
+> default stays false. Those two must disagree in exactly that direction — a `true` component
+> default would silently grow clouds on every existing v12 level the next time it loaded, which
+> is the one thing the frozen-record scheme cannot undo — and `the_default_scene_opts_into_
+> clouds_while_the_component_does_not` asserts both halves plus that nothing *else* in the block
+> was privately tuned. The golden itself asserts the clouds are actually visible in it (12.2 %
+> of the upper frame), so the re-bless is justified by a measurement rather than by a comment.
+>
+> **The coverage slider was calibrated against what it does, not what it says.** As first
+> written, 0.30 realised 13 % sky cover and 0.45 realised 97 % — nine tenths of the slider did
+> nothing and a tenth did everything, because two octaves of interpolated hash pile up around
+> 0.5 and the authored bias slid that narrow field across the density threshold in one go.
+> Stretching the weather field to fill `[0, 1]` and recalibrating the bias slope/offset against
+> *realised* cover spreads the transition over the range an author actually drags (0.2 → clear,
+> 0.35 → 60 %, 0.55 → solid). The component default moved to **0.35** as a result, and World
+> Settings shows the aviation word for what the number will look like (clear / few / scattered /
+> broken / overcast) rather than pretending the slider is an area fraction.
+>
+> **Tiers + cost.** `CloudQuality` derives from `AtmosphereQuality` — one knob, not two, because
+> a machine that can afford a 256×64 transmittance LUT can afford a 128³ cloud volume and
+> letting them disagree would only produce combinations nobody tests. High/Medium/Low are 128³ /
+> 96³ / 64³ shape, 32³ / 24³ / 16³ detail, 512² / 384² / 256² shadow, 96 / 64 / 32 primary march
+> steps, 6 / 5 / 4 sun steps and 16 / 12 / 8 shadow-bake steps. The **Low-tier cheat is
+> documented and deterministic**: it skips the erosion volume entirely, losing the wisps but
+> staying a pure function of the same inputs. (A billboard fallback would not — it needs a
+> screen-space fade, and screen-space is where determinism goes to die.) The march itself is
+> adaptive — long strides through empty air, rewind and refine on contact — so the step count is
+> a *ceiling*, not a per-pixel cost. Measured at 1280×720 with the default coverage, GPU-fenced:
+> **+0.09 ms Low, +0.20 ms Medium, +0.29 ms High** over the same frame without clouds. The
+> always-on VRAM is ~9.6 MB at High (8.4 shape + 0.13 detail + 2 shadow, allocated
+> unconditionally like `ShadowResources`' 48 MB cascade array); the bake runs once per seed.
+>
+> **Honest scope:** cloud shadows reach the **direct** lighting of every lit pass, not the GI
+> probes — P18.4 owns GI↔sky coupling and the probes still read the gradient constants, so a
+> heavy overcast dims the sun on the ground but not the bounce. No weather presets, no
+> precipitation, no lightning (P17.4). Aerial perspective on clouds reuses P17.2's homogeneous
+> v1 rather than a froxel volume, and height fog is deliberately *not* applied to them (fog is a
+> ground-level authored layer and a cloud four kilometres up is above it by construction). The
+> cloud layer does not self-shadow onto the terrain's *own* CSM cascades — it multiplies the sun
+> after them, which is right for a soft occluder and would be wrong for a hard one. Clouds are
+> flat-slab: no orographic lift over mountains, no cloud-height variation with terrain. The
+> march clamp reads MSAA sample 0, so a pixel partially covered by geometry *inside* the deck
+> takes its march length from one sample (see the occlusion paragraph). The visual pass — that
+> the four new images and the new default level actually look good — is human-verified, as every
+> GPU path here is.
+>
+> **Schema v13 — the same bump for the same reason, one phase later.** `.inf_lvl` payloads are
+> bincode, which reads a fixed field count positionally, so growing `SkyAtmosphere` by 14 fields
+> makes a v12 record **stop short** of what the decoder expects and read straight on into the
+> next entity's bytes. Silently. `#[serde(default)]` rescues self-describing formats and this is
+> not one. So the v12 shape freezes as `SkyAtmosphereV12` inside `EntityRecordV12` /
+> `SceneFileV12` in **both** codecs — the v8→v9 `TerrainV8` and v11→v12 precedents verbatim, a
+> component's layout changing while no entity slot moves — and `into_current` lifts a v12 level
+> with clouds **disabled**, which is exactly what a v12 level meant.
+> `v13_clouds_are_wider_on_the_wire_than_v12` pins the delta at exactly **62 bytes**, priced
+> field by field rather than as one number: 1 bool + 11 × f32 (44) + 16 for the `Color` +
+> `varint_len(SkyAtmosphere::default().cloud_seed)`. That last term is a named computation and
+> not a literal for a reason — the workspace's `bincode::config::standard()` is **varint**, so
+> the seed's cost is a function of the *default seed's value* rather than of its type, and a
+> future change to that default would otherwise fail saying "the cloud block grew", which would
+> be a lie. The default is asserted to be 0 beside it, so the failure names the field that
+> actually moved. That is the
+> mechanical proof no serde attribute could have covered it. Every sample and template changed
+> by **one byte, at offset 0** (`12` → `13`) — verified programmatically, every file's length
+> unchanged and offset 0 the only differing byte — because no committed content carries a
+> `SkyAtmosphere`, so the 62-byte block never appears in any of them.
+>
+> One thing the editor's ladder needed that inf-scene's did not: `EntityRecordV12` carries the
+> *frozen* atmosphere, so `EntityRecordV11::into_v12` cannot reach the live component and
+> `SkyAtmosphereV11::into_current` became `::into_v12`, filling the physical block from **this
+> ladder's own** `v12_*` literals rather than from `SkyAtmosphere::default()`. That is
+> doctrinally right for a frozen record — a frozen record must never reach into Ring 0, or it
+> stops being frozen — and it is byte-identical to inf-scene's one-hop lift *only while* the
+> two agree about the v12 defaults, which is precisely what
+> `cloud_defaults_are_the_documented_ones` asserts over all 22 fields rather than leaving
+> implicit.
+
 - **P17.1 Sun & time of day** — 1. kill the `SUN_DIR` const: a `SkyAtmosphere` + `TimeOfDay`
   world-component set (components + registry + schema records) projected in both scene
   builders; 2. deterministic solar math (date/latitude → sun and moon position); 3. TOD
@@ -1577,6 +1849,17 @@ wire-format change: the v11 shape freezes as `SkyAtmosphereV11` inside `EntityRe
 `SceneFileV11` in both codecs, exactly the v8→v9 `TerrainV8` precedent (a component's layout
 changed; no entity slot moved). `into_current` lifts a v11 level with the new block at its
 defaults — a gradient sky and no fog, which is what a v11 level meant.
+
+Schema **v13**: `SkyAtmosphere` grows the volumetric-cloud block (P17.3) — enable flag,
+coverage, cloud type, the SI-metre layer bottom/top, extinction (m⁻¹), erosion detail, field
+seed, the m/s wind pair, forward phase `g`, ground-shadow strength, ambient multiplier, and the
+droplet colour. Same mechanism as v12 for the same reason (bincode is positional, so growing a
+component **is** a wire-format change): `SkyAtmosphereV12` freezes inside `EntityRecordV12` /
+`SceneFileV12` in both codecs, and `into_current` lifts a v12 level with **clouds disabled** —
+what a v12 level meant. The delta is exactly **62 bytes** (1 bool + 11 f32 + a 4×f32 `Color` +
+**1** for the `u32` seed under `bincode`'s varint `standard()` config). The clock stays
+untouched: the wind's drift is *derived* from `TimeOfDay`, not authored, so nothing about it
+crosses the wire.
 
 ### Phase 18 — Lumen-class GI & virtualized-geometry completion
 

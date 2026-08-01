@@ -15,10 +15,14 @@
  * panel edits the block a level actually tunes, and Details edits the rest
  * through the same undo door.
  *
- * Units per architecture rule 6: the fog block is **SI metres** (`m⁻¹`
- * extinction and falloff, metre height); the disc sizes are **degrees of
- * angular diameter**; everything else is a dimensionless multiplier over a
- * physical constant that lives in `inf_render::atmosphere`.
+ * Units per architecture rule 6: the fog block and the P17.3 **cloud block** are
+ * **SI metres** (`m⁻¹` extinction and falloff, metre heights, m/s wind); the disc
+ * sizes are **degrees of angular diameter**; everything else is a dimensionless
+ * multiplier over a physical constant that lives in `inf_render::atmosphere` or
+ * `inf_render::clouds`.
+ *
+ * The cloud block follows the same numeric-and-boolean rule: `cloud_color` stays
+ * in Details with the other five colours.
  */
 export type SkyAtmosphereDto = { 
 /**
@@ -78,4 +82,56 @@ fog_falloff: number,
 /**
  * World altitude the fog density applies at, **m**.
  */
-fog_height: number, };
+fog_height: number, 
+/**
+ * Draw volumetric clouds. Requires [`physical`](Self::physical).
+ */
+clouds_enabled: boolean, 
+/**
+ * Fractional sky coverage, `[0, 1]`.
+ */
+cloud_coverage: number, 
+/**
+ * Cloud type, `[0, 1]`: 0 = stratus sheet, 1 = cumulus tower.
+ */
+cloud_type: number, 
+/**
+ * Bottom of the cloud layer, **m** of world altitude.
+ */
+cloud_bottom: number, 
+/**
+ * Top of the cloud layer, **m**.
+ */
+cloud_top: number, 
+/**
+ * Cloud extinction at full density, **m⁻¹**.
+ */
+cloud_density: number, 
+/**
+ * Erosion detail strength, `[0, 1]`.
+ */
+cloud_detail: number, 
+/**
+ * Field seed (low 24 bits used).
+ */
+cloud_seed: number, 
+/**
+ * Wind velocity in world X, **m/s**.
+ */
+cloud_wind_x: number, 
+/**
+ * Wind velocity in world Z, **m/s**.
+ */
+cloud_wind_z: number, 
+/**
+ * Forward phase asymmetry `g`, `[0, 0.95]`.
+ */
+cloud_phase_g: number, 
+/**
+ * How much the layer darkens the sun on the ground, `[0, 1]`.
+ */
+cloud_shadow: number, 
+/**
+ * Ambient multiplier inside a cloud, `[0, 4]`.
+ */
+cloud_ambient: number, };

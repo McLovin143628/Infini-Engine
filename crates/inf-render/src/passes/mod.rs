@@ -4,6 +4,8 @@
 
 pub mod bloom;
 pub mod classic_vgeom;
+pub mod cloud;
+pub mod cloud_bake;
 pub mod composite;
 pub mod debug;
 pub mod depth_prepass;
@@ -50,6 +52,19 @@ pub(crate) enum ShaderKind {
     /// nothing else. The two LUT bake compute passes have no view uniform and no
     /// lights (P17.2).
     AtmosphereCompute,
+    /// [`cloud_shader`]: common_view + the atmosphere library + the cloud field at
+    /// `@group(1)` — the raymarch pass (P17.3), which needs the sky LUTs for
+    /// lighting and both noise volumes for density, but no lighting env.
+    Cloud,
+    /// [`cloud_bake_shader`]: the atmosphere uniform + the cloud **generators** at
+    /// `@group(0)`, with no sampled textures at all — the two noise volumes are
+    /// *storage* textures here, which is precisely why `cloud_field.wgsl` (which
+    /// declares them as sampled) cannot be included (P17.3).
+    CloudBake,
+    /// [`cloud_shadow_bake_shader`]: the atmosphere uniform + generators + the
+    /// sampled cloud field at `@group(0)`, plus the shadow map as storage — the
+    /// only compute pass that both reads and writes cloud data (P17.3).
+    CloudShadowBake,
 }
 
 // ── atmosphere composition (P17.2) ───────────────────────────────────────────
@@ -67,6 +82,10 @@ const ENV_ATMOS_TRANSMITTANCE: u32 = 7;
 const ENV_ATMOS_SKYVIEW: u32 = 8;
 const ENV_ATMOS_SAMPLER: u32 = 9;
 const ENV_ATMOS_UNIFORM: u32 = 10;
+/// The cloud-shadow map (P17.3) — the **one** binding volumetric clouds add to
+/// the lit passes. It reuses [`ENV_ATMOS_SAMPLER`] (clamp-to-edge, linear), which
+/// is exactly what it wants, and its parameters ride in the atmosphere uniform.
+const ENV_CLOUD_SHADOW: u32 = 11;
 
 /// The atmosphere *medium* library, bound at `group`/`binding`.
 pub(crate) fn atmosphere_source(group: u32, binding: u32) -> String {
@@ -103,6 +122,66 @@ pub(crate) fn sky_shader(source: &str) -> String {
 /// bake's own storage/input bindings, and nothing else.
 pub(crate) fn atmosphere_compute_shader(source: &str) -> String {
     format!("{}\n{}", atmosphere_source(0, 0), source)
+}
+
+// ── cloud composition (P17.3) ────────────────────────────────────────────────
+
+/// The cloud **generators** (hash, Perlin, Worley, weather, height profile,
+/// phase). Binding-free by design — the noise bake declares the two volumes as
+/// *storage* textures while the raymarch declares them as *sampled* ones, so a
+/// single file that bound them could not serve both.
+pub(crate) fn cloud_noise_source() -> &'static str {
+    include_str!("../shaders/cloud_noise.wgsl")
+}
+
+/// The cloud **field**: the sampled volume bindings plus `cloud_density` and
+/// `cloud_sun_transmittance`. Only included by passes that bind both volumes as
+/// sampled textures (the raymarch and the shadow bake).
+pub(crate) fn cloud_field_source(group: u32, shape: u32, detail: u32, smp: u32) -> String {
+    include_str!("../shaders/cloud_field.wgsl")
+        .replace("CLOUD_GROUP", &group.to_string())
+        .replace("CLOUD_SHAPE_BIND", &shape.to_string())
+        .replace("CLOUD_DETAIL_BIND", &detail.to_string())
+        .replace("CLOUD_SMP_BIND", &smp.to_string())
+}
+
+/// The cloud raymarch module: common_view + the atmosphere at `@group(1)`
+/// bindings 0..3 + the cloud field at 4/5/6. The scene depth at binding 7 is
+/// declared by `cloud.wgsl` itself, since it is the only consumer.
+pub(crate) fn cloud_shader(source: &str) -> String {
+    format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        include_str!("../shaders/common_view.wgsl"),
+        atmosphere_source(1, 0),
+        atmosphere_lut_source(1, 1, 2, 3),
+        cloud_noise_source(),
+        cloud_field_source(1, 4, 5, 6),
+        source
+    )
+}
+
+/// The cloud noise bake: the atmosphere uniform (for the seed) + the generators,
+/// and nothing sampled.
+pub(crate) fn cloud_bake_shader(source: &str) -> String {
+    format!(
+        "{}\n{}\n{}",
+        atmosphere_source(0, 0),
+        cloud_noise_source(),
+        source
+    )
+}
+
+/// The cloud-shadow bake: the atmosphere uniform + generators + the sampled field
+/// at `@group(0)` bindings 1/2/3 — the only compute pass that both reads and
+/// writes cloud data.
+pub(crate) fn cloud_shadow_bake_shader(source: &str) -> String {
+    format!(
+        "{}\n{}\n{}\n{}",
+        atmosphere_source(0, 0),
+        cloud_noise_source(),
+        cloud_field_source(0, 1, 2, 3),
+        source
+    )
 }
 
 /// Every composed scene-shader module the renderer builds — label, WGSL
@@ -178,6 +257,21 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
         include_str!("../shaders/sprite.wgsl"),
         ShaderKind::Plain,
     ),
+    (
+        "cloud",
+        include_str!("../shaders/cloud.wgsl"),
+        ShaderKind::Cloud,
+    ),
+    (
+        "cloud_bake",
+        include_str!("../shaders/cloud_bake.wgsl"),
+        ShaderKind::CloudBake,
+    ),
+    (
+        "cloud_shadow_bake",
+        include_str!("../shaders/cloud_shadow_bake.wgsl"),
+        ShaderKind::CloudShadowBake,
+    ),
 ];
 
 /// Compose the named [`SHADER_TABLE`] entry. Panics on an unknown label —
@@ -193,6 +287,9 @@ pub(crate) fn shader_source(label: &str) -> String {
         ShaderKind::Lit(group) => lit_scene_shader(source, *group),
         ShaderKind::Sky => sky_shader(source),
         ShaderKind::AtmosphereCompute => atmosphere_compute_shader(source),
+        ShaderKind::Cloud => cloud_shader(source),
+        ShaderKind::CloudBake => cloud_bake_shader(source),
+        ShaderKind::CloudShadowBake => cloud_shadow_bake_shader(source),
     }
 }
 
@@ -206,8 +303,13 @@ pub(crate) fn shader_source(label: &str) -> String {
 pub(crate) fn lit_scene_shader(source: &str, env_group: u32) -> String {
     let env =
         include_str!("../shaders/env_lighting.wgsl").replace("GROUP_ENV", &env_group.to_string());
+    // P17.3: the cloud-shadow receiver. It reads `atmos` (the cloud block) and
+    // borrows `atmos_lut_smp`, so it must be composed AFTER both atmosphere
+    // fragments — WGSL has no forward declarations.
+    let cloud_shadow =
+        include_str!("../shaders/cloud_shadow.wgsl").replace("GROUP_ENV", &env_group.to_string());
     format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../shaders/common_view.wgsl"),
         env,
         atmosphere_source(env_group, ENV_ATMOS_UNIFORM),
@@ -217,6 +319,7 @@ pub(crate) fn lit_scene_shader(source: &str, env_group: u32) -> String {
             ENV_ATMOS_SKYVIEW,
             ENV_ATMOS_SAMPLER,
         ),
+        cloud_shadow,
         source
     )
 }
@@ -287,7 +390,9 @@ impl<K: PartialEq, T> GenCache<K, T> {
 /// Bindings: `0` ao_tex, `1` ao_smp, `2` shadow_map (`texture_depth_2d_array`),
 /// `3` shadow_smp (comparison), `4` shadow uniform, `5` gi SH storage, `6` gi
 /// uniform, `7` atmosphere transmittance LUT, `8` atmosphere sky-view LUT,
-/// `9` atmosphere LUT sampler, `10` atmosphere uniform. All fragment-stage.
+/// `9` atmosphere LUT sampler, `10` atmosphere uniform, `11` cloud-shadow map
+/// (P17.3 — which borrows the sampler at `9` rather than adding a twelfth entry).
+/// All fragment-stage.
 pub(crate) struct EnvBinding {
     pub bgl: wgpu::BindGroupLayout,
     ao_sampler: wgpu::Sampler,
@@ -404,6 +509,17 @@ impl EnvBinding {
                         },
                         count: None,
                     },
+                    // ── P17.3 clouds ──
+                    wgpu::BindGroupLayoutEntry {
+                        binding: ENV_CLOUD_SHADOW,
+                        visibility: frag,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let ao_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -448,6 +564,14 @@ impl EnvBinding {
     ///   the render tier, which recreates both LUTs at a new size →
     ///   `atmosphere.generation`. This is exactly the case the P13 version of this
     ///   comment warned about, arriving as predicted.
+    /// * `frame.atmosphere.cloud_shadow` (P17.3) is quality-dependent for the same
+    ///   reason — [`crate::clouds::CloudQuality`] is *derived* from
+    ///   `AtmosphereQuality`, so the cloud textures are recreated in the same
+    ///   breath as the LUTs and are covered by the same `atmosphere.generation`.
+    ///   A separate counter would only ever move in lockstep with this one; what
+    ///   would be a bug is a cloud resource recreated on some *other* trigger
+    ///   without a key component of its own, so if one is ever added, add its
+    ///   generation here too.
     /// * `frame.shadow.*` and `frame.gi.*` are still created **once** (in
     ///   `EngineRenderer::new`) and never recreated, so they need no key
     ///   component. If either ever becomes resizable, add its generation here too.
@@ -503,6 +627,12 @@ impl EnvBinding {
                     wgpu::BindGroupEntry {
                         binding: ENV_ATMOS_UNIFORM,
                         resource: frame.atmosphere.uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: ENV_CLOUD_SHADOW,
+                        resource: wgpu::BindingResource::TextureView(
+                            &frame.atmosphere.cloud_shadow,
+                        ),
                     },
                 ],
             })
@@ -590,6 +720,110 @@ mod gen_cache_tests {
         assert_ne!(base, (8, 11), "targets generation dropped from the key");
         assert_ne!(base, (7, 12), "atmosphere generation dropped from the key");
         assert_eq!(base, (7, 11));
+    }
+
+    /// The cloud bake's key type, given the same pointer-identity treatment as
+    /// [`ResourceKey`] above — GPU-free and deterministic, so it runs on every CI
+    /// leg rather than only where an adapter exists.
+    ///
+    /// [`super::cloud_bake::CloudBakeNode`] keys its two bind groups on the bare
+    /// `AtmosphereResources::generation` (a `u64`) rather than on the full
+    /// [`ResourceKey`], because nothing it binds is viewport-size-dependent —
+    /// rebuilding a compute bind group on every window resize would be a lie
+    /// about what invalidates it. What that buys is only worth having if a
+    /// generation bump *does* rebuild, which is what this pins.
+    ///
+    /// The failure this guards is the one the golden
+    /// `cloud_quality_switch_rebuilds_the_cloud_binds` catches from outside: a
+    /// stale bake bind group keeps writing into the *previous* tier's texture
+    /// views while the newly created ones stay zeroed — and wgpu keeps the old
+    /// textures alive as long as the bind group references them, so there is no
+    /// validation error and no black frame to notice.
+    #[test]
+    fn the_cloud_bake_key_rebuilds_on_a_generation_bump() {
+        use std::rc::Rc;
+
+        let mut cache: GenCache<u64, Rc<u32>> = GenCache::default();
+        let mut builds = 0u32;
+        let fetch = |cache: &mut GenCache<u64, Rc<u32>>, gen: u64, n: &mut u32| {
+            let counter = &mut *n;
+            cache
+                .get_or_build(gen, || {
+                    *counter += 1;
+                    Rc::new(*counter)
+                })
+                .clone()
+        };
+
+        let first = fetch(&mut cache, 1, &mut builds);
+        let again = fetch(&mut cache, 1, &mut builds);
+        assert!(
+            Rc::ptr_eq(&first, &again),
+            "an unchanged generation rebuilt"
+        );
+        assert_eq!(builds, 1);
+
+        // The whole point: a quality clamp recreates the cloud textures and bumps
+        // the generation, and the bind group must follow.
+        let after = fetch(&mut cache, 2, &mut builds);
+        assert!(
+            !Rc::ptr_eq(&after, &first),
+            "a generation bump did not rebuild the cloud bake bind group"
+        );
+        assert_eq!(builds, 2);
+
+        // Returning to a previously-seen generation still rebuilds: one slot, not
+        // a map, so it can never hand back a handle to a resource that has since
+        // been recreated under the same number.
+        let back = fetch(&mut cache, 1, &mut builds);
+        assert!(!Rc::ptr_eq(&back, &first));
+        assert_eq!(builds, 3);
+    }
+
+    /// **Half** of why P17.3 could add a third resizable resource to `EnvBinding`
+    /// — the cloud shadow map — without adding a third key component: the cloud
+    /// tier is a *total, injective, deterministic function of* the atmosphere
+    /// tier, so the atmosphere generation distinguishes every distinct set of
+    /// cloud textures that can exist.
+    ///
+    /// That is all this proves, and the name now says so. The other half — that
+    /// nothing assigns a cloud tier *outside* the constructor that bumps the
+    /// generation — is a property of the code rather than of the mapping, and is
+    /// pinned separately by
+    /// `sky_lut::tests::cloud_quality_is_only_assigned_at_construction`. Both are
+    /// needed: an injective mapping assigned in two places would still let the
+    /// textures change under an unchanged generation.
+    #[test]
+    fn cloud_quality_is_a_total_function_of_atmosphere_quality() {
+        use crate::atmosphere::AtmosphereQuality;
+        use crate::clouds::CloudQuality;
+
+        // Injective: two atmosphere tiers never share a cloud tier, so the
+        // atmosphere generation distinguishes every distinct cloud resource set.
+        let tiers = [
+            AtmosphereQuality::Low,
+            AtmosphereQuality::Medium,
+            AtmosphereQuality::High,
+        ];
+        let mut seen: Vec<(u32, u32, u32)> = Vec::new();
+        for q in tiers {
+            let c = CloudQuality::from_atmosphere(q);
+            let sizes = (c.shape_res(), c.detail_res(), c.shadow_res());
+            assert!(
+                !seen.contains(&sizes),
+                "{q:?} shares its cloud texture sizes with another tier — the \
+                 atmosphere generation would no longer distinguish them"
+            );
+            seen.push(sizes);
+        }
+        // ...and deterministic: the same atmosphere tier always yields the same
+        // cloud tier, so a rebuild reproduces the same sizes.
+        for q in tiers {
+            assert_eq!(
+                CloudQuality::from_atmosphere(q),
+                CloudQuality::from_atmosphere(q)
+            );
+        }
     }
 }
 

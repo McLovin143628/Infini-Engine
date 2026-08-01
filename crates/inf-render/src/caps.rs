@@ -77,6 +77,14 @@ impl RenderTier {
         // The atmosphere is never turned *off* by a tier — a sky the level
         // authored must still be a sky on a weak GPU — but its LUT sizes and
         // march counts scale down (P17.2). `clamp_to` only ever lowers.
+        //
+        // The same one knob carries the P17.3 clouds: `CloudQuality` is derived
+        // from `AtmosphereQuality` rather than authored separately, so a tier that
+        // shrinks the LUTs also shrinks the noise volumes, the shadow map and the
+        // march budget — and, at Low, drops the erosion volume from the march
+        // entirely. Deliberately one knob and not two: a machine that can afford a
+        // 256x64 transmittance LUT can afford a 128^3 cloud volume, and letting
+        // them disagree would only ever produce combinations nobody tests.
         settings.atmosphere.quality = settings.atmosphere.quality.clamp_to(self);
         settings
     }

@@ -50,6 +50,15 @@ struct Sample {
     projected: [u32; 3],
     /// Whether the projection published a directional key light this step.
     key_light: bool,
+    /// The cloud field's **wind displacement** this step, as `f32` bits (P17.3).
+    ///
+    /// This is the only *derived* value in the sky projection — everything else
+    /// is a component field copied across — so it is the one most able to drift
+    /// between the two hosts without anything else noticing. It is a pure
+    /// function of the level's clock (`ResolvedSky::cloud_time_s`), which is
+    /// exactly the claim this gate exists to hold: two runs at the same time of
+    /// day must see the same sky, in the editor and in a shipped build alike.
+    cloud_wind: [u32; 2],
 }
 
 /// The retired `SUN_DIR`, as the `f32` bits a projection publishes — what a
@@ -86,6 +95,7 @@ fn sample(sim: &RuntimeSim) -> Sample {
             .lights
             .iter()
             .any(|l| l.kind == inf_render::LightKind::Directional),
+        cloud_wind: scene.atmosphere.clouds.wind_offset().map(|v| v.to_bits()),
     }
 }
 
@@ -116,7 +126,12 @@ fn sky_doc(rate: f64) -> SceneDoc {
         // 60 Hz walk the sun from night through dawn into morning.
         rate,
     });
-    w.entity_mut(e).insert(SkyAtmosphere::default());
+    // Clouds ON: the trace then covers the wind's derivation from the clock,
+    // which is the projection's only computed field (P17.3).
+    w.entity_mut(e).insert(SkyAtmosphere {
+        clouds_enabled: true,
+        ..SkyAtmosphere::default()
+    });
     doc.world_mut().mark_dirty();
     doc.world_mut().propagate();
     doc
@@ -207,6 +222,20 @@ fn pie_sun_trace_matches_shipping() {
         .iter()
         .zip(&ship)
         .all(|(a, b)| a.projected == b.projected));
+    // ...and so does the cloud wind, which is derived rather than copied and is
+    // therefore the field a MIRROR drift would move first (P17.3).
+    assert!(
+        pie.iter()
+            .zip(&ship)
+            .all(|(a, b)| a.cloud_wind == b.cloud_wind),
+        "PIE and shipping disagree about the cloud wind"
+    );
+    // The wind actually moved during the trace, or the assertion above compares
+    // 240 copies of zero and proves nothing.
+    assert!(
+        pie.first().map(|s| s.cloud_wind) != pie.last().map(|s| s.cloud_wind),
+        "the cloud wind never moved across the trace — the gate is vacuous"
+    );
 }
 
 /// The level really did survive the cook with its clock intact — otherwise

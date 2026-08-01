@@ -1354,10 +1354,14 @@ impl TimeOfDayDto {
 /// panel edits the block a level actually tunes, and Details edits the rest
 /// through the same undo door.
 ///
-/// Units per architecture rule 6: the fog block is **SI metres** (`m⁻¹`
-/// extinction and falloff, metre height); the disc sizes are **degrees of
-/// angular diameter**; everything else is a dimensionless multiplier over a
-/// physical constant that lives in `inf_render::atmosphere`.
+/// Units per architecture rule 6: the fog block and the P17.3 **cloud block** are
+/// **SI metres** (`m⁻¹` extinction and falloff, metre heights, m/s wind); the disc
+/// sizes are **degrees of angular diameter**; everything else is a dimensionless
+/// multiplier over a physical constant that lives in `inf_render::atmosphere` or
+/// `inf_render::clouds`.
+///
+/// The cloud block follows the same numeric-and-boolean rule: `cloud_color` stays
+/// in Details with the other five colours.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
 pub struct SkyAtmosphereDto {
     /// Whether the level has a sky authority at all. `false` ⇒ these are the
@@ -1390,6 +1394,34 @@ pub struct SkyAtmosphereDto {
     pub fog_falloff: f32,
     /// World altitude the fog density applies at, **m**.
     pub fog_height: f32,
+
+    // ── volumetric clouds (P17.3) ────────────────────────────────────────
+    /// Draw volumetric clouds. Requires [`physical`](Self::physical).
+    pub clouds_enabled: bool,
+    /// Fractional sky coverage, `[0, 1]`.
+    pub cloud_coverage: f32,
+    /// Cloud type, `[0, 1]`: 0 = stratus sheet, 1 = cumulus tower.
+    pub cloud_type: f32,
+    /// Bottom of the cloud layer, **m** of world altitude.
+    pub cloud_bottom: f32,
+    /// Top of the cloud layer, **m**.
+    pub cloud_top: f32,
+    /// Cloud extinction at full density, **m⁻¹**.
+    pub cloud_density: f32,
+    /// Erosion detail strength, `[0, 1]`.
+    pub cloud_detail: f32,
+    /// Field seed (low 24 bits used).
+    pub cloud_seed: u32,
+    /// Wind velocity in world X, **m/s**.
+    pub cloud_wind_x: f32,
+    /// Wind velocity in world Z, **m/s**.
+    pub cloud_wind_z: f32,
+    /// Forward phase asymmetry `g`, `[0, 0.95]`.
+    pub cloud_phase_g: f32,
+    /// How much the layer darkens the sun on the ground, `[0, 1]`.
+    pub cloud_shadow: f32,
+    /// Ambient multiplier inside a cloud, `[0, 4]`.
+    pub cloud_ambient: f32,
 }
 
 impl SkyAtmosphereDto {
@@ -1415,6 +1447,19 @@ impl SkyAtmosphereDto {
             fog_density: a.fog_density,
             fog_falloff: a.fog_falloff,
             fog_height: a.fog_height,
+            clouds_enabled: a.clouds_enabled,
+            cloud_coverage: a.cloud_coverage,
+            cloud_type: a.cloud_type,
+            cloud_bottom: a.cloud_bottom,
+            cloud_top: a.cloud_top,
+            cloud_density: a.cloud_density,
+            cloud_detail: a.cloud_detail,
+            cloud_seed: a.cloud_seed,
+            cloud_wind_x: a.cloud_wind_x,
+            cloud_wind_z: a.cloud_wind_z,
+            cloud_phase_g: a.cloud_phase_g,
+            cloud_shadow: a.cloud_shadow,
+            cloud_ambient: a.cloud_ambient,
         }
     }
 
@@ -1454,6 +1499,30 @@ impl SkyAtmosphereDto {
             fog_density: num(self.fog_density, 0.0, 0.0, 1.0),
             fog_falloff: num(self.fog_falloff, 0.002, 0.0, 1.0),
             fog_height: num(self.fog_height, 0.0, -1.0e7, 1.0e7),
+            // ── clouds (P17.3) ──
+            clouds_enabled: self.clouds_enabled,
+            cloud_coverage: num(self.cloud_coverage, 0.35, 0.0, 1.0),
+            cloud_type: num(self.cloud_type, 0.7, 0.0, 1.0),
+            // The slab is clamped into a sane troposphere: a cloud layer below
+            // sea level or above the stratosphere is not a look, it is a typo,
+            // and the march would spend its whole budget on empty air.
+            cloud_bottom: num(self.cloud_bottom, 1500.0, -1.0e4, 5.0e4),
+            cloud_top: num(self.cloud_top, 4000.0, -1.0e4, 5.0e4),
+            // 1 m⁻¹ is opaque within a metre; the ceiling exists only so a typo
+            // cannot produce an infinity in the Beer-Lambert integral.
+            cloud_density: num(self.cloud_density, 0.04, 0.0, 1.0),
+            cloud_detail: num(self.cloud_detail, 0.6, 0.0, 1.0),
+            // Masked, not clamped: the renderer carries the seed through an f32
+            // uniform and only the low 24 bits survive exactly, so a larger value
+            // would silently become a different sky than the one displayed.
+            cloud_seed: self.cloud_seed & 0x00ff_ffff,
+            // A hurricane is ~80 m/s; past that the field wraps its whole tile
+            // inside a frame and reads as static.
+            cloud_wind_x: num(self.cloud_wind_x, 6.0, -200.0, 200.0),
+            cloud_wind_z: num(self.cloud_wind_z, 2.0, -200.0, 200.0),
+            cloud_phase_g: num(self.cloud_phase_g, 0.8, 0.0, 0.95),
+            cloud_shadow: num(self.cloud_shadow, 1.0, 0.0, 1.0),
+            cloud_ambient: num(self.cloud_ambient, 1.0, 0.0, 4.0),
             ..base
         }
     }

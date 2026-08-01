@@ -39,6 +39,7 @@
 use crate::atmosphere::{
     camera_radius_km, AtmosphereParams, AtmosphereQuality, SKY_EXPOSURE_CALIBRATION,
 };
+use crate::clouds::CloudQuality;
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
 use crate::renderer::FrameData;
@@ -50,6 +51,31 @@ pub const LUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// Bytes per LUT texel (four halves).
 const LUT_TEXEL_BYTES: u32 = 8;
+
+/// Side of the cloud-shadow map's world-XZ footprint, **metres** (P17.3).
+///
+/// 20 km at 512 texels is 39 m per texel. That is deliberately coarse: a cloud
+/// four kilometres up casts a shadow whose penumbra is hundreds of metres wide,
+/// so a crisper map would only be storing detail that is physically wrong. It is
+/// also what keeps the map worth re-baking — 512² × a 16-step march is a few
+/// hundred microseconds, and it only runs when the sun, the wind or the camera's
+/// snapped centre actually moved.
+pub const CLOUD_SHADOW_EXTENT_M: f32 = 20_000.0;
+
+/// Storage format of the cloud-shadow map.
+///
+/// The obvious choice, `r16float`, is not a core WebGPU **storage** format; the
+/// next one, `r32float`, is — but it is not **filterable** without the optional
+/// `float32-filterable` feature, and a nearest-sampled cloud shadow is a grid of
+/// 39 m squares rather than a soft penumbra. So the map spends four channels to
+/// get one that is both storable and filterable everywhere. At 512² that is 2 MB
+/// for a texture that must be bilinear, which is the right trade; it also reads
+/// back as f16, whose ~1e-3 relative precision is two orders inside the parity
+/// gate's envelope ([`crate::clouds::CPU_GPU_SHADOW_TOLERANCE`]).
+pub const CLOUD_SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// Storage format of both cloud noise volumes.
+pub const CLOUD_NOISE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// The shared atmosphere uniform (`std140`), written by [`AtmosphereNode`] and
 /// read by both LUT compute shaders, the sky pass and every lit pass. Mirrors
@@ -92,6 +118,33 @@ pub struct AtmosphereGpu {
     pub fog: [f32; 4],
     /// rgb = fog tint, w reserved.
     pub fog_color: [f32; 4],
+
+    // ── volumetric clouds (P17.3), SI metres ──────────────────────────────
+    //
+    // The cloud block rides in the *atmosphere* uniform rather than one of its
+    // own. That is a deliberate cost decision: a second uniform would add a
+    // binding to `EnvBinding`, the sky pass, both bake layouts and the raymarch,
+    // for data that is already a property of the same authored component. As it
+    // is, the whole feature costs the lit passes exactly one new binding (the
+    // shadow map).
+    /// x = clouds enabled, y = coverage `[0,1]`, z = cloud type `[0,1]`,
+    /// w = erosion detail strength `[0,1]`.
+    pub clouds: [f32; 4],
+    /// x = layer bottom (m), y = layer top (m), z = extinction at full density
+    /// (m⁻¹), w = seed as an integer-valued f32 (see
+    /// [`crate::clouds::CloudGpuSeed`]).
+    pub cloud_layer: [f32; 4],
+    /// x = wind offset X (m), y = wind offset Z (m), z = forward phase `g`,
+    /// w = ambient multiplier.
+    pub cloud_wind: [f32; 4],
+    /// x = primary march steps, y = sun-transmittance steps, z = shadow-bake
+    /// steps, w = 1 when this tier reads the detail volume.
+    pub cloud_march: [f32; 4],
+    /// x = world-shadow strength `[0,1]`, y = shadow-map world extent (m),
+    /// z/w = shadow-map centre in **world** X/Z metres (texel-quantized).
+    pub cloud_shadow: [f32; 4],
+    /// rgb = cloud droplet albedo tint, w reserved.
+    pub cloud_color: [f32; 4],
 }
 
 impl AtmosphereGpu {
@@ -102,25 +155,43 @@ impl AtmosphereGpu {
         Self::build(
             &AtmosphereParams::default(),
             &SunParams::default(),
-            0.0,
+            [0.0, 0.0, 0.0],
             AtmosphereQuality::High,
+            CloudQuality::High,
         )
     }
 
-    /// Pack a scene's atmosphere + sun into the shared uniform.
+    /// Pack a scene's atmosphere + sun (+ clouds) into the shared uniform.
     ///
-    /// `eye_altitude_m` is the camera's **world** altitude in metres (the only
-    /// metre-valued input the planet block takes; [`camera_radius_km`] converts).
+    /// `eye_world_m` is the camera's **world** position in metres: `y` is the only
+    /// input the planet block takes ([`camera_radius_km`] converts it to the
+    /// atmosphere's kilometres), and `xz` centres the cloud-shadow map.
     pub fn build(
         p: &AtmosphereParams,
         sun: &SunParams,
-        eye_altitude_m: f32,
+        eye_world_m: [f32; 3],
         quality: AtmosphereQuality,
+        cloud_quality: CloudQuality,
     ) -> Self {
+        let eye_altitude_m = eye_world_m[1];
         let sd = sun.unit_direction();
         let md = sun.unit_moon_direction();
         let i = sun.intensity.max(0.0);
         let mi = sun.moon_intensity.max(0.0);
+        // ── clouds (P17.3) ──
+        let c = &p.clouds;
+        // A degenerate slab (top ≤ bottom, or non-finite) collapses to zero
+        // thickness, which the shader's `h` test rejects everywhere — so hostile
+        // authoring produces an empty sky rather than a divide by zero.
+        let bottom = if c.bottom.is_finite() { c.bottom } else { 0.0 };
+        let top = if c.top.is_finite() {
+            c.top.max(bottom)
+        } else {
+            bottom
+        };
+        let wind = c.wind_offset();
+        let shadow_centre =
+            Self::cloud_shadow_centre([eye_world_m[0], eye_world_m[2]], cloud_quality);
         Self {
             params: [
                 if p.enabled { 1.0 } else { 0.0 },
@@ -180,7 +251,83 @@ impl AtmosphereGpu {
                 0.0,
             ],
             fog_color: [p.fog.color[0], p.fog.color[1], p.fog.color[2], 0.0],
+            clouds: [
+                if p.clouds_active() { 1.0 } else { 0.0 },
+                c.coverage.clamp(0.0, 1.0),
+                c.cloud_type.clamp(0.0, 1.0),
+                c.detail.clamp(0.0, 1.0),
+            ],
+            cloud_layer: [
+                bottom,
+                top,
+                c.density.max(0.0),
+                crate::clouds::CloudGpuSeed::encode(c.seed),
+            ],
+            cloud_wind: [
+                wind[0],
+                wind[1],
+                c.phase_g.clamp(0.0, 0.95),
+                c.ambient.clamp(0.0, 4.0),
+            ],
+            cloud_march: [
+                cloud_quality.march_steps() as f32,
+                cloud_quality.light_steps() as f32,
+                cloud_quality.shadow_steps() as f32,
+                if cloud_quality.uses_detail() {
+                    1.0
+                } else {
+                    0.0
+                },
+            ],
+            cloud_shadow: [
+                if p.cloud_shadows_active() {
+                    c.shadow_strength.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                },
+                CLOUD_SHADOW_EXTENT_M,
+                shadow_centre[0],
+                shadow_centre[1],
+            ],
+            cloud_color: [c.color[0], c.color[1], c.color[2], 0.0],
         }
+    }
+
+    /// The cloud-shadow map's world-XZ centre for a camera at `eye_xz`, snapped
+    /// to a whole texel.
+    ///
+    /// Snapping is not optional. The map is re-baked whenever its centre moves,
+    /// and an unsnapped centre moves every frame a flycam breathes — which would
+    /// both re-bake constantly and, worse, slide the shadow pattern by a fraction
+    /// of a texel each frame so that a *static* scene shimmered. Snapped, the map
+    /// jumps by exactly one texel at a time and the bilinear lookup lands on the
+    /// same values it did before.
+    pub fn cloud_shadow_centre(eye_xz: [f32; 2], quality: CloudQuality) -> [f32; 2] {
+        let texel = CLOUD_SHADOW_EXTENT_M / quality.shadow_res().max(1) as f32;
+        let snap = |v: f32| {
+            if v.is_finite() {
+                (v / texel).round() * texel
+            } else {
+                0.0
+            }
+        };
+        [snap(eye_xz[0]), snap(eye_xz[1])]
+    }
+
+    /// The uniform block for this frame — the single definition of how a
+    /// [`FrameData`] becomes `AtmosphereData`, shared by the LUT bake node (which
+    /// writes it) and the cloud bake node (which re-derives it to read its keys
+    /// out). Two hand-rolled copies of this would be two chances for the cache
+    /// keys and the uniform to disagree about what was baked.
+    pub(crate) fn from_frame(frame: &FrameData) -> Self {
+        let eye = frame.view.eye_world;
+        Self::build(
+            &frame.scene.atmosphere,
+            &frame.scene.sun,
+            [eye.x as f32, eye.y as f32, eye.z as f32],
+            frame.atmosphere.quality,
+            frame.atmosphere.cloud_quality,
+        )
     }
 
     fn medium_key(&self) -> MediumKey {
@@ -212,6 +359,68 @@ impl AtmosphereGpu {
             radius_m: (self.planet[2] as f64 * 1000.0).round() as i64,
         }
     }
+
+    /// What the two baked cloud **noise volumes** are a function of: the seed,
+    /// and nothing else.
+    ///
+    /// Not the coverage, not the wind, not the sun — those all shape the field at
+    /// *sample* time, which is the whole reason the volumes are worth baking. So
+    /// a level dragging the coverage slider re-bakes nothing at all, and 8.4 MB
+    /// of 3D noise is written once and then never again.
+    pub(crate) fn cloud_field_key(&self) -> u32 {
+        self.cloud_layer[3].to_bits()
+    }
+
+    /// What the cloud-**shadow** map is a function of: the field, the layer
+    /// geometry, the weather, the wind's current displacement, the sun direction,
+    /// the march budget and the map's snapped centre.
+    ///
+    /// Everything that moves a shadow, and nothing that does not — the camera's
+    /// *altitude*, for instance, is absent, because the map is a property of the
+    /// world rather than of the viewer.
+    pub(crate) fn cloud_shadow_key(&self) -> CloudShadowKey {
+        CloudShadowKey {
+            enabled: self.clouds[0].to_bits(),
+            field: self.cloud_field_key(),
+            shape: [
+                self.clouds[1].to_bits(),
+                self.clouds[2].to_bits(),
+                self.clouds[3].to_bits(),
+            ],
+            layer: [
+                self.cloud_layer[0].to_bits(),
+                self.cloud_layer[1].to_bits(),
+                self.cloud_layer[2].to_bits(),
+            ],
+            wind: [self.cloud_wind[0].to_bits(), self.cloud_wind[1].to_bits()],
+            sun_dir: [
+                self.sun_dir[0].to_bits(),
+                self.sun_dir[1].to_bits(),
+                self.sun_dir[2].to_bits(),
+            ],
+            steps: [self.cloud_march[2].to_bits(), self.cloud_march[3].to_bits()],
+            centre: [
+                self.cloud_shadow[2].to_bits(),
+                self.cloud_shadow[3].to_bits(),
+            ],
+            extent: self.cloud_shadow[1].to_bits(),
+        }
+    }
+}
+
+/// What the cloud-shadow map is a function of. Bit patterns, like every other key
+/// here, so a `NaN` parameter cannot make the cache thrash.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CloudShadowKey {
+    enabled: u32,
+    field: u32,
+    shape: [u32; 3],
+    layer: [u32; 3],
+    wind: [u32; 2],
+    sun_dir: [u32; 3],
+    steps: [u32; 2],
+    centre: [u32; 2],
+    extent: u32,
 }
 
 /// How far past sunset the stars have fully faded in, as a sine of elevation.
@@ -257,22 +466,40 @@ struct SkyViewKey {
 pub struct AtmosphereResources {
     transmittance_tex: wgpu::Texture,
     sky_view_tex: wgpu::Texture,
+    shape_tex: wgpu::Texture,
+    detail_tex: wgpu::Texture,
+    cloud_shadow_tex: wgpu::Texture,
     /// Transmittance LUT (sun-zenith-angle × altitude).
     pub transmittance: wgpu::TextureView,
     /// Sky-view LUT (view direction, sun-relative).
     pub sky_view: wgpu::TextureView,
-    /// Clamped bilinear sampler both LUTs are read through.
+    /// Clamped bilinear sampler both LUTs are read through. Also serves the
+    /// cloud-shadow map, which wants exactly the same addressing.
     pub sampler: wgpu::Sampler,
+    /// Cloud **shape** volume (Perlin–Worley base + 3 Worley octaves), P17.3.
+    pub cloud_shape: wgpu::TextureView,
+    /// Cloud **detail** (erosion) volume.
+    pub cloud_detail: wgpu::TextureView,
+    /// Cloud sun-transmittance map, world-XZ (P17.3).
+    pub cloud_shadow: wgpu::TextureView,
+    /// **Repeating** bilinear sampler the two tileable cloud volumes are read
+    /// through — the whole point of baking them tileable.
+    pub cloud_sampler: wgpu::Sampler,
     /// The shared `AtmosphereData` uniform.
     pub uniform: wgpu::Buffer,
     /// Bumped on every recreation. Bind-group caches MUST key on this.
     pub generation: u64,
     /// The quality these textures were sized for.
     pub quality: AtmosphereQuality,
+    /// The cloud tier the three cloud textures were sized for. Derived from
+    /// [`quality`](Self::quality) — one knob, not two — and therefore covered by
+    /// the same `generation`, because the two are always recreated together.
+    pub cloud_quality: CloudQuality,
 }
 
 impl AtmosphereResources {
     pub fn new(gpu: &GpuContext, quality: AtmosphereQuality, generation: u64) -> Self {
+        let cloud_quality = CloudQuality::from_atmosphere(quality);
         let make = |label: &str, (w, h): (u32, u32)| {
             gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -296,6 +523,67 @@ impl AtmosphereResources {
         let sky_view_tex = make("atmos-skyview-lut", quality.skyview_size());
         let transmittance = transmittance_tex.create_view(&Default::default());
         let sky_view = sky_view_tex.create_view(&Default::default());
+
+        // ── cloud volumes + shadow map (P17.3) ──
+        //
+        // Allocated unconditionally, like `ShadowResources`' 48 MB cascade array
+        // and `GiResources`' voxel grid: ~9.6 MB at High is well inside the
+        // house's existing always-on budget, and a lazily-grown texture would
+        // still need a 1×1 placeholder bound at every binding so that the bind
+        // groups stay valid — trading real complexity for a fraction of what the
+        // shadow map already costs.
+        let volume = |label: &str, res: u32| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: res,
+                    height: res,
+                    depth_or_array_layers: res,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D3,
+                format: CLOUD_NOISE_FORMAT,
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    // The CPU/GPU noise-parity gate reads these back.
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        };
+        let shape_tex = volume("cloud-shape", cloud_quality.shape_res());
+        let detail_tex = volume("cloud-detail", cloud_quality.detail_res());
+        let cloud_shadow_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cloud-shadow-map"),
+            size: wgpu::Extent3d {
+                width: cloud_quality.shadow_res(),
+                height: cloud_quality.shadow_res(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: CLOUD_SHADOW_FORMAT,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let cloud_shape = shape_tex.create_view(&Default::default());
+        let cloud_detail = detail_tex.create_view(&Default::default());
+        let cloud_shadow = cloud_shadow_tex.create_view(&Default::default());
+        // Repeat, not clamp: both volumes are tileable by construction, and that
+        // is what lets a 30 km march wrap an 8 km texture with no seam. Getting
+        // this wrong would smear the last texel across the whole sky.
+        let cloud_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("cloud-noise"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         // Clamp-to-edge is load-bearing, not a default: the transmittance
         // parameterization puts the horizon at the very edge of the u axis, and a
         // repeating sampler would wrap a grazing ray onto an overhead one.
@@ -319,12 +607,20 @@ impl AtmosphereResources {
         Self {
             transmittance_tex,
             sky_view_tex,
+            shape_tex,
+            detail_tex,
+            cloud_shadow_tex,
             transmittance,
             sky_view,
             sampler,
+            cloud_shape,
+            cloud_detail,
+            cloud_shadow,
+            cloud_sampler,
             uniform,
             generation,
             quality,
+            cloud_quality,
         }
     }
 
@@ -342,17 +638,82 @@ impl AtmosphereResources {
     pub fn read_sky_view(&self, gpu: &GpuContext) -> Result<Vec<u8>, String> {
         read_lut(gpu, &self.sky_view_tex, self.quality.skyview_size())
     }
+
+    /// Blocking readback of the baked cloud **shape** volume as tightly-packed
+    /// RGBA8 texels in x-major order. The CPU/GPU noise-parity gate compares this
+    /// against [`crate::clouds::shape_texel`].
+    pub fn read_cloud_shape(&self, gpu: &GpuContext) -> Result<Vec<u8>, String> {
+        let r = self.cloud_quality.shape_res();
+        read_texture(gpu, &self.shape_tex, (r, r, r), 4)
+    }
+
+    /// Blocking readback of the baked cloud **detail** volume.
+    pub fn read_cloud_detail(&self, gpu: &GpuContext) -> Result<Vec<u8>, String> {
+        let r = self.cloud_quality.detail_res();
+        read_texture(gpu, &self.detail_tex, (r, r, r), 4)
+    }
+
+    /// Blocking readback of the cloud-shadow map's transmittances, decoded from
+    /// f16 (see [`CLOUD_SHADOW_FORMAT`]). Row-major, `shadow_res()²` values.
+    pub fn read_cloud_shadow(&self, gpu: &GpuContext) -> Result<Vec<f32>, String> {
+        let r = self.cloud_quality.shadow_res();
+        let bytes = read_texture(gpu, &self.cloud_shadow_tex, (r, r, 1), LUT_TEXEL_BYTES)?;
+        // Four halves per texel; the transmittance is the red channel.
+        Ok(bytes
+            .chunks_exact(8)
+            .map(|c| half_to_f32(u16::from_le_bytes([c[0], c[1]])))
+            .collect())
+    }
+}
+
+/// IEEE-754 binary16 → f32. Six lines rather than a dependency: this exists only
+/// so the cloud-shadow parity gate can read the map back, and `half` is not
+/// otherwise in the workspace's pinned set.
+fn half_to_f32(h: u16) -> f32 {
+    let sign = ((h >> 15) & 1) as u32;
+    let exp = ((h >> 10) & 0x1f) as u32;
+    let frac = (h & 0x3ff) as u32;
+    let bits = match exp {
+        // Zero / subnormal: scale the fraction by 2^-24 in f32 space.
+        0 => {
+            if frac == 0 {
+                sign << 31
+            } else {
+                return (if sign == 1 { -1.0 } else { 1.0 }) * (frac as f32) * 5.960_464_5e-8;
+            }
+        }
+        // Inf / NaN.
+        0x1f => (sign << 31) | 0x7f80_0000 | (frac << 13),
+        _ => (sign << 31) | ((exp + 112) << 23) | (frac << 13),
+    };
+    f32::from_bits(bits)
 }
 
 /// 256-byte-row-aligned texture → CPU copy, unpadded on the way out (the same
 /// shape as [`crate::headless::HeadlessTarget::read_rgba`], for a 4×f16 format).
 fn read_lut(gpu: &GpuContext, tex: &wgpu::Texture, (w, h): (u32, u32)) -> Result<Vec<u8>, String> {
-    let unpadded = (w * LUT_TEXEL_BYTES) as usize;
+    read_texture(gpu, tex, (w, h, 1), LUT_TEXEL_BYTES)
+}
+
+/// The general form: any 2D or 3D texture → a tightly-packed CPU copy.
+///
+/// `rows_per_image` is what makes the 3D case work — without it a depth slice's
+/// rows are padded but its *slices* are not, and every slice after the first
+/// lands at the wrong offset. That is a silent corruption (the readback still has
+/// the right length), which is exactly the kind of thing a parity gate would
+/// blame on the shader.
+fn read_texture(
+    gpu: &GpuContext,
+    tex: &wgpu::Texture,
+    (w, h, d): (u32, u32, u32),
+    texel_bytes: u32,
+) -> Result<Vec<u8>, String> {
+    let unpadded = (w * texel_bytes) as usize;
     let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize)
         * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
     let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("atmos-lut-readback"),
-        size: (padded * h as usize) as u64,
+        size: (padded * h as usize * d as usize) as u64,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -373,13 +734,13 @@ fn read_lut(gpu: &GpuContext, tex: &wgpu::Texture, (w, h): (u32, u32)) -> Result
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(padded as u32),
-                rows_per_image: None,
+                rows_per_image: Some(h),
             },
         },
         wgpu::Extent3d {
             width: w,
             height: h,
-            depth_or_array_layers: 1,
+            depth_or_array_layers: d,
         },
     );
     gpu.queue.submit([encoder.finish()]);
@@ -398,7 +759,7 @@ fn read_lut(gpu: &GpuContext, tex: &wgpu::Texture, (w, h): (u32, u32)) -> Result
     let data = slice
         .get_mapped_range()
         .map_err(|e| format!("get_mapped_range: {e}"))?;
-    let mut out = Vec::with_capacity(unpadded * h as usize);
+    let mut out = Vec::with_capacity(unpadded * h as usize * d as usize);
     for row in data.chunks(padded) {
         out.extend_from_slice(&row[..unpadded]);
     }
@@ -541,12 +902,7 @@ impl RenderNode for AtmosphereNode {
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
         let res = frame.atmosphere;
         let params = &frame.scene.atmosphere;
-        let data = AtmosphereGpu::build(
-            params,
-            &frame.scene.sun,
-            frame.view.eye_world.y as f32,
-            res.quality,
-        );
+        let data = AtmosphereGpu::from_frame(frame);
 
         // Publish the uniform when it changed. `AtmosphereResources::new` already
         // wrote the disabled block, so a scene that never enables the atmosphere
@@ -679,8 +1035,9 @@ mod tests {
             ..SunParams::default()
         };
         let q = AtmosphereQuality::High;
-        let a = AtmosphereGpu::build(&p, &noon, 2.0, q);
-        let b = AtmosphereGpu::build(&p, &dusk, 2.0, q);
+        let cq = CloudQuality::High;
+        let a = AtmosphereGpu::build(&p, &noon, [0.0, 2.0, 0.0], q, cq);
+        let b = AtmosphereGpu::build(&p, &dusk, [0.0, 2.0, 0.0], q, cq);
         assert!(a.medium_key() == b.medium_key(), "sun moved the medium key");
         assert!(
             a.skyview_key() != b.skyview_key(),
@@ -688,8 +1045,8 @@ mod tests {
         );
 
         // Altitude: sub-metre jitter must NOT re-bake; a real climb must.
-        let c = AtmosphereGpu::build(&p, &noon, 2.4, q);
-        let d = AtmosphereGpu::build(&p, &noon, 250.0, q);
+        let c = AtmosphereGpu::build(&p, &noon, [0.0, 2.4, 0.0], q, cq);
+        let d = AtmosphereGpu::build(&p, &noon, [0.0, 250.0, 0.0], q, cq);
         assert!(
             a.skyview_key() == c.skyview_key(),
             "sub-metre jitter re-baked"
@@ -706,8 +1063,9 @@ mod tests {
                 ..p
             },
             &noon,
-            2.0,
+            [0.0, 2.0, 0.0],
             q,
+            cq,
         );
         assert!(a.medium_key() != hazy.medium_key());
         assert!(a.skyview_key() != hazy.skyview_key());
@@ -722,12 +1080,96 @@ mod tests {
                 ..p
             },
             &noon,
-            2.0,
+            [0.0, 2.0, 0.0],
             q,
+            cq,
         );
         assert!(a.medium_key() == foggy.medium_key());
         assert!(a.skyview_key() == foggy.skyview_key());
         assert_ne!(a, foggy, "the uniform itself must still change");
+    }
+
+    /// The **other half** of the "clouds need no key component" argument (the
+    /// first half is `passes::gen_cache_tests::cloud_quality_is_a_total_function_of_atmosphere_quality`).
+    ///
+    /// An injective tier mapping is not enough on its own: if some other code path
+    /// could assign `AtmosphereResources::cloud_quality` after construction, the
+    /// cloud textures could change under an *unchanged* `generation` and every
+    /// bind group keyed on it would go quietly stale — the exact failure the
+    /// `EnvBinding` invariant exists to prevent, and one wgpu keeps silent by
+    /// holding the old textures alive.
+    ///
+    /// So: the field is written in exactly one place, `new`, which is also the
+    /// only place that takes a fresh `generation`. Asserted over the crate's own
+    /// source because that is what the claim is *about* — there is no runtime
+    /// observation that could distinguish "assigned once" from "assigned twice
+    /// with the same value", and a type-level guarantee would mean making the
+    /// field private to a module that already contains its only writer.
+    #[test]
+    fn cloud_quality_is_only_assigned_at_construction() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, usize, String)>) {
+            for entry in std::fs::read_dir(dir).expect("readable src dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("readable source");
+                    for (i, line) in text.lines().enumerate() {
+                        let trimmed = line.trim();
+                        // Code only. Prose that *discusses* the field — including
+                        // the comments on this very test — is not an assignment,
+                        // and scanning it produces nothing but false positives.
+                        if trimmed.starts_with("//") {
+                            continue;
+                        }
+                        if trimmed.contains("cloud_quality") {
+                            out.push((path.clone(), i + 1, trimmed.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut hits = Vec::new();
+        walk(&src, &mut hits);
+        assert!(
+            !hits.is_empty(),
+            "the source scan found nothing — wrong path?"
+        );
+
+        // The needles are assembled at run time rather than written as literals:
+        // this file is inside the tree being scanned, and a literal needle would
+        // match the line that declares it. (It did, on the first run.)
+        let field = "cloud_quality";
+        let assign = format!(".{field} =");
+        let bind = format!("let {field} =");
+
+        // No field assignment anywhere: a dotted assignment to the field is the
+        // shape that would break the invariant.
+        for (path, line, text) in &hits {
+            assert!(
+                !text.contains(&assign),
+                "{}:{line} assigns the cloud tier after construction, which would                  change the cloud textures under an unchanged generation:
+  {text}",
+                path.display()
+            );
+        }
+        // ...and exactly one binding, the one `new` computes from the atmosphere
+        // tier it was handed.
+        let bindings: Vec<_> = hits
+            .iter()
+            .filter(|(_, _, t)| t.starts_with(&bind))
+            .collect();
+        assert_eq!(
+            bindings.len(),
+            1,
+            "expected exactly one `let cloud_quality =` (in `AtmosphereResources::new`), found {bindings:#?}"
+        );
+        assert!(
+            bindings[0].2.contains("CloudQuality::from_atmosphere"),
+            "the one binding no longer derives the tier from the atmosphere tier: {}",
+            bindings[0].2
+        );
     }
 
     /// Stars appear only after the sun is down, and are fully out by the end of
@@ -755,8 +1197,9 @@ mod tests {
     fn uniform_is_deterministic() {
         let p = enabled();
         let s = SunParams::default();
-        let a = AtmosphereGpu::build(&p, &s, 12.5, AtmosphereQuality::Medium);
-        let b = AtmosphereGpu::build(&p, &s, 12.5, AtmosphereQuality::Medium);
+        let eye = [3.5, 12.5, -7.25];
+        let a = AtmosphereGpu::build(&p, &s, eye, AtmosphereQuality::Medium, CloudQuality::Medium);
+        let b = AtmosphereGpu::build(&p, &s, eye, AtmosphereQuality::Medium, CloudQuality::Medium);
         assert_eq!(bytemuck::bytes_of(&a), bytemuck::bytes_of(&b));
     }
 
@@ -778,7 +1221,13 @@ mod tests {
             intensity: -5.0,
             ..SunParams::default()
         };
-        let g = AtmosphereGpu::build(&p, &s, f32::INFINITY, AtmosphereQuality::Low);
+        let g = AtmosphereGpu::build(
+            &p,
+            &s,
+            [f32::NAN, f32::INFINITY, f32::NEG_INFINITY],
+            AtmosphereQuality::Low,
+            CloudQuality::Low,
+        );
         assert!(g.rayleigh[3] > 0.0 && g.mie[2] > 0.0 && g.ozone_shape[1] > 0.0);
         assert!((-0.95..=0.95).contains(&g.mie[3]));
         assert!(g.planet[2].is_finite() && g.planet[2] > g.planet[0]);

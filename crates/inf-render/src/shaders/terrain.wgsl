@@ -265,6 +265,15 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         direct = direct * sf;
         spec_term = spec_term * sf;
     }
+    // P17.3: the cloud layer's soft, large-scale sun occlusion. Terrain is where
+    // this reads most — a kilometre-wide cloud shadow drifting over a valley is
+    // the whole point of baking the map. Guarded like the CSM block above, so a
+    // cloudless scene is byte-identical.
+    if (atmos.clouds.x > 0.5 && atmos.cloud_shadow.x > 0.0) {
+        let cf = cloud_shadow_factor(in.world_local);
+        direct = direct * cf;
+        spec_term = spec_term * cf;
+    }
     let ao = textureSampleLevel(ao_tex, ao_smp, in.clip.xy / view.grid_axis_viewport.zw, 0.0).r;
     let lo = albedo * (ambient * ao + direct) + spec_term;
 

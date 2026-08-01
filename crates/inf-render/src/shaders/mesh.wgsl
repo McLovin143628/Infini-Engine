@@ -153,6 +153,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         if (shadow.params.x > 0.5) {
             d = d * shadow_factor(in.world_pos, n);
         }
+        // P17.3: large-scale cloud shadowing of the sun. Guarded exactly like the
+        // CSM block above, so a scene without clouds runs the identical
+        // instruction stream and its goldens stay byte-identical.
+        if (atmos.clouds.x > 0.5 && atmos.cloud_shadow.x > 0.0) {
+            d = d * cloud_shadow_factor(in.world_pos);
+        }
         lo += d;
     } else {
         // The first directional light receives the cascaded shadow factor.
@@ -167,6 +173,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
                 if (shadow.params.x > 0.5 && !shadowed) {
                     d = d * shadow_factor(in.world_pos, n);
                     shadowed = true;
+                }
+                // P17.3: cloud shadows darken every directional light, not just
+                // the first — a cloud layer is above all of them.
+                if (atmos.clouds.x > 0.5 && atmos.cloud_shadow.x > 0.0) {
+                    d = d * cloud_shadow_factor(in.world_pos);
                 }
                 lo += d;
             } else {

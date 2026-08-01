@@ -29,11 +29,12 @@ use inf_ecs::{Guid, Vec3d};
 use inf_math::FloatingOrigin;
 use inf_render::{
     detect_tier, expand_nine_slice, expand_text, handle_from_guid, AtmosphereParams, BloomSettings,
-    EngineRenderer, GiSettings, GpuContext, HAlign, HeightFog, LightKind, MeshInstance,
-    NineSliceParams, PrebatchedRun, PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene,
-    RenderSettings, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap,
-    RenderView, ShadowSettings, SkyParams, SsaoSettings, SunParams, SurfaceChain, TerrainTileKey,
-    TextParams, TilemapParams, VgeomAsset, VgeomInstance, BUILTIN_FONT_TEXTURE,
+    CloudParams, EngineRenderer, GiSettings, GpuContext, HAlign, HeightFog, LightKind,
+    MeshInstance, NineSliceParams, PrebatchedRun, PrimMesh, RenderChunk, RenderLight,
+    RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
+    RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings, SkyParams, SsaoSettings,
+    SunParams, SurfaceChain, TerrainTileKey, TextParams, TilemapParams, VgeomAsset, VgeomInstance,
+    BUILTIN_FONT_TEXTURE,
 };
 use inf_scene::RenderSettingsRecord;
 
@@ -730,6 +731,27 @@ fn project_sky(scene: &mut RenderScene, world: &inf_ecs::EcsWorld) {
             falloff: a.fog_falloff,
             height: a.fog_height,
             color: [a.fog_color.r, a.fog_color.g, a.fog_color.b],
+        },
+        // Volumetric clouds (P17.3). `time_s` is the one field here that is
+        // *derived* rather than authored: the wind drifts with the level's clock
+        // (`ResolvedSky::cloud_time_s`, defined once in Ring 0) and with nothing
+        // else, so two runs at the same time of day see the same sky.
+        clouds: CloudParams {
+            enabled: a.clouds_enabled,
+            coverage: a.cloud_coverage,
+            cloud_type: a.cloud_type,
+            bottom: a.cloud_bottom,
+            top: a.cloud_top,
+            density: a.cloud_density,
+            detail: a.cloud_detail,
+            seed: a.cloud_seed,
+            wind_x: a.cloud_wind_x,
+            wind_z: a.cloud_wind_z,
+            time_s: sky.cloud_time_s(),
+            phase_g: a.cloud_phase_g,
+            shadow_strength: a.cloud_shadow,
+            ambient: a.cloud_ambient,
+            color: [a.cloud_color.r, a.cloud_color.g, a.cloud_color.b],
         },
         ..AtmosphereParams::default()
     };

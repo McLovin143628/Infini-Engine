@@ -12,6 +12,7 @@
 pub mod atmosphere;
 pub mod camera;
 pub mod caps;
+pub mod clouds;
 pub mod csm;
 pub mod debug_draw;
 pub mod gi;
@@ -37,6 +38,10 @@ pub use camera::{
     ortho_reverse_z, OrthoParams, RenderView, DEPTH_CLEAR, DEPTH_COMPARE, DEPTH_FORMAT,
 };
 pub use caps::{choose_tier, detect_tier, AdapterCaps, RenderTier};
+pub use clouds::{
+    detail_texel, shape_texel, wind_offset, CloudParams, CloudQuality, CloudVolumes,
+    CPU_GPU_EXACT_FRACTION, CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_TEXEL_TOLERANCE,
+};
 pub use debug_draw::{
     collider_outline_2d, collider_outline_3d, ColliderOutline2D, ColliderOutline3D, DebugDraw,
     DebugVertex,

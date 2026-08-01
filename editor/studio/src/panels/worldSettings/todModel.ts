@@ -92,3 +92,40 @@ export function fogVisibility(density: number): string {
   if (metres >= 10) return `~${Math.round(metres)} m`;
   return "< 10 m";
 }
+
+/**
+ * Plain-language sky-cover label for a cloud `coverage` value (P17.3).
+ *
+ * The slider is a **bias on a procedural weather field**, not a literal area
+ * fraction — 0.35 realises about 60 % sky cover, which nobody would guess from
+ * the number. Rather than pretend otherwise, the panel names the result in the
+ * terms a meteorologist (and every flight sim) uses, so an author picks the sky
+ * they want instead of hunting for it: clear, few, scattered, broken, overcast.
+ *
+ * The thresholds come from the renderer's measured coverage response (see
+ * `inf_render::clouds::weather`), not from the octa scale directly — the two
+ * agree on the words, which is the point.
+ */
+export function cloudCoverLabel(coverage: number): string {
+  if (!Number.isFinite(coverage) || coverage <= 0.2) return "clear";
+  if (coverage < 0.3) return "few";
+  if (coverage < 0.42) return "scattered";
+  if (coverage < 0.55) return "broken";
+  return "overcast";
+}
+
+/**
+ * Cloud-layer thickness label for the World Settings readback (P17.3).
+ *
+ * Both altitudes are **metres** (SI, matching `SkyAtmosphere.cloud_bottom` /
+ * `cloud_top`). A slab whose top is at or below its bottom draws nothing at all,
+ * which is a silent no-op the author would otherwise have to discover by
+ * squinting at an empty sky — so it is named here instead.
+ */
+export function cloudLayerLabel(bottom: number, top: number): string {
+  if (!Number.isFinite(bottom) || !Number.isFinite(top)) return "—";
+  const thickness = top - bottom;
+  if (thickness <= 0) return "empty (top is not above bottom)";
+  if (thickness >= 1000) return `${(thickness / 1000).toFixed(1)} km thick`;
+  return `${Math.round(thickness)} m thick`;
+}

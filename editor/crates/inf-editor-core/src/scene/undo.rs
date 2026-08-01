@@ -876,6 +876,19 @@ mod tests {
             fog_density: -1.0,
             fog_falloff: f32::NAN,
             fog_height: 0.0,
+            clouds_enabled: true,
+            cloud_coverage: 9.0,
+            cloud_type: -3.0,
+            cloud_bottom: f32::NAN,
+            cloud_top: 1e12,
+            cloud_density: -1.0,
+            cloud_detail: f32::NAN,
+            cloud_seed: u32::MAX,
+            cloud_wind_x: 1e9,
+            cloud_wind_z: f32::NAN,
+            cloud_phase_g: 5.0,
+            cloud_shadow: -1.0,
+            cloud_ambient: 1e9,
         };
         let a = hostile.to_component(SkyAtmosphere::default());
         assert_eq!(a.sky_intensity, 1.0, "NaN fell back to the default");
@@ -888,8 +901,25 @@ mod tests {
         assert_eq!(a.aerial_perspective, 0.0);
         assert_eq!(a.fog_density, 0.0);
         assert_eq!(a.fog_falloff, 0.002);
-        // Everything the DTO does not carry is untouched.
+        // ── clouds (P17.3) ──
+        assert_eq!(a.cloud_coverage, 1.0);
+        assert_eq!(a.cloud_type, 0.0);
+        assert_eq!(a.cloud_bottom, 1500.0, "NaN fell back to the default");
+        assert_eq!(a.cloud_top, 50_000.0);
+        assert_eq!(a.cloud_density, 0.0);
+        assert_eq!(a.cloud_detail, 0.6, "NaN fell back to the default");
+        // The seed is MASKED, not clamped: only the low 24 bits survive the f32
+        // uniform, so anything else would display one sky and render another.
+        assert_eq!(a.cloud_seed, 0x00ff_ffff);
+        assert_eq!(a.cloud_wind_x, 200.0);
+        assert_eq!(a.cloud_wind_z, 2.0, "NaN fell back to the default");
+        assert_eq!(a.cloud_phase_g, 0.95);
+        assert_eq!(a.cloud_shadow, 0.0);
+        assert_eq!(a.cloud_ambient, 4.0);
+        // Everything the DTO does not carry is untouched — including the cloud
+        // block's own `Color`, which stays in the Details grid with the other five.
         assert_eq!(a.zenith, SkyAtmosphere::default().zenith);
+        assert_eq!(a.cloud_color, SkyAtmosphere::default().cloud_color);
     }
 
     /// The Phase-17 "done when": a **new** level's sky is the physical one. The
@@ -930,5 +960,43 @@ mod tests {
         // The authority is the actor World Settings would have created.
         let guid = doc.sky_authority().expect("authority");
         assert_eq!(doc.display_name(guid), "Sky");
+    }
+
+    /// P17.3: a **new** level boots with clouds, while the component default —
+    /// which is also what every v12 level lifts to — stays off.
+    ///
+    /// The two must disagree in exactly this direction and nowhere else. If the
+    /// component default ever flipped true, every existing level would silently
+    /// grow a sky it was never authored against on its next load, which is the
+    /// one thing the frozen-record scheme cannot undo. If the *demo* default
+    /// flipped false, the `editor_default` golden's one P17.3 re-bless would have
+    /// been for nothing.
+    #[test]
+    fn the_default_scene_opts_into_clouds_while_the_component_does_not() {
+        use inf_ecs::components::SkyAtmosphere;
+
+        let doc = SceneDoc::with_demo();
+        let sky = doc.sky_atmosphere().expect("the default level has a sky");
+        assert!(
+            sky.clouds_enabled,
+            "a new level should boot with clouds — that is the P17.3 look"
+        );
+        assert!(
+            !SkyAtmosphere::default().clouds_enabled,
+            "the COMPONENT default must stay off, or every v12 level grows clouds \
+             it was never authored against when it is lifted"
+        );
+        // ...and nothing else in the block was privately tuned: the demo diverges
+        // by exactly one boolean, so what the golden pictures is the documented
+        // defaults.
+        let defaults = SkyAtmosphere::default();
+        assert_eq!(
+            sky,
+            SkyAtmosphere {
+                clouds_enabled: true,
+                ..defaults
+            },
+            "the default scene tuned something other than `clouds_enabled`"
+        );
     }
 }

@@ -95,6 +95,16 @@ fn the_shared_projector_body_is_not_a_stub() {
         "enabled: a.physical",
         "fog: HeightFog",
         "moon_phase: phase",
+        // P17.3: the volumetric-cloud block. `time_s` is the fragment that
+        // matters most — it is the only *derived* field in the projection, and a
+        // host that fed it a frame counter or a wall clock instead of
+        // `ResolvedSky::cloud_time_s()` would drift the two skies apart while
+        // every other assertion here still passed.
+        "clouds: CloudParams",
+        "enabled: a.clouds_enabled",
+        "time_s: sky.cloud_time_s()",
+        "seed: a.cloud_seed",
+        "shadow_strength: a.cloud_shadow",
     ] {
         assert!(
             body.contains(fragment),

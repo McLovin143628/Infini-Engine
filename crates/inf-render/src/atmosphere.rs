@@ -183,6 +183,9 @@ pub struct AtmosphereParams {
     pub star_intensity: f32,
     /// Height fog (SI metres).
     pub fog: HeightFog,
+    /// Volumetric clouds (P17.3), **SI metres**. Disabled by default; see
+    /// [`crate::clouds::CloudParams`].
+    pub clouds: crate::clouds::CloudParams,
 }
 
 impl Default for AtmosphereParams {
@@ -214,16 +217,37 @@ impl Default for AtmosphereParams {
             moon_phase: 0.5,
             star_intensity: 1.0,
             fog: HeightFog::default(),
+            clouds: crate::clouds::CloudParams::default(),
         }
     }
 }
 
 impl AtmosphereParams {
     /// Whether anything in this block should touch a *lit* pass — the aerial
-    /// perspective / height-fog receivers. `false` keeps them byte-identical.
+    /// perspective / height-fog receivers, or (P17.3) the cloud-shadow map.
+    /// `false` keeps them byte-identical.
     #[inline]
     pub fn affects_lit_passes(&self) -> bool {
-        self.enabled && (self.aerial_perspective > 0.0 || self.fog.active())
+        self.enabled
+            && (self.aerial_perspective > 0.0 || self.fog.active() || self.clouds.shadows_world())
+    }
+
+    /// Whether the cloud bake + raymarch passes should run (P17.3).
+    ///
+    /// Clouds require the physical atmosphere: they are lit by the sun's
+    /// transmittance through it and ambient-lit by the sky-view LUT, so a cloud
+    /// over the v11 gradient sky would be a grey blob with nothing to light it.
+    /// The projectors therefore only ever set `clouds.enabled` on an enabled
+    /// atmosphere, and this is the single place that invariant is enforced.
+    #[inline]
+    pub fn clouds_active(&self) -> bool {
+        self.enabled && self.clouds.active()
+    }
+
+    /// Whether the cloud-shadow map should be baked and sampled by lit passes.
+    #[inline]
+    pub fn cloud_shadows_active(&self) -> bool {
+        self.enabled && self.clouds.shadows_world()
     }
 
     /// The effective (turbidity-scaled) Mie scattering coefficient, km⁻¹.

@@ -4,6 +4,8 @@ import {
   clampDayOfYear,
   clampLatitude,
   clampLongitude,
+  cloudCoverLabel,
+  cloudLayerLabel,
   compassPoint,
   DAYS_PER_YEAR,
   formatClock,
@@ -113,5 +115,54 @@ describe("height-fog visibility label (P17.2)", () => {
       previous = current;
     }
     expect(saturated, "the sweep never reached the saturated label").toBe(true);
+  });
+});
+
+describe("cloud sky-cover label (P17.3)", () => {
+  it("names the sky the way an author would", () => {
+    // The slider is a bias on a procedural field, not an area fraction — the
+    // label is the only place the panel says what the number will actually look
+    // like, so these are the words the rows are worth having.
+    expect(cloudCoverLabel(0)).toBe("clear");
+    expect(cloudCoverLabel(0.2)).toBe("clear");
+    expect(cloudCoverLabel(0.25)).toBe("few");
+    // The component default: broken cumulus with real gaps, which is what the
+    // `clouds_scattered` golden pictures.
+    expect(cloudCoverLabel(0.35)).toBe("scattered");
+    expect(cloudCoverLabel(0.5)).toBe("broken");
+    expect(cloudCoverLabel(1)).toBe("overcast");
+  });
+
+  it("is monotone across the slider and survives nonsense", () => {
+    const order = ["clear", "few", "scattered", "broken", "overcast"];
+    let seen = 0;
+    for (let i = 0; i <= 100; i++) {
+      const rank = order.indexOf(cloudCoverLabel(i / 100));
+      expect(rank).toBeGreaterThanOrEqual(0);
+      expect(rank).toBeGreaterThanOrEqual(seen);
+      seen = rank;
+    }
+    // ...and it reaches both ends rather than parking in the middle.
+    expect(seen).toBe(order.length - 1);
+    expect(cloudCoverLabel(NaN)).toBe("clear");
+    expect(cloudCoverLabel(-5)).toBe("clear");
+  });
+});
+
+describe("cloud layer label (P17.3)", () => {
+  it("reports thickness in the unit that reads", () => {
+    // The component default layer, 1500 m to 4000 m.
+    expect(cloudLayerLabel(1500, 4000)).toBe("2.5 km thick");
+    expect(cloudLayerLabel(900, 2200)).toBe("1.3 km thick");
+    expect(cloudLayerLabel(1000, 1400)).toBe("400 m thick");
+  });
+
+  it("names the silent no-op instead of leaving it to be discovered", () => {
+    // A top at or below the base draws nothing at all. Without this the author
+    // sees an empty sky and no explanation.
+    expect(cloudLayerLabel(2000, 2000)).toBe("empty (top is not above bottom)");
+    expect(cloudLayerLabel(4000, 1500)).toBe("empty (top is not above bottom)");
+    expect(cloudLayerLabel(NaN, 4000)).toBe("—");
+    expect(cloudLayerLabel(1500, Infinity)).toBe("—");
   });
 });

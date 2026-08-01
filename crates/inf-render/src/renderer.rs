@@ -161,7 +161,14 @@ impl FrameTargets {
                 height,
                 DEPTH_FORMAT,
                 SCENE_SAMPLES,
-                RT,
+                // TEXTURE_BINDING as well as RENDER_ATTACHMENT (P17.3): the cloud
+                // raymarch binds this as a `texture_depth_multisampled_2d` to
+                // clamp its march at the nearest geometry, while the same view
+                // stays bound as a READ-ONLY depth attachment so the hardware
+                // test still rejects fully-occluded cloud fragments per sample.
+                // Adding the usage changes no pixel — it only widens what the
+                // texture may be bound as.
+                RT_TEX,
             ),
             scene_hdr: tex("scene-hdr", width, height, HDR_FORMAT, 1, RT_TEX),
             scene_color: tex("scene-color", width, height, LDR_FORMAT, 1, RT_TEX),
@@ -293,6 +300,11 @@ impl EngineRenderer {
         // no-op (not even a uniform write, after the first frame) unless the
         // scene carries an enabled `AtmosphereParams`.
         graph.add(passes::sky_lut::AtmosphereNode::new(gpu));
+        // Cloud noise volumes + cloud-shadow map (P17.3): compute-only, so it
+        // touches no colour target. It must precede BOTH the lit passes (which
+        // sample the shadow map through `EnvBinding`) and the cloud raymarch
+        // (which samples the volumes). A no-op unless the scene enables clouds.
+        graph.add(passes::cloud_bake::CloudBakeNode::new(gpu));
         graph.add(passes::sky::SkyNode::new(gpu, &view_bgl));
         // Cascaded shadow maps (P13.3b): renders the first directional light's
         // cascades + publishes the shared shadow uniform. A no-op (uniform only)
@@ -319,6 +331,11 @@ impl EngineRenderer {
         graph.add(passes::classic_vgeom::ClassicVgeomNode::new(gpu, &view_bgl));
         graph.add(passes::skinned::SkinnedMeshNode::new(gpu, &view_bgl));
         graph.add(passes::terrain::TerrainNode::new(gpu, &view_bgl));
+        // Volumetric clouds (P17.3): a depth-tested, premultiplied-alpha raymarch
+        // over everything opaque. AFTER the opaque passes so the depth buffer can
+        // occlude it, BEFORE translucency so glass composites over it. A no-op
+        // unless the scene enables clouds, so opaque scenes stay byte-identical.
+        graph.add(passes::cloud::CloudNode::new(gpu, &view_bgl));
         // Translucent forward pass (R-P5): alpha-blended, depth-tested but not
         // depth-writing, back-to-front sorted. Draws after all opaque geometry +
         // terrain, into the same MSAA scene target, before the grid. A no-op unless

@@ -2144,6 +2144,30 @@ impl SceneDoc {
         self.edit_set_prop(guid, tp, "fog_density", &num(atmos.fog_density));
         self.edit_set_prop(guid, tp, "fog_falloff", &num(atmos.fog_falloff));
         self.edit_set_prop(guid, tp, "fog_height", &num(atmos.fog_height));
+        // ── volumetric clouds (P17.3) ──
+        self.edit_set_prop(
+            guid,
+            tp,
+            "clouds_enabled",
+            &PropValue::Bool(atmos.clouds_enabled),
+        );
+        self.edit_set_prop(guid, tp, "cloud_coverage", &num(atmos.cloud_coverage));
+        self.edit_set_prop(guid, tp, "cloud_type", &num(atmos.cloud_type));
+        self.edit_set_prop(guid, tp, "cloud_bottom", &num(atmos.cloud_bottom));
+        self.edit_set_prop(guid, tp, "cloud_top", &num(atmos.cloud_top));
+        self.edit_set_prop(guid, tp, "cloud_density", &num(atmos.cloud_density));
+        self.edit_set_prop(guid, tp, "cloud_detail", &num(atmos.cloud_detail));
+        self.edit_set_prop(
+            guid,
+            tp,
+            "cloud_seed",
+            &PropValue::Number(f64::from(atmos.cloud_seed)),
+        );
+        self.edit_set_prop(guid, tp, "cloud_wind_x", &num(atmos.cloud_wind_x));
+        self.edit_set_prop(guid, tp, "cloud_wind_z", &num(atmos.cloud_wind_z));
+        self.edit_set_prop(guid, tp, "cloud_phase_g", &num(atmos.cloud_phase_g));
+        self.edit_set_prop(guid, tp, "cloud_shadow", &num(atmos.cloud_shadow));
+        self.edit_set_prop(guid, tp, "cloud_ambient", &num(atmos.cloud_ambient));
         self.commit_transaction();
         Some(guid)
     }

@@ -92,6 +92,19 @@ pub fn build(doc: &mut SceneDoc) {
 ///   density that would read at a distance is invisible here, so a nonzero
 ///   default would be a knob that appears to do nothing. Aerial perspective is
 ///   already on, already physical, and already correct at every scale.
+///
+/// ## The one place this scene departs from the component defaults (P17.3)
+///
+/// `SkyAtmosphere::clouds_enabled` defaults to **false** and this scene sets it
+/// **true**. The two are not in tension, they are answering different questions.
+/// The *component* default has to be false because it is also what every existing
+/// v12 level lifts to, and a level must not grow a sky it was never authored
+/// against — a rule the schema bump depends on. The *new-level* default is what
+/// an author should see the first time they open the editor, and an empty blue
+/// dome is not it. Everything else in the cloud block stays at its documented
+/// default (0.35 coverage — broken cumulus with real gaps — a 1.5–4 km layer, a
+/// 6 m/s westerly), so this is one boolean of divergence, not a private tuning.
+/// It is the one reason `editor_default` was re-blessed in P17.3.
 fn add_sky(doc: &mut SceneDoc, parent: uuid::Uuid) {
     let sky = doc.create(SpawnKind::Empty, "Sky", Some(parent));
     let Some(e) = doc.entity_of(sky) else {
@@ -101,7 +114,10 @@ fn add_sky(doc: &mut SceneDoc, parent: uuid::Uuid) {
     let world = doc.world_mut();
     let mut entity = world.world_mut().entity_mut(e);
     entity.insert(TimeOfDay::default());
-    entity.insert(SkyAtmosphere::default());
+    entity.insert(SkyAtmosphere {
+        clouds_enabled: true,
+        ..SkyAtmosphere::default()
+    });
     world.mark_dirty();
 }
 

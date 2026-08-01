@@ -49,6 +49,30 @@ struct AtmosphereData {
     fog: vec4<f32>,
     // rgb = fog tint, w unused.
     fog_color: vec4<f32>,
+
+    // ── volumetric clouds (P17.3), SI METRES ──
+    //
+    // The cloud block rides here rather than in a uniform of its own, so the
+    // whole feature costs the lit passes exactly ONE new binding (the shadow
+    // map). See `passes::sky_lut::AtmosphereGpu`.
+    //
+    // x = clouds enabled, y = coverage [0,1], z = cloud type [0,1],
+    // w = erosion detail strength [0,1].
+    clouds: vec4<f32>,
+    // x = layer bottom (m), y = layer top (m), z = extinction at full density
+    // (m^-1), w = seed as an integer-valued f32 (u32(...) to recover it).
+    cloud_layer: vec4<f32>,
+    // x = wind offset X (m), y = wind offset Z (m), z = forward phase g,
+    // w = ambient multiplier.
+    cloud_wind: vec4<f32>,
+    // x = primary march steps, y = sun-transmittance steps, z = shadow-bake
+    // steps, w = 1 when this tier reads the detail volume.
+    cloud_march: vec4<f32>,
+    // x = world-shadow strength [0,1], y = shadow-map world extent (m),
+    // zw = shadow-map centre in WORLD X/Z metres (texel-quantized).
+    cloud_shadow: vec4<f32>,
+    // rgb = cloud droplet albedo tint, w unused.
+    cloud_color: vec4<f32>,
 };
 
 @group(ATMOS_GROUP) @binding(ATMOS_BIND) var<uniform> atmos: AtmosphereData;

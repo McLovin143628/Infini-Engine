@@ -2600,7 +2600,10 @@ impl TimeOfDay {
 /// — is unchanged. P17.2 appends the **physical-atmosphere block**: a
 /// Hillaire-2020-class transmittance / sky-view LUT pair drives the sky, the sun
 /// and moon discs, the starfield, aerial perspective on lit geometry, and
-/// exponential height fog.
+/// exponential height fog. P17.3 appends the **volumetric-cloud block**: a
+/// raymarched layer between two authored altitudes, shaped by deterministic 3D
+/// noise, drifting with the level's clock, and casting a soft large-scale shadow
+/// on the world.
 ///
 /// # Units (architecture rule 6)
 ///
@@ -2618,8 +2621,9 @@ impl TimeOfDay {
 /// `#[serde(default)]`, so the reflection Details grid, the World Settings panel
 /// and the JSON/TOML sidecar all tolerate a partial record. **That is not what
 /// makes the bincode payload safe** — bincode is not self-describing, so growing
-/// this struct is a wire-format change and P17.2 bumps the level schema to v12
-/// with the v11 shape frozen (`SkyAtmosphereV11` in both codecs).
+/// this struct is a wire-format change: P17.2 bumped the level schema to v12 with
+/// the v11 shape frozen (`SkyAtmosphereV11` in both codecs), and P17.3 bumped it
+/// to v13 the same way for the volumetric-cloud block (`SkyAtmosphereV12`).
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[reflect(Component, Default)]
 pub struct SkyAtmosphere {
@@ -2730,6 +2734,80 @@ pub struct SkyAtmosphere {
     /// stylised (green, sepia, alien) air.
     #[serde(default = "default_fog_color")]
     pub fog_color: Color,
+
+    // ── the volumetric-cloud block (schema v13 · P17.3) ───────────────────
+    /// Draw **volumetric clouds**. `false` by default — unlike
+    /// [`physical`](Self::physical), which every level that opted into a clock
+    /// wanted — because clouds are a per-level artistic choice with a real frame
+    /// cost, and because every v12 level must keep the sky it was authored
+    /// against. The editor's default scene opts *in*; existing content does not.
+    ///
+    /// Clouds require [`physical`](Self::physical): they are lit by the sun's
+    /// transmittance through the atmosphere and ambient-lit by the sky-view LUT,
+    /// so a cloud over the v11 gradient would be a grey blob with nothing to light
+    /// it. The renderer enforces that (`AtmosphereParams::clouds_active`).
+    #[serde(default)]
+    pub clouds_enabled: bool,
+    /// Fractional sky **coverage**, `[0, 1]`. `0` is cloudless, `0.35` (the
+    /// default) is broken cumulus with real gaps, `1` is solid overcast. It biases
+    /// a procedural weather field rather than naming a literal area fraction, so
+    /// the realised cover tracks it monotonically without matching it exactly.
+    #[serde(default = "default_cloud_coverage")]
+    pub cloud_coverage: f32,
+    /// Cloud **type**, `[0, 1]`: `0` = stratus (a flat sheet along the bottom of
+    /// the layer), `1` = cumulus (towering, rounded, filling the slab). Drives the
+    /// vertical density profile.
+    #[serde(default = "default_cloud_type")]
+    pub cloud_type: f32,
+    /// Bottom of the cloud layer, **metres** of world altitude (SI).
+    #[serde(default = "default_cloud_bottom")]
+    pub cloud_bottom: f32,
+    /// Top of the cloud layer, **metres**. Held above
+    /// [`cloud_bottom`](Self::cloud_bottom) by the renderer; a degenerate slab
+    /// simply draws nothing.
+    #[serde(default = "default_cloud_top")]
+    pub cloud_top: f32,
+    /// Cloud extinction at full density, **m⁻¹** (SI). Real cloud is 0.01–0.1;
+    /// over a two-kilometre column even the low end is optically opaque, which is
+    /// why the default sits near the bottom of the range.
+    #[serde(default = "default_cloud_density")]
+    pub cloud_density: f32,
+    /// Strength of the high-frequency **erosion** detail, `[0, 1]`. `0` leaves
+    /// smooth blobs; `1` carves the wispy edges that make a cloud read as vapour.
+    /// The Low render tier ignores this (it skips the detail volume entirely).
+    #[serde(default = "default_cloud_detail")]
+    pub cloud_detail: f32,
+    /// Field **seed**. Changing it re-rolls the whole sky; only the low 24 bits
+    /// are used (the renderer carries it through an f32 uniform).
+    #[serde(default)]
+    pub cloud_seed: u32,
+    /// Wind velocity in world **X**, **m/s** (SI). The drift is a deterministic
+    /// function of the [`TimeOfDay`] clock, *not* of a wall clock — so two runs at
+    /// the same time of day see the same sky.
+    #[serde(default = "default_cloud_wind_x")]
+    pub cloud_wind_x: f32,
+    /// Wind velocity in world **Z**, **m/s**.
+    #[serde(default = "default_cloud_wind_z")]
+    pub cloud_wind_z: f32,
+    /// Forward-scattering asymmetry of the dominant cloud phase lobe,
+    /// `[0, 0.95]`. The back lobe is derived from it, so one number still buys the
+    /// two-lobe phase that produces silver linings.
+    #[serde(default = "default_cloud_phase_g")]
+    pub cloud_phase_g: f32,
+    /// How much the cloud layer darkens the **sun on the ground**, `[0, 1]`. `0`
+    /// disables the cloud-shadow map entirely and the lit passes take the
+    /// byte-identical no-cloud-shadow path; `1` is the physical amount.
+    #[serde(default = "default_one")]
+    pub cloud_shadow: f32,
+    /// Multiplier on the ambient (sky) light inside a cloud, `[0, 4]`. `1` is the
+    /// physical amount; raising it lifts the shaded undersides of an overcast
+    /// deck, which is the usual artistic complaint about correct clouds.
+    #[serde(default = "default_one")]
+    pub cloud_ambient: f32,
+    /// Linear albedo tint of the cloud droplets (alpha unused). White is physical
+    /// — water is grey — and the tint is for stylised skies.
+    #[serde(default = "default_cloud_color")]
+    pub cloud_color: Color,
 }
 
 fn default_true() -> bool {
@@ -2779,6 +2857,39 @@ fn default_fog_falloff() -> f32 {
 fn default_fog_color() -> Color {
     Color::new(1.0, 1.0, 1.0, 1.0)
 }
+// ── volumetric clouds (v13 · P17.3). Mirrors `inf_render::clouds::CloudParams::default`
+// field for field, minus the two projected-not-authored ones (`enabled` is this
+// component's `clouds_enabled`; `time_s` comes from the `TimeOfDay` clock).
+fn default_cloud_coverage() -> f32 {
+    0.35 // broken cumulus with real gaps — see the golden `clouds_scattered`
+}
+fn default_cloud_type() -> f32 {
+    0.7 // cumulus-leaning stratocumulus
+}
+fn default_cloud_bottom() -> f32 {
+    1500.0 // m — a temperate fair-weather cumulus base
+}
+fn default_cloud_top() -> f32 {
+    4000.0 // m
+}
+fn default_cloud_density() -> f32 {
+    0.04 // m^-1
+}
+fn default_cloud_detail() -> f32 {
+    0.6
+}
+fn default_cloud_wind_x() -> f32 {
+    6.0 // m/s — a light breeze; the layer crosses 8 km in ~23 minutes
+}
+fn default_cloud_wind_z() -> f32 {
+    2.0 // m/s
+}
+fn default_cloud_phase_g() -> f32 {
+    0.8
+}
+fn default_cloud_color() -> Color {
+    Color::new(1.0, 1.0, 1.0, 1.0)
+}
 
 impl Default for SkyAtmosphere {
     fn default() -> Self {
@@ -2805,6 +2916,20 @@ impl Default for SkyAtmosphere {
             fog_falloff: default_fog_falloff(),
             fog_height: 0.0,
             fog_color: default_fog_color(),
+            clouds_enabled: false,
+            cloud_coverage: default_cloud_coverage(),
+            cloud_type: default_cloud_type(),
+            cloud_bottom: default_cloud_bottom(),
+            cloud_top: default_cloud_top(),
+            cloud_density: default_cloud_density(),
+            cloud_detail: default_cloud_detail(),
+            cloud_seed: 0,
+            cloud_wind_x: default_cloud_wind_x(),
+            cloud_wind_z: default_cloud_wind_z(),
+            cloud_phase_g: default_cloud_phase_g(),
+            cloud_shadow: default_one(),
+            cloud_ambient: default_one(),
+            cloud_color: default_cloud_color(),
         }
     }
 }

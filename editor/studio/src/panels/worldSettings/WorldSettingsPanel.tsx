@@ -34,6 +34,8 @@ import {
   clampDayOfYear,
   clampLatitude,
   clampLongitude,
+  cloudCoverLabel,
+  cloudLayerLabel,
   compassPoint,
   formatClock,
   SECONDS_PER_DAY,
@@ -335,6 +337,114 @@ export default function WorldSettingsPanel() {
             </PropertyRow>
             <PropertyRow label="Visibility">
               <ReadOnly>{fogVisibility(settings.atmosphere.fog_density)}</ReadOnly>
+            </PropertyRow>
+          </PropertySection>
+
+          <PropertySection title="Clouds">
+            <p className="px-2 pb-1 text-[11px] leading-snug text-(--ink-text-dim)">
+              A raymarched cloud layer between two altitudes, shaped by seeded noise and
+              drifting with the level&rsquo;s clock &mdash; so the same time of day always gives
+              the same sky. Needs{" "}
+              <span className="text-(--ink-text)">Physical Sky</span>. The droplet tint lives in
+              Details on the <span className="text-(--ink-text)">Sky</span> actor.
+            </p>
+            <PropertyRow label="Clouds">
+              <CheckboxField
+                value={settings.atmosphere.clouds_enabled}
+                onChange={(v) => patchAtmos({ clouds_enabled: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Coverage">
+              <NumberField
+                value={settings.atmosphere.cloud_coverage}
+                step={0.05}
+                onChange={(v) => patchAtmos({ cloud_coverage: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Sky Cover">
+              <ReadOnly>{cloudCoverLabel(settings.atmosphere.cloud_coverage)}</ReadOnly>
+            </PropertyRow>
+            <PropertyRow label="Type (stratus→cumulus)">
+              <NumberField
+                value={settings.atmosphere.cloud_type}
+                step={0.05}
+                onChange={(v) => patchAtmos({ cloud_type: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Base (m)">
+              <NumberField
+                value={settings.atmosphere.cloud_bottom}
+                step={50}
+                onChange={(v) => patchAtmos({ cloud_bottom: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Top (m)">
+              <NumberField
+                value={settings.atmosphere.cloud_top}
+                step={50}
+                onChange={(v) => patchAtmos({ cloud_top: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Layer">
+              <ReadOnly>
+                {cloudLayerLabel(settings.atmosphere.cloud_bottom, settings.atmosphere.cloud_top)}
+              </ReadOnly>
+            </PropertyRow>
+            <PropertyRow label="Density (1/m)">
+              <NumberField
+                value={settings.atmosphere.cloud_density}
+                step={0.005}
+                onChange={(v) => patchAtmos({ cloud_density: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Detail">
+              <NumberField
+                value={settings.atmosphere.cloud_detail}
+                step={0.05}
+                onChange={(v) => patchAtmos({ cloud_detail: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Seed">
+              <NumberField
+                value={settings.atmosphere.cloud_seed}
+                step={1}
+                onChange={(v) => patchAtmos({ cloud_seed: Math.max(0, Math.round(v)) })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Wind X (m/s)">
+              <NumberField
+                value={settings.atmosphere.cloud_wind_x}
+                step={0.5}
+                onChange={(v) => patchAtmos({ cloud_wind_x: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Wind Z (m/s)">
+              <NumberField
+                value={settings.atmosphere.cloud_wind_z}
+                step={0.5}
+                onChange={(v) => patchAtmos({ cloud_wind_z: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Forward Scatter">
+              <NumberField
+                value={settings.atmosphere.cloud_phase_g}
+                step={0.05}
+                onChange={(v) => patchAtmos({ cloud_phase_g: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Ground Shadow">
+              <NumberField
+                value={settings.atmosphere.cloud_shadow}
+                step={0.05}
+                onChange={(v) => patchAtmos({ cloud_shadow: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Ambient">
+              <NumberField
+                value={settings.atmosphere.cloud_ambient}
+                step={0.1}
+                onChange={(v) => patchAtmos({ cloud_ambient: v })}
+              />
             </PropertyRow>
           </PropertySection>
 

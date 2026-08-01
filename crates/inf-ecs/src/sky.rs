@@ -99,6 +99,24 @@ impl ResolvedSky {
         floor + (1.0 - floor) * s
     }
 
+    /// The clock reading the **cloud wind** drifts by, in seconds (P17.3).
+    ///
+    /// `(day_of_year − 1) · 86400 + seconds`, so the drift is continuous across
+    /// midnight instead of snapping back — a level whose clock runs at rate 60
+    /// would otherwise show the whole sky jump every 24 in-game minutes.
+    ///
+    /// This lives here, in Ring 0, rather than in either projector, for the same
+    /// reason [`sky_authority`] does: it is the kind of one-line derivation that
+    /// two byte-identical MIRROR bodies would eventually stop agreeing about.
+    /// The wind is a function of the **document's** clock and of nothing else —
+    /// no wall clock, no frame counter — which is what makes two runs at the same
+    /// time of day render the same sky.
+    #[inline]
+    pub fn cloud_time_s(&self) -> f64 {
+        let day = self.time_of_day.day_of_year.max(1) as f64 - 1.0;
+        day * 86_400.0 + self.time_of_day.seconds
+    }
+
     /// The sky gradient colours to hand the renderer: the authored zenith /
     /// horizon / ground scaled by [`sky_dim`](Self::sky_dim).
     pub fn sky_gradient(&self) -> [[f32; 3]; 3] {
