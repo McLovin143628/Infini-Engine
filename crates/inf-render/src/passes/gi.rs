@@ -24,7 +24,6 @@
 
 use glam::Vec3;
 
-use crate::camera::SUN_DIR;
 use crate::gi::{probe_count, GI_DIM, PROBE_DIMS};
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
@@ -302,7 +301,8 @@ impl RenderNode for GiNode {
                 .write_buffer(&self.instances, 0, bytemuck::cast_slice(&packed));
         }
 
-        // Sun + sky radiance from the scene (first directional light, else fallback).
+        // Sun + sky radiance from the scene (first directional light, else the
+        // projected time-of-day sun).
         let (sun_dir, sun_color) = frame
             .scene
             .lights
@@ -318,7 +318,19 @@ impl RenderNode for GiNode {
                     ],
                 )
             })
-            .unwrap_or((SUN_DIR.normalize(), [3.0, 3.0, 3.0]));
+            // No directional light: fall back to the scene's **projected** sun
+            // (P17.1), so probe radiance tracks the time of day instead of a
+            // compile-time constant. A scene with no time-of-day authority
+            // projects the retired constant, so this is byte-identical for
+            // content that has not opted in.
+            .unwrap_or_else(|| {
+                let sun = &frame.scene.sun;
+                let i = sun.intensity;
+                (
+                    sun.unit_direction(),
+                    [sun.color[0] * i, sun.color[1] * i, sun.color[2] * i],
+                )
+            });
 
         let sky = &frame.scene.sky;
         let data = GiDataGpu {

@@ -17,8 +17,8 @@ use crate::components::{
     CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
     CombineRule, Decal, DistanceModel, Foliage, FoliagePaletteEntry, Joint2D, Joint3D, JointKind2D,
     JointKind3D, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice, PcgVolume,
-    Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, Spline, SplineInterp, Sprite,
-    StreamingSource, Terrain, Text2D, TextAlign, Tilemap, Transform, Visibility, Volume,
+    Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, SkyAtmosphere, Spline, SplineInterp, Sprite,
+    StreamingSource, Terrain, Text2D, TextAlign, Tilemap, TimeOfDay, Transform, Visibility, Volume,
     VolumeKind,
 };
 use crate::math::{Color, Vec2d, Vec3d};
@@ -133,6 +133,11 @@ impl ComponentRegistry {
             AudioListener => "Audio Listener",
             StreamingSource => "Streaming Source",
             AlwaysLoaded => "Always Loaded",
+            // P17.1 — the sky authority pair. Editable (and therefore
+            // sequencer-keyable: `TimeOfDay.seconds` resolves through
+            // `type_path_for("Time of Day")`).
+            TimeOfDay => "Time of Day",
+            SkyAtmosphere => "Sky Atmosphere",
         }
 
         Self { types, editable }
@@ -145,10 +150,21 @@ impl ComponentRegistry {
     /// The reflect `type_path` of an editable component by its Details display
     /// name (e.g. `"Material"`), for editor code that mutates components by
     /// field without naming `bevy_reflect` itself.
+    ///
+    /// Falls back to the Rust **short type name** (the last `::` segment, e.g.
+    /// `"TimeOfDay"` for the `"Time of Day"` display) so a stored reference — a
+    /// sequencer track path, a saved preset — survives a display-name rename and
+    /// can be written the way the type is spelled in code. Display names win, so
+    /// this can never shadow an existing lookup.
     pub fn type_path_for(&self, display: &str) -> Option<&'static str> {
         self.editable
             .iter()
             .find(|c| c.display == display)
+            .or_else(|| {
+                self.editable
+                    .iter()
+                    .find(|c| c.type_path.rsplit("::").next() == Some(display))
+            })
             .map(|c| c.type_path)
     }
 
@@ -209,7 +225,7 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        assert_eq!(reg.editable().len(), 32);
+        assert_eq!(reg.editable().len(), 34);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(
@@ -219,6 +235,80 @@ mod tests {
             );
         }
         assert_eq!(reg.display_name(Transform::type_path()), Some("Transform"));
+    }
+
+    /// `type_path_for` resolves a component by its Details **display name** and,
+    /// failing that, by its Rust **short type name** — the fallback that lets a
+    /// stored reference (a sequencer track path, a preset) be written the way the
+    /// type is spelled in code and survive a display-name rename.
+    #[test]
+    fn type_path_for_resolves_display_names_and_short_names() {
+        let reg = ComponentRegistry::new();
+        // Display name (the primary lookup).
+        assert_eq!(
+            reg.type_path_for("Time of Day"),
+            Some(TimeOfDay::type_path())
+        );
+        assert_eq!(reg.type_path_for("Mesh"), Some(MeshRef::type_path()));
+        // Short type name (the fallback) — note "Mesh" above is a *display* name
+        // that is not the short name of `MeshRef`, so both paths are exercised.
+        assert_eq!(reg.type_path_for("TimeOfDay"), Some(TimeOfDay::type_path()));
+        assert_eq!(reg.type_path_for("MeshRef"), Some(MeshRef::type_path()));
+        assert_eq!(
+            reg.type_path_for("SkyAtmosphere"),
+            Some(SkyAtmosphere::type_path())
+        );
+        // Every editable component is reachable by BOTH spellings.
+        for info in reg.editable() {
+            let short = info.type_path.rsplit("::").next().unwrap();
+            assert_eq!(
+                reg.type_path_for(info.display),
+                Some(info.type_path),
+                "{} unreachable by display name",
+                info.display
+            );
+            assert_eq!(
+                reg.type_path_for(short),
+                Some(info.type_path),
+                "{} unreachable by short name {short}",
+                info.display
+            );
+        }
+        assert_eq!(reg.type_path_for("Nonexistent Component"), None);
+    }
+
+    /// The fallback must never make a lookup ambiguous: no display name may
+    /// collide with another component's short name, and no two components may
+    /// share either spelling. This is what keeps the fallback from silently
+    /// shadowing a real component the day someone adds one.
+    #[test]
+    fn display_and_short_names_are_globally_unique() {
+        let reg = ComponentRegistry::new();
+        let mut seen: Vec<&str> = Vec::new();
+        for info in reg.editable() {
+            let short = info.type_path.rsplit("::").next().unwrap();
+            for name in [info.display, short] {
+                if name == info.display && name == short {
+                    continue; // the two spellings coincide; count it once
+                }
+                assert!(
+                    !seen.contains(&name),
+                    "'{name}' names more than one component — the short-name \
+                     fallback in `type_path_for` would become ambiguous"
+                );
+                seen.push(name);
+            }
+            if info.display == short {
+                assert!(
+                    !seen.contains(&info.display),
+                    "'{}' duplicated",
+                    info.display
+                );
+                seen.push(info.display);
+            }
+        }
+        // Sanity: the sweep really covered the whole editable list.
+        assert!(seen.len() >= reg.editable().len());
     }
 
     #[test]

@@ -441,6 +441,23 @@ impl RuntimeSim {
         terrain_height_at(&self.world, x, z)
     }
 
+    /// The level clock as the simulation sees it (UTC seconds since midnight);
+    /// `0` when the level has no clock. The read half of the `sky.*` host seam,
+    /// exposed so a gate can trace the clock without naming `bevy_ecs`.
+    pub fn time_of_day_seconds(&self) -> f64 {
+        inf_ecs::sky::time_of_day_seconds(&self.world)
+    }
+
+    /// The unit direction **toward the sun** the projected scene would carry, or
+    /// the renderer's retired-constant default when the level has no clock. This
+    /// is the value the PIE-vs-shipping sun trace compares, so it must come from
+    /// the same `inf_ecs::sky` resolution the projectors use — not a second copy.
+    pub fn sun_direction(&self) -> glam::DVec3 {
+        inf_ecs::sky::resolve_sky(&self.world)
+            .map(|s| s.sun)
+            .unwrap_or_else(|| inf_render::DEFAULT_SUN_DIR.normalize().as_dvec3())
+    }
+
     /// **The render-sync point.** Advance every streamed terrain's camera-driven
     /// cut, exactly once per frame, immediately before the scene projection.
     ///
@@ -552,6 +569,15 @@ impl RuntimeSim {
         //    this step can query a height. Camera-free by construction — see
         //    `crate::terrain_stream` for why that separation is structural.
         self.terrain.sync_sim(&mut self.world);
+        // ── P17.1 time of day ── advance the level clock ONCE per fixed step,
+        //    before anything reads it, so blueprints, the projected sun, shadows,
+        //    GI and audio all observe one consistent clock for the step. Pure IEEE
+        //    add/mul/floor over the sim's own state (`inf_ecs::sky`), hence
+        //    bit-identical across runs and across processes — which is what makes
+        //    the sun-direction trace a replay- and PIE-vs-shipping gate. Frozen at
+        //    `rate == 0` (the component default), and never called outside a
+        //    fixed step, so an idle editor never moves the sun.
+        inf_ecs::sky::advance_time_of_day(&mut self.world, dt);
         // 1. ECS → physics.
         self.bridge.sync_from_world(&self.world);
         self.bridge3d.sync_from_world(&self.world); // ── P11.3 3D bridge: sync ──
@@ -1138,6 +1164,24 @@ impl Host for RuntimeHost<'_> {
                 arg_f64(args, 0),
                 arg_f64(args, 1),
             ))),
+            // sky.* (P17.1) — the level clock, Blueprint-drivable. Four one-line
+            // seams over `inf_ecs::sky`, shared verbatim with the editor SimHost
+            // so preview == shipped by construction. Units: seconds for the clock,
+            // a dimensionless multiplier for the rate.
+            (Some("sky"), Some("get_time_of_day")) => {
+                Ok(Value::Float(inf_ecs::sky::time_of_day_seconds(self.world)))
+            }
+            (Some("sky"), Some("set_time_of_day")) => {
+                inf_ecs::sky::set_time_of_day_seconds(self.world, arg_f64(args, 0));
+                Ok(Value::Unit)
+            }
+            (Some("sky"), Some("get_rate")) => {
+                Ok(Value::Float(inf_ecs::sky::time_of_day_rate(self.world)))
+            }
+            (Some("sky"), Some("set_rate")) => {
+                inf_ecs::sky::set_time_of_day_rate(self.world, arg_f64(args, 0));
+                Ok(Value::Unit)
+            }
             // Unknown engine call: log it (matching the editor host) so a
             // partially-authored blueprint still runs rather than aborting.
             _ => {

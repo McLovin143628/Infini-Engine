@@ -228,7 +228,7 @@ impl Picker {
         gpu.queue.write_buffer(
             &self.view_buf,
             0,
-            bytemuck::bytes_of(&crate::camera::ViewUniforms::from_view(view)),
+            bytemuck::bytes_of(&crate::camera::ViewUniforms::from_view(view, &scene.sun)),
         );
 
         let (_, _, _, id_view) = self.target.as_ref().unwrap();

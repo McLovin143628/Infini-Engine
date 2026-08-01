@@ -1258,6 +1258,88 @@ impl PartitionSettingsDto {
     }
 }
 
+/// The level's **time of day** as the World Settings panel edits it (P17.1).
+///
+/// Unlike every other block on [`LevelSettingsDto`], this is **not** part of the
+/// file-level `LevelSettings` record: the clock lives on an ECS component
+/// (`inf_ecs::components::TimeOfDay`) carried by the level's *sky authority*
+/// entity, because it has to persist per-entity, animate from Blueprints and key
+/// from the sequencer. The panel is a view onto that component, which is why this
+/// DTO carries [`present`](Self::present).
+///
+/// Units per architecture rule 6: `seconds` is UTC seconds since midnight,
+/// angles are degrees, `rate` is a dimensionless multiplier.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct TimeOfDayDto {
+    /// Whether the level actually has a clock. `false` ⇒ the other fields are the
+    /// component defaults shown as a preview, and the level renders under the
+    /// renderer's retired fixed sun. Writing any row creates the authority.
+    pub present: bool,
+    /// UTC seconds since midnight, `[0, 86400)`.
+    pub seconds: f64,
+    /// Day of the year, `1..=365` (no leap day; the engine's year is fixed).
+    pub day_of_year: u32,
+    /// Latitude in degrees, `+` north.
+    pub latitude_deg: f64,
+    /// Longitude in degrees, `+` east.
+    pub longitude_deg: f64,
+    /// Simulated clock-seconds per simulated second. `0` freezes the sun.
+    pub rate: f64,
+    /// Read-only sun **altitude** above the horizon, degrees — a live readback so
+    /// the panel can say "the sun is 34° up" without duplicating the astronomy in
+    /// TypeScript. Derived, never written back.
+    pub sun_elevation_deg: f64,
+    /// Read-only sun **azimuth**, degrees clockwise from north. Derived.
+    pub sun_azimuth_deg: f64,
+}
+
+impl TimeOfDayDto {
+    /// Project the level's clock (or, with none, the component defaults marked
+    /// `present: false`).
+    pub fn from_doc(doc: &crate::scene::SceneDoc) -> Self {
+        let (present, tod) = match doc.time_of_day() {
+            Some(t) => (true, t),
+            None => (false, inf_ecs::components::TimeOfDay::default()),
+        };
+        let dir = inf_math::solar::sun_direction(&tod.solar_input());
+        Self {
+            present,
+            seconds: tod.seconds,
+            day_of_year: tod.day_of_year,
+            latitude_deg: tod.latitude_deg,
+            longitude_deg: tod.longitude_deg,
+            rate: tod.rate,
+            sun_elevation_deg: inf_math::solar::elevation_deg(dir),
+            sun_azimuth_deg: inf_math::solar::azimuth_deg(dir),
+        }
+    }
+
+    /// Convert an edited DTO back into the authoritative component, clamping
+    /// every field into its documented range so a hand-crafted IPC payload
+    /// cannot put the sun somewhere impossible.
+    pub fn to_component(self) -> inf_ecs::components::TimeOfDay {
+        inf_ecs::components::TimeOfDay {
+            seconds: inf_math::solar::wrap_seconds(self.seconds),
+            day_of_year: self.day_of_year.clamp(1, inf_math::solar::DAYS_PER_YEAR),
+            latitude_deg: if self.latitude_deg.is_finite() {
+                self.latitude_deg.clamp(-90.0, 90.0)
+            } else {
+                0.0
+            },
+            longitude_deg: if self.longitude_deg.is_finite() {
+                self.longitude_deg.clamp(-180.0, 180.0)
+            } else {
+                0.0
+            },
+            rate: if self.rate.is_finite() {
+                self.rate
+            } else {
+                0.0
+            },
+        }
+    }
+}
+
 /// The level's file-level settings, as the World Settings panel edits them
 /// (`scene_get_settings` / `scene_set_settings`). Mirrors
 /// [`crate::scene::serialize::LevelSettings`]; `render` nests
@@ -1274,18 +1356,25 @@ pub struct LevelSettingsDto {
     pub render: RenderSettingsRecordDto,
     /// World-partition / level-streaming block (P16.5).
     pub partition: PartitionSettingsDto,
+    /// Time-of-day block (P17.1). Projected from the sky-authority **entity's**
+    /// components, not from the file settings record — see [`TimeOfDayDto`].
+    pub time_of_day: TimeOfDayDto,
 }
 
 impl LevelSettingsDto {
-    /// Project the authoritative [`LevelSettings`](crate::scene::serialize::LevelSettings)
-    /// into the DTO the panel reads.
-    pub fn from_settings(s: &crate::scene::serialize::LevelSettings) -> Self {
+    /// Project the whole document's settings into the DTO the panel reads: the
+    /// file-level [`LevelSettings`](crate::scene::serialize::LevelSettings) plus
+    /// the time-of-day block, which lives on an entity rather than in the record
+    /// (see [`TimeOfDayDto`]).
+    pub fn from_doc(doc: &crate::scene::SceneDoc) -> Self {
+        let s = doc.settings();
         Self {
             gravity_2d: [s.gravity_2d.x, s.gravity_2d.y],
             gravity_3d: [s.gravity_3d.x, s.gravity_3d.y, s.gravity_3d.z],
             sim_hz: s.sim_hz,
             render: RenderSettingsRecordDto::from_record(&s.render),
             partition: PartitionSettingsDto::from_record(&s.partition),
+            time_of_day: TimeOfDayDto::from_doc(doc),
         }
     }
 

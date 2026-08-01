@@ -420,7 +420,7 @@ impl EngineRenderer {
             base_vp
         };
 
-        let mut uniforms = ViewUniforms::from_view(view);
+        let mut uniforms = ViewUniforms::from_view(view, &scene.sun);
         // R-P2 view mode: the unlit flag drives the lit passes' albedo+emissive
         // short-circuit (Unlit AND Wireframe both shade unlit). Lit writes 0, so
         // every pre-R-P2 golden stays byte-identical.

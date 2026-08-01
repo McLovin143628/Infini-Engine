@@ -983,6 +983,8 @@ mod tests {
             foliage: None,
             streaming_source: None,
             always_loaded: None,
+            time_of_day: None,
+            sky_atmosphere: None,
         };
         e.visible = true;
         e

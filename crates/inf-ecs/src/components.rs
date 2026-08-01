@@ -2494,6 +2494,200 @@ impl Default for StreamingSource {
 #[reflect(Component, Default)]
 pub struct AlwaysLoaded;
 
+// ── Time of day & sky (P17.1, schema v11) ───────────────────────────────────
+
+/// **Time of day** (schema v11): the world clock the sun and moon are a pure
+/// function of. Retires the compile-time `SUN_DIR` constant the renderer shipped
+/// from Phase 2 to Phase 16.
+///
+/// One entity in a level carries this — the *sky authority*, resolved
+/// deterministically by [`crate::sky::sky_authority`] (lowest `Guid` wins) so the
+/// editor viewport and the shipped player agree even though they walk the world
+/// in different orders. It pairs with [`SkyAtmosphere`] on the same entity.
+///
+/// Units follow architecture rule 6 (SI, documented): **seconds** for the clock,
+/// **degrees** for the angles (the Details/UI boundary convention), and a
+/// dimensionless multiplier for [`rate`](Self::rate).
+///
+/// The clock advances only inside the fixed simulation step (`rate × dt`,
+/// wrapping the day) — never while merely authoring, so an idle editor never
+/// dirties the document. `rate` defaults to **0** (frozen): a level opts into a
+/// moving sun explicitly.
+///
+/// Every field is `#[serde(default)]`, and the defaults place the sun within
+/// **1.6°** of the retired `SUN_DIR` — a scene that adds this component keeps
+/// essentially the look it had.
+///
+/// Blueprint-drivable through the `sky.*` host namespace, and
+/// `TimeOfDay.seconds` is a valid sequencer property-track path.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct TimeOfDay {
+    /// UTC seconds since midnight, `[0, 86400)`. Local solar time is
+    /// `seconds + longitude_deg / 15 h`, so 12:00 at longitude 0 is solar noon on
+    /// the prime meridian. Values outside the range wrap.
+    #[serde(default = "default_tod_seconds")]
+    pub seconds: f64,
+    /// Day of the year, `1..=365`. The engine's year is fixed-length: no leap
+    /// day, no year field (a game clock, not an ephemeris). Day 172 ≈ the June
+    /// solstice.
+    #[serde(default = "default_tod_day_of_year")]
+    pub day_of_year: u32,
+    /// Geodetic latitude in **degrees**, positive north (`[-90, 90]`).
+    #[serde(default = "default_tod_latitude_deg")]
+    pub latitude_deg: f64,
+    /// Longitude in **degrees**, positive east (`[-180, 180)`).
+    #[serde(default)]
+    pub longitude_deg: f64,
+    /// Simulated seconds of clock per real second of simulation — dimensionless.
+    /// `0` freezes the clock (the default); `60` makes a day pass in 24 minutes;
+    /// negative runs time backwards.
+    #[serde(default)]
+    pub rate: f64,
+}
+
+fn default_tod_seconds() -> f64 {
+    36_000.0 // 10:00 UTC
+}
+fn default_tod_day_of_year() -> u32 {
+    172 // ≈ the June solstice
+}
+fn default_tod_latitude_deg() -> f64 {
+    48.9
+}
+
+impl Default for TimeOfDay {
+    fn default() -> Self {
+        Self {
+            seconds: default_tod_seconds(),
+            day_of_year: default_tod_day_of_year(),
+            latitude_deg: default_tod_latitude_deg(),
+            longitude_deg: 0.0,
+            rate: 0.0,
+        }
+    }
+}
+
+impl TimeOfDay {
+    /// The solar inputs this clock represents — the bridge to
+    /// [`inf_math::solar`], which owns every bit of the actual astronomy.
+    pub fn solar_input(&self) -> inf_math::solar::SolarInput {
+        inf_math::solar::SolarInput {
+            seconds: self.seconds,
+            day_of_year: self.day_of_year,
+            latitude_deg: self.latitude_deg,
+            longitude_deg: self.longitude_deg,
+        }
+    }
+
+    /// Advance the clock by `dt` real seconds at this component's `rate`,
+    /// wrapping the day. Pure IEEE add/mul/floor — bit-identical everywhere, so
+    /// the replay and PIE-vs-shipping traces are portable.
+    pub fn advance(&mut self, dt: f64) {
+        let (seconds, day) =
+            inf_math::solar::advance(self.seconds, self.day_of_year, self.rate, dt);
+        self.seconds = seconds;
+        self.day_of_year = day;
+    }
+}
+
+/// **Sky atmosphere** (schema v11): how the [`TimeOfDay`] sun and moon light the
+/// world, and the gradient tint the sky pass draws.
+///
+/// This is the minimal parameter set P17.2 (physical atmosphere / LUTs) will
+/// grow — deliberately just enough to make time of day *do* something without
+/// changing the look of anything that does not opt in. The three colour fields
+/// are `SkyParams`' first real writers; their defaults are byte-for-byte the
+/// renderer's existing editor-dark gradient.
+///
+/// Lives on the same entity as [`TimeOfDay`] (the sky authority). Every field is
+/// `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct SkyAtmosphere {
+    /// Whether the sun/moon light the scene. When `false` the clock still runs
+    /// and the sky still tints, but no directional light is projected — a level
+    /// that wants to author its own suns turns this off.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Sun radiant-intensity multiplier. `3.0` matches the intensity the mesh
+    /// shaders' hard-coded fallback sun used through Phase 16.
+    #[serde(default = "default_sun_intensity")]
+    pub sun_intensity: f32,
+    /// Linear sun colour (alpha unused).
+    #[serde(default = "default_sun_color")]
+    pub sun_color: Color,
+    /// Moon radiant-intensity multiplier, applied while the sun is below the
+    /// horizon.
+    #[serde(default = "default_moon_intensity")]
+    pub moon_intensity: f32,
+    /// Linear moon colour (alpha unused).
+    #[serde(default = "default_moon_color")]
+    pub moon_color: Color,
+    /// Linear sky gradient colour straight overhead.
+    #[serde(default = "default_sky_zenith")]
+    pub zenith: Color,
+    /// Linear sky gradient colour at the horizon.
+    #[serde(default = "default_sky_horizon")]
+    pub horizon: Color,
+    /// Linear sky gradient colour below the horizon (ground haze).
+    #[serde(default = "default_sky_ground")]
+    pub ground: Color,
+    /// How far the gradient darkens once the sun is fully below the horizon,
+    /// `[0, 1]`: `0` keeps the authored colours all night, `1` fades them to
+    /// black. The blend is a smoothstep over the sun's elevation, and it is
+    /// **exactly 1.0 (no change) whenever the sun is more than ~9° up**, so a
+    /// daytime scene renders the authored gradient unmodified.
+    #[serde(default = "default_night_darkening")]
+    pub night_darkening: f32,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_sun_intensity() -> f32 {
+    3.0
+}
+fn default_sun_color() -> Color {
+    Color::new(1.0, 0.98, 0.95, 1.0)
+}
+fn default_moon_intensity() -> f32 {
+    0.15
+}
+fn default_moon_color() -> Color {
+    Color::new(0.62, 0.72, 1.0, 1.0)
+}
+// The renderer's `SkyParams::default()` gradient, mirrored here so a default
+// `SkyAtmosphere` writes back exactly the pixels the engine drew before P17.1.
+fn default_sky_zenith() -> Color {
+    Color::new(0.012, 0.021, 0.038, 1.0)
+}
+fn default_sky_horizon() -> Color {
+    Color::new(0.055, 0.081, 0.120, 1.0)
+}
+fn default_sky_ground() -> Color {
+    Color::new(0.009, 0.011, 0.015, 1.0)
+}
+fn default_night_darkening() -> f32 {
+    0.85
+}
+
+impl Default for SkyAtmosphere {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            sun_intensity: default_sun_intensity(),
+            sun_color: default_sun_color(),
+            moon_intensity: default_moon_intensity(),
+            moon_color: default_moon_color(),
+            zenith: default_sky_zenith(),
+            horizon: default_sky_horizon(),
+            ground: default_sky_ground(),
+            night_darkening: default_night_darkening(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3271,6 +3465,83 @@ mod tests {
         let d: StreamingSource = serde_json::from_str("{}").unwrap();
         assert_eq!(d, StreamingSource::default());
         assert_eq!(d.radius_m, 512.0);
+    }
+
+    #[test]
+    fn time_of_day_serde_round_trips_and_defaults() {
+        let t = TimeOfDay {
+            seconds: 3_600.0,
+            day_of_year: 355,
+            latitude_deg: -33.9,
+            longitude_deg: 151.2,
+            rate: 60.0,
+        };
+        let back: TimeOfDay = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(t, back);
+        // Every field is `#[serde(default)]`, so an empty payload is the default.
+        let d: TimeOfDay = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, TimeOfDay::default());
+        assert_eq!(d.seconds, 36_000.0);
+        assert_eq!(d.day_of_year, 172);
+        assert_eq!(d.latitude_deg, 48.9);
+        assert_eq!(d.longitude_deg, 0.0);
+        assert_eq!(d.rate, 0.0, "a level opts into a moving sun explicitly");
+        // A partial payload fills the rest with defaults (the additive contract).
+        let p: TimeOfDay = serde_json::from_str(r#"{"rate":120.0}"#).unwrap();
+        assert_eq!(p.rate, 120.0);
+        assert_eq!(p.seconds, 36_000.0);
+    }
+
+    #[test]
+    fn time_of_day_default_reproduces_the_retired_sun_constant() {
+        // The compile-time `inf_render::camera::SUN_DIR` this component retires.
+        let legacy = DVec3::new(0.45, 0.75, 0.3).normalize();
+        let d = inf_math::solar::sun_direction(&TimeOfDay::default().solar_input());
+        let angle = d.dot(legacy).clamp(-1.0, 1.0).acos().to_degrees();
+        assert!(
+            angle < 1.6,
+            "default sun is {angle}° off the retired constant"
+        );
+    }
+
+    #[test]
+    fn time_of_day_advance_wraps_and_freezes() {
+        let mut t = TimeOfDay {
+            seconds: 86_399.0,
+            day_of_year: 365,
+            rate: 1.0,
+            ..TimeOfDay::default()
+        };
+        t.advance(2.0);
+        assert_eq!(t.seconds, 1.0);
+        assert_eq!(t.day_of_year, 1, "the year rolls with the day");
+        // rate 0 freezes.
+        let mut frozen = TimeOfDay::default();
+        let before = frozen;
+        frozen.advance(1_000.0);
+        assert_eq!(frozen, before);
+    }
+
+    #[test]
+    fn sky_atmosphere_serde_round_trips_and_defaults() {
+        let s = SkyAtmosphere {
+            enabled: false,
+            sun_intensity: 5.0,
+            night_darkening: 0.25,
+            ..SkyAtmosphere::default()
+        };
+        let back: SkyAtmosphere =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(s, back);
+        let d: SkyAtmosphere = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, SkyAtmosphere::default());
+        assert!(d.enabled);
+        assert_eq!(d.sun_intensity, 3.0);
+        // The gradient defaults must be the renderer's existing `SkyParams`
+        // defaults verbatim — that identity is what keeps the sky byte-identical.
+        assert_eq!(d.zenith, Color::new(0.012, 0.021, 0.038, 1.0));
+        assert_eq!(d.horizon, Color::new(0.055, 0.081, 0.120, 1.0));
+        assert_eq!(d.ground, Color::new(0.009, 0.011, 0.015, 1.0));
     }
 
     #[test]

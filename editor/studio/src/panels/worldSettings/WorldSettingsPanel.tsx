@@ -18,6 +18,7 @@ import type { ReactNode } from "react";
 import type { LevelSettingsDto } from "../../bindings/LevelSettingsDto";
 import type { PartitionSettingsDto } from "../../bindings/PartitionSettingsDto";
 import type { RenderSettingsRecordDto } from "../../bindings/RenderSettingsRecordDto";
+import type { TimeOfDayDto } from "../../bindings/TimeOfDayDto";
 import {
   CheckboxField,
   NumberField,
@@ -28,6 +29,16 @@ import {
 import { useProjectStore } from "../../stores/projectStore";
 import { useSceneStore } from "../../stores/sceneStore";
 import { useViewportStore } from "../../stores/viewportStore";
+import {
+  clampDayOfYear,
+  clampLatitude,
+  clampLongitude,
+  compassPoint,
+  formatClock,
+  SECONDS_PER_DAY,
+  sunLabel,
+  wrapSeconds,
+} from "./todModel";
 
 /** A read-only value cell for info rows that have no setter. */
 function ReadOnly({ children }: { children: ReactNode }) {
@@ -53,6 +64,15 @@ export default function WorldSettingsPanel() {
     settings && setLevelSettings({ ...settings, render: { ...settings.render, ...patch } });
   const patchPartition = (patch: Partial<PartitionSettingsDto>) =>
     settings && setLevelSettings({ ...settings, partition: { ...settings.partition, ...patch } });
+  // Every time-of-day write sets `present: true` — that is the signal the backend
+  // reads as "create the sky authority if this level has no clock yet", which is
+  // how a level opts into a dynamic sun from this panel.
+  const patchTod = (patch: Partial<TimeOfDayDto>) =>
+    settings &&
+    setLevelSettings({
+      ...settings,
+      time_of_day: { ...settings.time_of_day, present: true, ...patch },
+    });
 
   const mode = useViewportStore((s) => s.mode);
   const setMode = useViewportStore((s) => s.setMode);
@@ -141,6 +161,68 @@ export default function WorldSettingsPanel() {
                 step={1}
                 onChange={(v) => patchWorld({ sim_hz: v })}
               />
+            </PropertyRow>
+          </PropertySection>
+
+          <PropertySection title="Time of Day">
+            <p className="px-2 pb-1 text-[11px] leading-snug text-(--ink-text-dim)">
+              Drives the sun and moon from a real solar model. Editing any row gives this
+              level a <span className="text-(--ink-text)">Sky</span> actor carrying the Time
+              of Day and Sky Atmosphere components &mdash; tune the rest in Details, key the
+              time in the Sequencer, or drive it from Blueprints.
+              {!settings.time_of_day.present && " This level has no clock yet."}
+            </p>
+            <PropertyRow label="Time">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <input
+                  type="range"
+                  min={0}
+                  max={SECONDS_PER_DAY - 1}
+                  step={60}
+                  value={wrapSeconds(settings.time_of_day.seconds)}
+                  onChange={(e) => patchTod({ seconds: wrapSeconds(Number(e.target.value)) })}
+                  className="min-w-0 flex-1 accent-(--ink-accent)"
+                  aria-label="Time of day"
+                />
+                <span className="w-12 shrink-0 text-right font-mono text-xs text-(--ink-text)">
+                  {formatClock(settings.time_of_day.seconds)}
+                </span>
+              </div>
+            </PropertyRow>
+            <PropertyRow label="Day of Year">
+              <NumberField
+                value={settings.time_of_day.day_of_year}
+                step={1}
+                onChange={(v) => patchTod({ day_of_year: clampDayOfYear(v) })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Latitude (°N)">
+              <NumberField
+                value={settings.time_of_day.latitude_deg}
+                step={1}
+                onChange={(v) => patchTod({ latitude_deg: clampLatitude(v) })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Longitude (°E)">
+              <NumberField
+                value={settings.time_of_day.longitude_deg}
+                step={1}
+                onChange={(v) => patchTod({ longitude_deg: clampLongitude(v) })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Rate (×)">
+              <NumberField
+                value={settings.time_of_day.rate}
+                step={1}
+                onChange={(v) => patchTod({ rate: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Sun">
+              <ReadOnly>
+                {sunLabel(settings.time_of_day.sun_elevation_deg)}
+                {" \u00b7 "}
+                {compassPoint(settings.time_of_day.sun_azimuth_deg)}
+              </ReadOnly>
             </PropertyRow>
           </PropertySection>
 

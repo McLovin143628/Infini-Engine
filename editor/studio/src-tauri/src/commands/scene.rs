@@ -674,21 +674,35 @@ pub async fn scene_list_default(
 /// block) for the editable World Settings panel.
 #[tauri::command]
 pub async fn scene_get_settings(state: State<'_, SceneState>) -> Result<LevelSettingsDto, String> {
-    let settings = lock(&state.doc)?.settings();
-    Ok(LevelSettingsDto::from_settings(&settings))
+    let doc = lock(&state.doc)?;
+    Ok(LevelSettingsDto::from_doc(&doc))
 }
 
 /// Replace the level settings as one undo step (World Settings panel; the
 /// frontend debounces the calls). Emits `world://delta` so the panel + any
 /// listener re-sync. The host applies the render block to the live viewport on
-/// the resulting version bump.
+/// the resulting version bump, and re-projects the sun on the same bump (P17.1).
 #[tauri::command]
 pub async fn scene_set_settings(
     app: AppHandle,
     state: State<'_, SceneState>,
     settings: LevelSettingsDto,
 ) -> Result<(), String> {
-    lock(&state.doc)?.edit_settings(settings.to_settings());
+    {
+        let mut doc = lock(&state.doc)?;
+        doc.edit_settings(settings.to_settings());
+        // The time-of-day half lives on the sky-authority ENTITY, not in the
+        // settings record, so it is a separate (also single-step) edit. `present`
+        // rides through as the **create** flag: the panel sets it on any time-of-day
+        // row (opting the level into a dynamic sun), and leaves it `false` when it
+        // is merely echoing back the previewed defaults — so editing gravity can
+        // never conjure a sun as a side effect. The guard itself lives in
+        // `SceneDoc::edit_time_of_day`, where it is unit-testable.
+        doc.edit_time_of_day(
+            settings.time_of_day.to_component(),
+            settings.time_of_day.present,
+        );
+    }
     emit_world_delta(&app, &state);
     Ok(())
 }

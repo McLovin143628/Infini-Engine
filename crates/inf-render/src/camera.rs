@@ -149,11 +149,17 @@ pub struct ViewUniforms {
     pub flags: [f32; 4],
 }
 
-/// Fixed editor sun for Phase 2 (light theory arrives with materials, P7).
-pub const SUN_DIR: Vec3 = Vec3::new(0.45, 0.75, 0.3);
-
 impl ViewUniforms {
-    pub fn from_view(view: &RenderView) -> Self {
+    /// Pack the view uniforms with the scene's projected sun (P17.1).
+    ///
+    /// `sun_dir` used to be the compile-time `SUN_DIR` constant; it is now
+    /// [`crate::scene::SunParams::unit_direction`], projected from the level's
+    /// `TimeOfDay` + `SkyAtmosphere` components. A scene with no time-of-day
+    /// authority projects [`crate::scene::DEFAULT_SUN_DIR`], which is bit-for-bit
+    /// the value the constant produced — so every pass that reads `view.sun_dir`
+    /// (sky glow, terrain, the mesh shaders' no-light fallback) is unchanged for
+    /// content that has not opted in.
+    pub fn from_view(view: &RenderView, sun: &crate::scene::SunParams) -> Self {
         let vp = view.view_proj();
         let origin = view.origin.origin();
         // Camera basis (render-local == world directions): right = fwd × up,
@@ -165,7 +171,7 @@ impl ViewUniforms {
             view_proj: vp.to_cols_array(),
             inv_view_proj: vp.inverse().to_cols_array(),
             eye: view.eye_local().extend(0.0).to_array(),
-            sun_dir: SUN_DIR.normalize().extend(0.0).to_array(),
+            sun_dir: sun.unit_direction().extend(0.0).to_array(),
             grid_axis_viewport: Vec4::new(
                 -origin.x as f32,
                 -origin.z as f32,
@@ -269,7 +275,7 @@ mod tests {
     fn uniforms_pack_grid_axis_from_origin() {
         let mut v = test_view();
         v.origin = FloatingOrigin::new(DVec3::new(500.0, 0.0, -300.0));
-        let u = ViewUniforms::from_view(&v);
+        let u = ViewUniforms::from_view(&v, &crate::scene::SunParams::default());
         assert_eq!(u.grid_axis_viewport[0], -500.0);
         assert_eq!(u.grid_axis_viewport[1], 300.0);
         assert_eq!(
@@ -282,13 +288,30 @@ mod tests {
         // Perspective packs mode flag 0; the origin's Y still populates the 2D
         // axis slot (only read by the grid shader in ortho).
         assert_eq!(u.mode_axis[0], 0.0);
+        // The default sun is the retired `SUN_DIR` constant, normalized — the
+        // byte-stability guarantee for every pre-P17.1 golden.
+        assert_eq!(
+            Vec3::from_slice(&u.sun_dir[..3]),
+            crate::scene::DEFAULT_SUN_DIR.normalize()
+        );
+    }
+
+    #[test]
+    fn uniforms_take_the_sun_from_the_scene() {
+        let v = test_view();
+        let sun = crate::scene::SunParams {
+            direction: Vec3::new(0.0, -1.0, 0.0),
+            ..crate::scene::SunParams::default()
+        };
+        let u = ViewUniforms::from_view(&v, &sun);
+        assert_eq!(Vec3::from_slice(&u.sun_dir[..3]), Vec3::NEG_Y);
     }
 
     #[test]
     fn uniforms_pack_camera_basis_for_billboards() {
         // A camera looking down -Z with up +Y: right = +X, up = +Y.
         let v = test_view();
-        let u = ViewUniforms::from_view(&v);
+        let u = ViewUniforms::from_view(&v, &crate::scene::SunParams::default());
         assert!((Vec3::from_slice(&u.cam_right[..3]) - Vec3::X).length() < 1e-6);
         assert!((Vec3::from_slice(&u.cam_up[..3]) - Vec3::Y).length() < 1e-6);
     }

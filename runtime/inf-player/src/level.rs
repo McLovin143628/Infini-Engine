@@ -569,6 +569,8 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
             foliage,
             streaming_source,
             always_loaded,
+            time_of_day,
+            sky_atmosphere,
         } = e;
 
         let entity = world.spawn_with_guid(guid, &name, None);
@@ -677,6 +679,13 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
                 em.insert(c);
             }
             if let Some(c) = foliage {
+                em.insert(c);
+            }
+            // ── v11 sky authority (P17.1) ──
+            if let Some(c) = time_of_day {
+                em.insert(c);
+            }
+            if let Some(c) = sky_atmosphere {
                 em.insert(c);
             }
             // ── v10 world-partition components (P16.5) ──
@@ -1415,6 +1424,8 @@ mod tests {
             foliage: None,
             streaming_source: None,
             always_loaded: None,
+            time_of_day: None,
+            sky_atmosphere: None,
         };
         parent.sprite = Some(Sprite {
             size: Vec2d::new(1.0, 1.0),

@@ -25,7 +25,8 @@ use inf_render::{
     GizmoDrag, GizmoMode, GpuContext, HAlign, LightKind, MeshInstance, NineSliceParams,
     OrthoParams, Picker, PrebatchedRun, PrimMesh, RenderChunk, RenderLight, RenderLight2D,
     RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView,
-    SpriteInstance, SurfaceChain, TerrainTileKey, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
+    SkyParams, SpriteInstance, SunParams, SurfaceChain, TerrainTileKey, TextParams, TilemapParams,
+    BUILTIN_FONT_TEXTURE,
 };
 use inf_render::{
     detect_tier, BloomSettings, GiSettings, RenderSettings, RenderTier, ShadowSettings,
@@ -909,6 +910,10 @@ impl EngineHost {
         self.spline_polylines.clear();
 
         let world = doc.world();
+        // The sky authority first (P17.1): it writes `scene.sun` / `scene.sky` and,
+        // when a clock is present, pushes the sun/moon directional light as
+        // `lights[0]` — a stable index on both projector sides.
+        project_sky(&mut self.scene, world);
         let w = world.world();
         let mut next_id: u32 = 1;
         for &guid in doc.order() {
@@ -1649,6 +1654,61 @@ fn pcg_kind_color(kind: u32) -> [f32; 4] {
         [0.35, 0.58, 0.45, 1.0], // shrub teal
     ];
     PALETTE[(kind as usize) % PALETTE.len()]
+}
+
+/// Project the level's **sky authority** into the renderer's sun + sky blocks
+/// (P17.1) — the seam that retired `inf_render::camera::SUN_DIR`.
+///
+/// **MIRROR**: byte-for-byte identical in `inf_viewport::host::project_sky` and
+/// `inf_player::render::project_sky`, and pinned by a parity test in each crate.
+/// The one thing that *could* silently diverge — *which* entity is the authority,
+/// since the editor walks document order and the player walks `Guid` order —
+/// deliberately does not live here: [`inf_ecs::sky::resolve_sky`] answers it once,
+/// in Ring 0, by lowest `Guid`.
+///
+/// With no authority the renderer's own defaults stand: the retired constant's
+/// direction and the historic three-colour gradient, so every level that has not
+/// opted into time of day renders exactly the pixels it always did.
+///
+/// When a clock is present the sun (or, once it has set, the moon) is also pushed
+/// as a **directional light**, so shadows, GI and the PBR loop all follow the
+/// clock without any of those passes knowing time of day exists. It goes in
+/// first, before the entity loop, so its index is stable on both sides. A level
+/// that would rather author its own suns sets `SkyAtmosphere::enabled = false`,
+/// which keeps the clock and the tint but projects no light.
+fn project_sky(scene: &mut RenderScene, world: &inf_ecs::EcsWorld) {
+    let Some(sky) = inf_ecs::sky::resolve_sky(world) else {
+        scene.sun = SunParams::default();
+        scene.sky = SkyParams::default();
+        return;
+    };
+    let a = &sky.atmosphere;
+    scene.sun = SunParams {
+        direction: sky.sun.as_vec3(),
+        color: [a.sun_color.r, a.sun_color.g, a.sun_color.b],
+        intensity: a.sun_intensity,
+        moon_direction: sky.moon.as_vec3(),
+        moon_color: [a.moon_color.r, a.moon_color.g, a.moon_color.b],
+        moon_intensity: a.moon_intensity,
+    };
+    let [zenith, horizon, ground] = sky.sky_gradient();
+    scene.sky = SkyParams {
+        zenith,
+        horizon,
+        ground,
+    };
+    if let Some((direction, color, intensity)) = sky.key_light() {
+        scene.lights.push(RenderLight {
+            kind: LightKind::Directional,
+            color,
+            intensity,
+            direction: direction.as_vec3(),
+            position: DVec3::ZERO,
+            range: 0.0,
+            cast_shadows: true,
+            ..RenderLight::default()
+        });
+    }
 }
 
 /// Project an ECS `Light` (+ its world transform) into a renderer light (R-P3).
@@ -3629,5 +3689,100 @@ mod terrain_resolution {
         // ray and interpolates at the crossing, so they differ by the sub-cell
         // residual — not by "one of them found nothing", which is the claim here.
         assert!((hit.world.y - y).abs() < 1e-3, "{hit:?} vs {y}");
+    }
+}
+
+#[cfg(test)]
+mod sky_projection_tests {
+    use super::{project_sky, RenderScene, SkyParams, SunParams};
+    use inf_ecs::components::{SkyAtmosphere, TimeOfDay};
+    use inf_ecs::EcsWorld;
+    use uuid::Uuid;
+
+    fn world_with(tod: TimeOfDay, atmos: SkyAtmosphere) -> EcsWorld {
+        let mut w = EcsWorld::new();
+        let e = w.spawn_with_guid(Uuid::from_u128(1), "Sky", None);
+        w.world_mut().entity_mut(e).insert(tod);
+        w.world_mut().entity_mut(e).insert(atmos);
+        w
+    }
+
+    // NOTE: the **MIRROR gate** that compares this crate's `project_sky` against
+    // the shipped player's, character for character, deliberately does NOT live
+    // here: this module is `#[cfg(any(windows, target_os = "macos"))]`, so a test
+    // inside it is invisible to the Linux CI leg. It lives in
+    // `inf-editor-core/tests/projector_mirror.rs`, which compiles on all three
+    // platforms and reads both files as source text.
+
+    /// No time-of-day authority ⇒ the renderer's own defaults stand, which are
+    /// bit-for-bit the retired `SUN_DIR` and the historic gradient. This is the
+    /// promise that keeps every pre-P17.1 level and golden byte-identical.
+    #[test]
+    fn a_clockless_world_projects_the_retired_defaults() {
+        let mut scene = RenderScene::default();
+        scene.sun.intensity = 999.0; // deliberately dirty, to prove it is reset
+        scene.lights.clear();
+        project_sky(&mut scene, &EcsWorld::new());
+        assert_eq!(scene.sun, SunParams::default());
+        assert_eq!(scene.sky, SkyParams::default());
+        assert!(scene.lights.is_empty(), "no clock ⇒ no sun light");
+    }
+
+    /// A daytime clock publishes the sun as `lights[0]` and leaves the authored
+    /// gradient untouched (the sky only dims once the sun is near the horizon).
+    #[test]
+    fn a_daytime_clock_publishes_the_sun() {
+        let mut scene = RenderScene::default();
+        let w = world_with(TimeOfDay::default(), SkyAtmosphere::default());
+        project_sky(&mut scene, &w);
+        assert!(scene.sun.direction.y > 0.5, "{:?}", scene.sun);
+        assert_eq!(scene.sun.intensity, 3.0);
+        assert_eq!(scene.sky, SkyParams::default(), "daytime tint is untouched");
+        assert_eq!(scene.lights.len(), 1);
+        assert_eq!(scene.lights[0].kind, inf_render::LightKind::Directional);
+        assert!(scene.lights[0].cast_shadows);
+        assert_eq!(
+            scene.lights[0].direction, scene.sun.direction,
+            "the key light must be the projected sun"
+        );
+    }
+
+    /// At night the moon takes over as the key light and the gradient darkens.
+    #[test]
+    fn a_night_clock_publishes_the_moon_and_darkens_the_sky() {
+        let mut scene = RenderScene::default();
+        let w = world_with(
+            TimeOfDay {
+                seconds: 0.0,
+                ..TimeOfDay::default()
+            },
+            SkyAtmosphere::default(),
+        );
+        project_sky(&mut scene, &w);
+        assert!(scene.sun.direction.y < 0.0, "the sun has set");
+        assert_eq!(scene.lights.len(), 1);
+        assert_eq!(scene.lights[0].intensity, 0.15);
+        assert_eq!(scene.lights[0].direction, scene.sun.moon_direction);
+        assert!(
+            scene.sky.zenith[2] < SkyParams::default().zenith[2],
+            "the night sky must darken: {:?}",
+            scene.sky
+        );
+    }
+
+    /// `enabled: false` keeps the clock and the tint but authors no light.
+    #[test]
+    fn a_disabled_atmosphere_projects_no_light() {
+        let mut scene = RenderScene::default();
+        let w = world_with(
+            TimeOfDay::default(),
+            SkyAtmosphere {
+                enabled: false,
+                ..SkyAtmosphere::default()
+            },
+        );
+        project_sky(&mut scene, &w);
+        assert!(scene.lights.is_empty());
+        assert!(scene.sun.direction.y > 0.5, "the sun is still projected");
     }
 }

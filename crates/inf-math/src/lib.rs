@@ -12,6 +12,12 @@ pub use glam;
 pub mod portable;
 pub use portable::{pcos, pcos64, psin, psin64};
 
+pub mod solar;
+pub use solar::{
+    advance as advance_time_of_day, bodies as sky_bodies, moon_direction, sun_direction, SkyBodies,
+    SolarInput, SECONDS_PER_DAY,
+};
+
 pub mod spline;
 pub use spline::{
     arc_length_lut, eval as eval_spline, eval_at_distance, eval_catmull_rom, eval_linear,

@@ -410,6 +410,12 @@ pub enum PersistentReason {
 ///
 /// Note `actor` deliberately does **not** make an entity placed. A blueprint on a
 /// mesh streams with the mesh; a blueprint on a bare transform is a manager.
+///
+/// Nor do the v11 sky slots (`time_of_day` / `sky_atmosphere`, P17.1). The level
+/// clock is a world-wide singleton whose transform means nothing, so it falls
+/// through to [`PersistentReason::Unplaced`] and cooks into the persistent cell —
+/// which is the only correct answer: a sun that streams out when the player walks
+/// away would take the whole sky with it.
 pub fn occupies_space(e: &RuntimeEntity) -> bool {
     e.mesh.is_some()
         || e.sprite.is_some()
@@ -1294,6 +1300,8 @@ mod tests {
             foliage: None,
             streaming_source: None,
             always_loaded: None,
+            time_of_day: None,
+            sky_atmosphere: None,
         }
     }
 
@@ -1465,6 +1473,15 @@ mod tests {
             ..rec(1, "Manager", (0.0, 0.0, 0.0))
         }));
         assert!(occupies_space(&prop(1, (0.0, 0.0, 0.0))));
+        // The v11 sky authority is a world singleton, not a placed thing: it must
+        // land in the persistent cell so the sun can never stream out.
+        let sky = RuntimeEntity {
+            time_of_day: Some(inf_ecs::components::TimeOfDay::default()),
+            sky_atmosphere: Some(inf_ecs::components::SkyAtmosphere::default()),
+            ..rec(1, "Sky", (5_000.0, 0.0, 5_000.0))
+        };
+        assert!(!occupies_space(&sky));
+        assert_eq!(persistent_reason(&sky), Some(PersistentReason::Unplaced));
         assert!(occupies_space(&RuntimeEntity {
             light: Some(Light::default()),
             ..rec(1, "L", (0.0, 0.0, 0.0))

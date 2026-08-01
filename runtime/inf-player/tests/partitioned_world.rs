@@ -703,6 +703,8 @@ fn a_persistent_blueprint_binds_in_a_partitioned_level() {
         foliage: None,
         streaming_source: None,
         always_loaded: None,
+        time_of_day: None,
+        sky_atmosphere: None,
     };
 
     let level = inf_scene::RuntimeLevel {

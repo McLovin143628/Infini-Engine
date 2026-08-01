@@ -450,6 +450,15 @@ impl SimSession {
     /// The four-phase fixed step (see the module docs).
     fn fixed_step(&mut self, doc: &mut SceneDoc) {
         let dt = self.stepper.fixed_dt();
+        // ── P17.1 time of day ── advance the level clock ONCE per fixed step,
+        //    before anything reads it, so blueprints, the projected sun, shadows,
+        //    GI and audio all observe one consistent clock for the step. Pure IEEE
+        //    add/mul/floor over the sim's own state (`inf_ecs::sky`), hence
+        //    bit-identical across runs and across processes — which is what makes
+        //    the sun-direction trace a replay- and PIE-vs-shipping gate. Frozen at
+        //    `rate == 0` (the component default), and never called outside a
+        //    fixed step, so an idle editor never moves the sun.
+        inf_ecs::sky::advance_time_of_day(doc.world_mut(), dt);
         // 1. ECS → physics.
         self.bridge.sync_from_world(doc.world());
         self.bridge3d.sync_from_world(doc.world()); // ── P11.3 3D bridge: sync ──
@@ -1200,6 +1209,24 @@ impl Host for SimHost<'_> {
                 arg_f64(args, 0),
                 arg_f64(args, 1),
             ))),
+            // sky.* (P17.1) — the level clock, Blueprint-drivable. Four one-line
+            // seams over `inf_ecs::sky`, shared verbatim with the shipped runtime
+            // host so preview == shipped by construction. Units: seconds for the
+            // clock, a dimensionless multiplier for the rate.
+            (Some("sky"), Some("get_time_of_day")) => {
+                Ok(Value::Float(inf_ecs::sky::time_of_day_seconds(self.world)))
+            }
+            (Some("sky"), Some("set_time_of_day")) => {
+                inf_ecs::sky::set_time_of_day_seconds(self.world, arg_f64(args, 0));
+                Ok(Value::Unit)
+            }
+            (Some("sky"), Some("get_rate")) => {
+                Ok(Value::Float(inf_ecs::sky::time_of_day_rate(self.world)))
+            }
+            (Some("sky"), Some("set_rate")) => {
+                inf_ecs::sky::set_time_of_day_rate(self.world, arg_f64(args, 0));
+                Ok(Value::Unit)
+            }
             // Unknown engine call: log it (matching the graph preview host) so a
             // partially-authored blueprint still runs rather than aborting.
             _ => {

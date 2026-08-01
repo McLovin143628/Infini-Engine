@@ -547,6 +547,103 @@ impl Default for SkyParams {
     }
 }
 
+/// The sun this renderer shipped with from Phase 2 to Phase 16, as a
+/// compile-time `camera::SUN_DIR` constant. **P17.1 retired the constant**: the
+/// direction is now projected from the scene's `TimeOfDay` + `SkyAtmosphere`
+/// components, and this value survives only as [`SunParams::default`] — the
+/// fallback a scene with no time-of-day authority (every unit test, every
+/// pre-P17.1 golden, a bare `RenderScene::default()`) still renders with, so
+/// those pixels are byte-identical to what they always were.
+///
+/// Kept **un-normalized**, exactly as the deleted constant was: every one of its
+/// three call sites wrote `SUN_DIR.normalize()`, and
+/// [`SunParams::unit_direction`] does the same multiplication on the same bits.
+/// Hand-transcribing the normalized triple would risk a 1-ULP drift that moves
+/// every pre-P17.1 golden, so the arithmetic is reproduced rather than the
+/// result — pinned by `default_sun_is_the_retired_constant_normalized`, which
+/// compares raw `to_bits()`.
+pub const DEFAULT_SUN_DIR: Vec3 = Vec3::new(0.45, 0.75, 0.3);
+
+/// The scene's **sun and moon** (P17.1) — direction, colour and intensity for
+/// each, projected from the `TimeOfDay` + `SkyAtmosphere` component pair by both
+/// scene builders (`inf_viewport::host` and `inf_player::render`).
+///
+/// This is the renderer's single source of a sun direction. It feeds:
+///
+/// * `ViewUniforms::sun_dir` — read by the sky gradient's glow, the terrain
+///   shader, and the mesh/skinned/vgeom shaders' no-light fallback;
+/// * the CSM caster fallback ([`crate::passes::shadow`]) when a scene has no
+///   directional light at all;
+/// * the GI sun fallback ([`crate::passes::gi`]), so probe radiance tracks the
+///   time of day.
+///
+/// A scene that authors its own directional light still wins over the fallbacks —
+/// exactly the precedence the renderer had before P17.1, with the constant
+/// swapped for a projected value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SunParams {
+    /// Unit direction **toward** the sun (same convention as
+    /// [`RenderLight::direction`]).
+    pub direction: Vec3,
+    /// Linear sun colour.
+    pub color: [f32; 3],
+    /// Sun radiant-intensity multiplier.
+    pub intensity: f32,
+    /// Unit direction **toward** the moon.
+    pub moon_direction: Vec3,
+    /// Linear moon colour.
+    pub moon_color: [f32; 3],
+    /// Moon radiant-intensity multiplier (used while the sun is below the
+    /// horizon).
+    pub moon_intensity: f32,
+}
+
+impl Default for SunParams {
+    /// The retired [`DEFAULT_SUN_DIR`] at the intensity the shaders' hard-coded
+    /// fallback used (`3.0`), so a scene that never opts into time of day renders
+    /// exactly the pixels it rendered before P17.1. `direction` is the raw
+    /// constant; consumers read [`unit_direction`](SunParams::unit_direction).
+    fn default() -> Self {
+        Self {
+            direction: DEFAULT_SUN_DIR,
+            color: [1.0, 1.0, 1.0],
+            intensity: 3.0,
+            // Straight down — a moon nobody projected is a moon nobody sees. The
+            // renderer never reads it unless the projection filled it in.
+            moon_direction: Vec3::NEG_Y,
+            moon_color: [0.62, 0.72, 1.0],
+            moon_intensity: 0.0,
+        }
+    }
+}
+
+impl SunParams {
+    /// The sun direction as a unit vector — what every consumer actually reads.
+    ///
+    /// A projector that hands over a degenerate (zero / non-finite) vector gets
+    /// the retired default rather than a `NaN` uniform, which would otherwise
+    /// black out the sky glow and the CSM cascade fit.
+    pub fn unit_direction(&self) -> Vec3 {
+        let d = self.direction.normalize_or_zero();
+        if d.length_squared() > 0.5 {
+            d
+        } else {
+            DEFAULT_SUN_DIR.normalize()
+        }
+    }
+
+    /// The moon direction as a unit vector; degenerate input reads as "straight
+    /// down", i.e. a moon below the world.
+    pub fn unit_moon_direction(&self) -> Vec3 {
+        let d = self.moon_direction.normalize_or_zero();
+        if d.length_squared() > 0.5 {
+            d
+        } else {
+            Vec3::NEG_Y
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RenderScene {
     pub instances: Vec<MeshInstance>,
@@ -618,6 +715,10 @@ pub struct RenderScene {
     /// buffer re-upload (tilemaps additionally re-expand per frame for culling).
     pub version: u64,
     pub sky: SkyParams,
+    /// The sun and moon (P17.1). Defaults to the retired `SUN_DIR` constant, so a
+    /// scene whose projector found no time-of-day authority renders exactly as it
+    /// did before. See [`SunParams`].
+    pub sun: SunParams,
     pub grid_enabled: bool,
     /// Ids drawn with the selection outline.
     pub selected: Vec<u32>,
@@ -637,6 +738,41 @@ impl RenderScene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_sun_is_the_retired_constant_normalized() {
+        // `DEFAULT_SUN_DIR` must be `normalize(0.45, 0.75, 0.3)` — the value the
+        // deleted `camera::SUN_DIR` produced at every one of its call sites. This
+        // identity is the whole reason every pre-P17.1 golden stays byte-identical.
+        let legacy = Vec3::new(0.45, 0.75, 0.3).normalize();
+        let s = SunParams::default();
+        assert_eq!(
+            s.unit_direction().to_array().map(f32::to_bits),
+            legacy.to_array().map(f32::to_bits),
+            "the default sun moved — every pre-P17.1 golden would move with it"
+        );
+        assert!((s.unit_direction().length() - 1.0).abs() < 1e-6);
+        assert_eq!(RenderScene::default().sun, s);
+        // A scene that never opts in never lights anything with the moon.
+        assert_eq!(s.moon_intensity, 0.0);
+        assert_eq!(s.unit_moon_direction(), Vec3::NEG_Y);
+    }
+
+    #[test]
+    fn degenerate_sun_direction_falls_back() {
+        let s = SunParams {
+            direction: Vec3::ZERO,
+            moon_direction: Vec3::ZERO,
+            ..SunParams::default()
+        };
+        assert_eq!(s.unit_direction(), DEFAULT_SUN_DIR.normalize());
+        assert_eq!(s.unit_moon_direction(), Vec3::NEG_Y);
+        let nan = SunParams {
+            direction: Vec3::splat(f32::NAN),
+            ..SunParams::default()
+        };
+        assert!(nan.unit_direction().is_finite());
+    }
 
     #[test]
     fn dirty_bumps_version() {

@@ -31,9 +31,9 @@ use inf_render::{
     detect_tier, expand_nine_slice, expand_text, handle_from_guid, BloomSettings, EngineRenderer,
     GiSettings, GpuContext, HAlign, LightKind, MeshInstance, NineSliceParams, PrebatchedRun,
     PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
-    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings, SsaoSettings,
-    SurfaceChain, TerrainTileKey, TextParams, TilemapParams, VgeomAsset, VgeomInstance,
-    BUILTIN_FONT_TEXTURE,
+    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings, SkyParams,
+    SsaoSettings, SunParams, SurfaceChain, TerrainTileKey, TextParams, TilemapParams, VgeomAsset,
+    VgeomInstance, BUILTIN_FONT_TEXTURE,
 };
 use inf_scene::RenderSettingsRecord;
 
@@ -256,6 +256,10 @@ pub fn project_scene(
     let mut vgeom_seen: std::collections::HashSet<u128> = std::collections::HashSet::new();
 
     let world = sim.world();
+    // The sky authority first (P17.1): it writes `scene.sun` / `scene.sky` and,
+    // when a clock is present, pushes the sun/moon directional light as
+    // `lights[0]` — a stable index on both projector sides.
+    project_sky(scene, world);
     let w = world.world();
 
     // Guid-sorted entity list (mirrors doc.order()'s determinism without a doc).
@@ -660,6 +664,61 @@ fn pcg_kind_color(kind: u32) -> [f32; 4] {
         [0.35, 0.58, 0.45, 1.0], // shrub teal
     ];
     PALETTE[(kind as usize) % PALETTE.len()]
+}
+
+/// Project the level's **sky authority** into the renderer's sun + sky blocks
+/// (P17.1) — the seam that retired `inf_render::camera::SUN_DIR`.
+///
+/// **MIRROR**: byte-for-byte identical in `inf_viewport::host::project_sky` and
+/// `inf_player::render::project_sky`, and pinned by a parity test in each crate.
+/// The one thing that *could* silently diverge — *which* entity is the authority,
+/// since the editor walks document order and the player walks `Guid` order —
+/// deliberately does not live here: [`inf_ecs::sky::resolve_sky`] answers it once,
+/// in Ring 0, by lowest `Guid`.
+///
+/// With no authority the renderer's own defaults stand: the retired constant's
+/// direction and the historic three-colour gradient, so every level that has not
+/// opted into time of day renders exactly the pixels it always did.
+///
+/// When a clock is present the sun (or, once it has set, the moon) is also pushed
+/// as a **directional light**, so shadows, GI and the PBR loop all follow the
+/// clock without any of those passes knowing time of day exists. It goes in
+/// first, before the entity loop, so its index is stable on both sides. A level
+/// that would rather author its own suns sets `SkyAtmosphere::enabled = false`,
+/// which keeps the clock and the tint but projects no light.
+fn project_sky(scene: &mut RenderScene, world: &inf_ecs::EcsWorld) {
+    let Some(sky) = inf_ecs::sky::resolve_sky(world) else {
+        scene.sun = SunParams::default();
+        scene.sky = SkyParams::default();
+        return;
+    };
+    let a = &sky.atmosphere;
+    scene.sun = SunParams {
+        direction: sky.sun.as_vec3(),
+        color: [a.sun_color.r, a.sun_color.g, a.sun_color.b],
+        intensity: a.sun_intensity,
+        moon_direction: sky.moon.as_vec3(),
+        moon_color: [a.moon_color.r, a.moon_color.g, a.moon_color.b],
+        moon_intensity: a.moon_intensity,
+    };
+    let [zenith, horizon, ground] = sky.sky_gradient();
+    scene.sky = SkyParams {
+        zenith,
+        horizon,
+        ground,
+    };
+    if let Some((direction, color, intensity)) = sky.key_light() {
+        scene.lights.push(RenderLight {
+            kind: LightKind::Directional,
+            color,
+            intensity,
+            direction: direction.as_vec3(),
+            position: DVec3::ZERO,
+            range: 0.0,
+            cast_shadows: true,
+            ..RenderLight::default()
+        });
+    }
 }
 
 /// Project an ECS `Light` (+ its world transform) into a renderer light (R-P3).

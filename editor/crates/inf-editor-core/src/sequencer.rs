@@ -540,6 +540,70 @@ mod tests {
         Key { t, value, interp }
     }
 
+    /// P17.1: `TimeOfDay.seconds` is a valid property-track target, keyable and
+    /// scrubbable with **zero** sequencer code — the payoff for making the clock a
+    /// reflected component instead of a settings field.
+    ///
+    /// Both spellings of the component resolve: the Details display name
+    /// ("Time of Day") and the Rust short name ("TimeOfDay"), so a track path
+    /// written either way keeps working.
+    #[test]
+    fn time_of_day_seconds_is_a_keyable_track() {
+        use inf_ecs::components::TimeOfDay;
+
+        let mut doc = SceneDoc::new();
+        let sky = doc.create(SpawnKind::Empty, "Sky", None);
+        let tp = doc
+            .world()
+            .registry()
+            .type_path_for("TimeOfDay")
+            .expect("TimeOfDay is registered");
+        assert_eq!(
+            doc.world().registry().type_path_for("Time of Day"),
+            Some(tp),
+            "the display name and the short name must resolve the same component"
+        );
+        assert!(doc.edit_add_component(sky, tp));
+
+        // The authored value reads back through the track path…
+        assert_eq!(
+            read_scalar(&doc, sky, "TimeOfDay.seconds"),
+            Some(TimeOfDay::default().seconds)
+        );
+        assert_eq!(
+            read_scalar(&doc, sky, "Time of Day.seconds"),
+            Some(TimeOfDay::default().seconds)
+        );
+
+        // …and a two-key dawn→dusk ramp scrubs it, non-dirtying, restoring exactly.
+        let mut seq = Sequence::new("Sunrise");
+        let mut track = PropertyTrack::new(sky, "TimeOfDay.seconds");
+        track.keys = vec![
+            key(0.0, 21_600.0, Interp::Linear), // 06:00
+            key(4.0, 64_800.0, Interp::Linear), // 18:00
+        ];
+        seq.tracks.push(track);
+
+        let snapshot = capture_snapshot(&doc, &seq);
+        apply_sequence_at(&mut doc, &seq, 2.0);
+        assert_eq!(
+            read_scalar(&doc, sky, "TimeOfDay.seconds"),
+            Some(43_200.0),
+            "the midpoint of 06:00→18:00 is noon"
+        );
+        // The scrubbed sun really is the noon sun, i.e. the track reached the
+        // authority the projectors resolve — not just some component field.
+        let noon = inf_ecs::sky::resolve_sky(doc.world()).expect("sky authority");
+        assert_eq!(noon.time_of_day.seconds, 43_200.0);
+
+        restore_snapshot(&mut doc, &snapshot);
+        assert_eq!(
+            read_scalar(&doc, sky, "TimeOfDay.seconds"),
+            Some(TimeOfDay::default().seconds),
+            "stopping the scrub restores the authored clock"
+        );
+    }
+
     #[test]
     fn sample_holds_before_first_and_after_last() {
         let mut tr = PropertyTrack::new(Uuid::nil(), "Transform.translation.x");

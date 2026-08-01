@@ -572,6 +572,115 @@ mod tests {
         assert_eq!(doc.settings(), LevelSettings { ..edited });
     }
 
+    /// P17.1: editing the time of day from World Settings is **one** undo step,
+    /// and the first edit creates the sky authority inside that same step — so a
+    /// single Ctrl+Z takes the whole opt-in back out, entity and all.
+    #[test]
+    fn time_of_day_edit_creates_the_authority_in_one_undo_step() {
+        use inf_ecs::components::TimeOfDay;
+
+        let mut doc = SceneDoc::new();
+        let entities = doc.order().len();
+        let undos = doc.undo_len();
+        assert!(doc.time_of_day().is_none(), "a new level has no clock");
+
+        let authored = TimeOfDay {
+            seconds: 43_200.0,
+            day_of_year: 355,
+            latitude_deg: -33.9,
+            longitude_deg: 151.2,
+            rate: 60.0,
+        };
+        let guid = doc.edit_time_of_day(authored, true).expect("created");
+
+        assert_eq!(doc.time_of_day(), Some(authored));
+        assert_eq!(doc.sky_authority(), Some(guid));
+        assert_eq!(doc.order().len(), entities + 1, "one Sky actor appeared");
+        assert_eq!(
+            doc.undo_len(),
+            undos + 1,
+            "create + two components + five fields collapse into ONE step"
+        );
+        assert!(doc.is_dirty());
+
+        // Undo removes the whole opt-in …
+        assert!(doc.undo());
+        assert!(doc.time_of_day().is_none());
+        assert_eq!(doc.order().len(), entities);
+        // … and redo restores it exactly.
+        assert!(doc.redo());
+        assert_eq!(doc.time_of_day(), Some(authored));
+
+        // A second edit re-uses the authority (no new entity) and is still one step.
+        let undos = doc.undo_len();
+        let later = TimeOfDay {
+            seconds: 0.0,
+            ..authored
+        };
+        assert_eq!(doc.edit_time_of_day(later, false), Some(guid));
+        assert_eq!(doc.order().len(), entities + 1);
+        assert_eq!(doc.undo_len(), undos + 1);
+        assert_eq!(doc.time_of_day(), Some(later));
+
+        // An idempotent edit records nothing.
+        let undos = doc.undo_len();
+        doc.edit_time_of_day(later, true);
+        assert_eq!(doc.undo_len(), undos, "no-op edit records nothing");
+    }
+
+    /// P17.1 finding-3 guard: `create: false` on a level with **no** clock must be
+    /// a total no-op — no entity, no undo entry, no version bump, no dirty flag.
+    ///
+    /// This is what stops an unrelated World Settings write (gravity, sim rate, the
+    /// partition block) from conjuring a `Sky` actor out of the time-of-day
+    /// *preview* values the panel round-trips. The flag used to live only in the
+    /// Ring-2 command, where nothing could test it.
+    #[test]
+    fn time_of_day_without_create_never_conjures_an_authority() {
+        use inf_ecs::components::TimeOfDay;
+
+        let mut doc = SceneDoc::new();
+        let entities = doc.order().len();
+        let undos = doc.undo_len();
+        let version = doc.version();
+        assert!(doc.time_of_day().is_none());
+
+        let previewed = TimeOfDay {
+            seconds: 1234.0,
+            ..TimeOfDay::default()
+        };
+        assert_eq!(doc.edit_time_of_day(previewed, false), None);
+
+        assert!(doc.time_of_day().is_none(), "no clock was created");
+        assert!(doc.sky_authority().is_none());
+        assert_eq!(doc.order().len(), entities, "no entity appeared");
+        assert_eq!(doc.undo_len(), undos, "nothing was recorded");
+        assert_eq!(doc.version(), version, "the version did not bump");
+        assert!(!doc.is_dirty(), "the document was not dirtied");
+
+        // …and `create: true` on the same doc does the whole opt-in in one step.
+        let guid = doc.edit_time_of_day(previewed, true).expect("created");
+        assert_eq!(doc.sky_authority(), Some(guid));
+        assert_eq!(doc.time_of_day(), Some(previewed));
+        assert_eq!(doc.order().len(), entities + 1);
+        assert_eq!(doc.undo_len(), undos + 1);
+        assert!(doc.is_dirty());
+
+        // Once an authority exists, `create: false` still writes it — the flag
+        // governs creation only.
+        let later = TimeOfDay {
+            seconds: 4321.0,
+            ..previewed
+        };
+        assert_eq!(doc.edit_time_of_day(later, false), Some(guid));
+        assert_eq!(doc.time_of_day(), Some(later));
+        assert_eq!(
+            doc.order().len(),
+            entities + 1,
+            "still exactly one Sky actor"
+        );
+    }
+
     /// Nested `begin`/`commit` collapse into ONE undo step: an inner commit must
     /// not close the outer transaction (only the outermost commit does).
     #[test]

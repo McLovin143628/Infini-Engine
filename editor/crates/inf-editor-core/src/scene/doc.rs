@@ -14,7 +14,8 @@ use glam::{DVec2, DVec3};
 use inf_ecs::components::{
     AtlasRect, Camera, Collider3D, ColliderShape3DKind, Foliage, FoliageInstance,
     FoliagePaletteEntry, GlobalTransform, Light, Light2D, LightKind, Material, MeshRef, NineSlice,
-    Primitive, Spline, Sprite, Terrain, Text2D, Tilemap, Transform, Visibility, Volume, VolumeKind,
+    Primitive, Spline, Sprite, Terrain, Text2D, Tilemap, TimeOfDay, Transform, Visibility, Volume,
+    VolumeKind,
 };
 use inf_ecs::{Color, ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d, Vec3d};
 use inf_terrain::{
@@ -1943,6 +1944,118 @@ impl SceneDoc {
             },
         );
         n
+    }
+
+    // ── time of day (P17.1) ──────────────────────────────────────────────
+
+    /// The level's clock, as the World Settings panel shows it: the **sky
+    /// authority's** [`TimeOfDay`], or `None` when the level has none (which is
+    /// every pre-P17.1 level, and renders under the retired `SUN_DIR`).
+    ///
+    /// The authority is resolved by `inf_ecs::sky` (lowest `Guid` wins) — the same
+    /// rule both scene projectors use, so the panel can never show a different
+    /// clock from the one the viewport is rendering.
+    pub fn time_of_day(&self) -> Option<TimeOfDay> {
+        inf_ecs::sky::resolve_sky(&self.world).map(|s| s.time_of_day)
+    }
+
+    /// The `Guid` of the entity carrying the level's clock, if any.
+    pub fn sky_authority(&self) -> Option<Uuid> {
+        inf_ecs::sky::sky_authority(&self.world).and_then(|e| self.world.guid_of(e))
+    }
+
+    /// Edit the level's clock as **one** undo step (World Settings; the frontend
+    /// debounces the calls).
+    ///
+    /// `create` decides what happens when the level has **no** clock yet:
+    ///
+    /// * `true` — create the sky authority (an empty entity named `Sky` carrying
+    ///   [`TimeOfDay`] + `SkyAtmosphere` at their defaults) inside the same
+    ///   transaction, so a single undo removes the whole opt-in. This is
+    ///   deliberately the only way a level gains a dynamic sun from this panel:
+    ///   the components are the source of truth (they persist, animate from
+    ///   Blueprints and key from the sequencer), and World Settings is a view onto
+    ///   them rather than a second place the sun could live.
+    /// * `false` — do **nothing at all**: no entity, no undo entry, no version
+    ///   bump, no dirty flag. This is what a settings write that merely *echoed
+    ///   back* the previewed defaults must do — the World Settings panel sends the
+    ///   whole settings block on every edit, including the gravity and partition
+    ///   rows, and none of those may conjure a sun as a side effect.
+    ///
+    /// A level that already has a clock is written either way (`create` only
+    /// governs the create).
+    ///
+    /// Returns the authority's `Guid`, or `None` when nothing was done. A no-op
+    /// edit (same values) returns the existing `Guid` and records nothing.
+    pub fn edit_time_of_day(&mut self, tod: TimeOfDay, create: bool) -> Option<Uuid> {
+        // Reflect type paths come through the registry facade — `bevy_reflect`
+        // never leaves `inf-ecs` (architecture rule). Both components are
+        // registered in `inf_ecs::registry`, so this cannot fail in practice; it
+        // is `None` rather than a panic so a settings write can never take the
+        // editor down.
+        let reg = self.world.registry();
+        let (Some(tp), Some(atmos_tp)) = (
+            reg.type_path_for("TimeOfDay"),
+            reg.type_path_for("SkyAtmosphere"),
+        ) else {
+            debug_assert!(false, "TimeOfDay/SkyAtmosphere must be registered");
+            return None;
+        };
+        let existing = self.sky_authority();
+        if existing.is_none() && !create {
+            return None;
+        }
+        if let Some(guid) = existing {
+            if self.time_of_day() == Some(tod) {
+                return Some(guid);
+            }
+        }
+
+        self.begin_transaction("Time of Day");
+        let guid = match existing {
+            Some(g) => g,
+            None => {
+                let g = self.edit_create(SpawnKind::Empty, "Sky", None);
+                // Both must land: the entity is brand new, so neither component can
+                // already be present, and both are addable. A silent `false` here
+                // would leave a `Sky` actor that does nothing.
+                // Clock FIRST: the intermediate state is then "a clock with a
+                // defaulted atmosphere" (benign) rather than "an atmosphere with no
+                // clock", which is the shape `inf_ecs::sky` warns about.
+                let added_clock = self.edit_add_component(g, tp);
+                let added_atmos = self.edit_add_component(g, atmos_tp);
+                debug_assert!(
+                    added_atmos && added_clock,
+                    "the sky authority must gain both components"
+                );
+                g
+            }
+        };
+        // Written through the reflection edit path so each field records a normal
+        // `SetProp` (the transaction collapses them into the one step) and the
+        // Details grid, the sequencer and this panel all go through one door.
+        self.edit_set_prop(guid, tp, "seconds", &PropValue::Number(tod.seconds));
+        self.edit_set_prop(
+            guid,
+            tp,
+            "day_of_year",
+            &PropValue::Number(f64::from(tod.day_of_year)),
+        );
+        self.edit_set_prop(
+            guid,
+            tp,
+            "latitude_deg",
+            &PropValue::Number(tod.latitude_deg),
+        );
+        self.edit_set_prop(
+            guid,
+            tp,
+            "longitude_deg",
+            &PropValue::Number(tod.longitude_deg),
+        );
+        self.edit_set_prop(guid, tp, "rate", &PropValue::Number(tod.rate));
+        self.commit_transaction();
+        Some(guid)
     }
 
     // ── history control ──────────────────────────────────────────────────

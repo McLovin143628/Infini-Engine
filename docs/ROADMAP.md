@@ -1280,6 +1280,111 @@ Starting point: the sky is a 44-line three-colour gradient shader, `SkyParams` h
 writers, and the sun is a `SUN_DIR` constant consumed by the sky, GI, and shadow passes — no
 atmosphere, fog, cloud, or TOD code exists anywhere.
 
+> **STATUS: P17.1 COMPLETE** (2026-08-01) — **local gates green; CI pending push.** The sun
+> stopped being a compile-time constant: `inf_render::camera::SUN_DIR` is **deleted**, and every
+> consumer (the sky glow, the terrain shader, the mesh/skinned/vgeom no-light fallback, the CSM
+> caster fallback, the GI sun fallback) now reads a `RenderScene.sun` block projected from a
+> `TimeOfDay` + `SkyAtmosphere` component pair. Pinned by
+> `runtime/inf-player/tests/sun_tod.rs`: a cooked pack and a PIE payload run the same scripted
+> clock ramp and produce **bit-identical** clock + sun + projected-`RenderScene.sun` traces.
+>
+> **Deterministic solar math** lives in `inf_math::solar` — not `inf-render` — because the
+> editor projector, the shipped-player projector, the fixed-step clock, the `sky.*` Blueprint
+> host and the sequencer all need it and none of them should pay for `wgpu` to get it;
+> `inf-math` is the leaf every one of them already reaches, and it is where the bit-portable
+> trigonometry lives. Declination and the equation of time are Spencer (1971) fits (≈0.03° /
+> ≈0.3 min); the topocentric transform is written **directly as a vector** (`East = −cos δ·sin H`,
+> `Up = sin δ·sin φ + cos δ·cos φ·cos H`, `North = sin δ·cos φ − cos δ·sin φ·cos H`) so no
+> `asin`/`atan2` is ever needed and the whole module stays on `psin64`/`pcos64` + `sqrt`/`floor`.
+> Equinox and solstice noon elevations land within **0.02°** of exact spherical geometry at
+> latitudes from the equator to 78° N; midnight sun and polar night hold above the Arctic circle.
+> The psin/pcos law does not strictly *bind* here — a sun direction feeds uniforms, not committed
+> bytes; the committed bytes are `TimeOfDay`'s plain `f64` fields, which `advance` touches with
+> nothing but IEEE add/mul/floor — but it is followed anyway, because two gates compare numbers
+> across process boundaries (PIE vs shipping, replay), and portable polynomials make those traces
+> portable artefacts rather than machine-local ones. `elevation_deg`/`azimuth_deg` are the only
+> `std`-trig functions and are documented **display-only**. The moon is an explicit v1
+> approximation (ecliptic-longitude model: hour angle lags the sun by `phase·2π`, declination
+> from `sin δ = sin ε·sin λ`; no lunar inclination, eccentricity or nodal precession — errors of
+> a few degrees, and the phase repeats each simulated year because the engine has no year field).
+>
+> **The singleton problem, solved once.** The two scene projectors walk the world in *different*
+> orders (the editor in document order, the player in `Guid` order), so "the first `TimeOfDay` I
+> meet" would silently resolve to different entities. `inf_ecs::sky::sky_authority` answers it in
+> Ring 0 by **lowest `(Guid, Entity)`** — properties of the data, not of the traversal — and
+> `resolve_sky`/`advance_time_of_day`/the four `sky.*` host seams all go through it. The `Entity`
+> tie-break matters for the one shape a level can still reach: duplicate `Guid`s from a mangled
+> merge, where a `Guid`-only comparison would keep whichever the walk happened to hit first. The
+> lookup is `O(clocks)`, not `O(entities)` — `try_query_filtered` restricts it to archetypes that
+> actually hold a clock, which is what keeps a Blueprint calling `sky.get_time_of_day()` several
+> times a tick from scanning a 50k-entity world (asserted by a relative-scale test: an 8 000-entity
+> world must not cost 20× a 100-entity one). What is left in the two MIRRORs is a ~30-line mapping
+> into renderer types (neither Ring-0 crate can host it: `inf-render` does not depend on `inf-ecs`,
+> and `inf-ecs` must not depend on `inf-render`), compared character for character by
+> `inf-editor-core/tests/projector_mirror.rs` — deliberately **not** inside
+> `inf_viewport::host`, which is `#[cfg(windows/macos)]` and therefore invisible to the Linux CI leg.
+>
+> **Diagnostics.** A `SkyAtmosphere` is read *from the authority entity*, so one with no
+> `TimeOfDay` beside it is silently inert — the level looks configured and renders as if it were
+> not. Both shapes (no clock anywhere; a clock elsewhere) emit a one-shot `tracing::warn!` naming
+> the entity and the remedy, latched because `resolve_sky` runs every frame in two projectors.
+>
+> **Byte-stability, deliberately.** `SunParams::default()` is the retired constant kept
+> **un-normalized** (`Vec3::new(0.45, 0.75, 0.3)`), because every one of `SUN_DIR`'s three call
+> sites wrote `.normalize()` and reproducing the *arithmetic* cannot drift by an ULP the way
+> transcribing the *result* can; `unit_direction()` does the same multiplication on the same
+> bits, pinned by a `to_bits()` comparison. A level with no clock projects exactly that, so
+> **all 23 goldens are byte-identical under `INF_GOLDEN_STRICT` — nothing was re-blessed.** The
+> `SkyAtmosphere` gradient defaults are `SkyParams::default()` verbatim, and `sky_dim()` is
+> exactly `1.0` whenever the sun is more than ~9° up, so a daytime scene draws the authored
+> colours untouched; the smoothstep only bites at dusk. The component defaults (10:00 UTC, day
+> 172, 48.9° N) put the sun within **1.6°** of the retired constant, so a scene that opts in
+> keeps essentially the look it had.
+>
+> **Where time advances:** once per fixed step, at the top, in **both** `SimSession::fixed_step`
+> and `RuntimeSim::fixed_step`, so blueprints, the projected sun, shadows, GI and audio all
+> observe one consistent clock for the step. `rate` defaults to **0** (frozen) — a level opts
+> into a moving sun explicitly — and nothing outside a fixed step ever calls it, so an idle
+> editor never moves the sun or dirties the document. Simulate's enter/exit snapshot restores the
+> authored clock on Stop for free.
+>
+> **Schema v11** — the entity record appends `time_of_day` / `sky_atmosphere` in **both** codecs;
+> `LevelSettings`/`RuntimeSettings` are untouched, so only the entity record freezes
+> (`EntityRecordV10` in each, with `into_current` + `from_current`), the v10 file record is
+> repointed at it, and every older decode arm gains one `.into_v10()` hop. A `scene_v10.inf_lvl`
+> fixture is blessed in both crates from a frozen writer, byte-compared **against each other**
+> (the mirror lock), and loads forever; the downgrade direction is asserted as a property, not
+> left to a bless-only path. Every committed sample and template grew by exactly
+> `2 bytes × entity_count` — two `Option::None` tags — plus the one schema byte: the single-byte
+> standard, and the arithmetic *is* the contract.
+>
+> **Blueprint + sequencer:** a `sky.*` namespace (`get`/`set_time_of_day`, `get`/`set_rate`) as
+> four **single-purpose** nodes — a pure node with more than one data output would fan into
+> `sky::get::<field>` and force three-segment arms in both hosts. Zero IR change, zero transpiler
+> change (`crates/inf-transpile/tests/sky_roundtrip.rs` proves it). `TimeOfDay.seconds` keys from
+> the sequencer with **zero** sequencer code — the payoff for making the clock a reflected
+> component; `ComponentRegistry::type_path_for` gained a short-name fallback so both
+> `"Time of Day"` and `"TimeOfDay"` resolve, and a stored track path survives a display rename.
+>
+> **World Settings** grew a Time of Day section (time slider with `HH:MM` readback, day-of-year,
+> lat/long, rate, plus a live sun elevation/compass readback computed in Rust rather than
+> re-implemented in TypeScript). The clock is **not** in `LevelSettings`: the DTO projects the
+> authority entity's components, and writing any row calls
+> `SceneDoc::edit_time_of_day(tod, create)`, which creates the `Sky` actor + both components +
+> five field writes inside **one** undo transaction — so a single Ctrl+Z takes the whole opt-in
+> back out. `create` is the DTO's `present` flag pushed down into Ring 1 (where it is testable):
+> the panel sends the *whole* settings block on every edit, so without it, editing gravity would
+> conjure a sun out of the previewed defaults. `create: false` on a clockless level is a total
+> no-op — no entity, no undo entry, no version bump, no dirty flag.
+>
+> **Honest scope:** the sky is still the 44-line three-colour gradient — P17.2 replaces it with
+> the Hillaire LUTs. The moon has a direction and an intensity but nothing draws a moon *disc*
+> (P17.2). New levels do **not** yet default to a dynamic sky (that is the Phase-17 done-when,
+> not P17.1's); a level opts in from World Settings or by adding the components in Details. The
+> GI fallback tracks TOD but probe sky-radiance is still the gradient constants (P18.4). The
+> visual pass — dawn/dusk colour, the night gradient, the sun glow at grazing angles — is
+> human-verified, as every GPU path here is.
+
 - **P17.1 Sun & time of day** — 1. kill the `SUN_DIR` const: a `SkyAtmosphere` + `TimeOfDay`
   world-component set (components + registry + schema records) projected in both scene
   builders; 2. deterministic solar math (date/latitude → sun and moon position); 3. TOD
@@ -1294,6 +1399,11 @@ atmosphere, fog, cloud, or TOD code exists anywhere.
 - **P17.4 Weather states** — 1. coverage/precipitation/wind parameter blocks with blendable
   presets, Blueprint-drivable; 2. minimal precipitation VFX v1 (a full VFX system stays future
   scope); 3. accumulation hooks consumed by P22 deformation (snowfall).
+
+Schema **v11**: the sky-authority pair — a `TimeOfDay` clock (UTC seconds, day of year,
+latitude/longitude, rate) and a `SkyAtmosphere` block (sun/moon colour + intensity, the
+three gradient colours, night darkening) as entity slots in both codecs (P17.1). The file
+settings are untouched, so only the entity record froze.
 
 ### Phase 18 — Lumen-class GI & virtualized-geometry completion
 

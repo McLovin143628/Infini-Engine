@@ -17,8 +17,8 @@ use inf_ecs::components::{
     ActorClass, AlwaysLoaded, AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource,
     BlendMode, Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D, Decal,
     Foliage, Joint2D, Joint3D, Light, Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume,
-    RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, Spline, Sprite, StreamingSource, Terrain,
-    Text2D, Tilemap, Transform, Visibility, Volume,
+    RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, SkyAtmosphere, Spline, Sprite,
+    StreamingSource, Terrain, Text2D, Tilemap, TimeOfDay, Transform, Visibility, Volume,
 };
 use inf_ecs::math::{Color, Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
@@ -118,7 +118,17 @@ use crate::scene::SceneDoc;
 ///   Second bump in one phase, deliberately: P16.3 shipped v9 before partition
 ///   metadata was designed, and retro-fitting it into v9 would mean re-blessing
 ///   bytes that are already committed and already load.
-pub const SCHEMA_VERSION: u32 = 10;
+/// * v11 — P17.1: the [`EntityRecord`] appends the two **sky-authority** slots —
+///   `time_of_day` ([`TimeOfDay`], the world clock the sun and moon are a pure
+///   function of) and `sky_atmosphere` ([`SkyAtmosphere`], how that sun lights the
+///   world and tints the gradient) — retiring the renderer's compile-time
+///   `SUN_DIR`. [`LevelSettings`] is **untouched**, so only the entity record
+///   freezes: the pre-v11 shape is [`EntityRecordV10`], and the
+///   [`EntityRecordV10::into_current`] hop lifts it with both slots `None` — a
+///   level with no clock, which is exactly what every pre-v11 level was and which
+///   the scene projectors render under the retired constant's direction. Older
+///   v1..v10 payloads load unchanged (see [`decode`] + [`SceneFileV10`]).
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// File-level simulation settings (P9.5 · schema v3). Replaces the player's
 /// hard-coded `DEFAULT_GRAVITY`/`DEFAULT_HZ`. The serde defaults **preserve the
@@ -423,6 +433,16 @@ pub struct EntityRecord {
     /// persistent cell and exists for the whole run.
     #[serde(default)]
     pub always_loaded: Option<AlwaysLoaded>,
+    // ── v11 (P17.1) sky-authority components ──────────────────────────────
+    /// The level's world clock. At most one entity should carry it; the
+    /// resolution rule (lowest `Guid` wins) lives in `inf_ecs::sky`, shared by
+    /// both scene projectors so they can never disagree about which one it is.
+    #[serde(default)]
+    pub time_of_day: Option<TimeOfDay>,
+    /// How the clock's sun and moon light the world and tint the sky gradient.
+    /// Sits on the same entity as `time_of_day`.
+    #[serde(default)]
+    pub sky_atmosphere: Option<SkyAtmosphere>,
 }
 
 /// The pre-v8 `Light` byte layout (schema v8 froze this when `Light` gained its
@@ -1627,8 +1647,8 @@ impl EntityRecordV9 {
     /// Lift a v9 record to the current (v10) shape: both world-partition slots
     /// default to `None` — a pre-v10 level named no streaming source and marked
     /// nothing always-loaded.
-    fn into_current(self) -> EntityRecord {
-        EntityRecord {
+    fn into_v10(self) -> EntityRecordV10 {
+        EntityRecordV10 {
             guid: self.guid,
             name: self.name,
             parent: self.parent,
@@ -1682,7 +1702,155 @@ pub struct SceneFileV9 {
 }
 
 impl SceneFileV9 {
-    /// Lift a v9 file to the current (v10) shape.
+    /// Lift a v9 file to the frozen v10 shape (the next hop in the ladder).
+    fn into_v10(self) -> SceneFileV10 {
+        SceneFileV10 {
+            schema_version: 10,
+            title: self.title,
+            entities: self
+                .entities
+                .into_iter()
+                .map(EntityRecordV9::into_v10)
+                .collect(),
+            settings: self.settings.into_current(),
+        }
+    }
+}
+
+/// The **pre-v11** entity byte layout (schema v11 froze this when the record
+/// gained its two sky-authority slots). A v10 payload decodes through this and
+/// [`EntityRecordV10::into_current`] lifts it with both slots `None`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityRecordV10 {
+    pub guid: Uuid,
+    pub name: String,
+    pub parent: Option<Uuid>,
+    pub transform: Transform,
+    pub visible: bool,
+    pub mesh: Option<MeshRef>,
+    pub material: Option<Material>,
+    pub light: Option<Light>,
+    pub camera: Option<Camera>,
+    // ── v2 (P8.2b) 2D components ──────────────────────────────────────────
+    /// A 2D sprite quad.
+    #[serde(default)]
+    pub sprite: Option<Sprite>,
+    /// A chunked 2D tilemap (sparse, multi-chunk content persists in full).
+    #[serde(default)]
+    pub tilemap: Option<Tilemap>,
+    /// A 9-slice bordered panel.
+    #[serde(default)]
+    pub nine_slice: Option<NineSlice>,
+    /// A bitmap-text label.
+    #[serde(default)]
+    pub text2d: Option<Text2D>,
+    /// A 2D radial light.
+    #[serde(default)]
+    pub light_2d: Option<Light2D>,
+    // ── v3 (P9.5) physics components + actor binding ──────────────────────
+    /// A 2D rigid body.
+    #[serde(default)]
+    pub rigid_body_2d: Option<RigidBody2D>,
+    /// A 2D collider.
+    #[serde(default)]
+    pub collider_2d: Option<Collider2D>,
+    /// A 2D kinematic character mover tuning block.
+    #[serde(default)]
+    pub character_controller_2d: Option<CharacterController2D>,
+    /// A 3D rigid body.
+    #[serde(default)]
+    pub rigid_body_3d: Option<RigidBody3D>,
+    /// A 3D collider.
+    #[serde(default)]
+    pub collider_3d: Option<Collider3D>,
+    /// A 3D kinematic character mover tuning block.
+    #[serde(default)]
+    pub character_controller_3d: Option<CharacterController3D>,
+    /// The GUID of the `.inf_act` blueprint-class asset bound to this entity
+    /// (the [`ActorClass`] link); `None` when the entity runs no blueprint.
+    #[serde(default)]
+    pub actor: Option<Uuid>,
+    // ── v4 (P10.6) world components ───────────────────────────────────────
+    /// A heightfield terrain (paged heights + splat weights + material layers).
+    /// `TerrainData`'s manual serde keeps unpainted tiles byte-stable.
+    #[serde(default)]
+    pub terrain: Option<Terrain>,
+    /// A procedural scatter volume. Its `evaluated` instance cache is
+    /// `#[serde(skip)]`, so only the `graph` ref + region + seed persist.
+    #[serde(default)]
+    pub pcg_volume: Option<PcgVolume>,
+    // ── v5 (P11.4) animation / character components ───────────────────────
+    /// A skinned-mesh binding (skeletal mesh + skeleton GUID refs).
+    #[serde(default)]
+    pub skeletal_mesh: Option<SkeletalMesh>,
+    /// A single-clip play-head.
+    #[serde(default)]
+    pub anim_player: Option<AnimPlayer>,
+    /// An animation state machine. Its `runtime` play state is `#[serde(skip)]`
+    /// — persisted **without** transient state (rebuilt each play session), like
+    /// [`PcgVolume`]'s `evaluated` cache.
+    #[serde(default)]
+    pub anim_state_machine: Option<AnimStateMachine>,
+    /// How the entity consumes its clip's root motion.
+    #[serde(default)]
+    pub root_motion: Option<RootMotion>,
+    /// A socket-follow attachment (rides another entity's socket).
+    #[serde(default)]
+    pub attached_to: Option<AttachedTo>,
+    // ── v6 (P12.4) joints / spatial-audio components ──────────────────────
+    /// A 2D physics joint (links this body to `other`'s). Its `#[reflect(ignore)]`
+    /// `other` entity ref is serde-persisted.
+    #[serde(default)]
+    pub joint_2d: Option<Joint2D>,
+    /// A 3D physics joint (links this body to `other`'s).
+    #[serde(default)]
+    pub joint_3d: Option<Joint3D>,
+    /// A spatialized sound emitter (its `clip` ref persists; playback is output-only).
+    #[serde(default)]
+    pub audio_source: Option<AudioSource>,
+    /// The active spatial-audio listener flag.
+    #[serde(default)]
+    pub audio_listener: Option<AudioListener>,
+    // ── v8 (R-P0) world-decoration components ─────────────────────────────
+    /// A projected decal.
+    #[serde(default)]
+    pub decal: Option<Decal>,
+    /// A trigger / blocking gameplay volume.
+    #[serde(default)]
+    pub volume: Option<Volume>,
+    /// A control-point spline (path / rail).
+    #[serde(default)]
+    pub spline: Option<Spline>,
+    /// A foliage scatter (palette + bulk instances).
+    #[serde(default)]
+    pub foliage: Option<Foliage>,
+    // ── v10 (P16.5) world-partition components ────────────────────────────
+    /// Marks this entity as a **streaming source**: world-partition cell
+    /// residency is computed from its position at the fixed-step boundary. The
+    /// editor stays single-document, so this only takes effect in PIE / a
+    /// cooked run.
+    #[serde(default)]
+    pub streaming_source: Option<StreamingSource>,
+    /// Marks this entity as never-streamed: it cooks into the partition's
+    /// persistent cell and exists for the whole run.
+    #[serde(default)]
+    pub always_loaded: Option<AlwaysLoaded>,
+}
+
+/// A frozen schema-v10 file layout. It carried the **live** [`LevelSettings`]
+/// shape (v11 did not touch the settings), so only `entities` is repointed at the
+/// frozen [`EntityRecordV10`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneFileV10 {
+    pub schema_version: u32,
+    pub title: String,
+    pub entities: Vec<EntityRecordV10>,
+    #[serde(default)]
+    pub settings: LevelSettings,
+}
+
+impl SceneFileV10 {
+    /// Lift a v10 file to the current (v11) shape.
     fn into_current(self) -> SceneFile {
         SceneFile {
             schema_version: SCHEMA_VERSION,
@@ -1690,9 +1858,108 @@ impl SceneFileV9 {
             entities: self
                 .entities
                 .into_iter()
-                .map(EntityRecordV9::into_current)
+                .map(EntityRecordV10::into_current)
                 .collect(),
-            settings: self.settings.into_current(),
+            settings: self.settings,
+        }
+    }
+}
+
+impl EntityRecordV10 {
+    /// Lift a frozen v10 record to the live (v11) [`EntityRecord`]: both
+    /// sky-authority slots default to `None` — a pre-v11 level had no clock, so
+    /// the projectors render it with the retired `SUN_DIR` direction, which is
+    /// exactly the sun it was authored under.
+    pub fn into_current(self) -> EntityRecord {
+        EntityRecord {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: self.decal,
+            volume: self.volume,
+            spline: self.spline,
+            foliage: self.foliage,
+            streaming_source: self.streaming_source,
+            always_loaded: self.always_loaded,
+            time_of_day: None,
+            sky_atmosphere: None,
+        }
+    }
+
+    /// Project a live [`EntityRecord`] back onto the frozen v10 shape (the
+    /// downgrade-bless path that regenerates the committed v10 fixture). The two
+    /// sky slots have no v10 home and are dropped — the one deliberately lossy
+    /// direction, asserted as a property by
+    /// `v10_entity_downgrade_is_lossless_except_for_the_sky_slots`.
+    pub fn from_current(r: EntityRecord) -> Self {
+        Self {
+            guid: r.guid,
+            name: r.name,
+            parent: r.parent,
+            transform: r.transform,
+            visible: r.visible,
+            mesh: r.mesh,
+            material: r.material,
+            light: r.light,
+            camera: r.camera,
+            sprite: r.sprite,
+            tilemap: r.tilemap,
+            nine_slice: r.nine_slice,
+            text2d: r.text2d,
+            light_2d: r.light_2d,
+            rigid_body_2d: r.rigid_body_2d,
+            collider_2d: r.collider_2d,
+            character_controller_2d: r.character_controller_2d,
+            rigid_body_3d: r.rigid_body_3d,
+            collider_3d: r.collider_3d,
+            character_controller_3d: r.character_controller_3d,
+            actor: r.actor,
+            terrain: r.terrain,
+            pcg_volume: r.pcg_volume,
+            skeletal_mesh: r.skeletal_mesh,
+            anim_player: r.anim_player,
+            anim_state_machine: r.anim_state_machine,
+            root_motion: r.root_motion,
+            attached_to: r.attached_to,
+            joint_2d: r.joint_2d,
+            joint_3d: r.joint_3d,
+            audio_source: r.audio_source,
+            audio_listener: r.audio_listener,
+            decal: r.decal,
+            volume: r.volume,
+            spline: r.spline,
+            foliage: r.foliage,
+            streaming_source: r.streaming_source,
+            always_loaded: r.always_loaded,
         }
     }
 }
@@ -1784,6 +2051,8 @@ pub fn record_of(doc: &SceneDoc, guid: Uuid) -> Option<EntityRecord> {
         foliage: w.get::<Foliage>(e).cloned(),
         streaming_source: w.get::<StreamingSource>(e).copied(),
         always_loaded: w.get::<AlwaysLoaded>(e).copied(),
+        time_of_day: w.get::<TimeOfDay>(e).copied(),
+        sky_atmosphere: w.get::<SkyAtmosphere>(e).copied(),
     })
 }
 
@@ -1903,6 +2172,7 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
                     .into_v7()
                     .into_v8()
                     .into_v9()
+                    .into_v10()
                     .into_current(),
             )
         }
@@ -1918,6 +2188,7 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
                     .into_v7()
                     .into_v8()
                     .into_v9()
+                    .into_v10()
                     .into_current(),
             )
         }
@@ -1932,6 +2203,7 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
                     .into_v7()
                     .into_v8()
                     .into_v9()
+                    .into_v10()
                     .into_current(),
             )
         }
@@ -1945,6 +2217,7 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
                     .into_v7()
                     .into_v8()
                     .into_v9()
+                    .into_v10()
                     .into_current(),
             )
         }
@@ -1952,33 +2225,46 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
             let (v5, _): (SceneFileV5, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v5: {e}"))?;
-            migrate(v5.into_v6().into_v7().into_v8().into_v9().into_current())
+            migrate(
+                v5.into_v6()
+                    .into_v7()
+                    .into_v8()
+                    .into_v9()
+                    .into_v10()
+                    .into_current(),
+            )
         }
         6 => {
             let (v6, _): (SceneFileV6, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v6: {e}"))?;
-            migrate(v6.into_v7().into_v8().into_v9().into_current())
+            migrate(v6.into_v7().into_v8().into_v9().into_v10().into_current())
         }
         7 => {
             let (v7, _): (SceneFileV7, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v7: {e}"))?;
-            migrate(v7.into_v8().into_v9().into_current())
+            migrate(v7.into_v8().into_v9().into_v10().into_current())
         }
         8 => {
             let (v8, _): (SceneFileV8, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v8: {e}"))?;
-            migrate(v8.into_v9().into_current())
+            migrate(v8.into_v9().into_v10().into_current())
         }
         9 => {
             let (v9, _): (SceneFileV9, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v9: {e}"))?;
-            migrate(v9.into_current())
+            migrate(v9.into_v10().into_current())
         }
         10 => {
+            let (v10, _): (SceneFileV10, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| format!("decode v10: {e}"))?;
+            migrate(v10.into_current())
+        }
+        11 => {
             let (file, _): (SceneFile, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode: {e}"))?;
@@ -2000,7 +2286,7 @@ pub fn migrate(file: SceneFile) -> Result<SceneFile, String> {
         ));
     }
     // Records are already lifted to the current shape by the versioned decode
-    // (v1→…→v9→v10); nothing more to do here. Future upgrades chain in `decode`.
+    // (v1→…→v10→v11); nothing more to do here. Future upgrades chain in `decode`.
     Ok(file)
 }
 
@@ -2097,6 +2383,8 @@ pub(crate) fn write_record_components(
     clone_slot!(&rec.foliage, Foliage);
     copy_slot!(&rec.streaming_source, StreamingSource);
     copy_slot!(&rec.always_loaded, AlwaysLoaded);
+    copy_slot!(&rec.time_of_day, TimeOfDay);
+    copy_slot!(&rec.sky_atmosphere, SkyAtmosphere);
 }
 
 pub fn apply_to_doc(doc: &mut SceneDoc, file: &SceneFile) {
@@ -4962,7 +5250,10 @@ mod tests {
         doc.world_mut().propagate();
 
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 10, "a partitioned level writes a v10 payload");
+        assert_eq!(
+            bytes1[0], SCHEMA_VERSION as u8,
+            "a partitioned level writes a current-schema payload"
+        );
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
         let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
@@ -5014,5 +5305,278 @@ mod tests {
         let one: PartitionSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
         assert!(one.enabled);
         assert_eq!(one.cell_size_m, 256.0);
+    }
+
+    // ── schema v11 (P17.1 sky authority) ──────────────────────────────────
+
+    /// An all-`None` frozen v10 entity — the struct-update base for
+    /// [`v10_reference`]. Built through the downgrade hop so the field list can
+    /// never drift from the live record.
+    fn v10_base(guid: uuid::Uuid, name: &str, parent: Option<uuid::Uuid>) -> EntityRecordV10 {
+        EntityRecordV10::from_current(v9_base(guid, name, parent).into_v10().into_current())
+    }
+
+    /// Rebuild the exact schema-v10 file the committed v10 fixture was generated
+    /// from, out of the frozen v10 record types (the provenance lock). Carries the
+    /// **v10** additions (a streaming source, an always-loaded marker, a
+    /// partitioned settings block) plus a mesh and a light, so the pre-v11 entity
+    /// byte layout is pinned by committed bytes.
+    fn v10_reference() -> SceneFileV10 {
+        use inf_ecs::components::{
+            AlwaysLoaded, Light, LightKind, Material, Primitive, StreamingSource,
+        };
+        let g = uuid::Uuid::from_u128;
+        SceneFileV10 {
+            schema_version: 10,
+            title: "V10 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV10 {
+                    mesh: Some(MeshRef {
+                        primitive: Primitive::Cube,
+                        asset: Some(g(0xA0A1)),
+                    }),
+                    material: Some(Material::default()),
+                    streaming_source: Some(StreamingSource { radius_m: 300.0 }),
+                    ..v10_base(g(0xA001), "Player", None)
+                },
+                EntityRecordV10 {
+                    always_loaded: Some(AlwaysLoaded),
+                    ..v10_base(g(0xA002), "GameMode", None)
+                },
+                EntityRecordV10 {
+                    light: Some(Light {
+                        kind: LightKind::Directional,
+                        color: Color::WHITE,
+                        intensity: 2.0,
+                        ..Default::default()
+                    }),
+                    ..v10_base(g(0xA003), "Sun", None)
+                },
+            ],
+            settings: LevelSettings {
+                gravity_2d: Vec2d::new(0.0, -18.0),
+                gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+                sim_hz: 90.0,
+                render: RenderSettingsRecord {
+                    exposure: 1.1,
+                    ..RenderSettingsRecord::default()
+                },
+                partition: PartitionSettings {
+                    enabled: true,
+                    cell_size_m: 128.0,
+                    activation_radius_m: 200.0,
+                    prefetch_margin_m: 300.0,
+                },
+            },
+        }
+    }
+
+    /// Write the committed v10 fixture from [`v10_reference`] under
+    /// `INF_BLESS_FIXTURES=1` (the temporary-writer discipline). Never hand-edit
+    /// the committed bytes.
+    #[test]
+    fn bless_v10_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").is_err() {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v10_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 10);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v10.inf_lvl");
+        std::fs::write(&path, &bytes).expect("write v10 fixture");
+        eprintln!("blessed v10 fixture: {}", path.display());
+    }
+
+    #[test]
+    fn v10_fixture_is_reproducible_and_genuinely_v10() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v10.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v10 fixture present");
+        assert_eq!(bytes[0], 10, "fixture must be a genuine schema-v10 payload");
+        let rebuilt = bincode::serde::encode_to_vec(v10_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v10 fixture must match our frozen v10 writer"
+        );
+    }
+
+    /// This crate's committed v10 fixture must be **byte-identical** to the Ring-0
+    /// runtime reader's, because the two codecs are one wire contract written
+    /// twice. A divergence here is the exact bug the mirror doctrine exists to
+    /// catch, and it would otherwise only surface as a player that cannot open a
+    /// level the editor just saved.
+    #[test]
+    fn v10_fixture_matches_the_runtime_codecs_copy() {
+        let mine = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v10.inf_lvl");
+        let theirs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../crates/inf-scene/tests/fixtures/scene_v10.inf_lvl");
+        assert_eq!(
+            std::fs::read(&mine).expect("editor v10 fixture"),
+            std::fs::read(&theirs).expect("runtime v10 fixture"),
+            "the two v11-bump fixtures diverged — the codecs are no longer mirrors"
+        );
+    }
+
+    /// The committed v10 fixture — written by the **pre-v11 codec**, before the
+    /// entity record grew its two sky-authority slots — still loads, with both new
+    /// slots at their documented default. The "old bytes load forever" gate for
+    /// the v11 bump.
+    #[test]
+    fn v10_fixture_loads_forever_and_lifts_to_v11() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v10.inf_lvl");
+        let file = decode(&std::fs::read(&path).unwrap()).expect("v10 fixture decodes");
+        assert_eq!(file.schema_version, SCHEMA_VERSION);
+        assert_eq!(file.title, "V10 Fixture Level");
+        assert_eq!(file.entities.len(), 3);
+        let by_name = |n: &str| file.entities.iter().find(|r| r.name == n).unwrap();
+
+        // The v10 content survives the frozen-record hop intact …
+        assert_eq!(by_name("Player").streaming_source.unwrap().radius_m, 300.0);
+        assert!(by_name("GameMode").always_loaded.is_some());
+        assert_eq!(
+            by_name("Player").mesh.unwrap().asset,
+            Some(uuid::Uuid::from_u128(0xA0A1))
+        );
+        assert_eq!(file.settings.sim_hz, 90.0);
+        assert!(file.settings.partition.enabled);
+        assert_eq!(file.settings.partition.cell_size_m, 128.0);
+
+        // … and every v11 slot lifts to its documented default: no clock at all,
+        // which is what makes a pre-v11 level render under the retired sun.
+        for e in &file.entities {
+            assert!(e.time_of_day.is_none());
+            assert!(e.sky_atmosphere.is_none());
+        }
+
+        // Load → save → load is byte-identical at the current schema.
+        let mut doc = SceneDoc::new();
+        apply_to_doc(&mut doc, &file);
+        let bytes1 = encode(&to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], SCHEMA_VERSION as u8);
+        let mut doc2 = SceneDoc::new();
+        apply_to_doc(&mut doc2, &decode(&bytes1).unwrap());
+        assert_eq!(encode(&to_scene_file(&doc2)).unwrap(), bytes1);
+    }
+
+    /// The **downgrade-bless** direction for the v10 entity record, as a checked
+    /// property rather than a path only `INF_BLESS_FIXTURES=1` walks.
+    #[test]
+    fn v10_entity_downgrade_is_lossless_except_for_the_sky_slots() {
+        use inf_ecs::components::{AlwaysLoaded, StreamingSource};
+        let g = uuid::Uuid::from_u128;
+        let live = EntityRecord {
+            streaming_source: Some(StreamingSource { radius_m: 42.0 }),
+            always_loaded: Some(AlwaysLoaded),
+            time_of_day: Some(TimeOfDay {
+                seconds: 1234.0,
+                rate: 60.0,
+                ..TimeOfDay::default()
+            }),
+            sky_atmosphere: Some(SkyAtmosphere::default()),
+            ..v9_base(g(0xB001), "Sky", None).into_v10().into_current()
+        };
+        let back = EntityRecordV10::from_current(live.clone()).into_current();
+        assert_eq!(back.streaming_source, live.streaming_source);
+        assert_eq!(back.always_loaded, live.always_loaded);
+        assert_eq!(back.name, live.name);
+        assert!(
+            back.time_of_day.is_none() && back.sky_atmosphere.is_none(),
+            "the sky slots have no v10 home and must come back empty"
+        );
+        // A record with no clock survives the hop exactly.
+        let plain = v9_base(g(0xB002), "Prop", None).into_v10().into_current();
+        assert_eq!(
+            EntityRecordV10::from_current(plain.clone()).into_current(),
+            plain
+        );
+    }
+
+    /// The two v11 component slots persist across save → load and re-encode
+    /// byte-identically — including through the live ECS (`record_of` reads them,
+    /// `write_record_components` writes them).
+    #[test]
+    fn v11_sky_components_round_trip() {
+        let mut doc = SceneDoc::new();
+        doc.set_title("Sky Level");
+        let sky = doc.create(SpawnKind::Empty, "Sky", None);
+        let tod = TimeOfDay {
+            seconds: 3_600.0,
+            day_of_year: 355,
+            latitude_deg: -33.9,
+            longitude_deg: 151.2,
+            rate: 120.0,
+        };
+        let atmos = SkyAtmosphere {
+            sun_intensity: 5.5,
+            night_darkening: 0.4,
+            ..SkyAtmosphere::default()
+        };
+        {
+            let e = doc.world().entity_of(sky).unwrap();
+            let w = doc.world_mut().world_mut();
+            w.entity_mut(e).insert(tod);
+            w.entity_mut(e).insert(atmos);
+        }
+        doc.create(SpawnKind::Cube, "Prop", None);
+
+        let bytes1 = encode(&to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], SCHEMA_VERSION as u8);
+        let file = decode(&bytes1).unwrap();
+        let rec = file.entities.iter().find(|r| r.name == "Sky").unwrap();
+        assert_eq!(rec.time_of_day, Some(tod));
+        assert_eq!(rec.sky_atmosphere, Some(atmos));
+        assert!(file
+            .entities
+            .iter()
+            .find(|r| r.name == "Prop")
+            .unwrap()
+            .time_of_day
+            .is_none());
+
+        // Save → load → save is byte-identical (the single-byte standard).
+        let mut doc2 = SceneDoc::new();
+        apply_to_doc(&mut doc2, &file);
+        assert_eq!(encode(&to_scene_file(&doc2)).unwrap(), bytes1);
+
+        // The components really reached the ECS, not just the record.
+        let e = doc2.world().entity_of(sky).unwrap();
+        assert_eq!(doc2.world().world().get::<TimeOfDay>(e).copied(), Some(tod));
+        assert_eq!(
+            doc2.world().world().get::<SkyAtmosphere>(e).copied(),
+            Some(atmos)
+        );
+    }
+
+    /// The `Ring-0 ↔ Ring-1` default lock for the new components: `inf-scene` and
+    /// this codec must agree field-for-field, because the two shapes staying
+    /// identical *is* the wire contract (the same reason
+    /// `partition_settings_mirror_matches_the_runtime_defaults` exists).
+    #[test]
+    fn sky_component_defaults_are_the_documented_ones() {
+        let t = TimeOfDay::default();
+        assert_eq!(t.seconds, 36_000.0);
+        assert_eq!(t.day_of_year, 172);
+        assert_eq!(t.latitude_deg, 48.9);
+        assert_eq!(t.longitude_deg, 0.0);
+        assert_eq!(t.rate, 0.0, "a level opts into a moving sun explicitly");
+        let a = SkyAtmosphere::default();
+        assert!(a.enabled);
+        assert_eq!(a.sun_intensity, 3.0);
+        // The gradient defaults must equal the renderer's `SkyParams::default()`
+        // exactly — that identity is what keeps the sky byte-identical.
+        assert_eq!([a.zenith.r, a.zenith.g, a.zenith.b], [0.012, 0.021, 0.038]);
+        assert_eq!(
+            [a.horizon.r, a.horizon.g, a.horizon.b],
+            [0.055, 0.081, 0.120]
+        );
+        assert_eq!([a.ground.r, a.ground.g, a.ground.b], [0.009, 0.011, 0.015]);
+        // Partial payloads fill the same values (the additive contract).
+        let partial: SkyAtmosphere = serde_json::from_str("{}").unwrap();
+        assert_eq!(partial, a);
+        let partial: TimeOfDay = serde_json::from_str(r#"{"rate":60.0}"#).unwrap();
+        assert_eq!(partial.rate, 60.0);
+        assert_eq!(partial.seconds, 36_000.0);
     }
 }

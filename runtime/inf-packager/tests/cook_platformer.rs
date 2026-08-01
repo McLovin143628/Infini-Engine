@@ -463,6 +463,8 @@ fn make_streaming_terrain_project(root: &Path) -> AssetId {
             foliage: None,
             streaming_source: None,
             always_loaded: None,
+            time_of_day: None,
+            sky_atmosphere: None,
         }],
         settings: Default::default(),
     };

@@ -18,7 +18,7 @@
 //!   the shared uniform (with `enabled = 0`) so receivers read a valid flag, then
 //!   renders nothing — receivers take the byte-stable un-shadowed instruction path.
 
-use crate::camera::{DEPTH_FORMAT, SUN_DIR};
+use crate::camera::DEPTH_FORMAT;
 use crate::csm::{
     bounding_sphere, cascade_matrix, cascade_splits, frustum_slice_corners, SHADOW_CASCADES,
     SHADOW_RESOLUTION,
@@ -347,8 +347,10 @@ impl RenderNode for ShadowNode {
         // Shadow caster: the first directional light that **casts shadows** (R-P3
         // honours `cast_shadows` for directional CSM; point/spot shadow maps are
         // deferred, so their flag is inert). Fallbacks:
-        //  * no directional light at all → the editor sun (a point/spot-only scene
-        //    still gets grounded shadows, matching the receiver shaders' fallback);
+        //  * no directional light at all → the scene's **projected** sun (P17.1;
+        //    a point/spot-only scene still gets grounded shadows, matching the
+        //    receiver shaders' `view.sun_dir` fallback — and both now follow the
+        //    time of day);
         //  * directional lights exist but none casts → no CSM this frame (publish
         //    the disabled uniform so receivers read a valid `enabled = 0`, render
         //    nothing).
@@ -366,7 +368,7 @@ impl RenderNode for ShadowNode {
             .any(|l| l.kind == LightKind::Directional);
         let light_dir_to = match caster {
             Some(d) => d,
-            None if !any_directional => SUN_DIR.normalize(),
+            None if !any_directional => frame.scene.sun.unit_direction(),
             None => {
                 gpu.queue.write_buffer(
                     &frame.shadow.uniform,

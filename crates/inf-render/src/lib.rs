@@ -55,8 +55,8 @@ pub use scene::{
     terrain_id_from_guid, Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk,
     RenderLight, RenderLight2D, RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile,
     RenderTilemap, SkinnedInstance, SkinnedMeshData, SkinnedVertex, SkyParams, SpriteInstance,
-    SpriteTextureUpload, TerrainTileKey, TextureHandle, TilemapParams, VgeomAsset, VgeomInstance,
-    VgeomMesh, ID_GIZMO_BASE, ID_NONE,
+    SpriteTextureUpload, SunParams, TerrainTileKey, TextureHandle, TilemapParams, VgeomAsset,
+    VgeomInstance, VgeomMesh, DEFAULT_SUN_DIR, ID_GIZMO_BASE, ID_NONE,
 };
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,

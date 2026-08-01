@@ -77,6 +77,8 @@ fn rec(guid: u128, name: &str, at: (f64, f64)) -> inf_scene::RuntimeEntity {
         foliage: None,
         streaming_source: None,
         always_loaded: None,
+        time_of_day: None,
+        sky_atmosphere: None,
     }
 }
 

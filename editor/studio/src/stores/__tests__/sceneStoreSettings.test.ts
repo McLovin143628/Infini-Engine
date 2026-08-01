@@ -41,6 +41,16 @@ const sample: LevelSettingsDto = {
     activation_radius_m: 256,
     prefetch_margin_m: 256,
   },
+  time_of_day: {
+    present: false,
+    seconds: 36000,
+    day_of_year: 172,
+    latitude_deg: 48.9,
+    longitude_deg: 0,
+    rate: 0,
+    sun_elevation_deg: 55.1,
+    sun_azimuth_deg: 125.4,
+  },
 };
 
 describe("sceneStore level settings slice", () => {

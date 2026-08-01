@@ -48,6 +48,7 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(physics3d_nodes());
     reg.register_all(input_nodes());
     reg.register_all(audio_nodes());
+    reg.register_all(sky_nodes());
     reg
 }
 
@@ -541,6 +542,43 @@ fn physics3d_nodes() -> Vec<NodeDef> {
     ]
 }
 
+/// The time-of-day kit (P17.1): read and drive the level clock the sun and moon
+/// are a pure function of.
+///
+/// Four **single-purpose** nodes rather than one getter with two outputs, on
+/// purpose: a `PureCall` with more than one data output fans each pin into its
+/// own `sky::get::<field>` call (see [`crate::lower`]), which would force
+/// three-segment match arms in both hosts. One output each keeps the emitted
+/// path a plain `sky::get_time_of_day(…)`.
+///
+/// Execution reaches the level clock through the ordinary
+/// [`Host`](crate::interp::Host) boundary — the `sky.*` namespace routes to a
+/// pair of `inf_ecs::sky` seams shared verbatim by the editor's Simulate host and
+/// the shipped runtime host — so there is **no IR change**, exactly like
+/// `terrain.height_at`. The transpiler emits the matching `sky::*` free calls.
+///
+/// Units per architecture rule 6: `seconds` is UTC seconds since midnight
+/// (`0..86400`, wrapped by the setter); `rate` is simulated clock-seconds per
+/// simulated second — dimensionless, `0` = frozen, negative runs time backwards.
+fn sky_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("sky.get_time_of_day", "Get Time of Day", "sky")
+            .described("The level clock, in UTC seconds since midnight (0..86400).")
+            .with_outputs(vec![PortDef::new("seconds", PortType::Float)]),
+        NodeDef::new("sky.set_time_of_day", "Set Time of Day", "sky")
+            .described("Set the level clock, in seconds since midnight (wraps at 86400).")
+            .with_inputs(vec![exec_in(), PortDef::new("seconds", PortType::Float)])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
+        NodeDef::new("sky.get_rate", "Get Time Rate", "sky")
+            .described("How fast the clock runs: simulated seconds per second (0 = frozen).")
+            .with_outputs(vec![PortDef::new("rate", PortType::Float)]),
+        NodeDef::new("sky.set_rate", "Set Time Rate", "sky")
+            .described("Set how fast the clock runs (0 freezes it; negative runs it backwards).")
+            .with_inputs(vec![exec_in(), PortDef::new("rate", PortType::Float)])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
+    ]
+}
+
 /// The input-state kit (P8.4): pure Bool queries the Simulate loop answers from
 /// the focused viewport's keyboard state. Both take the action/key **as a `Str`
 /// data input** (wire a `lit.str`) rather than a node param, so they lower with
@@ -742,6 +780,45 @@ mod tests {
         // get_velocity fans to x/y/z.
         let gv = reg.get("physics3d.get_velocity").unwrap();
         assert_eq!(gv.output("z").unwrap().ty, PortType::Float);
+    }
+
+    #[test]
+    fn sky_kit_is_registered() {
+        let reg = blueprint_registry();
+        for id in [
+            "sky.get_time_of_day",
+            "sky.set_time_of_day",
+            "sky.get_rate",
+            "sky.set_rate",
+        ] {
+            assert!(reg.get(id).is_some(), "missing sky node {id}");
+        }
+        // The getters are pure single-output queries — which is what keeps their
+        // lowered call path a bare `sky::get_time_of_day(…)` instead of fanning
+        // into `sky::get::<field>` (see `sky_nodes`' docs).
+        for id in ["sky.get_time_of_day", "sky.get_rate"] {
+            let d = reg.get(id).unwrap();
+            assert!(d.input(EXEC_IN).is_none(), "{id} must be pure");
+            assert_eq!(d.outputs.len(), 1, "{id} must have one data output");
+        }
+        assert_eq!(
+            reg.get("sky.get_time_of_day")
+                .unwrap()
+                .output("seconds")
+                .unwrap()
+                .ty,
+            PortType::Float
+        );
+        // The setters are exec actions taking one Float.
+        for id in ["sky.set_time_of_day", "sky.set_rate"] {
+            let d = reg.get(id).unwrap();
+            assert!(d.input(EXEC_IN).is_some(), "{id} must be an exec action");
+            assert!(d.output(EXEC_THEN).is_some());
+        }
+        assert_eq!(
+            reg.get("sky.set_rate").unwrap().input("rate").unwrap().ty,
+            PortType::Float
+        );
     }
 
     #[test]

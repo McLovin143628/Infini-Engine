@@ -21,6 +21,7 @@ pub mod refs;
 pub mod registry;
 pub mod schedule;
 pub mod sim;
+pub mod sky;
 pub mod transform;
 pub mod world;
 
@@ -32,8 +33,8 @@ pub use components::{
     ColliderShape2DKind, ColliderShape3DKind, CombineRule, ComputedVisibility, GlobalTransform,
     Guid, Joint2D, Joint3D, JointKind2D, JointKind3D, Light, LightKind, Material, MeshRef, Name,
     PcgVolume, Primitive, RigidBody2D, RigidBody3D, RootMotion, RootMotionMode, ScatteredInstance,
-    SkeletalMesh, SmRuntimeState, Sprite, Terrain, TileBounds, TileChunk, Tilemap, Transform,
-    Visibility, CHUNK_DIM, CHUNK_TILES,
+    SkeletalMesh, SkyAtmosphere, SmRuntimeState, Sprite, Terrain, TileBounds, TileChunk, Tilemap,
+    TimeOfDay, Transform, Visibility, CHUNK_DIM, CHUNK_TILES,
 };
 pub use hierarchy::{ChildOf, Children};
 pub use math::{Color, Vec2d, Vec3d};
@@ -47,4 +48,5 @@ pub use schedule::{
     ecs_task_pool_threads, init_ecs_task_pool, ScheduleMode, SimSchedule, SimScheduleBuilder,
 };
 pub use sim::{sim_snapshot, AngularVelocity, EntitySimState, Lifetime, SimConfig, Velocity};
+pub use sky::{advance_time_of_day, resolve_sky, sky_authority, ResolvedSky};
 pub use world::EcsWorld;
