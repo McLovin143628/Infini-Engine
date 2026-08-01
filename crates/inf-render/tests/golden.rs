@@ -27,10 +27,10 @@ use inf_render::{
     PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
     RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings,
     SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance, SpriteTextureUpload,
-    SsaoSettings, TextParams, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings,
-    ViewMode, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
-    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT,
-    TILE_CHUNK_DIM,
+    SsaoSettings, TerrainTileKey, TextParams, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh,
+    VgeomSettings, ViewMode, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL,
+    BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE,
+    HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -794,11 +794,12 @@ fn hill_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
                 }
             }
             tiles.push(RenderTerrainTile {
-                coord: (tx, tz),
+                key: TerrainTileKey::lod0((tx, tz)),
                 origin: DVec3::new(ox, 0.0, oz),
                 heights,
                 weights: Vec::new(),
                 height_bounds: (lo, hi),
+                version: 1,
             });
         }
     }
@@ -808,7 +809,6 @@ fn hill_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
         tiles,
         layers: default_layers(),
         macro_variation: 0.15,
-        version: 1,
     }
 }
 
@@ -875,7 +875,7 @@ fn golden_terrain_lod() {
 
     // The pure assembly must produce ≥2 distinct LOD levels (the "≥2 rings" gate).
     let patches = assemble_patches(&terrain, &view, &view.origin);
-    let mut lods: Vec<u32> = patches.iter().map(|p| p.lod).collect();
+    let mut lods: Vec<u32> = patches.iter().map(|p| p.ring).collect();
     lods.sort_unstable();
     lods.dedup();
     assert!(
@@ -945,11 +945,12 @@ fn splat_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
                 }
             }
             tiles.push(RenderTerrainTile {
-                coord: (tx, tz),
+                key: TerrainTileKey::lod0((tx, tz)),
                 origin: DVec3::new(ox, 0.0, oz),
                 heights,
                 weights,
                 height_bounds: (lo, hi),
+                version: 1,
             });
         }
     }
@@ -959,7 +960,6 @@ fn splat_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
         tiles,
         layers: default_layers(),
         macro_variation: 0.15,
-        version: 1,
     }
 }
 
@@ -996,6 +996,170 @@ fn golden_terrain_splat() {
     }
     assert!(green, "expected the grass (green) layer band");
     assert!(snow, "expected the snow (bright) layer band");
+}
+
+/// A synthetic **streamed** terrain (P16.3b1): three asset LOD levels over one
+/// global height function, handed to the renderer as a quadtree cut instead of a
+/// fully-resident heightfield.
+///
+/// * level 0 — only the 2 × 2 block at the origin is resident (a deliberately
+///   *partial* level-0 residency, the streaming shape);
+/// * level 1 — the 2 × 2 block covering 4 × that area (the mid ring);
+/// * level 2 — the 2 × 2 block covering 16 × it, **minus `(1,1)`** so one far
+///   quadrant is genuinely uncovered (the renderer must render the hole, not
+///   invent coverage).
+///
+/// Coarse pages sample the same global function at `2^lod ·` the spacing, so —
+/// exactly like the real `inf_terrain::pyramid` decimation — every coarse sample
+/// *is* one of the fine samples, and the shared edges agree bit-for-bit.
+fn streamed_terrain(res: u32, mps: f64) -> RenderTerrain {
+    let f = |x: f64, z: f64| 5.0 * (x * 0.04).sin() * (z * 0.04).cos() + 4.0;
+    let span0 = (res as f64 - 1.0) * mps;
+    let page = |lod: u32, coord: (i32, i32), version: u64| {
+        let step = mps * (1u64 << lod) as f64;
+        let span = span0 * (1u64 << lod) as f64;
+        let (ox, oz) = (coord.0 as f64 * span, coord.1 as f64 * span);
+        let mut heights = vec![0f32; (res * res) as usize];
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for j in 0..res {
+            for i in 0..res {
+                let h = f(ox + i as f64 * step, oz + j as f64 * step) as f32;
+                heights[(j * res + i) as usize] = h;
+                lo = lo.min(h);
+                hi = hi.max(h);
+            }
+        }
+        RenderTerrainTile {
+            key: TerrainTileKey::new(lod, coord),
+            origin: DVec3::new(ox, 0.0, oz),
+            heights,
+            weights: Vec::new(),
+            height_bounds: (lo, hi),
+            version: 1 + version,
+        }
+    };
+    let block = [(0, 0), (0, 1), (1, 0), (1, 1)];
+    // Key-ascending (level 0, then level 1, then level 2) — the projection order.
+    let mut tiles = Vec::new();
+    for (lod, coords) in [
+        (0u32, &block[..]),
+        (1, &block[..]),
+        (2, &block[..3]), // (1,1) deliberately absent
+    ] {
+        for &c in coords {
+            tiles.push(page(lod, c, tiles.len() as u64));
+        }
+    }
+    RenderTerrain {
+        tile_resolution: res,
+        meters_per_sample: mps,
+        tiles,
+        layers: default_layers(),
+        macro_variation: 0.15,
+    }
+}
+
+/// Streamed-terrain headless gate (P16.3b1). A partially-resident level 0 with
+/// coarse pyramid pages covering the outer rings must render deterministically —
+/// **including across frames that share one renderer**, where the second frame's
+/// per-tile version gate finds every stamp unchanged and uploads nothing. A
+/// regression that dropped or half-refreshed a cached page would show up here as
+/// a differing frame.
+///
+/// Deliberately **not** a committed golden PNG: the pixels exercise the same
+/// shading path the three terrain goldens already pin, while everything this
+/// batch adds (which page sources which patch) is asserted structurally, which is
+/// adapter-robust — the harness's stated bar for what CI can actually check.
+#[test]
+fn streamed_terrain_renders_partial_residency() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let res = 33;
+    let terrain = streamed_terrain(res, 1.0);
+    // Overlook from the near corner down the +X/+Z diagonal, so the resident
+    // level-0 block is close and the coarse pages recede into the outer rings.
+    let view = look_view(
+        DVec3::new(-20.0, 60.0, -20.0),
+        DVec3::new(120.0, 0.0, 120.0),
+    );
+
+    // ── structural: source selection over the residency set ──────────────────
+    let patches = assemble_patches(&terrain, &view, &view.origin);
+    assert_eq!(
+        patches,
+        assemble_patches(&terrain, &view, &view.origin),
+        "assembly must be a pure function of (residency set, view)"
+    );
+    let drawn: Vec<TerrainTileKey> = patches.iter().map(|p| p.key).collect();
+    // Fine wins: every resident level-0 page draws …
+    for c in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+        assert!(
+            drawn.contains(&TerrainTileKey::lod0(c)),
+            "level-0 page {c:?} must draw (fine wins)"
+        );
+    }
+    // … and the coarse pages whose whole footprint they cover stand down.
+    assert!(
+        !drawn.contains(&TerrainTileKey::new(1, (0, 0))),
+        "the fully-subdivided level-1 page must not double-draw over level 0"
+    );
+    assert!(
+        !drawn.contains(&TerrainTileKey::new(2, (0, 0))),
+        "the fully-subdivided level-2 page must not double-draw"
+    );
+    // Coarse pages serve the outer coverage, at ≥2 distinct asset levels.
+    let mut levels: Vec<u32> = drawn.iter().map(|k| k.lod).collect();
+    levels.sort_unstable();
+    levels.dedup();
+    assert!(
+        levels.len() >= 2 && levels.contains(&0),
+        "expected fine + coarse sources, got asset levels {levels:?}"
+    );
+    // The absent page is simply not drawn — a hole, faithfully rendered.
+    assert!(!drawn.contains(&TerrainTileKey::new(2, (1, 1))));
+    // Nothing is drawn twice, and a coarse patch keeps the full-density grid its
+    // level already decimated for (ring − lod).
+    let mut unique = drawn.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), drawn.len(), "a page was assembled twice");
+    for p in &patches {
+        assert_eq!(p.mesh_lod, inf_render::patch_mesh_lod(p.ring, p.key.lod));
+        assert_eq!(terrain.tiles[p.tile].key, p.key);
+    }
+
+    // ── determinism: two fresh renderers, then two frames on a warm cache ─────
+    let scene = RenderScene {
+        grid_enabled: true,
+        terrain: Some(terrain),
+        ..Default::default()
+    };
+    let cold_a = render(&gpu, &scene, &view);
+    let cold_b = render(&gpu, &scene, &view);
+    assert_eq!(
+        cold_a, cold_b,
+        "streamed terrain must render deterministically"
+    );
+
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+    let warm_a = target.read_rgba(&gpu).expect("readback");
+    renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+    let warm_b = target.read_rgba(&gpu).expect("readback");
+    assert_eq!(
+        warm_a, warm_b,
+        "a second frame over an unchanged residency set uploads nothing and must \
+         be byte-identical"
+    );
+    assert_eq!(
+        cold_a, warm_a,
+        "a warm tile cache must render the cold frame"
+    );
+
+    let lit = warm_a
+        .chunks(4)
+        .any(|p| p[0] as u16 + p[1] as u16 + p[2] as u16 > 150);
+    assert!(lit, "expected a lit terrain pixel");
 }
 
 /// A view looking straight down -Z at the world XY plane, so sprites (which lie

@@ -298,13 +298,87 @@ impl Default for Ambient2D {
     }
 }
 
+/// A projected terrain tile's identity: its **asset LOD level** plus its grid
+/// coordinate *at that level* (P16.3b1).
+///
+/// This is the renderer-local mirror of `inf_terrain::TileKey` — `inf-render` is
+/// Ring 0 and deliberately does **not** depend on `inf-terrain`, so the two
+/// documented projectors (`inf_viewport::host::project_terrain` and
+/// `inf_player::render::project_terrain`) map one onto the other, exactly like
+/// every other scene DTO.
+///
+/// Level `0` is the authored, full-resolution heightfield. A level-`n` tile
+/// covers `2ⁿ ×` the world span at the same sample count (metres-per-sample
+/// doubles per level), so level-`n` tile `(TX, TZ)` is the 2 × 2 block of
+/// level-`(n−1)` tiles `(2TX+a, 2TZ+b)` decimated 2:1.
+///
+/// `Ord` sorts by **`lod` first, then `coord`** (matching `inf_terrain::TileKey`),
+/// so a projection that emits level 0 and then each coarse level in ascending key
+/// order is globally key-ascending — the order the tile list is documented to
+/// arrive in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TerrainTileKey {
+    /// Asset LOD level; `0` is the authored full-resolution level.
+    pub lod: u32,
+    /// Tile grid coordinate `(tx, tz)` **within that level**.
+    pub coord: (i32, i32),
+}
+
+impl TerrainTileKey {
+    /// A level-0 (authored, full-resolution) key.
+    #[inline]
+    pub const fn lod0(coord: (i32, i32)) -> Self {
+        Self { lod: 0, coord }
+    }
+
+    /// A key at an explicit level.
+    #[inline]
+    pub const fn new(lod: u32, coord: (i32, i32)) -> Self {
+        Self { lod, coord }
+    }
+
+    /// The coarser key one level up that contains this tile (`lod + 1`, coordinate
+    /// halved with **floor** semantics so negative coordinates group correctly —
+    /// tile `−1` belongs to block `−1`, not block `0`).
+    #[inline]
+    pub const fn parent(self) -> Self {
+        Self {
+            lod: self.lod + 1,
+            coord: (self.coord.0.div_euclid(2), self.coord.1.div_euclid(2)),
+        }
+    }
+
+    /// The four finer keys this tile decimates (`lod − 1`, coordinate doubled),
+    /// in a fixed scan order. Empty at level 0 (nothing is finer).
+    ///
+    /// Saturating doubling: a coordinate that would overflow `i32` cannot name a
+    /// real tile anyway, so the clamped key simply never matches a resident one.
+    #[inline]
+    pub fn children(self) -> [Self; 4] {
+        let lod = self.lod.saturating_sub(1);
+        let (x, z) = (
+            self.coord.0.saturating_mul(2),
+            self.coord.1.saturating_mul(2),
+        );
+        [
+            Self::new(lod, (x, z)),
+            Self::new(lod, (x.saturating_add(1), z)),
+            Self::new(lod, (x, z.saturating_add(1))),
+            Self::new(lod, (x.saturating_add(1), z.saturating_add(1))),
+        ]
+    }
+}
+
 /// One terrain tile handed to the [`TerrainNode`](crate::passes::terrain): its
-/// grid coordinate, the `f64` world origin of sample `(0,0)`, and the row-major
-/// `f32` height offsets (from `origin.y`). Mirrors `inf_terrain::TerrainTile` but
-/// stays renderer-agnostic (the host projects it, like `RenderTilemap`).
+/// [`TerrainTileKey`] (asset LOD + grid coordinate), the `f64` world origin of
+/// sample `(0,0)`, the row-major `f32` height offsets (from `origin.y`), and the
+/// **change stamp** the GPU cache gates its upload on. Mirrors
+/// `inf_terrain::TerrainTile` but stays renderer-agnostic (the host projects it,
+/// like `RenderTilemap`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderTerrainTile {
-    pub coord: (i32, i32),
+    /// Asset LOD level + grid coordinate at that level.
+    pub key: TerrainTileKey,
     /// World position of sample `(0,0)` (`f64` anchor).
     pub origin: DVec3,
     /// `resolution²` row-major height offsets (metres) from `origin.y`.
@@ -312,10 +386,18 @@ pub struct RenderTerrainTile {
     /// `resolution²` row-major RGBA8 splat weights (P10.4), resolved from the
     /// tile's sparse store (an unpainted tile projects the uniform default). The
     /// terrain pass uploads these into a per-tile `Rgba8Unorm` weight texture
-    /// beside the height texture.
+    /// beside the height texture. Coarse (LOD ≥ 1) tiles carry no painted weights
+    /// — the pyramid is heights-only — so they project the uniform default.
     pub weights: Vec<[u8; 4]>,
     /// Inclusive `(min, max)` of `heights` (for the tile's AABB cull bound).
     pub height_bounds: (f32, f32),
+    /// The tile's **monotone change stamp** (P16.3b1), projected from
+    /// `inf_terrain::TerrainData::tile_version`. The GPU texture cache re-uploads
+    /// this tile if — and only if — the stamp differs from the one its cached
+    /// copy was built at. `0` means "no stamp" (a tile the source could not
+    /// version) and is treated conservatively as *always re-upload*, never as a
+    /// cache hit.
+    pub version: u64,
 }
 
 /// One terrain splat material layer (P10.4), projected from the ECS
@@ -342,31 +424,69 @@ impl Default for RenderTerrainLayer {
     }
 }
 
-/// The renderer's terrain input: a paged heightfield projected from the ECS
-/// `Terrain` component. The [`TerrainNode`](crate::passes::terrain) uploads a
-/// per-tile R32Float height texture + a per-tile Rgba8Unorm splat-weight texture
-/// (both cached, version-gated) and assembles concentric clipmap LOD rings around
-/// the camera each frame, blending the four `layers` by the splat weights.
+/// The renderer's terrain input: the **resident** page set of a paged heightfield
+/// projected from the ECS `Terrain` component. The
+/// [`TerrainNode`](crate::passes::terrain) uploads a per-tile R32Float height
+/// texture + a per-tile Rgba8Unorm splat-weight texture (both cached, gated by
+/// each tile's own [`version`](RenderTerrainTile::version)) and assembles
+/// concentric clipmap LOD rings around the camera each frame, blending the four
+/// `layers` by the splat weights.
+///
+/// ## Residency (P16.3b1)
+///
+/// `tiles` is whatever the projector handed over — it is **not** assumed to be a
+/// complete terrain. A missing tile simply produces no patch (a hole, exactly as
+/// an unauthored tile always did), and coarse (LOD ≥ 1) pyramid tiles may ride
+/// beside the level-0 ones to cover the outer rings. The renderer never invents a
+/// want: it faithfully draws the set it is given (camera-driven residency
+/// selection lives above this DTO).
+///
+/// There is deliberately **no whole-terrain version counter** (P16.3b1 removed
+/// it): the per-tile stamps are strictly more precise, and a single global
+/// counter is exactly the field a projector forgets to bump — the shipped player
+/// pinned it to a constant, which would have frozen the GPU cache the moment
+/// residency started changing. The one terrain-wide GPU upload left (the splat
+/// material uniform) is gated by comparing the packed value, which cannot
+/// desync.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RenderTerrain {
-    /// Samples per tile side (the height/weight-texture dimension).
+    /// Samples per tile side (the height/weight-texture dimension). Terrain-wide:
+    /// a coarse level keeps the resolution and doubles the spacing.
     pub tile_resolution: u32,
-    /// World units between samples.
+    /// World units between samples **at level 0**.
     pub meters_per_sample: f64,
-    /// Authored tiles, sorted by coordinate (deterministic upload/draw order).
+    /// The resident tiles, ascending by [`TerrainTileKey`] (level 0 first, then
+    /// each coarse level) — a deterministic upload/draw order.
     pub tiles: Vec<RenderTerrainTile>,
     /// The four splat material layers the per-sample weights blend (P10.4).
     pub layers: [RenderTerrainLayer; 4],
     /// Amplitude of the large-scale fBm albedo modulation (`0` = off).
     pub macro_variation: f32,
-    /// Bump on any tile/height/weight/material change — gates the GPU uploads.
-    pub version: u64,
 }
 
 impl RenderTerrain {
-    /// World edge length of one tile: `(resolution − 1) · mps`.
+    /// World edge length of one **level-0** tile: `(resolution − 1) · mps`. Also
+    /// the unit the clipmap ring thresholds are scaled by.
     pub fn tile_span(&self) -> f64 {
         (self.tile_resolution.max(2) as f64 - 1.0) * self.meters_per_sample
+    }
+
+    /// World edge length of a tile at asset LOD `lod`: `tile_span · 2^lod` (the
+    /// metres-per-sample doubling, at a constant sample count).
+    pub fn tile_span_at(&self, lod: u32) -> f64 {
+        self.tile_span() * (1u64 << lod.min(62)) as f64
+    }
+
+    /// The coarsest asset LOD present in the projection (`0` for a level-0-only
+    /// terrain — every inline, non-streamed terrain).
+    pub fn max_lod(&self) -> u32 {
+        self.tiles.iter().map(|t| t.key.lod).max().unwrap_or(0)
+    }
+
+    /// The projected `(key → change stamp)` ledger, in tile order — the input the
+    /// GPU texture cache gates its uploads on.
+    pub fn tile_versions(&self) -> impl Iterator<Item = (TerrainTileKey, u64)> + '_ {
+        self.tiles.iter().map(|t| (t.key, t.version))
     }
 }
 
@@ -416,8 +536,9 @@ pub struct RenderScene {
     pub sprites: Vec<SpriteInstance>,
     /// Heightfield terrain (P10.1). `Some` ⇒ the terrain pass draws clipmap LOD
     /// rings around the camera; `None` ⇒ the pass is a no-op (so scenes without
-    /// terrain — every pre-P10.1 golden — stay byte-identical). Its own `version`
-    /// gates the per-tile height-texture uploads.
+    /// terrain — every pre-P10.1 golden — stay byte-identical). Each tile's own
+    /// [`version`](RenderTerrainTile::version) stamp gates its height/weight
+    /// texture upload (P16.3b1).
     pub terrain: Option<RenderTerrain>,
     /// 2D tilemaps (P8.1b). The sprite pass culls each tilemap's chunks against
     /// the camera and expands the visible ones into prebatched sprite runs, then

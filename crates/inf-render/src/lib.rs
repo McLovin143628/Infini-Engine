@@ -41,7 +41,8 @@ pub use gpu::{create_instance, GpuContext};
 pub use headless::{HeadlessTarget, HEADLESS_FORMAT};
 pub use passes::composite::BlitMode;
 pub use passes::terrain::{
-    assemble_patches, cells_at_lod, lod_for_distance, lod_thresholds, morph_factor, TerrainPatch,
+    assemble_patches, cells_at_lod, lod_for_distance, lod_thresholds, morph_factor, patch_mesh_lod,
+    plan_tile_cache, ring_source_lod, superseded, CachedTile, TerrainPatch, TileCachePlan,
     TERRAIN_BASE_CELLS, TERRAIN_LOD_COUNT,
 };
 pub use pick::Picker;
@@ -54,8 +55,8 @@ pub use scene::{
     Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D,
     RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap,
     SkinnedInstance, SkinnedMeshData, SkinnedVertex, SkyParams, SpriteInstance,
-    SpriteTextureUpload, TextureHandle, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh,
-    ID_GIZMO_BASE, ID_NONE,
+    SpriteTextureUpload, TerrainTileKey, TextureHandle, TilemapParams, VgeomAsset, VgeomInstance,
+    VgeomMesh, ID_GIZMO_BASE, ID_NONE,
 };
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,

@@ -32,7 +32,8 @@ use inf_render::{
     GiSettings, GpuContext, HAlign, LightKind, MeshInstance, NineSliceParams, PrebatchedRun,
     PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
     RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings, SsaoSettings,
-    SurfaceChain, TextParams, TilemapParams, VgeomAsset, VgeomInstance, BUILTIN_FONT_TEXTURE,
+    SurfaceChain, TerrainTileKey, TextParams, TilemapParams, VgeomAsset, VgeomInstance,
+    BUILTIN_FONT_TEXTURE,
 };
 use inf_scene::RenderSettingsRecord;
 
@@ -251,12 +252,12 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
         // scene's single terrain slot exactly like the editor viewport host
         // (`inf_viewport::host::project_terrain`), so cooked/PIE terrain renders.
         // First visible, non-empty terrain wins (multi-terrain merge is a
-        // follow-up). Terrain is **static in sim v1**, so a constant version keeps
-        // the terrain pass from re-uploading height textures every frame.
+        // follow-up). Per-tile change stamps ride along (P16.3b1), so the terrain
+        // pass re-uploads a height texture only when that tile really changed.
         if scene.terrain.is_none() {
             if let Some(terrain) = w.get::<Terrain>(entity) {
                 if !terrain.data.is_empty() {
-                    scene.terrain = Some(project_terrain(terrain, translation, TERRAIN_VERSION));
+                    scene.terrain = Some(project_terrain(terrain, translation));
                 }
             }
         }
@@ -481,37 +482,54 @@ fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
     }
 }
 
-/// Terrain is static in the player's sim v1, so a fixed version keeps the terrain
-/// pass from re-uploading the height/weight textures every frame.
-const TERRAIN_VERSION: u64 = 1;
-
 /// Project an ECS [`Terrain`] (+ world translation) into a [`RenderTerrain`],
-/// mirroring `inf_viewport::host::project_terrain`: each authored tile becomes a
-/// [`RenderTerrainTile`] (heights + resolved RGBA8 splat weights + precomputed
-/// height bounds), plus the four material layers + macro variation.
-fn project_terrain(terrain: &Terrain, translation: DVec3, version: u64) -> RenderTerrain {
+/// mirroring `inf_viewport::host::project_terrain`: each **resident** tile becomes
+/// a [`RenderTerrainTile`] (heights + resolved RGBA8 splat weights + precomputed
+/// height bounds + its monotone change stamp), plus the four material layers +
+/// macro variation.
+///
+/// Level 0 (the authored heightfield) is emitted first, then the resident coarse
+/// pyramid pages in ascending key order — both from `BTreeMap`s, so the tile list
+/// is globally `TileKey`-ascending and the upload/draw order is deterministic.
+///
+/// The stamps are what keep the GPU cache hot: `project_scene` rebuilds this DTO
+/// every frame, but a tile's stamp only advances when the tile is actually
+/// mutated, so a static (or streamed-but-settled) terrain re-uploads nothing.
+/// That replaces the old constant `TERRAIN_VERSION` — which was correct only
+/// while terrain could never change (P16.3b1).
+///
+/// **MIRROR** of `inf_viewport::host::project_terrain` — keep the two in sync.
+fn project_terrain(terrain: &Terrain, translation: DVec3) -> RenderTerrain {
     let data = &terrain.data;
     let res = data.tile_resolution();
     let n = (res * res) as usize;
+    let project_tile = |key: inf_terrain::TileKey, tile: &inf_terrain::TerrainTile| {
+        // A coarse pyramid page is always unpainted (the pyramid is heights-only),
+        // so it resolves to the uniform default like any unpainted tile.
+        let weights: Vec<[u8; 4]> = if tile.weights_are_default() {
+            vec![inf_terrain::DEFAULT_WEIGHT; n]
+        } else {
+            (0..res)
+                .flat_map(|j| (0..res).map(move |i| (i, j)))
+                .map(|(i, j)| tile.weight_sample(res, i, j))
+                .collect()
+        };
+        RenderTerrainTile {
+            key: TerrainTileKey::new(key.lod, key.coord),
+            origin: tile.origin + translation,
+            heights: tile.heights().to_vec(),
+            weights,
+            height_bounds: tile.height_bounds(),
+            version: data.tile_version(key),
+        }
+    };
     let tiles = data
         .tiles()
-        .map(|(&coord, tile)| {
-            let weights: Vec<[u8; 4]> = if tile.weights_are_default() {
-                vec![inf_terrain::DEFAULT_WEIGHT; n]
-            } else {
-                (0..res)
-                    .flat_map(|j| (0..res).map(move |i| (i, j)))
-                    .map(|(i, j)| tile.weight_sample(res, i, j))
-                    .collect()
-            };
-            RenderTerrainTile {
-                coord,
-                origin: tile.origin + translation,
-                heights: tile.heights().to_vec(),
-                weights,
-                height_bounds: tile.height_bounds(),
-            }
-        })
+        .map(|(&coord, tile)| project_tile(inf_terrain::TileKey::lod0(coord), tile))
+        .chain(
+            data.coarse_tiles()
+                .map(|(&key, tile)| project_tile(key, tile)),
+        )
         .collect();
     let layers = std::array::from_fn(|k| RenderTerrainLayer {
         albedo: terrain.layers[k].albedo.to_array(),
@@ -524,7 +542,6 @@ fn project_terrain(terrain: &Terrain, translation: DVec3, version: u64) -> Rende
         tiles,
         layers,
         macro_variation: terrain.macro_variation as f32,
-        version,
     }
 }
 

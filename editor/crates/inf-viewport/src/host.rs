@@ -25,7 +25,7 @@ use inf_render::{
     GizmoDrag, GizmoMode, GpuContext, HAlign, LightKind, MeshInstance, NineSliceParams,
     OrthoParams, Picker, PrebatchedRun, PrimMesh, RenderChunk, RenderLight, RenderLight2D,
     RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView,
-    SpriteInstance, SurfaceChain, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
+    SpriteInstance, SurfaceChain, TerrainTileKey, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
 };
 use inf_render::{
     detect_tier, BloomSettings, GiSettings, RenderSettings, RenderTier, ShadowSettings,
@@ -851,8 +851,9 @@ impl EngineHost {
             // Heightfield terrain (P10.1) projects into the render scene's single
             // terrain slot; the terrain pass assembles clipmap LOD rings each
             // frame. First visible, non-empty terrain wins (multi-terrain merge is
-            // a follow-up). Version = doc version so height textures re-upload on
-            // any document change.
+            // a follow-up). Each tile carries its own change stamp (P16.3b1), so
+            // re-projecting on a document change re-uploads only the tiles a
+            // sculpt/paint stroke actually touched.
             if self.scene.terrain.is_none() {
                 if let Some(terrain) = w.get::<Terrain>(entity) {
                     if visible && !terrain.data.is_empty() {
@@ -860,8 +861,7 @@ impl EngineHost {
                             .get::<GlobalTransform>(entity)
                             .map(|g| g.translation())
                             .unwrap_or(DVec3::ZERO);
-                        self.scene.terrain =
-                            Some(project_terrain(terrain, translation, doc.version()));
+                        self.scene.terrain = Some(project_terrain(terrain, translation));
                         self.terrain_guid = Some(guid);
                     }
                 }
@@ -1552,36 +1552,52 @@ fn project_tilemap(tilemap: &Tilemap, translation: DVec3) -> RenderTilemap {
 
 /// Project an ECS [`Terrain`] (+ its world translation) into a [`RenderTerrain`].
 ///
-/// Each authored tile becomes a [`RenderTerrainTile`] with its `f64` origin
+/// Each **resident** tile becomes a [`RenderTerrainTile`] with its `f64` origin
 /// offset by the entity's world translation (so the terrain follows its
-/// transform), its `f32` height buffer copied out of the paged data, and its
-/// height bounds precomputed for the terrain pass's per-tile frustum cull. Tiles
-/// arrive in the paged data's `BTreeMap` order → deterministic upload/draw order.
-fn project_terrain(terrain: &Terrain, translation: DVec3, version: u64) -> RenderTerrain {
+/// transform), its `f32` height buffer copied out of the paged data, its height
+/// bounds precomputed for the terrain pass's per-tile frustum cull, and its
+/// monotone change stamp so the GPU cache re-uploads only what actually moved
+/// (P16.3b1).
+///
+/// Level 0 (the authored heightfield) is emitted first, then the resident coarse
+/// pyramid pages in ascending key order — both from `BTreeMap`s, so the tile list
+/// is globally `TileKey`-ascending and the upload/draw order is deterministic. An
+/// inline (non-asset) terrain holds no coarse pages, so it projects exactly the
+/// level-0 list it always did.
+///
+/// **MIRROR** of `inf_player::render::project_terrain` — keep the two in sync.
+fn project_terrain(terrain: &Terrain, translation: DVec3) -> RenderTerrain {
     let data = &terrain.data;
     let res = data.tile_resolution();
     let n = (res * res) as usize;
+    let project_tile = |key: inf_terrain::TileKey, tile: &inf_terrain::TerrainTile| {
+        // Resolve the sparse weight store into a full res² buffer for upload
+        // (an unpainted tile → uniform default layer 0; a coarse pyramid page is
+        // always unpainted — the pyramid is heights-only).
+        let weights: Vec<[u8; 4]> = if tile.weights_are_default() {
+            vec![inf_terrain::DEFAULT_WEIGHT; n]
+        } else {
+            (0..res)
+                .flat_map(|j| (0..res).map(move |i| (i, j)))
+                .map(|(i, j)| tile.weight_sample(res, i, j))
+                .collect()
+        };
+        RenderTerrainTile {
+            key: TerrainTileKey::new(key.lod, key.coord),
+            origin: tile.origin + translation,
+            heights: tile.heights().to_vec(),
+            weights,
+            height_bounds: tile.height_bounds(),
+            version: data.tile_version(key),
+        }
+    };
     let tiles = data
         .tiles()
-        .map(|(&coord, tile)| {
-            // Resolve the sparse weight store into a full res² buffer for upload
-            // (an unpainted tile → uniform default layer 0).
-            let weights: Vec<[u8; 4]> = if tile.weights_are_default() {
-                vec![inf_terrain::DEFAULT_WEIGHT; n]
-            } else {
-                (0..res)
-                    .flat_map(|j| (0..res).map(move |i| (i, j)))
-                    .map(|(i, j)| tile.weight_sample(res, i, j))
-                    .collect()
-            };
-            RenderTerrainTile {
-                coord,
-                origin: tile.origin + translation,
-                heights: tile.heights().to_vec(),
-                weights,
-                height_bounds: tile.height_bounds(),
-            }
-        })
+        .map(|(&coord, tile)| project_tile(inf_terrain::TileKey::lod0(coord), tile))
+        .chain(
+            data.coarse_tiles()
+                .map(|(&key, tile)| project_tile(key, tile)),
+        )
         .collect();
     let layers = std::array::from_fn(|k| RenderTerrainLayer {
         albedo: terrain.layers[k].albedo.to_array(),
@@ -1594,7 +1610,6 @@ fn project_terrain(terrain: &Terrain, translation: DVec3, version: u64) -> Rende
         tiles,
         layers,
         macro_variation: terrain.macro_variation as f32,
-        version,
     }
 }
 

@@ -213,6 +213,33 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    /// A **resident tile always holds a stamp** (P16.3): loading a terrain draws
+    /// one per tile, so a GPU tile cache sees a stable, non-zero version and
+    /// uploads each page once — instead of treating every tile as unstamped and
+    /// re-uploading the whole heightfield every frame. Loading is not an edit, so
+    /// nothing is marked dirty.
+    #[test]
+    fn deserialized_tiles_carry_change_stamps() {
+        let t = sine_terrain(8, 1.5);
+        let json = serde_json::to_string(&t).unwrap();
+        let back: TerrainData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.version_ledger_len(), back.tile_count());
+        for (&coord, _) in back.tiles() {
+            assert!(
+                back.tile_version(TileKey::lod0(coord)) > 0,
+                "loaded tile {coord:?} must be stamped"
+            );
+        }
+        assert!(
+            !back.has_dirty_tiles(),
+            "a fresh load schedules no write-back"
+        );
+        // Stamps are runtime state, not content: equality and the bytes are
+        // unaffected.
+        assert_eq!(t, back);
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+    }
+
     #[test]
     fn serde_rejects_wrong_length_tile() {
         // A tile whose height buffer doesn't match resolution² is refused on load.

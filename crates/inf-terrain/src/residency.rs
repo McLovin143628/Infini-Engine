@@ -23,12 +23,16 @@
 //!   and `normal_at` are untouched. Streaming can therefore never *change* an
 //!   answer, only make one available.
 //! * **Per-tile versions.** Every mutation stamps the tile it touched from a
-//!   single per-terrain monotone counter (a sculpt or paint stroke stamps only the
-//!   tiles under the brush), so a GPU tile cache re-uploads a page when — and only
-//!   when — its contents changed. The counter never decreases, so a re-paged tile's
-//!   stamp is strictly greater than any it held before and a stale cache entry can
-//!   never be mistaken for a fresh one; the *ledger* is pruned on evict, so it stays
-//!   bounded by residency rather than by everything ever streamed.
+//!   single **process-global** monotone counter (a sculpt or paint stroke stamps
+//!   only the tiles under the brush), so a GPU tile cache re-uploads a page when —
+//!   and only when — its contents changed. The counter never decreases, so a
+//!   re-paged tile's stamp is strictly greater than any it held before and a stale
+//!   cache entry can never be mistaken for a fresh one. It is global rather than
+//!   per-terrain so that two *different* terrains can never mint the same stamp
+//!   for the same tile coordinate — a key-addressed cache would otherwise serve
+//!   level A's tiles after a switch to level B (see `NEXT_TILE_VERSION`). The
+//!   *ledger* is pruned on evict, so it stays bounded by residency rather than by
+//!   everything ever streamed.
 //! * **Dirty set.** The same mutations mark the tile dirty; a caller
 //!   [`drains`](TerrainData::drain_dirty) the set to write edits back to the cold
 //!   store. `sync_residency` refuses to evict a dirty tile — unsaved authoring is
@@ -239,6 +243,57 @@ mod tests {
             store.load_tile(TileKey::lod0((3, 3))).unwrap().unwrap(),
             *t.get_tile((3, 3)).unwrap()
         );
+    }
+
+    /// Stamps are unique across **`TerrainData` instances**, not merely within
+    /// one (P16.3b1). A per-instance counter would hand two freshly loaded
+    /// terrains the identical 1, 2, 3, … over the identical tile coordinates, and
+    /// a consumer that caches by tile key alone — the renderer's GPU tile cache —
+    /// would keep serving the first terrain's contents after a level switch.
+    #[test]
+    fn distinct_terrains_mint_disjoint_stamps() {
+        let t = terrain_4x4();
+        let mut store = MemoryTileStore::new();
+        store.stage_level0(&t).unwrap();
+        let wants = tile_range(0, (0, 0), (1, 1));
+
+        // Two independent terrains page in the SAME tile coordinates.
+        let mut a = TerrainData::new(5, 2.0);
+        let mut b = TerrainData::new(5, 2.0);
+        a.sync_residency(&wants, &store);
+        b.sync_residency(&wants, &store);
+
+        let stamps_a: BTreeSet<u64> = wants.iter().map(|&k| a.tile_version(k)).collect();
+        let stamps_b: BTreeSet<u64> = wants.iter().map(|&k| b.tile_version(k)).collect();
+        assert_eq!(
+            stamps_a.len(),
+            wants.len(),
+            "stamps unique within a terrain"
+        );
+        assert_eq!(stamps_b.len(), wants.len());
+        assert!(
+            stamps_a.is_disjoint(&stamps_b),
+            "two terrains minted overlapping stamps {stamps_a:?} / {stamps_b:?} — a \
+             key-addressed cache would serve stale tiles across a level switch"
+        );
+        // The later terrain's stamps are strictly greater, tile for tile.
+        for &key in &wants {
+            assert!(b.tile_version(key) > a.tile_version(key));
+        }
+
+        // The same holds for two terrains **deserialized** from identical bytes —
+        // the File → Open shape, where every tile coordinate necessarily matches.
+        let json = serde_json::to_string(&t).unwrap();
+        let c: TerrainData = serde_json::from_str(&json).unwrap();
+        let d: TerrainData = serde_json::from_str(&json).unwrap();
+        assert_eq!(c, d, "identical authored content …");
+        for (&coord, _) in c.tiles() {
+            let key = TileKey::lod0(coord);
+            assert!(
+                d.tile_version(key) > c.tile_version(key) && c.tile_version(key) > 0,
+                "… must still carry distinct, live stamps at {coord:?}"
+            );
+        }
     }
 
     #[test]

@@ -46,7 +46,7 @@ pub const DEFAULT_METERS_PER_SAMPLE: f64 = 1.0;
 /// * `coarse` — resident LOD ≥ 1 tiles from the pyramid, kept apart so no
 ///   level-0 code path can ever accidentally see a downsampled tile;
 /// * `versions` — the change stamp of each **resident** tile, drawn from one
-///   per-terrain monotone counter (see [`TerrainData::tile_version`]);
+///   **process-global** monotone counter (see [`TerrainData::tile_version`]);
 /// * `dirty` — tiles mutated since the last drain, for write-back.
 ///
 /// `PartialEq` compares only the **authored** state (resolution, spacing, level-0
@@ -62,14 +62,31 @@ pub struct TerrainData {
     coarse: BTreeMap<TileKey, TerrainTile>,
     /// Change stamps for **resident** tiles only — pruned on evict/remove, so the
     /// ledger is bounded by residency and a terrain that pages a planet forever
-    /// never grows a map entry per tile it has ever seen.
+    /// never grows a map entry per tile it has ever seen. Stamps are drawn from
+    /// [`NEXT_TILE_VERSION`], which is *process-global* — see there for why.
     versions: BTreeMap<TileKey, u64>,
-    /// The single monotone source those stamps are drawn from. Never decreases
-    /// for the life of the `TerrainData`, which is what makes a re-paged tile's
-    /// stamp strictly greater than any stamp that tile (or any other) ever had.
-    next_version: u64,
     dirty: BTreeSet<TileKey>,
 }
+
+/// The single monotone source **every** tile stamp in the process is drawn from.
+///
+/// Deliberately global rather than per-[`TerrainData`]. A per-instance counter
+/// makes two different terrains mint the *same* stamps — two freshly loaded
+/// levels both walk their tile `BTreeMap` in order and hand out 1, 2, 3, … — and
+/// a consumer that caches by tile key alone (the renderer's GPU tile cache does
+/// exactly that) would then see "version 1 == cached version 1" after a
+/// File → Open and keep displaying the **previous level's** height texels
+/// wherever the two levels' tile coordinates coincide.
+///
+/// One global counter makes a stamp unique across all `TerrainData` instances for
+/// the life of the process, so "same stamp" always means "same content", and
+/// every documented property survives unchanged: it only ever increases (so a
+/// re-paged tile's stamp still strictly exceeds any it held before), `0` is still
+/// never a live stamp, and the per-terrain ledger is still pruned on evict. At
+/// one stamp per nanosecond a `u64` lasts ~584 years, so wraparound is not a
+/// concern; `Relaxed` is sufficient because the only requirement is uniqueness,
+/// not ordering against other memory.
+static NEXT_TILE_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl PartialEq for TerrainData {
     /// Authored state only — see the type docs.
@@ -100,7 +117,6 @@ impl TerrainData {
             tiles: BTreeMap::new(),
             coarse: BTreeMap::new(),
             versions: BTreeMap::new(),
-            next_version: 0,
             dirty: BTreeSet::new(),
         }
     }
@@ -352,11 +368,12 @@ impl TerrainData {
 
 impl TerrainData {
     /// Stamp `key` with the next version — the single monotone allocator every
-    /// residency and mutation path draws from.
+    /// residency and mutation path draws from ([`NEXT_TILE_VERSION`], global to
+    /// the process so stamps are unique across terrains, not just within one).
     #[inline]
     fn stamp(&mut self, key: TileKey) {
-        self.next_version += 1;
-        self.versions.insert(key, self.next_version);
+        let v = NEXT_TILE_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        self.versions.insert(key, v);
     }
 
     /// Stamp `key` **and** mark it dirty — the funnel every *mutation* goes
@@ -370,15 +387,24 @@ impl TerrainData {
     /// A resident tile's change stamp; **`0` for a tile that is not resident**
     /// (never loaded, evicted, or deleted).
     ///
-    /// Stamps come from one per-terrain counter that only ever increases, so:
+    /// Stamps come from one **process-global** counter ([`NEXT_TILE_VERSION`])
+    /// that only ever increases, so:
     ///
     /// * a stamp is strictly greater than every stamp handed out before it —
     ///   including any this tile held in an earlier residency, so a re-paged tile
     ///   can never be mistaken for the contents a GPU cache still holds;
+    /// * a stamp is unique across **every** `TerrainData` in the process, so a
+    ///   key-addressed cache cannot serve one terrain's tile as another's after a
+    ///   level switch (see [`NEXT_TILE_VERSION`] for the failure it prevents);
     /// * `0` is never a live stamp, so a consumer that treats "0 or changed" as
     ///   "re-upload" is conservatively correct for a non-resident tile;
     /// * the ledger is **bounded by residency** — evicting or deleting a tile
     ///   drops its entry, so paging across a planet costs no permanent memory.
+    ///
+    /// Stamps are therefore **not reproducible across runs** — they are runtime
+    /// cache identity, never content. Nothing serialized, hashed, or compared for
+    /// equality may read one (`PartialEq` for `TerrainData` deliberately ignores
+    /// them).
     #[inline]
     pub fn tile_version(&self, key: TileKey) -> u64 {
         self.versions.get(&key).copied().unwrap_or(0)
@@ -616,6 +642,15 @@ impl<'de> Deserialize<'de> for TerrainData {
                 )));
             }
             data.tiles.insert((x, z), tile);
+            // A **resident tile always holds a stamp** (P16.3): a freshly loaded
+            // tile is resident, so it draws one here exactly like a streamed-in or
+            // authored one. Without this a deserialized terrain would report
+            // version `0` for every tile — "no stamp" — and a GPU tile cache,
+            // which conservatively re-uploads an unstamped page, would re-upload
+            // the entire heightfield every single frame. Loading is not an edit,
+            // so it stamps but does **not** dirty (no write-back is scheduled),
+            // and the serialized bytes are untouched.
+            data.stamp(TileKey::lod0((x, z)));
         }
         Ok(data)
     }
