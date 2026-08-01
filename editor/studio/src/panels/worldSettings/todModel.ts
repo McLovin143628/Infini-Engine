@@ -73,3 +73,22 @@ export function compassPoint(azimuthDeg: number): string {
   const idx = Math.round((((azimuthDeg % 360) + 360) % 360) / 45) % 8;
   return points[idx];
 }
+
+/**
+ * Meteorological visibility implied by a height-fog density, as a label.
+ *
+ * Koschmieder's law: a black object vanishes into the haze at the distance where
+ * contrast drops to ~2 %, i.e. `V = 3 / sigma`. The panel shows this because
+ * "0.0004 per metre" means nothing to anyone, whereas "visibility ~7.5 km" is a
+ * number an author can picture and can check against their level's scale.
+ *
+ * `density` is in **m^-1** (SI, matching `SkyAtmosphere.fog_density`); 0 or
+ * non-finite reads as clear air.
+ */
+export function fogVisibility(density: number): string {
+  if (!Number.isFinite(density) || density <= 0) return "clear (no fog)";
+  const metres = 3 / density;
+  if (metres >= 1000) return `~${(metres / 1000).toFixed(metres < 10000 ? 1 : 0)} km`;
+  if (metres >= 10) return `~${Math.round(metres)} m`;
+  return "< 10 m";
+}

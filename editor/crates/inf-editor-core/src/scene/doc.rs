@@ -1964,6 +1964,18 @@ impl SceneDoc {
         inf_ecs::sky::sky_authority(&self.world).and_then(|e| self.world.guid_of(e))
     }
 
+    /// The level's atmosphere (P17.2): the **sky authority's** `SkyAtmosphere`,
+    /// or `None` when the level has no clock.
+    ///
+    /// Resolved through the same authority rule as [`Self::time_of_day`], so the
+    /// panel can never show one entity's atmosphere while the viewport renders
+    /// another's. Note this returns `None` for a clockless level even if some
+    /// entity carries a stray `SkyAtmosphere` — which is correct, because such a
+    /// component is inert (`inf_ecs::sky` warns about exactly that shape).
+    pub fn sky_atmosphere(&self) -> Option<inf_ecs::components::SkyAtmosphere> {
+        inf_ecs::sky::resolve_sky(&self.world).map(|s| s.atmosphere)
+    }
+
     /// Edit the level's clock as **one** undo step (World Settings; the frontend
     /// debounces the calls).
     ///
@@ -2054,6 +2066,84 @@ impl SceneDoc {
             &PropValue::Number(tod.longitude_deg),
         );
         self.edit_set_prop(guid, tp, "rate", &PropValue::Number(tod.rate));
+        self.commit_transaction();
+        Some(guid)
+    }
+
+    /// Edit the level's **atmosphere** as one undo step (P17.2) — the sibling of
+    /// [`Self::edit_time_of_day`], with identical `create` semantics.
+    ///
+    /// The two are separate entry points rather than one combined write because
+    /// the panel debounces them independently and a user dragging the fog slider
+    /// should not be told they edited "Time of Day" in the undo stack. They share
+    /// the authority, so whichever runs first on a clockless level creates it —
+    /// and `edit_time_of_day` deliberately creates *both* components, so the
+    /// second call always finds a target.
+    ///
+    /// `create: false` on a clockless level is a total no-op: no entity, no undo
+    /// entry, no version bump, no dirty flag. That matters for the same reason it
+    /// does on the clock — the panel posts the whole settings block on every edit,
+    /// so without it, nudging gravity would conjure a sky out of the previewed
+    /// defaults.
+    ///
+    /// Only the fields [`crate::ipc::SkyAtmosphereDto`] exposes are written; the
+    /// component's five `Color` fields are left alone, so a Details-authored sun
+    /// colour survives a fog edit.
+    pub fn edit_sky_atmosphere(
+        &mut self,
+        atmos: inf_ecs::components::SkyAtmosphere,
+        create: bool,
+    ) -> Option<Uuid> {
+        let reg = self.world.registry();
+        let Some(tp) = reg.type_path_for("SkyAtmosphere") else {
+            debug_assert!(false, "SkyAtmosphere must be registered");
+            return None;
+        };
+        let existing = self.sky_authority();
+        if existing.is_none() && !create {
+            return None;
+        }
+        if let Some(guid) = existing {
+            if self.sky_atmosphere() == Some(atmos) {
+                return Some(guid);
+            }
+        }
+
+        self.begin_transaction("Sky Atmosphere");
+        // Creating goes through `edit_time_of_day`, not through a second
+        // hand-rolled spawn: it is the one place that knows the authority must
+        // gain the clock FIRST (the intermediate "atmosphere with no clock" state
+        // is the shape `inf_ecs::sky` warns about), and reusing it means there is
+        // exactly one definition of what a sky authority is.
+        let guid = match existing {
+            Some(g) => g,
+            None => match self.edit_time_of_day(TimeOfDay::default(), true) {
+                Some(g) => g,
+                None => {
+                    self.commit_transaction();
+                    return None;
+                }
+            },
+        };
+        let num = |v: f32| PropValue::Number(f64::from(v));
+        self.edit_set_prop(guid, tp, "enabled", &PropValue::Bool(atmos.enabled));
+        self.edit_set_prop(guid, tp, "physical", &PropValue::Bool(atmos.physical));
+        self.edit_set_prop(guid, tp, "sky_intensity", &num(atmos.sky_intensity));
+        self.edit_set_prop(guid, tp, "turbidity", &num(atmos.turbidity));
+        self.edit_set_prop(guid, tp, "mie_anisotropy", &num(atmos.mie_anisotropy));
+        self.edit_set_prop(guid, tp, "sun_disc_deg", &num(atmos.sun_disc_deg));
+        self.edit_set_prop(guid, tp, "moon_disc_deg", &num(atmos.moon_disc_deg));
+        self.edit_set_prop(guid, tp, "star_intensity", &num(atmos.star_intensity));
+        self.edit_set_prop(guid, tp, "tint_strength", &num(atmos.tint_strength));
+        self.edit_set_prop(
+            guid,
+            tp,
+            "aerial_perspective",
+            &num(atmos.aerial_perspective),
+        );
+        self.edit_set_prop(guid, tp, "fog_density", &num(atmos.fog_density));
+        self.edit_set_prop(guid, tp, "fog_falloff", &num(atmos.fog_falloff));
+        self.edit_set_prop(guid, tp, "fog_height", &num(atmos.fog_height));
         self.commit_transaction();
         Some(guid)
     }

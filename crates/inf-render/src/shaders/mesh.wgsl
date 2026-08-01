@@ -209,7 +209,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // the post tonemap pass (ACES + exposure) runs afterward on the whole buffer.
     let dist = length(in.world_pos - view.eye.xyz);
     let haze = 1.0 - exp(-dist * 0.004);
-    let col = mix(lo, vec3<f32>(0.055, 0.081, 0.120), haze * 0.4);
+    var col = mix(lo, vec3<f32>(0.055, 0.081, 0.120), haze * 0.4);
+    // P17.2: with an atmosphere, the fixed haze is replaced wholesale by physical
+    // aerial perspective + height fog. The branch is never taken for a scene
+    // without a time-of-day authority, so the arithmetic above is exactly what
+    // every pre-P17.2 golden ran.
+    if (atmos.params.x > 0.5) {
+        col = atmos_apply(lo, in.world_pos);
+    }
 
     return vec4<f32>(col, in.color.a);
 }

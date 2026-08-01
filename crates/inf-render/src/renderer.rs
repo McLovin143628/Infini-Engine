@@ -26,6 +26,7 @@ use crate::graph::RenderGraph;
 use crate::passes;
 use crate::passes::gi::GiResources;
 use crate::passes::shadow::ShadowResources;
+use crate::passes::sky_lut::AtmosphereResources;
 use crate::scene::RenderScene;
 use crate::settings::{halton_jitter, mip_chain_sizes, RenderSettings};
 
@@ -205,6 +206,10 @@ pub struct FrameData<'a> {
     /// Shared dynamic-GI resources (P13.3b): the GI node writes the SH probes, the
     /// lit passes sample them (byte-neutral when GI is off).
     pub gi: &'a GiResources,
+    /// Shared atmosphere resources (P17.2): the two LUTs + the shared uniform the
+    /// bake node writes and the sky/lit passes sample. **Resizable** — its
+    /// `generation` is part of the `EnvBinding` cache key.
+    pub atmosphere: &'a AtmosphereResources,
     /// Jittered view-projection of the **previous** frame (TAA reprojection).
     pub taa_prev_view_proj: [f32; 16],
     /// False on the first frame / after a resize (history has nothing usable).
@@ -239,6 +244,12 @@ pub struct EngineRenderer {
     /// size; the shadow/GI graph nodes write them, the lit passes sample them).
     shadow: ShadowResources,
     gi: GiResources,
+    /// Shared atmosphere LUTs + uniform (P17.2). Unlike `shadow`/`gi` these are
+    /// **recreated** when [`crate::atmosphere::AtmosphereQuality`] changes, which
+    /// is why they carry a generation the env bind-group cache keys on.
+    atmosphere: AtmosphereResources,
+    /// Monotonic source of `atmosphere.generation`.
+    next_atmosphere_generation: u64,
 }
 
 impl EngineRenderer {
@@ -273,7 +284,15 @@ impl EngineRenderer {
             }],
         });
 
+        let settings = RenderSettings::default();
+        let atmosphere = AtmosphereResources::new(gpu, settings.atmosphere.quality, 1);
+
         let mut graph = RenderGraph::default();
+        // Atmosphere LUT bake (P17.2): compute-only, so it touches no colour
+        // target and safely precedes the sky pass that samples its output. A
+        // no-op (not even a uniform write, after the first frame) unless the
+        // scene carries an enabled `AtmosphereParams`.
+        graph.add(passes::sky_lut::AtmosphereNode::new(gpu));
         graph.add(passes::sky::SkyNode::new(gpu, &view_bgl));
         // Cascaded shadow maps (P13.3b): renders the first directional light's
         // cascades + publishes the shared shadow uniform. A no-op (uniform only)
@@ -327,7 +346,7 @@ impl EngineRenderer {
             next_generation: 1,
             graph,
             out_format,
-            settings: RenderSettings::default(),
+            settings,
             view_mode: ViewMode::default(),
             polygon_mode_line: gpu
                 .device
@@ -338,6 +357,8 @@ impl EngineRenderer {
             prev_view_proj: None,
             shadow: ShadowResources::new(gpu),
             gi: GiResources::new(gpu),
+            atmosphere,
+            next_atmosphere_generation: 2,
         }
     }
 
@@ -354,6 +375,12 @@ impl EngineRenderer {
             self.prev_view_proj = None;
         }
         self.settings = settings;
+    }
+
+    /// The shared atmosphere resources (P17.2). Exposed for the LUT-determinism
+    /// gate, which reads the baked textures back and byte-compares two bakes.
+    pub fn atmosphere(&self) -> &crate::passes::sky_lut::AtmosphereResources {
+        &self.atmosphere
     }
 
     /// The active shading view mode (R-P2).
@@ -403,6 +430,20 @@ impl EngineRenderer {
             self.targets = Some(FrameTargets::create(gpu, scene_size, self.next_generation));
             self.next_generation += 1;
             self.prev_view_proj = None; // history textures were reallocated
+        }
+
+        // The atmosphere LUTs are sized by quality, which a host may clamp down
+        // at any time (tier detection, a mobile preset, a settings change).
+        // Recreating them bumps `generation`, which is what makes the env
+        // bind-group cache drop its now-dangling views — see
+        // `passes::EnvBinding::bind_group`.
+        if self.atmosphere.quality != self.settings.atmosphere.quality {
+            self.atmosphere = AtmosphereResources::new(
+                gpu,
+                self.settings.atmosphere.quality,
+                self.next_atmosphere_generation,
+            );
+            self.next_atmosphere_generation += 1;
         }
 
         // Camera sub-pixel jitter (TAA only), applied to the projection.
@@ -466,6 +507,7 @@ impl EngineRenderer {
             taa_history_valid: history_valid,
             shadow: &self.shadow,
             gi: &self.gi,
+            atmosphere: &self.atmosphere,
             view_mode: self.view_mode,
         };
         self.graph.run(gpu, &mut encoder, &frame);

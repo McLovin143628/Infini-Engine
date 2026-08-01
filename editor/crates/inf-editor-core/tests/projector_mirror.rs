@@ -86,6 +86,15 @@ fn the_shared_projector_body_is_not_a_stub() {
         "scene.lights.push",
         "SunParams::default()",
         "SkyParams::default()",
+        // P17.2: the physical atmosphere rides the same projection. Both the
+        // authored block and the no-authority reset must be present, or a level
+        // with a clock would render an atmosphere-less sky in one host and a
+        // physical one in the other.
+        "scene.atmosphere = AtmosphereParams",
+        "AtmosphereParams::default()",
+        "enabled: a.physical",
+        "fog: HeightFog",
+        "moon_phase: phase",
     ] {
         assert!(
             body.contains(fragment),

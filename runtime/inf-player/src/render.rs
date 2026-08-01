@@ -28,12 +28,12 @@ use inf_ecs::components::{
 use inf_ecs::{Guid, Vec3d};
 use inf_math::FloatingOrigin;
 use inf_render::{
-    detect_tier, expand_nine_slice, expand_text, handle_from_guid, BloomSettings, EngineRenderer,
-    GiSettings, GpuContext, HAlign, LightKind, MeshInstance, NineSliceParams, PrebatchedRun,
-    PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
-    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings, SkyParams,
-    SsaoSettings, SunParams, SurfaceChain, TerrainTileKey, TextParams, TilemapParams, VgeomAsset,
-    VgeomInstance, BUILTIN_FONT_TEXTURE,
+    detect_tier, expand_nine_slice, expand_text, handle_from_guid, AtmosphereParams, BloomSettings,
+    EngineRenderer, GiSettings, GpuContext, HAlign, HeightFog, LightKind, MeshInstance,
+    NineSliceParams, PrebatchedRun, PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene,
+    RenderSettings, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap,
+    RenderView, ShadowSettings, SkyParams, SsaoSettings, SunParams, SurfaceChain, TerrainTileKey,
+    TextParams, TilemapParams, VgeomAsset, VgeomInstance, BUILTIN_FONT_TEXTURE,
 };
 use inf_scene::RenderSettingsRecord;
 
@@ -690,9 +690,11 @@ fn project_sky(scene: &mut RenderScene, world: &inf_ecs::EcsWorld) {
     let Some(sky) = inf_ecs::sky::resolve_sky(world) else {
         scene.sun = SunParams::default();
         scene.sky = SkyParams::default();
+        scene.atmosphere = AtmosphereParams::default();
         return;
     };
     let a = &sky.atmosphere;
+    let phase = sky.moon_phase as f32;
     scene.sun = SunParams {
         direction: sky.sun.as_vec3(),
         color: [a.sun_color.r, a.sun_color.g, a.sun_color.b],
@@ -700,12 +702,36 @@ fn project_sky(scene: &mut RenderScene, world: &inf_ecs::EcsWorld) {
         moon_direction: sky.moon.as_vec3(),
         moon_color: [a.moon_color.r, a.moon_color.g, a.moon_color.b],
         moon_intensity: a.moon_intensity,
+        moon_phase: phase,
     };
     let [zenith, horizon, ground] = sky.sky_gradient();
     scene.sky = SkyParams {
         zenith,
         horizon,
         ground,
+    };
+    // The physical atmosphere (P17.2). Only the *multipliers* come from the
+    // level: the Rayleigh / Mie / ozone coefficients themselves are physical
+    // constants of Earth's air and stay at `AtmosphereParams::default()`, so
+    // "atmosphere" cannot be mis-authored into something that is not one.
+    scene.atmosphere = AtmosphereParams {
+        enabled: a.physical,
+        turbidity: a.turbidity,
+        mie_g: a.mie_anisotropy,
+        sky_intensity: a.sky_intensity,
+        aerial_perspective: a.aerial_perspective,
+        tint_strength: a.tint_strength,
+        sun_disc_deg: a.sun_disc_deg,
+        moon_disc_deg: a.moon_disc_deg,
+        moon_phase: phase,
+        star_intensity: a.star_intensity,
+        fog: HeightFog {
+            density: a.fog_density,
+            falloff: a.fog_falloff,
+            height: a.fog_height,
+            color: [a.fog_color.r, a.fog_color.g, a.fog_color.b],
+        },
+        ..AtmosphereParams::default()
     };
     if let Some((direction, color, intensity)) = sky.key_light() {
         scene.lights.push(RenderLight {

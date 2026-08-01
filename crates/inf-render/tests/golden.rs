@@ -22,15 +22,16 @@ use inf_render::gizmo::{self, GizmoAxis, GizmoMode};
 use inf_render::golden::{image_diff, within_tolerance};
 use inf_render::passes::vgeom::{cpu_visible_set, cull_flags, frustum_planes, lod_threshold};
 use inf_render::{
-    assemble_patches, cull_visible, expand_text, Ambient2D, BloomSettings, EngineRenderer,
-    GiSettings, GpuContext, HAlign, HeadlessTarget, LightKind, MeshInstance, PrebatchedRun,
-    PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
-    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings,
-    SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance, SpriteTextureUpload,
-    SsaoSettings, TerrainTileKey, TextParams, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh,
-    VgeomSettings, ViewMode, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL,
-    BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE,
-    HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    assemble_patches, cull_visible, expand_text, Ambient2D, AtmosphereParams, AtmosphereQuality,
+    BloomSettings, EngineRenderer, GiSettings, GpuContext, HAlign, HeadlessTarget, HeightFog,
+    LightKind, MeshInstance, PrebatchedRun, PrimMesh, RenderChunk, RenderLight, RenderLight2D,
+    RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer, RenderTerrainTile,
+    RenderTilemap, RenderView, ShadowSettings, SkinnedInstance, SkinnedMeshData, SkinnedVertex,
+    SpriteInstance, SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey, TextParams,
+    TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode,
+    BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
+    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, HEADLESS_FORMAT,
+    TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -2457,5 +2458,668 @@ fn golden_gi_bleed() {
     assert!(
         near > 1.03,
         "near-wall floor not reddened (ratio {near:.3})"
+    );
+}
+
+// ── P17.2 physical atmosphere ────────────────────────────────────────────────
+//
+// The time-of-day sweep. These are the FIRST goldens in the suite that carry an
+// atmosphere at all — every scene above renders with `AtmosphereParams::default()`
+// (disabled), which is what keeps all 23 pre-P17.2 goldens byte-identical.
+//
+// The scenes are built from `inf_math::solar` exactly as both scene projectors
+// build them, at `SkyAtmosphere`'s defaults, so what these images show is what a
+// new level actually looks like — not a hand-tuned demo of the shader.
+
+/// The default sky authority a new level gets: day 172 (June solstice), 48.9° N,
+/// prime meridian — `TimeOfDay::default()`'s place, at `seconds` UTC.
+fn tod_scene(seconds: f64) -> (RenderScene, inf_math::solar::SkyBodies) {
+    let bodies = inf_math::solar::bodies(&inf_math::solar::SolarInput {
+        seconds,
+        day_of_year: 172,
+        latitude_deg: 48.9,
+        longitude_deg: 0.0,
+    });
+    // The `SkyAtmosphere::default()` values, mapped the way `project_sky` maps
+    // them in both hosts.
+    let scene = RenderScene {
+        sun: SunParams {
+            direction: bodies.sun.as_vec3(),
+            color: [1.0, 0.98, 0.95],
+            intensity: 3.0,
+            moon_direction: bodies.moon.as_vec3(),
+            moon_color: [0.62, 0.72, 1.0],
+            moon_intensity: 0.15,
+            moon_phase: bodies.moon_phase as f32,
+        },
+        atmosphere: AtmosphereParams {
+            enabled: true,
+            moon_phase: bodies.moon_phase as f32,
+            ..AtmosphereParams::default()
+        },
+        ..Default::default()
+    };
+    (scene, bodies)
+}
+
+/// A ground-level camera looking along the horizontal azimuth of `toward`,
+/// pitched up by `pitch_deg` so the horizon sits low in frame. Aiming at a body's
+/// azimuth (rather than at a fixed compass point) keeps the disc in shot whatever
+/// the date and latitude, so these goldens do not silently become pictures of
+/// empty sky if the solar model is ever refined.
+fn horizon_view(toward: DVec3, pitch_deg: f64) -> RenderView {
+    let flat = DVec3::new(toward.x, 0.0, toward.z);
+    let flat = if flat.length_squared() > 1e-9 {
+        flat.normalize()
+    } else {
+        DVec3::X
+    };
+    let p = pitch_deg.to_radians();
+    let forward = (flat * p.cos() + DVec3::Y * p.sin()).normalize();
+    RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: DVec3::new(0.0, 2.0, 0.0),
+        forward: forward.as_vec3(),
+        up: Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 0.05,
+        width: W,
+        height: H,
+        ortho: None,
+    }
+}
+
+/// Mean sRGB-encoded RGB of a screen rectangle (0..1 per channel). Ratios between
+/// two such means are what the structural assertions below compare, which is
+/// adapter-robust in a way absolute pixel values are not.
+fn mean_rgb(img: &[u8], x0: u32, y0: u32, x1: u32, y1: u32) -> [f32; 3] {
+    let mut acc = [0.0f32; 3];
+    let mut n = 0.0;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = px(img, x, y);
+            for c in 0..3 {
+                acc[c] += p[c] as f32 / 255.0;
+            }
+            n += 1.0;
+        }
+    }
+    [acc[0] / n, acc[1] / n, acc[2] / n]
+}
+
+fn luma(c: [f32; 3]) -> f32 {
+    c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722
+}
+
+/// The brightest single pixel in a screen rectangle, as a 0..1 mean of channels.
+fn brightest(img: &[u8], x0: u32, y0: u32, x1: u32, y1: u32) -> f32 {
+    let mut best = 0.0f32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = px(img, x, y);
+            let v = (p[0] as f32 + p[1] as f32 + p[2] as f32) / (3.0 * 255.0);
+            best = best.max(v);
+        }
+    }
+    best
+}
+
+/// Sky brightness gradient + colour at high noon: deep blue overhead, brighter
+/// and less saturated toward the horizon (Rayleigh optical depth grows with the
+/// path length). This is the shape a three-colour gradient cannot fake — it falls
+/// out of the LUT parameterization, and is wrong the moment that is.
+#[test]
+fn golden_sky_noon() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, bodies) = tod_scene(43_200.0); // 12:00 UTC
+    assert!(bodies.sun.y > 0.85, "12:00 at the solstice should be high");
+    let view = horizon_view(bodies.sun, 25.0);
+    let img = check_golden(&gpu, "sky_noon", &scene, &view);
+
+    // The camera is pitched +25° with a 60° vertical FOV, so the horizon LINE
+    // sits ~75 px below centre (y ≈ 165) and everything below it is the sky
+    // pass's ground. Both bands are sampled in sky, above that line.
+    let top = mean_rgb(&img, 0, 0, W, H / 8);
+    let horizon = mean_rgb(&img, 0, H * 80 / 100, W, H * 90 / 100);
+    eprintln!("sky_noon top {top:?} horizon {horizon:?}");
+    assert!(top[2] > top[0] + 0.08, "zenith not blue: {top:?}");
+    // A real daytime sky, not a dim one.
+    assert!(top[2] > 0.35, "zenith too dark for noon: {top:?}");
+    assert!(
+        luma(horizon) > luma(top),
+        "horizon should out-brighten the zenith: {horizon:?} vs {top:?}"
+    );
+    assert!(
+        horizon[0] / horizon[2] > top[0] / top[2] + 0.05,
+        "horizon should be less blue than the zenith: {horizon:?} vs {top:?}"
+    );
+}
+
+/// Dawn: the sun is a few degrees up, so its light has crossed a long slab of
+/// air. The band around it must be markedly redder than the zenith — the single
+/// assertion that catches a swapped Rayleigh triple, and the GPU sibling of the
+/// CPU `sunset_is_redder_than_noon` unit test.
+#[test]
+fn golden_sky_dawn() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, bodies) = tod_scene(16_200.0); // 04:30 UTC
+    assert!(
+        bodies.sun.y > 0.0 && bodies.sun.y < 0.2,
+        "04:30 should be just after sunrise, got y {}",
+        bodies.sun.y
+    );
+    let view = horizon_view(bodies.sun, 6.0);
+    let img = check_golden(&gpu, "sky_dawn", &scene, &view);
+
+    // The band just above the horizon line (the camera is pitched +6°, so the
+    // horizon sits ~18 px below centre) — not the bottom of the frame, which is
+    // the sky pass's ground.
+    let top = mean_rgb(&img, 0, 0, W, H / 6);
+    let low = mean_rgb(&img, 0, H * 50 / 100, H, H * 58 / 100);
+    eprintln!("sky_dawn top {top:?} low {low:?}");
+    assert!(
+        low[0] / low[2].max(1e-4) > top[0] / top[2].max(1e-4) + 0.15,
+        "the horizon band should be redder than the zenith: {low:?} vs {top:?}"
+    );
+    // The sun disc is in frame and clips to (near) white.
+    let peak = brightest(&img, 0, 0, W, H);
+    assert!(peak > 0.94, "no sun disc in frame (brightest {peak:.3})");
+}
+
+/// Dusk, on the other side of the sky. A separate golden from dawn because the
+/// sun's azimuth differs by ~100° and so does the ozone-shaped blue of the
+/// opposite horizon — a sweep with only one twilight would not notice a model
+/// that made both ends identical.
+#[test]
+fn golden_sky_dusk() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, bodies) = tod_scene(71_100.0); // 19:45 UTC
+    assert!(
+        bodies.sun.y > 0.0 && bodies.sun.y < 0.2,
+        "19:45 should be just before sunset, got y {}",
+        bodies.sun.y
+    );
+    // Dawn and dusk must not be the same picture.
+    let (_, dawn) = tod_scene(16_200.0);
+    assert!(
+        bodies.sun.x * dawn.sun.x + bodies.sun.z * dawn.sun.z < 0.5,
+        "dawn and dusk azimuths are too close to be distinct goldens"
+    );
+    let view = horizon_view(bodies.sun, 6.0);
+    let img = check_golden(&gpu, "sky_dusk", &scene, &view);
+
+    let top = mean_rgb(&img, 0, 0, W, H / 6);
+    let low = mean_rgb(&img, 0, H * 50 / 100, H, H * 58 / 100);
+    eprintln!("sky_dusk top {top:?} low {low:?}");
+    assert!(
+        low[0] / low[2].max(1e-4) > top[0] / top[2].max(1e-4) + 0.15,
+        "the horizon band should be redder than the zenith: {low:?} vs {top:?}"
+    );
+}
+
+/// Night: the sky collapses to the multiple-scattering floor and the procedural
+/// starfield appears. The star assertion is a *local-contrast* one (a bright
+/// isolated texel against a dark field) rather than a mean, because a mean would
+/// also pass for a uniformly-raised black level.
+#[test]
+fn golden_sky_night() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, bodies) = tod_scene(84_600.0); // 23:30 UTC
+    assert!(bodies.sun.y < -0.2, "23:30 should be deep night");
+    // Look away from the sun and well up, where the stars are.
+    let view = horizon_view(-bodies.sun, 35.0);
+    let img = check_golden(&gpu, "sky_night", &scene, &view);
+
+    let sky = mean_rgb(&img, 0, 0, W, H / 2);
+    eprintln!("sky_night mean {sky:?}");
+    assert!(sky[2] < 0.30, "night sky is not dark: {sky:?}");
+    let field = (sky[0] + sky[1] + sky[2]) / 3.0;
+    let peak = brightest(&img, 0, 0, W, H / 2);
+    assert!(
+        peak > field + 0.12,
+        "no starfield contrast (brightest {peak:.3} vs field {field:.3})"
+    );
+}
+
+/// The starfield is a pure function of the view direction: two renders of the
+/// same night sky must be byte-identical (the hash is integer-only, per the
+/// psin/pcos law's spirit — no trig anywhere in it), and a *rotated* camera must
+/// see a different patch of sky rather than a field pinned to the screen.
+#[test]
+fn stars_are_deterministic_and_world_locked() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, bodies) = tod_scene(84_600.0);
+    let view = horizon_view(-bodies.sun, 35.0);
+    let a = render(&gpu, &scene, &view);
+    let b = render(&gpu, &scene, &view);
+    assert_eq!(a, b, "the starfield is not deterministic");
+
+    // Yaw the camera 40°: the same screen pixels must now show different sky.
+    let f = view.forward;
+    let (s, c) = 40f32.to_radians().sin_cos();
+    let rotated = RenderView {
+        forward: Vec3::new(f.x * c + f.z * s, f.y, -f.x * s + f.z * c).normalize(),
+        ..view
+    };
+    let r = render(&gpu, &scene, &rotated);
+    assert_ne!(a, r, "the starfield followed the camera instead of the sky");
+}
+
+/// Aerial perspective + height fog on lit geometry, as a **controlled
+/// experiment** rather than a pretty picture: two walls with identical albedo,
+/// identical orientation and identical screen size, one at 50 m and one at
+/// 1500 m — the far one is the near one scaled 30× about the eye, so it projects
+/// to the same rectangle mirrored across the frame. Every pixel-level difference
+/// between them is therefore the atmosphere and nothing else.
+///
+/// Also carries the off-path proof: the same scene with the atmosphere disabled
+/// is the pre-P17.2 render.
+#[test]
+fn golden_aerial_fog() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = tod_scene(43_200.0);
+    scene.atmosphere.fog = HeightFog {
+        density: 1.5e-3, // ≈ 2 km visibility — a properly foggy morning
+        falloff: 0.002,  // 500 m e-folding height
+        height: 0.0,
+        color: [1.0, 1.0, 1.0],
+    };
+    // Ground, deliberately DARK: a bright albedo is already near white before any
+    // scattering touches it, so the wash toward the sky would be invisible.
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.5, -6000.0),
+        Quat::IDENTITY,
+        Vec3::new(8000.0, 1.0, 16000.0),
+        [0.10, 0.11, 0.12, 1.0],
+        1,
+    ));
+    // The matched pair. `NEAR` is at −14 m across at 50 m out; `FAR` is that
+    // exact vector × 30, mirrored in x, so both subtend the same angle.
+    const WALL: [f32; 4] = [0.16, 0.17, 0.18, 1.0];
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(-14.0, 8.0, -50.0),
+        Quat::IDENTITY,
+        Vec3::new(16.0, 16.0, 1.0),
+        WALL,
+        2,
+    ));
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(420.0, 8.0, -1500.0),
+        Quat::IDENTITY,
+        Vec3::new(480.0, 480.0, 30.0),
+        WALL,
+        3,
+    ));
+    // A few pillars down the centre — not measured, but they are what makes the
+    // golden readable as a picture of depth rather than two grey squares.
+    for (i, d) in [15.0f64, 45.0, 140.0, 420.0].into_iter().enumerate() {
+        scene.instances.push(MeshInstance::lit(
+            DVec3::new(0.0, 6.0, -d),
+            Quat::IDENTITY,
+            Vec3::new(2.0, 12.0, 2.0),
+            [0.13, 0.14, 0.15, 1.0],
+            i as u32 + 4,
+        ));
+    }
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.95],
+        intensity: 3.0,
+        direction: bodies.sun.as_vec3(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+
+    // Eye at the walls' centre height looking dead ahead, so the two rectangles
+    // land symmetrically about the frame centre.
+    let view = RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: DVec3::new(0.0, 8.0, 0.0),
+        forward: Vec3::NEG_Z,
+        up: Vec3::Y,
+        fov_y: 45f32.to_radians(),
+        near: 0.05,
+        width: W,
+        height: H,
+        ortho: None,
+    };
+    let img = check_golden(&gpu, "aerial_fog", &scene, &view);
+
+    // Both walls are sampled 20 px above centre — inside each rectangle, and
+    // above the horizon line so no ground creeps into either box.
+    let near = mean_rgb(&img, 91, 62, 107, 78);
+    let far = mean_rgb(&img, 213, 62, 229, 78);
+    // The sky is sampled at the SAME screen height as the walls, off to the right
+    // of the far one: the in-scattered light a horizontal ray picks up is the
+    // horizon's air column, which is markedly whiter than the deep blue overhead.
+    let sky = mean_rgb(&img, 276, 62, 316, 78);
+    let gap = |a: [f32; 3], b: [f32; 3]| {
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+    };
+    eprintln!(
+        "aerial_fog near {near:?} far {far:?} sky {sky:?} gap {:.3} / {:.3}",
+        gap(near, sky),
+        gap(far, sky)
+    );
+    assert!(
+        luma(far) > luma(near) + 0.10,
+        "the far wall did not lighten: near {near:?} far {far:?}"
+    );
+    // ...and it converges ON THE SKY, which is the assertion that actually pins
+    // the model. "Gets bluer" would be wrong here and would rightly fail: a hazy
+    // noon horizon is whiter than the blue hemispheric ambient, so the far wall
+    // gets *less* blue while still becoming more sky-coloured. Distance in RGB
+    // says what was meant.
+    assert!(
+        gap(far, sky) < gap(near, sky) * 0.6,
+        "the far wall did not converge on the sky: near {near:?} far {far:?} sky {sky:?}"
+    );
+
+    // Off path, in its strongest form: the SAME geometry with no atmosphere is
+    // the pre-P17.2 render, and it must be deterministic and different.
+    let mut plain = scene.clone();
+    plain.atmosphere = AtmosphereParams::default();
+    plain.sun = SunParams::default();
+    let a = render(&gpu, &plain, &view);
+    let b = render(&gpu, &plain, &view);
+    assert_eq!(a, b, "the no-atmosphere path must stay deterministic");
+    assert_ne!(a, img, "the atmosphere changed nothing about the scene");
+    // With no atmosphere the two walls are the SAME colour (only the old fixed
+    // distance haze separates them) — which is exactly what P17.2 replaced.
+    let plain_near = mean_rgb(&a, 91, 62, 107, 78);
+    let plain_far = mean_rgb(&a, 213, 62, 229, 78);
+    assert!(
+        (luma(plain_far) - luma(plain_near)).abs() < luma(far) - luma(near),
+        "the old haze separated the walls more than the atmosphere does: \
+         plain {plain_near:?}/{plain_far:?} vs atmos {near:?}/{far:?}"
+    );
+}
+
+/// The LUT determinism gate: two independent renderers bake the same LUTs from
+/// the same inputs, and the texels must match **byte for byte**. This is the
+/// atmosphere's version of the double-render gate every golden runs, one level
+/// lower — on the intermediate the sky is a lookup into — so a nondeterministic
+/// march surfaces here rather than as a flaky pixel three passes downstream.
+#[test]
+fn atmosphere_luts_are_deterministic() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, bodies) = tod_scene(43_200.0);
+    let view = horizon_view(bodies.sun, 20.0);
+
+    let bake = || {
+        let target = HeadlessTarget::new(&gpu, W, H);
+        let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+        let a = renderer.atmosphere();
+        (
+            a.read_transmittance(&gpu).expect("transmittance readback"),
+            a.read_sky_view(&gpu).expect("sky-view readback"),
+        )
+    };
+    let (t1, s1) = bake();
+    let (t2, s2) = bake();
+    assert_eq!(t1, t2, "transmittance LUT is not deterministic");
+    assert_eq!(s1, s2, "sky-view LUT is not deterministic");
+    // ...and not trivially empty (a bake that never dispatched would also match).
+    assert!(
+        t1.iter().any(|&b| b != 0),
+        "transmittance LUT is empty — did the bake dispatch?"
+    );
+    assert!(
+        s1.iter().any(|&b| b != 0),
+        "sky-view LUT is empty — did the bake dispatch?"
+    );
+    let (tw, th) = AtmosphereQuality::High.transmittance_size();
+    let (sw, sh) = AtmosphereQuality::High.skyview_size();
+    assert_eq!(t1.len(), (tw * th * 8) as usize);
+    assert_eq!(s1.len(), (sw * sh * 8) as usize);
+}
+
+/// A quality change RESIZES the LUTs — exactly the case the `EnvBinding` cache
+/// invariant guards. A stale key does **not** validate-error and does not blank
+/// the frame: wgpu keeps the old texture alive as long as a bind group references
+/// it, so the pass just silently samples the previous quality's LUT. So the
+/// assertions here are frame **differences**, not liveness:
+///
+/// * `frames[1] != frames[0]` — Low really does produce a different image from
+///   High (if it did not, every other assertion would be vacuous);
+/// * `frames[3] == frames[0]` — coming back to High reproduces High **exactly**.
+///   With a stale bind group the last frame would keep Medium's LUTs and this is
+///   the assertion that catches it.
+///
+/// The cube is placed along the view direction, so the lit pass — the one that
+/// binds `EnvBinding` — actually covers pixels; that it does is asserted rather
+/// than assumed. The adapter-free half of this gate is
+/// `passes::gen_cache_tests::pointer_identity_changes_only_when_the_key_does`.
+#[test]
+fn atmosphere_quality_switch_rebuilds_the_env_bind() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = tod_scene(43_200.0);
+    let view = horizon_view(bodies.sun, 10.0);
+    // Down the view axis, not down −Z: `horizon_view` aims at the sun's azimuth,
+    // which at noon is due south (+Z), so a cube at −Z would be behind the camera
+    // and the env bind group would never be sampled at all.
+    let ahead = DVec3::new(bodies.sun.x, 0.0, bodies.sun.z).normalize();
+    // A DISTANT wall filling the middle of the frame, under thick fog. NEAR
+    // geometry is not enough: at a few metres the aerial/fog term is ~nothing, so
+    // the lit pass barely reads the LUT and a stale `EnvBinding` is invisible
+    // (verified by mutation — with a near cube, dropping the atmosphere
+    // generation from the key left this test green). At 1500 m under 2 km
+    // visibility the wall's colour is mostly in-scattered sky sampled *through
+    // the env bind*, so a stale LUT moves it.
+    scene.atmosphere.fog = HeightFog {
+        density: 1.5e-3,
+        falloff: 0.0,
+        height: 0.0,
+        color: [1.0, 1.0, 1.0],
+    };
+    scene.instances.push(MeshInstance::lit(
+        ahead * 1500.0 + DVec3::new(0.0, 266.0, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(1400.0, 540.0, 5.0),
+        [0.06, 0.06, 0.07, 1.0],
+        1,
+    ));
+    scene.mark_dirty();
+
+    // Prove the cube covers pixels: the same frame without it must differ.
+    let mut sky_only = scene.clone();
+    sky_only.instances.clear();
+    sky_only.mark_dirty();
+    let bare = render(&gpu, &sky_only, &view);
+
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    let mut settings = RenderSettings::default();
+    let mut frames = Vec::new();
+    let mut seen = Vec::new();
+    for q in [
+        AtmosphereQuality::High,
+        AtmosphereQuality::Low,
+        AtmosphereQuality::Medium,
+        AtmosphereQuality::High,
+    ] {
+        settings.atmosphere.quality = q;
+        renderer.set_settings(settings);
+        renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+        frames.push(target.read_rgba(&gpu).expect("readback"));
+        seen.push(renderer.atmosphere().quality);
+    }
+
+    let differing = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x != y).count();
+    // The wall's interior, well inside its screen rectangle: LIT pixels, which is
+    // the only place the env bind group is read at all.
+    let wall = |img: &[u8]| -> Vec<u8> {
+        (70..110)
+            .flat_map(|y| (100..220).map(move |x| (x, y)))
+            .flat_map(|(x, y)| px(img, x, y))
+            .collect()
+    };
+    let covered = differing(&frames[0], &bare);
+    eprintln!(
+        "quality switch: wall covers {covered} bytes; whole frame Low-vs-High {};          wall region Low-vs-High {}",
+        differing(&frames[1], &frames[0]),
+        differing(&wall(&frames[1]), &wall(&frames[0]))
+    );
+    assert!(
+        covered > 20_000,
+        "the lit wall covers almost nothing ({covered} bytes) — the env bind group          is not being sampled, so this test would pass with a stale key"
+    );
+
+    // The env-bind assertion: the LIT region must change with the LUT. A stale
+    // `EnvBinding` keeps High's views for every frame, so this region would come
+    // back byte-identical while the (separately keyed) sky around it changed —
+    // which is exactly what a whole-frame comparison would fail to notice.
+    assert_ne!(
+        wall(&frames[1]),
+        wall(&frames[0]),
+        "the lit wall is byte-identical at Low and High — the env bind group is          still holding the previous quality's LUT views"
+    );
+    // And the whole frame differs too (the sky path, separately keyed).
+    assert_ne!(
+        frames[1], frames[0],
+        "Low and High rendered identically — the LUT resize had no visible effect"
+    );
+    // Round trip: back at High, the frame must reproduce the first High frame
+    // byte for byte.
+    assert_eq!(
+        frames[3], frames[0],
+        "returning to High did not reproduce the High frame"
+    );
+
+    assert_eq!(
+        seen,
+        vec![
+            AtmosphereQuality::High,
+            AtmosphereQuality::Low,
+            AtmosphereQuality::Medium,
+            AtmosphereQuality::High,
+        ],
+        "the resources did not follow the settings"
+    );
+}
+
+/// **The editor default look** (P17.2's "gorgeous default sky" deliverable): the
+/// `TimeOfDay::default()` clock — 10:00 UTC on day 172 at 48.9° N — over a
+/// primitive scene of the same shape a new level is built with.
+///
+/// This is deliberately *not* a mirror of `inf_editor_core::scene::demo::build`,
+/// which lives in another ring and would silently drift from a copy here. It is
+/// the same **sky** over representative geometry: what this golden pins is the
+/// default clock's look, which is the thing a change to the defaults would move.
+///
+/// Why 10:00 rather than noon: the sun lands ≈ 55° up, which keeps a real
+/// direction — long enough shadows and a clear light/shade split to read shape —
+/// while still giving a saturated blue zenith. A noon sun lights everything from
+/// straight overhead and flattens exactly the geometry a default scene exists to
+/// show off.
+#[test]
+fn golden_editor_default() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = tod_scene(36_000.0); // TimeOfDay::default(): 10:00 UTC
+    let elevation = bodies.sun.y.asin().to_degrees();
+    assert!(
+        (50.0..60.0).contains(&elevation),
+        "the default clock should put the sun ~55° up, got {elevation:.1}°"
+    );
+    scene.grid_enabled = true;
+
+    // Ground plane + the three props, at the default scene's placements/colours.
+    let mut push = |mesh, t: DVec3, s: Vec3, c: [f32; 3], id| {
+        scene.instances.push(MeshInstance {
+            translation: t,
+            rotation: Quat::IDENTITY,
+            scale: s,
+            color: [c[0], c[1], c[2], 1.0],
+            metallic: 0.0,
+            roughness: 0.6,
+            emissive: [0.0; 3],
+            id,
+            mesh,
+            blend: 0,
+            cutoff: 0.5,
+        })
+    };
+    push(
+        PrimMesh::Plane,
+        DVec3::ZERO,
+        Vec3::new(20.0, 1.0, 20.0),
+        [0.30, 0.32, 0.35],
+        1,
+    );
+    push(
+        PrimMesh::Cube,
+        DVec3::new(-2.0, 0.5, 0.0),
+        Vec3::ONE,
+        [0.80, 0.25, 0.22],
+        2,
+    );
+    push(
+        PrimMesh::Sphere,
+        DVec3::new(0.0, 0.6, -1.5),
+        Vec3::ONE,
+        [0.25, 0.55, 0.85],
+        3,
+    );
+    push(
+        PrimMesh::Cylinder,
+        DVec3::new(2.0, 0.75, 0.5),
+        Vec3::ONE,
+        [0.30, 0.70, 0.35],
+        4,
+    );
+    // The sky's own key light, exactly as `project_sky` pushes it, plus the
+    // default scene's point fill.
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.95],
+        intensity: 3.0,
+        direction: bodies.sun.as_vec3(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        cast_shadows: true,
+        ..RenderLight::default()
+    });
+    // The default scene's point fill, at `Light::default()`'s intensity 1.0 —
+    // not a number invented here.
+    scene.lights.push(RenderLight {
+        kind: LightKind::Point,
+        color: [1.0, 1.0, 1.0],
+        intensity: 1.0,
+        direction: Vec3::Y,
+        position: DVec3::new(4.0, 3.0, 4.0),
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+
+    // A near-horizontal camera rather than the suite's usual look-down overlook:
+    // the point of this golden is the SKY, and an overlook shows almost none.
+    let view = look_view(DVec3::new(7.0, 2.4, 9.5), DVec3::new(0.0, 1.6, 0.0));
+    let img = check_golden(&gpu, "editor_default", &scene, &view);
+
+    // The sky above the horizon is a believable daytime blue: bright, clearly
+    // blue-dominant, and NOT the near-black editor gradient this replaced (whose
+    // zenith was linear 0.038 — about 0.07 sRGB).
+    let sky = mean_rgb(&img, 0, 0, W, H / 6);
+    eprintln!("editor_default sky {sky:?}");
+    assert!(sky[2] > 0.45, "the default sky is not bright: {sky:?}");
+    assert!(
+        sky[2] > sky[0] + 0.08,
+        "the default sky is not blue: {sky:?}"
+    );
+    assert!(sky[2] < 0.98, "the default sky is blown out: {sky:?}");
+    // The props are lit and readable against it.
+    assert!(
+        luma(mean_rgb(
+            &img,
+            W / 2 - 60,
+            H * 70 / 100,
+            W / 2 + 60,
+            H * 92 / 100
+        )) > 0.15,
+        "the ground and props are too dark under the default sun"
     );
 }

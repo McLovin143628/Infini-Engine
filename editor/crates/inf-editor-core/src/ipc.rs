@@ -1340,6 +1340,125 @@ impl TimeOfDayDto {
     }
 }
 
+/// The level's **physical atmosphere** as the World Settings panel edits it
+/// (P17.2) — the sky-authority entity's `inf_ecs::components::SkyAtmosphere`.
+///
+/// Like [`TimeOfDayDto`] this is an entity projection, not a file-settings
+/// record, and it rides the same [`present`](Self::present) create flag: the two
+/// components live on the same authority, so opting into either creates both.
+///
+/// **Deliberately numeric-and-boolean only.** `SkyAtmosphere` also carries five
+/// `Color` fields (sun, moon, and the three gradient colours); those stay in the
+/// reflection Details grid, which already has a colour widget, rather than
+/// forcing one into the World Settings property-row kit. Nothing is lost — the
+/// panel edits the block a level actually tunes, and Details edits the rest
+/// through the same undo door.
+///
+/// Units per architecture rule 6: the fog block is **SI metres** (`m⁻¹`
+/// extinction and falloff, metre height); the disc sizes are **degrees of
+/// angular diameter**; everything else is a dimensionless multiplier over a
+/// physical constant that lives in `inf_render::atmosphere`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct SkyAtmosphereDto {
+    /// Whether the level has a sky authority at all. `false` ⇒ these are the
+    /// component defaults shown as a preview; writing any row creates it.
+    pub present: bool,
+    /// Whether the sun/moon are projected as a directional light.
+    pub enabled: bool,
+    /// Draw the physically-based sky (LUTs, discs, stars) instead of the
+    /// three-colour gradient.
+    pub physical: bool,
+    /// Linear exposure multiplier on the sky's radiance.
+    pub sky_intensity: f32,
+    /// Aerosol density multiplier over clear air ("turbidity").
+    pub turbidity: f32,
+    /// Mie phase asymmetry `g`, `[-0.95, 0.95]`.
+    pub mie_anisotropy: f32,
+    /// Sun angular **diameter**, degrees (true ≈ 0.53).
+    pub sun_disc_deg: f32,
+    /// Moon angular diameter, degrees.
+    pub moon_disc_deg: f32,
+    /// Starfield brightness multiplier.
+    pub star_intensity: f32,
+    /// Blend back toward the authored gradient, `[0, 1]`.
+    pub tint_strength: f32,
+    /// Aerial-perspective strength on lit geometry (`1` = physical).
+    pub aerial_perspective: f32,
+    /// Height-fog extinction at `fog_height`, **m⁻¹**. `0` = no fog.
+    pub fog_density: f32,
+    /// Height-fog vertical falloff, **m⁻¹**.
+    pub fog_falloff: f32,
+    /// World altitude the fog density applies at, **m**.
+    pub fog_height: f32,
+}
+
+impl SkyAtmosphereDto {
+    /// Project the level's atmosphere (or, with no authority, the component
+    /// defaults marked `present: false`).
+    pub fn from_doc(doc: &crate::scene::SceneDoc) -> Self {
+        let (present, a) = match doc.sky_atmosphere() {
+            Some(a) => (true, a),
+            None => (false, inf_ecs::components::SkyAtmosphere::default()),
+        };
+        Self {
+            present,
+            enabled: a.enabled,
+            physical: a.physical,
+            sky_intensity: a.sky_intensity,
+            turbidity: a.turbidity,
+            mie_anisotropy: a.mie_anisotropy,
+            sun_disc_deg: a.sun_disc_deg,
+            moon_disc_deg: a.moon_disc_deg,
+            star_intensity: a.star_intensity,
+            tint_strength: a.tint_strength,
+            aerial_perspective: a.aerial_perspective,
+            fog_density: a.fog_density,
+            fog_falloff: a.fog_falloff,
+            fog_height: a.fog_height,
+        }
+    }
+
+    /// Overlay an edited DTO onto the level's current atmosphere, clamping every
+    /// field into its documented range.
+    ///
+    /// It **overlays** rather than constructing from scratch because the DTO
+    /// deliberately omits the five `Color` fields (see the type docs): building a
+    /// fresh component here would silently reset a level's authored sun colour
+    /// every time somebody nudged the fog. Non-finite input falls back to the
+    /// component default rather than to zero — a `NaN` turbidity would otherwise
+    /// blank the whole sky.
+    pub fn to_component(
+        self,
+        base: inf_ecs::components::SkyAtmosphere,
+    ) -> inf_ecs::components::SkyAtmosphere {
+        let num = |v: f32, fallback: f32, lo: f32, hi: f32| {
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                fallback
+            }
+        };
+        inf_ecs::components::SkyAtmosphere {
+            enabled: self.enabled,
+            physical: self.physical,
+            sky_intensity: num(self.sky_intensity, 1.0, 0.0, 64.0),
+            turbidity: num(self.turbidity, 1.0, 0.0, 16.0),
+            mie_anisotropy: num(self.mie_anisotropy, 0.8, -0.95, 0.95),
+            sun_disc_deg: num(self.sun_disc_deg, 0.545, 0.0, 90.0),
+            moon_disc_deg: num(self.moon_disc_deg, 0.52, 0.0, 90.0),
+            star_intensity: num(self.star_intensity, 1.0, 0.0, 64.0),
+            tint_strength: num(self.tint_strength, 0.0, 0.0, 1.0),
+            aerial_perspective: num(self.aerial_perspective, 1.0, 0.0, 4.0),
+            // 1 m⁻¹ is already opaque within a metre; the ceiling only exists so
+            // a typo cannot produce an infinity in the fog integral.
+            fog_density: num(self.fog_density, 0.0, 0.0, 1.0),
+            fog_falloff: num(self.fog_falloff, 0.002, 0.0, 1.0),
+            fog_height: num(self.fog_height, 0.0, -1.0e7, 1.0e7),
+            ..base
+        }
+    }
+}
+
 /// The level's file-level settings, as the World Settings panel edits them
 /// (`scene_get_settings` / `scene_set_settings`). Mirrors
 /// [`crate::scene::serialize::LevelSettings`]; `render` nests
@@ -1359,6 +1478,9 @@ pub struct LevelSettingsDto {
     /// Time-of-day block (P17.1). Projected from the sky-authority **entity's**
     /// components, not from the file settings record — see [`TimeOfDayDto`].
     pub time_of_day: TimeOfDayDto,
+    /// Physical-atmosphere block (P17.2). Same authority entity, same
+    /// `present` create flag — see [`SkyAtmosphereDto`].
+    pub atmosphere: SkyAtmosphereDto,
 }
 
 impl LevelSettingsDto {
@@ -1375,6 +1497,7 @@ impl LevelSettingsDto {
             render: RenderSettingsRecordDto::from_record(&s.render),
             partition: PartitionSettingsDto::from_record(&s.partition),
             time_of_day: TimeOfDayDto::from_doc(doc),
+            atmosphere: SkyAtmosphereDto::from_doc(doc),
         }
     }
 

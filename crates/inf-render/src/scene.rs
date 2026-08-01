@@ -596,6 +596,9 @@ pub struct SunParams {
     /// Moon radiant-intensity multiplier (used while the sun is below the
     /// horizon).
     pub moon_intensity: f32,
+    /// Lunar phase, `[0, 1)` — `0` new, `0.5` full (P17.2). Only the sky pass
+    /// reads it, to place the moon disc's terminator; it lights nothing.
+    pub moon_phase: f32,
 }
 
 impl Default for SunParams {
@@ -613,6 +616,9 @@ impl Default for SunParams {
             moon_direction: Vec3::NEG_Y,
             moon_color: [0.62, 0.72, 1.0],
             moon_intensity: 0.0,
+            // Full — the phase a projector that never filled it in would want if
+            // anything ever drew this moon, which nothing does at intensity 0.
+            moon_phase: 0.5,
         }
     }
 }
@@ -719,6 +725,12 @@ pub struct RenderScene {
     /// scene whose projector found no time-of-day authority renders exactly as it
     /// did before. See [`SunParams`].
     pub sun: SunParams,
+    /// The physically-based atmosphere (P17.2): the LUT-driven sky, the sun/moon
+    /// discs, the starfield, aerial perspective and height fog. **Disabled** by
+    /// default, so a scene with no time-of-day authority draws the P17.1 gradient
+    /// and its lit passes take the byte-identical no-atmosphere arithmetic. See
+    /// [`crate::atmosphere::AtmosphereParams`].
+    pub atmosphere: crate::atmosphere::AtmosphereParams,
     pub grid_enabled: bool,
     /// Ids drawn with the selection outline.
     pub selected: Vec<u32>,

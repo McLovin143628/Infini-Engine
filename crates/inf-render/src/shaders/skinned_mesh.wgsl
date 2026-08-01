@@ -197,10 +197,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     lo += in.emissive;
 
-    // HDR-linear haze; the post tonemap pass runs afterward.
+    // HDR-linear haze; the post tonemap pass runs afterward. P17.2: replaced by
+    // physical aerial perspective + height fog when the scene has an atmosphere.
     let dist = length(in.world_pos - view.eye.xyz);
     let haze = 1.0 - exp(-dist * 0.004);
-    let col = mix(lo, vec3<f32>(0.055, 0.081, 0.120), haze * 0.4);
+    var col = mix(lo, vec3<f32>(0.055, 0.081, 0.120), haze * 0.4);
+    if (atmos.params.x > 0.5) {
+        col = atmos_apply(lo, in.world_pos);
+    }
 
     return vec4<f32>(col, in.color.a);
 }

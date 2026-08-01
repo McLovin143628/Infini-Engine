@@ -51,6 +51,22 @@ const sample: LevelSettingsDto = {
     sun_elevation_deg: 55.1,
     sun_azimuth_deg: 125.4,
   },
+  atmosphere: {
+    present: false,
+    enabled: true,
+    physical: true,
+    sky_intensity: 1,
+    turbidity: 1,
+    mie_anisotropy: 0.8,
+    sun_disc_deg: 0.545,
+    moon_disc_deg: 0.52,
+    star_intensity: 1,
+    tint_strength: 0,
+    aerial_perspective: 1,
+    fog_density: 0,
+    fog_falloff: 0.002,
+    fog_height: 0,
+  },
 };
 
 describe("sceneStore level settings slice", () => {

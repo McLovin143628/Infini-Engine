@@ -2591,17 +2591,35 @@ impl TimeOfDay {
     }
 }
 
-/// **Sky atmosphere** (schema v11): how the [`TimeOfDay`] sun and moon light the
-/// world, and the gradient tint the sky pass draws.
+/// **Sky atmosphere** (schema v11; grown in v12): how the [`TimeOfDay`] sun and
+/// moon light the world, the physically-based sky that is drawn behind it, and
+/// the artistic gradient tint layered over that.
 ///
-/// This is the minimal parameter set P17.2 (physical atmosphere / LUTs) will
-/// grow — deliberately just enough to make time of day *do* something without
-/// changing the look of anything that does not opt in. The three colour fields
-/// are `SkyParams`' first real writers; their defaults are byte-for-byte the
-/// renderer's existing editor-dark gradient.
+/// The v11 half — [`enabled`](Self::enabled), the sun/moon colour + intensity
+/// pairs, the three gradient colours and [`night_darkening`](Self::night_darkening)
+/// — is unchanged. P17.2 appends the **physical-atmosphere block**: a
+/// Hillaire-2020-class transmittance / sky-view LUT pair drives the sky, the sun
+/// and moon discs, the starfield, aerial perspective on lit geometry, and
+/// exponential height fog.
+///
+/// # Units (architecture rule 6)
+///
+/// The Rayleigh / Mie / ozone coefficients themselves are **not** authored here:
+/// they are physical constants of Earth's atmosphere and live once, in
+/// `inf_render::atmosphere::AtmosphereParams` (kilometre altitudes, per-kilometre
+/// coefficients — the atmospheric-optics convention, documented there). What a
+/// level authors is a handful of dimensionless multipliers over them, plus the
+/// **height fog in SI metres**: [`fog_density`](Self::fog_density) and
+/// [`fog_falloff`](Self::fog_falloff) are per-metre (m⁻¹) and
+/// [`fog_height`](Self::fog_height) is a world altitude in metres, because fog is
+/// authored against world geometry rather than against the planet.
 ///
 /// Lives on the same entity as [`TimeOfDay`] (the sky authority). Every field is
-/// `#[serde(default)]`.
+/// `#[serde(default)]`, so the reflection Details grid, the World Settings panel
+/// and the JSON/TOML sidecar all tolerate a partial record. **That is not what
+/// makes the bincode payload safe** — bincode is not self-describing, so growing
+/// this struct is a wire-format change and P17.2 bumps the level schema to v12
+/// with the v11 shape frozen (`SkyAtmosphereV11` in both codecs).
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[reflect(Component, Default)]
 pub struct SkyAtmosphere {
@@ -2640,6 +2658,78 @@ pub struct SkyAtmosphere {
     /// daytime scene renders the authored gradient unmodified.
     #[serde(default = "default_night_darkening")]
     pub night_darkening: f32,
+
+    // ── the physical-atmosphere block (schema v12 · P17.2) ────────────────
+    /// Draw the **physically-based sky** (transmittance + sky-view LUTs, sun and
+    /// moon discs, stars) instead of the three-colour gradient. `true` by
+    /// default: a level that has opted into a clock wants a real sky, and no
+    /// pre-P17.2 content carries this component at all, so nothing that exists
+    /// today changes. Turning it off restores the exact v11 gradient pass.
+    #[serde(default = "default_true")]
+    pub physical: bool,
+    /// Linear exposure multiplier on the physical sky's radiance (dimensionless).
+    /// Scales the sky *only* — the sun and moon discs and the lighting are driven
+    /// by [`sun_intensity`](Self::sun_intensity) / [`moon_intensity`](Self::moon_intensity).
+    #[serde(default = "default_one")]
+    pub sky_intensity: f32,
+    /// Aerosol (Mie) density multiplier over the clear-air reference —
+    /// dimensionless "turbidity". `1` is a clean day; larger values thicken the
+    /// haze band at the horizon and warm the sun's halo. Clamped to `[0, 16]`.
+    #[serde(default = "default_one")]
+    pub turbidity: f32,
+    /// Mie phase asymmetry `g`, `[-0.95, 0.95]`. Positive = forward-scattering
+    /// (the real atmosphere, ≈ 0.8) which is what produces the bright glow around
+    /// the sun.
+    #[serde(default = "default_mie_anisotropy")]
+    pub mie_anisotropy: f32,
+    /// Sun **angular diameter** in degrees as seen from the ground. The true
+    /// value is ≈ 0.53°; the default rounds to 0.545° (the mean apparent
+    /// diameter). Larger values give a softer, bigger sun.
+    #[serde(default = "default_sun_disc_deg")]
+    pub sun_disc_deg: f32,
+    /// Moon angular diameter in degrees (true mean ≈ 0.52°).
+    #[serde(default = "default_moon_disc_deg")]
+    pub moon_disc_deg: f32,
+    /// Starfield brightness multiplier (dimensionless). `0` removes the stars.
+    /// The field fades in as the sun sets and is a pure function of view
+    /// direction, so it is screen-stable under camera rotation.
+    #[serde(default = "default_one")]
+    pub star_intensity: f32,
+    /// How far the physical sky is pulled back toward the authored
+    /// [`zenith`](Self::zenith)/[`horizon`](Self::horizon)/[`ground`](Self::ground)
+    /// gradient, `[0, 1]`. **`0` by default** — the physical result stands on its
+    /// own and the gradient colours are the artistic override, not a tax on it.
+    /// `1` reproduces the v11 gradient exactly.
+    #[serde(default)]
+    pub tint_strength: f32,
+    /// Strength of **aerial perspective** on lit geometry, `[0, 4]`: how much of
+    /// the atmosphere's in-scattered light is mixed into distant surfaces (and
+    /// how much of their own radiance is extinguished). `1` is the physical
+    /// amount; `0` disables it.
+    #[serde(default = "default_one")]
+    pub aerial_perspective: f32,
+    /// Exponential **height-fog** extinction at [`fog_height`](Self::fog_height),
+    /// in **m⁻¹** (SI). `0` — the default — means no height fog at all, and the
+    /// receivers take the byte-identical no-fog path. A visibility of `d` metres
+    /// is roughly `3 / d`, so `6e-4` ≈ 5 km visibility and `1.5e-4` ≈ 20 km.
+    #[serde(default)]
+    pub fog_density: f32,
+    /// Height-fog vertical falloff in **m⁻¹**: density decays as
+    /// `exp(-falloff · (y − fog_height))`. The default `0.002` is a 500 m
+    /// e-folding height (a valley-floor haze layer). `0` makes the fog uniform
+    /// with altitude.
+    #[serde(default = "default_fog_falloff")]
+    pub fog_falloff: f32,
+    /// World altitude in **metres** at which the fog reaches
+    /// [`fog_density`](Self::fog_density).
+    #[serde(default)]
+    pub fog_height: f32,
+    /// Linear tint multiplied into the fog's in-scattered light. The in-scatter
+    /// itself is sampled from the sky in the view direction, so white (the
+    /// default) already gives fog that matches the time of day; the tint is for
+    /// stylised (green, sepia, alien) air.
+    #[serde(default = "default_fog_color")]
+    pub fog_color: Color,
 }
 
 fn default_true() -> bool {
@@ -2671,6 +2761,24 @@ fn default_sky_ground() -> Color {
 fn default_night_darkening() -> f32 {
     0.85
 }
+fn default_one() -> f32 {
+    1.0
+}
+fn default_mie_anisotropy() -> f32 {
+    0.8
+}
+fn default_sun_disc_deg() -> f32 {
+    0.545
+}
+fn default_moon_disc_deg() -> f32 {
+    0.52
+}
+fn default_fog_falloff() -> f32 {
+    0.002 // 500 m e-folding height
+}
+fn default_fog_color() -> Color {
+    Color::new(1.0, 1.0, 1.0, 1.0)
+}
 
 impl Default for SkyAtmosphere {
     fn default() -> Self {
@@ -2684,6 +2792,19 @@ impl Default for SkyAtmosphere {
             horizon: default_sky_horizon(),
             ground: default_sky_ground(),
             night_darkening: default_night_darkening(),
+            physical: default_true(),
+            sky_intensity: default_one(),
+            turbidity: default_one(),
+            mie_anisotropy: default_mie_anisotropy(),
+            sun_disc_deg: default_sun_disc_deg(),
+            moon_disc_deg: default_moon_disc_deg(),
+            star_intensity: default_one(),
+            tint_strength: 0.0,
+            aerial_perspective: default_one(),
+            fog_density: 0.0,
+            fog_falloff: default_fog_falloff(),
+            fog_height: 0.0,
+            fog_color: default_fog_color(),
         }
     }
 }

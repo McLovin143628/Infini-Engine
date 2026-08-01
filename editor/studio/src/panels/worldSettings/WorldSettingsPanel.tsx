@@ -18,6 +18,7 @@ import type { ReactNode } from "react";
 import type { LevelSettingsDto } from "../../bindings/LevelSettingsDto";
 import type { PartitionSettingsDto } from "../../bindings/PartitionSettingsDto";
 import type { RenderSettingsRecordDto } from "../../bindings/RenderSettingsRecordDto";
+import type { SkyAtmosphereDto } from "../../bindings/SkyAtmosphereDto";
 import type { TimeOfDayDto } from "../../bindings/TimeOfDayDto";
 import {
   CheckboxField,
@@ -36,6 +37,7 @@ import {
   compassPoint,
   formatClock,
   SECONDS_PER_DAY,
+  fogVisibility,
   sunLabel,
   wrapSeconds,
 } from "./todModel";
@@ -72,6 +74,14 @@ export default function WorldSettingsPanel() {
     setLevelSettings({
       ...settings,
       time_of_day: { ...settings.time_of_day, present: true, ...patch },
+    });
+  // Same story for the atmosphere: it lives on the same authority entity, so a
+  // write here also carries `present: true` and opts a clockless level in.
+  const patchAtmos = (patch: Partial<SkyAtmosphereDto>) =>
+    settings &&
+    setLevelSettings({
+      ...settings,
+      atmosphere: { ...settings.atmosphere, present: true, ...patch },
     });
 
   const mode = useViewportStore((s) => s.mode);
@@ -223,6 +233,108 @@ export default function WorldSettingsPanel() {
                 {" \u00b7 "}
                 {compassPoint(settings.time_of_day.sun_azimuth_deg)}
               </ReadOnly>
+            </PropertyRow>
+          </PropertySection>
+
+          <PropertySection title="Atmosphere">
+            <p className="px-2 pb-1 text-[11px] leading-snug text-(--ink-text-dim)">
+              A physically-based sky &mdash; Rayleigh, Mie and ozone scattering baked into
+              lookup tables each time the sun moves &mdash; plus sun and moon discs, stars, and
+              distance scattering on everything the camera can see. Colours live in Details on
+              the <span className="text-(--ink-text)">Sky</span> actor.
+              {!settings.atmosphere.present && " This level has no sky yet."}
+            </p>
+            <PropertyRow label="Physical Sky">
+              <CheckboxField
+                value={settings.atmosphere.physical}
+                onChange={(v) => patchAtmos({ physical: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Sun Lights Scene">
+              <CheckboxField
+                value={settings.atmosphere.enabled}
+                onChange={(v) => patchAtmos({ enabled: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Sky Intensity">
+              <NumberField
+                value={settings.atmosphere.sky_intensity}
+                step={0.1}
+                onChange={(v) => patchAtmos({ sky_intensity: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Turbidity (haze)">
+              <NumberField
+                value={settings.atmosphere.turbidity}
+                step={0.1}
+                onChange={(v) => patchAtmos({ turbidity: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Haze Anisotropy">
+              <NumberField
+                value={settings.atmosphere.mie_anisotropy}
+                step={0.05}
+                onChange={(v) => patchAtmos({ mie_anisotropy: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Sun Size (°)">
+              <NumberField
+                value={settings.atmosphere.sun_disc_deg}
+                step={0.05}
+                onChange={(v) => patchAtmos({ sun_disc_deg: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Moon Size (°)">
+              <NumberField
+                value={settings.atmosphere.moon_disc_deg}
+                step={0.05}
+                onChange={(v) => patchAtmos({ moon_disc_deg: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Stars">
+              <NumberField
+                value={settings.atmosphere.star_intensity}
+                step={0.1}
+                onChange={(v) => patchAtmos({ star_intensity: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Gradient Tint">
+              <NumberField
+                value={settings.atmosphere.tint_strength}
+                step={0.05}
+                onChange={(v) => patchAtmos({ tint_strength: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Aerial Perspective">
+              <NumberField
+                value={settings.atmosphere.aerial_perspective}
+                step={0.1}
+                onChange={(v) => patchAtmos({ aerial_perspective: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Fog Density (1/m)">
+              <NumberField
+                value={settings.atmosphere.fog_density}
+                step={0.0001}
+                onChange={(v) => patchAtmos({ fog_density: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Fog Falloff (1/m)">
+              <NumberField
+                value={settings.atmosphere.fog_falloff}
+                step={0.0005}
+                onChange={(v) => patchAtmos({ fog_falloff: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Fog Height (m)">
+              <NumberField
+                value={settings.atmosphere.fog_height}
+                step={1}
+                onChange={(v) => patchAtmos({ fog_height: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Visibility">
+              <ReadOnly>{fogVisibility(settings.atmosphere.fog_density)}</ReadOnly>
             </PropertyRow>
           </PropertySection>
 

@@ -86,6 +86,15 @@ pub struct RenderSettings {
     /// Dynamic global illumination (P13.3b). **OFF by default** → the hemispheric
     /// ambient path is byte-identical.
     pub gi: GiSettings,
+    /// Physical-atmosphere quality (P17.2): LUT resolution, ray-march step
+    /// counts and star density. Unlike its neighbours this has **no enable
+    /// flag** — whether an atmosphere is drawn at all is a property of the
+    /// *scene* (does the level have a `TimeOfDay` authority?), not of the
+    /// renderer, so a setting could only ever disagree with the content. What
+    /// the renderer owns is how expensively to draw it. Defaults to
+    /// [`AtmosphereQuality::High`]; [`RenderTier::apply`](crate::caps::RenderTier::apply)
+    /// clamps it **down** like every other capability knob.
+    pub atmosphere: AtmosphereSettings,
     /// GPU-capability auto-tier override (P13.4.2). `None` → the host probes the
     /// adapter and picks a [`RenderTier`](crate::caps::RenderTier)
     /// ([`detect_tier`](crate::caps::detect_tier)); `Some(tier)` forces it
@@ -214,6 +223,30 @@ impl Default for VgeomSettings {
     }
 }
 
+/// Physical-atmosphere render settings (P17.2).
+///
+/// Deliberately thin: the atmosphere's *parameters* live on the scene (projected
+/// from the level's `SkyAtmosphere` component), because they are content. What
+/// lives here is the **cost** — how big the LUTs are and how many march steps
+/// they take — which is a property of the machine.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtmosphereSettings {
+    /// LUT resolution / ray-march budget / star density.
+    pub quality: crate::atmosphere::AtmosphereQuality,
+}
+
+impl Default for AtmosphereSettings {
+    /// High. Unlike bloom/SSAO/TAA/shadows/GI this is **not** "off by default",
+    /// and it does not need to be: the atmosphere node dispatches nothing at all
+    /// unless the scene enables it, so a default-settings render of a
+    /// pre-P17.2 scene issues exactly the commands it always did.
+    fn default() -> Self {
+        Self {
+            quality: crate::atmosphere::AtmosphereQuality::High,
+        }
+    }
+}
+
 impl Default for RenderSettings {
     fn default() -> Self {
         Self {
@@ -226,6 +259,7 @@ impl Default for RenderSettings {
             vgeom: VgeomSettings::default(),
             shadows: ShadowSettings::default(),
             gi: GiSettings::default(),
+            atmosphere: AtmosphereSettings::default(),
             tier_override: None,
         }
     }

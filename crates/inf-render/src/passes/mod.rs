@@ -15,6 +15,7 @@ pub mod resolve;
 pub mod shadow;
 pub mod skinned;
 pub mod sky;
+pub mod sky_lut;
 pub mod sprite;
 pub mod ssao;
 pub mod taa;
@@ -39,8 +40,69 @@ pub(crate) fn scene_shader(source: &str) -> String {
 pub(crate) enum ShaderKind {
     /// [`scene_shader`]: common_view prepended.
     Plain,
-    /// [`lit_scene_shader`]: common_view + env_lighting at the given group.
+    /// [`lit_scene_shader`]: common_view + env_lighting + the atmosphere library
+    /// at the given group.
     Lit(u32),
+    /// [`sky_shader`]: common_view + the atmosphere library at `@group(1)` — the
+    /// sky pass, which needs the LUTs but not the lighting env.
+    Sky,
+    /// [`atmosphere_compute_shader`]: the atmosphere library at `@group(0)` and
+    /// nothing else. The two LUT bake compute passes have no view uniform and no
+    /// lights (P17.2).
+    AtmosphereCompute,
+}
+
+// ── atmosphere composition (P17.2) ───────────────────────────────────────────
+//
+// `atmosphere.wgsl` (the medium: densities, extinction, LUT parameterizations,
+// phases, the star hash) and `atmosphere_lut.wgsl` (sampling the two baked LUTs
+// + aerial perspective/height fog) are token-substituted into whichever group
+// each consumer has spare — the same mechanism `GROUP_ENV` uses. There is no
+// fourth bind group to spend, so the atmosphere rides along in the group the
+// pass already binds.
+
+/// Env-group binding indices the atmosphere occupies inside [`EnvBinding`],
+/// appended after the AO (0,1) / shadow (2,3,4) / GI (5,6) block.
+const ENV_ATMOS_TRANSMITTANCE: u32 = 7;
+const ENV_ATMOS_SKYVIEW: u32 = 8;
+const ENV_ATMOS_SAMPLER: u32 = 9;
+const ENV_ATMOS_UNIFORM: u32 = 10;
+
+/// The atmosphere *medium* library, bound at `group`/`binding`.
+pub(crate) fn atmosphere_source(group: u32, binding: u32) -> String {
+    include_str!("../shaders/atmosphere.wgsl")
+        .replace("ATMOS_GROUP", &group.to_string())
+        .replace("ATMOS_BIND", &binding.to_string())
+}
+
+/// The atmosphere *LUT-sampling* library. Only included by passes that bind both
+/// baked LUTs (the sky pass and, through [`lit_scene_shader`], every lit pass);
+/// the bake passes themselves take [`atmosphere_source`] alone.
+pub(crate) fn atmosphere_lut_source(group: u32, t: u32, s: u32, smp: u32) -> String {
+    include_str!("../shaders/atmosphere_lut.wgsl")
+        .replace("ATMOS_GROUP", &group.to_string())
+        .replace("ATMOS_TBIND", &t.to_string())
+        .replace("ATMOS_SBIND", &s.to_string())
+        .replace("ATMOS_SMPBIND", &smp.to_string())
+}
+
+/// The sky pass module: common_view + the whole atmosphere library at
+/// `@group(1)` (uniform at 1, transmittance 2, sky view 3, sampler 4 — binding 0
+/// is the authored gradient the sky pass already had).
+pub(crate) fn sky_shader(source: &str) -> String {
+    format!(
+        "{}\n{}\n{}\n{}",
+        include_str!("../shaders/common_view.wgsl"),
+        atmosphere_source(1, 1),
+        atmosphere_lut_source(1, 2, 3, 4),
+        source
+    )
+}
+
+/// A LUT bake compute module: the medium library at `@group(0) @binding(0)`, the
+/// bake's own storage/input bindings, and nothing else.
+pub(crate) fn atmosphere_compute_shader(source: &str) -> String {
+    format!("{}\n{}", atmosphere_source(0, 0), source)
 }
 
 /// Every composed scene-shader module the renderer builds — label, WGSL
@@ -85,15 +147,21 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
         include_str!("../shaders/grid.wgsl"),
         ShaderKind::Plain,
     ),
+    ("sky", include_str!("../shaders/sky.wgsl"), ShaderKind::Sky),
     (
-        "sky",
-        include_str!("../shaders/sky.wgsl"),
-        ShaderKind::Plain,
+        "atmos_transmittance",
+        include_str!("../shaders/sky_transmittance.wgsl"),
+        ShaderKind::AtmosphereCompute,
+    ),
+    (
+        "atmos_skyview",
+        include_str!("../shaders/sky_view.wgsl"),
+        ShaderKind::AtmosphereCompute,
     ),
     (
         "vgeom_mesh",
         include_str!("../shaders/vgeom_mesh.wgsl"),
-        ShaderKind::Plain,
+        ShaderKind::Lit(2),
     ),
     (
         "taa",
@@ -123,127 +191,110 @@ pub(crate) fn shader_source(label: &str) -> String {
     match kind {
         ShaderKind::Plain => scene_shader(source),
         ShaderKind::Lit(group) => lit_scene_shader(source, *group),
+        ShaderKind::Sky => sky_shader(source),
+        ShaderKind::AtmosphereCompute => atmosphere_compute_shader(source),
     }
 }
 
-/// A **lit** scene shader (mesh/skinned/terrain): [`scene_shader`] plus the shared
-/// environment-lighting snippet (AO + cascaded shadows + dynamic GI bindings and
-/// sampling fns), with its `GROUP_ENV` token substituted for the pipeline's env
-/// bind-group index (mesh/skinned = 2, terrain = 3). See [`EnvBinding`] +
-/// `shaders/env_lighting.wgsl`.
+/// A **lit** scene shader (mesh/skinned/terrain/vgeom): [`scene_shader`] plus the
+/// shared environment-lighting snippet (AO + cascaded shadows + dynamic GI
+/// bindings and sampling fns) **and the atmosphere library** (P17.2: aerial
+/// perspective + height fog), with their `GROUP_ENV` / `ATMOS_GROUP` tokens
+/// substituted for the pipeline's env bind-group index (mesh/skinned/vgeom = 2,
+/// terrain = 3). See [`EnvBinding`] + `shaders/env_lighting.wgsl` +
+/// `shaders/atmosphere*.wgsl`.
 pub(crate) fn lit_scene_shader(source: &str, env_group: u32) -> String {
     let env =
         include_str!("../shaders/env_lighting.wgsl").replace("GROUP_ENV", &env_group.to_string());
     format!(
-        "{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}",
         include_str!("../shaders/common_view.wgsl"),
         env,
+        atmosphere_source(env_group, ENV_ATMOS_UNIFORM),
+        atmosphere_lut_source(
+            env_group,
+            ENV_ATMOS_TRANSMITTANCE,
+            ENV_ATMOS_SKYVIEW,
+            ENV_ATMOS_SAMPLER,
+        ),
         source
     )
 }
 
-/// The SSAO/ambient-occlusion bind (texture + sampler) that the lit passes
-/// (mesh/terrain/skinned) sample. When SSAO is disabled the [`ssao`] node clears
-/// the AO target to **white** (1.0), so the ambient term is unchanged — the
-/// binding is present in every lit pipeline but pixel-neutral when off. The
-/// bind group is rebuilt whenever the frame targets are recreated.
-pub(crate) struct AoBinding {
-    pub bgl: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-    bg: Option<(u64, wgpu::BindGroup)>,
-}
-
-impl AoBinding {
-    pub fn new(gpu: &GpuContext) -> Self {
-        let bgl = gpu
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("ao"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-        let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("ao"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-        Self {
-            bgl,
-            sampler,
-            bg: None,
-        }
-    }
-
-    /// The AO bind group for this frame, rebuilt when the targets change.
-    ///
-    /// This binds only the size-dependent AO view, so keying on
-    /// `frame.targets.generation` is complete. (Its sibling [`EnvBinding`] additionally
-    /// embeds shadow/GI resources under the same key — sound only because those are
-    /// created once; see that method's invariant.)
-    pub fn bind_group(&mut self, gpu: &GpuContext, frame: &FrameData) -> &wgpu::BindGroup {
-        if self
-            .bg
-            .as_ref()
-            .is_none_or(|(gen, _)| *gen != frame.targets.generation)
-        {
-            let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("ao"),
-                layout: &self.bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&frame.targets.ao),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ],
-            });
-            self.bg = Some((frame.targets.generation, bg));
-        }
-        &self.bg.as_ref().unwrap().1
-    }
-}
-
-/// The consolidated **environment** bind (P13.3b): AO + cascaded shadows + dynamic
-/// GI in a *single* bind group so the lit passes stay within the 4-bind-group limit
-/// (mesh needs view/lights/env; skinned adds joints; terrain adds tile/material).
+/// The cache key every bind group that embeds a **resizable** resource is keyed
+/// on: `(frame targets generation, atmosphere resources generation)`.
 ///
-/// It occupies the exact group index each shader previously used for [`AoBinding`]
-/// (mesh/skinned = 2, terrain = 3), and keeps the AO texture+sampler at
+/// A tuple rather than a single counter because the two resources are recreated
+/// for unrelated reasons — the targets on a viewport resize, the atmosphere LUTs
+/// on a render-tier / quality clamp — and either alone must invalidate.
+pub(crate) type ResourceKey = (u64, u64);
+
+/// The current [`ResourceKey`] for a frame.
+#[inline]
+pub(crate) fn resource_key(frame: &FrameData) -> ResourceKey {
+    (frame.targets.generation, frame.atmosphere.generation)
+}
+
+/// A generation-keyed single-slot cache: hands back the stored value while the
+/// key is unchanged, and **rebuilds** it otherwise.
+///
+/// Extracted (P17.2) so the invalidation rule is one testable thing rather than
+/// three hand-rolled `is_none_or(|(k, _)| *k != key)` sites that can each drift.
+/// The failure it exists to prevent is quiet: with a stale key the pass keeps a
+/// bind group built from the *previous* quality's LUT views and silently samples
+/// last tier's textures — no validation error, no black frame, just wrong pixels
+/// that a determinism gate would happily call stable.
+///
+/// `pointer_identity_changes_only_when_the_key_does` pins the behaviour on a
+/// stand-in payload, so it runs on every CI leg with no adapter.
+/// Generic over the key so a pass keys on exactly what it embeds: [`EnvBinding`]
+/// on the full [`ResourceKey`], the sky pass and the LUT bake on the atmosphere
+/// generation alone (they hold no size-dependent view, and rebuilding them on
+/// every viewport resize would be a lie about what invalidates them).
+pub(crate) struct GenCache<K, T> {
+    slot: Option<(K, T)>,
+}
+
+impl<K, T> Default for GenCache<K, T> {
+    fn default() -> Self {
+        Self { slot: None }
+    }
+}
+
+impl<K: PartialEq, T> GenCache<K, T> {
+    /// The cached value for `key`, building it with `build` when the key moved
+    /// (or on the first call).
+    pub fn get_or_build(&mut self, key: K, build: impl FnOnce() -> T) -> &T {
+        if self.slot.as_ref().is_none_or(|(k, _)| *k != key) {
+            self.slot = Some((key, build()));
+        }
+        &self.slot.as_ref().unwrap().1
+    }
+}
+
+/// The consolidated **environment** bind (P13.3b, grown in P17.2): AO + cascaded
+/// shadows + dynamic GI + the atmosphere LUTs in a *single* bind group so the lit
+/// passes stay within the 4-bind-group limit (mesh needs view/lights/env; skinned
+/// adds joints; terrain adds tile/material; vgeom adds its meshlet storage group).
+///
+/// It occupies the group index each shader uses for its environment
+/// (mesh/skinned/vgeom = 2, terrain = 3), and keeps the AO texture+sampler at
 /// bindings 0/1 — so the existing AO shader declarations are unchanged and only the
-/// shadow (2,3,4) + GI (5,6) bindings are *appended*. With shadows/GI off the
-/// receivers branch on the shared uniforms' `enabled` flags and take the byte-stable
-/// AO-only path.
+/// shadow (2,3,4), GI (5,6) and atmosphere (7,8,9,10) bindings are *appended*. With
+/// shadows/GI/atmosphere off the receivers branch on the shared uniforms' `enabled`
+/// flags and take the byte-stable AO-only path.
 ///
 /// Bindings: `0` ao_tex, `1` ao_smp, `2` shadow_map (`texture_depth_2d_array`),
 /// `3` shadow_smp (comparison), `4` shadow uniform, `5` gi SH storage, `6` gi
-/// uniform. All fragment-stage. The bind group is rebuilt when the frame targets
-/// change (the AO view is the only size-dependent resource; shadow/GI resources are
-/// stable).
+/// uniform, `7` atmosphere transmittance LUT, `8` atmosphere sky-view LUT,
+/// `9` atmosphere LUT sampler, `10` atmosphere uniform. All fragment-stage.
 pub(crate) struct EnvBinding {
     pub bgl: wgpu::BindGroupLayout,
     ao_sampler: wgpu::Sampler,
     shadow_sampler: wgpu::Sampler,
-    bg: Option<(u64, wgpu::BindGroup)>,
+    /// Keyed on [`ResourceKey`] — the two resizable inputs. See
+    /// [`EnvBinding::bind_group`].
+    bg: GenCache<ResourceKey, wgpu::BindGroup>,
 }
 
 impl EnvBinding {
@@ -316,6 +367,43 @@ impl EnvBinding {
                         },
                         count: None,
                     },
+                    // ── P17.2 atmosphere ──
+                    wgpu::BindGroupLayoutEntry {
+                        binding: ENV_ATMOS_TRANSMITTANCE,
+                        visibility: frag,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: ENV_ATMOS_SKYVIEW,
+                        visibility: frag,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: ENV_ATMOS_SAMPLER,
+                        visibility: frag,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: ENV_ATMOS_UNIFORM,
+                        visibility: frag,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let ao_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -338,28 +426,37 @@ impl EnvBinding {
             bgl,
             ao_sampler,
             shadow_sampler,
-            bg: None,
+            bg: GenCache::default(),
         }
     }
 
-    /// The env bind group for this frame, rebuilt when the frame targets change.
+    /// The env bind group for this frame, rebuilt when any resource it embeds is
+    /// recreated.
     ///
-    /// INVARIANT: this cache is keyed **only** on `frame.targets.generation`, yet the
-    /// bind group also embeds the shadow (`frame.shadow.array_view`, `.uniform`) and
-    /// GI (`frame.gi.sh`, `.uniform`) resources. That is sound only because those
-    /// shadow/GI resources are created **once** (in `EngineRenderer::new`) and never
-    /// recreated — the AO view is the sole size-dependent resource. If shadow/GI
-    /// resources ever become resizable, this key MUST incorporate their generation,
-    /// or the bind group will hold a stale view.
+    /// INVARIANT (extended in P17.2): the key is [`resource_key`] — **every
+    /// resizable resource this bind group embeds must appear in it**. Miss one and
+    /// the pass keeps a bind group built from the *previous* views and silently
+    /// samples the previous quality's LUT: no validation error, no black frame,
+    /// just wrong pixels that a determinism gate would happily call stable. (wgpu
+    /// keeps the old texture alive as long as the bind group references it, so
+    /// there is no use-after-free to trip over either — which is exactly what
+    /// makes it quiet.)
+    ///
+    /// * `frame.targets.ao` is size-dependent → `targets.generation`.
+    /// * `frame.atmosphere.transmittance` / `.sky_view` are **quality**-dependent:
+    ///   [`crate::atmosphere::AtmosphereQuality`] can be clamped down at runtime by
+    ///   the render tier, which recreates both LUTs at a new size →
+    ///   `atmosphere.generation`. This is exactly the case the P13 version of this
+    ///   comment warned about, arriving as predicted.
+    /// * `frame.shadow.*` and `frame.gi.*` are still created **once** (in
+    ///   `EngineRenderer::new`) and never recreated, so they need no key
+    ///   component. If either ever becomes resizable, add its generation here too.
     pub fn bind_group(&mut self, gpu: &GpuContext, frame: &FrameData) -> &wgpu::BindGroup {
-        if self
-            .bg
-            .as_ref()
-            .is_none_or(|(gen, _)| *gen != frame.targets.generation)
-        {
-            let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let (bgl, ao_sampler, shadow_sampler) = (&self.bgl, &self.ao_sampler, &self.shadow_sampler);
+        self.bg.get_or_build(resource_key(frame), || {
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("env"),
-                layout: &self.bgl,
+                layout: bgl,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -367,7 +464,7 @@ impl EnvBinding {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.ao_sampler),
+                        resource: wgpu::BindingResource::Sampler(ao_sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -375,7 +472,7 @@ impl EnvBinding {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                        resource: wgpu::BindingResource::Sampler(shadow_sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -389,11 +486,110 @@ impl EnvBinding {
                         binding: 6,
                         resource: frame.gi.uniform.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: ENV_ATMOS_TRANSMITTANCE,
+                        resource: wgpu::BindingResource::TextureView(
+                            &frame.atmosphere.transmittance,
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: ENV_ATMOS_SKYVIEW,
+                        resource: wgpu::BindingResource::TextureView(&frame.atmosphere.sky_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: ENV_ATMOS_SAMPLER,
+                        resource: wgpu::BindingResource::Sampler(&frame.atmosphere.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: ENV_ATMOS_UNIFORM,
+                        resource: frame.atmosphere.uniform.as_entire_binding(),
+                    },
                 ],
-            });
-            self.bg = Some((frame.targets.generation, bg));
+            })
+        })
+    }
+}
+
+#[cfg(test)]
+mod gen_cache_tests {
+    use super::*;
+
+    /// The `EnvBinding` invariant, as a **pointer-identity** property on a
+    /// stand-in payload — deterministic and adapter-free, so it runs on every CI
+    /// leg rather than only where a GPU exists.
+    ///
+    /// This is the seam the golden `atmosphere_quality_switch_rebuilds_the_env_bind`
+    /// cannot reach: from outside, a stale bind group is *silent* (wgpu keeps the
+    /// old texture alive, so there is no validation error and no black frame — the
+    /// pass simply samples the previous quality's LUT). Here the rebuild is
+    /// observable directly: a new payload is a different allocation.
+    #[test]
+    fn pointer_identity_changes_only_when_the_key_does() {
+        use std::rc::Rc;
+
+        /// Fetch through the cache, counting how many times the payload was
+        /// actually *built*. Returns an owned handle: every one is kept alive for
+        /// the whole test, so the allocator cannot hand a freed address back and
+        /// make a rebuild look like a cache hit.
+        fn fetch(
+            cache: &mut GenCache<ResourceKey, Rc<u32>>,
+            key: ResourceKey,
+            builds: &mut u32,
+        ) -> Rc<u32> {
+            let counter = &mut *builds;
+            cache
+                .get_or_build(key, || {
+                    *counter += 1;
+                    Rc::new(*counter)
+                })
+                .clone()
         }
-        &self.bg.as_ref().unwrap().1
+
+        // `Rc` stands in for `wgpu::BindGroup`, which is itself a refcounted
+        // handle — so this is the same identity question the real cache answers.
+        let mut cache: GenCache<ResourceKey, Rc<u32>> = GenCache::default();
+        let mut builds = 0u32;
+
+        let first = fetch(&mut cache, (1, 1), &mut builds);
+        // Same key ⇒ the SAME allocation, and the builder never ran again.
+        let again = fetch(&mut cache, (1, 1), &mut builds);
+        assert!(Rc::ptr_eq(&first, &again), "an unchanged key rebuilt");
+        assert_eq!(builds, 1, "an unchanged key must not rebuild");
+
+        // The atmosphere generation alone must invalidate — this is the key
+        // component P17.2 added, and the one a regression would drop.
+        let after_atmos = fetch(&mut cache, (1, 2), &mut builds);
+        assert!(
+            !Rc::ptr_eq(&after_atmos, &first),
+            "an atmosphere-generation bump did not rebuild the bind group"
+        );
+        assert_eq!(builds, 2);
+
+        // ...and so must the frame-targets generation alone (the P13 component).
+        let after_targets = fetch(&mut cache, (2, 2), &mut builds);
+        assert!(
+            !Rc::ptr_eq(&after_targets, &after_atmos),
+            "a targets-generation bump did not rebuild the bind group"
+        );
+        assert_eq!(builds, 3);
+
+        // Returning to a previously-seen key still rebuilds: the cache is one
+        // slot, not a map, so it can never hand back a handle to a resource that
+        // has since been recreated under the same number.
+        let back = fetch(&mut cache, (1, 1), &mut builds);
+        assert!(!Rc::ptr_eq(&back, &first));
+        assert_eq!(builds, 4);
+    }
+
+    /// A key that ignores one of its inputs is exactly the regression this guards,
+    /// so assert the tuple is injective in both components rather than trusting
+    /// the call site.
+    #[test]
+    fn resource_key_is_injective_in_both_components() {
+        let base: ResourceKey = (7, 11);
+        assert_ne!(base, (8, 11), "targets generation dropped from the key");
+        assert_ne!(base, (7, 12), "atmosphere generation dropped from the key");
+        assert_eq!(base, (7, 11));
     }
 }
 

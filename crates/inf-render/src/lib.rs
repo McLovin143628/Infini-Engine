@@ -9,6 +9,7 @@
 //! f64 world space; the [`RenderView`]'s floating origin converts to f32
 //! render-local at upload. Depth is reverse-infinite Z.
 
+pub mod atmosphere;
 pub mod camera;
 pub mod caps;
 pub mod csm;
@@ -28,6 +29,10 @@ pub mod scene;
 pub mod settings;
 pub mod surface;
 
+pub use atmosphere::{
+    camera_radius_km, extinction, height_fog_optical_depth, height_fog_transmittance,
+    transmittance_to_top, AtmosphereParams, AtmosphereQuality, HeightFog,
+};
 pub use camera::{
     ortho_reverse_z, OrthoParams, RenderView, DEPTH_CLEAR, DEPTH_COMPARE, DEPTH_FORMAT,
 };

@@ -4,7 +4,7 @@
 //! save (then round-trip byte-identically).
 
 use glam::DVec3;
-use inf_ecs::components::{Material, Transform};
+use inf_ecs::components::{Material, SkyAtmosphere, TimeOfDay, Transform};
 use inf_ecs::math::{Color, Vec3d};
 
 use crate::ipc::SpawnKind;
@@ -43,21 +43,66 @@ pub fn build(doc: &mut SceneDoc) {
 
     // Lighting.
     let lighting = doc.create(SpawnKind::Empty, "Lighting", None);
-    let sun = doc.create(SpawnKind::DirectionalLight, "Sun", Some(lighting));
-    set_transform(
-        doc,
-        sun,
-        Transform {
-            translation: Vec3d::new(0.0, 8.0, 0.0),
-            rotation: Vec3d::new(-50.0, -30.0, 0.0),
-            scale: Vec3d::ONE,
-        },
-    );
+    add_sky(doc, lighting);
     let fill = doc.create(SpawnKind::PointLight, "FillLight", Some(lighting));
     set_transform(doc, fill, translate(4.0, 3.0, 4.0));
 
     doc.world_mut().propagate();
     doc.mark_saved();
+}
+
+/// Give the default scene the **sky authority** — the `TimeOfDay` +
+/// `SkyAtmosphere` pair that makes a new level's sky the physically-based one
+/// (P17.2; the Phase-17 "done when"). Existing levels are untouched: this runs
+/// only when a fresh document is built.
+///
+/// ## Why this REPLACED the demo's directional light rather than joining it
+///
+/// `project_sky` pushes the sun as a directional light in **both** hosts, so a
+/// level carrying a `TimeOfDay` *and* an authored `Sun` would be lit twice, from
+/// two unrelated directions, and would cast two sets of shadows. The time of day
+/// is the sun now; the old `DirectionalLight` at `(-50°, -30°, 0°)` has no job
+/// left. (A level that would rather author its own suns still can — that is what
+/// `SkyAtmosphere::enabled = false` is for.)
+///
+/// ## Why the actor is called `Sky` and lives here
+///
+/// `SceneDoc::edit_time_of_day` — what World Settings calls when a *clockless*
+/// level opts in — creates an actor with exactly this name and these two
+/// components. Matching it means a user who learns the sky on a default level
+/// recognises it on any other, and means `edit_time_of_day` finds this one
+/// instead of conjuring a second (it resolves the authority by lowest `Guid`, so
+/// there is never a second clock).
+///
+/// ## Why the defaults are the *component* defaults, untouched
+///
+/// "What a new level gets" and "what these components mean" being the same thing
+/// is worth more than a tuned demo — there is then nothing to explain twice, and
+/// the golden that pins this look (`inf-render`'s `sky_noon`/`editor_default`) is
+/// pinning the documented defaults rather than a private tweak. They are good
+/// defaults on their own terms:
+///
+/// * **10:00 UTC, day 172, 48.9° N** puts the sun ≈ 55° up — high enough for a
+///   saturated blue zenith and a bright, clean key, low enough to keep a
+///   *direction*. A noon sun lights everything from straight overhead and
+///   flattens exactly the geometry the default scene exists to show.
+/// * **`rate = 0`** freezes the clock. An idle editor must never move the sun,
+///   because moving it would dirty the document under a user who touched nothing.
+/// * **no height fog** (`fog_density = 0`). At this scene's 20 m scale any
+///   density that would read at a distance is invisible here, so a nonzero
+///   default would be a knob that appears to do nothing. Aerial perspective is
+///   already on, already physical, and already correct at every scale.
+fn add_sky(doc: &mut SceneDoc, parent: uuid::Uuid) {
+    let sky = doc.create(SpawnKind::Empty, "Sky", Some(parent));
+    let Some(e) = doc.entity_of(sky) else {
+        debug_assert!(false, "the Sky actor was just created");
+        return;
+    };
+    let world = doc.world_mut();
+    let mut entity = world.world_mut().entity_mut(e);
+    entity.insert(TimeOfDay::default());
+    entity.insert(SkyAtmosphere::default());
+    world.mark_dirty();
 }
 
 fn translate(x: f64, y: f64, z: f64) -> Transform {

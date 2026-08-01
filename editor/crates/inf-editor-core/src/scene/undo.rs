@@ -713,4 +713,222 @@ mod tests {
         assert!(doc.undo());
         assert!(!doc.can_undo());
     }
+
+    /// P17.2: the atmosphere is edited through the same one-step door as the
+    /// clock, on the same authority — and the first edit on a clockless level
+    /// creates BOTH components inside that single step, because an atmosphere
+    /// with no clock beside it is the inert shape `inf_ecs::sky` warns about.
+    #[test]
+    fn sky_atmosphere_edit_creates_the_authority_in_one_undo_step() {
+        use inf_ecs::components::SkyAtmosphere;
+
+        let mut doc = SceneDoc::new();
+        let entities = doc.order().len();
+        let undos = doc.undo_len();
+        assert!(doc.sky_atmosphere().is_none(), "a new level has no sky");
+
+        let authored = SkyAtmosphere {
+            physical: true,
+            turbidity: 2.5,
+            fog_density: 6.0e-4,
+            fog_height: 120.0,
+            star_intensity: 0.4,
+            ..SkyAtmosphere::default()
+        };
+        let guid = doc.edit_sky_atmosphere(authored, true).expect("created");
+
+        assert_eq!(doc.sky_atmosphere(), Some(authored));
+        assert_eq!(doc.sky_authority(), Some(guid));
+        // The clock came with it, at its defaults — the level is now a complete
+        // sky authority, not half of one.
+        assert_eq!(
+            doc.time_of_day(),
+            Some(inf_ecs::components::TimeOfDay::default())
+        );
+        assert_eq!(doc.order().len(), entities + 1, "one Sky actor appeared");
+        assert_eq!(
+            doc.undo_len(),
+            undos + 1,
+            "create + both components + every field collapse into ONE step"
+        );
+
+        // One Ctrl+Z takes the whole opt-in back out; redo restores it exactly.
+        assert!(doc.undo());
+        assert!(doc.sky_atmosphere().is_none());
+        assert_eq!(doc.order().len(), entities);
+        assert!(doc.redo());
+        assert_eq!(doc.sky_atmosphere(), Some(authored));
+
+        // An idempotent edit records nothing.
+        let undos = doc.undo_len();
+        doc.edit_sky_atmosphere(authored, true);
+        assert_eq!(doc.undo_len(), undos, "no-op edit records nothing");
+    }
+
+    /// The same finding-3 guard the clock has: `create: false` on a level with no
+    /// authority must be a total no-op, so a World Settings write that merely
+    /// echoes the previewed atmosphere defaults back cannot conjure a `Sky` actor
+    /// while somebody is editing gravity.
+    #[test]
+    fn sky_atmosphere_without_create_never_conjures_an_authority() {
+        use inf_ecs::components::SkyAtmosphere;
+
+        let mut doc = SceneDoc::new();
+        let entities = doc.order().len();
+        let undos = doc.undo_len();
+        let version = doc.version();
+
+        assert_eq!(
+            doc.edit_sky_atmosphere(SkyAtmosphere::default(), false),
+            None
+        );
+        assert_eq!(doc.order().len(), entities);
+        assert_eq!(doc.undo_len(), undos);
+        assert_eq!(doc.version(), version, "a no-op must not bump the version");
+        assert!(!doc.is_dirty());
+
+        // With `create`, the same call opts in …
+        let guid = doc
+            .edit_sky_atmosphere(SkyAtmosphere::default(), true)
+            .expect("opted in");
+        assert_eq!(doc.sky_authority(), Some(guid));
+
+        // … and afterwards `create: false` still writes the existing authority.
+        let hazy = SkyAtmosphere {
+            turbidity: 4.0,
+            ..SkyAtmosphere::default()
+        };
+        assert_eq!(doc.edit_sky_atmosphere(hazy, false), Some(guid));
+        assert_eq!(doc.sky_atmosphere(), Some(hazy));
+    }
+
+    /// The DTO deliberately carries no colours, so a World Settings write must
+    /// leave a Details-authored sun/moon/gradient colour alone. This is the
+    /// overlay contract that `SkyAtmosphereDto::to_component` implements and the
+    /// Ring-2 command relies on.
+    #[test]
+    fn atmosphere_dto_overlay_preserves_authored_colours() {
+        use crate::ipc::SkyAtmosphereDto;
+        use inf_ecs::components::SkyAtmosphere;
+        use inf_ecs::math::Color;
+
+        let mut doc = SceneDoc::new();
+        let authored_sun = Color::new(1.0, 0.4, 0.1, 1.0);
+        doc.edit_sky_atmosphere(
+            SkyAtmosphere {
+                sun_color: authored_sun,
+                ..SkyAtmosphere::default()
+            },
+            true,
+        )
+        .expect("created");
+        // …except the DTO cannot carry that colour, so write it through the
+        // component path the Details grid uses.
+        let guid = doc.sky_authority().unwrap();
+        let tp = doc
+            .world()
+            .registry()
+            .type_path_for("SkyAtmosphere")
+            .unwrap();
+        doc.edit_set_prop(
+            guid,
+            tp,
+            "sun_color",
+            &inf_ecs::props::PropValue::Color([1.0, 0.4, 0.1, 1.0]),
+        );
+        assert_eq!(doc.sky_atmosphere().unwrap().sun_color, authored_sun);
+
+        // Now do what the panel does: project, change one number, write back.
+        let mut dto = SkyAtmosphereDto::from_doc(&doc);
+        assert!(dto.present);
+        dto.fog_density = 5.0e-4;
+        let base = doc.sky_atmosphere().unwrap();
+        doc.edit_sky_atmosphere(dto.to_component(base), dto.present);
+
+        let after = doc.sky_atmosphere().unwrap();
+        assert_eq!(after.fog_density, 5.0e-4);
+        assert_eq!(
+            after.sun_color, authored_sun,
+            "a fog edit erased the authored sun colour"
+        );
+    }
+
+    /// Nonsense from a hand-crafted IPC payload is clamped, never stored — a
+    /// `NaN` turbidity would blank the sky and a negative fog density would make
+    /// the exponential integral blow up.
+    #[test]
+    fn atmosphere_dto_clamps_hostile_input() {
+        use crate::ipc::SkyAtmosphereDto;
+        use inf_ecs::components::SkyAtmosphere;
+
+        let hostile = SkyAtmosphereDto {
+            present: true,
+            enabled: true,
+            physical: true,
+            sky_intensity: f32::NAN,
+            turbidity: -5.0,
+            mie_anisotropy: 12.0,
+            sun_disc_deg: -1.0,
+            moon_disc_deg: 1e9,
+            star_intensity: f32::INFINITY,
+            tint_strength: 4.0,
+            aerial_perspective: -2.0,
+            fog_density: -1.0,
+            fog_falloff: f32::NAN,
+            fog_height: 0.0,
+        };
+        let a = hostile.to_component(SkyAtmosphere::default());
+        assert_eq!(a.sky_intensity, 1.0, "NaN fell back to the default");
+        assert_eq!(a.turbidity, 0.0);
+        assert_eq!(a.mie_anisotropy, 0.95);
+        assert_eq!(a.sun_disc_deg, 0.0);
+        assert_eq!(a.moon_disc_deg, 90.0);
+        assert_eq!(a.star_intensity, 1.0);
+        assert_eq!(a.tint_strength, 1.0);
+        assert_eq!(a.aerial_perspective, 0.0);
+        assert_eq!(a.fog_density, 0.0);
+        assert_eq!(a.fog_falloff, 0.002);
+        // Everything the DTO does not carry is untouched.
+        assert_eq!(a.zenith, SkyAtmosphere::default().zenith);
+    }
+
+    /// The Phase-17 "done when": a **new** level's sky is the physical one. The
+    /// default scene carries the authority pair, and — the part that is easy to
+    /// get wrong — it does NOT also carry a hand-authored directional sun, which
+    /// would light the level twice from two directions.
+    #[test]
+    fn the_default_scene_has_a_physical_sky_and_only_one_sun() {
+        use inf_ecs::components::{Light, LightKind};
+
+        let doc = SceneDoc::with_demo();
+        let sky = doc.sky_atmosphere().expect("the default level has a sky");
+        assert!(sky.physical, "the default sky is the physical one");
+        assert!(sky.enabled, "the default sun lights the scene");
+        assert_eq!(
+            doc.time_of_day(),
+            Some(inf_ecs::components::TimeOfDay::default()),
+            "the default clock is the documented 10:00 default"
+        );
+        assert_eq!(
+            doc.time_of_day().unwrap().rate,
+            0.0,
+            "an idle editor must not move the sun"
+        );
+
+        // No authored directional light: the time of day IS the sun.
+        let world = doc.world().world();
+        let directional = world
+            .iter_entities()
+            .filter_map(|e| e.get::<Light>())
+            .filter(|l| l.kind == LightKind::Directional)
+            .count();
+        assert_eq!(
+            directional, 0,
+            "the default scene has both a sky sun and an authored one — it would be lit twice"
+        );
+
+        // The authority is the actor World Settings would have created.
+        let guid = doc.sky_authority().expect("authority");
+        assert_eq!(doc.display_name(guid), "Sky");
+    }
 }

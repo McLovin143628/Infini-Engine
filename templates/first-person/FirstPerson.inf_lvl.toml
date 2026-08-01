@@ -1,5 +1,5 @@
-schema_version = 11
+schema_version = 12
 guid = "00000000-0000-0000-0000-000084060000"
 title = "First Person"
 entity_count = 4
-content_hash = "676af869db6c0426"
+content_hash = "44b37da5e9df4ed9"

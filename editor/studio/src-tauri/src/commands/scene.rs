@@ -702,6 +702,16 @@ pub async fn scene_set_settings(
             settings.time_of_day.to_component(),
             settings.time_of_day.present,
         );
+        // The atmosphere (P17.2) rides the same authority entity and the same
+        // create guard. It overlays the level's CURRENT component rather than
+        // rebuilding one, so the `Color` fields the DTO deliberately omits (sun,
+        // moon and the three gradient colours, all edited in Details) survive a
+        // fog-slider drag.
+        let base = doc.sky_atmosphere().unwrap_or_default();
+        doc.edit_sky_atmosphere(
+            settings.atmosphere.to_component(base),
+            settings.atmosphere.present,
+        );
     }
     emit_world_delta(&app, &state);
     Ok(())

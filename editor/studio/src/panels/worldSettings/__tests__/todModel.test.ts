@@ -7,6 +7,7 @@ import {
   compassPoint,
   DAYS_PER_YEAR,
   formatClock,
+  fogVisibility,
   formatClockSeconds,
   SECONDS_PER_DAY,
   sunLabel,
@@ -66,5 +67,51 @@ describe("World Settings time-of-day model (P17.1)", () => {
     expect(compassPoint(359)).toBe("N");
     expect(compassPoint(-90)).toBe("W");
     expect(compassPoint(NaN)).toBe("—");
+  });
+});
+
+describe("height-fog visibility label (P17.2)", () => {
+  it("reports clear air for zero or nonsense density", () => {
+    expect(fogVisibility(0)).toBe("clear (no fog)");
+    expect(fogVisibility(-1)).toBe("clear (no fog)");
+    expect(fogVisibility(Number.NaN)).toBe("clear (no fog)");
+  });
+
+  it("converts m^-1 extinction to Koschmieder visibility", () => {
+    // V = 3 / sigma.
+    expect(fogVisibility(4e-4)).toBe("~7.5 km");
+    expect(fogVisibility(1.5e-3)).toBe("~2.0 km");
+    expect(fogVisibility(3e-4)).toBe("~10 km");
+    expect(fogVisibility(0.01)).toBe("~300 m");
+    expect(fogVisibility(1)).toBe("< 10 m");
+  });
+
+  it("reports a shorter visibility as density rises", () => {
+    // Parse the label back out rather than re-deriving 3/sigma locally: a test
+    // that recomputes the formula it is testing proves only that arithmetic works.
+    const metres = (label: string): number => {
+      if (label === "< 10 m") return 5;
+      const m = /^~([\d.]+) (km|m)$/.exec(label);
+      expect(m, `unparsable visibility label: ${label}`).not.toBeNull();
+      const [, value, unit] = m!;
+      return Number(value) * (unit === "km" ? 1000 : 1);
+    };
+    let previous = Number.POSITIVE_INFINITY;
+    let saturated = false;
+    for (let d = 1e-5; d < 1; d *= 2) {
+      const label = fogVisibility(d);
+      const current = metres(label);
+      if (label === "< 10 m") {
+        // The label saturates rather than reporting centimetres; once there it
+        // stays there.
+        saturated = true;
+        expect(current).toBeLessThanOrEqual(previous);
+      } else {
+        expect(saturated, "visibility came back after saturating").toBe(false);
+        expect(current).toBeLessThan(previous);
+      }
+      previous = current;
+    }
+    expect(saturated, "the sweep never reached the saturated label").toBe(true);
   });
 });

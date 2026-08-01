@@ -1385,6 +1385,170 @@ atmosphere, fog, cloud, or TOD code exists anywhere.
 > visual pass — dawn/dusk colour, the night gradient, the sun glow at grazing angles — is
 > human-verified, as every GPU path here is.
 
+> **STATUS: P17.2 COMPLETE** (2026-08-01) — **local gates green; CI pending push.** The
+> 44-line gradient is gone. The sky is a Hillaire-2020-class **transmittance + sky-view LUT
+> pair** baked by two compute passes, sampled by a rewritten `sky.wgsl` that also draws the sun
+> and moon discs and a procedural starfield, and re-used by every lit pass for **aerial
+> perspective + exponential height fog**. `SkyAtmosphere` grew the physical block, and a **new
+> level now boots with a real sky** — the Phase-17 done-when.
+>
+> **Where the physics lives.** `inf_render::atmosphere` is pure and GPU-free: the medium
+> (Rayleigh `exp(-h/8 km)`, Mie `exp(-h/1.2 km)` with Cornette-Shanks `g = 0.8`, and the ozone
+> tent at 25 ± 15 km that is the whole reason a twilight sky stays blue instead of going
+> muddy), both LUT parameterizations, and the closed-form height-fog integral. So the physics
+> is unit-tested on **every** CI leg, including the ones with no adapter where the golden
+> harness skips: transmittance is monotone with altitude per channel, a ray into the planet is
+> opaque, turbidity scales the aerosol terms and nothing else, and a 0.5°-elevation sun is
+> **> 10× redder** (r/b) than an overhead one with blue down under 2 % — the single assertion
+> that catches a swapped wavelength triple. Every function has a WGSL mirror named in its doc
+> comment.
+>
+> **Units, stated once and enforced.** Atmospheric optics is kilometres and km⁻¹ and fighting
+> that would be worse than documenting it, so `inf_render::atmosphere` — and only it — works in
+> km. `HeightFog` is **SI metres** throughout (m⁻¹ extinction and falloff, metre altitudes),
+> because fog is authored against level geometry rather than against a planet; the single
+> conversion happens in `camera_radius_km`. Architecture rule 6 is satisfied by saying which
+> unit each quantity is in, not by pretending the engine has only one.
+>
+> **The LUT parameterizations are the load-bearing choice.** Transmittance uses Bruneton's
+> `(u = distance-to-atmosphere-top between its two extremes, v = distance-to-horizon)` mapping
+> rather than a linear `mu`, because a linear mapping spends most of a 256×64 texture on the
+> ~identical overhead directions and bands the sunset. Sky view uses Hillaire's horizon-pivoted
+> warp: `v = 0.5` is **exactly** the horizon and both halves are sqrt-compressed toward it,
+> where the gradient is steepest; `u` is the azimuth relative to the sun, sqrt-warped toward it
+> where the Mie halo lives. Both mappings round-trip in unit tests, and the sky-view warp is
+> asserted monotone with the horizon on the seam — a bad parameterization shows up as a black
+> line across the sky, and that is a test, not a bug report.
+>
+> **Version gating, two different keys.** The transmittance LUT is a function of the **medium
+> and the shell alone** — not the sun, not the camera — so it is baked on the first enabled
+> frame and then essentially never again. The sky-view LUT additionally keys on the sun
+> direction, the sun's radiance, the exposure and the camera radius **quantized to whole
+> metres**, so a hovering flycam does not re-bake 60 times a second over sub-millimetre jitter
+> that cannot change anything at a 6360 km radius. Both keys are `to_bits()` tuples, so a `NaN`
+> parameter cannot make the cache thrash. Unit-tested as a property: moving the sun must not
+> touch the medium key, a 248 m climb must move the view key, a 0.4 m one must not, and a fog
+> change — a *receiver* parameter — must move neither.
+>
+> **The `EnvBinding` invariant, extended as its own comment predicted.** P13 wrote: *"If
+> shadow/GI resources ever become resizable, this key MUST incorporate their generation."* The
+> atmosphere LUTs are the first resizable resource in that bind group — `AtmosphereQuality` is
+> clamped **down** by `RenderTier` at runtime, which recreates both textures at a new size — so
+> the cache key is now the pair `(targets.generation, atmosphere.generation)` and
+> `AtmosphereResources` carries a monotonic generation the renderer bumps on every recreation.
+> The failure mode is **quiet**, which is what makes the gate's shape matter: wgpu keeps the old
+> texture alive as long as a bind group references it, so a stale key does not validate-error and
+> does not blank the frame — the pass simply keeps sampling the previous quality's LUT. So
+> `atmosphere_quality_switch_rebuilds_the_env_bind` asserts on the *lit region* of a distant
+> fogged wall (near geometry has no aerial term to speak of, and a whole-frame compare is
+> satisfied by the separately-keyed sky pass), and the adapter-free
+> `pointer_identity_changes_only_when_the_key_does` pins the same rule on a refcounted stand-in
+> payload. Both were mutation-verified: dropping the atmosphere generation from the key, and
+> making the cache ignore its key entirely, each fail. Shadow/GI stay out of the key, still
+> created once, and the comment now says so explicitly rather than by omission.
+>
+> **vgeom joined the lit family.** `vgeom_mesh.wgsl` was the one lit shader still on the
+> AO-only bind (`ShaderKind::Plain` + `AoBinding`), which meant `lit_scene_shader` did *not*
+> in fact reach it — so meshlet geometry would have been the only surface in the engine with no
+> aerial perspective. It is now `ShaderKind::Lit(2)` on the shared `EnvBinding`, `AoBinding` is
+> deleted as its last user, and both vgeom goldens are byte-identical.
+>
+> **Byte-stability of the off path — measured, not asserted.** The atmosphere is **disabled by
+> default** and every consumer branches on one uniform flag; the gradient body survives verbatim
+> inside `gradient_sky()`, and each lit shader still computes its historic fixed haze and only
+> then overwrites it when the flag is set. Verified the hard way: `INF_BLESS_GOLDENS=1` was run
+> over the whole suite and `git status` reported **zero** changes to the 23 pre-P17.2 golden
+> PNGs — byte-identical, not within-tolerance. That covers the recomposed shader table, the four
+> new `EnvBinding` bindings and the vgeom bind-group swap.
+>
+> **Goldens added (6, none re-blessed):** `sky_dawn` / `sky_noon` / `sky_dusk` / `sky_night` —
+> the TOD sweep P17.4 extends, built from `inf_math::solar` at the *component defaults* so they
+> picture what a level actually gets rather than a tuned demo; `aerial_fog` — two walls of
+> identical albedo and identical screen size at 50 m and 1500 m (the far one is the near one
+> scaled 30× about the eye), so every pixel of difference between them **is** the atmosphere;
+> `editor_default` — the default clock's look. The structural assertions are ratios and
+> region comparisons, not absolute pixels: the horizon out-brightens and de-saturates against
+> the zenith at noon, the twilight band is measurably redder than the zenith at both dawn *and*
+> dusk (kept as two goldens because their azimuths differ by ~100°), the night field carries
+> star **contrast** rather than a raised black level, and the far wall converges on the sky in
+> RGB distance. That last one is deliberate: "gets bluer" would be *wrong* and fails — a hazy
+> noon horizon is whiter than the blue hemispheric ambient, so distant geometry gets less blue
+> while becoming more sky-coloured.
+>
+> **Determinism.** `atmosphere_luts_are_deterministic` reads both baked textures back and
+> byte-compares two independent bakes — one level below the frame, so a nondeterministic march
+> surfaces here instead of as a flaky pixel three passes downstream. The starfield is
+> **integer-hash only, no trig anywhere**, per the spirit of the psin/pcos law: it is a pure
+> function of world direction, byte-identical across renders, and yaws with the camera rather
+> than sticking to the screen (both asserted).
+>
+> **The one honest approximation.** Aerial perspective is a v1 without a froxel volume: the
+> eye→surface segment is treated as homogeneous at the camera's local extinction, and the
+> in-scattered colour is the sky-view LUT **with the elevation clamped at the horizon**. That
+> clamp is not a fudge — below the horizon the LUT means "the planet seen through air", whereas
+> a surface 800 m away needs "the air column between here and there", which for any horizontal
+> or downhill ray *is* the horizon's column. Without the clamp distant downhill geometry gets
+> **darker** with distance, the exact opposite of aerial perspective (caught by the
+> `aerial_fog` golden, which is why it exists). Hillaire's 3D aerial-perspective LUT is the
+> documented follow-up, as is the 32×32 multiple-scattering LUT that the single
+> `ATMOS_MULTI_SCATTER` constant currently stands in for.
+>
+> **Schema v12 — the bump the batch was told to avoid, and why it could not be.** `#[serde(default)]`
+> rescues *self-describing* formats. `.inf_lvl` payloads are **bincode**, which reads a fixed
+> field count positionally, so after growing `SkyAtmosphere` by 13 fields a v11 record **stops
+> short** of what the decoder now expects — and the decoder, having no length to stop at, reads
+> straight on into the next entity's bytes. Silently. That is the
+> same root cause as the standing `skip_serializing_if` law, and it is exactly what the
+> frozen-record scheme exists for. The v8→v9 `TerrainV8` precedent applies verbatim: only a
+> component's shape changed, so no entity slot moved, `SkyAtmosphereV11` + `EntityRecordV11` +
+> `SceneFileV11` are frozen in **both** codecs, and `into_current` lifts a v11 level with the
+> physical block at its defaults — a gradient sky and no fog, which is precisely what a v11
+> level meant. `v12_atmosphere_is_wider_on_the_wire_than_v11` pins the delta at exactly
+> **61 bytes** (1 bool + 11 f32 + a 4×f32 `Color`), which is the mechanical proof that no serde
+> attribute could have covered it. Every sample and template changed by **one byte, at offset 0**
+> (`11` → `12`); no committed content carries a `SkyAtmosphere`, so the 61-byte block never
+> appears in them.
+>
+> **The default level's sun is now the time of day.** `demo::build` gains the `Sky` authority
+> pair — named and shaped exactly like what World Settings creates, so a user who learns it once
+> recognises it everywhere — and **loses its authored `DirectionalLight`**, because `project_sky`
+> pushes the sun as a directional light in both hosts and a level carrying both would be lit
+> twice from two directions and cast two sets of shadows. The defaults are the *component*
+> defaults untouched, which is worth more than a tuned demo: 10:00 UTC on day 172 at 48.9° N
+> puts the sun ≈ 55° up — high enough for a saturated blue zenith, low enough to keep a
+> direction, where a noon sun would flatten exactly the geometry the scene exists to show;
+> `rate = 0` so an idle editor never moves the sun and never dirties the document under a user
+> who touched nothing; and no height fog, because at a 20 m scene's scale any density that reads
+> at distance is invisible here and would be a knob that appears to do nothing.
+>
+> **World Settings** grew an Atmosphere section — physical-sky and sun-lights-scene toggles,
+> sky intensity, turbidity, haze anisotropy, disc sizes, stars, gradient tint, aerial-perspective
+> strength and the three fog rows, plus a live **visibility readback** (Koschmieder `3/σ`), because
+> "0.0004 per metre" means nothing to an author and "~7.5 km" is checkable against their level.
+> `SkyAtmosphereDto` is deliberately numeric-and-boolean only: the five `Color` fields stay in
+> the Details grid, which already has a colour widget. It therefore **overlays** rather than
+> rebuilds — a fog-slider drag must not silently reset an authored sun colour, which is a test.
+> `edit_sky_atmosphere` mirrors `edit_time_of_day` exactly, including the `create` guard that
+> stops a gravity edit from conjuring a sky, and creating goes *through* `edit_time_of_day` so
+> there is one definition of what a sky authority is and the clock always lands first.
+>
+> **Tiers + cost.** `AtmosphereQuality` (256×64 / 192×108 at High down to 128×32 / 96×54 at Low,
+> with 40/32 down to 24/16 march steps and the star density scaled with it) is clamped down by
+> `RenderTier::apply` and `clamp_mobile` — never up, like every other capability knob. A tier
+> never turns the sky **off**: a sky the level authored must still be a sky on a weak GPU. The
+> sky-view bake is ~20 k threads × 32 steps at High and only runs when the sun or the camera's
+> altitude actually moved; it replaces a per-pixel march for every sky pixel at any output
+> resolution. Frame budget measured **0.17 ms/frame** (33 ms budget) and the sim step **0.040
+> ms** (2 ms) — untouched, as expected: this is all render-side.
+>
+> **Honest scope:** no clouds, no weather, no precipitation (P17.3/4). The moon's phase
+> terminator is the right *shape* (an ellipse at `cos 2πφ`) but its roll about the view axis is
+> pinned to the local horizontal rather than derived from the ecliptic — documented in the
+> shader, and invisible at 0.5° across. GI probe radiance still reads the gradient constants
+> rather than the sky-view LUT (P18.4 owns that). The `night_darkening` / gradient-tint path
+> remains the artistic override at strength 0 by default. The visual pass — that the four sweep
+> images and the default level actually look good — is human-verified, as every GPU path here is.
+
 - **P17.1 Sun & time of day** — 1. kill the `SUN_DIR` const: a `SkyAtmosphere` + `TimeOfDay`
   world-component set (components + registry + schema records) projected in both scene
   builders; 2. deterministic solar math (date/latitude → sun and moon position); 3. TOD
@@ -1404,6 +1568,15 @@ Schema **v11**: the sky-authority pair — a `TimeOfDay` clock (UTC seconds, day
 latitude/longitude, rate) and a `SkyAtmosphere` block (sun/moon colour + intensity, the
 three gradient colours, night darkening) as entity slots in both codecs (P17.1). The file
 settings are untouched, so only the entity record froze.
+
+Schema **v12**: `SkyAtmosphere` grows the physical-atmosphere block (P17.2) — physical-sky
+flag, sky intensity, turbidity, Mie anisotropy, sun/moon disc diameters, star intensity,
+gradient-tint strength, aerial-perspective strength, and the SI-metre height-fog quartet
+(density, falloff, height, colour). Bincode is positional, so growing a component **is** a
+wire-format change: the v11 shape freezes as `SkyAtmosphereV11` inside `EntityRecordV11` /
+`SceneFileV11` in both codecs, exactly the v8→v9 `TerrainV8` precedent (a component's layout
+changed; no entity slot moved). `into_current` lifts a v11 level with the new block at its
+defaults — a gradient sky and no fog, which is what a v11 level meant.
 
 ### Phase 18 — Lumen-class GI & virtualized-geometry completion
 

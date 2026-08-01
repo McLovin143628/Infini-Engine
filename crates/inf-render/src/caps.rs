@@ -74,6 +74,10 @@ impl RenderTier {
                 settings.gi.enabled = false;
             }
         }
+        // The atmosphere is never turned *off* by a tier — a sky the level
+        // authored must still be a sky on a weak GPU — but its LUT sizes and
+        // march counts scale down (P17.2). `clamp_to` only ever lowers.
+        settings.atmosphere.quality = settings.atmosphere.quality.clamp_to(self);
         settings
     }
 
@@ -108,6 +112,8 @@ impl RenderTier {
         settings.taa = false;
         settings.bloom.enabled = false;
         settings.shadows.enabled = false;
+        // A phone still gets a sky — at the smallest LUTs and the fewest steps.
+        settings.atmosphere.quality = settings.atmosphere.quality.clamp_to(RenderTier::Low);
         settings
     }
 }

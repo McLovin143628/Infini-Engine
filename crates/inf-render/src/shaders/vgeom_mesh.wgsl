@@ -132,8 +132,11 @@ struct Lights {
 };
 @group(1) @binding(0) var<uniform> lights: Lights;
 
-@group(2) @binding(0) var ao_tex: texture_2d<f32>;
-@group(2) @binding(1) var ao_smp: sampler;
+// AO + cascaded shadows + dynamic GI + the atmosphere ride the shared env bind
+// group at @group(2) (declared in env_lighting.wgsl / atmosphere*.wgsl, prepended
+// by `lit_scene_shader` — P17.2 promoted this pass from the AO-only bind to the
+// same env bind every other lit pass uses, so aerial perspective reaches meshlet
+// geometry too).
 
 const PI: f32 = 3.14159265359;
 
@@ -256,7 +259,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     let dist = length(in.world_pos - view.eye.xyz);
     let haze = 1.0 - exp(-dist * 0.004);
-    let col = mix(lo, vec3<f32>(0.055, 0.081, 0.120), haze * 0.4);
+    var col = mix(lo, vec3<f32>(0.055, 0.081, 0.120), haze * 0.4);
+    if (atmos.params.x > 0.5) {
+        col = atmos_apply(lo, in.world_pos);
+    }
 
     return vec4<f32>(col, in.color.a);
 }

@@ -1,5 +1,17 @@
-//! Sky gradient node: first scene pass; clears color + depth for the frame,
-//! then fills the background (depth writes off, everything else draws over).
+//! Sky node: first scene pass; clears color + depth for the frame, then fills
+//! the background (depth writes off, everything else draws over).
+//!
+//! Since P17.2 it draws one of two things, selected by the scene's
+//! [`AtmosphereParams::enabled`](crate::atmosphere::AtmosphereParams::enabled):
+//!
+//! * the schema-v11 three-colour gradient (every level without a `TimeOfDay`
+//!   authority — the byte-stable path), or
+//! * the physical sky: the sky-view LUT baked by [`super::sky_lut`], the sun and
+//!   moon discs, and the procedural starfield.
+//!
+//! The pass binds the gradient uniform at `@group(1) @binding(0)` — exactly where
+//! it always was — and the atmosphere block is *appended* at 1..4, so the
+//! gradient path's shader arithmetic is unchanged.
 
 use crate::camera::{DEPTH_CLEAR, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
@@ -17,7 +29,11 @@ struct SkyUniforms {
 pub struct SkyNode {
     pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    bgl: wgpu::BindGroupLayout,
+    /// Cached against the atmosphere resources' generation — the LUT views are
+    /// recreated when the quality tier changes. Nothing here is size-dependent,
+    /// so the frame-target generation is deliberately NOT part of the key.
+    bind_group: super::GenCache<u64, wgpu::BindGroup>,
     /// The sky params the uniform buffer currently holds; skip the re-upload while
     /// unchanged (the buffer is created empty, so the first frame always writes).
     uploaded: Option<crate::scene::SkyParams>,
@@ -39,29 +55,46 @@ impl SkyNode {
             mapped_at_creation: false,
         });
 
+        let frag = wgpu::ShaderStages::FRAGMENT;
+        let uniform = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: frag,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let lut = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: frag,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
         let bgl = gpu
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("sky"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    // 0 = the authored gradient (pre-P17.2 binding, unmoved).
+                    uniform(0),
+                    // 1..4 = the atmosphere block (P17.2).
+                    uniform(1),
+                    lut(2),
+                    lut(3),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: frag,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
                     },
-                    count: None,
-                }],
+                ],
             });
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sky"),
-            layout: &bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniforms.as_entire_binding(),
-            }],
-        });
 
         let layout = gpu
             .device
@@ -111,7 +144,8 @@ impl SkyNode {
         Self {
             pipeline,
             uniforms,
-            bind_group,
+            bgl,
+            bind_group: super::GenCache::default(),
             uploaded: None,
         }
     }
@@ -139,6 +173,43 @@ impl RenderNode for SkyNode {
             self.uploaded = Some(*sky);
         }
 
+        // The atmosphere LUT views are recreated when the quality tier changes,
+        // so the bind group is keyed on their generation (the same discipline
+        // `EnvBinding` follows).
+        let atmos = frame.atmosphere;
+        let (bgl, uniforms) = (&self.bgl, &self.uniforms);
+        let bind_group = self
+            .bind_group
+            .get_or_build(atmos.generation, || {
+                gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sky"),
+                    layout: bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: uniforms.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: atmos.uniform.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&atmos.transmittance),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&atmos.sky_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::Sampler(&atmos.sampler),
+                        },
+                    ],
+                })
+            })
+            .clone();
+
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("sky"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -164,7 +235,7 @@ impl RenderNode for SkyNode {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
-        pass.set_bind_group(1, &self.bind_group, &[]);
+        pass.set_bind_group(1, &bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
 }

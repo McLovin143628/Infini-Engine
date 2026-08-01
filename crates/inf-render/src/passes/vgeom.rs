@@ -799,7 +799,9 @@ pub struct VgeomNode {
     raster_bgl: wgpu::BindGroupLayout,
     lights_buf: wgpu::Buffer,
     lights_bg: wgpu::BindGroup,
-    ao: super::AoBinding,
+    /// AO + shadows + GI + atmosphere env bind at `@group(2)` (P17.2; was the
+    /// AO-only bind, so aerial perspective now reaches meshlet geometry too).
+    env: super::EnvBinding,
     dummy_hzb: wgpu::TextureView,
     geom_cache: BTreeMap<u128, VgeomGpu>,
     draws: BTreeMap<u128, AssetDraw>,
@@ -848,7 +850,7 @@ impl VgeomNode {
             }],
         });
 
-        let ao = super::AoBinding::new(gpu);
+        let env = super::EnvBinding::new(gpu);
 
         // Group 3: the vgeom storage buffers (vertex-visible) + flags uniform.
         let vs = wgpu::ShaderStages::VERTEX;
@@ -918,7 +920,7 @@ impl VgeomNode {
                 bind_group_layouts: &[
                     Some(view_bgl),
                     Some(&lights_bgl),
-                    Some(&ao.bgl),
+                    Some(&env.bgl),
                     Some(&raster_bgl),
                 ],
                 immediate_size: 0,
@@ -969,7 +971,7 @@ impl VgeomNode {
             raster_bgl,
             lights_buf,
             lights_bg,
-            ao,
+            env,
             dummy_hzb: dummy_hzb(gpu),
             geom_cache: BTreeMap::new(),
             draws: BTreeMap::new(),
@@ -1031,7 +1033,7 @@ impl RenderNode for VgeomNode {
             [1.0, 1.0, 1.0, 0.0]
         };
 
-        let ao_bg = self.ao.bind_group(gpu, frame).clone();
+        let env_bg = self.env.bind_group(gpu, frame).clone();
 
         let flags = FlagsGpu {
             flags: [settings.debug_meshlets as u32, 0, 0, 0],
@@ -1179,7 +1181,7 @@ impl RenderNode for VgeomNode {
             pass.set_pipeline(&self.raster);
             pass.set_bind_group(0, frame.view_bg, &[]);
             pass.set_bind_group(1, &self.lights_bg, &[]);
-            pass.set_bind_group(2, &ao_bg, &[]);
+            pass.set_bind_group(2, &env_bg, &[]);
             pass.set_bind_group(3, &raster_bg, &[]);
             pass.draw_indirect(&draw.draw_args, 0);
         }

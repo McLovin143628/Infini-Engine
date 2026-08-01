@@ -269,8 +269,14 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     let lo = albedo * (ambient * ao + direct) + spec_term;
 
     // HDR-linear haze; the post tonemap pass (ACES + exposure) runs afterward.
+    // P17.2: replaced by physical aerial perspective + height fog when the scene
+    // has an atmosphere. Terrain is the pass that shows this off — it is the only
+    // geometry that reliably reaches the horizon.
     let dist = length(in.world_local - view.eye.xyz);
     let haze = 1.0 - exp(-dist * 0.0025);
-    let col = mix(lo, vec3<f32>(0.055, 0.081, 0.120), haze * 0.5);
+    var col = mix(lo, vec3<f32>(0.055, 0.081, 0.120), haze * 0.5);
+    if (atmos.params.x > 0.5) {
+        col = atmos_apply(lo, in.world_local);
+    }
     return vec4<f32>(col, 1.0);
 }
