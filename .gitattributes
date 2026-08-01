@@ -17,6 +17,9 @@
 *.inf_anim -text
 *.inf_skel -text
 *.inf_sm -text
+# .inf_pack: the frozen v1 pack fixture (P16.1 back-compat gate) is compared
+# byte-for-byte; a cooked ship pack is binary by construction.
+*.inf_pack -text
 *.png -text
 
 # TOML (asset sidecars included) participates in byte-determinism tests and is

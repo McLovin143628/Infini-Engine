@@ -2945,6 +2945,7 @@ name = "inf-asset"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "memmap2",
  "notify",
  "notify-debouncer-full",
  "ruzstd",

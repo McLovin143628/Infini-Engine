@@ -194,6 +194,14 @@ zstd = "0.13"
 # cook determinism is untouched; wasm reads packs (decode-only) with ruzstd. MIT
 # (on the deny allow-list). Decode-only ⇒ the browser never cooks/writes packs.
 ruzstd = "0.8"
+# ── streaming: zero-copy pack reads (Phase 16.1) ────────────────────────────
+# memmap2 maps a shipped `.inf_pack` into the address space so the runtime reads
+# an uncompressed blob as a borrowed `&[u8]` slice (`PackReader::read_ref`) with
+# no whole-file read and no copy — the substrate P16.3 terrain-tile streaming and
+# P18.2 meshlet streaming page against. inf-asset uses it NATIVE-ONLY; wasm32 has
+# no mmap and keeps the owned-bytes path. Already in the tree (winit's Wayland
+# stack pulls the same 0.9), so this pins no new crate. MIT/Apache-2.0.
+memmap2 = "0.9"
 # ── editor↔frontend shared types → committed TS bindings (CI drift-checked) ──
 ts-rs = "12"
 # test-only (dev-dependencies in member crates)

@@ -18,7 +18,10 @@ cook, and is proven byte-identical to it — so previewing never diverges from s
 
 **Cooking** turns your project into a shippable, content-addressed pack (`.inf_pack`): it resolves
 the dependency closure of your levels, validates and compiles Blueprints, and bundles everything
-into a deterministic, zstd-compressed, xxh3-verified archive with a GUID-sorted index. Rebuilds are
+into a deterministic archive with a GUID-sorted index. Most payloads are zstd-compressed;
+streaming-class assets (virtualized meshes today, terrain tiles next) are stored uncompressed and
+16-byte aligned so the runtime can read them straight out of a memory-mapped pack with no copy.
+Every blob carries an xxh3-128 hash, checked the first time that entry is read. Rebuilds are
 byte-identical. Cook from the CLI or from the editor:
 
 ```sh

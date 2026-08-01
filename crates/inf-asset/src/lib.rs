@@ -40,7 +40,10 @@ pub use hash::ContentHash;
 pub use id::AssetId;
 pub use import_cache::{ImportCache, ImportKey};
 pub use kind::{importable_source_kind, AssetKind};
-pub use pack::{PackEntry, PackReader, PackWriter, PACK_FORMAT_VERSION, PACK_MAGIC};
+pub use pack::{
+    PackEntry, PackReader, PackWriter, BLOB_ALIGN, PACK_FORMAT_VERSION, PACK_MAGIC,
+    PACK_MIN_READ_VERSION,
+};
 pub use payload::{decode, encode, AssetPayload};
 pub use sidecar::{is_sidecar, sidecar_path, AssetSidecar, SIDECAR_SCHEMA_VERSION};
 #[cfg(not(target_arch = "wasm32"))]

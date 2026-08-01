@@ -18,14 +18,17 @@ xxhash-rust = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
-# Native/desktop: the `notify` file watcher (asset DB live rescans) and the C
-# `zstd` codec (pack encode + decode). Neither targets `wasm32-unknown-unknown`
-# (notify has no browser backend; zstd-sys's C build won't cross-compile), so
-# they are host-only. The wasm player never watches files and never cooks packs.
+# Native/desktop: the `notify` file watcher (asset DB live rescans), the C
+# `zstd` codec (pack encode + decode), and `memmap2` (zero-copy pack reads, P16.1).
+# None targets `wasm32-unknown-unknown` (notify has no browser backend; zstd-sys's
+# C build won't cross-compile; a browser has no address space to map a file into),
+# so they are host-only. The wasm player never watches files, never cooks packs,
+# and reads packs it fetched over HTTP as owned bytes.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 zstd = { workspace = true }
+memmap2 = { workspace = true }
 
 # Web (P14.2): the browser player must DECODE fetched packs; ruzstd is the
 # pure-Rust zstd decoder that builds for wasm (encode stays host-only).
