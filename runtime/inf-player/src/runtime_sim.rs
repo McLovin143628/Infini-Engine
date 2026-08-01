@@ -222,6 +222,16 @@ pub struct RuntimeSim {
     /// Optional sandboxed WASM mods, ticked each fixed step (P14.5). `None` on
     /// the browser player + any run without `--mods`.
     mods: Option<Box<dyn ModHook>>,
+    /// Camera-driven terrain streaming (P16.3b2). Empty for every world with no
+    /// asset-backed `Terrain`, in which case every call below is a no-op and the
+    /// step is bit-identical to the pre-P16.3b2 one.
+    ///
+    /// **The determinism seam.** Its `sync_sim` runs at the TOP of
+    /// [`fixed_step`](Self::fixed_step) from sim state alone; its `sync_render`
+    /// is only ever called by the frame loop
+    /// ([`sync_render_terrain`](Self::sync_render_terrain)) and writes into a
+    /// working set no entity references. See [`crate::terrain_stream`].
+    terrain: crate::terrain_stream::TerrainStreaming,
 }
 
 /// The obstruction gain (linear) applied to an occluded spatial source — a −12 dB
@@ -285,6 +295,7 @@ impl RuntimeSim {
             prev_positions: HashMap::new(),
             cur_positions: HashMap::new(),
             mods: None,
+            terrain: crate::terrain_stream::TerrainStreaming::default(),
         };
 
         sim.bridge.sync_from_world(&sim.world);
@@ -365,6 +376,45 @@ impl RuntimeSim {
     /// Total fixed steps advanced.
     pub fn steps(&self) -> u64 {
         self.steps
+    }
+
+    // ── terrain streaming (P16.3b2) ───────────────────────────────────────
+
+    /// Attach camera-driven terrain streaming (see [`crate::terrain_stream`]).
+    /// Runs one immediate [`sync_sim`](crate::terrain_stream::TerrainStreaming::sync_sim)
+    /// so the world is queryable before the first step (`BeginPlay` has already
+    /// run by the time a caller reaches here, which is why the attach seam is
+    /// separate from `new`).
+    pub fn set_terrain_streaming(&mut self, streaming: crate::terrain_stream::TerrainStreaming) {
+        self.terrain = streaming;
+        self.terrain.sync_sim(&mut self.world);
+    }
+
+    /// The streamed terrains (render-resident data + counters). Read by the
+    /// render projection and the diagnostics dump.
+    pub fn terrain_streaming(&self) -> &crate::terrain_stream::TerrainStreaming {
+        &self.terrain
+    }
+
+    /// The `terrain.height_at` **host seam**, as the simulation sees it: the exact
+    /// function the Blueprint node dispatches to (lowest-`Guid` non-empty
+    /// [`Terrain`], its component-resident working set, entity-origin shifted).
+    ///
+    /// Exposed so the streaming gate can assert sim determinism against the real
+    /// seam rather than a re-implementation of it.
+    pub fn terrain_height_at(&self, x: f64, z: f64) -> f64 {
+        terrain_height_at(&self.world, x, z)
+    }
+
+    /// **The render-sync point.** Advance every streamed terrain's camera-driven
+    /// cut, exactly once per frame, immediately before the scene projection.
+    ///
+    /// Deliberately *not* called from [`fixed_step`](Self::fixed_step): the sim
+    /// must never observe the result. The windowed loop and the headless harness
+    /// call it at the same place in their frame so a scripted camera path yields
+    /// the same resident-set trace either way.
+    pub fn sync_render_terrain(&mut self, camera_world: DVec3) {
+        self.terrain.sync_render(camera_world);
     }
 
     /// Render interpolation factor in `[0, 1)` (how far into the next step the
@@ -456,6 +506,11 @@ impl RuntimeSim {
 
     fn fixed_step(&mut self) {
         let dt = self.stepper.fixed_dt();
+        // 0. Terrain streaming, SIM side (P16.3b2). Level-0 pages around the sim's
+        //    own entities, loaded synchronously in key order BEFORE anything in
+        //    this step can query a height. Camera-free by construction — see
+        //    `crate::terrain_stream` for why that separation is structural.
+        self.terrain.sync_sim(&mut self.world);
         // 1. ECS → physics.
         self.bridge.sync_from_world(&self.world);
         self.bridge3d.sync_from_world(&self.world); // ── P11.3 3D bridge: sync ──

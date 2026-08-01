@@ -478,6 +478,18 @@ impl TerrainData {
         Ok(true)
     }
 
+    /// Make an **already-decoded** tile resident — the seam a streamer that
+    /// decodes off the main thread applies its batch through (P16.3b2).
+    ///
+    /// Identical in every respect to what [`request_tile`](Self::request_tile)
+    /// does after its own decode: the tile is stamped (a consumer must see it as
+    /// changed) but **not** marked dirty (paging a page in is not an edit, so it
+    /// schedules no write-back), and a level-0 tile's horizontal origin is
+    /// re-derived from its coordinate so it stays grid-aligned.
+    pub fn insert_resident_tile(&mut self, key: TileKey, tile: TerrainTile) {
+        self.insert_resident(key, tile);
+    }
+
     /// Insert a tile as resident **without** marking it dirty: streaming a page in
     /// is not an edit, so it must not schedule a write-back. Its version still
     /// bumps (the contents changed from the consumer's point of view).

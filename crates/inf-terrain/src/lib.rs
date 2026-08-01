@@ -22,8 +22,23 @@
 //! of an mmap'd `.inf_pack` with no decode and no copy. [`TerrainData`] is then
 //! the *resident* working set — grown and shrunk against a [`TileStore`] by an
 //! explicit set of wanted `(coord, lod)` keys, with per-tile versions and a dirty
-//! set for write-back. No camera or budget policy lives in Ring 0; the caller
-//! computes the wants.
+//! set for write-back.
+//!
+//! [`residency`] executes wants; [`wants`] **computes** them (pure functions: a
+//! camera-driven quadtree cut with hysteresis, and the sim's level-0
+//! neighbourhood); [`stream`] holds the state that drives them — the cold stores
+//! ([`PackTileStore`] over a cooked pack, [`FileTileStore`] over a loose file) and
+//! the [`TerrainStreamer`].
+//!
+//! ### The determinism doctrine
+//!
+//! The fixed-step sim's results must **never** depend on camera-driven residency.
+//! Sim wants ([`sim_wants`]) are computed from sim state alone and loaded
+//! synchronously at the fixed-step boundary into the `TerrainData` the world
+//! holds; render wants ([`render_wants`]) are camera-driven and land in a
+//! **second** working set inside the [`TerrainStreamer`] that the world has no
+//! reference to. See [`stream`] for why that separation is structural rather than
+//! conventional.
 
 pub mod asset;
 mod brush;
@@ -38,7 +53,9 @@ mod raycast;
 mod region;
 pub mod residency;
 mod splat;
+pub mod stream;
 mod tile;
+pub mod wants;
 
 use glam::DVec3;
 
@@ -57,7 +74,15 @@ pub use raycast::{raycast_terrain, TerrainHit};
 pub use region::HeightRegion;
 pub use residency::{tile_range, MemoryTileStore, ResidencyReport, TileStore};
 pub use splat::{apply_paint, paint_weight, SplatDelta, SplatPatch, SplatStroke, SPLAT_LAYERS};
+pub use stream::{
+    open_file_tile_store, FileTileStore, PackTileStore, StreamBudget, TerrainStreamStats,
+    TerrainStreamer,
+};
 pub use tile::{TerrainTile, TileKey, DEFAULT_WEIGHT};
+pub use wants::{
+    advance_cut, clamp_cut, render_wants, sim_wants, RenderWantsParams, TileCatalog, TileGrid,
+    TileIndex, DEFAULT_HYSTERESIS,
+};
 
 /// The minimal world-space height query seam downstream systems code against
 /// (PCG scatter, sculpt brushes). Kept deliberately small: a paged heightfield,

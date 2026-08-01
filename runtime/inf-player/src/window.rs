@@ -99,6 +99,11 @@ pub struct PlayerApp {
     /// maps it onto the live `RenderSettings` at build (and device-loss rebuild).
     /// `default` for content with no authored block (PIE / web / android v1).
     render: inf_scene::RenderSettingsRecord,
+    /// Seconds since the last terrain-streaming diagnostics line (P16.3b2). The
+    /// counters go to `tracing` — the existing Output Log / log-file path — once
+    /// a second, and only while something actually streams, so a non-streaming
+    /// world logs nothing at all.
+    stats_accum: f64,
     /// The HTML canvas the winit window binds to (web only). Set by [`run_web`];
     /// applied to the window attributes in `resumed`.
     #[cfg(target_arch = "wasm32")]
@@ -128,6 +133,7 @@ impl PlayerApp {
             input_state: InputState::new(map),
             live: None,
             pie: None,
+            stats_accum: 0.0,
             paused: false,
             vmeshes,
             render,
@@ -227,6 +233,26 @@ impl PlayerApp {
         })
     }
 
+    /// Emit the terrain-streaming counters once a second (P16.3b2).
+    ///
+    /// The diagnostics seam is deliberately the existing one — `tracing`, which
+    /// already tees to the log file and (in the editor) the Output Log — rather
+    /// than a new overlay or IPC channel.
+    fn log_stream_stats(&mut self, dt: f64) {
+        if self.sim.terrain_streaming().is_empty() {
+            return;
+        }
+        self.stats_accum += dt;
+        if self.stats_accum < 1.0 {
+            return;
+        }
+        self.stats_accum = 0.0;
+        tracing::info!(
+            "inf-player: {}",
+            self.sim.terrain_streaming().stats().summary()
+        );
+    }
+
     /// One frame: fold input, advance the sim by the elapsed time, project, draw.
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
         // Elapsed time + drain this frame's input into the resolved state.
@@ -248,6 +274,16 @@ impl PlayerApp {
 
         let alpha = self.sim.alpha();
         let view = self.view();
+        // THE RENDER-SYNC POINT (P16.3b2): advance every streamed terrain's
+        // camera-driven cut exactly once per frame, here — after the fixed steps
+        // and before the projection, so the sim can never observe it. The headless
+        // harness drives `RuntimeSim::sync_render_terrain` at the same place in its
+        // loop, which is what makes a scripted camera path reproduce the same
+        // resident-set trace with and without a window.
+        if let Some(v) = view.as_ref() {
+            self.sim.sync_render_terrain(v.eye_world);
+        }
+        self.log_stream_stats(dt);
         let Some(live) = self.live.as_mut() else {
             return;
         };

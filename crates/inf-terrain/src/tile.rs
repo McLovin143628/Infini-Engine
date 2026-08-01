@@ -56,6 +56,33 @@ impl TileKey {
             coord: (self.coord.0.div_euclid(2), self.coord.1.div_euclid(2)),
         }
     }
+
+    /// The four finer keys one level down whose footprints tile this one
+    /// (`lod − 1`, coordinate doubled), in the fixed order
+    /// `(2x, 2z), (2x+1, 2z), (2x, 2z+1), (2x+1, 2z+1)`.
+    ///
+    /// The exact inverse of [`parent`](Self::parent) — `k.parent().children()`
+    /// contains `k` for every key, including negative coordinates, because the
+    /// halving floors. At level 0 (nothing is finer) the level saturates and the
+    /// result is meaningless; callers gate on `lod > 0`.
+    ///
+    /// MIRROR of `inf_render::TerrainTileKey::children` — the two must agree, or
+    /// the streamer's cut and the renderer's `fully_subdivided` test would
+    /// disagree about what "all four children" means.
+    #[inline]
+    pub const fn children(self) -> [Self; 4] {
+        let lod = self.lod.saturating_sub(1);
+        let (x, z) = (
+            self.coord.0.saturating_mul(2),
+            self.coord.1.saturating_mul(2),
+        );
+        [
+            Self::new(lod, (x, z)),
+            Self::new(lod, (x.saturating_add(1), z)),
+            Self::new(lod, (x, z.saturating_add(1))),
+            Self::new(lod, (x.saturating_add(1), z.saturating_add(1))),
+        ]
+    }
 }
 
 /// The default per-sample splat weight: **100 % layer 0** (`[255, 0, 0, 0]`), so

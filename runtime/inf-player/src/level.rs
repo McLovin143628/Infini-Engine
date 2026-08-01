@@ -40,6 +40,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use glam::{DVec2, DVec3};
 use uuid::Uuid;
@@ -54,6 +55,8 @@ use inf_ecs::{EcsWorld, Guid};
 use inf_pcg::height::FnHeight;
 use inf_pcg::{PcgAssetPayload, Region};
 use inf_scene::{RenderSettingsRecord, RuntimeEntity};
+
+use crate::terrain_stream::TerrainSource;
 
 /// The cook's default pack file name (kept in sync with
 /// `inf_packager::DEFAULT_PACK_NAME`; duplicated here so the shipped player does
@@ -840,7 +843,10 @@ struct BootManifest {
 /// `manifest.toml`). Opens the pack, resolves the root level GUID, and reads its
 /// bytes; `.inf_act` classes are read straight out of the pack too.
 pub struct PackLevelSource {
-    reader: PackReader,
+    /// `Arc` so a streaming store can hold the mapping open beyond the source's
+    /// own lifetime (P16.3b2): a [`PackTileStore`](inf_terrain::PackTileStore)
+    /// slices tiles straight out of it for as long as the world runs.
+    reader: Arc<PackReader>,
     root_level: AssetId,
     label: String,
 }
@@ -890,7 +896,7 @@ impl PackLevelSource {
             .unwrap_or_else(|| "pack".to_string());
 
         Ok(Self {
-            reader,
+            reader: Arc::new(reader),
             root_level,
             label,
         })
@@ -909,7 +915,7 @@ impl PackLevelSource {
             .map(|e| e.guid)
             .ok_or_else(|| "pack has no level to boot".to_string())?;
         Ok(Self {
-            reader,
+            reader: Arc::new(reader),
             root_level,
             label: label.into(),
         })
@@ -1023,6 +1029,70 @@ impl PackLevelSource {
     pub fn audio_assets(&self) -> Result<HashMap<Uuid, inf_audio::AudioAsset>, String> {
         self.anim_assets_by_guid(AssetKind::Audio)
     }
+
+    /// The pack mapping, shared. A streaming store holds this open for the life of
+    /// the world and slices tiles out of it (P16.3b2).
+    pub fn reader(&self) -> &Arc<PackReader> {
+        &self.reader
+    }
+
+    /// Resolve a `Terrain.asset` GUID to a **zero-copy** streaming source over the
+    /// pack's `.inf_terrain` entry (P16.3b2).
+    ///
+    /// `None` when the pack has no such entry (a dangling ref — the cook already
+    /// warns; the level's inline data stays authoritative). `Err` only for a
+    /// corrupt payload, which must be loud rather than a silently flat world.
+    pub fn terrain_source(&self, guid: Uuid) -> Result<Option<TerrainSource>, String> {
+        let id = AssetId(guid);
+        if !self.reader.contains(id) {
+            return Ok(None);
+        }
+        let store = inf_terrain::PackTileStore::open(self.reader.clone(), id)?;
+        let header = *store.header();
+        Ok(Some(TerrainSource {
+            store: Arc::new(store),
+            tile_resolution: header.tile_resolution,
+            meters_per_sample: header.meters_per_sample,
+        }))
+    }
+}
+
+/// Index every loose `.inf_terrain` in `dir` (non-recursive) **by its asset
+/// GUID** (from the sibling inf_asset `.toml` sidecar) — the dev-dir twin of
+/// [`PackLevelSource::terrain_source`] (P16.3b2). Deterministic (path-sorted);
+/// files without a readable sidecar are skipped.
+pub fn terrain_paths_by_guid_from_dir(dir: &Path) -> HashMap<Uuid, PathBuf> {
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("inf_terrain"))
+            .collect(),
+        Err(_) => return HashMap::new(),
+    };
+    files.sort();
+    let mut out = HashMap::new();
+    for p in files {
+        match inf_asset::AssetSidecar::load(&p) {
+            Ok(side) => {
+                out.insert(side.guid.uuid(), p);
+            }
+            Err(_) => tracing::warn!("inf-player: .inf_terrain without a sidecar {}", p.display()),
+        }
+    }
+    out
+}
+
+/// Open a loose `.inf_terrain` as a streaming source (the `--level` dev-dir
+/// path). The whole payload is read once; tiles are then sliced out of it.
+pub fn terrain_source_from_file(path: &Path) -> Result<TerrainSource, String> {
+    let store = inf_terrain::open_file_tile_store(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let header = *store.header();
+    Ok(TerrainSource {
+        store: Arc::new(store),
+        tile_resolution: header.tile_resolution,
+        meters_per_sample: header.meters_per_sample,
+    })
 }
 
 impl LevelSource for PackLevelSource {

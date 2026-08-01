@@ -62,7 +62,12 @@ async fn run(canvas_id: String, pack_url: String) -> Result<(), String> {
     let source = crate::level::PackLevelSource::from_reader(reader, "web")?;
     let built = crate::build_world_from_pack(&source)?;
     let title = format!("Infinity Engine (Web) — {}", built.label);
-    let sim = crate::sim_from_built(built);
+    let mut sim = crate::sim_from_built(built);
+    // Terrain streaming (P16.3b2) works here too: the in-memory `PackReader` still
+    // hands `read_ref` a borrowed slice for an uncompressed (streaming-class)
+    // entry, so tiles are sub-sliced with no copy. The load batch takes the serial
+    // path on wasm (no thread pool) and produces the identical result.
+    crate::attach_terrain_streaming(&mut sim, &crate::TerrainContent::Pack(source));
     crate::window::run_web(title, canvas, sim, crate::input::default_map())
 }
 

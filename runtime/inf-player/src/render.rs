@@ -254,10 +254,21 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
         // First visible, non-empty terrain wins (multi-terrain merge is a
         // follow-up). Per-tile change stamps ride along (P16.3b1), so the terrain
         // pass re-uploads a height texture only when that tile really changed.
+        //
+        // P16.3b2 — THE SIM/RENDER SPLIT: an asset-backed terrain draws the
+        // **streamer's** camera-driven working set, not the component's. The
+        // component's set is the sim's (level-0 pages around the sim's entities);
+        // projecting it would put the camera's cut and the sim's residency in the
+        // same container, which is exactly the coupling the doctrine forbids.
+        // An inline terrain has no streamer and projects its own data, unchanged.
         if scene.terrain.is_none() {
             if let Some(terrain) = w.get::<Terrain>(entity) {
-                if !terrain.data.is_empty() {
-                    scene.terrain = Some(project_terrain(terrain, translation));
+                let data = sim
+                    .terrain_streaming()
+                    .render_data(guid)
+                    .unwrap_or(&terrain.data);
+                if !data.is_empty() || data.coarse_tile_count() > 0 {
+                    scene.terrain = Some(project_terrain(terrain, data, translation));
                 }
             }
         }
@@ -488,6 +499,13 @@ fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
 /// height bounds + its monotone change stamp), plus the four material layers +
 /// macro variation.
 ///
+/// `data` is the working set to draw and is passed **explicitly** (P16.3b2): for
+/// an inline terrain it is `terrain.data`, for a streamed one it is the
+/// streamer's camera-driven set. `terrain` still supplies the layers and macro
+/// variation, which are authored, not streamed. Making the choice a parameter is
+/// what keeps "which residency am I drawing?" a decision at the call site rather
+/// than an assumption buried here.
+///
 /// Level 0 (the authored heightfield) is emitted first, then the resident coarse
 /// pyramid pages in ascending key order — both from `BTreeMap`s, so the tile list
 /// is globally `TileKey`-ascending and the upload/draw order is deterministic.
@@ -499,8 +517,17 @@ fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
 /// while terrain could never change (P16.3b1).
 ///
 /// **MIRROR** of `inf_viewport::host::project_terrain` — keep the two in sync.
-fn project_terrain(terrain: &Terrain, translation: DVec3) -> RenderTerrain {
-    let data = &terrain.data;
+///
+/// `pub` so the streaming gate can assert **rendered-frame determinism** without a
+/// GPU: the DTO this returns is the entire input to the terrain pass, so hashing
+/// it across two runs is exactly "the same frame was drawn". (Excluding
+/// `version`, which is a process-global cache stamp and deliberately not
+/// reproducible — see `TerrainData::tile_version`.)
+pub fn project_terrain(
+    terrain: &Terrain,
+    data: &inf_terrain::TerrainData,
+    translation: DVec3,
+) -> RenderTerrain {
     let res = data.tile_resolution();
     let n = (res * res) as usize;
     let project_tile = |key: inf_terrain::TileKey, tile: &inf_terrain::TerrainTile| {

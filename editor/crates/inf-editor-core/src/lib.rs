@@ -16,4 +16,6 @@ pub mod scene;
 pub mod sequencer;
 pub mod simulate;
 pub mod sorting;
+/// Editor-side camera-driven terrain streaming (P16.3b2).
+pub mod terrain_stream;
 pub mod thumbnail;

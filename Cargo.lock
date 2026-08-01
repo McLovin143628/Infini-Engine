@@ -3379,10 +3379,12 @@ dependencies = [
  "glam 0.33.2",
  "image",
  "inf-asset",
+ "inf-core",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
+ "tracing",
  "uuid",
  "xxhash-rust",
 ]

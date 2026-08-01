@@ -14,6 +14,10 @@ serde = { workspace = true }
 # The `.inf_terrain` streaming asset (P16.3): `AssetKind`/`AssetPayload` + the
 # dual-format rule. Ring-0 → Ring-0 (inf-asset never names terrain, so no cycle).
 inf-asset = { workspace = true }
+# The engine job pool (P16.3b2 streaming): a render-wants load batch decodes its
+# tiles through `parallel_map_ref` — the deterministic in-order pure map — so the
+# batch is parallel without becoming timing-dependent. Ring-0 → Ring-0.
+inf-core = { workspace = true }
 # Per-tile blobs inside the `.inf_terrain` payload are the SAME deterministic
 # bincode a tile writes into an `.inf_lvl`, so the two persistence paths agree
 # byte-for-byte. Promoted from dev-dependencies at P16.3.
@@ -23,6 +27,9 @@ bincode = { workspace = true }
 # pin is unnecessary — `image` handles both formats through one DynamicImage path.
 image = { workspace = true }
 thiserror = { workspace = true }
+# Streaming diagnostics: a page that fails to decode is warned about, never
+# silently turned into geometry.
+tracing = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -44,6 +44,11 @@ use crate::camera::{
 };
 use crate::SurfaceTarget;
 
+/// Frames of *page movement* between terrain-streaming diagnostics lines
+/// (P16.3b2). Roughly 5 s at 60 fps of continuous paging; a settled camera never
+/// reaches it because the counter only ticks when the cut actually changed.
+const STREAM_LOG_INTERVAL_FRAMES: u32 = 300;
+
 /// Map an ECS [`Primitive`] to the renderer's [`PrimMesh`] (R-P1).
 ///
 /// MIRROR: keep identical to `inf_player::render::prim_mesh` (the player's
@@ -178,6 +183,27 @@ pub struct EngineHost {
     /// GUID of the terrain entity the sculpt tool targets (the first visible,
     /// non-empty terrain — matches `scene.terrain`). Set each projection.
     terrain_guid: Option<Uuid>,
+    /// Camera-driven streaming for asset-backed terrains (P16.3b2). The policy
+    /// lives in `inf_editor_core::terrain_stream` (Ring 1, so Linux CI compiles
+    /// and tests it); the host only calls it — at projection time
+    /// ([`rebuild_scene`](Self::rebuild_scene)) and at the render-sync point
+    /// ([`render_frame`](Self::render_frame)).
+    ///
+    /// **The determinism seam.** Its pages land in the streamer's own working set,
+    /// never in the document's `Terrain.data`, so moving the editor camera cannot
+    /// dirty the document, change a `height_at` answer, or desync a Simulate
+    /// session from a shipped run. Disabled until a content root is set, which
+    /// makes inline terrain behaviour bit-identical to before.
+    terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams,
+    /// Whether the terrain currently projected is asset-backed (streamed). Sculpt
+    /// and paint reject a stroke against one — see [`Self::take_tool_status`].
+    terrain_streamed: bool,
+    /// The last tool-rejection message, for a Ring-2 caller to surface. Drained by
+    /// [`take_tool_status`](Self::take_tool_status).
+    tool_status: Option<String>,
+    /// Frames until the next terrain-streaming diagnostics line. Counts down only
+    /// while pages are actually moving, so a settled camera logs nothing.
+    stream_log_countdown: u32,
     /// In-flight sculpt stroke: the accumulating brush gesture (`None` = idle).
     sculpt_drag: Option<SculptDrag>,
     /// World-space brush-ring loop points (following terrain height), rebuilt as
@@ -545,6 +571,10 @@ impl EngineHost {
             tool_mode: ToolMode::Select,
             sculpt: SculptSettings::default(),
             terrain_guid: None,
+            terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams::new(),
+            terrain_streamed: false,
+            tool_status: None,
+            stream_log_countdown: STREAM_LOG_INTERVAL_FRAMES,
             sculpt_drag: None,
             sculpt_ring: Vec::new(),
             sculpt_ring_color: [1.0; 4],
@@ -731,6 +761,7 @@ impl EngineHost {
         self.scene.lights_2d.clear();
         self.scene.terrain = None;
         self.terrain_guid = None;
+        self.terrain_streamed = false;
         self.id_to_guid.clear();
         self.guid_to_id.clear();
         self.collider_outlines.clear();
@@ -854,15 +885,40 @@ impl EngineHost {
             // a follow-up). Each tile carries its own change stamp (P16.3b1), so
             // re-projecting on a document change re-uploads only the tiles a
             // sculpt/paint stroke actually touched.
+            //
+            // P16.3b2 — THE SIM/RENDER SPLIT: an asset-backed terrain draws the
+            // **streamer's** camera-driven working set; the document's `data` stays
+            // exactly as authored (empty, for a streamed terrain) and is never
+            // written by the camera. An inline terrain has no stream and projects
+            // its own data, unchanged.
             if self.scene.terrain.is_none() {
                 if let Some(terrain) = w.get::<Terrain>(entity) {
-                    if visible && !terrain.data.is_empty() {
+                    if visible {
                         let translation = w
                             .get::<GlobalTransform>(entity)
                             .map(|g| g.translation())
                             .unwrap_or(DVec3::ZERO);
-                        self.scene.terrain = Some(project_terrain(terrain, translation));
-                        self.terrain_guid = Some(guid);
+                        let streamed = self.terrain_streams.ensure(
+                            guid,
+                            terrain,
+                            translation,
+                            self.last_eye_world,
+                        );
+                        let projected = if streamed {
+                            self.terrain_streams
+                                .render_data(guid)
+                                .filter(|d| d.tile_count() + d.coarse_tile_count() > 0)
+                                .map(|d| project_terrain(terrain, d, translation))
+                        } else if !terrain.data.is_empty() {
+                            Some(project_terrain(terrain, &terrain.data, translation))
+                        } else {
+                            None
+                        };
+                        if let Some(rt) = projected {
+                            self.scene.terrain = Some(rt);
+                            self.terrain_guid = Some(guid);
+                            self.terrain_streamed = streamed;
+                        }
                     }
                 }
             }
@@ -1552,6 +1608,13 @@ fn project_tilemap(tilemap: &Tilemap, translation: DVec3) -> RenderTilemap {
 
 /// Project an ECS [`Terrain`] (+ its world translation) into a [`RenderTerrain`].
 ///
+/// `data` is the working set to draw and is passed **explicitly** (P16.3b2): for
+/// an inline terrain it is `terrain.data`, for a streamed one it is the
+/// streamer's camera-driven set. `terrain` still supplies the layers and macro
+/// variation, which are authored, not streamed. Making the choice a parameter is
+/// what keeps "which residency am I drawing?" a decision at the call site rather
+/// than an assumption buried here.
+///
 /// Each **resident** tile becomes a [`RenderTerrainTile`] with its `f64` origin
 /// offset by the entity's world translation (so the terrain follows its
 /// transform), its `f32` height buffer copied out of the paged data, its height
@@ -1566,8 +1629,7 @@ fn project_tilemap(tilemap: &Tilemap, translation: DVec3) -> RenderTilemap {
 /// level-0 list it always did.
 ///
 /// **MIRROR** of `inf_player::render::project_terrain` — keep the two in sync.
-fn project_terrain(terrain: &Terrain, translation: DVec3) -> RenderTerrain {
-    let data = &terrain.data;
+fn project_terrain(terrain: &Terrain, data: &TerrainData, translation: DVec3) -> RenderTerrain {
     let res = data.tile_resolution();
     let n = (res * res) as usize;
     let project_tile = |key: inf_terrain::TileKey, tile: &inf_terrain::TerrainTile| {
@@ -2033,6 +2095,91 @@ impl EngineHost {
         self.tool_mode
     }
 
+    // ── streamed terrain (P16.3b2) ────────────────────────────────────────
+
+    /// Point terrain streaming at a project's content root (or `None` to disable
+    /// it). Rescans the loose `.inf_terrain` index and drops every live stream, so
+    /// a project switch can never serve the previous project's pages.
+    ///
+    /// Until a root is set nothing streams and an asset-backed terrain draws its
+    /// (empty) inline data — so an editor that never calls this behaves exactly as
+    /// it did before P16.3b2.
+    ///
+    /// **No caller yet, deliberately.** Wiring it means a Ring-2 `project://changed`
+    /// handler pushing the open project's `Content` directory through
+    /// `ViewportHandle`, and Ring 2 is outside this batch's scope. It is also not
+    /// yet *reachable* content: the editor cannot author a `Terrain.asset` until
+    /// the P16.4 import wizard, so the streaming path has nothing to stream in the
+    /// shipping app — which is exactly why "inline terrains: zero behaviour
+    /// change" holds today. The logic itself is exercised by
+    /// `inf_editor_core::terrain_stream`'s tests on all three OSes.
+    #[allow(dead_code)]
+    pub fn set_terrain_content_root(&mut self, root: Option<std::path::PathBuf>) {
+        self.terrain_streams.set_content_root(root);
+        self.terrain_streamed = false;
+        self.synced_version = None; // force a re-projection
+    }
+
+    /// Whether the projected terrain streams from a `.inf_terrain` asset.
+    /// (Same deferred-caller note as [`set_terrain_content_root`](Self::set_terrain_content_root).)
+    #[allow(dead_code)]
+    pub fn terrain_is_streamed(&self) -> bool {
+        self.terrain_streamed
+    }
+
+    /// Terrain-streaming counters, for the diagnostics path.
+    pub fn terrain_stream_stats(&self) -> &inf_terrain::TerrainStreamStats {
+        self.terrain_streams.stats()
+    }
+
+    /// Take the last tool-rejection message (e.g. a sculpt stroke refused on a
+    /// streamed terrain), leaving none.
+    ///
+    /// The **status seam**: host-side by design (this batch adds no IPC). A Ring-2
+    /// caller can drain it onto the status bar; until one does, the message is
+    /// already in the Output Log via `tracing` — which is where every other
+    /// host-side diagnostic already surfaces.
+    #[allow(dead_code)]
+    pub fn take_tool_status(&mut self) -> Option<String> {
+        self.tool_status.take()
+    }
+
+    /// Record a tool rejection: remember it for the caller and log it once.
+    fn reject_tool(&mut self, message: &str) {
+        if self.tool_status.as_deref() != Some(message) {
+            tracing::warn!("inf-viewport: {message}");
+        }
+        self.tool_status = Some(message.to_string());
+    }
+
+    /// Advance the streamed terrain's camera-driven cut and, when it changed,
+    /// re-project the render terrain from the streamer's working set.
+    ///
+    /// Re-projecting here (rather than waiting for a document change) is what lets
+    /// pages appear as the camera flies: `sync_from_doc` is version-gated and the
+    /// camera does not bump the document version — nor should it.
+    fn sync_streamed_terrain(&mut self) {
+        if !self.terrain_streams.sync_render(self.last_eye_world) {
+            return;
+        }
+        // Streaming diagnostics on the existing debug path (`tracing` → the Output
+        // Log / log file), throttled so a flying camera doesn't flood it. No new
+        // panel, no new IPC channel.
+        self.stream_log_countdown = self.stream_log_countdown.saturating_sub(1);
+        if self.stream_log_countdown == 0 {
+            self.stream_log_countdown = STREAM_LOG_INTERVAL_FRAMES;
+            tracing::info!("inf-viewport: {}", self.terrain_stream_stats().summary());
+        }
+        let Some(guid) = self.terrain_guid else {
+            return;
+        };
+        if let Some((component, data, translation)) = self.terrain_streams.projection_inputs(guid) {
+            if data.tile_count() + data.coarse_tile_count() > 0 {
+                self.scene.terrain = Some(project_terrain(component, data, translation));
+            }
+        }
+    }
+
     /// `true` while a sculpt stroke is in progress.
     pub fn is_sculpting(&self) -> bool {
         self.sculpt_drag.is_some()
@@ -2090,6 +2237,13 @@ impl EngineHost {
     /// Update the hovered brush ring (idle Sculpt mode): raycast the cursor and
     /// rebuild the ring, or clear it off-terrain.
     pub fn update_sculpt_hover(&mut self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) {
+        // A streamed terrain has no editable working set in the document, so the
+        // brush ring would follow a heightfield the tools cannot touch. Show no
+        // ring rather than an inviting one (P16.3b2; see `begin_sculpt`).
+        if self.terrain_streamed {
+            self.sculpt_ring.clear();
+            return;
+        }
         match self.sculpt_pick(doc, view, px, py) {
             Some((_, center, _)) => self.refresh_ring(doc, center),
             None => self.sculpt_ring.clear(),
@@ -2107,6 +2261,19 @@ impl EngineHost {
         py: u32,
         ctrl: bool,
     ) -> bool {
+        // P16.3b2: reject gracefully on an asset-backed (streamed) terrain.
+        //
+        // The tools edit the document's `TerrainData` and commit a `HeightDelta` /
+        // `SplatDelta` undo step against it. A streamed terrain's document data is
+        // empty — the pages live in the streamer, are camera-driven, and are
+        // evicted the moment the camera moves — so a stroke would either no-op or,
+        // worse, author tiles into the document that shadow the asset and then
+        // silently disagree with it. Write-back through the residency dirty set
+        // (and re-emitting the `.inf_terrain`) arrives with the P16.4 wizard work.
+        if self.terrain_streamed {
+            self.reject_tool(inf_editor_core::terrain_stream::STREAMED_TERRAIN_EDIT_REJECTION);
+            return false;
+        }
         let Some((guid, center, height)) = self.sculpt_pick(doc, view, px, py) else {
             return false;
         };
@@ -2530,6 +2697,12 @@ impl EngineHost {
         // Remember the camera eye for PCG draw-distance culling on the next
         // projection (see `last_eye_world`).
         self.last_eye_world = view.eye_world;
+        // THE RENDER-SYNC POINT (P16.3b2): advance every streamed terrain's
+        // camera-driven cut exactly once per frame, here. Unlike the document
+        // projection this is *not* version-gated — the cut follows the camera, and
+        // the camera moves without the document changing. Nothing it does is
+        // visible to the document, which is the whole point.
+        self.sync_streamed_terrain();
         if self.gpu.is_lost() {
             tracing::warn!("inf-viewport: device lost — rebuilding GPU stack");
             let (w, h) = self.chain.requested_size();

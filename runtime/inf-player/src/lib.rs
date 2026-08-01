@@ -36,6 +36,8 @@ pub mod log;
 pub mod mods;
 pub mod render;
 pub mod runtime_sim;
+/// Camera-driven terrain streaming (P16.3b2) — the sim/render want split.
+pub mod terrain_stream;
 pub mod vmesh;
 // The browser (wasm32) entry point + fetch/run glue (P14.2). Gated to wasm so
 // the desktop build never names wasm-bindgen/web-sys.
@@ -100,32 +102,104 @@ fn apply_boot_config(args: &mut Args) {
     }
 }
 
+/// Where a world's `.inf_terrain` streaming assets come from (P16.3b2).
+///
+/// Held beside the built world so [`attach_terrain_streaming`] can resolve a
+/// `Terrain.asset` GUID **without reopening the pack** — the mapping a
+/// `PackTileStore` slices tiles out of must stay open for the life of the run.
+pub enum TerrainContent {
+    /// No streaming source (the `--demo` world, or content with no terrain asset).
+    None,
+    /// Loose `.inf_terrain` files beside a `--level`, indexed by asset GUID.
+    Dir(std::collections::HashMap<uuid::Uuid, PathBuf>),
+    /// The opened cooked pack (`--pack` / the exported game).
+    Pack(PackLevelSource),
+}
+
+impl TerrainContent {
+    /// Resolve one `Terrain.asset` GUID. `None` — a dangling ref, or no source —
+    /// leaves the terrain on its inline data (the documented fallback).
+    pub fn source(&self, guid: uuid::Uuid) -> Option<terrain_stream::TerrainSource> {
+        match self {
+            TerrainContent::None => None,
+            TerrainContent::Dir(index) => {
+                match level::terrain_source_from_file(index.get(&guid)?) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        tracing::error!("inf-player: terrain asset {guid}: {e}");
+                        None
+                    }
+                }
+            }
+            TerrainContent::Pack(source) => match source.terrain_source(guid) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("inf-player: terrain asset {guid}: {e}");
+                    None
+                }
+            },
+        }
+    }
+}
+
+/// The content directory a `--level` boot reads its sidecar assets from.
+fn level_content_dir(args: &Args, level_path: &std::path::Path) -> PathBuf {
+    args.content
+        .clone()
+        .or_else(|| level_path.parent().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Build the world the player runs: the programmatic demo, a loose `.inf_lvl`, or
 /// a cooked pack. Levels/packs decode through the `inf-scene` reader and bind
 /// actor classes via [`InfSceneWorldBuilder`].
-fn build_world(args: &Args) -> Result<BuiltWorld, String> {
+///
+/// Returns the world **plus** its streaming-terrain source, which the caller
+/// hands to [`attach_terrain_streaming`] after building the sim.
+fn build_world(args: &Args) -> Result<(BuiltWorld, TerrainContent), String> {
     match &args.world {
-        WorldChoice::Demo => Ok(demo::build()),
+        WorldChoice::Demo => Ok((demo::build(), TerrainContent::None)),
         WorldChoice::Level(path) => {
             let source = DevDirLevelSource::new(path);
-            let content_dir = args
-                .content
-                .clone()
-                .or_else(|| path.parent().map(PathBuf::from))
-                .unwrap_or_else(|| PathBuf::from("."));
+            let content_dir = level_content_dir(args, path);
             let actors = level::load_actor_classes_from_dir(&content_dir);
             let by_guid = level::load_actor_classes_by_guid_from_dir(&content_dir);
             let pcgs = level::load_pcg_payloads_by_guid_from_dir(&content_dir);
             let (skeletons, clips, machines) = level::load_anim_assets_from_dir(&content_dir);
             let audio = level::load_audio_assets_from_dir(&content_dir);
+            let terrains = level::terrain_paths_by_guid_from_dir(&content_dir);
             let builder = InfSceneWorldBuilder::with_defaults(actors)
                 .with_bindings(by_guid)
                 .with_pcgs(pcgs)
                 .with_anim_assets(skeletons, clips, machines)
                 .with_audio(audio);
-            level::load(&source, &builder)
+            Ok((
+                level::load(&source, &builder)?,
+                TerrainContent::Dir(terrains),
+            ))
         }
-        WorldChoice::Pack(path) => build_world_from_pack(&PackLevelSource::open(path)?),
+        WorldChoice::Pack(path) => {
+            let source = PackLevelSource::open(path)?;
+            let built = build_world_from_pack(&source)?;
+            Ok((built, TerrainContent::Pack(source)))
+        }
+    }
+}
+
+/// Attach camera-driven terrain streaming to `sim` for every asset-backed
+/// `Terrain` in its world (P16.3b2). A no-op for a world with none — which is
+/// every level the editor writes today, so inline terrain behaviour is untouched.
+pub fn attach_terrain_streaming(sim: &mut RuntimeSim, content: &TerrainContent) {
+    if matches!(content, TerrainContent::None) {
+        return;
+    }
+    let streaming = terrain_stream::TerrainStreaming::attach(
+        sim.world_mut(),
+        inf_terrain::StreamBudget::default(),
+        |guid| content.source(guid),
+    );
+    if !streaming.is_empty() {
+        sim.set_terrain_streaming(streaming);
     }
 }
 
@@ -156,7 +230,7 @@ pub fn build_world_from_pack(source: &PackLevelSource) -> Result<BuiltWorld, Str
 /// with the crash report already written to stderr + the crash file by the panic
 /// hook.
 pub fn run_headless(args: &Args) -> ExitCode {
-    let built = match build_world(args) {
+    let (built, terrain_content) = match build_world(args) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("inf-player: {e}");
@@ -170,6 +244,7 @@ pub fn run_headless(args: &Args) -> ExitCode {
     tracing::info!("inf-player: headless run of '{label}' for {frames} frame(s)");
 
     let mut sim = sim_from_built(built);
+    attach_terrain_streaming(&mut sim, &terrain_content);
     attach_mods(&mut sim, args);
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
         fold_trace_sim(sim, frames, panic_after)
@@ -191,7 +266,7 @@ pub fn run_headless(args: &Args) -> ExitCode {
 
 /// Windowed path: open a window and play. Human-verified (needs a GPU + display).
 pub fn run_windowed(args: &Args) -> ExitCode {
-    let built = match build_world(args) {
+    let (built, terrain_content) = match build_world(args) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("inf-player: {e}");
@@ -213,6 +288,7 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     // captured before `built` is consumed, applied by the render host.
     let render = built.render;
     let mut sim = sim_from_built(built);
+    attach_terrain_streaming(&mut sim, &terrain_content);
     attach_mods(&mut sim, args);
     match window::run(title, args.width, args.height, sim, map, vmeshes, render) {
         Ok(()) => ExitCode::SUCCESS,
@@ -339,6 +415,16 @@ use inf_runtime::pie::ScenePayload;
 /// v3 `.inf_lvl` bytes through [`InfSceneWorldBuilder::with_bindings`]. This is
 /// the seam that makes PIE == shipping — the same builder the `--pack` /
 /// `--level` boot uses, fed the live editor scene instead of a cooked file.
+///
+/// **Streamed terrain over the PIE wire is deferred (P16.3b2).** [`ScenePayload`]
+/// carries level bytes plus blueprint/PCG/anim assets, not `.inf_terrain` ones, so
+/// a PIE session over an asset-backed terrain would run with it unstreamed. That
+/// is not yet reachable content — the editor cannot author a `Terrain.asset` until
+/// the P16.4 import wizard — and extending the payload is an `inf-runtime` (Ring 0
+/// protocol) change this batch deliberately did not make. The parity it would
+/// prove is covered meanwhile by the streamed-terrain gate's cooked-vs-loose arm
+/// (`runtime/inf-player/tests/streamed_terrain.rs`), which runs the identical
+/// world off a pack and off loose files and compares the traces.
 pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, String> {
     use crate::level::WorldBuilder;
     use std::collections::HashMap;

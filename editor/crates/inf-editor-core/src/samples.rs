@@ -2732,6 +2732,284 @@ fallback (a far camera picks a coarser level than a near one); and the auto-tier
 disables vgeom on the Low tier. GPU parts skip cleanly with no adapter.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// -- Streamed-terrain gate scene (P16.3b2) -----------------------------------
+//
+// The camera-driven-streaming gate scene: a terrain that lives ENTIRELY in a
+// `.inf_terrain` asset (the level carries an empty working set plus the asset
+// ref), a "Walker" entity the sim scripts across it, a sun and a camera.
+//
+// The `.inf_lvl` is committed; the `.inf_terrain` is **generated into the
+// fixture's content directory** by [`write_streamed_terrain_asset`] rather than
+// committed, because it is ~100 KB of derived bytes a pure generator reproduces
+// exactly (the same reasoning that keeps the vgeom demo's mesh small).
+
+pub const STREAMED_TERRAIN_LEVEL_GUID: Uuid = Uuid::from_u128(0x8416_0000);
+pub const STREAMED_TERRAIN_TERRAIN_GUID: Uuid = Uuid::from_u128(0x8416_0001);
+pub const STREAMED_TERRAIN_WALKER_GUID: Uuid = Uuid::from_u128(0x8416_0002);
+pub const STREAMED_TERRAIN_SUN_GUID: Uuid = Uuid::from_u128(0x8416_0003);
+pub const STREAMED_TERRAIN_CAMERA_GUID: Uuid = Uuid::from_u128(0x8416_0004);
+/// The **asset** GUID of the generated `World.inf_terrain`, stamped into its
+/// inf_asset sidecar. Stable so the level's `Terrain.asset` ref resolves through
+/// the AssetDb / the cooked pack, and the cook's level -> terrain edge ships it.
+pub const STREAMED_TERRAIN_ASSET_GUID: Uuid = Uuid::from_u128(0x8416_00AA);
+
+/// Samples per tile side. Small enough that 256 pages stay ~100 KB, large enough
+/// that a page is a real page.
+pub const STREAMED_TERRAIN_RESOLUTION: u32 = 9;
+/// Level-0 metres per sample => a 16 m tile span.
+pub const STREAMED_TERRAIN_MPS: f64 = 2.0;
+/// Level-0 tiles per side: a 16 x 16 grid => **256 m of world**, far wider than
+/// any single render-wants radius (`RENDER_LOD0_RADIUS_TILES` x 16 m = 40 m), so
+/// the camera genuinely pages tiles in and out as it moves. 16 is a power of two,
+/// so the pyramid closes cleanly: 256 -> 64 -> 16 -> 4 pages, i.e. **three coarse
+/// levels** (the gate needs at least two).
+pub const STREAMED_TERRAIN_TILES: i32 = 16;
+
+/// World edge length of the generated terrain (metres).
+pub fn streamed_terrain_world_size() -> f64 {
+    (STREAMED_TERRAIN_RESOLUTION as f64 - 1.0)
+        * STREAMED_TERRAIN_MPS
+        * STREAMED_TERRAIN_TILES as f64
+}
+
+/// The generated terrain's analytic height at world `(x, z)`.
+///
+/// Built from [`inf_math::psin64`] / [`inf_math::pcos64`], never `std` trig: the
+/// P14 law -- `std` transcendentals are not bit-portable, and this function's
+/// output ends up in bytes a cook on one OS and a run on another must agree about.
+pub fn streamed_terrain_height(x: f64, z: f64) -> f64 {
+    8.0 * inf_math::psin64(x * 0.04) * inf_math::pcos64(z * 0.035)
+        + 2.0 * inf_math::psin64((x + z) * 0.11)
+}
+
+/// The authored level-0 heightfield the `.inf_terrain` is built from.
+pub fn streamed_terrain_data() -> inf_terrain::TerrainData {
+    let mut t = inf_terrain::TerrainData::new(STREAMED_TERRAIN_RESOLUTION, STREAMED_TERRAIN_MPS);
+    for tz in 0..STREAMED_TERRAIN_TILES {
+        for tx in 0..STREAMED_TERRAIN_TILES {
+            t.author_tile((tx, tz), streamed_terrain_height);
+        }
+    }
+    t
+}
+
+/// The `.inf_terrain` payload: the level-0 grid plus its full LOD pyramid.
+///
+/// A pure function of the generators, so two builds are byte-identical (the
+/// `.inf_terrain` layout is deterministic by construction -- see
+/// `inf_terrain::asset`).
+pub fn streamed_terrain_asset() -> inf_terrain::TerrainAsset {
+    let data = streamed_terrain_data();
+    let pyramid = inf_terrain::build_pyramid(&data, inf_terrain::PyramidOptions::default());
+    inf_terrain::build_terrain_asset(&data, &pyramid).expect("streamed-terrain asset builds")
+}
+
+/// Write `World.inf_terrain` (+ its inf_asset sidecar with the stable asset GUID)
+/// into `dir` -- the gate's **fixture setup**, and the P16.4 import wizard's model.
+///
+/// Goes through [`inf_terrain::write_terrain_asset`], the one sanctioned writer:
+/// the bytes on disk are the raw payload image, never a framed `inf_asset::encode`
+/// (which would knock every tile off its 16-byte boundary). The sidecar hashes
+/// exactly the bytes written, so the cook packs them verbatim.
+pub fn write_streamed_terrain_asset(dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?;
+    let asset = streamed_terrain_asset();
+    let path = dir.join("World.inf_terrain");
+    let bytes = inf_terrain::write_terrain_asset(&path, &asset)
+        .map_err(|e| format!("write terrain asset: {e}"))?;
+    inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(STREAMED_TERRAIN_ASSET_GUID),
+        inf_asset::AssetKind::Terrain,
+        inf_asset::ContentHash::of(bytes),
+    )
+    .save(&path)
+    .map_err(|e| format!("write terrain sidecar: {e}"))
+}
+
+/// Build the streamed-terrain [`SceneDoc`].
+///
+/// The `Terrain` component carries **no tiles**: its `data` is an empty working
+/// set configured on the asset's grid, and `asset` points at the `.inf_terrain`.
+/// That is the whole point -- the level stays kilobytes while the world is
+/// 256 m x 256 m of paged heightfield.
+pub fn streamed_terrain_scene() -> SceneDoc {
+    use inf_ecs::components::{Camera, Light, LightKind, Terrain};
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Streamed Terrain");
+    let world_size = streamed_terrain_world_size();
+
+    // -- The streamed terrain, anchored at the world origin (so world XZ ==
+    //    terrain-local XZ and the height probe is the bare generator). --
+    doc.create_with_guid(
+        STREAMED_TERRAIN_TERRAIN_GUID,
+        SpawnKind::Empty,
+        "Terrain",
+        None,
+    );
+    insert!(
+        doc,
+        STREAMED_TERRAIN_TERRAIN_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+    {
+        let mut terrain = Terrain::configured(STREAMED_TERRAIN_RESOLUTION, STREAMED_TERRAIN_MPS);
+        terrain.asset = Some(STREAMED_TERRAIN_ASSET_GUID);
+        terrain.macro_variation = 0.2;
+        debug_assert!(terrain.data.is_empty(), "a streamed terrain ships no tiles");
+        insert!(doc, STREAMED_TERRAIN_TERRAIN_GUID, terrain);
+    }
+
+    // -- The walker: the entity the SIM scripts across the terrain. Its position
+    //    is what `sim_wants` derives level-0 residency from, and the gate probes
+    //    `terrain.height_at` under it. --
+    doc.create_with_guid(
+        STREAMED_TERRAIN_WALKER_GUID,
+        SpawnKind::Empty,
+        "Walker",
+        None,
+    );
+    insert!(
+        doc,
+        STREAMED_TERRAIN_WALKER_GUID,
+        Transform::from_translation(streamed_terrain_walk_point(0))
+    );
+    // A character controller is what makes the Walker a **terrain observer**
+    // (`inf_player::terrain_stream::observes_terrain`): sim residency follows the
+    // things that walk on the ground, not everything with a transform. With no
+    // `RigidBody3D`/`Collider3D` beside it the physics bridge skips the entity
+    // entirely, so this marks intent without simulating anything.
+    insert!(
+        doc,
+        STREAMED_TERRAIN_WALKER_GUID,
+        inf_ecs::components::CharacterController3D::default()
+    );
+
+    // -- A directional sun. --
+    doc.create_with_guid(STREAMED_TERRAIN_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        STREAMED_TERRAIN_SUN_GUID,
+        Transform {
+            translation: inf_ecs::math::Vec3d::new(0.0, 80.0, 0.0),
+            rotation: inf_ecs::math::Vec3d::new(-50.0, -30.0, 0.0),
+            scale: inf_ecs::math::Vec3d::new(1.0, 1.0, 1.0),
+        }
+    );
+    insert!(
+        doc,
+        STREAMED_TERRAIN_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            color: Color::new(1.0, 0.97, 0.9, 1.0),
+            intensity: 2.5,
+            ..Default::default()
+        }
+    );
+
+    // -- A camera over the middle of the world. --
+    doc.create_with_guid(
+        STREAMED_TERRAIN_CAMERA_GUID,
+        SpawnKind::Empty,
+        "Camera",
+        None,
+    );
+    insert!(
+        doc,
+        STREAMED_TERRAIN_CAMERA_GUID,
+        Transform::from_translation(DVec3::new(world_size * 0.5, 60.0, world_size * 0.5))
+    );
+    insert!(doc, STREAMED_TERRAIN_CAMERA_GUID, Camera::default());
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+/// The scripted **sim** walk: step `i`'s world position for the Walker entity.
+///
+/// A diagonal crossing of the whole 256 m world, so the sim's level-0
+/// neighbourhood really does page in and out. Deterministic and camera-free --
+/// this is the trace the "sim determinism vs camera" gate compares.
+pub fn streamed_terrain_walk_point(step: usize) -> DVec3 {
+    let world_size = streamed_terrain_world_size();
+    let t = step as f64 * 1.5;
+    let x = (t % world_size).clamp(0.0, world_size);
+    let z = ((t * 0.7) % world_size).clamp(0.0, world_size);
+    DVec3::new(x, streamed_terrain_height(x, z), z)
+}
+
+/// Scripted **camera** path A: a straight sweep along +X at mid-Z.
+pub fn streamed_terrain_camera_a(step: usize) -> DVec3 {
+    let world_size = streamed_terrain_world_size();
+    let x = (step as f64 * 3.0) % world_size;
+    DVec3::new(x, 40.0, world_size * 0.5)
+}
+
+/// Scripted **camera** path B: an orbit around the world centre -- deliberately
+/// nothing like [`streamed_terrain_camera_a`], so "the sim ignores the camera" is
+/// tested against a genuinely different residency history, not a variation of the
+/// same one.
+pub fn streamed_terrain_camera_b(step: usize) -> DVec3 {
+    let world_size = streamed_terrain_world_size();
+    let a = step as f64 * 0.21;
+    let r = world_size * 0.35;
+    DVec3::new(
+        world_size * 0.5 + r * inf_math::pcos64(a),
+        40.0,
+        world_size * 0.5 + r * inf_math::psin64(a),
+    )
+}
+
+/// The repo-root `samples/streamed-terrain/` directory.
+pub fn streamed_terrain_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/streamed-terrain")
+}
+
+/// Write the committed streamed-terrain files (regeneration path): the `.inf_lvl`
+/// (+ sidecar) and the README. The `.inf_terrain` itself is **not** committed --
+/// see [`write_streamed_terrain_asset`].
+pub fn write_streamed_terrain() -> Result<(), String> {
+    let dir = streamed_terrain_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    crate::scene::serialize::save(
+        &streamed_terrain_scene(),
+        &dir.join("StreamedTerrain.inf_lvl"),
+        Some(STREAMED_TERRAIN_LEVEL_GUID),
+    )?;
+    std::fs::write(dir.join("README.md"), STREAMED_TERRAIN_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const STREAMED_TERRAIN_README: &str = "# Streamed Terrain (P16.3 gate scene)\n\n\
+Generated by `inf_editor_core::samples::streamed_terrain_scene` -- the P16.3b2 gate\n\
+scene for **camera-driven terrain streaming**.\n\n\
+- `StreamedTerrain.inf_lvl` -- the scene (schema v9). Its `Terrain` carries an EMPTY\n\
+  working set plus `asset = World.inf_terrain`, so the level stays kilobytes while\n\
+  the world is 256 m x 256 m of paged heightfield. A `Walker` entity is what the\n\
+  gate scripts across the terrain.\n\
+- `World.inf_terrain` -- NOT committed. It is ~100 KB of derived bytes that\n\
+  `samples::write_streamed_terrain_asset` reproduces exactly, so the gate generates\n\
+  it into the fixture's Content directory (16x16 level-0 pages of 9^2 samples at\n\
+  2 m, plus three coarse pyramid levels: 256 -> 64 -> 16 -> 4).\n\n\
+## The doctrine this scene exists to pin\n\n\
+The fixed-step sim's results must never depend on camera-driven residency. Sim\n\
+wants (level-0 pages around the sim's own entities) load synchronously at the\n\
+fixed-step boundary into the ECS `Terrain`'s data; render wants (the camera's\n\
+quadtree cut) load into a separate working set inside the streamer that no entity\n\
+references.\n\n\
+The gate (`runtime/inf-player/tests/streamed_terrain.rs`):\n\n\
+1. the cook ships the `.inf_terrain` through the level->terrain edge, UNCOMPRESSED\n\
+   (streaming-class), so tiles page zero-copy out of the mapping;\n\
+2. a headless run over a scripted camera path reproduces a byte-identical\n\
+   resident-set trace AND rendered-frame (projected terrain) trace across two runs;\n\
+3. the SAME scripted sim under two COMPLETELY different camera paths produces a\n\
+   byte-identical sim trace -- the doctrine, as an executable assertion;\n\
+4. PIE == shipping: the cooked-pack path and the editor-doc path stream the same\n\
+   terrain to the same sim trace and the same resident set.\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2905,6 +3183,7 @@ mod tests {
             write_character_demo().expect("regenerate character demo");
             write_physics_playground().expect("regenerate physics playground");
             write_vgeom_demo().expect("regenerate vgeom demo");
+            write_streamed_terrain().expect("regenerate streamed terrain");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -3045,6 +3324,83 @@ mod tests {
                 "committed Dense.inf_mesh drifted from the generator"
             );
         }
+
+        // Streamed-terrain lock (P16.3b2): only the `.inf_lvl` is committed — the
+        // `.inf_terrain` is generated into a fixture's Content dir by the gate.
+        let sdir = streamed_terrain_dir();
+        let slvl = sdir.join("StreamedTerrain.inf_lvl");
+        if slvl.exists() {
+            let want_lvl = crate::scene::serialize::encode(
+                &crate::scene::serialize::to_scene_file(&streamed_terrain_scene()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&slvl).unwrap(),
+                want_lvl,
+                "committed streamed-terrain .inf_lvl drifted from the generator"
+            );
+        }
+    }
+
+    // ── Streamed-terrain sample shape (P16.3b2) ────────────────────────────
+
+    /// The generated `.inf_terrain` really is what the gate needs: at least two
+    /// coarse pyramid levels, and a level-0 grid wider than any single render
+    /// wants radius — otherwise "the camera pages tiles" would never be exercised.
+    #[test]
+    fn streamed_terrain_asset_has_a_pyramid_and_outgrows_the_wants_radius() {
+        let asset = streamed_terrain_asset();
+        let reader = asset.reader();
+        assert!(
+            reader.lod_levels() >= 3,
+            "need level 0 + at least two coarse levels, got {}",
+            reader.lod_levels()
+        );
+        let level0 = reader.keys().filter(|k| k.is_lod0()).count();
+        assert_eq!(
+            level0,
+            (STREAMED_TERRAIN_TILES * STREAMED_TERRAIN_TILES) as usize
+        );
+        assert_eq!(reader.tile_resolution(), STREAMED_TERRAIN_RESOLUTION);
+        assert_eq!(reader.meters_per_sample(), STREAMED_TERRAIN_MPS);
+
+        // The world is far wider than the finest streaming radius, so a cut over
+        // it is genuinely partial.
+        let span = (STREAMED_TERRAIN_RESOLUTION as f64 - 1.0) * STREAMED_TERRAIN_MPS;
+        assert!(streamed_terrain_world_size() > 4.0 * span);
+
+        // The payload is a pure function of the generators (the cook, and the
+        // fixture setup, must be able to reproduce it byte for byte).
+        assert_eq!(asset.as_bytes(), streamed_terrain_asset().as_bytes());
+
+        // The level ships NO tiles — the whole point of the asset ref.
+        let doc = streamed_terrain_scene();
+        let (data, _) = doc
+            .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+            .expect("terrain entity present");
+        assert!(data.is_empty(), "a streamed level must ship no tiles");
+    }
+
+    /// The two scripted camera paths must really be different, or gate (c) would
+    /// prove nothing.
+    #[test]
+    fn streamed_terrain_camera_paths_diverge() {
+        let a: Vec<_> = (0..40).map(streamed_terrain_camera_a).collect();
+        let b: Vec<_> = (0..40).map(streamed_terrain_camera_b).collect();
+        assert_ne!(a, b);
+        let far = a
+            .iter()
+            .zip(&b)
+            .map(|(p, q)| (*p - *q).length())
+            .fold(0.0f64, f64::max);
+        assert!(far > streamed_terrain_world_size() * 0.2, "paths too close");
+        // And the walk crosses the world (so sim residency really slides).
+        let walk: Vec<_> = (0..120).map(streamed_terrain_walk_point).collect();
+        let dx = walk.last().unwrap().x - walk[0].x;
+        assert!(
+            dx.abs() > streamed_terrain_world_size() * 0.5,
+            "walk too short"
+        );
     }
 
     // ── Character-demo gate test (a): byte-identical save/reload ────────────
