@@ -186,6 +186,10 @@ pub struct AtmosphereParams {
     /// Volumetric clouds (P17.3), **SI metres**. Disabled by default; see
     /// [`crate::clouds::CloudParams`].
     pub clouds: crate::clouds::CloudParams,
+    /// Precipitation (P17.4), **SI metres**. Disabled by default; see
+    /// [`crate::precip::PrecipParams`]. Projected from the weather block, never
+    /// authored directly — which is why it has no knobs of its own here.
+    pub precip: crate::precip::PrecipParams,
 }
 
 impl Default for AtmosphereParams {
@@ -218,6 +222,7 @@ impl Default for AtmosphereParams {
             star_intensity: 1.0,
             fog: HeightFog::default(),
             clouds: crate::clouds::CloudParams::default(),
+            precip: crate::precip::PrecipParams::default(),
         }
     }
 }
@@ -248,6 +253,18 @@ impl AtmosphereParams {
     #[inline]
     pub fn cloud_shadows_active(&self) -> bool {
         self.enabled && self.clouds.shadows_world()
+    }
+
+    /// Whether the precipitation pass should draw (P17.4).
+    ///
+    /// Gated on the physical atmosphere for the same reason clouds are: a
+    /// raindrop is lit by the sky-view LUT and the sun's transmittance through
+    /// the air, so precipitation over the v11 gradient would be a grey speck
+    /// with nothing to light it. The projectors only ever set `precip.enabled`
+    /// on an enabled atmosphere, and this is the single place that is enforced.
+    #[inline]
+    pub fn precip_active(&self) -> bool {
+        self.enabled && self.precip.active()
     }
 
     /// The effective (turbidity-scaled) Mie scattering coefficient, km⁻¹.

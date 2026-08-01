@@ -145,6 +145,31 @@ pub struct AtmosphereGpu {
     pub cloud_shadow: [f32; 4],
     /// rgb = cloud droplet albedo tint, w reserved.
     pub cloud_color: [f32; 4],
+
+    // ── precipitation (P17.4), SI metres ──────────────────────────────────
+    //
+    // Rides in the atmosphere uniform for exactly the reason the cloud block
+    // does: a uniform of its own would add a binding to a pass that already
+    // binds this one, for data that is a property of the same authored
+    // component. The precipitation pass therefore binds nothing new at all.
+    /// x = particle count (integer-valued), y = intensity `[0,1]`,
+    /// z = snowiness `[0,1]`, w = fall speed (m/s).
+    pub precip: [f32; 4],
+    /// x = horizontal box period (m), y = vertical box period (m),
+    /// z = particle half-length along its velocity (m), w = particle radius (m).
+    pub precip_box: [f32; 4],
+    /// x = wind drift X (m, wrapped into the box), y = drift Z (m, wrapped),
+    /// z = distance already fallen (m, wrapped), w = alpha scale.
+    pub precip_phase: [f32; 4],
+    /// xyz = the camera's world position **modulo** the box (m) — the
+    /// world-anchoring term; w reserved.
+    pub precip_eye: [f32; 4],
+    /// rgb = droplet albedo tint, w reserved.
+    pub precip_color: [f32; 4],
+    /// x = wind X (m/s), y = wind Z (m/s) — the **raw rates**, not the wrapped
+    /// drift, because the fall direction is `normalize(wind_x, −fall, wind_z)`
+    /// and a wrapped drift is no longer proportional to the wind. zw reserved.
+    pub precip_wind: [f32; 4],
 }
 
 impl AtmosphereGpu {
@@ -155,7 +180,7 @@ impl AtmosphereGpu {
         Self::build(
             &AtmosphereParams::default(),
             &SunParams::default(),
-            [0.0, 0.0, 0.0],
+            glam::DVec3::ZERO,
             AtmosphereQuality::High,
             CloudQuality::High,
         )
@@ -163,16 +188,21 @@ impl AtmosphereGpu {
 
     /// Pack a scene's atmosphere + sun (+ clouds) into the shared uniform.
     ///
-    /// `eye_world_m` is the camera's **world** position in metres: `y` is the only
-    /// input the planet block takes ([`camera_radius_km`] converts it to the
-    /// atmosphere's kilometres), and `xz` centres the cloud-shadow map.
+    /// `eye_world` is the camera's **world** position in metres, taken as `f64`
+    /// (architecture rule 3): `y` is the only input the planet block takes
+    /// ([`camera_radius_km`] converts it to the atmosphere's kilometres), `xz`
+    /// centres the cloud-shadow map, and all three feed
+    /// [`crate::precip::PrecipParams::eye_mod`] — which is the one consumer that
+    /// genuinely needs the `f64`, because it takes a modulo and an `f32` metre
+    /// at 3 200 km already has 0.25 m of resolution.
     pub fn build(
         p: &AtmosphereParams,
         sun: &SunParams,
-        eye_world_m: [f32; 3],
+        eye_world: glam::DVec3,
         quality: AtmosphereQuality,
         cloud_quality: CloudQuality,
     ) -> Self {
+        let eye_world_m = [eye_world.x as f32, eye_world.y as f32, eye_world.z as f32];
         let eye_altitude_m = eye_world_m[1];
         let sd = sun.unit_direction();
         let md = sun.unit_moon_direction();
@@ -192,6 +222,11 @@ impl AtmosphereGpu {
         let wind = c.wind_offset();
         let shadow_centre =
             Self::cloud_shadow_centre([eye_world_m[0], eye_world_m[2]], cloud_quality);
+        // ── precipitation (P17.4) ──
+        let precip = &p.precip;
+        let precip_quality = crate::precip::PrecipQuality::from_atmosphere(quality);
+        let precip_offsets = precip.offsets();
+        let precip_eye = crate::precip::PrecipParams::eye_mod(eye_world);
         Self {
             params: [
                 if p.enabled { 1.0 } else { 0.0 },
@@ -290,6 +325,32 @@ impl AtmosphereGpu {
                 shadow_centre[1],
             ],
             cloud_color: [c.color[0], c.color[1], c.color[2], 0.0],
+            // ── precipitation (P17.4) ──
+            precip: [
+                if p.precip_active() {
+                    precip.count(precip_quality) as f32
+                } else {
+                    0.0
+                },
+                precip.intensity.clamp(0.0, 1.0),
+                precip.snowiness.clamp(0.0, 1.0),
+                precip.fall_speed(),
+            ],
+            precip_box: [
+                crate::precip::PRECIP_BOX_XZ_M,
+                crate::precip::PRECIP_BOX_Y_M,
+                precip.half_length(),
+                precip.radius(),
+            ],
+            precip_phase: [
+                precip_offsets[0],
+                precip_offsets[1],
+                precip_offsets[2],
+                crate::precip::PRECIP_ALPHA,
+            ],
+            precip_eye: [precip_eye[0], precip_eye[1], precip_eye[2], 0.0],
+            precip_color: [precip.color[0], precip.color[1], precip.color[2], 0.0],
+            precip_wind: [precip.wind_x, precip.wind_z, 0.0, 0.0],
         }
     }
 
@@ -320,11 +381,10 @@ impl AtmosphereGpu {
     /// out). Two hand-rolled copies of this would be two chances for the cache
     /// keys and the uniform to disagree about what was baked.
     pub(crate) fn from_frame(frame: &FrameData) -> Self {
-        let eye = frame.view.eye_world;
         Self::build(
             &frame.scene.atmosphere,
             &frame.scene.sun,
-            [eye.x as f32, eye.y as f32, eye.z as f32],
+            frame.view.eye_world,
             frame.atmosphere.quality,
             frame.atmosphere.cloud_quality,
         )
@@ -1036,8 +1096,8 @@ mod tests {
         };
         let q = AtmosphereQuality::High;
         let cq = CloudQuality::High;
-        let a = AtmosphereGpu::build(&p, &noon, [0.0, 2.0, 0.0], q, cq);
-        let b = AtmosphereGpu::build(&p, &dusk, [0.0, 2.0, 0.0], q, cq);
+        let a = AtmosphereGpu::build(&p, &noon, glam::DVec3::new(0.0, 2.0, 0.0), q, cq);
+        let b = AtmosphereGpu::build(&p, &dusk, glam::DVec3::new(0.0, 2.0, 0.0), q, cq);
         assert!(a.medium_key() == b.medium_key(), "sun moved the medium key");
         assert!(
             a.skyview_key() != b.skyview_key(),
@@ -1045,8 +1105,8 @@ mod tests {
         );
 
         // Altitude: sub-metre jitter must NOT re-bake; a real climb must.
-        let c = AtmosphereGpu::build(&p, &noon, [0.0, 2.4, 0.0], q, cq);
-        let d = AtmosphereGpu::build(&p, &noon, [0.0, 250.0, 0.0], q, cq);
+        let c = AtmosphereGpu::build(&p, &noon, glam::DVec3::new(0.0, 2.4, 0.0), q, cq);
+        let d = AtmosphereGpu::build(&p, &noon, glam::DVec3::new(0.0, 250.0, 0.0), q, cq);
         assert!(
             a.skyview_key() == c.skyview_key(),
             "sub-metre jitter re-baked"
@@ -1063,7 +1123,7 @@ mod tests {
                 ..p
             },
             &noon,
-            [0.0, 2.0, 0.0],
+            glam::DVec3::new(0.0, 2.0, 0.0),
             q,
             cq,
         );
@@ -1080,7 +1140,7 @@ mod tests {
                 ..p
             },
             &noon,
-            [0.0, 2.0, 0.0],
+            glam::DVec3::new(0.0, 2.0, 0.0),
             q,
             cq,
         );
@@ -1197,7 +1257,7 @@ mod tests {
     fn uniform_is_deterministic() {
         let p = enabled();
         let s = SunParams::default();
-        let eye = [3.5, 12.5, -7.25];
+        let eye = glam::DVec3::new(3.5, 12.5, -7.25);
         let a = AtmosphereGpu::build(&p, &s, eye, AtmosphereQuality::Medium, CloudQuality::Medium);
         let b = AtmosphereGpu::build(&p, &s, eye, AtmosphereQuality::Medium, CloudQuality::Medium);
         assert_eq!(bytemuck::bytes_of(&a), bytemuck::bytes_of(&b));
@@ -1224,7 +1284,7 @@ mod tests {
         let g = AtmosphereGpu::build(
             &p,
             &s,
-            [f32::NAN, f32::INFINITY, f32::NEG_INFINITY],
+            glam::DVec3::new(f64::NAN, f64::INFINITY, f64::NEG_INFINITY),
             AtmosphereQuality::Low,
             CloudQuality::Low,
         );

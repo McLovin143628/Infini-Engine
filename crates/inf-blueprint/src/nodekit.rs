@@ -576,6 +576,39 @@ fn sky_nodes() -> Vec<NodeDef> {
             .described("Set how fast the clock runs (0 freezes it; negative runs it backwards).")
             .with_inputs(vec![exec_in(), PortDef::new("rate", PortType::Float)])
             .with_outputs(vec![exec_out(EXEC_THEN)]),
+        // ── weather (P17.4) ──
+        //
+        // The preset crosses as a **`Str`** (`"clear" | "overcast" | "storm" |
+        // "fog" | "snow"`), the way `input.is_down` takes its action name: it
+        // needs no new `PortType`, it lowers with zero special-casing, and an
+        // unparseable name is a documented no-op rather than a different sky.
+        //
+        // `blend_seconds` is read literally, which matters because an unwired
+        // Float pin lowers to `0.0`: a `Set Weather` node with only its preset
+        // wired changes the weather NOW, which is what it looks like it will do.
+        // A negative value falls back to the level's authored blend time.
+        NodeDef::new("sky.set_weather", "Set Weather", "sky")
+            .described(
+                "Blend the weather to a preset (clear/overcast/storm/fog/snow) over \
+                 `blend_seconds` (0 = instantly; negative = the level's authored blend time).",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("preset", PortType::Str).required(),
+                PortDef::new("blend_seconds", PortType::Float),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN)]),
+        NodeDef::new("sky.get_weather", "Get Weather", "sky")
+            .described("The weather preset the level is in (or blending toward).")
+            .with_outputs(vec![PortDef::new("preset", PortType::Str)]),
+        NodeDef::new("sky.get_precipitation", "Get Precipitation", "sky")
+            .described("How hard it is raining or snowing right now, 0..1 (0 = dry).")
+            .with_outputs(vec![PortDef::new("intensity", PortType::Float)]),
+        NodeDef::new("sky.get_wind_speed", "Get Wind Speed", "sky")
+            .described(
+                "Wind speed in metres per second — what drifts the clouds and slants the rain.",
+            )
+            .with_outputs(vec![PortDef::new("speed", PortType::Float)]),
     ]
 }
 
@@ -790,13 +823,24 @@ mod tests {
             "sky.set_time_of_day",
             "sky.get_rate",
             "sky.set_rate",
+            // P17.4 weather
+            "sky.set_weather",
+            "sky.get_weather",
+            "sky.get_precipitation",
+            "sky.get_wind_speed",
         ] {
             assert!(reg.get(id).is_some(), "missing sky node {id}");
         }
         // The getters are pure single-output queries — which is what keeps their
         // lowered call path a bare `sky::get_time_of_day(…)` instead of fanning
         // into `sky::get::<field>` (see `sky_nodes`' docs).
-        for id in ["sky.get_time_of_day", "sky.get_rate"] {
+        for id in [
+            "sky.get_time_of_day",
+            "sky.get_rate",
+            "sky.get_weather",
+            "sky.get_precipitation",
+            "sky.get_wind_speed",
+        ] {
             let d = reg.get(id).unwrap();
             assert!(d.input(EXEC_IN).is_none(), "{id} must be pure");
             assert_eq!(d.outputs.len(), 1, "{id} must have one data output");
@@ -817,6 +861,53 @@ mod tests {
         }
         assert_eq!(
             reg.get("sky.set_rate").unwrap().input("rate").unwrap().ty,
+            PortType::Float
+        );
+
+        // P17.4: `set_weather` is the kit's only two-argument action. The preset
+        // is a `Str` (no new PortType, no lowering special case) and is
+        // **required**, because a blank preset name parses to nothing and would
+        // make the node a silent no-op; `blend_seconds` is optional and lowers to
+        // `0.0` unwired, which the host reads as "instantly".
+        let sw = reg.get("sky.set_weather").unwrap();
+        assert!(sw.input(EXEC_IN).is_some(), "set_weather is an exec action");
+        assert!(sw.output(EXEC_THEN).is_some());
+        assert_eq!(sw.input("preset").unwrap().ty, PortType::Str);
+        assert!(sw.input("preset").unwrap().required);
+        assert_eq!(sw.input("blend_seconds").unwrap().ty, PortType::Float);
+        assert!(!sw.input("blend_seconds").unwrap().required);
+        // Declaration order IS argument order (`lower::data_input_ports`), so a
+        // swap here would silently pass the blend time as the preset name.
+        let args: Vec<&str> = sw
+            .inputs
+            .iter()
+            .filter(|p| !p.ty.is_exec())
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(args, ["preset", "blend_seconds"]);
+
+        assert_eq!(
+            reg.get("sky.get_weather")
+                .unwrap()
+                .output("preset")
+                .unwrap()
+                .ty,
+            PortType::Str
+        );
+        assert_eq!(
+            reg.get("sky.get_precipitation")
+                .unwrap()
+                .output("intensity")
+                .unwrap()
+                .ty,
+            PortType::Float
+        );
+        assert_eq!(
+            reg.get("sky.get_wind_speed")
+                .unwrap()
+                .output("speed")
+                .unwrap()
+                .ty,
             PortType::Float
         );
     }

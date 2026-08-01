@@ -24,6 +24,7 @@ pub mod headless;
 pub mod passes;
 pub mod pick;
 pub mod pipeline;
+pub mod precip;
 pub mod primitives;
 pub mod renderer;
 pub mod scene;
@@ -56,6 +57,10 @@ pub use passes::terrain::{
     TileCachePlan, TERRAIN_BASE_CELLS, TERRAIN_LOD_COUNT,
 };
 pub use pick::Picker;
+pub use precip::{
+    particle_offset, precip_base, wrap_signed, PrecipParams, PrecipQuality, PRECIP_BOX_XZ_M,
+    PRECIP_BOX_Y_M, RAIN_FALL_SPEED, SNOW_FALL_SPEED,
+};
 pub use primitives::{PrimGpu, PrimMesh, PrimRange};
 pub use renderer::{
     EngineRenderer, ViewMode, AO_FORMAT, HDR_FORMAT, LDR_FORMAT, MASK_FORMAT, SCENE_FORMAT,

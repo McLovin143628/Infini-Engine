@@ -1528,6 +1528,187 @@ impl SkyAtmosphereDto {
     }
 }
 
+/// The five named weather states (P17.4), as the panel's preset buttons name
+/// them.
+///
+/// A DTO twin of [`inf_ecs::components::WeatherPreset`] rather than the type
+/// itself, because Ring 0 must not derive `ts_rs::TS` — the same arrangement
+/// every other enum on this boundary uses. `rename_all = "lowercase"` makes the
+/// generated TypeScript a union of string literals (`"clear" | "overcast" | …`),
+/// which is exactly what a row of buttons wants, and it matches
+/// [`WeatherPreset::as_str`](inf_ecs::components::WeatherPreset::as_str) so a
+/// Blueprint and the panel spell a preset the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum WeatherPresetDto {
+    Clear,
+    Overcast,
+    Storm,
+    Fog,
+    Snow,
+}
+
+impl WeatherPresetDto {
+    /// The Ring-0 preset this names.
+    pub fn to_preset(self) -> inf_ecs::components::WeatherPreset {
+        use inf_ecs::components::WeatherPreset as P;
+        match self {
+            WeatherPresetDto::Clear => P::Clear,
+            WeatherPresetDto::Overcast => P::Overcast,
+            WeatherPresetDto::Storm => P::Storm,
+            WeatherPresetDto::Fog => P::Fog,
+            WeatherPresetDto::Snow => P::Snow,
+        }
+    }
+
+    /// Project a Ring-0 preset onto the DTO.
+    pub fn from_preset(p: inf_ecs::components::WeatherPreset) -> Self {
+        use inf_ecs::components::WeatherPreset as P;
+        match p {
+            P::Clear => WeatherPresetDto::Clear,
+            P::Overcast => WeatherPresetDto::Overcast,
+            P::Storm => WeatherPresetDto::Storm,
+            P::Fog => WeatherPresetDto::Fog,
+            P::Snow => WeatherPresetDto::Snow,
+        }
+    }
+}
+
+/// The level's **weather** block (P17.4) — the `weather_*` half of the sky
+/// authority's `SkyAtmosphere`.
+///
+/// A block of its own rather than more fields on [`SkyAtmosphereDto`], because
+/// it is a different question with a different UI: the atmosphere section is a
+/// list of physical knobs, while weather is *one coherent state* picked from
+/// preset buttons and then, optionally, hand-tuned. Same authority entity, same
+/// [`present`](Self::present) create flag.
+///
+/// Numeric-and-boolean plus the preset enum: like [`SkyAtmosphereDto`], no
+/// `Color` crosses here (the droplet tint is the cloud colour, edited in
+/// Details).
+///
+/// Units per architecture rule 6: wind **m/s**, fog extinction **m⁻¹** (SI),
+/// blend times **seconds**, the rest dimensionless `[0, 1]`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct WeatherDto {
+    /// Whether the level has a sky authority at all. `false` ⇒ these are the
+    /// component defaults shown as a preview; writing any row creates it.
+    pub present: bool,
+    /// Whether the weather block **drives** the sky. `false` leaves the authored
+    /// cloud/fog rows in charge and stops all precipitation.
+    pub enabled: bool,
+    /// The preset the live values are blending toward (and equal, once settled).
+    pub preset: WeatherPresetDto,
+    /// Default transition length, **seconds**, used by the preset buttons and by
+    /// a `sky.set_weather` that does not say.
+    pub blend_seconds: f32,
+    /// Seconds left in the transition in flight; `0` = settled. Read-only in the
+    /// panel — it is simulation state, not an authored value.
+    pub blend_remaining: f32,
+    /// Live cloud coverage `[0, 1]`.
+    pub coverage: f32,
+    /// Live cloud type `[0, 1]` (0 = stratus sheet, 1 = cumulus tower).
+    pub cloud_type: f32,
+    /// Live wind in world X, **m/s**.
+    pub wind_x: f32,
+    /// Live wind in world Z, **m/s**.
+    pub wind_z: f32,
+    /// Live height-fog extinction, **m⁻¹**.
+    pub fog_density: f32,
+    /// Live precipitation intensity `[0, 1]`.
+    pub precipitation: f32,
+    /// Live precipitation phase `[0, 1]`: 0 = rain, 1 = snow.
+    pub snowiness: f32,
+}
+
+impl WeatherDto {
+    /// Project the level's weather (or, with no authority, the component
+    /// defaults marked `present: false`).
+    pub fn from_doc(doc: &crate::scene::SceneDoc) -> Self {
+        let (present, a) = match doc.sky_atmosphere() {
+            Some(a) => (true, a),
+            None => (false, inf_ecs::components::SkyAtmosphere::default()),
+        };
+        Self {
+            present,
+            enabled: a.weather_enabled,
+            preset: WeatherPresetDto::from_preset(a.weather_target),
+            blend_seconds: a.weather_blend_seconds,
+            blend_remaining: a.weather_blend_remaining,
+            coverage: a.weather_coverage,
+            cloud_type: a.weather_cloud_type,
+            wind_x: a.weather_wind_x,
+            wind_z: a.weather_wind_z,
+            fog_density: a.weather_fog_density,
+            precipitation: a.weather_precipitation,
+            snowiness: a.weather_snowiness,
+        }
+    }
+
+    /// Overlay this block onto a live `SkyAtmosphere`, clamping hostile input.
+    ///
+    /// `..base` matters for the same reason it does on [`SkyAtmosphereDto`]: the
+    /// panel sends the whole settings block on every edit, and a wind-slider drag
+    /// must not reset the authored cloud colours — or, here, the *atmosphere*
+    /// half of the very same component.
+    pub fn to_component(
+        self,
+        base: inf_ecs::components::SkyAtmosphere,
+    ) -> inf_ecs::components::SkyAtmosphere {
+        let num = |v: f32, fallback: f32, lo: f32, hi: f32| {
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                fallback
+            }
+        };
+        // The upper bound is `inf_ecs::sky::MAX_WEATHER_BLEND_S` **by reference**,
+        // never a repeated `3600.0`: `sky::set_weather` is the other door into
+        // these two fields and clamps to the same constant, and the bound is
+        // arithmetic (past it the f32 countdown stops making progress and the
+        // blend never settles), so two copies of the number would be two chances
+        // to arm the blender forever.
+        let max_blend = inf_ecs::sky::MAX_WEATHER_BLEND_S;
+        inf_ecs::components::SkyAtmosphere {
+            weather_enabled: self.enabled,
+            weather_target: self.preset.to_preset(),
+            // A blend of 0 is legal (snap); negative is not, and a NaN would make
+            // the fixed step's `remaining > 0` test read as false forever.
+            weather_blend_seconds: num(self.blend_seconds, 8.0, 0.0, max_blend),
+            weather_blend_remaining: num(self.blend_remaining, 0.0, 0.0, max_blend),
+            weather_coverage: num(self.coverage, 0.0, 0.0, 1.0),
+            weather_cloud_type: num(self.cloud_type, 0.5, 0.0, 1.0),
+            weather_wind_x: num(self.wind_x, 0.0, -200.0, 200.0),
+            weather_wind_z: num(self.wind_z, 0.0, -200.0, 200.0),
+            weather_fog_density: num(self.fog_density, 0.0, 0.0, 1.0),
+            weather_precipitation: num(self.precipitation, 0.0, 0.0, 1.0),
+            weather_snowiness: num(self.snowiness, 0.0, 0.0, 1.0),
+            ..base
+        }
+    }
+
+    /// The DTO for a preset **snapped**: the state a preset button produces.
+    /// Keeps the button's meaning ("this preset, now") in Ring 1 where it is
+    /// testable, rather than in TypeScript where it is not.
+    pub fn snapped_to(self, preset: WeatherPresetDto) -> Self {
+        let p = preset.to_preset().params();
+        Self {
+            present: true,
+            enabled: true,
+            preset,
+            blend_remaining: 0.0,
+            coverage: p.coverage,
+            cloud_type: p.cloud_type,
+            wind_x: p.wind_x,
+            wind_z: p.wind_z,
+            fog_density: p.fog_density,
+            precipitation: p.precipitation,
+            snowiness: p.snowiness,
+            ..self
+        }
+    }
+}
+
 /// The level's file-level settings, as the World Settings panel edits them
 /// (`scene_get_settings` / `scene_set_settings`). Mirrors
 /// [`crate::scene::serialize::LevelSettings`]; `render` nests
@@ -1550,6 +1731,9 @@ pub struct LevelSettingsDto {
     /// Physical-atmosphere block (P17.2). Same authority entity, same
     /// `present` create flag — see [`SkyAtmosphereDto`].
     pub atmosphere: SkyAtmosphereDto,
+    /// Weather block (P17.4). Same authority entity again, same create flag —
+    /// see [`WeatherDto`].
+    pub weather: WeatherDto,
 }
 
 impl LevelSettingsDto {
@@ -1567,6 +1751,7 @@ impl LevelSettingsDto {
             partition: PartitionSettingsDto::from_record(&s.partition),
             time_of_day: TimeOfDayDto::from_doc(doc),
             atmosphere: SkyAtmosphereDto::from_doc(doc),
+            weather: WeatherDto::from_doc(doc),
         }
     }
 

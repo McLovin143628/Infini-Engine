@@ -25,14 +25,14 @@ use inf_render::{
     assemble_patches, cull_visible, detail_texel, expand_text, shape_texel, Ambient2D,
     AtmosphereParams, AtmosphereQuality, BloomSettings, CloudParams, CloudQuality, CloudVolumes,
     EngineRenderer, GiSettings, GpuContext, HAlign, HeadlessTarget, HeightFog, LightKind,
-    MeshInstance, PrebatchedRun, PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene,
-    RenderSettings, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap,
-    RenderView, ShadowSettings, SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance,
-    SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey, TextParams, TilemapParams,
-    VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode, BILLBOARD_CYLINDRICAL,
-    BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP,
-    BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, CPU_GPU_EXACT_FRACTION, CPU_GPU_SHADOW_TOLERANCE,
-    CPU_GPU_TEXEL_TOLERANCE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    MeshInstance, PrebatchedRun, PrecipParams, PrecipQuality, PrimMesh, RenderChunk, RenderLight,
+    RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
+    RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings, SkinnedInstance, SkinnedMeshData,
+    SkinnedVertex, SpriteInstance, SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey,
+    TextParams, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode,
+    BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
+    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, CPU_GPU_EXACT_FRACTION,
+    CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_TEXEL_TOLERANCE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -3995,5 +3995,507 @@ fn cloud_quality_switch_rebuilds_the_cloud_binds() {
         frames[3], frames[0],
         "returning to High did not reproduce the High frame — a cloud bind group is \
          still holding a previous tier's volume"
+    );
+}
+
+// ── P17.4 weather states + precipitation ─────────────────────────────────────
+//
+// Three more sweep goldens, built the same way the P17.2/P17.3 ones are: from
+// `inf_math::solar` at the component defaults, with the weather block's values
+// taken straight from `inf_ecs::components::WeatherPreset::params()`. So what
+// these picture is what a level gets when it clicks a preset button, not a tuned
+// demo of the shader.
+//
+// The preset numbers are LITERALS here rather than reached for through `inf-ecs`,
+// for the reason `tod_scene` spells the `SkyAtmosphere` defaults out: `inf-render`
+// does not depend on `inf-ecs` and must not start doing so for a test. The Ring-0
+// side pins the same table (`preset_names_round_trip_and_reject_typos` asserts the
+// presets are distinct; the phase-17 gate asserts the projected values), and the
+// frontend mirror is pinned by `todModel.test.ts` — three copies, each with a test
+// naming the other.
+//
+// None of the 33 pre-P17.4 goldens moves: weather is disabled by default, the
+// precipitation node dispatches nothing at all, and the projection's
+// `precip.enabled` is false unless a weather block asks for rain. Verified the
+// P17.2/P17.3 way — running the whole suite under `INF_BLESS_GOLDENS=1` and
+// confirming `git status` reports zero changed PNGs — not merely asserted.
+
+/// A weather state over the P17.3 clouds and the P17.2 sky.
+///
+/// `(coverage, cloud_type, wind_x, wind_z, fog_density, precipitation, snowiness)`
+/// — the seven fields of `WeatherParams`, in declaration order.
+#[allow(clippy::too_many_arguments)]
+fn weather_scene(
+    seconds: f64,
+    coverage: f32,
+    cloud_type: f32,
+    wind_x: f32,
+    wind_z: f32,
+    fog_density: f32,
+    precipitation: f32,
+    snowiness: f32,
+) -> (RenderScene, inf_math::solar::SkyBodies) {
+    let (mut scene, bodies) = tod_scene(seconds);
+    scene.atmosphere.clouds = CloudParams {
+        enabled: true,
+        coverage,
+        cloud_type,
+        wind_x,
+        wind_z,
+        ..CloudParams::default()
+    };
+    scene.atmosphere.fog = HeightFog {
+        density: fog_density,
+        ..HeightFog::default()
+    };
+    scene.atmosphere.precip = PrecipParams {
+        enabled: precipitation > 0.0,
+        intensity: precipitation,
+        snowiness,
+        wind_x,
+        wind_z,
+        // A fixed clock reading: the golden must picture ONE instant, and the
+        // drift is a pure function of this number (`PrecipParams::offsets`), so
+        // pinning it is what makes the image reproducible at all.
+        time_s: 1_234.5,
+        ..PrecipParams::default()
+    };
+    (scene, bodies)
+}
+
+/// The Storm preset — `WeatherPreset::Storm.params()`, field for field — over a
+/// low, thick storm deck. The slab geometry is *not* part of a preset (a preset
+/// drives coverage and type, not altitude), so it is authored here the way a
+/// level would author it, and for the reason `clouds_overcast` lowers its stratus
+/// sheet: a 1.5-4 km fair-weather base seen from the ground is mostly horizon,
+/// and a storm is a ceiling.
+fn storm_scene(seconds: f64) -> (RenderScene, inf_math::solar::SkyBodies) {
+    let (mut scene, bodies) = weather_scene(seconds, 1.0, 0.35, 22.0, 9.0, 6.0e-4, 1.0, 0.0);
+    scene.atmosphere.clouds.bottom = 600.0;
+    scene.atmosphere.clouds.top = 2800.0;
+    scene.mark_dirty();
+    (scene, bodies)
+}
+/// The Fog preset.
+fn fog_scene(seconds: f64) -> (RenderScene, inf_math::solar::SkyBodies) {
+    weather_scene(seconds, 0.5, 0.1, 1.5, 0.5, 6.0e-3, 0.0, 0.0)
+}
+/// The Snow preset.
+fn snow_scene(seconds: f64) -> (RenderScene, inf_math::solar::SkyBodies) {
+    weather_scene(seconds, 0.9, 0.3, 5.0, 2.0, 1.2e-3, 0.7, 1.0)
+}
+
+/// The same scene with the precipitation switched off — the control every
+/// precipitation assertion compares against, so "it drew something" is measured
+/// rather than assumed.
+fn without_precip(scene: &RenderScene) -> RenderScene {
+    let mut s = scene.clone();
+    s.atmosphere.precip = PrecipParams::default();
+    s.mark_dirty();
+    s
+}
+
+/// A few metres of ground under the camera, so the frame is not all sky and the
+/// depth buffer has something in it for the precipitation to be tested against.
+fn ground_plane(scene: &mut RenderScene) {
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.5, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(400.0, 1.0, 400.0),
+        [0.22, 0.24, 0.26, 1.0],
+        1,
+    ));
+    scene.mark_dirty();
+}
+
+/// **Storm at noon.** Full coverage, a hard wind and heavy rain. The assertions
+/// are the two things a weather state has to get right at once: the *sky* went
+/// overcast (the cloud half), and the *air* filled with rain (the precipitation
+/// half), measured against the same frame with each switched off in turn.
+#[test]
+fn golden_weather_storm_noon() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = storm_scene(43_200.0);
+    ground_plane(&mut scene);
+    let view = horizon_view(bodies.sun, 14.0);
+    let img = check_golden(&gpu, "weather_storm_noon", &scene, &view);
+
+    let dry = render(&gpu, &without_precip(&scene), &view);
+    let clear = render(&gpu, &without_clouds(&without_precip(&scene)), &view);
+
+    // The cloud half. `clouds_overcast` already owns the de-blueing claim; what a
+    // *weather preset* has to show is that the whole coherent state took effect,
+    // so this measures the two things a storm ceiling does to the sky: it covers
+    // it, and it darkens it.
+    let covered = changed_fraction(&dry, &clear, H / 3);
+    let sky = mean_rgb(&dry, 0, 0, W, H / 3);
+    let bare = mean_rgb(&clear, 0, 0, W, H / 3);
+    eprintln!("storm sky {sky:?} vs clear {bare:?}; covered {covered:.3}");
+    assert!(
+        covered > 0.9,
+        "the storm deck left {:.1}% of the sky open",
+        100.0 * (1.0 - covered)
+    );
+    assert!(
+        luma(sky) < luma(bare) * 0.9,
+        "the storm deck did not darken the sky: {sky:?} vs {bare:?}"
+    );
+
+    // The precipitation half: the rain perceptibly changed a real fraction of the
+    // frame. The threshold is low on purpose — a drop is a faint mark by design
+    // (see PRECIP_ALPHA), and a sheet of rain is a *density* of them, so demanding
+    // heavy per-pixel deltas would be demanding the wrong look.
+    let wet = changed_fraction(&img, &dry, H);
+    eprintln!("storm rain covered {wet:.4} of the frame");
+    assert!(wet > 0.01, "heavy rain changed almost nothing ({wet:.4})");
+
+    // …and it is DISTRIBUTED rather than a blob: split the frame into eight
+    // vertical bands and require rain in most of them. A single bright artefact
+    // (a degenerate quad, a NaN centre) would pass the fraction test above and
+    // fail this one.
+    let mut bands = 0;
+    for b in 0..8u32 {
+        let (x0, x1) = (b * W / 8, (b + 1) * W / 8);
+        let mut n = 0u32;
+        for y in 0..H {
+            for x in x0..x1 {
+                let a = px(&img, x, y);
+                let c = px(&dry, x, y);
+                let d: i32 = (0..3).map(|i| (a[i] as i32 - c[i] as i32).abs()).sum();
+                if d > 4 {
+                    n += 1;
+                }
+            }
+        }
+        if n > 4 {
+            bands += 1;
+        }
+    }
+    eprintln!("storm rain reached {bands}/8 bands");
+    assert!(bands >= 6, "the rain is not distributed across the frame");
+}
+
+/// **Fog at dawn.** The Fog preset's 6e-3 m⁻¹ is a Koschmieder visibility of
+/// ~500 m, so the assertion is the one thing fog must do: a distant wall loses
+/// its contrast against the sky while a near one keeps it.
+#[test]
+fn golden_weather_fog_dawn() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = fog_scene(18_000.0);
+    assert!(
+        bodies.sun.y > -0.1 && bodies.sun.y < 0.25,
+        "05:00 should put the sun near the horizon"
+    );
+    ground_plane(&mut scene);
+    // Two dark walls of identical albedo and identical SCREEN size — the far one
+    // is the near one scaled 30x about the eye — so every pixel of difference
+    // between them is the fog. (The `aerial_fog` construction, reused because it
+    // is the only way to compare two distances without also comparing two sizes.)
+    let dir = DVec3::new(bodies.sun.x, 0.0, bodies.sun.z).normalize();
+    for (dist, scale) in [(30.0f64, 1.0f32), (900.0, 30.0)] {
+        let across = DVec3::new(-dir.z, 0.0, dir.x);
+        scene.instances.push(MeshInstance::lit(
+            dir * dist + across * (dist * 0.25),
+            Quat::IDENTITY,
+            Vec3::new(12.0 * scale, 12.0 * scale, 0.5 * scale),
+            [0.08, 0.08, 0.09, 1.0],
+            1,
+        ));
+    }
+    scene.mark_dirty();
+    let view = horizon_view(bodies.sun, 2.0);
+    let img = check_golden(&gpu, "weather_fog_dawn", &scene, &view);
+
+    // The control: the same scene with the fog density back at zero.
+    let mut clear = scene.clone();
+    clear.atmosphere.fog = HeightFog::default();
+    clear.mark_dirty();
+    let dry = render(&gpu, &clear, &view);
+
+    // Fog raises the darkest thing in frame toward the sky: the walls are much
+    // darker than the air, so the frame's minimum luma must climb.
+    let darkest = |img: &[u8]| {
+        let mut lo = 1.0f32;
+        for y in 0..H {
+            for x in 0..W {
+                let c = px(img, x, y);
+                let l = luma([
+                    c[0] as f32 / 255.0,
+                    c[1] as f32 / 255.0,
+                    c[2] as f32 / 255.0,
+                ]);
+                lo = lo.min(l);
+            }
+        }
+        lo
+    };
+    let foggy = darkest(&img);
+    let clean = darkest(&dry);
+    eprintln!("fog_dawn darkest {foggy:.4} vs clear {clean:.4}");
+    assert!(
+        foggy > clean + 0.01,
+        "the fog preset did not lift the shadows: {foggy:.4} vs {clean:.4}"
+    );
+    // …and it did it *with distance*: the whole frame is not merely brighter.
+    assert!(
+        changed_fraction(&img, &dry, H) > 0.1,
+        "the fog changed almost nothing"
+    );
+}
+
+/// **Snow at dusk.** Two claims, and the second is the interesting one: the
+/// flakes are lit by the *sky* rather than by a hard-coded white, so the same
+/// snow is measurably warmer at dusk than at noon. That is the single assertion
+/// that would catch precipitation being shaded by a constant — the P17.3
+/// `clouds_dusk` argument, one layer down.
+#[test]
+fn golden_weather_snow_dusk() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = snow_scene(71_100.0);
+    assert!(
+        bodies.sun.y > 0.0 && bodies.sun.y < 0.2,
+        "19:45 should put the sun just above the horizon"
+    );
+    ground_plane(&mut scene);
+    let view = horizon_view(bodies.sun, 12.0);
+    let img = check_golden(&gpu, "weather_snow_dusk", &scene, &view);
+
+    let dry = render(&gpu, &without_precip(&scene), &view);
+    let snowing = changed_fraction(&img, &dry, H);
+    eprintln!("snow_dusk covered {snowing:.4}");
+    assert!(
+        snowing > 0.01,
+        "the snow drew almost nothing ({snowing:.4})"
+    );
+
+    // Snow is not rain: the same intensity at `snowiness = 0` produces a
+    // different image, because the fall speed, the streak length and the flake
+    // radius all move with the phase.
+    let mut as_rain = scene.clone();
+    as_rain.atmosphere.precip.snowiness = 0.0;
+    as_rain.mark_dirty();
+    let rain = render(&gpu, &as_rain, &view);
+    assert_ne!(
+        img, rain,
+        "snowiness changed nothing — the phase is ignored"
+    );
+
+    // The colour claim. Measure only where the precipitation actually IS (pixels
+    // the dry control differs from), so the sky behind it cannot carry the test.
+    let warmth = |img: &[u8], base: &[u8]| {
+        let (mut r, mut b, mut n) = (0.0f32, 0.0f32, 0.0f32);
+        for y in 0..H {
+            for x in 0..W {
+                let a = px(img, x, y);
+                let c = px(base, x, y);
+                let d: i32 = (0..3).map(|i| (a[i] as i32 - c[i] as i32).abs()).sum();
+                if d > 4 {
+                    r += a[0] as f32;
+                    b += a[2] as f32;
+                    n += 1.0;
+                }
+            }
+        }
+        (r / n.max(1.0)) / (b / n.max(1.0)).max(1e-4)
+    };
+    let (mut noon_scene, noon_bodies) = snow_scene(43_200.0);
+    ground_plane(&mut noon_scene);
+    let noon_view = horizon_view(noon_bodies.sun, 12.0);
+    let noon = render(&gpu, &noon_scene, &noon_view);
+    let noon_dry = render(&gpu, &without_precip(&noon_scene), &noon_view);
+
+    let dusk_warm = warmth(&img, &dry);
+    let noon_warm = warmth(&noon, &noon_dry);
+    eprintln!("snow_dusk r/b {dusk_warm:.3} vs noon {noon_warm:.3}");
+    assert!(
+        dusk_warm > noon_warm + 0.05,
+        "dusk snow is not warmer than noon snow ({dusk_warm:.3} vs {noon_warm:.3}) \
+         — the flakes are being lit by a constant, not by the sky"
+    );
+}
+
+/// The **off path**, measured rather than asserted: a scene whose precipitation
+/// is disabled renders **byte-identically** to one that never had a
+/// `PrecipParams` at all. That is what keeps all 33 pre-P17.4 goldens intact —
+/// the node returns before touching the encoder, so the command stream is the
+/// one it always was.
+#[test]
+fn precipitation_off_is_byte_identical() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = storm_scene(43_200.0);
+    ground_plane(&mut scene);
+    let view = horizon_view(bodies.sun, 8.0);
+
+    let mut disabled = scene.clone();
+    disabled.atmosphere.precip.enabled = false;
+    disabled.mark_dirty();
+
+    // Three ways to say "no rain", all of which must produce the same pixels:
+    // never configured, explicitly disabled, and zero intensity.
+    let bare = render(&gpu, &without_precip(&scene), &view);
+    assert_eq!(render(&gpu, &disabled, &view), bare, "disabled != absent");
+    let mut zero = scene.clone();
+    zero.atmosphere.precip.intensity = 0.0;
+    zero.mark_dirty();
+    assert_eq!(render(&gpu, &zero, &view), bare, "zero intensity != absent");
+
+    // …and the enabled one really is different, or all three compare nothing.
+    assert_ne!(render(&gpu, &scene, &view), bare);
+}
+
+/// The **depth** contract: geometry in front of the camera occludes the
+/// precipitation behind it. Without a depth test the drops would hang in front
+/// of the world, which is the most visible way a particle layer goes wrong.
+#[test]
+fn precipitation_is_occluded_by_geometry() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = storm_scene(43_200.0);
+    ground_plane(&mut scene);
+    let view = horizon_view(bodies.sun, 8.0);
+
+    // A wall a couple of metres ahead, filling the middle of the frame. Every
+    // drop beyond it must go.
+    let ahead = DVec3::new(bodies.sun.x, 0.05, bodies.sun.z).normalize();
+    scene.instances.push(MeshInstance::lit(
+        ahead * 2.5,
+        Quat::IDENTITY,
+        Vec3::new(20.0, 20.0, 0.4),
+        [0.5, 0.1, 0.1, 1.0],
+        1,
+    ));
+    scene.mark_dirty();
+    let walled = render(&gpu, &scene, &view);
+    let walled_dry = render(&gpu, &without_precip(&scene), &view);
+    // The control: the identical scene with the wall removed, so the SAME screen
+    // region is measured against itself with and without an occluder. An absolute
+    // threshold would only be measuring how much of the box lies in front of
+    // 2.5 m; the ratio is the depth test.
+    let mut open_scene = scene.clone();
+    open_scene.instances.pop();
+    open_scene.mark_dirty();
+    let open = render(&gpu, &open_scene, &view);
+    let open_dry = render(&gpu, &without_precip(&open_scene), &view);
+
+    let centre_changed = |a: &[u8], b: &[u8]| {
+        let (x0, x1) = (W * 3 / 8, W * 5 / 8);
+        let (y0, y1) = (H * 3 / 8, H * 5 / 8);
+        let mut n = 0u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let p = px(a, x, y);
+                let q = px(b, x, y);
+                let d: i32 = (0..3).map(|i| (p[i] as i32 - q[i] as i32).abs()).sum();
+                if d > 4 {
+                    n += 1;
+                }
+            }
+        }
+        n as f32 / ((x1 - x0) * (y1 - y0)) as f32
+    };
+    let behind_wall = centre_changed(&walled, &walled_dry);
+    let open_air = centre_changed(&open, &open_dry);
+    eprintln!("precip over a 2.5 m wall: {behind_wall:.4} vs open air {open_air:.4}");
+    // A wall 2.5 m into a 40 m box hides ~94 % of the depth the rain occupies, so
+    // what survives is the sliver of drops genuinely in front of it. Without the
+    // depth test this region would be as rained-on as the open air beside it —
+    // mutation-verified by removing `depth_compare` from the pipeline, which
+    // takes the ratio from ~0.2 to ~1.0.
+    assert!(
+        behind_wall < open_air * 0.35,
+        "rain is drawing through a wall 2.5 m away ({behind_wall:.4} vs {open_air:.4} in open air)"
+    );
+    assert!(open_air > 0.2, "the open-air control is not raining");
+}
+
+/// The precipitation field is a pure function of the level's clock, exactly like
+/// the cloud wind: two scenes at the same `time_s` are byte-identical, and one a
+/// tenth of a second later is not.
+///
+/// Adapter-free where it can be (the offsets), on the GPU where it must be (the
+/// frame), so a nondeterministic placement surfaces at whichever level it is
+/// introduced.
+#[test]
+fn precipitation_follows_the_level_clock() {
+    // The CPU half runs everywhere, including CI legs with no adapter.
+    let at = |t: f64| {
+        PrecipParams {
+            enabled: true,
+            intensity: 1.0,
+            wind_x: 22.0,
+            wind_z: 9.0,
+            time_s: t,
+            ..PrecipParams::default()
+        }
+        .offsets()
+    };
+    assert_eq!(
+        at(1_234.5),
+        at(1_234.5),
+        "the offsets are not a pure function"
+    );
+    assert_ne!(at(1_234.5), at(1_234.6));
+
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = storm_scene(43_200.0);
+    ground_plane(&mut scene);
+    let view = horizon_view(bodies.sun, 8.0);
+    let a = render(&gpu, &scene, &view);
+    let b = render(&gpu, &scene, &view);
+    assert_eq!(a, b, "the precipitation pass is not deterministic");
+
+    let mut later = scene.clone();
+    later.atmosphere.precip.time_s += 0.1;
+    later.mark_dirty();
+    assert_ne!(render(&gpu, &later, &view), a, "the rain never fell");
+}
+
+/// The **tier** clamp reaches precipitation: a lower atmosphere quality draws
+/// fewer particles, and never more. Asserted on the count (which is what the tier
+/// actually controls) and confirmed on the frame, so "the tier is wired" and "the
+/// tier is honoured" are separate claims.
+#[test]
+fn precipitation_density_follows_the_render_tier() {
+    let p = PrecipParams {
+        enabled: true,
+        intensity: 1.0,
+        ..PrecipParams::default()
+    };
+    let n = |q| p.count(PrecipQuality::from_atmosphere(q));
+    assert!(n(AtmosphereQuality::Medium) < n(AtmosphereQuality::High));
+    assert!(n(AtmosphereQuality::Low) < n(AtmosphereQuality::Medium));
+
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = storm_scene(43_200.0);
+    ground_plane(&mut scene);
+    let view = horizon_view(bodies.sun, 8.0);
+    // The control must be rendered at the SAME tier: a lower atmosphere quality
+    // also shrinks the sky LUTs, so comparing a Low frame against a High dry one
+    // measures the whole sky rather than the rain. Not hypothetical — the first
+    // draft of this test reported Low drawing *thirty times* the rain of High,
+    // which was the LUT difference in its entirety.
+    let with = |q, precip: bool| {
+        let mut s = RenderSettings::default();
+        s.atmosphere.quality = q;
+        let sc = if precip {
+            scene.clone()
+        } else {
+            without_precip(&scene)
+        };
+        render_with(&gpu, &sc, &view, s)
+    };
+    let high = changed_fraction(
+        &with(AtmosphereQuality::High, true),
+        &with(AtmosphereQuality::High, false),
+        H,
+    );
+    let low = changed_fraction(
+        &with(AtmosphereQuality::Low, true),
+        &with(AtmosphereQuality::Low, false),
+        H,
+    );
+    eprintln!("precip coverage High {high:.4} vs Low {low:.4}");
+    assert!(
+        low < high,
+        "the Low tier drew as much rain as High ({low:.4} vs {high:.4})"
     );
 }

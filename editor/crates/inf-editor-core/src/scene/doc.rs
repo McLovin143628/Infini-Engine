@@ -2172,6 +2172,114 @@ impl SceneDoc {
         Some(guid)
     }
 
+    /// Edit the level's **weather** block as one undo step (P17.4) — the third
+    /// sibling of [`Self::edit_time_of_day`] / [`Self::edit_sky_atmosphere`],
+    /// with identical `create` semantics.
+    ///
+    /// Separate from `edit_sky_atmosphere` even though both write the same
+    /// component, for the reason that split them in the first place: the undo
+    /// entry is named after what the user did. Clicking "Storm" should read
+    /// **Weather** in the history, not "Sky Atmosphere".
+    ///
+    /// Only the eleven `weather_*` fields are written, so an atmosphere edit and
+    /// a weather edit in either order compose rather than overwrite — which is
+    /// exactly what the panel does, since it posts the whole settings block on
+    /// every change.
+    pub fn edit_weather(
+        &mut self,
+        atmos: inf_ecs::components::SkyAtmosphere,
+        create: bool,
+    ) -> Option<Uuid> {
+        let reg = self.world.registry();
+        let Some(tp) = reg.type_path_for("SkyAtmosphere") else {
+            debug_assert!(false, "SkyAtmosphere must be registered");
+            return None;
+        };
+        let existing = self.sky_authority();
+        if existing.is_none() && !create {
+            return None;
+        }
+        // A no-op records nothing: no undo entry, no version bump, no dirty flag.
+        if let Some(guid) = existing {
+            if self.sky_atmosphere().is_some_and(|a| {
+                a.weather_params() == atmos.weather_params()
+                    && a.weather_enabled == atmos.weather_enabled
+                    && a.weather_target == atmos.weather_target
+                    && a.weather_blend_seconds == atmos.weather_blend_seconds
+                    && a.weather_blend_remaining == atmos.weather_blend_remaining
+            }) {
+                return Some(guid);
+            }
+        }
+
+        self.begin_transaction("Weather");
+        let guid = match existing {
+            Some(g) => g,
+            None => match self.edit_time_of_day(inf_ecs::components::TimeOfDay::default(), true) {
+                Some(g) => g,
+                None => {
+                    self.commit_transaction();
+                    return None;
+                }
+            },
+        };
+        let num = |v: f32| PropValue::Number(f64::from(v));
+        self.edit_set_prop(
+            guid,
+            tp,
+            "weather_enabled",
+            &PropValue::Bool(atmos.weather_enabled),
+        );
+        // The preset is a reflected unit enum, written by **variant name** — the
+        // Rust spelling (`"Storm"`), not the lowercase wire spelling, because that
+        // is what `bevy_reflect`'s `DynamicEnum` matches on.
+        self.edit_set_prop(
+            guid,
+            tp,
+            "weather_target",
+            &PropValue::Enum {
+                value: atmos.weather_target.variant_name().to_string(),
+                options: Vec::new(),
+            },
+        );
+        self.edit_set_prop(
+            guid,
+            tp,
+            "weather_blend_seconds",
+            &num(atmos.weather_blend_seconds),
+        );
+        self.edit_set_prop(
+            guid,
+            tp,
+            "weather_blend_remaining",
+            &num(atmos.weather_blend_remaining),
+        );
+        self.edit_set_prop(guid, tp, "weather_coverage", &num(atmos.weather_coverage));
+        self.edit_set_prop(
+            guid,
+            tp,
+            "weather_cloud_type",
+            &num(atmos.weather_cloud_type),
+        );
+        self.edit_set_prop(guid, tp, "weather_wind_x", &num(atmos.weather_wind_x));
+        self.edit_set_prop(guid, tp, "weather_wind_z", &num(atmos.weather_wind_z));
+        self.edit_set_prop(
+            guid,
+            tp,
+            "weather_fog_density",
+            &num(atmos.weather_fog_density),
+        );
+        self.edit_set_prop(
+            guid,
+            tp,
+            "weather_precipitation",
+            &num(atmos.weather_precipitation),
+        );
+        self.edit_set_prop(guid, tp, "weather_snowiness", &num(atmos.weather_snowiness));
+        self.commit_transaction();
+        Some(guid)
+    }
+
     // ── history control ──────────────────────────────────────────────────
 
     /// Open an undo transaction; every recorded edit until [`Self::commit_transaction`]

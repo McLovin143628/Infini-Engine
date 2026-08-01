@@ -141,7 +141,7 @@ use uuid::Uuid;
 ///   to their live `SkyAtmosphere::default()` values. That means
 ///   `clouds_enabled: false`: a v12 level had **no clouds**, which is exactly what
 ///   a v12 level meant.
-pub const SCHEMA_VERSION: u32 = 13;
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// File-level simulation settings (schema v3+), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -434,12 +434,25 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v13 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v14 file layout (current). `entities` reuses [`RuntimeEntity`].
 #[derive(Serialize, Deserialize)]
-struct SceneFileV13 {
+struct SceneFileV14 {
     schema_version: u32,
     title: String,
     entities: Vec<RuntimeEntity>,
+    #[serde(default)]
+    settings: RuntimeSettings,
+}
+
+/// A frozen schema-v13 file layout. It carried the **live** settings shape (v14
+/// did not touch [`RuntimeSettings`]), so only `entities` is repointed at the
+/// frozen [`EntityRecordV13`].
+#[derive(Serialize, Deserialize)]
+struct SceneFileV13 {
+    #[allow(dead_code)]
+    schema_version: u32,
+    title: String,
+    entities: Vec<EntityRecordV13>,
     #[serde(default)]
     settings: RuntimeSettings,
 }
@@ -2534,6 +2547,447 @@ impl EntityRecordV12 {
     }
 }
 
+/// The **pre-v14** [`SkyAtmosphere`] byte layout (schema v14 froze this when the
+/// component grew its **weather block**). The frozen [`EntityRecordV13`] carries
+/// `sky_atmosphere` as `Option<SkyAtmosphereV13>`, exactly as
+/// [`EntityRecordV12`] carries it as `Option<SkyAtmosphereV12>`;
+/// [`SkyAtmosphereV13::into_current`] lifts it.
+///
+/// The 36 fields mirror the v13 component one-for-one **including their
+/// `#[serde(default = "...")]` markers**, and the default fns are reproduced here
+/// rather than reached for in `inf_ecs` -- a frozen record must not be able to
+/// move when the live component's defaults are re-tuned. bincode ignores defaults
+/// on the write side, but keeping them identical means this record decodes every
+/// partial payload the live one did, in the human-readable codecs too.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct SkyAtmosphereV13 {
+    #[serde(default = "v13_sky_true")]
+    enabled: bool,
+    #[serde(default = "v13_sun_intensity")]
+    sun_intensity: f32,
+    #[serde(default = "v13_sun_color")]
+    sun_color: Color,
+    #[serde(default = "v13_moon_intensity")]
+    moon_intensity: f32,
+    #[serde(default = "v13_moon_color")]
+    moon_color: Color,
+    #[serde(default = "v13_sky_zenith")]
+    zenith: Color,
+    #[serde(default = "v13_sky_horizon")]
+    horizon: Color,
+    #[serde(default = "v13_sky_ground")]
+    ground: Color,
+    #[serde(default = "v13_night_darkening")]
+    night_darkening: f32,
+    #[serde(default = "v13_sky_true")]
+    physical: bool,
+    #[serde(default = "v13_one")]
+    sky_intensity: f32,
+    #[serde(default = "v13_one")]
+    turbidity: f32,
+    #[serde(default = "v13_mie_anisotropy")]
+    mie_anisotropy: f32,
+    #[serde(default = "v13_sun_disc_deg")]
+    sun_disc_deg: f32,
+    #[serde(default = "v13_moon_disc_deg")]
+    moon_disc_deg: f32,
+    #[serde(default = "v13_one")]
+    star_intensity: f32,
+    #[serde(default)]
+    tint_strength: f32,
+    #[serde(default = "v13_one")]
+    aerial_perspective: f32,
+    #[serde(default)]
+    fog_density: f32,
+    #[serde(default = "v13_fog_falloff")]
+    fog_falloff: f32,
+    #[serde(default)]
+    fog_height: f32,
+    #[serde(default = "v13_fog_color")]
+    fog_color: Color,
+    #[serde(default)]
+    clouds_enabled: bool,
+    #[serde(default = "v13_cloud_coverage")]
+    cloud_coverage: f32,
+    #[serde(default = "v13_cloud_type")]
+    cloud_type: f32,
+    #[serde(default = "v13_cloud_bottom")]
+    cloud_bottom: f32,
+    #[serde(default = "v13_cloud_top")]
+    cloud_top: f32,
+    #[serde(default = "v13_cloud_density")]
+    cloud_density: f32,
+    #[serde(default = "v13_cloud_detail")]
+    cloud_detail: f32,
+    #[serde(default)]
+    cloud_seed: u32,
+    #[serde(default = "v13_cloud_wind_x")]
+    cloud_wind_x: f32,
+    #[serde(default = "v13_cloud_wind_z")]
+    cloud_wind_z: f32,
+    #[serde(default = "v13_cloud_phase_g")]
+    cloud_phase_g: f32,
+    #[serde(default = "v13_one")]
+    cloud_shadow: f32,
+    #[serde(default = "v13_one")]
+    cloud_ambient: f32,
+    #[serde(default = "v13_cloud_color")]
+    cloud_color: Color,
+}
+
+fn v13_sky_true() -> bool {
+    true
+}
+fn v13_sun_intensity() -> f32 {
+    3.0
+}
+fn v13_sun_color() -> Color {
+    Color::new(1.0, 0.98, 0.95, 1.0)
+}
+fn v13_moon_intensity() -> f32 {
+    0.15
+}
+fn v13_moon_color() -> Color {
+    Color::new(0.62, 0.72, 1.0, 1.0)
+}
+fn v13_sky_zenith() -> Color {
+    Color::new(0.012, 0.021, 0.038, 1.0)
+}
+fn v13_sky_horizon() -> Color {
+    Color::new(0.055, 0.081, 0.120, 1.0)
+}
+fn v13_sky_ground() -> Color {
+    Color::new(0.009, 0.011, 0.015, 1.0)
+}
+fn v13_night_darkening() -> f32 {
+    0.85
+}
+fn v13_one() -> f32 {
+    1.0
+}
+fn v13_mie_anisotropy() -> f32 {
+    0.8
+}
+fn v13_sun_disc_deg() -> f32 {
+    0.545
+}
+fn v13_moon_disc_deg() -> f32 {
+    0.52
+}
+fn v13_fog_falloff() -> f32 {
+    0.002 // 500 m e-folding height
+}
+fn v13_fog_color() -> Color {
+    Color::new(1.0, 1.0, 1.0, 1.0)
+}
+fn v13_cloud_coverage() -> f32 {
+    0.35
+}
+fn v13_cloud_type() -> f32 {
+    0.7
+}
+fn v13_cloud_bottom() -> f32 {
+    1500.0
+}
+fn v13_cloud_top() -> f32 {
+    4000.0
+}
+fn v13_cloud_density() -> f32 {
+    0.04
+}
+fn v13_cloud_detail() -> f32 {
+    0.6
+}
+fn v13_cloud_wind_x() -> f32 {
+    6.0
+}
+fn v13_cloud_wind_z() -> f32 {
+    2.0
+}
+fn v13_cloud_phase_g() -> f32 {
+    0.8
+}
+fn v13_cloud_color() -> Color {
+    Color::new(1.0, 1.0, 1.0, 1.0)
+}
+
+impl SkyAtmosphereV13 {
+    /// Lift to the live [`SkyAtmosphere`]: the 36 v13 fields carry through
+    /// verbatim and the 11 P17.4 weather fields take their live
+    /// `SkyAtmosphere::default()` values. That default *is* what a v13 level
+    /// meant -- `weather_enabled: false` leaves the authored cloud and fog fields
+    /// driving the sky exactly as they did, which is the byte-stability promise.
+    fn into_current(self) -> SkyAtmosphere {
+        SkyAtmosphere {
+            enabled: self.enabled,
+            sun_intensity: self.sun_intensity,
+            sun_color: self.sun_color,
+            moon_intensity: self.moon_intensity,
+            moon_color: self.moon_color,
+            zenith: self.zenith,
+            horizon: self.horizon,
+            ground: self.ground,
+            night_darkening: self.night_darkening,
+            physical: self.physical,
+            sky_intensity: self.sky_intensity,
+            turbidity: self.turbidity,
+            mie_anisotropy: self.mie_anisotropy,
+            sun_disc_deg: self.sun_disc_deg,
+            moon_disc_deg: self.moon_disc_deg,
+            star_intensity: self.star_intensity,
+            tint_strength: self.tint_strength,
+            aerial_perspective: self.aerial_perspective,
+            fog_density: self.fog_density,
+            fog_falloff: self.fog_falloff,
+            fog_height: self.fog_height,
+            fog_color: self.fog_color,
+            clouds_enabled: self.clouds_enabled,
+            cloud_coverage: self.cloud_coverage,
+            cloud_type: self.cloud_type,
+            cloud_bottom: self.cloud_bottom,
+            cloud_top: self.cloud_top,
+            cloud_density: self.cloud_density,
+            cloud_detail: self.cloud_detail,
+            cloud_seed: self.cloud_seed,
+            cloud_wind_x: self.cloud_wind_x,
+            cloud_wind_z: self.cloud_wind_z,
+            cloud_phase_g: self.cloud_phase_g,
+            cloud_shadow: self.cloud_shadow,
+            cloud_ambient: self.cloud_ambient,
+            cloud_color: self.cloud_color,
+            ..SkyAtmosphere::default()
+        }
+    }
+
+    /// Project a live [`SkyAtmosphere`] back onto the frozen v13 shape (the
+    /// downgrade-bless path). The whole weather block has no v13 home and is
+    /// dropped -- the deliberately lossy direction, used only to regenerate an
+    /// old fixture from a current record.
+    #[cfg(test)]
+    fn from_current(a: SkyAtmosphere) -> Self {
+        Self {
+            enabled: a.enabled,
+            sun_intensity: a.sun_intensity,
+            sun_color: a.sun_color,
+            moon_intensity: a.moon_intensity,
+            moon_color: a.moon_color,
+            zenith: a.zenith,
+            horizon: a.horizon,
+            ground: a.ground,
+            night_darkening: a.night_darkening,
+            physical: a.physical,
+            sky_intensity: a.sky_intensity,
+            turbidity: a.turbidity,
+            mie_anisotropy: a.mie_anisotropy,
+            sun_disc_deg: a.sun_disc_deg,
+            moon_disc_deg: a.moon_disc_deg,
+            star_intensity: a.star_intensity,
+            tint_strength: a.tint_strength,
+            aerial_perspective: a.aerial_perspective,
+            fog_density: a.fog_density,
+            fog_falloff: a.fog_falloff,
+            fog_height: a.fog_height,
+            fog_color: a.fog_color,
+            clouds_enabled: a.clouds_enabled,
+            cloud_coverage: a.cloud_coverage,
+            cloud_type: a.cloud_type,
+            cloud_bottom: a.cloud_bottom,
+            cloud_top: a.cloud_top,
+            cloud_density: a.cloud_density,
+            cloud_detail: a.cloud_detail,
+            cloud_seed: a.cloud_seed,
+            cloud_wind_x: a.cloud_wind_x,
+            cloud_wind_z: a.cloud_wind_z,
+            cloud_phase_g: a.cloud_phase_g,
+            cloud_shadow: a.cloud_shadow,
+            cloud_ambient: a.cloud_ambient,
+            cloud_color: a.cloud_color,
+        }
+    }
+}
+
+/// The **pre-v14** entity byte layout (schema v14 froze this when
+/// [`SkyAtmosphere`] grew its weather block). Identical to the live
+/// [`RuntimeEntity`] except that `sky_atmosphere` is typed as the frozen
+/// [`SkyAtmosphereV13`] — v14 added **no** entity slot and moved none, so this is
+/// the `TerrainV8` shape of bump, not the `EntityRecordV10` shape.
+#[derive(Clone, Serialize, Deserialize)]
+struct EntityRecordV13 {
+    guid: Uuid,
+    name: String,
+    parent: Option<Uuid>,
+    transform: Transform,
+    visible: bool,
+    mesh: Option<MeshRef>,
+    material: Option<Material>,
+    light: Option<Light>,
+    camera: Option<Camera>,
+    #[serde(default)]
+    sprite: Option<Sprite>,
+    #[serde(default)]
+    tilemap: Option<Tilemap>,
+    #[serde(default)]
+    nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    text2d: Option<Text2D>,
+    #[serde(default)]
+    light_2d: Option<Light2D>,
+    #[serde(default)]
+    rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    actor: Option<Uuid>,
+    #[serde(default)]
+    terrain: Option<Terrain>,
+    #[serde(default)]
+    pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    root_motion: Option<RootMotion>,
+    #[serde(default)]
+    attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    audio_source: Option<AudioSource>,
+    #[serde(default)]
+    audio_listener: Option<AudioListener>,
+    #[serde(default)]
+    decal: Option<Decal>,
+    #[serde(default)]
+    volume: Option<Volume>,
+    #[serde(default)]
+    spline: Option<Spline>,
+    #[serde(default)]
+    foliage: Option<Foliage>,
+    #[serde(default)]
+    streaming_source: Option<StreamingSource>,
+    #[serde(default)]
+    always_loaded: Option<AlwaysLoaded>,
+    #[serde(default)]
+    time_of_day: Option<TimeOfDay>,
+    /// The **pre-v14** atmosphere shape — the one field that makes this record
+    /// differ from the live [`RuntimeEntity`].
+    #[serde(default)]
+    sky_atmosphere: Option<SkyAtmosphereV13>,
+}
+
+impl EntityRecordV13 {
+    /// Lift a frozen v13 record to the live (v14) [`RuntimeEntity`]. Every slot
+    /// carries through unchanged; only the atmosphere is lifted, through
+    /// [`SkyAtmosphereV13::into_current`].
+    fn into_runtime(self) -> RuntimeEntity {
+        RuntimeEntity {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: self.decal,
+            volume: self.volume,
+            spline: self.spline,
+            foliage: self.foliage,
+            streaming_source: self.streaming_source,
+            always_loaded: self.always_loaded,
+            time_of_day: self.time_of_day,
+            sky_atmosphere: self.sky_atmosphere.map(SkyAtmosphereV13::into_current),
+        }
+    }
+
+    /// Project a live [`RuntimeEntity`] back onto the frozen v13 shape (the
+    /// downgrade-bless path that regenerates the committed v13 fixture). Only the
+    /// weather block is lost — asserted as a property by
+    /// `v13_entity_downgrade_is_lossless_except_for_the_weather_block`.
+    #[cfg(test)]
+    fn from_current(r: RuntimeEntity) -> Self {
+        Self {
+            guid: r.guid,
+            name: r.name,
+            parent: r.parent,
+            transform: r.transform,
+            visible: r.visible,
+            mesh: r.mesh,
+            material: r.material,
+            light: r.light,
+            camera: r.camera,
+            sprite: r.sprite,
+            tilemap: r.tilemap,
+            nine_slice: r.nine_slice,
+            text2d: r.text2d,
+            light_2d: r.light_2d,
+            rigid_body_2d: r.rigid_body_2d,
+            collider_2d: r.collider_2d,
+            character_controller_2d: r.character_controller_2d,
+            rigid_body_3d: r.rigid_body_3d,
+            collider_3d: r.collider_3d,
+            character_controller_3d: r.character_controller_3d,
+            actor: r.actor,
+            terrain: r.terrain,
+            pcg_volume: r.pcg_volume,
+            skeletal_mesh: r.skeletal_mesh,
+            anim_player: r.anim_player,
+            anim_state_machine: r.anim_state_machine,
+            root_motion: r.root_motion,
+            attached_to: r.attached_to,
+            joint_2d: r.joint_2d,
+            joint_3d: r.joint_3d,
+            audio_source: r.audio_source,
+            audio_listener: r.audio_listener,
+            decal: r.decal,
+            volume: r.volume,
+            spline: r.spline,
+            foliage: r.foliage,
+            streaming_source: r.streaming_source,
+            always_loaded: r.always_loaded,
+            time_of_day: r.time_of_day,
+            sky_atmosphere: r.sky_atmosphere.map(SkyAtmosphereV13::from_current),
+        }
+    }
+}
+
 /// Decode a `.inf_lvl` payload, lifting older schemas to [`RuntimeLevel`].
 pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     let (header, _): (Header, usize) = bincode::serde::decode_from_slice(bytes, bincode_config())
@@ -2713,8 +3167,22 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v13: {e}")))?;
             Ok(RuntimeLevel {
                 title: v13.title,
-                entities: v13.entities,
+                entities: v13
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV13::into_runtime)
+                    .collect(),
                 settings: v13.settings,
+            })
+        }
+        14 => {
+            let (v14, _): (SceneFileV14, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v14: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v14.title,
+                entities: v14.entities,
+                settings: v14.settings,
             })
         }
         found => Err(SceneError::SchemaTooNew {
@@ -2726,7 +3194,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
 
 /// Encode a level to the current schema (v13) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV13 {
+    let file = SceneFileV14 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -4459,12 +4927,14 @@ mod tests {
         let lifted = RuntimeLevel::decode(&v11).unwrap().encode().unwrap();
         // The v12 block: 13 appended fields = 1 bool byte + 11 f32 + a 4-f32
         // Color = 1 + 60 bytes. `encode` writes the **current** schema, so the
-        // lift now also appends the v13 cloud block's 62 bytes (broken down in
-        // `v13_clouds_are_wider_on_the_wire_than_v12`) — one growth per bump,
-        // both on the one entity that carries an atmosphere.
+        // lift also appends the v13 cloud block's 62 bytes (broken down in
+        // `v13_clouds_are_wider_on_the_wire_than_v12`) and the v14 weather
+        // block's 38 (broken down in `v14_weather_is_wider_on_the_wire_than_v13`)
+        // — one growth per bump, all on the one entity that carries an
+        // atmosphere.
         assert_eq!(
             lifted.len(),
-            v11.len() + 61 + 62,
+            v11.len() + 61 + 62 + 38,
             "the one entity carrying an atmosphere grew by the physical block"
         );
     }
@@ -4900,9 +5370,12 @@ mod tests {
             "the field-by-field price no longer sums to 62"
         );
 
+        // `encode` writes the **current** schema, so the lift also appends the
+        // v14 weather block — priced in `v14_weather_is_wider_on_the_wire_than_v13`
+        // and named here rather than folded into the number.
         assert_eq!(
             lifted.len(),
-            v12.len() + expected,
+            v12.len() + expected + WEATHER_WIRE_BYTES,
             "the one entity carrying an atmosphere grew by the cloud block"
         );
     }
@@ -4920,5 +5393,459 @@ mod tests {
             0x1_0000..=0xffff_ffff => 5,
             _ => 9,
         }
+    }
+
+    // ── schema v14 (P17.4 weather states) ─────────────────────────────────
+
+    /// Wire width of the appended v14 weather block, priced field by field.
+    ///
+    /// 1 bool + a fieldless-enum variant index (bincode writes it as a varint, so
+    /// the default `Clear` at index 0 costs one byte) + 9 f32. Named rather than
+    /// spelled `38` at each use, so a future field lands in one place.
+    const WEATHER_WIRE_BYTES: usize = 1 + 1 + 9 * 4;
+
+    /// An all-`None` frozen v13 entity — the struct-update base for
+    /// [`v13_scene_reference`]. Built through the downgrade hop so the field list
+    /// can never drift from the live record.
+    fn v13_rec(guid: Uuid, name: &str, parent: Option<Uuid>) -> EntityRecordV13 {
+        EntityRecordV13::from_current(v9_rec(guid, name, parent).into_runtime())
+    }
+
+    /// The **v13** atmosphere the fixture's sky entity carries: deliberately
+    /// **non-default** in fields drawn from all three earlier blocks (the v11
+    /// half, the physical block and the cloud block), so the v14 hop is proven to
+    /// preserve what v13 authored rather than merely to produce defaults.
+    ///
+    /// Spelled out in **literals** for the reason the whole frozen-record scheme
+    /// exists: the committed bytes must be traceable to written values, and a
+    /// frozen record must not be able to move when the live component is
+    /// re-tuned.
+    fn v13_fixture_atmosphere() -> SkyAtmosphereV13 {
+        SkyAtmosphereV13 {
+            enabled: true,
+            sun_intensity: 4.25,
+            sun_color: Color::new(1.0, 0.98, 0.95, 1.0),
+            moon_intensity: 0.15,
+            moon_color: Color::new(0.62, 0.72, 1.0, 1.0),
+            zenith: Color::new(0.012, 0.021, 0.038, 1.0),
+            horizon: Color::new(0.055, 0.081, 0.120, 1.0),
+            ground: Color::new(0.009, 0.011, 0.015, 1.0),
+            night_darkening: 0.35,
+            physical: true,
+            sky_intensity: 1.0,
+            turbidity: 2.5,
+            mie_anisotropy: 0.8,
+            sun_disc_deg: 0.545,
+            moon_disc_deg: 0.52,
+            star_intensity: 1.0,
+            tint_strength: 0.0,
+            aerial_perspective: 1.0,
+            fog_density: 6e-4,
+            fog_falloff: 0.002,
+            fog_height: 0.0,
+            fog_color: Color::new(1.0, 1.0, 1.0, 1.0),
+            clouds_enabled: true,
+            cloud_coverage: 0.62,
+            cloud_type: 0.4,
+            cloud_bottom: 900.0,
+            cloud_top: 5200.0,
+            cloud_density: 0.07,
+            cloud_detail: 0.85,
+            cloud_seed: 90_210,
+            cloud_wind_x: -11.5,
+            cloud_wind_z: 3.25,
+            cloud_phase_g: 0.55,
+            cloud_shadow: 0.4,
+            cloud_ambient: 1.75,
+            cloud_color: Color::new(0.94, 0.96, 1.0, 1.0),
+        }
+    }
+
+    /// A representative frozen schema-v13 scene — the provenance source for the
+    /// committed `scene_v13.inf_lvl`. Carries the **v13** additions (a clock plus
+    /// a non-default pre-v14 `SkyAtmosphere` with clouds on) over the v10
+    /// world-partition content, so the pre-v14 entity byte layout is pinned by
+    /// committed bytes.
+    fn v13_scene_reference() -> SceneFileV13 {
+        use inf_ecs::components::Primitive;
+        let g = uuid::Uuid::from_u128;
+        SceneFileV13 {
+            schema_version: 13,
+            title: "V13 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV13 {
+                    mesh: Some(MeshRef {
+                        primitive: Primitive::Cube,
+                        asset: Some(g(0xC0A1)),
+                    }),
+                    material: Some(Material::default()),
+                    streaming_source: Some(StreamingSource { radius_m: 300.0 }),
+                    ..v13_rec(g(0xC001), "Player", None)
+                },
+                EntityRecordV13 {
+                    always_loaded: Some(AlwaysLoaded),
+                    ..v13_rec(g(0xC002), "GameMode", None)
+                },
+                EntityRecordV13 {
+                    light: Some(Light {
+                        kind: LightKind::Directional,
+                        color: Color::WHITE,
+                        intensity: 2.0,
+                        ..Default::default()
+                    }),
+                    time_of_day: Some(TimeOfDay {
+                        seconds: 3_600.0,
+                        day_of_year: 355,
+                        latitude_deg: -33.9,
+                        longitude_deg: 151.2,
+                        rate: 120.0,
+                    }),
+                    sky_atmosphere: Some(v13_fixture_atmosphere()),
+                    ..v13_rec(g(0xC003), "Sky", None)
+                },
+            ],
+            settings: RuntimeSettings {
+                gravity_2d: Vec2d::new(0.0, -18.0),
+                gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+                sim_hz: 90.0,
+                render: RenderSettingsRecord {
+                    exposure: 1.1,
+                    ..RenderSettingsRecord::default()
+                },
+                partition: PartitionSettings {
+                    enabled: true,
+                    cell_size_m: 128.0,
+                    activation_radius_m: 200.0,
+                    prefetch_margin_m: 300.0,
+                },
+            },
+        }
+    }
+
+    /// Bless the committed `scene_v13.inf_lvl` from [`v13_scene_reference`] under
+    /// `INF_BLESS_FIXTURES=1` (inert otherwise). Never hand-edit the committed
+    /// bytes.
+    #[test]
+    fn bless_scene_v13_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v13_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 13);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v13.inf_lvl");
+        std::fs::write(&path, &bytes).unwrap();
+        eprintln!("blessed scene_v13 fixture: {}", path.display());
+    }
+
+    /// The committed schema-v13 fixture — written by the **pre-v14 codec**, before
+    /// `SkyAtmosphere` grew its weather block — still decodes here, with the v13
+    /// shape preserved verbatim and the 11 new fields lifted to their live
+    /// defaults. The "old bytes load forever" gate for the v14 bump.
+    #[test]
+    fn v13_loads_and_lifts_the_weather() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v13.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v13 fixture present");
+        assert_eq!(bytes[0], 13, "fixture is a genuine schema-v13 payload");
+        // Reproducibility lock: the frozen v13 writer still emits those exact bytes.
+        let rebuilt =
+            bincode::serde::encode_to_vec(v13_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "committed v13 fixture matches the frozen writer"
+        );
+
+        let level = RuntimeLevel::decode(&bytes).expect("v13 fixture decodes");
+        assert_eq!(level.title, "V13 Fixture Level");
+        let by_name = |n: &str| level.entities.iter().find(|e| e.name == n).unwrap();
+
+        // The v13 content survives the frozen-record hop intact …
+        assert_eq!(by_name("Player").streaming_source.unwrap().radius_m, 300.0);
+        assert_eq!(by_name("GameMode").always_loaded, Some(AlwaysLoaded));
+        assert_eq!(by_name("Sky").time_of_day.unwrap().rate, 120.0);
+        assert_eq!(level.settings.sim_hz, 90.0);
+
+        // … including the **non-default** fields from all three earlier blocks.
+        let a = by_name("Sky")
+            .sky_atmosphere
+            .expect("sky carries an atmosphere");
+        assert_eq!(a.sun_intensity, 4.25);
+        assert_eq!(a.night_darkening, 0.35);
+        assert_eq!(a.turbidity, 2.5);
+        assert_eq!(a.fog_density, 6e-4);
+        assert!(a.clouds_enabled, "v13 could author clouds");
+        assert_eq!(a.cloud_seed, 90_210);
+        assert_eq!(a.cloud_wind_x, -11.5);
+
+        // … and every v14 field lifts to its documented default: weather OFF, so
+        // the authored cloud and fog fields above are still what drives the sky.
+        // That is exactly what a v13 level meant.
+        let d = SkyAtmosphere::default();
+        assert!(!a.weather_enabled, "a v13 level had no weather block");
+        assert_eq!(a.weather_target, d.weather_target);
+        assert_eq!(a.weather_blend_seconds, d.weather_blend_seconds);
+        assert_eq!(a.weather_blend_remaining, 0.0, "nothing in flight");
+        assert_eq!(a.weather_coverage, d.weather_coverage);
+        assert_eq!(a.weather_cloud_type, d.weather_cloud_type);
+        assert_eq!(a.weather_wind_x, d.weather_wind_x);
+        assert_eq!(a.weather_wind_z, d.weather_wind_z);
+        assert_eq!(a.weather_fog_density, d.weather_fog_density);
+        assert_eq!(a.weather_precipitation, d.weather_precipitation);
+        assert_eq!(a.weather_snowiness, d.weather_snowiness);
+
+        // Rewriting lifts to the current schema (v14) and re-decodes equal.
+        let out = level.encode().unwrap();
+        assert_eq!(out[0], SCHEMA_VERSION as u8);
+        assert_eq!(RuntimeLevel::decode(&out).unwrap(), level);
+    }
+
+    /// The **downgrade-bless** direction for the v13 entity record, as a checked
+    /// property rather than a path only `INF_BLESS_FIXTURES=1` walks.
+    #[test]
+    fn v13_entity_downgrade_is_lossless_except_for_the_weather_block() {
+        let g = uuid::Uuid::from_u128;
+        let authored = SkyAtmosphere {
+            // the v13 shape — must survive …
+            sun_intensity: 4.25,
+            turbidity: 3.5,
+            fog_density: 6e-4,
+            clouds_enabled: true,
+            cloud_coverage: 0.9,
+            cloud_seed: 7,
+            cloud_wind_x: 20.0,
+            // … and the v14 block — must not.
+            weather_enabled: true,
+            weather_target: inf_ecs::components::WeatherPreset::Storm,
+            weather_blend_remaining: 4.0,
+            weather_precipitation: 1.0,
+            weather_snowiness: 1.0,
+            ..SkyAtmosphere::default()
+        };
+        let live = RuntimeEntity {
+            time_of_day: Some(TimeOfDay::default()),
+            sky_atmosphere: Some(authored),
+            ..v9_rec(g(0xD001), "Sky", None).into_runtime()
+        };
+        let back = EntityRecordV13::from_current(live.clone()).into_runtime();
+        assert_eq!(back.name, live.name);
+        assert_eq!(back.time_of_day, live.time_of_day);
+
+        let a = back.sky_atmosphere.unwrap();
+        // The v13 thirty-six survive verbatim …
+        assert_eq!(a.sun_intensity, 4.25);
+        assert_eq!(a.turbidity, 3.5);
+        assert_eq!(a.fog_density, 6e-4);
+        assert!(a.clouds_enabled);
+        assert_eq!(a.cloud_coverage, 0.9);
+        assert_eq!(a.cloud_seed, 7);
+        assert_eq!(a.cloud_wind_x, 20.0);
+        // … and the weather block has no v13 home, so it comes back at the live
+        // defaults — the one deliberately lossy direction.
+        let d = SkyAtmosphere::default();
+        assert_eq!(
+            a.weather_enabled, d.weather_enabled,
+            "`weather_enabled: true` cannot be stored in v13"
+        );
+        assert_eq!(a.weather_target, d.weather_target);
+        assert_eq!(a.weather_blend_remaining, d.weather_blend_remaining);
+        assert_eq!(a.weather_precipitation, d.weather_precipitation);
+        assert_eq!(a.weather_snowiness, d.weather_snowiness);
+
+        // An entity whose atmosphere is entirely default survives the hop exactly,
+        // as does one with no atmosphere at all.
+        let defaulted = RuntimeEntity {
+            sky_atmosphere: Some(SkyAtmosphere::default()),
+            ..v9_rec(g(0xD002), "PlainSky", None).into_runtime()
+        };
+        assert_eq!(
+            EntityRecordV13::from_current(defaulted.clone()).into_runtime(),
+            defaulted
+        );
+        let plain = v9_rec(g(0xD003), "Prop", None).into_runtime();
+        assert_eq!(
+            EntityRecordV13::from_current(plain.clone()).into_runtime(),
+            plain
+        );
+    }
+
+    /// The v14 additions round-trip byte-identically, and a level that authors the
+    /// weather block really moves the bytes (the fields are persisted, not
+    /// inferred) — the guard that would have caught the bump being skipped.
+    #[test]
+    fn v14_weather_round_trip() {
+        use inf_ecs::components::WeatherPreset;
+        let g = uuid::Uuid::from_u128;
+        let atmos = SkyAtmosphere {
+            weather_enabled: true,
+            weather_target: WeatherPreset::Snow,
+            weather_blend_seconds: 12.5,
+            weather_blend_remaining: 3.25,
+            weather_coverage: 0.77,
+            weather_cloud_type: 0.31,
+            weather_wind_x: -14.5,
+            weather_wind_z: 6.25,
+            weather_fog_density: 9e-4,
+            weather_precipitation: 0.65,
+            weather_snowiness: 0.5,
+            ..SkyAtmosphere::default()
+        };
+        let mut level = RuntimeLevel {
+            title: "V14 Weather".into(),
+            entities: vec![
+                RuntimeEntity {
+                    time_of_day: Some(TimeOfDay::default()),
+                    sky_atmosphere: Some(atmos),
+                    ..v9_rec(g(0xA101), "Sky", None).into_runtime()
+                },
+                v9_rec(g(0xA102), "Prop", None).into_runtime(),
+            ],
+            settings: RuntimeSettings::default(),
+        };
+
+        let bytes = level.encode().unwrap();
+        assert_eq!(bytes[0], SCHEMA_VERSION as u8);
+        let back = RuntimeLevel::decode(&bytes).expect("v14 decodes");
+        assert_eq!(back, level);
+        assert_eq!(back.encode().unwrap(), bytes, "re-encode is byte-identical");
+        assert_eq!(back.entities[0].sky_atmosphere, Some(atmos));
+        assert!(back.entities[1].sky_atmosphere.is_none());
+
+        // Changing one v14-only field really moves the bytes. If the block were
+        // not persisted (i.e. if the bump had been skipped) this would not hold —
+        // and the field chosen is the *enum*, which is the one whose wire form is
+        // a varint rather than a fixed-width float.
+        level.entities[0].sky_atmosphere = Some(SkyAtmosphere {
+            weather_target: WeatherPreset::Fog,
+            ..atmos
+        });
+        let other = level.encode().unwrap();
+        assert_ne!(other, bytes);
+        assert_eq!(
+            other.len(),
+            bytes.len(),
+            "both variant indices are one byte"
+        );
+        assert_eq!(RuntimeLevel::decode(&other).unwrap(), level);
+    }
+
+    /// A **v13 payload is genuinely narrower** than the current one for the same
+    /// level — the concrete reason `#[serde(default)]` could not have rescued this
+    /// bump either. bincode is not self-describing: it reads a fixed field count
+    /// positionally, so feeding these v13 bytes to the grown struct would run off
+    /// the end of the atmosphere and into the next record.
+    #[test]
+    fn v14_weather_is_wider_on_the_wire_than_v13() {
+        use inf_ecs::components::WeatherPreset;
+        let v13 = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v13.inf_lvl"),
+        )
+        .expect("committed v13 fixture present");
+        let lifted = RuntimeLevel::decode(&v13).unwrap().encode().unwrap();
+
+        // The 11 appended fields, priced individually rather than as one number.
+        //
+        // The `weather_target` term is the reason this is spelled out: a fieldless
+        // serde enum is written as its **variant index**, and the workspace's
+        // `bincode::config::standard()` encodes integers as varints — so the
+        // preset's cost is a function of the *default variant's index*, not of its
+        // type. A future preset inserted before `Clear` would silently move the
+        // total, and a bare `+ 38` would then fail saying "the weather block
+        // grew", which would be a lie.
+        const BOOL: usize = 1;
+        const F32: usize = 4;
+        let target = SkyAtmosphere::default().weather_target;
+        assert_eq!(
+            target,
+            WeatherPreset::Clear,
+            "the default weather preset moved; the breakdown below prices it as a \
+             varint over its variant index, so re-derive the total"
+        );
+        // Derived from the **encoding**, not from the hand-maintained `ALL`
+        // array: what costs bytes is serde's variant index, and reading it off a
+        // list someone has to remember to reorder would just move the fragility.
+        // A fieldless enum encodes to exactly its varint index, so the encoded
+        // length IS `varint_len(index)` and the bytes ARE the index.
+        let encoded = bincode::serde::encode_to_vec(target, bincode_config()).unwrap();
+        assert_eq!(
+            encoded,
+            vec![0u8],
+            "the default preset no longer encodes as variant index 0; re-derive              the width below rather than editing the number"
+        );
+        let index = u64::from(encoded[0]);
+        let expected = BOOL                 // weather_enabled
+            + varint_len(index)             // weather_target
+            + 9 * F32; // blend_seconds/blend_remaining/coverage/cloud_type/
+                       // wind_x/wind_z/fog_density/precipitation/snowiness
+        assert_eq!(
+            expected, WEATHER_WIRE_BYTES,
+            "the field-by-field price no longer sums to the named constant"
+        );
+        assert_eq!(expected, 38, "the weather block is 38 bytes on the wire");
+
+        assert_eq!(
+            lifted.len(),
+            v13.len() + expected,
+            "the one entity carrying an atmosphere grew by the weather block"
+        );
+    }
+
+    /// The Ring-0 twin of the editor codec's `weather_defaults_are_the_documented_ones`.
+    ///
+    /// Both codecs carry their own `SkyAtmosphereV13`, and the whole frozen-record
+    /// doctrine rests on those being pinned to **literals** rather than to
+    /// `SkyAtmosphere::default()`. Having the gate in only one crate would leave
+    /// the other free to drift, and the two ladders lift v12 by different routes
+    /// (this crate in one hop from `SkyAtmosphere::default()`, the editor's through
+    /// its own `into_v13` literals), so their agreeing is exactly what makes those
+    /// routes equivalent.
+    #[test]
+    fn weather_defaults_are_the_documented_ones() {
+        use inf_ecs::components::WeatherPreset;
+        let a = SkyAtmosphere::default();
+        assert!(
+            !a.weather_enabled,
+            "existing content keeps the sky it was authored against"
+        );
+        assert_eq!(a.weather_target, WeatherPreset::Clear);
+        assert_eq!(a.weather_blend_seconds, 8.0, "seconds");
+        assert_eq!(a.weather_blend_remaining, 0.0, "settled");
+        // The live defaults ARE a settled Clear state — the property that makes
+        // enabling weather one boolean rather than a parameter hunt.
+        assert_eq!(a.weather_params(), WeatherPreset::Clear.params());
+
+        // Lifting a default-frozen record yields a default live one.
+        let frozen = SkyAtmosphereV13::from_current(a);
+        assert_eq!(frozen.into_current(), a);
+
+        // This crate's frozen record has its OWN literal defaults, asserted
+        // against the `v13_*` fns the `#[serde(default = "…")]` markers name.
+        assert!(v13_sky_true());
+        assert_eq!(v13_sun_intensity(), 3.0);
+        assert_eq!(v13_night_darkening(), 0.85);
+        assert_eq!(v13_one(), 1.0);
+        assert_eq!(v13_mie_anisotropy(), 0.8);
+        assert_eq!(v13_sun_disc_deg(), 0.545);
+        assert_eq!(v13_moon_disc_deg(), 0.52);
+        assert_eq!(v13_fog_falloff(), 0.002);
+        assert_eq!(v13_fog_color(), Color::new(1.0, 1.0, 1.0, 1.0));
+        assert_eq!(v13_cloud_coverage(), 0.35);
+        assert_eq!(v13_cloud_type(), 0.7);
+        assert_eq!(v13_cloud_bottom(), 1500.0);
+        assert_eq!(v13_cloud_top(), 4000.0);
+        assert_eq!(v13_cloud_density(), 0.04);
+        assert_eq!(v13_cloud_detail(), 0.6);
+        assert_eq!(v13_cloud_wind_x(), 6.0);
+        assert_eq!(v13_cloud_wind_z(), 2.0);
+        assert_eq!(v13_cloud_phase_g(), 0.8);
+        assert_eq!(v13_cloud_color(), Color::new(1.0, 1.0, 1.0, 1.0));
+
+        // …and today those literals agree with the live component's v13 half,
+        // which is what makes v14 a pure append and what keeps this crate's
+        // one-hop v12 lift equivalent to the editor ladder's two-hop one.
+        assert_eq!(frozen.cloud_coverage, v13_cloud_coverage());
+        assert_eq!(frozen.cloud_wind_x, v13_cloud_wind_x());
+        assert_eq!(frozen.cloud_shadow, v13_one());
+        assert_eq!(frozen.fog_falloff, v13_fog_falloff());
+        assert_eq!(frozen.enabled, v13_sky_true());
+        assert_eq!(frozen.physical, v13_sky_true());
     }
 }

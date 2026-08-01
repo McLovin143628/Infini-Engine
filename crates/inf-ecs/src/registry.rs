@@ -19,7 +19,7 @@ use crate::components::{
     JointKind3D, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice, PcgVolume,
     Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, SkyAtmosphere, Spline, SplineInterp, Sprite,
     StreamingSource, Terrain, Text2D, TextAlign, Tilemap, TimeOfDay, Transform, Visibility, Volume,
-    VolumeKind,
+    VolumeKind, WeatherPreset,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -80,6 +80,9 @@ impl ComponentRegistry {
         types.register::<VolumeKind>();
         types.register::<SplineInterp>();
         types.register::<FoliagePaletteEntry>();
+        // P17.4 — `SkyAtmosphere::weather_target`. Registered as a value type so
+        // the Details grid surfaces it as the preset dropdown it is.
+        types.register::<WeatherPreset>();
         // Opaque entity reference (E-P1) — joint `other` fields; surfaced by the
         // Details walker as an entity-picker widget.
         types.register::<crate::refs::EntityRef>();

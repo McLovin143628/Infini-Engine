@@ -121,3 +121,128 @@ fn frame_stays_under_budget() {
         info.name
     );
 }
+
+/// **The Phase 17 sky-stack budget** (P17.4): what the whole living sky —
+/// atmosphere LUTs, volumetric clouds, cloud shadows and precipitation — costs a
+/// frame, per render tier, measured against the same frame with each layer off.
+///
+/// Deliberately **not a new ratchet constant**. §8's rule is that a budget
+/// tripwire only ever ratchets down, which makes each one a standing maintenance
+/// obligation; adding a second for a feature that is *off by default* and whose
+/// worst measured cost is a fraction of a millisecond would be paying that
+/// obligation for nothing. The existing `FRAME_BUDGET_MS` already covers the
+/// composed frame, and this test asserts the sky-on frame is inside it — the same
+/// tripwire, now exercised with every Phase-17 layer enabled at once, which is
+/// the case that was previously untested. What the per-tier numbers are *for* is
+/// the ROADMAP's cost table and a future decision about whether any of it needs a
+/// ratchet of its own; they are printed, not asserted, because an absolute
+/// millisecond on one machine is not a contract.
+///
+/// The relative claims that ARE asserted are the ones that can regress
+/// meaningfully: a lower tier must not cost more than a higher one, and the
+/// whole stack must stay inside the frame budget on real hardware.
+#[test]
+fn sky_stack_cost_per_tier() {
+    use inf_render::{
+        AtmosphereParams, AtmosphereQuality, CloudParams, PrecipParams, RenderSettings, SunParams,
+    };
+
+    let Ok(gpu) = GpuContext::headless() else {
+        eprintln!("SKIP sky_stack_cost: no GPU adapter");
+        return;
+    };
+    let info = gpu.adapter.get_info();
+    let software = info.device_type == wgpu::DeviceType::Cpu
+        || info.name.to_ascii_lowercase().contains("paravirtual");
+
+    // The measured scene: the same cube field, under a full Phase-17 sky in the
+    // heaviest state a weather preset can produce (Storm — solid cover, full
+    // rain), so what is measured is the ceiling rather than a typical frame.
+    let mut lit = cube_field(11);
+    let bodies = inf_math::solar::bodies(&inf_math::solar::SolarInput {
+        seconds: 43_200.0,
+        day_of_year: 172,
+        latitude_deg: 48.9,
+        longitude_deg: 0.0,
+    });
+    lit.sun = SunParams {
+        direction: bodies.sun.as_vec3(),
+        ..SunParams::default()
+    };
+    lit.atmosphere = AtmosphereParams {
+        enabled: true,
+        clouds: CloudParams {
+            enabled: true,
+            coverage: 1.0,
+            cloud_type: 0.35,
+            bottom: 600.0,
+            top: 2800.0,
+            ..CloudParams::default()
+        },
+        precip: PrecipParams {
+            enabled: true,
+            intensity: 1.0,
+            wind_x: 22.0,
+            wind_z: 9.0,
+            time_s: 1_234.5,
+            ..PrecipParams::default()
+        },
+        ..AtmosphereParams::default()
+    };
+    lit.mark_dirty();
+
+    let mut bare = lit.clone();
+    bare.atmosphere = AtmosphereParams::default();
+    bare.mark_dirty();
+
+    let view = overlook_view();
+    let target = HeadlessTarget::new(&gpu, W, H);
+
+    let measure = |scene: &RenderScene, quality: AtmosphereQuality| -> f64 {
+        let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        let mut settings = RenderSettings::default();
+        settings.atmosphere.quality = quality;
+        renderer.set_settings(settings);
+        for _ in 0..10 {
+            renderer.render(&gpu, scene, &view, &target.view, (W, H));
+        }
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        const N: u32 = 60;
+        let start = std::time::Instant::now();
+        for _ in 0..N {
+            renderer.render(&gpu, scene, &view, &target.view, (W, H));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        start.elapsed().as_secs_f64() * 1000.0 / f64::from(N)
+    };
+
+    let baseline = measure(&bare, AtmosphereQuality::High);
+    let mut costs = Vec::new();
+    for q in [
+        AtmosphereQuality::Low,
+        AtmosphereQuality::Medium,
+        AtmosphereQuality::High,
+    ] {
+        let ms = measure(&lit, q);
+        eprintln!(
+            "sky_stack {q:?}: {ms:.3} ms/frame (+{:.3} ms over a sky-less {baseline:.3} ms) on {}",
+            ms - baseline,
+            info.name
+        );
+        costs.push((q, ms));
+    }
+
+    if software {
+        // A CPU rasterizer's timing is not representative of anything; the frame
+        // pipeline having run at all is the whole claim here.
+        return;
+    }
+    for (q, ms) in &costs {
+        assert!(
+            *ms < FRAME_BUDGET_MS,
+            "the full Phase-17 sky at {q:?} cost {ms:.3} ms, over the \
+             {FRAME_BUDGET_MS} ms frame budget on {} (§8: investigate, never raise it)",
+            info.name
+        );
+    }
+}

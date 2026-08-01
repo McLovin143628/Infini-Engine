@@ -8,6 +8,8 @@
  * exactly the kind of mirror that drifts.
  */
 
+import type { WeatherPresetDto } from "../../bindings/WeatherPresetDto";
+
 /** Seconds in one solar day — the modulus the clock lives in. */
 export const SECONDS_PER_DAY = 86_400;
 
@@ -128,4 +130,114 @@ export function cloudLayerLabel(bottom: number, top: number): string {
   if (thickness <= 0) return "empty (top is not above bottom)";
   if (thickness >= 1000) return `${(thickness / 1000).toFixed(1)} km thick`;
   return `${Math.round(thickness)} m thick`;
+}
+
+// ── weather (P17.4) ─────────────────────────────────────────────────────────
+
+/**
+ * The five weather presets, in menu order — the frontend mirror of
+ * `inf_ecs::components::WeatherPreset::ALL`.
+ *
+ * Typed as the generated `WeatherPresetDto` union, so adding a preset in Rust
+ * and forgetting it here is a **type error** rather than a missing button.
+ */
+export const WEATHER_PRESETS = [
+  "clear",
+  "overcast",
+  "storm",
+  "fog",
+  "snow",
+] as const satisfies readonly WeatherPresetDto[];
+
+/**
+ * The numbers a preset button writes — the TypeScript mirror of
+ * `WeatherPreset::params()`.
+ *
+ * Duplicated across the ring boundary on purpose: the button must produce its
+ * values *optimistically*, before the IPC round-trip, or clicking "Storm" would
+ * leave the sliders showing the old sky for a debounce interval. The Rust side
+ * remains authoritative — `WeatherDto::snapped_to` recomputes the same state
+ * server-side from `WeatherPreset::params()`, so a drift here is corrected on
+ * the next snapshot rather than persisted. `weather_preset_table_matches_rust`
+ * pins the two together.
+ */
+export function weatherPreset(preset: WeatherPresetDto): {
+  coverage: number;
+  cloud_type: number;
+  wind_x: number;
+  wind_z: number;
+  fog_density: number;
+  precipitation: number;
+  snowiness: number;
+} {
+  switch (preset) {
+    case "overcast":
+      return {
+        coverage: 0.85,
+        cloud_type: 0.2,
+        wind_x: 9.0,
+        wind_z: 3.5,
+        fog_density: 7.5e-5,
+        precipitation: 0.0,
+        snowiness: 0.0,
+      };
+    case "storm":
+      return {
+        coverage: 1.0,
+        cloud_type: 0.35,
+        wind_x: 22.0,
+        wind_z: 9.0,
+        fog_density: 6.0e-4,
+        precipitation: 1.0,
+        snowiness: 0.0,
+      };
+    case "fog":
+      return {
+        coverage: 0.5,
+        cloud_type: 0.1,
+        wind_x: 1.5,
+        wind_z: 0.5,
+        fog_density: 6.0e-3,
+        precipitation: 0.0,
+        snowiness: 0.0,
+      };
+    case "snow":
+      return {
+        coverage: 0.9,
+        cloud_type: 0.3,
+        wind_x: 5.0,
+        wind_z: 2.0,
+        fog_density: 1.2e-3,
+        precipitation: 0.7,
+        snowiness: 1.0,
+      };
+    case "clear":
+    default:
+      return {
+        coverage: 0.08,
+        cloud_type: 0.75,
+        wind_x: 4.0,
+        wind_z: 1.5,
+        fog_density: 0.0,
+        precipitation: 0.0,
+        snowiness: 0.0,
+      };
+  }
+}
+
+/**
+ * Plain-language readback for the precipitation pair, so an author can see what
+ * "0.35 / 0.8" is going to look like without rendering it.
+ *
+ * `snowiness` is a blend rather than a switch, so the words follow it: below a
+ * third it is rain, above two thirds it is snow, and the band between is sleet —
+ * which is what a continuous rain-to-snow transition physically passes through.
+ */
+export function precipLabel(intensity: number, snowiness: number): string {
+  if (!Number.isFinite(intensity) || intensity <= 0) return "dry";
+  const s = Number.isFinite(snowiness) ? Math.min(Math.max(snowiness, 0), 1) : 0;
+  const kind = s < 1 / 3 ? "rain" : s > 2 / 3 ? "snow" : "sleet";
+  const i = Math.min(Math.max(intensity, 0), 1);
+  const strength = i < 0.25 ? "light" : i < 0.6 ? "steady" : i < 0.9 ? "heavy" : "torrential";
+  return `${strength} ${kind}`;
 }

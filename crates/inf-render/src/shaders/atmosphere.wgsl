@@ -73,6 +73,30 @@ struct AtmosphereData {
     cloud_shadow: vec4<f32>,
     // rgb = cloud droplet albedo tint, w unused.
     cloud_color: vec4<f32>,
+
+    // ── precipitation (P17.4), SI METRES ──
+    //
+    // Rides here for the same reason the cloud block does: the precipitation
+    // pass then binds nothing at all beyond what the sky already binds.
+    //
+    // x = particle count (integer-valued), y = intensity [0,1],
+    // z = snowiness [0,1] (0 = rain, 1 = snow), w = fall speed (m/s).
+    precip: vec4<f32>,
+    // x = horizontal box period (m), y = vertical box period (m),
+    // z = particle half-length along its velocity (m), w = particle radius (m).
+    precip_box: vec4<f32>,
+    // x = wind drift X (m, wrapped into the box), y = drift Z (m, wrapped),
+    // z = distance already fallen (m, wrapped), w = alpha scale.
+    precip_phase: vec4<f32>,
+    // xyz = the camera's WORLD position modulo the box (m) — the world-anchoring
+    // term, reduced on the CPU in f64; w unused.
+    precip_eye: vec4<f32>,
+    // rgb = droplet albedo tint, w unused.
+    precip_color: vec4<f32>,
+    // x = wind X (m/s), y = wind Z (m/s) — the RAW rates, not the wrapped
+    // drift, because the fall direction is `normalize(wind_x, -fall, wind_z)`
+    // and a wrapped drift is no longer proportional to the wind. zw unused.
+    precip_wind: vec4<f32>,
 };
 
 @group(ATMOS_GROUP) @binding(ATMOS_BIND) var<uniform> atmos: AtmosphereData;

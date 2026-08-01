@@ -23,10 +23,10 @@ use inf_render::{
     collider_outline_2d, collider_outline_3d, expand_nine_slice, expand_text, gizmo,
     handle_from_guid, AtmosphereParams, CloudParams, ColliderOutline2D, ColliderOutline3D,
     DebugDraw, EngineRenderer, GizmoDelta, GizmoDrag, GizmoMode, GpuContext, HAlign, HeightFog,
-    LightKind, MeshInstance, NineSliceParams, OrthoParams, Picker, PrebatchedRun, PrimMesh,
-    RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderTerrain, RenderTerrainLayer,
-    RenderTerrainTile, RenderTilemap, RenderView, SkyParams, SpriteInstance, SunParams,
-    SurfaceChain, TerrainTileKey, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
+    LightKind, MeshInstance, NineSliceParams, OrthoParams, Picker, PrebatchedRun, PrecipParams,
+    PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderTerrain,
+    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, SkyParams, SpriteInstance,
+    SunParams, SurfaceChain, TerrainTileKey, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
 };
 use inf_render::{
     detect_tier, BloomSettings, GiSettings, RenderSettings, RenderTier, ShadowSettings,
@@ -1700,6 +1700,14 @@ fn project_sky(scene: &mut RenderScene, world: &inf_ecs::EcsWorld) {
         horizon,
         ground,
     };
+    // The **weather in force** (P17.4), resolved once in Ring 0: when the
+    // weather block is enabled it *drives* cloud coverage/type, the wind and the
+    // fog density; when it is not, those come from the authored fields exactly
+    // as they did in v13. Which of the two applies is decided by
+    // `ResolvedSky::weather`, not here — it is precisely the kind of one-line
+    // derivation two byte-identical MIRROR bodies would eventually stop agreeing
+    // about, which is the same reasoning that put `cloud_time_s` in Ring 0.
+    let w = sky.weather();
     // The physical atmosphere (P17.2). Only the *multipliers* come from the
     // level: the Rayleigh / Mie / ozone coefficients themselves are physical
     // constants of Earth's air and stay at `AtmosphereParams::default()`, so
@@ -1716,7 +1724,7 @@ fn project_sky(scene: &mut RenderScene, world: &inf_ecs::EcsWorld) {
         moon_phase: phase,
         star_intensity: a.star_intensity,
         fog: HeightFog {
-            density: a.fog_density,
+            density: w.fog_density,
             falloff: a.fog_falloff,
             height: a.fog_height,
             color: [a.fog_color.r, a.fog_color.g, a.fog_color.b],
@@ -1727,19 +1735,35 @@ fn project_sky(scene: &mut RenderScene, world: &inf_ecs::EcsWorld) {
         // else, so two runs at the same time of day see the same sky.
         clouds: CloudParams {
             enabled: a.clouds_enabled,
-            coverage: a.cloud_coverage,
-            cloud_type: a.cloud_type,
+            coverage: w.cloud_coverage,
+            cloud_type: w.cloud_type,
             bottom: a.cloud_bottom,
             top: a.cloud_top,
             density: a.cloud_density,
             detail: a.cloud_detail,
             seed: a.cloud_seed,
-            wind_x: a.cloud_wind_x,
-            wind_z: a.cloud_wind_z,
+            wind_x: w.wind_x,
+            wind_z: w.wind_z,
             time_s: sky.cloud_time_s(),
             phase_g: a.cloud_phase_g,
             shadow_strength: a.cloud_shadow,
             ambient: a.cloud_ambient,
+            color: [a.cloud_color.r, a.cloud_color.g, a.cloud_color.b],
+        },
+        // Precipitation (P17.4). Entirely derived: the weather block decides
+        // whether it falls, how hard and how frozen, and the same wind that
+        // drifts the clouds slants it. `time_s` is the level's clock again, so
+        // the rain is a function of the document and of nothing else. The tint
+        // is the cloud droplet colour on purpose — rain and the cloud it fell
+        // out of are the same water, and a second colour field would be one more
+        // thing to keep consistent for a stylised sky.
+        precip: PrecipParams {
+            enabled: w.precipitation > 0.0,
+            intensity: w.precipitation,
+            snowiness: w.snowiness,
+            wind_x: w.wind_x,
+            wind_z: w.wind_z,
+            time_s: sky.cloud_time_s(),
             color: [a.cloud_color.r, a.cloud_color.g, a.cloud_color.b],
         },
         ..AtmosphereParams::default()

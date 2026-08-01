@@ -80,6 +80,20 @@ const sample: LevelSettingsDto = {
     cloud_shadow: 1,
     cloud_ambient: 1,
   },
+  weather: {
+    present: true,
+    enabled: false,
+    preset: "clear",
+    blend_seconds: 8,
+    blend_remaining: 0,
+    coverage: 0.08,
+    cloud_type: 0.75,
+    wind_x: 4,
+    wind_z: 1.5,
+    fog_density: 0,
+    precipitation: 0,
+    snowiness: 0,
+  },
 };
 
 describe("sceneStore level settings slice", () => {

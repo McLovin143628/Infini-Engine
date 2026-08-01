@@ -540,6 +540,92 @@ mod tests {
         Key { t, value, interp }
     }
 
+    /// P17.4: the **weather parameters** are ordinary reflected `f32` fields on
+    /// `SkyAtmosphere`, so a sequencer can key them with **zero** sequencer code —
+    /// the same payoff `TimeOfDay.seconds` collected, and the reason the design
+    /// note chose live parameters over a `from/to/t` state machine (a blend
+    /// fraction is not something a curve can be drawn through).
+    ///
+    /// **What this test proves, precisely:** that the fields *resolve* as track
+    /// paths under both the display name and the short name, that a two-key ramp
+    /// scrubs and restores them, and that scrubbing one does **not** switch the
+    /// weather block on (a keyed parameter on a disabled block still resolves
+    /// dry). The other half of "a keyed track owns the value" — that a **settled**
+    /// blend never writes these fields back — is a Ring-0 property of
+    /// `advance_weather`, and is proved there by
+    /// `inf_ecs::sky::tests::a_settled_blend_leaves_hand_authored_values_alone`.
+    /// The editor cannot prove it: nothing here runs a fixed step.
+    #[test]
+    fn weather_parameters_are_keyable_tracks() {
+        use inf_ecs::components::SkyAtmosphere;
+
+        let mut doc = SceneDoc::new();
+        let sky = doc.create(SpawnKind::Empty, "Sky", None);
+        let tp = doc
+            .world()
+            .registry()
+            .type_path_for("SkyAtmosphere")
+            .expect("SkyAtmosphere is registered");
+        assert_eq!(
+            doc.world().registry().type_path_for("Sky Atmosphere"),
+            Some(tp),
+            "the display name and the short name must resolve the same component"
+        );
+        assert!(doc.edit_add_component(sky, tp));
+        // The atmosphere is read FROM the clock's entity, so the authority needs
+        // both components — the arrangement `edit_time_of_day` creates.
+        let tod_tp = doc
+            .world()
+            .registry()
+            .type_path_for("TimeOfDay")
+            .expect("TimeOfDay is registered");
+        assert!(doc.edit_add_component(sky, tod_tp));
+
+        let d = SkyAtmosphere::default();
+        assert_eq!(
+            read_scalar(&doc, sky, "SkyAtmosphere.weather_precipitation"),
+            Some(f64::from(d.weather_precipitation))
+        );
+        assert_eq!(
+            read_scalar(&doc, sky, "Sky Atmosphere.weather_wind_x"),
+            Some(f64::from(d.weather_wind_x))
+        );
+
+        // A two-key ramp scrubs the rain up, non-dirtying, restoring exactly.
+        let mut seq = Sequence::new("Downpour");
+        let mut track = PropertyTrack::new(sky, "SkyAtmosphere.weather_precipitation");
+        track.keys = vec![key(0.0, 0.0, Interp::Linear), key(4.0, 1.0, Interp::Linear)];
+        seq.tracks.push(track);
+
+        let snapshot = capture_snapshot(&doc, &seq);
+        apply_sequence_at(&mut doc, &seq, 2.0);
+        assert_eq!(
+            read_scalar(&doc, sky, "SkyAtmosphere.weather_precipitation"),
+            Some(0.5)
+        );
+        // The scrubbed value really reached the authority the projectors resolve —
+        // and, because weather is off by default, the RESOLVED precipitation is
+        // still zero, which is the "no dead controls in reverse" half of the
+        // contract: keying a parameter does not silently switch the block on.
+        let sky_state = inf_ecs::sky::resolve_sky(doc.world()).expect("sky authority");
+        assert_eq!(
+            sky_state.atmosphere.weather_precipitation, 0.5,
+            "the track reached the authority's component"
+        );
+        assert_eq!(
+            sky_state.weather().precipitation,
+            0.0,
+            "…but a disabled weather block still resolves dry"
+        );
+
+        restore_snapshot(&mut doc, &snapshot);
+        assert_eq!(
+            read_scalar(&doc, sky, "SkyAtmosphere.weather_precipitation"),
+            Some(f64::from(d.weather_precipitation)),
+            "stopping the scrub restores the authored value"
+        );
+    }
+
     /// P17.1: `TimeOfDay.seconds` is a valid property-track target, keyable and
     /// scrubbable with **zero** sequencer code — the payoff for making the clock a
     /// reflected component instead of a settings field.

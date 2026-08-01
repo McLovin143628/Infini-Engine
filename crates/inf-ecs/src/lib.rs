@@ -48,5 +48,8 @@ pub use schedule::{
     ecs_task_pool_threads, init_ecs_task_pool, ScheduleMode, SimSchedule, SimScheduleBuilder,
 };
 pub use sim::{sim_snapshot, AngularVelocity, EntitySimState, Lifetime, SimConfig, Velocity};
-pub use sky::{advance_time_of_day, resolve_sky, sky_authority, ResolvedSky};
+pub use sky::{
+    advance_time_of_day, advance_weather, resolve_sky, sky_authority, ResolvedSky, ResolvedWeather,
+    MAX_WEATHER_BLEND_S, SNOW_ACCUMULATION_MAX_M_PER_S,
+};
 pub use world::EcsWorld;

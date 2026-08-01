@@ -2591,9 +2591,183 @@ impl TimeOfDay {
     }
 }
 
-/// **Sky atmosphere** (schema v11; grown in v12): how the [`TimeOfDay`] sun and
-/// moon light the world, the physically-based sky that is drawn behind it, and
-/// the artistic gradient tint layered over that.
+/// A named **weather state** (schema v14 · P17.4).
+///
+/// Five presets, each a coherent set of values for the whole weather block —
+/// cloud coverage and type, wind, fog density and precipitation — rather than
+/// five independent sliders an author has to keep consistent by hand. Blending
+/// between two of them is what "the weather changed" means.
+///
+/// The variants are the *targets* a level or a Blueprint names; the live values
+/// are [`SkyAtmosphere`]'s `weather_*` fields, which the fixed step walks toward
+/// the target (see [`crate::sky::advance_weather`]). Once a transition has
+/// settled the blender never writes them again, which is precisely what lets the
+/// sequencer and the Details grid own them.
+///
+/// The wire form is a **fieldless serde enum**: bincode writes the variant index
+/// as one varint byte, so a preset costs a byte rather than the seven floats its
+/// [`params`](Self::params) expand to.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WeatherPreset {
+    /// A clean, dry day: a few fair-weather cumulus, a light breeze, no fog, no
+    /// precipitation. The default, and what `weather_*`'s own defaults spell.
+    #[default]
+    Clear,
+    /// A solid grey deck, a stronger wind and a touch of haze — still dry.
+    Overcast,
+    /// Full coverage, a hard wind and heavy rain.
+    Storm,
+    /// A thick ground-level fog layer under a half-covered sky, almost no wind.
+    /// Visibility ≈ 500 m (Koschmieder `3/σ`).
+    Fog,
+    /// Heavy snowfall under a near-solid deck. The one preset whose
+    /// [`WeatherParams::snowiness`] is 1, so it is the one that drives
+    /// [`crate::sky::ResolvedSky::snow_accumulation_rate`] — the P22 hook.
+    Snow,
+}
+
+/// The seven blendable numbers a [`WeatherPreset`] expands to — the *whole*
+/// weather state, and exactly the fields [`SkyAtmosphere`]'s `weather_*` block
+/// stores live.
+///
+/// Units per architecture rule 6: wind in **m/s**, fog extinction in **m⁻¹**
+/// (SI), the rest dimensionless `[0, 1]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WeatherParams {
+    /// Fractional cloud coverage `[0, 1]`, driving [`SkyAtmosphere::cloud_coverage`].
+    pub coverage: f32,
+    /// Cloud type `[0, 1]` (0 = stratus sheet, 1 = towering cumulus).
+    pub cloud_type: f32,
+    /// Wind velocity in world **X**, m/s. Drifts the clouds *and* slants the
+    /// precipitation.
+    pub wind_x: f32,
+    /// Wind velocity in world **Z**, m/s.
+    pub wind_z: f32,
+    /// Height-fog extinction, **m⁻¹**. Visibility ≈ `3 / density` metres.
+    pub fog_density: f32,
+    /// Precipitation intensity `[0, 1]`. `0` ⇒ the precipitation pass draws
+    /// nothing at all.
+    pub precipitation: f32,
+    /// How frozen the precipitation is, `[0, 1]`: `0` = rain (fast, streaked),
+    /// `1` = snow (slow, round). Blendable, so a Storm → Snow transition is a
+    /// continuous change of phase rather than a swap.
+    pub snowiness: f32,
+}
+
+impl WeatherPreset {
+    /// Every preset, in menu order — the one place the list is enumerated, so a
+    /// new state cannot be added to the enum and forgotten by the editor.
+    pub const ALL: [WeatherPreset; 5] = [
+        WeatherPreset::Clear,
+        WeatherPreset::Overcast,
+        WeatherPreset::Storm,
+        WeatherPreset::Fog,
+        WeatherPreset::Snow,
+    ];
+
+    /// The preset's values. Pure, `const`-shaped and total — the single table
+    /// both the blend target and the editor's preset buttons read.
+    pub fn params(self) -> WeatherParams {
+        match self {
+            // A few fair-weather cumulus. Coverage well under the cloud block's
+            // own 0.35 default, because "Clear" has to look clear.
+            WeatherPreset::Clear => WeatherParams {
+                coverage: 0.08,
+                cloud_type: 0.75,
+                wind_x: 4.0,
+                wind_z: 1.5,
+                fog_density: 0.0,
+                precipitation: 0.0,
+                snowiness: 0.0,
+            },
+            // A flat grey deck with a little haze under it (~40 km visibility).
+            WeatherPreset::Overcast => WeatherParams {
+                coverage: 0.85,
+                cloud_type: 0.2,
+                wind_x: 9.0,
+                wind_z: 3.5,
+                fog_density: 7.5e-5,
+                precipitation: 0.0,
+                snowiness: 0.0,
+            },
+            // Solid, hard wind (≈ 24 m/s ≈ Beaufort 9), heavy rain, ~5 km
+            // visibility through the downpour.
+            WeatherPreset::Storm => WeatherParams {
+                coverage: 1.0,
+                cloud_type: 0.35,
+                wind_x: 22.0,
+                wind_z: 9.0,
+                fog_density: 6.0e-4,
+                precipitation: 1.0,
+                snowiness: 0.0,
+            },
+            // Thick ground fog: 6e-3 m⁻¹ is a Koschmieder visibility of ~500 m.
+            // Half a sky above it, and almost no wind — fog and wind do not
+            // coexist, which is why this preset's wind is near zero.
+            WeatherPreset::Fog => WeatherParams {
+                coverage: 0.5,
+                cloud_type: 0.1,
+                wind_x: 1.5,
+                wind_z: 0.5,
+                fog_density: 6.0e-3,
+                precipitation: 0.0,
+                snowiness: 0.0,
+            },
+            // Heavy snow under a near-solid deck; the flakes themselves cut
+            // visibility to a couple of kilometres.
+            WeatherPreset::Snow => WeatherParams {
+                coverage: 0.9,
+                cloud_type: 0.3,
+                wind_x: 5.0,
+                wind_z: 2.0,
+                fog_density: 1.2e-3,
+                precipitation: 0.7,
+                snowiness: 1.0,
+            },
+        }
+    }
+
+    /// The lowercase identifier a Blueprint / the sequencer / a saved preset
+    /// names this state by (`"clear"`, `"overcast"`, `"storm"`, `"fog"`,
+    /// `"snow"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WeatherPreset::Clear => "clear",
+            WeatherPreset::Overcast => "overcast",
+            WeatherPreset::Storm => "storm",
+            WeatherPreset::Fog => "fog",
+            WeatherPreset::Snow => "snow",
+        }
+    }
+
+    /// The **reflect variant name** (`"Clear"`, `"Storm"`, …) — the Rust
+    /// spelling `bevy_reflect`'s `DynamicEnum` matches on, which is what the
+    /// editor's `edit_set_prop` writes. Deliberately distinct from
+    /// [`as_str`](Self::as_str), which is the lowercase *wire* spelling a
+    /// Blueprint and the DTO use; conflating the two writes a variant that
+    /// silently fails to apply.
+    pub fn variant_name(self) -> &'static str {
+        match self {
+            WeatherPreset::Clear => "Clear",
+            WeatherPreset::Overcast => "Overcast",
+            WeatherPreset::Storm => "Storm",
+            WeatherPreset::Fog => "Fog",
+            WeatherPreset::Snow => "Snow",
+        }
+    }
+
+    /// Parse the identifier [`as_str`](Self::as_str) writes, case- and
+    /// whitespace-insensitively. `None` for anything else — a Blueprint that
+    /// typos a preset name must be a **no-op**, not a silently different sky.
+    pub fn parse(name: &str) -> Option<Self> {
+        let n = name.trim().to_ascii_lowercase();
+        WeatherPreset::ALL.into_iter().find(|p| p.as_str() == n)
+    }
+}
+
+/// **Sky atmosphere** (schema v11; grown in v12, v13 and v14): how the
+/// [`TimeOfDay`] sun and moon light the world, the physically-based sky that is
+/// drawn behind it, and the artistic gradient tint layered over that.
 ///
 /// The v11 half — [`enabled`](Self::enabled), the sun/moon colour + intensity
 /// pairs, the three gradient colours and [`night_darkening`](Self::night_darkening)
@@ -2603,7 +2777,10 @@ impl TimeOfDay {
 /// exponential height fog. P17.3 appends the **volumetric-cloud block**: a
 /// raymarched layer between two authored altitudes, shaped by deterministic 3D
 /// noise, drifting with the level's clock, and casting a soft large-scale shadow
-/// on the world.
+/// on the world. P17.4 appends the **weather block**: one coherent, blendable
+/// state — coverage, type, wind, fog and precipitation together — that *drives*
+/// the cloud and fog fields above it whenever
+/// [`weather_enabled`](Self::weather_enabled) is set.
 ///
 /// # Units (architecture rule 6)
 ///
@@ -2808,6 +2985,82 @@ pub struct SkyAtmosphere {
     /// — water is grey — and the tint is for stylised skies.
     #[serde(default = "default_cloud_color")]
     pub cloud_color: Color,
+
+    // ── the weather block (schema v14 · P17.4) ────────────────────────────
+    //
+    // DESIGN NOTE — why the live parameters are the state, and the preset is
+    // only the target.
+    //
+    // The alternative shape is a pure state machine: store `from`, `to` and a
+    // blend fraction, and derive everything. It is smaller, and it is wrong for
+    // this engine for two reasons. (1) The sequencer keys **reflected component
+    // fields**; a `from/to/t` triple is not something a curve can be drawn
+    // through, so weather would have needed bespoke sequencer code — and P17.1
+    // bought "zero sequencer code" by making the clock a plain reflected field.
+    // (2) It leaves the Details grid with nothing authorable between presets,
+    // i.e. dead controls, which the batch brief rules out.
+    //
+    // So the live values ARE the component, and the transition is two extra
+    // fields beside them. The blend is advanced in the sim fixed step, exactly
+    // like `TimeOfDay::rate`, by closing `dt / remaining` of the gap each step —
+    // which is *exactly* linear (after n steps the gap is scaled by
+    // `(T − n·dt)/T`), reaches the target precisely as `remaining` hits 0, and
+    // needs no `from` snapshot to do it. Once settled
+    // (`weather_blend_remaining == 0`) the blender never writes these fields
+    // again, so a sequencer track or a Details edit owns them outright.
+    /// Whether the weather block **drives** the sky. When `true`,
+    /// [`cloud_coverage`](Self::cloud_coverage), [`cloud_type`](Self::cloud_type),
+    /// the cloud wind pair and [`fog_density`](Self::fog_density) are taken from
+    /// the `weather_*` fields below and the authored ones are ignored; when
+    /// `false` the authored fields stand exactly as they did in v13 and the
+    /// weather block is inert (no precipitation, no blending — the fixed step
+    /// skips it). **`false` by default**: every v13 level must keep the sky it
+    /// was authored against, and the projection must stay byte-identical for it.
+    #[serde(default)]
+    pub weather_enabled: bool,
+    /// The state the live `weather_*` values are blending **toward**. Once
+    /// [`weather_blend_remaining`](Self::weather_blend_remaining) reaches `0`
+    /// they equal it — unless something (the sequencer, a Details edit, a
+    /// Blueprint writing a field directly) has since moved them, which is
+    /// allowed and is why this names the *target* rather than the current state.
+    #[serde(default)]
+    pub weather_target: WeatherPreset,
+    /// How long a `sky.set_weather` transition takes when the caller does not
+    /// say, **seconds**. Also what the editor's preset buttons use.
+    #[serde(default = "default_weather_blend_seconds")]
+    pub weather_blend_seconds: f32,
+    /// Seconds left in the transition in flight; `0` = settled, and the fixed
+    /// step then touches nothing. Persisted (rather than reset on load) so a
+    /// saved mid-transition level resumes exactly where it was — the same reason
+    /// [`TimeOfDay::seconds`] is persisted.
+    #[serde(default)]
+    pub weather_blend_remaining: f32,
+    /// Live cloud coverage `[0, 1]` — drives [`cloud_coverage`](Self::cloud_coverage).
+    #[serde(default = "default_weather_coverage")]
+    pub weather_coverage: f32,
+    /// Live cloud type `[0, 1]` — drives [`cloud_type`](Self::cloud_type).
+    #[serde(default = "default_weather_cloud_type")]
+    pub weather_cloud_type: f32,
+    /// Live wind in world **X**, m/s — drives the cloud drift *and* the angle
+    /// the precipitation falls at.
+    #[serde(default = "default_weather_wind_x")]
+    pub weather_wind_x: f32,
+    /// Live wind in world **Z**, m/s.
+    #[serde(default = "default_weather_wind_z")]
+    pub weather_wind_z: f32,
+    /// Live height-fog extinction, **m⁻¹** (SI) — drives
+    /// [`fog_density`](Self::fog_density). Visibility ≈ `3 / density` metres.
+    #[serde(default)]
+    pub weather_fog_density: f32,
+    /// Live precipitation intensity `[0, 1]`. `0` ⇒ the precipitation pass is
+    /// instruction-neutral (it dispatches no draw at all).
+    #[serde(default)]
+    pub weather_precipitation: f32,
+    /// Live precipitation phase, `[0, 1]`: `0` = rain, `1` = snow. Blendable, so
+    /// rain turning to snow is a continuous transition. Feeds
+    /// [`crate::sky::ResolvedSky::snow_accumulation_rate`] — the P22 hook.
+    #[serde(default)]
+    pub weather_snowiness: f32,
 }
 
 fn default_true() -> bool {
@@ -2890,6 +3143,54 @@ fn default_cloud_phase_g() -> f32 {
 fn default_cloud_color() -> Color {
     Color::new(1.0, 1.0, 1.0, 1.0)
 }
+// ── weather (v14 · P17.4). The live values default to the **Clear** preset, so
+// a default component is a *settled* Clear state rather than an arbitrary one —
+// enabling weather is then a single boolean, exactly like enabling clouds.
+fn default_weather_blend_seconds() -> f32 {
+    8.0 // s — long enough to read as weather changing, short enough to test
+}
+fn default_weather_coverage() -> f32 {
+    WeatherPreset::Clear.params().coverage
+}
+fn default_weather_cloud_type() -> f32 {
+    WeatherPreset::Clear.params().cloud_type
+}
+fn default_weather_wind_x() -> f32 {
+    WeatherPreset::Clear.params().wind_x
+}
+fn default_weather_wind_z() -> f32 {
+    WeatherPreset::Clear.params().wind_z
+}
+
+impl SkyAtmosphere {
+    /// The live weather values as a [`WeatherParams`] — the shape the blend and
+    /// the preset table both speak.
+    #[inline]
+    pub fn weather_params(&self) -> WeatherParams {
+        WeatherParams {
+            coverage: self.weather_coverage,
+            cloud_type: self.weather_cloud_type,
+            wind_x: self.weather_wind_x,
+            wind_z: self.weather_wind_z,
+            fog_density: self.weather_fog_density,
+            precipitation: self.weather_precipitation,
+            snowiness: self.weather_snowiness,
+        }
+    }
+
+    /// Write the live weather values back. Used by the blender, by the editor's
+    /// preset buttons and by `sky.set_weather` when it is told to snap.
+    #[inline]
+    pub fn set_weather_params(&mut self, p: WeatherParams) {
+        self.weather_coverage = p.coverage;
+        self.weather_cloud_type = p.cloud_type;
+        self.weather_wind_x = p.wind_x;
+        self.weather_wind_z = p.wind_z;
+        self.weather_fog_density = p.fog_density;
+        self.weather_precipitation = p.precipitation;
+        self.weather_snowiness = p.snowiness;
+    }
+}
 
 impl Default for SkyAtmosphere {
     fn default() -> Self {
@@ -2930,6 +3231,17 @@ impl Default for SkyAtmosphere {
             cloud_shadow: default_one(),
             cloud_ambient: default_one(),
             cloud_color: default_cloud_color(),
+            weather_enabled: false,
+            weather_target: WeatherPreset::Clear,
+            weather_blend_seconds: default_weather_blend_seconds(),
+            weather_blend_remaining: 0.0,
+            weather_coverage: default_weather_coverage(),
+            weather_cloud_type: default_weather_cloud_type(),
+            weather_wind_x: default_weather_wind_x(),
+            weather_wind_z: default_weather_wind_z(),
+            weather_fog_density: WeatherPreset::Clear.params().fog_density,
+            weather_precipitation: WeatherPreset::Clear.params().precipitation,
+            weather_snowiness: WeatherPreset::Clear.params().snowiness,
         }
     }
 }

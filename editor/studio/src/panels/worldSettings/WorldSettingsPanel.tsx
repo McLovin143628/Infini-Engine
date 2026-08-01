@@ -19,6 +19,8 @@ import type { LevelSettingsDto } from "../../bindings/LevelSettingsDto";
 import type { PartitionSettingsDto } from "../../bindings/PartitionSettingsDto";
 import type { RenderSettingsRecordDto } from "../../bindings/RenderSettingsRecordDto";
 import type { SkyAtmosphereDto } from "../../bindings/SkyAtmosphereDto";
+import type { WeatherDto } from "../../bindings/WeatherDto";
+import type { WeatherPresetDto } from "../../bindings/WeatherPresetDto";
 import type { TimeOfDayDto } from "../../bindings/TimeOfDayDto";
 import {
   CheckboxField,
@@ -42,6 +44,9 @@ import {
   fogVisibility,
   sunLabel,
   wrapSeconds,
+  precipLabel,
+  weatherPreset,
+  WEATHER_PRESETS,
 } from "./todModel";
 
 /** A read-only value cell for info rows that have no setter. */
@@ -85,6 +90,18 @@ export default function WorldSettingsPanel() {
       ...settings,
       atmosphere: { ...settings.atmosphere, present: true, ...patch },
     });
+  // …and again for weather (P17.4): a third block on the same authority entity.
+  const patchWeather = (patch: Partial<WeatherDto>) =>
+    settings &&
+    setLevelSettings({
+      ...settings,
+      weather: { ...settings.weather, present: true, ...patch },
+    });
+  // A preset button writes the whole state at once and leaves nothing in flight —
+  // the editor runs no fixed step while idle, so a blend here would simply never
+  // advance. `weatherPreset` keeps the numbers in one place (and under test).
+  const applyPreset = (preset: WeatherPresetDto) =>
+    patchWeather({ enabled: true, preset, blend_remaining: 0, ...weatherPreset(preset) });
 
   const mode = useViewportStore((s) => s.mode);
   const setMode = useViewportStore((s) => s.setMode);
@@ -445,6 +462,106 @@ export default function WorldSettingsPanel() {
                 step={0.1}
                 onChange={(v) => patchAtmos({ cloud_ambient: v })}
               />
+            </PropertyRow>
+          </PropertySection>
+
+          <PropertySection title="Weather">
+            <p className="px-2 pb-1 text-[11px] leading-snug text-(--ink-text-dim)">
+              One coherent state &mdash; cloud cover, wind, fog and precipitation together.
+              While it is on it <em>drives</em> the Clouds and Fog rows above; turn it off and
+              those go back to being authored directly. Blueprints blend between presets with{" "}
+              <span className="text-(--ink-text)">Set Weather</span>.
+            </p>
+            <div className="flex flex-wrap gap-1 px-2 pb-1">
+              {WEATHER_PRESETS.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  aria-pressed={settings.weather.preset === preset}
+                  onClick={() => applyPreset(preset)}
+                  className={
+                    "rounded px-2 py-[3px] text-[11px] capitalize " +
+                    (settings.weather.preset === preset
+                      ? "bg-(--ink-accent) text-(--ink-bg)"
+                      : "bg-(--ink-surface-2) text-(--ink-text-dim) hover:text-(--ink-text)")
+                  }
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
+            <PropertyRow label="Weather Drives Sky">
+              <CheckboxField
+                value={settings.weather.enabled}
+                onChange={(v) => patchWeather({ enabled: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Blend Time (s)">
+              <NumberField
+                value={settings.weather.blend_seconds}
+                step={0.5}
+                onChange={(v) => patchWeather({ blend_seconds: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Coverage">
+              <NumberField
+                value={settings.weather.coverage}
+                step={0.05}
+                onChange={(v) => patchWeather({ coverage: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Sky Cover">
+              <ReadOnly>{cloudCoverLabel(settings.weather.coverage)}</ReadOnly>
+            </PropertyRow>
+            <PropertyRow label="Type (stratus&rarr;cumulus)">
+              <NumberField
+                value={settings.weather.cloud_type}
+                step={0.05}
+                onChange={(v) => patchWeather({ cloud_type: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Wind X (m/s)">
+              <NumberField
+                value={settings.weather.wind_x}
+                step={0.5}
+                onChange={(v) => patchWeather({ wind_x: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Wind Z (m/s)">
+              <NumberField
+                value={settings.weather.wind_z}
+                step={0.5}
+                onChange={(v) => patchWeather({ wind_z: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Fog Density (1/m)">
+              <NumberField
+                value={settings.weather.fog_density}
+                step={0.0001}
+                onChange={(v) => patchWeather({ fog_density: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Visibility">
+              <ReadOnly>{fogVisibility(settings.weather.fog_density)}</ReadOnly>
+            </PropertyRow>
+            <PropertyRow label="Precipitation">
+              <NumberField
+                value={settings.weather.precipitation}
+                step={0.05}
+                onChange={(v) => patchWeather({ precipitation: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Snow (0 rain &rarr; 1 snow)">
+              <NumberField
+                value={settings.weather.snowiness}
+                step={0.05}
+                onChange={(v) => patchWeather({ snowiness: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Falling">
+              <ReadOnly>
+                {precipLabel(settings.weather.precipitation, settings.weather.snowiness)}
+              </ReadOnly>
             </PropertyRow>
           </PropertySection>
 

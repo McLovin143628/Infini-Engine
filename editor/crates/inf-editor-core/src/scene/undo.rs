@@ -802,6 +802,159 @@ mod tests {
         assert_eq!(doc.sky_atmosphere(), Some(hazy));
     }
 
+    /// P17.4: a weather edit is **one** undo step, labelled for what the user did,
+    /// and it opts a clockless level in exactly like the other two entry points.
+    #[test]
+    fn weather_edit_is_one_undo_step_and_creates_the_authority() {
+        use inf_ecs::components::{SkyAtmosphere, WeatherPreset};
+
+        let mut doc = SceneDoc::new();
+        let entities = doc.order().len();
+        let undos = doc.undo_len();
+
+        // Without `create` on a clockless level: a total no-op.
+        assert_eq!(doc.edit_weather(SkyAtmosphere::default(), false), None);
+        assert_eq!(doc.order().len(), entities);
+        assert_eq!(doc.undo_len(), undos);
+        assert!(
+            !doc.is_dirty(),
+            "a refused write must not dirty the document"
+        );
+
+        // With `create`: the Sky actor + both components + eleven field writes
+        // collapse into ONE entry.
+        let storm = SkyAtmosphere {
+            weather_enabled: true,
+            weather_target: WeatherPreset::Storm,
+            ..SkyAtmosphere::default()
+        };
+        let guid = doc.edit_weather(storm, true).expect("opted in");
+        assert_eq!(doc.sky_authority(), Some(guid));
+        assert_eq!(doc.undo_len(), undos + 1, "one undo entry, not thirteen");
+        assert_eq!(doc.order().len(), entities + 1);
+        let a = doc.sky_atmosphere().expect("atmosphere");
+        assert!(a.weather_enabled);
+        assert_eq!(a.weather_target, WeatherPreset::Storm);
+
+        // A single Ctrl+Z takes the whole opt-in back out …
+        assert!(doc.undo());
+        assert_eq!(doc.order().len(), entities);
+        assert_eq!(doc.sky_authority(), None);
+        // … and redo restores it, enum field included (the reflect variant name
+        // really applied — a wrong spelling would silently leave `Clear`).
+        assert!(doc.redo());
+        assert_eq!(
+            doc.sky_atmosphere().unwrap().weather_target,
+            WeatherPreset::Storm
+        );
+
+        // Re-writing the same values records nothing.
+        let before = doc.undo_len();
+        assert_eq!(doc.edit_weather(storm, false), Some(guid));
+        assert_eq!(doc.undo_len(), before, "a no-op must record nothing");
+    }
+
+    /// The two blocks share one component, so writing either must leave the other
+    /// alone — the composition the Ring-2 command depends on when it posts the
+    /// whole settings DTO on every edit.
+    #[test]
+    fn weather_and_atmosphere_edits_compose_rather_than_overwrite() {
+        use crate::ipc::{WeatherDto, WeatherPresetDto};
+        use inf_ecs::components::{SkyAtmosphere, WeatherPreset};
+
+        let mut doc = SceneDoc::new();
+        doc.edit_sky_atmosphere(
+            SkyAtmosphere {
+                turbidity: 4.0,
+                fog_height: 120.0,
+                ..SkyAtmosphere::default()
+            },
+            true,
+        )
+        .expect("created");
+
+        // A weather write through the DTO overlay path the command uses.
+        let base = doc.sky_atmosphere().unwrap();
+        let dto = WeatherDto::from_doc(&doc).snapped_to(WeatherPresetDto::Snow);
+        doc.edit_weather(dto.to_component(base), true);
+
+        let a = doc.sky_atmosphere().unwrap();
+        assert_eq!(a.turbidity, 4.0, "the atmosphere half must survive");
+        assert_eq!(a.fog_height, 120.0);
+        assert!(a.weather_enabled);
+        assert_eq!(a.weather_target, WeatherPreset::Snow);
+        assert_eq!(a.weather_params(), WeatherPreset::Snow.params());
+        assert_eq!(a.weather_blend_remaining, 0.0, "a preset button snaps");
+
+        // …and the reverse order: an atmosphere write must not reset the weather.
+        let base = doc.sky_atmosphere().unwrap();
+        doc.edit_sky_atmosphere(
+            SkyAtmosphere {
+                turbidity: 1.5,
+                ..base
+            },
+            false,
+        );
+        let a = doc.sky_atmosphere().unwrap();
+        assert_eq!(a.turbidity, 1.5);
+        assert_eq!(a.weather_target, WeatherPreset::Snow);
+        assert_eq!(
+            a.weather_precipitation,
+            WeatherPreset::Snow.params().precipitation
+        );
+    }
+
+    /// Hostile DTO input is clamped, never stored — the same contract
+    /// `atmosphere_dto_clamps_hostile_input` holds one block over.
+    #[test]
+    fn weather_dto_clamps_hostile_input() {
+        use crate::ipc::{WeatherDto, WeatherPresetDto};
+        use inf_ecs::components::SkyAtmosphere;
+
+        let hostile = WeatherDto {
+            present: true,
+            enabled: true,
+            preset: WeatherPresetDto::Fog,
+            blend_seconds: f32::NAN,
+            blend_remaining: -5.0,
+            coverage: 9.0,
+            cloud_type: -3.0,
+            wind_x: f32::INFINITY,
+            wind_z: -1e9,
+            fog_density: -1.0,
+            precipitation: 7.5,
+            snowiness: f32::NAN,
+        };
+        let a = hostile.to_component(SkyAtmosphere::default());
+        assert_eq!(
+            a.weather_blend_seconds, 8.0,
+            "NaN falls back to the default"
+        );
+        assert_eq!(a.weather_blend_remaining, 0.0, "negative clamps to settled");
+        // The blend bound is the SHARED Ring-0 constant, not a repeated literal:
+        // `sky::set_weather` is the other door into these two fields and clamps to
+        // the same value, and the bound is arithmetic (past it the f32 countdown
+        // stops making progress and the blend never settles), so two copies of the
+        // number would be two chances to arm the blender forever.
+        let huge = WeatherDto {
+            blend_seconds: 5e6,
+            blend_remaining: 5e6,
+            ..hostile
+        };
+        let b = huge.to_component(SkyAtmosphere::default());
+        assert_eq!(b.weather_blend_seconds, inf_ecs::sky::MAX_WEATHER_BLEND_S);
+        assert_eq!(b.weather_blend_remaining, inf_ecs::sky::MAX_WEATHER_BLEND_S);
+        assert_eq!(a.weather_coverage, 1.0);
+        assert_eq!(a.weather_cloud_type, 0.0);
+        assert_eq!(a.weather_wind_x, 0.0, "infinite wind falls back to still");
+        assert_eq!(a.weather_wind_z, -200.0);
+        assert_eq!(a.weather_fog_density, 0.0);
+        assert_eq!(a.weather_precipitation, 1.0);
+        assert_eq!(a.weather_snowiness, 0.0);
+        // The atmosphere half of the base is untouched.
+        assert_eq!(a.cloud_coverage, SkyAtmosphere::default().cloud_coverage);
+    }
+
     /// The DTO deliberately carries no colours, so a World Settings write must
     /// leave a Details-authored sun/moon/gradient colour alone. This is the
     /// overlay contract that `SkyAtmosphereDto::to_component` implements and the

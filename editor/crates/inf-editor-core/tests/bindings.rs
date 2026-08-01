@@ -21,7 +21,8 @@ use inf_editor_core::ipc::{
     SequenceDto, SkyAtmosphereDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpriteGridDto,
     SpriteRectDto, SpriteSheetDto, TerrainImportPlanDto, TerrainImportResultDto,
     TerrainImportSettingsDto, TilemapCellDto, TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto,
-    ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto,
+    ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto, WeatherDto,
+    WeatherPresetDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -105,6 +106,8 @@ fn export_bindings() {
     PartitionSettingsDto::export_all(&cfg).expect("export PartitionSettingsDto");
     TimeOfDayDto::export_all(&cfg).expect("export TimeOfDayDto");
     SkyAtmosphereDto::export_all(&cfg).expect("export SkyAtmosphereDto");
+    WeatherDto::export_all(&cfg).expect("export WeatherDto");
+    WeatherPresetDto::export_all(&cfg).expect("export WeatherPresetDto");
     MatValuesDto::export_all(&cfg).expect("export MatValuesDto");
     MatOverridesDto::export_all(&cfg).expect("export MatOverridesDto");
     MaterialInstanceDto::export_all(&cfg).expect("export MaterialInstanceDto");

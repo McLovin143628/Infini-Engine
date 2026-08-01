@@ -336,6 +336,12 @@ impl EngineRenderer {
         // occlude it, BEFORE translucency so glass composites over it. A no-op
         // unless the scene enables clouds, so opaque scenes stay byte-identical.
         graph.add(passes::cloud::CloudNode::new(gpu, &view_bgl));
+        // Precipitation (P17.4): a depth-tested, premultiplied-alpha billboard
+        // layer around the camera. AFTER the clouds so rain composites over the
+        // deck it falls out of, BEFORE translucency so glass composites over it.
+        // A no-op unless the weather block is precipitating, so dry scenes stay
+        // byte-identical.
+        graph.add(passes::precip::PrecipNode::new(gpu, &view_bgl));
         // Translucent forward pass (R-P5): alpha-blended, depth-tested but not
         // depth-writing, back-to-front sorted. Draws after all opaque geometry +
         // terrain, into the same MSAA scene target, before the grid. A no-op unless

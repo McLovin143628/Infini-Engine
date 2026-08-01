@@ -459,6 +459,12 @@ impl SimSession {
         //    `rate == 0` (the component default), and never called outside a
         //    fixed step, so an idle editor never moves the sun.
         inf_ecs::sky::advance_time_of_day(doc.world_mut(), dt);
+        // The weather blend advances in the same slot, for the same reason
+        // (P17.4): everything downstream — the projected clouds, the fog, the
+        // precipitation, a Blueprint reading `sky.get_precipitation` — must
+        // observe ONE weather state for the step. Inert unless a transition is
+        // actually in flight on an enabled weather block.
+        inf_ecs::sky::advance_weather(doc.world_mut(), dt);
         // 1. ECS → physics.
         self.bridge.sync_from_world(doc.world());
         self.bridge3d.sync_from_world(doc.world()); // ── P11.3 3D bridge: sync ──
@@ -1155,6 +1161,8 @@ struct SimHost<'a> {
     dispatch_queue: &'a mut VecDeque<(i64, String)>,
 }
 
+use inf_ecs::components::WeatherPreset;
+
 impl Host for SimHost<'_> {
     fn call(&mut self, path: &[String], args: &[Value]) -> Result<Value, RunError> {
         match (
@@ -1226,6 +1234,27 @@ impl Host for SimHost<'_> {
             (Some("sky"), Some("set_rate")) => {
                 inf_ecs::sky::set_time_of_day_rate(self.world, arg_f64(args, 0));
                 Ok(Value::Unit)
+            }
+            // sky.* weather (P17.4) — four more one-line seams over
+            // `inf_ecs::sky`, shared verbatim by both hosts. The preset arrives
+            // as a Str (the `input.is_down` precedent); an unparseable name is a
+            // **no-op**, because a typo must never quietly produce a different
+            // sky. `blend_seconds` is literal: 0 snaps, negative means "the
+            // level's authored blend time".
+            (Some("sky"), Some("set_weather")) => {
+                if let Some(p) = WeatherPreset::parse(&arg_str(args, 0)) {
+                    inf_ecs::sky::set_weather(self.world, p, arg_f64(args, 1));
+                }
+                Ok(Value::Unit)
+            }
+            (Some("sky"), Some("get_weather")) => Ok(Value::Str(
+                inf_ecs::sky::weather_preset_name(self.world).to_string(),
+            )),
+            (Some("sky"), Some("get_precipitation")) => Ok(Value::Float(
+                inf_ecs::sky::weather_precipitation(self.world),
+            )),
+            (Some("sky"), Some("get_wind_speed")) => {
+                Ok(Value::Float(inf_ecs::sky::weather_wind_speed(self.world)))
             }
             // Unknown engine call: log it (matching the graph preview host) so a
             // partially-authored blueprint still runs rather than aborting.

@@ -105,6 +105,21 @@ fn the_shared_projector_body_is_not_a_stub() {
         "time_s: sky.cloud_time_s()",
         "seed: a.cloud_seed",
         "shadow_strength: a.cloud_shadow",
+        // P17.4: the weather block. `let w = sky.weather()` is the fragment that
+        // matters — it is the Ring-0 decision about which of two parameter sets
+        // is in force, and a host that inlined its own `if weather_enabled`
+        // would be exactly the divergence this gate exists to stop. The three
+        // *driven* assignments are here too, because a host could call
+        // `sky.weather()` and then keep reading the authored fields, which would
+        // pass a fragment check that only looked for the call.
+        "let w = sky.weather();",
+        "density: w.fog_density",
+        "coverage: w.cloud_coverage",
+        "cloud_type: w.cloud_type",
+        "wind_x: w.wind_x",
+        "precip: PrecipParams",
+        "intensity: w.precipitation",
+        "snowiness: w.snowiness",
     ] {
         assert!(
             body.contains(fragment),

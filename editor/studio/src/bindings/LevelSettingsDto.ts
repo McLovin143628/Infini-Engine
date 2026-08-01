@@ -3,6 +3,7 @@ import type { PartitionSettingsDto } from "./PartitionSettingsDto";
 import type { RenderSettingsRecordDto } from "./RenderSettingsRecordDto";
 import type { SkyAtmosphereDto } from "./SkyAtmosphereDto";
 import type { TimeOfDayDto } from "./TimeOfDayDto";
+import type { WeatherDto } from "./WeatherDto";
 
 /**
  * The level's file-level settings, as the World Settings panel edits them
@@ -40,4 +41,9 @@ time_of_day: TimeOfDayDto,
  * Physical-atmosphere block (P17.2). Same authority entity, same
  * `present` create flag — see [`SkyAtmosphereDto`].
  */
-atmosphere: SkyAtmosphereDto, };
+atmosphere: SkyAtmosphereDto, 
+/**
+ * Weather block (P17.4). Same authority entity again, same create flag —
+ * see [`WeatherDto`].
+ */
+weather: WeatherDto, };

@@ -1109,7 +1109,7 @@ material functions, multi-viewport, PIE player options.
 
 ---
 
-## 12. Next-Gen Wave — Phases 16–25 (planned 2026-07-31; **P16 COMPLETE**)
+## 12. Next-Gen Wave — Phases 16–25 (planned 2026-07-31; **P16–P17 COMPLETE**)
 
 The 16-phase master plan (§6) and UE-Parity Wave 1 (§11) are complete and CI-green: the engine
 now does what a mature traditional engine does. This wave pushes past that workflow —
@@ -1279,6 +1279,227 @@ PIE == shipping on the sky-state trace, and new levels default to the dynamic sk
 Starting point: the sky is a 44-line three-colour gradient shader, `SkyParams` has zero
 writers, and the sun is a `SUN_DIR` constant consumed by the sky, GI, and shadow passes — no
 atmosphere, fog, cloud, or TOD code exists anywhere.
+
+> **STATUS: Phase 17 COMPLETE** (2026-08-01) — **local gates green; CI pending push.** (Written
+> with the commit rather than after the CI run, like Phase 16's, and saying so rather than
+> claiming a green it has not seen.) The engine's default look is a living sky: a new level
+> boots at 10:00 on the June solstice under a Hillaire-class physical atmosphere with a
+> raymarched cumulus deck drifting on a 6 m/s westerly, and every part of it — the sun, the
+> clouds, the weather, the rain — is a pure function of the document rather than of a wall
+> clock, a frame index or a machine.
+>
+> The whole phase is pinned by one composed gate,
+> `runtime/inf-player/tests/phase17_gate.rs`: a 600× time-of-day ramp with **two weather
+> transitions driven through the Blueprint host seams** (Clear → Storm → Snow), traced across
+> the full sky state — clock, sun, projected sun, cloud wind, cloud field, fog, the weather
+> block, the blend countdown, the precipitation offsets and count, and the P22 snow-accumulation
+> rate — asserted bit-identical across two runs, bit-identical between a cooked pack and a PIE
+> payload, and bit-identical across ECS pool sizes.
+>
+> **P17.1 Sun & time of day** — `SUN_DIR` **deleted**; a `TimeOfDay` + `SkyAtmosphere` component
+> pair projected into `RenderScene.sun` by both scene builders; deterministic solar math in
+> `inf_math::solar` (Spencer fits, a vector topocentric transform on `psin64`/`pcos64` so no
+> `asin`/`atan2` is ever needed); the **singleton problem solved once** in Ring 0 by
+> `sky_authority` (lowest `(Guid, Entity)`, archetype-scoped); the clock advanced in both fixed
+> steps; a `sky.*` Blueprint namespace and zero-code sequencer keying. **P17.2 Physical
+> atmosphere** — transmittance + sky-view LUT compute passes on Bruneton/Hillaire
+> parameterizations, a rewritten `sky.wgsl` drawing sun and moon discs and an integer-hashed
+> starfield, aerial perspective + exponential height fog in every lit pass, and the
+> `EnvBinding` generation key extended to `(targets, atmosphere)` — the first resizable resource
+> in that bind group, exactly as P13's comment predicted. **P17.3 Volumetric clouds** — a
+> Perlin–Worley shape volume and a Worley detail volume baked from a pure-integer hash, marched
+> in a dedicated pass between the opaque and translucent ones (two occlusion mechanisms: the
+> hardware test on the slab-entry depth, plus a march clamp against the read-only depth
+> texture), a 512² cloud-shadow map sampled beside the CSM, and CPU/GPU parity gated at 1 LSB.
+> **P17.4 Weather states + the phase gate** — below.
+>
+> **P17.4, in detail.** (1) **The weather state's shape** was the batch's real design call, and
+> the note is worth keeping: the alternative was a pure `from → to → t` state machine, which is
+> smaller and is wrong here for two reasons. The sequencer keys **reflected component fields**,
+> and a blend fraction is not something a curve can be drawn through — P17.1 bought "zero
+> sequencer code" by making the clock a plain reflected field, and a state machine would have
+> spent it. And it leaves the Details grid with nothing authorable between presets, i.e. dead
+> controls. So the **live values are the component** (coverage, type, wind X/Z, fog density,
+> precipitation, snowiness) and the transition is two extra fields beside them
+> (`weather_target`, `weather_blend_remaining`). `advance_weather` closes `dt / remaining` of
+> the gap each fixed step, which is linear **in exact arithmetic** — after `n` steps the
+> surviving gap is `∏(1 − dt/(T − i·dt)) = (T − n·dt)/T` — and needs **no `from` snapshot** to
+> be. In f32 it is linear to within a measured **17 ULP over a 240-step (4 s at 60 Hz) blend**,
+> i.e. ~1e-6 of a unit range, which is why the gate asserts linearity against a 1e-3 envelope
+> (loose enough for the accumulation, tight enough that a smoothstep — off by 0.09 of the range
+> at `t = 0.25` — fails at once). The **endpoint** is exact rather than merely close: the last
+> step *assigns* the target instead of closing the final `k = 1`, so "a settled blend equals its
+> preset" is a bit-identity, not a tolerance. A blend also takes `ceil(T/dt)` steps and
+> occasionally one more, because `1/60` is not representable and the countdown accumulates —
+> the gate asserts the count is 240–242 rather than pretending it is 240.
+>
+> A related sharp edge, found in audit: the countdown is `f32`, so a large enough
+> `weather_blend_remaining` makes `remaining − dt` round back to `remaining` — the blend freezes
+> and `advance_weather` writes the component every step forever, voiding the "settled ⇒ the
+> blender never writes" contract everything else rests on. `MAX_WEATHER_BLEND_S` (3600 s) is
+> that ceiling, defined once in Ring 0 and referenced — never re-spelled — by both doors into
+> the field (`sky.set_weather` and `WeatherDto::to_component`), plus a **no-progress backstop**
+> inside `advance_weather` for the hand-edited sidecar that bypasses both. Two conditions, not
+> one: the arithmetic test (`remaining − dt >= remaining`) catches the true freeze for any `dt`,
+> and the ceiling test catches the band just below it where the subtraction still moves but by
+> one ULP a step — sixteen million steps to settle, i.e. frozen in practice. Once settled the blender never writes those fields again, which is precisely what
+> lets a sequencer track or a Details edit own them.
+> (2) **Driven, not duplicated.** `ResolvedSky::weather()` decides, in Ring 0, whether the
+> `weather_*` block or the authored `cloud_*`/`fog_density` fields are in force — the
+> `cloud_time_s` precedent, for the same reason: it is exactly the sort of one-line derivation
+> two byte-identical MIRROR bodies eventually stop agreeing about. With weather off the
+> projection reproduces v13 field for field (asserted over a whole day-ramp), which is the
+> byte-stability promise for every existing level; with it on, coverage, type, the wind that
+> drifts the clouds *and* slants the rain, and the fog density all come from the weather block.
+> (3) **Precipitation v1** is a dedicated ~200-line pass, not a VFX system, and says so. No
+> vertex buffer: `draw(0..6, 0..count)` with a particle's entire state derived from
+> `cloud_hash(i, salt)` — the same pure-integer avalanche the cloud field uses, already pinned
+> bit-for-bit — plus three displacements the CPU wraps in `f64` (`wind·t`, `fall·t`) exactly as
+> `wind_offset` does, because a day of 9 m/s fall is 780 km and an `f32` metre there has 6 cm of
+> resolution. **World-anchoring without a world coordinate**: the shader gets the camera's world
+> position *modulo the box*, so `p = eye + wrap_signed(base + drift − eye_mod, box)` is congruent
+> to `base + drift` in world space — the lattice is locked to the world, the rain does not slide
+> with the camera, and the floating origin never enters the expression so a rebase cannot pop
+> it. Depth is the **hardware test alone** (read-only attachment, `Greater`, writes off): the
+> cloud pass needed a manual depth read because a raymarch has to clamp `t_far` at geometry
+> *inside* the slab, whereas a particle is a flat quad at one depth, and the hardware test
+> resolves per MSAA sample where a manual load would not.
+> (4) **The honest calibrations, and the batch's only supra-physical constants.** A raindrop is
+> ~2 mm across and genuinely sub-pixel at any resolution, so a physically-sized quad rasterizes
+> to nothing (or to a flickering scatter of hit samples). Three consequences, disclosed together
+> in `precip.rs` rather than one at a time: the drawn **sizes** are all larger than the
+> hydrometeor they stand for — `RAIN_RADIUS_M` 20× a drop's radius, `SNOW_RADIUS_M` ~15× a
+> flake's, `RAIN_STREAK_M` ~7× the 0.15 m a 9 m/s drop smears in one 60 Hz frame; the quad is
+> **widened** to at least 1.3 px with its alpha divided by the same factor (the standard
+> sub-pixel-geometry treatment, energy-conserving) with that compensation **capped at 4×**; and
+> the **sky gain is above 1** (1.15). The first two share one reason — 48 000 particles stand in
+> for millions, so a sample can only read as a sheet by being drawn bigger than what it
+> represents, and full alpha compensation makes the far half of the sheet vanish. The third is
+> geometry: a drop gathers light from the whole hemisphere while `atmos_sample_skyview` returns
+> the one direction it is seen against, so at a gain of exactly 1 rain composites over the sky
+> to precisely the sky — an identity, not a look. Everything else in the layer (fall speeds, box
+> extents, wind, the accumulation rate) is real.
+> (5) **The P22 hook.** `ResolvedSky::snow_accumulation_rate()` returns
+> `intensity × snowiness × SNOW_ACCUMULATION_MAX_M_PER_S` (1.4e-5 m/s ≈ 5 cm/hour at full
+> blast) in Ring 0, so P22.1's deformation code consumes a rate rather than re-deriving one.
+> Nothing renders accumulation yet; the gate asserts it is exactly zero through the rain,
+> reaches the documented value once the Snow preset settles, and passes through **continuous
+> intermediate values** during the blend, which is what an integrator needs.
+> (6) **Blueprint + sequencer + editor.** `sky.set_weather(preset, blend_seconds)` plus three
+> getters; the preset crosses as a **`Str`** (the `input.is_down` precedent — no new `PortType`,
+> no lowering special case, and a typo is a documented **no-op** rather than a different sky),
+> and `blend_seconds` is read literally so an unwired pin (`0.0`) changes the weather *now*,
+> which is what the node looks like it will do. `set_weather` also **enables** the block: a
+> script naming a preset means it, and doing nothing because a checkbox was clear is the worst
+> of the available behaviours (asserted, not assumed). Zero IR change and zero transpiler
+> change again. The eleven `weather_*` fields are ordinary reflected `f32`s, so the sequencer
+> keys them with zero sequencer code. World Settings grew a Weather section — five preset
+> buttons that **snap** (an idle editor runs no fixed step, so a blend there would simply never
+> advance), a blend time, the explicit params, and `precipLabel` / `cloudCoverLabel` /
+> `fogVisibility` readbacks. `WeatherDto` is a block of its own rather than more fields on
+> `SkyAtmosphereDto`, because it is a different question with a different UI, and its own
+> `edit_weather` transaction means clicking "Storm" reads **Weather** in the undo history.
+>
+> **Schema v14 — the third bump of the phase, for the third time for the same reason.**
+> `.inf_lvl` payloads are bincode, which reads a fixed field count positionally, so growing
+> `SkyAtmosphere` by 11 fields makes a v13 record **stop short** of what the decoder expects and
+> read on into the next entity's bytes, silently. The v13 shape freezes as `SkyAtmosphereV13`
+> inside `EntityRecordV13` / `SceneFileV13` in **both** codecs, and `into_current` lifts a v13
+> level with **weather disabled** — which leaves the authored cloud and fog fields driving the
+> sky exactly as they did, i.e. what a v13 level meant.
+> `v14_weather_is_wider_on_the_wire_than_v13` pins the delta at exactly **38 bytes**, priced
+> field by field: 1 bool + `varint_len(default_variant_index)` + 9 × f32. That middle term is a
+> named computation rather than a literal for the same reason the v13 test spelled out
+> `cloud_seed`: `WeatherPreset` is a fieldless serde enum written as its **variant index**, and
+> `bincode::config::standard()` is varint, so its cost is a function of the *default preset's
+> position* rather than of its type — a preset inserted before `Clear` would otherwise fail
+> saying "the weather block grew", which would be a lie. A `scene_v13.inf_lvl` fixture is
+> blessed in both crates from a frozen writer and **byte-compared against each other** (the
+> mirror lock); the downgrade direction is asserted as a property, not left to a bless-only
+> path. Every committed sample and template changed by **exactly one byte, at offset 0**
+> (`13` → `14`) — verified programmatically, every file's length unchanged and offset 0 the only
+> differing byte — because no committed content carries a `SkyAtmosphere`.
+>
+> **Goldens: three added, none re-blessed.** `weather_storm_noon` (the Storm preset over a low
+> storm deck — asserting the ceiling covers >90 % of the sky band *and* darkens it, that the
+> rain perceptibly changes >1 % of the frame, and that it reaches **6 of 8** vertical bands, so
+> a single bright artefact cannot pass), `weather_fog_dawn` (the Fog preset's 6e-3 m⁻¹ ≈ 500 m
+> visibility, measured as the frame's *darkest* pixel climbing — two identical-albedo,
+> identical-screen-size walls at 30 m and 900 m, the `aerial_fog` construction reused), and
+> `weather_snow_dusk` (flakes measurably **warmer at dusk than at noon**, measured only over the
+> pixels the precipitation actually occupies, which is the single assertion that would catch
+> precipitation shaded by a constant instead of by the sky-view LUT). Beside them, four
+> non-image gates: the off path is byte-identical three ways (absent / disabled / zero
+> intensity), a 2.5 m wall cuts the rain behind it to under a third of the open-air rate
+> (mutation-verified by dropping `depth_compare`, which takes the ratio to ~1.0), the field
+> follows the level clock, and the tier clamp reduces the particle count — that last one caught
+> its own first draft, which compared a Low-tier frame against a High-tier control and reported
+> Low drawing **thirty times** the rain of High, all of it the LUT-size difference. **All 33
+> pre-P17.4 goldens are byte-identical**, verified the P17.2/P17.3 way: `INF_BLESS_GOLDENS=1`
+> over the whole suite, `git status` reporting zero changed PNGs.
+>
+> **Cost.** Measured GPU-fenced at 640×360 on an RTX 4070 Ti, with the *heaviest* state a preset
+> can produce (Storm: solid cover, full rain), against the same frame with the whole sky off
+> (0.299 ms): **+0.036 ms Low, +0.180 ms Medium, +0.393 ms High.** Deliberately **no new ratchet
+> constant**: §8's rule is that a budget tripwire only ratchets down, which makes each one a
+> standing obligation, and paying it for an off-by-default feature whose worst measured cost is
+> four tenths of a millisecond would be paying it for nothing. `sky_stack_cost_per_tier` asserts
+> the composed sky-on frame stays inside the existing `FRAME_BUDGET_MS` — the same tripwire,
+> now exercised with every Phase-17 layer on at once, which was previously untested — and
+> prints the per-tier numbers rather than asserting them, because an absolute millisecond on one
+> machine is not a contract.
+>
+> **Key decisions, in one place.** *The `SUN_DIR` retirement mechanism*: `SunParams::default()`
+> keeps the retired constant **un-normalized** (`Vec3::new(0.45, 0.75, 0.3)`) because all three
+> of its call sites wrote `.normalize()`, and reproducing the *arithmetic* cannot drift by an
+> ULP the way transcribing the *result* can — which is why all 23 goldens survived P17.1
+> untouched. *The v12/v13/v14 ladder*: three bumps in one phase, each a component growing inside
+> an unmoved entity slot (the v8→v9 `TerrainV8` shape), each with a frozen record carrying its
+> **own literal defaults** so a frozen record can never move when the live component is re-tuned,
+> and each with a fixture blessed twice and byte-compared. The two ladders lift by different
+> routes — `inf-scene` in one hop from `SkyAtmosphere::default()`, the editor's through its own
+> `into_v13` literals — and `weather_defaults_are_the_documented_ones` in **both** crates is what
+> makes those routes equivalent rather than coincidentally equal. *GenCache / ResourceKey
+> discipline*: every bind group is keyed on exactly what it embeds — `EnvBinding` and the cloud
+> raymarch on `(targets, atmosphere)`, the LUT bake, the cloud bake and the precipitation pass on
+> the atmosphere generation alone, because nothing they bind is viewport-size-dependent and
+> rebuilding on a window resize would be a lie about what invalidates them. The failure this
+> guards is **quiet**: wgpu keeps the old texture alive as long as a bind group references it, so
+> a stale key produces no validation error and no black frame, just last tier's pixels that a
+> determinism gate would happily call stable. *The depth clamp*: the cloud march's `t_far` clamp
+> against the scene depth is what stops a summit *inside* the deck from being veiled by the cloud
+> behind it — the hardware test cannot, because the fragment's depth is the slab's entry plane,
+> which is genuinely in front of the summit. Measured 0.275 vs 0.588 composited alpha with and
+> without it.
+>
+> **Honest human-verified remainders.** Every GPU path in this phase is human-verified, as they
+> all are: that the four TOD sweep images, the four cloud images, the three weather images and
+> the default level actually **look good** on hardware is a subjective bar no assertion reaches,
+> and "gorgeous" in the phase's own framing is the one criterion this ledger cannot check off.
+> Specifically outstanding: a visual pass on dawn/dusk colour and the night gradient at real
+> resolution; whether the precipitation reads as rain rather than as noise at 1080p and 4K (the
+> goldens are 320×180, where a widened drop is a large fraction of a pixel); whether the
+> weather blend *feels* like weather changing at the default 8 s; and the Phase 17 demo
+> recording.
+>
+> **Deferred, with where each is tracked.** Hillaire's 32×32 **multiple-scattering LUT** (the
+> single `ATMOS_MULTI_SCATTER` constant stands in — `crates/inf-render/src/atmosphere.rs`) and
+> his 3D **froxel aerial-perspective LUT** (the homogeneous v1 with a horizon-clamped in-scatter
+> is documented in `atmosphere_lut.wgsl`). **TAA-integrated temporal cloud jitter** — the
+> standard way to buy back march steps, and a per-frame-index dependence, which is exactly what a
+> byte-identical determinism gate forbids; it needs a jitter that is a function of the *level's*
+> clock rather than the frame counter (`crates/inf-render/src/shaders/cloud.wgsl`). The **moon's
+> roll about the view axis** is pinned to the local horizontal rather than derived from the
+> ecliptic (`sky.wgsl`; invisible at 0.5° across). **GI ↔ sky coupling → P18.4**: cloud shadows
+> reach the *direct* lighting of every lit pass but not the probes, which still read the gradient
+> constants, so a heavy overcast dims the sun on the ground but not the bounce. Precipitation has
+> **no collision and no audio** — drops fall through roofs, and rain is silent (the audio command
+> queue is the seam, `docs/memos/` audio doctrine); it also has no splashes, no wetness/roughness
+> response on materials, and no lightning. **Weather zones / volumes** — one weather state per
+> level, so a valley cannot be foggy while the ridge is clear; the `Volume` component is the
+> obvious carrier and this is future scope, not a P17 remainder. Clouds remain a **flat slab**
+> (no orographic lift, no terrain-varying base), and precipitation is a fixed-size box around the
+> camera rather than a projected frustum volume.
 
 > **STATUS: P17.1 COMPLETE** (2026-08-01) — **local gates green; CI pending push.** The sun
 > stopped being a compile-time constant: `inf_render::camera::SUN_DIR` is **deleted**, and every
@@ -1860,6 +2081,20 @@ what a v12 level meant. The delta is exactly **62 bytes** (1 bool + 11 f32 + a 4
 **1** for the `u32` seed under `bincode`'s varint `standard()` config). The clock stays
 untouched: the wind's drift is *derived* from `TimeOfDay`, not authored, so nothing about it
 crosses the wire.
+
+Schema **v14**: `SkyAtmosphere` grows the **weather block** (P17.4) — the enable flag, the
+target `WeatherPreset`, the authored blend length and the in-flight remainder, and the seven
+live blendable parameters (coverage, cloud type, the m/s wind pair, fog density in m⁻¹,
+precipitation intensity, snowiness). Same mechanism as v12 and v13 for the same reason:
+`SkyAtmosphereV13` freezes inside `EntityRecordV13` / `SceneFileV13` in both codecs, and
+`into_current` lifts a v13 level with **weather disabled** — leaving the authored cloud and fog
+fields driving the sky exactly as they did, which is what a v13 level meant. The delta is
+exactly **38 bytes** (1 bool + `varint_len` of the default preset's variant index + 9 × f32);
+the preset's cost is priced as a varint over its *index* rather than as a fixed width, because
+a fieldless serde enum under bincode's varint `standard()` config costs what its position
+costs. Third bump in one phase, deliberately: each of v12/v13/v14 shipped before the next
+block's design existed, and retro-fitting any of them would mean re-blessing bytes that are
+already committed and already load.
 
 ### Phase 18 — Lumen-class GI & virtualized-geometry completion
 

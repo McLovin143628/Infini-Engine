@@ -712,6 +712,14 @@ pub async fn scene_set_settings(
             settings.atmosphere.to_component(base),
             settings.atmosphere.present,
         );
+        // The weather block writes third, onto whatever the atmosphere edit just
+        // left: both project the SAME component, so re-reading the base here is
+        // what stops the second write from resurrecting the first's old values.
+        let base = doc.sky_atmosphere().unwrap_or_default();
+        doc.edit_weather(
+            settings.weather.to_component(base),
+            settings.weather.present,
+        );
     }
     emit_world_delta(&app, &state);
     Ok(())

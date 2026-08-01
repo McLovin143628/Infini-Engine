@@ -13,6 +13,7 @@ pub mod gi;
 pub mod grid;
 pub mod mask;
 pub mod mesh;
+pub mod precip;
 pub mod resolve;
 pub mod shadow;
 pub mod skinned;
@@ -65,6 +66,11 @@ pub(crate) enum ShaderKind {
     /// sampled cloud field at `@group(0)`, plus the shadow map as storage — the
     /// only compute pass that both reads and writes cloud data (P17.3).
     CloudShadowBake,
+    /// [`precip_shader`]: common_view + the atmosphere library at `@group(1)` +
+    /// the cloud **generators** (for the hash alone) — the precipitation pass
+    /// (P17.4), which places particles from an integer hash and lights them from
+    /// the sky LUTs, and binds no volume and no depth texture.
+    Precip,
 }
 
 // ── atmosphere composition (P17.2) ───────────────────────────────────────────
@@ -156,6 +162,27 @@ pub(crate) fn cloud_shader(source: &str) -> String {
         atmosphere_lut_source(1, 1, 2, 3),
         cloud_noise_source(),
         cloud_field_source(1, 4, 5, 6),
+        source
+    )
+}
+
+/// The precipitation module: common_view + the atmosphere at `@group(1)`
+/// bindings 0..3 + the cloud **generators**, which is where `cloud_hash` /
+/// `cloud_hash_unit` live. Reusing that hash rather than writing a second one is
+/// the point: it is already pinned bit-for-bit by
+/// `clouds::tests::committed_noise_values_are_bit_stable`, and a precipitation
+/// hash of its own would be a second thing to keep portable.
+pub(crate) fn precip_shader(source: &str) -> String {
+    format!(
+        "{}
+{}
+{}
+{}
+{}",
+        include_str!("../shaders/common_view.wgsl"),
+        atmosphere_source(1, 0),
+        atmosphere_lut_source(1, 1, 2, 3),
+        cloud_noise_source(),
         source
     )
 }
@@ -272,6 +299,11 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
         include_str!("../shaders/cloud_shadow_bake.wgsl"),
         ShaderKind::CloudShadowBake,
     ),
+    (
+        "precip",
+        include_str!("../shaders/precip.wgsl"),
+        ShaderKind::Precip,
+    ),
 ];
 
 /// Compose the named [`SHADER_TABLE`] entry. Panics on an unknown label —
@@ -290,6 +322,7 @@ pub(crate) fn shader_source(label: &str) -> String {
         ShaderKind::Cloud => cloud_shader(source),
         ShaderKind::CloudBake => cloud_bake_shader(source),
         ShaderKind::CloudShadowBake => cloud_shadow_bake_shader(source),
+        ShaderKind::Precip => precip_shader(source),
     }
 }
 

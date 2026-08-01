@@ -12,7 +12,10 @@ import {
   fogVisibility,
   formatClockSeconds,
   SECONDS_PER_DAY,
+  precipLabel,
   sunLabel,
+  weatherPreset,
+  WEATHER_PRESETS,
   wrapSeconds,
 } from "../todModel";
 
@@ -164,5 +167,98 @@ describe("cloud layer label (P17.3)", () => {
     expect(cloudLayerLabel(4000, 1500)).toBe("empty (top is not above bottom)");
     expect(cloudLayerLabel(NaN, 4000)).toBe("—");
     expect(cloudLayerLabel(1500, Infinity)).toBe("—");
+  });
+});
+
+// ── weather (P17.4) ─────────────────────────────────────────────────────────
+
+describe("World Settings weather model (P17.4)", () => {
+  it("lists every preset exactly once, in menu order", () => {
+    expect(WEATHER_PRESETS).toEqual(["clear", "overcast", "storm", "fog", "snow"]);
+    expect(new Set(WEATHER_PRESETS).size).toBe(WEATHER_PRESETS.length);
+  });
+
+  /**
+   * The preset table is duplicated across the ring boundary (the button must
+   * write its values optimistically, before the IPC round-trip). These literals
+   * are the SAME numbers `WeatherPreset::params()` returns in
+   * `crates/inf-ecs/src/components.rs`; if that table is re-tuned, this fails and
+   * says so, which is the whole reason the duplication is affordable.
+   */
+  it("mirrors the Rust preset table field for field", () => {
+    expect(weatherPreset("clear")).toEqual({
+      coverage: 0.08,
+      cloud_type: 0.75,
+      wind_x: 4.0,
+      wind_z: 1.5,
+      fog_density: 0.0,
+      precipitation: 0.0,
+      snowiness: 0.0,
+    });
+    expect(weatherPreset("overcast")).toEqual({
+      coverage: 0.85,
+      cloud_type: 0.2,
+      wind_x: 9.0,
+      wind_z: 3.5,
+      fog_density: 7.5e-5,
+      precipitation: 0.0,
+      snowiness: 0.0,
+    });
+    expect(weatherPreset("storm")).toEqual({
+      coverage: 1.0,
+      cloud_type: 0.35,
+      wind_x: 22.0,
+      wind_z: 9.0,
+      fog_density: 6.0e-4,
+      precipitation: 1.0,
+      snowiness: 0.0,
+    });
+    expect(weatherPreset("fog")).toEqual({
+      coverage: 0.5,
+      cloud_type: 0.1,
+      wind_x: 1.5,
+      wind_z: 0.5,
+      fog_density: 6.0e-3,
+      precipitation: 0.0,
+      snowiness: 0.0,
+    });
+    expect(weatherPreset("snow")).toEqual({
+      coverage: 0.9,
+      cloud_type: 0.3,
+      wind_x: 5.0,
+      wind_z: 2.0,
+      fog_density: 1.2e-3,
+      precipitation: 0.7,
+      snowiness: 1.0,
+    });
+  });
+
+  it("gives every preset a distinct sky", () => {
+    const seen = WEATHER_PRESETS.map((p) => JSON.stringify(weatherPreset(p)));
+    expect(new Set(seen).size).toBe(WEATHER_PRESETS.length);
+  });
+
+  it("only Snow accumulates — the P22 hook's frontend tell", () => {
+    for (const p of WEATHER_PRESETS) {
+      const w = weatherPreset(p);
+      if (p === "snow") expect(w.snowiness).toBe(1);
+      else expect(w.snowiness).toBe(0);
+    }
+  });
+
+  it("labels precipitation by strength and phase", () => {
+    expect(precipLabel(0, 0)).toBe("dry");
+    expect(precipLabel(-1, 1)).toBe("dry");
+    expect(precipLabel(NaN, 0)).toBe("dry");
+    expect(precipLabel(0.1, 0)).toBe("light rain");
+    expect(precipLabel(0.4, 0)).toBe("steady rain");
+    expect(precipLabel(0.7, 0)).toBe("heavy rain");
+    expect(precipLabel(1, 0)).toBe("torrential rain");
+    // Snowiness is a blend, so the words pass through sleet on the way.
+    expect(precipLabel(0.7, 0.5)).toBe("heavy sleet");
+    expect(precipLabel(0.7, 1)).toBe("heavy snow");
+    // Hostile input clamps rather than producing "undefined".
+    expect(precipLabel(9, 9)).toBe("torrential snow");
+    expect(precipLabel(0.5, NaN)).toBe("steady rain");
   });
 });
