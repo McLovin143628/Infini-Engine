@@ -136,8 +136,9 @@ fn gate_a_scene_round_trips_byte_identical() {
     // the generator → committed bytes lock).
     let committed = std::fs::read(vgeom_demo_dir().join("VgeomDemo.inf_lvl")).unwrap();
     assert_eq!(
-        committed[0], 8,
-        "committed vgeom-demo is a schema-v8 payload"
+        committed[0],
+        inf_scene::SCHEMA_VERSION as u8,
+        "committed vgeom-demo is a current-schema payload"
     );
     let level = inf_scene::RuntimeLevel::decode(&committed).unwrap();
     let re = level.encode().unwrap();

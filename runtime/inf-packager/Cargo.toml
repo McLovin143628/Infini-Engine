@@ -25,6 +25,9 @@ inf-project = { workspace = true }
 # Cook stage: derive the virtualized-geometry `.inf_vmesh` from `.inf_mesh`.
 inf-mesh = { workspace = true }
 inf-vgeom = { workspace = true }
+# Cook stage: structurally validate a `.inf_terrain`'s header + tile directory
+# (P16.3). Header/directory only — the cook never decodes a tile.
+inf-terrain = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -35,6 +38,13 @@ tracing = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 # Integration tests inspect the cooked pack + decode a level/vmesh out of it.
+# `inf-ecs` (P16.3) is test-only: the terrain cook tests author a level carrying a
+# `Terrain` component pointing at a `.inf_terrain`. (`inf-terrain` itself is a real
+# dependency above — the cook validates terrain assets.)
+inf-ecs = { workspace = true }
+# Forges the "bincode-framed .inf_terrain" corrupt-payload case — the exact
+# mistake a generic asset writer would make.
+bincode = { workspace = true }
 inf-asset = { workspace = true }
 inf-scene = { workspace = true }
 inf-project = { workspace = true }

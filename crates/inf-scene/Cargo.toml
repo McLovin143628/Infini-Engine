@@ -12,6 +12,9 @@ publish = false
 # The runtime `.inf_lvl` reader decodes into the SAME `inf-ecs` component types
 # the editor's authoring codec writes, so bytes round-trip field-for-field.
 inf-ecs = { workspace = true }
+# The frozen pre-v9 `TerrainV8` record names `TerrainData` directly (schema v9
+# froze `Terrain`'s layout when it gained its `.inf_terrain` asset reference).
+inf-terrain = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 uuid = { workspace = true }

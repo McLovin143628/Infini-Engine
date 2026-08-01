@@ -13,7 +13,19 @@
 //! P10.5; sculpt brushes, P10.2) code against — a minimal `height`/`normal`
 //! lookup that hides the paging. The clipmap-LOD renderer lives in `inf-render`;
 //! it consumes a projection of this data.
+//!
+//! ## Streaming (P16.3)
+//!
+//! Terrain also lives outside the level as a [`TerrainAsset`] (`.inf_terrain`): a
+//! header + tile directory + 16-byte-aligned per-tile blobs across an LOD
+//! [`pyramid`], cooked **uncompressed** so a runtime pages one tile straight out
+//! of an mmap'd `.inf_pack` with no decode and no copy. [`TerrainData`] is then
+//! the *resident* working set — grown and shrunk against a [`TileStore`] by an
+//! explicit set of wanted `(coord, lod)` keys, with per-tile versions and a dirty
+//! set for write-back. No camera or budget policy lives in Ring 0; the caller
+//! computes the wants.
 
+pub mod asset;
 mod brush;
 mod data;
 mod delta;
@@ -21,22 +33,31 @@ pub mod erosion;
 mod import;
 pub use erosion::{erode, erode_terrain, erode_with, ErosionParams, ErosionStats};
 mod noise;
+pub mod pyramid;
 mod raycast;
 mod region;
+pub mod residency;
 mod splat;
 mod tile;
 
 use glam::DVec3;
 
+pub use asset::{
+    build_terrain_asset, read_terrain_asset, write_terrain_asset, TerrainAsset,
+    TerrainAssetBuilder, TerrainAssetError, TerrainAssetHeader, TerrainAssetReader,
+    TerrainAssetView, TileDirEntry, TERRAIN_ASSET_SCHEMA_VERSION, TILE_ALIGN,
+};
 pub use brush::{apply_brush, dab_positions, BrushOp, BrushParams, Falloff, FlattenTarget, Stroke};
 pub use data::{TerrainData, DEFAULT_METERS_PER_SAMPLE, DEFAULT_TILE_RESOLUTION};
 pub use delta::{HeightDelta, TilePatch};
 pub use import::{encode_png16, HeightImage, HeightmapImport, TerrainError};
 pub use noise::fbm_signed;
+pub use pyramid::{build_pyramid, PyramidLevel, PyramidOptions};
 pub use raycast::{raycast_terrain, TerrainHit};
 pub use region::HeightRegion;
+pub use residency::{tile_range, MemoryTileStore, ResidencyReport, TileStore};
 pub use splat::{apply_paint, paint_weight, SplatDelta, SplatPatch, SplatStroke, SPLAT_LAYERS};
-pub use tile::{TerrainTile, DEFAULT_WEIGHT};
+pub use tile::{TerrainTile, TileKey, DEFAULT_WEIGHT};
 
 /// The minimal world-space height query seam downstream systems code against
 /// (PCG scatter, sculpt brushes). Kept deliberately small: a paged heightfield,

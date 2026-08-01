@@ -6,6 +6,58 @@
 use glam::DVec3;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// A tile's identity inside a terrain: its grid coordinate **plus its LOD level**
+/// (P16.3).
+///
+/// Level `0` is the authored, full-resolution level — the one [`super::TerrainData`]'s
+/// height/normal queries, the sculpt brushes and the `.inf_lvl` inline form all
+/// mean when they say "tile `(tx, tz)`". Level `n` covers `2ⁿ ×` the world span at
+/// the same sample count (metres-per-sample doubles each level), so a level-`n`
+/// tile `(TX, TZ)` is the 2×2 block of level-`(n−1)` tiles
+/// `(2TX+a, 2TZ+b), a,b ∈ {0,1}` decimated 2:1 (see [`crate::pyramid`]).
+///
+/// `Ord` sorts by **`lod` first, then `tx`, then `tz`** — so a `BTreeMap`/
+/// `BTreeSet` of keys groups a whole LOD level contiguously (a clipmap ring reads
+/// one contiguous run of the asset's tile directory) and every iteration order is
+/// deterministic, which is what makes the `.inf_terrain` layout byte-stable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TileKey {
+    /// LOD level; `0` is the authored full-resolution level.
+    pub lod: u32,
+    /// Tile grid coordinate `(tx, tz)` **within that level**.
+    pub coord: (i32, i32),
+}
+
+impl TileKey {
+    /// A level-0 (authored, full-resolution) key.
+    #[inline]
+    pub const fn lod0(coord: (i32, i32)) -> Self {
+        Self { lod: 0, coord }
+    }
+
+    /// A key at an explicit level.
+    #[inline]
+    pub const fn new(lod: u32, coord: (i32, i32)) -> Self {
+        Self { lod, coord }
+    }
+
+    /// `true` for the authored full-resolution level.
+    #[inline]
+    pub const fn is_lod0(self) -> bool {
+        self.lod == 0
+    }
+
+    /// The coarser key one level up that contains this tile (`lod + 1`, coordinate
+    /// halved with floor semantics so negative coordinates group correctly).
+    #[inline]
+    pub const fn parent(self) -> Self {
+        Self {
+            lod: self.lod + 1,
+            coord: (self.coord.0.div_euclid(2), self.coord.1.div_euclid(2)),
+        }
+    }
+}
+
 /// The default per-sample splat weight: **100 % layer 0** (`[255, 0, 0, 0]`), so
 /// an unpainted terrain shades entirely as its first [`TerrainLayer`]. Channels
 /// are `[layer0, layer1, layer2, layer3]` and are kept normalized to sum ≈ 255.

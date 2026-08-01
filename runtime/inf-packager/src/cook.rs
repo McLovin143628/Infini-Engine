@@ -17,7 +17,9 @@
 //!    graphs. Unreferenced strays are dropped.
 //! 4. **Compile blueprints** — decode + migrate + statically validate every
 //!    `.inf_act`/`.inf_fn` IR; a broken graph fails the cook with a
-//!    handler-anchored error.
+//!    handler-anchored error. Streaming assets are structurally validated in the
+//!    same stage: a `.inf_terrain`'s header + tile directory must parse (P16.3),
+//!    because the runtime pages tiles by trusting that structure.
 //! 5. **Rewrite levels for runtime** — decode each `.inf_lvl` with the Ring-0
 //!    [`inf_scene`] reader (validating it) and re-encode to the current runtime
 //!    schema (upgrading legacy v1 levels to v2).
@@ -264,6 +266,22 @@ fn cook_one(input: CookInput, opts: &CookOptions) -> Result<CookOutput> {
             is_blueprint = true;
             raw
         }
+        // A `.inf_terrain` rides through verbatim — the payload IS the shipped
+        // layout, and re-encoding it would be a no-op at best — but it is
+        // **structurally validated** first (P16.3). The runtime pages tiles by
+        // trusting a header + directory it checks once; a truncated, overlapping,
+        // misaligned or accidentally bincode-framed asset must break the build
+        // here rather than the player later. Header + directory only: this is
+        // O(tile_count) and never decodes a tile.
+        AssetKind::Terrain => {
+            inf_terrain::TerrainAssetReader::new(raw.as_slice()).map_err(|e| {
+                CookError::Terrain {
+                    guid,
+                    message: e.to_string(),
+                }
+            })?;
+            raw
+        }
         // Data assets ride through verbatim (already deterministic bincode).
         _ => raw,
     };
@@ -318,6 +336,10 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
 
     // ── 3. dependency closure (BFS over forward edges) ──────────────────────
     let closure = dependency_closure(&db, &roots);
+    // A level may name a terrain asset the project no longer has. The closure
+    // simply cannot follow that edge, which would ship a level whose ground never
+    // streams — silently. Say so.
+    warnings.extend(dangling_terrain_refs(&db, &closure));
 
     // ── 4/5/6. compile blueprints + rewrite levels + derive vmesh ───────────
     //
@@ -543,7 +565,8 @@ fn dependency_closure(db: &AssetDb, roots: &[AssetId]) -> Vec<AssetId> {
 ///   blueprint-class bindings (v3), `PcgVolume.graph` scatter refs (v4), and the
 ///   v5 animation-component refs: `SkeletalMesh.{skeleton, mesh}`,
 ///   `AnimPlayer.clip`, `AnimStateMachine.sm` (real level→anim edges, so an
-///   explicit-roots cook of just a level ships its referenced anim assets).
+///   explicit-roots cook of just a level ships its referenced anim assets), and
+///   the v9 `Terrain.asset` streaming-terrain ref (P16.3).
 /// * **StateMachine** (`.inf_sm`) — the clip GUIDs its states/blend-spaces play
 ///   (`Motion::Clip` + blend entries) **and** its skeleton ref. This closes the
 ///   `state-machine → clip` edge so the clips a machine plays ship in the pack.
@@ -568,6 +591,12 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
                 // `.inf_vmesh` meshlet DAG beside it (the virtualized-geometry path).
                 deps.extend(e.mesh.as_ref().and_then(|m| m.asset).map(AssetId));
                 deps.extend(e.pcg_volume.as_ref().and_then(|v| v.graph).map(AssetId));
+                // P16.3: a Terrain.asset pulls its `.inf_terrain` into the closure
+                // so the cook packs the streaming tiles + LOD pyramid beside the
+                // level. The entry is stored **uncompressed** (streaming-class,
+                // `PackWriter::compresses_kind`) so the runtime pages individual
+                // tiles out of the mapping.
+                deps.extend(e.terrain.as_ref().and_then(|t| t.asset).map(AssetId));
                 if let Some(sk) = &e.skeletal_mesh {
                     deps.extend(sk.skeleton.map(AssetId));
                     deps.extend(sk.mesh.map(AssetId));
@@ -608,6 +637,44 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
         }
         _ => Vec::new(),
     }
+}
+
+/// Advisory: `Terrain.asset` references, in the levels being cooked, that name an
+/// asset the project database does not have (P16.3).
+///
+/// [`dependency_closure`] can only follow edges it can resolve, so a dangling
+/// terrain ref is skipped — which would otherwise ship a level whose terrain never
+/// streams with no sign anything was wrong. Non-fatal (the level is still valid;
+/// the inline `data` remains authoritative when the asset is absent), so it is a
+/// warning rather than a [`CookError`], and it is deduplicated + sorted so the
+/// report stays deterministic.
+fn dangling_terrain_refs(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
+    let mut missing: BTreeSet<(AssetId, AssetId)> = BTreeSet::new();
+    for &id in closure {
+        let Some(entry) = db.get(id) else { continue };
+        if entry.kind() != AssetKind::Level {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&entry.path) else {
+            continue;
+        };
+        let Ok(level) = inf_scene::decode(&raw) else {
+            continue;
+        };
+        for e in &level.entities {
+            if let Some(asset) = e.terrain.as_ref().and_then(|t| t.asset) {
+                if !db.contains(AssetId(asset)) {
+                    missing.insert((id, AssetId(asset)));
+                }
+            }
+        }
+    }
+    missing
+        .into_iter()
+        .map(|(level, asset)| {
+            format!("level {level} references missing terrain asset {asset};                      its tiles will not stream")
+        })
+        .collect()
 }
 
 /// Every clip GUID a state's [`Motion`](inf_anim::state_machine::Motion) plays: a

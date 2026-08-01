@@ -1617,13 +1617,28 @@ fn default_macro_variation() -> f64 {
 /// array-of-struct is not a Details-grid scalar; edited via the paint UI /
 /// defaults), while `macro_variation` is a plain reflected `f64` (Details-editable).
 ///
+/// ## Streaming from a `.inf_terrain` asset (P16.3 · schema v9)
+///
+/// [`asset`](Self::asset) optionally points at a `.inf_terrain` asset — the
+/// out-of-level container that holds the tiles plus their LOD pyramid, cooked
+/// uncompressed so a runtime pages tiles straight out of an mmap'd `.inf_pack`
+/// ([`inf_terrain::TerrainAsset`]). **Both paths are legal and the rule is
+/// simple: the inline [`data`](Self::data) is authoritative while `asset` is
+/// `None`.** When `asset` is set, the tile data streams from it and the inline
+/// `data` is the resident working set. The editor keeps terrain inline for now;
+/// the authoring flow that promotes a terrain to an asset lands in a later batch.
+/// The cook follows `Terrain.asset` as a real level → asset dependency edge.
+///
 /// ## FROZEN SHAPE (`.inf_lvl` schema v4)
 ///
 /// This component's field set is **finalized for the upcoming `.inf_lvl` v4
 /// schema batch** (the migration that first persists `Terrain`/[`PcgVolume`] in
 /// the `EntityRecord`). Every field is additive and `#[serde(default)]`, so a
 /// minimal `{}` payload and any pre-v4 partial payload decode; new fields append.
-/// Do not reorder or repurpose existing fields — extend additively.
+/// Do not reorder or repurpose existing fields — extend additively. (`asset`
+/// appended at v9 is exactly such an additive extension; because bincode is not
+/// self-describing, the pre-v9 layout is frozen as `TerrainV8` in both scene
+/// codecs and every v4..v8 record decodes its terrain slot through it.)
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[reflect(Component, Default)]
 pub struct Terrain {
@@ -1650,6 +1665,20 @@ pub struct Terrain {
     /// shader (`0` = off). A plain reflected `f64` → Details-editable.
     #[serde(default = "default_macro_variation")]
     pub macro_variation: f64,
+    /// GUID of the `.inf_terrain` asset this terrain streams its tiles from
+    /// (schema v9, P16.3).
+    ///
+    /// `None` — the default and what the editor still writes — means the inline
+    /// [`data`](Self::data) is the whole terrain and its only authority. When set,
+    /// the tiles (and their LOD pyramid) live in the asset and `data` holds the
+    /// resident working set; the cook follows this edge to pack the
+    /// `.inf_terrain`. `#[reflect(ignore)]` (an asset reference, not a
+    /// Details-grid scalar — picked through the asset UI, like
+    /// [`MeshRef::asset`]) and `#[serde(default)]` so every pre-v9 payload
+    /// decodes with it absent.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub asset: Option<Uuid>,
 }
 
 fn default_terrain_mps() -> f64 {
@@ -1668,6 +1697,7 @@ impl Default for Terrain {
             data,
             layers: default_terrain_layers(),
             macro_variation: default_macro_variation(),
+            asset: None,
         }
     }
 }
@@ -1684,6 +1714,7 @@ impl Terrain {
             data,
             layers: default_terrain_layers(),
             macro_variation: default_macro_variation(),
+            asset: None,
         }
     }
 }

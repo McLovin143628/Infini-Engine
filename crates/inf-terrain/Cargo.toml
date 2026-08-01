@@ -11,6 +11,13 @@ publish = false
 [dependencies]
 glam = { workspace = true }
 serde = { workspace = true }
+# The `.inf_terrain` streaming asset (P16.3): `AssetKind`/`AssetPayload` + the
+# dual-format rule. Ring-0 → Ring-0 (inf-asset never names terrain, so no cycle).
+inf-asset = { workspace = true }
+# Per-tile blobs inside the `.inf_terrain` payload are the SAME deterministic
+# bincode a tile writes into an `.inf_lvl`, so the two persistence paths agree
+# byte-for-byte. Promoted from dev-dependencies at P16.3.
+bincode = { workspace = true }
 # PNG16 + EXR heightmap decode/encode. The workspace `image` pin already enables
 # the `png` and `exr` features (see [workspace.dependencies]); a standalone `exr`
 # pin is unnecessary — `image` handles both formats through one DynamicImage path.
@@ -21,6 +28,7 @@ thiserror = { workspace = true }
 serde_json = { workspace = true }
 # Byte-identity checks: xxh3 a terrain's tiles before/after an undo round-trip.
 xxhash-rust = { workspace = true }
-# bincode round-trip guard: terrain persists in the bincode `.inf_lvl` (P10.6), so
-# the tile serde must be non-self-describing-safe.
-bincode = { workspace = true }
+# The `.inf_terrain` round trip through a real cooked pack (P16.3): build a pack
+# on disk, `PackReader::open` it, and slice tiles out of the mapping.
+tempfile = { workspace = true }
+uuid = { workspace = true }

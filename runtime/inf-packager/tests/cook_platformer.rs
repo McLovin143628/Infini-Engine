@@ -374,3 +374,238 @@ fn dependency_closure_excludes_an_unreferenced_stray() {
         "no texture in the pack"
     );
 }
+
+// ── P16.3: the Terrain.asset → .inf_terrain cook edge ────────────────────────
+
+/// A deterministic 4 × 4-tile terrain from a **polynomial** height field (never
+/// `std` trig — the P14 bit-portability law).
+fn streaming_terrain() -> inf_terrain::TerrainData {
+    let mut t = inf_terrain::TerrainData::new(9, 2.0);
+    for tz in 0..4 {
+        for tx in 0..4 {
+            t.author_tile((tx, tz), |x, z| x * 0.25 - z * 0.125 + 5.0);
+        }
+    }
+    t
+}
+
+/// Scaffold a project holding one level whose `Terrain` streams from a
+/// `.inf_terrain` asset, plus that asset. Returns the terrain asset's GUID.
+fn make_streaming_terrain_project(root: &Path) -> AssetId {
+    ProjectManifest::new("Terrain Streaming", "blank-3d")
+        .save(root)
+        .unwrap();
+    let content = root.join("Content");
+    std::fs::create_dir_all(&content).unwrap();
+
+    // The `.inf_terrain` asset: tiles + LOD pyramid, written as the RAW payload
+    // image (never `inf_asset::encode` — a length prefix would misalign tiles).
+    let src = streaming_terrain();
+    let pyramid = inf_terrain::build_pyramid(&src, inf_terrain::PyramidOptions::default());
+    let asset = inf_terrain::build_terrain_asset(&src, &pyramid).unwrap();
+    let terrain_id = AssetId(uuid::Uuid::from_u128(0x1603_0100));
+    let terrain_path = content.join("World.inf_terrain");
+    std::fs::write(&terrain_path, asset.as_bytes()).unwrap();
+    AssetSidecar::new(
+        terrain_id,
+        AssetKind::Terrain,
+        ContentHash::of(asset.as_bytes()),
+    )
+    .save(&terrain_path)
+    .unwrap();
+
+    // A level whose single entity carries a Terrain pointing at it. The sidecar
+    // deliberately declares NO dependencies, so the edge can only be found by
+    // walking the level's persisted `Terrain.asset`.
+    let level = inf_scene::RuntimeLevel {
+        title: "Streaming Terrain".into(),
+        entities: vec![inf_scene::RuntimeEntity {
+            guid: uuid::Uuid::from_u128(0x1603_0101),
+            name: "Terrain".into(),
+            parent: None,
+            transform: Default::default(),
+            visible: true,
+            mesh: None,
+            material: None,
+            light: None,
+            camera: None,
+            sprite: None,
+            tilemap: None,
+            nine_slice: None,
+            text2d: None,
+            light_2d: None,
+            rigid_body_2d: None,
+            collider_2d: None,
+            character_controller_2d: None,
+            rigid_body_3d: None,
+            collider_3d: None,
+            character_controller_3d: None,
+            actor: None,
+            terrain: Some(inf_ecs::components::Terrain {
+                asset: Some(terrain_id.uuid()),
+                ..inf_ecs::components::Terrain::configured(9, 2.0)
+            }),
+            pcg_volume: None,
+            skeletal_mesh: None,
+            anim_player: None,
+            anim_state_machine: None,
+            root_motion: None,
+            attached_to: None,
+            joint_2d: None,
+            joint_3d: None,
+            audio_source: None,
+            audio_listener: None,
+            decal: None,
+            volume: None,
+            spline: None,
+            foliage: None,
+        }],
+        settings: Default::default(),
+    };
+    let level_bytes = level.encode().unwrap();
+    let level_path = content.join("World.inf_lvl");
+    std::fs::write(&level_path, &level_bytes).unwrap();
+    AssetSidecar::new(
+        AssetId(uuid::Uuid::from_u128(0x1603_0102)),
+        AssetKind::Level,
+        ContentHash::of(&level_bytes),
+    )
+    .save(&level_path)
+    .unwrap();
+
+    terrain_id
+}
+
+#[test]
+fn cook_follows_the_terrain_asset_edge_and_stores_it_uncompressed() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let terrain_id = make_streaming_terrain_project(&proj);
+    let out = dir.path().join("out");
+
+    let report = cook(&proj, &out, &CookOptions::default()).expect("cook succeeds");
+    assert_eq!(report.asset_count, 2, "level + its .inf_terrain");
+    assert_eq!(report.kinds.get("terrain"), Some(&1));
+
+    let reader = PackReader::open(&out.join(DEFAULT_PACK_NAME)).unwrap();
+    let entry = reader
+        .entry(terrain_id)
+        .expect("terrain packed via the edge");
+    assert_eq!(entry.kind, AssetKind::Terrain);
+    assert!(
+        !entry.compressed,
+        "a streaming-class kind must cook uncompressed"
+    );
+
+    // Page tiles straight out of the pack mapping.
+    let payload = reader.read_ref(terrain_id).unwrap();
+    assert!(matches!(payload, std::borrow::Cow::Borrowed(_)));
+    let view = inf_terrain::TerrainAssetReader::new(&*payload).unwrap();
+    let src = streaming_terrain();
+    assert_eq!(view.tile_resolution(), 9);
+    assert!(view.lod_levels() > 1, "the LOD pyramid shipped too");
+    for (&coord, tile) in src.tiles() {
+        let key = inf_terrain::TileKey::lod0(coord);
+        assert_eq!(&view.tile(key).unwrap().unwrap(), tile);
+        assert_eq!(
+            view.tile_bytes(key).unwrap().as_ptr() as usize % 16,
+            0,
+            "tile {coord:?} is not 16-byte aligned in the mapping"
+        );
+    }
+}
+
+#[test]
+fn cook_with_a_terrain_asset_is_deterministic() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    make_streaming_terrain_project(&proj);
+    let a = dir.path().join("a");
+    let b = dir.path().join("b");
+    cook(&proj, &a, &CookOptions::default()).unwrap();
+    cook(&proj, &b, &CookOptions::default()).unwrap();
+    assert_eq!(
+        std::fs::read(a.join(DEFAULT_PACK_NAME)).unwrap(),
+        std::fs::read(b.join(DEFAULT_PACK_NAME)).unwrap(),
+        "two cooks of one terrain project are byte-identical"
+    );
+}
+
+#[test]
+fn a_corrupt_terrain_asset_fails_the_cook() {
+    // The runtime pages tiles by trusting a header + directory it validated once,
+    // so a malformed `.inf_terrain` must break the BUILD, not the shipped player.
+    // Three shapes of wrong, each caught at cook:
+    //   1. bincode-framed (what a generic `inf_asset::encode` would have written —
+    //      the exact mistake the closed write door exists to prevent);
+    //   2. truncated mid-directory;
+    //   3. a directory entry pointing past the end of the payload.
+    let src = streaming_terrain();
+    let pyramid = inf_terrain::build_pyramid(&src, inf_terrain::PyramidOptions::default());
+    let good = inf_terrain::build_terrain_asset(&src, &pyramid).unwrap();
+    let image = good.as_bytes();
+
+    let framed = bincode::serde::encode_to_vec(image, bincode::config::standard()).unwrap();
+    let truncated = image[..80].to_vec();
+    let oob = {
+        let mut b = image.to_vec();
+        // First directory entry's offset field → past the end.
+        b[64 + 16..64 + 24].copy_from_slice(&u64::MAX.to_le_bytes());
+        b
+    };
+
+    for (label, payload) in [
+        ("bincode-framed", framed),
+        ("truncated", truncated),
+        ("out-of-bounds blob", oob),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("proj");
+        let terrain_id = make_streaming_terrain_project(&proj);
+        // Overwrite the good asset with the corrupt one (sidecar hash is not the
+        // guard here — a structural check is).
+        std::fs::write(proj.join("Content/World.inf_terrain"), &payload).unwrap();
+
+        let err = cook(&proj, &dir.path().join("out"), &CookOptions::default())
+            .expect_err(&format!("{label} must fail the cook"));
+        match err {
+            CookError::Terrain { guid, message } => {
+                assert_eq!(guid, terrain_id, "{label} error names the asset");
+                assert!(!message.is_empty(), "{label} error explains itself");
+            }
+            other => panic!("{label}: expected CookError::Terrain, got {other:?}"),
+        }
+    }
+
+    // …and the unmodified asset still cooks, so the check is not just "always fail".
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    make_streaming_terrain_project(&proj);
+    cook(&proj, &dir.path().join("out"), &CookOptions::default())
+        .expect("a valid terrain asset still cooks");
+}
+
+#[test]
+fn a_dangling_terrain_reference_warns_without_failing() {
+    // A level naming a terrain asset the project no longer has: the closure cannot
+    // follow the edge, so the level would ship with ground that never streams.
+    // Non-fatal (the inline data stays authoritative) but never silent.
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let terrain_id = make_streaming_terrain_project(&proj);
+    // Delete the terrain asset + its sidecar, leaving the level's reference dangling.
+    std::fs::remove_file(proj.join("Content/World.inf_terrain")).unwrap();
+    std::fs::remove_file(proj.join("Content/World.inf_terrain.toml")).unwrap();
+
+    let report = cook(&proj, &dir.path().join("out"), &CookOptions::default())
+        .expect("a dangling ref is an advisory, not a cook failure");
+    assert_eq!(report.asset_count, 1, "just the level; the terrain is gone");
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains(&terrain_id.to_string()) && w.contains("terrain")),
+        "the dangling terrain ref must be reported: {:?}",
+        report.warnings
+    );
+}

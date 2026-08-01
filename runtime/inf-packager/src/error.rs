@@ -40,6 +40,16 @@ pub enum CookError {
     #[error("mesh {guid}: {message}")]
     Mesh { guid: AssetId, message: String },
 
+    /// A `.inf_terrain` failed its structural check at cook (P16.3).
+    ///
+    /// The runtime pages tiles out of this payload by **trusting the header and
+    /// directory it validated once** — a truncated, overlapping, misaligned or
+    /// accidentally bincode-framed asset must therefore fail the BUILD, never
+    /// reach a shipped player. Named like the blueprint error for the same reason:
+    /// the cook is where a broken asset is cheap to fix.
+    #[error("terrain {guid}: {message}")]
+    Terrain { guid: AssetId, message: String },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 

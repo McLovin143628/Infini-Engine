@@ -153,6 +153,7 @@ fn kind_code(kind: AssetKind) -> u16 {
         AssetKind::AnimClip => 14,
         AssetKind::StateMachine => 15,
         AssetKind::MeshletMesh => 16,
+        AssetKind::Terrain => 17,
     }
 }
 
@@ -175,6 +176,7 @@ fn kind_from_code(code: u16) -> AssetKind {
         14 => AssetKind::AnimClip,
         15 => AssetKind::StateMachine,
         16 => AssetKind::MeshletMesh,
+        17 => AssetKind::Terrain,
         _ => AssetKind::Unknown,
     }
 }
@@ -249,8 +251,11 @@ impl PackWriter {
     /// ship size for streaming latency, and it is deliberate.
     ///
     /// Today that is [`AssetKind::MeshletMesh`] (`.inf_vmesh`, read via mmap
-    /// slices in P18.2). **The terrain-tile kinds join this list in P16.3**
-    /// (`.inf_terrain`), which is the only edit this seam should need.
+    /// slices in P18.2) and [`AssetKind::Terrain`] (`.inf_terrain`, P16.3): a
+    /// terrain asset is a header + tile directory + **16-byte-aligned per-tile
+    /// blobs**, and the whole point of that layout is that a streamer slices one
+    /// tile out of the mapping without touching the rest. zstd would force a
+    /// whole-asset decode — hundreds of MB to page one tile — so it stays raw.
     ///
     /// Everything else keeps the P9.2 behaviour: zstd above
     /// [`COMPRESS_THRESHOLD`] bytes, stored raw when compression would inflate.
@@ -261,7 +266,7 @@ impl PackWriter {
     pub fn compresses_kind(kind: AssetKind) -> bool {
         match kind {
             // Streaming-class: paged out of the mapping as borrowed slices.
-            AssetKind::MeshletMesh => false,
+            AssetKind::MeshletMesh | AssetKind::Terrain => false,
             AssetKind::Unknown
             | AssetKind::Level
             | AssetKind::Mesh
@@ -984,6 +989,17 @@ mod tests {
         for &k in AssetKind::all() {
             assert_eq!(kind_from_code(kind_code(k)), k, "{k:?}");
         }
+        // Codes are a permanent on-disk contract — every already-shipped pack
+        // decodes its index through them, so they may only ever be APPENDED to.
+        // Pinning them here turns an accidental renumber into a test failure
+        // rather than a silently mis-typed asset in an old build.
+        assert_eq!(kind_code(AssetKind::Unknown), 0);
+        assert_eq!(kind_code(AssetKind::Level), 1);
+        assert_eq!(kind_code(AssetKind::MeshletMesh), 16);
+        assert_eq!(kind_code(AssetKind::Terrain), 17, "P16.3 appended 17");
+        // …and an unknown future code degrades to `Unknown` rather than erroring,
+        // so a newer pack's extra kinds never break an older reader's index parse.
+        assert_eq!(kind_from_code(9999), AssetKind::Unknown);
     }
 
     // ── P16.1: alignment, zero-copy reads, verify-once, mmap ────────────────
@@ -1122,10 +1138,14 @@ mod tests {
 
     /// Streaming-class kinds cook uncompressed; everything else is unchanged.
     #[test]
-    fn meshlet_meshes_are_stored_uncompressed() {
-        assert!(!PackWriter::compresses_kind(AssetKind::MeshletMesh));
+    fn streaming_class_kinds_are_stored_uncompressed() {
+        /// The full streaming-class list; a new kind joins it only deliberately.
+        const STREAMING: &[AssetKind] = &[AssetKind::MeshletMesh, AssetKind::Terrain];
+        for &k in STREAMING {
+            assert!(!PackWriter::compresses_kind(k), "{k:?} must stay raw");
+        }
         for &k in AssetKind::all() {
-            if k != AssetKind::MeshletMesh {
+            if !STREAMING.contains(&k) {
                 assert!(PackWriter::compresses_kind(k), "{k:?}");
             }
         }
@@ -1135,14 +1155,19 @@ mod tests {
         w.add_bytes(guid(1), AssetKind::MeshletMesh, &payload)
             .unwrap();
         w.add_bytes(guid(2), AssetKind::Mesh, &payload).unwrap();
+        w.add_bytes(guid(3), AssetKind::Terrain, &payload).unwrap();
         let r = PackReader::from_bytes(w.to_bytes().unwrap()).unwrap();
 
-        let vmesh = r.entry(guid(1)).unwrap();
-        assert!(!vmesh.compressed, "vmesh blobs must stay mmap-readable");
-        assert_eq!(vmesh.stored_len, payload.len() as u64);
-        assert_eq!(vmesh.stored_len, vmesh.uncompressed_len);
+        for g in [guid(1), guid(3)] {
+            let e = r.entry(g).unwrap();
+            assert!(!e.compressed, "{:?} blobs must stay mmap-readable", e.kind);
+            assert_eq!(e.stored_len, payload.len() as u64);
+            assert_eq!(e.stored_len, e.uncompressed_len);
+            assert_eq!(r.read(g).unwrap(), payload);
+            // Borrowed, not decoded — the zero-copy streaming promise.
+            assert!(matches!(r.read_ref(g).unwrap(), Cow::Borrowed(_)));
+        }
         assert!(r.entry(guid(2)).unwrap().compressed, "meshes still zstd");
-        assert_eq!(r.read(guid(1)).unwrap(), payload);
     }
 
     /// `open` maps the file and reads through the mapping.

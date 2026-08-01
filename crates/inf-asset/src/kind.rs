@@ -45,6 +45,12 @@ pub enum AssetKind {
     /// Animation state machine (`.inf_sm`) — states + transitions + blend spaces
     /// (P11.2).
     StateMachine,
+    /// Streamable terrain tiles (`.inf_terrain`) — a header + tile directory +
+    /// 16-byte-aligned per-tile blobs across an LOD pyramid (P16.3). A
+    /// **streaming-class** kind: it cooks uncompressed so a runtime can page
+    /// individual tiles straight out of an mmap'd pack
+    /// (`PackWriter::compresses_kind`).
+    Terrain,
     /// Anything else living under the content root.
     Unknown,
 }
@@ -69,6 +75,7 @@ impl AssetKind {
             AssetKind::Skeleton => "inf_skel",
             AssetKind::AnimClip => "inf_anim",
             AssetKind::StateMachine => "inf_sm",
+            AssetKind::Terrain => "inf_terrain",
             AssetKind::Unknown => return None,
         })
     }
@@ -92,6 +99,7 @@ impl AssetKind {
             "inf_skel" => AssetKind::Skeleton,
             "inf_anim" => AssetKind::AnimClip,
             "inf_sm" => AssetKind::StateMachine,
+            "inf_terrain" => AssetKind::Terrain,
             _ => AssetKind::Unknown,
         }
     }
@@ -123,6 +131,7 @@ impl AssetKind {
             AssetKind::Skeleton => "skeleton",
             AssetKind::AnimClip => "anim_clip",
             AssetKind::StateMachine => "state_machine",
+            AssetKind::Terrain => "terrain",
             AssetKind::Unknown => "unknown",
         }
     }
@@ -146,6 +155,7 @@ impl AssetKind {
             AssetKind::Skeleton => "Skeleton",
             AssetKind::AnimClip => "Animation",
             AssetKind::StateMachine => "State Machine",
+            AssetKind::Terrain => "Terrain",
             AssetKind::Unknown => "File",
         }
     }
@@ -170,6 +180,7 @@ impl AssetKind {
             AssetKind::Skeleton,
             AssetKind::AnimClip,
             AssetKind::StateMachine,
+            AssetKind::Terrain,
         ]
     }
 }

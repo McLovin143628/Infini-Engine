@@ -91,7 +91,19 @@ use crate::scene::SceneDoc;
 ///   their documented defaults) and appends the four v8 slots defaulted to
 ///   `None`. Older v1..v7 payloads load with all the new fields/slots defaulted
 ///   (see [`decode`] + [`SceneFileV7`]).
-pub const SCHEMA_VERSION: u32 = 8;
+///
+/// * v9 — P16.3: [`Terrain`] gained an `asset: Option<Uuid>` reference to a
+///   `.inf_terrain` **streaming asset** (a header + tile directory + 16-byte-
+///   aligned per-tile blobs across an LOD pyramid, cooked uncompressed so a
+///   runtime pages tiles out of an mmap'd pack). `None` — what the editor still
+///   writes — means the inline `data` is the terrain's only authority, so an
+///   older level's meaning is preserved exactly. This changed `Terrain`'s byte
+///   layout, so the pre-v9 shape is frozen as [`TerrainV8`] and every v4..v8
+///   record carries its `terrain` slot as `Option<TerrainV8>`; the
+///   [`EntityRecordV8::into_current`] hop lifts it with `asset: None`. No new
+///   entity slot was added — v9 differs from v8 only inside `Terrain` (see
+///   [`decode`] + [`SceneFileV8`]).
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// File-level simulation settings (P9.5 · schema v3). Replaces the player's
 /// hard-coded `DEFAULT_GRAVITY`/`DEFAULT_HZ`. The serde defaults **preserve the
@@ -733,7 +745,7 @@ pub struct EntityRecordV4 {
     #[serde(default)]
     pub actor: Option<Uuid>,
     #[serde(default)]
-    pub terrain: Option<Terrain>,
+    pub terrain: Option<TerrainV8>,
     #[serde(default)]
     pub pcg_volume: Option<PcgVolume>,
 }
@@ -841,7 +853,7 @@ pub struct EntityRecordV5 {
     #[serde(default)]
     pub actor: Option<Uuid>,
     #[serde(default)]
-    pub terrain: Option<Terrain>,
+    pub terrain: Option<TerrainV8>,
     #[serde(default)]
     pub pcg_volume: Option<PcgVolume>,
     #[serde(default)]
@@ -964,7 +976,7 @@ pub struct EntityRecordV6 {
     #[serde(default)]
     pub actor: Option<Uuid>,
     #[serde(default)]
-    pub terrain: Option<Terrain>,
+    pub terrain: Option<TerrainV8>,
     #[serde(default)]
     pub pcg_volume: Option<PcgVolume>,
     #[serde(default)]
@@ -1099,7 +1111,7 @@ pub struct EntityRecordV7 {
     #[serde(default)]
     pub actor: Option<Uuid>,
     #[serde(default)]
-    pub terrain: Option<Terrain>,
+    pub terrain: Option<TerrainV8>,
     #[serde(default)]
     pub pcg_volume: Option<PcgVolume>,
     #[serde(default)]
@@ -1123,12 +1135,13 @@ pub struct EntityRecordV7 {
 }
 
 impl EntityRecordV7 {
-    /// Lift a v7 record to the current (v8) shape: `material`/`light` gain their
-    /// new v8 fields at the documented defaults ([`MaterialV7::into_current`] /
+    /// Lift a v7 record to the **v8** shape: `material`/`light` gain their new v8
+    /// fields at the documented defaults ([`MaterialV7::into_current`] /
     /// [`LightV7::into_current`]); the four world-decoration slots default to
-    /// `None`; every other slot carries through unchanged.
-    fn into_current(self) -> EntityRecord {
-        EntityRecord {
+    /// `None`; every other slot (terrain included — still the frozen
+    /// [`TerrainV8`] at this hop) carries through unchanged.
+    fn into_v8(self) -> EntityRecordV8 {
+        EntityRecordV8 {
             guid: self.guid,
             name: self.name,
             parent: self.parent,
@@ -1180,8 +1193,213 @@ pub struct SceneFileV7 {
 }
 
 impl SceneFileV7 {
-    /// Lift a v7 file to the current (v8) shape (the frozen settings lift to the
-    /// live [`LevelSettings`] with a default render block).
+    /// Lift a v7 file to the **v8** shape (the frozen settings lift to the live
+    /// [`LevelSettings`] with a default render block).
+    fn into_v8(self) -> SceneFileV8 {
+        SceneFileV8 {
+            schema_version: 8,
+            title: self.title,
+            entities: self
+                .entities
+                .into_iter()
+                .map(EntityRecordV7::into_v8)
+                .collect(),
+            settings: self.settings.into_current(),
+        }
+    }
+}
+
+/// The **pre-v9** `Terrain` byte layout (schema v9 froze this when [`Terrain`]
+/// gained its `asset` reference to a `.inf_terrain` streaming asset). Every
+/// frozen v4..v8 record carries `terrain` as `Option<TerrainV8>`;
+/// [`TerrainV8::into_current`] lifts it.
+///
+/// The fields mirror the live component one-for-one **including their
+/// `#[serde(default)]` markers**, so this record decodes every partial payload the
+/// live one did (bincode ignores defaults on the write side, but the TOML/JSON
+/// dual-format path does not).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TerrainV8 {
+    #[serde(default = "default_terrain_mps")]
+    pub meters_per_sample: f64,
+    #[serde(default = "default_terrain_resolution")]
+    pub tile_resolution: u32,
+    #[serde(default)]
+    pub data: inf_terrain::TerrainData,
+    #[serde(default = "inf_ecs::components::default_terrain_layers")]
+    pub layers: [inf_ecs::components::TerrainLayer; inf_ecs::components::TERRAIN_LAYERS],
+    #[serde(default = "default_macro_variation")]
+    pub macro_variation: f64,
+}
+
+fn default_terrain_mps() -> f64 {
+    inf_terrain::DEFAULT_METERS_PER_SAMPLE
+}
+fn default_terrain_resolution() -> u32 {
+    inf_terrain::DEFAULT_TILE_RESOLUTION
+}
+fn default_macro_variation() -> f64 {
+    0.15
+}
+
+impl TerrainV8 {
+    /// Lift to the live [`Terrain`]: `asset` defaults to `None`, i.e. the inline
+    /// `data` remains the terrain's only authority — exactly what a pre-v9 level
+    /// meant.
+    pub fn into_current(self) -> Terrain {
+        Terrain {
+            meters_per_sample: self.meters_per_sample,
+            tile_resolution: self.tile_resolution,
+            data: self.data,
+            layers: self.layers,
+            macro_variation: self.macro_variation,
+            asset: None,
+        }
+    }
+
+    /// Project a live [`Terrain`] back onto the frozen shape (the downgrade-bless
+    /// path that regenerates old fixtures). The `asset` reference has no v8 home
+    /// and is dropped — a deliberately lossy direction.
+    pub fn from_current(t: Terrain) -> Self {
+        Self {
+            meters_per_sample: t.meters_per_sample,
+            tile_resolution: t.tile_resolution,
+            data: t.data,
+            layers: t.layers,
+            macro_variation: t.macro_variation,
+        }
+    }
+}
+
+/// A frozen schema-v8 entity record (pre-P16.3): the full v8 slot set with the
+/// live `Light`/`Material`/decoration components, but the **pre-v9**
+/// [`TerrainV8`] terrain slot. v9 changed only `Terrain`, so this differs from the
+/// live [`EntityRecord`] only there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityRecordV8 {
+    pub guid: Uuid,
+    pub name: String,
+    pub parent: Option<Uuid>,
+    pub transform: Transform,
+    pub visible: bool,
+    pub mesh: Option<MeshRef>,
+    pub material: Option<Material>,
+    pub light: Option<Light>,
+    pub camera: Option<Camera>,
+    #[serde(default)]
+    pub sprite: Option<Sprite>,
+    #[serde(default)]
+    pub tilemap: Option<Tilemap>,
+    #[serde(default)]
+    pub nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    pub text2d: Option<Text2D>,
+    #[serde(default)]
+    pub light_2d: Option<Light2D>,
+    #[serde(default)]
+    pub rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    pub collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    pub character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    pub rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    pub collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    pub character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    pub actor: Option<Uuid>,
+    #[serde(default)]
+    pub terrain: Option<TerrainV8>,
+    #[serde(default)]
+    pub pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    pub skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    pub anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    pub anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    pub root_motion: Option<RootMotion>,
+    #[serde(default)]
+    pub attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    pub joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    pub joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    pub audio_source: Option<AudioSource>,
+    #[serde(default)]
+    pub audio_listener: Option<AudioListener>,
+    #[serde(default)]
+    pub decal: Option<Decal>,
+    #[serde(default)]
+    pub volume: Option<Volume>,
+    #[serde(default)]
+    pub spline: Option<Spline>,
+    #[serde(default)]
+    pub foliage: Option<Foliage>,
+}
+
+impl EntityRecordV8 {
+    /// Lift a v8 record to the current (v9) shape: the terrain slot gains
+    /// `asset: None`; every other slot carries through unchanged.
+    fn into_current(self) -> EntityRecord {
+        EntityRecord {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain.map(TerrainV8::into_current),
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: self.decal,
+            volume: self.volume,
+            spline: self.spline,
+            foliage: self.foliage,
+        }
+    }
+}
+
+/// A schema-v8 [`SceneFile`] (frozen layout for legacy decode).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneFileV8 {
+    pub schema_version: u32,
+    pub title: String,
+    pub entities: Vec<EntityRecordV8>,
+    /// v9 did not touch the file settings, so the v8 record reuses the live one.
+    #[serde(default)]
+    pub settings: LevelSettings,
+}
+
+impl SceneFileV8 {
+    /// Lift a v8 file to the current (v9) shape.
     fn into_current(self) -> SceneFile {
         SceneFile {
             schema_version: SCHEMA_VERSION,
@@ -1189,9 +1407,9 @@ impl SceneFileV7 {
             entities: self
                 .entities
                 .into_iter()
-                .map(EntityRecordV7::into_current)
+                .map(EntityRecordV8::into_current)
                 .collect(),
-            settings: self.settings.into_current(),
+            settings: self.settings,
         }
     }
 }
@@ -1324,6 +1542,7 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
                     .into_v5()
                     .into_v6()
                     .into_v7()
+                    .into_v8()
                     .into_current(),
             )
         }
@@ -1337,6 +1556,7 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
                     .into_v5()
                     .into_v6()
                     .into_v7()
+                    .into_v8()
                     .into_current(),
             )
         }
@@ -1344,33 +1564,46 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
             let (v3, _): (SceneFileV3, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v3: {e}"))?;
-            migrate(v3.into_v4().into_v5().into_v6().into_v7().into_current())
+            migrate(
+                v3.into_v4()
+                    .into_v5()
+                    .into_v6()
+                    .into_v7()
+                    .into_v8()
+                    .into_current(),
+            )
         }
         4 => {
             let (v4, _): (SceneFileV4, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v4: {e}"))?;
-            migrate(v4.into_v5().into_v6().into_v7().into_current())
+            migrate(v4.into_v5().into_v6().into_v7().into_v8().into_current())
         }
         5 => {
             let (v5, _): (SceneFileV5, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v5: {e}"))?;
-            migrate(v5.into_v6().into_v7().into_current())
+            migrate(v5.into_v6().into_v7().into_v8().into_current())
         }
         6 => {
             let (v6, _): (SceneFileV6, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v6: {e}"))?;
-            migrate(v6.into_v7().into_current())
+            migrate(v6.into_v7().into_v8().into_current())
         }
         7 => {
             let (v7, _): (SceneFileV7, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v7: {e}"))?;
-            migrate(v7.into_current())
+            migrate(v7.into_v8().into_current())
         }
         8 => {
+            let (v8, _): (SceneFileV8, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| format!("decode v8: {e}"))?;
+            migrate(v8.into_current())
+        }
+        9 => {
             let (file, _): (SceneFile, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode: {e}"))?;
@@ -1392,7 +1625,7 @@ pub fn migrate(file: SceneFile) -> Result<SceneFile, String> {
         ));
     }
     // Records are already lifted to the current shape by the versioned decode
-    // (v1→…→v7→v8); nothing more to do here. Future upgrades chain in `decode`.
+    // (v1→…→v8→v9); nothing more to do here. Future upgrades chain in `decode`.
     Ok(file)
 }
 
@@ -1851,7 +2084,10 @@ mod tests {
 
         // save → load → save is byte-identical.
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 8, "authored payload is a genuine schema-v8 file");
+        assert_eq!(
+            bytes1[0], SCHEMA_VERSION as u8,
+            "authored payload is written at the current schema"
+        );
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
         let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
@@ -2472,8 +2708,8 @@ mod tests {
         let (doc, actor_guid) = authored_v3_scene();
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
         assert_eq!(
-            bytes1[0], 8,
-            "the physics/actor content now writes as a schema-v8 file"
+            bytes1[0], SCHEMA_VERSION as u8,
+            "the physics/actor content is written at the current schema"
         );
 
         let mut doc2 = SceneDoc::new();
@@ -2825,8 +3061,8 @@ mod tests {
 
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
         assert_eq!(
-            bytes1[0], 8,
-            "anim content writes as a genuine schema-v8 file"
+            bytes1[0], SCHEMA_VERSION as u8,
+            "anim content is written at the current schema"
         );
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
@@ -3113,7 +3349,10 @@ mod tests {
         let _ = g_anchor;
 
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 8, "joints/audio content writes a schema-v8 file");
+        assert_eq!(
+            bytes1[0], SCHEMA_VERSION as u8,
+            "joints/audio content is written at the current schema"
+        );
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
         let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
@@ -3526,6 +3765,333 @@ mod tests {
         assert_eq!(file.settings.render, RenderSettingsRecord::default());
     }
 
+    // ── v8 forever-load fixture (frozen pre-v9) ─────────────────────────────
+
+    /// A deterministic authored terrain for the v8 fixture: two shared-edge tiles
+    /// written from one **polynomial** height field (never `sin`/`cos` — `std`
+    /// trig is not bit-portable across targets, the P14 law), plus a painted splat
+    /// weight so the fixture exercises a materialized weight buffer.
+    fn fixture_terrain() -> Terrain {
+        let mut t = Terrain::configured(4, 2.0);
+        let f = |x: f64, z: f64| x * 0.5 - z * 0.25 + 3.0;
+        t.data.author_tile((0, 0), f);
+        t.data.author_tile((1, 0), f);
+        t.data
+            .get_tile_mut((0, 0))
+            .unwrap()
+            .set_weight_sample(4, 1, 2, [40, 100, 80, 35]);
+        t.macro_variation = 0.25;
+        t
+    }
+
+    /// A minimal all-`None` frozen v8 entity record ([`EntityRecordV8`] has no
+    /// `Default`, like the other frozen records — this local helper stands in).
+    fn v8_base(guid: uuid::Uuid, name: &str, parent: Option<uuid::Uuid>) -> EntityRecordV8 {
+        EntityRecordV8 {
+            guid,
+            name: name.into(),
+            parent,
+            transform: EcsTransform::IDENTITY,
+            visible: true,
+            mesh: None,
+            material: None,
+            light: None,
+            camera: None,
+            sprite: None,
+            tilemap: None,
+            nine_slice: None,
+            text2d: None,
+            light_2d: None,
+            rigid_body_2d: None,
+            collider_2d: None,
+            character_controller_2d: None,
+            rigid_body_3d: None,
+            collider_3d: None,
+            character_controller_3d: None,
+            actor: None,
+            terrain: None,
+            pcg_volume: None,
+            skeletal_mesh: None,
+            anim_player: None,
+            anim_state_machine: None,
+            root_motion: None,
+            attached_to: None,
+            joint_2d: None,
+            joint_3d: None,
+            audio_source: None,
+            audio_listener: None,
+            decal: None,
+            volume: None,
+            spline: None,
+            foliage: None,
+        }
+    }
+
+    /// Rebuild the exact schema-v8 file the committed v8 fixture was generated
+    /// from, out of the frozen v8 record types (the provenance lock). Carries a v8
+    /// `Material` (blend + cutoff), a v8 `Light` (range + cones + shadows), the
+    /// four v8 world-decoration slots and — the point of this fixture for P16.3 —
+    /// a **populated `Terrain`**, pinning the pre-v9 `Terrain` byte layout.
+    fn v8_reference() -> SceneFileV8 {
+        use inf_ecs::components::{
+            BlendMode, Decal, Foliage, FoliageInstance, FoliagePaletteEntry, Light, LightKind,
+            Material, Spline, SplineInterp, Volume, VolumeKind,
+        };
+        let g = uuid::Uuid::from_u128;
+        let cube = g(0x8002);
+        SceneFileV8 {
+            schema_version: 8,
+            title: "V8 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV8 {
+                    mesh: Some(MeshRef {
+                        primitive: Primitive::Plane,
+                        asset: None,
+                    }),
+                    material: Some(Material {
+                        base_color: Color::new(0.3, 0.32, 0.35, 1.0),
+                        metallic: 0.0,
+                        roughness: 0.5,
+                        emissive: Color::new(0.0, 0.0, 0.0, 1.0),
+                        blend: BlendMode::Masked,
+                        alpha_cutoff: 0.25,
+                    }),
+                    ..v8_base(g(0x8001), "Ground", None)
+                },
+                EntityRecordV8 {
+                    mesh: Some(MeshRef {
+                        primitive: Primitive::Cube,
+                        asset: Some(g(0x80A1)),
+                    }),
+                    decal: Some(Decal {
+                        size: Vec3d::new(3.0, 1.0, 3.0),
+                        color: Color::new(0.1, 0.1, 0.1, 1.0),
+                        opacity: 0.8,
+                        fade_angle_deg: 50.0,
+                    }),
+                    volume: Some(Volume {
+                        kind: VolumeKind::Blocking,
+                        tint: Color::new(0.9, 0.2, 0.2, 0.5),
+                    }),
+                    spline: Some(Spline {
+                        points: vec![
+                            Vec3d::ZERO,
+                            Vec3d::new(2.0, 0.0, 1.0),
+                            Vec3d::new(4.0, 1.0, 0.0),
+                        ],
+                        closed: true,
+                        interp: SplineInterp::Linear,
+                    }),
+                    foliage: Some(Foliage {
+                        palette: vec![
+                            FoliagePaletteEntry {
+                                primitive: Primitive::Cone,
+                                tint: Color::new(0.1, 0.6, 0.1, 1.0),
+                            },
+                            FoliagePaletteEntry::default(),
+                        ],
+                        instances: vec![
+                            FoliageInstance {
+                                position: Vec3d::new(1.0, 0.0, 2.0),
+                                rotation: Vec3d::new(0.0, 45.0, 0.0),
+                                scale: 1.2,
+                                kind: 0,
+                            },
+                            FoliageInstance::default(),
+                        ],
+                    }),
+                    ..v8_base(cube, "Cube", None)
+                },
+                EntityRecordV8 {
+                    light: Some(Light {
+                        kind: LightKind::Spot,
+                        color: Color::WHITE,
+                        intensity: 3.0,
+                        range: 25.0,
+                        inner_cone_deg: 18.0,
+                        outer_cone_deg: 32.0,
+                        cast_shadows: false,
+                    }),
+                    ..v8_base(g(0x8008), "Spot", Some(cube))
+                },
+                EntityRecordV8 {
+                    terrain: Some(TerrainV8::from_current(fixture_terrain())),
+                    ..v8_base(g(0x8009), "Terrain", None)
+                },
+            ],
+            settings: LevelSettings {
+                gravity_2d: Vec2d::new(0.0, -20.0),
+                gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+                sim_hz: 120.0,
+                render: RenderSettingsRecord {
+                    exposure: 1.4,
+                    dither: false,
+                    bloom_enabled: true,
+                    bloom_threshold: 0.8,
+                    bloom_knee: 0.3,
+                    bloom_intensity: 0.12,
+                    ssao_enabled: true,
+                    ssao_radius: 0.9,
+                    ssao_intensity: 0.75,
+                    ssao_bias: 0.03,
+                    taa: true,
+                    shadows_enabled: true,
+                    shadows_max_distance: 80.0,
+                    gi_enabled: true,
+                    gi_intensity: 1.25,
+                },
+            },
+        }
+    }
+
+    /// Write the committed v8 fixture from [`v8_reference`] under
+    /// `INF_BLESS_FIXTURES=1` (the temporary-writer discipline). Never hand-edit
+    /// the committed bytes.
+    #[test]
+    fn bless_v8_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").is_err() {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v8_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 8);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v8.inf_lvl");
+        std::fs::write(&path, &bytes).expect("write v8 fixture");
+        eprintln!("blessed v8 fixture: {}", path.display());
+    }
+
+    #[test]
+    fn v8_fixture_is_reproducible_and_genuinely_v8() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v8.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v8 fixture present");
+        assert_eq!(bytes[0], 8, "fixture must be a genuine schema-v8 payload");
+        let rebuilt = bincode::serde::encode_to_vec(v8_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v8 fixture must match our frozen v8 writer"
+        );
+    }
+
+    /// The committed v8 fixture — written by the **pre-v9 codec**, before
+    /// `Terrain` grew its asset reference — still loads, with the terrain lifted
+    /// through the frozen [`TerrainV8`] record and `asset` defaulted to `None`.
+    /// The "old bytes load forever" gate for the v9 bump.
+    #[test]
+    fn v8_fixture_loads_forever_and_lifts_to_v9() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v8.inf_lvl");
+        let file = decode(&std::fs::read(&path).unwrap()).expect("v8 fixture decodes");
+        assert_eq!(file.schema_version, SCHEMA_VERSION);
+        assert_eq!(file.title, "V8 Fixture Level");
+        assert_eq!(file.entities.len(), 4);
+        let by_name = |n: &str| file.entities.iter().find(|r| r.name == n).unwrap();
+
+        // The terrain survives the frozen-record hop intact …
+        let terrain = by_name("Terrain").terrain.as_ref().expect("terrain slot");
+        assert_eq!(terrain, &fixture_terrain(), "v8 terrain decodes unchanged");
+        assert_eq!(terrain.data.tile_count(), 2);
+        assert_eq!(terrain.macro_variation, 0.25);
+        assert_eq!(
+            terrain
+                .data
+                .get_tile((0, 0))
+                .unwrap()
+                .weight_sample(4, 1, 2),
+            [40, 100, 80, 35]
+        );
+        // … and the new v9 field lifts to its documented default: a pre-v9 level's
+        // terrain is inline-authoritative, which is exactly what it always meant.
+        assert_eq!(terrain.asset, None);
+
+        // The rest of the v8 slot set carries through untouched.
+        assert_eq!(by_name("Ground").material.unwrap().blend, BlendMode::Masked);
+        assert_eq!(by_name("Spot").light.unwrap().range, 25.0);
+        assert_eq!(by_name("Cube").foliage.as_ref().unwrap().instances.len(), 2);
+        assert_eq!(file.settings.render.exposure, 1.4);
+
+        // Rebuilding a doc from it and re-saving yields a current-schema file that
+        // round-trips byte-identically (the load → save → load identity).
+        let mut doc = SceneDoc::new();
+        apply_to_doc(&mut doc, &file);
+        let bytes1 = encode(&to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], SCHEMA_VERSION as u8);
+        let mut doc2 = SceneDoc::new();
+        apply_to_doc(&mut doc2, &decode(&bytes1).unwrap());
+        assert_eq!(encode(&to_scene_file(&doc2)).unwrap(), bytes1);
+    }
+
+    // ── v9 (P16.3) terrain asset reference ─────────────────────────────────
+
+    /// A `.inf_terrain` asset reference on a `Terrain` persists across
+    /// save → load and re-encodes byte-identically, with the inline tile data
+    /// riding alongside it (both paths legal — the editor still authors inline).
+    #[test]
+    fn terrain_asset_reference_persists_across_save_load_v9() {
+        let asset_guid = uuid::Uuid::from_u128(0x1603_00AA);
+        let mut doc = SceneDoc::new();
+        let e = doc.create(SpawnKind::Empty, "Streamed Terrain", None);
+        insert!(
+            doc,
+            e,
+            Terrain {
+                asset: Some(asset_guid),
+                ..fixture_terrain()
+            }
+        );
+        doc.world_mut().propagate();
+
+        let bytes1 = encode(&to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], 9, "a v9 terrain writes a genuine v9 payload");
+        let mut loaded = SceneDoc::new();
+        apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
+        let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
+        assert_eq!(bytes1, bytes2, "v9 save→load→save must be byte-identical");
+
+        let file = to_scene_file(&loaded);
+        let t = file.entities[0]
+            .terrain
+            .as_ref()
+            .expect("terrain persisted");
+        assert_eq!(t.asset, Some(asset_guid), "the asset ref survives the trip");
+        assert_eq!(
+            t.data.tile_count(),
+            2,
+            "inline tiles ride alongside the ref"
+        );
+        assert_eq!(
+            t.data.get_tile((0, 0)).unwrap().weight_sample(4, 1, 2),
+            [40, 100, 80, 35]
+        );
+
+        // Clearing the reference produces different bytes (so the ref really is
+        // persisted, not silently dropped) and still round-trips.
+        let mut inline_doc = SceneDoc::new();
+        let e = inline_doc.create(SpawnKind::Empty, "Streamed Terrain", None);
+        insert!(inline_doc, e, fixture_terrain());
+        inline_doc.world_mut().propagate();
+        let inline = encode(&to_scene_file(&inline_doc)).unwrap();
+        assert_ne!(inline, bytes1, "the asset ref is really in the bytes");
+    }
+
+    /// The terrain slot survives the human-readable codec too (the dual-format
+    /// rule) — including the new `asset` reference.
+    #[test]
+    fn terrain_asset_reference_is_dual_format_serde_safe() {
+        let t = Terrain {
+            asset: Some(uuid::Uuid::from_u128(0x1603_00BB)),
+            ..fixture_terrain()
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(serde_json::from_str::<Terrain>(&json).unwrap(), t);
+        // A pre-v9 JSON object (no `asset` key) decodes with the field defaulted.
+        let stripped = json.replace(&format!(",\"asset\":\"{}\"", t.asset.unwrap()), "");
+        assert_ne!(stripped, json, "the asset key is present in the JSON");
+        let back: Terrain = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(back.asset, None);
+        assert_eq!(back.data, t.data);
+    }
+
     // ── v8 (R-P0) world-decoration + render-settings persistence ───────────
 
     /// A spot light with cones + range, a translucent material, a Decal, a Volume,
@@ -3661,7 +4227,10 @@ mod tests {
         doc.world_mut().propagate();
 
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 8, "v8 content writes a genuine schema-v8 file");
+        assert_eq!(
+            bytes1[0], SCHEMA_VERSION as u8,
+            "v8 content is written at the current schema"
+        );
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
         let bytes2 = encode(&to_scene_file(&loaded)).unwrap();

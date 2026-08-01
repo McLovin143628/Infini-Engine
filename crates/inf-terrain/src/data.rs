@@ -5,13 +5,21 @@
 //! stores just the pages that carry data. Determinism is structural: the
 //! `BTreeMap` fixes iteration/serialization order, and the flat serde form is
 //! portable across bincode/JSON.
+//!
+//! As of P16.3 the tile map is the **resident** set rather than "the terrain": it
+//! is grown and shrunk against a [`TileStore`] by an explicit set of wanted
+//! `(coord, lod)` pairs, coarse LOD tiles ride beside it in a second map, and
+//! every tile carries a monotone version + a dirty mark. See [`crate::residency`]
+//! for the contract; nothing about the level-0 API changed, and a fully-resident
+//! terrain behaves exactly as it did before.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use glam::{DVec2, DVec3};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::tile::TerrainTile;
+use crate::residency::{ResidencyReport, TileStore};
+use crate::tile::{TerrainTile, TileKey};
 use crate::HeightSource;
 
 /// Default samples per tile side (256 × 256).
@@ -27,11 +35,49 @@ pub const DEFAULT_METERS_PER_SAMPLE: f64 = 1.0;
 /// mps` — so a tile's **last** sample row/column coincides with the **first** of
 /// the next tile (shared edges), and authoring both tiles from the same world
 /// function keeps them seamless (the boundary-continuity guarantee).
-#[derive(Clone, Debug, PartialEq)]
+///
+/// ## Residency (P16.3)
+///
+/// `tiles` is the resident **level-0** set — the authored, editable heightfield
+/// every query, brush and `.inf_lvl` write already meant. Three companions ride
+/// beside it and are **not** serialized (they are runtime streaming state, not
+/// authored content, so `.inf_lvl` bytes are untouched):
+///
+/// * `coarse` — resident LOD ≥ 1 tiles from the pyramid, kept apart so no
+///   level-0 code path can ever accidentally see a downsampled tile;
+/// * `versions` — the change stamp of each **resident** tile, drawn from one
+///   per-terrain monotone counter (see [`TerrainData::tile_version`]);
+/// * `dirty` — tiles mutated since the last drain, for write-back.
+///
+/// `PartialEq` compares only the **authored** state (resolution, spacing, level-0
+/// tiles). Two terrains holding the same authored data are equal regardless of
+/// which coarse pages happen to be paged in or how many times a tile has been
+/// touched — those are derived caches, and letting them into equality would make
+/// a scene look dirty for having streamed.
+#[derive(Clone, Debug)]
 pub struct TerrainData {
     tile_resolution: u32,
     meters_per_sample: f64,
     tiles: BTreeMap<(i32, i32), TerrainTile>,
+    coarse: BTreeMap<TileKey, TerrainTile>,
+    /// Change stamps for **resident** tiles only — pruned on evict/remove, so the
+    /// ledger is bounded by residency and a terrain that pages a planet forever
+    /// never grows a map entry per tile it has ever seen.
+    versions: BTreeMap<TileKey, u64>,
+    /// The single monotone source those stamps are drawn from. Never decreases
+    /// for the life of the `TerrainData`, which is what makes a re-paged tile's
+    /// stamp strictly greater than any stamp that tile (or any other) ever had.
+    next_version: u64,
+    dirty: BTreeSet<TileKey>,
+}
+
+impl PartialEq for TerrainData {
+    /// Authored state only — see the type docs.
+    fn eq(&self, other: &Self) -> bool {
+        self.tile_resolution == other.tile_resolution
+            && self.meters_per_sample == other.meters_per_sample
+            && self.tiles == other.tiles
+    }
 }
 
 impl Default for TerrainData {
@@ -52,6 +98,10 @@ impl TerrainData {
                 DEFAULT_METERS_PER_SAMPLE
             },
             tiles: BTreeMap::new(),
+            coarse: BTreeMap::new(),
+            versions: BTreeMap::new(),
+            next_version: 0,
+            dirty: BTreeSet::new(),
         }
     }
 
@@ -110,7 +160,18 @@ impl TerrainData {
         self.tiles.get(&coord)
     }
 
+    /// Mutable access to a resident level-0 tile.
+    ///
+    /// **Touching is mutating**: the tile's version is bumped and it is marked
+    /// dirty on the way out, because a `&mut` handle cannot tell the caller's
+    /// intent. Every sculpt / paint / erosion path funnels through here (or
+    /// [`get_or_create_tile`](Self::get_or_create_tile)), so "bump only the tiles
+    /// under the brush" falls out for free.
     pub fn get_tile_mut(&mut self, coord: (i32, i32)) -> Option<&mut TerrainTile> {
+        if !self.tiles.contains_key(&coord) {
+            return None;
+        }
+        self.touch(TileKey::lod0(coord));
         self.tiles.get_mut(&coord)
     }
 
@@ -122,9 +183,12 @@ impl TerrainData {
     /// Get `(tx, tz)`, creating it flat (offsets `0`, `origin.y = 0`) if absent,
     /// and return a mutable handle. The horizontal origin is derived from the
     /// coordinate, so tiles stay grid-aligned.
+    /// (Mutating access — bumps the tile's version and marks it dirty; see
+    /// [`get_tile_mut`](Self::get_tile_mut).)
     pub fn get_or_create_tile(&mut self, coord: (i32, i32)) -> &mut TerrainTile {
         let res = self.tile_resolution;
         let o = self.tile_origin_xz(coord);
+        self.touch(TileKey::lod0(coord));
         self.tiles
             .entry(coord)
             .or_insert_with(|| TerrainTile::flat(res, DVec3::new(o.x, 0.0, o.y)))
@@ -145,13 +209,24 @@ impl TerrainData {
         let o = self.tile_origin_xz(coord);
         tile.origin.x = o.x;
         tile.origin.z = o.y;
+        self.touch(TileKey::lod0(coord));
         self.tiles.insert(coord, tile);
         Ok(())
     }
 
-    /// Remove `(tx, tz)`, returning it if it existed.
+    /// Remove `(tx, tz)`, returning it if it existed. An authoring delete —
+    /// version-bumping and dirty-marking, unlike a residency
+    /// [`evict`](Self::evict_tile), which drops a page without touching either.
     pub fn remove_tile(&mut self, coord: (i32, i32)) -> Option<TerrainTile> {
-        self.tiles.remove(&coord)
+        let gone = self.tiles.remove(&coord);
+        if gone.is_some() {
+            let key = TileKey::lod0(coord);
+            // The deletion still needs writing back, but the tile is no longer
+            // resident, so it holds no stamp (the bounded-ledger rule).
+            self.dirty.insert(key);
+            self.versions.remove(&key);
+        }
+        gone
     }
 
     /// Author an entire tile from a world-space height function `f(x, z) → metres`
@@ -270,6 +345,213 @@ impl TerrainData {
         let dhdx = (hr - hl) / (2.0 * e);
         let dhdz = (hu - hd) / (2.0 * e);
         Some(DVec3::new(-dhdx, 1.0, -dhdz).normalize())
+    }
+}
+
+// ── residency, versions, dirty tracking (P16.3) ─────────────────────────────
+
+impl TerrainData {
+    /// Stamp `key` with the next version — the single monotone allocator every
+    /// residency and mutation path draws from.
+    #[inline]
+    fn stamp(&mut self, key: TileKey) {
+        self.next_version += 1;
+        self.versions.insert(key, self.next_version);
+    }
+
+    /// Stamp `key` **and** mark it dirty — the funnel every *mutation* goes
+    /// through (streaming a page in stamps without dirtying).
+    #[inline]
+    fn touch(&mut self, key: TileKey) {
+        self.stamp(key);
+        self.dirty.insert(key);
+    }
+
+    /// A resident tile's change stamp; **`0` for a tile that is not resident**
+    /// (never loaded, evicted, or deleted).
+    ///
+    /// Stamps come from one per-terrain counter that only ever increases, so:
+    ///
+    /// * a stamp is strictly greater than every stamp handed out before it —
+    ///   including any this tile held in an earlier residency, so a re-paged tile
+    ///   can never be mistaken for the contents a GPU cache still holds;
+    /// * `0` is never a live stamp, so a consumer that treats "0 or changed" as
+    ///   "re-upload" is conservatively correct for a non-resident tile;
+    /// * the ledger is **bounded by residency** — evicting or deleting a tile
+    ///   drops its entry, so paging across a planet costs no permanent memory.
+    #[inline]
+    pub fn tile_version(&self, key: TileKey) -> u64 {
+        self.versions.get(&key).copied().unwrap_or(0)
+    }
+
+    /// How many tiles currently hold a change stamp.
+    ///
+    /// The bounded-ledger invariant made observable: this tracks the resident set,
+    /// never the set of tiles ever streamed. A residency test asserts it, and a
+    /// streaming budget can read it without walking the map.
+    pub fn version_ledger_len(&self) -> usize {
+        self.versions.len()
+    }
+
+    /// Whether `key` is currently resident (level 0 or coarse).
+    pub fn is_resident(&self, key: TileKey) -> bool {
+        if key.is_lod0() {
+            self.tiles.contains_key(&key.coord)
+        } else {
+            self.coarse.contains_key(&key)
+        }
+    }
+
+    /// A resident tile at any level.
+    pub fn resident_tile(&self, key: TileKey) -> Option<&TerrainTile> {
+        if key.is_lod0() {
+            self.tiles.get(&key.coord)
+        } else {
+            self.coarse.get(&key)
+        }
+    }
+
+    /// Every resident key across all levels, ascending (level-0 first).
+    pub fn resident_keys(&self) -> Vec<TileKey> {
+        self.tiles
+            .keys()
+            .map(|&c| TileKey::lod0(c))
+            .chain(self.coarse.keys().copied())
+            .collect()
+    }
+
+    /// Number of resident coarse (LOD ≥ 1) tiles. Level-0 residency is
+    /// [`tile_count`](Self::tile_count).
+    pub fn coarse_tile_count(&self) -> usize {
+        self.coarse.len()
+    }
+
+    /// Iterate resident coarse tiles in ascending key order.
+    pub fn coarse_tiles(&self) -> impl Iterator<Item = (&TileKey, &TerrainTile)> {
+        self.coarse.iter()
+    }
+
+    /// Make `key` resident from `store`.
+    ///
+    /// Returns `Ok(true)` when the tile is resident afterwards. An **already
+    /// resident** tile is left untouched (never re-read over live edits) and
+    /// reports `true`; a tile the store cannot serve reports `false`. `Err` only
+    /// for a corrupt blob — the tile then stays non-resident.
+    pub fn request_tile<S: TileStore + ?Sized>(
+        &mut self,
+        key: TileKey,
+        store: &S,
+    ) -> Result<bool, String> {
+        if self.is_resident(key) {
+            return Ok(true);
+        }
+        let Some(tile) = store.load_tile(key)? else {
+            return Ok(false);
+        };
+        self.insert_resident(key, tile);
+        Ok(true)
+    }
+
+    /// Insert a tile as resident **without** marking it dirty: streaming a page in
+    /// is not an edit, so it must not schedule a write-back. Its version still
+    /// bumps (the contents changed from the consumer's point of view).
+    fn insert_resident(&mut self, key: TileKey, mut tile: TerrainTile) {
+        self.stamp(key);
+        if key.is_lod0() {
+            let o = self.tile_origin_xz(key.coord);
+            tile.origin.x = o.x;
+            tile.origin.z = o.y;
+            self.tiles.insert(key.coord, tile);
+        } else {
+            self.coarse.insert(key, tile);
+        }
+    }
+
+    /// Drop `key` from residency, returning whether it was resident.
+    ///
+    /// A pure paging operation: it does **not** mark anything dirty (there is
+    /// nothing to write back that was not already marked). Evicting a tile with
+    /// unsaved edits silently loses them — [`sync_residency`](Self::sync_residency)
+    /// is the safe door, which refuses to.
+    pub fn evict_tile(&mut self, key: TileKey) -> bool {
+        let had = if key.is_lod0() {
+            self.tiles.remove(&key.coord).is_some()
+        } else {
+            self.coarse.remove(&key).is_some()
+        };
+        if had {
+            // Bounded ledger: a non-resident tile has no stamp (see
+            // [`tile_version`](Self::tile_version)). Reloading it draws a fresh,
+            // strictly greater one, so pruning here costs no correctness.
+            self.versions.remove(&key);
+        }
+        had
+    }
+
+    /// Reconcile residency against an explicit set of wanted `(coord, lod)` keys.
+    ///
+    /// Loads every want the store can serve, drops every resident tile that is no
+    /// longer wanted — **except** dirty ones, which are retained and reported so
+    /// their edits can be written back first. There is no camera and no budget
+    /// policy here by design (see [`crate::residency`]): the caller computes the
+    /// wants, this executes them.
+    pub fn sync_residency<S: TileStore + ?Sized>(
+        &mut self,
+        wants: &BTreeSet<TileKey>,
+        store: &S,
+    ) -> ResidencyReport {
+        let mut report = ResidencyReport::default();
+
+        // Evict first, so a sliding window frees its trailing pages before paging
+        // in the leading ones (peak residency stays at the window size).
+        for key in self.resident_keys() {
+            if wants.contains(&key) {
+                continue;
+            }
+            if self.dirty.contains(&key) {
+                report.retained_dirty.push(key);
+                continue;
+            }
+            if self.evict_tile(key) {
+                report.evicted.push(key);
+            }
+        }
+
+        for &key in wants {
+            if self.is_resident(key) {
+                continue;
+            }
+            match store.load_tile(key) {
+                Ok(Some(tile)) => {
+                    self.insert_resident(key, tile);
+                    report.loaded.push(key);
+                }
+                Ok(None) => report.missing.push(key),
+                Err(e) => report.failed.push((key, e)),
+            }
+        }
+        report
+    }
+
+    /// Tiles mutated since the last drain, ascending.
+    pub fn dirty_tiles(&self) -> Vec<TileKey> {
+        self.dirty.iter().copied().collect()
+    }
+
+    /// Whether any tile awaits write-back.
+    pub fn has_dirty_tiles(&self) -> bool {
+        !self.dirty.is_empty()
+    }
+
+    /// Take the dirty set, leaving it empty — the write-back seam. Exactly the
+    /// tiles mutated since the previous drain, ascending, with no duplicates.
+    pub fn drain_dirty(&mut self) -> Vec<TileKey> {
+        std::mem::take(&mut self.dirty).into_iter().collect()
+    }
+
+    /// Clear the dirty set **without** reading it (a fresh load is not an edit).
+    pub fn clear_dirty(&mut self) {
+        self.dirty.clear();
     }
 }
 

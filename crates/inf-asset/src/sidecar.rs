@@ -143,6 +143,36 @@ mod tests {
         assert_eq!(back.tags, vec!["a".to_string(), "b".to_string()]);
     }
 
+    /// Every kind — the P16.3 `Terrain` included — emits a deterministic sidecar
+    /// that round-trips its `kind` field. The kind is serialized by its
+    /// `snake_case` slug, so a new variant that forgot its `AssetKind::all()`
+    /// entry or picked a colliding name is caught here rather than in the field.
+    #[test]
+    fn every_kind_sidecars_deterministically() {
+        let mut seen = std::collections::BTreeSet::new();
+        for &kind in AssetKind::all() {
+            let s = AssetSidecar::new(AssetId::new(), kind, ContentHash::of(b"payload"));
+            let a = s.to_toml().unwrap();
+            assert_eq!(
+                a,
+                s.to_toml().unwrap(),
+                "{kind:?} re-emit is byte-identical"
+            );
+            let back = AssetSidecar::from_toml(&a).unwrap();
+            assert_eq!(back, s, "{kind:?} sidecar round trip");
+            assert!(seen.insert(kind.slug()), "duplicate slug for {kind:?}");
+        }
+        // The new streaming kind specifically: slug, extension and classification
+        // agree in all three directions.
+        let t = AssetSidecar::new(AssetId::new(), AssetKind::Terrain, ContentHash::of(b"x"));
+        assert!(t.to_toml().unwrap().contains("kind = \"terrain\""));
+        assert_eq!(AssetKind::Terrain.extension(), Some("inf_terrain"));
+        assert_eq!(
+            AssetKind::from_path(Path::new("Content/World.inf_terrain")),
+            AssetKind::Terrain
+        );
+    }
+
     #[test]
     fn save_load_through_disk() {
         let dir = tempfile::tempdir().unwrap();

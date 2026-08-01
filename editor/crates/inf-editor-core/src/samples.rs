@@ -2844,7 +2844,11 @@ mod tests {
         let doc = vgeom_demo_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 8, "vgeom-demo writes as a schema-v8 file");
+        assert_eq!(
+            bytes1[0],
+            crate::scene::serialize::SCHEMA_VERSION as u8,
+            "vgeom-demo writes at the current schema"
+        );
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(
@@ -3058,7 +3062,11 @@ mod tests {
         let doc = character_demo_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 8, "character-demo writes as a schema-v8 file");
+        assert_eq!(
+            bytes1[0],
+            crate::scene::serialize::SCHEMA_VERSION as u8,
+            "character-demo writes at the current schema"
+        );
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(
@@ -3120,7 +3128,11 @@ mod tests {
         let doc = terrain_demo_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 8, "terrain-demo writes as a schema-v8 file");
+        assert_eq!(
+            bytes1[0],
+            crate::scene::serialize::SCHEMA_VERSION as u8,
+            "terrain-demo writes at the current schema"
+        );
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(
@@ -3206,7 +3218,11 @@ mod tests {
         let doc = physics_playground_scene();
         let bytes1 =
             crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 8, "physics-playground writes a schema-v8 file");
+        assert_eq!(
+            bytes1[0],
+            crate::scene::serialize::SCHEMA_VERSION as u8,
+            "physics-playground writes at the current schema"
+        );
 
         let mut doc2 = SceneDoc::new();
         crate::scene::serialize::apply_to_doc(
