@@ -36,6 +36,7 @@ import type { ErosionParamsDto } from "../bindings/ErosionParamsDto";
 import type { ErosionReportDto } from "../bindings/ErosionReportDto";
 import type { FileEntryDto } from "../bindings/FileEntryDto";
 import type { GitStatusDto } from "../bindings/GitStatusDto";
+import type { HeightmapProbeDto } from "../bindings/HeightmapProbeDto";
 import type { LayoutSummary } from "../bindings/LayoutSummary";
 import type { LevelSettingsDto } from "../bindings/LevelSettingsDto";
 import type { PackageErrorDto } from "../bindings/PackageErrorDto";
@@ -57,6 +58,9 @@ import type { Snap3DDto } from "../bindings/Snap3DDto";
 import type { GizmoModeDto } from "../bindings/GizmoModeDto";
 import type { GizmoSpaceDto } from "../bindings/GizmoSpaceDto";
 import type { SortingLayerDto } from "../bindings/SortingLayerDto";
+import type { TerrainImportPlanDto } from "../bindings/TerrainImportPlanDto";
+import type { TerrainImportResultDto } from "../bindings/TerrainImportResultDto";
+import type { TerrainImportSettingsDto } from "../bindings/TerrainImportSettingsDto";
 import type { CollisionLayerDto } from "../bindings/CollisionLayerDto";
 import type { SpawnKind } from "../bindings/SpawnKind";
 import type { SpriteSheetDto } from "../bindings/SpriteSheetDto";
@@ -199,6 +203,53 @@ export const terrain = {
     region?: [number, number, number, number],
   ): Promise<ErosionReportDto> =>
     invoke<ErosionReportDto>("terrain_erode", { entity, params, steps, region: region ?? null }),
+
+  // ── Terrain Import wizard (P16.4a) ───────────────────────────────────────
+
+  /**
+   * Read a heightmap's HEADER (no pixel decode) and get the settings the wizard
+   * should open with. Instant even on a 16k x 16k source.
+   */
+  probeHeightmap: (path: string): Promise<HeightmapProbeDto> =>
+    invoke<HeightmapProbeDto>("terrain_probe_heightmap", { path }),
+
+  /**
+   * The world a settings block would produce for a `width x height` source —
+   * extent in METRES (the wizard divides by 1000 for its km readback) and the
+   * level-0 tile counts. Pure arithmetic; recomputed on every settings edit.
+   */
+  importPlan: (
+    width: number,
+    height: number,
+    settings: TerrainImportSettingsDto,
+  ): Promise<TerrainImportPlanDto> =>
+    invoke<TerrainImportPlanDto>("terrain_import_plan", { width, height, settings }),
+
+  /**
+   * Queue the chunked import. Returns the job id; progress arrives on
+   * `assets://import` (phase `"progress"` carries `done`/`total` tiles).
+   */
+  import: (
+    path: string,
+    settings: TerrainImportSettingsDto,
+    name?: string,
+  ): Promise<number> =>
+    invoke<number>("terrain_import", { path, settings, name: name ?? null }),
+
+  /** Ask an in-flight import to stop; it still reports terminally. */
+  cancelImport: (job: number): Promise<boolean> =>
+    invoke<boolean>("terrain_import_cancel", { job }),
+
+  /** Details of a finished `.inf_terrain` asset (the wizard's done state). */
+  assetInfo: (assetId: string): Promise<TerrainImportResultDto> =>
+    invoke<TerrainImportResultDto>("terrain_asset_info", { assetId }),
+
+  /**
+   * Spawn a Terrain entity that STREAMS from `assetId` (no tiles in the level).
+   * One undoable edit; returns the new entity GUID.
+   */
+  spawnStreamed: (assetId: string): Promise<string> =>
+    invoke<string>("terrain_spawn_streamed", { assetId }),
 };
 
 /**

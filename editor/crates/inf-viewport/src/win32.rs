@@ -45,7 +45,7 @@ use crate::camera::{
 };
 use crate::host::EngineHost;
 use crate::{KeyChord, SharedScene, SurfaceTarget, ViewportEvent, ViewportEventSink, ViewportRect};
-use inf_editor_core::ipc::{GizmoModeDto, ViewModeDto};
+use inf_editor_core::ipc::{GizmoModeDto, ViewModeDto, ViewportToolStatusDto};
 use inf_render::{GizmoMode, ViewMode};
 
 /// Map the IPC gizmo-mode DTO to the renderer enum (Wave 2). Kept next to the
@@ -122,6 +122,11 @@ enum Cmd {
     /// Set the shading view mode (Lit / Unlit / Wireframe) from the toolbar
     /// (R-P2). The renderer clamps Wireframe→Unlit if unsupported.
     SetViewMode(ViewMode),
+    /// Point terrain streaming at a project's content root (or `None` to disable
+    /// it) — the P16.4a `project://changed` wiring.
+    SetTerrainContentRoot(Option<std::path::PathBuf>),
+    /// Rebuild the loose `.inf_terrain` index in place (a terrain import landed).
+    RefreshTerrainIndex,
     /// Adopt a foreign (PIE player) window into the viewport slot: reparent it
     /// to our parent, position it at the hole, and hide our own child (embedded
     /// PIE, P9.4). The `isize` is the foreign HWND.
@@ -208,6 +213,19 @@ impl ViewportHandle {
     /// (R-P2). Takes the IPC DTO so Ring 2 needn't name the renderer enum.
     pub fn set_view_mode(&self, mode: ViewModeDto) {
         let _ = self.tx.send(Cmd::SetViewMode(to_view_mode(mode)));
+    }
+
+    /// Point terrain streaming at a project's content root (P16.4a). Rescans the
+    /// loose `.inf_terrain` index and drops every live stream, so a project
+    /// switch can never serve the previous project's pages.
+    pub fn set_terrain_content_root(&self, root: Option<std::path::PathBuf>) {
+        let _ = self.tx.send(Cmd::SetTerrainContentRoot(root));
+    }
+
+    /// Rebuild the loose `.inf_terrain` index without dropping live streams —
+    /// pushed when a terrain import finishes (P16.4a).
+    pub fn refresh_terrain_index(&self) {
+        let _ = self.tx.send(Cmd::RefreshTerrainIndex);
     }
 
     /// Adopt a foreign (PIE player) window into the viewport slot (embedded PIE,
@@ -823,6 +841,10 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
     // presenting, the loop sleeps instead of busy-spinning on a dead surface (M3).
     let mut visible = true;
 
+    // Last published streamed-terrain state, so the status event only fires on
+    // a change (see the drain below).
+    let mut last_terrain_streamed = false;
+
     'outer: loop {
         // Recover from an embedded PIE window that vanished without a
         // ReleaseForeign (the player crashed/exited): our child is hidden behind
@@ -879,6 +901,8 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 Ok(Cmd::SetGizmoSpace(s)) => host.set_gizmo_space(s),
                 Ok(Cmd::SetSnap3D(s)) => host.set_snap_3d(s),
                 Ok(Cmd::SetViewMode(m)) => host.set_view_mode(m),
+                Ok(Cmd::SetTerrainContentRoot(root)) => host.set_terrain_content_root(root),
+                Ok(Cmd::RefreshTerrainIndex) => host.refresh_terrain_index(),
                 Ok(Cmd::EmbedForeign(foreign)) => {
                     // Position the foreign window at the hole immediately. If no
                     // SetRect has arrived yet, fall back to our child's current
@@ -1192,6 +1216,19 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
         };
         if world_changed {
             sink(ViewportEvent::WorldChanged);
+        }
+
+        // Drain the tool-status seam (P16.4a). A rejection is one-shot; the
+        // streamed flag is a standing fact, so it is published only on change —
+        // an event per frame would flood the webview for no information.
+        let status = host.take_tool_status();
+        let streamed = host.terrain_is_streamed();
+        if status.is_some() || streamed != last_terrain_streamed {
+            last_terrain_streamed = streamed;
+            sink(ViewportEvent::ToolStatus(ViewportToolStatusDto {
+                message: status,
+                terrain_streamed: streamed,
+            }));
         }
 
         // A live navigation gesture cancels a focus animation.

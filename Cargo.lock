@@ -1812,6 +1812,7 @@ dependencies = [
  "miniz_oxide",
  "num-complex",
  "pulp",
+ "rayon-core",
  "smallvec",
  "zune-inflate",
 ]
@@ -3355,6 +3356,7 @@ dependencies = [
  "inf-pcg",
  "inf-project",
  "inf-runtime",
+ "inf-terrain",
  "inf-transpile",
  "inf-viewport",
  "portable-pty",
@@ -3376,10 +3378,13 @@ name = "inf-terrain"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "exr",
  "glam 0.33.2",
+ "half",
  "image",
  "inf-asset",
  "inf-core",
+ "png 0.18.1",
  "serde",
  "serde_json",
  "tempfile",

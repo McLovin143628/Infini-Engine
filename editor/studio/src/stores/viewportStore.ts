@@ -21,6 +21,7 @@ import type { Snap3DDto } from "../bindings/Snap3DDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
 import type { ViewModeDto } from "../bindings/ViewModeDto";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
+import { useShellStore } from "./shellStore";
 
 /** localStorage key for the persisted 3D gizmo snap settings (Wave 2). */
 const SNAP3D_KEY = "inf.viewport.snap3d";
@@ -55,6 +56,13 @@ interface ViewportUiState {
 
   /** Active tool: pick/gizmo (`Select`) or terrain sculpt (`Sculpt`). (P10.2b) */
   toolMode: ToolModeDto;
+  /**
+   * The terrain the viewport is drawing streams from a `.inf_terrain` (P16.4a).
+   * Read-only, pushed on `viewport://tool-status`: a streamed terrain has no
+   * editable working set in the document, so sculpt/paint are disabled until the
+   * write-back path lands (P16.4b).
+   */
+  terrainStreamed: boolean;
   /** Sculpt brush operation. */
   sculptOp: SculptOpDto;
   /** Brush radius (world metres). */
@@ -204,6 +212,7 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   pixelsPerUnit: 100,
   viewMode: "Lit",
   toolMode: "Select",
+  terrainStreamed: false,
   sculptOp: "Raise",
   sculptRadius: 8,
   sculptStrength: 0.5,
@@ -480,6 +489,16 @@ export function initViewportSync(): () => void {
       if (useViewportStore.getState().gizmoMode !== mode) {
         useViewportStore.setState({ gizmoMode: mode });
       }
+    }),
+  );
+  // Tool rejections + the streamed-terrain flag (P16.4a). The message is a
+  // one-shot toast; the flag is standing state the toolbar reads.
+  track(
+    listenTo("viewport://tool-status", (status) => {
+      if (useViewportStore.getState().terrainStreamed !== status.terrain_streamed) {
+        useViewportStore.setState({ terrainStreamed: status.terrain_streamed });
+      }
+      if (status.message) useShellStore.getState().pushStatus(status.message, 6000);
     }),
   );
   return () => {

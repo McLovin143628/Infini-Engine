@@ -5,10 +5,20 @@
  */
 export type ImportEventDto = { job: number, source: string, 
 /**
- * "started" | "finished" | "failed".
+ * "started" | "progress" | "finished" | "failed".
  */
 phase: string, 
 /**
  * GUIDs produced (on "finished").
  */
-produced: Array<string>, primary: string | null, cached: boolean, error: string | null, };
+produced: Array<string>, primary: string | null, cached: boolean, error: string | null, 
+/**
+ * Units of work completed / total (on "progress"; terrain imports report
+ * tiles written across every LOD level). `null` for jobs with no progress
+ * model.
+ */
+done: number | null, total: number | null, 
+/**
+ * A short stage label on "progress" ("tiles", "lod2", …).
+ */
+stage: string | null, };

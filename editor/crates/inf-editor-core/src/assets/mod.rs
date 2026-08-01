@@ -14,16 +14,18 @@ pub mod queue;
 pub mod snapshot;
 pub mod sprite_sheet;
 pub mod table_import;
+pub mod terrain_import;
 
 use std::path::{Path, PathBuf};
 
 use inf_asset::{
-    AssetDb, AssetEntry, AssetError, AssetId, AssetPayload, AssetSidecar, ContentHash, ImportCache,
-    Result,
+    AssetDb, AssetEntry, AssetError, AssetId, AssetKind, AssetPayload, AssetSidecar, ContentHash,
+    ImportCache, Result,
 };
 
 pub use import::ImportOutcome;
 pub use queue::{ImportProgress, ImportQueue};
+pub use terrain_import::{TerrainImportOutcome, TerrainImportSettings, TERRAIN_IMPORT_FOLDER};
 
 /// A content project rooted at a directory: the asset database + import cache.
 pub struct AssetProject {
@@ -125,6 +127,77 @@ impl AssetProject {
         });
         self.bump();
         Ok(id)
+    }
+
+    /// Register an asset whose payload a **specialized writer** already put on
+    /// disk, instead of the generic dual-format [`write_asset`](Self::write_asset).
+    ///
+    /// Exactly one kind needs this today: `.inf_terrain` (P16.3/P16.4). Its
+    /// payload is a raw, 16-byte-aligned image that must go through
+    /// [`inf_terrain::write_terrain_asset`] — the generic path would frame it with
+    /// a bincode length prefix and silently knock every tile off its alignment, so
+    /// `TerrainAsset` deliberately implements neither `AssetPayload` nor `serde`
+    /// and the generic door fails to compile. This is the matching door: the
+    /// caller writes the bytes, hands us their hash, and the database gets its
+    /// sidecar exactly as it would for any other asset.
+    ///
+    /// Pass `reuse` to keep an existing GUID (a reimport rewriting its own file).
+    ///
+    /// # The half-written-pair problem
+    ///
+    /// The payload is already on disk when this is called, so a failure to write
+    /// the sidecar would leave a payload **with no sidecar** — which the content
+    /// watcher later promotes into the database under a *freshly minted* GUID, so
+    /// the level's `Terrain.asset` reference silently dangles. Two things prevent
+    /// that: the sidecar goes down temp + rename (never half-written, and a
+    /// reimport's existing sidecar survives a failure intact), and if it fails for
+    /// a **new** asset the payload is removed again, so the pair is all-or-nothing.
+    ///
+    /// A failed *reimport* keeps its payload — the previous bytes are already gone
+    /// and its sidecar still names the right GUID; only `content_hash` is stale
+    /// until the next successful reimport, which is a re-derivable inconsistency
+    /// rather than a dangling reference.
+    pub fn register_written_asset(
+        &mut self,
+        path: PathBuf,
+        kind: AssetKind,
+        content_hash: ContentHash,
+        source: Option<String>,
+        import: Option<toml::Table>,
+        reuse: Option<AssetId>,
+    ) -> Result<AssetId> {
+        let id = reuse.unwrap_or_default();
+        let mut sidecar = AssetSidecar::new(id, kind, content_hash);
+        sidecar.source = source;
+        sidecar.import = import;
+        if let Some(existing) = reuse.and_then(|r| self.db.get(r)) {
+            sidecar.tags = existing.sidecar.tags.clone();
+        }
+        if let Err(e) = save_sidecar_atomically(&sidecar, &path) {
+            if reuse.is_none() {
+                let _ = std::fs::remove_file(&path);
+            }
+            return Err(e);
+        }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Asset")
+            .to_string();
+        self.db.insert(AssetEntry {
+            sidecar,
+            path,
+            name,
+        });
+        self.bump();
+        Ok(id)
+    }
+
+    /// A collision-free payload path under `dir` — the same naming the generic
+    /// writer uses, exposed for [`register_written_asset`](Self::register_written_asset).
+    pub fn unique_asset_path(&self, dir: &Path, name: &str, ext: &str) -> Result<PathBuf> {
+        std::fs::create_dir_all(dir)?;
+        unique_path(dir, name, ext)
     }
 
     // ── mutation ──────────────────────────────────────────────────────────
@@ -290,6 +363,33 @@ impl AssetProject {
     }
 }
 
+/// Write `sidecar` beside `payload_path` **atomically** (temp file + rename),
+/// the same discipline `inf_terrain::write_terrain_asset` and
+/// `PackWriter::write_to_file` use.
+///
+/// A plain `fs::write` can leave a truncated TOML behind on a full disk or a
+/// crash, and truncating an existing sidecar is worse than not writing one: the
+/// asset's GUID would be lost while its payload stayed. Renaming over the target
+/// makes the sidecar either wholly old or wholly new. A failed attempt cleans up
+/// its own temp file rather than leaving litter in the content root.
+fn save_sidecar_atomically(sidecar: &AssetSidecar, payload_path: &Path) -> Result<()> {
+    if let Some(parent) = payload_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let final_path = inf_asset::sidecar_path(payload_path);
+    let tmp = {
+        let mut s = final_path.as_os_str().to_os_string();
+        s.push(format!(".{}.tmp", std::process::id()));
+        PathBuf::from(s)
+    };
+    let text = sidecar.to_toml()?;
+    if let Err(e) = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &final_path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
 /// A collision-free payload path: `<dir>/<name>.<ext>`, `_1`, `_2`, …
 fn unique_path(dir: &Path, name: &str, ext: &str) -> Result<PathBuf> {
     let safe = sanitize(name);
@@ -372,6 +472,99 @@ mod tests {
         assert_eq!(e.name, "New");
         assert!(e.path.exists());
         assert!(inf_asset::sidecar_path(&e.path).exists());
+    }
+
+    /// A payload with no sidecar is worse than no asset at all: the content
+    /// watcher later promotes it under a **freshly minted** GUID, so any level
+    /// that referenced the intended one dangles silently. The pair must therefore
+    /// be all-or-nothing (P16.4a audit).
+    #[test]
+    fn a_failed_sidecar_write_leaves_no_orphan_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut proj = AssetProject::open(dir.path()).unwrap();
+        let content = proj.content_dir("Terrain").unwrap();
+        let payload = content.join("World.inf_terrain");
+        std::fs::write(&payload, b"payload bytes").unwrap();
+
+        // Make the sidecar write fail by parking a DIRECTORY where its file goes.
+        let side = inf_asset::sidecar_path(&payload);
+        std::fs::create_dir_all(&side).unwrap();
+
+        let err = proj
+            .register_written_asset(
+                payload.clone(),
+                AssetKind::Terrain,
+                ContentHash::of(b"payload bytes"),
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(!err.to_string().is_empty());
+        assert!(
+            !payload.exists(),
+            "the payload survived a failed sidecar write — it would be adopted \
+             under a random GUID by the watcher"
+        );
+        assert!(proj.db().is_empty(), "nothing may be registered");
+        // No temp litter beside the asset either.
+        let strays: Vec<_> = std::fs::read_dir(&content)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "left temp files: {strays:?}");
+    }
+
+    /// The sidecar goes down temp + rename, so a **reimport** whose sidecar write
+    /// fails keeps the previous, still-valid sidecar rather than a truncated one —
+    /// the GUID is never lost.
+    #[test]
+    fn a_failed_reimport_sidecar_write_keeps_the_previous_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut proj = AssetProject::open(dir.path()).unwrap();
+        let content = proj.content_dir("Terrain").unwrap();
+        let payload = content.join("World.inf_terrain");
+        std::fs::write(&payload, b"v1").unwrap();
+        let id = proj
+            .register_written_asset(
+                payload.clone(),
+                AssetKind::Terrain,
+                ContentHash::of(b"v1"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let side = inf_asset::sidecar_path(&payload);
+        let original = std::fs::read_to_string(&side).unwrap();
+
+        // Now make the *rename* fail by replacing the sidecar with a directory.
+        std::fs::remove_file(&side).unwrap();
+        std::fs::create_dir_all(&side).unwrap();
+        std::fs::write(&payload, b"v2").unwrap();
+        assert!(proj
+            .register_written_asset(
+                payload.clone(),
+                AssetKind::Terrain,
+                ContentHash::of(b"v2"),
+                None,
+                None,
+                Some(id),
+            )
+            .is_err());
+        // A reimport keeps its payload (the old bytes are already gone) and the
+        // database still knows the asset under its original GUID.
+        assert!(payload.exists());
+        assert!(proj.db().contains(id));
+        // Put the real sidecar back and confirm it was never truncated.
+        std::fs::remove_dir(&side).unwrap();
+        std::fs::write(&side, &original).unwrap();
+        assert_eq!(
+            inf_asset::AssetSidecar::load(&payload).unwrap().guid,
+            id,
+            "the GUID must survive a failed sidecar write"
+        );
     }
 
     #[test]

@@ -29,6 +29,16 @@ impl ProjectState {
             .ok()
             .and_then(|guard| guard.as_ref().map(|p| p.root.clone()))
     }
+
+    /// The open project's `Content` directory. Pushed to the viewport's terrain
+    /// streamer on project open **and** on viewport attach, since either can
+    /// happen first (P16.4a).
+    pub fn current_content_root(&self) -> Option<PathBuf> {
+        self.current
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|p| p.content_root()))
+    }
 }
 
 fn info(p: &Project) -> ProjectInfoDto {
@@ -47,16 +57,31 @@ fn apply_open(
     state: &ProjectState,
     project: Project,
 ) -> Result<ProjectInfoDto, String> {
-    // Re-root the asset database to this project's content dir.
-    if let Some(assets) = app.try_state::<AssetState>() {
-        assets.reroot(app, project.content_root());
-    }
-    // Record in the recent list.
+    let dto = info(&project);
+    let content_root = project.content_root();
+
+    // PUBLISH FIRST. `viewport_attach` reads `state.current` to catch up on a
+    // project that opened before it existed; if the push below happened while
+    // `current` was still `None`, an attach landing in that window would read
+    // `None`, and the push it raced would already be gone — a terrain that never
+    // streams until the next project switch. Setting `current` first makes the
+    // two paths idempotent instead of ordered.
     if let Ok(cfg) = app.path().app_config_dir() {
         let _ = RecentProjects::push(&cfg, &project);
     }
-    let dto = info(&project);
     *state.current.lock().map_err(|e| e.to_string())? = Some(project);
+
+    // Re-root the asset database to this project's content dir.
+    if let Some(assets) = app.try_state::<AssetState>() {
+        assets.reroot(app, content_root.clone());
+    }
+    // …and point the viewport's terrain streamer at the same directory, so a
+    // `Terrain.asset` in the level resolves to a loose `.inf_terrain` and starts
+    // paging (P16.4a). Switching projects re-points it, which drops every live
+    // stream — the previous project's pages can never be served here.
+    if let Some(viewport) = app.try_state::<super::ViewportState>() {
+        viewport.set_terrain_content_root(Some(content_root));
+    }
     let _ = app.emit("project://changed", dto.clone());
     tracing::info!("project opened: {}", dto.name);
     Ok(dto)
@@ -130,7 +155,11 @@ pub async fn project_open(
 /// the cleared state from the command result; no event is emitted (the
 /// `project://changed` channel carries an opened project, never a close).
 #[tauri::command]
-pub async fn project_close(state: State<'_, ProjectState>) -> Result<(), String> {
+pub async fn project_close(app: AppHandle, state: State<'_, ProjectState>) -> Result<(), String> {
     *state.current.lock().map_err(|e| e.to_string())? = None;
+    // Stop streaming the closed project's terrain pages.
+    if let Some(viewport) = app.try_state::<super::ViewportState>() {
+        viewport.set_terrain_content_root(None);
+    }
     Ok(())
 }

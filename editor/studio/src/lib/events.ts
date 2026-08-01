@@ -18,6 +18,7 @@ import type { LogLine } from "../bindings/LogLine";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
 import type { SceneDelta } from "../bindings/SceneDelta";
 import type { ViewportKey } from "../bindings/ViewportKey";
+import type { ViewportToolStatusDto } from "../bindings/ViewportToolStatusDto";
 
 export type { UnlistenFn };
 
@@ -63,6 +64,13 @@ export interface EventPayloads {
   "viewport://key": ViewportKey;
   /** Transform-gizmo mode echoed from the viewport (W/E/R or IPC) → toolbar (Wave 2). */
   "viewport://gizmo": GizmoModeDto;
+  /**
+   * A viewport tool raised a status message and/or the projected terrain's
+   * streamed state changed (P16.4a): the message goes to the status bar, the
+   * flag greys out sculpt/paint (a streamed terrain has no editable working set
+   * in the document yet).
+   */
+  "viewport://tool-status": ViewportToolStatusDto;
   /** Incremental world change after any mutation (P3.2). */
   "world://delta": SceneDelta;
   /** Content changed (import/delete/rename/watcher) → re-fetch snapshot (P4.4). */

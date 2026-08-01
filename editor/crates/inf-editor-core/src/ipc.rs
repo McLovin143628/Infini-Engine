@@ -367,13 +367,149 @@ pub struct ImportEventDto {
     #[ts(type = "number")]
     pub job: u64,
     pub source: String,
-    /// "started" | "finished" | "failed".
+    /// "started" | "progress" | "finished" | "failed".
     pub phase: String,
     /// GUIDs produced (on "finished").
     pub produced: Vec<String>,
     pub primary: Option<String>,
     pub cached: bool,
     pub error: Option<String>,
+    /// Units of work completed / total (on "progress"; terrain imports report
+    /// tiles written across every LOD level). `null` for jobs with no progress
+    /// model.
+    #[ts(type = "number | null")]
+    pub done: Option<u64>,
+    #[ts(type = "number | null")]
+    pub total: Option<u64>,
+    /// A short stage label on "progress" ("tiles", "lod2", …).
+    pub stage: Option<String>,
+}
+
+/// The viewport's tool-state notice (`viewport://tool-status`, P16.4).
+///
+/// One channel for both halves of the B2 status seam, because they change for
+/// the same reason and land in the same corner of the UI: `message` is the
+/// one-shot rejection a tool raised (drained from the host's `take_tool_status`)
+/// and goes to the status bar; `terrain_streamed` is the standing fact that the
+/// projected terrain pages from a `.inf_terrain` and therefore cannot be
+/// sculpted yet, and disables the brush tools in the viewport toolbar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ViewportToolStatusDto {
+    pub message: Option<String>,
+    pub terrain_streamed: bool,
+}
+
+// ── Terrain import wizard (P16.4) ────────────────────────────────────────
+
+/// What `terrain_probe_heightmap` read out of a heightmap's **header** — no
+/// pixels were decoded, so this is instant even for a 16 k × 16 k source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct HeightmapProbeDto {
+    /// Absolute source path (echoed so the wizard can keep one object).
+    pub path: String,
+    /// "PNG" | "EXR".
+    pub format: String,
+    pub width: u32,
+    pub height: u32,
+    /// Bits per sample of the source.
+    pub bit_depth: u32,
+    /// `true` when the source carries floats — i.e. when float-metres mode is
+    /// offered.
+    pub float_samples: bool,
+    /// The channel the importer will read ("gray", "Y", …).
+    pub channel: String,
+    /// The settings the wizard opens with for this source.
+    pub suggested: TerrainImportSettingsDto,
+}
+
+/// The Terrain Import wizard's settings block. Mirrors
+/// `inf_editor_core::assets::TerrainImportSettings` and is persisted verbatim
+/// into the asset's sidecar, so a reimport re-runs these exact choices.
+///
+/// **Metric**: `meters_per_sample`, `min_height` and `max_height` are SI metres
+/// (units doctrine). The wizard's kilometre readback is a display division by
+/// 1000 and never a stored scale factor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct TerrainImportSettingsDto {
+    pub tile_resolution: u32,
+    pub meters_per_sample: f64,
+    pub min_height: f64,
+    pub max_height: f64,
+    /// Take the decoded float as absolute metres (float sources only).
+    pub float_meters: bool,
+    /// Straddle the world origin instead of growing into +X/+Z.
+    pub center: bool,
+    pub max_pyramid_levels: u32,
+    #[ts(type = "number")]
+    pub min_pyramid_tiles: usize,
+}
+
+/// The world a given source + settings pair will produce, recomputed on every
+/// wizard edit so the extent readback is never stale.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct TerrainImportPlanDto {
+    /// Real-world span in **metres**.
+    pub extent_x_m: f64,
+    pub extent_z_m: f64,
+    /// Level-0 tiles across / down.
+    pub tiles_x: u32,
+    pub tiles_z: u32,
+    /// Level-0 tiles in total.
+    #[ts(type = "number")]
+    pub tiles: u64,
+}
+
+impl TerrainImportSettingsDto {
+    /// Convert to the Ring-1 settings the import job (and the sidecar) use.
+    pub fn to_settings(&self) -> crate::assets::TerrainImportSettings {
+        crate::assets::TerrainImportSettings {
+            tile_resolution: self.tile_resolution,
+            meters_per_sample: self.meters_per_sample,
+            min_height: self.min_height,
+            max_height: self.max_height,
+            float_meters: self.float_meters,
+            center: self.center,
+            max_pyramid_levels: self.max_pyramid_levels,
+            min_pyramid_tiles: self.min_pyramid_tiles,
+        }
+    }
+
+    /// The DTO form of a settings block.
+    pub fn from_settings(s: &crate::assets::TerrainImportSettings) -> Self {
+        Self {
+            tile_resolution: s.tile_resolution,
+            meters_per_sample: s.meters_per_sample,
+            min_height: s.min_height,
+            max_height: s.max_height,
+            float_meters: s.float_meters,
+            center: s.center,
+            max_pyramid_levels: s.max_pyramid_levels,
+            min_pyramid_tiles: s.min_pyramid_tiles,
+        }
+    }
+}
+
+/// The finished state of a terrain import — what the wizard's "Add to Scene"
+/// step acts on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct TerrainImportResultDto {
+    /// The `.inf_terrain` asset GUID.
+    pub asset: String,
+    /// Display name (file stem of the produced asset).
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub tiles_x: u32,
+    pub tiles_z: u32,
+    #[ts(type = "number")]
+    pub tiles: u64,
+    pub lod_levels: u32,
+    /// Real-world span in metres.
+    pub extent_x_m: f64,
+    pub extent_z_m: f64,
+    /// Payload size on disk, in bytes.
+    #[ts(type = "number")]
+    pub bytes: u64,
 }
 
 /// The `assets://changed` event payload — a version bump prompting a re-fetch.

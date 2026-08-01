@@ -169,7 +169,7 @@ export default function ContentDrawer() {
     return [...set].sort();
   }, [assetsById]);
 
-  const activeImports = Object.values(imports).filter((i) => i.phase === "started");
+  const activeImports = Object.values(imports).filter((i) => i.phase === "started" || i.phase === "progress");
 
   return (
     <div

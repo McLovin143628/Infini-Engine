@@ -65,6 +65,7 @@ export const MENU_BAR: TopMenu[] = [
       act("file.saveAll", "Save All", "Ctrl+Shift+S"),
       sep,
       act("file.importIntoLevel", "Import Into Level…"),
+      act("file.importTerrain", "Import Terrain…"),
       act("file.exportAll", "Export All…"),
       act("file.exportSelected", "Export Selected…"),
       sep,

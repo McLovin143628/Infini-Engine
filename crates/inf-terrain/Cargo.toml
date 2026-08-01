@@ -22,10 +22,20 @@ inf-core = { workspace = true }
 # bincode a tile writes into an `.inf_lvl`, so the two persistence paths agree
 # byte-for-byte. Promoted from dev-dependencies at P16.3.
 bincode = { workspace = true }
-# PNG16 + EXR heightmap decode/encode. The workspace `image` pin already enables
-# the `png` and `exr` features (see [workspace.dependencies]); a standalone `exr`
-# pin is unnecessary — `image` handles both formats through one DynamicImage path.
+# PNG16 heightmap ENCODE (the export path) still goes through `image`'s one-shot
+# DynamicImage writer.
 image = { workspace = true }
+# P16.4 chunked import: the DECODE path is row-at-a-time, so it reaches for the
+# codecs directly rather than `image`'s whole-image `DynamicImage`.
+#   png  — `Reader::next_row`, one row per call (already in the tree; the
+#          workspace pin is the same crate `image` uses one major behind).
+#   exr  — `block::read(..).decompress_sequential(..)`, one decompressed scanline
+#          block at a time. Already in the tree via `image`'s `exr` feature, so
+#          this pins no new crate; BSD-3-Clause, on the deny allow-list.
+#   half — the `f16` sample type an EXR line may carry (in-tree via exr).
+png = { workspace = true }
+exr = { workspace = true }
+half = { workspace = true }
 thiserror = { workspace = true }
 # Streaming diagnostics: a page that fails to decode is warned about, never
 # silently turned into geometry.

@@ -44,6 +44,28 @@ impl ViewportState {
         }
     }
 
+    /// Point the viewport's terrain streamer at a project's content root (or
+    /// `None` to disable it) — pushed from the `project://changed` flow so a
+    /// `Terrain.asset` authored by the import wizard resolves to a loose
+    /// `.inf_terrain` and starts paging (P16.4a, the B2 seam).
+    pub fn set_terrain_content_root(&self, root: Option<std::path::PathBuf>) {
+        if let Ok(guard) = self.0.lock() {
+            if let Some(handle) = guard.as_ref() {
+                handle.set_terrain_content_root(root);
+            }
+        }
+    }
+
+    /// Rebuild the viewport's loose `.inf_terrain` index in place, keeping live
+    /// streams — pushed when a terrain import finishes (P16.4a).
+    pub fn refresh_terrain_index(&self) {
+        if let Ok(guard) = self.0.lock() {
+            if let Some(handle) = guard.as_ref() {
+                handle.refresh_terrain_index();
+            }
+        }
+    }
+
     /// Release an embedded foreign window and restore the native viewport child.
     pub fn release_foreign(&self) {
         if let Ok(guard) = self.0.lock() {
@@ -66,7 +88,18 @@ pub async fn viewport_attach(
         return Ok(()); // idempotent: React StrictMode double-mounts
     }
 
-    *guard = Some(attach_native(&window, scene.doc.clone())?);
+    let handle = attach_native(&window, scene.doc.clone())?;
+    // The project may already be open (the viewport attaches when the workspace
+    // mounts, which can be either side of a project open), so push the content
+    // root now as well as from `project://changed` — P16.4a.
+    if let Some(root) = window
+        .app_handle()
+        .try_state::<super::ProjectState>()
+        .and_then(|p| p.current_content_root())
+    {
+        handle.set_terrain_content_root(Some(root));
+    }
+    *guard = Some(handle);
     tracing::info!("viewport attached");
     Ok(())
 }
@@ -93,6 +126,14 @@ fn event_sink(app: tauri::AppHandle) -> inf_viewport::ViewportEventSink {
         ViewportEvent::GizmoModeChanged(mode) => {
             if let Err(e) = app.emit("viewport://gizmo", mode) {
                 tracing::warn!("viewport://gizmo emit failed: {e}");
+            }
+        }
+        // A tool rejection and/or a change in whether the projected terrain
+        // streams (P16.4a). The shell shows the message in the status bar and
+        // greys the sculpt/paint tools out while the terrain is streamed.
+        ViewportEvent::ToolStatus(status) => {
+            if let Err(e) = app.emit("viewport://tool-status", status) {
+                tracing::warn!("viewport://tool-status emit failed: {e}");
             }
         }
     })

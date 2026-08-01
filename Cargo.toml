@@ -164,6 +164,19 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 # CSV/JSON import for .inf_table data assets (P4.5).
 csv = "1"
+# ── chunked heightmap decode (Phase 16.4) ───────────────────────────────────
+# The huge-heightmap importer reads ROW BANDS, not whole images, so it names the
+# two codecs directly instead of going through `image`'s DynamicImage:
+#   exr  — OpenEXR: `block::read(..).decompress_sequential(..)` hands back one
+#          decompressed scanline block at a time, which is the chunked seam a
+#          16k² float-metre DEM needs. Already in the tree via `image`'s `exr`
+#          feature (same 1.74 resolution), so this pins no new crate.
+#          BSD-3-Clause — on the deny allow-list.
+#   half — the `f16` sample type an EXR channel may use (in-tree via exr).
+# (`png` is already pinned below beside the other test-time crates and is used by
+# inf-terrain for `Reader::next_row` row-band decoding.)
+exr = "1.74"
+half = "2"
 # ── IDE: embedded terminal (Phase 5.3) ──
 # Cross-platform pseudo-terminal (ConPTY on Windows) for the terminal panel.
 portable-pty = "0.8"

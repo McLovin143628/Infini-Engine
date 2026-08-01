@@ -20,6 +20,8 @@ interface ShellState {
   packageDialogOpen: boolean;
   /** Terrain erosion bake dialog open (Sculpt toolbar ▸ Erode…, P10.3b). */
   erodeOpen: boolean;
+  /** Terrain Import wizard open (File ▸ Import Terrain…, P16.4a). */
+  terrainImportOpen: boolean;
   /** Content Drawer slide-up (P1.4.3). */
   drawerOpen: boolean;
   /** Command palette overlay (P1.4.5). */
@@ -31,6 +33,7 @@ interface ShellState {
   setSortingLayersOpen: (open: boolean) => void;
   setPackageDialogOpen: (open: boolean) => void;
   setErodeOpen: (open: boolean) => void;
+  setTerrainImportOpen: (open: boolean) => void;
   setDrawerOpen: (open: boolean) => void;
   toggleDrawer: () => void;
   setPaletteOpen: (open: boolean) => void;
@@ -44,6 +47,7 @@ export const useShellStore = create<ShellState>((set) => ({
   sortingLayersOpen: false,
   packageDialogOpen: false,
   erodeOpen: false,
+  terrainImportOpen: false,
   drawerOpen: false,
   paletteOpen: false,
   pushStatus: (message, ttlMs = 4000) => {
@@ -60,6 +64,7 @@ export const useShellStore = create<ShellState>((set) => ({
   setSortingLayersOpen: (sortingLayersOpen) => set({ sortingLayersOpen }),
   setPackageDialogOpen: (packageDialogOpen) => set({ packageDialogOpen }),
   setErodeOpen: (erodeOpen) => set({ erodeOpen }),
+  setTerrainImportOpen: (terrainImportOpen) => set({ terrainImportOpen }),
   setDrawerOpen: (drawerOpen) => set({ drawerOpen }),
   toggleDrawer: () => set((s) => ({ drawerOpen: !s.drawerOpen })),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),

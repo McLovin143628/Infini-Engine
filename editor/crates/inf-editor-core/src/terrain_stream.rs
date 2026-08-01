@@ -78,8 +78,13 @@ pub struct EditorTerrainStreams {
     /// Where loose `.inf_terrain` assets are looked up. `None` (the default)
     /// disables streaming entirely — an inline terrain is unaffected either way.
     content_root: Option<PathBuf>,
-    /// Asset GUID → loose file, rescanned when the root changes.
+    /// Asset GUID → loose file, rebuilt when the root changes and, lazily, when
+    /// a lookup misses (see [`EditorTerrainStreams::resolve`]).
     index: HashMap<Uuid, PathBuf>,
+    /// Asset GUIDs a rescan has already failed to find, so a genuinely dangling
+    /// reference costs **one** directory walk rather than one per frame. Cleared
+    /// whenever the index is rebuilt.
+    rescanned_for: std::collections::HashSet<Uuid>,
     /// Entity GUID → its stream.
     streams: HashMap<Uuid, EditorStream>,
     stats: TerrainStreamStats,
@@ -106,7 +111,29 @@ impl EditorTerrainStreams {
             Some(dir) => terrain_paths_by_guid(dir),
             None => HashMap::new(),
         };
+        self.rescanned_for.clear();
         self.content_root = root;
+    }
+
+    /// Rebuild the loose-asset index **without** disturbing live streams.
+    ///
+    /// The index is a snapshot taken when the content root was set, so an asset
+    /// written *after* it — exactly what the P16.4 import wizard does — would
+    /// otherwise never be found. Ring 2 calls this when a terrain import
+    /// finishes. Unlike [`set_content_root`](Self::set_content_root) it keeps
+    /// every resident page, so refreshing after an import does not re-page a
+    /// terrain the user is already flying over.
+    pub fn refresh_index(&mut self) {
+        let Some(dir) = self.content_root.clone() else {
+            return;
+        };
+        self.index = terrain_paths_by_guid(&dir);
+        self.rescanned_for.clear();
+    }
+
+    /// Number of indexed loose `.inf_terrain` assets.
+    pub fn index_len(&self) -> usize {
+        self.index.len()
     }
 
     /// The active content root.
@@ -156,6 +183,41 @@ impl EditorTerrainStreams {
         self.streams.get(&entity).map(|s| s.streamer.cut())
     }
 
+    /// Look `asset` up in the loose-file index, **rescanning once** if it misses.
+    ///
+    /// The index is a snapshot of the content root taken when the root was set.
+    /// An asset written after that — a terrain the import wizard just produced —
+    /// is therefore absent from it, and without this the entity the wizard spawns
+    /// draws nothing until the project is reopened. A miss triggers **one** rescan
+    /// per asset GUID (`rescanned_for`), so a reference that is genuinely dangling
+    /// costs a single directory walk instead of one every frame.
+    fn resolve(&mut self, asset: Uuid, entity: Uuid) -> Option<PathBuf> {
+        if let Some(path) = self.index.get(&asset) {
+            return Some(path.clone());
+        }
+        let root = self.content_root.clone()?;
+        if !self.rescanned_for.insert(asset) {
+            return None; // already looked for this one, still absent
+        }
+        self.index = terrain_paths_by_guid(&root);
+        match self.index.get(&asset) {
+            Some(path) => {
+                tracing::info!(
+                    "inf-editor-core: terrain asset {asset} appeared after the index was built \
+                     — rescanned the content root"
+                );
+                Some(path.clone())
+            }
+            None => {
+                tracing::warn!(
+                    "inf-viewport: terrain {entity} references .inf_terrain {asset}, which is \
+                     not in the content root — drawing its inline data"
+                );
+                None
+            }
+        }
+    }
+
     /// Ensure `entity`'s stream exists and is current, returning whether it
     /// streams (i.e. whether the viewport should draw the streamer's working set
     /// instead of the component's).
@@ -182,13 +244,7 @@ impl EditorTerrainStreams {
             }
             self.streams.remove(&entity); // the ref was repointed
         }
-        let Some(path) = self.index.get(&asset).cloned() else {
-            if self.content_root.is_some() {
-                tracing::warn!(
-                    "inf-viewport: terrain {entity} references .inf_terrain {asset}, which is \
-                     not in the content root — drawing its inline data"
-                );
-            }
+        let Some(path) = self.resolve(asset, entity) else {
             return false;
         };
         let store = match inf_terrain::open_file_tile_store(&path) {
@@ -301,21 +357,23 @@ fn lightweight_component(terrain: &Terrain) -> Terrain {
     }
 }
 
-/// Index every loose `.inf_terrain` in `dir` (non-recursive) by its asset GUID,
-/// read from the sibling inf_asset `.toml` sidecar.
+/// Index every loose `.inf_terrain` **under** `dir` by its asset GUID, read from
+/// the sibling inf_asset `.toml` sidecar.
 ///
-/// The editor twin of `inf_player::level::terrain_paths_by_guid_from_dir`;
-/// deterministic (path-sorted), and files without a readable sidecar are skipped.
+/// **Recursive**, unlike its player counterpart
+/// (`inf_player::level::terrain_paths_by_guid_from_dir`), and deliberately so:
+/// the player's scans a single sample-level *directory*, while this one scans a
+/// whole project **content root**, which has folders — the P16.4 import wizard
+/// writes to `<Content>/Terrain/`. Flat scanning would leave a freshly imported
+/// terrain unstreamable, which is the entire point of the import.
+///
+/// Deterministic (each directory's entries are path-sorted before descending),
+/// files without a readable sidecar are skipped, and the editor's own
+/// dot-directories (`.inf` import cache, `.infinity` settings) are not walked.
 pub fn terrain_paths_by_guid(dir: &Path) -> HashMap<Uuid, PathBuf> {
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("inf_terrain"))
-            .collect(),
-        Err(_) => return HashMap::new(),
-    };
-    files.sort();
     let mut out = HashMap::new();
+    let mut files = Vec::new();
+    collect_terrain_files(dir, 0, &mut files);
     for p in files {
         match inf_asset::AssetSidecar::load(&p) {
             Ok(side) => {
@@ -328,6 +386,34 @@ pub fn terrain_paths_by_guid(dir: &Path) -> HashMap<Uuid, PathBuf> {
         }
     }
     out
+}
+
+/// Depth cap for [`terrain_paths_by_guid`]'s walk — deep enough for any content
+/// layout, shallow enough that a symlink loop cannot hang project open.
+const MAX_CONTENT_DEPTH: u32 = 16;
+
+fn collect_terrain_files(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
+    if depth > MAX_CONTENT_DEPTH {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            let hidden = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.starts_with('.'));
+            if !hidden {
+                collect_terrain_files(&path, depth + 1, out);
+            }
+        } else if path.extension().and_then(|s| s.to_str()) == Some("inf_terrain") {
+            out.push(path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -528,5 +614,141 @@ mod tests {
         let empty = tempfile::tempdir().unwrap();
         assert!(terrain_paths_by_guid(empty.path()).is_empty());
         assert!(terrain_paths_by_guid(Path::new("no/such/dir")).is_empty());
+    }
+
+    /// The import wizard writes into `<Content>/Terrain/`, so a flat scan of the
+    /// content root would leave a freshly imported terrain unstreamable — the
+    /// one thing the whole import exists to avoid (P16.4a).
+    #[test]
+    fn the_index_finds_terrain_in_content_subfolders() {
+        let root = tempfile::tempdir().unwrap();
+        write_streamed_terrain_asset(&root.path().join("Terrain")).unwrap();
+        let index = terrain_paths_by_guid(root.path());
+        assert_eq!(index.len(), 1, "a subfolder terrain must be indexed");
+        let path = &index[&STREAMED_TERRAIN_ASSET_GUID];
+        assert!(
+            path.ends_with("Terrain/World.inf_terrain")
+                || path.ends_with("Terrain\\World.inf_terrain")
+        );
+
+        // …and the editor's own dot-directories are not walked (an import cache
+        // can hold copies whose sidecars would shadow the real asset).
+        write_streamed_terrain_asset(&root.path().join(".inf/import-cache")).unwrap();
+        assert_eq!(terrain_paths_by_guid(root.path()).len(), 1);
+    }
+
+    /// **The import-then-walk gate (P16.4a audit).** The index is built when the
+    /// content root is set; the wizard writes its asset *after* that. Without
+    /// rescan-on-miss, "Add to Scene" would spawn an entity that draws nothing
+    /// until the project is reopened — the one thing the import exists to avoid.
+    #[test]
+    fn a_terrain_written_after_the_index_still_streams() {
+        let root = tempfile::tempdir().unwrap();
+        let mut s = EditorTerrainStreams::new();
+        // Index the (empty) content root FIRST — this is the stale snapshot.
+        s.set_content_root(Some(root.path().to_path_buf()));
+        assert_eq!(s.index_len(), 0);
+
+        // …then import lands the asset, exactly as the wizard does.
+        write_streamed_terrain_asset(&root.path().join("Terrain")).unwrap();
+
+        let doc = streamed_terrain_scene();
+        let world = doc.world();
+        let e = world.entity_of(STREAMED_TERRAIN_TERRAIN_GUID).unwrap();
+        let terrain = world.world().get::<Terrain>(e).unwrap().clone();
+
+        // No reopen, no `set_content_root`: the miss rescans and finds it.
+        assert!(
+            s.ensure(
+                STREAMED_TERRAIN_TERRAIN_GUID,
+                &terrain,
+                DVec3::ZERO,
+                DVec3::new(64.0, 40.0, 64.0)
+            ),
+            "a terrain written after the index was built must still stream"
+        );
+        assert_eq!(s.index_len(), 1);
+        let data = s.render_data(STREAMED_TERRAIN_TERRAIN_GUID).unwrap();
+        assert!(data.tile_count() + data.coarse_tile_count() > 0);
+    }
+
+    /// …and a reference that really is dangling costs ONE walk, not one a frame.
+    #[test]
+    fn a_dangling_asset_reference_rescans_only_once() {
+        let root = tempfile::tempdir().unwrap();
+        let doc = streamed_terrain_scene();
+        let world = doc.world();
+        let e = world.entity_of(STREAMED_TERRAIN_TERRAIN_GUID).unwrap();
+        let terrain = world.world().get::<Terrain>(e).unwrap().clone();
+
+        let mut s = EditorTerrainStreams::new();
+        s.set_content_root(Some(root.path().to_path_buf()));
+        // First miss rescans (and still finds nothing).
+        assert!(!s.ensure(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &terrain,
+            DVec3::ZERO,
+            DVec3::ZERO
+        ));
+        // Now write it — but the GUID is already on the "looked, absent" list, so
+        // the next `ensure` must NOT walk the directory again…
+        write_streamed_terrain_asset(root.path()).unwrap();
+        assert!(!s.ensure(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &terrain,
+            DVec3::ZERO,
+            DVec3::ZERO
+        ));
+        // …until something explicitly refreshes the index (what Ring 2 does when
+        // an import finishes).
+        s.refresh_index();
+        assert!(s.ensure(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &terrain,
+            DVec3::ZERO,
+            DVec3::ZERO
+        ));
+    }
+
+    /// `refresh_index` keeps live streams (unlike a content-root change), so an
+    /// import never re-pages a terrain the user is already flying over.
+    #[test]
+    fn refreshing_the_index_keeps_live_streams() {
+        let (dir, terrain) = fixture();
+        let mut s = EditorTerrainStreams::new();
+        s.set_content_root(Some(dir.path().to_path_buf()));
+        s.ensure(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &terrain,
+            DVec3::ZERO,
+            DVec3::new(64.0, 40.0, 64.0),
+        );
+        assert_eq!(s.len(), 1);
+        s.refresh_index();
+        assert_eq!(s.len(), 1, "refresh_index must not drop live streams");
+        assert!(s.is_streamed(STREAMED_TERRAIN_TERRAIN_GUID));
+    }
+
+    /// A terrain streamed out of a content SUBFOLDER pages exactly like one in
+    /// the root — the end of the import wizard's "walk it immediately" path.
+    #[test]
+    fn a_terrain_in_a_subfolder_streams() {
+        let root = tempfile::tempdir().unwrap();
+        write_streamed_terrain_asset(&root.path().join("Terrain")).unwrap();
+        let doc = streamed_terrain_scene();
+        let world = doc.world();
+        let e = world.entity_of(STREAMED_TERRAIN_TERRAIN_GUID).unwrap();
+        let terrain = world.world().get::<Terrain>(e).unwrap().clone();
+
+        let mut s = EditorTerrainStreams::new();
+        s.set_content_root(Some(root.path().to_path_buf()));
+        assert!(s.ensure(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &terrain,
+            DVec3::ZERO,
+            DVec3::new(64.0, 40.0, 64.0)
+        ));
+        let data = s.render_data(STREAMED_TERRAIN_TERRAIN_GUID).unwrap();
+        assert!(data.tile_count() + data.coarse_tile_count() > 0);
     }
 }

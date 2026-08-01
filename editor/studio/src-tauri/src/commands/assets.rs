@@ -10,9 +10,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use inf_asset::{AssetChange, AssetId, AssetKind, AssetWatcher};
+use inf_asset::{AssetId, AssetKind, AssetWatcher};
 use inf_editor_core::assets::{
-    data, material_instance, snapshot, sprite_sheet, AssetProject, ImportProgress, ImportQueue,
+    data, material_instance, queue::tick as asset_tick, snapshot, sprite_sheet, AssetProject,
+    ImportProgress, ImportQueue,
 };
 use inf_editor_core::ipc::{
     AssetChanged, AssetRefDto, AssetSnapshot, DataAssetDto, DeleteResult, ImportEventDto,
@@ -156,6 +157,28 @@ impl AssetState {
             proj.write_asset(&dir, name, &inst, None, inst.dependencies(), None)
                 .map_err(|e| e.to_string())
         })
+    }
+
+    /// Queue a chunked heightmap → `.inf_terrain` import on the shared import
+    /// worker (P16.4a). Returns the job id; progress arrives on `assets://import`
+    /// like every other import.
+    pub fn submit_terrain_import(
+        &self,
+        source: PathBuf,
+        settings: inf_editor_core::assets::TerrainImportSettings,
+        name: Option<String>,
+    ) -> Result<u64, String> {
+        let mut guard = self.inner.lock().map_err(|e| e.to_string())?;
+        let inner = guard.as_mut().ok_or("assets not initialized")?;
+        Ok(inner.queue.submit_terrain(source, settings, name))
+    }
+
+    /// Ask an in-flight cancellable import to stop. `false` for an unknown or
+    /// already-finished job.
+    pub fn cancel_import(&self, job: u64) -> Result<bool, String> {
+        let guard = self.inner.lock().map_err(|e| e.to_string())?;
+        let inner = guard.as_ref().ok_or("assets not initialized")?;
+        Ok(inner.queue.cancel(job))
     }
 
     /// The current content-root directory (where per-project editor metadata —
@@ -316,8 +339,21 @@ fn seed_starter_content(project: &Arc<Mutex<AssetProject>>, root: &std::path::Pa
 }
 
 /// The background tick: drain import progress → `assets://import`, drain the
-/// file watcher → rescan → `assets://changed`.
+/// file watcher → rescan → `assets://changed`, and refresh the viewport's terrain
+/// index when a `.inf_terrain` lands.
+///
+/// The *logic* is [`inf_editor_core::assets::tick`] (Ring 1, unit-tested); this
+/// is only the emit side. Two rules make it safe:
+///
+/// * The tick **never blocks on the project mutex** — `tick` uses `try_lock`, so a
+///   multi-minute terrain import cannot stop the progress events it reports.
+/// * The tick holds `state.inner` only for the (now lock-free) `tick` call, so
+///   `terrain_import_cancel` and every other asset command can still get in while
+///   an import runs.
 fn spawn_tick(app: AppHandle) {
+    // Last version successfully read; reused when a tick loses the try_lock race
+    // (a version one tick stale is harmless — the frontend re-fetches either way).
+    let mut last_version = 0u64;
     std::thread::Builder::new()
         .name("asset-tick".into())
         .spawn(move || loop {
@@ -325,9 +361,7 @@ fn spawn_tick(app: AppHandle) {
             let Some(state) = app.try_state::<AssetState>() else {
                 continue;
             };
-            let mut changed = false;
-            let version;
-            {
+            let outcome = {
                 let mut guard = match state.inner.lock() {
                     Ok(g) => g,
                     Err(_) => continue,
@@ -335,53 +369,66 @@ fn spawn_tick(app: AppHandle) {
                 let Some(inner) = guard.as_mut() else {
                     continue;
                 };
-                for ev in inner.queue.poll() {
-                    if matches!(ev, ImportProgress::Finished { .. }) {
-                        changed = true;
-                    }
-                    let _ = app.emit("assets://import", import_event(&ev));
-                }
-                if let Some(w) = &inner.watcher {
-                    let batch = w.drain();
-                    if !batch.is_empty() {
-                        if let Ok(mut proj) = inner.project.lock() {
-                            for c in batch {
-                                match c {
-                                    AssetChange::Upserted(p) => {
-                                        let _ = proj.db_mut().rescan_path(&p);
-                                    }
-                                    AssetChange::Removed(p) => {
-                                        proj.db_mut().remove_path(&p);
-                                    }
-                                }
-                            }
-                            proj.bump();
-                            changed = true;
-                        }
-                    }
-                }
-                version = match inner.project.lock() {
-                    Ok(proj) => proj.version(),
-                    Err(_) => 0,
-                };
+                let AssetInner {
+                    project,
+                    queue,
+                    watcher,
+                    ..
+                } = inner;
+                asset_tick(queue, project, watcher.as_ref())
+            };
+            for ev in &outcome.events {
+                let _ = app.emit("assets://import", import_event(ev));
             }
-            if changed {
-                let _ = app.emit("assets://changed", AssetChanged { version });
+            if let Some(v) = outcome.version {
+                last_version = v;
+            }
+            if outcome.content_changed {
+                let _ = app.emit(
+                    "assets://changed",
+                    AssetChanged {
+                        version: last_version,
+                    },
+                );
+            }
+            // A terrain landed: the viewport's loose-asset index predates it, so
+            // refresh it in place or the entity the wizard just spawned draws
+            // nothing (P16.4a).
+            if outcome.terrain_changed {
+                if let Some(viewport) = app.try_state::<super::ViewportState>() {
+                    viewport.refresh_terrain_index();
+                }
             }
         })
         .expect("spawn asset tick");
 }
 
 fn import_event(ev: &ImportProgress) -> ImportEventDto {
+    let base = |id: u64, source: &std::path::Path, phase: &str| ImportEventDto {
+        job: id,
+        source: source.to_string_lossy().into_owned(),
+        phase: phase.into(),
+        produced: vec![],
+        primary: None,
+        cached: false,
+        error: None,
+        done: None,
+        total: None,
+        stage: None,
+    };
     match ev {
-        ImportProgress::Started { id, source } => ImportEventDto {
-            job: *id,
-            source: source.to_string_lossy().into_owned(),
-            phase: "started".into(),
-            produced: vec![],
-            primary: None,
-            cached: false,
-            error: None,
+        ImportProgress::Started { id, source } => base(*id, source, "started"),
+        ImportProgress::Progress {
+            id,
+            source,
+            done,
+            total,
+            stage,
+        } => ImportEventDto {
+            done: Some(*done),
+            total: Some(*total),
+            stage: Some(stage.clone()),
+            ..base(*id, source, "progress")
         },
         ImportProgress::Finished {
             id,
@@ -390,22 +437,14 @@ fn import_event(ev: &ImportProgress) -> ImportEventDto {
             primary,
             cached,
         } => ImportEventDto {
-            job: *id,
-            source: source.to_string_lossy().into_owned(),
-            phase: "finished".into(),
             produced: produced.iter().map(|a| a.to_string()).collect(),
             primary: primary.map(|a| a.to_string()),
             cached: *cached,
-            error: None,
+            ..base(*id, source, "finished")
         },
         ImportProgress::Failed { id, source, error } => ImportEventDto {
-            job: *id,
-            source: source.to_string_lossy().into_owned(),
-            phase: "failed".into(),
-            produced: vec![],
-            primary: None,
-            cached: false,
             error: Some(error.clone()),
+            ..base(*id, source, "failed")
         },
     }
 }

@@ -12,6 +12,7 @@ import LayoutDialog from "./shell/LayoutDialog";
 import SortingLayersDialog from "./shell/SortingLayersDialog";
 import PackageDialog from "./shell/PackageDialog";
 import ErodeDialog from "./shell/ErodeDialog";
+import TerrainImportDialog from "./shell/TerrainImportDialog";
 import ContentDrawer from "./shell/ContentDrawer";
 import CommandPalette from "./shell/CommandPalette";
 import StartScreen from "./shell/StartScreen";
@@ -28,6 +29,7 @@ import { listenTo } from "./lib/events";
 import { startLogListener } from "./stores/logStore";
 import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
 import { initAssetSync, registerAssetCommands } from "./stores/assetStore";
+import { initTerrainImportSync } from "./stores/terrainImportStore";
 import { initProjectSync, registerProjectCommands, useProjectStore } from "./stores/projectStore";
 import { useTourStore } from "./stores/tourStore";
 import {
@@ -86,6 +88,18 @@ export default function App() {
     let dispose: (() => void) | undefined;
     let disposed = false;
     initAssetSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
+  }, []);
+
+  // The Terrain Import wizard folds its own job's `assets://import` events
+  // (P16.4a). StrictMode-safe.
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    let disposed = false;
+    initTerrainImportSync().then((fn) => (disposed ? fn() : (dispose = fn)));
     return () => {
       disposed = true;
       dispose?.();
@@ -221,6 +235,7 @@ export default function App() {
       <SortingLayersDialog />
       <PackageDialog />
       <ErodeDialog />
+      <TerrainImportDialog />
       <CommandPalette />
       <StartScreen />
       <FirstRunTour />

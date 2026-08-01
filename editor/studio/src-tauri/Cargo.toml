@@ -36,6 +36,10 @@ inf-packager = { workspace = true }
 inf-graph = { workspace = true }
 inf-ecs = { workspace = true }
 inf-pcg = { workspace = true }
+# The Terrain Import wizard commands read a produced `.inf_terrain` header back
+# (grid config for the spawned component, tile counts for the done state) and
+# name the lattice type the plan command computes with (P16.4a).
+inf-terrain = { workspace = true }
 inf-anim = { workspace = true }
 inf-blueprint = { workspace = true }
 inf-transpile = { workspace = true }

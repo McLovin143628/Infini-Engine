@@ -1167,6 +1167,43 @@ impl SceneDoc {
         guid
     }
 
+    /// Create a **streamed** terrain: a `Terrain` whose heightfield lives in a
+    /// `.inf_terrain` asset rather than in the document (P16.4a).
+    ///
+    /// The component carries the asset's own grid configuration and an **empty**
+    /// `data` — that is the whole point, so a 131 km world costs the level a few
+    /// hundred bytes and the editor streamer pages it from the content root.
+    ///
+    /// The asset is attached **before** the undo record is snapshotted, so redo
+    /// restores a streamed terrain and not the starter sine-hill the plain
+    /// `Add ▸ Terrain` spawns. Returns the new GUID.
+    pub fn edit_create_streamed_terrain(
+        &mut self,
+        name: &str,
+        asset: Uuid,
+        tile_resolution: u32,
+        meters_per_sample: f64,
+    ) -> Uuid {
+        let guid = self.create(SpawnKind::Terrain, name, None);
+        if let Some(entity) = self.world.entity_of(guid) {
+            let mut terrain = Terrain::configured(tile_resolution.max(2), meters_per_sample);
+            terrain.asset = Some(asset);
+            self.world.world_mut().entity_mut(entity).insert(terrain);
+        }
+        let at = self.order.iter().position(|g| *g == guid).unwrap_or(0);
+        if let Some(record) = crate::scene::serialize::record_of(self, guid) {
+            self.history.record(
+                "Create Streamed Terrain",
+                EditCommand::Create {
+                    at,
+                    record: Box::new(record),
+                },
+            );
+        }
+        self.touch();
+        guid
+    }
+
     /// Delete + record for undo (the whole subtree round-trips on undo).
     pub fn edit_delete(&mut self, guids: &[Uuid]) {
         use std::collections::HashSet;

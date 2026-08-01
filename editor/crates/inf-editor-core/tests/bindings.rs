@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use inf_editor_core::ipc::CollisionLayerDto;
+use inf_editor_core::ipc::HeightmapProbeDto;
 use inf_editor_core::ipc::{
     AddableComponentDto, AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot,
     ComponentDto, DataAssetDto, DataFieldDto, DeleteResult, DetailsDto, ErosionParamsDto,
@@ -17,8 +18,9 @@ use inf_editor_core::ipc::{
     PropFieldDto, PropValueDto, RecentProjectDto, SceneDelta, SceneNode, SceneSnapshot,
     SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto,
     SeqKeyDto, SeqTrackDto, SequenceDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind,
-    SpriteGridDto, SpriteRectDto, SpriteSheetDto, TilemapCellDto, TilemapDto, ToolModeDto,
-    ViewModeDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
+    SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainImportPlanDto, TerrainImportResultDto,
+    TerrainImportSettingsDto, TilemapCellDto, TilemapDto, ToolModeDto, ViewModeDto, ViewportDrop,
+    ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -50,6 +52,11 @@ fn export_bindings() {
     AssetRefDto::export_all(&cfg).expect("export AssetRefDto");
     DeleteResult::export_all(&cfg).expect("export DeleteResult");
     ImportEventDto::export_all(&cfg).expect("export ImportEventDto");
+    ViewportToolStatusDto::export_all(&cfg).expect("export ViewportToolStatusDto");
+    HeightmapProbeDto::export_all(&cfg).expect("export HeightmapProbeDto");
+    TerrainImportSettingsDto::export_all(&cfg).expect("export TerrainImportSettingsDto");
+    TerrainImportPlanDto::export_all(&cfg).expect("export TerrainImportPlanDto");
+    TerrainImportResultDto::export_all(&cfg).expect("export TerrainImportResultDto");
     AssetChanged::export_all(&cfg).expect("export AssetChanged");
     DataAssetDto::export_all(&cfg).expect("export DataAssetDto");
     DataFieldDto::export_all(&cfg).expect("export DataFieldDto");

@@ -2105,24 +2105,34 @@ impl EngineHost {
     /// (empty) inline data — so an editor that never calls this behaves exactly as
     /// it did before P16.3b2.
     ///
-    /// **No caller yet, deliberately.** Wiring it means a Ring-2 `project://changed`
-    /// handler pushing the open project's `Content` directory through
-    /// `ViewportHandle`, and Ring 2 is outside this batch's scope. It is also not
-    /// yet *reachable* content: the editor cannot author a `Terrain.asset` until
-    /// the P16.4 import wizard, so the streaming path has nothing to stream in the
-    /// shipping app — which is exactly why "inline terrains: zero behaviour
-    /// change" holds today. The logic itself is exercised by
-    /// `inf_editor_core::terrain_stream`'s tests on all three OSes.
-    #[allow(dead_code)]
+    /// Pushed from Ring 2's `project://changed` flow (P16.4a): the open project's
+    /// `Content` directory, so a `Terrain.asset` authored by the import wizard
+    /// resolves to a loose `.inf_terrain` and starts paging. Before a project is
+    /// open there is no root and nothing streams — an inline terrain is
+    /// unaffected either way. The streaming *policy* is unit-tested on all three
+    /// OSes in `inf_editor_core::terrain_stream`; this is only the call site.
     pub fn set_terrain_content_root(&mut self, root: Option<std::path::PathBuf>) {
         self.terrain_streams.set_content_root(root);
         self.terrain_streamed = false;
         self.synced_version = None; // force a re-projection
     }
 
+    /// Rebuild the loose `.inf_terrain` index **without** dropping live streams.
+    ///
+    /// Pushed from Ring 2 when a terrain import finishes (P16.4a): the index was
+    /// built when the project opened, so a freshly imported asset is not in it and
+    /// the entity the wizard just spawned would draw nothing. Re-pointing the
+    /// content root would also work but re-pages every terrain; this does not.
+    pub fn refresh_terrain_index(&mut self) {
+        self.terrain_streams.refresh_index();
+        self.synced_version = None; // force a re-projection
+    }
+
     /// Whether the projected terrain streams from a `.inf_terrain` asset.
-    /// (Same deferred-caller note as [`set_terrain_content_root`](Self::set_terrain_content_root).)
-    #[allow(dead_code)]
+    ///
+    /// Polled each frame by the platform loop and published on
+    /// `viewport://tool-status`, which is what greys the sculpt/paint tools out
+    /// (they cannot edit a streamed terrain until P16.4b).
     pub fn terrain_is_streamed(&self) -> bool {
         self.terrain_streamed
     }
@@ -2135,11 +2145,11 @@ impl EngineHost {
     /// Take the last tool-rejection message (e.g. a sculpt stroke refused on a
     /// streamed terrain), leaving none.
     ///
-    /// The **status seam**: host-side by design (this batch adds no IPC). A Ring-2
-    /// caller can drain it onto the status bar; until one does, the message is
-    /// already in the Output Log via `tracing` — which is where every other
-    /// host-side diagnostic already surfaces.
-    #[allow(dead_code)]
+    /// The **status seam**: drained once per frame by the platform loop and
+    /// emitted as [`ViewportEvent::ToolStatus`], which Ring 2 forwards on
+    /// `viewport://tool-status` and the shell shows in the status bar. It is also
+    /// still in the Output Log via `tracing`, where every other host-side
+    /// diagnostic surfaces.
     pub fn take_tool_status(&mut self) -> Option<String> {
         self.tool_status.take()
     }

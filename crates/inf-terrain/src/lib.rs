@@ -42,10 +42,11 @@
 
 pub mod asset;
 mod brush;
+pub mod chunked;
 mod data;
 mod delta;
 pub mod erosion;
-mod import;
+pub mod import;
 pub use erosion::{erode, erode_terrain, erode_with, ErosionParams, ErosionStats};
 mod noise;
 pub mod pyramid;
@@ -65,9 +66,15 @@ pub use asset::{
     TerrainAssetView, TileDirEntry, TERRAIN_ASSET_SCHEMA_VERSION, TILE_ALIGN,
 };
 pub use brush::{apply_brush, dab_positions, BrushOp, BrushParams, Falloff, FlattenTarget, Stroke};
+pub use chunked::{
+    import_heightmap, import_heightmap_in, ChunkedImportOptions, ImportProgress, ImportReport,
+};
 pub use data::{TerrainData, DEFAULT_METERS_PER_SAMPLE, DEFAULT_TILE_RESOLUTION};
 pub use delta::{HeightDelta, TilePatch};
-pub use import::{encode_png16, HeightImage, HeightmapImport, TerrainError};
+pub use import::{
+    encode_png16, probe_heightmap, HeightImage, HeightMode, HeightmapFormat, HeightmapGrid,
+    HeightmapImport, HeightmapProbe, TerrainError,
+};
 pub use noise::fbm_signed;
 pub use pyramid::{build_pyramid, PyramidLevel, PyramidOptions};
 pub use raycast::{raycast_terrain, TerrainHit};
@@ -286,6 +293,7 @@ mod tests {
             meters_per_sample: 1.0,
             min_height: 0.0,
             max_height: 65535.0,
+            ..Default::default()
         };
         // A 9×9 grid = 2×2 tiles of resolution 5 (shared edges), exact fit.
         let mut src = TerrainData::new(res, 1.0);
@@ -320,6 +328,7 @@ mod tests {
             meters_per_sample: 10.0,
             min_height: -100.0,
             max_height: 100.0,
+            ..Default::default()
         };
         let t = TerrainData::from_height_image(&png, import).unwrap();
         // Sample (0,0) = 0 → min; (1,0) = 65535 → max.

@@ -27,8 +27,11 @@ export type { AssetDto, AssetFolderDto, CollectionDto };
 export interface ImportJob {
   job: number;
   source: string;
-  phase: "started" | "finished" | "failed";
+  phase: "started" | "progress" | "finished" | "failed";
   error?: string | null;
+  /** Units done / total, on a job that reports progress (terrain, P16.4a). */
+  done?: number | null;
+  total?: number | null;
 }
 
 interface AssetState {
@@ -144,6 +147,8 @@ export const useAssetStore = create<AssetState>((set, get) => ({
           source: e.source,
           phase: e.phase as ImportJob["phase"],
           error: e.error,
+          done: e.done == null ? null : Number(e.done),
+          total: e.total == null ? null : Number(e.total),
         },
       },
     }));

@@ -54,7 +54,11 @@ fn to_view_mode(d: ViewModeDto) -> ViewMode {
 enum Cmd {
     SetRect(ViewportRect),
     SetVisible(bool),
-    Drop { x: f32, y: f32, payload: String },
+    Drop {
+        x: f32,
+        y: f32,
+        payload: String,
+    },
     SetMode(ViewportMode),
     SetSnap2D(Snap2DSettings),
     SetToolMode(ToolMode),
@@ -64,6 +68,10 @@ enum Cmd {
     SetGizmoSpace(GizmoSpace),
     SetSnap3D(SnapSettings),
     SetViewMode(ViewMode),
+    /// Point terrain streaming at a project's content root (P16.4a).
+    SetTerrainContentRoot(Option<std::path::PathBuf>),
+    /// Rebuild the loose `.inf_terrain` index in place (a terrain import landed).
+    RefreshTerrainIndex,
     Destroy,
 }
 
@@ -144,6 +152,19 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::SetViewMode(to_view_mode(mode)));
     }
 
+    /// Point terrain streaming at a project's content root (P16.4a). Rescans the
+    /// loose `.inf_terrain` index and drops every live stream, so a project
+    /// switch can never serve the previous project's pages.
+    pub fn set_terrain_content_root(&self, root: Option<std::path::PathBuf>) {
+        let _ = self.tx.send(Cmd::SetTerrainContentRoot(root));
+    }
+
+    /// Rebuild the loose `.inf_terrain` index without dropping live streams
+    /// (P16.4a).
+    pub fn refresh_terrain_index(&self) {
+        let _ = self.tx.send(Cmd::RefreshTerrainIndex);
+    }
+
     /// Adopt a foreign PIE player window (no-op on macOS: cross-process view
     /// adoption is unsupported, so PIE uses "Play in New Window" — see the
     /// Spike D memo). Kept for a uniform `ViewportHandle` surface.
@@ -197,8 +218,10 @@ pub fn spawn(ns_view: isize, sink: ViewportEventSink, scene: SharedScene) -> Vie
     };
 
     // macOS input (flycam/orbit + key forwarding) isn't wired yet — the camera
-    // holds its default pose, so there are no events to surface. Kept in the
-    // signature for parity with the Windows host; the hardware pass wires it.
+    // holds its default pose, so there are no events to surface. That also means
+    // no sculpt/paint stroke can be attempted here, so the P16.4a tool-status
+    // drain (`take_tool_status` / `terrain_is_streamed`) has nothing to report
+    // either; the hardware pass wires the sink and both together.
     let _ = sink;
 
     std::thread::Builder::new()
@@ -277,6 +300,8 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedSce
                 Ok(Cmd::SetGizmoSpace(s)) => host.set_gizmo_space(s),
                 Ok(Cmd::SetSnap3D(s)) => host.set_snap_3d(s),
                 Ok(Cmd::SetViewMode(m)) => host.set_view_mode(m),
+                Ok(Cmd::SetTerrainContentRoot(root)) => host.set_terrain_content_root(root),
+                Ok(Cmd::RefreshTerrainIndex) => host.refresh_terrain_index(),
                 Ok(Cmd::Destroy) | Err(TryRecvError::Disconnected) => break 'outer,
                 Err(TryRecvError::Empty) => break,
             }

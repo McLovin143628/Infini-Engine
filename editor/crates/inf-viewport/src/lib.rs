@@ -60,6 +60,12 @@ pub enum ViewportEvent {
     /// stays free of the platform-gated `inf_render::GizmoMode` (Linux builds
     /// this file too).
     GizmoModeChanged(inf_editor_core::ipc::GizmoModeDto),
+    /// A tool raised a status message, and/or the projected terrain's *streamed*
+    /// state changed (P16.4a). Ring 2 forwards it on `viewport://tool-status`:
+    /// the message goes to the status bar, the flag greys out sculpt/paint —
+    /// which is the smallest honest surface for "this terrain streams and the
+    /// brushes cannot touch it yet".
+    ToolStatus(inf_editor_core::ipc::ViewportToolStatusDto),
 }
 
 /// Sink the host installs to receive [`ViewportEvent`]s. `Arc` so the render
@@ -165,6 +171,8 @@ impl ViewportHandle {
     pub fn set_gizmo_space(&self, _space: camera::GizmoSpace) {}
     pub fn set_snap_3d(&self, _snap: camera::SnapSettings) {}
     pub fn set_view_mode(&self, _mode: inf_editor_core::ipc::ViewModeDto) {}
+    pub fn set_terrain_content_root(&self, _root: Option<std::path::PathBuf>) {}
+    pub fn refresh_terrain_index(&self) {}
     pub fn embed_foreign(&self, _hwnd: isize) {}
     pub fn release_foreign(&self) {}
     pub fn destroy(&self) {}

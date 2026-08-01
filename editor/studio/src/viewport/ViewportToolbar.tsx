@@ -54,6 +54,10 @@ const LAYER_SWATCHES: [string, string][] = [
   ["#eef1f8", "Snow"],
 ];
 
+/** Why the brush tools are off while a streamed terrain is projected. */
+const STREAMED_TERRAIN_HINT =
+  "This terrain streams from a .inf_terrain asset — sculpt and paint cannot edit it yet.";
+
 export default function ViewportToolbar() {
   const mode = useViewportStore((s) => s.mode);
   const setMode = useViewportStore((s) => s.setMode);
@@ -67,6 +71,7 @@ export default function ViewportToolbar() {
   const setPixelsPerUnit = useViewportStore((s) => s.setPixelsPerUnit);
   const toolMode = useViewportStore((s) => s.toolMode);
   const setToolMode = useViewportStore((s) => s.setToolMode);
+  const terrainStreamed = useViewportStore((s) => s.terrainStreamed);
   const viewMode = useViewportStore((s) => s.viewMode);
   const setViewMode = useViewportStore((s) => s.setViewMode);
 
@@ -162,23 +167,39 @@ export default function ViewportToolbar() {
             role="group"
             aria-label="Viewport tool"
           >
-            {TOOLS.map(([id, label, title]) => (
-              <button
-                key={id}
-                type="button"
-                aria-pressed={toolMode === id}
-                title={title}
-                className={`flex h-6 items-center rounded px-2 ${
-                  toolMode === id
-                    ? "bg-(--ink-bg-3) text-(--ink-text)"
-                    : "text-(--ink-text-dim) hover:text-(--ink-text)"
-                }`}
-                onClick={() => setToolMode(id)}
-              >
-                {label}
-              </button>
-            ))}
+            {TOOLS.map(([id, label, title]) => {
+              // A streamed (.inf_terrain) terrain has no editable working set in
+              // the document, so the brush tools are refused by the viewport
+              // host. Say so up front rather than letting the stroke bounce
+              // (P16.4a; write-back is P16.4b).
+              const blocked = terrainStreamed && id === "Sculpt";
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  aria-pressed={toolMode === id}
+                  disabled={blocked}
+                  title={blocked ? STREAMED_TERRAIN_HINT : title}
+                  className={`flex h-6 items-center rounded px-2 ${
+                    toolMode === id
+                      ? "bg-(--ink-bg-3) text-(--ink-text)"
+                      : "text-(--ink-text-dim) hover:text-(--ink-text)"
+                  } disabled:opacity-40`}
+                  onClick={() => setToolMode(id)}
+                >
+                  {label}
+                </button>
+              );
+            })}
           </div>
+          {terrainStreamed && (
+            <span
+              className="rounded bg-(--ink-bg-0) px-2 py-0.5 text-(--ink-text-faint)"
+              title={STREAMED_TERRAIN_HINT}
+            >
+              Streamed terrain
+            </span>
+          )}
           {toolMode === "Sculpt" && <SculptControls />}
           {toolMode === "Foliage" && <FoliageControls />}
         </>

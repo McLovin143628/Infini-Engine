@@ -141,6 +141,13 @@ export function bootstrapShellCommands(): void {
     useShellStore.getState().toggleDrawer();
   });
 
+  // The Terrain Import wizard (P16.4a): File ▸ Import Terrain… — deliberately
+  // its own entry rather than a branch of "Import Into Level…", because a .png
+  // is far more often a texture than a heightmap.
+  setCommandHandler("file.importTerrain", () => {
+    useShellStore.getState().setTerrainImportOpen(true);
+  });
+
   // Layout persistence (P1.2.5).
   setCommandHandler("window.layout.default", () => {
     useDockLayout.getState().resetLayout();
