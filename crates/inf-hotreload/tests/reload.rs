@@ -12,6 +12,38 @@ use inf_hotreload::{HotWorld, InstanceStatus, PluginHost};
 
 const DT: f64 = 1.0 / 60.0;
 
+/// The **dedicated** target directory the fixture plugins build into.
+///
+/// This is the fix for an intermittent macOS CI failure (`copy fixture dylib:
+/// NotFound`). nextest runs every test in its own process, so N processes each
+/// invoke `cargo build` for the fixtures. Cargo takes an exclusive lock on the
+/// *build directory*, which serializes the builds — but when that directory is
+/// the shared workspace `target/`, other cargo activity against it (the test
+/// binaries themselves, built under a different feature unification) can force a
+/// **relink** of the very dylibs a process is in the middle of copying. `fs::copy`
+/// then sees the file between unlink and rename and fails.
+///
+/// Giving the fixtures a directory nothing else writes to makes the sequence
+/// deterministic rather than merely unlikely: the first process to arrive takes
+/// cargo's lock, builds and links, and releases it; every process after that
+/// blocks on the same lock and then finds the units *fresh*, so no relink ever
+/// happens while a copy is in flight. No sleeps, no retries — the race is removed
+/// rather than widened out of reach.
+///
+/// Honours `CARGO_TARGET_DIR` so a CI override still lands inside the cache, and
+/// otherwise sits under the workspace `target/` so `cargo clean` reaches it.
+fn fixture_target_dir() -> PathBuf {
+    let base = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..")
+                .join("target")
+        });
+    base.join("hotreload-fixtures")
+}
+
 /// Build both fixture plugins (once per test process) and return their
 /// artifact paths, parsed from cargo's JSON messages so `CARGO_TARGET_DIR`
 /// overrides and per-OS dylib naming are handled for us.
@@ -19,8 +51,13 @@ fn fixture_dylibs() -> &'static (PathBuf, PathBuf) {
     static BUILT: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
     BUILT.get_or_init(|| {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+        let target_dir = fixture_target_dir();
         let output = Command::new(cargo)
             .current_dir(env!("CARGO_MANIFEST_DIR"))
+            // See `fixture_target_dir`: a directory only these fixtures build
+            // into, so concurrent test processes serialize on cargo's own lock
+            // and never relink an artifact another process is copying.
+            .env("CARGO_TARGET_DIR", &target_dir)
             .args([
                 "build",
                 "-p",
@@ -61,16 +98,24 @@ fn fixture_dylibs() -> &'static (PathBuf, PathBuf) {
             }
         }
         // Copy the built artifacts into a process-private directory and load
-        // from those copies. nextest runs each test in its own process, so
-        // several of these test binaries invoke `cargo build` concurrently and
-        // may re-touch the shared `target/` dylibs; loading from a private copy
-        // makes the fixtures immune to a rebuild tearing the file mid-read
-        // (an intermittent macOS-only `dlopen` failure otherwise).
+        // from those copies, so a later fixture rebuild can never tear a file
+        // this process still has open. With `fixture_target_dir` there is no
+        // longer a concurrent relink to race — this is the second, independent
+        // guard, and it also keeps the ORIGINAL artifact writable, which is what
+        // `original_stays_writable_while_loaded` checks.
         let stash = std::env::temp_dir().join(format!("inf-hotreload-fix-{}", std::process::id()));
         std::fs::create_dir_all(&stash).expect("create fixture stash");
         let stable = |src: PathBuf| -> PathBuf {
             let dst = stash.join(src.file_name().expect("dylib file name"));
-            std::fs::copy(&src, &dst).expect("copy fixture dylib");
+            // Name both paths on failure: a bare `NotFound` here cost a CI
+            // investigation once already.
+            std::fs::copy(&src, &dst).unwrap_or_else(|e| {
+                panic!(
+                    "copy fixture dylib {} -> {}: {e}",
+                    src.display(),
+                    dst.display()
+                )
+            });
             dst
         };
         (
