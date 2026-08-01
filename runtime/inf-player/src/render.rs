@@ -147,6 +147,52 @@ impl PlayerRenderHost {
         project_scene(&mut self.scene, sim, alpha, &self.vmeshes);
     }
 
+    /// Stroke the **world-partition cell overlay** into the debug-line layer
+    /// (P16.5) — one wireframe box per streamed cell, coloured by its state.
+    ///
+    /// A deliberately separate, opt-in step *after* [`project`](Self::project)
+    /// rather than a branch inside it: this is engine debug geometry behind
+    /// `--debug-cells`, and keeping it out of the projection makes it obvious at
+    /// the call site that a shipped player draws none of it. It reads only
+    /// [`CellStreaming`](crate::cell_stream::CellStreaming) state and writes only
+    /// into `scene.debug`, so there is no path from here back into the sim.
+    ///
+    /// The boxes are 1 m tall slabs sitting on the cell footprint at `y = 0` —
+    /// enough to read the grid from a ground camera without occluding the world.
+    pub fn draw_cell_overlay(&mut self, sim: &RuntimeSim) {
+        use crate::cell_stream::CellState;
+        let cells = sim.cell_streaming();
+        if cells.is_empty() {
+            return;
+        }
+        self.scene.debug.clear();
+        for coord in cells.available() {
+            let color = match cells.cell_state(coord) {
+                CellState::Active => [0.25, 0.95, 0.35, 1.0],
+                CellState::Loaded => [0.95, 0.80, 0.20, 1.0],
+                CellState::Cold => [0.35, 0.38, 0.45, 1.0],
+                CellState::Failed => [0.95, 0.25, 0.25, 1.0],
+            };
+            let (min, max) = cells.cell_bounds(coord);
+            let center = DVec3::new(
+                (min[0] + max[0]) * 0.5,
+                CELL_OVERLAY_HALF_HEIGHT_M,
+                (min[1] + max[1]) * 0.5,
+            );
+            let half = Vec3::new(
+                ((max[0] - min[0]) * 0.5) as f32,
+                CELL_OVERLAY_HALF_HEIGHT_M as f32,
+                ((max[1] - min[1]) * 0.5) as f32,
+            );
+            self.scene.debug.wire_box(
+                self.origin.to_render(center),
+                half,
+                glam::Quat::IDENTITY,
+                color,
+            );
+        }
+    }
+
     /// Whether the GPU meshlet path is active (the auto-picked tier is High).
     pub fn vgeom_enabled(&self) -> bool {
         self.vgeom_enabled
@@ -175,6 +221,10 @@ impl PlayerRenderHost {
         self.gpu.is_lost()
     }
 }
+
+/// Half-height (metres) of a cell-overlay wireframe slab. Low enough to read the
+/// grid from a ground camera without boxing the world in.
+const CELL_OVERLAY_HALF_HEIGHT_M: f64 = 0.5;
 
 /// Fill `scene` from `sim`'s world, blending actor positions by `alpha`.
 /// Deterministic `Guid` iteration order. `vmeshes` resolves a `MeshRef.asset` to

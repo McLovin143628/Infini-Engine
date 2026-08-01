@@ -1216,10 +1216,52 @@ impl RenderSettingsRecordDto {
     }
 }
 
+/// World-partition settings, as the World Settings panel edits them (P16.5).
+/// Mirrors [`crate::scene::serialize::PartitionSettings`].
+///
+/// **The editor stays single-document.** Turning `enabled` on does not partition
+/// the open level in the editor — nothing streams while authoring. It tells the
+/// *cook* to split the level into cells and the *player* (PIE and shipping) to
+/// stream them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct PartitionSettingsDto {
+    /// Whether this level is partitioned at cook time and streamed at runtime.
+    pub enabled: bool,
+    /// Square cell edge length (metres).
+    pub cell_size_m: f64,
+    /// How close a streaming source must come to a cell before its entities
+    /// **spawn** (metres). Sim-visible: it decides what exists.
+    pub activation_radius_m: f64,
+    /// Extra metres within which a cell may be *loaded* ahead of need.
+    /// **Not** sim-visible: a cell that reaches its activation step unloaded
+    /// blocks the step, so this buys latency and never changes a result.
+    pub prefetch_margin_m: f64,
+}
+
+impl PartitionSettingsDto {
+    fn from_record(p: &crate::scene::serialize::PartitionSettings) -> Self {
+        Self {
+            enabled: p.enabled,
+            cell_size_m: p.cell_size_m,
+            activation_radius_m: p.activation_radius_m,
+            prefetch_margin_m: p.prefetch_margin_m,
+        }
+    }
+
+    fn to_record(self) -> crate::scene::serialize::PartitionSettings {
+        crate::scene::serialize::PartitionSettings {
+            enabled: self.enabled,
+            cell_size_m: self.cell_size_m,
+            activation_radius_m: self.activation_radius_m,
+            prefetch_margin_m: self.prefetch_margin_m,
+        }
+    }
+}
+
 /// The level's file-level settings, as the World Settings panel edits them
 /// (`scene_get_settings` / `scene_set_settings`). Mirrors
 /// [`crate::scene::serialize::LevelSettings`]; `render` nests
-/// [`RenderSettingsRecordDto`].
+/// [`RenderSettingsRecordDto`] and `partition` nests [`PartitionSettingsDto`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
 pub struct LevelSettingsDto {
     /// 2D world gravity (m/s²) — `[x, y]`.
@@ -1230,6 +1272,8 @@ pub struct LevelSettingsDto {
     pub sim_hz: f64,
     /// Renderer HDR / post / lighting block.
     pub render: RenderSettingsRecordDto,
+    /// World-partition / level-streaming block (P16.5).
+    pub partition: PartitionSettingsDto,
 }
 
 impl LevelSettingsDto {
@@ -1241,6 +1285,7 @@ impl LevelSettingsDto {
             gravity_3d: [s.gravity_3d.x, s.gravity_3d.y, s.gravity_3d.z],
             sim_hz: s.sim_hz,
             render: RenderSettingsRecordDto::from_record(&s.render),
+            partition: PartitionSettingsDto::from_record(&s.partition),
         }
     }
 
@@ -1256,6 +1301,7 @@ impl LevelSettingsDto {
             ),
             sim_hz: self.sim_hz,
             render: self.render.to_record(),
+            partition: self.partition.to_record(),
         }
     }
 }

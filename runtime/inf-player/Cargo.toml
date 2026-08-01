@@ -24,6 +24,10 @@ path = "src/main.rs"
 # ── the fixed-step loop + PIE protocol/toy world (Spike D seam, P9.4) ──
 inf-runtime = { workspace = true }
 # ── the real runtime the player drives (all Ring 0) ──
+# The deterministic in-order job pool: the world-partition cell prefetch decodes
+# a bounded batch through `parallel_map_ref` (P16.5), gated off wasm32 at the
+# call site exactly as `inf_terrain::stream::load_tiles` does.
+inf-core = { workspace = true }
 inf-ecs = { workspace = true }
 inf-physics = { workspace = true }
 # Terrain heightfield projection + the PCG scatter runtime the player evaluates on

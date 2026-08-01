@@ -459,6 +459,8 @@ fn make_streaming_terrain_project(root: &Path) -> AssetId {
             volume: None,
             spline: None,
             foliage: None,
+            streaming_source: None,
+            always_loaded: None,
         }],
         settings: Default::default(),
     };

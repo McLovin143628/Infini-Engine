@@ -14,13 +14,14 @@ use inf_editor_core::ipc::{
     ComponentDto, DataAssetDto, DataFieldDto, DeleteResult, DetailsDto, ErosionParamsDto,
     ErosionReportDto, FileEntryDto, FoliageSettingsDto, GitFileDto, GitStatusDto, GizmoModeDto,
     GizmoSpaceDto, ImportEventDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto,
-    PackageKindCountDto, PackageResultDto, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto,
-    PropFieldDto, PropValueDto, RecentProjectDto, SaveResultDto, SceneDelta, SceneNode,
-    SceneSnapshot, SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto,
-    SeqInterpDto, SeqKeyDto, SeqTrackDto, SequenceDto, Snap2DDto, Snap3DDto, SortingLayerDto,
-    SpawnKind, SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainImportPlanDto,
-    TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto, TilemapDto, ToolModeDto,
-    ViewModeDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto,
+    PackageKindCountDto, PackageResultDto, PartitionSettingsDto, ProjectInfoDto,
+    ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto, RecentProjectDto,
+    SaveResultDto, SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto, SculptOpDto,
+    SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto, SeqTrackDto,
+    SequenceDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpriteGridDto, SpriteRectDto,
+    SpriteSheetDto, TerrainImportPlanDto, TerrainImportResultDto, TerrainImportSettingsDto,
+    TilemapCellDto, TilemapDto, ToolModeDto, ViewModeDto, ViewportDrop, ViewportKey,
+    ViewportModeDto, ViewportRect, ViewportToolStatusDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -98,6 +99,10 @@ fn export_bindings() {
     SeqKeyDto::export_all(&cfg).expect("export SeqKeyDto");
     SeqInterpDto::export_all(&cfg).expect("export SeqInterpDto");
     LevelSettingsDto::export_all(&cfg).expect("export LevelSettingsDto");
+    // Nested inside `LevelSettingsDto`, so `export_all` already emits it — rooted
+    // explicitly per this file's rule that every `inf_editor_core::ipc` type
+    // appears here, so a future consumer importing it directly cannot drift.
+    PartitionSettingsDto::export_all(&cfg).expect("export PartitionSettingsDto");
     MatValuesDto::export_all(&cfg).expect("export MatValuesDto");
     MatOverridesDto::export_all(&cfg).expect("export MatOverridesDto");
     MaterialInstanceDto::export_all(&cfg).expect("export MaterialInstanceDto");

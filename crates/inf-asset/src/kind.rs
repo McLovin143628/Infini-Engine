@@ -51,6 +51,15 @@ pub enum AssetKind {
     /// individual tiles straight out of an mmap'd pack
     /// (`PackWriter::compresses_kind`).
     Terrain,
+    /// A level's cook-derived **world partition** (`.inf_part`) — a header + cell
+    /// directory + 16-byte-aligned per-cell entity-record blobs (P16.5). Like
+    /// [`MeshletMesh`](AssetKind::MeshletMesh) it is *derived at cook time*, never
+    /// authored: its GUID is a pure function of its level's
+    /// (`inf_packager::derived_partition_id`), so the runtime finds it without an
+    /// index. A **streaming-class** kind: it cooks uncompressed so the player can
+    /// slice one cell straight out of an mmap'd pack
+    /// (`PackWriter::compresses_kind`).
+    Partition,
     /// Anything else living under the content root.
     Unknown,
 }
@@ -76,6 +85,7 @@ impl AssetKind {
             AssetKind::AnimClip => "inf_anim",
             AssetKind::StateMachine => "inf_sm",
             AssetKind::Terrain => "inf_terrain",
+            AssetKind::Partition => "inf_part",
             AssetKind::Unknown => return None,
         })
     }
@@ -100,6 +110,7 @@ impl AssetKind {
             "inf_anim" => AssetKind::AnimClip,
             "inf_sm" => AssetKind::StateMachine,
             "inf_terrain" => AssetKind::Terrain,
+            "inf_part" => AssetKind::Partition,
             _ => AssetKind::Unknown,
         }
     }
@@ -132,6 +143,7 @@ impl AssetKind {
             AssetKind::AnimClip => "anim_clip",
             AssetKind::StateMachine => "state_machine",
             AssetKind::Terrain => "terrain",
+            AssetKind::Partition => "partition",
             AssetKind::Unknown => "unknown",
         }
     }
@@ -156,6 +168,7 @@ impl AssetKind {
             AssetKind::AnimClip => "Animation",
             AssetKind::StateMachine => "State Machine",
             AssetKind::Terrain => "Terrain",
+            AssetKind::Partition => "World Partition",
             AssetKind::Unknown => "File",
         }
     }
@@ -181,6 +194,7 @@ impl AssetKind {
             AssetKind::AnimClip,
             AssetKind::StateMachine,
             AssetKind::Terrain,
+            AssetKind::Partition,
         ]
     }
 }

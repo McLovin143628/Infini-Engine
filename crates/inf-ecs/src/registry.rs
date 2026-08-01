@@ -12,13 +12,14 @@ use bevy_reflect::std_traits::ReflectDefault;
 use bevy_reflect::{TypePath, TypeRegistry};
 
 use crate::components::{
-    AnimPlayer, AnimStateMachine, AtlasRect, AudioListener, AudioSource, BillboardMode, BlendMode,
-    BodyKind2D, BodyKind3D, Camera, CharacterController2D, CharacterController3D, Collider2D,
-    Collider3D, ColliderShape2DKind, ColliderShape3DKind, CombineRule, Decal, DistanceModel,
-    Foliage, FoliagePaletteEntry, Joint2D, Joint3D, JointKind2D, JointKind3D, Light, Light2D,
-    LightKind, Material, MeshRef, Name, NineSlice, PcgVolume, Primitive, RigidBody2D, RigidBody3D,
-    SkeletalMesh, Spline, SplineInterp, Sprite, Terrain, Text2D, TextAlign, Tilemap, Transform,
-    Visibility, Volume, VolumeKind,
+    AlwaysLoaded, AnimPlayer, AnimStateMachine, AtlasRect, AudioListener, AudioSource,
+    BillboardMode, BlendMode, BodyKind2D, BodyKind3D, Camera, CharacterController2D,
+    CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
+    CombineRule, Decal, DistanceModel, Foliage, FoliagePaletteEntry, Joint2D, Joint3D, JointKind2D,
+    JointKind3D, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice, PcgVolume,
+    Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, Spline, SplineInterp, Sprite,
+    StreamingSource, Terrain, Text2D, TextAlign, Tilemap, Transform, Visibility, Volume,
+    VolumeKind,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -130,6 +131,8 @@ impl ComponentRegistry {
             Joint3D => "Joint 3D",
             AudioSource => "Audio Source",
             AudioListener => "Audio Listener",
+            StreamingSource => "Streaming Source",
+            AlwaysLoaded => "Always Loaded",
         }
 
         Self { types, editable }
@@ -206,7 +209,7 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        assert_eq!(reg.editable().len(), 30);
+        assert_eq!(reg.editable().len(), 32);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

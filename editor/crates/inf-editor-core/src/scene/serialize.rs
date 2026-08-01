@@ -14,11 +14,11 @@
 use std::path::{Path, PathBuf};
 
 use inf_ecs::components::{
-    ActorClass, AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource, BlendMode,
-    Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D, Decal, Foliage,
-    Joint2D, Joint3D, Light, Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume,
-    RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, Spline, Sprite, Terrain, Text2D, Tilemap,
-    Transform, Visibility, Volume,
+    ActorClass, AlwaysLoaded, AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource,
+    BlendMode, Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D, Decal,
+    Foliage, Joint2D, Joint3D, Light, Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume,
+    RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, Spline, Sprite, StreamingSource, Terrain,
+    Text2D, Tilemap, Transform, Visibility, Volume,
 };
 use inf_ecs::math::{Color, Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
@@ -103,7 +103,22 @@ use crate::scene::SceneDoc;
 ///   [`EntityRecordV8::into_current`] hop lifts it with `asset: None`. No new
 ///   entity slot was added — v9 differs from v8 only inside `Terrain` (see
 ///   [`decode`] + [`SceneFileV8`]).
-pub const SCHEMA_VERSION: u32 = 9;
+///
+/// * v10 — P16.5: the [`EntityRecord`] appended two **world-partition** slots —
+///   `streaming_source` ([`StreamingSource`], the sim-side driver of cell
+///   residency) and `always_loaded` ([`AlwaysLoaded`], the never-streamed
+///   marker) — and [`LevelSettings`] gained a `partition`
+///   ([`PartitionSettings`]) block. Neither `Light`/`Material`/`Terrain` nor any
+///   existing slot moved, so the pre-v10 shapes are frozen as
+///   [`LevelSettingsV9`] / [`EntityRecordV9`] and the
+///   [`EntityRecordV9::into_current`] hop lifts them with the two slots `None`
+///   and partitioning **off** — exactly what a pre-v10 level meant. Older
+///   v1..v9 payloads load unchanged (see [`decode`] + [`SceneFileV9`]).
+///
+///   Second bump in one phase, deliberately: P16.3 shipped v9 before partition
+///   metadata was designed, and retro-fitting it into v9 would mean re-blessing
+///   bytes that are already committed and already load.
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// File-level simulation settings (P9.5 · schema v3). Replaces the player's
 /// hard-coded `DEFAULT_GRAVITY`/`DEFAULT_HZ`. The serde defaults **preserve the
@@ -128,6 +143,12 @@ pub struct LevelSettings {
     /// (and every existing fixture) loads with the stable default look.
     #[serde(default)]
     pub render: RenderSettingsRecord,
+    /// World-partition / level-streaming configuration (schema v10). Additive
+    /// field: `#[serde(default)]` → [`PartitionSettings::default`], whose
+    /// `enabled` is `false`, so every pre-v10 level (and every existing fixture)
+    /// keeps cooking and loading as one document.
+    #[serde(default)]
+    pub partition: PartitionSettings,
 }
 
 fn default_gravity_3d() -> Vec3d {
@@ -144,6 +165,60 @@ impl Default for LevelSettings {
             gravity_3d: default_gravity_3d(),
             sim_hz: default_sim_hz(),
             render: RenderSettingsRecord::default(),
+            partition: PartitionSettings::default(),
+        }
+    }
+}
+
+/// World-partition configuration (schema v10) — a **flat, fully-explicit**
+/// mirror of `inf_scene::PartitionSettings`, field-for-field and default-for-
+/// default, kept here for the same reason [`RenderSettingsRecord`] is: this Ring-1
+/// codec must not depend on the Ring-0 runtime reader, and bincode is not
+/// self-describing, so the two shapes staying identical *is* the wire contract.
+///
+/// The cross-check is the `.inf_lvl` cross-decode test in `inf-scene` (which
+/// parses editor-written bytes field-for-field), plus
+/// [`partition_settings_mirror_matches_the_runtime_defaults`] below.
+///
+/// ## What each field means
+///
+/// * `enabled` — off by default; a level only partitions when an author says so.
+/// * `cell_size_m` — the square grid cell edge, metres.
+/// * `activation_radius_m` — how close a streaming source must come to a cell
+///   before its entities **spawn**. This is sim-visible: it decides what exists.
+/// * `prefetch_margin_m` — extra metres within which a cell may be *loaded*
+///   ahead of need. This is **not** sim-visible: a cell that reaches its
+///   activation step unloaded blocks the step, so the margin buys latency and
+///   can never move a simulation result.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PartitionSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_cell_size_m")]
+    pub cell_size_m: f64,
+    #[serde(default = "default_activation_radius_m")]
+    pub activation_radius_m: f64,
+    #[serde(default = "default_prefetch_margin_m")]
+    pub prefetch_margin_m: f64,
+}
+
+fn default_cell_size_m() -> f64 {
+    256.0
+}
+fn default_activation_radius_m() -> f64 {
+    256.0
+}
+fn default_prefetch_margin_m() -> f64 {
+    256.0
+}
+
+impl Default for PartitionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cell_size_m: default_cell_size_m(),
+            activation_radius_m: default_activation_radius_m(),
+            prefetch_margin_m: default_prefetch_margin_m(),
         }
     }
 }
@@ -337,6 +412,17 @@ pub struct EntityRecord {
     /// A foliage scatter (palette + bulk instances).
     #[serde(default)]
     pub foliage: Option<Foliage>,
+    // ── v10 (P16.5) world-partition components ────────────────────────────
+    /// Marks this entity as a **streaming source**: world-partition cell
+    /// residency is computed from its position at the fixed-step boundary. The
+    /// editor stays single-document, so this only takes effect in PIE / a
+    /// cooked run.
+    #[serde(default)]
+    pub streaming_source: Option<StreamingSource>,
+    /// Marks this entity as never-streamed: it cooks into the partition's
+    /// persistent cell and exists for the whole run.
+    #[serde(default)]
+    pub always_loaded: Option<AlwaysLoaded>,
 }
 
 /// The pre-v8 `Light` byte layout (schema v8 froze this when `Light` gained its
@@ -408,8 +494,8 @@ impl Default for MaterialV7 {
 
 /// The pre-v8 file-level settings byte layout (schema v8 froze this when
 /// [`LevelSettings`] gained its `render` block). Frozen entity/file records
-/// (v3..v7) carry `settings` as [`LevelSettingsV7`]; [`LevelSettingsV7::into_current`]
-/// lifts it with a default [`RenderSettingsRecord`].
+/// (v3..v7) carry `settings` as [`LevelSettingsV7`]; [`LevelSettingsV7::into_v9`]
+/// lifts it into the next frozen shape with a default [`RenderSettingsRecord`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LevelSettingsV7 {
     #[serde(default)]
@@ -421,9 +507,12 @@ pub struct LevelSettingsV7 {
 }
 
 impl LevelSettingsV7 {
-    /// Lift to the current [`LevelSettings`] (default render block).
-    fn into_current(self) -> LevelSettings {
-        LevelSettings {
+    /// Lift to the frozen **v8/v9** shape ([`LevelSettingsV9`]) with a default
+    /// render block. The ladder stops here rather than jumping to the live type,
+    /// so the v7 → v10 path is the composition of two documented one-version
+    /// hops instead of one hop that has to be rewritten on every future bump.
+    fn into_v9(self) -> LevelSettingsV9 {
+        LevelSettingsV9 {
             gravity_2d: self.gravity_2d,
             gravity_3d: self.gravity_3d,
             sim_hz: self.sim_hz,
@@ -1204,7 +1293,7 @@ impl SceneFileV7 {
                 .into_iter()
                 .map(EntityRecordV7::into_v8)
                 .collect(),
-            settings: self.settings.into_current(),
+            settings: self.settings.into_v9(),
         }
     }
 }
@@ -1343,10 +1432,10 @@ pub struct EntityRecordV8 {
 }
 
 impl EntityRecordV8 {
-    /// Lift a v8 record to the current (v9) shape: the terrain slot gains
+    /// Lift a v8 record to the **v9** shape: the terrain slot gains
     /// `asset: None`; every other slot carries through unchanged.
-    fn into_current(self) -> EntityRecord {
-        EntityRecord {
+    fn into_v9(self) -> EntityRecordV9 {
+        EntityRecordV9 {
             guid: self.guid,
             name: self.name,
             parent: self.parent,
@@ -1387,19 +1476,213 @@ impl EntityRecordV8 {
     }
 }
 
+/// The pre-v10 file-level settings byte layout (schema v10 froze this when
+/// [`LevelSettings`] gained its `partition` block). Frozen file records (v8..v9)
+/// carry `settings` as [`LevelSettingsV9`] — v9 did not touch the settings, so
+/// one frozen record serves both. [`LevelSettingsV9::into_current`] lifts it with
+/// a default (disabled) [`PartitionSettings`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LevelSettingsV9 {
+    #[serde(default)]
+    pub gravity_2d: Vec2d,
+    #[serde(default = "default_gravity_3d")]
+    pub gravity_3d: Vec3d,
+    #[serde(default = "default_sim_hz")]
+    pub sim_hz: f64,
+    #[serde(default)]
+    pub render: RenderSettingsRecord,
+}
+
+impl LevelSettingsV9 {
+    /// Lift to the live [`LevelSettings`]: partitioning defaults to **off**,
+    /// which is exactly what a pre-v10 level meant (one document, no streaming).
+    pub fn into_current(self) -> LevelSettings {
+        LevelSettings {
+            gravity_2d: self.gravity_2d,
+            gravity_3d: self.gravity_3d,
+            sim_hz: self.sim_hz,
+            render: self.render,
+            partition: PartitionSettings::default(),
+        }
+    }
+
+    /// Project live [`LevelSettings`] back onto the frozen shape (the
+    /// downgrade-bless path that regenerates old fixtures). The partition block
+    /// has no v9 home and is dropped — a deliberately lossy direction.
+    pub fn from_current(s: LevelSettings) -> Self {
+        Self {
+            gravity_2d: s.gravity_2d,
+            gravity_3d: s.gravity_3d,
+            sim_hz: s.sim_hz,
+            render: s.render,
+        }
+    }
+}
+
+impl Default for LevelSettingsV9 {
+    fn default() -> Self {
+        Self::from_current(LevelSettings::default())
+    }
+}
+
 /// A schema-v8 [`SceneFile`] (frozen layout for legacy decode).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneFileV8 {
     pub schema_version: u32,
     pub title: String,
     pub entities: Vec<EntityRecordV8>,
-    /// v9 did not touch the file settings, so the v8 record reuses the live one.
+    /// The **pre-v10** settings shape (v9 did not touch them).
     #[serde(default)]
-    pub settings: LevelSettings,
+    pub settings: LevelSettingsV9,
 }
 
 impl SceneFileV8 {
-    /// Lift a v8 file to the current (v9) shape.
+    /// Lift a v8 file to the **v9** shape (only `Terrain` changed).
+    fn into_v9(self) -> SceneFileV9 {
+        SceneFileV9 {
+            schema_version: 9,
+            title: self.title,
+            entities: self
+                .entities
+                .into_iter()
+                .map(EntityRecordV8::into_v9)
+                .collect(),
+            settings: self.settings,
+        }
+    }
+}
+
+/// A schema-**v9** [`EntityRecord`] (pre-P16.5) — the exact byte layout written
+/// by P16.3..P16.4b editors: the full v9 slot set with the live `Terrain`
+/// (asset reference included), but **neither** v10 world-partition slot. Frozen
+/// forever so the committed v9 fixture (and any level saved before P16.5) loads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityRecordV9 {
+    pub guid: Uuid,
+    pub name: String,
+    pub parent: Option<Uuid>,
+    pub transform: Transform,
+    pub visible: bool,
+    pub mesh: Option<MeshRef>,
+    pub material: Option<Material>,
+    pub light: Option<Light>,
+    pub camera: Option<Camera>,
+    #[serde(default)]
+    pub sprite: Option<Sprite>,
+    #[serde(default)]
+    pub tilemap: Option<Tilemap>,
+    #[serde(default)]
+    pub nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    pub text2d: Option<Text2D>,
+    #[serde(default)]
+    pub light_2d: Option<Light2D>,
+    #[serde(default)]
+    pub rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    pub collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    pub character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    pub rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    pub collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    pub character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    pub actor: Option<Uuid>,
+    #[serde(default)]
+    pub terrain: Option<Terrain>,
+    #[serde(default)]
+    pub pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    pub skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    pub anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    pub anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    pub root_motion: Option<RootMotion>,
+    #[serde(default)]
+    pub attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    pub joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    pub joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    pub audio_source: Option<AudioSource>,
+    #[serde(default)]
+    pub audio_listener: Option<AudioListener>,
+    #[serde(default)]
+    pub decal: Option<Decal>,
+    #[serde(default)]
+    pub volume: Option<Volume>,
+    #[serde(default)]
+    pub spline: Option<Spline>,
+    #[serde(default)]
+    pub foliage: Option<Foliage>,
+}
+
+impl EntityRecordV9 {
+    /// Lift a v9 record to the current (v10) shape: both world-partition slots
+    /// default to `None` — a pre-v10 level named no streaming source and marked
+    /// nothing always-loaded.
+    fn into_current(self) -> EntityRecord {
+        EntityRecord {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: self.decal,
+            volume: self.volume,
+            spline: self.spline,
+            foliage: self.foliage,
+            streaming_source: None,
+            always_loaded: None,
+        }
+    }
+}
+
+/// A schema-v9 [`SceneFile`] (frozen layout for legacy decode).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneFileV9 {
+    pub schema_version: u32,
+    pub title: String,
+    pub entities: Vec<EntityRecordV9>,
+    #[serde(default)]
+    pub settings: LevelSettingsV9,
+}
+
+impl SceneFileV9 {
+    /// Lift a v9 file to the current (v10) shape.
     fn into_current(self) -> SceneFile {
         SceneFile {
             schema_version: SCHEMA_VERSION,
@@ -1407,9 +1690,9 @@ impl SceneFileV8 {
             entities: self
                 .entities
                 .into_iter()
-                .map(EntityRecordV8::into_current)
+                .map(EntityRecordV9::into_current)
                 .collect(),
-            settings: self.settings,
+            settings: self.settings.into_current(),
         }
     }
 }
@@ -1499,6 +1782,8 @@ pub fn record_of(doc: &SceneDoc, guid: Uuid) -> Option<EntityRecord> {
         volume: w.get::<Volume>(e).copied(),
         spline: w.get::<Spline>(e).cloned(),
         foliage: w.get::<Foliage>(e).cloned(),
+        streaming_source: w.get::<StreamingSource>(e).copied(),
+        always_loaded: w.get::<AlwaysLoaded>(e).copied(),
     })
 }
 
@@ -1617,6 +1902,7 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
                     .into_v6()
                     .into_v7()
                     .into_v8()
+                    .into_v9()
                     .into_current(),
             )
         }
@@ -1631,6 +1917,7 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
                     .into_v6()
                     .into_v7()
                     .into_v8()
+                    .into_v9()
                     .into_current(),
             )
         }
@@ -1644,6 +1931,7 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
                     .into_v6()
                     .into_v7()
                     .into_v8()
+                    .into_v9()
                     .into_current(),
             )
         }
@@ -1651,33 +1939,46 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
             let (v4, _): (SceneFileV4, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v4: {e}"))?;
-            migrate(v4.into_v5().into_v6().into_v7().into_v8().into_current())
+            migrate(
+                v4.into_v5()
+                    .into_v6()
+                    .into_v7()
+                    .into_v8()
+                    .into_v9()
+                    .into_current(),
+            )
         }
         5 => {
             let (v5, _): (SceneFileV5, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v5: {e}"))?;
-            migrate(v5.into_v6().into_v7().into_v8().into_current())
+            migrate(v5.into_v6().into_v7().into_v8().into_v9().into_current())
         }
         6 => {
             let (v6, _): (SceneFileV6, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v6: {e}"))?;
-            migrate(v6.into_v7().into_v8().into_current())
+            migrate(v6.into_v7().into_v8().into_v9().into_current())
         }
         7 => {
             let (v7, _): (SceneFileV7, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v7: {e}"))?;
-            migrate(v7.into_v8().into_current())
+            migrate(v7.into_v8().into_v9().into_current())
         }
         8 => {
             let (v8, _): (SceneFileV8, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v8: {e}"))?;
-            migrate(v8.into_current())
+            migrate(v8.into_v9().into_current())
         }
         9 => {
+            let (v9, _): (SceneFileV9, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| format!("decode v9: {e}"))?;
+            migrate(v9.into_current())
+        }
+        10 => {
             let (file, _): (SceneFile, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode: {e}"))?;
@@ -1699,7 +2000,7 @@ pub fn migrate(file: SceneFile) -> Result<SceneFile, String> {
         ));
     }
     // Records are already lifted to the current shape by the versioned decode
-    // (v1→…→v8→v9); nothing more to do here. Future upgrades chain in `decode`.
+    // (v1→…→v9→v10); nothing more to do here. Future upgrades chain in `decode`.
     Ok(file)
 }
 
@@ -1794,6 +2095,8 @@ pub(crate) fn write_record_components(
     copy_slot!(&rec.volume, Volume);
     clone_slot!(&rec.spline, Spline);
     clone_slot!(&rec.foliage, Foliage);
+    copy_slot!(&rec.streaming_source, StreamingSource);
+    copy_slot!(&rec.always_loaded, AlwaysLoaded);
 }
 
 pub fn apply_to_doc(doc: &mut SceneDoc, file: &SceneFile) {
@@ -2820,6 +3123,7 @@ mod tests {
             gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
             sim_hz: 120.0,
             render: RenderSettingsRecord::default(),
+            partition: PartitionSettings::default(),
         });
 
         let ground = doc.create(SpawnKind::Empty, "Ground", None);
@@ -4084,7 +4388,7 @@ mod tests {
                     ..v8_base(g(0x8009), "Terrain", None)
                 },
             ],
-            settings: LevelSettings {
+            settings: LevelSettingsV9 {
                 gravity_2d: Vec2d::new(0.0, -20.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 120.0,
@@ -4208,11 +4512,14 @@ mod tests {
         doc.world_mut().propagate();
 
         let bytes1 = encode(&to_scene_file(&doc)).unwrap();
-        assert_eq!(bytes1[0], 9, "a v9 terrain writes a genuine v9 payload");
+        assert_eq!(
+            bytes1[0], SCHEMA_VERSION as u8,
+            "encode always writes the current schema"
+        );
         let mut loaded = SceneDoc::new();
         apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
         let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
-        assert_eq!(bytes1, bytes2, "v9 save→load→save must be byte-identical");
+        assert_eq!(bytes1, bytes2, "save→load→save must be byte-identical");
 
         let file = to_scene_file(&loaded);
         let t = file.entities[0]
@@ -4284,6 +4591,7 @@ mod tests {
         doc.set_title("V8 Level");
         // Non-default render settings on the file.
         doc.set_settings(LevelSettings {
+            partition: PartitionSettings::default(),
             gravity_2d: Vec2d::new(0.0, -18.0),
             gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
             sim_hz: 90.0,
@@ -4459,5 +4767,252 @@ mod tests {
         assert!(!d.shadows_enabled && !d.gi_enabled);
         assert_eq!(d.shadows_max_distance, 60.0);
         assert_eq!(d.gi_intensity, 1.0);
+    }
+
+    // ── v9 forever-load fixture + v10 (P16.5) world partition ───────────────
+
+    /// A minimal all-`None` frozen v9 entity record.
+    fn v9_base(guid: uuid::Uuid, name: &str, parent: Option<uuid::Uuid>) -> EntityRecordV9 {
+        EntityRecordV9 {
+            guid,
+            name: name.into(),
+            parent,
+            transform: EcsTransform::IDENTITY,
+            visible: true,
+            mesh: None,
+            material: None,
+            light: None,
+            camera: None,
+            sprite: None,
+            tilemap: None,
+            nine_slice: None,
+            text2d: None,
+            light_2d: None,
+            rigid_body_2d: None,
+            collider_2d: None,
+            character_controller_2d: None,
+            rigid_body_3d: None,
+            collider_3d: None,
+            character_controller_3d: None,
+            actor: None,
+            terrain: None,
+            pcg_volume: None,
+            skeletal_mesh: None,
+            anim_player: None,
+            anim_state_machine: None,
+            root_motion: None,
+            attached_to: None,
+            joint_2d: None,
+            joint_3d: None,
+            audio_source: None,
+            audio_listener: None,
+            decal: None,
+            volume: None,
+            spline: None,
+            foliage: None,
+        }
+    }
+
+    /// Rebuild the exact schema-v9 file the committed v9 fixture was generated
+    /// from, out of the frozen v9 record types (the provenance lock). Carries a
+    /// **v9 `Terrain` with an asset reference** — the thing v9 added — plus a mesh
+    /// with an asset ref and a light, so the pre-v10 entity + settings byte
+    /// layouts are pinned by committed bytes.
+    fn v9_reference() -> SceneFileV9 {
+        use inf_ecs::components::{Light, LightKind, Material, Primitive};
+        let g = uuid::Uuid::from_u128;
+        SceneFileV9 {
+            schema_version: 9,
+            title: "V9 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV9 {
+                    mesh: Some(MeshRef {
+                        primitive: Primitive::Cube,
+                        asset: Some(g(0x90A1)),
+                    }),
+                    material: Some(Material::default()),
+                    ..v9_base(g(0x9001), "Cube", None)
+                },
+                EntityRecordV9 {
+                    terrain: Some(Terrain {
+                        asset: Some(g(0x9_00AA)),
+                        ..fixture_terrain()
+                    }),
+                    ..v9_base(g(0x9002), "Terrain", None)
+                },
+                EntityRecordV9 {
+                    light: Some(Light {
+                        kind: LightKind::Directional,
+                        color: Color::WHITE,
+                        intensity: 2.0,
+                        ..Default::default()
+                    }),
+                    ..v9_base(g(0x9003), "Sun", None)
+                },
+            ],
+            settings: LevelSettingsV9 {
+                gravity_2d: Vec2d::new(0.0, -18.0),
+                gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+                sim_hz: 90.0,
+                render: RenderSettingsRecord {
+                    exposure: 1.1,
+                    ..RenderSettingsRecord::default()
+                },
+            },
+        }
+    }
+
+    /// Write the committed v9 fixture from [`v9_reference`] under
+    /// `INF_BLESS_FIXTURES=1` (the temporary-writer discipline). Never hand-edit
+    /// the committed bytes.
+    #[test]
+    fn bless_v9_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").is_err() {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v9_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 9);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v9.inf_lvl");
+        std::fs::write(&path, &bytes).expect("write v9 fixture");
+        eprintln!("blessed v9 fixture: {}", path.display());
+    }
+
+    #[test]
+    fn v9_fixture_is_reproducible_and_genuinely_v9() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v9.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v9 fixture present");
+        assert_eq!(bytes[0], 9, "fixture must be a genuine schema-v9 payload");
+        let rebuilt = bincode::serde::encode_to_vec(v9_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v9 fixture must match our frozen v9 writer"
+        );
+    }
+
+    /// The committed v9 fixture — written by the **pre-v10 codec**, before the
+    /// entity record grew its two world-partition slots and the settings grew
+    /// their partition block — still loads, with every v10 field at its
+    /// documented default. The "old bytes load forever" gate for the v10 bump.
+    #[test]
+    fn v9_fixture_loads_forever_and_lifts_to_v10() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v9.inf_lvl");
+        let file = decode(&std::fs::read(&path).unwrap()).expect("v9 fixture decodes");
+        assert_eq!(file.schema_version, SCHEMA_VERSION);
+        assert_eq!(file.title, "V9 Fixture Level");
+        assert_eq!(file.entities.len(), 3);
+        let by_name = |n: &str| file.entities.iter().find(|r| r.name == n).unwrap();
+
+        // The v9 content survives the frozen-record hop intact …
+        let terrain = by_name("Terrain").terrain.as_ref().expect("terrain slot");
+        assert_eq!(terrain.asset, Some(uuid::Uuid::from_u128(0x9_00AA)));
+        assert_eq!(terrain.data.tile_count(), 2);
+        assert_eq!(
+            by_name("Cube").mesh.unwrap().asset,
+            Some(uuid::Uuid::from_u128(0x90A1))
+        );
+        assert_eq!(file.settings.sim_hz, 90.0);
+        assert_eq!(file.settings.render.exposure, 1.1);
+
+        // … and every v10 field lifts to its documented default: no streaming
+        // sources, nothing pinned always-loaded, partitioning OFF.
+        for e in &file.entities {
+            assert!(e.streaming_source.is_none());
+            assert!(e.always_loaded.is_none());
+        }
+        assert_eq!(file.settings.partition, PartitionSettings::default());
+        assert!(!file.settings.partition.enabled);
+
+        // Rebuilding a doc from it and re-saving yields a current-schema file that
+        // round-trips byte-identically (the load → save → load identity).
+        let mut doc = SceneDoc::new();
+        apply_to_doc(&mut doc, &file);
+        let bytes1 = encode(&to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], SCHEMA_VERSION as u8);
+        let mut doc2 = SceneDoc::new();
+        apply_to_doc(&mut doc2, &decode(&bytes1).unwrap());
+        assert_eq!(encode(&to_scene_file(&doc2)).unwrap(), bytes1);
+    }
+
+    /// The two v10 component slots and the file-level partition block persist
+    /// across save → load and re-encode byte-identically — including through the
+    /// live ECS (`record_of` reads them, `write_record_components` writes them).
+    #[test]
+    fn v10_partition_components_and_settings_round_trip() {
+        use inf_ecs::components::{AlwaysLoaded, StreamingSource};
+
+        let mut doc = SceneDoc::new();
+        doc.set_title("Partitioned Level");
+        doc.set_settings(LevelSettings {
+            partition: PartitionSettings {
+                enabled: true,
+                cell_size_m: 128.0,
+                activation_radius_m: 200.0,
+                prefetch_margin_m: 300.0,
+            },
+            ..LevelSettings::default()
+        });
+        let player = doc.create(SpawnKind::Empty, "Player", None);
+        insert!(doc, player, StreamingSource { radius_m: 384.0 });
+        let manager = doc.create(SpawnKind::Empty, "GameMode", None);
+        insert!(doc, manager, AlwaysLoaded);
+        doc.create(SpawnKind::Empty, "Prop", None);
+        doc.world_mut().propagate();
+
+        let bytes1 = encode(&to_scene_file(&doc)).unwrap();
+        assert_eq!(bytes1[0], 10, "a partitioned level writes a v10 payload");
+        let mut loaded = SceneDoc::new();
+        apply_to_doc(&mut loaded, &decode(&bytes1).unwrap());
+        let bytes2 = encode(&to_scene_file(&loaded)).unwrap();
+        assert_eq!(bytes1, bytes2, "v10 save→load→save must be byte-identical");
+
+        let file = to_scene_file(&loaded);
+        let by_name = |n: &str| file.entities.iter().find(|r| r.name == n).unwrap();
+        assert_eq!(
+            by_name("Player").streaming_source.unwrap().radius_m,
+            384.0,
+            "the streaming source survived the ECS round trip"
+        );
+        assert_eq!(by_name("GameMode").always_loaded, Some(AlwaysLoaded));
+        assert!(by_name("Prop").streaming_source.is_none());
+        assert!(by_name("Prop").always_loaded.is_none());
+        assert_eq!(file.settings.partition.cell_size_m, 128.0);
+        assert_eq!(file.settings.partition.activation_radius_m, 200.0);
+        assert_eq!(file.settings.partition.prefetch_margin_m, 300.0);
+        assert!(file.settings.partition.enabled);
+
+        // The settings block is really persisted, not inferred: turning it off
+        // moves the bytes.
+        let mut off = loaded;
+        off.set_settings(LevelSettings::default());
+        assert_ne!(encode(&to_scene_file(&off)).unwrap(), bytes1);
+    }
+
+    /// This Ring-1 codec's [`PartitionSettings`] mirror must stay field-for-field
+    /// and default-for-default identical to the Ring-0 runtime one, or a level
+    /// written here decodes to different settings there — silently, since bincode
+    /// is not self-describing. The editor cannot depend on `inf-scene` (ring
+    /// inversion), so the mirror is asserted against the documented constants the
+    /// runtime publishes, and the byte-level cross-check lives in `inf-scene`'s
+    /// cross-decode test over the committed samples.
+    #[test]
+    fn partition_settings_mirror_matches_the_runtime_defaults() {
+        let d = PartitionSettings::default();
+        assert!(
+            !d.enabled,
+            "a level is unpartitioned until an author says so"
+        );
+        assert_eq!(d.cell_size_m, 256.0);
+        assert_eq!(d.activation_radius_m, 256.0);
+        assert_eq!(d.prefetch_margin_m, 256.0);
+        // Every field carries `#[serde(default)]`, so a partial (human-readable)
+        // payload fills the same values.
+        let partial: PartitionSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(partial, d);
+        let one: PartitionSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert!(one.enabled);
+        assert_eq!(one.cell_size_m, 256.0);
     }
 }

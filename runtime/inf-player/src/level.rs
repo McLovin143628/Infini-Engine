@@ -54,6 +54,7 @@ use inf_ecs::components::{
 use inf_ecs::{EcsWorld, Guid};
 use inf_pcg::height::FnHeight;
 use inf_pcg::{PcgAssetPayload, Region};
+use inf_scene::partition::PartitionSettings;
 use inf_scene::{RenderSettingsRecord, RuntimeEntity};
 
 use crate::terrain_stream::TerrainSource;
@@ -104,6 +105,106 @@ pub struct BuiltWorld {
     /// [`RuntimeSim::set_audio_clips`](crate::runtime_sim::RuntimeSim::set_audio_clips)
     /// so a scene `AudioSource` plays the same clip as in the editor Simulate.
     pub audio_clips: BTreeMap<Uuid, inf_audio::AudioAsset>,
+    /// Where this world's streamed **partition cells** come from (P16.5).
+    /// [`PartitionContent::None`] for every unpartitioned level, in which case
+    /// `world` already holds every entity and nothing streams.
+    pub partition: PartitionContent,
+}
+
+impl BuiltWorld {
+    /// Take the partition source out of the built world (it is moved into the
+    /// [`CellStreaming`](crate::cell_stream::CellStreaming) manager, and
+    /// [`sim_from_built`](crate::sim_from_built) consumes the rest).
+    pub fn take_partition(&mut self) -> PartitionContent {
+        std::mem::replace(&mut self.partition, PartitionContent::None)
+    }
+}
+
+/// A partitioned level's **resolved** cell source (P16.5) — the cell mirror of
+/// [`crate::TerrainContent`].
+///
+/// Resolved eagerly by [`InfSceneWorldBuilder::build`], because the persistent
+/// cell is not an afterthought: it *is* the level's world at step 0, and it has
+/// to be spawned before actor binding runs, or a partitioned level would boot
+/// with no blueprint bound to anything.
+///
+/// Two sources, one store trait, and that is the PIE-==-shipping seam. A cooked
+/// level ships its entities in a `.inf_part` sliced out of the pack mapping; a
+/// loose / PIE level still carries them inline, so the runtime bins them with the
+/// **same Ring-0 function the cook used**. Same cells, same order, same
+/// activation timeline.
+#[derive(Default, Clone)]
+pub enum PartitionContent {
+    /// The level is not partitioned (or has nothing to stream).
+    #[default]
+    None,
+    /// A resolved cell store plus the level's partition settings.
+    Streamed(Arc<dyn crate::cell_stream::CellStore>, PartitionSettings),
+}
+
+impl PartitionContent {
+    /// Whether anything streams.
+    pub fn is_none(&self) -> bool {
+        matches!(self, PartitionContent::None)
+    }
+
+    /// The level's partition settings (defaults when nothing streams).
+    pub fn settings(&self) -> PartitionSettings {
+        match self {
+            PartitionContent::None => PartitionSettings::default(),
+            PartitionContent::Streamed(_, s) => *s,
+        }
+    }
+
+    /// The resolved cell store, if this level streams.
+    pub fn store(&self) -> Option<&Arc<dyn crate::cell_stream::CellStore>> {
+        match self {
+            PartitionContent::None => None,
+            PartitionContent::Streamed(s, _) => Some(s),
+        }
+    }
+}
+
+/// Resolve a partitioned level's cell store.
+///
+/// # The discriminator is "is there a pack?", not "is the level empty?"
+///
+/// Those two look interchangeable — a cooked level's entities moved into the
+/// `.inf_part`, so it *is* empty — but they diverge on a case that is trivially
+/// reachable and reads as a bug: an author ticks **Enabled** in World Settings on
+/// a brand-new, still-empty scratch level and hits Play. There is no pack, and
+/// nothing to stream, and the honest answer is "an empty partitioned world, which
+/// is empty". Discriminating on emptiness instead would send that level down the
+/// pack arm and fail it with a message about a `.inf_part` the user has never
+/// heard of and could not have produced.
+///
+/// So: **no pack → bin whatever the level carries in memory** (zero entities
+/// included; the loose `.inf_lvl`, the PIE handoff, an uncooked project). **Pack
+/// → the cooked `.inf_part`**, and a missing one there is a genuine hard error —
+/// a cooked partitioned level ships no entities at all, so degrading to "run it
+/// unpartitioned" would silently boot an empty world, the one failure worse than
+/// not booting.
+fn resolve_cell_store(
+    entities: &[RuntimeEntity],
+    settings: &PartitionSettings,
+    pack: Option<&(Arc<PackReader>, AssetId)>,
+) -> Result<Arc<dyn crate::cell_stream::CellStore>, String> {
+    let Some((reader, level_id)) = pack else {
+        return Ok(Arc::new(
+            crate::cell_stream::MemoryCellStore::from_entities(entities, settings),
+        ));
+    };
+    let id = AssetId(crate::cell_stream::derived_partition_id(level_id.uuid()));
+    if !reader.contains(id) {
+        return Err(format!(
+            "level is partitioned but its .inf_part ({id}) is not in the pack — the cooked \
+             level ships no entities of its own, so this world would boot empty"
+        ));
+    }
+    Ok(Arc::new(crate::cell_stream::PackCellStore::open(
+        reader.clone(),
+        id,
+    )?))
 }
 
 /// Produces the raw serialized bytes of a level (an `.inf_lvl` payload). The
@@ -198,6 +299,10 @@ pub struct InfSceneWorldBuilder {
     /// level's own [`LevelSettings`](inf_scene::RuntimeSettings) always wins.
     gravity: DVec2,
     hz: f64,
+    /// The cooked pack + this level's asset id, so a **partitioned** level can be
+    /// resolved to its derived `.inf_part` (P16.5). `None` on the loose /
+    /// PIE path, where a partitioned level is binned in memory instead.
+    partition_pack: Option<(Arc<PackReader>, AssetId)>,
 }
 
 impl InfSceneWorldBuilder {
@@ -213,6 +318,7 @@ impl InfSceneWorldBuilder {
             audio: HashMap::new(),
             gravity,
             hz,
+            partition_pack: None,
         }
     }
 
@@ -249,6 +355,16 @@ impl InfSceneWorldBuilder {
         self.skeletons = skeletons;
         self.clips = clips;
         self.machines = machines;
+        self
+    }
+
+    /// Attach the cooked pack + this level's asset id so a partitioned level
+    /// resolves to its derived `.inf_part` (P16.5). Builder style, wired by
+    /// [`build_world_from_pack`](crate::build_world_from_pack). Without it a
+    /// partitioned level is binned in memory from its own entities — which is
+    /// exactly right for the loose / PIE path, and produces the identical cells.
+    pub fn with_partition_pack(mut self, reader: Arc<PackReader>, level: AssetId) -> Self {
+        self.partition_pack = Some((reader, level));
         self
     }
 
@@ -299,7 +415,48 @@ impl WorldBuilder for InfSceneWorldBuilder {
         let level = inf_scene::decode(level_bytes).map_err(|e| format!("decode level: {e}"))?;
         let title = level.title;
         let settings = level.settings;
-        let mut world = populate_world(level.entities);
+
+        // ── P16.5 world partition ──
+        //
+        // Three shapes, one rule ("the level's entities live wherever the
+        // partition says"):
+        //
+        // * not partitioned → every entity spawns now, exactly as before;
+        // * partitioned, no pack (a loose `.inf_lvl`, the PIE handoff, an
+        //   uncooked project) → bin the level's own entities here with the same
+        //   Ring-0 function the cook uses;
+        // * partitioned, cooked pack → they are in the derived `.inf_part`.
+        //
+        // In BOTH partitioned shapes the **persistent cell is spawned right here**,
+        // through the normal population path — not by `CellStreaming::attach`, and
+        // that ordering is load-bearing rather than incidental. `RuntimeSim`
+        // assigns blueprint actor ids ONCE, at construction, from the entities
+        // present then; the streamer is attached after the sim exists, so spawning
+        // the persistent cell there would hand `RuntimeSim::new` an empty world and
+        // bind ZERO actors — silently, because an unbound actor is not an error,
+        // it is just a prop that never moves. Spawning here means
+        // `resolve_bound_actors` below sees the persistent cell and a partitioned
+        // level's blueprints bind exactly as an unpartitioned level's do.
+        // (Grid cells spawn later, at the streamer's sync points — and an entity
+        // that arrives that way genuinely does NOT get a ticking blueprint in v1;
+        // the cook warns about it, and the negative test in
+        // `runtime/inf-player/tests/partitioned_world.rs` pins it.)
+        let (entities, partition) = if settings.partition.enabled {
+            let store = resolve_cell_store(
+                &level.entities,
+                &settings.partition,
+                self.partition_pack.as_ref(),
+            )?;
+            let persistent = store.persistent()?;
+            (
+                persistent,
+                PartitionContent::Streamed(store, settings.partition),
+            )
+        } else {
+            (level.entities, PartitionContent::None)
+        };
+
+        let mut world = populate_world(entities);
         world.propagate();
         // Evaluate PCG scatter volumes on load: their `evaluated` cache is never
         // persisted (`#[serde(skip)]`), so the player recomputes it from the
@@ -339,6 +496,7 @@ impl WorldBuilder for InfSceneWorldBuilder {
             state_machines: self.resolve_state_machines(),
             root_clips: self.resolve_root_clips(),
             audio_clips: self.resolve_audio_clips(),
+            partition,
         })
     }
 }
@@ -349,8 +507,27 @@ impl WorldBuilder for InfSceneWorldBuilder {
 /// reparent is a deliberate second pass so it is robust to order.
 pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
     let mut world = EcsWorld::new();
+    spawn_entities(&mut world, entities);
+    world
+}
+
+/// Spawn `entities` **into an existing world**, returning their `Guid`s in the
+/// order they were spawned.
+///
+/// This is [`populate_world`]'s body, lifted so world-partition cell streaming
+/// (P16.5) can spawn one cell at a time into a world that is already running —
+/// the same machinery, the same component set, the same two-pass reparent, so a
+/// streamed cell is indistinguishable from the same entities having been in the
+/// level all along. That equivalence is what the PIE-==-shipping gate rests on;
+/// a second, parallel spawn path would be a place for the two to drift.
+///
+/// Parent links resolve **within this batch** (plus any entity already in the
+/// world carrying that `Guid`), which is exactly why the partitioner keeps a
+/// hierarchy in one cell — see `inf_scene::partition::partition_entities`.
+pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec<Uuid> {
     let mut by_guid: HashMap<Uuid, inf_ecs::Entity> = HashMap::new();
     let mut pending_parents: Vec<(inf_ecs::Entity, Uuid)> = Vec::new();
+    let mut spawned: Vec<Uuid> = Vec::with_capacity(entities.len());
 
     for e in entities {
         let RuntimeEntity {
@@ -390,10 +567,13 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
             volume,
             spline,
             foliage,
+            streaming_source,
+            always_loaded,
         } = e;
 
         let entity = world.spawn_with_guid(guid, &name, None);
         by_guid.insert(guid, entity);
+        spawned.push(guid);
         if !visible {
             world.set_visible(entity, false);
         }
@@ -499,6 +679,13 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
             if let Some(c) = foliage {
                 em.insert(c);
             }
+            // ── v10 world-partition components (P16.5) ──
+            if let Some(c) = streaming_source {
+                em.insert(c);
+            }
+            if let Some(c) = always_loaded {
+                em.insert(c);
+            }
         }
         world.mark_dirty();
         if let Some(p) = parent {
@@ -507,11 +694,19 @@ pub fn populate_world(entities: Vec<RuntimeEntity>) -> EcsWorld {
     }
 
     for (child, parent_guid) in pending_parents {
-        if let Some(&pe) = by_guid.get(&parent_guid) {
+        // Prefer a parent from this batch; fall back to one already in the world
+        // (a streamed cell can never need this — hierarchies do not split — but a
+        // caller spawning a fragment gets the kinder behaviour rather than a
+        // silently orphaned child).
+        if let Some(pe) = by_guid
+            .get(&parent_guid)
+            .copied()
+            .or_else(|| world.entity_of(parent_guid))
+        {
             world.reparent(child, Some(pe));
         }
     }
-    world
+    spawned
 }
 
 /// Evaluate every [`PcgVolume`] whose `graph` ref resolves in `pcgs`, refreshing
@@ -1031,9 +1226,15 @@ impl PackLevelSource {
     }
 
     /// The pack mapping, shared. A streaming store holds this open for the life of
-    /// the world and slices tiles out of it (P16.3b2).
+    /// the world and slices tiles (P16.3b2) / partition cells (P16.5) out of it.
     pub fn reader(&self) -> &Arc<PackReader> {
         &self.reader
+    }
+
+    /// The root level's asset id — the key a partitioned level's derived
+    /// `.inf_part` is computed from (P16.5).
+    pub fn root_level(&self) -> AssetId {
+        self.root_level
     }
 
     /// Resolve a `Terrain.asset` GUID to a **zero-copy** streaming source over the
@@ -1212,6 +1413,8 @@ mod tests {
             volume: None,
             spline: None,
             foliage: None,
+            streaming_source: None,
+            always_loaded: None,
         };
         parent.sprite = Some(Sprite {
             size: Vec2d::new(1.0, 1.0),

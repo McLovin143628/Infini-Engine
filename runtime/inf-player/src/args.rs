@@ -78,6 +78,14 @@ pub struct Args {
     /// Test/diagnostic hook: panic after this many fixed steps (headless), to
     /// exercise the crash-capture + nonzero-exit path. `None` = never.
     pub panic_after: Option<u64>,
+    /// Draw the world-partition **cell overlay** (P16.5): a wireframe box per
+    /// streamed cell, coloured by its state (`--debug-cells`).
+    ///
+    /// Off by default and gated behind a flag rather than always-on, because it
+    /// is engine debug geometry in a shipped player: it costs a `DebugDraw` line
+    /// batch per frame and it is not something a player should ever see by
+    /// accident. Purely a render concern — nothing it reads can reach the sim.
+    pub debug_cells: bool,
 }
 
 impl Default for Args {
@@ -96,6 +104,7 @@ impl Default for Args {
             log_file: None,
             crash_file: PathBuf::from("crash.txt"),
             panic_after: None,
+            debug_cells: false,
         }
     }
 }
@@ -122,6 +131,7 @@ impl Args {
                 // Accepted for CI-invocation compatibility; the exit code already
                 // reflects success/failure.
                 "--assert-exit" => {}
+                "--debug-cells" => args.debug_cells = true,
                 "--level" => {
                     let v = iter.next().ok_or("--level needs a path")?;
                     args.world = WorldChoice::Level(PathBuf::from(v));

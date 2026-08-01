@@ -50,6 +50,15 @@ pub enum CookError {
     #[error("terrain {guid}: {message}")]
     Terrain { guid: AssetId, message: String },
 
+    /// A level's world partition could not be built (P16.5).
+    ///
+    /// A partitioned level ships **no entities of its own** — they live in the
+    /// derived `.inf_part` — so a failure here cannot degrade to "cook it
+    /// unpartitioned": that would silently ship an empty world. It fails the
+    /// build, where it is cheap.
+    #[error("partition of level {guid}: {message}")]
+    Partition { guid: AssetId, message: String },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 

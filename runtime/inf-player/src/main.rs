@@ -243,15 +243,21 @@ fn handle_msg(
                 return Control::RunWindow(payload);
             }
             match inf_player::build_world_from_payload(&payload) {
-                Ok(built) => {
+                Ok(mut built) => {
                     let level = built.label.clone();
                     let actor_count = built.actors.len();
-                    let sim = inf_player::runtime_sim::RuntimeSim::new(
+                    // P16.5: a partitioned scene streams in PIE too — the payload
+                    // carries the entities inline, so the in-memory binning path
+                    // produces the same cells the cook would. Skipping this would
+                    // run an empty world and quietly break PIE == shipping.
+                    let partition = built.take_partition();
+                    let mut sim = inf_player::runtime_sim::RuntimeSim::new(
                         built.world,
                         built.actors,
                         built.gravity,
                         built.hz,
                     );
+                    inf_player::attach_cell_streaming(&mut sim, &partition);
                     *active = Active::Real {
                         sim: Box::new(sim),
                         frame: 0,
@@ -334,7 +340,7 @@ fn run_pie_window(
     rx: std::sync::mpsc::Receiver<EditorToPlayer>,
     mut stdout: impl std::io::Write + 'static,
 ) -> ExitCode {
-    let built = match inf_player::build_world_from_payload(&payload) {
+    let mut built = match inf_player::build_world_from_payload(&payload) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("inf-player: build scene failed: {e}");
@@ -348,12 +354,14 @@ fn run_pie_window(
         return ExitCode::SUCCESS;
     }
     let title = format!("Infinity Engine (PIE) — {}", built.label);
-    let sim = inf_player::runtime_sim::RuntimeSim::new(
+    let partition = built.take_partition();
+    let mut sim = inf_player::runtime_sim::RuntimeSim::new(
         built.world,
         built.actors,
         built.gravity,
         built.hz,
     );
+    inf_player::attach_cell_streaming(&mut sim, &partition);
     match inf_player::window::run_pie(
         title,
         1280,

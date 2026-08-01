@@ -49,12 +49,16 @@
 //!   slot through it, lifting to the live [`MeshRef`] with `asset: None`. No new
 //!   entity slot was added — v7 differs from v6 only inside `MeshRef`.
 
+pub mod partition;
+
+pub use partition::{PartitionSettings, DEFAULT_CELL_SIZE_M};
+
 use inf_ecs::components::{
-    AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource, BlendMode, Camera,
-    CharacterController2D, CharacterController3D, Collider2D, Collider3D, Decal, Foliage, Joint2D,
-    Joint3D, Light, Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D,
-    RigidBody3D, RootMotion, SkeletalMesh, Spline, Sprite, Terrain, TerrainLayer, Text2D, Tilemap,
-    Transform, Volume,
+    AlwaysLoaded, AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource, BlendMode,
+    Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D, Decal, Foliage,
+    Joint2D, Joint3D, Light, Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume,
+    RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, Spline, Sprite, StreamingSource, Terrain,
+    TerrainLayer, Text2D, Tilemap, Transform, Volume,
 };
 use inf_ecs::math::{Color, Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
@@ -75,7 +79,21 @@ use uuid::Uuid;
 ///   v4..v8 record carries its `terrain` slot through it, lifted with
 ///   `asset: None` (the inline `data` stays authoritative, which is exactly what
 ///   an older level meant).
-pub const SCHEMA_VERSION: u32 = 9;
+/// * **v10** — P16.5: the entity record appends two **world-partition** slots —
+///   `streaming_source` ([`StreamingSource`], the sim-side driver of cell
+///   residency) and `always_loaded` ([`AlwaysLoaded`], the never-streamed
+///   marker) — and the file settings gain a `partition`
+///   ([`PartitionSettings`]) block. The pre-v10 settings shape is frozen as
+///   [`RuntimeSettingsV9`] and the pre-v10 entity record as [`EntityRecordV9`];
+///   both lift with the new fields defaulted, i.e. `partition.enabled = false`,
+///   which is exactly what an older level meant (no partitioning).
+///
+///   **Second bump in one phase, deliberately.** P16.3 shipped v9 before the
+///   partition metadata existed as a design; retro-fitting `partition` into v9
+///   would mean re-blessing bytes that are already committed and already load.
+///   An append-only v10 is the honest alternative, and the frozen-record ladder
+///   is exactly the machinery that makes a second bump cheap.
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// File-level simulation settings (schema v3+), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -94,6 +112,11 @@ pub struct RuntimeSettings {
     /// `#[serde(default)]` → [`RenderSettingsRecord::default`].
     #[serde(default)]
     pub render: RenderSettingsRecord,
+    /// World-partition / level-streaming configuration (schema v10). Additive:
+    /// `#[serde(default)]` → [`PartitionSettings::default`], whose `enabled` is
+    /// `false`, so every pre-v10 level keeps cooking and loading as one document.
+    #[serde(default)]
+    pub partition: PartitionSettings,
 }
 
 fn default_gravity_3d() -> Vec3d {
@@ -110,6 +133,7 @@ impl Default for RuntimeSettings {
             gravity_3d: default_gravity_3d(),
             sim_hz: default_sim_hz(),
             render: RenderSettingsRecord::default(),
+            partition: PartitionSettings::default(),
         }
     }
 }
@@ -288,6 +312,15 @@ pub struct RuntimeEntity {
     /// A foliage scatter (palette + bulk instances).
     #[serde(default)]
     pub foliage: Option<Foliage>,
+    // ── v10 (P16.5) world-partition components ────────────────────────────
+    /// Marks this entity as a **streaming source**: cell residency is computed
+    /// from its position at the fixed-step boundary (never from a camera).
+    #[serde(default)]
+    pub streaming_source: Option<StreamingSource>,
+    /// Marks this entity as never-streamed: it cooks into the partition's
+    /// persistent cell and exists for the whole run.
+    #[serde(default)]
+    pub always_loaded: Option<AlwaysLoaded>,
 }
 
 /// A decoded level ready for the runtime to instantiate.
@@ -307,7 +340,7 @@ impl RuntimeLevel {
         decode(bytes)
     }
 
-    /// Encode to the **current** schema (v7) — a deterministic bincode payload.
+    /// Encode to the **current** schema (v10) — a deterministic bincode payload.
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode(self)
     }
@@ -344,9 +377,9 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v9 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v10 file layout (current). `entities` reuses [`RuntimeEntity`].
 #[derive(Serialize, Deserialize)]
-struct SceneFileV9 {
+struct SceneFileV10 {
     schema_version: u32,
     title: String,
     entities: Vec<RuntimeEntity>,
@@ -446,6 +479,7 @@ impl RuntimeSettingsV7 {
             gravity_3d: self.gravity_3d,
             sim_hz: self.sim_hz,
             render: RenderSettingsRecord::default(),
+            partition: PartitionSettings::default(),
         }
     }
 
@@ -466,6 +500,58 @@ impl Default for RuntimeSettingsV7 {
             gravity_2d: Vec2d::ZERO,
             gravity_3d: default_gravity_3d(),
             sim_hz: default_sim_hz(),
+        }
+    }
+}
+
+/// The **pre-v10** file-settings byte layout (schema v10 froze this when the file
+/// settings gained a `partition` block). Frozen file records (v8..v9) carry
+/// `settings` as [`RuntimeSettingsV9`]; [`RuntimeSettingsV9::into_current`] lifts
+/// it with a default (disabled) [`PartitionSettings`].
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct RuntimeSettingsV9 {
+    #[serde(default)]
+    gravity_2d: Vec2d,
+    #[serde(default = "default_gravity_3d")]
+    gravity_3d: Vec3d,
+    #[serde(default = "default_sim_hz")]
+    sim_hz: f64,
+    #[serde(default)]
+    render: RenderSettingsRecord,
+}
+
+impl RuntimeSettingsV9 {
+    fn into_current(self) -> RuntimeSettings {
+        RuntimeSettings {
+            gravity_2d: self.gravity_2d,
+            gravity_3d: self.gravity_3d,
+            sim_hz: self.sim_hz,
+            render: self.render,
+            partition: PartitionSettings::default(),
+        }
+    }
+
+    /// Downgrade live [`RuntimeSettings`] to the pre-v10 layout (fixture bless
+    /// path). The partition block has no v9 home and is dropped — a lossy
+    /// direction, used only to regenerate old fixtures from a current sample.
+    #[cfg(test)]
+    fn from_current(s: RuntimeSettings) -> Self {
+        Self {
+            gravity_2d: s.gravity_2d,
+            gravity_3d: s.gravity_3d,
+            sim_hz: s.sim_hz,
+            render: s.render,
+        }
+    }
+}
+
+impl Default for RuntimeSettingsV9 {
+    fn default() -> Self {
+        Self {
+            gravity_2d: Vec2d::ZERO,
+            gravity_3d: default_gravity_3d(),
+            sim_hz: default_sim_hz(),
+            render: RenderSettingsRecord::default(),
         }
     }
 }
@@ -842,6 +928,8 @@ impl EntityRecordV1 {
             volume: None,
             spline: None,
             foliage: None,
+            streaming_source: None,
+            always_loaded: None,
         }
     }
 }
@@ -885,6 +973,8 @@ impl EntityRecordV2 {
             volume: None,
             spline: None,
             foliage: None,
+            streaming_source: None,
+            always_loaded: None,
         }
     }
 }
@@ -928,6 +1018,8 @@ impl EntityRecordV3 {
             volume: None,
             spline: None,
             foliage: None,
+            streaming_source: None,
+            always_loaded: None,
         }
     }
 }
@@ -971,6 +1063,8 @@ impl EntityRecordV4 {
             volume: None,
             spline: None,
             foliage: None,
+            streaming_source: None,
+            always_loaded: None,
         }
     }
 }
@@ -1014,6 +1108,8 @@ impl EntityRecordV5 {
             volume: None,
             spline: None,
             foliage: None,
+            streaming_source: None,
+            always_loaded: None,
         }
     }
 }
@@ -1060,6 +1156,8 @@ impl EntityRecordV6 {
             volume: None,
             spline: None,
             foliage: None,
+            streaming_source: None,
+            always_loaded: None,
         }
     }
 }
@@ -1242,6 +1340,8 @@ impl EntityRecordV7 {
             volume: None,
             spline: None,
             foliage: None,
+            streaming_source: None,
+            always_loaded: None,
         }
     }
 }
@@ -1317,7 +1417,9 @@ struct EntityRecordV8 {
     foliage: Option<Foliage>,
 }
 
-/// A frozen schema-v8 file layout.
+/// A frozen schema-v8 file layout. Its `settings` are the **pre-v10** shape
+/// ([`RuntimeSettingsV9`]) — v9 did not touch the file settings, so one frozen
+/// record serves both v8 and v9 payloads.
 #[derive(Serialize, Deserialize)]
 struct SceneFileV8 {
     #[allow(dead_code)]
@@ -1325,7 +1427,7 @@ struct SceneFileV8 {
     title: String,
     entities: Vec<EntityRecordV8>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV9,
 }
 
 impl EntityRecordV8 {
@@ -1370,6 +1472,139 @@ impl EntityRecordV8 {
             volume: self.volume,
             spline: self.spline,
             foliage: self.foliage,
+            streaming_source: None,
+            always_loaded: None,
+        }
+    }
+}
+
+/// A frozen schema-v9 entity record (pre-P16.5): the full v9 slot set with the
+/// live `Terrain` (asset reference included), but **neither** v10
+/// world-partition slot. v10 appended only `streaming_source` / `always_loaded`,
+/// so this differs from the live [`RuntimeEntity`] only there.
+#[derive(Serialize, Deserialize)]
+struct EntityRecordV9 {
+    guid: Uuid,
+    name: String,
+    parent: Option<Uuid>,
+    transform: Transform,
+    visible: bool,
+    mesh: Option<MeshRef>,
+    material: Option<Material>,
+    light: Option<Light>,
+    camera: Option<Camera>,
+    #[serde(default)]
+    sprite: Option<Sprite>,
+    #[serde(default)]
+    tilemap: Option<Tilemap>,
+    #[serde(default)]
+    nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    text2d: Option<Text2D>,
+    #[serde(default)]
+    light_2d: Option<Light2D>,
+    #[serde(default)]
+    rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    actor: Option<Uuid>,
+    #[serde(default)]
+    terrain: Option<Terrain>,
+    #[serde(default)]
+    pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    root_motion: Option<RootMotion>,
+    #[serde(default)]
+    attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    audio_source: Option<AudioSource>,
+    #[serde(default)]
+    audio_listener: Option<AudioListener>,
+    #[serde(default)]
+    decal: Option<Decal>,
+    #[serde(default)]
+    volume: Option<Volume>,
+    #[serde(default)]
+    spline: Option<Spline>,
+    #[serde(default)]
+    foliage: Option<Foliage>,
+}
+
+/// A frozen schema-v9 file layout (carries the pre-v10 [`RuntimeSettingsV9`]).
+#[derive(Serialize, Deserialize)]
+struct SceneFileV9 {
+    #[allow(dead_code)]
+    schema_version: u32,
+    title: String,
+    entities: Vec<EntityRecordV9>,
+    #[serde(default)]
+    settings: RuntimeSettingsV9,
+}
+
+impl EntityRecordV9 {
+    /// Lift a frozen v9 record to the live (v10) [`RuntimeEntity`]: both
+    /// world-partition slots default to `None` — a pre-v10 level named no
+    /// streaming source and marked nothing always-loaded, which is exactly what
+    /// an unpartitioned level means.
+    fn into_runtime(self) -> RuntimeEntity {
+        RuntimeEntity {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: self.decal,
+            volume: self.volume,
+            spline: self.spline,
+            foliage: self.foliage,
+            streaming_source: None,
+            always_loaded: None,
         }
     }
 }
@@ -1488,7 +1723,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV8::into_runtime)
                     .collect(),
-                settings: v8.settings,
+                settings: v8.settings.into_current(),
             })
         }
         9 => {
@@ -1497,8 +1732,22 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v9: {e}")))?;
             Ok(RuntimeLevel {
                 title: v9.title,
-                entities: v9.entities,
-                settings: v9.settings,
+                entities: v9
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV9::into_runtime)
+                    .collect(),
+                settings: v9.settings.into_current(),
+            })
+        }
+        10 => {
+            let (v10, _): (SceneFileV10, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v10: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v10.title,
+                entities: v10.entities,
+                settings: v10.settings,
             })
         }
         found => Err(SceneError::SchemaTooNew {
@@ -1508,9 +1757,9 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     }
 }
 
-/// Encode a level to the current schema (v9) as a deterministic bincode payload.
+/// Encode a level to the current schema (v10) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV9 {
+    let file = SceneFileV10 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -1595,14 +1844,14 @@ mod tests {
 
     #[test]
     fn editor_encoded_current_sample_decodes_and_round_trips_byte_identical() {
-        // The committed platformer is an **editor-encoded** current-schema (v9)
+        // The committed platformer is an **editor-encoded** current-schema (v10)
         // level. This is the editor→runtime cross-decode: the Ring-0 reader parses
         // the editor's bytes field-for-field, and re-encoding is byte-identical
         // (the cook's runtime rewrite of an already-current level is a no-op).
         let original = read_committed("samples/platformer-2d/Platformer.inf_lvl");
         assert_eq!(
             original[0], SCHEMA_VERSION as u8,
-            "committed platformer is the current schema (v9)"
+            "committed platformer is the current schema (v10)"
         );
         let level = RuntimeLevel::decode(&original).unwrap();
         let reencoded = level.encode().unwrap();
@@ -2229,7 +2478,7 @@ mod tests {
                     ..v8_rec(g(0x8009), "Terrain", None)
                 },
             ],
-            settings: RuntimeSettings {
+            settings: RuntimeSettingsV9 {
                 gravity_2d: Vec2d::new(0.0, -20.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 120.0,
@@ -2341,8 +2590,11 @@ mod tests {
         };
 
         let bytes = level.encode().unwrap();
-        assert_eq!(bytes[0], 9, "a v9 terrain writes a genuine v9 payload");
-        let back = RuntimeLevel::decode(&bytes).expect("v9 decodes");
+        assert_eq!(
+            bytes[0], SCHEMA_VERSION as u8,
+            "encode always writes the current schema"
+        );
+        let back = RuntimeLevel::decode(&bytes).expect("current schema decodes");
         assert_eq!(back, level);
         assert_eq!(back.encode().unwrap(), bytes, "re-encode is byte-identical");
         assert_eq!(
@@ -2481,5 +2733,252 @@ mod tests {
         assert_eq!(cube.foliage.as_ref().unwrap().instances.len(), 3);
         assert_eq!(back.settings.render.exposure, 1.4);
         assert!(back.settings.render.gi_enabled);
+    }
+
+    // ── v9 forever-load fixture (frozen pre-v10) ────────────────────────────
+
+    /// A minimal all-`None` frozen v9 entity record, filled via struct-update
+    /// syntax by [`v9_scene_reference`].
+    fn v9_rec(guid: Uuid, name: &str, parent: Option<Uuid>) -> EntityRecordV9 {
+        EntityRecordV9 {
+            guid,
+            name: name.into(),
+            parent,
+            transform: Transform::IDENTITY,
+            visible: true,
+            mesh: None,
+            material: None,
+            light: None,
+            camera: None,
+            sprite: None,
+            tilemap: None,
+            nine_slice: None,
+            text2d: None,
+            light_2d: None,
+            rigid_body_2d: None,
+            collider_2d: None,
+            character_controller_2d: None,
+            rigid_body_3d: None,
+            collider_3d: None,
+            character_controller_3d: None,
+            actor: None,
+            terrain: None,
+            pcg_volume: None,
+            skeletal_mesh: None,
+            anim_player: None,
+            anim_state_machine: None,
+            root_motion: None,
+            attached_to: None,
+            joint_2d: None,
+            joint_3d: None,
+            audio_source: None,
+            audio_listener: None,
+            decal: None,
+            volume: None,
+            spline: None,
+            foliage: None,
+        }
+    }
+
+    /// A representative frozen schema-v9 scene — the provenance source for the
+    /// committed `scene_v9.inf_lvl`. Carries a **v9 `Terrain` with an asset
+    /// reference** (the thing v9 added) plus a mesh and a light, so the pre-v10
+    /// entity + settings byte layouts are pinned by committed bytes.
+    fn v9_scene_reference() -> SceneFileV9 {
+        use inf_ecs::components::Primitive;
+        let g = uuid::Uuid::from_u128;
+        SceneFileV9 {
+            schema_version: 9,
+            title: "V9 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV9 {
+                    mesh: Some(MeshRef {
+                        primitive: Primitive::Cube,
+                        asset: Some(g(0x90A1)),
+                    }),
+                    material: Some(Material::default()),
+                    ..v9_rec(g(0x9001), "Cube", None)
+                },
+                EntityRecordV9 {
+                    terrain: Some(Terrain {
+                        asset: Some(g(0x9_00AA)),
+                        ..fixture_terrain()
+                    }),
+                    ..v9_rec(g(0x9002), "Terrain", None)
+                },
+                EntityRecordV9 {
+                    light: Some(Light {
+                        kind: LightKind::Directional,
+                        color: Color::WHITE,
+                        intensity: 2.0,
+                        ..Default::default()
+                    }),
+                    ..v9_rec(g(0x9003), "Sun", None)
+                },
+            ],
+            settings: RuntimeSettingsV9 {
+                gravity_2d: Vec2d::new(0.0, -18.0),
+                gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+                sim_hz: 90.0,
+                render: RenderSettingsRecord {
+                    exposure: 1.1,
+                    ..RenderSettingsRecord::default()
+                },
+            },
+        }
+    }
+
+    /// Bless the committed `scene_v9.inf_lvl` from [`v9_scene_reference`] under
+    /// `INF_BLESS_FIXTURES=1` (inert otherwise) — the same discipline the v7/v8
+    /// fixtures use. Never hand-edit the committed bytes.
+    #[test]
+    fn bless_scene_v9_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v9_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 9);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v9.inf_lvl");
+        std::fs::write(&path, &bytes).unwrap();
+        eprintln!("blessed scene_v9 fixture: {}", path.display());
+    }
+
+    /// The committed schema-v9 fixture — written by the **pre-v10 codec**, before
+    /// the entity record grew its two world-partition slots and the settings grew
+    /// their partition block — still decodes here, with everything lifted to its
+    /// documented default. This is the "old bytes load forever" gate for the v10
+    /// bump.
+    #[test]
+    fn scene_v9_fixture_decodes_with_v10_defaults() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v9.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v9 fixture present");
+        assert_eq!(bytes[0], 9, "fixture is a genuine schema-v9 payload");
+        // Reproducibility lock: the frozen v9 writer still emits those exact bytes.
+        let rebuilt =
+            bincode::serde::encode_to_vec(v9_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "committed v9 fixture matches the frozen writer"
+        );
+
+        let level = RuntimeLevel::decode(&bytes).expect("v9 fixture decodes");
+        assert_eq!(level.title, "V9 Fixture Level");
+        let by_name = |n: &str| level.entities.iter().find(|e| e.name == n).unwrap();
+
+        // The v9 content survives the frozen-record hop intact …
+        let terrain = by_name("Terrain").terrain.as_ref().expect("terrain slot");
+        assert_eq!(terrain.asset, Some(uuid::Uuid::from_u128(0x9_00AA)));
+        assert_eq!(terrain.data.tile_count(), 2);
+        assert_eq!(
+            by_name("Cube").mesh.unwrap().asset,
+            Some(uuid::Uuid::from_u128(0x90A1))
+        );
+        assert_eq!(level.settings.sim_hz, 90.0);
+        assert_eq!(level.settings.render.exposure, 1.1);
+
+        // … and every v10 field lifts to its documented default: no streaming
+        // sources, nothing pinned always-loaded, partitioning OFF.
+        for e in &level.entities {
+            assert!(e.streaming_source.is_none());
+            assert!(e.always_loaded.is_none());
+        }
+        assert_eq!(level.settings.partition, PartitionSettings::default());
+        assert!(
+            !level.settings.partition.enabled,
+            "a pre-v10 level is a single document"
+        );
+
+        // Rewriting lifts to the current schema (v10) and re-decodes equal.
+        let out = level.encode().unwrap();
+        assert_eq!(out[0], SCHEMA_VERSION as u8);
+        assert_eq!(RuntimeLevel::decode(&out).unwrap(), level);
+    }
+
+    /// The **downgrade-bless** direction, as a checked property rather than a
+    /// path only a `INF_BLESS_FIXTURES=1` run ever walks.
+    ///
+    /// `from_current` → `into_current` must be the identity on everything the v9
+    /// shape can hold, and must drop exactly one thing: the partition block,
+    /// which has no v9 home. That is what "lossy in one documented direction"
+    /// means, and it is the property a future fixture re-bless depends on.
+    #[test]
+    fn v9_settings_downgrade_is_lossless_except_for_the_partition_block() {
+        let live = RuntimeSettings {
+            gravity_2d: Vec2d::new(0.0, -18.0),
+            gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+            sim_hz: 90.0,
+            render: RenderSettingsRecord {
+                exposure: 1.4,
+                taa: true,
+                ..RenderSettingsRecord::default()
+            },
+            partition: PartitionSettings {
+                enabled: true,
+                cell_size_m: 64.0,
+                activation_radius_m: 80.0,
+                prefetch_margin_m: 96.0,
+            },
+        };
+        let back = RuntimeSettingsV9::from_current(live).into_current();
+        assert_eq!(back.gravity_2d, live.gravity_2d);
+        assert_eq!(back.gravity_3d, live.gravity_3d);
+        assert_eq!(back.sim_hz, live.sim_hz);
+        assert_eq!(back.render, live.render);
+        assert_eq!(
+            back.partition,
+            PartitionSettings::default(),
+            "the partition block has no v9 home and must come back defaulted"
+        );
+        // An already-unpartitioned settings block survives the hop exactly.
+        let plain = RuntimeSettings::default();
+        assert_eq!(RuntimeSettingsV9::from_current(plain).into_current(), plain);
+    }
+
+    /// The v10 additions round-trip byte-identically: both new entity slots and
+    /// the file-level partition block.
+    #[test]
+    fn v10_partition_slots_and_settings_round_trip() {
+        use inf_ecs::components::{AlwaysLoaded, StreamingSource};
+        let g = uuid::Uuid::from_u128;
+        let mut level = RuntimeLevel {
+            title: "V10 Partition".into(),
+            entities: vec![
+                RuntimeEntity {
+                    streaming_source: Some(StreamingSource { radius_m: 300.0 }),
+                    ..v9_rec(g(0xA001), "Player", None).into_runtime()
+                },
+                RuntimeEntity {
+                    always_loaded: Some(AlwaysLoaded),
+                    ..v9_rec(g(0xA002), "GameMode", None).into_runtime()
+                },
+                v9_rec(g(0xA003), "Prop", None).into_runtime(),
+            ],
+            settings: RuntimeSettings {
+                partition: PartitionSettings {
+                    enabled: true,
+                    cell_size_m: 128.0,
+                    activation_radius_m: 200.0,
+                    prefetch_margin_m: 300.0,
+                },
+                ..RuntimeSettings::default()
+            },
+        };
+
+        let bytes = level.encode().unwrap();
+        assert_eq!(bytes[0], 10, "a partitioned level writes a v10 payload");
+        let back = RuntimeLevel::decode(&bytes).expect("v10 decodes");
+        assert_eq!(back, level);
+        assert_eq!(back.encode().unwrap(), bytes, "re-encode is byte-identical");
+        assert_eq!(back.entities[0].streaming_source.unwrap().radius_m, 300.0);
+        assert_eq!(back.entities[1].always_loaded, Some(AlwaysLoaded));
+        assert!(back.entities[2].streaming_source.is_none());
+        assert_eq!(back.settings.partition.cell_size_m, 128.0);
+
+        // Turning partitioning off really moves the bytes (the block is persisted,
+        // not inferred).
+        level.settings.partition = PartitionSettings::default();
+        let off = level.encode().unwrap();
+        assert_ne!(off, bytes);
+        assert_eq!(RuntimeLevel::decode(&off).unwrap(), level);
     }
 }

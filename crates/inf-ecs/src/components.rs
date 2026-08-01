@@ -2424,6 +2424,76 @@ pub struct Foliage {
     pub instances: Vec<FoliageInstance>,
 }
 
+// ── P16.5 world-partition components (`.inf_lvl` schema v10) ─────────────────
+
+/// Default [`StreamingSource::radius_m`] — a 512 m personal radius, two default
+/// 256 m cells in every direction.
+pub fn default_streaming_source_radius() -> f64 {
+    512.0
+}
+
+/// A **streaming source** (schema v10): an entity whose position drives world
+/// -partition cell residency.
+///
+/// # This is a SIM component, deliberately
+///
+/// Cell streaming spawns and despawns entities, so it changes what the fixed step
+/// can see — which means residency has to be a function of *sim state alone*, or
+/// the replay / PIE-==-shipping gates die. That is why the want set is derived
+/// from entities carrying this component (the possessed character, a scripted
+/// convoy, a spectator pawn) and **never** from the free camera: a camera is a
+/// render concern, and letting it decide which entities exist would be exactly
+/// the coupling the terrain-streaming doctrine forbids.
+///
+/// The editor viewport's free camera *is* a legitimate source while authoring —
+/// there is no simulation there to corrupt — but the editor stays single-document
+/// in v1, so nothing streams in it at all.
+///
+/// A world with no streaming source wants no cells: only the persistent cell is
+/// resident, which is the correct (and deterministic) answer.
+///
+/// `radius_m` **overrides** the level's
+/// `PartitionSettings::activation_radius_m` for this source when it is larger, so
+/// a long-range observer (a flying vehicle, a sniper camera pawn) can pull more
+/// world in without changing the level default for everyone.
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct StreamingSource {
+    /// Activation radius around this entity, in **metres**. Cells whose footprint
+    /// comes within this distance are activated at the next deterministic sync
+    /// point. Clamped against the level's `activation_radius_m` (the larger wins).
+    #[serde(default = "default_streaming_source_radius")]
+    pub radius_m: f64,
+}
+
+impl Default for StreamingSource {
+    fn default() -> Self {
+        Self {
+            radius_m: default_streaming_source_radius(),
+        }
+    }
+}
+
+/// **Always loaded** (schema v10): a marker excluding this entity from grid
+/// partitioning — it is cooked into the partition's *persistent* cell and exists
+/// for the whole run, wherever the streaming sources are.
+///
+/// This is what a level's managers, global volumes, the sun, the boot camera and
+/// anything gameplay assumes is always spawned carry. It is a marker (no fields):
+/// the residency answer for such an entity is not a parameter, it is "yes".
+///
+/// Note the partitioner *also* routes entities with **no meaningful world
+/// position** to the persistent cell without this marker — see
+/// `inf_scene::partition::is_persistent`. The marker is the explicit, authored
+/// override for an entity that *does* have a position but must never stream.
+#[derive(
+    Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
+#[reflect(Component, Default)]
+pub struct AlwaysLoaded;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3190,5 +3260,28 @@ mod tests {
         let d: Foliage = serde_json::from_str("{}").unwrap();
         assert_eq!(d, Foliage::default());
         assert!(d.palette.is_empty() && d.instances.is_empty());
+    }
+
+    #[test]
+    fn streaming_source_serde_round_trips_and_defaults() {
+        let s = StreamingSource { radius_m: 384.0 };
+        let back: StreamingSource =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(s, back);
+        let d: StreamingSource = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, StreamingSource::default());
+        assert_eq!(d.radius_m, 512.0);
+    }
+
+    #[test]
+    fn always_loaded_is_a_zero_field_marker() {
+        let m = AlwaysLoaded;
+        let back: AlwaysLoaded = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(m, back);
+        // A marker carries no state, so a bincode `Option<AlwaysLoaded>` is one
+        // tag byte — the cheapest possible per-entity slot.
+        let bytes =
+            bincode::serde::encode_to_vec(Some(AlwaysLoaded), bincode::config::standard()).unwrap();
+        assert_eq!(bytes.len(), 1);
     }
 }

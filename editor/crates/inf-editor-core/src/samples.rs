@@ -3010,6 +3010,242 @@ The gate (`runtime/inf-player/tests/streamed_terrain.rs`):\n\n\
    terrain to the same sim trace and the same resident set.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// -- Partitioned-world gate scene (P16.5) ------------------------------------
+//
+// The world-partition gate scene: a 4 x 4 grid of 128 m cells, one authored prop
+// per cell, a persistent manager + sun, and a "Walker" carrying a
+// `StreamingSource` that the gate scripts along the +X row. Everything is
+// committed as ONE `.inf_lvl` (the editor stays single-document); the `.inf_part`
+// is DERIVED by the cook, exactly as `.inf_vmesh` is.
+
+pub const PARTITIONED_LEVEL_GUID: Uuid = Uuid::from_u128(0x8416_0500);
+pub const PARTITIONED_WALKER_GUID: Uuid = Uuid::from_u128(0x8416_0501);
+pub const PARTITIONED_MANAGER_GUID: Uuid = Uuid::from_u128(0x8416_0502);
+pub const PARTITIONED_SUN_GUID: Uuid = Uuid::from_u128(0x8416_0503);
+/// A prop parented under the cell-(3,3) prop — proves a hierarchy streams as one
+/// unit even though its own transform sits nowhere near its parent's cell.
+pub const PARTITIONED_CHILD_GUID: Uuid = Uuid::from_u128(0x8416_0504);
+
+/// Cell edge length (metres). Small enough that a scripted walk crosses several
+/// cells in a short run; large enough to be a plausible authoring unit.
+pub const PARTITIONED_CELL_SIZE_M: f64 = 128.0;
+/// Cells per side: 4 x 4 = 16, comfortably over the gate's "at least 3 x 3".
+pub const PARTITIONED_GRID: i32 = 4;
+/// Level activation radius (metres) — under one cell, so exactly the cells the
+/// walker is standing on/next to activate and the trace has real churn.
+pub const PARTITIONED_ACTIVATION_RADIUS_M: f64 = 32.0;
+/// Level prefetch margin (metres). Cells within `activation + margin` may be
+/// decoded ahead of need; it can never change WHICH cells activate.
+pub const PARTITIONED_PREFETCH_MARGIN_M: f64 = 192.0;
+
+/// World edge length of the partitioned grid (metres).
+pub fn partitioned_world_size() -> f64 {
+    PARTITIONED_CELL_SIZE_M * PARTITIONED_GRID as f64
+}
+
+/// The stable GUID of the prop authored in cell `(cx, cz)`.
+pub fn partitioned_prop_guid(cx: i32, cz: i32) -> Uuid {
+    Uuid::from_u128(0x8416_0600 + (cz * PARTITIONED_GRID + cx) as u128)
+}
+
+/// The world position of the prop authored in cell `(cx, cz)` — the cell's
+/// centre, so it is unambiguously inside exactly one cell.
+pub fn partitioned_prop_position(cx: i32, cz: i32) -> DVec3 {
+    DVec3::new(
+        (cx as f64 + 0.5) * PARTITIONED_CELL_SIZE_M,
+        0.0,
+        (cz as f64 + 0.5) * PARTITIONED_CELL_SIZE_M,
+    )
+}
+
+/// The scripted **sim** walk: step `i`'s world position for the Walker.
+///
+/// Straight along +X through the centres of row `z = 0`, one third of a cell per
+/// step, so the walk crosses every cell in the row and the activation trace has
+/// real transitions. Deterministic and camera-free — this is the trace the gates
+/// compare, and (by the doctrine) the only thing residency may depend on.
+pub fn partitioned_walk_point(step: usize) -> DVec3 {
+    let span = partitioned_world_size();
+    let x = (step as f64 * (PARTITIONED_CELL_SIZE_M / 3.0)) % span;
+    DVec3::new(x, 0.0, PARTITIONED_CELL_SIZE_M * 0.5)
+}
+
+/// Build the partitioned-world [`SceneDoc`].
+///
+/// The document is a plain, single, unpartitioned-looking level — because that is
+/// what the editor authors. What makes it partitioned is one settings block; the
+/// cook is what splits it, and the player is what streams it.
+pub fn partitioned_world_scene() -> SceneDoc {
+    use crate::scene::serialize::{LevelSettings, PartitionSettings};
+    use inf_ecs::components::{AlwaysLoaded, Light, LightKind, StreamingSource};
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Partitioned World");
+    doc.set_settings(LevelSettings {
+        partition: PartitionSettings {
+            enabled: true,
+            cell_size_m: PARTITIONED_CELL_SIZE_M,
+            activation_radius_m: PARTITIONED_ACTIVATION_RADIUS_M,
+            prefetch_margin_m: PARTITIONED_PREFETCH_MARGIN_M,
+        },
+        ..LevelSettings::default()
+    });
+
+    // -- The persistent cell --
+    //
+    // A manager with no spatial component at all (the `Unplaced` rule), and a sun
+    // explicitly marked `AlwaysLoaded` (a Light DOES occupy space, so without the
+    // marker it would stream out and the world would go dark). Those two entities
+    // are the whole "what is a persistent cell for" story, in the scene.
+    doc.create_with_guid(PARTITIONED_MANAGER_GUID, SpawnKind::Empty, "GameMode", None);
+    insert!(
+        doc,
+        PARTITIONED_MANAGER_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+
+    doc.create_with_guid(PARTITIONED_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        PARTITIONED_SUN_GUID,
+        Transform {
+            translation: inf_ecs::math::Vec3d::new(0.0, 80.0, 0.0),
+            rotation: inf_ecs::math::Vec3d::new(-50.0, -30.0, 0.0),
+            scale: inf_ecs::math::Vec3d::new(1.0, 1.0, 1.0),
+        }
+    );
+    insert!(
+        doc,
+        PARTITIONED_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            color: Color::new(1.0, 0.97, 0.9, 1.0),
+            intensity: 2.5,
+            ..Default::default()
+        }
+    );
+    insert!(doc, PARTITIONED_SUN_GUID, AlwaysLoaded);
+
+    // -- The streaming source: the entity residency is derived FROM. --
+    //
+    // It carries a `StreamingSource` (which is also what makes it persistent —
+    // a source that could stream itself out is a bootstrap paradox), and
+    // `radius_m: 0` so the LEVEL's activation radius is what governs; the gate
+    // then has one knob to reason about.
+    doc.create_with_guid(PARTITIONED_WALKER_GUID, SpawnKind::Empty, "Walker", None);
+    insert!(
+        doc,
+        PARTITIONED_WALKER_GUID,
+        Transform::from_translation(partitioned_walk_point(0))
+    );
+    insert!(
+        doc,
+        PARTITIONED_WALKER_GUID,
+        StreamingSource { radius_m: 0.0 }
+    );
+
+    // -- One authored prop per cell (a cube at the cell centre). --
+    for cz in 0..PARTITIONED_GRID {
+        for cx in 0..PARTITIONED_GRID {
+            let guid = partitioned_prop_guid(cx, cz);
+            doc.create_with_guid(guid, SpawnKind::Cube, &format!("Prop {cx},{cz}"), None);
+            insert!(
+                doc,
+                guid,
+                Transform::from_translation(partitioned_prop_position(cx, cz))
+            );
+        }
+    }
+
+    // -- A child of the far-corner prop, authored a whole world away. --
+    //
+    // Its own transform would bin it into cell (0,0); the partitioner assigns it
+    // its ROOT's cell instead, so the pair never splits. The gate asserts it
+    // appears and disappears together with its parent.
+    doc.create_with_guid(
+        PARTITIONED_CHILD_GUID,
+        SpawnKind::Cube,
+        "Far Child",
+        Some(partitioned_prop_guid(
+            PARTITIONED_GRID - 1,
+            PARTITIONED_GRID - 1,
+        )),
+    );
+    insert!(
+        doc,
+        PARTITIONED_CHILD_GUID,
+        Transform::from_translation(DVec3::new(-2000.0, 0.0, -2000.0))
+    );
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+/// The repo-root `samples/partitioned-world/` directory.
+pub fn partitioned_world_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/partitioned-world")
+}
+
+/// Write the committed partitioned-world files (regeneration path).
+pub fn write_partitioned_world() -> Result<(), String> {
+    let dir = partitioned_world_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    crate::scene::serialize::save(
+        &partitioned_world_scene(),
+        &dir.join("PartitionedWorld.inf_lvl"),
+        Some(PARTITIONED_LEVEL_GUID),
+    )?;
+    std::fs::write(dir.join("README.md"), PARTITIONED_WORLD_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const PARTITIONED_WORLD_README: &str = "# Partitioned World (P16.5 gate scene)\n\n\
+Generated by `inf_editor_core::samples::partitioned_world_scene` -- the P16.5 gate\n\
+scene for **world partition / level streaming**.\n\n\
+- `PartitionedWorld.inf_lvl` -- the scene (schema v10). ONE document, as the editor\n\
+  always authors: a 4x4 grid of cubes at the centres of 128 m cells, a `GameMode`\n\
+  with no spatial component, a sun marked `AlwaysLoaded`, a `Walker` carrying a\n\
+  `StreamingSource`, and a child of the far-corner prop authored a whole world\n\
+  away from it. What makes it partitioned is one settings block\n\
+  (`partition.enabled`), nothing else.\n\
+- `PartitionedWorld.inf_part` -- NOT committed. It is DERIVED by the cook (like\n\
+  `.inf_vmesh`): the cook bins the entities into a persistent cell + 16 grid cells\n\
+  and writes them to a pack entry whose GUID is a pure function of the level's.\n\n\
+## The doctrine this scene exists to pin\n\n\
+Cell streaming decides which entities EXIST, so residency must be a function of sim\n\
+state alone. Wants come from `StreamingSource` entities read at the fixed-step\n\
+boundary -- never a camera -- and activation/deactivation happen only at that sync\n\
+point, in ascending cell order. Loading may run ahead (the prefetch margin); a cell\n\
+that reaches its activation step unloaded blocks the step. So the margin buys\n\
+latency and can never move a result.\n\n\
+## The v1 boundaries, stated rather than discovered\n\n\
+- The PERSISTENT cell is the world at step 0: the level builder spawns it BEFORE\n\
+  blueprint actors bind, so a persistent entity's `ActorClass` ticks normally. An\n\
+  entity that streams IN does NOT gain a ticking blueprint in v1 (the actor map is\n\
+  fixed at `RuntimeSim` construction). Mark such an entity `AlwaysLoaded`.\n\
+- Runtime-spawned entities are never despawned by streaming; a statically-placed\n\
+  one is evicted with its BIRTH cell, wherever a script has since moved it.\n\
+- A cook-time reference from one cell to another is a cook WARNING, never a\n\
+  promotion: residency must not depend on the reference graph.\n\
+- The editor's in-process Simulate runs the whole document unpartitioned (single\n\
+  document in v1); PIE and a shipped build both stream, and those two are what the\n\
+  parity gate compares.\n\n\
+The gate (`runtime/inf-player/tests/partitioned_world.rs`):\n\n\
+1. the cook emits ONE `.inf_part` entry, UNCOMPRESSED, deterministic across\n\
+   rebuilds, and the cooked `.inf_lvl` carries no entities;\n\
+2. two headless runs of the scripted walk produce an identical activation trace;\n\
+3. the SAME walk under two DIFFERENT prefetch margins produces a byte-identical\n\
+   sim trace -- the doctrine, as an executable assertion;\n\
+4. PIE == shipping: the cooked-pack path and the editor-document path stream the\n\
+   same cells to the same sim trace;\n\
+5. non-partitioned regression: the platformer sample's pack is byte-identical\n\
+   whether or not partitioning exists;\n\
+6. an entity in a far cell does not exist until the walker approaches -- then it\n\
+   exists with its authored transform.\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3184,6 +3420,7 @@ mod tests {
             write_physics_playground().expect("regenerate physics playground");
             write_vgeom_demo().expect("regenerate vgeom demo");
             write_streamed_terrain().expect("regenerate streamed terrain");
+            write_partitioned_world().expect("regenerate partitioned world");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -3325,6 +3562,22 @@ mod tests {
             );
         }
 
+        // Partitioned-world lock (P16.5): only the `.inf_lvl` is committed — the
+        // `.inf_part` is DERIVED by the cook (like `.inf_vmesh`).
+        let pwdir = partitioned_world_dir();
+        let pwlvl = pwdir.join("PartitionedWorld.inf_lvl");
+        if pwlvl.exists() {
+            let want_lvl = crate::scene::serialize::encode(
+                &crate::scene::serialize::to_scene_file(&partitioned_world_scene()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&pwlvl).unwrap(),
+                want_lvl,
+                "committed partitioned-world .inf_lvl drifted from the generator"
+            );
+        }
+
         // Streamed-terrain lock (P16.3b2): only the `.inf_lvl` is committed — the
         // `.inf_terrain` is generated into a fixture's Content dir by the gate.
         let sdir = streamed_terrain_dir();
@@ -3383,6 +3636,81 @@ mod tests {
 
     /// The two scripted camera paths must really be different, or gate (c) would
     /// prove nothing.
+    /// The partitioned-world scene survives the P3 discipline (save→load→save is
+    /// byte-identical) **and** carries the partition settings + the two v10
+    /// component markers the gate depends on.
+    #[test]
+    fn partitioned_world_saves_and_reloads_byte_identical() {
+        use inf_ecs::components::{AlwaysLoaded, StreamingSource};
+        let doc = partitioned_world_scene();
+        let file = crate::scene::serialize::to_scene_file(&doc);
+        let bytes1 = crate::scene::serialize::encode(&file).unwrap();
+        let mut back = SceneDoc::new();
+        crate::scene::serialize::apply_to_doc(
+            &mut back,
+            &crate::scene::serialize::decode(&bytes1).unwrap(),
+        );
+        let bytes2 =
+            crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&back))
+                .unwrap();
+        assert_eq!(bytes1, bytes2, "save→load→save must be byte-identical");
+
+        // The settings block is what makes this a partitioned level.
+        let settings = back.settings();
+        assert!(settings.partition.enabled);
+        assert_eq!(settings.partition.cell_size_m, PARTITIONED_CELL_SIZE_M);
+        assert_eq!(
+            settings.partition.activation_radius_m,
+            PARTITIONED_ACTIVATION_RADIUS_M
+        );
+
+        // One prop per cell, plus the far child, plus the three persistent-ish
+        // entities (manager / sun / walker).
+        let n = (PARTITIONED_GRID * PARTITIONED_GRID) as usize;
+        assert_eq!(file.entities.len(), n + 4);
+
+        let w = back.world();
+        let src = w.entity_of(PARTITIONED_WALKER_GUID).expect("walker");
+        assert!(w.world().get::<StreamingSource>(src).is_some());
+        let sun = w.entity_of(PARTITIONED_SUN_GUID).expect("sun");
+        assert!(w.world().get::<AlwaysLoaded>(sun).is_some());
+        // The far child really is parented to the far-corner prop.
+        let child = w.entity_of(PARTITIONED_CHILD_GUID).expect("child");
+        let parent = w
+            .entity_of(partitioned_prop_guid(
+                PARTITIONED_GRID - 1,
+                PARTITIONED_GRID - 1,
+            ))
+            .expect("far prop");
+        assert_eq!(w.parent_of(child), Some(parent));
+    }
+
+    /// The scripted walk really crosses cells — otherwise the streaming gate
+    /// would be asserting over a world that never streams.
+    #[test]
+    fn partitioned_walk_crosses_every_cell_in_its_row() {
+        use std::collections::BTreeSet;
+        let seen: BTreeSet<i32> = (0..PARTITIONED_GRID as usize * 3)
+            .map(|i| {
+                let p = partitioned_walk_point(i);
+                (p.x / PARTITIONED_CELL_SIZE_M).floor() as i32
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            (0..PARTITIONED_GRID).collect::<BTreeSet<i32>>(),
+            "the walk must visit every cell of row z=0"
+        );
+        // …and each prop sits unambiguously inside exactly one cell.
+        for cz in 0..PARTITIONED_GRID {
+            for cx in 0..PARTITIONED_GRID {
+                let p = partitioned_prop_position(cx, cz);
+                assert_eq!((p.x / PARTITIONED_CELL_SIZE_M).floor() as i32, cx);
+                assert_eq!((p.z / PARTITIONED_CELL_SIZE_M).floor() as i32, cz);
+            }
+        }
+    }
+
     #[test]
     fn streamed_terrain_camera_paths_diverge() {
         let a: Vec<_> = (0..40).map(streamed_terrain_camera_a).collect();

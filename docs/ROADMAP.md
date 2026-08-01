@@ -1154,7 +1154,11 @@ streamed-scene ms budgets ratchet in CI (120 fps-class headless; real fps human-
   and the player render mirror; 2. streamed-scene frame budgets + residency memory ceilings on
   the ratchet.
 
-Schema **v9**: Terrain becomes an asset reference plus streaming settings; partition metadata.
+Schema **v9**: Terrain becomes an asset reference plus streaming settings (P16.3).
+Schema **v10**: world-partition metadata — the `StreamingSource` / `AlwaysLoaded`
+components plus a `PartitionSettings` block on the level (P16.5). A deliberate second
+bump in one phase: v9 shipped before the partition design existed, and retro-fitting it
+would mean re-blessing bytes that are already committed and already load.
 
 ### Phase 17 — Ultra Dynamic Sky & atmosphere
 

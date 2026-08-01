@@ -232,6 +232,18 @@ pub struct RuntimeSim {
     /// ([`sync_render_terrain`](Self::sync_render_terrain)) and writes into a
     /// working set no entity references. See [`crate::terrain_stream`].
     terrain: crate::terrain_stream::TerrainStreaming,
+    /// World-partition cell streaming (P16.5). Empty for every unpartitioned
+    /// level, in which case every call below is a no-op and the step is
+    /// bit-identical to the pre-P16.5 one.
+    ///
+    /// **The other determinism seam, and the stricter one.** Terrain residency
+    /// only costs detail; cell residency decides which entities *exist*, so its
+    /// wants come from sim entities alone (`StreamingSource`) and it has no
+    /// render half at all. `sync_sim` runs at the very TOP of
+    /// [`fixed_step`](Self::fixed_step), before even terrain, so a cell's
+    /// entities are present before anything — including terrain's own observer
+    /// scan — can look for them. See [`crate::cell_stream`].
+    cells: crate::cell_stream::CellStreaming,
 }
 
 /// The obstruction gain (linear) applied to an occluded spatial source — a −12 dB
@@ -296,6 +308,7 @@ impl RuntimeSim {
             cur_positions: HashMap::new(),
             mods: None,
             terrain: crate::terrain_stream::TerrainStreaming::default(),
+            cells: crate::cell_stream::CellStreaming::default(),
         };
 
         sim.bridge.sync_from_world(&sim.world);
@@ -394,6 +407,28 @@ impl RuntimeSim {
     /// render projection and the diagnostics dump.
     pub fn terrain_streaming(&self) -> &crate::terrain_stream::TerrainStreaming {
         &self.terrain
+    }
+
+    // ── world-partition cell streaming (P16.5) ────────────────────────────
+
+    /// Attach world-partition cell streaming (see [`crate::cell_stream`]).
+    ///
+    /// Runs one immediate [`sync_sim`](crate::cell_stream::CellStreaming::sync_sim)
+    /// at step 0, so the cells around the streaming sources are already populated
+    /// before the first fixed step — the same reason
+    /// [`set_terrain_streaming`](Self::set_terrain_streaming) does.
+    pub fn set_cell_streaming(&mut self, cells: crate::cell_stream::CellStreaming) {
+        self.cells = cells;
+        self.cells.sync_sim(&mut self.world, self.steps);
+        // A cell activation spawned entities; terrain residency is derived from
+        // (some of) them, so re-derive it before anything reads a height.
+        self.terrain.sync_sim(&mut self.world);
+    }
+
+    /// The cell streamer (residency + counters + the activation trace). Read by
+    /// the diagnostics dump, the debug overlay and the gates.
+    pub fn cell_streaming(&self) -> &crate::cell_stream::CellStreaming {
+        &self.cells
     }
 
     /// The `terrain.height_at` **host seam**, as the simulation sees it: the exact
@@ -506,7 +541,13 @@ impl RuntimeSim {
 
     fn fixed_step(&mut self) {
         let dt = self.stepper.fixed_dt();
-        // 0. Terrain streaming, SIM side (P16.3b2). Level-0 pages around the sim's
+        // 0a. World-partition CELL streaming (P16.5). Spawn/despawn the cells the
+        //     sim's own `StreamingSource` entities want, in ascending cell order,
+        //     BEFORE anything else — including terrain's observer scan, which has
+        //     to see the entities a freshly-activated cell brought in. Camera-free
+        //     by construction: `sync_sim` has no camera to be given.
+        self.cells.sync_sim(&mut self.world, self.steps);
+        // 0b. Terrain streaming, SIM side (P16.3b2). Level-0 pages around the sim's
         //    own entities, loaded synchronously in key order BEFORE anything in
         //    this step can query a height. Camera-free by construction — see
         //    `crate::terrain_stream` for why that separation is structural.

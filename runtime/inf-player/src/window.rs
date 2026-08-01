@@ -104,6 +104,8 @@ pub struct PlayerApp {
     /// a second, and only while something actually streams, so a non-streaming
     /// world logs nothing at all.
     stats_accum: f64,
+    /// Draw the world-partition cell overlay (`--debug-cells`, P16.5).
+    debug_cells: bool,
     /// The HTML canvas the winit window binds to (web only). Set by [`run_web`];
     /// applied to the window attributes in `resumed`.
     #[cfg(target_arch = "wasm32")]
@@ -134,6 +136,7 @@ impl PlayerApp {
             live: None,
             pie: None,
             stats_accum: 0.0,
+            debug_cells: false,
             paused: false,
             vmeshes,
             render,
@@ -233,13 +236,15 @@ impl PlayerApp {
         })
     }
 
-    /// Emit the terrain-streaming counters once a second (P16.3b2).
+    /// Emit the streaming counters once a second (terrain P16.3b2, cells P16.5).
     ///
     /// The diagnostics seam is deliberately the existing one — `tracing`, which
     /// already tees to the log file and (in the editor) the Output Log — rather
-    /// than a new overlay or IPC channel.
+    /// than a new panel or IPC channel.
     fn log_stream_stats(&mut self, dt: f64) {
-        if self.sim.terrain_streaming().is_empty() {
+        let terrain = !self.sim.terrain_streaming().is_empty();
+        let cells = !self.sim.cell_streaming().is_empty();
+        if !terrain && !cells {
             return;
         }
         self.stats_accum += dt;
@@ -247,10 +252,18 @@ impl PlayerApp {
             return;
         }
         self.stats_accum = 0.0;
-        tracing::info!(
-            "inf-player: {}",
-            self.sim.terrain_streaming().stats().summary()
-        );
+        if terrain {
+            tracing::info!(
+                "inf-player: {}",
+                self.sim.terrain_streaming().stats().summary()
+            );
+        }
+        if cells {
+            tracing::info!(
+                "inf-player: {}",
+                self.sim.cell_streaming().stats().summary()
+            );
+        }
     }
 
     /// One frame: fold input, advance the sim by the elapsed time, project, draw.
@@ -302,6 +315,9 @@ impl PlayerApp {
             }
         }
         live.host.project(&self.sim, alpha);
+        if self.debug_cells {
+            live.host.draw_cell_overlay(&self.sim);
+        }
         if let Some(view) = view {
             live.host.render(&view);
         }
@@ -426,6 +442,7 @@ impl ApplicationHandler for PlayerApp {
 
 /// Run the windowed player over `sim` with input bindings `map`. Blocks until the
 /// window closes; returns an error only if the event loop fails to start.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     title: String,
     width: u32,
@@ -434,10 +451,12 @@ pub fn run(
     map: InputMap,
     vmeshes: Arc<VmeshRegistry>,
     render: inf_scene::RenderSettingsRecord,
+    debug_cells: bool,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = PlayerApp::new(title, width, height, sim, map, vmeshes, render);
+    app.debug_cells = debug_cells;
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("run_app: {e}"))

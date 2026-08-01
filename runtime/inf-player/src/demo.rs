@@ -148,6 +148,8 @@ pub fn build() -> BuiltWorld {
         state_machines: std::collections::BTreeMap::new(),
         root_clips: Vec::new(),
         audio_clips: std::collections::BTreeMap::new(),
+        // The programmatic demo is a single document — nothing streams.
+        partition: crate::level::PartitionContent::None,
     }
 }
 

@@ -16,6 +16,7 @@
 import type { ReactNode } from "react";
 
 import type { LevelSettingsDto } from "../../bindings/LevelSettingsDto";
+import type { PartitionSettingsDto } from "../../bindings/PartitionSettingsDto";
 import type { RenderSettingsRecordDto } from "../../bindings/RenderSettingsRecordDto";
 import {
   CheckboxField,
@@ -50,6 +51,8 @@ export default function WorldSettingsPanel() {
     settings && setLevelSettings({ ...settings, ...patch });
   const patchRender = (patch: Partial<RenderSettingsRecordDto>) =>
     settings && setLevelSettings({ ...settings, render: { ...settings.render, ...patch } });
+  const patchPartition = (patch: Partial<PartitionSettingsDto>) =>
+    settings && setLevelSettings({ ...settings, partition: { ...settings.partition, ...patch } });
 
   const mode = useViewportStore((s) => s.mode);
   const setMode = useViewportStore((s) => s.setMode);
@@ -137,6 +140,41 @@ export default function WorldSettingsPanel() {
                 value={settings.sim_hz}
                 step={1}
                 onChange={(v) => patchWorld({ sim_hz: v })}
+              />
+            </PropertyRow>
+          </PropertySection>
+
+          <PropertySection title="World Partition">
+            <p className="px-2 pb-1 text-[11px] leading-snug text-(--ink-text-dim)">
+              Splits this level into streamed cells at cook time. The editor stays a single
+              document &mdash; nothing streams while you author. Play-in-editor and a shipped
+              build both stream it.
+            </p>
+            <PropertyRow label="Enabled">
+              <CheckboxField
+                value={settings.partition.enabled}
+                onChange={(v) => patchPartition({ enabled: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Cell Size (m)">
+              <NumberField
+                value={settings.partition.cell_size_m}
+                step={16}
+                onChange={(v) => patchPartition({ cell_size_m: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Activation Radius (m)">
+              <NumberField
+                value={settings.partition.activation_radius_m}
+                step={16}
+                onChange={(v) => patchPartition({ activation_radius_m: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Prefetch Margin (m)">
+              <NumberField
+                value={settings.partition.prefetch_margin_m}
+                step={16}
+                onChange={(v) => patchPartition({ prefetch_margin_m: v })}
               />
             </PropertyRow>
           </PropertySection>

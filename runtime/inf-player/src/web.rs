@@ -60,9 +60,15 @@ async fn run(canvas_id: String, pack_url: String) -> Result<(), String> {
     );
     let reader = inf_asset::PackReader::from_bytes(bytes).map_err(|e| e.to_string())?;
     let source = crate::level::PackLevelSource::from_reader(reader, "web")?;
-    let built = crate::build_world_from_pack(&source)?;
+    let mut built = crate::build_world_from_pack(&source)?;
+    let partition = built.take_partition();
     let title = format!("Infinity Engine (Web) — {}", built.label);
     let mut sim = crate::sim_from_built(built);
+    // P16.5 cell streaming works here too: the in-memory `PackReader` hands
+    // `read_ref` a borrowed slice for the (uncompressed, streaming-class)
+    // `.inf_part`, so a cell is sub-sliced with no copy, and the prefetch batch
+    // takes the serial path on wasm (no thread pool) for an identical result.
+    crate::attach_cell_streaming(&mut sim, &partition);
     // Terrain streaming (P16.3b2) works here too: the in-memory `PackReader` still
     // hands `read_ref` a borrowed slice for an uncompressed (streaming-class)
     // entry, so tiles are sub-sliced with no copy. The load batch takes the serial

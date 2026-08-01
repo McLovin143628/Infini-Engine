@@ -35,6 +35,12 @@ const sample: LevelSettingsDto = {
     gi_enabled: false,
     gi_intensity: 1.0,
   },
+  partition: {
+    enabled: false,
+    cell_size_m: 256,
+    activation_radius_m: 256,
+    prefetch_margin_m: 256,
+  },
 };
 
 describe("sceneStore level settings slice", () => {

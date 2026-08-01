@@ -25,6 +25,8 @@
 //! byte-identically to its dev-dir source (the cooked-==-uncooked gate).
 
 pub mod args;
+/// World-partition cell streaming (P16.5) — sim-driven spawn/despawn.
+pub mod cell_stream;
 pub mod config;
 pub mod demo;
 pub mod input;
@@ -186,6 +188,27 @@ fn build_world(args: &Args) -> Result<(BuiltWorld, TerrainContent), String> {
     }
 }
 
+/// Attach world-partition **cell streaming** to `sim` (P16.5).
+///
+/// A no-op for [`PartitionContent::None`](level::PartitionContent::None) — every
+/// unpartitioned level, i.e. every level the editor writes by default — so
+/// unpartitioned behaviour is untouched.
+///
+/// The persistent cell is already in `sim`'s world: the level builder spawned it
+/// before actor binding, because it *is* the level at step 0. This only attaches
+/// the manager for what streams.
+pub fn attach_cell_streaming(sim: &mut RuntimeSim, content: &level::PartitionContent) {
+    let Some(store) = content.store() else {
+        return;
+    };
+    let cells = cell_stream::CellStreaming::attach(
+        store.clone(),
+        content.settings(),
+        cell_stream::CellStreamBudget::default(),
+    );
+    sim.set_cell_streaming(cells);
+}
+
 /// Attach camera-driven terrain streaming to `sim` for every asset-backed
 /// `Terrain` in its world (P16.3b2). A no-op for a world with none — which is
 /// every level the editor writes today, so inline terrain behaviour is untouched.
@@ -219,7 +242,10 @@ pub fn build_world_from_pack(source: &PackLevelSource) -> Result<BuiltWorld, Str
         .with_bindings(by_guid)
         .with_pcgs(pcgs)
         .with_anim_assets(skeletons, clips, machines)
-        .with_audio(audio);
+        .with_audio(audio)
+        // P16.5: a partitioned cooked level resolves its derived `.inf_part` out
+        // of this same (already-open) pack mapping.
+        .with_partition_pack(source.reader().clone(), source.root_level());
     level::load(source, &builder)
 }
 
@@ -230,13 +256,14 @@ pub fn build_world_from_pack(source: &PackLevelSource) -> Result<BuiltWorld, Str
 /// with the crash report already written to stderr + the crash file by the panic
 /// hook.
 pub fn run_headless(args: &Args) -> ExitCode {
-    let (built, terrain_content) = match build_world(args) {
+    let (mut built, terrain_content) = match build_world(args) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("inf-player: {e}");
             return ExitCode::FAILURE;
         }
     };
+    let partition = built.take_partition();
     let label = built.label.clone();
     let frames = args.run_frames;
     let panic_after = args.panic_after;
@@ -244,6 +271,9 @@ pub fn run_headless(args: &Args) -> ExitCode {
     tracing::info!("inf-player: headless run of '{label}' for {frames} frame(s)");
 
     let mut sim = sim_from_built(built);
+    // Cells first: terrain residency is derived from the sim's entities, and a
+    // freshly-activated cell brings some of them in.
+    attach_cell_streaming(&mut sim, &partition);
     attach_terrain_streaming(&mut sim, &terrain_content);
     attach_mods(&mut sim, args);
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -266,13 +296,14 @@ pub fn run_headless(args: &Args) -> ExitCode {
 
 /// Windowed path: open a window and play. Human-verified (needs a GPU + display).
 pub fn run_windowed(args: &Args) -> ExitCode {
-    let (built, terrain_content) = match build_world(args) {
+    let (mut built, terrain_content) = match build_world(args) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("inf-player: {e}");
             return ExitCode::FAILURE;
         }
     };
+    let partition = built.take_partition();
     let map = match &args.world {
         WorldChoice::Level(path) => input::load_map_beside(path),
         WorldChoice::Demo | WorldChoice::Pack(_) => input::default_map(),
@@ -288,9 +319,19 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     // captured before `built` is consumed, applied by the render host.
     let render = built.render;
     let mut sim = sim_from_built(built);
+    attach_cell_streaming(&mut sim, &partition);
     attach_terrain_streaming(&mut sim, &terrain_content);
     attach_mods(&mut sim, args);
-    match window::run(title, args.width, args.height, sim, map, vmeshes, render) {
+    match window::run(
+        title,
+        args.width,
+        args.height,
+        sim,
+        map,
+        vmeshes,
+        render,
+        args.debug_cells,
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("inf-player: {e}");
@@ -489,8 +530,14 @@ pub fn step_state_hash(sim: &mut RuntimeSim) -> u64 {
 /// each step's [`step_state_hash`]. A PIE subprocess fed the same payload must
 /// stream byte-identical per-step hashes.
 pub fn scene_trace(payload: &ScenePayload, frames: u64) -> Result<Vec<u64>, String> {
-    let built = build_world_from_payload(payload)?;
+    let mut built = build_world_from_payload(payload)?;
+    // P16.5: a partitioned scene streams here too — the payload carries the
+    // level's entities inline, so the in-memory binning path produces the very
+    // same cells the cook would have. Without this the reference trace would run
+    // an empty world and "PIE == shipping" would compare nothing to nothing.
+    let partition = built.take_partition();
     let mut sim = sim_from_built(built);
+    attach_cell_streaming(&mut sim, &partition);
     let mut hashes = Vec::with_capacity(frames as usize);
     for _ in 0..frames {
         sim.step_once(RuntimeInput::default());

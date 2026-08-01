@@ -154,6 +154,7 @@ fn kind_code(kind: AssetKind) -> u16 {
         AssetKind::StateMachine => 15,
         AssetKind::MeshletMesh => 16,
         AssetKind::Terrain => 17,
+        AssetKind::Partition => 18,
     }
 }
 
@@ -177,6 +178,7 @@ fn kind_from_code(code: u16) -> AssetKind {
         15 => AssetKind::StateMachine,
         16 => AssetKind::MeshletMesh,
         17 => AssetKind::Terrain,
+        18 => AssetKind::Partition,
         _ => AssetKind::Unknown,
     }
 }
@@ -251,11 +253,18 @@ impl PackWriter {
     /// ship size for streaming latency, and it is deliberate.
     ///
     /// Today that is [`AssetKind::MeshletMesh`] (`.inf_vmesh`, read via mmap
-    /// slices in P18.2) and [`AssetKind::Terrain`] (`.inf_terrain`, P16.3): a
-    /// terrain asset is a header + tile directory + **16-byte-aligned per-tile
-    /// blobs**, and the whole point of that layout is that a streamer slices one
-    /// tile out of the mapping without touching the rest. zstd would force a
-    /// whole-asset decode — hundreds of MB to page one tile — so it stays raw.
+    /// slices in P18.2), [`AssetKind::Terrain`] (`.inf_terrain`, P16.3) and
+    /// [`AssetKind::Partition`] (`.inf_part`, P16.5): each is a header +
+    /// directory + **16-byte-aligned per-page blobs**, and the whole point of that
+    /// layout is that a streamer slices one page out of the mapping without
+    /// touching the rest. zstd would force a whole-asset decode — hundreds of MB
+    /// to page one tile, or every cell in the world to spawn one — so they stay
+    /// raw.
+    ///
+    /// **[`AssetKind::Level`] deliberately stays compressed**, which is exactly
+    /// why P16.5's partition could not ride inside the level entry: a compressed
+    /// entry can never be `read_ref`'d, and flipping `Level` to raw would move the
+    /// bytes of every pack ever cooked.
     ///
     /// Everything else keeps the P9.2 behaviour: zstd above
     /// [`COMPRESS_THRESHOLD`] bytes, stored raw when compression would inflate.
@@ -266,7 +275,7 @@ impl PackWriter {
     pub fn compresses_kind(kind: AssetKind) -> bool {
         match kind {
             // Streaming-class: paged out of the mapping as borrowed slices.
-            AssetKind::MeshletMesh | AssetKind::Terrain => false,
+            AssetKind::MeshletMesh | AssetKind::Terrain | AssetKind::Partition => false,
             AssetKind::Unknown
             | AssetKind::Level
             | AssetKind::Mesh
@@ -997,6 +1006,7 @@ mod tests {
         assert_eq!(kind_code(AssetKind::Level), 1);
         assert_eq!(kind_code(AssetKind::MeshletMesh), 16);
         assert_eq!(kind_code(AssetKind::Terrain), 17, "P16.3 appended 17");
+        assert_eq!(kind_code(AssetKind::Partition), 18, "P16.5 appended 18");
         // …and an unknown future code degrades to `Unknown` rather than erroring,
         // so a newer pack's extra kinds never break an older reader's index parse.
         assert_eq!(kind_from_code(9999), AssetKind::Unknown);
@@ -1140,7 +1150,11 @@ mod tests {
     #[test]
     fn streaming_class_kinds_are_stored_uncompressed() {
         /// The full streaming-class list; a new kind joins it only deliberately.
-        const STREAMING: &[AssetKind] = &[AssetKind::MeshletMesh, AssetKind::Terrain];
+        const STREAMING: &[AssetKind] = &[
+            AssetKind::MeshletMesh,
+            AssetKind::Terrain,
+            AssetKind::Partition,
+        ];
         for &k in STREAMING {
             assert!(!PackWriter::compresses_kind(k), "{k:?} must stay raw");
         }

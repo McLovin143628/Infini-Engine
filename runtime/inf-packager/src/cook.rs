@@ -23,6 +23,17 @@
 //! 5. **Rewrite levels for runtime** — decode each `.inf_lvl` with the Ring-0
 //!    [`inf_scene`] reader (validating it) and re-encode to the current runtime
 //!    schema (upgrading legacy v1 levels to v2).
+//!
+//!    **World partition** (P16.5): a level whose `settings.partition.enabled` is
+//!    set does not ship its entities inline. They are binned by
+//!    [`inf_scene::partition::partition_entities`] into a persistent cell plus a
+//!    grid of streamed cells, written to a derived `.inf_part`
+//!    ([`AssetKind::Partition`], stored **uncompressed** so the runtime slices one
+//!    cell straight out of the mapping), and the cooked level keeps only its title
+//!    and settings. Its GUID is a deterministic function of the level's
+//!    ([`derived_partition_id`]) — the [`derived_vmesh_id`] precedent — so the
+//!    runtime finds it with no side index. A level with partitioning **off** cooks
+//!    byte-for-byte as it did before this existed.
 //! 6. **Derive virtualized geometry** (P13.1) — for every `.inf_mesh` in the
 //!    closure whose triangle count is at least
 //!    [`VgeomCookOptions::min_triangles`], build a meshlet LOD DAG
@@ -101,6 +112,22 @@ pub fn derived_vmesh_id(mesh_id: AssetId) -> AssetId {
     ))
 }
 
+/// The fixed salt XORed into a level GUID to derive its `.inf_part` GUID.
+///
+/// Same construction (and same reasoning) as [`VMESH_ID_SALT`]: XOR with a
+/// constant is a bijection, so distinct levels always yield distinct partition
+/// ids, and the salt makes a collision with an *authored* asset id vanishingly
+/// unlikely — the cook guards the remaining case. The runtime finds a level's
+/// partition by computing the id, so no side index has to ship or stay in sync.
+const PARTITION_ID_SALT: u128 = 0x7016_0500_5041_5254_9d4e_2c7a_b31f_60e8;
+
+/// Derive the deterministic `.inf_part` asset id for a given level id.
+pub fn derived_partition_id(level_id: AssetId) -> AssetId {
+    AssetId(uuid::Uuid::from_u128(
+        level_id.uuid().as_u128() ^ PARTITION_ID_SALT,
+    ))
+}
+
 /// The outcome of a successful cook.
 #[derive(Debug, Clone)]
 pub struct CookReport {
@@ -128,6 +155,11 @@ pub struct CookReport {
     pub levels_rewritten: usize,
     /// How many `.inf_vmesh` meshlet DAGs were derived from meshes (P13.1).
     pub meshlet_meshes_derived: usize,
+    /// How many `.inf_part` world partitions were built from levels (P16.5).
+    pub partitions_built: usize,
+    /// Total streamed grid cells across those partitions (the persistent cell is
+    /// not counted — it is always resident, so it is not a streaming unit).
+    pub partition_cells: usize,
     /// Non-fatal advisories (e.g. "no levels").
     pub warnings: Vec<String>,
 }
@@ -161,6 +193,12 @@ impl CookReport {
             s.push_str(&format!(
                 "  {} meshlet DAG(s) derived (.inf_vmesh)\n",
                 self.meshlet_meshes_derived
+            ));
+        }
+        if self.partitions_built > 0 {
+            s.push_str(&format!(
+                "  {} world partition(s) built (.inf_part), {} streamed cell(s)\n",
+                self.partitions_built, self.partition_cells
             ));
         }
         match self.root_level {
@@ -202,6 +240,13 @@ enum CookOutput {
         is_blueprint: bool,
         /// A derived meshlet DAG `(vmesh_id, bytes)` for a dense mesh.
         vmesh: Option<(AssetId, Vec<u8>)>,
+        /// A derived world partition `(part_id, bytes, streamed_cell_count)` for
+        /// a partitioned level (P16.5).
+        partition: Option<(AssetId, Vec<u8>, usize)>,
+        /// Cook advisories raised while cooking this asset (today: cross-cell
+        /// references in a partitioned level). Folded into the report in closure
+        /// order so it stays deterministic.
+        advisories: Vec<String>,
     },
 }
 
@@ -221,11 +266,24 @@ fn cook_one(input: CookInput, opts: &CookOptions) -> Result<CookOutput> {
 
     let mut is_level = false;
     let mut is_blueprint = false;
+    let mut partition: Option<(AssetId, Vec<u8>, usize)> = None;
+    let mut advisories: Vec<String> = Vec::new();
     let cooked: Vec<u8> = match kind {
         AssetKind::Level => {
-            let level =
+            let mut level =
                 inf_scene::decode(&raw).map_err(|source| CookError::Scene { guid, source })?;
             is_level = true;
+            if level.settings.partition.enabled {
+                let (bytes, cells, notes) = build_partition(guid, &level)?;
+                partition = Some((derived_partition_id(guid), bytes, cells));
+                advisories = notes;
+                // The entities now live in the `.inf_part`. Shipping them here too
+                // would double the level's bytes AND give the runtime two
+                // authorities for the same world — so the cooked level keeps only
+                // its title and settings, and `partition.enabled` is what tells the
+                // player where its entities went.
+                level.entities.clear();
+            }
             inf_scene::encode(&level).map_err(|source| CookError::Scene { guid, source })?
         }
         AssetKind::Blueprint => {
@@ -302,7 +360,71 @@ fn cook_one(input: CookInput, opts: &CookOptions) -> Result<CookOutput> {
         is_level,
         is_blueprint,
         vmesh,
+        partition,
+        advisories,
     })
+}
+
+/// Bin a partitioned level's entities and build its `.inf_part` payload.
+///
+/// Returns the payload bytes, the number of **streamed** grid cells (the
+/// persistent cell is not a streaming unit), and the cross-cell-reference
+/// advisories.
+///
+/// Pure over `level`, like every other `cook_one` stage, so it runs on the job
+/// pool and two cooks of one level are byte-identical.
+fn build_partition(
+    guid: AssetId,
+    level: &inf_scene::RuntimeLevel,
+) -> Result<(Vec<u8>, usize, Vec<String>)> {
+    use inf_scene::partition;
+
+    let settings = &level.settings.partition;
+    let plan = partition::partition_entities(&level.entities, settings);
+    let asset =
+        partition::build_partition_asset(&plan, settings).map_err(|e| CookError::Partition {
+            guid,
+            message: e.to_string(),
+        })?;
+
+    // ── advisories ──
+    //
+    // Both of these are hazards the cook can *see* and the runtime can only
+    // *suffer*, and neither is fixed up automatically: a fixup would make cell
+    // residency depend on the reference graph / on which entities carry a script,
+    // and a level's memory ceiling would then move every time gameplay was added.
+    // So they are named, with the remedy, where they are cheap to fix — the
+    // `dangling_terrain_refs` precedent.
+    let mut advisories: Vec<String> = Vec::new();
+
+    // (1) A cook-time reference from one cell to another is legal to author and
+    //     legal to cook, but at runtime the target may simply not be spawned when
+    //     the referrer is.
+    advisories.extend(partition::cross_cell_refs(&plan).into_iter().map(|r| {
+        format!(
+            "level {guid}: entity {} in {} references entity {} in {} through `{}` — the \
+             target may not be resident when the referrer is; mark it AlwaysLoaded, or put \
+             both under one parent so they stream together",
+            r.from, r.from_cell, r.to, r.to_cell, r.field
+        )
+    }));
+
+    // (2) A Blueprint on a STREAMED entity never ticks: the runtime assigns actor
+    //     ids once, at `RuntimeSim` construction, from the persistent cell. The
+    //     mesh + `ActorClass` shape (an enemy, a door, a pickup) is the commonest
+    //     gameplay actor there is and bins into a cell every time, so without this
+    //     the only symptom is a level full of statues.
+    advisories.extend(partition::streamed_actors(&plan).into_iter().map(|a| {
+        format!(
+            "level {guid}: entity {} in {} runs blueprint {} but is STREAMED — a blueprint \
+             only ticks on an entity present when the sim is built, so this one will never \
+             run; mark it AlwaysLoaded (or give it a StreamingSource) to put it in the \
+             persistent cell",
+            a.entity, a.cell, a.class
+        )
+    }));
+
+    Ok((asset.into_bytes(), plan.cells.len(), advisories))
 }
 
 /// Cook `project_root` into `out_dir`, producing a pack + manifest.
@@ -389,9 +511,14 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     let mut blueprints_validated = 0usize;
     let mut levels_rewritten = 0usize;
     let mut meshlet_meshes_derived = 0usize;
+    let mut partitions_built = 0usize;
+    let mut partition_cells = 0usize;
     // Meshlet DAGs derived alongside their meshes, added after the closure so a
     // derived id never shadows a real closure asset processed later.
     let mut derived_vmeshes: Vec<(AssetId, Vec<u8>)> = Vec::new();
+    // World partitions derived alongside their levels, added after the closure for
+    // exactly the same reason.
+    let mut derived_partitions: Vec<(AssetId, Vec<u8>, usize)> = Vec::new();
 
     for output in outputs {
         match output? {
@@ -403,6 +530,8 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
                 is_level,
                 is_blueprint,
                 vmesh,
+                partition,
+                advisories,
             } => {
                 writer.add_bytes(guid, kind, &cooked)?;
                 *kinds.entry(kind.slug().to_string()).or_default() += 1;
@@ -427,6 +556,23 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
                         derived_vmeshes.push((vmesh_id, vmesh_bytes));
                     }
                 }
+                warnings.extend(advisories);
+                if let Some((part_id, part_bytes, cells)) = partition {
+                    // A collision here would make the partition unreachable (the
+                    // runtime looks it up by the derived id), and a partitioned
+                    // level ships no entities of its own — so unlike the vmesh
+                    // case, degrading to "skip it" would ship an empty world.
+                    // Fail the build.
+                    if db.contains(part_id)
+                        || derived_partitions.iter().any(|(id, _, _)| *id == part_id)
+                    {
+                        return Err(CookError::Partition {
+                            guid,
+                            message: format!("derived partition id {part_id} collides"),
+                        });
+                    }
+                    derived_partitions.push((part_id, part_bytes, cells));
+                }
             }
         }
     }
@@ -438,6 +584,18 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
             .entry(AssetKind::MeshletMesh.slug().to_string())
             .or_default() += 1;
         meshlet_meshes_derived += 1;
+    }
+
+    // Pack the derived world partitions. `AssetKind::Partition` is
+    // streaming-class, so `PackWriter` stores these **uncompressed** and the
+    // runtime slices one cell out of the mapping with no decode of the rest.
+    for (part_id, bytes, cells) in &derived_partitions {
+        writer.add_bytes(*part_id, AssetKind::Partition, bytes)?;
+        *kinds
+            .entry(AssetKind::Partition.slug().to_string())
+            .or_default() += 1;
+        partitions_built += 1;
+        partition_cells += cells;
     }
 
     // ── 7. write pack + manifest ────────────────────────────────────────────
@@ -483,6 +641,8 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
         blueprints_validated,
         levels_rewritten,
         meshlet_meshes_derived,
+        partitions_built,
+        partition_cells,
         warnings,
     })
 }
@@ -672,7 +832,10 @@ fn dangling_terrain_refs(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
     missing
         .into_iter()
         .map(|(level, asset)| {
-            format!("level {level} references missing terrain asset {asset};                      its tiles will not stream")
+            format!(
+                "level {level} references missing terrain asset {asset}; its tiles will not \
+                 stream"
+            )
         })
         .collect()
 }

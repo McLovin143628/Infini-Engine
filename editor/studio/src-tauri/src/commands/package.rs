@@ -109,6 +109,11 @@ fn cook_error_to_dto(err: CookError) -> PackageErrorDto {
             dto.message = message;
             dto.guid = Some(guid.to_string());
         }
+        CookError::Partition { guid, message } => {
+            dto.class = "partition".into();
+            dto.message = message;
+            dto.guid = Some(guid.to_string());
+        }
         CookError::Project(_) => dto.class = "project".into(),
         CookError::Asset(_) => dto.class = "asset".into(),
         CookError::Io(_) => dto.class = "io".into(),
