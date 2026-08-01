@@ -22,6 +22,8 @@ interchangeably, because graphs transpile to real Rust source and stay bidirecti
 8. [Verification & CI strategy](#8-verification--ci-strategy)
 9. [Platform strategy](#9-platform-strategy)
 10. [Porting inventory](#10-porting-inventory)
+11. [Post-plan status — UE-Parity Wave 1](#11-post-plan-status--ue-parity-wave-1-2026-07-22-complete)
+12. [Next-Gen Wave — Phases 16–25](#12-next-gen-wave--phases-1625-planned-2026-07-31) — 10 phases
 
 ---
 
@@ -1100,6 +1102,301 @@ decal render pass (component slot shipped), point/spot shadow maps, Delay node +
 pins, graph→.inf_act authoring (prerequisite for live-Simulate breakpoint highlighting),
 spline meshes + per-point gizmo, mesh-asset foliage palettes, vgeom/skinned translucency,
 material functions, multi-viewport, PIE player options.
+
+---
+
+## 12. Next-Gen Wave — Phases 16–25 (planned 2026-07-31)
+
+The 16-phase master plan (§6) and UE-Parity Wave 1 (§11) are complete and CI-green: the engine
+now does what a mature traditional engine does. This wave pushes past that workflow —
+planet-scale streaming worlds, a living sky, Lumen/Nanite-class completion, biome-driven PCG
+with a structure grammar and fully enterable furnished buildings, realistic water, volumetric
+(diggable) terrain, deformation and destruction, an embedded DCC suite, and in-engine
+photogrammetry. Foundation-first order, one phase in flight at a time, each sub-phase ≈ one
+reviewable commit.
+
+**Execution doctrine:** every phase keeps the house gates — determinism (replay traces),
+goldens, PIE == shipping, CI on three OSes; schema bumps land at most one per phase via the
+frozen-record + downgrade-bless pattern.
+
+### Phase 16 — World scale & streaming foundation
+
+**Goal:** planet-scale becomes an engineering fact, not an aspiration. **Done when:** a
+≥ 16k×16k source heightmap imports through the wizard (`meters_per_sample` ≥ 8 → tens of km),
+flies in PIE with tiles paging under a bounded residency budget, cooked == uncooked, and
+streamed-scene ms budgets ratchet in CI (120 fps-class headless; real fps human-verified).
+
+- **P16.1 mmap zero-copy packs** — 1. `memmap2` backing in `inf-asset`'s pack reader with a
+  borrowed `read_ref() -> &[u8]` for uncompressed, 16-byte-aligned, xxh3-verified-once entries;
+  2. streaming-class kinds (terrain tiles, vmesh) cook uncompressed — zstd path unchanged, wasm
+  keeps whole-file reads; 3. `PACK_FORMAT_VERSION` bump with back-compat read.
+- **P16.2 Units doctrine** — 1. `docs/memos/units-doctrine.md` + the CLAUDE.md/ROADMAP rule:
+  1 world unit = 1 metre, SI everywhere, no unit-scale factor ever; 2. name the loose constants
+  (editor grid spacing, snap increments) as those files are next touched.
+- **P16.3 Terrain tile streaming** — 1. terrain leaves the `.inf_lvl` blob for a new
+  `.inf_terrain` asset (per-tile blobs + index, new `AssetKind` + pack code); 2. `TerrainData`
+  gains residency — a resident map + a cold-store trait over the asset, camera-radius
+  load/evict on the job pool; 3. per-tile versions replace the whole-terrain version counter;
+  4. a cook-time tile LOD pyramid feeds the outer clipmap rings so far terrain never needs
+  full-res residency; 5. sculpt/paint keeps the live-stroke + `EditCommand` contract against
+  resident tiles.
+- **P16.4 Huge-heightmap import** — 1. banded/tiled decode (PNG16 row bands, tiled EXR,
+  float-metre EXR) replaces the whole-image decode; 2. tiles + pyramid emitted straight to
+  `.inf_terrain` on the job pool with progress; 3. a Terrain Import wizard — drop a file, set
+  the real-world extent, import in the background, walk it. The "import a terrain and get
+  developing" UX gate.
+- **P16.5 World partition / level streaming** — 1. cook-time grid-cell partition of `.inf_lvl`
+  (entities binned by position, `AlwaysLoaded` flag); 2. a runtime streaming manager loading
+  cells by camera radius through the existing `LevelSource`/`WorldBuilder` seam, extended for
+  incremental spawn/despawn; 3. a streaming debug overlay; 4. PIE == shipping on a partitioned
+  scene (the editor stays single-document in v1).
+- **P16.6 Multi-terrain & budgets** — 1. lift "first visible terrain wins" in the viewport host
+  and the player render mirror; 2. streamed-scene frame budgets + residency memory ceilings on
+  the ratchet.
+
+Schema **v9**: Terrain becomes an asset reference plus streaming settings; partition metadata.
+
+### Phase 17 — Ultra Dynamic Sky & atmosphere
+
+**Goal:** the engine's default look becomes a living sky. **Done when:** a time-of-day sweep
+holds goldens (dawn/noon/dusk/night), clouds are deterministic under the psin/pcos doctrine,
+PIE == shipping on the sky-state trace, and new levels default to the dynamic sky.
+
+Starting point: the sky is a 44-line three-colour gradient shader, `SkyParams` has zero
+writers, and the sun is a `SUN_DIR` constant consumed by the sky, GI, and shadow passes — no
+atmosphere, fog, cloud, or TOD code exists anywhere.
+
+- **P17.1 Sun & time of day** — 1. kill the `SUN_DIR` const: a `SkyAtmosphere` + `TimeOfDay`
+  world-component set (components + registry + schema records) projected in both scene
+  builders; 2. deterministic solar math (date/latitude → sun and moon position); 3. TOD
+  animatable from Blueprints and the sequencer; 4. World Settings rows through the existing
+  settings commands.
+- **P17.2 Physical atmosphere** — 1. Hillaire-style transmittance / sky-view LUT compute passes
+  replacing the gradient (new shader entries validate through the SHADER_TABLE naga gate);
+  2. aerial perspective + height fog in the lit passes, extending the generation-keyed
+  `EnvBinding` cache invariant; 3. stars and moon at night.
+- **P17.3 Volumetric clouds** — 1. raymarched coverage/type-driven clouds on hand-rolled
+  deterministic noise; 2. wind drift; 3. sun occlusion feeding the shadow and GI inputs.
+- **P17.4 Weather states** — 1. coverage/precipitation/wind parameter blocks with blendable
+  presets, Blueprint-drivable; 2. minimal precipitation VFX v1 (a full VFX system stays future
+  scope); 3. accumulation hooks consumed by P22 deformation (snowfall).
+
+### Phase 18 — Lumen-class GI & virtualized-geometry completion
+
+**Goal:** the flagship rendering wave — finish Nanite, finish Lumen. **Done when:** a
+vgeom-heavy scene streams meshlets from an mmap pack under two-pass occlusion, the editor
+viewport shows real imported meshes, GI responds to TOD/sky and has a specular term, and
+goldens + parity + budget ratchets all hold.
+
+Starting point: HZB is a single-pass v1, off by default; whole vmeshes upload at once with no
+eviction; the editor viewport still draws primitive placeholders instead of `MeshRef.asset`;
+GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and has no specular.
+
+- **P18.1 Two-pass HZB occlusion** — 1. persist the last-frame visible list; 2. early draw →
+  HZB from its depth → late cull and draw of the remainder; 3. on by default where supported.
+- **P18.2 Meshlet streaming** — 1. a residency/page table over the existing coarse-first level
+  layout; 2. partial pack decode / range reads on P16.1 mmap; 3. suballocated GPU buffers with
+  eviction; 4. cull feedback for missing meshlets; 5. the cut clamps to resident levels — never
+  a hole, only softer detail.
+- **P18.3 Editor real meshes** — 1. the asset DB / vmesh cache reachable from the viewport
+  thread (in-editor `build_vgeom` on import; `.inf_vmesh` stops being cook-only);
+  2. `MeshRef.asset` + `SkeletalMesh` rendered in the interactive viewport — the oldest
+  documented gap, closed.
+- **P18.4 GI v2 (Lumen-class)** — 1. terrain and skinned geometry into voxelization; 2. the
+  instance cap lifted via chunked, prioritized voxelization; 3. temporal probe amortization;
+  4. a specular term (SH-derived + screen-space reflections v1); 5. sky radiance from P17
+  replacing the gradient constants; 6. emissive injection; 7. cascade blending in CSM;
+  8. quality tiers on the existing `RenderTier` clamp-down system.
+- **P18.5 GPU-instanced scatter** — 1. PCG/foliage instances onto GPU instance buffers;
+  2. per-instance frustum + HZB culling; 3. impostor/LOD fade — the P10.5 deferrals, landed
+  here so P19 biome populations scale.
+
+### Phase 19 — Biomes, PCG grammar & enterable structures
+
+**Goal:** paint where the world *is*; let a grammar build what stands on it — including
+interiors. **Done when:** a multi-biome streamed terrain grows a grammar-built neighbourhood
+along a spline road with at least one fully enterable, multi-floor, furnished building per
+palette, deterministic across cooks, PIE == shipping.
+
+Starting point: no biome, grammar, or interior concept exists; erosion discards its flow and
+sediment state; the `MaskImage` sampler has no graph node; lowering is single-rule even though
+`PcgDocument` already models layers × rules × weighted kinds.
+
+- **P19.1 Erosion data maps** — 1. accumulate flow / deposition / wear maps in the erosion
+  passes (CPU reference + WGSL mirror, parity-gated exactly like heights); 2. persist them
+  per-tile and sparse on the format-aware serde pattern; 3. export as mask images (Gaea-style
+  data maps).
+- **P19.2 Biome painting** — 1. a `BiomeSet` asset — named biomes with colour, splat mapping,
+  PCG graph ref, water/structure hints; 2. per-sample biome ids on tiles, sparse, mirroring the
+  splat weights; 3. a paint tool cloning the splat seam (`BiomeDelta` beside `SplatDelta`,
+  `EditCommand::PaintBiome`, toolbar controls + a biome-overlay view mode).
+- **P19.3 Biome → PCG binding & node-kit completion** — 1. evaluation dispatches per-biome
+  graphs with feathered border blending; 2. the deferred `mask.image` node and multi-rule
+  lowering; 3. data-map samplers (`mask.flow`, `mask.wear`, …) over P19.1.
+- **P19.4 PCG grammar core** — 1. a deterministic rule-rewriting grammar in `inf-pcg`,
+  counter-hashed like scatter; 2. token rules expanding along splines and footprint volumes
+  into placed modular-mesh instances (fences, walls, façades); 3. a grammar node namespace in
+  `.inf_pcg` + a rule text editor; 4. transpile/PIE parity.
+- **P19.5 Building & interior grammar** — the enterable-buildings requirement: 1. footprint →
+  floor stack → room partitioning by an interior grammar; 2. staircase/connector placement,
+  door and window cutting; 3. per-room-type furniture population (scatter with wall-align and
+  clearance placement rules); 4. building-type palettes — **office, apartment, industrial
+  (factory/warehouse), house, estate, hotel, shop** — shipped as sample module sets
+  (primitive/procedural + CC0); 5. interiors respect the P16 streaming cells. Phase 23's DCC
+  later makes palette authoring in-engine.
+
+### Phase 20 — Water & hydrology
+
+**Goal:** realistic lakes, rivers, and oceans. **Done when:** a coastal scene — ocean plus a
+spline river fed by a lake — carries buoyant physics objects, replays deterministically on the
+physics/audio trace, holds water goldens, and PIE == shipping.
+
+- **P20.1 Water surfaces** — 1. a new `inf-water` (Ring 0) + render passes: ocean (Gerstner v1
+  → FFT spectrum v2, deterministic seeds), lake volumes (flat + ripple), and spline rivers
+  (flow along the parity-wave splines, width/depth profiles, downhill validation against
+  terrain, P19.1 flow maps as inputs); 2. shading — depth-tinted absorption, screen-space
+  refraction, shore blending against terrain height, foam from flow/wave data; 3. integration
+  with the translucent pass.
+- **P20.2 Water volumes & physics** — 1. a `WaterVolume` component; 2. buoyancy and drag forces
+  in the rapier bridges, deterministic and replay-gated; 3. splash/enter/exit events into
+  Blueprints and the audio command queue; 4. a swim-capable character-controller mode.
+- **P20.3 Underwater & wetness** — 1. underwater post (tinted fog, surface light shafts v1);
+  2. wetness darkening near waterlines, feeding P22's material response.
+- **P20.4 Hydrology authoring** — 1. river and lake placement tools in the terrain toolbar;
+  2. per-biome water-level hints; 3. the erosion → water pipeline: carve with P10 erosion, fill
+  with P20 water.
+
+### Phase 21 — Volumetric terrain: caves, tunnels & excavation
+
+**Goal:** terrain stops being a heightfield-only illusion — dig it, tunnel it, build under it.
+**Done when:** on a streamed terrain you can carve a cave system and excavate a foundation pit
+with displaced soil piles, build an underground room in the pit, save and reload
+byte-identical, and it works in PIE.
+
+**Design stance (honest):** the planet-scale base **stays a heightfield** — the streaming
+clipmap economics from P16 are unbeatable at that scale. Volumetric capability arrives as
+**SDF voxel chunk volumes that locally override and extend it**, the hybrid serious open-world
+tech uses. We are not voxelizing the planet.
+
+- **P21.1 Voxel chunk core** — 1. `inf-voxel` (Ring 0): a sparse SDF chunk store, f64-anchored
+  like terrain tiles, format-aware serde; 2. deterministic meshing (dual-contouring /
+  transvoxel class); 3. material channels aligned with the terrain splat layers; 4. per-chunk
+  versions + residency riding the P16 streaming machinery.
+- **P21.2 Terrain integration** — 1. volumes punch **holes** in the heightfield (per-sample
+  hole mask on tiles → clipmap discards; collision switches to the voxel mesh inside a volume);
+  2. seamless material and normal blending at the seams; 3. carve-brush and spline-tunnel
+  tools.
+- **P21.3 Excavation & soil displacement** — 1. dig tools (box/spline/brush cuts for
+  foundations, parking garages, underground malls); 2. material accounting — excavated volume
+  becomes displaced spoil (voxel additions or instanced debris), conservation-tested like the
+  erosion mass gates; 3. undo via chunk deltas on the `EditCommand` pattern.
+- **P21.4 Runtime carving** — 1. the same ops as Blueprint nodes, deterministic and
+  replay-gated, so games can dig at runtime; 2. physics and nav updates on carve.
+
+### Phase 22 — Dynamic world: deformation & destruction
+
+**Goal:** the world reacts — surfaces deform, assets and buildings break. **Done when:** a
+playground scene shows footprints and tyre tracks in snow and sand, bending grass, and a car
+and a multi-storey building destroyed by Blueprint-triggered explosions with debris physics —
+deterministic on the replay trace, PIE == shipping.
+
+- **P22.1 Surface deformation (snow/sand/grass/mud)** — 1. world-space deformation
+  height/offset maps around active actors, compute-written into a camera-following ring buffer;
+  2. sampled by the terrain displacement and foliage bend shaders; 3. per-splat-layer response
+  params (depth, recovery time, hardness); 4. accumulation hooks from P17 weather (snowfall
+  refills the surface); 5. deterministic fixed-step writes for committed content.
+- **P22.2 Fracture pipeline** — 1. cook-time (later DCC-time) Voronoi pre-fracture of meshes
+  into chunk hierarchies — `.inf_fracture` beside the mesh, deterministic seeds;
+  2. material-derived strength params (density, Young's-modulus-class scalars — the DCC spec's
+  derivation, simplified) on physics materials.
+- **P22.3 Runtime destruction** — 1. damage events and a Blueprint kit swapping the intact mesh
+  for chunk bodies through the existing rapier bridges; 2. a **structural-integrity graph** for
+  buildings — support-chunk removal drives progressive collapse, solved deterministically at
+  fixed step; 3. debris lifetime and budget caps with despawn; 4. audio/VFX event hooks.
+- **P22.4 Destructible environments at scale** — 1. instanced debris through the P18.5 GPU
+  instance path; 2. per-tier debris budgets; 3. destruction state persisted in the save and
+  replication seams, with net-relevant events documented for the P14 net layer.
+
+### Phase 23 — Embedded DCC v1: modeling core
+
+**Goal:** create and edit meshes inside the engine. **Done when:** you can model a usable prop
+(extrude / bevel / loop-cut), unwrap it, save it as a standard mesh asset, and watch a scene
+that references it live-update — with clean undo and deterministic op replay.
+
+Starting point: no editing code exists anywhere (`inf-mesh` is flat, import-only, with no
+exporter), the frontend has no 3D library so in-panel 3D must be Rust-rendered, and the
+viewport is explicitly single-instance. The material editor is the proven new-panel template
+and the headless preview render is the proven offscreen-PNG path.
+
+- **P23.1 Design memo** — 1. the DCC spec's open questions answered against our infrastructure
+  — reuse `bevy_reflect` + the asset DB + undo; **no Blender DNA/RNA clone**; 2. the
+  edit-session model; 3. the viewport decision below, with measured latency.
+- **P23.2 Multi-viewport enabler** — 1. promote `ViewportState` to a keyed map with
+  id-parameterized `viewport_*` commands and events; 2. a second `EngineHost` on its own thread
+  with its own scene projector; 3. per-viewport airspace refcounts. Fallback if hostile:
+  offscreen-PNG interactive preview first, native second viewport as fast-follow. Also unlocks
+  the standing editor multi-viewport deferral.
+- **P23.3 Mesh kernel** — 1. `inf-dcc` (Ring 0): a half-edge structure importing from and
+  exporting to `inf-mesh`'s `MeshAsset` (the missing writer); 2. validity invariants
+  property-tested; 3. an op journal — deterministic replay is both the undo/redo story and the
+  test story, mirroring `GraphJournal`.
+- **P23.4 Modeling ops & tools** — 1. extrude / inset / bevel / loop-cut / knife / merge /
+  subdivide / mirror; 2. a vertex/edge/face selection model with soft-select; 3. gizmo reuse
+  extended to component selections; 4. a Model Editor panel on the material-editor template.
+- **P23.5 Sculpt & UV** — 1. brush sculpt on the edit mesh, reusing the terrain brush/falloff
+  doctrine; 2. UV seams + an LSCM-class unwrap + a 2D UV panel; 3. normals and tangents
+  recompute.
+- **P23.6 Asset round-trip** — 1. edited meshes save through the asset DB (dependency events
+  already live-update referencing scenes); 2. "Edit Mesh" from the Content Drawer context menu;
+  3. vgeom rebuild on save via the P18.3 machinery.
+
+### Phase 24 — DCC v2: characters
+
+**Goal:** new characters stop being painful — template body plans become auto-rigged,
+animatable characters. **Done when:** a biped and a quadruped generate from templates, the
+biped rig auto-fits an imported humanoid mesh, weights solve, cloth and hair attach, and both
+run under existing state machines in PIE.
+
+Starting point: `inf-anim` already provides validated skeletons, poses and skinning palettes,
+clips, blend spaces, state machines, retarget v1, sockets and root motion, with a GPU skinning
+pass. Missing for rigging: IK solvers, weight painting, in-viewport bone manipulation, and a
+skeleton editor.
+
+- **P24.1 Template body plans** — 1. a parametric N-pedal skeleton generator (biped, quadruped,
+  hexapod, arbitrary; proportions as params) emitting standard `.inf_skel`; 2. a template
+  library UI.
+- **P24.2 Auto-fit & weight solve** — 1. SDF-based template-to-mesh fitting (bounding analysis
+  → joint-placement optimization); 2. heat / voxel-diffusion weight solve; 3. a manual
+  weight-paint brush applying the terrain-paint doctrine to the P23 kernel; 4. IK solvers
+  (Two-Bone + FABRIK) landing in `inf-anim` for both rig authoring and runtime use.
+- **P24.3 Modular rigging** — 1. append limbs, tails and extras without breaking IK chains or
+  weight tables; 2. sockets integration.
+- **P24.4 Cloth & hair authoring** — 1. XPBD cloth (garment meshes against character SDF
+  collision, deterministic fixed-step, replay-gated); 2. strand hair (guide curves +
+  interpolation, clump/curl params, card generation for lower tiers); 3. authored in the Model
+  Editor, run by runtime systems, quality-tiered.
+- **P24.5 Character pipeline UX** — 1. a "New Character from Template" wizard: pick a plan →
+  shape it → auto-rig → a default locomotion set wired to a state machine. The anti-pain
+  headline.
+
+### Phase 25 — Photogrammetry: photos → asset
+
+**Goal:** photos in, game-ready asset out, entirely in-engine. **Done when:** a
+synthetic-render dataset with known poses reconstructs within error bounds deterministically, a
+real photo set produces a textured, retopologized, LOD-ready asset through the wizard, and the
+result imports as a standard asset.
+
+Decided 2026-07-31: **native classical SfM + GPU MVS** in Rust/WGSL — deterministic and
+in-engine, with no external reconstruction dependency.
+
+- **P25.1 SfM core** — 1. feature extraction and matching with deterministic ordering;
+  2. incremental SfM + bundle adjustment on the job pool, pool-size-invariant per house rules.
+- **P25.2 GPU MVS** — 1. WGSL plane-sweep depth maps; 2. TSDF fusion → dense mesh extraction.
+- **P25.3 Finish pipeline** — 1. decimation/retopo (meshopt-based v1); 2. UV unwrap via P23.5;
+  3. normal / AO / albedo bake from dense → retopo on the existing headless bake machinery;
+  4. optional de-lighting v1.
+- **P25.4 Capture wizard** — 1. drop photos → reconstruct with progress → preview through the
+  offscreen path → import; 2. failure diagnostics (coverage and overlap warnings).
 
 ---
 
