@@ -1,11 +1,16 @@
-//! **P16.5 cook advisories, end to end.**
+//! **World-partition cook advisories, end to end** (P16.5, extended P16.6).
 //!
-//! World partition can see two hazards at cook time that the runtime can only
-//! *suffer*, and neither is fixed up automatically (a fixup would make cell
-//! residency depend on the reference graph, or on which entities happen to carry
-//! a script — so a level's memory ceiling would move every time gameplay was
-//! added). They are surfaced as cook advisories instead, where they are cheap to
-//! fix: the `dangling_terrain_refs` precedent.
+//! World partition can see three hazards at cook time that the runtime can only
+//! *suffer*, and none is fixed up automatically (a fixup would make cell
+//! residency depend on the reference graph, on which entities happen to carry a
+//! script, or on which components they carry — so a level's memory ceiling would
+//! move every time content was added). They are surfaced as cook advisories
+//! instead, where they are cheap to fix: the `dangling_terrain_refs` precedent.
+//!
+//! The third (P16.6) is the loudest in its consequences: a `Terrain` bins by its
+//! entity ORIGIN while its heightfield spans kilometres, so an unmarked terrain in
+//! a partitioned level means **the ground despawns under the player** the moment
+//! they walk out of its cell.
 //!
 //! These are integration tests rather than a trust in the Ring-0 unit tests
 //! because the advisories are produced inside the **parallel** `cook_one` stage
@@ -80,8 +85,9 @@ fn mesh() -> Option<inf_ecs::components::MeshRef> {
 }
 
 /// The hazard level: a streaming source, a cross-cell joint, a streamed
-/// mesh+blueprint actor, and a persistent entity carrying the *same* blueprint
-/// (which must stay silent).
+/// mesh+blueprint actor, a persistent entity carrying the *same* blueprint (which
+/// must stay silent), an **unmarked terrain** (P16.6), and an `AlwaysLoaded` one
+/// (also silent).
 fn hazard_level(partitioned: bool) -> inf_scene::RuntimeLevel {
     inf_scene::RuntimeLevel {
         title: "Hazards".into(),
@@ -119,6 +125,22 @@ fn hazard_level(partitioned: bool) -> inf_scene::RuntimeLevel {
                 actor: Some(g(0xC0AC)),
                 ..rec(0xC005, "GameMode", (0.0, 0.0))
             },
+            // P16.6 — the ground-despawns shape: a terrain with no marker. It
+            // occupies space, so it bins into the cell holding its origin, and its
+            // heightfield leaves with that cell.
+            inf_scene::RuntimeEntity {
+                terrain: Some(inf_ecs::components::Terrain {
+                    asset: Some(g(0xC0AA)),
+                    ..Default::default()
+                }),
+                ..rec(0xC006, "Terrain", (10.0, 10.0))
+            },
+            // …and the sanctioned authoring: the same terrain, marked. Silent.
+            inf_scene::RuntimeEntity {
+                terrain: Some(inf_ecs::components::Terrain::default()),
+                always_loaded: Some(inf_ecs::components::AlwaysLoaded),
+                ..rec(0xC007, "Good Terrain", (300.0, 10.0))
+            },
         ],
         settings: inf_scene::RuntimeSettings {
             partition: inf_scene::PartitionSettings {
@@ -148,9 +170,9 @@ fn make_hazard_project(root: &Path, partitioned: bool) {
         .unwrap();
 }
 
-/// Both P16.5 hazards travel from the Ring-0 scan, through `cook_one`'s per-asset
+/// All three hazards travel from the Ring-0 scan, through `cook_one`'s per-asset
 /// advisories, into `CookReport.warnings` — non-fatally, naming the entity, the
-/// cell, the blueprint and the remedy.
+/// cell, the blueprint/asset and the remedy.
 #[test]
 fn partition_advisories_reach_the_cook_report() {
     let dir = tempfile::tempdir().unwrap();
@@ -208,6 +230,43 @@ fn partition_advisories_reach_the_cook_report() {
             .iter()
             .any(|w| w.contains(&g(0xC005).to_string())),
         "a persistent blueprint must not be reported: {:?}",
+        report.warnings
+    );
+
+    // (3) P16.6 — the STREAMED TERRAIN. This is the one whose symptom is "the
+    //     world has no floor past cell (0,0)", so the advisory has to name the
+    //     entity, that it is streamed, its `.inf_terrain`, and the remedy.
+    let terrain = report
+        .warnings
+        .iter()
+        .find(|w| w.contains(&g(0xC006).to_string()))
+        .unwrap_or_else(|| {
+            panic!(
+                "the streamed terrain must be reported: {:?}",
+                report.warnings
+            )
+        });
+    assert!(terrain.contains("STREAMED"), "{terrain}");
+    assert!(
+        terrain.contains("DESPAWN"),
+        "the advisory must say what actually happens: {terrain}"
+    );
+    assert!(
+        terrain.contains("AlwaysLoaded"),
+        "the advisory must name the remedy: {terrain}"
+    );
+    assert!(
+        terrain.contains(&g(0xC0AA).to_string()),
+        "…and the .inf_terrain it streams from: {terrain}"
+    );
+
+    // The AlwaysLoaded terrain — what every committed sample authors — is silent.
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| w.contains(&g(0xC007).to_string())),
+        "an AlwaysLoaded terrain must not be reported: {:?}",
         report.warnings
     );
 

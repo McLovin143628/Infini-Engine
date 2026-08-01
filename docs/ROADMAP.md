@@ -1039,6 +1039,10 @@ author time). Native wgpu viewport over immediate-mode egui (§2.3.1). See
 - **Cook/PIE:** CI cooks a sample and runs `inf-player --headless --run-frames 300 --assert-exit`.
 - **Performance:** criterion benches (transform propagation, sprite batcher, scatter kernels);
   nightly frame-budget smoke on a reference scene with a hard ms budget that only ratchets down.
+  From P16.6 the ratchet also covers a **streamed scene**: a fixed-step ms budget while cell +
+  terrain streaming are live, plus residency **memory ceilings** (terrain page bytes, cell blob
+  bytes, active cells), all asserted headless over `samples/phase16-world`
+  (`inf_player::budget`; the table lives in `docs/profiling.md` §2).
 - **Process:** every phase ends with a recorded demo against its written checklist; each
   phase's sample content is committed under `samples/` and becomes the next phase's regression
   fixture.
@@ -1105,7 +1109,7 @@ material functions, multi-viewport, PIE player options.
 
 ---
 
-## 12. Next-Gen Wave — Phases 16–25 (planned 2026-07-31)
+## 12. Next-Gen Wave — Phases 16–25 (planned 2026-07-31; **P16 COMPLETE**)
 
 The 16-phase master plan (§6) and UE-Parity Wave 1 (§11) are complete and CI-green: the engine
 now does what a mature traditional engine does. This wave pushes past that workflow —
@@ -1125,6 +1129,110 @@ frozen-record + downgrade-bless pattern.
 ≥ 16k×16k source heightmap imports through the wizard (`meters_per_sample` ≥ 8 → tens of km),
 flies in PIE with tiles paging under a bounded residency budget, cooked == uncooked, and
 streamed-scene ms budgets ratchet in CI (120 fps-class headless; real fps human-verified).
+
+> **STATUS: Phase 16 COMPLETE** (2026-08-01) — **local gates green; CI pending push.** (This
+> block is written with the commit rather than after the CI run, unlike the earlier phases';
+> it says so rather than claiming a green it has not seen.) The whole phase is
+> pinned by one composed gate — `samples/phase16-world` + `runtime/inf-player/tests/phase16_gate.rs`:
+> a wizard-imported streamed terrain, a partitioned world on top of it, a **second inline
+> terrain**, and a scripted `StreamingSource` walk with a diverging render camera.
+>
+> **P16.1 mmap zero-copy packs** — `memmap2` backing in `inf-asset`'s pack reader with a
+> borrowed `read_ref() -> &[u8]` for uncompressed, 16-byte-aligned, xxh3-verified-once entries;
+> streaming-class kinds (terrain tiles, `.inf_part`, vmesh) cook **uncompressed** so a page is a
+> sub-slice of the mapping; `PACK_FORMAT_VERSION` bump with back-compat read; wasm keeps
+> whole-file reads. **P16.2 Units doctrine** — `docs/memos/units-doctrine.md` + the
+> CLAUDE.md/ROADMAP rule (1 world unit = 1 metre, SI everywhere, no unit-scale factor ever),
+> and the loose constants named as their files were touched. **P16.3 Terrain tile streaming** —
+> terrain leaves the `.inf_lvl` blob for the `.inf_terrain` asset (header + sorted tile
+> directory + 16-byte-aligned blobs across a cook-time LOD pyramid); `TerrainData` becomes the
+> *resident working set* over a `TileStore` (pack or loose file); per-tile change stamps replace
+> the whole-terrain counter; and **the determinism doctrine** — sim wants (level-0 pages around
+> terrain *observers*) load synchronously at the fixed-step boundary into the ECS component,
+> camera wants (a quadtree cut with hysteresis) land in a second working set the world holds no
+> reference to. **P16.4 Huge-heightmap import** — banded PNG16/EXR row decode + a chunked
+> importer that emits tiles and pyramid straight into the payload (`O(one tile row)` live pages,
+> byte-identical to the whole-image path and to any job-pool size), the Terrain Import wizard,
+> and **sculpt/paint on a streamed terrain** with save-time write-back that is byte-equal to a
+> full rebuild. **P16.5 World partition / level streaming** — cook-time grid-cell partition into
+> a derived `.inf_part`, a runtime cell manager that spawns/despawns at the deterministic sync
+> point only (loading may be early; activation may not be late), a `--debug-cells` overlay, and
+> PIE == shipping on the partitioned sample. **P16.6 Multi-terrain & budgets** — see below.
+>
+> **P16.6, in detail.** (1) **Multi-terrain**: `RenderScene.terrains` is a `Vec`, the terrain
+> pass loops it with per-terrain patch assembly, per-terrain splat-material uniforms and a GPU
+> tile cache keyed by `(RenderTerrain::id, TerrainTileKey)` — two terrains routinely share tile
+> coordinates, so the coordinate-only key was a live collision; both projector MIRRORs
+> (`inf_viewport::host::rebuild_scene`, `inf_player::render::project_scene`) emit **every**
+> visible terrain — the editor in document order, the player in `Guid` order, each deterministic
+> for its own side — and both stamp `terrain_id_from_guid`, which is what makes a PIE-vs-shipping
+> comparison of the projected scene match terrains up by *identity* rather than by index;
+> `EditorTerrainStreams::retain_only` keeps *all* live streamed GUIDs (it previously evicted a
+> second terrain's whole payload every frame). Every cursor path — sculpt, paint, drag-drop spawn,
+> foliage — now resolves through one `terrain_probes` seam, so a **streamed** terrain answers from
+> the pages the streamer has paged in rather than from the document's (by-design empty) set:
+> picks take the **nearest** hit along the ray (a stroke in progress restricts to the terrain it
+> started on), scatters take the **topmost** surface, since foliage falls from above. Existing
+> single-terrain goldens are byte-identical under `INF_GOLDEN_STRICT`; a two-terrain structural
+> scene joins the harness.
+> (2) **`.inf_terrain` header v2**: the pyramid options are recorded (128-byte header, 56 bytes
+> reserved); a v1 payload keeps loading forever and reports its options as **`None` — unknown,
+> not "the defaults"**, which is what let `warn_on_pyramid_reshape` narrow to the one case it can
+> still honestly describe. (3) **Streamed-scene budgets** in `inf_player::budget` on the §8
+> ratchet, asserted headless over the gate scene: `STREAMED_STEP_BUDGET_MS` 4.0 (measured 0.18),
+> terrain residency ≤ 16 MiB (measured 5.65), cell residency ≤ 256 KiB / 8 active cells
+> (measured 2.8 KiB / 4). (4) **`CellStreamStats::unresolved_refs`** — the live count of
+> cross-cell `AttachedTo`/joint references that are currently disconnected, logged once per
+> referrer; the runtime face of the cook's `cross_cell_refs` warning. (5) A third **cook
+> advisory**, `partition::streamed_terrains` — see the terrain × partition boundary below.
+>
+> **Schema:** scene **v9** (terrain becomes an asset ref + streaming settings) and **v10**
+> (world-partition metadata) — a deliberate second bump in one phase, because v9 shipped before
+> the partition design existed and retro-fitting it would have meant re-blessing bytes that were
+> already committed and already load. The `.inf_terrain` **v2** header is asset-internal and
+> costs the scene schema nothing.
+>
+> **The terrain × partition boundary, stated.** A `Terrain` "occupies space", so the partitioner
+> bins it by its entity **origin** — while its heightfield spans kilometres from that origin. An
+> unmarked terrain in a partitioned level therefore lands in one cell and **the ground despawns
+> under the player** when a streaming source leaves it; enabling partitioning on a level that
+> already has terrain produces this every time, with no symptom until somebody walks far enough.
+> v1 does not auto-promote (a fixup would make residency depend on which *components* an entity
+> carries, and a cell-local patch of inline ground is a legitimate thing to author), so the cook
+> **warns** — naming the entity, its cell, its `.inf_terrain` and the remedy, mark it
+> `AlwaysLoaded` — exactly as it already does for a streamed Blueprint actor. Both committed
+> partitioned samples author it that way. Binning a terrain by its real **footprint** (or
+> splitting it across cells) so that only a genuinely cell-local terrain streams is the deferred
+> fix; it is tracked on `inf_scene::partition::streamed_terrains`, whose docs say the diagnostic
+> narrows the day it lands.
+>
+> **Human-verified remainders (not asserted by CI, and honestly so):** the real-hardware frame
+> rate — CI can only bound the CPU-side streaming work (see `inf_player::budget` on why a
+> millisecond on a shared runner is not a millisecond on a target machine), so the 120 fps-class
+> claim itself needs a GPU and a stopwatch; the *visual* pass on streamed terrain (LOD pops,
+> fine↔coarse skirt slivers at grazing angles, splat continuity across a cut); a **UX pass on the
+> Terrain Import wizard** with a real multi-gigabyte source; the literal **16k × 16k import**
+> (`terrain_import::huge_heightmap_16k_imports`, `#[ignore]`d — ~268 M samples and ~1 GB of
+> payload cannot run in a CI job that also cooks it twice, so the gate scene runs the same
+> pipeline at 1025² / 8 m / 8.2 km and the 16k pass is run by hand when the importer is
+> profiled); and the phase demo recording.
+>
+> **Deferred, with where each is tracked:** a **disk-to-disk streaming rewriter** so a
+> write-back does not stage two whole payloads in RAM (`inf_terrain::writeback` module docs —
+> the same follow-up P16.4a's chunked import documents from the other side); **PIE-wire streamed
+> terrain**, i.e. the editor's in-process Simulate paging like the subprocess player does
+> (`inf_editor_core::terrain_stream` — the editor computes no sim wants today); a **dynamic actor
+> map** so an entity that streams *in* gains a ticking Blueprint (`inf_player::cell_stream`
+> module docs — the actor map is fixed at `RuntimeSim` construction; content marks such entities
+> `AlwaysLoaded` meanwhile, and both partitioned samples' READMEs say so); **footprint-aware
+> terrain binning**, so a terrain need not be `AlwaysLoaded` to survive partitioning
+> (`inf_scene::partition::streamed_terrains`, and the cook advisory it feeds); a **multi-anchor
+> pyramid seam** — `TerrainAssetBuilder::with_origin` exists but every terrain is anchored at
+> zero, so two terrains cannot yet share one pyramid across their boundary; a **background spawn
+> pool** for cell activation (today a cell that reaches its activation step unloaded blocks the
+> step — the documented v1 semantic, mitigated by the prefetch margin); and a **virtual-texture
+> revisit** for terrain splat weights at 256² pages (§6 P10 deferral, unchanged — the pyramid is
+> heights-only and coarse rings read the level-0 weight page).
 
 - **P16.1 mmap zero-copy packs** — 1. `memmap2` backing in `inf-asset`'s pack reader with a
   borrowed `read_ref() -> &[u8]` for uncompressed, 16-byte-aligned, xxh3-verified-once entries;
@@ -1151,8 +1259,10 @@ streamed-scene ms budgets ratchet in CI (120 fps-class headless; real fps human-
   incremental spawn/despawn; 3. a streaming debug overlay; 4. PIE == shipping on a partitioned
   scene (the editor stays single-document in v1).
 - **P16.6 Multi-terrain & budgets** — 1. lift "first visible terrain wins" in the viewport host
-  and the player render mirror; 2. streamed-scene frame budgets + residency memory ceilings on
-  the ratchet.
+  and the player render mirror (`RenderScene.terrains`, per-terrain GPU cache keys, nearest-hit
+  terrain picking); 2. `.inf_terrain` header v2 records the pyramid options; 3. streamed-scene
+  frame budgets + residency memory ceilings on the ratchet; 4. `CellStreamStats::unresolved_refs`;
+  5. the composed **Phase 16 gate** (`samples/phase16-world`).
 
 Schema **v9**: Terrain becomes an asset reference plus streaming settings (P16.3).
 Schema **v10**: world-partition metadata — the `StreamingSource` / `AlwaysLoaded`

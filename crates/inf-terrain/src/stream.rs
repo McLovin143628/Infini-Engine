@@ -831,7 +831,7 @@ mod tests {
             }
         }
         let p = build_pyramid(&t, PyramidOptions::default());
-        let asset = build_terrain_asset(&t, &p).unwrap();
+        let asset = build_terrain_asset(&t, &p, PyramidOptions::default()).unwrap();
         let store = TerrainAssetReader::new(asset.into_bytes()).unwrap();
         (t, store)
     }

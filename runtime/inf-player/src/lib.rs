@@ -25,6 +25,8 @@
 //! byte-identically to its dev-dir source (the cooked-==-uncooked gate).
 
 pub mod args;
+/// Streamed-scene performance + residency budgets (P16.6) — the §8 ratchet.
+pub mod budget;
 /// World-partition cell streaming (P16.5) — sim-driven spawn/despawn.
 pub mod cell_stream;
 pub mod config;

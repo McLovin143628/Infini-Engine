@@ -29,6 +29,14 @@ uuid = { workspace = true }
 # crates already use.
 xxhash-rust = { workspace = true }
 
+[dev-dependencies]
+# The terrain-resolution tests build a real streamed terrain from the committed
+# sample (write the .inf_terrain into a temp content root, page it in) — the only
+# way to assert that a STREAMED terrain's document set is empty while its
+# streamer's is not, which is the whole reason every cursor path resolves through
+# `terrain_probe`.
+tempfile = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
 inf-render = { workspace = true }
 wgpu = { workspace = true }

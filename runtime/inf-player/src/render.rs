@@ -231,7 +231,17 @@ const CELL_OVERLAY_HALF_HEIGHT_M: f64 = 0.5;
 /// its cook-derived meshlet DAG (P13.4) — a resolved mesh renders real geometry
 /// (meshlet path or classic fallback), an unresolved one falls back to a placeholder
 /// cube instance (as before).
-fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes: &VmeshRegistry) {
+///
+/// `pub` for the same reason [`project_terrain`] is: this DTO is the **entire**
+/// input the renderer consumes, so a gate can assert what a frame would draw —
+/// two terrains, their ids, their resident pages — without a GPU, and compare it
+/// between a cooked run and an editor-document run.
+pub fn project_scene(
+    scene: &mut RenderScene,
+    sim: &RuntimeSim,
+    alpha: f64,
+    vmeshes: &VmeshRegistry,
+) {
     scene.instances.clear();
     scene.lights.clear();
     scene.sprites.clear();
@@ -240,7 +250,7 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
     scene.lights_2d.clear();
     scene.vgeom_assets.clear();
     scene.vgeom_instances.clear();
-    scene.terrain = None;
+    scene.terrains.clear();
     // Track which vmesh assets are already listed this frame (dedup — the render
     // node caches GPU geometry by id, but the asset list must not duplicate).
     let mut vgeom_seen: std::collections::HashSet<u128> = std::collections::HashSet::new();
@@ -298,12 +308,24 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
                 scene.tilemaps.push(project_tilemap(tilemap, translation));
             }
         }
-        // Heightfield terrain (P10.6): the player projects it into the render
-        // scene's single terrain slot exactly like the editor viewport host
-        // (`inf_viewport::host::project_terrain`), so cooked/PIE terrain renders.
-        // First visible, non-empty terrain wins (multi-terrain merge is a
-        // follow-up). Per-tile change stamps ride along (P16.3b1), so the terrain
-        // pass re-uploads a height texture only when that tile really changed.
+        // Heightfield terrain (P10.6): the player projects **every** visible,
+        // non-empty terrain into the render scene's terrain list, exactly like the
+        // editor viewport host (`inf_viewport::host::project_terrain`), so
+        // cooked/PIE terrain renders. Per-tile change stamps ride along (P16.3b1),
+        // so the terrain pass re-uploads a height texture only when that tile
+        // really changed.
+        //
+        // P16.6 — MULTI-TERRAIN: the old "first visible terrain wins" rule is
+        // gone. Terrains arrive in `Guid` order (this loop's order), and each
+        // carries `terrain_id_from_guid(guid)` so the renderer's per-tile texture
+        // cache and per-terrain splat uniform stay separate — two terrains
+        // routinely share tile coordinates.
+        //
+        // MIRROR, precisely: the editor viewport emits terrains in the DOCUMENT's
+        // entity order, not `Guid` order. Both are deterministic for their own
+        // side; what makes a PIE-vs-shipping comparison of the projected scene
+        // meaningful is that both stamp the SAME `id` from the entity `Guid`, so
+        // the two lists match up by identity rather than by index.
         //
         // P16.3b2 — THE SIM/RENDER SPLIT: an asset-backed terrain draws the
         // **streamer's** camera-driven working set, not the component's. The
@@ -311,15 +333,15 @@ fn project_scene(scene: &mut RenderScene, sim: &RuntimeSim, alpha: f64, vmeshes:
         // projecting it would put the camera's cut and the sim's residency in the
         // same container, which is exactly the coupling the doctrine forbids.
         // An inline terrain has no streamer and projects its own data, unchanged.
-        if scene.terrain.is_none() {
-            if let Some(terrain) = w.get::<Terrain>(entity) {
-                let data = sim
-                    .terrain_streaming()
-                    .render_data(guid)
-                    .unwrap_or(&terrain.data);
-                if !data.is_empty() || data.coarse_tile_count() > 0 {
-                    scene.terrain = Some(project_terrain(terrain, data, translation));
-                }
+        if let Some(terrain) = w.get::<Terrain>(entity) {
+            let data = sim
+                .terrain_streaming()
+                .render_data(guid)
+                .unwrap_or(&terrain.data);
+            if !data.is_empty() || data.coarse_tile_count() > 0 {
+                let mut rt = project_terrain(terrain, data, translation);
+                rt.id = inf_render::terrain_id_from_guid(guid.as_u128());
+                scene.terrains.push(rt);
             }
         }
         // PCG scatter volumes (P10.6): project the volume's evaluated instance
@@ -614,6 +636,10 @@ pub fn project_terrain(
         tex_scale: terrain.layers[k].tex_scale as f32,
     });
     RenderTerrain {
+        // The caller stamps the terrain entity's identity (P16.6); a bare
+        // projection is "unkeyed", which is exactly right for the single-terrain
+        // callers (the gates' DTO fingerprints) that never reach a GPU cache.
+        id: 0,
         tile_resolution: res,
         meters_per_sample: data.meters_per_sample(),
         tiles,

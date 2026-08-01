@@ -2,7 +2,7 @@
 //! blob for a random-access, page-at-a-time container.
 //!
 //! ```text
-//! ┌ header (64 B, all little-endian) ─────────────────────────────────┐
+//! ┌ header (v2: 128 B; v1: 64 B — all little-endian) ─────────────────┐
 //! │  magic         [u8; 8]   b"INFTERRN"                              │
 //! │  schema_ver    u32       TERRAIN_ASSET_SCHEMA_VERSION             │
 //! │  tile_res      u32       samples per tile side (every level)      │
@@ -11,12 +11,37 @@
 //! │  lod_levels    u32       levels present (1 = level 0 only)        │
 //! │  tile_count    u32       directory entries                        │
 //! │  blob_base     u64       absolute offset of the blob section      │
+//! │ ── v2 only, offset 64 ─────────────────────────────────────────── │
+//! │  pyr_max_lvls  u32       PyramidOptions::max_levels               │
+//! │  pyr_min_tiles u32       PyramidOptions::min_tiles                │
+//! │  reserved      [u8; 56]  zeros (room for v3 without a re-length)  │
 //! ├ tile directory (tile_count × 32 B, sorted by TileKey) ────────────┤
 //! │  lod u32 · tx i32 · tz i32 · reserved u32 · offset u64 · len u64  │
 //! ├ blob section (each tile's bincode bytes, 16-byte-aligned) ────────┤
 //! │  … tile blobs, zero-padded up to each 16-byte boundary …          │
 //! └───────────────────────────────────────────────────────────────────┘
 //! ```
+//!
+//! # Schema v2: the pyramid options are recorded (P16.6)
+//!
+//! v1's header stopped at `blob_base`, so the options a terrain's LOD pyramid was
+//! *built* with were nowhere on disk. The write-back path
+//! ([`crate::writeback::rewrite_terrain_asset`]) has to re-plan the pyramid to
+//! fold a sculpt back in, and with nothing recorded it could only re-plan with the
+//! **defaults** — silently reshaping an asset imported with non-default wizard
+//! knobs on its first save. (Inferring the options back out was considered and
+//! rejected: the two stop conditions are indistinguishable after the fact, and
+//! every inference rule that preserves a capped asset's depth also refuses to
+//! deepen a terrain that genuinely grew.)
+//!
+//! v2 writes them into 8 bytes of header, and the read side reports
+//! [`TerrainAssetHeader::pyramid`] as `Some` for a v2 asset and **`None` for a
+//! v1 one** — *unknown*, not "the defaults". That distinction is the whole value:
+//! a rewrite of a v1 asset still falls back to the defaults (there is nothing
+//! better to do), but it can now say so, and a rewrite of a v2 asset cannot
+//! reshape anything. The forward lift is the established asset-level pattern: the
+//! header length is a function of the schema version, so a v1 payload keeps
+//! loading, byte for byte, forever.
 //!
 //! # Why this shape
 //!
@@ -66,20 +91,43 @@ use glam::DVec3;
 use inf_asset::AssetKind;
 
 use crate::data::TerrainData;
-use crate::pyramid::PyramidLevel;
+use crate::pyramid::{PyramidLevel, PyramidOptions};
 use crate::tile::{TerrainTile, TileKey};
 
 /// Magic at the head of every `.inf_terrain` payload.
 pub const TERRAIN_ASSET_MAGIC: [u8; 8] = *b"INFTERRN";
 
-/// Current `.inf_terrain` payload schema version.
-pub const TERRAIN_ASSET_SCHEMA_VERSION: u32 = 1;
+/// Current `.inf_terrain` payload schema version (**2** since P16.6 — the header
+/// records the pyramid options; see the module docs).
+pub const TERRAIN_ASSET_SCHEMA_VERSION: u32 = 2;
 
 /// Tile blobs start on multiples of this many bytes (see the module docs).
 pub const TILE_ALIGN: u64 = 16;
 
-/// Bytes of the fixed header.
-pub const HEADER_LEN: u64 = 64;
+/// Bytes of the **v1** fixed header (no pyramid options).
+pub const HEADER_LEN_V1: u64 = 64;
+
+/// Bytes of the **v2** fixed header: v1's fields plus the pyramid options and 56
+/// reserved zero bytes. A multiple of [`TILE_ALIGN`], like v1, so the directory
+/// and every blob stay aligned without padding.
+pub const HEADER_LEN_V2: u64 = 128;
+
+/// Bytes of the fixed header **this build writes** (the current schema's).
+pub const HEADER_LEN: u64 = HEADER_LEN_V2;
+
+/// Bytes of the fixed header of a payload at `schema_version`.
+///
+/// The one place the version→length mapping lives, so the writer, the parser and
+/// the `blob_base` validation cannot disagree about where the directory starts.
+/// An unknown (future) version is rejected before this is ever asked.
+#[inline]
+pub const fn header_len(schema_version: u32) -> u64 {
+    if schema_version <= 1 {
+        HEADER_LEN_V1
+    } else {
+        HEADER_LEN_V2
+    }
+}
 
 /// Bytes of one tile-directory entry.
 pub const DIR_ENTRY_LEN: u64 = 32;
@@ -152,6 +200,13 @@ pub struct TerrainAssetHeader {
     pub tile_count: u32,
     /// Absolute offset of the blob section within the payload.
     pub blob_base: u64,
+    /// The [`PyramidOptions`] this asset's coarse levels were built with
+    /// (schema v2+), or `None` for a **v1** payload, which did not record them.
+    ///
+    /// `None` means *unknown*, deliberately — not "the defaults". A write-back has
+    /// to fall back to the defaults either way, but only the `None` case can
+    /// actually reshape an asset, so only the `None` case warns.
+    pub pyramid: Option<PyramidOptions>,
 }
 
 /// One tile-directory entry: where a tile's blob lives inside the payload.
@@ -177,6 +232,7 @@ pub struct TerrainAssetBuilder {
     tile_resolution: u32,
     meters_per_sample: f64,
     origin: DVec3,
+    pyramid: PyramidOptions,
     tiles: BTreeMap<TileKey, Vec<u8>>,
 }
 
@@ -192,6 +248,7 @@ impl TerrainAssetBuilder {
                 crate::DEFAULT_METERS_PER_SAMPLE
             },
             origin: DVec3::ZERO,
+            pyramid: PyramidOptions::default(),
             tiles: BTreeMap::new(),
         }
     }
@@ -200,6 +257,20 @@ impl TerrainAssetBuilder {
     /// partitioning; a [`TerrainData`] grid is anchored at zero today).
     pub fn with_origin(mut self, origin: DVec3) -> Self {
         self.origin = origin;
+        self
+    }
+
+    /// Record the [`PyramidOptions`] the coarse levels being staged were built
+    /// with (schema v2 header; P16.6).
+    ///
+    /// **Set this to the options actually used.** The value is what a later
+    /// write-back re-plans with, so a wrong one costs a needless total pyramid
+    /// rebuild and an asset reshaped away from the shape its author chose — which
+    /// is precisely the failure v2 exists to end. Defaults to
+    /// [`PyramidOptions::default`], which is correct for every caller that used
+    /// the defaults to build.
+    pub fn with_pyramid(mut self, pyramid: PyramidOptions) -> Self {
+        self.pyramid = pyramid;
         self
     }
 
@@ -245,6 +316,11 @@ impl TerrainAssetBuilder {
         // there — `align_up` states the invariant rather than relying on it), and
         // every tile after it starts on the next aligned boundary.
         let blob_base = align_up(HEADER_LEN + DIR_ENTRY_LEN * count as u64);
+        // The options are u32 on disk; `min_tiles` is a usize in the API and a
+        // count in practice, so a saturating narrow is exact for every value a
+        // real pyramid can have and monotone for the absurd ones.
+        let pyr_max_levels = self.pyramid.max_levels;
+        let pyr_min_tiles = u32::try_from(self.pyramid.min_tiles).unwrap_or(u32::MAX);
         let mut offsets = Vec::with_capacity(self.tiles.len());
         let mut offset = blob_base;
         for blob in self.tiles.values() {
@@ -264,6 +340,11 @@ impl TerrainAssetBuilder {
         out.extend_from_slice(&lod_levels.to_le_bytes());
         out.extend_from_slice(&count.to_le_bytes());
         out.extend_from_slice(&blob_base.to_le_bytes());
+        debug_assert_eq!(out.len() as u64, HEADER_LEN_V1);
+        // ── v2 tail: the pyramid options + reserved zeros ──
+        out.extend_from_slice(&pyr_max_levels.to_le_bytes());
+        out.extend_from_slice(&pyr_min_tiles.to_le_bytes());
+        out.resize(HEADER_LEN as usize, 0);
         debug_assert_eq!(out.len() as u64, HEADER_LEN);
 
         for ((key, blob), &off) in self.tiles.iter().zip(&offsets) {
@@ -293,8 +374,18 @@ impl TerrainAssetBuilder {
 ///
 /// Level 0 is `data`'s own tiles; each [`PyramidLevel`] contributes its own level.
 /// Anchored at the world origin — see [`TerrainAssetBuilder::with_origin`].
-pub fn build_terrain_asset(data: &TerrainData, pyramid: &[PyramidLevel]) -> Result<TerrainAsset> {
-    let mut b = TerrainAssetBuilder::new(data.tile_resolution(), data.meters_per_sample());
+///
+/// `opts` must be **the options `pyramid` was built with**: they are recorded in
+/// the v2 header so a later write-back re-plans to the same shape (P16.6). It is
+/// an explicit parameter rather than a default precisely so the pyramid and the
+/// options recorded beside it cannot drift apart at a call site.
+pub fn build_terrain_asset(
+    data: &TerrainData,
+    pyramid: &[PyramidLevel],
+    opts: PyramidOptions,
+) -> Result<TerrainAsset> {
+    let mut b = TerrainAssetBuilder::new(data.tile_resolution(), data.meters_per_sample())
+        .with_pyramid(opts);
     for (&coord, tile) in data.tiles() {
         b.insert(TileKey::lod0(coord), tile)?;
     }
@@ -370,6 +461,7 @@ impl std::fmt::Debug for TerrainAsset {
             .field("meters_per_sample", &self.header.meters_per_sample)
             .field("lod_levels", &self.header.lod_levels)
             .field("tile_count", &self.header.tile_count)
+            .field("pyramid", &self.header.pyramid)
             .field("bytes", &self.bytes.len())
             .finish()
     }
@@ -488,6 +580,13 @@ impl<B: AsRef<[u8]>> TerrainAssetReader<B> {
         self.header.lod_levels
     }
 
+    /// The [`PyramidOptions`] the coarse levels were built with, or `None` for a
+    /// **v1** payload that did not record them (P16.6).
+    #[inline]
+    pub fn pyramid_options(&self) -> Option<PyramidOptions> {
+        self.header.pyramid
+    }
+
     /// Number of tiles across all levels.
     #[inline]
     pub fn tile_count(&self) -> usize {
@@ -556,7 +655,7 @@ impl<B: AsRef<[u8]>> TerrainAssetReader<B> {
 
 /// Parse + validate the header and directory of a payload image.
 fn parse(data: &[u8]) -> Result<(TerrainAssetHeader, Vec<TileDirEntry>)> {
-    if (data.len() as u64) < HEADER_LEN {
+    if (data.len() as u64) < HEADER_LEN_V1 {
         return Err(TerrainAssetError::TooShort);
     }
     if data[0..8] != TERRAIN_ASSET_MAGIC {
@@ -593,7 +692,18 @@ fn parse(data: &[u8]) -> Result<(TerrainAssetHeader, Vec<TileDirEntry>)> {
     let tile_count = u32_at(52);
     let blob_base = u64_at(56);
 
-    let dir_end = HEADER_LEN + DIR_ENTRY_LEN * tile_count as u64;
+    // The header's length — and therefore where the directory starts — is a pure
+    // function of the schema version (see [`header_len`]).
+    let hlen = header_len(schema_version);
+    if (data.len() as u64) < hlen {
+        return Err(TerrainAssetError::TooShort);
+    }
+    let pyramid = (schema_version >= 2).then(|| PyramidOptions {
+        max_levels: u32_at(64),
+        min_tiles: u32_at(68) as usize,
+    });
+
+    let dir_end = hlen + DIR_ENTRY_LEN * tile_count as u64;
     if (data.len() as u64) < dir_end {
         return Err(TerrainAssetError::Malformed(
             "truncated in the tile directory".into(),
@@ -612,7 +722,7 @@ fn parse(data: &[u8]) -> Result<(TerrainAssetHeader, Vec<TileDirEntry>)> {
     // would let one tile's edit corrupt another, and a reader has no way to notice.
     let mut prev_end = blob_base;
     for i in 0..tile_count as u64 {
-        let base = (HEADER_LEN + DIR_ENTRY_LEN * i) as usize;
+        let base = (hlen + DIR_ENTRY_LEN * i) as usize;
         let key = TileKey {
             lod: u32::from_le_bytes(data[base..base + 4].try_into().unwrap()),
             coord: (
@@ -667,6 +777,7 @@ fn parse(data: &[u8]) -> Result<(TerrainAssetHeader, Vec<TileDirEntry>)> {
             lod_levels,
             tile_count,
             blob_base,
+            pyramid,
         },
         dir,
     ))
@@ -699,14 +810,193 @@ mod tests {
     fn sample_asset() -> TerrainAsset {
         let t = sample_terrain();
         let p = build_pyramid(&t, PyramidOptions::default());
-        build_terrain_asset(&t, &p).unwrap()
+        build_terrain_asset(&t, &p, PyramidOptions::default()).unwrap()
+    }
+
+    // ── schema v2: the pyramid options in the header (P16.6) ─────────────────
+
+    /// Re-encode `asset`'s tiles as a **v1** payload image — the pre-P16.6 layout,
+    /// byte for byte (64-byte header, no pyramid options).
+    ///
+    /// This is the v1 *fixture*: hand-built rather than committed, because the
+    /// bytes are a pure function of the tiles and a committed blob would only be a
+    /// less-inspectable copy of this loop. What it pins is the real thing — a v1
+    /// image, produced exactly as the shipped v1 writer produced one, must keep
+    /// loading forever.
+    fn v1_image(asset: &TerrainAsset) -> Vec<u8> {
+        let r = asset.reader();
+        let count = r.tile_count() as u32;
+        let blob_base = (HEADER_LEN_V1 + DIR_ENTRY_LEN * count as u64).next_multiple_of(TILE_ALIGN);
+        let mut offsets = Vec::with_capacity(count as usize);
+        let mut offset = blob_base;
+        for e in r.directory() {
+            offsets.push(offset);
+            offset = (offset + e.len).next_multiple_of(TILE_ALIGN);
+        }
+        let total = offset;
+
+        let mut out = Vec::with_capacity(total as usize);
+        out.extend_from_slice(&TERRAIN_ASSET_MAGIC);
+        out.extend_from_slice(&1u32.to_le_bytes()); // schema v1
+        out.extend_from_slice(&r.tile_resolution().to_le_bytes());
+        out.extend_from_slice(&r.meters_per_sample().to_le_bytes());
+        for v in r.origin().to_array() {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&r.lod_levels().to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&blob_base.to_le_bytes());
+        assert_eq!(out.len() as u64, HEADER_LEN_V1);
+        for (e, &off) in r.directory().iter().zip(&offsets) {
+            out.extend_from_slice(&e.key.lod.to_le_bytes());
+            out.extend_from_slice(&e.key.coord.0.to_le_bytes());
+            out.extend_from_slice(&e.key.coord.1.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&off.to_le_bytes());
+            out.extend_from_slice(&e.len.to_le_bytes());
+        }
+        for (e, &off) in r.directory().iter().zip(&offsets) {
+            out.resize(off as usize, 0);
+            out.extend_from_slice(r.tile_bytes(e.key).unwrap());
+        }
+        out.resize(total as usize, 0);
+        out
+    }
+
+    /// The header this build writes is v2, its length is 128, and the pyramid
+    /// options it was built with come back out of it.
+    #[test]
+    fn v2_records_the_pyramid_options() {
+        let t = sample_terrain();
+        let opts = PyramidOptions {
+            max_levels: 3,
+            min_tiles: 2,
+        };
+        let p = build_pyramid(&t, opts);
+        let asset = build_terrain_asset(&t, &p, opts).unwrap();
+        let r = asset.reader();
+        assert_eq!(r.header().schema_version, 2);
+        assert_eq!(r.pyramid_options(), Some(opts));
+        // The directory starts after a 128-byte header, and the reserved tail is
+        // zeros (so a v3 that fills it can be told from a v2 that did not).
+        assert_eq!(header_len(2), HEADER_LEN_V2);
+        assert!(asset.as_bytes()[72..HEADER_LEN_V2 as usize]
+            .iter()
+            .all(|&b| b == 0));
+        assert_eq!(
+            r.header().blob_base,
+            (HEADER_LEN_V2 + DIR_ENTRY_LEN * r.tile_count() as u64).next_multiple_of(TILE_ALIGN)
+        );
+    }
+
+    /// **Byte-identity for v2 rebuilds.** Two builds of one terrain with the same
+    /// options are byte-identical; a build with *different* options differs only
+    /// where it must (the 8 recorded bytes) when the pyramid shape is unchanged.
+    #[test]
+    fn v2_rebuilds_are_byte_identical() {
+        let t = sample_terrain();
+        let opts = PyramidOptions::default();
+        let p = build_pyramid(&t, opts);
+        let a = build_terrain_asset(&t, &p, opts).unwrap();
+        let b = build_terrain_asset(&t, &p, opts).unwrap();
+        assert_eq!(a.as_bytes(), b.as_bytes(), "a rebuild moved bytes");
+
+        // Same tiles, different recorded options ⇒ same length, same directory,
+        // same blobs — and exactly the two option words differ.
+        let other = PyramidOptions {
+            max_levels: 5,
+            min_tiles: 3,
+        };
+        let c = TerrainAssetBuilder::new(t.tile_resolution(), t.meters_per_sample())
+            .with_pyramid(other);
+        let mut c = c;
+        for (&coord, tile) in t.tiles() {
+            c.insert(TileKey::lod0(coord), tile).unwrap();
+        }
+        for level in &p {
+            for (&coord, tile) in &level.tiles {
+                c.insert(TileKey::new(level.lod, coord), tile).unwrap();
+            }
+        }
+        let c = c.build().unwrap();
+        assert_eq!(a.as_bytes().len(), c.as_bytes().len());
+        let differing: Vec<usize> = a
+            .as_bytes()
+            .iter()
+            .zip(c.as_bytes())
+            .enumerate()
+            .filter(|(_, (x, y))| x != y)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            differing.iter().all(|&i| (64..72).contains(&i)),
+            "options changed bytes outside the header slot: {differing:?}"
+        );
+        assert_eq!(c.reader().pyramid_options(), Some(other));
+    }
+
+    /// **A v1 payload loads forever**, and reports its pyramid options as
+    /// *unknown* rather than as the defaults — the distinction the write-back
+    /// warning is built on.
+    #[test]
+    fn a_v1_payload_still_loads_and_reports_unknown_options() {
+        let asset = sample_asset();
+        let v1 = v1_image(&asset);
+        assert_eq!(v1[8..12], 1u32.to_le_bytes(), "the fixture must be v1");
+        assert_eq!(header_len(1), HEADER_LEN_V1);
+
+        let back = TerrainAsset::from_bytes(v1.clone()).expect("a v1 payload must still load");
+        let (old, new) = (back.reader(), asset.reader());
+        assert_eq!(old.header().schema_version, 1);
+        assert_eq!(old.pyramid_options(), None, "v1 options are UNKNOWN");
+        assert_eq!(new.pyramid_options(), Some(PyramidOptions::default()));
+
+        // Every tile is byte-identical through the older container.
+        assert_eq!(old.tile_count(), new.tile_count());
+        assert_eq!(old.tile_resolution(), new.tile_resolution());
+        assert_eq!(old.meters_per_sample(), new.meters_per_sample());
+        assert_eq!(old.lod_levels(), new.lod_levels());
+        for key in new.keys() {
+            assert_eq!(old.tile_bytes(key), new.tile_bytes(key), "{key:?}");
+        }
+        // …and a v1 image is genuinely 64 bytes shorter in its header.
+        assert_eq!(
+            back.reader().header().blob_base + (v1.len() as u64 - back.reader().header().blob_base),
+            v1.len() as u64
+        );
+        assert_eq!(
+            new.header().blob_base - old.header().blob_base,
+            HEADER_LEN_V2 - HEADER_LEN_V1
+        );
+
+        // A truncated v1 header is still rejected, and a v1 image truncated to
+        // v1-header length (no directory) is a legal empty terrain, not a v2 read
+        // that walks off the end.
+        assert_eq!(
+            TerrainAsset::from_bytes(v1[..40].to_vec()).unwrap_err(),
+            TerrainAssetError::TooShort
+        );
+    }
+
+    /// A payload claiming a **future** schema is refused rather than mis-parsed.
+    #[test]
+    fn a_newer_schema_is_refused() {
+        let mut bytes = sample_asset().into_bytes();
+        bytes[8..12].copy_from_slice(&(TERRAIN_ASSET_SCHEMA_VERSION + 1).to_le_bytes());
+        assert_eq!(
+            TerrainAsset::from_bytes(bytes).unwrap_err(),
+            TerrainAssetError::SchemaTooNew {
+                found: TERRAIN_ASSET_SCHEMA_VERSION + 1,
+                current: TERRAIN_ASSET_SCHEMA_VERSION,
+            }
+        );
     }
 
     #[test]
     fn header_round_trips_and_counts_levels() {
         let t = sample_terrain();
         let p = build_pyramid(&t, PyramidOptions::default());
-        let asset = build_terrain_asset(&t, &p).unwrap();
+        let asset = build_terrain_asset(&t, &p, PyramidOptions::default()).unwrap();
         let r = asset.reader();
         assert_eq!(r.header().schema_version, TERRAIN_ASSET_SCHEMA_VERSION);
         assert_eq!(r.tile_resolution(), 5);
@@ -725,7 +1015,7 @@ mod tests {
     fn every_tile_round_trips_bit_identically() {
         let t = sample_terrain();
         let p = build_pyramid(&t, PyramidOptions::default());
-        let asset = build_terrain_asset(&t, &p).unwrap();
+        let asset = build_terrain_asset(&t, &p, PyramidOptions::default()).unwrap();
         let r = asset.reader();
         for (&coord, tile) in t.tiles() {
             let back = r.tile(TileKey::lod0(coord)).unwrap().expect("lod0 present");
@@ -812,7 +1102,7 @@ mod tests {
     fn to_terrain_data_recovers_the_authored_level() {
         let t = sample_terrain();
         let p = build_pyramid(&t, PyramidOptions::default());
-        let asset = build_terrain_asset(&t, &p).unwrap();
+        let asset = build_terrain_asset(&t, &p, PyramidOptions::default()).unwrap();
         let mut back = asset.reader().to_terrain_data().unwrap();
         assert_eq!(back, t, "level-0 tiles rebuild the authored terrain");
         assert_eq!(back.tile_count(), t.tile_count());
@@ -822,7 +1112,7 @@ mod tests {
     #[test]
     fn empty_terrain_builds_a_valid_header_only_payload() {
         let t = TerrainData::new(8, 1.0);
-        let asset = build_terrain_asset(&t, &[]).unwrap();
+        let asset = build_terrain_asset(&t, &[], PyramidOptions::default()).unwrap();
         let r = asset.reader();
         assert_eq!(r.tile_count(), 0);
         assert_eq!(r.lod_levels(), 1);

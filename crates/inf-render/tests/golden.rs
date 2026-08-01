@@ -804,6 +804,7 @@ fn hill_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
         }
     }
     RenderTerrain {
+        id: 0,
         tile_resolution: res,
         meters_per_sample: mps,
         tiles,
@@ -842,7 +843,7 @@ fn golden_terrain() {
     let terrain = hill_terrain(res, 1.0, 2, 2); // 2×2 tiles, ~64 m square
     let scene = RenderScene {
         grid_enabled: true,
-        terrain: Some(terrain),
+        terrains: vec![terrain],
         ..Default::default()
     };
     // Angled overlook of the terrain centre (~(32, ·, 32)).
@@ -886,7 +887,7 @@ fn golden_terrain_lod() {
 
     let scene = RenderScene {
         grid_enabled: true,
-        terrain: Some(terrain),
+        terrains: vec![terrain],
         ..Default::default()
     };
     let img = check_golden(&gpu, "terrain_lod", &scene, &view);
@@ -955,6 +956,7 @@ fn splat_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
         }
     }
     RenderTerrain {
+        id: 0,
         tile_resolution: res,
         meters_per_sample: mps,
         tiles,
@@ -974,7 +976,7 @@ fn golden_terrain_splat() {
     let terrain = splat_terrain(res, 1.0, 2, 2); // ~64 m square, banded layers
     let scene = RenderScene {
         grid_enabled: true,
-        terrain: Some(terrain),
+        terrains: vec![terrain],
         ..Default::default()
     };
     // Angled overlook of the banded terrain, side-on to the cliff.
@@ -1051,6 +1053,7 @@ fn streamed_terrain(res: u32, mps: f64) -> RenderTerrain {
         }
     }
     RenderTerrain {
+        id: 0,
         tile_resolution: res,
         meters_per_sample: mps,
         tiles,
@@ -1130,7 +1133,7 @@ fn streamed_terrain_renders_partial_residency() {
     // ── determinism: two fresh renderers, then two frames on a warm cache ─────
     let scene = RenderScene {
         grid_enabled: true,
-        terrain: Some(terrain),
+        terrains: vec![terrain],
         ..Default::default()
     };
     let cold_a = render(&gpu, &scene, &view);
@@ -1160,6 +1163,94 @@ fn streamed_terrain_renders_partial_residency() {
         .chunks(4)
         .any(|p| p[0] as u16 + p[1] as u16 + p[2] as u16 > 150);
     assert!(lit, "expected a lit terrain pixel");
+}
+
+/// Shift every tile of `t` by `offset` and stamp it with `id` — a second terrain
+/// placed elsewhere in the world while keeping the *same* tile coordinates, which
+/// is the collision case the P16.6 cache key exists for.
+fn placed_terrain(mut t: RenderTerrain, id: u64, offset: DVec3) -> RenderTerrain {
+    t.id = id;
+    for tile in &mut t.tiles {
+        tile.origin += offset;
+    }
+    t
+}
+
+/// **P16.6 multi-terrain headless gate.** Two independent terrains — same tile
+/// coordinates, different world anchors, different splat layers — render in one
+/// frame, deterministically, and both are actually drawn.
+///
+/// Deliberately **not** a committed golden PNG, following the streamed-terrain
+/// precedent above: the shading path is already pinned by the three terrain
+/// goldens, and everything this batch adds (per-terrain cache slots, per-terrain
+/// material uniforms, one instance buffer across both patch lists) is asserted
+/// structurally, which is adapter-robust — the harness's stated bar for what CI
+/// can actually check. The single-terrain goldens are what pin byte-identity.
+#[test]
+fn two_terrains_render_independently_in_one_frame() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let res = 17;
+    let a = placed_terrain(hill_terrain(res, 1.0, 2, 2), 1, DVec3::ZERO);
+    // B sits 40 m down +X, so both are in frame at once, and it paints from a
+    // different layer set so a shared material uniform would be visible.
+    let mut b = placed_terrain(hill_terrain(res, 1.0, 2, 2), 2, DVec3::new(40.0, 6.0, 0.0));
+    b.layers[0].albedo = [0.75, 0.18, 0.12, 1.0];
+    b.macro_variation = 0.0;
+
+    // The fixture only bites while the two terrains share tile coordinates.
+    let keys_a: Vec<_> = a.tiles.iter().map(|t| t.key).collect();
+    let keys_b: Vec<_> = b.tiles.iter().map(|t| t.key).collect();
+    assert_eq!(keys_a, keys_b, "the two terrains must share tile keys");
+
+    let view = look_view(DVec3::new(16.0, 34.0, -26.0), DVec3::new(36.0, 4.0, 16.0));
+
+    // Both terrains assemble patches under this view (each against its OWN grid).
+    let pa = assemble_patches(&a, &view, &view.origin);
+    let pb = assemble_patches(&b, &view, &view.origin);
+    assert!(!pa.is_empty() && !pb.is_empty(), "both must be visible");
+
+    let one = RenderScene {
+        grid_enabled: true,
+        terrains: vec![a.clone()],
+        ..Default::default()
+    };
+    let both = RenderScene {
+        grid_enabled: true,
+        terrains: vec![a, b],
+        ..Default::default()
+    };
+
+    // Determinism: two fresh renderers over the two-terrain scene agree…
+    let cold_a = render(&gpu, &both, &view);
+    let cold_b = render(&gpu, &both, &view);
+    assert_eq!(cold_a, cold_b, "two terrains must render deterministically");
+
+    // …and a warm cache (second frame, every stamp unchanged, nothing uploaded)
+    // reproduces the cold frame — the per-terrain cache slots stay in step.
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    renderer.render(&gpu, &both, &view, &target.view, (W, H));
+    let warm_a = target.read_rgba(&gpu).expect("readback");
+    renderer.render(&gpu, &both, &view, &target.view, (W, H));
+    let warm_b = target.read_rgba(&gpu).expect("readback");
+    assert_eq!(warm_a, warm_b, "a warm two-terrain frame must be stable");
+    assert_eq!(cold_a, warm_a, "warm != cold for two terrains");
+
+    // The second terrain really contributed pixels.
+    let solo = render(&gpu, &one, &view);
+    assert_ne!(
+        solo, cold_a,
+        "adding the second terrain changed nothing — it never drew"
+    );
+
+    // Dropping a terrain from the scene mid-session frees its cache and still
+    // renders the survivor exactly as a fresh renderer would.
+    renderer.render(&gpu, &one, &view, &target.view, (W, H));
+    let after_drop = target.read_rgba(&gpu).expect("readback");
+    assert_eq!(
+        after_drop, solo,
+        "evicting terrain B's pages perturbed terrain A"
+    );
 }
 
 /// A view looking straight down -Z at the world XY plane, so sprites (which lie

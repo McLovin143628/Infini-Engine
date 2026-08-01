@@ -2801,7 +2801,8 @@ pub fn streamed_terrain_data() -> inf_terrain::TerrainData {
 pub fn streamed_terrain_asset() -> inf_terrain::TerrainAsset {
     let data = streamed_terrain_data();
     let pyramid = inf_terrain::build_pyramid(&data, inf_terrain::PyramidOptions::default());
-    inf_terrain::build_terrain_asset(&data, &pyramid).expect("streamed-terrain asset builds")
+    inf_terrain::build_terrain_asset(&data, &pyramid, inf_terrain::PyramidOptions::default())
+        .expect("streamed-terrain asset builds")
 }
 
 /// Write `World.inf_terrain` (+ its inf_asset sidecar with the stable asset GUID)
@@ -3246,6 +3247,456 @@ The gate (`runtime/inf-player/tests/partitioned_world.rs`):\n\n\
    exists with its authored transform.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// -- Phase 16 gate scene: the composed world (P16.6) --------------------------
+//
+// The closing gate of Phase 16 puts every piece of the phase in ONE level:
+//
+//   * a **wizard-imported streamed terrain** — built by the P16.4a chunked
+//     importer from a synthetic 16-bit heightmap at `meters_per_sample = 8`, so
+//     the world is kilometres wide and the `.inf_terrain` carries a real LOD
+//     pyramid (three levels);
+//   * a **partitioned world on top of it** — a 4 x 4 grid of 2 km cells with an
+//     authored prop in each, a persistent manager, and an `AlwaysLoaded` sun;
+//   * a **second, inline terrain** off to one side — the multi-terrain half of
+//     P16.6, proving two terrains render (and stream, and pick) side by side in
+//     PIE == shipping;
+//   * a scripted `StreamingSource` walk, and a camera path that deliberately goes
+//     somewhere else.
+//
+// Both terrain entities are marked `AlwaysLoaded`. A `Terrain` component
+// "occupies space" (`inf_scene::partition::occupies_space`), so without the
+// marker the partitioner would bin the terrain entity into one cell and the
+// ground would blink out of existence as the player walked away. That is a v1
+// boundary of world partition, not a bug — stated here and in the sample's README
+// rather than discovered.
+//
+// The `.inf_lvl` is committed; the `.inf_terrain` is **generated** into the
+// fixture's content directory by [`write_phase16_terrain_asset`], because it is
+// ~5 MB of derived bytes a pure generator reproduces exactly (the same reasoning
+// as the streamed-terrain sample, one order of magnitude up).
+
+pub const PHASE16_LEVEL_GUID: Uuid = Uuid::from_u128(0x8416_0900);
+/// The streamed terrain (asset-backed, the wizard-imported one).
+pub const PHASE16_TERRAIN_GUID: Uuid = Uuid::from_u128(0x8416_0901);
+/// The second terrain: inline tiles in the level, no asset.
+pub const PHASE16_INLINE_TERRAIN_GUID: Uuid = Uuid::from_u128(0x8416_0902);
+/// The scripted walker: a `StreamingSource` **and** a terrain observer.
+pub const PHASE16_WALKER_GUID: Uuid = Uuid::from_u128(0x8416_0903);
+pub const PHASE16_SUN_GUID: Uuid = Uuid::from_u128(0x8416_0904);
+pub const PHASE16_MANAGER_GUID: Uuid = Uuid::from_u128(0x8416_0905);
+pub const PHASE16_CAMERA_GUID: Uuid = Uuid::from_u128(0x8416_0906);
+/// The asset GUID stamped into the generated `Phase16World.inf_terrain` sidecar.
+pub const PHASE16_TERRAIN_ASSET_GUID: Uuid = Uuid::from_u128(0x8416_09AA);
+
+/// Source heightmap edge, in samples. `1025 = 8 x 128 + 1`, so the lattice closes
+/// exactly on 8 x 8 shared-edge tiles with no clamped final row.
+///
+/// This is the CI-affordable stand-in for the wizard's headline case. A literal
+/// 16 k x 16 k source is ~268 M samples and produces a ~1 GB payload however it is
+/// tiled — the sample count, not the tiling, is what costs — so it cannot run in a
+/// CI job that also cooks it into a pack twice. The **shape** of the import is the
+/// real one (chunked row-band decode, banded pyramid, `meters_per_sample` >> 1,
+/// kilometre-scale extent); the 16 k pass itself lives in
+/// `terrain_import::huge_heightmap_16k_imports`, which is `#[ignore]`d for exactly
+/// the same reason and run by hand when the importer is profiled.
+pub const PHASE16_SOURCE_SAMPLES: u32 = 1025;
+/// Samples per tile side of the imported terrain.
+pub const PHASE16_TILE_RESOLUTION: u32 = 129;
+/// World metres per sample: the "8 m spacing turns a big heightmap into a
+/// continent" case the wizard exists for (>= 8, per the Phase 16 goal).
+pub const PHASE16_MPS: f64 = 8.0;
+/// Elevation the source's full scale maps to.
+pub const PHASE16_MAX_HEIGHT: f64 = 400.0;
+
+/// Partition cell edge (metres): 2 km, so the 8.2 km world is a 4 x 4 grid.
+pub const PHASE16_CELL_SIZE_M: f64 = 2048.0;
+/// Cells per side (4 x 4 = 16, comfortably over the gate's "at least 3 x 3").
+pub const PHASE16_GRID: i32 = 4;
+/// Level activation radius (metres) — under one cell, so the walk really churns.
+pub const PHASE16_ACTIVATION_RADIUS_M: f64 = 512.0;
+/// Level prefetch margin (metres). Look-ahead only: it can never change WHICH
+/// cells activate, which is one of the properties the gate asserts.
+pub const PHASE16_PREFETCH_MARGIN_M: f64 = 2048.0;
+
+/// The inline terrain's grid: 4 x 4 pages of 9^2 samples at 4 m — a few kilobytes
+/// in the `.inf_lvl`, and a completely different grid from the streamed one, which
+/// is the point (a shared per-tile GPU cache key would collide immediately).
+pub const PHASE16_INLINE_RESOLUTION: u32 = 9;
+pub const PHASE16_INLINE_MPS: f64 = 4.0;
+pub const PHASE16_INLINE_TILES: i32 = 4;
+
+/// World edge length of the streamed terrain (metres).
+pub fn phase16_world_size() -> f64 {
+    (PHASE16_SOURCE_SAMPLES as f64 - 1.0) * PHASE16_MPS
+}
+
+/// World origin of the **inline** terrain: north of the streamed one, clear of it
+/// in XZ so the two never overlap and the gate can tell their pixels apart.
+pub fn phase16_inline_origin() -> DVec3 {
+    DVec3::new(0.0, 0.0, -1024.0)
+}
+
+/// The normalized `[0, 1]` source value at source sample `(i, j)`.
+///
+/// Built from [`inf_math::psin64`] / [`inf_math::pcos64`], never `std` trig: the
+/// P14 law — `std` transcendentals are not bit-portable, and this function's
+/// output becomes bytes that a cook on one OS and a run on another must agree
+/// about, through a `.inf_terrain` the gate hashes.
+pub fn phase16_source_sample(i: u32, j: u32) -> f64 {
+    let x = i as f64;
+    let z = j as f64;
+    let v = 0.5
+        + 0.25 * inf_math::psin64(x * 0.011) * inf_math::pcos64(z * 0.009)
+        + 0.15 * inf_math::psin64((x + z) * 0.021)
+        + 0.05 * inf_math::pcos64((x - 2.0 * z) * 0.047);
+    v.clamp(0.0, 1.0)
+}
+
+/// The synthetic 16-bit source heightmap the import consumes, PNG-encoded — the
+/// file a user would drop on the Terrain Import wizard.
+pub fn phase16_source_png() -> Result<Vec<u8>, String> {
+    let n = PHASE16_SOURCE_SAMPLES;
+    let mut samples = Vec::with_capacity((n * n) as usize);
+    for j in 0..n {
+        for i in 0..n {
+            samples.push((phase16_source_sample(i, j) * u16::MAX as f64).round() as u16);
+        }
+    }
+    inf_terrain::encode_png16(&inf_terrain::HeightImage {
+        width: n,
+        height: n,
+        samples,
+    })
+    .map_err(|e| format!("encode source heightmap: {e}"))
+}
+
+/// The wizard settings the gate's terrain is imported with — the same
+/// [`TerrainImportSettings`](crate::assets::terrain_import::TerrainImportSettings)
+/// block the Terrain Import wizard fills in and writes into the asset's sidecar.
+pub fn phase16_import_settings() -> crate::assets::terrain_import::TerrainImportSettings {
+    crate::assets::terrain_import::TerrainImportSettings {
+        tile_resolution: PHASE16_TILE_RESOLUTION,
+        meters_per_sample: PHASE16_MPS,
+        min_height: 0.0,
+        max_height: PHASE16_MAX_HEIGHT,
+        float_meters: false,
+        // Grow into +X/+Z from the world origin, so world XZ == terrain-local XZ
+        // and every probe in the gate is the bare generator.
+        center: false,
+        ..Default::default()
+    }
+}
+
+/// Import the gate's `.inf_terrain` **through the wizard's own path**: the
+/// wizard's settings block mapped onto Ring-0 `HeightmapImport`, then
+/// [`inf_terrain::import_heightmap_reader`] — the chunked, row-band importer
+/// P16.4a built, which never materializes the sample grid.
+///
+/// The only thing the wizard adds on top is a project to commit into and a
+/// generated GUID; the fixture supplies a stable GUID instead (so the level's
+/// `Terrain.asset` ref resolves), exactly as `write_streamed_terrain_asset` does.
+pub fn phase16_terrain_asset() -> Result<inf_terrain::TerrainAsset, String> {
+    let png = phase16_source_png()?;
+    let probe = inf_terrain::probe_heightmap_bytes(&png).map_err(|e| format!("probe: {e}"))?;
+    let settings = phase16_import_settings();
+    let import = settings.to_import(probe.width, probe.height);
+    let opts = inf_terrain::ChunkedImportOptions {
+        pyramid: settings.pyramid(),
+    };
+    let (asset, _report) = inf_terrain::import_heightmap_reader(
+        std::io::Cursor::new(png),
+        import,
+        opts,
+        &mut |_| {},
+        &|| false,
+    )
+    .map_err(|e| format!("chunked import: {e}"))?;
+    Ok(asset)
+}
+
+/// Write `Phase16World.inf_terrain` (+ its `inf_asset` sidecar with the stable
+/// asset GUID) into `dir` — the gate's **fixture setup**.
+pub fn write_phase16_terrain_asset(dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?;
+    let asset = phase16_terrain_asset()?;
+    let path = dir.join("Phase16World.inf_terrain");
+    let bytes = inf_terrain::write_terrain_asset(&path, &asset)
+        .map_err(|e| format!("write terrain asset: {e}"))?;
+    inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(PHASE16_TERRAIN_ASSET_GUID),
+        inf_asset::AssetKind::Terrain,
+        inf_asset::ContentHash::of(bytes),
+    )
+    .save(&path)
+    .map_err(|e| format!("write terrain sidecar: {e}"))
+}
+
+/// The **inline** second terrain's authored heightfield — small, entity-local,
+/// and carried in the `.inf_lvl` itself.
+pub fn phase16_inline_terrain_data() -> inf_terrain::TerrainData {
+    let mut t = inf_terrain::TerrainData::new(PHASE16_INLINE_RESOLUTION, PHASE16_INLINE_MPS);
+    for tz in 0..PHASE16_INLINE_TILES {
+        for tx in 0..PHASE16_INLINE_TILES {
+            t.author_tile((tx, tz), |x, z| {
+                12.0 + 3.0 * inf_math::psin64(x * 0.05) * inf_math::pcos64(z * 0.05)
+            });
+        }
+    }
+    t.clear_dirty();
+    t
+}
+
+/// The stable GUID of the prop authored in cell `(cx, cz)`.
+pub fn phase16_prop_guid(cx: i32, cz: i32) -> Uuid {
+    Uuid::from_u128(0x8416_0A00 + (cz * PHASE16_GRID + cx) as u128)
+}
+
+/// The world position of the prop authored in cell `(cx, cz)` — the cell centre,
+/// so it is unambiguously inside exactly one cell.
+pub fn phase16_prop_position(cx: i32, cz: i32) -> DVec3 {
+    DVec3::new(
+        (cx as f64 + 0.5) * PHASE16_CELL_SIZE_M,
+        0.0,
+        (cz as f64 + 0.5) * PHASE16_CELL_SIZE_M,
+    )
+}
+
+/// The scripted **sim** walk: step `i`'s world position for the walker.
+///
+/// A diagonal crossing of the whole 8.2 km world at a third of a cell per step, so
+/// cells activate/deactivate repeatedly AND the terrain's level-0 neighbourhood
+/// slides. Deterministic and camera-free — this is the trace the gates compare,
+/// and (by the doctrine) the only thing residency may depend on.
+pub fn phase16_walk_point(step: usize) -> DVec3 {
+    let span = phase16_world_size();
+    let t = step as f64 * (PHASE16_CELL_SIZE_M / 3.0);
+    let x = (t % span).clamp(0.0, span);
+    let z = ((t * 0.5) % span).clamp(0.0, span);
+    DVec3::new(x, 0.0, z)
+}
+
+/// Scripted **camera** path A: a straight sweep along +X at mid-Z, deliberately
+/// unrelated to the walk.
+pub fn phase16_camera_a(step: usize) -> DVec3 {
+    let span = phase16_world_size();
+    let x = (step as f64 * 512.0) % span;
+    DVec3::new(x, 600.0, span * 0.5)
+}
+
+/// Scripted **camera** path B: an orbit of the world centre — nothing like
+/// [`phase16_camera_a`], so "the sim ignores the camera" is tested against a
+/// genuinely different residency history.
+pub fn phase16_camera_b(step: usize) -> DVec3 {
+    let span = phase16_world_size();
+    let a = step as f64 * 0.23;
+    let r = span * 0.35;
+    DVec3::new(
+        span * 0.5 + r * inf_math::pcos64(a),
+        600.0,
+        span * 0.5 + r * inf_math::psin64(a),
+    )
+}
+
+/// Build the Phase 16 gate [`SceneDoc`] — the composed world.
+pub fn phase16_world_scene() -> SceneDoc {
+    use crate::scene::serialize::{LevelSettings, PartitionSettings};
+    use inf_ecs::components::{
+        AlwaysLoaded, Camera, CharacterController3D, Light, LightKind, StreamingSource, Terrain,
+    };
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Phase 16 World");
+    doc.set_settings(LevelSettings {
+        partition: PartitionSettings {
+            enabled: true,
+            cell_size_m: PHASE16_CELL_SIZE_M,
+            activation_radius_m: PHASE16_ACTIVATION_RADIUS_M,
+            prefetch_margin_m: PHASE16_PREFETCH_MARGIN_M,
+        },
+        ..LevelSettings::default()
+    });
+
+    // -- Terrain 1: the wizard-imported, streamed one. --
+    //
+    // AlwaysLoaded: a Terrain occupies space, so the partitioner would otherwise
+    // bin this entity into cell (0,0) and the ground would vanish 2 km in.
+    doc.create_with_guid(PHASE16_TERRAIN_GUID, SpawnKind::Empty, "Terrain", None);
+    insert!(
+        doc,
+        PHASE16_TERRAIN_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+    {
+        let mut terrain = Terrain::configured(PHASE16_TILE_RESOLUTION, PHASE16_MPS);
+        terrain.asset = Some(PHASE16_TERRAIN_ASSET_GUID);
+        terrain.macro_variation = 0.2;
+        debug_assert!(terrain.data.is_empty(), "a streamed terrain ships no tiles");
+        insert!(doc, PHASE16_TERRAIN_GUID, terrain);
+    }
+    insert!(doc, PHASE16_TERRAIN_GUID, AlwaysLoaded);
+
+    // -- Terrain 2: inline tiles, its own grid, its own place in the world. --
+    doc.create_with_guid(
+        PHASE16_INLINE_TERRAIN_GUID,
+        SpawnKind::Empty,
+        "Inline Terrain",
+        None,
+    );
+    insert!(
+        doc,
+        PHASE16_INLINE_TERRAIN_GUID,
+        Transform::from_translation(phase16_inline_origin())
+    );
+    {
+        let mut terrain = Terrain::configured(PHASE16_INLINE_RESOLUTION, PHASE16_INLINE_MPS);
+        terrain.data = phase16_inline_terrain_data();
+        // A visibly different material so the two terrains are told apart on
+        // screen as well as in the DTO.
+        terrain.layers[0].albedo = Color::new(0.55, 0.28, 0.18, 1.0);
+        terrain.macro_variation = 0.0;
+        insert!(doc, PHASE16_INLINE_TERRAIN_GUID, terrain);
+    }
+    insert!(doc, PHASE16_INLINE_TERRAIN_GUID, AlwaysLoaded);
+
+    // -- The persistent cell: an unplaced manager + an AlwaysLoaded sun. --
+    doc.create_with_guid(PHASE16_MANAGER_GUID, SpawnKind::Empty, "GameMode", None);
+    insert!(
+        doc,
+        PHASE16_MANAGER_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+
+    doc.create_with_guid(PHASE16_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        PHASE16_SUN_GUID,
+        Transform {
+            translation: inf_ecs::math::Vec3d::new(0.0, 800.0, 0.0),
+            rotation: inf_ecs::math::Vec3d::new(-50.0, -30.0, 0.0),
+            scale: inf_ecs::math::Vec3d::new(1.0, 1.0, 1.0),
+        }
+    );
+    insert!(
+        doc,
+        PHASE16_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            color: Color::new(1.0, 0.97, 0.9, 1.0),
+            intensity: 2.5,
+            ..Default::default()
+        }
+    );
+    insert!(doc, PHASE16_SUN_GUID, AlwaysLoaded);
+
+    // -- The walker: cell streaming's source AND the terrain's observer. --
+    //
+    // One entity carrying both roles is deliberate: it is what makes the two
+    // streamers' want sets move together, which is the composed case this gate
+    // exists to cover. `radius_m: 0` defers to the level's activation radius.
+    doc.create_with_guid(PHASE16_WALKER_GUID, SpawnKind::Empty, "Walker", None);
+    insert!(
+        doc,
+        PHASE16_WALKER_GUID,
+        Transform::from_translation(phase16_walk_point(0))
+    );
+    insert!(doc, PHASE16_WALKER_GUID, StreamingSource { radius_m: 0.0 });
+    insert!(doc, PHASE16_WALKER_GUID, CharacterController3D::default());
+
+    // -- One authored prop per cell (a cube at the cell centre). --
+    for cz in 0..PHASE16_GRID {
+        for cx in 0..PHASE16_GRID {
+            let guid = phase16_prop_guid(cx, cz);
+            doc.create_with_guid(guid, SpawnKind::Cube, &format!("Prop {cx},{cz}"), None);
+            insert!(
+                doc,
+                guid,
+                Transform::from_translation(phase16_prop_position(cx, cz))
+            );
+        }
+    }
+
+    // -- A camera over the middle of the world. --
+    doc.create_with_guid(PHASE16_CAMERA_GUID, SpawnKind::Empty, "Camera", None);
+    insert!(
+        doc,
+        PHASE16_CAMERA_GUID,
+        Transform::from_translation(phase16_camera_a(0))
+    );
+    insert!(doc, PHASE16_CAMERA_GUID, Camera::default());
+    insert!(doc, PHASE16_CAMERA_GUID, AlwaysLoaded);
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+/// The repo-root `samples/phase16-world/` directory.
+pub fn phase16_world_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/phase16-world")
+}
+
+/// Write the committed Phase 16 gate files (regeneration path): the `.inf_lvl`
+/// (+ sidecar) and the README. The `.inf_terrain` is **not** committed — see
+/// [`write_phase16_terrain_asset`].
+pub fn write_phase16_world() -> Result<(), String> {
+    let dir = phase16_world_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    crate::scene::serialize::save(
+        &phase16_world_scene(),
+        &dir.join("Phase16World.inf_lvl"),
+        Some(PHASE16_LEVEL_GUID),
+    )?;
+    std::fs::write(dir.join("README.md"), PHASE16_WORLD_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const PHASE16_WORLD_README: &str = "# Phase 16 World (the phase gate scene)\n\n\
+Generated by `inf_editor_core::samples::phase16_world_scene` -- the **composed**\n\
+gate scene for Phase 16 (world scale & streaming). Everything the phase built, in\n\
+one level.\n\n\
+- `Phase16World.inf_lvl` -- the scene (schema v10). A partitioned 4x4 grid of 2 km\n\
+  cells with a prop in each, a `GameMode` with no spatial component, an\n\
+  `AlwaysLoaded` sun and camera, a `Walker` that is BOTH the cell-streaming\n\
+  `StreamingSource` and the terrain observer, and **two terrains**.\n\
+- `Phase16World.inf_terrain` -- NOT committed. ~5 MB of derived bytes that\n\
+  `samples::write_phase16_terrain_asset` reproduces exactly by running the P16.4a\n\
+  **chunked importer** over a synthetic 1025^2 16-bit heightmap at 8 m/sample:\n\
+  8x8 level-0 pages of 129^2 samples over 8.2 km of world, plus two coarse pyramid\n\
+  levels (64 -> 16 -> 4).\n\n\
+## The two terrains\n\n\
+`Terrain` streams from the `.inf_terrain`; `Inline Terrain` carries its tiles in\n\
+the level, on a completely different grid (9^2 samples at 4 m) and at a different\n\
+world origin. Both render, both are picked against, and both survive the cook --\n\
+which is P16.6's multi-terrain deliverable end to end.\n\n\
+Both are marked `AlwaysLoaded`. A `Terrain` component *occupies space*\n\
+(`inf_scene::partition::occupies_space`), so without the marker the partitioner\n\
+would bin the terrain entity into the ONE cell holding its origin -- and the ground\n\
+would despawn under the player as they walked out of it. That is a v1 boundary of\n\
+world partition, and the cook says so: `partition::streamed_terrains` raises an\n\
+advisory naming the terrain, its cell, its `.inf_terrain` and the remedy, so a user\n\
+authoring their own partitioned level is told rather than left to discover it.\n\
+Binning a terrain by its real footprint instead of its origin is the deferred fix.\n\n\
+## Scale, honestly\n\n\
+The Phase 16 goal names a 16k x 16k source. That is ~268 M samples and ~1 GB of\n\
+payload however it is tiled, so it cannot run in a CI job that also cooks it into\n\
+a pack -- the *shape* of the import here is the real one (chunked row-band decode,\n\
+banded pyramid, 8 m spacing, kilometre-scale extent) at a size CI can afford. The\n\
+literal 16k pass is `terrain_import::huge_heightmap_16k_imports`, `#[ignore]`d and\n\
+run by hand when the importer is profiled.\n\n\
+## The gate (`runtime/inf-player/tests/phase16_gate.rs`)\n\n\
+1. full determinism across two runs -- sim trace, cell activation timeline, and\n\
+   terrain render-cut trace;\n\
+2. cooked == uncooked (PIE == shipping) on all three traces, with TWO terrains\n\
+   projected;\n\
+3. residency stays under the configured ceilings (`inf_player::budget`) for the\n\
+   whole run -- terrain bytes, cell bytes, active cells;\n\
+4. the fixed-step ms budget holds while both streamers are live;\n\
+5. the sim trace is invariant under the camera path AND under the prefetch\n\
+   margin -- the composed doctrine proof: neither the renderer's residency nor\n\
+   the streamer's look-ahead can reach a fixed step.\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3421,6 +3872,7 @@ mod tests {
             write_vgeom_demo().expect("regenerate vgeom demo");
             write_streamed_terrain().expect("regenerate streamed terrain");
             write_partitioned_world().expect("regenerate partitioned world");
+            write_phase16_world().expect("regenerate phase16 world");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -3593,6 +4045,148 @@ mod tests {
                 "committed streamed-terrain .inf_lvl drifted from the generator"
             );
         }
+
+        // Phase 16 gate lock (P16.6): only the `.inf_lvl` is committed — the
+        // `.inf_terrain` is imported into a fixture's Content dir by the gate, and
+        // the `.inf_part` is derived by the cook.
+        let p16dir = phase16_world_dir();
+        let p16lvl = p16dir.join("Phase16World.inf_lvl");
+        if p16lvl.exists() {
+            let want_lvl = crate::scene::serialize::encode(
+                &crate::scene::serialize::to_scene_file(&phase16_world_scene()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&p16lvl).unwrap(),
+                want_lvl,
+                "committed phase16-world .inf_lvl drifted from the generator"
+            );
+        }
+    }
+
+    // ── Phase 16 gate scene shape (P16.6) ──────────────────────────────────
+
+    /// The wizard-imported `.inf_terrain` really is what the gate needs: a
+    /// kilometre-scale extent at `meters_per_sample >= 8`, at least three LOD
+    /// levels, and a world far wider than any single render-wants radius — and it
+    /// is a **pure function of the generator**, so the fixture setup, the cook and
+    /// a second machine all produce the same bytes.
+    #[test]
+    fn phase16_terrain_imports_through_the_wizard_path() {
+        let asset = phase16_terrain_asset().expect("the chunked import succeeds");
+        let r = asset.reader();
+        assert_eq!(r.tile_resolution(), PHASE16_TILE_RESOLUTION);
+        assert_eq!(r.meters_per_sample(), PHASE16_MPS);
+        // The phase goal names >= 8 m/sample; pinned as a const check so a
+        // future retune of the sample cannot quietly drop below it.
+        const _: () = assert!(PHASE16_MPS >= 8.0);
+        assert!(
+            r.lod_levels() >= 3,
+            "need level 0 + at least two coarse levels, got {}",
+            r.lod_levels()
+        );
+        // 1025 samples at 128 cells/tile ⇒ 8 x 8 level-0 pages, 8.2 km of world.
+        let level0 = r.keys().filter(|k| k.is_lod0()).count();
+        assert_eq!(level0, 64, "level-0 lattice");
+        assert!(
+            (phase16_world_size() - 8192.0).abs() < 1e-9,
+            "world is {} m",
+            phase16_world_size()
+        );
+
+        // Schema v2 (P16.6): the asset records the pyramid options it was built
+        // with, so a sculpt write-back can never re-shape it.
+        assert_eq!(
+            r.pyramid_options(),
+            Some(phase16_import_settings().pyramid()),
+            "the imported asset must record its wizard pyramid settings"
+        );
+
+        // The cut is genuinely partial: the world is many tile spans wide.
+        let span = (PHASE16_TILE_RESOLUTION as f64 - 1.0) * PHASE16_MPS;
+        assert!(phase16_world_size() > 4.0 * span);
+
+        // Byte-deterministic: two imports of the same source agree exactly.
+        let again = phase16_terrain_asset().expect("import twice");
+        assert_eq!(asset.as_bytes(), again.as_bytes());
+    }
+
+    /// The composed scene carries **two** terrains — one streamed, one inline —
+    /// plus the partition block and the dual-role walker the gate scripts.
+    #[test]
+    fn phase16_scene_composes_terrain_and_partition() {
+        use inf_ecs::components::{AlwaysLoaded, StreamingSource, Terrain};
+
+        let doc = phase16_world_scene();
+        let file = crate::scene::serialize::to_scene_file(&doc);
+        assert!(file.settings.partition.enabled);
+        assert_eq!(file.settings.partition.cell_size_m, PHASE16_CELL_SIZE_M);
+        // The gate needs at least a 3x3 grid.
+        const _: () = assert!(PHASE16_GRID >= 3);
+
+        let terrains: Vec<_> = file
+            .entities
+            .iter()
+            .filter(|e| e.terrain.is_some())
+            .collect();
+        assert_eq!(terrains.len(), 2, "the gate scene has TWO terrains");
+        for e in &terrains {
+            assert!(
+                e.always_loaded.is_some(),
+                "a Terrain occupies space, so it must be AlwaysLoaded or it streams out"
+            );
+        }
+
+        let world = doc.world();
+        let w = world.world();
+        let streamed = world.entity_of(PHASE16_TERRAIN_GUID).expect("streamed");
+        let t = w.get::<Terrain>(streamed).expect("terrain component");
+        assert_eq!(t.asset, Some(PHASE16_TERRAIN_ASSET_GUID));
+        assert!(t.data.is_empty(), "a streamed terrain ships no tiles");
+
+        let inline = world
+            .entity_of(PHASE16_INLINE_TERRAIN_GUID)
+            .expect("inline");
+        let t2 = w.get::<Terrain>(inline).expect("terrain component");
+        assert!(t2.asset.is_none(), "the second terrain is inline");
+        assert_eq!(
+            t2.data.tile_count(),
+            (PHASE16_INLINE_TILES * PHASE16_INLINE_TILES) as usize
+        );
+        // Two DIFFERENT grids — the case a coordinate-only GPU cache key breaks on.
+        assert_ne!(t.data.tile_resolution(), t2.data.tile_resolution());
+        assert_ne!(t.data.meters_per_sample(), t2.data.meters_per_sample());
+
+        // The walker is both the streaming source and a terrain observer.
+        let walker = world.entity_of(PHASE16_WALKER_GUID).expect("walker");
+        assert!(w.get::<StreamingSource>(walker).is_some());
+        assert!(w
+            .get::<inf_ecs::components::CharacterController3D>(walker)
+            .is_some());
+        assert!(
+            w.get::<AlwaysLoaded>(walker).is_none(),
+            "a source is already persistent"
+        );
+
+        // The scripted walk crosses the whole world, and the camera paths differ.
+        let walk: Vec<_> = (0..24).map(phase16_walk_point).collect();
+        assert!(walk.iter().map(|p| p.x).fold(0.0f64, f64::max) > phase16_world_size() * 0.5);
+        assert_ne!(phase16_camera_a(7), phase16_camera_b(7));
+
+        // Save → load → save is byte-identical (the P3 discipline).
+        let bytes1 = crate::scene::serialize::encode(&file).unwrap();
+        let mut doc2 = SceneDoc::new();
+        crate::scene::serialize::apply_to_doc(
+            &mut doc2,
+            &crate::scene::serialize::decode(&bytes1).unwrap(),
+        );
+        let bytes2 =
+            crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(&doc2))
+                .unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "phase16 scene must round-trip byte-identically"
+        );
     }
 
     // ── Streamed-terrain sample shape (P16.3b2) ────────────────────────────

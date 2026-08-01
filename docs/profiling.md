@@ -74,8 +74,21 @@ be lowered, never raised.** A regression must be fixed, not accommodated.
 | Render frame (mean, ~484-cube scene, full pipeline) | `FRAME_BUDGET_MS` | 33.0 ms | `inf-render` · `tests/frame_budget.rs` |
 | Editor project-open (asset scan) | `OPEN_BUDGET_MS` | 5000 ms | `inf-editor-core` · `tests/startup_budget.rs` |
 | Player pack-load-to-first-world | `STARTUP_BUDGET_MS` | 5000 ms | `inf-player` · `tests/startup_budget.rs` |
+| **Streamed** fixed step (mean, cell + terrain streaming live) | `STREAMED_STEP_BUDGET_MS` | 4.0 ms | `inf-player` · `tests/phase16_gate.rs` |
+| Terrain page bytes resident (peak over the flythrough) | `TERRAIN_RESIDENT_BYTES_CEILING` | 16 MiB | `inf-player` · `tests/phase16_gate.rs` |
+| Partition cell bytes resident (peak) | `CELL_RESIDENT_BYTES_CEILING` | 256 KiB | `inf-player` · `tests/phase16_gate.rs` |
+| Partition cells active at once (peak) | `CELL_RESIDENT_CEILING` | 8 | `inf-player` · `tests/phase16_gate.rs` |
 
 Notes:
+
+- The four **streamed-scene** budgets (P16.6) live in `inf_player::budget`, are
+  asserted over the composed `samples/phase16-world` gate scene, and print their
+  measured values on every run (step 0.18 ms, terrain 5.65 MiB, cells 2.8 KiB / 4
+  active on a developer machine) — read the line, then lower the constant. Their
+  module docs also state, honestly, what a byte ceiling on a gate-sized scene can
+  and cannot catch, and why the **120 fps-class frame-rate claim itself stays
+  human-verified on real hardware**: CI can bound the CPU-side streaming work, not
+  a frame.
 
 - **`frame_budget`** skips when no GPU adapter is present, and on a **software**
   adapter (llvmpipe/WARP on CI) it only *smoke-renders* — the strict budget is

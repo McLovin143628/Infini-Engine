@@ -448,8 +448,28 @@ impl Default for RenderTerrainLayer {
 /// residency started changing. The one terrain-wide GPU upload left (the splat
 /// material uniform) is gated by comparing the packed value, which cannot
 /// desync.
+///
+/// ## Multi-terrain (P16.6)
+///
+/// A scene carries **N** of these ([`RenderScene::terrains`]); each is an
+/// independent heightfield with its own grid, its own residency and its own splat
+/// material. [`id`](Self::id) is what keeps their GPU caches apart — see there.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RenderTerrain {
+    /// Stable identity of the terrain this projection describes (P16.6).
+    ///
+    /// The per-tile GPU texture cache and the splat-material uniform are keyed by
+    /// `(id, tile key)` / `id`, so two terrains whose grids share a coordinate
+    /// cannot overwrite each other's pages, and a terrain that leaves the scene
+    /// releases exactly its own resources. Both projectors derive it from the
+    /// terrain entity's `Guid` ([`terrain_id_from_guid`]); `0` is the "unkeyed"
+    /// value a single-terrain caller (and every pre-P16.6 test) leaves at its
+    /// default, which is why single-terrain scenes stay byte-identical.
+    ///
+    /// **Distinct terrains in one scene must carry distinct ids.** The renderer
+    /// cannot check that — two projections claiming one id simply share a cache
+    /// slot and fight over it.
+    pub id: u64,
     /// Samples per tile side (the height/weight-texture dimension). Terrain-wide:
     /// a coarse level keeps the resolution and doubles the spacing.
     pub tile_resolution: u32,
@@ -487,6 +507,24 @@ impl RenderTerrain {
     /// GPU texture cache gates its uploads on.
     pub fn tile_versions(&self) -> impl Iterator<Item = (TerrainTileKey, u64)> + '_ {
         self.tiles.iter().map(|t| (t.key, t.version))
+    }
+}
+
+/// Fold a terrain entity's 128-bit `Guid` into the 64-bit
+/// [`RenderTerrain::id`] both projectors use (P16.6).
+///
+/// XOR-folding the halves, then forcing a non-zero result: `0` is reserved for
+/// "unkeyed" (the default a single-terrain caller leaves in place), so a GUID that
+/// happens to fold to zero must not silently become it. Pure, so the editor
+/// viewport and the shipped player derive the same id for the same entity — which
+/// is what makes a PIE-vs-shipping comparison of the projected scene meaningful.
+#[inline]
+pub fn terrain_id_from_guid(guid: u128) -> u64 {
+    let folded = (guid as u64) ^ ((guid >> 64) as u64);
+    if folded == 0 {
+        1
+    } else {
+        folded
     }
 }
 
@@ -534,12 +572,27 @@ pub struct RenderScene {
     pub lights: Vec<RenderLight>,
     /// 2D sprites (batched + drawn by the sprite pass over the 3D scene).
     pub sprites: Vec<SpriteInstance>,
-    /// Heightfield terrain (P10.1). `Some` ⇒ the terrain pass draws clipmap LOD
-    /// rings around the camera; `None` ⇒ the pass is a no-op (so scenes without
-    /// terrain — every pre-P10.1 golden — stay byte-identical). Each tile's own
+    /// Heightfield terrains (P10.1; **N of them** since P16.6). The terrain pass
+    /// draws each one's clipmap LOD rings around the camera, in list order; an
+    /// empty list ⇒ the pass is a no-op (so scenes without terrain — every
+    /// pre-P10.1 golden — stay byte-identical). Each tile's own
     /// [`version`](RenderTerrainTile::version) stamp gates its height/weight
-    /// texture upload (P16.3b1).
-    pub terrain: Option<RenderTerrain>,
+    /// texture upload (P16.3b1), keyed per terrain by
+    /// [`RenderTerrain::id`] (P16.6).
+    ///
+    /// Ordering is the projector's, and it is what the draw order follows — so it
+    /// must be deterministic. It is **not** the same order in both projectors: the
+    /// player walks its world in `Guid` order, the editor viewport walks the
+    /// document's own entity order. Each is deterministic for its own side, which
+    /// is what a per-side determinism gate needs; what makes a *cross-side*
+    /// comparison meaningful is [`id`](RenderTerrain::id), which both derive from
+    /// the terrain entity's `Guid`, so a PIE-vs-shipping diff matches terrains up
+    /// by identity rather than by position in a list.
+    ///
+    /// The terrains are independent: one's residency, grid and splat material say
+    /// nothing about another's, and they may legitimately overlap in world space
+    /// (the depth test resolves it, exactly as it does for two meshes).
+    pub terrains: Vec<RenderTerrain>,
     /// 2D tilemaps (P8.1b). The sprite pass culls each tilemap's chunks against
     /// the camera and expands the visible ones into prebatched sprite runs, then
     /// batches them together with the loose `sprites`. Because culling depends on

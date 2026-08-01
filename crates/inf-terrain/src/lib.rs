@@ -62,19 +62,21 @@ pub mod writeback;
 use glam::DVec3;
 
 pub use asset::{
-    build_terrain_asset, read_terrain_asset, write_terrain_asset, TerrainAsset,
+    build_terrain_asset, header_len, read_terrain_asset, write_terrain_asset, TerrainAsset,
     TerrainAssetBuilder, TerrainAssetError, TerrainAssetHeader, TerrainAssetReader,
-    TerrainAssetView, TileDirEntry, TERRAIN_ASSET_SCHEMA_VERSION, TILE_ALIGN,
+    TerrainAssetView, TileDirEntry, HEADER_LEN_V1, HEADER_LEN_V2, TERRAIN_ASSET_SCHEMA_VERSION,
+    TILE_ALIGN,
 };
 pub use brush::{apply_brush, dab_positions, BrushOp, BrushParams, Falloff, FlattenTarget, Stroke};
 pub use chunked::{
-    import_heightmap, import_heightmap_in, ChunkedImportOptions, ImportProgress, ImportReport,
+    import_heightmap, import_heightmap_in, import_heightmap_reader, import_heightmap_reader_in,
+    ChunkedImportOptions, ImportProgress, ImportReport,
 };
 pub use data::{TerrainData, DEFAULT_METERS_PER_SAMPLE, DEFAULT_TILE_RESOLUTION};
 pub use delta::{HeightDelta, TilePatch};
 pub use import::{
-    encode_png16, probe_heightmap, HeightImage, HeightMode, HeightmapFormat, HeightmapGrid,
-    HeightmapImport, HeightmapProbe, TerrainError,
+    encode_png16, probe_heightmap, probe_heightmap_bytes, HeightImage, HeightMode, HeightmapFormat,
+    HeightmapGrid, HeightmapImport, HeightmapProbe, TerrainError,
 };
 pub use noise::fbm_signed;
 pub use pyramid::{

@@ -424,6 +424,26 @@ fn build_partition(
         )
     }));
 
+    // (3) A TERRAIN on a streamed entity takes the ground with it. A heightfield
+    //     spans kilometres from its entity origin, but the partitioner bins it by
+    //     that origin, so it lands in one cell — and when the player walks out of
+    //     that cell the floor of the world despawns. Enabling partitioning on a
+    //     level that already has terrain produces this every time, with no symptom
+    //     until somebody walks far enough.
+    advisories.extend(partition::streamed_terrains(&plan).into_iter().map(|t| {
+        let source = match t.asset {
+            Some(a) => format!("streamed from .inf_terrain {a}"),
+            None => "inline".to_string(),
+        };
+        format!(
+            "level {guid}: terrain entity {} ({source}) landed in {} and is STREAMED — a \
+             heightfield spans far more world than the cell holding its origin, so the ground \
+             will DESPAWN once a streaming source leaves that cell; mark the terrain \
+             AlwaysLoaded to keep it in the persistent cell",
+            t.entity, t.cell
+        )
+    }));
+
     Ok((asset.into_bytes(), plan.cells.len(), advisories))
 }
 

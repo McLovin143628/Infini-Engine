@@ -37,7 +37,7 @@ fn terrain(n: i32) -> TerrainData {
 fn terrain_asset_pages_out_of_a_cooked_pack_without_decoding_it() {
     let src = terrain(4);
     let pyramid = build_pyramid(&src, PyramidOptions::default());
-    let asset = build_terrain_asset(&src, &pyramid).unwrap();
+    let asset = build_terrain_asset(&src, &pyramid, PyramidOptions::default()).unwrap();
     let guid = AssetId(uuid::Uuid::from_u128(0x1603_0001));
 
     // Cook: the payload bytes go into the pack verbatim (streaming-class kinds are
@@ -95,7 +95,7 @@ fn terrain_asset_pages_out_of_a_cooked_pack_without_decoding_it() {
 fn residency_streams_a_window_from_the_packed_asset() {
     let src = terrain(4);
     let pyramid = build_pyramid(&src, PyramidOptions::default());
-    let asset = build_terrain_asset(&src, &pyramid).unwrap();
+    let asset = build_terrain_asset(&src, &pyramid, PyramidOptions::default()).unwrap();
     let guid = AssetId(uuid::Uuid::from_u128(0x1603_0002));
 
     let dir = tempfile::tempdir().unwrap();

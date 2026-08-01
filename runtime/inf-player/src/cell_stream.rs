@@ -82,13 +82,24 @@
 //! Promoting would make residency depend on the reference graph, which turns a
 //! streaming budget into a guess; so the hazard is surfaced where it is cheap to
 //! fix and the author decides — exactly the dangling-terrain-ref precedent.
+//!
+//! At **runtime** the same hazard has an observable state:
+//! [`CellStreamStats::unresolved_refs`] (P16.6) counts the references that are
+//! disconnected *right now* — an `AttachedTo` whose target is not resident (the
+//! follower freezes where it stands, per `inf_ecs::attach::update_attachments`) or
+//! a joint whose other body is not resident (the physics bridge drops it). The
+//! cook warns at build time about the ones it can see statically; this is what the
+//! author reads when it actually happens, and what the P16.6 budget gate asserts
+//! is zero on a well-authored scene.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use uuid::Uuid;
 
-use inf_ecs::components::{GlobalTransform, StreamingSource, Transform};
+use inf_ecs::components::{
+    AttachedTo, GlobalTransform, Joint2D, Joint3D, StreamingSource, Transform,
+};
 use inf_ecs::{EcsWorld, Guid};
 use inf_scene::partition::{
     cell_distance, cells_within, CellCoord, CellDirEntry, CellKey, PartitionAssetHeader,
@@ -173,6 +184,22 @@ pub struct CellStreamStats {
     /// Cells whose blob failed to decode. Excluded from every subsequent want, so
     /// a corrupt cell is a hole in the world rather than a crash loop.
     pub failed: u64,
+    /// **Cross-cell references currently disconnected** (P16.6): live entities
+    /// whose `AttachedTo.target`, `Joint2D.other` or `Joint3D.other` names a
+    /// `Guid` that does not resolve in the world right now.
+    ///
+    /// This is a *live* count, recomputed at the deterministic sync point — it
+    /// rises when the cell holding the target streams out and falls when it comes
+    /// back. It is **not an error count**: the behaviour is defined either way (an
+    /// `AttachedTo` whose target is gone leaves the follower frozen where it
+    /// stands; a joint whose other body is gone is skipped by the physics bridge).
+    /// It is the number that tells an author their level depends on a reference
+    /// across a streaming boundary — the runtime face of the cook's
+    /// `cross_cell_refs` warning.
+    ///
+    /// A pure function of world state, like every other counter here, so it cannot
+    /// make a run non-reproducible.
+    pub unresolved_refs: usize,
 }
 
 impl CellStreamStats {
@@ -181,7 +208,8 @@ impl CellStreamStats {
     pub fn summary(&self) -> String {
         format!(
             "cell streaming: {} cell(s) resident ({} entities), {} loaded, {} pending, \
-             {} activations / {} deactivations / {} blocking / {} failed, {:.1} KiB",
+             {} activations / {} deactivations / {} blocking / {} failed, {:.1} KiB, \
+             {} unresolved ref(s)",
             self.cells_resident,
             self.entities_resident,
             self.cells_loaded,
@@ -191,6 +219,7 @@ impl CellStreamStats {
             self.blocking_loads,
             self.failed,
             self.bytes_resident as f64 / 1024.0,
+            self.unresolved_refs,
         )
     }
 }
@@ -466,6 +495,10 @@ pub struct CellStreaming {
     /// Whether the last sync was already over [`ACTIVATION_SOFT_CEILING`], so a
     /// stable oversized set warns once instead of every fixed step.
     warned_ceiling: bool,
+    /// Referrer `Guid`s whose broken cross-cell reference has already been logged
+    /// (P16.6) — once per GUID, not once per step, so a cell that stays out of
+    /// residency for a thousand steps says it one time.
+    logged_unresolved: BTreeSet<Uuid>,
 }
 
 impl CellStreaming {
@@ -502,6 +535,7 @@ impl CellStreaming {
             stats: CellStreamStats::default(),
             events: Vec::new(),
             warned_ceiling: false,
+            logged_unresolved: BTreeSet::new(),
         }
     }
 
@@ -714,6 +748,65 @@ impl CellStreaming {
         // 6. One propagate for the whole reconcile.
         world.propagate();
         self.refresh_stats(&activate);
+        // 7. Cross-cell reference health (P16.6). A read-only scan of sim state
+        //    AFTER the reconcile, so the count describes the world the step is
+        //    about to run against — and, being a pure function of that state, it
+        //    can never make a run non-reproducible.
+        self.stats.unresolved_refs = self.scan_unresolved_refs(world);
+    }
+
+    /// Count — and, once per referrer, log — the cross-cell references that are
+    /// disconnected in `world` right now (P16.6).
+    ///
+    /// Walks the entities carrying a persisted entity reference and checks each
+    /// target `Guid` against the live world. Deterministic: entities are visited
+    /// in `Guid` order, so the log lines (and the count) are a pure function of
+    /// world state.
+    ///
+    /// Runtime-spawned entities are included deliberately: a blueprint that
+    /// attached something to a streamed entity has exactly the same hazard as a
+    /// cook-time reference, and the cook could not have warned about it.
+    fn scan_unresolved_refs(&mut self, world: &EcsWorld) -> usize {
+        let w = world.world();
+        // (referrer, field, target) — collected then sorted, so the log order is
+        // stable rather than archetype-order.
+        let mut broken: Vec<(Uuid, &'static str, Uuid)> = Vec::new();
+        for e in w.iter_entities() {
+            let Some(guid) = e.get::<Guid>().map(|g| g.0) else {
+                continue;
+            };
+            let mut check = |field: &'static str, target: Option<Uuid>| {
+                if let Some(t) = target {
+                    if world.entity_of(t).is_none() {
+                        broken.push((guid, field, t));
+                    }
+                }
+            };
+            check(
+                "attached_to.target",
+                e.get::<AttachedTo>().map(|a| a.target),
+            );
+            check(
+                "joint_2d.other",
+                e.get::<Joint2D>().and_then(|j| j.other.get()),
+            );
+            check(
+                "joint_3d.other",
+                e.get::<Joint3D>().and_then(|j| j.other.get()),
+            );
+        }
+        broken.sort_unstable();
+        for &(referrer, field, target) in &broken {
+            if self.logged_unresolved.insert(referrer) {
+                tracing::debug!(
+                    "inf-player: entity {referrer}'s {field} names {target}, which is not \
+                     resident — the reference is disconnected until that cell streams back in \
+                     (an AttachedTo follower freezes in place; a joint is skipped). Mark the \
+                     target AlwaysLoaded, or keep the pair in one cell, if the link must hold."
+                );
+            }
+        }
+        broken.len()
     }
 
     /// World-space bounds of a cell: `(min_xz, max_xz)` in metres. The debug
@@ -1122,6 +1215,97 @@ mod tests {
         assert_eq!(s.stats().cells_resident, 0, "nothing wants a cell");
         assert!(world.entity_of(guid(0xF0)).is_some());
         assert!(world.entity_of(guid(0x100)).is_none());
+    }
+
+    /// **P16.6 — `unresolved_refs` tracks the live cross-cell hazard.**
+    ///
+    /// A persistent entity is attached to a prop in a far cell. While that cell is
+    /// cold the reference is disconnected and the counter says so; walking the
+    /// source over reconnects it and the counter falls back to zero. The behaviour
+    /// itself is unchanged (the follower simply keeps its transform) — what is new
+    /// is that the author can see it.
+    #[test]
+    fn unresolved_refs_counts_disconnected_cross_cell_references() {
+        use inf_ecs::components::AttachedTo;
+        use inf_ecs::Vec3d;
+
+        let far = guid(0x102); // the prop in cell (2,0)
+        let mut entities = vec![
+            RuntimeEntity {
+                always_loaded: Some(AlwaysLoaded),
+                mesh: None,
+                // A persistent follower riding a socket on a STREAMED prop.
+                attached_to: Some(AttachedTo::new(far, "", Vec3d::ZERO)),
+                ..rec(0xF2, "Turret", (0.0, 0.0))
+            },
+            RuntimeEntity {
+                streaming_source: Some(StreamingSource { radius_m: 0.0 }),
+                ..rec(0xF1, "Player", (50.0, 0.0))
+            },
+            // …and a joint whose other body is a prop in cell (1,0).
+            RuntimeEntity {
+                always_loaded: Some(AlwaysLoaded),
+                joint_3d: Some(inf_ecs::components::Joint3D {
+                    other: inf_ecs::refs::EntityRef::new(guid(0x101)),
+                    ..Default::default()
+                }),
+                ..rec(0xF3, "Winch", (0.0, 0.0))
+            },
+        ];
+        for i in 0..3i32 {
+            entities.push(rec(
+                0x100 + i as u128,
+                "Prop",
+                (i as f64 * 100.0 + 50.0, 0.0),
+            ));
+        }
+        let store: Arc<dyn CellStore> =
+            Arc::new(MemoryCellStore::from_entities(&entities, &settings()));
+        let mut world = EcsWorld::new();
+        crate::level::spawn_entities(&mut world, store.persistent().unwrap());
+        world.propagate();
+        let mut s = CellStreaming::attach(store, settings(), CellStreamBudget::default());
+
+        // Step 0: the source is in cell (0,0); both targets are cold.
+        s.sync_sim(&mut world, 0);
+        assert!(
+            world.entity_of(far).is_none(),
+            "the far prop is not resident"
+        );
+        assert_eq!(
+            s.stats().unresolved_refs,
+            2,
+            "both the attachment and the joint are disconnected"
+        );
+        assert!(s.stats().summary().contains("unresolved ref"));
+
+        // Walk the source into cell (1,0): the joint's body streams in.
+        let player = world.entity_of(guid(0xF1)).expect("player");
+        inf_ecs::sim::set_translation(&mut world, player, Vec3d::new(150.0, 0.0, 0.0));
+        world.propagate();
+        s.sync_sim(&mut world, 1);
+        assert!(world.entity_of(guid(0x101)).is_some());
+        assert_eq!(s.stats().unresolved_refs, 1, "the joint reconnected");
+
+        // …and onto the (1,0)/(2,0) boundary, where BOTH cells are inside the
+        // activation radius: every reference reconnects.
+        inf_ecs::sim::set_translation(&mut world, player, Vec3d::new(200.0, 0.0, 0.0));
+        world.propagate();
+        s.sync_sim(&mut world, 2);
+        assert!(world.entity_of(far).is_some());
+        assert!(world.entity_of(guid(0x101)).is_some());
+        assert_eq!(s.stats().unresolved_refs, 0, "everything is connected");
+
+        // Walking away disconnects it again — the counter is live, not sticky.
+        inf_ecs::sim::set_translation(&mut world, player, Vec3d::new(50.0, 0.0, 0.0));
+        world.propagate();
+        s.sync_sim(&mut world, 3);
+        assert_eq!(s.stats().unresolved_refs, 2);
+
+        // A world with no such references never counts anything.
+        let (mut w2, mut s2) = fixture();
+        s2.sync_sim(&mut w2, 0);
+        assert_eq!(s2.stats().unresolved_refs, 0);
     }
 
     #[test]

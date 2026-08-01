@@ -180,9 +180,19 @@ pub struct EngineHost {
     tool_mode: ToolMode,
     /// Sculpt brush configuration pushed from the toolbar (P10.2b).
     sculpt: SculptSettings,
-    /// GUID of the terrain entity the sculpt tool targets (the first visible,
-    /// non-empty terrain — matches `scene.terrain`). Set each projection.
+    /// GUID of the terrain entity the terrain tools currently target (P16.6).
+    ///
+    /// Set to the **first** projected terrain on each projection — so a
+    /// single-terrain document behaves exactly as it did before — and then moved
+    /// to whichever terrain the cursor is actually over by
+    /// [`sculpt_pick`](Self::sculpt_pick)'s nearest-hit resolution, which the
+    /// hover and stroke paths both run through. `None` ⇒ no terrain is projected.
     terrain_guid: Option<Uuid>,
+    /// Every visible, non-empty terrain in the current projection, in the
+    /// document's order — **index-aligned with `scene.terrains`** (P16.6), which
+    /// is what lets a re-projection of one terrain (a streamed cut advancing, a
+    /// dab landing) write back into the right slot instead of rebuilding the list.
+    terrain_slots: Vec<TerrainSlot>,
     /// Camera-driven streaming for asset-backed terrains (P16.3b2). The policy
     /// lives in `inf_editor_core::terrain_stream` (Ring 1, so Linux CI compiles
     /// and tests it); the host only calls it — at projection time
@@ -198,16 +208,6 @@ pub struct EngineHost {
     /// content root is set, which makes inline terrain behaviour bit-identical to
     /// before.
     terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams,
-    /// Whether the terrain currently projected is asset-backed (streamed).
-    terrain_streamed: bool,
-    /// Whether the projected streamed terrain can be edited, i.e. its
-    /// `.inf_terrain` is writable (P16.4b). Always `false` for an inline terrain,
-    /// which needs no asset to save to. Refreshed each projection.
-    terrain_editable: bool,
-    /// Whether the projected terrain carries tiles not yet written back to its
-    /// asset — what flips the toolbar's status chip. Refreshed each projection and
-    /// after every dab/commit.
-    terrain_unsaved_edits: bool,
     /// The last tool-rejection message, for a Ring-2 caller to surface. Drained by
     /// [`take_tool_status`](Self::take_tool_status).
     tool_status: Option<String>,
@@ -286,6 +286,130 @@ fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
         },
         ..d
     }
+}
+
+/// One projected terrain (P16.6) — the per-terrain state the old single-terrain
+/// `terrain_streamed` / `terrain_editable` / `terrain_unsaved_edits` fields held,
+/// now one record per terrain and index-aligned with `scene.terrains`.
+struct TerrainSlot {
+    /// The terrain entity.
+    guid: Uuid,
+    /// Asset-backed (streamed from a `.inf_terrain`) rather than inline.
+    streamed: bool,
+    /// Streamed **and** its asset is a writable file the save path can fold edits
+    /// into. Always `false` for an inline terrain, which needs no asset at all —
+    /// read together with `streamed`: *streamed && !editable* is the one case the
+    /// terrain tools refuse.
+    editable: bool,
+    /// Carries tiles not yet written back to its asset.
+    unsaved: bool,
+}
+
+/// One terrain the cursor-resolution helpers below consider (P16.6): the entity,
+/// the heightfield **actually under the cursor**, and the terrain's world
+/// translation.
+///
+/// The middle field is the load-bearing one. For an inline terrain it is the
+/// document's own `TerrainData`; for a **streamed** one the document's set is
+/// empty by design (its tiles live in the `.inf_terrain`, and only what the
+/// streamer has paged in is real), so it must be the streamer's render working
+/// set. Everything that resolves a cursor against terrain — sculpt, paint,
+/// drag-drop, foliage — funnels through [`EngineHost::terrain_probes`], which is
+/// the one place that choice is made.
+struct TerrainProbe<'a> {
+    guid: Uuid,
+    data: &'a inf_terrain::TerrainData,
+    translation: DVec3,
+}
+
+/// Where a ray met a terrain: the entity, the hit in that terrain's local XZ, the
+/// local surface height, and the world-space point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TerrainRayHit {
+    guid: Uuid,
+    local_xz: DVec2,
+    local_height: f64,
+    world: DVec3,
+}
+
+/// Build a [`TerrainProbe`] per slot, in order, resolving each one's heightfield
+/// through `resolve` and honouring `restrict` (P16.6).
+///
+/// Free + generic over the resolver so the **restrict** rule — the thing that
+/// pins a stroke to the terrain it started on — unit-tests without a GPU, which
+/// an `EngineHost` method could not.
+fn terrain_probes_of<'a>(
+    slots: &[TerrainSlot],
+    restrict: Option<Uuid>,
+    mut resolve: impl FnMut(Uuid) -> Option<(&'a inf_terrain::TerrainData, DVec3)>,
+) -> Vec<TerrainProbe<'a>> {
+    slots
+        .iter()
+        .filter(|s| !restrict.is_some_and(|g| g != s.guid))
+        .filter_map(|s| {
+            resolve(s.guid).map(|(data, translation)| TerrainProbe {
+                guid: s.guid,
+                data,
+                translation,
+            })
+        })
+        .collect()
+}
+
+/// The **nearest** terrain hit along a world-space ray (P16.6).
+///
+/// Nearest-along-the-ray is the only defensible rule once terrains can overlap or
+/// nest: the surface you can see is the surface a brush must write, and
+/// "whichever terrain the document happens to list first" is neither. Ties (two
+/// coincident surfaces) resolve to the earlier probe, i.e. document order, so the
+/// choice is deterministic rather than dependent on iteration luck.
+///
+/// Pure, so the rule unit-tests without a GPU.
+fn nearest_terrain_hit(
+    probes: &[TerrainProbe<'_>],
+    ro_w: DVec3,
+    rd: DVec3,
+) -> Option<TerrainRayHit> {
+    let mut best: Option<(f64, TerrainRayHit)> = None;
+    for probe in probes {
+        let Some(hit) = raycast_terrain(probe.data, ro_w - probe.translation, rd, 1.0e6) else {
+            continue;
+        };
+        let world = probe.translation + hit.point;
+        let d = (world - ro_w).length();
+        if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+            best = Some((
+                d,
+                TerrainRayHit {
+                    guid: probe.guid,
+                    local_xz: DVec2::new(hit.point.x, hit.point.z),
+                    local_height: hit.point.y,
+                    world,
+                },
+            ));
+        }
+    }
+    best.map(|(_, hit)| hit)
+}
+
+/// The **topmost** terrain surface at world XZ `p`, as `(entity, world height)`.
+///
+/// Topmost rather than nearest, because this answers "what ground is here?" for
+/// things scattered from above (foliage) rather than "what did the cursor hit?".
+/// Ties resolve to the earlier probe. Pure, so it unit-tests without a GPU.
+fn topmost_surface(probes: &[TerrainProbe<'_>], p: DVec2) -> Option<(Uuid, f64)> {
+    let mut best: Option<(f64, Uuid)> = None;
+    for probe in probes {
+        let local = DVec2::new(p.x - probe.translation.x, p.y - probe.translation.z);
+        let Some(h) = probe.data.height_at(local) else {
+            continue;
+        };
+        let y = probe.translation.y + h;
+        if best.as_ref().is_none_or(|(by, _)| y > *by) {
+            best = Some((y, probe.guid));
+        }
+    }
+    best.map(|(y, g)| (g, y))
 }
 
 /// An in-flight sculpt gesture (P10.2b): the mouse-down→up stroke accumulating
@@ -581,10 +705,8 @@ impl EngineHost {
             tool_mode: ToolMode::Select,
             sculpt: SculptSettings::default(),
             terrain_guid: None,
+            terrain_slots: Vec::new(),
             terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams::new(),
-            terrain_streamed: false,
-            terrain_editable: false,
-            terrain_unsaved_edits: false,
             tool_status: None,
             stream_log_countdown: STREAM_LOG_INTERVAL_FRAMES,
             sculpt_drag: None,
@@ -771,11 +893,12 @@ impl EngineHost {
         self.scene.tilemaps.clear();
         self.scene.prebatched.clear();
         self.scene.lights_2d.clear();
-        self.scene.terrain = None;
-        self.terrain_guid = None;
-        self.terrain_streamed = false;
-        self.terrain_editable = false;
-        self.terrain_unsaved_edits = false;
+        self.scene.terrains.clear();
+        self.terrain_slots.clear();
+        // `terrain_guid` (the tool target) is deliberately NOT cleared here — it
+        // is re-validated against the new slot list at the end of the projection,
+        // so a sculpt stroke (which bumps the document version on every dab, and
+        // therefore re-projects) keeps aiming at the terrain it is editing.
         self.id_to_guid.clear();
         self.guid_to_id.clear();
         self.collider_outlines.clear();
@@ -893,56 +1016,66 @@ impl EngineHost {
                 }
             }
 
-            // Heightfield terrain (P10.1) projects into the render scene's single
-            // terrain slot; the terrain pass assembles clipmap LOD rings each
-            // frame. First visible, non-empty terrain wins (multi-terrain merge is
-            // a follow-up). Each tile carries its own change stamp (P16.3b1), so
-            // re-projecting on a document change re-uploads only the tiles a
-            // sculpt/paint stroke actually touched.
+            // Heightfield terrain (P10.1) projects into the render scene's terrain
+            // list; the terrain pass assembles clipmap LOD rings around the camera
+            // for each one, every frame. Each tile carries its own change stamp
+            // (P16.3b1), so re-projecting on a document change re-uploads only the
+            // tiles a sculpt/paint stroke actually touched.
+            //
+            // P16.6 — MULTI-TERRAIN: "first visible terrain wins" is gone. EVERY
+            // visible, non-empty terrain projects, in **document order**, and the
+            // parallel `terrain_slots` records which of them is streamed/editable/
+            // dirty.
+            //
+            // MIRROR, precisely: `inf_player::render::project_scene` runs the same
+            // projection but walks its world in `Guid` order — the editor has a
+            // document and the player does not. Both orders are deterministic for
+            // their own side; what makes a PIE-vs-shipping comparison meaningful is
+            // that both stamp the SAME `RenderTerrain::id` from the entity `Guid`,
+            // so the two lists match up by identity rather than by index.
             //
             // P16.3b2 — THE SIM/RENDER SPLIT: an asset-backed terrain draws the
             // **streamer's** camera-driven working set; the document's `data` stays
             // exactly as authored (empty, for a streamed terrain) and is never
             // written by the camera. An inline terrain has no stream and projects
             // its own data, unchanged.
-            if self.scene.terrain.is_none() {
-                if let Some(terrain) = w.get::<Terrain>(entity) {
-                    if visible {
-                        let translation = w
-                            .get::<GlobalTransform>(entity)
-                            .map(|g| g.translation())
-                            .unwrap_or(DVec3::ZERO);
-                        let streamed = self.terrain_streams.ensure(
+            if let Some(terrain) = w.get::<Terrain>(entity) {
+                if visible {
+                    let translation = w
+                        .get::<GlobalTransform>(entity)
+                        .map(|g| g.translation())
+                        .unwrap_or(DVec3::ZERO);
+                    let streamed = self.terrain_streams.ensure(
+                        guid,
+                        terrain,
+                        translation,
+                        self.last_eye_world,
+                    );
+                    // P16.4b — the document's authored tiles are the authority
+                    // for a streamed terrain, so mirror them into the render
+                    // set (pinned) before projecting. Copies nothing when
+                    // nothing was edited.
+                    if streamed {
+                        self.terrain_streams.overlay_document_edits(guid, doc);
+                    }
+                    let projected = if streamed {
+                        self.terrain_streams
+                            .render_data(guid)
+                            .filter(|d| d.tile_count() + d.coarse_tile_count() > 0)
+                            .map(|d| project_terrain(guid, terrain, d, translation))
+                    } else if !terrain.data.is_empty() {
+                        Some(project_terrain(guid, terrain, &terrain.data, translation))
+                    } else {
+                        None
+                    };
+                    if let Some(rt) = projected {
+                        self.scene.terrains.push(rt);
+                        self.terrain_slots.push(TerrainSlot {
                             guid,
-                            terrain,
-                            translation,
-                            self.last_eye_world,
-                        );
-                        // P16.4b — the document's authored tiles are the authority
-                        // for a streamed terrain, so mirror them into the render
-                        // set (pinned) before projecting. Copies nothing when
-                        // nothing was edited.
-                        if streamed {
-                            self.terrain_streams.overlay_document_edits(guid, doc);
-                        }
-                        let projected = if streamed {
-                            self.terrain_streams
-                                .render_data(guid)
-                                .filter(|d| d.tile_count() + d.coarse_tile_count() > 0)
-                                .map(|d| project_terrain(terrain, d, translation))
-                        } else if !terrain.data.is_empty() {
-                            Some(project_terrain(terrain, &terrain.data, translation))
-                        } else {
-                            None
-                        };
-                        if let Some(rt) = projected {
-                            self.scene.terrain = Some(rt);
-                            self.terrain_guid = Some(guid);
-                            self.terrain_streamed = streamed;
-                            self.terrain_editable =
-                                streamed && self.terrain_streams.is_editable(guid);
-                            self.terrain_unsaved_edits = streamed && terrain.data.has_dirty_tiles();
-                        }
+                            streamed,
+                            editable: streamed && self.terrain_streams.is_editable(guid),
+                            unsaved: streamed && terrain.data.has_dirty_tiles(),
+                        });
                     }
                 }
             }
@@ -1287,13 +1420,26 @@ impl EngineHost {
         }
 
         // Release every terrain stream the projection did not just use (P16.4b
-        // audit). The viewport draws ONE terrain, so a stream keyed on any other
-        // entity — a terrain that became invisible, was deleted, or belonged to a
-        // document that has since been replaced — is dead memory holding a whole
-        // `.inf_terrain` payload, plus any tile it pinned for an unsaved edit
-        // (which nothing would ever unpin). This is the only place that knows
-        // which terrain is live, so it is the only place that can do it.
-        self.terrain_streams.retain_only(self.terrain_guid);
+        // audit; P16.6: **all** live terrains, not just the first). A stream keyed
+        // on an entity the projection did not touch — a terrain that became
+        // invisible, was deleted, or belonged to a document that has since been
+        // replaced — is dead memory holding a whole `.inf_terrain` payload, plus
+        // any tile it pinned for an unsaved edit (which nothing would ever unpin).
+        // This is the only place that knows which terrains are live, so it is the
+        // only place that can do it.
+        self.terrain_streams
+            .retain_only(self.terrain_slots.iter().map(|s| s.guid));
+
+        // Re-validate the tool target: keep it if that terrain is still projected
+        // (so a stroke's status stays about the terrain being sculpted), else fall
+        // back to the first projected terrain — which is exactly the pre-P16.6
+        // behaviour for a single-terrain document.
+        if !self
+            .terrain_guid
+            .is_some_and(|g| self.terrain_slots.iter().any(|s| s.guid == g))
+        {
+            self.terrain_guid = self.terrain_slots.first().map(|s| s.guid);
+        }
 
         self.scene.hovered = None;
         self.scene.mark_dirty();
@@ -1662,7 +1808,12 @@ fn project_tilemap(tilemap: &Tilemap, translation: DVec3) -> RenderTilemap {
 /// level-0 list it always did.
 ///
 /// **MIRROR** of `inf_player::render::project_terrain` — keep the two in sync.
-fn project_terrain(terrain: &Terrain, data: &TerrainData, translation: DVec3) -> RenderTerrain {
+fn project_terrain(
+    guid: Uuid,
+    terrain: &Terrain,
+    data: &TerrainData,
+    translation: DVec3,
+) -> RenderTerrain {
     let res = data.tile_resolution();
     let n = (res * res) as usize;
     let project_tile = |key: inf_terrain::TileKey, tile: &inf_terrain::TerrainTile| {
@@ -1700,6 +1851,10 @@ fn project_terrain(terrain: &Terrain, data: &TerrainData, translation: DVec3) ->
         tex_scale: terrain.layers[k].tex_scale as f32,
     });
     RenderTerrain {
+        // P16.6: the terrain entity's identity, folded to 64 bits exactly as the
+        // player's mirror folds it — what keeps two terrains' GPU tile caches and
+        // splat uniforms apart when their grids share coordinates.
+        id: inf_render::terrain_id_from_guid(guid.as_u128()),
         tile_resolution: res,
         meters_per_sample: data.meters_per_sample(),
         tiles,
@@ -1912,14 +2067,13 @@ impl EngineHost {
             }
             return ro_w;
         }
-        // Terrain surface under the cursor (reuses the sculpt raycast pattern).
-        if let Some(guid) = self.terrain_guid {
-            if let Some((data, translation)) = doc.terrain_data_and_origin(guid) {
-                let local_origin = ro_w - translation;
-                if let Some(hit) = raycast_terrain(data, local_origin, rd, 1.0e6) {
-                    return translation + hit.point;
-                }
-            }
+        // Terrain surface under the cursor — the NEAREST hit across every
+        // projected terrain (P16.6), resolved through `terrain_probes` so a
+        // STREAMED terrain answers from the pages the streamer has actually paged
+        // in. (Reading the document's own set here was the bug: it is empty for a
+        // streamed terrain, so every drop fell through to the ground plane.)
+        if let Some(hit) = nearest_terrain_hit(&self.terrain_probes(doc, None), ro_w, rd) {
+            return hit.world;
         }
         // Ground plane y = 0 (in front of the eye).
         if rd.y.abs() > 1e-6 {
@@ -2146,7 +2300,7 @@ impl EngineHost {
     /// OSes in `inf_editor_core::terrain_stream`; this is only the call site.
     pub fn set_terrain_content_root(&mut self, root: Option<std::path::PathBuf>) {
         self.terrain_streams.set_content_root(root);
-        self.terrain_streamed = false;
+        self.terrain_slots.clear();
         self.synced_version = None; // force a re-projection
     }
 
@@ -2161,30 +2315,52 @@ impl EngineHost {
         self.synced_version = None; // force a re-projection
     }
 
-    /// Whether the projected terrain streams from a `.inf_terrain` asset.
+    /// The slot for a projected terrain, if it is one (P16.6).
+    fn terrain_slot(&self, guid: Uuid) -> Option<&TerrainSlot> {
+        self.terrain_slots.iter().find(|s| s.guid == guid)
+    }
+
+    /// The slot the terrain tools currently target — the terrain under the cursor
+    /// at the last pick, else the first projected one (P16.6).
+    fn active_terrain_slot(&self) -> Option<&TerrainSlot> {
+        self.terrain_guid
+            .and_then(|g| self.terrain_slot(g))
+            .or(self.terrain_slots.first())
+    }
+
+    /// Whether the terrain the tools are aimed at streams from a `.inf_terrain`
+    /// asset.
     ///
     /// Polled each frame by the platform loop and published on
     /// `viewport://tool-status`, where the shell uses it to label the terrain.
     /// As of P16.4b it no longer greys the brush tools out — see
     /// [`terrain_is_editable`](Self::terrain_is_editable), which does.
+    ///
+    /// P16.6: with several terrains projected this describes the **targeted** one
+    /// (the cursor's, else the first) rather than "the" terrain — which is what
+    /// the status bar has to say, since it is the terrain a stroke would land on.
     pub fn terrain_is_streamed(&self) -> bool {
-        self.terrain_streamed
+        self.active_terrain_slot().is_some_and(|s| s.streamed)
     }
 
-    /// Whether the projected **streamed** terrain can be sculpted/painted, i.e.
+    /// Whether the targeted **streamed** terrain can be sculpted/painted, i.e.
     /// its `.inf_terrain` is a writable file the save path can fold edits into.
     ///
     /// `false` for an inline terrain (which is always editable and needs no
     /// asset) — read it together with [`terrain_is_streamed`](Self::terrain_is_streamed):
     /// *streamed && !editable* is the one case the tools refuse.
     pub fn terrain_is_editable(&self) -> bool {
-        self.terrain_editable
+        self.active_terrain_slot().is_some_and(|s| s.editable)
     }
 
-    /// Whether the projected terrain carries tiles not yet written back to its
+    /// Whether **any** projected terrain carries tiles not yet written back to its
     /// `.inf_terrain` — the toolbar's "unsaved terrain edits" chip.
+    ///
+    /// Deliberately the aggregate, not the targeted terrain's: the chip warns that
+    /// Ctrl+S has work to do, and a stroke on terrain A must not stop reading as
+    /// unsaved because the cursor has since drifted over terrain B.
     pub fn terrain_has_unsaved_edits(&self) -> bool {
-        self.terrain_unsaved_edits
+        self.terrain_slots.iter().any(|s| s.unsaved)
     }
 
     /// Release every terrain stream — its resident pages, its edit pins, and its
@@ -2196,9 +2372,7 @@ impl EngineHost {
     /// an unsaved edit stay alive for the life of the process.
     pub fn clear_terrain_streams(&mut self) {
         self.terrain_streams.clear();
-        self.terrain_streamed = false;
-        self.terrain_editable = false;
-        self.terrain_unsaved_edits = false;
+        self.terrain_slots.clear();
         self.terrain_guid = None;
         self.synced_version = None; // force a re-projection against the new doc
     }
@@ -2212,7 +2386,9 @@ impl EngineHost {
     /// `EditorTerrainStreams::reload_store`.
     pub fn reload_terrain_stores(&mut self) {
         self.terrain_streams.reload_stores();
-        self.terrain_unsaved_edits = false;
+        for slot in &mut self.terrain_slots {
+            slot.unsaved = false;
+        }
         self.synced_version = None; // re-project from the refreshed store
     }
 
@@ -2259,12 +2435,23 @@ impl EngineHost {
             self.stream_log_countdown = STREAM_LOG_INTERVAL_FRAMES;
             tracing::info!("inf-viewport: {}", self.terrain_stream_stats().summary());
         }
-        let Some(guid) = self.terrain_guid else {
-            return;
-        };
-        if let Some((component, data, translation)) = self.terrain_streams.projection_inputs(guid) {
-            if data.tile_count() + data.coarse_tile_count() > 0 {
-                self.scene.terrain = Some(project_terrain(component, data, translation));
+        // P16.6: every streamed terrain advances its own cut, so re-project each
+        // of them into its own slot (`terrain_slots` is index-aligned with
+        // `scene.terrains`, so no lookup and no reordering).
+        for i in 0..self.terrain_slots.len() {
+            let slot_guid = self.terrain_slots[i].guid;
+            if !self.terrain_slots[i].streamed {
+                continue;
+            }
+            if let Some((component, data, translation)) =
+                self.terrain_streams.projection_inputs(slot_guid)
+            {
+                if data.tile_count() + data.coarse_tile_count() > 0 {
+                    let rt = project_terrain(slot_guid, component, data, translation);
+                    if let Some(dst) = self.scene.terrains.get_mut(i) {
+                        *dst = rt;
+                    }
+                }
             }
         }
     }
@@ -2294,7 +2481,7 @@ impl EngineHost {
         doc: &'a SceneDoc,
         guid: Uuid,
     ) -> Option<(&'a inf_terrain::TerrainData, DVec3)> {
-        if self.terrain_streamed {
+        if self.terrain_slot(guid).is_some_and(|s| s.streamed) {
             if let Some((_, data, translation)) = self.terrain_streams.projection_inputs(guid) {
                 return Some((data, translation));
             }
@@ -2302,10 +2489,34 @@ impl EngineHost {
         doc.terrain_data_and_origin(guid)
     }
 
-    /// Raycast the cursor against the target terrain, returning the hit centre in
-    /// terrain-local XZ and the local surface height there. Reuses the same
-    /// screen→world ray as picking/gizmo drags, rebased through the floating
-    /// origin and shifted into the terrain entity's local frame.
+    /// A [`TerrainProbe`] per projected terrain, in document order — **the one
+    /// place** the "which heightfield is under the cursor?" choice is made
+    /// (P16.6).
+    ///
+    /// Every terrain-resolving path (sculpt, paint, drag-drop spawn, foliage) goes
+    /// through here, so none of them can drift back to reading the document's own
+    /// `TerrainData` — which is *empty by design* for a streamed terrain and would
+    /// silently drop every cursor onto the `y = 0` ground plane.
+    ///
+    /// `restrict` narrows to a single terrain (a stroke in progress; see
+    /// [`terrain_pick`](Self::terrain_pick)).
+    fn terrain_probes<'a>(
+        &'a self,
+        doc: &'a SceneDoc,
+        restrict: Option<Uuid>,
+    ) -> Vec<TerrainProbe<'a>> {
+        terrain_probes_of(&self.terrain_slots, restrict, |guid| {
+            self.terrain_probe(doc, guid)
+        })
+    }
+
+    /// Raycast the cursor against **every** projected terrain and return the
+    /// NEAREST hit (P16.6): the terrain entity, the hit centre in that terrain's
+    /// local XZ, and the local surface height there.
+    ///
+    /// Reuses the same screen→world ray as picking/gizmo drags, rebased through
+    /// the floating origin and shifted into each terrain entity's local frame by
+    /// [`nearest_terrain_hit`], which is where the rule (and its tie-break) lives.
     fn sculpt_pick(
         &self,
         doc: &SceneDoc,
@@ -2313,13 +2524,29 @@ impl EngineHost {
         px: u32,
         py: u32,
     ) -> Option<(Uuid, DVec2, f64)> {
-        let guid = self.terrain_guid?;
-        let (data, translation) = self.terrain_probe(doc, guid)?;
+        self.terrain_pick(doc, view, px, py, None)
+    }
+
+    /// [`sculpt_pick`](Self::sculpt_pick), optionally **restricted to one
+    /// terrain**.
+    ///
+    /// A stroke in progress restricts to the terrain it started on: dragging the
+    /// cursor over a neighbouring terrain must not silently move the brush onto
+    /// it (the dabs would land in a different document entity, and the single
+    /// `HeightDelta` the stroke commits belongs to exactly one terrain).
+    fn terrain_pick(
+        &self,
+        doc: &SceneDoc,
+        view: &RenderView,
+        px: u32,
+        py: u32,
+        restrict: Option<Uuid>,
+    ) -> Option<(Uuid, DVec2, f64)> {
         let (ro, rd) = view.pixel_ray(px as f32, py as f32);
-        // Render-local ray → world → terrain-local (render axes == world axes).
-        let local_origin = self.origin.to_world(ro) - translation;
-        let hit = raycast_terrain(data, local_origin, rd.as_dvec3(), 1.0e6)?;
-        Some((guid, DVec2::new(hit.point.x, hit.point.z), hit.point.y))
+        let ro_w = self.origin.to_world(ro);
+        let probes = self.terrain_probes(doc, restrict);
+        nearest_terrain_hit(&probes, ro_w, rd.as_dvec3())
+            .map(|h| (h.guid, h.local_xz, h.local_height))
     }
 
     /// Page the level-0 tiles a dab at `center` needs into the **document's**
@@ -2329,7 +2556,7 @@ impl EngineHost {
     /// `inf_editor_core::terrain_edit` for why the document — and not this
     /// host's streamer — owns the tiles a brush writes.
     fn page_brush_footprint(&mut self, doc: &mut SceneDoc, guid: Uuid, center: DVec2) {
-        if !self.terrain_streamed {
+        if !self.terrain_slot(guid).is_some_and(|s| s.streamed) {
             return;
         }
         self.terrain_streams
@@ -2340,22 +2567,30 @@ impl EngineHost {
     /// unsaved-edits flag — run after every dab so the stroke is visible as it is
     /// made and the status chip lights up on the first sample changed.
     fn after_terrain_edit(&mut self, doc: &SceneDoc, guid: Uuid) {
-        if !self.terrain_streamed {
+        let Some(index) = self.terrain_slots.iter().position(|s| s.guid == guid) else {
+            return;
+        };
+        if !self.terrain_slots[index].streamed {
             return;
         }
         self.terrain_streams.overlay_document_edits(guid, doc);
-        self.terrain_unsaved_edits = !doc.terrain_dirty_tiles(guid).is_empty();
+        self.terrain_slots[index].unsaved = !doc.terrain_dirty_tiles(guid).is_empty();
         if let Some((component, data, translation)) = self.terrain_streams.projection_inputs(guid) {
             if data.tile_count() + data.coarse_tile_count() > 0 {
-                self.scene.terrain = Some(project_terrain(component, data, translation));
+                let rt = project_terrain(guid, component, data, translation);
+                if let Some(dst) = self.scene.terrains.get_mut(index) {
+                    *dst = rt;
+                }
             }
         }
     }
 
-    /// Rebuild the brush-ring loop points from the current terrain around
-    /// `center` (terrain-local XZ), coloured by the active op. Clears the ring if
-    /// the terrain vanished.
-    fn refresh_ring(&mut self, doc: &SceneDoc, center: DVec2) {
+    /// Rebuild the brush-ring loop points around `center` (terrain-local XZ on
+    /// `guid`), coloured by the active op. Clears the ring if the terrain vanished.
+    ///
+    /// P16.6: the terrain is passed in rather than read off "the" terrain field —
+    /// the ring must follow the surface the cursor actually resolved to.
+    fn refresh_ring(&mut self, doc: &SceneDoc, guid: Option<Uuid>, center: DVec2) {
         let op = self
             .sculpt_drag
             .as_ref()
@@ -2365,14 +2600,13 @@ impl EngineHost {
         // under the cursor reads as the layer being painted); sculpt ops use
         // their fixed op colour.
         let color = if op == SculptOp::Paint {
-            self.terrain_guid
-                .and_then(|g| doc.terrain_layer_albedo(g, self.sculpt.paint_layer))
+            guid.and_then(|g| doc.terrain_layer_albedo(g, self.sculpt.paint_layer))
                 .unwrap_or_else(|| op_color(op))
         } else {
             op_color(op)
         };
         self.sculpt_ring_color = color;
-        if let Some(guid) = self.terrain_guid {
+        if let Some(guid) = guid {
             if let Some((data, translation)) = self.terrain_probe(doc, guid) {
                 let ring = build_ring(data, translation, center, self.sculpt.radius);
                 self.sculpt_ring = ring;
@@ -2384,16 +2618,24 @@ impl EngineHost {
 
     /// Update the hovered brush ring (idle Sculpt mode): raycast the cursor and
     /// rebuild the ring, or clear it off-terrain.
+    ///
+    /// P16.6: the pick resolves which terrain is under the cursor, so hovering
+    /// also **retargets the tools** — the editable/read-only decision below is
+    /// then made against that terrain, not against whichever one came first.
     pub fn update_sculpt_hover(&mut self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) {
+        let hit = self.sculpt_pick(doc, view, px, py);
+        if let Some((guid, _, _)) = hit {
+            self.terrain_guid = Some(guid);
+        }
         // A streamed terrain whose asset cannot be written has nowhere to save a
         // stroke to, so showing an inviting ring would be a lie (P16.4b — an
         // editable streamed terrain rings exactly like an inline one).
-        if self.terrain_streamed && !self.terrain_editable {
+        if self.terrain_is_streamed() && !self.terrain_is_editable() {
             self.sculpt_ring.clear();
             return;
         }
-        match self.sculpt_pick(doc, view, px, py) {
-            Some((_, center, _)) => self.refresh_ring(doc, center),
+        match hit {
+            Some((guid, center, _)) => self.refresh_ring(doc, Some(guid), center),
             None => self.sculpt_ring.clear(),
         }
     }
@@ -2409,33 +2651,43 @@ impl EngineHost {
         py: u32,
         ctrl: bool,
     ) -> bool {
+        // P16.6: resolve which terrain the cursor is on FIRST, then judge that
+        // terrain. Refusing on "the" terrain's writability while the click lands on
+        // a different one is exactly the class of bug multi-terrain introduces.
+        let hit = self.sculpt_pick(doc, view, px, py);
+        if let Some((guid, _, _)) = hit {
+            self.terrain_guid = Some(guid);
+        }
         // P16.4b: a streamed terrain IS editable — its tiles page into the
         // document on demand and the save path writes them back. The only refusal
         // left is the honest one: an asset the editor cannot write, where a stroke
         // would be lost at Ctrl+S rather than saved.
-        if self.terrain_streamed && !self.terrain_editable {
+        if self.terrain_is_streamed() && !self.terrain_is_editable() {
             self.reject_tool(inf_editor_core::terrain_stream::STREAMED_TERRAIN_READONLY_REJECTION);
             return false;
         }
-        let Some((guid, center, height)) = self.sculpt_pick(doc, view, px, py) else {
-            // A miss on a streamed terrain has two very different causes. If the
-            // asset really has ground under the cursor, it is simply paged at
-            // coarse detail and there is no level-0 page to sculpt — say so
-            // (P16.4b audit: a silent no-op reads as a broken tool). Clicking past
-            // the edge of the terrain is not a problem and stays silent.
-            if self.terrain_streamed {
-                if let Some(g) = self.terrain_guid {
-                    let p = self.pick_world_point(doc, view, px, py);
-                    let local = self
-                        .terrain_streams
-                        .projection_inputs(g)
-                        .map(|(_, _, t)| DVec2::new(p.x - t.x, p.z - t.z))
-                        .unwrap_or(DVec2::new(p.x, p.z));
-                    if self.terrain_streams.covers_level0(g, local) {
-                        self.reject_tool(
-                            inf_editor_core::terrain_stream::STREAMED_TERRAIN_COARSE_REJECTION,
-                        );
-                    }
+        let Some((guid, center, height)) = hit else {
+            // A miss has two very different causes on a streamed terrain. If some
+            // streamed asset really has ground under the cursor, it is simply
+            // paged at coarse detail and there is no level-0 page to sculpt — say
+            // so (P16.4b audit: a silent no-op reads as a broken tool). Clicking
+            // past the edge of every terrain is not a problem and stays silent.
+            let p = self.pick_world_point(doc, view, px, py);
+            for i in 0..self.terrain_slots.len() {
+                let g = self.terrain_slots[i].guid;
+                if !self.terrain_slots[i].streamed {
+                    continue;
+                }
+                let local = self
+                    .terrain_streams
+                    .projection_inputs(g)
+                    .map(|(_, _, t)| DVec2::new(p.x - t.x, p.z - t.z))
+                    .unwrap_or(DVec2::new(p.x, p.z));
+                if self.terrain_streams.covers_level0(g, local) {
+                    self.reject_tool(
+                        inf_editor_core::terrain_stream::STREAMED_TERRAIN_COARSE_REJECTION,
+                    );
+                    break;
                 }
             }
             return false;
@@ -2463,7 +2715,7 @@ impl EngineHost {
             last_local: center,
             flatten_height: height,
         });
-        self.refresh_ring(doc, center);
+        self.refresh_ring(doc, Some(guid), center);
         true
     }
 
@@ -2476,7 +2728,10 @@ impl EngineHost {
         };
         let (guid, last, op, flatten_h) =
             (drag.guid, drag.last_local, drag.op, drag.flatten_height);
-        let Some((_, cur, _)) = self.sculpt_pick(doc, view, px, py) else {
+        // Restricted to the stroke's own terrain (P16.6): sliding over a
+        // neighbouring terrain holds the stroke exactly as sliding off the world
+        // does, rather than teleporting the brush onto different ground.
+        let Some((_, cur, _)) = self.terrain_pick(doc, view, px, py, Some(guid)) else {
             return; // cursor slid off the terrain — hold the stroke, add nothing
         };
         let settings = self.sculpt;
@@ -2505,7 +2760,7 @@ impl EngineHost {
             d.last_local = new_last;
         }
         self.after_terrain_edit(doc, guid);
-        self.refresh_ring(doc, cur);
+        self.refresh_ring(doc, Some(guid), cur);
     }
 
     /// Finish the stroke: commit the merged height [`inf_terrain::HeightDelta`] or
@@ -2542,14 +2797,32 @@ impl EngineHost {
         const FOLIAGE_RING: [f32; 4] = [0.35, 0.85, 0.40, 1.0];
         self.sculpt_ring_color = FOLIAGE_RING;
         let center_xz = DVec2::new(center.x, center.z);
-        if let Some(g) = self.terrain_guid {
-            if let Some((data, t)) = doc.terrain_data_and_origin(g) {
-                let local = DVec2::new(center_xz.x - t.x, center_xz.y - t.z);
-                self.sculpt_ring = build_ring(data, t, local, self.foliage.radius);
+        // P16.6: the ring follows the TOPMOST terrain covering the brush centre —
+        // the same surface `foliage_surface_height` lifts instances onto — and it
+        // is resolved through `terrain_probes`, so a streamed terrain rings on the
+        // pages it has actually paged in rather than not at all.
+        let probes = self.terrain_probes(doc, None);
+        if let Some((guid, _)) = topmost_surface(&probes, center_xz) {
+            if let Some(probe) = probes.iter().find(|p| p.guid == guid) {
+                let local = DVec2::new(
+                    center_xz.x - probe.translation.x,
+                    center_xz.y - probe.translation.z,
+                );
+                self.sculpt_ring =
+                    build_ring(probe.data, probe.translation, local, self.foliage.radius);
                 return;
             }
         }
         self.sculpt_ring = ground_ring(center_xz, self.foliage.radius);
+    }
+
+    /// The world height foliage lands on at world XZ `p`: the topmost terrain
+    /// surface covering it, else `0.0` (the ground plane) — the pre-P16.6 answer
+    /// for a world with no terrain, unchanged.
+    fn foliage_surface_height(&self, doc: &SceneDoc, p: DVec2) -> f64 {
+        topmost_surface(&self.terrain_probes(doc, None), p)
+            .map(|(_, y)| y)
+            .unwrap_or(0.0)
     }
 
     /// Hover update (idle Foliage mode): move the brush ring to the cursor.
@@ -2690,22 +2963,12 @@ impl EngineHost {
         if let Some(d) = self.foliage_drag.as_mut() {
             d.next_sample += target as u64;
         }
-        // Lift each candidate to the terrain (scoped immutable doc borrow).
-        let heights: Vec<f64> = {
-            let terrain = self
-                .terrain_guid
-                .and_then(|g| doc.terrain_data_and_origin(g));
-            cands
-                .iter()
-                .map(|c| match terrain {
-                    Some((data, t)) => {
-                        let local = DVec2::new(c.pos_xz.x - t.x, c.pos_xz.y - t.z);
-                        data.height_at(local).map(|h| t.y + h).unwrap_or(0.0)
-                    }
-                    None => 0.0,
-                })
-                .collect()
-        };
+        // Lift each candidate onto the topmost terrain covering it (P16.6), else
+        // the ground plane (scoped immutable doc borrow).
+        let heights: Vec<f64> = cands
+            .iter()
+            .map(|c| self.foliage_surface_height(doc, c.pos_xz))
+            .collect();
         let ms2 = foliage_min_spacing(s.density).powi(2);
         let mut accepted: Vec<FoliageInstance> = Vec::new();
         {
@@ -3138,5 +3401,233 @@ mod foliage_sampler {
         assert!(foliage_min_spacing(0.1) > foliage_min_spacing(4.0));
         assert!(foliage_min_spacing(0.0) >= 0.05);
         assert!(foliage_min_spacing(1e9) >= 0.05);
+    }
+}
+
+/// **P16.6 — how the cursor resolves against N terrains.**
+///
+/// These pin the two rules the multi-terrain tool paths are built on, as pure
+/// functions: nearest-along-the-ray for a pick, topmost for a scatter, plus the
+/// `restrict` filter that keeps a stroke on the terrain it started on. An
+/// `EngineHost` needs a GPU, so the rules live in free functions and the host is
+/// a one-line caller of each — which is what makes them testable at all.
+#[cfg(test)]
+mod terrain_resolution {
+    use super::{
+        nearest_terrain_hit, terrain_probes_of, topmost_surface, TerrainProbe, TerrainSlot,
+    };
+    use glam::{DVec2, DVec3};
+    use uuid::Uuid;
+
+    fn guid(n: u128) -> Uuid {
+        Uuid::from_u128(n)
+    }
+
+    /// A flat 4 × 4-tile heightfield at local height `h` (9² samples @ 2 m ⇒ a
+    /// 64 m square).
+    fn flat(h: f64) -> inf_terrain::TerrainData {
+        let mut t = inf_terrain::TerrainData::new(9, 2.0);
+        for tz in 0..4 {
+            for tx in 0..4 {
+                t.author_tile((tx, tz), |_, _| h);
+            }
+        }
+        t
+    }
+
+    fn slot(g: Uuid) -> TerrainSlot {
+        TerrainSlot {
+            guid: g,
+            streamed: false,
+            editable: false,
+            unsaved: false,
+        }
+    }
+
+    fn probe<'a>(g: Uuid, data: &'a inf_terrain::TerrainData, at: DVec3) -> TerrainProbe<'a> {
+        TerrainProbe {
+            guid: g,
+            data,
+            translation: at,
+        }
+    }
+
+    /// A straight-down ray from high above `(x, z)`.
+    fn down(x: f64, z: f64) -> (DVec3, DVec3) {
+        (DVec3::new(x, 500.0, z), DVec3::new(0.0, -1.0, 0.0))
+    }
+
+    /// **Nearest wins.** Two overlapping terrains under one cursor: the pick lands
+    /// on the surface you can actually see, not on whichever the document lists
+    /// first. Ties resolve to document order, so the answer is deterministic.
+    #[test]
+    fn a_pick_takes_the_nearest_of_overlapping_terrains() {
+        let (low, high) = (flat(10.0), flat(0.0));
+        let (a, b) = (guid(1), guid(2));
+        // A sits on the ground (surface y = 10); B is a raised platform over the
+        // SAME footprint (surface y = 50) — so B is nearer to a camera above.
+        let probes = vec![
+            probe(a, &low, DVec3::ZERO),
+            probe(b, &high, DVec3::new(0.0, 50.0, 0.0)),
+        ];
+        let (ro, rd) = down(20.0, 20.0);
+        let hit = nearest_terrain_hit(&probes, ro, rd).expect("the ray must hit something");
+        assert_eq!(hit.guid, b, "the pick fell through the nearer terrain");
+        assert!((hit.world.y - 50.0).abs() < 1e-6, "{:?}", hit.world);
+        assert!((hit.local_height - 0.0).abs() < 1e-6);
+
+        // Listing order must not change the answer.
+        let reversed = vec![
+            probe(b, &high, DVec3::new(0.0, 50.0, 0.0)),
+            probe(a, &low, DVec3::ZERO),
+        ];
+        assert_eq!(nearest_terrain_hit(&reversed, ro, rd).unwrap().guid, b);
+
+        // Two coincident surfaces tie — resolved to the EARLIER probe (document
+        // order), never to iteration luck.
+        let same = flat(10.0);
+        let tied = vec![probe(a, &low, DVec3::ZERO), probe(b, &same, DVec3::ZERO)];
+        assert_eq!(nearest_terrain_hit(&tied, ro, rd).unwrap().guid, a);
+
+        // A ray that misses every terrain footprint reports nothing (the caller
+        // then falls back to the ground plane).
+        let (miss_ro, miss_rd) = down(9_000.0, 9_000.0);
+        assert!(nearest_terrain_hit(&probes, miss_ro, miss_rd).is_none());
+        assert!(nearest_terrain_hit(&[], ro, rd).is_none());
+    }
+
+    /// **Restrict pins a stroke.** Mid-stroke, a nearer terrain appearing under
+    /// the cursor must not move the brush: the dabs belong to one document entity
+    /// and the single `HeightDelta` the stroke commits belongs to one terrain.
+    #[test]
+    fn a_restricted_pick_stays_on_the_terrain_the_stroke_started_on() {
+        let (low, high) = (flat(10.0), flat(0.0));
+        let (a, b) = (guid(1), guid(2));
+        let slots = [slot(a), slot(b)];
+        let resolve = |g: Uuid| {
+            if g == a {
+                Some((&low, DVec3::ZERO))
+            } else {
+                Some((&high, DVec3::new(0.0, 50.0, 0.0)))
+            }
+        };
+        let (ro, rd) = down(20.0, 20.0);
+
+        // Unrestricted, the nearer terrain B wins (as the test above pins).
+        let free = terrain_probes_of(&slots, None, resolve);
+        assert_eq!(free.len(), 2);
+        assert_eq!(nearest_terrain_hit(&free, ro, rd).unwrap().guid, b);
+
+        // Restricted to A — the terrain a stroke started on — B is not even a
+        // candidate, and the hit stays on A's surface.
+        let pinned = terrain_probes_of(&slots, Some(a), resolve);
+        assert_eq!(pinned.len(), 1);
+        let hit = nearest_terrain_hit(&pinned, ro, rd).expect("A is still under the cursor");
+        assert_eq!(hit.guid, a);
+        assert!((hit.world.y - 10.0).abs() < 1e-6);
+
+        // Restricting to a terrain that is not projected yields no candidates at
+        // all — the stroke holds rather than jumping (`update_sculpt` returns).
+        assert!(terrain_probes_of(&slots, Some(guid(99)), resolve).is_empty());
+    }
+
+    /// **Topmost wins for a scatter.** Foliage falls from above, so the ground at
+    /// a point is the highest surface covering it — not the first listed, and not
+    /// the nearest to a camera that may be underneath.
+    #[test]
+    fn a_scatter_takes_the_topmost_surface() {
+        let (low, high) = (flat(10.0), flat(0.0));
+        let (a, b) = (guid(1), guid(2));
+        let probes = vec![
+            probe(a, &low, DVec3::ZERO),
+            probe(b, &high, DVec3::new(0.0, 50.0, 0.0)),
+        ];
+        let p = DVec2::new(20.0, 20.0);
+        let (g, y) = topmost_surface(&probes, p).expect("covered");
+        assert_eq!(g, b);
+        assert!((y - 50.0).abs() < 1e-6);
+
+        // Off both footprints ⇒ nothing (the caller uses the y = 0 ground plane).
+        assert!(topmost_surface(&probes, DVec2::new(9_000.0, 9_000.0)).is_none());
+        assert!(topmost_surface(&[], p).is_none());
+
+        // A terrain's own world translation lifts its surface.
+        let lifted = vec![probe(a, &low, DVec3::new(0.0, 7.0, 0.0))];
+        assert!((topmost_surface(&lifted, p).unwrap().1 - 17.0).abs() < 1e-6);
+    }
+
+    /// **Why every terrain path must resolve through `terrain_probe`** (the P16.6
+    /// audit fix): a streamed terrain's *document* heightfield is EMPTY by design —
+    /// its tiles live in the `.inf_terrain` — so resolving a cursor against it
+    /// finds nothing and drops silently to the `y = 0` ground plane. Only the
+    /// streamer's render working set has real ground in it.
+    ///
+    /// This is the fixture the sculpt path already used and the drag-drop/foliage
+    /// paths did not; it fails loudly if the document's set ever becomes the
+    /// answer again.
+    #[test]
+    fn a_streamed_terrains_document_set_is_empty_but_its_streamer_has_ground() {
+        use inf_editor_core::samples::{
+            streamed_terrain_scene, write_streamed_terrain_asset, STREAMED_TERRAIN_TERRAIN_GUID,
+        };
+        use inf_editor_core::terrain_stream::EditorTerrainStreams;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_streamed_terrain_asset(dir.path()).unwrap();
+        let doc = streamed_terrain_scene();
+        let terrain = {
+            let world = doc.world();
+            let e = world.entity_of(STREAMED_TERRAIN_TERRAIN_GUID).unwrap();
+            world
+                .world()
+                .get::<inf_ecs::components::Terrain>(e)
+                .unwrap()
+                .clone()
+        };
+
+        // (1) The DOCUMENT's set — what the buggy call sites read — is empty, so
+        //     no probe over it resolves any surface anywhere.
+        let (doc_data, doc_origin) = doc
+            .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+            .expect("the entity exists");
+        assert!(doc_data.is_empty(), "a streamed terrain ships no tiles");
+        let doc_probes = vec![probe(STREAMED_TERRAIN_TERRAIN_GUID, doc_data, doc_origin)];
+        let p = DVec2::new(64.0, 64.0);
+        assert!(
+            topmost_surface(&doc_probes, p).is_none(),
+            "the document's set must have no ground — that is the bug's cause"
+        );
+        let (ro, rd) = down(p.x, p.y);
+        assert!(nearest_terrain_hit(&doc_probes, ro, rd).is_none());
+
+        // (2) The STREAMER's render set does have ground there, once the camera
+        //     has paged it in — which is what `terrain_probe` hands back.
+        let mut streams = EditorTerrainStreams::new();
+        streams.set_content_root(Some(dir.path().to_path_buf()));
+        let eye = DVec3::new(p.x, 40.0, p.y);
+        assert!(
+            streams.ensure(STREAMED_TERRAIN_TERRAIN_GUID, &terrain, DVec3::ZERO, eye),
+            "the fixture terrain must stream"
+        );
+        for _ in 0..32 {
+            streams.sync_render(eye);
+        }
+        let (_, live, translation) = streams
+            .projection_inputs(STREAMED_TERRAIN_TERRAIN_GUID)
+            .expect("the stream is live");
+        assert!(!live.is_empty(), "the camera paged nothing in");
+        let live_probes = vec![probe(STREAMED_TERRAIN_TERRAIN_GUID, live, translation)];
+
+        let (_, y) = topmost_surface(&live_probes, p).expect("streamed ground under the cursor");
+        assert!(
+            y.abs() > 1e-9,
+            "the streamed surface read as flat zero — the generator has relief here"
+        );
+        let hit = nearest_terrain_hit(&live_probes, ro, rd).expect("the ray must hit the ground");
+        // The two agree to within the raycaster's marching step: `height_at`
+        // bilinearly interpolates the samples while `raycast_terrain` walks the
+        // ray and interpolates at the crossing, so they differ by the sub-cell
+        // residual — not by "one of them found nothing", which is the claim here.
+        assert!((hit.world.y - y).abs() < 1e-3, "{hit:?} vs {y}");
     }
 }

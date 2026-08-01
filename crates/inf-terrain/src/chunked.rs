@@ -464,7 +464,10 @@ impl<'a> Build<'a> {
             plan,
             assembler: BandAssembler::new(grid, import),
             accs,
-            builder: TerrainAssetBuilder::new(import.resolution(), import.meters_per_sample),
+            // P16.6: record the options this import's pyramid was built with in
+            // the v2 header, so a later write-back re-plans to the same shape.
+            builder: TerrainAssetBuilder::new(import.resolution(), import.meters_per_sample)
+                .with_pyramid(opts.pyramid),
             tiles_total,
             tiles_done: 0,
             peak_live: 0,
@@ -660,7 +663,7 @@ mod tests {
     ) -> Vec<u8> {
         let data = TerrainData::from_height_image(bytes, import).unwrap();
         let pyramid = build_pyramid(&data, opts.pyramid);
-        crate::asset::build_terrain_asset(&data, &pyramid)
+        crate::asset::build_terrain_asset(&data, &pyramid, opts.pyramid)
             .unwrap()
             .into_bytes()
     }

@@ -233,7 +233,7 @@ mod tests {
     fn asset_reader_is_a_tile_store() {
         let t = terrain_4x4();
         let p = build_pyramid(&t, PyramidOptions::default());
-        let asset = build_terrain_asset(&t, &p).unwrap();
+        let asset = build_terrain_asset(&t, &p, PyramidOptions::default()).unwrap();
         let reader = asset.reader();
         let store: &dyn TileStore = &reader;
         assert_eq!(store.tile_keys().len(), reader.tile_count());
@@ -462,7 +462,7 @@ mod tests {
     fn coarse_levels_are_resident_beside_level_zero() {
         let t = terrain_4x4();
         let p = build_pyramid(&t, PyramidOptions::default());
-        let asset = build_terrain_asset(&t, &p).unwrap();
+        let asset = build_terrain_asset(&t, &p, PyramidOptions::default()).unwrap();
         let reader = asset.reader();
 
         let mut live = TerrainData::new(5, 2.0);

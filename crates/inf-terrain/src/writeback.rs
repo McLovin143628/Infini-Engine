@@ -155,7 +155,13 @@ pub fn rewrite_terrain_asset<B: AsRef<[u8]>>(
         level0.remove(c);
     }
 
-    let mut builder = TerrainAssetBuilder::new(res, mps0).with_origin(source.origin());
+    // P16.6: the rewrite carries the options it re-planned with into the new
+    // header, so the *next* write-back re-plans identically. `opts` is the source
+    // header's own options when it recorded them (v2) and the caller's fallback
+    // when it did not (v1) — either way, recording them ends the drift.
+    let mut builder = TerrainAssetBuilder::new(res, mps0)
+        .with_origin(source.origin())
+        .with_pyramid(opts);
     for &coord in &level0 {
         let key = TileKey::lod0(coord);
         match edits.changed.get(&coord) {
@@ -278,7 +284,12 @@ mod tests {
     }
 
     fn asset_of(t: &TerrainData) -> TerrainAsset {
-        build_terrain_asset(t, &build_pyramid(t, PyramidOptions::default())).unwrap()
+        build_terrain_asset(
+            t,
+            &build_pyramid(t, PyramidOptions::default()),
+            PyramidOptions::default(),
+        )
+        .unwrap()
     }
 
     /// Rewrite `source` with `edits`, and assert the result is **byte-identical**

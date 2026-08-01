@@ -173,36 +173,53 @@ impl TerrainFlushReport {
     }
 }
 
-/// The pyramid options a `.inf_terrain` write-back re-plans with.
+/// The pyramid options a `.inf_terrain` write-back re-plans with **when the asset
+/// does not say** — i.e. the fallback for a schema-**v1** payload.
 ///
-/// # A stated limitation, not an assumption
+/// # How this stopped being a limitation (P16.6)
 ///
-/// **The `.inf_terrain` header does not record the options its pyramid was built
-/// with.** Every asset this engine produces today uses the defaults — the sample
-/// generator hard-codes them and the import wizard defaults to them — so the
-/// common case re-plans to exactly the shape it already had and the recompute is
-/// genuinely partial. But the wizard *exposes* `max_pyramid_levels` /
-/// `min_pyramid_tiles`, so an asset imported with non-default knobs will be
-/// re-planned to the **default shape** on its first save: the output is still a
-/// correct, byte-deterministic pyramid over the edited terrain, but it is not the
-/// shape its author chose, and the whole pyramid is rebuilt rather than the
-/// ancestors of the edit.
+/// v1's header did not record the options its pyramid was built with, so every
+/// write-back re-planned with the defaults. The common case was fine (the sample
+/// generator hard-codes the defaults and the wizard defaults to them), but the
+/// wizard *exposes* `max_pyramid_levels` / `min_pyramid_tiles`, so an asset
+/// imported with non-default knobs was silently re-planned to the **default
+/// shape** on its first save — still a correct, byte-deterministic pyramid, but
+/// not the shape its author chose, and a total rebuild rather than a partial one.
 ///
-/// Inferring the options back out of the asset (its level count and coarsest
-/// level size) was considered and rejected: the two stop conditions are not
-/// distinguishable after the fact, and every inference rule that preserves a
-/// capped asset's depth also refuses to deepen a terrain that genuinely grew.
-/// The real fix is to write the options into the header, which is a
-/// `.inf_terrain` schema change and therefore a separate batch;
-/// [`warn_on_pyramid_reshape`] makes the situation loud in the meantime.
+/// **Schema v2 records them** (`inf_terrain::asset`), so
+/// [`write_terrain_edits`] re-plans with the asset's *own* options and a v2 asset
+/// can no longer be reshaped by a save. This constant is what a v1 asset falls
+/// back to, and it is the only case [`warn_on_pyramid_reshape`] can still fire
+/// for. (Inferring the options back out of a v1 asset was considered and rejected
+/// again: the two stop conditions are indistinguishable after the fact, and every
+/// inference rule that preserves a capped asset's depth also refuses to deepen a
+/// terrain that genuinely grew. A v1 asset is upgraded to v2 by that first save,
+/// recording the defaults — which is the most honest thing that can be known
+/// about it, and it means the warning fires at most once per asset.)
 pub const WRITE_BACK_PYRAMID: PyramidOptions = PyramidOptions {
     max_levels: inf_terrain::pyramid::DEFAULT_MAX_PYRAMID_LEVELS,
     min_tiles: inf_terrain::pyramid::DEFAULT_MIN_PYRAMID_TILES,
 };
 
-/// Warn when `source`'s pyramid does not have the depth [`WRITE_BACK_PYRAMID`]
-/// would have given it — i.e. when this save is about to re-shape an asset that
-/// was imported with non-default pyramid knobs (see there).
+/// The options a write-back of `source` should re-plan its pyramid with: the ones
+/// the asset **records** (schema v2), else [`WRITE_BACK_PYRAMID`] (schema v1, which
+/// did not record them).
+pub fn write_back_pyramid<B: AsRef<[u8]>>(
+    source: &inf_terrain::TerrainAssetReader<B>,
+) -> PyramidOptions {
+    source.pyramid_options().unwrap_or(WRITE_BACK_PYRAMID)
+}
+
+/// Warn when a **v1** `source`'s pyramid does not have the depth
+/// [`WRITE_BACK_PYRAMID`] would have given it — i.e. when this save is about to
+/// re-shape an asset whose options were never recorded (see there).
+///
+/// P16.6 narrowed this to exactly the case it can still describe. A v2 asset
+/// carries its own options, so the rewrite re-plans to the shape its author chose
+/// and there is nothing to warn about; a v1 asset that already matches the
+/// defaults is not being reshaped either. What is left — a v1 asset that genuinely
+/// disagrees with the defaults — is the one situation where a save really does
+/// change the asset's shape, and it stays loud.
 ///
 /// Cheap: it plans over the source's **own** level-0 coordinate set, which is
 /// coordinate arithmetic with no tile data touched at all.
@@ -210,6 +227,9 @@ fn warn_on_pyramid_reshape<B: AsRef<[u8]>>(
     source: &inf_terrain::TerrainAssetReader<B>,
     path: &Path,
 ) {
+    if source.pyramid_options().is_some() {
+        return; // schema v2: the asset says, so nothing is re-shaped
+    }
     let level0: std::collections::BTreeSet<(i32, i32)> = source
         .keys()
         .filter(|k| k.is_lod0())
@@ -221,9 +241,10 @@ fn warn_on_pyramid_reshape<B: AsRef<[u8]>>(
     if want != have {
         tracing::warn!(
             "inf-editor-core: {} has {have} coarse LOD level(s) but the default pyramid options \
-             would give it {want} — this asset was imported with non-default pyramid settings, \
-             and saving terrain edits will re-plan it to the default shape. (The .inf_terrain \
-             header does not record the options; see terrain_edit::WRITE_BACK_PYRAMID.)",
+             would give it {want} — this is a schema-v1 .inf_terrain, which did not record the \
+             settings it was imported with, so saving terrain edits will re-plan it to the \
+             default shape (and write it as v2, recording those defaults). Re-import it if you \
+             need its original pyramid settings; see terrain_edit::WRITE_BACK_PYRAMID.",
             path.display()
         );
     }
@@ -322,17 +343,19 @@ pub fn write_terrain_edits(
             }
         };
         warn_on_pyramid_reshape(&source, path);
-        let rewritten =
-            match inf_terrain::rewrite_terrain_asset(&source, &item.edits, WRITE_BACK_PYRAMID) {
-                Ok(Some(a)) => a,
-                // Nothing to write (an empty edit set slipped through) — not a
-                // failure, and nothing to un-mark either.
-                Ok(None) => continue,
-                Err(e) => {
-                    fail(format!("rewrite {}: {e}", path.display()));
-                    continue;
-                }
-            };
+        // P16.6: re-plan with the options the asset RECORDS (schema v2), falling
+        // back to the defaults only for a v1 payload that never recorded any.
+        let opts = write_back_pyramid(&source);
+        let rewritten = match inf_terrain::rewrite_terrain_asset(&source, &item.edits, opts) {
+            Ok(Some(a)) => a,
+            // Nothing to write (an empty edit set slipped through) — not a
+            // failure, and nothing to un-mark either.
+            Ok(None) => continue,
+            Err(e) => {
+                fail(format!("rewrite {}: {e}", path.display()));
+                continue;
+            }
+        };
         // Drop the old payload before the rename: the store owns a whole copy of
         // the previous image, and there is no reason to hold two plus the new one.
         drop(source);
@@ -1136,6 +1159,65 @@ mod tests {
             "the write-back would re-plan a default asset's pyramid to a different depth"
         );
         assert!(planned.len() >= 2, "the fixture must have a real pyramid");
+    }
+
+    /// **P16.6.** A schema-v2 asset carries its own pyramid options, so a
+    /// write-back re-plans with *those* — the non-default import can no longer be
+    /// silently reshaped by a save.
+    #[test]
+    fn a_v2_asset_writes_back_with_its_own_recorded_options() {
+        use inf_terrain::PyramidOptions;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Custom.inf_terrain");
+        // A deliberately non-default shape: cap at two coarse levels.
+        let opts = PyramidOptions {
+            max_levels: 2,
+            min_tiles: 1,
+        };
+        let data = inf_editor_core_samples_terrain();
+        let pyramid = inf_terrain::build_pyramid(&data, opts);
+        let asset = inf_terrain::build_terrain_asset(&data, &pyramid, opts).unwrap();
+        inf_terrain::write_terrain_asset(&path, &asset).unwrap();
+
+        let source = inf_terrain::open_file_tile_store(&path).unwrap();
+        assert_eq!(
+            source.pyramid_options(),
+            Some(opts),
+            "a v2 asset must report its own options"
+        );
+        assert_eq!(
+            super::write_back_pyramid(&source),
+            opts,
+            "the write-back must re-plan with the recorded options, not the defaults"
+        );
+        assert_ne!(opts, super::WRITE_BACK_PYRAMID, "the fixture must differ");
+        // …and the depth really is the capped one, not the default one.
+        assert_eq!(source.lod_levels(), 1 + pyramid.len() as u32);
+        assert_eq!(pyramid.len(), 2);
+
+        // Round trip a rewrite: the new image keeps the recorded options, so the
+        // NEXT save re-plans identically (the drift v2 exists to end).
+        let mut edited = data.clone();
+        inf_terrain::apply_brush(
+            &mut edited,
+            inf_terrain::BrushOp::Raise,
+            inf_terrain::BrushParams::new(DVec2::new(20.0, 20.0), 8.0, 3.0),
+        );
+        let edits =
+            inf_terrain::writeback::TerrainEdits::from_dirty(&edited, &edited.dirty_tiles());
+        let out =
+            inf_terrain::rewrite_terrain_asset(&source, &edits, super::write_back_pyramid(&source))
+                .unwrap()
+                .unwrap();
+        assert_eq!(out.reader().pyramid_options(), Some(opts));
+        assert_eq!(out.reader().lod_levels(), source.lod_levels());
+    }
+
+    /// A 16 × 16-tile heightfield at the sample's grid — big enough that the
+    /// pyramid options visibly change its depth.
+    fn inf_editor_core_samples_terrain() -> inf_terrain::TerrainData {
+        crate::samples::streamed_terrain_data()
     }
 
     /// The autosave note names the terrain and the tile count — the honest

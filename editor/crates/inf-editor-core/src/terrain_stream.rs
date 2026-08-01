@@ -346,13 +346,18 @@ impl EditorTerrainStreams {
         self.stats = TerrainStreamStats::default();
     }
 
-    /// Drop every stream except `keep` (the terrain the viewport is drawing).
+    /// Drop every stream whose entity is **not** in `keep` — the terrains the
+    /// viewport is currently drawing (P16.6: all of them, not just the first).
     ///
-    /// The viewport draws one terrain (first visible wins), so a stream for an
-    /// entity that is no longer projected is dead memory; releasing it also
-    /// releases its `.inf_terrain` payload.
-    pub fn retain_only(&mut self, keep: Option<Uuid>) {
-        self.streams.retain(|k, _| Some(*k) == keep);
+    /// A stream for an entity that is no longer projected is dead memory;
+    /// releasing it also releases its `.inf_terrain` payload and any tile it
+    /// pinned for an unsaved edit. Takes the live set as an iterator because the
+    /// caller (the viewport host's projection) produces it as one — and because
+    /// passing the *single* live terrain was exactly the shape that made this
+    /// function evict a second terrain's payload every frame.
+    pub fn retain_only(&mut self, keep: impl IntoIterator<Item = Uuid>) {
+        let keep: std::collections::BTreeSet<Uuid> = keep.into_iter().collect();
+        self.streams.retain(|k, _| keep.contains(k));
         self.refresh_stats();
     }
 
@@ -832,6 +837,45 @@ mod tests {
         );
         assert_eq!(s.len(), 1);
         s.retain_only(Some(Uuid::from_u128(0xDEAD)));
+        assert!(s.is_empty());
+    }
+
+    /// **P16.6.** Two streamed terrains projected at once: `retain_only` must keep
+    /// **both**, and drop only what really left the projection.
+    ///
+    /// The pre-P16.6 signature took the single live terrain, so a viewport drawing
+    /// two of them released one whole `.inf_terrain` payload every frame and paged
+    /// it back in the next — the coupling P16.4b's audit note flagged as
+    /// single-terrain-shaped.
+    #[test]
+    fn retain_only_keeps_every_live_stream() {
+        let (dir, terrain) = fixture();
+        let second = Uuid::from_u128(0x5EC0_11D2);
+        let mut s = EditorTerrainStreams::new();
+        s.set_content_root(Some(dir.path().to_path_buf()));
+        // Two entities streaming from the same asset — different terrains as far
+        // as the manager is concerned (streams are keyed by ENTITY).
+        assert!(s.ensure(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &terrain,
+            DVec3::ZERO,
+            DVec3::ZERO
+        ));
+        assert!(s.ensure(second, &terrain, DVec3::new(1000.0, 0.0, 0.0), DVec3::ZERO));
+        assert_eq!(s.len(), 2);
+
+        // Both live ⇒ both kept.
+        s.retain_only([STREAMED_TERRAIN_TERRAIN_GUID, second]);
+        assert_eq!(s.len(), 2, "a live stream was released");
+
+        // One leaves the projection ⇒ exactly that one is released.
+        s.retain_only([second]);
+        assert_eq!(s.len(), 1);
+        assert!(s.render_data(second).is_some());
+        assert!(s.render_data(STREAMED_TERRAIN_TERRAIN_GUID).is_none());
+
+        // Nothing live ⇒ everything released.
+        s.retain_only(std::iter::empty());
         assert!(s.is_empty());
     }
 

@@ -363,16 +363,26 @@ pub struct CachedTile {
     pub resolution: u32,
 }
 
+/// Identity of one cached tile **across the scene's terrains** (P16.6): the
+/// owning [`RenderTerrain::id`] plus the tile's own key.
+///
+/// Two terrains routinely share tile coordinates — each grid is anchored in its
+/// own entity's frame — so the key had to grow a terrain half the moment a scene
+/// could hold more than one. Ordering is `(id, key)`, so a plan is grouped by
+/// terrain and ascending within each, and a single-terrain scene (id `0`) orders
+/// exactly as the pre-P16.6 key-only cache did.
+pub type TileCacheKey = (u64, TerrainTileKey);
+
 /// What one texture-cache sync must do: which tiles to (re)upload, which cached
 /// entries to drop. Both lists are in a deterministic order — `upload` follows the
-/// projection's tile order, `evict` is ascending by key.
+/// projection's (terrain, tile) walk, `evict` is ascending by [`TileCacheKey`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TileCachePlan {
     /// Tiles whose GPU copy is stale (or absent) and must be written.
-    pub upload: Vec<TerrainTileKey>,
+    pub upload: Vec<TileCacheKey>,
     /// Cached tiles that left the projection (or went malformed) and must be
     /// dropped, freeing their textures.
-    pub evict: Vec<TerrainTileKey>,
+    pub evict: Vec<TileCacheKey>,
 }
 
 /// Plan the per-tile GPU texture cache against a projection — a pure function, so
@@ -386,31 +396,39 @@ pub struct TileCachePlan {
 /// is not `resolution²`) are neither uploaded nor kept — a bad page never becomes
 /// silent geometry.
 ///
+/// Multi-terrain (P16.6): `terrains` is the scene's whole list, walked in order,
+/// and each terrain's own `tile_resolution` governs its tiles — so a scene mixing a
+/// 256² streamed terrain with a 16² inline one plans both correctly, and a terrain
+/// leaving the scene evicts exactly its own pages.
+///
 /// `state` projects the cache's value type down to the identity the planner
 /// reasons about, so the node can hold GPU resources in the same map the test
 /// fills with plain [`CachedTile`]s.
 pub fn plan_tile_cache<T>(
-    cached: &BTreeMap<TerrainTileKey, T>,
+    cached: &BTreeMap<TileCacheKey, T>,
     state: impl Fn(&T) -> CachedTile,
-    terrain: &RenderTerrain,
+    terrains: &[RenderTerrain],
 ) -> TileCachePlan {
-    let res = terrain.tile_resolution.max(2);
-    let expect = (res * res) as usize;
     let mut upload = Vec::new();
-    let mut live: BTreeSet<TerrainTileKey> = BTreeSet::new();
-    for tile in &terrain.tiles {
-        if tile.heights.len() != expect {
-            continue; // malformed — skip rather than upload garbage
-        }
-        live.insert(tile.key);
-        let fresh = tile.version != 0
-            && cached.get(&tile.key).map(&state)
-                == Some(CachedTile {
-                    version: tile.version,
-                    resolution: res,
-                });
-        if !fresh {
-            upload.push(tile.key);
+    let mut live: BTreeSet<TileCacheKey> = BTreeSet::new();
+    for terrain in terrains {
+        let res = terrain.tile_resolution.max(2);
+        let expect = (res * res) as usize;
+        for tile in &terrain.tiles {
+            if tile.heights.len() != expect {
+                continue; // malformed — skip rather than upload garbage
+            }
+            let key = (terrain.id, tile.key);
+            live.insert(key);
+            let fresh = tile.version != 0
+                && cached.get(&key).map(&state)
+                    == Some(CachedTile {
+                        version: tile.version,
+                        resolution: res,
+                    });
+            if !fresh {
+                upload.push(key);
+            }
         }
     }
     let evict = cached
@@ -521,21 +539,31 @@ impl MaterialRaw {
     }
 }
 
+/// One terrain's splat-material uniform (`@group(2)`) + the packed value the
+/// buffer currently holds — the gate for the one terrain-wide upload left (a value
+/// compare, so it cannot desync). One of these per [`RenderTerrain::id`] (P16.6):
+/// the layers are per-terrain, so a single shared uniform would have made the last
+/// terrain drawn recolour every other one.
+struct MaterialSlot {
+    _buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    uploaded: MaterialRaw,
+}
+
 pub struct TerrainNode {
     pipeline: wgpu::RenderPipeline,
     tile_bgl: wgpu::BindGroupLayout,
     /// One grid mesh per LOD (index 0 = finest).
     lod_meshes: Vec<LodMesh>,
-    /// Per-tile height + weight textures, keyed by [`TerrainTileKey`] (asset LOD +
-    /// coord), so level-0 and coarse pages of the same ground cache side by side.
+    /// Per-tile height + weight textures, keyed by [`TileCacheKey`] (terrain id +
+    /// asset LOD + coord), so level-0 and coarse pages of the same ground — and
+    /// same-coordinate pages of *different* terrains — cache side by side.
     /// `BTreeMap` ⇒ deterministic iteration.
-    textures: BTreeMap<TerrainTileKey, TileTextures>,
-    /// Terrain splat material uniform (`@group(2)`) + its bind group.
-    material_buffer: wgpu::Buffer,
-    material_bg: wgpu::BindGroup,
-    /// The packed material the uniform buffer currently holds — the gate for the
-    /// one terrain-wide upload left (a value compare, so it cannot desync).
-    uploaded_material: Option<MaterialRaw>,
+    textures: BTreeMap<TileCacheKey, TileTextures>,
+    /// Layout of the per-terrain splat-material bind group (`@group(2)`).
+    material_bgl: wgpu::BindGroupLayout,
+    /// Per-terrain splat material uniforms, keyed by [`RenderTerrain::id`].
+    materials: BTreeMap<u64, MaterialSlot>,
     /// AO + shadows + GI env bind at `@group(3)` (P13.3b).
     env: super::EnvBinding,
     instances: Option<wgpu::Buffer>,
@@ -615,21 +643,6 @@ impl TerrainNode {
                     count: None,
                 }],
             });
-        let material_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("terrain-material"),
-            size: std::mem::size_of::<MaterialRaw>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let material_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("terrain-material"),
-            layout: &material_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: material_buffer.as_entire_binding(),
-            }],
-        });
-
         let env = super::EnvBinding::new(gpu);
         let layout = gpu
             .device
@@ -748,9 +761,8 @@ impl TerrainNode {
             tile_bgl,
             lod_meshes,
             textures: BTreeMap::new(),
-            material_buffer,
-            material_bg,
-            uploaded_material: None,
+            material_bgl,
+            materials: BTreeMap::new(),
             env,
             instances: None,
             instance_capacity: 0,
@@ -763,17 +775,33 @@ impl TerrainNode {
     /// stamp changed (or that are new / resized) and exactly the cached tiles that
     /// left the projection. Sculpting one tile re-uploads that tile and nothing
     /// else; evicting a page frees its textures the frame the projection drops it.
-    /// The terrain-wide splat material rides a value compare beside it.
-    fn sync_textures(&mut self, gpu: &GpuContext, terrain: &RenderTerrain) {
-        // Splat material uniform (terrain-wide): write only on a real change.
-        let material = MaterialRaw::from_terrain(terrain);
-        if self.uploaded_material != Some(material) {
-            gpu.queue
-                .write_buffer(&self.material_buffer, 0, bytemuck::bytes_of(&material));
-            self.uploaded_material = Some(material);
+    /// Each terrain's splat material rides a value compare beside it (P16.6: one
+    /// uniform slot per [`RenderTerrain::id`], released when that terrain leaves).
+    fn sync_textures(&mut self, gpu: &GpuContext, terrains: &[RenderTerrain]) {
+        // Splat material uniforms (one per terrain): write only on a real change,
+        // and drop the slots of terrains that left the scene.
+        let live_ids: BTreeSet<u64> = terrains.iter().map(|t| t.id).collect();
+        self.materials.retain(|id, _| live_ids.contains(id));
+        for terrain in terrains {
+            let material = MaterialRaw::from_terrain(terrain);
+            match self.materials.get_mut(&terrain.id) {
+                Some(slot) => {
+                    if slot.uploaded != material {
+                        gpu.queue
+                            .write_buffer(&slot._buffer, 0, bytemuck::bytes_of(&material));
+                        slot.uploaded = material;
+                    }
+                }
+                None => {
+                    let slot = create_material_slot(gpu, &self.material_bgl, material);
+                    gpu.queue
+                        .write_buffer(&slot._buffer, 0, bytemuck::bytes_of(&material));
+                    self.materials.insert(terrain.id, slot);
+                }
+            }
         }
 
-        let plan = plan_tile_cache(&self.textures, |t| t.cached, terrain);
+        let plan = plan_tile_cache(&self.textures, |t| t.cached, terrains);
         for key in &plan.evict {
             self.textures.remove(key);
         }
@@ -781,85 +809,116 @@ impl TerrainNode {
             return;
         }
 
-        let res = terrain.tile_resolution.max(2);
-        let expect = (res * res) as usize;
-
-        // `plan.upload` is built by walking `terrain.tiles` in order, so it is a
-        // subsequence of that walk — one shared cursor pairs each planned key back
-        // to its tile with no lookup and no ordering assumption about the vec.
+        // `plan.upload` is built by walking the terrains in order and each one's
+        // tiles in order, so it is a subsequence of that same walk — one shared
+        // cursor pairs each planned key back to its tile with no lookup and no
+        // ordering assumption about the vecs.
         let mut wanted = plan.upload.iter().peekable();
-        for tile in &terrain.tiles {
-            if wanted.peek() != Some(&&tile.key) {
-                continue;
-            }
-            wanted.next();
+        for terrain in terrains {
+            let res = terrain.tile_resolution.max(2);
+            let expect = (res * res) as usize;
+            for tile in &terrain.tiles {
+                let key = (terrain.id, tile.key);
+                if wanted.peek() != Some(&&key) {
+                    continue;
+                }
+                wanted.next();
 
-            let entry = self
-                .textures
-                .entry(tile.key)
-                .or_insert_with(|| create_tile_textures(gpu, &self.tile_bgl, res, tile.version));
-            if entry.cached.resolution != res {
-                *entry = create_tile_textures(gpu, &self.tile_bgl, res, tile.version);
-            }
-            entry.cached.version = tile.version;
-            let tex = &*entry;
-            gpu.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &tex._height,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                bytemuck::cast_slice(&tile.heights),
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(res * 4),
-                    rows_per_image: Some(res),
-                },
-                wgpu::Extent3d {
-                    width: res,
-                    height: res,
-                    depth_or_array_layers: 1,
-                },
-            );
+                let entry = self.textures.entry(key).or_insert_with(|| {
+                    create_tile_textures(gpu, &self.tile_bgl, res, tile.version)
+                });
+                if entry.cached.resolution != res {
+                    *entry = create_tile_textures(gpu, &self.tile_bgl, res, tile.version);
+                }
+                entry.cached.version = tile.version;
+                let tex = &*entry;
+                gpu.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tex._height,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytemuck::cast_slice(&tile.heights),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(res * 4),
+                        rows_per_image: Some(res),
+                    },
+                    wgpu::Extent3d {
+                        width: res,
+                        height: res,
+                        depth_or_array_layers: 1,
+                    },
+                );
 
-            // Splat weights: fall back to a uniform default when a tile projected
-            // no (or a malformed) weight buffer, so shading stays layer 0. Coarse
-            // pyramid pages always take this path — the pyramid is heights-only.
-            // Uniform default = 100% layer 0 (mirrors inf_terrain::DEFAULT_WEIGHT;
-            // kept local so the renderer stays independent of inf-terrain).
-            const DEFAULT_WEIGHT: [u8; 4] = [255, 0, 0, 0];
-            let default_weights;
-            let weights: &[[u8; 4]] = if tile.weights.len() == expect {
-                &tile.weights
-            } else {
-                default_weights = vec![DEFAULT_WEIGHT; expect];
-                &default_weights
-            };
-            gpu.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &tex._weights,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                bytemuck::cast_slice(weights),
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(res * 4),
-                    rows_per_image: Some(res),
-                },
-                wgpu::Extent3d {
-                    width: res,
-                    height: res,
-                    depth_or_array_layers: 1,
-                },
-            );
+                // Splat weights: fall back to a uniform default when a tile
+                // projected no (or a malformed) weight buffer, so shading stays
+                // layer 0. Coarse pyramid pages always take this path — the pyramid
+                // is heights-only. Uniform default = 100% layer 0 (mirrors
+                // inf_terrain::DEFAULT_WEIGHT; kept local so the renderer stays
+                // independent of inf-terrain).
+                const DEFAULT_WEIGHT: [u8; 4] = [255, 0, 0, 0];
+                let default_weights;
+                let weights: &[[u8; 4]] = if tile.weights.len() == expect {
+                    &tile.weights
+                } else {
+                    default_weights = vec![DEFAULT_WEIGHT; expect];
+                    &default_weights
+                };
+                gpu.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tex._weights,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytemuck::cast_slice(weights),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(res * 4),
+                        rows_per_image: Some(res),
+                    },
+                    wgpu::Extent3d {
+                        width: res,
+                        height: res,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
         }
         debug_assert!(
             wanted.next().is_none(),
             "every planned upload must pair with a projected tile"
         );
+    }
+}
+
+/// Create one terrain's splat-material uniform buffer + bind group, recording
+/// `material` as the value the caller is about to write into it.
+fn create_material_slot(
+    gpu: &GpuContext,
+    layout: &wgpu::BindGroupLayout,
+    material: MaterialRaw,
+) -> MaterialSlot {
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("terrain-material"),
+        size: std::mem::size_of::<MaterialRaw>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("terrain-material"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    });
+    MaterialSlot {
+        _buffer: buffer,
+        bind_group,
+        uploaded: material,
     }
 }
 
@@ -924,38 +983,47 @@ impl RenderNode for TerrainNode {
     }
 
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
-        let Some(terrain) = frame.scene.terrain.as_ref() else {
-            return; // no terrain → byte-identical to pre-P10.1
-        };
-        if terrain.tiles.is_empty() {
+        let terrains = frame.scene.terrains.as_slice();
+        // No terrain (or nothing resident in any of them) → byte-identical to
+        // pre-P10.1: the node encodes nothing at all.
+        if terrains.iter().all(|t| t.tiles.is_empty()) {
             return;
         }
-        self.sync_textures(gpu, terrain);
+        self.sync_textures(gpu, terrains);
 
-        let patches = assemble_patches(terrain, frame.view, &frame.view.origin);
-        if patches.is_empty() {
+        // Assemble each terrain independently — clipmap rings, source selection
+        // and culling are all functions of ONE terrain's grid and residency, and
+        // two terrains say nothing about each other's LODs.
+        let patches: Vec<Vec<TerrainPatch>> = terrains
+            .iter()
+            .map(|t| assemble_patches(t, frame.view, &frame.view.origin))
+            .collect();
+        if patches.iter().all(Vec::is_empty) {
             return;
         }
 
-        // Pack per-patch instance data (one per visible patch, in patch order —
-        // `patch.tile` indexes the source tile directly, so instance index i is
-        // always patch i and the two can never drift apart).
-        let res = terrain.tile_resolution.max(2) as f32;
+        // Pack per-patch instance data into ONE buffer, terrain-major then patch
+        // order — `patch.tile` indexes its own terrain's tile list directly, so
+        // global instance index i is always the i-th patch of the same walk the
+        // draw loop performs, and the two can never drift apart.
         let origin = &frame.view.origin;
-        let mut raw: Vec<PatchRaw> = Vec::with_capacity(patches.len());
-        for p in &patches {
-            let tile = &terrain.tiles[p.tile];
-            // A coarse page covers 2^lod × the level-0 span; the skirt depth (and
-            // the cull margin above) scale with it, which is what keeps the
-            // fine↔coarse seam sealed (see the module docs).
-            let span = terrain.tile_span_at(p.key.lod) as f32;
-            let o = origin.to_render(tile.origin);
-            let (hmin, hmax) = tile.height_bounds;
-            let skirt = (hmax - hmin).abs().max(span * 0.05).max(1.0);
-            raw.push(PatchRaw {
-                o_span: [o.x, o.y, o.z, span],
-                params: [p.morph, cells_at_lod(p.mesh_lod) as f32, res, skirt],
-            });
+        let mut raw: Vec<PatchRaw> = Vec::with_capacity(patches.iter().map(Vec::len).sum());
+        for (terrain, patches) in terrains.iter().zip(&patches) {
+            let res = terrain.tile_resolution.max(2) as f32;
+            for p in patches {
+                let tile = &terrain.tiles[p.tile];
+                // A coarse page covers 2^lod × the level-0 span; the skirt depth
+                // (and the cull margin above) scale with it, which is what keeps
+                // the fine↔coarse seam sealed (see the module docs).
+                let span = terrain.tile_span_at(p.key.lod) as f32;
+                let o = origin.to_render(tile.origin);
+                let (hmin, hmax) = tile.height_bounds;
+                let skirt = (hmax - hmin).abs().max(span * 0.05).max(1.0);
+                raw.push(PatchRaw {
+                    o_span: [o.x, o.y, o.z, span],
+                    params: [p.morph, cells_at_lod(p.mesh_lod) as f32, res, skirt],
+                });
+            }
         }
         if raw.is_empty() {
             return;
@@ -1001,20 +1069,34 @@ impl RenderNode for TerrainNode {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
-        pass.set_bind_group(2, &self.material_bg, &[]);
         pass.set_bind_group(3, &env_bg, &[]);
         pass.set_vertex_buffer(1, inst_buf.slice(..));
 
-        for (idx, patch) in patches.iter().enumerate() {
-            let Some(tex) = self.textures.get(&patch.key) else {
-                continue;
-            };
-            let mesh = &self.lod_meshes[patch.mesh_lod.min(TERRAIN_LOD_COUNT - 1) as usize];
-            pass.set_bind_group(1, &tex.bind_group, &[]);
-            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-            let i = idx as u32;
-            pass.draw_indexed(0..mesh.index_count, 0, i..i + 1);
+        // The instance cursor advances once per patch **whether or not** the patch
+        // draws, so it stays in lockstep with the packing walk above; a patch whose
+        // texture is missing (evicted between plan and draw) is skipped, never
+        // shifted onto another patch's instance.
+        let mut idx: u32 = 0;
+        for (terrain, patches) in terrains.iter().zip(&patches) {
+            let material = self.materials.get(&terrain.id);
+            if let Some(m) = material {
+                pass.set_bind_group(2, &m.bind_group, &[]);
+            }
+            for patch in patches {
+                let i = idx;
+                idx += 1;
+                if material.is_none() {
+                    continue;
+                }
+                let Some(tex) = self.textures.get(&(terrain.id, patch.key)) else {
+                    continue;
+                };
+                let mesh = &self.lod_meshes[patch.mesh_lod.min(TERRAIN_LOD_COUNT - 1) as usize];
+                pass.set_bind_group(1, &tex.bind_group, &[]);
+                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.index_count, 0, i..i + 1);
+            }
         }
     }
 }
@@ -1045,7 +1127,13 @@ mod tests {
     /// A terrain over an explicit residency set (key order preserved), stamped
     /// `1` per tile.
     fn terrain_of(keys: impl IntoIterator<Item = TerrainTileKey>) -> RenderTerrain {
+        terrain_of_id(0, keys)
+    }
+
+    /// [`terrain_of`] with an explicit [`RenderTerrain::id`] (P16.6).
+    fn terrain_of_id(id: u64, keys: impl IntoIterator<Item = TerrainTileKey>) -> RenderTerrain {
         RenderTerrain {
+            id,
             tile_resolution: RES,
             meters_per_sample: MPS,
             tiles: keys.into_iter().map(|k| tile_at(k, 1)).collect(),
@@ -1558,15 +1646,15 @@ mod tests {
     }
 
     /// The cache state a plan is computed against, from `(key, version)` pairs at
-    /// the fixture resolution.
+    /// the fixture resolution, all under terrain id `0`.
     fn cache_of(
         entries: impl IntoIterator<Item = (TerrainTileKey, u64)>,
-    ) -> BTreeMap<TerrainTileKey, CachedTile> {
+    ) -> BTreeMap<TileCacheKey, CachedTile> {
         entries
             .into_iter()
             .map(|(k, version)| {
                 (
-                    k,
+                    (0, k),
                     CachedTile {
                         version,
                         resolution: RES,
@@ -1574,6 +1662,12 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// The plan's keys with the terrain half dropped — the single-terrain shape
+    /// the assertions below read most naturally.
+    fn keys_of(v: &[TileCacheKey]) -> Vec<TerrainTileKey> {
+        v.iter().map(|&(_, k)| k).collect()
     }
 
     #[test]
@@ -1585,34 +1679,38 @@ mod tests {
         let keys: Vec<_> = terrain.tiles.iter().map(|t| t.key).collect();
 
         // Cold cache ⇒ everything uploads.
-        let plan = plan_tile_cache(&BTreeMap::new(), |c: &CachedTile| *c, &terrain);
-        assert_eq!(plan.upload, keys);
+        let plan = plan_tile_cache(
+            &BTreeMap::new(),
+            |c: &CachedTile| *c,
+            std::slice::from_ref(&terrain),
+        );
+        assert_eq!(keys_of(&plan.upload), keys);
         assert!(plan.evict.is_empty());
 
         // Warm, in sync ⇒ nothing at all moves.
         let warm = cache_of(terrain.tile_versions());
-        let plan = plan_tile_cache(&warm, |c| *c, &terrain);
+        let plan = plan_tile_cache(&warm, |c| *c, std::slice::from_ref(&terrain));
         assert_eq!(plan, TileCachePlan::default());
 
         // Sculpt ONE tile (its stamp advances) ⇒ exactly that tile re-uploads.
         terrain.tiles[2].version = 99;
-        let plan = plan_tile_cache(&warm, |c| *c, &terrain);
-        assert_eq!(plan.upload, vec![keys[2]]);
+        let plan = plan_tile_cache(&warm, |c| *c, std::slice::from_ref(&terrain));
+        assert_eq!(keys_of(&plan.upload), vec![keys[2]]);
         assert!(plan.evict.is_empty());
 
         // A projected stamp of 0 is "no stamp" — never a cache hit, even when the
         // cached entry also reads 0.
         let mut unstamped = flat_terrain(1);
         unstamped.tiles[0].version = 0;
-        let plan = plan_tile_cache(&cache_of([(keys[0], 0)]), |c| *c, &unstamped);
-        assert_eq!(plan.upload, vec![keys[0]]);
+        let plan = plan_tile_cache(&cache_of([(keys[0], 0)]), |c| *c, &[unstamped]);
+        assert_eq!(keys_of(&plan.upload), vec![keys[0]]);
 
         // A resolution change invalidates the cached textures on its own (this
         // cache is rebuilt from the *current* stamps, so nothing else is stale).
         let mut resized = cache_of(terrain.tile_versions());
-        resized.get_mut(&keys[1]).unwrap().resolution = RES * 2;
-        let plan = plan_tile_cache(&resized, |c| *c, &terrain);
-        assert_eq!(plan.upload, vec![keys[1]]);
+        resized.get_mut(&(0, keys[1])).unwrap().resolution = RES * 2;
+        let plan = plan_tile_cache(&resized, |c| *c, std::slice::from_ref(&terrain));
+        assert_eq!(keys_of(&plan.upload), vec![keys[1]]);
     }
 
     #[test]
@@ -1624,10 +1722,10 @@ mod tests {
         // the survivor neither uploads nor moves.
         let kept = TerrainTileKey::lod0((1, 1));
         let shrunk = terrain_of([kept]);
-        let plan = plan_tile_cache(&warm, |c| *c, &shrunk);
+        let plan = plan_tile_cache(&warm, |c| *c, &[shrunk]);
         assert!(plan.upload.is_empty(), "{plan:?}");
         assert_eq!(
-            plan.evict,
+            keys_of(&plan.evict),
             vec![
                 TerrainTileKey::lod0((0, 0)),
                 TerrainTileKey::lod0((0, 1)),
@@ -1638,18 +1736,95 @@ mod tests {
 
         // Level-0 and coarse pages of the same ground cache independently.
         let mixed = terrain_of([TerrainTileKey::lod0((0, 0)), TerrainTileKey::new(1, (0, 0))]);
-        let plan = plan_tile_cache(&BTreeMap::new(), |c: &CachedTile| *c, &mixed);
+        let plan = plan_tile_cache(&BTreeMap::new(), |c: &CachedTile| *c, &[mixed]);
         assert_eq!(
-            plan.upload,
+            keys_of(&plan.upload),
             vec![TerrainTileKey::lod0((0, 0)), TerrainTileKey::new(1, (0, 0))]
         );
 
         // A malformed page is never uploaded, and never kept.
         let mut broken = flat_terrain(1);
         broken.tiles[0].heights.truncate(3);
-        let plan = plan_tile_cache(&warm, |c| *c, &broken);
+        let plan = plan_tile_cache(&warm, |c| *c, &[broken]);
         assert!(plan.upload.is_empty());
         assert_eq!(plan.evict.len(), 4, "including the malformed tile's cache");
+    }
+
+    /// **P16.6 — two terrains sharing tile coordinates never share cache slots.**
+    ///
+    /// The single-terrain cache was keyed by `TerrainTileKey` alone. Two terrains
+    /// are anchored in their own entities' frames, so tile `(0,0)` of each is a
+    /// perfectly ordinary collision — under the old key one would have overwritten
+    /// the other's height texels every frame, and the frame would have drawn
+    /// terrain A's ground under terrain B.
+    #[test]
+    fn two_terrains_cache_the_same_coordinate_independently() {
+        let a = terrain_of_id(7, [TerrainTileKey::lod0((0, 0))]);
+        let b = terrain_of_id(9, [TerrainTileKey::lod0((0, 0))]);
+
+        // Cold: both upload, terrain-major.
+        let plan = plan_tile_cache(
+            &BTreeMap::new(),
+            |c: &CachedTile| *c,
+            std::slice::from_ref(&a),
+        );
+        assert_eq!(plan.upload, vec![(7, TerrainTileKey::lod0((0, 0)))]);
+        let plan = plan_tile_cache(
+            &BTreeMap::new(),
+            |c: &CachedTile| *c,
+            &[a.clone(), b.clone()],
+        );
+        assert_eq!(
+            plan.upload,
+            vec![
+                (7, TerrainTileKey::lod0((0, 0))),
+                (9, TerrainTileKey::lod0((0, 0))),
+            ]
+        );
+
+        // Warm from A alone: A hits, B still uploads — the collision the terrain
+        // half of the key exists to prevent.
+        let warm: BTreeMap<TileCacheKey, CachedTile> = [(
+            (7, TerrainTileKey::lod0((0, 0))),
+            CachedTile {
+                version: 1,
+                resolution: RES,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let plan = plan_tile_cache(&warm, |c| *c, &[a.clone(), b.clone()]);
+        assert_eq!(plan.upload, vec![(9, TerrainTileKey::lod0((0, 0)))]);
+        assert!(plan.evict.is_empty());
+
+        // Terrain A leaving the scene evicts exactly A's pages.
+        let plan = plan_tile_cache(&warm, |c| *c, &[b]);
+        assert_eq!(plan.evict, vec![(7, TerrainTileKey::lod0((0, 0)))]);
+
+        // …and an empty scene evicts everything.
+        let plan = plan_tile_cache(&warm, |c| *c, &[]);
+        assert_eq!(plan.evict, vec![(7, TerrainTileKey::lod0((0, 0)))]);
+        assert!(plan.upload.is_empty());
+    }
+
+    /// Two terrains at different resolutions each plan against **their own**
+    /// `tile_resolution` — the field that used to be read once, from "the" terrain.
+    #[test]
+    fn each_terrain_plans_against_its_own_resolution() {
+        let a = terrain_of_id(1, [TerrainTileKey::lod0((0, 0))]);
+        let mut b = terrain_of_id(2, [TerrainTileKey::lod0((0, 0))]);
+        // B is a 4² terrain whose tile carries 4² heights; under A's 16² rule it
+        // would look malformed and silently never draw.
+        b.tile_resolution = 4;
+        b.tiles[0].heights = vec![0.0; 16];
+        let plan = plan_tile_cache(&BTreeMap::new(), |c: &CachedTile| *c, &[a, b]);
+        assert_eq!(
+            plan.upload,
+            vec![
+                (1, TerrainTileKey::lod0((0, 0))),
+                (2, TerrainTileKey::lod0((0, 0))),
+            ]
+        );
     }
 
     /// Switching levels must invalidate the cache even though the tile *keys* are
@@ -1679,13 +1854,13 @@ mod tests {
 
         let warm = cache_of(level_a.tile_versions());
         assert_eq!(
-            plan_tile_cache(&warm, |c| *c, &level_a),
+            plan_tile_cache(&warm, |c| *c, std::slice::from_ref(&level_a)),
             TileCachePlan::default(),
             "the level it was filled from is a clean cache hit"
         );
-        let plan = plan_tile_cache(&warm, |c| *c, &level_b);
+        let plan = plan_tile_cache(&warm, |c| *c, std::slice::from_ref(&level_b));
         assert_eq!(
-            plan.upload,
+            keys_of(&plan.upload),
             level_b.tiles.iter().map(|t| t.key).collect::<Vec<_>>(),
             "every tile of the new level must re-upload"
         );

@@ -34,6 +34,9 @@ inf export --project samples/<name> --out /tmp/<name>-dist
 | [`physics-playground`](physics-playground/) | P12 (Physics) | Box stacks, motors, ropes, CCD, ragdolls, collision layers + spatial audio. |
 | [`vgeom-demo`](vgeom-demo/) | P13 (Virtual geometry) | A 10M+ source-triangle scene via one instanced dense mesh + meshlet culling. |
 | [`mods/`](mods/) | P14.5 (Modding) | A sandboxed **WASM mod** (`spinner`) — safe, no-recompile end-user extensibility. |
+| [`streamed-terrain`](streamed-terrain/) | P16.3 (Terrain streaming) | A 256 m heightfield living entirely in a `.inf_terrain`, paging by camera — and the sim/render want split that keeps the camera out of the fixed step. |
+| [`partitioned-world`](partitioned-world/) | P16.5 (World partition) | A 4×4 grid of 128 m cells whose entities spawn/despawn around a `StreamingSource`, plus the persistent cell. |
+| [`phase16-world`](phase16-world/) | **P16 (the phase gate)** | The composed world: a **wizard-imported** streamed terrain over 8.2 km, a partition on top of it, a **second inline terrain**, and the residency/step budgets. |
 
 ## Project templates
 

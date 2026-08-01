@@ -402,7 +402,9 @@ fn make_streaming_terrain_project(root: &Path) -> AssetId {
     // image (never `inf_asset::encode` — a length prefix would misalign tiles).
     let src = streaming_terrain();
     let pyramid = inf_terrain::build_pyramid(&src, inf_terrain::PyramidOptions::default());
-    let asset = inf_terrain::build_terrain_asset(&src, &pyramid).unwrap();
+    let asset =
+        inf_terrain::build_terrain_asset(&src, &pyramid, inf_terrain::PyramidOptions::default())
+            .unwrap();
     let terrain_id = AssetId(uuid::Uuid::from_u128(0x1603_0100));
     let terrain_path = content.join("World.inf_terrain");
     std::fs::write(&terrain_path, asset.as_bytes()).unwrap();
@@ -544,15 +546,19 @@ fn a_corrupt_terrain_asset_fails_the_cook() {
     //   3. a directory entry pointing past the end of the payload.
     let src = streaming_terrain();
     let pyramid = inf_terrain::build_pyramid(&src, inf_terrain::PyramidOptions::default());
-    let good = inf_terrain::build_terrain_asset(&src, &pyramid).unwrap();
+    let good =
+        inf_terrain::build_terrain_asset(&src, &pyramid, inf_terrain::PyramidOptions::default())
+            .unwrap();
     let image = good.as_bytes();
 
     let framed = bincode::serde::encode_to_vec(image, bincode::config::standard()).unwrap();
-    let truncated = image[..80].to_vec();
+    // Mid-directory: past the fixed header (v2: 128 B), inside the first entry.
+    let hlen = inf_terrain::HEADER_LEN_V2 as usize;
+    let truncated = image[..hlen + 8].to_vec();
     let oob = {
         let mut b = image.to_vec();
         // First directory entry's offset field → past the end.
-        b[64 + 16..64 + 24].copy_from_slice(&u64::MAX.to_le_bytes());
+        b[hlen + 16..hlen + 24].copy_from_slice(&u64::MAX.to_le_bytes());
         b
     };
 

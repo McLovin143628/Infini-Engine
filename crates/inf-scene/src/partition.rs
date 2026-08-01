@@ -679,6 +679,69 @@ pub fn streamed_actors(plan: &PartitionPlan) -> Vec<StreamedActor> {
     out.into_iter().collect()
 }
 
+/// A `Terrain` entity that landed in a **streamed** cell — and therefore takes
+/// the ground with it when that cell deactivates.
+///
+/// See [`streamed_terrains`] for why this is a diagnostic rather than a fixup.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StreamedTerrain {
+    /// The entity carrying the `Terrain` component.
+    pub entity: Uuid,
+    /// The streamed cell it was binned into.
+    pub cell: CellKey,
+    /// Its `.inf_terrain` asset GUID, if it streams from one (`None` = inline).
+    pub asset: Option<Uuid>,
+}
+
+/// Every entity in a **streamed** cell that carries a `Terrain` component.
+///
+/// # Why this has to be a cook diagnostic
+///
+/// A terrain "occupies space" ([`occupies_space`]) — it has a transform and it is
+/// visible, so by the ordinary rule it bins into the one cell containing its
+/// entity origin. But a heightfield is not *at* its origin: it spans kilometres
+/// from it, and a streamed one spans as much of the world as its `.inf_terrain`
+/// covers. So the cell that owns it is a single 128 m–2 km square, and the moment
+/// the player walks out of that square **the ground despawns under them** — the
+/// terrain entity is gone, `terrain.height_at` reads the unauthored `0.0`
+/// everywhere, and the whole world renders as sky. Nothing crashes; the level
+/// simply stops having a floor.
+///
+/// That is not an exotic authoring mistake either: enabling partitioning on a
+/// level that already has terrain produces it every single time, with no symptom
+/// until somebody walks far enough.
+///
+/// v1 does **not** auto-promote a terrain to the persistent cell, for the same
+/// reason [`streamed_actors`] does not promote a Blueprint actor: a fixup here
+/// would make residency depend on which *components* an entity happens to carry,
+/// so a level's memory ceiling would move silently as content is added. It is
+/// also not always wrong to stream a terrain — a small inline patch of ground
+/// genuinely local to one cell is a legitimate (if unusual) thing to author. The
+/// cook says what will happen, names the remedy, and the author decides: mark it
+/// [`AlwaysLoaded`](inf_ecs::components::AlwaysLoaded).
+///
+/// Sorted + deduplicated (by `BTreeSet`), so a cook report stays deterministic.
+///
+/// **This diagnostic narrows the day terrain entities carry their real world
+/// extent into the partitioner** — at which point a terrain could be binned by its
+/// footprint (or split across cells) instead of by its origin, and only a terrain
+/// that really is cell-local would stream.
+pub fn streamed_terrains(plan: &PartitionPlan) -> Vec<StreamedTerrain> {
+    let mut out: BTreeSet<StreamedTerrain> = BTreeSet::new();
+    for (&coord, list) in &plan.cells {
+        for e in list {
+            if let Some(t) = &e.terrain {
+                out.insert(StreamedTerrain {
+                    entity: e.guid,
+                    cell: CellKey::grid(coord),
+                    asset: t.asset,
+                });
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
 // ── errors ──────────────────────────────────────────────────────────────────
 
 /// A failure building or reading a `.inf_part` payload.
@@ -1410,6 +1473,13 @@ mod tests {
             camera: Some(Camera::default()),
             ..rec(1, "C", (0.0, 0.0, 0.0))
         }));
+        // A terrain occupies space — and that is exactly why `streamed_terrains`
+        // exists: it bins by its ORIGIN while its heightfield spans kilometres, so
+        // an unmarked terrain in a partitioned level takes the ground with it.
+        assert!(occupies_space(&RuntimeEntity {
+            terrain: Some(inf_ecs::components::Terrain::default()),
+            ..rec(1, "T", (0.0, 0.0, 0.0))
+        }));
     }
 
     #[test]
@@ -1497,6 +1567,68 @@ mod tests {
         );
         assert!(streamed_actors(&plan).is_empty());
         assert!(streamed_actors(&PartitionPlan::default()).is_empty());
+    }
+
+    /// A `Terrain` on a **streamed** entity is reported — a heightfield spans far
+    /// more world than the cell holding its origin, so streaming it out takes the
+    /// ground with it. An `AlwaysLoaded` terrain is silent, which is what every
+    /// committed sample does.
+    #[test]
+    fn streamed_terrains_are_reported_and_always_loaded_ones_are_not() {
+        let asset = guid(0xAA);
+        let entities = vec![
+            // The dangerous shape: a terrain with no marker at all.
+            RuntimeEntity {
+                terrain: Some(inf_ecs::components::Terrain {
+                    asset: Some(asset),
+                    ..Default::default()
+                }),
+                mesh: None,
+                ..rec(1, "Terrain", (10.0, 0.0, 10.0))
+            },
+            // An INLINE terrain, also unmarked — same hazard, different source.
+            RuntimeEntity {
+                terrain: Some(inf_ecs::components::Terrain::default()),
+                mesh: None,
+                ..rec(2, "Inline Terrain", (400.0, 0.0, 10.0))
+            },
+            // Marked persistent — the sanctioned authoring, and silent.
+            RuntimeEntity {
+                terrain: Some(inf_ecs::components::Terrain::default()),
+                always_loaded: Some(AlwaysLoaded),
+                mesh: None,
+                ..rec(3, "Good Terrain", (700.0, 0.0, 10.0))
+            },
+            // A streamed prop with no terrain — not our story.
+            prop(4, (10.0, 0.0, 10.0)),
+        ];
+        let plan = partition_entities(&entities, &settings(256.0));
+        let reported = streamed_terrains(&plan);
+
+        assert_eq!(reported.len(), 2, "{reported:?}");
+        // Sorted + deduplicated by `BTreeSet`, so the report is deterministic.
+        assert_eq!(reported[0].entity, guid(1));
+        assert_eq!(reported[0].cell, CellKey::grid((0, 0)));
+        assert_eq!(reported[0].asset, Some(asset), "the .inf_terrain is named");
+        assert_eq!(reported[1].entity, guid(2));
+        assert_eq!(reported[1].cell, CellKey::grid((1, 0)));
+        assert_eq!(reported[1].asset, None, "an inline terrain has no asset");
+
+        // Reporting does not change the plan — v1 never auto-promotes, because
+        // residency must not depend on which components an entity carries.
+        assert!(plan.cells[&(0, 0)].iter().any(|e| e.guid == guid(1)));
+        assert!(plan.persistent.iter().any(|e| e.guid == guid(3)));
+    }
+
+    /// A level with no terrain — and an unpartitioned one — report nothing.
+    #[test]
+    fn streamed_terrains_is_silent_without_terrain() {
+        let plan = partition_entities(
+            &[prop(1, (10.0, 0.0, 10.0)), prop(2, (400.0, 0.0, 10.0))],
+            &settings(256.0),
+        );
+        assert!(streamed_terrains(&plan).is_empty());
+        assert!(streamed_terrains(&PartitionPlan::default()).is_empty());
     }
 
     // ── the container ───────────────────────────────────────────────────────
