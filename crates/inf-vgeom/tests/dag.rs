@@ -133,7 +133,9 @@ fn assert_watertight(mesh: &VgeomMesh, meshlets: &[usize], expected_boundary: &[
     for (&e, &c) in &counts {
         assert!(
             c == 1 || c == 2,
-            "edge {e:?} used {c} times — non-manifold selection"
+            "edge {e:?} used {c} times — non-manifold selection. THE BUILDER BROKE ITS \
+             GUARANTEE (the source mesh's manifoldness is asserted separately, by \
+             `assert_source_is_manifold`, so this is not a bad fixture)"
         );
     }
     assert_eq!(
@@ -141,6 +143,89 @@ fn assert_watertight(mesh: &VgeomMesh, meshlets: &[usize], expected_boundary: &[
         expected_boundary,
         "selected surface boundary differs from the mesh rim (crack or hole)"
     );
+}
+
+/// The **premise** of every assertion in [`assert_watertight`]: the *source* mesh
+/// is manifold, so "≤ 2 triangles per edge" is a property the builder can be held
+/// to rather than an accident of the fixture.
+///
+/// Stated as its own assertion because the difference between "the input broke the
+/// premise" and "the builder broke the guarantee" is exactly what a macOS-only
+/// failure of this suite cost to work out — the generic message left both live, and
+/// the fixture had just been rewritten (the `psin`/`pcos` port), so the fixture was
+/// the natural suspect. It was not: the builder had an input-dependent hole and
+/// arm64's `meshopt` clusterization walked into it. Assert the premise up front and
+/// that fork is decided before the sweep starts.
+fn assert_source_is_manifold(positions: &[[f32; 3]], indices: &[u32]) {
+    let mut seen_pos: BTreeMap<[u32; 3], u32> = BTreeMap::new();
+    for p in positions {
+        *seen_pos
+            .entry([p[0].to_bits(), p[1].to_bits(), p[2].to_bits()])
+            .or_insert(0) += 1;
+    }
+    assert!(
+        seen_pos.values().all(|&c| c == 1),
+        "INPUT BROKE THE PREMISE: the fixture has coincident vertex positions, which \
+         weld into a non-manifold mesh — fix the generator, not the builder"
+    );
+
+    let mut tris: BTreeMap<[u32; 3], u32> = BTreeMap::new();
+    let mut counts: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    for t in indices.chunks_exact(3) {
+        assert!(
+            t[0] != t[1] && t[1] != t[2] && t[0] != t[2],
+            "INPUT BROKE THE PREMISE: degenerate source triangle {t:?}"
+        );
+        let mut sorted = [t[0], t[1], t[2]];
+        sorted.sort_unstable();
+        *tris.entry(sorted).or_insert(0) += 1;
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            *counts.entry(edge_key(a, b)).or_insert(0) += 1;
+        }
+    }
+    assert!(
+        tris.values().all(|&c| c == 1),
+        "INPUT BROKE THE PREMISE: the fixture has duplicate source triangles"
+    );
+    for (&e, &c) in &counts {
+        assert!(
+            c <= 2,
+            "INPUT BROKE THE PREMISE: source edge {e:?} used {c} times — the fixture \
+             is non-manifold, so the builder was never promised a manifold cut"
+        );
+    }
+}
+
+/// Every distinct cut of `mesh`, checked. The selection is constant on
+/// `[b, b')` between consecutive distinct meshlet errors — every `parent_error` is
+/// some meshlet's `error`, or `+∞` — so the breakpoints *are* the complete set of
+/// selections the runtime can make, and sweeping them is exhaustive rather than
+/// dense-and-hopeful.
+fn assert_cut_invariant_everywhere(mesh: &VgeomMesh, what: &str) {
+    let lod0 = lod0_indices(mesh);
+    let rim = boundary_of(&edge_counts(mesh, lod0.iter().copied()));
+
+    let mut thresholds: Vec<f32> = mesh.meshlets.iter().map(|m| m.error).collect();
+    thresholds.push(0.0);
+    thresholds.sort_by(|a, b| a.partial_cmp(b).expect("meshlet errors are finite"));
+    thresholds.dedup();
+
+    for t in thresholds {
+        let sel = selected_indices(mesh, t);
+        assert!(!sel.is_empty(), "{what}: threshold {t} selected nothing");
+        let counts = edge_counts(mesh, sel.iter().copied());
+        for (&e, &c) in &counts {
+            assert!(
+                c == 1 || c == 2,
+                "{what}: t={t} edge {e:?} used {c} times — non-manifold cut"
+            );
+        }
+        assert_eq!(
+            boundary_of(&counts),
+            rim,
+            "{what}: t={t} boundary drifted from the mesh rim (crack or hole)"
+        );
+    }
 }
 
 fn selected_indices(mesh: &VgeomMesh, threshold: f32) -> Vec<usize> {
@@ -279,6 +364,9 @@ fn dag_errors_are_strictly_monotonic() {
 #[test]
 fn cut_invariant_holds_at_every_threshold() {
     let (p, n, uv, idx) = wavy_grid(100);
+    // The premise first: everything below asserts "≤ 2 triangles per edge", which
+    // only means anything if the *input* had that property.
+    assert_source_is_manifold(&p, &idx);
     let mesh = build_vgeom(&p, &n, &uv, &idx, BuildParams::default());
 
     // The mesh rim: single-used edges of the finest (LOD-0) full surface.
@@ -319,6 +407,81 @@ fn cut_invariant_holds_at_every_threshold() {
         assert!(!sel.is_empty(), "threshold {t} selected nothing");
         assert_watertight(&mesh, &sel, &rim);
     }
+}
+
+/// The same invariant, over **many different clusterizations of the same mesh**.
+///
+/// `cut_invariant_holds_at_every_threshold` above pins one build: the default
+/// parameters, whose `meshopt` clusterization on *this* host. That is one sample of
+/// the property the builder actually claims — "the cut is watertight and
+/// non-overlapping for whatever `build_meshlets` returns" — and it is not a
+/// hypothetical distinction, because `meshopt` is native C++ whose clusterizer and
+/// simplifier take different float and SIMD paths on arm64 and x86_64. Fed the
+/// byte-identical vertices `test_support` guarantees, the two architectures build
+/// **different DAGs**, and the builder used to be correct on one and wrong on the
+/// other: this suite went green on Windows and Linux while asserting
+/// `edge (6754, 6954) used 4 times` on macOS arm64.
+///
+/// Varying `BuildParams` varies the clusterization and the grouping on *any* host,
+/// which is how that arm64-only failure was reproduced on x86_64. Every entry below
+/// is a witness — each one broke the pre-fix builder here, with the same
+/// four-triangles-on-one-edge signature. (`build.rs`'s
+/// `cut_invariant_survives_adversarial_clusterings` attacks the same property from
+/// the other side, with synthetic partitions and no `meshopt` clusterizer at all.)
+#[test]
+fn cut_invariant_holds_under_many_clusterizations() {
+    #[rustfmt::skip]
+    let cases: &[(usize, usize, usize, f32, usize, f32)] = &[
+        // n,  max_verts, max_tris, cone_weight, group_size, target_ratio
+        (40,   32,  40,  0.0,   2, 0.5),
+        (40,   48,  64,  0.5,   8, 0.7),
+        (50,   64, 124,  0.0,   8, 0.7),
+        (50,   64, 124,  0.5,   2, 0.5),
+        (50,   32,  40,  0.0,   8, 0.7),
+        (50,  255, 512,  0.25,  4, 0.7),
+        (50,   48,  64,  0.0,  12, 0.5),
+        (50,   48,  64,  0.5,   4, 0.3),
+        (60,   64, 124,  0.25,  4, 0.3),
+        (60,   32,  40,  0.0,   8, 0.3),
+        (60,   32,  40,  0.25,  2, 0.5),
+        (60,   32,  40,  0.25,  2, 0.3),
+        (60,   32,  40,  0.25,  4, 0.3),
+    ];
+
+    let mut multi_level = 0usize;
+    for &(n, max_vertices, max_triangles, cone_weight, max_group_size, target_ratio) in cases {
+        let (p, nrm, uv, idx) = wavy_grid(n);
+        assert_source_is_manifold(&p, &idx);
+        let mesh = build_vgeom(
+            &p,
+            &nrm,
+            &uv,
+            &idx,
+            BuildParams {
+                max_vertices,
+                max_triangles,
+                cone_weight,
+                max_group_size,
+                target_ratio,
+                max_levels: 16,
+            },
+        );
+        let what = format!(
+            "n={n} mv={max_vertices} mt={max_triangles} cw={cone_weight} \
+             gs={max_group_size} tr={target_ratio}"
+        );
+        assert_cut_invariant_everywhere(&mesh, &what);
+        if mesh.level_count() > 1 {
+            multi_level += 1;
+        }
+    }
+
+    // Anti-vacuity: a case that never coarsens satisfies the invariant for free.
+    assert_eq!(
+        multi_level,
+        cases.len(),
+        "every case must build a multi-level DAG or it gates nothing"
+    );
 }
 
 #[test]

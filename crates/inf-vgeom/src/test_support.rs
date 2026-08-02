@@ -60,6 +60,27 @@
 //! machine and shipped; only the *cook's* own determinism (same platform, same
 //! input, same bytes) is a promise, and that one is gated.
 //!
+//! # And when a macOS-only vgeom failure is *not* the fixture
+//!
+//! Two macOS trips in a row came out of this module, so the third one — `tests/
+//! dag.rs::cut_invariant_holds_at_every_threshold` asserting `edge (6754, 6954)
+//! used 4 times` on arm64 and nowhere else — looked like a third. It was not. The
+//! fixture was manifold, duplicate-free and byte-identical across platforms
+//! exactly as promised; what differed was `meshopt`'s **clusterization**, and the
+//! builder had a hole that only some clusterizations reach (it locks seam
+//! *vertices*, which does not stop a group inventing an edge *between* two of
+//! them). See `build.rs`'s "Why locking the seam vertices is not enough". The same
+//! failure reproduces on x86_64 on ~10 % of ordinary meshes at the default build
+//! parameters, so "arm64-only" was a property of the sample, not of the bug.
+//!
+//! The lesson for this module is narrow but worth writing down: **a portable
+//! fixture makes the input identical, and that is all it makes identical.** When a
+//! vgeom suite fails on one platform, the fork is "did the input break the
+//! premise" versus "did the builder break the guarantee", and the two are cheap to
+//! tell apart — `dag.rs::assert_source_is_manifold` now decides it before the
+//! sweep starts, and a `BuildParams` sweep reproduces a foreign clusterization's
+//! DAG on any host.
+//!
 //! So the rule for every suite built on these fixtures is: **no test may assert a
 //! count, a page ladder or a byte total that was measured on somebody's machine.**
 //! Derive the expectation from the build at runtime; assert shape, monotonicity,

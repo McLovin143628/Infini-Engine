@@ -30,6 +30,49 @@
 //! makes the cut select exactly one meshlet per root-to-leaf path — a complete,
 //! non-overlapping surface at every threshold.
 //!
+//! ## Why locking the seam vertices is not enough (the seam check)
+//!
+//! Step 3's boundary locking is what makes neighbouring groups agree, and it is
+//! *almost* the whole argument — but `meshopt` (like any QEM simplifier) locks
+//! **vertices**, not **edges**, and that gap is a real hole the invariant fell
+//! through. A locked vertex cannot move, yet an *unlocked interior* vertex `u` is
+//! free to collapse **into** a locked seam vertex `s`, and every triangle
+//! `(u, s', x)` it belonged to becomes `(s, s', x)` — **inventing** an edge
+//! `(s, s')` between two seam vertices that the group never had. The neighbouring
+//! group shares exactly those seam vertices, so it can invent the very same edge
+//! (or already own it as an interior edge of its own region), and the union of the
+//! two coarse patches is then non-manifold: one edge carrying **four** triangles,
+//! sometimes the same triangle twice with opposite winding. The per-group border
+//! stays intact throughout, so it is not a crack — it is an *overlap*, and the cut
+//! invariant forbids both.
+//!
+//! Nothing about that is input-specific, which is why it stayed hidden: it needs a
+//! clusterization that hands one group an interior vertex adjacent to two seam
+//! vertices whose chord the neighbour also draws. `meshopt`'s x86_64 clusterizer
+//! happened not to produce one for the default parameters on the P13.1 fixture;
+//! its arm64 clusterizer did, and so does x86_64 at a dozen other parameter
+//! settings (`tests/dag.rs::cut_invariant_holds_under_many_clusterizations`).
+//!
+//! The fix is [`seam_safe`]: after simplifying a group, its output is *accepted*
+//! only if it is manifold, its border is preserved exactly, and no edge between
+//! two seam vertices is used more often than the group's own input used it. Note
+//! what that does **not** say — inventing a chord is not banned outright. It
+//! cannot be: a coarse patch has to retriangulate its interior, and a build that
+//! refuses every invented chord flattens the whole DAG to a single level (measured:
+//! every fixture drops to `levels = 1`). What is banned is inventing an edge
+//! *somebody else may also draw* — one that already exists anywhere in the mesh at
+//! any level (tracked in `seen_edges`), or one a sibling group invents in the same
+//! round (resolved in the level loop, the only place both outputs are visible).
+//!
+//! Since the group input soups partition the level, every seam edge then stays at
+//! its original ≤ 2 uses and an invented edge is claimed once for the whole build,
+//! so the union is manifold **for any clusterization**. A group that fails simply
+//! does not coarsen (its meshlets stay roots), exactly as if `meshopt` had made no
+//! progress — the DAG loses a little depth in that region and stays correct
+//! everywhere. Measured on the fixtures: the default-parameter builds every other
+//! suite depends on are **unchanged**, and the pathological parameter settings that
+//! used to break lose one group each.
+//!
 //! ## Determinism
 //!
 //! The build is a deterministic function of its input: `meshopt` is deterministic
@@ -39,7 +82,7 @@
 //! **in-order collect** makes the result independent of pool size. Two builds of
 //! the same mesh are byte-identical.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use meshopt::{
     build_meshlets, compute_meshlet_bounds, generate_vertex_remap, optimize_vertex_cache,
@@ -135,6 +178,30 @@ struct BuiltMeshlet {
     group: u32,
 }
 
+impl BuiltMeshlet {
+    /// This meshlet's triangles as global vertex triples.
+    fn global_triangles(&self) -> impl Iterator<Item = [u32; 3]> + '_ {
+        self.tris.chunks_exact(3).map(|t| {
+            [
+                self.verts[t[0] as usize],
+                self.verts[t[1] as usize],
+                self.verts[t[2] as usize],
+            ]
+        })
+    }
+
+    /// This meshlet's undirected edges as global vertex pairs (with repeats).
+    fn global_edges(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.global_triangles().flat_map(|t| {
+            [
+                edge_key(t[0], t[1]),
+                edge_key(t[1], t[2]),
+                edge_key(t[2], t[0]),
+            ]
+        })
+    }
+}
+
 /// A group under construction; assembled into a [`Group`] at the end.
 struct BuiltGroup {
     input_level: u8,
@@ -149,7 +216,10 @@ struct BuiltGroup {
 struct GroupJob {
     /// The group's merged triangle soup as global vertex indices.
     combined_index: Vec<u32>,
-    /// Per-(whole-buffer-)vertex lock flags: the group's outer boundary is locked.
+    /// Per-(whole-buffer-)vertex lock flags: this group's **seam** vertices — the
+    /// ones it shares with another group of the same level, plus the ones on the
+    /// level's own open rim. Doubles as the "may be shared" predicate
+    /// [`seam_safe`] tests edges against.
     lock: Vec<bool>,
     /// Simplification target index count (`3 × target triangles`).
     target_index_count: usize,
@@ -161,7 +231,13 @@ struct GroupJob {
 struct GroupResult {
     simplified_index: Vec<u32>,
     group_error: f32,
+    /// Whether this group actually coarsened **and** its output is safe to
+    /// substitute for its input (see [`seam_safe`]). `false` leaves the group's
+    /// meshlets as roots.
     progressed: bool,
+    /// Brand-new seam edges this group's output introduced (empty unless
+    /// `progressed`). The level loop rejects a second group claiming any of them.
+    invented: Vec<(u32, u32)>,
 }
 
 /// Build a meshlet LOD DAG from a mesh's vertex streams + index buffer.
@@ -218,9 +294,35 @@ pub fn build_vgeom(
     let index = optimize_vertex_cache(&index, vertices.len());
 
     // ── LOD 0 ───────────────────────────────────────────────────────────────
-    let mut levels: Vec<Vec<BuiltMeshlet>> = vec![clusterize(&vertices, &index, &params, 0, 0.0)];
+    let level0 = clusterize(&vertices, &index, &params, 0, 0.0);
+    build_dag(vertices, level0, &params)
+}
+
+/// Everything after clusterization: group → simplify → recluster → link, level by
+/// level, then [`assemble`].
+///
+/// Split out of [`build_vgeom`] because this half is **pure Rust** and its
+/// guarantee is supposed to hold for *any* clusterization of the mesh, not just
+/// the one `meshopt`'s native clusterizer produces on the machine that happens to
+/// be cooking. That is exactly what
+/// `tests::cut_invariant_survives_adversarial_clusterings` fuzzes through this
+/// entry point — `meshopt`'s clusterizer is not the same code on arm64 and
+/// x86_64, and a builder hole reachable only through *its* output is still a
+/// builder hole.
+fn build_dag(
+    vertices: Vec<VgeomVertex>,
+    level0: Vec<BuiltMeshlet>,
+    params: &BuildParams,
+) -> VgeomMesh {
+    let mut levels: Vec<Vec<BuiltMeshlet>> = vec![level0];
     let mut groups: Vec<BuiltGroup> = Vec::new();
-    // Which group each BuiltGroup ended up at (index into `groups`).
+    // Every undirected edge that has appeared at *any* level built so far. A group
+    // may invent an edge between two seam vertices (see [`seam_safe`]) only if the
+    // edge is new to the whole mesh, because any edge that already exists somewhere
+    // belongs to a region a mixed-level cut can select alongside this group's
+    // output — which is exactly how the level-4 collision in the P13.1 gate arose.
+    let mut seen_edges: BTreeSet<(u32, u32)> =
+        levels[0].iter().flat_map(|m| m.global_edges()).collect();
     let mut level = 0usize;
 
     while level + 1 < params.max_levels {
@@ -232,18 +334,46 @@ pub fn build_vgeom(
         // Partition this level's meshlets into groups (deterministic greedy).
         let group_members = greedy_group(&levels[level], params.max_group_size);
 
+        // The level's seam vertices: shared between two groups, or on the level's
+        // own open rim. Computed once for the whole level (it is a property of the
+        // partition, not of any one group) and masked per group below.
+        let seam = level_seam(&levels[level], &group_members, vertices.len());
+
         // Prepare per-group simplification jobs (serial, cheap).
         let jobs: Vec<GroupJob> = group_members
             .iter()
             .map(|members| {
-                build_group_job(&levels[level], members, vertices.len(), params.target_ratio)
+                build_group_job(
+                    &levels[level],
+                    members,
+                    &seam,
+                    vertices.len(),
+                    params.target_ratio,
+                )
             })
             .collect();
 
         // The named parallel hot loop (§2.5): simplify every group. `parallel_map`
         // collects in input order, so the result is pool-size-invariant.
-        let results: Vec<GroupResult> =
-            inf_core::parallel_map(jobs, |job| simplify_group(&vertices, job));
+        let mut results: Vec<GroupResult> =
+            inf_core::parallel_map(jobs, |job| simplify_group(&vertices, &seen_edges, job));
+
+        // Two groups may each invent the *same* brand-new seam chord — neither can
+        // see the other's output, so neither `seam_safe` call can rule it out, and
+        // the union would put four triangles on that edge. Resolve it here, where
+        // the whole level is in hand: first group (in index order — deterministic)
+        // keeps the edge, the rest do not coarsen this round.
+        let mut claimed: BTreeSet<(u32, u32)> = BTreeSet::new();
+        for res in results.iter_mut() {
+            if !res.progressed {
+                continue;
+            }
+            if res.invented.iter().any(|e| claimed.contains(e)) {
+                res.progressed = false;
+                continue;
+            }
+            claimed.extend(res.invented.iter().copied());
+        }
 
         // Re-cluster progressed groups into the next level; link the DAG.
         let mut next: Vec<BuiltMeshlet> = Vec::new();
@@ -257,7 +387,7 @@ pub fn build_vgeom(
             let new_meshlets = clusterize(
                 &vertices,
                 &res.simplified_index,
-                &params,
+                params,
                 (level + 1) as u8,
                 res.group_error,
             );
@@ -278,6 +408,7 @@ pub fn build_vgeom(
                 continue;
             }
             any_progress = true;
+            seen_edges.extend(edge_use_counts(&res.simplified_index).into_keys());
             let produced_start_within = next.len();
             let produced_count = new_meshlets.len();
             next.extend(new_meshlets);
@@ -408,18 +539,10 @@ fn build_adjacency(meshlets: &[BuiltMeshlet]) -> BTreeMap<usize, BTreeMap<usize,
     // edge -> set of meshlets touching it.
     let mut edge_owners: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
     for (mi, m) in meshlets.iter().enumerate() {
-        for t in m.tris.chunks_exact(3) {
-            let gv = [
-                m.verts[t[0] as usize],
-                m.verts[t[1] as usize],
-                m.verts[t[2] as usize],
-            ];
-            for &(a, b) in &[(gv[0], gv[1]), (gv[1], gv[2]), (gv[2], gv[0])] {
-                let key = if a < b { (a, b) } else { (b, a) };
-                let owners = edge_owners.entry(key).or_default();
-                if owners.last() != Some(&mi) {
-                    owners.push(mi);
-                }
+        for key in m.global_edges() {
+            let owners = edge_owners.entry(key).or_default();
+            if owners.last() != Some(&mi) {
+                owners.push(mi);
             }
         }
     }
@@ -441,11 +564,67 @@ fn build_adjacency(meshlets: &[BuiltMeshlet]) -> BTreeMap<usize, BTreeMap<usize,
     adjacency
 }
 
-/// Assemble one group's simplification job: gather its triangle soup, compute the
-/// outer-boundary lock, and the simplification target.
+/// The **seam vertices** of one level's grouping: every vertex used by two or more
+/// groups (their shared border), plus every vertex on the level's own open rim.
+///
+/// These are exactly the vertices whose geometry another group — or the mesh's
+/// silhouette — also depends on, so they are the ones simplification must keep
+/// fixed, and (see [`seam_safe`]) the ones an invented edge between is forbidden.
+///
+/// This replaces the older per-group "endpoints of a once-used edge of my soup"
+/// rule. On a manifold level the two sets are identical (a vertex shared with a
+/// neighbour always ends a once-used edge of each side's soup); they differ only
+/// at a *bow-tie* vertex, where two groups meet at a single point with no
+/// once-used edge between them — which the old rule left unlocked and free to
+/// move, i.e. free to crack.
+fn level_seam(
+    meshlets: &[BuiltMeshlet],
+    group_members: &[Vec<usize>],
+    vertex_count: usize,
+) -> Vec<bool> {
+    let mut seam = vec![false; vertex_count];
+
+    // (a) vertices claimed by more than one group.
+    let mut owner: Vec<u32> = vec![u32::MAX; vertex_count];
+    // (b) the level's open rim: edges used exactly once across the whole level.
+    let mut edge_count: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+
+    for (gi, members) in group_members.iter().enumerate() {
+        let gi = gi as u32;
+        for &mi in members {
+            let m = &meshlets[mi];
+            for gv in m.global_triangles() {
+                for v in gv {
+                    let v = v as usize;
+                    if owner[v] == u32::MAX {
+                        owner[v] = gi;
+                    } else if owner[v] != gi {
+                        seam[v] = true;
+                    }
+                }
+                for (a, b) in [(gv[0], gv[1]), (gv[1], gv[2]), (gv[2], gv[0])] {
+                    *edge_count.entry(edge_key(a, b)).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    for ((a, b), c) in edge_count {
+        if c == 1 {
+            seam[a as usize] = true;
+            seam[b as usize] = true;
+        }
+    }
+    seam
+}
+
+/// Assemble one group's simplification job: gather its triangle soup, mask the
+/// level's seam flags down to the vertices this group actually uses, and compute
+/// the simplification target.
 fn build_group_job(
     meshlets: &[BuiltMeshlet],
     members: &[usize],
+    seam: &[bool],
     vertex_count: usize,
     target_ratio: f32,
 ) -> GroupJob {
@@ -454,13 +633,19 @@ fn build_group_job(
     for &mi in members {
         let m = &meshlets[mi];
         max_child_error = max_child_error.max(m.error);
-        for t in m.tris.chunks_exact(3) {
-            combined_index.push(m.verts[t[0] as usize]);
-            combined_index.push(m.verts[t[1] as usize]);
-            combined_index.push(m.verts[t[2] as usize]);
+        for gv in m.global_triangles() {
+            combined_index.extend_from_slice(&gv);
         }
     }
-    let lock = boundary_lock(&combined_index, vertex_count);
+    // Masked to this group's own vertices: a lock flag on a vertex this group does
+    // not reference is meaningless to `meshopt` and would only widen what
+    // `seam_safe` calls "shared".
+    let mut lock = vec![false; vertex_count];
+    for &v in &combined_index {
+        if seam[v as usize] {
+            lock[v as usize] = true;
+        }
+    }
     let tri_count = combined_index.len() / 3;
     let target_tri = ((tri_count as f32 * target_ratio).round() as usize).max(1);
     GroupJob {
@@ -471,32 +656,115 @@ fn build_group_job(
     }
 }
 
-/// Lock the vertices on the *outer boundary* of a triangle soup: an edge used by
-/// exactly one triangle is a boundary edge, and both its endpoints are locked.
-/// Locking a group's boundary keeps it fixed across simplification so neighboring
-/// groups (which share those vertices) stay crack-free.
-fn boundary_lock(index: &[u32], vertex_count: usize) -> Vec<bool> {
-    let mut edge_count: BTreeMap<(u32, u32), u32> = BTreeMap::new();
-    for t in index.chunks_exact(3) {
-        for &(a, b) in &[(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
-            let key = if a < b { (a, b) } else { (b, a) };
-            *edge_count.entry(key).or_insert(0) += 1;
-        }
+/// Undirected edge key.
+#[inline]
+fn edge_key(a: u32, b: u32) -> (u32, u32) {
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
     }
-    let mut lock = vec![false; vertex_count];
-    for ((a, b), c) in edge_count {
-        if c == 1 {
-            lock[a as usize] = true;
-            lock[b as usize] = true;
-        }
-    }
-    lock
 }
 
-/// Simplify one group with its boundary locked. Returns the simplified index
-/// buffer, the cumulative (strictly monotone) group error, and whether it made
-/// progress (fewer triangles than the input).
-fn simplify_group(vertices: &[VgeomVertex], job: GroupJob) -> GroupResult {
+/// Undirected edge → incident-triangle count over a triangle-list index buffer.
+fn edge_use_counts(index: &[u32]) -> BTreeMap<(u32, u32), u32> {
+    let mut counts: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    for t in index.chunks_exact(3) {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            *counts.entry(edge_key(a, b)).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// Whether a group's simplified soup may be **substituted** for its input soup
+/// without breaking the union — and if so, which brand-new seam edges it brought
+/// with it (the level loop de-duplicates those across groups).
+///
+/// The conditions:
+///
+/// 1. **Manifold, non-degenerate output** — no edge carries more than two of the
+///    group's own triangles, and no triangle is degenerate.
+/// 2. **Border preserved exactly** — the once-used edges of the output are the
+///    once-used edges of the input. A lost border edge is a hole, a gained one is
+///    a crack; either way the neighbouring group no longer matches.
+/// 3. **No seam edge used more than the input used it** — for an edge whose
+///    *both* endpoints are seam vertices, `out ≤ in`, and the `in == 0` case
+///    (an **invented** chord) is allowed only when the edge has never existed
+///    anywhere in the mesh at any level built so far.
+///
+/// Condition 3 is the one the old builder was missing. `meshopt` locks vertices,
+/// not edges: collapsing an interior vertex *into* a seam vertex rewrites every
+/// triangle it belonged to and can invent a chord between two seam vertices that
+/// the group never had. Inventing is not itself wrong — the coarse patch has to be
+/// allowed to retriangulate its interior, and forbidding it outright flattens the
+/// whole DAG to one level. It is wrong exactly when *somebody else* also draws
+/// that edge, and the two ways that happens are (a) the edge already exists in
+/// another region, at this or any finer level, which a mixed-level cut can select
+/// beside this group's output — ruled out here by `seen`; and (b) a sibling group
+/// invents the identical chord in the same round — ruled out by the level loop,
+/// which is the only place both outputs are visible.
+///
+/// Soundness: the group input soups partition the level, and an edge with a
+/// non-seam endpoint is private to one group (a non-seam vertex is used by no other
+/// group, by construction of [`level_seam`]). So for pre-existing seam edges
+/// `Σ_groups out ≤ Σ_groups in ≤ 2`; an invented edge is claimed once for the whole
+/// build; and private edges are bounded by condition 1. The union of the accepted
+/// coarse patches stays manifold **whatever the clusterization** — which is the
+/// property the P13.1 cut invariant needs, and the reason this check is not tuned
+/// to any particular mesh.
+fn seam_safe(
+    input: &[u32],
+    output: &[u32],
+    lock: &[bool],
+    seen: &BTreeSet<(u32, u32)>,
+) -> Option<Vec<(u32, u32)>> {
+    if output
+        .chunks_exact(3)
+        .any(|t| t[0] == t[1] || t[1] == t[2] || t[2] == t[0])
+    {
+        return None;
+    }
+    let inc = edge_use_counts(input);
+    let outc = edge_use_counts(output);
+
+    let mut invented: Vec<(u32, u32)> = Vec::new();
+    for (&e, &c) in &outc {
+        if c > 2 {
+            return None;
+        }
+        let (a, b) = e;
+        if !(lock[a as usize] && lock[b as usize]) {
+            continue; // private to this group
+        }
+        let had = inc.get(&e).copied().unwrap_or(0);
+        if c > had {
+            if had > 0 || seen.contains(&e) {
+                return None;
+            }
+            invented.push(e);
+        }
+    }
+
+    // Borders (once-used edges) must match exactly. `BTreeMap` iteration is
+    // ordered, so this compares the two sorted edge sequences without allocating.
+    let borders_match = inc
+        .iter()
+        .filter(|(_, &c)| c == 1)
+        .map(|(&e, _)| e)
+        .eq(outc.iter().filter(|(_, &c)| c == 1).map(|(&e, _)| e));
+    borders_match.then_some(invented)
+}
+
+/// Simplify one group with its seam vertices locked. Returns the simplified index
+/// buffer, the cumulative (strictly monotone) group error, and whether the result
+/// may replace the input — it made progress (fewer triangles) **and** it is
+/// [`seam_safe`].
+fn simplify_group(
+    vertices: &[VgeomVertex],
+    seen: &BTreeSet<(u32, u32)>,
+    job: GroupJob,
+) -> GroupResult {
     let vbytes: &[u8] = bytemuck::cast_slice(vertices);
     let adapter = VertexDataAdapter::new(vbytes, VERTEX_STRIDE, 0)
         .expect("vertex adapter: stride divides buffer, offset 0 < stride");
@@ -512,8 +780,13 @@ fn simplify_group(vertices: &[VgeomVertex], job: GroupJob) -> GroupResult {
         Some(&mut simplify_error),
     );
 
-    let progressed =
+    let coarsened =
         simplified_index.len() >= 3 && simplified_index.len() < job.combined_index.len();
+    let invented = if coarsened {
+        seam_safe(&job.combined_index, &simplified_index, &job.lock, seen)
+    } else {
+        None
+    };
     // Cumulative, strictly increasing object-space error (kept non-empty even when
     // meshopt reports ~0 error, or the increment rounds away at coarse magnitudes).
     let group_error = monotone_group_error(job.max_child_error, simplify_error);
@@ -521,7 +794,8 @@ fn simplify_group(vertices: &[VgeomVertex], job: GroupJob) -> GroupResult {
     GroupResult {
         simplified_index,
         group_error,
-        progressed,
+        progressed: invented.is_some(),
+        invented: invented.unwrap_or_default(),
     }
 }
 
@@ -676,5 +950,382 @@ mod tests {
             z > 0.0,
             "zero child + zero simplify must still be > 0: got {z}"
         );
+    }
+
+    // ── the clusterization fuzz (P13.1 watertightness, arm64 regression) ──────
+    //
+    // `build_meshlets` is `meshopt`'s native C++, and it is **not the same code**
+    // on arm64 and x86_64 — fed byte-identical vertices it returns a different
+    // partition, which is how a builder hole that x86_64's clusterization walked
+    // straight past showed up as a macOS-only failure of
+    // `tests/dag.rs::cut_invariant_holds_at_every_threshold`. Everything the
+    // builder guarantees is supposed to hold for **any** partition of the
+    // triangles into meshlets, so the honest gate is to drive [`build_dag`] — the
+    // whole pure-Rust half — with partitions no clusterizer would ever emit and
+    // assert the cut invariant on what comes back. It reproduces the arm64 class
+    // of failure on any host.
+
+    /// xorshift64\* — a deterministic PRNG so a fuzz failure is a fixed seed, not
+    /// a story. (`rand` is not a dependency of this crate and does not need to be.)
+    struct Rng(u64);
+
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        /// Uniform-ish in `1..=n`.
+        fn range1(&mut self, n: usize) -> usize {
+            (self.next_u64() % n as u64) as usize + 1
+        }
+    }
+
+    /// The `n × n` wavy grid of `tests/dag.rs` — the fixture the P13.1 gate
+    /// actually broke on. Its displacement oscillates (several extrema across the
+    /// sheet), so simplification has real choices to make; a monotone bump is too
+    /// tidy to provoke the seam collision. `psin64`/`pcos64` keep it bit-portable
+    /// (the P14 LAW), and every position is distinct, so the input is manifold and
+    /// nothing welds.
+    fn fuzz_grid(n: usize) -> (Vec<VgeomVertex>, Vec<u32>) {
+        let mut vertices = Vec::with_capacity(n * n);
+        for z in 0..n {
+            for x in 0..n {
+                let (fx, fz) = (x as f32, z as f32);
+                let y = (0.6
+                    * inf_math::psin64(fx as f64 * 0.5)
+                    * inf_math::pcos64(fz as f64 * 0.5)) as f32;
+                vertices.push(VgeomVertex {
+                    position: [fx, y, fz],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [fx / n as f32, fz / n as f32],
+                });
+            }
+        }
+        let mut indices = Vec::with_capacity((n - 1) * (n - 1) * 6);
+        let idx = |x: usize, z: usize| (z * n + x) as u32;
+        for z in 0..n - 1 {
+            for x in 0..n - 1 {
+                let (a, b, c, d) = (idx(x, z), idx(x + 1, z), idx(x, z + 1), idx(x + 1, z + 1));
+                indices.extend_from_slice(&[a, b, d, a, d, c]);
+            }
+        }
+        (vertices, indices)
+    }
+
+    /// How a fuzz run partitions the triangles — the stand-in for
+    /// `meshopt::build_meshlets`.
+    #[derive(Clone, Copy, Debug)]
+    enum FuzzMode {
+        /// Randomly-sized **compact tiles** with ragged edges: the shape a real
+        /// clusterizer produces, and the one that actually provokes the seam
+        /// collision — a cluster needs a fat interior for a vertex to have anywhere
+        /// to collapse *from*. Strips and scatter lock nearly everything and are
+        /// therefore the easy cases, not the hard ones.
+        Tiles { w: usize, h: usize, ragged: bool },
+        /// Random-length runs of the row-major triangle order (long thin strips).
+        Strips,
+        /// Random-length runs of a shuffled triangle order (spatially incoherent
+        /// clusters no clusterizer would emit).
+        Scatter,
+    }
+
+    /// Partition `index`'s triangles into [`BuiltMeshlet`]s per `mode`. `quads` is
+    /// the grid's quad-per-row count, so a triangle can be located on the sheet.
+    fn fuzz_clusters(
+        vertices: &[VgeomVertex],
+        index: &[u32],
+        rng: &mut Rng,
+        mode: FuzzMode,
+        quads: usize,
+    ) -> Vec<BuiltMeshlet> {
+        let tri_count = index.len() / 3;
+        // Triangle -> cluster key. Materialization below preserves key order and
+        // then triangle order, so the whole thing stays deterministic.
+        let mut keyed: Vec<(u64, usize)> = Vec::with_capacity(tri_count);
+        match mode {
+            FuzzMode::Tiles { w, h, ragged } => {
+                let cols = quads.div_ceil(w) as u64;
+                for t in 0..tri_count {
+                    let q = t / 2;
+                    let (mut cx, mut cz) = ((q % quads) / w, (q / quads) / h);
+                    // Ragged edges: nudge some triangles into a neighbouring tile,
+                    // which is what makes the seam curve interesting.
+                    if ragged && rng.next_u64().is_multiple_of(8) {
+                        match rng.next_u64() % 4 {
+                            0 => cx = cx.saturating_sub(1),
+                            1 => cx += 1,
+                            2 => cz = cz.saturating_sub(1),
+                            _ => cz += 1,
+                        }
+                    }
+                    keyed.push((cz as u64 * (cols + 2) + cx as u64, t));
+                }
+            }
+            FuzzMode::Strips | FuzzMode::Scatter => {
+                let mut order: Vec<usize> = (0..tri_count).collect();
+                if matches!(mode, FuzzMode::Scatter) {
+                    for i in (1..order.len()).rev() {
+                        let j = (rng.next_u64() % (i as u64 + 1)) as usize;
+                        order.swap(i, j);
+                    }
+                }
+                let mut key = 0u64;
+                let mut left = rng.range1(124);
+                for t in order {
+                    if left == 0 {
+                        key += 1;
+                        left = rng.range1(124);
+                    }
+                    left -= 1;
+                    keyed.push((key, t));
+                }
+            }
+        }
+        keyed.sort_by_key(|&(k, t)| (k, t));
+
+        let mut out: Vec<BuiltMeshlet> = Vec::new();
+        let mut verts: Vec<u32> = Vec::new();
+        let mut tris: Vec<u8> = Vec::new();
+        let mut current = u64::MAX;
+        let flush = |verts: &mut Vec<u32>, tris: &mut Vec<u8>, out: &mut Vec<BuiltMeshlet>| {
+            if tris.is_empty() {
+                return;
+            }
+            let (center, radius) = fuzz_bounds(vertices, verts);
+            out.push(BuiltMeshlet {
+                verts: std::mem::take(verts),
+                tris: std::mem::take(tris),
+                center,
+                radius,
+                cone_axis: [0.0, 1.0, 0.0],
+                cone_cutoff: 1.0,
+                lod_level: 0,
+                error: 0.0,
+                parent_error: f32::INFINITY,
+                group: Meshlet::NO_GROUP,
+            });
+        };
+
+        for (key, t) in keyed {
+            let gv = [index[t * 3], index[t * 3 + 1], index[t * 3 + 2]];
+            // A meshlet's triangle indices are `u8` locals, so at most 256 vertices;
+            // `meshopt`'s own cap is 512 triangles.
+            let fresh = gv.iter().filter(|g| !verts.contains(g)).count();
+            if key != current || verts.len() + fresh > 256 || tris.len() / 3 >= 512 {
+                flush(&mut verts, &mut tris, &mut out);
+                current = key;
+            }
+            for g in gv {
+                let local = match verts.iter().position(|v| *v == g) {
+                    Some(p) => p,
+                    None => {
+                        verts.push(g);
+                        verts.len() - 1
+                    }
+                };
+                tris.push(local as u8);
+            }
+        }
+        flush(&mut verts, &mut tris, &mut out);
+        out
+    }
+
+    fn fuzz_bounds(vertices: &[VgeomVertex], verts: &[u32]) -> ([f32; 3], f32) {
+        let mut c = [0.0f32; 3];
+        for &v in verts {
+            let p = vertices[v as usize].position;
+            for k in 0..3 {
+                c[k] += p[k] / verts.len() as f32;
+            }
+        }
+        let mut r2 = 0.0f32;
+        for &v in verts {
+            let p = vertices[v as usize].position;
+            let d = [p[0] - c[0], p[1] - c[1], p[2] - c[2]];
+            r2 = r2.max(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        }
+        (c, r2.sqrt())
+    }
+
+    /// The cut invariant, checked at **every** distinct cut: the selection is
+    /// constant on `[b, b')` between consecutive distinct meshlet errors (every
+    /// `parent_error` is some meshlet's `error`, or `+∞`), so testing each of those
+    /// breakpoints tests every selection the runtime can ever make.
+    fn assert_cut_invariant(mesh: &VgeomMesh, what: &str) {
+        let lod0: Vec<usize> = mesh
+            .meshlets
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.lod_level == 0)
+            .map(|(i, _)| i)
+            .collect();
+        let rim: Vec<(u32, u32)> = selection_edges(mesh, &lod0)
+            .into_iter()
+            .filter(|(_, c)| *c == 1)
+            .map(|(e, _)| e)
+            .collect();
+
+        let mut thresholds: Vec<f32> = mesh.meshlets.iter().map(|m| m.error).collect();
+        thresholds.push(0.0);
+        thresholds.sort_by(|a, b| a.partial_cmp(b).expect("errors are finite"));
+        thresholds.dedup();
+
+        for t in thresholds {
+            let sel: Vec<usize> = mesh.select(t).map(|(i, _)| i).collect();
+            assert!(!sel.is_empty(), "{what}: threshold {t} selected nothing");
+            let counts = selection_edges(mesh, &sel);
+            for (e, c) in &counts {
+                assert!(
+                    *c == 1 || *c == 2,
+                    "{what}: t={t} edge {e:?} used {c} times — non-manifold cut"
+                );
+            }
+            let boundary: Vec<(u32, u32)> = counts
+                .into_iter()
+                .filter(|(_, c)| *c == 1)
+                .map(|(e, _)| e)
+                .collect();
+            assert_eq!(
+                boundary, rim,
+                "{what}: t={t} boundary drifted (crack or hole)"
+            );
+        }
+    }
+
+    fn selection_edges(mesh: &VgeomMesh, sel: &[usize]) -> BTreeMap<(u32, u32), u32> {
+        let mut counts: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+        for &mi in sel {
+            let m = &mesh.meshlets[mi];
+            for t in 0..m.triangle_count as usize {
+                let [a, b, c] = mesh.triangle(mi, t);
+                for (u, v) in [(a, b), (b, c), (c, a)] {
+                    *counts.entry(edge_key(u, v)).or_insert(0) += 1;
+                }
+            }
+        }
+        counts
+    }
+
+    #[test]
+    fn cut_invariant_survives_adversarial_clusterings() {
+        let n = 48;
+        let (vertices, index) = fuzz_grid(n);
+        let mut multi_level = 0usize;
+        let mut runs = 0usize;
+
+        let mut modes: Vec<FuzzMode> = vec![FuzzMode::Strips, FuzzMode::Scatter];
+        for w in [3usize, 5, 8, 11] {
+            for h in [3usize, 6, 9] {
+                for ragged in [false, true] {
+                    modes.push(FuzzMode::Tiles { w, h, ragged });
+                }
+            }
+        }
+
+        for seed in 0..3u64 {
+            for &mode in &modes {
+                // The grouping and the reduction target shape the seams as much as
+                // the clusterization does, so they are part of the fuzz.
+                for &(max_group_size, target_ratio) in &[(2usize, 0.5f32), (8, 0.5), (8, 0.7)] {
+                    let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+                    let level0 = fuzz_clusters(&vertices, &index, &mut rng, mode, n - 1);
+                    // The synthetic partition must be a partition — every input
+                    // triangle exactly once — or the fuzz proves nothing.
+                    let tris: usize = level0.iter().map(|m| m.tris.len() / 3).sum();
+                    assert_eq!(tris, index.len() / 3, "the fuzz clustering lost triangles");
+
+                    let params = BuildParams {
+                        max_group_size,
+                        target_ratio,
+                        ..BuildParams::default()
+                    }
+                    .validated();
+                    let mesh = build_dag(vertices.clone(), level0, &params);
+                    let what = format!(
+                        "seed={seed} mode={mode:?} gs={max_group_size} ratio={target_ratio}"
+                    );
+                    assert_cut_invariant(&mesh, &what);
+                    runs += 1;
+                    if mesh.level_count() > 1 {
+                        multi_level += 1;
+                    }
+                }
+            }
+        }
+
+        // Anti-vacuity: a run where nothing ever coarsens would satisfy the cut
+        // invariant trivially and gate nothing.
+        assert!(
+            multi_level * 2 >= runs,
+            "only {multi_level} of {runs} fuzz clusterings built a multi-level DAG — \
+             the fuzz is not exercising the group/simplify/recluster path"
+        );
+    }
+
+    /// A quad `0-1-2-3` fanned around one interior vertex `4` — the smallest soup
+    /// that shows the bug. `0..=3` are seam (shared with the neighbouring group),
+    /// `4` is this group's own.
+    fn fan_soup() -> ([bool; 5], [u32; 12]) {
+        (
+            [true, true, true, true, false],
+            [0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4],
+        )
+    }
+
+    /// The seam rule itself, on a hand-built soup so it reads without a mesh.
+    #[test]
+    fn seam_safe_rejects_an_invented_chord_between_seam_vertices() {
+        let (lock, input) = fan_soup();
+        let seen: BTreeSet<(u32, u32)> = edge_use_counts(&input).into_keys().collect();
+
+        // Same soup back: safe, nothing invented.
+        assert_eq!(
+            seam_safe(&input, &input, &lock, &seen),
+            Some(Vec::new()),
+            "an unchanged soup must be accepted"
+        );
+
+        // Collapse the interior vertex 4 into the seam vertex 0 — precisely what
+        // `meshopt` is free to do, since locking 0 stops 0 from *moving* and says
+        // nothing about 4 moving onto it. The two triangles that degenerate drop
+        // out and the border survives intact, but the diagonal (0,2) — a chord
+        // between two seam vertices that this group never had — is now interior.
+        let collapsed = [1u32, 2, 0, 2, 3, 0];
+        let invented = seam_safe(&input, &collapsed, &lock, &seen)
+            .expect("a brand-new chord between seam vertices is allowed, and reported");
+        assert_eq!(
+            invented,
+            vec![(0, 2)],
+            "the invented chord must be reported so the level loop can stop a \
+             sibling group claiming the same one"
+        );
+
+        // If that chord already exists anywhere in the mesh, it belongs to another
+        // region that a mixed-level cut can select beside this output — reject.
+        let mut seen_more = seen.clone();
+        seen_more.insert((0, 2));
+        assert_eq!(
+            seam_safe(&input, &collapsed, &lock, &seen_more),
+            None,
+            "a chord that already exists somewhere must not be invented"
+        );
+    }
+
+    /// The border is still sacred: losing one is a hole, gaining one is a crack.
+    #[test]
+    fn seam_safe_rejects_a_changed_border() {
+        let (lock, input) = fan_soup();
+        let seen: BTreeSet<(u32, u32)> = edge_use_counts(&input).into_keys().collect();
+        // Dropping one triangle uses no edge more than the input did, but opens the
+        // border along (0,4) and (1,4).
+        let holed = [0u32, 1, 4, 1, 2, 4, 2, 3, 4];
+        assert_eq!(seam_safe(&input, &holed, &lock, &seen), None);
+        // A degenerate triangle is never acceptable either.
+        let degenerate = [0u32, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 0];
+        assert_eq!(seam_safe(&input, &degenerate, &lock, &seen), None);
     }
 }
