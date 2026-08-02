@@ -218,6 +218,10 @@ pub struct FrameData<'a> {
     /// only when `enabled`, and the node records the readback copy. Off by
     /// default, so the shipping path pays nothing.
     pub vgeom_audit: &'a VgeomAuditResources,
+    /// Instance-cull audit counters (P18.5): the scatter cull compute increments
+    /// them only when `enabled`, and the node records the readback copy. Off by
+    /// default, so the shipping path pays nothing.
+    pub scatter_audit: &'a passes::scatter::ScatterAuditResources,
     /// Shared atmosphere resources (P17.2): the two LUTs + the shared uniform the
     /// bake node writes and the sky/lit passes sample. **Resizable** — its
     /// `generation` is part of the `EnvBinding` cache key.
@@ -267,6 +271,8 @@ pub struct EngineRenderer {
     vgeom_audit: VgeomAuditResources,
     /// P18.2 meshlet-streaming state, published by the vgeom node each frame.
     vgeom_stream: passes::vgeom::SharedStreamReport,
+    /// P18.5 instance-cull counters (see [`EngineRenderer::set_scatter_audit`]).
+    scatter_audit: passes::scatter::ScatterAuditResources,
     /// Shared atmosphere LUTs + uniform (P17.2). Unlike `shadow`/`gi` these are
     /// **recreated** when [`crate::atmosphere::AtmosphereQuality`] changes, which
     /// is why they carry a generation the env bind-group cache keys on.
@@ -355,6 +361,14 @@ impl EngineRenderer {
         graph.add(passes::classic_vgeom::ClassicVgeomNode::new(gpu, &view_bgl));
         graph.add(passes::skinned::SkinnedMeshNode::new(gpu, &view_bgl));
         graph.add(passes::terrain::TerrainNode::new(gpu, &view_bgl));
+        // GPU-instanced scatter (P18.5): PCG volumes + painted foliage, culled
+        // per-instance on the GPU with LOD/impostor banding. LAST of the opaque
+        // passes on purpose — its HZB is built from the depth every other opaque
+        // pass has already written, which is the richest occluder set available —
+        // and still before clouds/precipitation/translucency, since scatter IS
+        // opaque. A no-op on a scene with no `scatter` batches, so every existing
+        // golden is untouched.
+        graph.add(passes::scatter::ScatterNode::new(gpu, &view_bgl));
         // Volumetric clouds (P17.3): a depth-tested, premultiplied-alpha raymarch
         // over everything opaque. AFTER the opaque passes so the depth buffer can
         // occlude it, BEFORE translucency so glass composites over it. A no-op
@@ -408,6 +422,7 @@ impl EngineRenderer {
             gi_audit,
             vgeom_audit: VgeomAuditResources::new(gpu),
             vgeom_stream,
+            scatter_audit: passes::scatter::ScatterAuditResources::new(gpu),
             atmosphere,
             next_atmosphere_generation: 2,
         }
@@ -445,6 +460,34 @@ impl EngineRenderer {
             return VgeomAudit::default();
         }
         self.vgeom_audit.read(gpu)
+    }
+
+    /// Enable/disable the P18.5 scatter instance-cull audit counters. **Off by
+    /// default**, on the same terms as the vgeom audit: the cull compute skips the
+    /// atomics and no readback copy is recorded, so the shipping frame is
+    /// untouched. It exists so a gate can prove the per-instance culling is real
+    /// rather than a no-op that trivially satisfies a pixel comparison.
+    pub fn set_scatter_audit(&mut self, enabled: bool) {
+        self.scatter_audit.enabled = enabled;
+    }
+
+    /// Read the scatter cull counters recorded by the **last submitted** frame.
+    /// Blocks on a buffer map; returns zeros if the audit was never enabled or the
+    /// scatter node did not run (no scatter content, or the CPU fallback path).
+    pub fn scatter_audit(&self, gpu: &GpuContext) -> passes::scatter::ScatterAudit {
+        if !self.scatter_audit.enabled {
+            // `shadow_casters` is a CPU counter the shadow node stores
+            // unconditionally (one relaxed store), so it is reported even with the
+            // GPU audit off — otherwise the one figure that says whether the tier
+            // clamps reached the caster pack would only exist in the mode nobody
+            // ships in.
+            return passes::scatter::ScatterAudit {
+                shadow_casters: self.scatter_audit.shadow_casters(),
+                uploads: self.scatter_audit.uploads(),
+                ..Default::default()
+            };
+        }
+        self.scatter_audit.read(gpu)
     }
 
     /// What the P18.2 meshlet streamer did on the **last rendered frame**:
@@ -622,6 +665,7 @@ impl EngineRenderer {
             shadow: &self.shadow,
             gi: &self.gi,
             vgeom_audit: &self.vgeom_audit,
+            scatter_audit: &self.scatter_audit,
             atmosphere: &self.atmosphere,
             view_mode: self.view_mode,
         };

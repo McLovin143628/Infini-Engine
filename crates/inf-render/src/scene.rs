@@ -189,6 +189,193 @@ impl VgeomInstance {
     }
 }
 
+// ── GPU-instanced scatter (P18.5) ────────────────────────────────────────────
+
+/// One scattered instance as a **host** authors it: world position, orientation,
+/// uniform scale, tint (P18.5).
+///
+/// This is the shape both projectors already had in hand — `PcgVolume::evaluated`
+/// and `Foliage::instances` — and it is *not* what reaches the GPU. Packing into
+/// [`ScatterInstanceRaw`] happens once, in [`ScatterData::build`], which is Ring 0
+/// so the editor viewport and the shipped player cannot pack differently.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScatterInstance {
+    /// World-space position (f64 — architecture rule 3).
+    pub position: DVec3,
+    pub rotation: Quat,
+    /// Uniform scale.
+    pub scale: f32,
+    /// Linear-space tint (rgba).
+    pub color: [f32; 4],
+}
+
+/// One scattered instance as the **GPU** stores it (P18.5) — 48 bytes, `Pod`, and
+/// deliberately **origin-independent**.
+///
+/// `offset` is relative to the batch's [`ScatterBatch::anchor`], not to the
+/// floating origin. That is the load-bearing part: a render-local pack would be
+/// invalidated by every origin rebase, so a camera flying across the world would
+/// re-upload every instance buffer it can see. Anchor-relative offsets are a pure
+/// function of the *content*, so the buffer is uploaded once per content change
+/// and the anchor rides in a per-frame uniform instead.
+///
+/// Precision: f32 relative to the batch anchor, so a batch spanning 1 km resolves
+/// to ~6e-5 m and one spanning 100 km to ~6e-3 m. Scatter volumes are authored at
+/// tens-to-hundreds of metres (`PcgVolume::extent` defaults to 50 m), so this is
+/// several orders of margin; a single batch covering a continent would not be.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ScatterInstanceRaw {
+    /// Position relative to the batch anchor (metres).
+    pub offset: [f32; 3],
+    /// Uniform scale.
+    pub scale: f32,
+    /// Orientation quaternion, `xyzw`.
+    pub rotation: [f32; 4],
+    /// Linear-space tint (rgba).
+    pub color: [f32; 4],
+}
+
+/// The immutable, content-addressed payload of a [`ScatterBatch`] (P18.5).
+///
+/// **Content-keyed, like everything else since P18.3.** [`key`](Self::key) is an
+/// `xxh3` 128-bit hash over the packed instance bytes *and* the primitive kind, so
+/// two batches with identical geometry share one GPU upload (two foliage entities
+/// painted from the same stroke, or the editor and the player rendering the same
+/// level) and a changed batch is a *different* asset rather than a stale one under
+/// a reused id. The renderer's `GenCache` keys on it directly; nothing hashes per
+/// frame.
+///
+/// The hash is folded **while packing**, in one pass over data the projector was
+/// building anyway — and the path it replaces built one 96-byte `MeshInstance` per
+/// scattered instance and pushed it into `RenderScene::instances`, so this is
+/// strictly cheaper than what it supersedes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScatterData {
+    /// Which built-in primitive every instance of this batch draws.
+    pub mesh: PrimMesh,
+    /// Packed, anchor-relative instance records in authored order.
+    pub instances: Vec<ScatterInstanceRaw>,
+    key: u128,
+    max_scale: f32,
+}
+
+impl ScatterData {
+    /// Pack world-space instances into an anchor-relative GPU payload and derive
+    /// the content key.
+    ///
+    /// Deterministic: the output is a pure function of `(mesh, anchor, instances)`
+    /// in authored order, with no floating-origin, camera or frame input.
+    pub fn build(
+        mesh: PrimMesh,
+        anchor: DVec3,
+        instances: impl IntoIterator<Item = ScatterInstance>,
+    ) -> Self {
+        let mut packed = Vec::new();
+        let mut max_scale: f32 = 0.0;
+        for i in instances {
+            let o = i.position - anchor;
+            max_scale = max_scale.max(i.scale.abs());
+            packed.push(ScatterInstanceRaw {
+                offset: [o.x as f32, o.y as f32, o.z as f32],
+                scale: i.scale,
+                rotation: i.rotation.to_array(),
+                color: i.color,
+            });
+        }
+        // The primitive kind is part of the identity: the same placements drawn as
+        // cubes and as spheres are two different batches, and an id that did not
+        // say so would serve one from the other's cached buffers.
+        let mut bytes = Vec::with_capacity(packed.len() * 48 + 4);
+        bytes.extend_from_slice(&(mesh as u32).to_le_bytes());
+        bytes.extend_from_slice(bytemuck::cast_slice(&packed));
+        let key = xxhash_rust::xxh3::xxh3_128(&bytes);
+        Self {
+            mesh,
+            instances: packed,
+            key,
+            max_scale,
+        }
+    }
+
+    /// The content key — the renderer's GPU-cache identity for this payload.
+    pub fn key(&self) -> u128 {
+        self.key
+    }
+
+    /// The largest uniform scale in the batch. Multiplied by the primitive's own
+    /// bounding radius it gives one conservative cull radius for every instance,
+    /// which is what lets the cull compute carry a single scalar instead of a
+    /// per-instance one.
+    pub fn max_scale(&self) -> f32 {
+        self.max_scale
+    }
+
+    pub fn len(&self) -> usize {
+        self.instances.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.instances.is_empty()
+    }
+}
+
+/// A GPU-scattered instance batch (P18.5) — the render-side form of a
+/// `PcgVolume`'s evaluated cache or a `Foliage` component's placed instances.
+///
+/// Before this batch both projectors expanded those lists into one
+/// [`MeshInstance`] each and pushed them onto [`RenderScene::instances`], so a
+/// 100k-instance scatter cost 100k CPU-side structs, 100k packed
+/// `InstanceRaw`s and a per-frame vertex-buffer upload of ~17 MB. Now the payload
+/// is uploaded **once per content change** into a storage buffer and culled
+/// per-instance on the GPU (frustum + the P18.1 HZB), with distance bands
+/// selecting full mesh / impostor / nothing.
+///
+/// The batch is one *object* as far as selection is concerned — a scatter is
+/// authored, moved and deleted as a whole — so it carries one pick [`id`](Self::id)
+/// rather than one per instance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScatterBatch {
+    /// The content-addressed payload. `Arc` so a projection that re-runs without
+    /// the scatter changing costs a pointer copy.
+    pub data: Arc<ScatterData>,
+    /// World-space anchor the payload's offsets are relative to. **Not** part of
+    /// the content key: a batch whose anchor moves (an interpolated actor) keeps
+    /// its buffer and only its uniform changes.
+    pub anchor: DVec3,
+    pub metallic: f32,
+    pub roughness: f32,
+    /// Linear self-emitted color (rgb).
+    pub emissive: [f32; 3],
+    /// Stable pick id for the whole batch (`ID_NONE` reserved).
+    pub id: u32,
+    /// Authored draw distance in metres; `0` ⇒ unlimited. Clamps the renderer's
+    /// own impostor/cull band **down**, never up — content may ask for less detail
+    /// than the tier allows, never for more.
+    ///
+    /// This is the one *content* LOD knob (`PcgVolume::draw_distance`, which has
+    /// existed since P10.5). Honouring it inside the cull compute is what finally
+    /// makes both hosts agree about it: the editor used to cull against its own
+    /// camera eye on the CPU while the player ignored the field entirely, so a
+    /// shipped build drew strictly more scatter than its preview.
+    pub draw_distance: f64,
+}
+
+impl ScatterBatch {
+    /// A plain lit batch (metallic 0, no emission, unlimited draw distance).
+    pub fn lit(data: Arc<ScatterData>, anchor: DVec3, roughness: f32, id: u32) -> Self {
+        Self {
+            data,
+            anchor,
+            metallic: 0.0,
+            roughness,
+            emissive: [0.0; 3],
+            id,
+            draw_distance: 0.0,
+        }
+    }
+}
+
 /// One vertex of a [`SkinnedMeshData`] — position + normal in **bind (rest)
 /// space**, plus the four joint influences that deform it. `#[repr(C)]` + `Pod`
 /// so it uploads straight to a GPU vertex buffer (56 bytes, no padding).
@@ -719,6 +906,14 @@ pub struct RenderScene {
     /// draw) when [`RenderSettings::vgeom`](crate::RenderSettings) is enabled,
     /// after the rigid mesh pass, into the same MSAA targets.
     pub vgeom_instances: Vec<VgeomInstance>,
+    /// GPU-scattered instance batches (P18.5) — PCG volumes and painted foliage.
+    /// Empty ⇒ the [`crate::passes::scatter`] node emits no commands, so every
+    /// scene without scatter content (including all 39 goldens) is untouched.
+    ///
+    /// Version-gated like everything else, but the *upload* is gated by each
+    /// batch's own [`ScatterData::key`] instead: a projection that rebuilds the
+    /// list without the scatter changing re-uses the GPU buffers.
+    pub scatter: Vec<ScatterBatch>,
     /// Scene lights (directional + point). Empty ⇒ the shader falls back to a
     /// default editor sun so unlit demo scenes still render.
     pub lights: Vec<RenderLight>,

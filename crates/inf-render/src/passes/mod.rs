@@ -15,6 +15,7 @@ pub mod mask;
 pub mod mesh;
 pub mod precip;
 pub mod resolve;
+pub mod scatter;
 pub mod shadow;
 pub mod skinned;
 pub mod sky;
@@ -71,6 +72,10 @@ pub(crate) enum ShaderKind {
     /// (P17.4), which places particles from an integer hash and lights them from
     /// the sky LUTs, and binds no volume and no depth texture.
     Precip,
+    /// [`hzb_cull_shader`]: the shared HZB occlusion test prepended, and nothing
+    /// else. The GPU culls (meshlet, P18.1; scatter, P18.5) have no view uniform
+    /// and no lights — what they share is one proven-conservative depth test.
+    HzbCull,
     /// [`gi_probe_shader`]: the atmosphere library at `@group(0)` bindings 3..6
     /// and nothing else — the P18.4 GI probe march, which has no view uniform and
     /// no lights but needs the sky-view LUT for its ray-miss term.
@@ -213,6 +218,23 @@ pub(crate) fn precip_shader(source: &str) -> String {
 /// The probe pass has no view uniform and no lights; what it needs from the
 /// atmosphere is exactly `atmos_sample_skyview` for its ray-**miss** term, which is
 /// how the P17 sky finally reaches the bounce.
+/// A GPU **cull** compute module (P18.5): the shared reverse-Z HZB occlusion test
+/// prepended, and nothing else.
+///
+/// Both culls that read the P18.1 pyramid compose through here — the meshlet cull
+/// (which had the test inline until P18.5) and the scatter cull. The test takes
+/// its uniform, its dimensions and the pyramid texture as *parameters* rather than
+/// reading globals, precisely so it can be one function serving two different
+/// bind layouts; keeping it in one file is the P18-fixture lesson applied before
+/// the second copy exists rather than after it drifts.
+pub(crate) fn hzb_cull_shader(source: &str) -> String {
+    format!(
+        "{}\n{}",
+        include_str!("../shaders/hzb_occlusion.wgsl"),
+        source
+    )
+}
+
 pub(crate) fn gi_probe_shader(source: &str) -> String {
     format!(
         "{}\n{}\n{}",
@@ -344,6 +366,21 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
         include_str!("../shaders/gi_probes.wgsl"),
         ShaderKind::GiProbes,
     ),
+    (
+        "vgeom_cull",
+        include_str!("../shaders/vgeom_cull.wgsl"),
+        ShaderKind::HzbCull,
+    ),
+    (
+        "scatter_cull",
+        include_str!("../shaders/scatter_cull.wgsl"),
+        ShaderKind::HzbCull,
+    ),
+    (
+        "scatter_mesh",
+        include_str!("../shaders/scatter_mesh.wgsl"),
+        ShaderKind::Lit(2),
+    ),
 ];
 
 /// Compose the named [`SHADER_TABLE`] entry. Panics on an unknown label —
@@ -363,6 +400,7 @@ pub(crate) fn shader_source(label: &str) -> String {
         ShaderKind::CloudBake => cloud_bake_shader(source),
         ShaderKind::CloudShadowBake => cloud_shadow_bake_shader(source),
         ShaderKind::Precip => precip_shader(source),
+        ShaderKind::HzbCull => hzb_cull_shader(source),
         ShaderKind::GiProbes => gi_probe_shader(source),
     }
 }
@@ -988,7 +1026,8 @@ mod shader_compose_tests {
             ("gi_voxelize", include_str!("../shaders/gi_voxelize.wgsl")),
             // `gi_probes` moved into SHADER_TABLE in P18.4 — it is a composed
             // module now (it includes the atmosphere library for its sky term).
-            ("vgeom_cull", include_str!("../shaders/vgeom_cull.wgsl")),
+            // `vgeom_cull` followed in P18.5, when the HZB occlusion test moved
+            // into `hzb_occlusion.wgsl` so the scatter cull could share it.
             ("vgeom_hzb", include_str!("../shaders/vgeom_hzb.wgsl")),
             ("shadow_depth", include_str!("../shaders/shadow_depth.wgsl")),
             ("tonemap", include_str!("../shaders/tonemap.wgsl")),

@@ -55,6 +55,32 @@ impl PrimMesh {
         }
     }
 
+    /// The radius of this kind's bounding sphere at **unit scale**, centred at the
+    /// origin (every built-in primitive is authored centred).
+    ///
+    /// Exact, not measured: the cube's half-diagonal is `√3/2`, the plane's is
+    /// `√2/2` (it lies flat in XZ), the cylinder's and the cone's are the
+    /// half-diagonal of a `0.5`-radius, `1`-tall bound — `√2/2` — and the sphere's
+    /// is its own `0.5`. Multiplied by an instance's uniform scale it gives the
+    /// conservative cull sphere the P18.5 scatter compute tests, and a
+    /// conservative-by-construction bound is what lets that cull be *subtractive*
+    /// rather than approximate. Pinned against the actual geometry by
+    /// `bounding_radius_bounds_every_vertex`.
+    pub const fn bounding_radius(self) -> f32 {
+        // `sqrt` is not const, so the two irrational half-diagonals come from
+        // `std::f32::consts` (√2/2 is `FRAC_1_SQRT_2`) and one folded literal
+        // (√3/2), rather than from three hand-typed decimals clippy would rightly
+        // flag as approximating a named constant.
+        const HALF_SQRT_3: f32 = 0.866_025_4;
+        match self {
+            PrimMesh::Cube => HALF_SQRT_3,
+            PrimMesh::Sphere => 0.5,
+            PrimMesh::Plane => std::f32::consts::FRAC_1_SQRT_2,
+            PrimMesh::Cylinder => std::f32::consts::FRAC_1_SQRT_2,
+            PrimMesh::Cone => std::f32::consts::FRAC_1_SQRT_2,
+        }
+    }
+
     /// This kind's CPU geometry (`pos + normal`, CCW-outside).
     pub fn geometry(self) -> (Vec<MeshVertex>, Vec<u16>) {
         match self {
@@ -380,6 +406,62 @@ impl PrimGpu {
     }
 }
 
+/// The same five primitives as [`PrimGpu`], uploaded as **storage** buffers for
+/// vertex-pulling passes (P18.5 scatter).
+///
+/// Two buffers, both read in the vertex stage: `vertices` is a flat `array<f32>`
+/// with six floats per vertex (position then normal, exactly `MeshVertex`'s
+/// layout), and `indices` widens the packed `u16` index list to `u32` because
+/// WGSL has no 16-bit scalar type. Widening costs ~4 KB for the whole primitive
+/// set and buys an index read that is one array subscript.
+///
+/// It exists rather than reusing [`PrimGpu`]'s buffers because a wgpu buffer's
+/// usage flags are fixed at creation and `VERTEX | INDEX` is not `STORAGE`; the
+/// geometry itself is byte-identical, produced by the same [`packed_geometry`].
+pub struct PrimStorage {
+    pub vertices: wgpu::Buffer,
+    pub indices: wgpu::Buffer,
+    pub ranges: [PrimRange; 5],
+}
+
+impl PrimStorage {
+    pub fn new(gpu: &GpuContext, label: &str) -> Self {
+        let (verts, idx, ranges) = packed_geometry();
+        let mut flat: Vec<f32> = Vec::with_capacity(verts.len() * 6);
+        for v in &verts {
+            flat.extend_from_slice(&v.pos);
+            flat.extend_from_slice(&v.normal);
+        }
+        let wide: Vec<u32> = idx.iter().map(|i| *i as u32).collect();
+        let mk = |name: &str, bytes: &[u8]| {
+            let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(name),
+                size: bytes.len() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            gpu.queue.write_buffer(&buf, 0, bytes);
+            buf
+        };
+        Self {
+            vertices: mk(
+                &format!("{label}-prim-storage-vertices"),
+                bytemuck::cast_slice(&flat),
+            ),
+            indices: mk(
+                &format!("{label}-prim-storage-indices"),
+                bytemuck::cast_slice(&wide),
+            ),
+            ranges,
+        }
+    }
+
+    /// The packed range of one kind's geometry.
+    pub fn range(&self, mesh: PrimMesh) -> PrimRange {
+        self.ranges[mesh.index()]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +478,33 @@ mod tests {
                 a.dot(b.cross(c))
             })
             .sum()
+    }
+
+    /// The P18.5 scatter cull tests ONE sphere per instance, sized by
+    /// [`PrimMesh::bounding_radius`], and the HZB proof needs that bound to be an
+    /// over-approximation — a radius one ULP short of a vertex would let the cull
+    /// prove a meshlet invisible that is not. So the constant is checked against
+    /// the geometry it claims to bound, kind by kind, rather than trusted.
+    #[test]
+    fn bounding_radius_bounds_every_vertex() {
+        for kind in PrimMesh::ALL {
+            let (verts, _) = kind.geometry();
+            let r = kind.bounding_radius();
+            let far = verts
+                .iter()
+                .map(|v| Vec3::from(v.pos).length())
+                .fold(0.0f32, f32::max);
+            assert!(
+                far <= r,
+                "{kind:?}: a vertex at {far} escapes its {r} bounding radius"
+            );
+            // …and it is TIGHT: a radius that over-bounds by a lot would cull
+            // nothing and quietly make the whole test vacuous.
+            assert!(
+                far >= r - 1e-3,
+                "{kind:?}: bounding radius {r} is loose (farthest vertex {far})"
+            );
+        }
     }
 
     fn assert_within_half(verts: &[MeshVertex]) {

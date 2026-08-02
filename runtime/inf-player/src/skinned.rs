@@ -1,0 +1,656 @@
+//! **The shipped player's skeletal render-asset store** — the matching follow-up
+//! P18.3 left open, and the close of a live PIE-vs-shipping divergence.
+//!
+//! P18.3 gave the *editor viewport* a real `SkeletalMesh` projection
+//! ([`inf_editor_core::render_assets`]): a bound skeletal mesh draws its actual
+//! skinned geometry, posed. The shipped player had **no `SkeletalMesh` branch at
+//! all** — `crate::render::project_scene` never touched
+//! [`RenderScene::skinned_meshes`](inf_render::RenderScene::skinned_meshes) — so a
+//! level with a skeletal character previewed correctly in PIE and shipped as
+//! nothing. This module is the player's half; [`crate::render`] is the projection
+//! that consumes it.
+//!
+//! It is to [`inf_editor_core::render_assets::EditorRenderAssets`] what
+//! [`crate::vmesh::VmeshRegistry`] is to that store's vgeom half: the same rules,
+//! reading a cooked pack (or a `--level` dev dir) instead of a project's loose
+//! content root.
+//!
+//! # What is mirrored, and what is host-local
+//!
+//! Two functions are kept **character for character** identical to the editor's,
+//! and `inf-editor-core`'s `tests/projector_mirror.rs` pins them as source text
+//! (it links neither crate, so it runs on the Linux CI leg):
+//!
+//! * [`SkinnedRegistry::resolve_skinned`] — the **pose rule**. No skeleton (or a
+//!   skeleton with no joints) ⇒ `None`, and the caller keeps the placeholder; no
+//!   `AnimPlayer`, no clip, or a clip that will not resolve ⇒ the **rest pose**;
+//!   otherwise the clip sampled at the play-head, honouring `looping`. Rule 2 is
+//!   what makes a character *visible* rather than invisible-until-it-plays, and it
+//!   is the same fallback the components document.
+//! * [`skinned_mesh_data`] — the bind-space rebuild (submeshes concatenated,
+//!   indices rebased, an unskinned submesh pinned to joint 0 with weight 1).
+//!
+//! What is deliberately host-local is *where the bytes come from* and *when*: the
+//! editor walks a mutable content root and re-scans on a miss, the player reads an
+//! immutable pack entry (or a dev-dir index taken once). That is the same
+//! asymmetry [`crate::vmesh`] already documents — but note the P18.3 **content
+//! hash vs GUID** difference does **not** apply here. That one exists because both
+//! vgeom render nodes cache GPU state by `VgeomAsset::id`, so a re-import under a
+//! stable id would render stale; the skinned pass caches by the **pointer
+//! identity** of the `Arc<SkinnedMeshData>` instead, and a re-import that produced
+//! a different `Arc` is a different key by construction. There is no id to
+//! content-address, so both hosts key skinned geometry by asset GUID.
+//!
+//! # The `Arc<SkinnedMeshData>` discipline
+//!
+//! `RenderScene::skinned_meshes` has been `Vec<Arc<SkinnedMeshData>>` since P18.3
+//! *because* the skinned pass caches its GPU uploads by pointer identity. A
+//! projector that rebuilt the bind-space stream every frame would re-upload
+//! megabytes per frame while claiming to be cached. So this store owns exactly one
+//! `Arc` per mesh asset for as long as it lives, hands out clones, and the
+//! projection pushes the clone straight into the scene — no copy, no re-upload.
+//! **The sharing is the convention this projector follows**; `skinned_geometry`
+//! and the unit test `the_same_mesh_asset_hands_out_one_shared_arc` below are what
+//! keep it true. It is invalidated by exactly one thing: dropping the registry
+//! (a level switch builds a new one), because a cooked pack entry is immutable for
+//! the life of the process.
+//!
+//! [`inf_editor_core::render_assets`]: https://docs.rs/inf-editor-core
+//! [`inf_editor_core::render_assets::EditorRenderAssets`]: https://docs.rs/inf-editor-core
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use glam::Mat4;
+use inf_anim::{AnimClip, AnimClipAsset, Skeleton, SkeletonAsset};
+use inf_asset::{AssetId, PackReader};
+use inf_ecs::components::{AnimPlayer, SkeletalMesh};
+use inf_render::SkinnedMeshData;
+use uuid::Uuid;
+
+// Native only — see `SkinnedRegistry::build_skinned_geometry` and this crate's
+// `Cargo.toml` for why the browser player carries no `inf-mesh`. Gated at the
+// import as well as the item because the wasm CI leg runs with `-D warnings`,
+// where an import used by nothing is a build failure.
+#[cfg(not(target_arch = "wasm32"))]
+use inf_mesh::MeshAsset;
+#[cfg(not(target_arch = "wasm32"))]
+use inf_render::SkinnedVertex;
+
+/// The loose asset extensions a dev-dir index covers — the three a
+/// `SkeletalMesh` + `AnimPlayer` pair can reach.
+const INDEXED_EXTENSIONS: [&str; 3] = ["inf_mesh", "inf_skel", "inf_anim"];
+
+/// A skeletal mesh resolved to something the skinned pass can draw.
+///
+/// **MIRROR** of `inf_editor_core::render_assets::SkinnedDraw`, field for field.
+#[derive(Clone)]
+pub struct SkinnedDraw {
+    /// Bind-space geometry, shared between every entity using the same
+    /// `(mesh, skeleton)` pair — and, across projections, the *same* `Arc`.
+    pub mesh: Arc<SkinnedMeshData>,
+    /// `global · inverse_bind` per joint, for this entity's current pose.
+    pub palette: Vec<Mat4>,
+    /// The `(mesh, skeleton)` pair, so a caller can deduplicate
+    /// [`RenderScene::skinned_meshes`](inf_render::RenderScene::skinned_meshes)
+    /// entries across instances.
+    pub key: (Uuid, Uuid),
+}
+
+/// Where a registry reads payload bytes from.
+enum Content {
+    /// Nothing — the `--demo` world, the PIE window, the browser player. Every
+    /// lookup misses, so every `SkeletalMesh` keeps its placeholder, which is
+    /// exactly the pre-existing behaviour for those hosts.
+    None,
+    /// A cooked pack. The `Arc<PackReader>` is the **same mapping**
+    /// [`crate::vmesh::VmeshRegistry`] pages meshlets out of — opened once per
+    /// run, not once per registry.
+    Pack(Arc<PackReader>),
+    /// A `--level` dev dir: asset GUID → loose file, indexed once at load from
+    /// the sibling `inf_asset` sidecars (the twin of
+    /// [`VmeshRegistry::from_dir`](crate::vmesh::VmeshRegistry::from_dir)).
+    Dir(HashMap<Uuid, PathBuf>),
+}
+
+/// Every skeletal render asset the shipped player can draw, resolved by GUID out
+/// of a cooked pack or a dev dir.
+///
+/// Resolution is **lazy and memoized** (hits *and* misses), like the editor's
+/// store: a level whose partition streams a character in at minute ten pays for
+/// that character then, and a dangling reference costs one failed lookup rather
+/// than one per frame.
+pub struct SkinnedRegistry {
+    content: Content,
+    /// Bind-space geometry by **mesh** GUID. `None` is a negative entry: this
+    /// asset has no usable skin stream, so stop trying every frame.
+    ///
+    /// Keyed by the mesh alone — the editor's store keys the same cache by
+    /// `(mesh, skeleton)`, but the value is a pure function of the `.inf_mesh`
+    /// (see [`skinned_mesh_data`], which never looks at a skeleton), so the extra
+    /// key component only splits the cache. The **slot** key the projection
+    /// deduplicates on is still the full pair, which is what has to match.
+    meshes: Mutex<HashMap<Uuid, Option<Arc<SkinnedMeshData>>>>,
+    /// Decoded skeletons by GUID (shared by every entity bound to one).
+    skeletons: Mutex<HashMap<Uuid, Option<Arc<Skeleton>>>>,
+    /// Decoded clips by GUID.
+    clips: Mutex<HashMap<Uuid, Option<Arc<AnimClip>>>>,
+}
+
+impl Default for SkinnedRegistry {
+    fn default() -> Self {
+        Self {
+            content: Content::None,
+            meshes: Mutex::default(),
+            skeletons: Mutex::default(),
+            clips: Mutex::default(),
+        }
+    }
+}
+
+/// A poisoned cache lock is not a reason to take the game down: the map is a pure
+/// memo of immutable content, so whatever a panicking thread left behind is still
+/// a valid (possibly incomplete) cache.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl SkinnedRegistry {
+    /// An inert registry: every `SkeletalMesh` keeps its placeholder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resolve skeletal assets out of a cooked pack, sharing the caller's
+    /// mapping.
+    pub fn from_pack(reader: Arc<PackReader>) -> Self {
+        Self {
+            content: Content::Pack(reader),
+            ..Self::default()
+        }
+    }
+
+    /// Index the loose `.inf_mesh` / `.inf_skel` / `.inf_anim` files in `dir`
+    /// (non-recursive) by their sidecar asset GUIDs — the dev-dir twin of
+    /// [`from_pack`](Self::from_pack). Deterministic (path-sorted); files without
+    /// a readable sidecar are skipped.
+    pub fn from_dir(dir: &Path) -> Self {
+        Self {
+            content: Content::Dir(index_dir(dir)),
+            ..Self::default()
+        }
+    }
+
+    /// Whether this registry can resolve anything at all (`false` for
+    /// [`new`](Self::new)).
+    pub fn has_content(&self) -> bool {
+        !matches!(self.content, Content::None)
+    }
+
+    /// Number of mesh assets with resolved bind-space geometry (negative entries
+    /// excluded) — the mirror of `EditorRenderAssets::loaded_skinned`.
+    pub fn loaded_skinned(&self) -> usize {
+        lock(&self.meshes).values().filter(|v| v.is_some()).count()
+    }
+
+    /// Register bind-space geometry directly, under a mesh asset GUID — the door
+    /// for tests and for a host that built the stream rather than loading one
+    /// (the twin of [`VmeshRegistry::insert_mesh`](crate::vmesh::VmeshRegistry::insert_mesh)).
+    pub fn insert_mesh(&mut self, mesh_id: Uuid, data: SkinnedMeshData) {
+        lock(&self.meshes).insert(mesh_id, Some(Arc::new(data)));
+    }
+
+    /// Register a decoded skeleton directly.
+    pub fn insert_skeleton(&mut self, id: Uuid, skeleton: Skeleton) {
+        lock(&self.skeletons).insert(id, Some(Arc::new(skeleton)));
+    }
+
+    /// Register a decoded clip directly.
+    pub fn insert_clip(&mut self, id: Uuid, clip: AnimClip) {
+        lock(&self.clips).insert(id, Some(Arc::new(clip)));
+    }
+
+    /// Resolve a [`SkeletalMesh`] (+ its optional [`AnimPlayer`]) to a drawable
+    /// skinned instance: bind-space geometry plus the skinning palette for the
+    /// pose that is actually in force.
+    ///
+    /// The pose rule, in order:
+    ///  1. no skeleton asset, or a skeleton with no joints ⇒ `None` (the caller
+    ///     keeps the placeholder — a skinned mesh with no skeleton is not a
+    ///     renderable thing);
+    ///  2. no `AnimPlayer`, or one with no clip, or a clip that will not resolve ⇒
+    ///     **rest pose** ([`inf_anim::Pose::rest`]);
+    ///  3. otherwise the clip sampled at the play-head, honouring `looping`.
+    ///
+    /// **MIRROR** of `inf_editor_core::render_assets::EditorRenderAssets::resolve_skinned`,
+    /// character for character — the ONE difference is `&self` here against
+    /// `&mut self` there (this store memoizes behind its own locks because the
+    /// projector holds it immutably; the editor's viewport owns its store
+    /// mutably). `projector_mirror.rs` normalizes exactly that token and compares
+    /// the rest.
+    pub fn resolve_skinned(
+        &self,
+        sm: &SkeletalMesh,
+        player: Option<&AnimPlayer>,
+    ) -> Option<SkinnedDraw> {
+        let mesh_id = sm.mesh?;
+        let skeleton_id = sm.skeleton?;
+        let skeleton = self.skeleton(skeleton_id)?;
+        if skeleton.is_empty() {
+            return None;
+        }
+        let mesh = self.skinned_geometry(mesh_id, skeleton_id)?;
+        let pose = match player.and_then(|p| p.clip.map(|c| (p, c))) {
+            Some((p, clip_id)) => match self.clip(clip_id) {
+                Some(clip) => inf_anim::sample_clip(&skeleton, &clip, p.t as f32, p.looping),
+                None => inf_anim::Pose::rest(&skeleton),
+            },
+            None => inf_anim::Pose::rest(&skeleton),
+        };
+        Some(SkinnedDraw {
+            mesh,
+            palette: inf_anim::skinning_matrices(&skeleton, &pose),
+            key: (mesh_id, skeleton_id),
+        })
+    }
+
+    /// A decoded skeleton, cached (hit or miss) by GUID.
+    pub fn skeleton(&self, id: Uuid) -> Option<Arc<Skeleton>> {
+        let mut cache = lock(&self.skeletons);
+        if let Some(hit) = cache.get(&id) {
+            return hit.clone();
+        }
+        let loaded = self
+            .load_payload::<SkeletonAsset>(id)
+            .map(|a| Arc::new(a.skeleton));
+        cache.insert(id, loaded.clone());
+        loaded
+    }
+
+    /// A decoded animation clip, cached (hit or miss) by GUID.
+    pub fn clip(&self, id: Uuid) -> Option<Arc<AnimClip>> {
+        let mut cache = lock(&self.clips);
+        if let Some(hit) = cache.get(&id) {
+            return hit.clone();
+        }
+        let loaded = self
+            .load_payload::<AnimClipAsset>(id)
+            .map(|a| Arc::new(a.clip));
+        cache.insert(id, loaded.clone());
+        loaded
+    }
+
+    /// Bind-space skinned geometry for a `(mesh, skeleton)` pair, cached.
+    ///
+    /// **The `Arc` sharing point.** One `Arc<SkinnedMeshData>` per mesh asset for
+    /// the life of the registry: every projection of every entity bound to that
+    /// mesh gets a clone of the same pointer, which is the identity the skinned
+    /// pass caches its GPU upload on. Rebuilding it per projection would silently
+    /// re-upload the whole bind-space stream every frame.
+    fn skinned_geometry(&self, mesh_id: Uuid, _skeleton_id: Uuid) -> Option<Arc<SkinnedMeshData>> {
+        let mut cache = lock(&self.meshes);
+        if let Some(hit) = cache.get(&mesh_id) {
+            return hit.clone();
+        }
+        let built = self.build_skinned_geometry(mesh_id).map(Arc::new);
+        cache.insert(mesh_id, built.clone());
+        built
+    }
+
+    /// Decode a mesh asset and rebuild its bind-space skinned stream.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn build_skinned_geometry(&self, mesh_id: Uuid) -> Option<SkinnedMeshData> {
+        self.load_payload::<MeshAsset>(mesh_id)
+            .and_then(|m| skinned_mesh_data(&m))
+    }
+
+    /// **wasm32**: the browser player carries no `inf-mesh` — its `meshopt`
+    /// dependency builds meshoptimizer's C++ through `cc`, which the wasm target
+    /// has no toolchain/sysroot for (measured: `cargo check --target
+    /// wasm32-unknown-unknown -p inf-player` fails on it), the same reason
+    /// `inf-vgeom` gates `meshopt` off wasm32. So a `SkeletalMesh` keeps its
+    /// placeholder in the browser — unchanged from before this batch — while
+    /// every native target draws the real skinned geometry.
+    #[cfg(target_arch = "wasm32")]
+    fn build_skinned_geometry(&self, _mesh_id: Uuid) -> Option<SkinnedMeshData> {
+        None
+    }
+
+    /// Read + decode one asset payload out of whatever content backs this
+    /// registry. A missing entry is a clean `None` (⇒ the placeholder); a
+    /// *corrupt* one warns and is also `None`, because one bad asset must not
+    /// take a level down — the same rule `VmeshRegistry` loads under.
+    fn load_payload<T: inf_asset::AssetPayload>(&self, id: Uuid) -> Option<T> {
+        let bytes = match &self.content {
+            Content::None => return None,
+            Content::Pack(reader) => {
+                let asset = AssetId(id);
+                if !reader.contains(asset) {
+                    return None;
+                }
+                match reader.read(asset) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!("inf-player: read skeletal asset {id}: {e}");
+                        return None;
+                    }
+                }
+            }
+            Content::Dir(index) => {
+                let path = index.get(&id)?;
+                match std::fs::read(path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!("inf-player: read {}: {e}", path.display());
+                        return None;
+                    }
+                }
+            }
+        };
+        match inf_asset::decode::<T>(&bytes) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!("inf-player: decode skeletal asset {id}: {e}");
+                None
+            }
+        }
+    }
+}
+
+/// Build bind-space [`SkinnedMeshData`] from a `.inf_mesh` that carries skinning
+/// influences, or `None` if none of its submeshes do.
+///
+/// Submeshes are concatenated into one vertex + index buffer (indices rebased),
+/// exactly like the thumbnailer's `combined_geometry` — the skinned pass draws one
+/// instance per entity, and per-submesh material slots are the same follow-up
+/// they are on the rigid path. An **unskinned** submesh inside a skinned mesh is
+/// kept and pinned to joint 0 with weight 1, which is what a rigid part welded to
+/// a skeleton's root means; dropping it would silently lose geometry.
+///
+/// **MIRROR** of `inf_editor_core::render_assets::skinned_mesh_data`, character
+/// for character — pinned by `projector_mirror.rs`. It has to be: the two hosts
+/// would otherwise upload *different vertex buffers* for the same asset, which no
+/// scene-level comparison can see.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn skinned_mesh_data(mesh: &MeshAsset) -> Option<SkinnedMeshData> {
+    if !mesh.submeshes.iter().any(|s| s.is_skinned()) {
+        return None;
+    }
+    let mut vertices: Vec<SkinnedVertex> = Vec::with_capacity(mesh.vertex_count());
+    let mut indices: Vec<u32> = Vec::new();
+    for sm in &mesh.submeshes {
+        let base = vertices.len() as u32;
+        for (i, v) in sm.vertices.iter().enumerate() {
+            let skin = sm.skin.get(i).copied().unwrap_or_default().normalized();
+            vertices.push(SkinnedVertex {
+                pos: v.position,
+                normal: v.normal,
+                joints: skin.joints.map(u32::from),
+                weights: skin.weights,
+            });
+        }
+        indices.extend(sm.indices.iter().map(|&i| i + base));
+    }
+    if vertices.is_empty() || indices.len() < 3 {
+        return None;
+    }
+    Some(SkinnedMeshData { vertices, indices })
+}
+
+/// Index every loose skeletal asset in `dir` (non-recursive) by its GUID, read
+/// from the sibling `inf_asset` `.toml` sidecar. Deterministic (path-sorted).
+fn index_dir(dir: &Path) -> HashMap<Uuid, PathBuf> {
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|e| INDEXED_EXTENSIONS.contains(&e))
+            })
+            .collect(),
+        Err(_) => return HashMap::new(),
+    };
+    files.sort();
+    let mut out = HashMap::new();
+    for p in files {
+        match inf_asset::AssetSidecar::load(&p) {
+            Ok(side) => {
+                out.insert(side.guid.uuid(), p);
+            }
+            Err(_) => tracing::warn!(
+                "inf-player: skeletal asset without a sidecar {}",
+                p.display()
+            ),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inf_anim::{Interpolation, Joint, JointTrack, JointTransform, QuatTrack};
+
+    const MESH: Uuid = Uuid::from_u128(0x5EED_0001);
+    const SKEL: Uuid = Uuid::from_u128(0x5EED_0002);
+    const CLIP: Uuid = Uuid::from_u128(0x5EED_0003);
+
+    fn two_joint_skeleton() -> Skeleton {
+        Skeleton::new(vec![
+            Joint {
+                name: "root".into(),
+                parent: None,
+                local_bind: JointTransform::default(),
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+            },
+            Joint {
+                name: "tip".into(),
+                parent: Some(0),
+                local_bind: JointTransform::from_trs(
+                    glam::Vec3::new(0.0, 1.0, 0.0),
+                    glam::Quat::IDENTITY,
+                    glam::Vec3::ONE,
+                ),
+                inverse_bind: Mat4::from_translation(glam::Vec3::new(0.0, -1.0, 0.0))
+                    .to_cols_array(),
+            },
+        ])
+        .unwrap()
+    }
+
+    fn wave_clip() -> AnimClip {
+        AnimClip {
+            name: "wave".into(),
+            duration: 2.0,
+            tracks: vec![JointTrack {
+                joint: 1,
+                translation: None,
+                rotation: Some(QuatTrack::new(
+                    vec![0.0, 2.0],
+                    vec![
+                        glam::Quat::IDENTITY.to_array(),
+                        glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2).to_array(),
+                    ],
+                    Interpolation::Linear,
+                )),
+                scale: None,
+            }],
+        }
+    }
+
+    fn triangle() -> SkinnedMeshData {
+        let v = |x: f32, y: f32, j: u32| SkinnedVertex {
+            pos: [x, y, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            joints: [j, 0, 0, 0],
+            weights: [1.0, 0.0, 0.0, 0.0],
+        };
+        SkinnedMeshData {
+            vertices: vec![v(0.0, 0.0, 0), v(1.0, 0.0, 0), v(0.0, 2.0, 1)],
+            indices: vec![0, 1, 2],
+        }
+    }
+
+    fn registry() -> SkinnedRegistry {
+        let mut reg = SkinnedRegistry::new();
+        reg.insert_mesh(MESH, triangle());
+        reg.insert_skeleton(SKEL, two_joint_skeleton());
+        reg.insert_clip(CLIP, wave_clip());
+        reg
+    }
+
+    fn bound() -> SkeletalMesh {
+        SkeletalMesh {
+            mesh: Some(MESH),
+            skeleton: Some(SKEL),
+        }
+    }
+
+    /// Rule 2 of the pose rule: no `AnimPlayer` ⇒ the rest pose, so a character
+    /// is visible the moment it is spawned rather than only once it plays.
+    #[test]
+    fn a_skeletal_mesh_projects_its_rest_pose() {
+        let reg = registry();
+        let draw = reg
+            .resolve_skinned(&bound(), None)
+            .expect("rest pose draws");
+        assert_eq!(draw.mesh.vertices.len(), 3);
+        assert_eq!(draw.mesh.indices, vec![0, 1, 2]);
+        assert_eq!(draw.palette.len(), 2, "one matrix per joint");
+        for m in &draw.palette {
+            assert!(
+                (*m - Mat4::IDENTITY)
+                    .to_cols_array()
+                    .iter()
+                    .all(|v| v.abs() < 1e-5),
+                "rest palette must be identity, got {m:?}"
+            );
+        }
+        assert_eq!(draw.key, (MESH, SKEL));
+    }
+
+    /// Rule 3: the palette follows the play-head, deterministically.
+    #[test]
+    fn an_anim_player_drives_the_palette() {
+        let reg = registry();
+        let rest = reg.resolve_skinned(&bound(), None).unwrap().palette;
+        let play = AnimPlayer {
+            clip: Some(CLIP),
+            // Mid-clip on purpose: `t == duration` on a LOOPING player wraps back
+            // to 0, which would compare the rest pose to itself and pass for the
+            // wrong reason.
+            t: 0.5,
+            ..AnimPlayer::default()
+        };
+        let posed = reg.resolve_skinned(&bound(), Some(&play)).unwrap().palette;
+        assert_ne!(rest[1].to_cols_array(), posed[1].to_cols_array());
+        let again = reg.resolve_skinned(&bound(), Some(&play)).unwrap().palette;
+        assert_eq!(posed[1].to_cols_array(), again[1].to_cols_array());
+    }
+
+    /// Rule 2 again: an `AnimPlayer` whose clip cannot be resolved falls back to
+    /// the rest pose rather than to nothing — a missing clip must not make a
+    /// character vanish.
+    #[test]
+    fn an_unresolvable_clip_falls_back_to_rest() {
+        let reg = registry();
+        let rest = reg.resolve_skinned(&bound(), None).unwrap().palette;
+        let ghost = reg
+            .resolve_skinned(
+                &bound(),
+                Some(&AnimPlayer {
+                    clip: Some(Uuid::from_u128(0xC0FFEE)),
+                    t: 0.5,
+                    ..AnimPlayer::default()
+                }),
+            )
+            .unwrap()
+            .palette;
+        assert_eq!(rest[1].to_cols_array(), ghost[1].to_cols_array());
+    }
+
+    /// Rule 1: half-bound (or unbacked) skeletal entities keep the placeholder,
+    /// and an inert registry resolves nothing at all.
+    #[test]
+    fn an_unbound_skeletal_mesh_stays_a_placeholder() {
+        let reg = registry();
+        assert!(reg
+            .resolve_skinned(&SkeletalMesh::default(), None)
+            .is_none());
+        assert!(reg
+            .resolve_skinned(
+                &SkeletalMesh {
+                    mesh: Some(MESH),
+                    skeleton: None
+                },
+                None
+            )
+            .is_none());
+        assert!(reg
+            .resolve_skinned(
+                &SkeletalMesh {
+                    mesh: Some(Uuid::from_u128(7)),
+                    skeleton: Some(SKEL)
+                },
+                None
+            )
+            .is_none());
+        assert!(SkinnedRegistry::new()
+            .resolve_skinned(&bound(), None)
+            .is_none());
+        assert!(!SkinnedRegistry::new().has_content());
+    }
+
+    /// **The `Arc` discipline.** Two projections of the same mesh asset hand out
+    /// the *same pointer*, which is the identity the skinned pass caches its GPU
+    /// upload on. If this ever became a fresh `Arc` per resolve, every frame
+    /// would re-upload the whole bind-space stream while the cache reported a hit
+    /// rate of zero — invisible in every pixel comparison in the repo.
+    #[test]
+    fn the_same_mesh_asset_hands_out_one_shared_arc() {
+        let reg = registry();
+        let a = reg.resolve_skinned(&bound(), None).unwrap().mesh;
+        let b = reg.resolve_skinned(&bound(), None).unwrap().mesh;
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "the store must share one Arc<SkinnedMeshData> per mesh asset"
+        );
+        assert_eq!(reg.loaded_skinned(), 1);
+    }
+
+    /// A miss is memoized too: a dangling reference costs one failed lookup for
+    /// the session, not one per frame.
+    #[test]
+    fn a_dangling_reference_misses_cheaply() {
+        let reg = SkinnedRegistry::from_dir(Path::new("does-not-exist"));
+        let ghost = SkeletalMesh {
+            mesh: Some(Uuid::from_u128(1)),
+            skeleton: Some(Uuid::from_u128(2)),
+        };
+        for _ in 0..5 {
+            assert!(reg.resolve_skinned(&ghost, None).is_none());
+        }
+        assert_eq!(reg.loaded_skinned(), 0);
+    }
+
+    /// A rigid mesh with no skin stream is not skinned geometry (the caller keeps
+    /// its placeholder).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_unskinned_mesh_is_not_skinned_geometry() {
+        use inf_mesh::{MeshVertex, SubMesh};
+        let rigid = MeshAsset::new(
+            vec![SubMesh {
+                name: "quad".into(),
+                vertices: vec![MeshVertex::default(); 3],
+                indices: vec![0, 1, 2],
+                material_slot: None,
+                skin: Vec::new(),
+            }],
+            vec![],
+        );
+        assert!(skinned_mesh_data(&rigid).is_none());
+    }
+}

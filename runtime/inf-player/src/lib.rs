@@ -40,6 +40,9 @@ pub mod log;
 pub mod mods;
 pub mod render;
 pub mod runtime_sim;
+/// Skeletal render assets (the P18.3 follow-up) — bind-space skinned geometry,
+/// skeletons and clips, resolved out of a cooked pack or a dev dir.
+pub mod skinned;
 /// Camera-driven terrain streaming (P16.3b2) — the sim/render want split.
 pub mod terrain_stream;
 pub mod vmesh;
@@ -315,8 +318,10 @@ pub fn run_windowed(args: &Args) -> ExitCode {
         None => format!("Infinity Engine — {}", built.label),
     };
     // P13.4: load the cook-derived vmesh DAGs so `MeshRef.asset` entities render
-    // real geometry (meshlet path / classic fallback per the renderer's auto-tier).
-    let vmeshes = std::sync::Arc::new(load_vmeshes(args));
+    // real geometry (meshlet path / classic fallback per the renderer's auto-tier),
+    // and (the P18.3 follow-up) the skeletal store so a `SkeletalMesh` renders its
+    // real posed geometry instead of a placeholder.
+    let (vmeshes, skinned) = load_render_assets(args);
     // R-P4: the level's scene-persisted render block (post/exposure/lighting),
     // captured before `built` is consumed, applied by the render host.
     let render = built.render;
@@ -331,6 +336,7 @@ pub fn run_windowed(args: &Args) -> ExitCode {
         sim,
         map,
         vmeshes,
+        skinned,
         render,
         args.debug_cells,
     ) {
@@ -342,19 +348,33 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     }
 }
 
-/// Load the `.inf_vmesh` registry for the chosen world: from the cooked pack
-/// (`--pack`), the level's dev-dir sidecars (`--level`), or empty (`--demo` /
-/// no meshes). The renderer resolves a `MeshRef.asset` against it (P13.4).
-fn load_vmeshes(args: &Args) -> vmesh::VmeshRegistry {
-    match &args.world {
-        WorldChoice::Demo => vmesh::VmeshRegistry::new(),
+/// Load the render-asset stores for the chosen world: the `.inf_vmesh` registry a
+/// `MeshRef.asset` resolves against (P13.4) and the skeletal store a
+/// `SkeletalMesh` resolves against (the P18.3 follow-up). Both come from the
+/// cooked pack (`--pack`), the level's dev-dir sidecars (`--level`), or are inert
+/// (`--demo`).
+///
+/// Loaded together on purpose: on the pack path they share **one**
+/// `Arc<PackReader>`, so the mapping is opened once however many kinds of asset
+/// the renderer reaches into it for (the P18.2 rule).
+fn load_render_assets(
+    args: &Args,
+) -> (
+    std::sync::Arc<vmesh::VmeshRegistry>,
+    std::sync::Arc<skinned::SkinnedRegistry>,
+) {
+    let (vmeshes, skinned) = match &args.world {
+        WorldChoice::Demo => (vmesh::VmeshRegistry::new(), skinned::SkinnedRegistry::new()),
         WorldChoice::Level(path) => {
             let content_dir = args
                 .content
                 .clone()
                 .or_else(|| path.parent().map(PathBuf::from))
                 .unwrap_or_else(|| PathBuf::from("."));
-            vmesh::VmeshRegistry::from_dir(&content_dir)
+            (
+                vmesh::VmeshRegistry::from_dir(&content_dir),
+                skinned::SkinnedRegistry::from_dir(&content_dir),
+            )
         }
         WorldChoice::Pack(path) => {
             let pack_path = if path.is_dir() {
@@ -362,20 +382,29 @@ fn load_vmeshes(args: &Args) -> vmesh::VmeshRegistry {
             } else {
                 path.clone()
             };
-            // One `Arc<PackReader>` shared by every indexed vmesh: the mapping is
-            // opened once, and a meshlet page is a sub-slice of it (P18.2).
-            match inf_asset::PackReader::open(&pack_path)
-                .map_err(|e| e.to_string())
-                .and_then(|r| vmesh::VmeshRegistry::from_pack(std::sync::Arc::new(r)))
-            {
-                Ok(reg) => reg,
+            // One `Arc<PackReader>` shared by every indexed vmesh AND by the
+            // skeletal store: the mapping is opened once, and a meshlet page is a
+            // sub-slice of it (P18.2).
+            match inf_asset::PackReader::open(&pack_path).map_err(|e| e.to_string()) {
+                Ok(reader) => {
+                    let reader = std::sync::Arc::new(reader);
+                    let skinned = skinned::SkinnedRegistry::from_pack(reader.clone());
+                    match vmesh::VmeshRegistry::from_pack(reader) {
+                        Ok(reg) => (reg, skinned),
+                        Err(e) => {
+                            tracing::warn!("inf-player: no vmeshes loaded from pack: {e}");
+                            (vmesh::VmeshRegistry::new(), skinned)
+                        }
+                    }
+                }
                 Err(e) => {
-                    tracing::warn!("inf-player: no vmeshes loaded from pack: {e}");
-                    vmesh::VmeshRegistry::new()
+                    tracing::warn!("inf-player: no render assets loaded from pack: {e}");
+                    (vmesh::VmeshRegistry::new(), skinned::SkinnedRegistry::new())
                 }
             }
         }
-    }
+    };
+    (std::sync::Arc::new(vmeshes), std::sync::Arc::new(skinned))
 }
 
 /// Construct a [`RuntimeSim`] from a [`BuiltWorld`], seeding it with the level's

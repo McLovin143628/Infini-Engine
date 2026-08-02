@@ -307,7 +307,21 @@ pub struct TerrainStreamer {
     /// edits ([`pin_tile`](Self::pin_tile)) — never evicted, never re-read from
     /// the store. Empty in the shipped player, which never edits anything.
     pinned: BTreeSet<TileKey>,
+    /// The **residency floor**: the catalog's coarsest level, always resident.
+    /// See [`residency_floor`](Self::residency_floor) for why it exists and why
+    /// it is deliberately *not* part of the published cut.
+    floor: BTreeSet<TileKey>,
     stats: TerrainStreamStats,
+}
+
+/// The catalog's **coarsest level**, minus keys known to be corrupt — the
+/// residency floor a [`TerrainStreamer`] pins (P18.4).
+fn residency_floor_of(catalog: &TileCatalog, blocked: &BTreeSet<TileKey>) -> BTreeSet<TileKey> {
+    catalog
+        .keys_at_lod(catalog.max_lod())
+        .into_iter()
+        .filter(|k| !blocked.contains(k))
+        .collect()
 }
 
 /// A [`TileIndex`] view that hides keys which failed to decode.
@@ -355,15 +369,19 @@ impl TerrainStreamer {
         // small by construction (`build_pyramid` stops at `min_tiles`), covers the
         // whole terrain, and gives the first frame something to draw while the
         // finer levels converge.
-        let cut: BTreeSet<TileKey> = catalog.keys_at_lod(catalog.max_lod()).into_iter().collect();
+        //
+        // It is also the **residency floor** (P18.4): the same set stays resident
+        // for the streamer's whole life, whatever the cut later refines into.
+        let floor = residency_floor_of(&catalog, &BTreeSet::new());
         Self {
             grid,
             catalog,
             params,
             budget,
             render: TerrainData::new(tile_resolution, meters_per_sample),
-            target: cut.clone(),
-            cut,
+            target: floor.clone(),
+            cut: floor.clone(),
+            floor,
             sim_bytes: 0,
             blocked: BTreeSet::new(),
             pinned: BTreeSet::new(),
@@ -401,6 +419,66 @@ impl TerrainStreamer {
     #[inline]
     pub fn cut(&self) -> &BTreeSet<TileKey> {
         &self.cut
+    }
+
+    /// The **residency floor**: the catalog's coarsest level, held resident for
+    /// the streamer's whole life (P18.4).
+    ///
+    /// # Why a floor exists
+    ///
+    /// [`render_wants`](crate::wants::render_wants) seeds from the pyramid's
+    /// coarsest level and *replaces* a node by its children whenever the camera is
+    /// inside the refine radius. A terrain small enough to sit entirely inside the
+    /// finest refine ring therefore refines **every root away**, and the
+    /// projection carries no root page at all. Downstream, `RenderTerrain::max_lod`
+    /// is a max over the projected set, so it collapses from the asset's real
+    /// coarsest level to `0` at that camera distance — and consumers that key off
+    /// it (the GI voxelizer picks its sampling LOD from `terrain.max_lod()`) flip
+    /// between two stable regimes as the camera crosses the threshold. Pinning the
+    /// root level makes `max_lod` a property of the **asset** instead of a
+    /// property of where the camera has been.
+    ///
+    /// # Why it is residency and NOT the cut
+    ///
+    /// The floor is never merged into [`cut`](Self::cut). The published cut stays
+    /// exactly `next ∩ resident`, so the quadtree-cut contract
+    /// [`wants`](crate::wants) states and the renderer leans on — no page coexists
+    /// with an ancestor, children enter and leave as complete sets of four — is
+    /// untouched. What changes is only *which pages are in memory*: the renderer's
+    /// source selection already decides per-frame which resident page draws, and a
+    /// root whose ground is covered by finer resident pages is suppressed there
+    /// (`inf_render::passes::terrain::superseded`).
+    ///
+    /// **That suppression needs two things from the renderer, and the first cut of
+    /// P18.5 only had one.** Coverage must be *transitive* (a pinned root routinely
+    /// sits several levels above the cut, so "all four immediate children are
+    /// resident" is the wrong question), **and** the redundancy clause must ask it
+    /// of the **pre-frustum-cull** projection. Asking it post-cull is a reproduced
+    /// z-fight: a camera inside the terrain culls the descendants behind it, the
+    /// root — whose AABB spans the whole grid — survives, reads as uncovered, and
+    /// draws its decimated surface over the fine pages in front. With both
+    /// properties in place the drawn patch set really is unchanged and the floor
+    /// costs residency, not pixels; `passes::terrain` carries the argument and the
+    /// two gates (`adding_covered_root_tiles_does_not_move_a_single_patch`,
+    /// `a_frustum_that_cuts_the_root_still_silences_it`).
+    ///
+    /// # Why it is cheap
+    ///
+    /// [`build_pyramid`](crate::pyramid::build_pyramid) stops as soon as a level
+    /// holds at most [`PyramidOptions::min_tiles`](crate::pyramid::PyramidOptions)
+    /// tiles, so the coarsest level is a handful of pages by construction — the
+    /// same argument the cut seed above already makes. It is charged against
+    /// [`StreamBudget::max_resident_tiles`] like a pin (see `pin_ceiling`), with
+    /// one honest edge: a budget *below the floor's own size* cannot be honoured,
+    /// because the floor is coverage and the whole point of the fix is that
+    /// coverage is not traded away for detail.
+    ///
+    /// A store with no pyramid (`catalog.max_lod() == 0`) has its **level 0** as
+    /// the floor — which is exactly the set `render_wants` returns for such a
+    /// store anyway, so its residency is unchanged.
+    #[inline]
+    pub fn residency_floor(&self) -> &BTreeSet<TileKey> {
+        &self.floor
     }
 
     /// The tile grid this streamer maps keys through.
@@ -572,32 +650,44 @@ impl TerrainStreamer {
             self.cut = catalog.keys_at_lod(catalog.max_lod()).into_iter().collect();
         }
         self.target.clone_from(&self.cut);
+        // The rewrite can have added or dropped whole levels, so the floor is
+        // recomputed rather than filtered (see `residency_floor`).
+        self.floor = residency_floor_of(&catalog, &self.blocked);
         self.catalog = catalog;
     }
 
-    /// The tile ceiling the **cut** may spend, given the pins that will be
-    /// resident beside it.
+    /// The tile ceiling the **cut** may spend, given the pins **and the residency
+    /// floor** that will be resident beside it.
     ///
     /// `max_resident_tiles` is documented (P16.3b2) as a hard bound on render
-    /// residency, and pinned tiles are render-resident — so the pins have to come
-    /// out of the same allowance rather than sitting outside it. Only pins that
-    /// are *not* already in `cut` are charged; a pinned tile the cut also wants is
-    /// paid for once.
+    /// residency, and both pinned tiles and
+    /// [floor](Self::residency_floor) tiles are render-resident — so they have to
+    /// come out of the same allowance rather than sitting outside it. Only members
+    /// that are *not* already in `cut` are charged; a page the cut also wants is
+    /// paid for once. That is exactly the accounting that keeps
+    /// `|cut ∪ pinned ∪ floor| ≤ max_resident_tiles`.
     ///
     /// Two documented edges:
     /// * `0` means unlimited and stays unlimited (subtracting from it would turn
     ///   "no ceiling" into "a tiny one").
-    /// * When the pins alone meet or exceed the ceiling, the cut still gets **1**
-    ///   tile rather than none — a terrain with no published cut draws nothing at
-    ///   all. Residency is then `pins + 1`, which is the one place the bound is
-    ///   exceeded, and it is exceeded by unsaved authoring the editor must not
-    ///   drop. Pins only ever exist in the editor; the shipped player never pins.
+    /// * When the pins and the floor alone meet or exceed the ceiling, the cut
+    ///   still gets **1** tile rather than none — a terrain with no published cut
+    ///   draws nothing at all. Residency is then `pins + floor + 1`, which is the
+    ///   one place the bound is exceeded, and it is exceeded by unsaved authoring
+    ///   the editor must not drop plus the coverage layer P18.4 pins on purpose. A
+    ///   budget below the floor's own size is therefore unsatisfiable by
+    ///   construction. Pins only ever exist in the editor; the shipped player never
+    ///   pins, but every streamer has a floor.
     fn pin_ceiling(&self, cut: &BTreeSet<TileKey>) -> usize {
         let max = self.budget.max_resident_tiles;
-        if max == 0 || self.pinned.is_empty() {
+        if max == 0 || (self.pinned.is_empty() && self.floor.is_empty()) {
             return max;
         }
-        let charged = self.pinned.iter().filter(|k| !cut.contains(k)).count();
+        let charged = self
+            .pinned
+            .union(&self.floor)
+            .filter(|k| !cut.contains(k))
+            .count();
         max.saturating_sub(charged).max(1)
     }
 
@@ -726,17 +816,26 @@ impl TerrainStreamer {
             if self.pinned.contains(&key) {
                 continue;
             }
+            // A floor tile is the terrain's coarsest coverage (P18.4): evicting it
+            // would make the projection's `max_lod` a function of where the camera
+            // has been. See `residency_floor`.
+            if self.floor.contains(&key) {
+                continue;
+            }
             if !next.contains(&key) && self.render.evict_tile(key) {
                 report.evicted.push(key);
             }
         }
 
         // Load the new pages as one deterministic parallel batch, then apply them
-        // in ascending key order.
+        // in ascending key order. The batch is `(cut ∪ floor) \ resident \
+        // blocked`: the floor pages in even when `render_wants` has refined past
+        // it, which is the whole point (`residency_floor`). `BTreeSet::union`
+        // yields ascending keys, so the batch order is unchanged.
         let to_load: Vec<TileKey> = next
-            .iter()
+            .union(&self.floor)
             .copied()
-            .filter(|k| !self.render.is_resident(*k))
+            .filter(|k| !self.render.is_resident(*k) && !self.blocked.contains(k))
             .collect();
         for (key, outcome) in to_load.iter().copied().zip(load_tiles(store, &to_load)) {
             match outcome {
@@ -975,11 +1074,22 @@ mod tests {
         );
         assert!(wants.iter().all(|k| sim.is_resident(*k)));
 
-        // The render side, meanwhile, really is clamped.
+        // The render side, meanwhile, really is clamped — down to the residency
+        // FLOOR plus the documented one-tile cut allowance (P18.4: the coarsest
+        // level is coverage and is never traded for detail, so a budget below its
+        // own size is unsatisfiable by construction; see `pin_ceiling`).
         s.sync_render(DVec2::new(20.0, 20.0), &store);
+        let floor = s.residency_floor().len();
+        assert!(floor > 0 && floor < wants.len(), "floor {floor}");
         assert!(
-            s.render_data().tile_count() + s.render_data().coarse_tile_count() <= 2,
+            s.render_data().tile_count() + s.render_data().coarse_tile_count() <= floor + 1,
             "the render budget is not being honoured"
+        );
+        assert!(
+            s.residency_floor()
+                .iter()
+                .all(|k| s.render_data().is_resident(*k)),
+            "a budget of ONE evicted the coverage floor"
         );
         assert_eq!(s.stats().sim_resident_level0, sim.tile_count());
     }
@@ -1333,6 +1443,229 @@ mod tests {
         assert_eq!(a.evictions, 1);
         assert!(a.budget_clamped);
         assert!(a.summary().contains("terrain streaming"));
+    }
+
+    // ── P18.4: the residency floor ───────────────────────────────────────────
+
+    /// The fixture's coarsest-level (root) keys.
+    fn roots(s: &TerrainStreamer) -> Vec<TileKey> {
+        s.catalog().keys_at_lod(s.catalog().max_lod())
+    }
+
+    /// The coarsest LOD actually **resident** in the render working set.
+    fn max_resident_lod(s: &TerrainStreamer) -> u32 {
+        s.render_data()
+            .resident_keys()
+            .iter()
+            .map(|k| k.lod)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// A streamer whose refine radii are wide enough to refine the WHOLE fixture
+    /// to level 0 from its centre — the terrain-inside-the-finest-ring shape.
+    fn wide_streamer(store: &FileTileStore) -> TerrainStreamer {
+        TerrainStreamer::from_store(
+            store,
+            5,
+            2.0,
+            RenderWantsParams::geometric(24.0, 4),
+            StreamBudget {
+                max_resident_tiles: 0,
+                max_loads_per_sync: 0,
+            },
+        )
+    }
+
+    /// **A terrain small enough to sit entirely inside the finest refine ring
+    /// still keeps its root level resident** (P18.4 — the auditor residual).
+    ///
+    /// `render_wants` replaces a node by its children whenever the camera is
+    /// inside the refine radius, so a small terrain refines every root away and
+    /// the projection carries no coarse page at all. `RenderTerrain::max_lod` is a
+    /// max over the projected set, so it then collapses to 0 and the GI voxelizer
+    /// (which picks its sampling LOD from it) flips regimes at that camera
+    /// distance. The floor is what stops that.
+    #[test]
+    fn a_fully_refined_terrain_still_keeps_its_root_level_resident() {
+        let (_t, store) = fixture();
+        let mut s = wide_streamer(&store);
+        assert!(s.catalog().max_lod() >= 2, "need a real pyramid");
+        let roots = roots(&s);
+        assert_eq!(roots.len(), 4, "the fixture's coarsest level");
+        assert_eq!(
+            s.residency_floor().iter().copied().collect::<Vec<_>>(),
+            roots,
+            "the floor IS the coarsest level"
+        );
+
+        // Park the camera at the terrain's centre and converge: every root is
+        // inside its own refine radius, so the cut refines all the way to level 0.
+        let centre = DVec2::new(32.0, 32.0);
+        for _ in 0..8 {
+            s.sync_render(centre, &store);
+        }
+        assert_eq!(s.stats().pending_loads, 0, "the backlog drains");
+
+        // (a) ANTI-VACUITY: the premise is live — the published cut really did
+        // refine every root away, and is level-0 only.
+        for r in &roots {
+            assert!(
+                !s.cut().contains(r),
+                "{r:?} is still in the cut — the fixture does not exercise the bug"
+            );
+        }
+        assert!(
+            s.cut().iter().all(|k| k.lod == 0),
+            "the whole terrain should have refined to level 0: {:?}",
+            s.cut()
+        );
+
+        // (b) …and yet every root page is RESIDENT.
+        for r in &roots {
+            assert!(
+                s.render_data().is_resident(*r),
+                "{r:?} was refined away and evicted — max_lod is camera-dependent again"
+            );
+        }
+
+        // (c) so the coarsest resident level is the ASSET's, not the camera's.
+        assert_eq!(max_resident_lod(&s), s.catalog().max_lod());
+
+        // The cut contract is untouched: the floor is residency, not the cut.
+        for &k in s.cut() {
+            let mut anc = k;
+            for _ in 0..8 {
+                anc = anc.parent();
+                assert!(!s.cut().contains(&anc), "{k:?} coexists with {anc:?}");
+            }
+        }
+        // Settled: the floor does not churn once paged.
+        let before = s.cut().clone();
+        let r = s.sync_render(centre, &store);
+        assert!(r.is_noop(), "{r:?}");
+        assert_eq!(s.cut(), &before);
+    }
+
+    /// **`max_lod` is stable across the regime boundary** — the actual regression.
+    ///
+    /// Drive one streamer from a far camera (the roots ARE the cut) to a near one
+    /// (the roots are refined away). Before the floor, the coarsest resident level
+    /// dropped from the asset's to 0 at that threshold; now it does not move.
+    #[test]
+    fn the_coarsest_resident_lod_does_not_move_with_the_camera() {
+        let (_t, store) = fixture();
+        let mut s = wide_streamer(&store);
+        let asset_max = s.catalog().max_lod();
+
+        // Far: the whole terrain is one coarse cut.
+        let far = DVec2::new(600.0, 600.0);
+        for _ in 0..8 {
+            s.sync_render(far, &store);
+        }
+        assert!(
+            s.cut().iter().any(|k| k.lod == asset_max),
+            "the far camera must keep the roots in the cut: {:?}",
+            s.cut()
+        );
+        let far_lod = max_resident_lod(&s);
+
+        // Near: everything refines to level 0 and the roots leave the cut.
+        let near = DVec2::new(32.0, 32.0);
+        for _ in 0..8 {
+            s.sync_render(near, &store);
+        }
+        assert!(
+            s.cut().iter().all(|k| k.lod == 0),
+            "the near camera must refine the roots away: {:?}",
+            s.cut()
+        );
+        let near_lod = max_resident_lod(&s);
+
+        assert_eq!(
+            far_lod, near_lod,
+            "the coarsest resident lod moved with the camera ({far_lod} → {near_lod})"
+        );
+        assert_eq!(near_lod, asset_max, "…and it is the ASSET's coarsest level");
+
+        // …and back again, for good measure.
+        for _ in 0..8 {
+            s.sync_render(far, &store);
+        }
+        assert_eq!(max_resident_lod(&s), asset_max);
+    }
+
+    /// **A store with no pyramid is unaffected**: its coarsest level *is* level 0,
+    /// so the floor is exactly the set `render_wants` already returns for it.
+    #[test]
+    fn a_pyramid_less_store_is_unaffected_by_the_floor() {
+        let (t, _asset) = fixture();
+        let mut mem = MemoryTileStore::new();
+        mem.stage_level0(&t).unwrap();
+        let mut s = TerrainStreamer::from_store(
+            &mem,
+            5,
+            2.0,
+            RenderWantsParams::geometric(12.0, 4),
+            StreamBudget::default(),
+        );
+        assert_eq!(s.catalog().max_lod(), 0);
+        assert_eq!(s.residency_floor().len(), 64);
+        assert!(s.residency_floor().iter().all(|k| k.is_lod0()));
+
+        for _ in 0..4 {
+            s.sync_render(DVec2::new(8.0, 8.0), &mem);
+        }
+        // Bit for bit what `memory_store_backs_the_streamer_too` asserts.
+        assert_eq!(s.render_data().coarse_tile_count(), 0);
+        assert_eq!(s.render_data().tile_count(), 64);
+        assert_eq!(max_resident_lod(&s), 0);
+    }
+
+    /// **The floor is charged against the budget**, exactly like a pin: the cut's
+    /// allowance shrinks by the floor pages it does not already contain, so total
+    /// residency still respects `max_resident_tiles`.
+    #[test]
+    fn the_residency_floor_is_charged_against_the_budget() {
+        let (_t, store) = fixture();
+        const CEILING: usize = 10;
+        let mut s = TerrainStreamer::from_store(
+            &store,
+            5,
+            2.0,
+            RenderWantsParams::geometric(24.0, 4),
+            StreamBudget {
+                max_resident_tiles: CEILING,
+                max_loads_per_sync: 3,
+            },
+        );
+        let floor = s.residency_floor().clone();
+        assert!(floor.len() < CEILING, "the fixture's floor must fit");
+
+        let centre = DVec2::new(32.0, 32.0);
+        for step in 0..60 {
+            s.sync_render(centre, &store);
+            let resident = s.render_data().resident_keys().len();
+            assert!(
+                resident <= CEILING,
+                "step {step}: the floor pushed residency to {resident} over the \
+                 {CEILING} ceiling"
+            );
+            for &k in &floor {
+                assert!(s.render_data().is_resident(k), "step {step}: {k:?} evicted");
+            }
+        }
+        assert!(
+            s.stats().budget_clamped,
+            "the ceiling must actually bind, or the test proves nothing"
+        );
+        // The accounting identity the ceiling rests on.
+        let cut = s.cut().clone();
+        assert!(
+            cut.union(&floor).count() <= CEILING,
+            "|cut ∪ floor| = {} blew the {CEILING} ceiling",
+            cut.union(&floor).count()
+        );
     }
 
     #[test]

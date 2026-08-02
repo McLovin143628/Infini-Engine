@@ -3697,6 +3697,486 @@ run by hand when the importer is profiled.\n\n\
    the streamer's look-ahead can reach a fixed step.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// -- Phase 18 gate scene: meshlets + GI + GPU scatter, composed (P18.6) -------
+//
+// The Phase-18-closing gate scene. Everything the phase built, in one level:
+//
+//   * **P18.1/P18.2 meshlets** -- a grid of standing slabs, every one a
+//     `MeshRef.asset` reference to the vgeom-demo's `Dense.inf_mesh` BY GUID
+//     ([`VGEOM_DEMO_MESH_GUID`]). The mesh binary is deliberately NOT duplicated
+//     here; the gate copies both sample directories into its throwaway project so
+//     the cook derives one `.inf_vmesh` from the one committed mesh. Slabs stand
+//     upright (a 90 deg rotation about X) precisely so they OCCLUDE -- an occluder
+//     set is what makes the two-pass HZB proof and the scatter occlusion counter
+//     non-vacuous, and a field of flat plates would provide neither.
+//   * **P18.4 GI v2** -- a `Terrain` (four authored tiles, real relief) plus a
+//     `TimeOfDay` + `SkyAtmosphere` authority running a fast clock, so the sun
+//     sweeps and the amortized probe sweep is exercised against a moving key
+//     light rather than a frozen one.
+//   * **P18.5 GPU scatter** -- a `PcgVolume` carrying the bulk (100k+ instances,
+//     see [`PHASE18_SCATTER_INSTANCES`]) and a small `Foliage` entity for the
+//     painted-scatter path. The split is a size decision, stated rather than
+//     discovered: a `PcgVolume`'s `evaluated` cache is a DERIVED cache that is
+//     never persisted (it is recomputed on load from the committed `.inf_pcg`),
+//     so 100k instances cost the `.inf_lvl` nothing, while `Foliage::instances`
+//     IS persisted -- 100k of those would be a megabyte of committed level.
+//
+// The committed `.inf_lvl` therefore stays ~15 KB while the loaded world carries
+// six figures of scatter, which is the same "small level, huge scene" property
+// the vgeom demo has for triangles.
+
+pub const PHASE18_LEVEL_GUID: Uuid = Uuid::from_u128(0x8418_0000);
+pub const PHASE18_TERRAIN_GUID: Uuid = Uuid::from_u128(0x8418_0001);
+pub const PHASE18_PCG_GUID: Uuid = Uuid::from_u128(0x8418_0002);
+pub const PHASE18_FOLIAGE_GUID: Uuid = Uuid::from_u128(0x8418_0003);
+pub const PHASE18_SKY_GUID: Uuid = Uuid::from_u128(0x8418_0004);
+pub const PHASE18_SUN_GUID: Uuid = Uuid::from_u128(0x8418_0005);
+pub const PHASE18_CAMERA_GUID: Uuid = Uuid::from_u128(0x8418_0006);
+/// The **asset** GUID of the committed `GroundCover.inf_pcg`, so the level's
+/// `PcgVolume.graph` ref resolves through the AssetDb / cooked pack and the
+/// cook's level->pcg dependency edge ships the graph.
+pub const PHASE18_PCG_ASSET_GUID: Uuid = Uuid::from_u128(0x8418_00AA);
+/// Base GUID for the meshlet slab entities (add the flat grid index).
+const PHASE18_SLAB_BASE: u128 = 0x8418_0100;
+
+/// Terrain samples per tile side. `17` closes a tile on a 16-cell lattice.
+pub const PHASE18_TERRAIN_RESOLUTION: u32 = 17;
+/// World metres per terrain sample -- 16 m, so ONE tile spans 256 m and four
+/// tiles cover the whole 512 m sample world in ~4.6 KB of committed heights.
+pub const PHASE18_TERRAIN_MPS: f64 = 16.0;
+/// Authored tiles per side (2 x 2 -- genuinely multi-tile, still tiny).
+pub const PHASE18_TERRAIN_TILES: i32 = 2;
+
+/// Meshlet slab grid side: `GRID x GRID` standing instances of the shared dense
+/// mesh.
+pub const PHASE18_SLAB_GRID: usize = 5;
+/// Spacing between slabs, metres.
+pub const PHASE18_SLAB_SPACING: f64 = 90.0;
+/// Uniform scale of one slab. The dense mesh spans `[-1, 1]` in XZ, so a slab is
+/// `2 * SCALE` metres wide and (standing) `2 * SCALE` metres tall.
+pub const PHASE18_SLAB_SCALE: f64 = 18.0;
+
+/// Scatter cell edge, metres (the PCG kernel's parallel granularity).
+pub const PHASE18_SCATTER_CELL_SIZE: f64 = 32.0;
+/// Scatter instances per m^2 at density 1.0.
+pub const PHASE18_SCATTER_DENSITY: f64 = 1.6;
+/// Half-extent of the scatter volume in world XZ, metres.
+pub const PHASE18_SCATTER_EXTENT: f64 = 128.0;
+/// Authored per-volume draw distance, metres. Deliberately **shorter** than the
+/// renderer's default 400 m cull band: `ScatterSettings` clamps DOWN only, so
+/// this is the one content knob that can pull the band in, and the gate's
+/// `distance_culled` counter is non-vacuous because of it.
+pub const PHASE18_SCATTER_DRAW_DISTANCE: f64 = 250.0;
+
+/// Exactly how many instances [`phase18_scatter_pcg_document`] places over the
+/// volume's region -- an exact, stated property of the sample rather than an
+/// emergent one.
+///
+/// The kernel is fully specified (`scatter.rs`'s "candidate scheme"), so the
+/// count is arithmetic, not luck: the region is `2 * EXTENT = 256 m` on a side and
+/// cell-aligned, giving `256 / 32 = 8` cells per axis (64 cells); each cell's
+/// budget is `DENSITY * CELL^2 = 1638.4`, so its jittered sub-grid is
+/// `g = round(sqrt(1638.4)) = 40` a side (1600 slots); the density field is a
+/// **constant 1.0**, so the hashed acceptance test `u < density` never rejects
+/// (`u` is drawn from `[0, 1)`); and jitter is bounded by half a sub-cell, so no
+/// candidate escapes the half-open region clip. `64 * 1600 = 102 400`.
+///
+/// The constant field is the deliberate part. terrain-demo already gates a
+/// noise x slope sampler; what this sample needs is a *stated* instance count at
+/// the gate's 100k scale, and a count that moved whenever someone retuned a noise
+/// frequency would be a fixture that rots.
+pub const PHASE18_SCATTER_INSTANCES: usize = 102_400;
+
+/// Painted-foliage grid side (`GRID x GRID` persisted instances). Small on
+/// purpose -- see the module note above on why the bulk is PCG.
+pub const PHASE18_FOLIAGE_GRID: i32 = 4;
+/// Spacing between painted foliage instances, metres (entity-local).
+pub const PHASE18_FOLIAGE_SPACING: f64 = 6.0;
+
+/// World edge length of the sample's terrain, metres (512).
+pub fn phase18_world_size() -> f64 {
+    PHASE18_TERRAIN_TILES as f64 * (PHASE18_TERRAIN_RESOLUTION as f64 - 1.0) * PHASE18_TERRAIN_MPS
+}
+
+/// The centre of the sample world in XZ.
+pub fn phase18_world_center() -> DVec3 {
+    let c = phase18_world_size() * 0.5;
+    DVec3::new(c, 0.0, c)
+}
+
+/// The sample's analytic terrain height at world `(x, z)`.
+///
+/// Built from [`inf_math::psin64`] / [`inf_math::pcos64`], never `std` trig: the
+/// P14 law -- `std` transcendentals are not bit-portable, and this function's
+/// output becomes committed `.inf_lvl` bytes that a cook on one OS and a run on
+/// another must agree about.
+///
+/// The relief is deliberately steep for the scale (~40 m peak-to-trough over a
+/// 512 m world). Hills are what put scatter instances *behind* something, and a
+/// gentle plain would make the HZB occlusion counter zero without anything being
+/// wrong with the renderer.
+pub fn phase18_height(x: f64, z: f64) -> f64 {
+    14.0 * inf_math::psin64(x * 0.019) * inf_math::pcos64(z * 0.017)
+        + 5.0 * inf_math::psin64((x + z) * 0.041)
+}
+
+/// The world position of the slab at grid index `(i, j)`, sitting on the ground.
+pub fn phase18_slab_position(i: usize, j: usize) -> DVec3 {
+    let offset = (PHASE18_SLAB_GRID as f64 - 1.0) * 0.5 * PHASE18_SLAB_SPACING;
+    let c = phase18_world_center();
+    let x = c.x + i as f64 * PHASE18_SLAB_SPACING - offset;
+    let z = c.z + j as f64 * PHASE18_SLAB_SPACING - offset;
+    // A standing slab spans +-SCALE about its centre, so lifting the centre by
+    // SCALE puts its base on the ground rather than half-buried.
+    DVec3::new(x, phase18_height(x, z) + PHASE18_SLAB_SCALE, z)
+}
+
+/// Build the sample's [`inf_pcg::PcgDocument`]: one layer, one rule, a **constant
+/// density field** (see [`PHASE18_SCATTER_INSTANCES`] for why), two weighted kinds
+/// so the projected scatter reads as varied content.
+pub fn phase18_scatter_pcg_document() -> inf_pcg::PcgDocument {
+    use inf_pcg::{PcgKind, PcgRule, SamplerDef};
+    let rule = PcgRule {
+        name: "ground-cover".into(),
+        sampler: SamplerDef::Constant(1.0),
+        scatter: inf_pcg::ScatterParams {
+            seed: 2026_0801,
+            cell_size: PHASE18_SCATTER_CELL_SIZE,
+            base_density: PHASE18_SCATTER_DENSITY,
+            jitter: 1.0,
+            align_to_normal: false,
+            scale_range: (0.6, 1.1),
+            rotation: inf_pcg::RotationMode::RandomYaw,
+            altitude_offset: 0.0,
+        },
+        kinds: vec![
+            PcgKind {
+                mesh: None,
+                weight: 3.0,
+            },
+            PcgKind {
+                mesh: None,
+                weight: 1.0,
+            },
+        ],
+    };
+    inf_pcg::PcgDocument::single_layer("ground", vec![rule])
+}
+
+/// The committed `.inf_pcg` payload for the sample (document-only envelope -- the
+/// player evaluates from its stored lowered document).
+pub fn phase18_scatter_pcg_payload() -> inf_pcg::PcgAssetPayload {
+    inf_pcg::PcgAssetPayload::new(phase18_scatter_pcg_document())
+}
+
+/// Build the Phase 18 gate [`SceneDoc`] -- the composed scene.
+pub fn phase18_scatter_scene() -> SceneDoc {
+    use inf_ecs::components::{
+        Camera, Foliage, FoliageInstance, FoliagePaletteEntry, Light, LightKind, Material, MeshRef,
+        PcgVolume, Primitive, SkyAtmosphere, Terrain, TimeOfDay,
+    };
+    use inf_ecs::math::Vec3d;
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Phase 18 Scatter");
+
+    // -- The ground: four authored tiles at the world origin, so world XZ ==
+    //    terrain-local XZ and every probe in the gate is the bare generator. --
+    doc.create_with_guid(PHASE18_TERRAIN_GUID, SpawnKind::Empty, "Terrain", None);
+    insert!(
+        doc,
+        PHASE18_TERRAIN_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+    {
+        let mut terrain = Terrain::configured(PHASE18_TERRAIN_RESOLUTION, PHASE18_TERRAIN_MPS);
+        for tz in 0..PHASE18_TERRAIN_TILES {
+            for tx in 0..PHASE18_TERRAIN_TILES {
+                terrain.data.author_tile((tx, tz), phase18_height);
+            }
+        }
+        terrain.data.clear_dirty();
+        terrain.macro_variation = 0.25;
+        insert!(doc, PHASE18_TERRAIN_GUID, terrain);
+    }
+
+    // -- The meshlet slabs: standing instances of the vgeom-demo's dense mesh,
+    //    referenced BY GUID (the binary is not duplicated into this sample). --
+    for j in 0..PHASE18_SLAB_GRID {
+        for i in 0..PHASE18_SLAB_GRID {
+            let idx = (j * PHASE18_SLAB_GRID + i) as u128;
+            let guid = Uuid::from_u128(PHASE18_SLAB_BASE + idx);
+            doc.create_with_guid(guid, SpawnKind::Empty, &format!("Slab {i}x{j}"), None);
+            let p = phase18_slab_position(i, j);
+            insert!(
+                doc,
+                guid,
+                Transform {
+                    translation: Vec3d::new(p.x, p.y, p.z),
+                    // Stand the displaced plane up so it occludes.
+                    rotation: Vec3d::new(90.0, 0.0, 0.0),
+                    scale: Vec3d::splat(PHASE18_SLAB_SCALE),
+                }
+            );
+            insert!(
+                doc,
+                guid,
+                MeshRef {
+                    primitive: Primitive::Cube,
+                    asset: Some(VGEOM_DEMO_MESH_GUID),
+                }
+            );
+            let t = idx as f32 / (PHASE18_SLAB_GRID * PHASE18_SLAB_GRID) as f32;
+            insert!(
+                doc,
+                guid,
+                Material {
+                    base_color: Color::new(0.42 + 0.28 * t, 0.46, 0.62 - 0.24 * t, 1.0),
+                    metallic: 0.0,
+                    roughness: 0.65,
+                    emissive: Color::new(0.0, 0.0, 0.0, 1.0),
+                    ..Default::default()
+                }
+            );
+        }
+    }
+
+    // -- The bulk scatter: a PCG volume over the middle 256 m of the world. --
+    doc.create_with_guid(PHASE18_PCG_GUID, SpawnKind::Empty, "Ground Cover", None);
+    insert!(
+        doc,
+        PHASE18_PCG_GUID,
+        Transform::from_translation(phase18_world_center())
+    );
+    insert!(
+        doc,
+        PHASE18_PCG_GUID,
+        PcgVolume {
+            graph: Some(PHASE18_PCG_ASSET_GUID),
+            extent: Vec2d::new(PHASE18_SCATTER_EXTENT, PHASE18_SCATTER_EXTENT),
+            seed: 0,
+            draw_distance: PHASE18_SCATTER_DRAW_DISTANCE,
+            ..Default::default()
+        }
+    );
+
+    // -- The painted scatter: a small Foliage patch (persisted instances). --
+    doc.create_with_guid(PHASE18_FOLIAGE_GUID, SpawnKind::Empty, "Foliage", None);
+    {
+        let c = phase18_world_center();
+        insert!(
+            doc,
+            PHASE18_FOLIAGE_GUID,
+            Transform::from_translation(DVec3::new(c.x, phase18_height(c.x, c.z), c.z))
+        );
+        let span = (PHASE18_FOLIAGE_GRID as f64 - 1.0) * 0.5 * PHASE18_FOLIAGE_SPACING;
+        let mut instances = Vec::new();
+        for jz in 0..PHASE18_FOLIAGE_GRID {
+            for ix in 0..PHASE18_FOLIAGE_GRID {
+                let n = (jz * PHASE18_FOLIAGE_GRID + ix) as u32;
+                instances.push(FoliageInstance {
+                    position: Vec3d::new(
+                        ix as f64 * PHASE18_FOLIAGE_SPACING - span,
+                        0.0,
+                        jz as f64 * PHASE18_FOLIAGE_SPACING - span,
+                    ),
+                    rotation: Vec3d::new(0.0, (n * 23 % 360) as f64, 0.0),
+                    scale: 1.0 + (n % 3) as f64 * 0.25,
+                    // Two palette slots, so both buckets of the projector's
+                    // per-primitive-kind split are exercised.
+                    kind: n % 2,
+                });
+            }
+        }
+        insert!(
+            doc,
+            PHASE18_FOLIAGE_GUID,
+            Foliage {
+                palette: vec![
+                    FoliagePaletteEntry {
+                        primitive: Primitive::Sphere,
+                        tint: Color::new(0.24, 0.48, 0.20, 1.0),
+                    },
+                    FoliagePaletteEntry {
+                        primitive: Primitive::Cone,
+                        tint: Color::new(0.32, 0.40, 0.16, 1.0),
+                    },
+                ],
+                instances,
+            }
+        );
+    }
+
+    // -- The sky authority: a fast clock, so GI's key light actually moves. --
+    doc.create_with_guid(PHASE18_SKY_GUID, SpawnKind::Empty, "Sky", None);
+    insert!(
+        doc,
+        PHASE18_SKY_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+    insert!(
+        doc,
+        PHASE18_SKY_GUID,
+        TimeOfDay {
+            seconds: 30_000.0,
+            day_of_year: 172,
+            latitude_deg: 48.9,
+            longitude_deg: 0.0,
+            // 600x -- the same ramp rate the Phase 17 gate uses, so a short
+            // scripted run sweeps the sun through a real arc.
+            rate: 600.0,
+        }
+    );
+    insert!(
+        doc,
+        PHASE18_SKY_GUID,
+        SkyAtmosphere {
+            clouds_enabled: false,
+            weather_enabled: false,
+            ..SkyAtmosphere::default()
+        }
+    );
+
+    // -- An authored directional sun beside the sky authority. --
+    doc.create_with_guid(PHASE18_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        PHASE18_SUN_GUID,
+        Transform {
+            translation: Vec3d::new(0.0, 200.0, 0.0),
+            rotation: Vec3d::new(-50.0, -30.0, 0.0),
+            scale: Vec3d::ONE,
+        }
+    );
+    insert!(
+        doc,
+        PHASE18_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            color: Color::new(1.0, 0.97, 0.9, 1.0),
+            intensity: 2.5,
+            ..Default::default()
+        }
+    );
+
+    // -- A camera low over the ground at one corner of the scatter volume. --
+    doc.create_with_guid(PHASE18_CAMERA_GUID, SpawnKind::Empty, "Camera", None);
+    {
+        let c = phase18_world_center();
+        let eye = DVec3::new(
+            c.x - PHASE18_SCATTER_EXTENT,
+            0.0,
+            c.z - PHASE18_SCATTER_EXTENT,
+        );
+        insert!(
+            doc,
+            PHASE18_CAMERA_GUID,
+            Transform::from_translation(DVec3::new(
+                eye.x,
+                phase18_height(eye.x, eye.z) + 4.0,
+                eye.z
+            ))
+        );
+        insert!(doc, PHASE18_CAMERA_GUID, Camera::default());
+    }
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+/// The repo-root `samples/phase18-scatter/` directory.
+pub fn phase18_scatter_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/phase18-scatter")
+}
+
+/// Write the committed Phase 18 gate files (regeneration path): the `.inf_lvl`
+/// (+ sidecar), the `.inf_pcg` graph (+ its inf_asset sidecar so the
+/// `PcgVolume.graph` ref resolves through the AssetDb / cooked pack), + README.
+///
+/// The dense `.inf_mesh` the slabs reference is **not** written here: it is
+/// `samples/vgeom-demo/Dense.inf_mesh`, shared by GUID (see the module note).
+pub fn write_phase18_scatter() -> Result<(), String> {
+    let dir = phase18_scatter_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    crate::scene::serialize::save(
+        &phase18_scatter_scene(),
+        &dir.join("Phase18Scatter.inf_lvl"),
+        Some(PHASE18_LEVEL_GUID),
+    )?;
+
+    let pcg_bytes = phase18_scatter_pcg_payload()
+        .encode()
+        .map_err(|e| format!("encode pcg: {e}"))?;
+    let pcg_path = dir.join("GroundCover.inf_pcg");
+    std::fs::write(&pcg_path, &pcg_bytes).map_err(|e| format!("write pcg: {e}"))?;
+    inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(PHASE18_PCG_ASSET_GUID),
+        inf_asset::AssetKind::Pcg,
+        inf_asset::ContentHash::of(&pcg_bytes),
+    )
+    .save(&pcg_path)
+    .map_err(|e| format!("write pcg sidecar: {e}"))?;
+
+    std::fs::write(dir.join("README.md"), PHASE18_SCATTER_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const PHASE18_SCATTER_README: &str = "# Phase 18 Scatter (the phase gate scene)\n\n\
+Generated by `inf_editor_core::samples::phase18_scatter_scene` -- the **composed**\n\
+gate scene for Phase 18 (Lumen-class GI + Nanite completion). Everything the phase\n\
+built, in one level.\n\n\
+- `Phase18Scatter.inf_lvl` -- the scene. A four-tile `Terrain`, a 5x5 grid of\n\
+  **standing meshlet slabs**, a `PcgVolume` carrying 102 400 scatter instances, a\n\
+  small painted `Foliage` patch, a `TimeOfDay` + `SkyAtmosphere` authority running\n\
+  a 600x clock, an authored sun, and a camera.\n\
+- `GroundCover.inf_pcg` -- the scatter graph the volume evaluates on load. Its\n\
+  instances are a **derived cache**, never persisted in the level (editor\n\
+  `pcg_evaluate`, shipped/PIE player `evaluate_pcg_volumes`).\n\
+- `Dense.inf_mesh` -- **NOT committed here.** The slabs reference\n\
+  `samples/vgeom-demo/Dense.inf_mesh` **by GUID**\n\
+  (`samples::VGEOM_DEMO_MESH_GUID`); duplicating a 1 MB mesh binary to give this\n\
+  sample its own copy would buy nothing but a second thing to keep in sync. The\n\
+  gate (`runtime/inf-player/tests/phase18_gate.rs`) copies **both** sample\n\
+  directories into its throwaway project's `Content`, so the cook sees one mesh\n\
+  and derives one `.inf_vmesh` from it.\n\n\
+## Why the scatter is split PCG + Foliage\n\n\
+A `PcgVolume`'s `evaluated` cache is not persisted -- it is recomputed on load from\n\
+the committed `.inf_pcg` -- so 102 400 instances cost the `.inf_lvl` nothing.\n\
+`Foliage::instances` **is** persisted, so 100k of those would be a megabyte of\n\
+committed level. The bulk is therefore PCG and the `Foliage` entity is a small\n\
+16-instance patch that covers the painted path (two palette slots, so both buckets\n\
+of the projector's per-primitive-kind split are exercised). The level stays ~15 KB\n\
+while the loaded world carries six figures of scatter -- the same \"small level,\n\
+huge scene\" property the vgeom demo has for triangles.\n\n\
+## Why the density field is a constant\n\n\
+The PCG kernel is fully specified, so a constant field makes the instance count\n\
+arithmetic rather than luck: 8x8 cells of 32 m, `1.6 * 32^2` budget each -> a 40x40\n\
+jittered sub-grid -> `64 * 1600 = 102 400`, pinned as\n\
+`samples::PHASE18_SCATTER_INSTANCES`. terrain-demo already gates a noise x slope\n\
+sampler; what this sample needs is a *stated* count at the 100k scale, and a count\n\
+that moved whenever someone retuned a noise frequency would be a fixture that rots.\n\n\
+## Why the slabs stand up\n\n\
+The dense mesh is a displaced plane. Laid flat (as in vgeom-demo) it occludes\n\
+almost nothing; rotated 90 deg about X it is a wall. Occluders are what make the\n\
+P18.1 two-pass proof and the P18.5 `occluded` counter non-vacuous -- \"occlusion on\n\
+is pixel-identical to occlusion off\" is trivially true when nothing is occluded.\n\
+The terrain's relief (~40 m peak-to-trough over 512 m) is steep for the same\n\
+reason: hills put scatter instances behind something.\n\n\
+## The gate (`runtime/inf-player/tests/phase18_gate.rs`)\n\n\
+1. the composed frame trace -- pixels, meshlet residency, GI audit and scatter\n\
+   audit -- is byte-identical across two fresh renderers over a camera path;\n\
+2. cooked == uncooked (PIE == shipping) on the projected trace;\n\
+3. the 10.6M-triangle vgeom gate still holds with GI, scatter and streaming all\n\
+   on -- P18.1's subtractive proof survives composition;\n\
+4. the instance-cull counters are real (frustum / occluded / distance / mesh /\n\
+   impostor all nonzero) and deterministic;\n\
+5. the composed frame is inside the frame budget, with per-system costs printed;\n\
+6. the golden inventory is exactly the 41 committed PNGs.\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3873,6 +4353,7 @@ mod tests {
             write_streamed_terrain().expect("regenerate streamed terrain");
             write_partitioned_world().expect("regenerate partitioned world");
             write_phase16_world().expect("regenerate phase16 world");
+            write_phase18_scatter().expect("regenerate phase18 scatter");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -4060,6 +4541,29 @@ mod tests {
                 std::fs::read(&p16lvl).unwrap(),
                 want_lvl,
                 "committed phase16-world .inf_lvl drifted from the generator"
+            );
+        }
+
+        // Phase 18 gate lock (P18.6): the `.inf_lvl` + the `.inf_pcg` are
+        // committed. The dense `.inf_mesh` the slabs reference is NOT — it is
+        // vgeom-demo's, shared by GUID, and locked by that sample's own arm above.
+        let p18dir = phase18_scatter_dir();
+        let p18lvl = p18dir.join("Phase18Scatter.inf_lvl");
+        let p18pcg = p18dir.join("GroundCover.inf_pcg");
+        if p18lvl.exists() && p18pcg.exists() {
+            let want_lvl = crate::scene::serialize::encode(
+                &crate::scene::serialize::to_scene_file(&phase18_scatter_scene()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&p18lvl).unwrap(),
+                want_lvl,
+                "committed phase18-scatter .inf_lvl drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(&p18pcg).unwrap(),
+                phase18_scatter_pcg_payload().encode().unwrap(),
+                "committed phase18-scatter .inf_pcg drifted from the generator"
             );
         }
     }

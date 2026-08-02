@@ -3248,6 +3248,7 @@ dependencies = [
  "inf-editor-core",
  "inf-input",
  "inf-math",
+ "inf-mesh",
  "inf-packager",
  "inf-pcg",
  "inf-physics",
@@ -3304,6 +3305,7 @@ dependencies = [
  "pollster",
  "tracing",
  "wgpu",
+ "xxhash-rust",
 ]
 
 [[package]]

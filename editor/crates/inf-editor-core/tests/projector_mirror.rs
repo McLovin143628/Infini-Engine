@@ -1,7 +1,8 @@
-//! The **projector MIRROR gate** (P17.1, extended P18.3): the editor viewport's
-//! ECS→`RenderScene` projection and the shipped player's must not drift.
+//! The **projector MIRROR gate** (P17.1, extended P18.3 and P18.5): the editor
+//! viewport's ECS→`RenderScene` projection and the shipped player's must not
+//! drift.
 //!
-//! Two things are pinned here. `project_sky` is compared **character for
+//! Three things are pinned here. `project_sky` is compared **character for
 //! character** — it is a self-contained function on both sides. The `MeshRef`
 //! branch that projects **real geometry** (P18.3) cannot be: it is inline in two
 //! loops with different iteration orders, different id bookkeeping and different
@@ -12,6 +13,14 @@
 //! forgot to project `emissive`", or "the player gained a field the editor never
 //! fills", either of which reads as *the shipped game looks different from the
 //! preview* and is found by a player, not by a compiler.
+//!
+//! The third is P18.5's **GPU-instanced scatter** — PCG volumes and painted
+//! foliage. It had no gate at all before this batch, which is how the two hosts
+//! came to disagree about `PcgVolume::draw_distance` for two phases: the editor
+//! culled against its own camera eye on the CPU and the player ignored the field
+//! entirely, so a shipped build drew strictly more scatter than its preview. Now
+//! the field rides on the batch, the GPU cull honours it for both hosts, and the
+//! `ScatterBatch` literal is pinned field for field like the vgeom one.
 //!
 //! # Why it lives here and not next to either projector
 //!
@@ -62,6 +71,32 @@ fn extract_fn(source: &str, name: &str) -> String {
     rest[..end].to_string()
 }
 
+/// The text of `fn <name>(` through its **brace-balanced** end — the indented
+/// twin of [`extract_fn`], which can only find a free function that terminates at
+/// column 0. Needed for the skeletal stores, whose shared rules are `impl`
+/// methods on each host's own store type.
+fn extract_method(source: &str, name: &str) -> String {
+    let source = source.replace("\r\n", "\n");
+    let needle = format!("fn {name}(");
+    let start = source
+        .find(&needle)
+        .unwrap_or_else(|| panic!("`{needle}` not found — was the store method renamed?"));
+    let mut depth = 0usize;
+    for (i, c) in source[start..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return source[start..start + i + 1].to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("`{needle}` does not terminate");
+}
+
 fn read(rel: &str) -> String {
     let path = workspace_root().join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
@@ -69,6 +104,13 @@ fn read(rel: &str) -> String {
 
 const VIEWPORT: &str = "editor/crates/inf-viewport/src/host.rs";
 const PLAYER: &str = "runtime/inf-player/src/render.rs";
+
+/// The editor's loose-file render-asset store (P18.3) — where the *skeletal*
+/// resolution + pose rule lives on the editor side.
+const EDITOR_ASSETS: &str = "editor/crates/inf-editor-core/src/render_assets.rs";
+/// The shipped player's skeletal render-asset store — the same rules over a
+/// cooked pack / dev dir.
+const PLAYER_ASSETS: &str = "runtime/inf-player/src/skinned.rs";
 
 #[test]
 fn project_sky_is_identical_in_both_projectors() {
@@ -143,8 +185,8 @@ fn the_shared_projector_body_is_not_a_stub() {
 
 // ── P18.3: the real-geometry (`MeshRef.asset`) projection ────────────────────
 
-/// The ordered `(field, value)` pairs of the **first** `VgeomInstance { … }`
-/// struct literal in `source`.
+/// The ordered `(field, value)` pairs of the **first** `<ty> { … }` struct literal
+/// in `source`.
 ///
 /// Deliberately naive — it takes lines until the first one that closes the
 /// literal — because the thing being compared is a flat struct literal, and a
@@ -152,12 +194,13 @@ fn the_shared_projector_body_is_not_a_stub() {
 /// drift. Comments and blank lines are dropped; a `field,` shorthand yields a
 /// value equal to the field name, so `translation,` and `translation: translation`
 /// compare equal (they mean the same thing and either is idiomatic).
-fn vgeom_instance_fields(source: &str) -> Vec<(String, String)> {
+fn struct_literal_fields(source: &str, ty: &str) -> Vec<(String, String)> {
     let source = source.replace("\r\n", "\n");
+    let open = format!("{ty} {{");
     let start = source
-        .find("VgeomInstance {")
-        .unwrap_or_else(|| panic!("no `VgeomInstance {{` literal — did the projection move?"))
-        + "VgeomInstance {".len();
+        .find(&open)
+        .unwrap_or_else(|| panic!("no `{open}` literal — did the projection move?"))
+        + open.len();
     let mut out = Vec::new();
     for line in source[start..].lines() {
         let t = line.trim();
@@ -174,7 +217,11 @@ fn vgeom_instance_fields(source: &str) -> Vec<(String, String)> {
         };
         out.push((name, value));
     }
-    panic!("the `VgeomInstance` literal does not terminate");
+    panic!("the `{ty}` literal does not terminate");
+}
+
+fn vgeom_instance_fields(source: &str) -> Vec<(String, String)> {
+    struct_literal_fields(source, "VgeomInstance")
 }
 
 /// Fields whose value expression is **host-local by design** and therefore
@@ -309,5 +356,460 @@ fn both_hosts_request_the_meshlet_path() {
             src.contains(".apply(") || src.contains("detect_and_clamp"),
             "the {label} applies no tier clamp to its request"
         );
+    }
+}
+
+// ── P18.5: the GPU-instanced scatter (PCG + foliage) projection ──────────────
+
+/// The source of ONE component branch in a projector's entity loop: from the
+/// `w.get::<Component>(entity)` probe that opens it to the probe that opens the
+/// next branch.
+///
+/// Both hosts walk their world in one loop of `if let Some(c) = w.get::<C>(entity)`
+/// branches, so the probes delimit them exactly. The end probe is passed in per
+/// host because the branch that *follows* foliage differs (the editor projects
+/// colliders next, the player meshes) — and if either host reorders its loop this
+/// gate fails loudly, which is the correct outcome for a deliberate change.
+fn branch_region(source: &str, from: &str, to: &str) -> String {
+    let source = source.replace("\r\n", "\n");
+    let start = source
+        .find(from)
+        .unwrap_or_else(|| panic!("`{from}` not found — did the projection loop change?"));
+    let rest = &source[start..];
+    let end = rest
+        .find(to)
+        .unwrap_or_else(|| panic!("`{to}` does not follow `{from}` — the loop was reordered?"));
+    rest[..end].to_string()
+}
+
+/// Fields of the `ScatterBatch` literal whose value expression is **host-local by
+/// design** and therefore excluded from the value comparison (their presence and
+/// order still are not).
+///
+///  * `id` — the pick id, allocated from each host's own counter over its own
+///    iteration order (document order vs `Guid` order). It has never matched
+///    across hosts and is not meant to; the editor additionally maps it back to a
+///    GUID, which the player has no use for. The two projectors happen to spell it
+///    with the same token today because the batch is built by a shared helper, but
+///    the *value* is host-local on principle and a host that inlined its own id
+///    allocation must not trip this gate.
+///
+/// Everything else — the payload, the anchor, the material constants and the
+/// content draw distance — is the same expression on both sides, because a scatter
+/// that shades or culls differently in the shipped build than in the preview is
+/// exactly the bug this file exists to catch.
+const SCATTER_HOST_LOCAL_FIELDS: [&str; 1] = ["id"];
+
+/// **The P18.5 mirror gate.** Both projectors build a `ScatterBatch` from the same
+/// ECS state; every field must be present on both sides, in the same order,
+/// carrying the same expression — except the documented host-local one.
+///
+/// The literal compared is the **first** in each file, which is the PCG one: both
+/// hosts define `push_pcg_scatter` before `push_foliage_scatter`.
+#[test]
+fn the_scatter_batch_projection_matches_field_for_field() {
+    let mine = struct_literal_fields(&read(VIEWPORT), "ScatterBatch");
+    let theirs = struct_literal_fields(&read(PLAYER), "ScatterBatch");
+
+    let names = |v: &[(String, String)]| v.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+    assert_eq!(
+        names(&mine),
+        names(&theirs),
+        "the two `ScatterBatch` projections carry different fields (or in a \
+         different order) — a field projected on one side and not the other means \
+         the shipped game draws PCG/foliage scatter differently from the preview"
+    );
+
+    for ((n, a), (_, b)) in mine.iter().zip(&theirs) {
+        if SCATTER_HOST_LOCAL_FIELDS.contains(&n.as_str()) {
+            continue;
+        }
+        assert_eq!(
+            a, b,
+            "`ScatterBatch::{n}` is projected as `{a}` in the editor viewport and \
+             `{b}` in the shipped player. Keep them identical, or — if the \
+             difference is deliberate — add the field to `SCATTER_HOST_LOCAL_FIELDS` \
+             with the reason written down."
+        );
+    }
+    // A guard on the guard: an empty literal would satisfy everything above.
+    assert!(
+        mine.len() >= 7,
+        "the `ScatterBatch` projection shrank to {} fields — was it gutted?",
+        mine.len()
+    );
+}
+
+/// The surrounding *rules* — not just the literal — must hold on both sides: the
+/// anchor convention, the placeholder palette, the deterministic per-kind
+/// grouping, the content draw distance… **and the absence of the per-instance CPU
+/// push**, which is the whole point of P18.5.
+///
+/// Without the absence check a projector could satisfy every fragment above while
+/// *also* still expanding each instance into `RenderScene::instances` — the scatter
+/// would then draw twice on one host and once on the other, which is precisely the
+/// preview-vs-shipping divergence this file exists to stop.
+#[test]
+fn both_projectors_scatter_pcg_and_foliage_the_same_way() {
+    // Fragments that must appear in BOTH projectors, verbatim.
+    const SHARED: [&str; 12] = [
+        // The Ring-0 pack + content hash, so neither host invents its own layout.
+        "ScatterData::build(",
+        // THE ANCHOR RULE: offsets are relative to the entity's world translation…
+        "anchor: translation,",
+        // …and foliage instances, being entity-LOCAL already, are packed against a
+        // ZERO build-anchor — no conversion, so the same stroke content-keys the
+        // same wherever it is placed.
+        "ScatterData::build(PrimMesh::ALL[k], DVec3::ZERO, bucket)",
+        // PCG stays a placeholder cube, coloured per kind.
+        "PrimMesh::Cube,",
+        "pcg_kind_color(si.kind)",
+        // Foliage rotation goes through the shared euler-degrees → quat rule.
+        "foliage_rot_quat(fi.rotation)",
+        // The palette fallback for an unknown kind, colour included.
+        "(PrimMesh::Cube, [0.28, 0.52, 0.24, 1.0])",
+        // Per-kind grouping: bucket in authored order, emit in `PrimMesh::ALL`
+        // order — deterministic and independent of which kinds are used.
+        "buckets[mesh.index()].push(",
+        "for (k, bucket) in buckets.into_iter().enumerate()",
+        // The content LOD knob rides on the batch (this is what made the two hosts
+        // finally agree about it) — and foliage has none.
+        "draw_distance: vol.draw_distance,",
+        "draw_distance: 0.0,",
+        // Both branches go through the shared helpers rather than open-coding.
+        "push_pcg_scatter(",
+    ];
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let src = read(path).replace("\r\n", "\n");
+        for fragment in SHARED {
+            assert!(
+                src.contains(fragment),
+                "the {label}'s scatter projection no longer contains `{fragment}` — \
+                 either the scatter path was changed on one side only, or this gate \
+                 needs updating deliberately"
+            );
+        }
+        assert!(src.contains("push_foliage_scatter("), "{label}");
+    }
+
+    // …and the per-instance CPU push is really gone from both PCG/Foliage branches.
+    for (label, path, pcg_end, foliage_end) in [
+        (
+            "editor viewport",
+            VIEWPORT,
+            "w.get::<Foliage>(entity)",
+            "w.get::<Collider2D>(entity)",
+        ),
+        (
+            "shipped player",
+            PLAYER,
+            "w.get::<Foliage>(entity)",
+            "w.get::<MeshRef>(entity)",
+        ),
+    ] {
+        let src = read(path);
+        for (branch, region) in [
+            (
+                "PcgVolume",
+                branch_region(&src, "w.get::<PcgVolume>(entity)", pcg_end),
+            ),
+            (
+                "Foliage",
+                branch_region(&src, "w.get::<Foliage>(entity)", foliage_end),
+            ),
+        ] {
+            assert!(
+                !region.contains("instances.push("),
+                "the {label}'s {branch} branch still pushes per-instance \
+                 `MeshInstance`s — P18.5 replaced that with one `ScatterBatch`, and \
+                 a host doing both draws the scatter twice:\n{region}"
+            );
+            assert!(
+                !region.contains("MeshInstance"),
+                "the {label}'s {branch} branch still builds a `MeshInstance`:\n{region}"
+            );
+            assert!(
+                region.contains("_scatter("),
+                "the {label}'s {branch} branch no longer calls its scatter helper:\n{region}"
+            );
+        }
+    }
+}
+
+/// **The "the follow-up landed" gate** (P18.5).
+///
+/// Both projectors used to carry the same warning — *">50k instances — instanced-
+/// draw perf path is a follow-up"* — because both expanded a scatter into one
+/// `MeshInstance` per instance and there was nothing better to do about it. This
+/// batch IS that follow-up: the payload uploads once per content change and the
+/// GPU culls it per instance. A warning left behind would be a false alarm on
+/// exactly the content the engine now handles best, and a reader would take it as
+/// a live limitation.
+#[test]
+fn neither_projector_warns_about_fifty_thousand_instances() {
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let src = read(path).replace("\r\n", "\n");
+        for stale in ["50_000", "instanced-draw perf"] {
+            assert!(
+                !src.contains(stale),
+                "the {label} still contains `{stale}` — P18.5 IS the instanced-draw \
+                 follow-up that warning pointed at, so it must not survive it"
+            );
+        }
+    }
+}
+
+// ── the skeletal (`SkeletalMesh`) projection ─────────────────────────────────
+//
+// P18.3 gave the editor viewport a real `SkeletalMesh` branch and left the
+// shipped player with **none at all**: a level with a skeletal character
+// previewed correctly in PIE and shipped as nothing. That was a live
+// PIE-vs-shipping divergence, not a missing feature, and the follow-up that
+// closes it is what these gates pin.
+//
+// Three layers, because the skeletal path is split across four files rather than
+// two: the **pose rule** and the **bind-space rebuild** live in each host's
+// render-asset store (Ring 1 for the editor, `inf-player` for the player) and are
+// self-contained functions, so they are compared *character for character*; the
+// `SkinnedInstance` literal is inline in two loops with different iteration
+// orders, so it is compared field for field, exactly like the P18.3 `VgeomInstance`
+// gate above.
+
+/// **The pose rule must be one rule.** No skeleton (or a jointless one) ⇒ the
+/// caller keeps its placeholder; no `AnimPlayer` / no clip / an unresolvable clip
+/// ⇒ the rest pose; otherwise the clip sampled at the play-head, honouring
+/// `looping`.
+///
+/// Every one of those three arms is a place the two hosts could silently drift,
+/// and each drift reads as a different bug in the shipped game: arm 1 as a
+/// character that vanishes instead of showing a placeholder, arm 2 as one that is
+/// invisible until it plays, arm 3 as one frozen in its bind pose. None of them
+/// is visible to a compiler, and only arm 3 would even show up in a scene-level
+/// comparison of the two hosts.
+///
+/// **The one permitted difference**, normalized below: the editor's store resolves
+/// lazily into its own maps and is owned mutably by the viewport (`&mut self`);
+/// the player's memoizes behind its own locks because the projector holds it
+/// immutably (`&self`). That is a difference in *who owns the cache*, not in the
+/// rule.
+#[test]
+fn the_skinned_pose_rule_is_identical_in_both_stores() {
+    let raw = extract_method(&read(EDITOR_ASSETS), "resolve_skinned");
+    // The normalization must rewrite the RECEIVER and nothing else. A second
+    // `&mut self` anywhere in the body would be silently erased along with it, and
+    // an interior-mutability divergence is exactly the kind of difference this gate
+    // exists to catch — so the token is asserted to occur exactly once before it is
+    // rewritten.
+    assert_eq!(
+        raw.matches("&mut self").count(),
+        1,
+        "`resolve_skinned` contains more than one `&mut self`; the receiver          normalization below would erase the others too"
+    );
+    let mine = raw.replace("&mut self", "&self");
+    let theirs = extract_method(&read(PLAYER_ASSETS), "resolve_skinned");
+    assert_eq!(
+        mine, theirs,
+        "the editor's and the player's `resolve_skinned` have drifted — the two \
+         hosts would pose the same character differently, so PIE would stop \
+         matching shipping. Keep them identical (modulo `&mut self` / `&self`), or \
+         move the rule into a Ring-0 crate both can depend on."
+    );
+}
+
+/// A guard on the guard: two stubs are identical too. The shared body has to
+/// actually implement the three arms.
+#[test]
+fn the_shared_pose_rule_is_not_a_stub() {
+    let body = extract_method(&read(PLAYER_ASSETS), "resolve_skinned");
+    for fragment in [
+        // Arm 1 — both halves of the binding, and the jointless-skeleton reject.
+        "let mesh_id = sm.mesh?;",
+        "let skeleton_id = sm.skeleton?;",
+        "if skeleton.is_empty() {",
+        // Arm 3 — the play-head sampled through the shared Ring-0 sampler,
+        // `looping` included (a host that dropped it would loop a one-shot).
+        "inf_anim::sample_clip(&skeleton, &clip, p.t as f32, p.looping)",
+        // Arm 2 — rest pose for BOTH "no player/clip" and "clip did not resolve".
+        // Two occurrences, and the count is asserted below.
+        "inf_anim::Pose::rest(&skeleton)",
+        // The palette the skinned pass consumes, and the dedup key the projection
+        // allocates `skinned_meshes` slots from.
+        "palette: inf_anim::skinning_matrices(&skeleton, &pose)",
+        "key: (mesh_id, skeleton_id)",
+    ] {
+        assert!(
+            body.contains(fragment),
+            "`resolve_skinned` no longer contains `{fragment}` — either it was \
+             gutted, or this gate needs updating deliberately:\n{body}"
+        );
+    }
+    assert_eq!(
+        body.matches("inf_anim::Pose::rest(&skeleton)").count(),
+        2,
+        "the rest-pose fallback must cover BOTH `no AnimPlayer/clip` and `the clip \
+         did not resolve` — one of the two arms stopped falling back:\n{body}"
+    );
+}
+
+/// **The bind-space rebuild must be one rebuild.** Both hosts turn the same
+/// `.inf_mesh` into the same `SkinnedMeshData`, or they upload *different vertex
+/// buffers* for the same asset — a divergence no scene-level comparison can see,
+/// because both scenes would carry one mesh with the right instance count.
+///
+/// The load-bearing details are the submesh concatenation with rebased indices,
+/// and pinning an unskinned submesh to joint 0 with weight 1 (dropping it instead
+/// would silently lose geometry on one host only).
+#[test]
+fn the_bind_space_rebuild_is_identical_in_both_stores() {
+    let mine = extract_fn(&read(EDITOR_ASSETS), "skinned_mesh_data");
+    let theirs = extract_fn(&read(PLAYER_ASSETS), "skinned_mesh_data");
+    assert_eq!(
+        mine, theirs,
+        "the editor's and the player's `skinned_mesh_data` have drifted — the two \
+         hosts would build different bind-space geometry from the same `.inf_mesh`"
+    );
+    // Not a stub: the concatenation, the rebase, and the joint-0 pin.
+    for fragment in [
+        "let base = vertices.len() as u32;",
+        "sm.skin.get(i).copied().unwrap_or_default().normalized()",
+        "indices.extend(sm.indices.iter().map(|&i| i + base));",
+    ] {
+        assert!(
+            theirs.contains(fragment),
+            "`skinned_mesh_data` lost `{fragment}`"
+        );
+    }
+}
+
+/// Fields of the `SkinnedInstance` literal whose value expression is **host-local
+/// by design** and therefore excluded from the value comparison (their presence
+/// and order still are not).
+///
+///  * `id` — the pick id, allocated from each host's own counter over its own
+///    iteration order (document order vs `Guid` order). It has never matched
+///    across hosts and is not meant to; the editor additionally maps it back to a
+///    GUID, which the player has no use for.
+///  * `mesh` — the index into `RenderScene::skinned_meshes`, allocated from each
+///    host's own per-projection dedup map in that same iteration order. Two hosts
+///    that agree perfectly about *which* `(mesh, skeleton)` pairs are drawn can
+///    still number their slots differently, and the number means nothing outside
+///    the scene it indexes.
+///
+/// Note what is **not** here, and deliberately so: unlike the `VgeomInstance`
+/// gate, `asset`-style content-hash-vs-GUID keying has no analogue on this path.
+/// The skinned pass caches its GPU upload by the **pointer identity** of the
+/// `Arc<SkinnedMeshData>`, so changed content is a different key by construction
+/// and neither host needs to content-address an id.
+/// Fields of `SkinnedInstance` the two hosts are *allowed* to project differently,
+/// each with the reason:
+///
+/// * `id` / `mesh` — each host numbers from its own counter over its own iteration
+///   order (the player walks the world in `Guid` order, the viewport walks the
+///   document's entity order), so the *values* differ while the rule does not. The
+///   same asymmetry `VGEOM_HOST_LOCAL_FIELDS` documents.
+/// * `translation` — the editor reads it straight off the entity's affine, the
+///   player reads `sim.interp_translation(..)` so a character is drawn at its
+///   interpolated position between fixed steps rather than snapped to the last one.
+///   Both hosts' own comments already say this; it belongs here so the gate stops
+///   asking about it and starts *documenting* it.
+const SKINNED_HOST_LOCAL_FIELDS: [&str; 3] = ["id", "mesh", "translation"];
+
+/// **The skeletal mirror gate.** Both projectors build a `SkinnedInstance` from
+/// the same ECS state; every field must be present on both sides, in the same
+/// order, carrying the same expression — except the two documented host-local
+/// ones.
+#[test]
+fn the_skinned_instance_projection_matches_field_for_field() {
+    let mine = struct_literal_fields(&read(VIEWPORT), "SkinnedInstance");
+    let theirs = struct_literal_fields(&read(PLAYER), "SkinnedInstance");
+
+    let names = |v: &[(String, String)]| v.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+    assert_eq!(
+        names(&mine),
+        names(&theirs),
+        "the two `SkinnedInstance` projections carry different fields (or in a \
+         different order) — a field projected on one side and not the other means \
+         the shipped game draws a character differently from the preview"
+    );
+
+    for ((n, a), (_, b)) in mine.iter().zip(&theirs) {
+        if SKINNED_HOST_LOCAL_FIELDS.contains(&n.as_str()) {
+            continue;
+        }
+        assert_eq!(
+            a, b,
+            "`SkinnedInstance::{n}` is projected as `{a}` in the editor viewport and \
+             `{b}` in the shipped player. Keep them identical, or — if the \
+             difference is deliberate — add the field to \
+             `SKINNED_HOST_LOCAL_FIELDS` with the reason written down."
+        );
+    }
+    // A guard on the guard: an empty literal would satisfy everything above.
+    assert!(
+        mine.len() >= 10,
+        "the `SkinnedInstance` projection shrank to {} fields — was it gutted?",
+        mine.len()
+    );
+}
+
+/// The surrounding *rules* — not just the literal — must hold on both sides: the
+/// `MeshRef`-absent gate the branch hangs off, the `AnimPlayer` lookup that feeds
+/// the pose, the one-slot-per-`(mesh, skeleton)` dedup, the `Arc` handed straight
+/// into the scene, and the placeholder that survives an unresolvable binding.
+///
+/// The `Arc` fragment is the load-bearing one. `RenderScene::skinned_meshes` is a
+/// `Vec<Arc<SkinnedMeshData>>` *because* the skinned pass caches its GPU upload by
+/// pointer identity; a host that pushed `draw.mesh.as_ref().clone()` — or rebuilt
+/// the stream per projection — would re-upload a character's whole bind-space
+/// buffer every frame while every pixel stayed identical, so nothing else in the
+/// repo would notice.
+#[test]
+fn both_projectors_draw_skeletal_meshes_the_same_way() {
+    // Fragments that must appear in BOTH projectors, verbatim.
+    const SHARED: [&str; 10] = [
+        // The branch is the `MeshRef`-absent arm: an entity is a rigid draw or a
+        // skinned one, never both.
+        "w.get::<MeshRef>(entity).is_none()",
+        "w.get::<SkeletalMesh>(entity).copied()",
+        // The pose input, and the shared store call that applies the pose rule.
+        "w.get::<inf_ecs::components::AnimPlayer>(entity).copied()",
+        "resolve_skinned(&sm, player.as_ref())",
+        // ONE `skinned_meshes` slot per (mesh, skeleton) pair…
+        "skinned_slots.entry(draw.key).or_insert_with(",
+        // …and the entry is the store's own `Arc`, pushed with no copy.
+        "skinned_meshes.push(draw.mesh)",
+        "skinned_meshes.len() - 1",
+        // Both lists are rebuilt from scratch every projection.
+        "skinned_meshes.clear()",
+        ".skinned.clear()",
+        // The placeholder survives, down to its slate tint, so the two hosts also
+        // agree about content whose assets are missing.
+        "color: [0.55, 0.60, 0.72, 1.0],",
+    ];
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let src = read(path).replace("\r\n", "\n");
+        for fragment in SHARED {
+            assert!(
+                src.contains(fragment),
+                "the {label}'s `SkeletalMesh` projection no longer contains \
+                 `{fragment}` — either the skeletal path was changed on one side \
+                 only, or this gate needs updating deliberately"
+            );
+        }
+        // The `Arc` must reach the scene UNCLONED-as-data. `.clone()` on the inner
+        // value (or a `to_vec()` of the vertex stream) would defeat the pass's
+        // pointer-identity upload cache silently.
+        for banned in [
+            "skinned_meshes.push(draw.mesh.as_ref().clone())",
+            "draw.mesh.vertices.clone()",
+        ] {
+            assert!(
+                !src.contains(banned),
+                "the {label} copies the bind-space stream into the scene \
+                 (`{banned}`) — `RenderScene::skinned_meshes` is `Vec<Arc<_>>` \
+                 precisely so the skinned pass can cache its GPU upload by pointer \
+                 identity, and a copy re-uploads a character every frame"
+            );
+        }
     }
 }

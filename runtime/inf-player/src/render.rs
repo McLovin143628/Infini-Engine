@@ -22,8 +22,8 @@ use uuid::Uuid;
 
 use inf_ecs::components::{
     BlendMode, ComputedVisibility, Foliage, GlobalTransform, Light, Light2D,
-    LightKind as EcsLightKind, Material, MeshRef, NineSlice, PcgVolume, Primitive, Sprite, Terrain,
-    Text2D, TextAlign, Tilemap,
+    LightKind as EcsLightKind, Material, MeshRef, NineSlice, PcgVolume, Primitive, SkeletalMesh,
+    Sprite, Terrain, Text2D, TextAlign, Tilemap,
 };
 use inf_ecs::{Guid, Vec3d};
 use inf_math::FloatingOrigin;
@@ -32,13 +32,14 @@ use inf_render::{
     CloudParams, EngineRenderer, GiSettings, GpuContext, HAlign, HeightFog, LightKind,
     MeshInstance, NineSliceParams, PrebatchedRun, PrecipParams, PrimMesh, RenderChunk, RenderLight,
     RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
-    RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings, SkyParams, SsaoSettings,
-    SunParams, SurfaceChain, TerrainTileKey, TextParams, TilemapParams, VgeomAsset, VgeomInstance,
-    BUILTIN_FONT_TEXTURE,
+    RenderTerrainTile, RenderTilemap, RenderView, ScatterBatch, ScatterData, ScatterInstance,
+    ShadowSettings, SkinnedInstance, SkyParams, SsaoSettings, SunParams, SurfaceChain,
+    TerrainTileKey, TextParams, TilemapParams, VgeomAsset, VgeomInstance, BUILTIN_FONT_TEXTURE,
 };
 use inf_scene::RenderSettingsRecord;
 
 use crate::runtime_sim::RuntimeSim;
+use crate::skinned::SkinnedRegistry;
 use crate::vmesh::VmeshRegistry;
 
 /// Owns the GPU stack + the render scene the player draws each frame.
@@ -53,6 +54,12 @@ pub struct PlayerRenderHost {
     ///
     /// [`set_vmeshes`]: PlayerRenderHost::set_vmeshes
     vmeshes: Arc<VmeshRegistry>,
+    /// The skeletal render assets a `SkeletalMesh` resolves to (bind-space
+    /// geometry + skeletons + clips), from the loaded pack / dev-dir; inert for
+    /// the `--demo` / PIE / browser worlds. Set via [`set_skinned`].
+    ///
+    /// [`set_skinned`]: PlayerRenderHost::set_skinned
+    skinned: Arc<SkinnedRegistry>,
     /// Whether the auto-picked [`RenderTier`](inf_render::RenderTier) enables the
     /// GPU meshlet path (High). Off → the classic discrete-LOD fallback renders the
     /// same vgeom content (the renderer's `ClassicVgeomNode`).
@@ -117,6 +124,7 @@ impl PlayerRenderHost {
             },
             origin: FloatingOrigin::default(),
             vmeshes: Arc::new(VmeshRegistry::new()),
+            skinned: Arc::new(SkinnedRegistry::new()),
             vgeom_enabled,
         })
     }
@@ -127,6 +135,19 @@ impl PlayerRenderHost {
     /// primitive-only worlds.
     pub fn set_vmeshes(&mut self, vmeshes: Arc<VmeshRegistry>) {
         self.vmeshes = vmeshes;
+    }
+
+    /// Attach the skeletal render-asset store (from the loaded pack / dev-dir) so
+    /// a bound `SkeletalMesh` renders its real, posed skinned geometry instead of
+    /// a placeholder cube — the shipped half of the editor viewport's P18.3
+    /// projection. Inert for primitive-only worlds.
+    ///
+    /// `Arc`-shared with nothing else today, but `Arc` on purpose: the registry
+    /// owns one `Arc<SkinnedMeshData>` per mesh asset, and a device-loss rebuild
+    /// has to hand the *same* store to the new host or every skinned upload would
+    /// be cold again for no reason.
+    pub fn set_skinned(&mut self, skinned: Arc<SkinnedRegistry>) {
+        self.skinned = skinned;
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -145,7 +166,7 @@ impl PlayerRenderHost {
 
     /// Rebuild the render scene from the sim's world, interpolated by `alpha`.
     pub fn project(&mut self, sim: &RuntimeSim, alpha: f64) {
-        project_scene(&mut self.scene, sim, alpha, &self.vmeshes);
+        project_scene_with_skinned(&mut self.scene, sim, alpha, &self.vmeshes, &self.skinned);
     }
 
     /// Stroke the **world-partition cell overlay** into the debug-line layer
@@ -243,6 +264,24 @@ pub fn project_scene(
     alpha: f64,
     vmeshes: &VmeshRegistry,
 ) {
+    project_scene_with_skinned(scene, sim, alpha, vmeshes, &SkinnedRegistry::new());
+}
+
+/// [`project_scene`] plus the skeletal store a bound `SkeletalMesh` resolves
+/// against — the **whole** projection, and what the shipped render host calls.
+///
+/// The four-argument [`project_scene`] is kept as the narrower door because a
+/// dozen existing gates drive it and none of them carry a character; it projects
+/// with an inert registry, which makes every `SkeletalMesh` fall back to its
+/// placeholder exactly as it did before this batch. A host that has skeletal
+/// content must call **this**.
+pub fn project_scene_with_skinned(
+    scene: &mut RenderScene,
+    sim: &RuntimeSim,
+    alpha: f64,
+    vmeshes: &VmeshRegistry,
+    skinned: &SkinnedRegistry,
+) {
     scene.instances.clear();
     scene.lights.clear();
     scene.sprites.clear();
@@ -251,10 +290,26 @@ pub fn project_scene(
     scene.lights_2d.clear();
     scene.vgeom_assets.clear();
     scene.vgeom_instances.clear();
+    // P18.3's follow-up: real skinned geometry. Both lists are rebuilt from
+    // scratch every projection, exactly like `instances` — the bind-space payload
+    // behind each entry is `Arc`-shared with the store, so re-projecting an
+    // unchanged character re-uses the GPU upload even though the list is rebuilt.
+    scene.skinned_meshes.clear();
+    scene.skinned.clear();
     scene.terrains.clear();
+    // P18.5: GPU-instanced scatter (PCG volumes + painted foliage) is rebuilt from
+    // scratch every projection, exactly like `instances`. The payload behind each
+    // batch is content-keyed, so re-projecting an unchanged scatter re-uses the
+    // GPU buffers even though the list itself is rebuilt.
+    scene.scatter.clear();
     // Track which vmesh assets are already listed this frame (dedup — the render
-    // node caches GPU geometry by id, but the asset list must not duplicate).
+    // node caches GPU geometry by id, but the asset list must not duplicate), and
+    // which `(mesh, skeleton)` pairs already own a `skinned_meshes` slot.
+    // MIRROR: both are `inf_viewport::host::rebuild_scene`'s locals of the same
+    // names and the same purpose.
     let mut vgeom_seen: std::collections::HashSet<u128> = std::collections::HashSet::new();
+    let mut skinned_slots: std::collections::HashMap<(Uuid, Uuid), usize> =
+        std::collections::HashMap::new();
 
     let world = sim.world();
     // The sky authority first (P17.1): it writes `scene.sun` / `scene.sky` and,
@@ -349,37 +404,133 @@ pub fn project_scene(
                 scene.terrains.push(rt);
             }
         }
-        // PCG scatter volumes (P10.6): project the volume's evaluated instance
-        // cache (populated on load by the level builder) into the existing
-        // mesh-instance path as placeholder cubes — the same viewport-parity gap
-        // as sprites/tilemaps (kind→real-mesh upload is a follow-up). Draw-distance
-        // is not culled here (the player has no persistent camera-eye seam yet; a
-        // documented follow-up mirroring the viewport's `last_eye_world` cull).
+        // PCG scatter volumes (P18.5): the volume's evaluated instance cache
+        // (populated on load by the level builder) projects as ONE GPU-instanced
+        // scatter batch instead of one `MeshInstance` per instance. The payload
+        // uploads once per content change and the cull compute does frustum + HZB
+        // + distance banding per instance.
+        //
+        // The volume's authored `draw_distance` now RIDES ON THE BATCH rather than
+        // being culled by the host, and that is what finally makes the two hosts
+        // agree about it: the editor used to cull against its own camera eye on the
+        // CPU while the player ignored the field entirely, so a shipped build drew
+        // strictly more scatter than its preview.
+        //
+        // MIRROR: `push_pcg_scatter` matches `inf_viewport::host`'s PCG projection
+        // (minus its pick-id map).
         if let Some(vol) = w.get::<PcgVolume>(entity) {
-            for si in &vol.evaluated {
-                scene.instances.push(MeshInstance {
-                    translation: si.position,
-                    rotation: si.rotation.as_quat(),
-                    scale: Vec3::splat(si.scale as f32),
-                    color: pcg_kind_color(si.kind),
-                    metallic: 0.0,
-                    roughness: 0.75,
-                    emissive: [0.0; 3],
-                    id: next_id,
-                    // PCG scatter placeholders are always cubes (no primitive kind).
-                    mesh: PrimMesh::Cube,
-                    // R-P5: PCG scatter placeholders are opaque.
-                    blend: 0,
-                    cutoff: 0.5,
-                });
+            if !vol.evaluated.is_empty() {
+                let id = next_id;
                 next_id += 1;
+                push_pcg_scatter(scene, vol, translation, id);
             }
         }
-        // Foliage scatter (E-P6): project every placed instance into the mesh path.
-        // MIRROR: `push_foliage` matches `inf_viewport::host`'s Foliage projection
-        // so the shipped player and the editor viewport draw the same scatter.
+        // Foliage scatter (P18.5): painted instances project as GPU-instanced
+        // scatter batches, one per primitive kind the palette resolves.
+        // MIRROR: `push_foliage_scatter` matches `inf_viewport::host`'s Foliage
+        // projection so the shipped player and the editor viewport draw the same
+        // scatter.
         if let Some(fol) = w.get::<Foliage>(entity) {
-            push_foliage(scene, fol, translation, &mut next_id);
+            if !fol.instances.is_empty() {
+                let id = next_id;
+                next_id += 1;
+                push_foliage_scatter(scene, fol, translation, id);
+            }
+        }
+        // Skeletal meshes (P11.1 → the P18.3 follow-up): a `SkeletalMesh` entity
+        // draws its REAL skinned geometry. The bind-space mesh comes from the
+        // referenced `.inf_mesh`'s skin streams, the palette from the `.inf_skel`
+        // posed by the entity's `AnimPlayer` — rest pose when there is no player,
+        // no clip, or an unresolvable one, so a character in a freshly loaded
+        // level is visible immediately rather than only once it plays. Both the
+        // resolution and the pose rule live in [`crate::skinned`], which is where
+        // the editor's Ring-1 store is mirrored character for character.
+        //
+        // The **placeholder cube survives** as the honest fallback: a
+        // `SkeletalMesh` with no assets bound (or with a mesh carrying no skin
+        // stream) is still authorable content that must draw as *something*.
+        //
+        // MIRROR of `inf_viewport::host::rebuild_scene`'s skeletal branch, pinned
+        // field for field by `inf-editor-core`'s `tests/projector_mirror.rs`.
+        // Until this batch the editor had this branch and the shipped player had
+        // none at all, so a level with a character previewed in PIE and shipped as
+        // nothing — a live PIE-vs-shipping divergence, not a missing feature.
+        //
+        // Host-local, as on the vgeom path: `translation` is the sim's
+        // **interpolated** actor position here and the raw affine's in the editor
+        // (the editor has no fixed-step interpolation to do), and `id` comes from
+        // this host's own counter over `Guid` order.
+        if w.get::<MeshRef>(entity).is_none() {
+            if let Some(sm) = w.get::<SkeletalMesh>(entity).copied() {
+                let affine = w
+                    .get::<GlobalTransform>(entity)
+                    .map(|g| g.0)
+                    .unwrap_or(glam::DAffine3::IDENTITY);
+                let (scale, rot, _t) = affine.to_scale_rotation_translation();
+                let id = next_id;
+                next_id += 1;
+                let player = w.get::<inf_ecs::components::AnimPlayer>(entity).copied();
+                match skinned.resolve_skinned(&sm, player.as_ref()) {
+                    Some(draw) => {
+                        // Real skinned geometry. PBR params come from the entity's
+                        // `Material` exactly as they do on the rigid path; an
+                        // unmaterialed character gets the renderer's neutral.
+                        let (color, metallic, roughness, emissive) = w
+                            .get::<Material>(entity)
+                            .map(|m| {
+                                let e = m.emissive.to_array();
+                                (
+                                    m.base_color.to_array(),
+                                    m.metallic,
+                                    m.roughness,
+                                    [e[0], e[1], e[2]],
+                                )
+                            })
+                            .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3]));
+                        // One `skinned_meshes` entry per (mesh, skeleton) pair,
+                        // and the entry is the store's own `Arc` — no copy here,
+                        // and the pass keys its GPU upload on that pointer, so
+                        // re-projecting an unchanged character costs neither a
+                        // memcpy nor a re-upload (P18.3). **This is the sharing
+                        // convention the projector has to follow**, and it is the
+                        // reason `skinned_meshes` is a `Vec<Arc<_>>` at all.
+                        let slot = *skinned_slots.entry(draw.key).or_insert_with(|| {
+                            scene.skinned_meshes.push(draw.mesh);
+                            scene.skinned_meshes.len() - 1
+                        });
+                        scene.skinned.push(SkinnedInstance {
+                            translation,
+                            rotation: rot.as_quat(),
+                            scale: scale.as_vec3(),
+                            color,
+                            metallic,
+                            roughness,
+                            emissive,
+                            id,
+                            mesh: slot,
+                            palette: draw.palette,
+                        });
+                    }
+                    // Unbound (or unskinned) — the editor's placeholder, down to
+                    // its slate tint, so the two hosts also agree about content
+                    // whose assets are missing.
+                    None => scene.instances.push(MeshInstance {
+                        translation,
+                        rotation: rot.as_quat(),
+                        scale: scale.as_vec3(),
+                        color: [0.55, 0.60, 0.72, 1.0],
+                        metallic: 0.0,
+                        roughness: 0.6,
+                        emissive: [0.0; 3],
+                        id,
+                        // Skeletal placeholder is always a cube (no primitive kind).
+                        mesh: PrimMesh::Cube,
+                        // R-P5: skeletal placeholders are opaque.
+                        blend: 0,
+                        cutoff: 0.5,
+                    }),
+                }
+            }
         }
         if let Some(mesh_ref) = w.get::<MeshRef>(entity) {
             let affine = w
@@ -469,42 +620,101 @@ fn prim_mesh(p: Primitive) -> PrimMesh {
     }
 }
 
-/// Project a [`Foliage`] component's instances into the render scene's mesh path
-/// (E-P6): mesh + tint from the referenced palette slot, each instance lifted by
-/// the entity's world `translation` (instances are entity-local). Every instance
-/// takes a fresh id (`next_id`). MIRROR: keep identical to the editor viewport's
-/// `inf_viewport::host` Foliage projection (minus its pick-id map).
-fn push_foliage(scene: &mut RenderScene, fol: &Foliage, translation: DVec3, next_id: &mut u32) {
+/// Project a [`PcgVolume`]'s evaluated cache into ONE GPU-instanced scatter batch
+/// (P18.5), anchored at the volume entity's world `translation`.
+///
+/// PCG scatter has always drawn as a placeholder cube — kind→real-mesh upload is
+/// the same documented viewport gap as sprites/tilemaps — and that does not change
+/// here; only how the cubes reach the GPU does. The payload replaces one
+/// `MeshInstance` per scattered instance with a content-keyed buffer uploaded once
+/// per content change and culled per-instance on the GPU.
+///
+/// **`draw_distance` rides on the batch now.** The editor used to cull it against
+/// its own camera eye on the CPU and the player ignored the field entirely, so a
+/// shipped build drew strictly more scatter than its preview. The cull compute
+/// honours it for both hosts, which is what finally makes them agree.
+///
+/// The whole batch takes ONE pick `id`: a scatter is authored, moved and deleted
+/// as a whole, so it is one object as far as selection is concerned.
+///
+/// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
+/// `inf-editor-core`'s `tests/projector_mirror.rs`.
+fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3, id: u32) {
+    if vol.evaluated.is_empty() {
+        return;
+    }
+    let data = ScatterData::build(
+        PrimMesh::Cube,
+        translation,
+        vol.evaluated.iter().map(|si| ScatterInstance {
+            position: si.position,
+            rotation: si.rotation.as_quat(),
+            scale: si.scale as f32,
+            color: pcg_kind_color(si.kind),
+        }),
+    );
+    scene.scatter.push(ScatterBatch {
+        data: Arc::new(data),
+        anchor: translation,
+        metallic: 0.0,
+        roughness: 0.75,
+        emissive: [0.0; 3],
+        id,
+        draw_distance: vol.draw_distance,
+    });
+}
+
+/// Project a [`Foliage`] component's painted instances into GPU-instanced scatter
+/// batches (P18.5): mesh + tint from the referenced palette slot.
+///
+/// Instances are entity-LOCAL, so the batch anchor is the entity `translation` and
+/// the packed offsets are the local positions with **no conversion**. That is what
+/// makes the payload a pure function of the paint stroke: the same stroke placed
+/// twice content-hashes to one GPU upload however far apart the two entities sit
+/// (the anchor is deliberately not part of `ScatterData::key`).
+///
+/// The palette resolves a primitive kind PER INSTANCE and one batch draws exactly
+/// one kind, so instances bucket by resolved kind in authored order and the buckets
+/// emit in [`PrimMesh::ALL`] order — deterministic, and independent of which kinds
+/// the palette happens to use.
+///
+/// Every batch of one entity shares ONE pick `id` (see [`push_pcg_scatter`]).
+///
+/// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
+/// `inf-editor-core`'s `tests/projector_mirror.rs`.
+fn push_foliage_scatter(scene: &mut RenderScene, fol: &Foliage, translation: DVec3, id: u32) {
     if fol.instances.is_empty() {
         return;
     }
-    if fol.instances.len() > 50_000 {
-        tracing::warn!(
-            "inf-player: Foliage entity has {} instances (>50k) — instanced-draw perf \
-             path is a follow-up",
-            fol.instances.len()
-        );
-    }
+    let mut buckets: [Vec<ScatterInstance>; PrimMesh::ALL.len()] = Default::default();
     for fi in &fol.instances {
         let (mesh, color) = fol
             .palette
             .get(fi.kind as usize)
             .map(|p| (prim_mesh(p.primitive), p.tint.to_array()))
             .unwrap_or((PrimMesh::Cube, [0.28, 0.52, 0.24, 1.0]));
-        scene.instances.push(MeshInstance {
-            translation: translation + fi.position.to_dvec3(),
+        buckets[mesh.index()].push(ScatterInstance {
+            // Entity-LOCAL, paired with the ZERO build-anchor below.
+            position: fi.position.to_dvec3(),
             rotation: foliage_rot_quat(fi.rotation),
-            scale: Vec3::splat(fi.scale as f32),
+            scale: fi.scale as f32,
             color,
+        });
+    }
+    for (k, bucket) in buckets.into_iter().enumerate() {
+        if bucket.is_empty() {
+            continue;
+        }
+        let data = ScatterData::build(PrimMesh::ALL[k], DVec3::ZERO, bucket);
+        scene.scatter.push(ScatterBatch {
+            data: Arc::new(data),
+            anchor: translation,
             metallic: 0.0,
             roughness: 0.85,
             emissive: [0.0; 3],
-            id: *next_id,
-            mesh,
-            blend: 0,
-            cutoff: 0.5,
+            id,
+            draw_distance: 0.0,
         });
-        *next_id += 1;
     }
 }
 
@@ -1075,13 +1285,15 @@ mod project_light_parity {
     }
 }
 
-/// Foliage projection mirror (E-P6): a `Foliage` component's instances survive a
-/// serde round-trip and project 1:1 into render mesh instances — the property the
-/// shipped player relies on so a level with painted foliage draws in PIE ==
-/// shipping (the editor viewport runs the identical projection).
+/// Foliage projection mirror (E-P6, reshaped by P18.5): a `Foliage` component's
+/// instances survive a serde round-trip and project — with no instance lost or
+/// invented — into GPU-instanced scatter batches, one per primitive kind the
+/// palette resolves. The shipped player relies on this so a level with painted
+/// foliage draws in PIE == shipping (the editor viewport runs the identical
+/// projection).
 #[cfg(test)]
 mod foliage_projection {
-    use super::{push_foliage, PrimMesh, RenderScene};
+    use super::{push_foliage_scatter, PrimMesh, RenderScene};
     use glam::DVec3;
     use inf_ecs::components::{Foliage, FoliageInstance, FoliagePaletteEntry, Primitive};
     use inf_ecs::{Color, Vec3d};
@@ -1120,32 +1332,82 @@ mod foliage_projection {
             "instances survive round-trip"
         );
 
-        // Project into a fresh scene: one render instance per foliage instance.
+        // Project into a fresh scene. P18.5: the instances no longer expand into
+        // `RenderScene::instances` one by one — they pack into scatter batches, so
+        // the count that must be preserved is the SUM across batches.
         let mut scene = RenderScene::default();
-        let mut next_id = 1u32;
-        push_foliage(&mut scene, &back, DVec3::new(10.0, 0.0, -5.0), &mut next_id);
-        assert_eq!(scene.instances.len(), back.instances.len());
-        assert_eq!(
-            next_id,
-            1 + back.instances.len() as u32,
-            "ids advance per instance"
+        let anchor = DVec3::new(10.0, 0.0, -5.0);
+        push_foliage_scatter(&mut scene, &back, anchor, 7);
+        let total: usize = scene.scatter.iter().map(|b| b.data.len()).sum();
+        assert_eq!(total, back.instances.len(), "no instance lost or invented");
+        assert!(
+            scene.instances.is_empty(),
+            "scatter must not also expand into the per-instance mesh path"
         );
 
-        // Palette drives mesh + tint; entity translation offsets the local position.
-        let first = &scene.instances[0];
-        assert!(matches!(first.mesh, PrimMesh::Cone));
-        assert_eq!(first.color, [0.3, 0.6, 0.28, 1.0]);
-        assert!((first.translation - DVec3::new(10.0, 0.0, -5.0)).length() < 1e-9);
-        // Kind 1 → the second palette slot (Sphere).
-        assert!(matches!(scene.instances[1].mesh, PrimMesh::Sphere));
+        // Two kinds are painted (alternating), so exactly two batches — emitted in
+        // `PrimMesh::ALL` order (Sphere before Cone), NOT in first-use order.
+        assert_eq!(scene.scatter.len(), 2);
+        assert!(matches!(scene.scatter[0].data.mesh, PrimMesh::Sphere));
+        assert!(matches!(scene.scatter[1].data.mesh, PrimMesh::Cone));
+
+        // Kind 1 → the second palette slot (Sphere): it lands in that primitive's
+        // batch, tinted by that slot. Kinds alternate over 7 instances, so kind 0
+        // (Cone) has 4 and kind 1 (Sphere) has 3.
+        assert_eq!(scene.scatter[0].data.len(), 3);
+        assert_eq!(scene.scatter[1].data.len(), 4);
+        assert_eq!(
+            scene.scatter[0].data.instances[0].color,
+            [0.6, 0.5, 0.2, 1.0]
+        );
+        assert_eq!(
+            scene.scatter[1].data.instances[0].color,
+            [0.3, 0.6, 0.28, 1.0]
+        );
+
+        for b in &scene.scatter {
+            // The entity translation is the ANCHOR, not baked into the offsets…
+            assert_eq!(b.anchor, anchor);
+            // …and every batch of one entity carries the one pick id it was given.
+            assert_eq!(b.id, 7);
+            assert_eq!(b.draw_distance, 0.0);
+        }
+        // Instance 0 is kind 0 (Cone) at the local origin — offsets are the LOCAL
+        // positions with no conversion.
+        assert_eq!(scene.scatter[1].data.instances[0].offset, [0.0, 0.0, 0.0]);
     }
 
     #[test]
     fn empty_foliage_projects_nothing() {
         let mut scene = RenderScene::default();
-        let mut next_id = 1u32;
-        push_foliage(&mut scene, &Foliage::default(), DVec3::ZERO, &mut next_id);
+        push_foliage_scatter(&mut scene, &Foliage::default(), DVec3::ZERO, 1);
+        assert!(scene.scatter.is_empty());
         assert!(scene.instances.is_empty());
-        assert_eq!(next_id, 1);
+    }
+
+    /// **Content addressing** (P18.5): two foliage entities painted with the same
+    /// stroke share one GPU upload, however far apart they sit. That only holds
+    /// because the packed offsets are the entity-LOCAL positions and the world
+    /// anchor is deliberately *not* part of `ScatterData::key` — pack against the
+    /// world position instead and every duplicated prop becomes a second upload.
+    #[test]
+    fn identical_foliage_content_hashes_to_the_same_key() {
+        let a_fol = demo_foliage();
+        let b_fol = demo_foliage();
+        let mut a = RenderScene::default();
+        let mut b = RenderScene::default();
+        push_foliage_scatter(&mut a, &a_fol, DVec3::new(10.0, 0.0, -5.0), 1);
+        push_foliage_scatter(&mut b, &b_fol, DVec3::new(-4000.0, 12.0, 900.0), 2);
+
+        assert_eq!(a.scatter.len(), b.scatter.len());
+        assert!(!a.scatter.is_empty(), "the fixture must actually scatter");
+        for (x, y) in a.scatter.iter().zip(&b.scatter) {
+            assert_eq!(
+                x.data.key(),
+                y.data.key(),
+                "the same stroke must content-key the same at a different anchor"
+            );
+        }
+        assert_ne!(a.scatter[0].anchor, b.scatter[0].anchor);
     }
 }

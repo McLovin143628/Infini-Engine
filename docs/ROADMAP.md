@@ -1109,7 +1109,7 @@ material functions, multi-viewport, PIE player options.
 
 ---
 
-## 12. Next-Gen Wave — Phases 16–25 (planned 2026-07-31; **P16–P17 COMPLETE**)
+## 12. Next-Gen Wave — Phases 16–25 (planned 2026-07-31; **P16–P18 COMPLETE**)
 
 The 16-phase master plan (§6) and UE-Parity Wave 1 (§11) are complete and CI-green: the engine
 now does what a mature traditional engine does. This wave pushes past that workflow —
@@ -2107,6 +2107,221 @@ Starting point: HZB is a single-pass v1, off by default; whole vmeshes upload at
 eviction; the editor viewport still draws primitive placeholders instead of `MeshRef.asset`;
 GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and has no specular.
 
+> **STATUS: Phase 18 COMPLETE** (2026-08-02) — **local gates green; CI pending push.**
+> (Written with the commit rather than after the CI run, like Phase 16's and Phase
+> 17's, and saying so rather than claiming a green it has not seen.) Nanite is
+> finished and Lumen is finished, to the engineering scope this repository can hold:
+> meshlets occlude meshlets and stream a page at a time out of an mmap'd pack under a
+> VRAM budget; the editor viewport draws the same real geometry the shipped player
+> does; global illumination sees the whole scene, reads the P17 sky, has a specular
+> term and can amortize without giving up determinism; and a hundred thousand
+> scattered instances are culled, LOD-banded and faded on the GPU in a fifth of a
+> millisecond.
+>
+> The whole phase is pinned by one composed gate,
+> `runtime/inf-player/tests/phase18_gate.rs`: a scene that streams meshlets from a
+> cooked pack under a binding budget, with two-pass occlusion on, GI v2 running
+> against a live time-of-day clock, and 100k+ GPU-scattered instances fading through
+> their impostor band — asserted deterministic across two runs on a composed trace
+> (pixels, residency, GI audit, instance-cull counters), identical between a cooked
+> pack and a PIE payload, still byte-identical between occlusion on and occlusion off
+> at 10.6M source triangles with everything else enabled, and inside `FRAME_BUDGET_MS`
+> with the per-system costs printed rather than merely asserted — **3.038 ms of a
+> 33 ms budget with everything on**, of which GI is 2.658 ms and the 102 416-instance
+> scatter is 0.036 ms. That split is the honest headline of the phase: what is left to
+> optimise in the flagship frame is Lumen, not Nanite and not the ground cover.
+>
+> **P18.1 Two-pass HZB occlusion** — the persisted visible list ping-ponged on the
+> GPU and never read back; `early cull → early draw → HZB build → late cull → late
+> draw`; the pyramid re-sourced from the **MSAA scene depth** rather than the
+> single-sample prepass, which is what made a proof possible at all; on by default at
+> High, provably free below it. **P18.2 Meshlet streaming** — `.inf_vmesh` v2 as a
+> paged container in the `.inf_terrain` shape, four suballocated pools under one
+> shared budget with transactional page reservation, a residency-clamped cut, a lazy
+> `VmeshRegistry`, and parse-time validation of every payload that arrives from disk.
+> **P18.3 Editor real meshes** — the oldest documented gap in the engine closed: an
+> imported glTF placed in a scene streams its meshlet DAG in the *editor*, derived on
+> import into a content-hash-cached sidecar, resolved by computing its id; a bound
+> `SkeletalMesh` draws its skinned mesh in rest pose; eviction, mirror discipline and
+> selection all follow the geometry. **P18.4 GI v2 (Lumen-class)** — the 256-instance
+> cap deleted in favour of a prioritized, macro-cell-binned gather; terrain, skinned
+> characters and meshlets both occluding and receiving; the ray-miss term reading the
+> P17.2 sky-view LUT; emissive injection; an SH-derived ambient specular plus a
+> screen-space *hit finder*; cascade blending; quality tiers on the existing clamp-down
+> system. **P18.5 GPU-instanced scatter** — below.
+>
+> **The five decisions worth carrying forward.**
+>
+> 1. **A per-frame conservativeness proof beats a convergence argument.** Two-pass
+>    occlusion is temporal, and the house gates assume a frame is a pure function of
+>    (scene, view, settings). The resolution was not "it converges" — it was to prove
+>    the HZB test is **purely subtractive** from the eight corners of a bounding
+>    sphere's world AABB, a `ceil(log2(span))` mip and a min-corner-anchored gather,
+>    so temporal state can only decide *when* a meshlet draws, never *whether* the
+>    union covers it. That turned a temporal feature into a byte-equality gate instead
+>    of a tolerance, and it is why all 36 goldens survived P18.1 untouched. P18.5
+>    inherited the proof wholesale for a second, entirely different consumer, which is
+>    the strongest evidence it was the right shape.
+>
+> 2. **The paging unit is a page, not a LOD level — and the allocator is
+>    transactional.** A group that fails to simplify leaves its members as *roots* at
+>    whatever level they reached, so roots live at many levels and "evict everything
+>    finer than F" would punch a hole. Page 0 is therefore every root from every level
+>    and is never evicted; residency is always a prefix, which makes ancestor closure
+>    structural rather than checked. The four pools share **one** budget (a fixed
+>    per-pool split makes some pool rather than the byte budget binding, and it binds
+>    hardest on the coarse pages, which is exactly backwards), and a page's four
+>    sections are reserved atomically with rollback — without which an asset whose
+>    root page was smaller than the growth overshoot ended with **zero** resident
+>    pages and *silently vanished from the frame*.
+>
+> 3. **An editor id must be content-addressed; a cooked one need not be.** A cooked
+>    pack is immutable, so a GUID names one sequence of bytes forever. A content root
+>    is not — and both render nodes cache GPU state by that id, so a content change
+>    under a stable id is a **stale render**, not a reload. Keying the editor's derived
+>    `.inf_vmesh` by its payload hash makes that unrepresentable and deduplicates for
+>    free. P18.5 applied the same rule to a payload that is rebuilt on *every*
+>    projection, which is the harder case: the hash is folded while packing, so it
+>    costs one pass over bytes the projector was writing anyway.
+>
+> 4. **Voxelize by gathering, and quantize whatever a clock touches.** A scatter
+>    voxelizer would race on the voxel word, and a race is nondeterminism; a gather
+>    over an unbounded instance list is `O(voxels × instances)`. Keeping the gather and
+>    shortening it — nearest-surface-first priority, a per-frame budget, macro-cell CSR
+>    bins — lifted the cap *and* made "first hit wins" a choice rather than a race.
+>    Separately: the moment a running `TimeOfDay` clock entered the probe-sweep key by
+>    raw bits, amortization silently paid a full update's cost for one slice of
+>    freshness. `sun_bucket` quantizes it (≈0.50° per bucket, ~2 sim-minutes at
+>    `rate = 1`), following P17.2's LUT-radius bucketing — and P18.5's CPU fallback
+>    buckets the camera for the same reason.
+>
+> 5. **Compaction order is a design decision, and the right answer differs per pass.**
+>    The meshlet cull appends atomically because its draw order provably cannot reach
+>    the image. The scatter cull cannot, because its LOD cross-fade is a dithered
+>    discard — so it pays a two-level prefix sum to make the compacted list "the
+>    survivors in ascending index" on every adapter. Two passes, two answers, both
+>    argued from what the frame actually depends on rather than from a house style.
+>
+> **Honest remainders — human-verified, not gated.** The visual bar is the one thing
+> no test in this repository can hold. That emissive bounce, blended cascades and
+> screen-space reflections *look* right; that a meshlet LOD transition is invisible in
+> motion; that an impostor cross-fade reads as depth rather than as a screen door;
+> that a streamed flythrough never shows a pop — all human-verified on one machine
+> (RTX 4070 Ti, Windows/Vulkan), and the subjective "Lumen-class" claim in this
+> phase's goal is exactly that: subjective. So is the frame rate: every cost figure
+> here is a headless measurement at 320×180 or 640×360 on one GPU, and a real-hardware
+> fps pass at shipping resolution across the tier ladder — plus a Tracy capture of the
+> composed gate scene — remains outstanding, as does the phase demo recording.
+>
+> **Deferred, with tracking.** Swept from all **seven** blocks the phase carries —
+> P18.1 through P18.5 plus the two fixture trips (portable trig, then the
+> `meshopt`-is-not-cross-platform re-import fixture) — so the list is in one place.
+> The watertight-builder fix that landed beside them added no block of its own and no
+> remainder: it corrected `build.rs`'s seam handling with the default-parameter DAGs
+> byte-identical, so nothing downstream of it moved.
+> *Rendering* — SSR is a screen-space **hit finder**, not a colour fetch; a
+> colour-sourced SSR needs a deferred pass or a reprojected history, and the depth
+> prepass it marches covers rigid meshes only. The GI volume still revoxelizes every
+> frame at the defaults (a **voxel cache keyed on the volume's snapped origin** is the
+> temporal half that remains), occupancy is binary and single-bounce, every primitive
+> voxelizes as a box or a sphere, the 40 m volume is near-field only (a cascaded or
+> world-space clipmap is the next structural step), and emissive is quantized to RGBA8
+> against a shared 16.0 ceiling. **The phase gate found one live defect and this is
+> where it is recorded:** `GiAudit::probe_cursor` does not advance across a shipped
+> run, so an amortized sweep restarts at probe 0 every frame and the probes past the
+> first slice are never re-integrated. The cause is upstream of GI —
+> `inf_player::render::project_scene` calls `RenderScene::mark_dirty()`
+> *unconditionally* at the end of every projection, so `scene.version` moves whether
+> or not any content did, and `GiSweepKey` resets the cursor. `gi::sun_bucket` exists
+> to stop exactly this happening via the **sun**; the version has the same shape of
+> problem and no equivalent guard. The gate prints the cursor and deliberately
+> asserts nothing about it, so the fix will not read as a regression — but the fix is
+> a projection-level "did anything actually change?" question that ripples through
+> every version-gated upload in the renderer, which is why it is tracked rather than
+> patched here. At the shipping default (`probe_budget = 0`, a full update) it is
+> unreachable. Scatter does not enter the voxelizer at all, and the
+> P18.5 block says why that is a decision rather than a gap.
+> *Virtualized geometry* — streaming wants are per **asset**, driven by its closest
+> instance, so a hundred distant instances page in the near one's detail;
+> per-instance/per-region residency needs a second remap level. A pool that grows
+> re-stages every resident page rather than copying (correct, and worth knowing before
+> someone "optimizes" it). `AssetResidency::floor_lod()` returns `max_lod` for both
+> "roots only" and "nothing resident", and should be an `Option<u32>`. The vgeom HZB
+> still sees only what precedes its node — terrain, skinned meshes and translucency
+> cannot occlude meshlets — while P18.5's scatter pyramid, built last of the opaque
+> passes, shows what a shared frame-level pyramid would look like; consolidating the
+> two is both a saving and a fidelity win. `late_drawn` disocclusion is exercised by
+> construction and by camera-cut re-convergence rather than by a dedicated
+> moving-camera trace.
+> *Editor* — the **web** player still draws a `SkeletalMesh` as a placeholder (the
+> `meshopt` C++ build script does not cross-compile to wasm32, so `inf-mesh` is
+> `cfg`-gated off it); an optional-`meshopt` feature on `inf-mesh` closes it. No
+> selection **outline** on real geometry (the mask pass draws `PrimMesh`
+> batches); scatter is likewise absent from the ID pass and reaches picking through the
+> analytic fallback — extending the ID pass to vgeom, skinned and scatter is one piece
+> of work that closes all of it. `VgeomCookOptions::min_triangles` is still 2048 while
+> the editor derives from one triangle, so a sub-2048-triangle imported mesh still
+> ships as a placeholder; the cook now raises a per-asset advisory naming the mesh,
+> and changing the default itself changes shipped bytes. Derived `.inf_vmesh` assets
+> are visible in the Content Drawer (a filter chip is the fix); a first project open
+> still derives one mesh at a time in the background; multi-material imported meshes
+> render with the entity's single `Material` (`build_vgeom` flattens submeshes, a
+> documented v1 limitation of the format). The skinned pass caches GPU geometry by
+> `Arc` pointer identity, which is a convention the projectors follow rather than
+> something the renderer can enforce — **both** hosts follow it now and both are
+> gated, but it is still a convention. The player's `render.rs` still calls
+> `detect_tier(..).apply(..)` rather than the one-call `detect_and_clamp` seam the
+> editor adopted in P18.3.
+> *Scatter* — impostors are shaded albedo discs; a **baked snapshot atlas** is what
+> textured scatter will need, and is the natural P19 companion to biome populations.
+> Scatter draws built-in **primitives** only: a `MeshRef.asset` scatter, routing
+> batches through the meshlet path, is the other P19 prerequisite. One cull radius per
+> batch (the primitive's bound × the batch's largest scale) rather than per instance.
+> The CPU fallback has no impostors and no per-instance occlusion, and re-packs on a
+> bucketed camera lattice. Scatter does not enter the GI voxelizer (a decision, argued
+> in the P18.5 block beside the shadow-caster budget it is contrasted with), and only
+> its full-mesh band casts shadows.
+>
+> **The golden ledger for the phase.** Thirty-six goldens entered Phase 18 and
+> **forty-one** leave it. Every movement, in one place, because "all N are
+> byte-identical" is a claim that only means something if the exceptions are
+> enumerated:
+>
+> | Golden | Batch | What moved, and why |
+> |---|---|---|
+> | `vgeom_dense.png` | P18 fixture fix | **Re-blessed.** The displaced-grid fixture went from `std` f32 trig to `psin64`/`pcos64` (the P14 LAW), so `meshopt` cooked a different — now *portable* — DAG on every platform. Strict mode passed *without* the re-bless (mean 2.5e-4, max 3.4e-2 against 6e-2 / 3.5e-1); re-blessed anyway so the reference is what today's generator produces. |
+> | `vgeom_far.png` | P18 fixture fix | **Re-blessed**, same cause (mean 1.5e-5, max 2.1e-2). |
+> | `csm.png` | P18.4 | **Changed.** Cascade blending landed with `cascade_blend` defaulting to 0.1. |
+> | `gi_bleed.png` | P18.4 | **Changed.** SH ambient specular replaced the flat `ambient × f0 × 0.5`, plus the voxelizer's priority-ordered upload. |
+> | `gi_emissive.png` | P18.4 | **New** (emissive injection). |
+> | `gi_specular.png` | P18.4 | **New** (the SH specular term). |
+> | `gi_terrain.png` | P18.4 | **New** (terrain in the voxel volume). |
+> | `scatter.png` | P18.5 | **New** — the full-mesh band: cull, prefix-sum compaction, vertex-pulled indirect draw, PBR. |
+> | `scatter_impostors.png` | P18.5 | **New** — the second indirect draw and the dithered cross-fade. |
+>
+> Nothing else in the suite moved at any point in the phase: P18.1, P18.2 and P18.3
+> each shipped with **all 36 byte-identical, verified strict**, and P18.5's five
+> changes to the shader stack (including the dither's 24-bit fold) left all 39
+> pre-existing images untouched. Each batch's claim was checked the same way — a full
+> `INF_BLESS_GOLDENS=1` sweep followed by `git status`, so "only these files" is an
+> observation rather than an intention.
+>
+> **No schema bump, and that is worth a line.** Phase 17 spent three
+> (`v12`/`v13`/`v14`) and §12's execution doctrine allows one per phase; Phase 18
+> spends **zero** and leaves the level format at **v14**. It is not luck. Everything
+> the phase added is either a *derived artifact* (the paged `.inf_vmesh` v2 container
+> and the editor's content-hash-keyed sidecars, neither of which is a level record), a
+> *renderer cost knob* (`VgeomSettings::stream`, `GiQuality`, `ScatterSettings` — all
+> on `RenderSettings`, which is a property of the machine and has never been
+> persisted), or a *reinterpretation of fields that already existed*
+> (`PcgVolume::draw_distance`, authored since P10.5 and merely honoured in a new
+> place). The one place a bump would have been forced — LOD band thresholds as
+> authored content — was deliberately answered by putting the bands on the renderer
+> beside `AtmosphereSettings` and letting the existing content knob clamp them down.
+> A phase that changes this much of the renderer without touching a byte of committed
+> level format is the payoff for the `.inf_vmesh` / `RenderSettings` split, and the
+> reason every pre-P18 level still loads unmigrated.
+
 > **P18.1 Two-pass HZB occlusion — COMPLETE** (2026-08-01, local gates green; CI pending push).
 > Meshlets now occlude meshlets, and occlusion ships **on by default**. Per frame the vgeom node
 > records `early cull → early draw` (last frame's visible set) → `HZB build` → `late cull → late
@@ -2461,7 +2676,11 @@ GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and h
 > pose rule is: no skeleton ⇒ keep the placeholder; no `AnimPlayer`, no clip, or an unresolvable
 > clip ⇒ **rest pose**; otherwise the clip sampled at the play-head through `inf_anim::sample_clip`.
 > Rest-pose-by-default is what makes a freshly dropped character visible instead of
-> invisible-until-you-press-play. Giving the player the same branch is the matching follow-up.
+> invisible-until-you-press-play. To be exact about the ladder, since "rest pose" is
+> doing two different jobs in that sentence: **no `Skeleton`** keeps the placeholder
+> cube (there is no bind pose to draw); a resolved skeleton with **no `AnimPlayer`, no
+> clip, or an unresolvable clip** draws the skinned mesh at its *bind* pose, i.e. an
+> identity palette; and only a resolved clip is sampled at the play-head. Giving the player the same branch was the matching follow-up, and **P18.5 landed it** — see that block.
 >
 > **The placeholder stays, and that is not a hedge.** A primitive `MeshRef` (Cube/Sphere/Plane/
 > Cylinder/Cone) is legitimate authored content, not a stand-in; an unresolved or dangling asset
@@ -2675,7 +2894,13 @@ GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and h
 > grew `COPY_SRC` + `read_voxels`/`read_sh` for it; mutation-checked by reverting the level filter,
 > which fails the gate. A column with no covering tile is a hole, exactly as an unauthored tile has
 > always drawn as nothing. vgeom also now *receives* GI, which it never did: it took the
-> hemispheric constant even with GI on, a gap since P13.3b.
+> hemispheric constant even with GI on, a gap since P13.3b. To be exact, since the
+> sentence has been read as broader than it is: the gap was in the **meshlet raster
+> specifically** (`vgeom_mesh.wgsl` gained the `gi_irradiance` /
+> `gi_ambient_specular` branch the rigid path had carried since P13.3b). The classic
+> discrete-LOD fallback already shares the rigid shader and so already received —
+> which means a machine that dropped *below* High had been getting more GI on the same
+> content than one at High.
 >
 > **The sky term closes the tracked P17 deferral.** `gi_probes.wgsl` is now a *composed* module
 > (it joined `SHADER_TABLE`, so the naga gate covers it): the atmosphere medium at
@@ -2802,6 +3027,480 @@ GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and h
 > convention the projectors follow, not something the renderer can enforce. The visual pass —
 > that emissive bounce, reflections and blended cascades actually *look* right — is
 > human-verified, as every GPU path here is.
+
+> **P18.5 GPU-instanced scatter + the Phase 18 gate — COMPLETE** (2026-08-02, local
+> gates green; CI pending push). PCG and foliage instances stop being CPU-pushed
+> `MeshInstance`s. They live in GPU instance buffers, are culled per instance on the
+> GPU against the frustum and the P18.1 HZB, and fade through distance bands to
+> impostors — the three P10.5 deferrals, landed together because they are one path.
+>
+> **What died, and the size of it.** Since P10.5 both projectors expanded
+> `PcgVolume::evaluated` and `Foliage::instances` into one `MeshInstance` *each* and
+> pushed them onto `RenderScene::instances`. A 100k-instance scatter therefore cost
+> 100k CPU structs per projection, 100k 176-byte `InstanceRaw`s per pack, and a
+> ~17 MB vertex-buffer upload — before the GPU had culled one of them. Both hosts
+> carried the same admission in a `warn!`: *">50k instances — instanced-draw perf
+> path is a follow-up"*. This is that follow-up; the warning is deleted, and
+> `projector_mirror::neither_projector_warns_about_fifty_thousand_instances` keeps it
+> deleted.
+>
+> **The payload is content-keyed AND origin-independent, and the second half is the
+> load-bearing one.** `ScatterData::build` packs 48 bytes per instance and folds an
+> `xxh3`-128 over the packed bytes *as it packs*; that hash is the renderer's
+> `GenCache` key, so identical content is one upload (two foliage entities painted
+> from the same stroke; the editor and the player rendering the same level) and
+> changed content is a *different* asset rather than a stale one under a reused id —
+> P18.3's derived-vmesh-id argument, applied to a payload that is rebuilt on every
+> projection. The obvious pack would store render-local positions, and it is wrong:
+> a render-local buffer is invalidated by every **floating-origin rebase**, so a
+> camera flying across the world would re-upload every instance buffer it can see.
+> Offsets are therefore relative to the batch's own **anchor**, which rides in a
+> per-frame uniform; the buffer is a pure function of the content and a rebase costs
+> 16 bytes. Precision is stated rather than assumed: f32 against the anchor resolves
+> to ~6e-5 m over a 1 km batch, and `PcgVolume::extent` defaults to 50 m.
+>
+> **The compaction is a PREFIX SUM, and that is the batch's real design call.** The
+> obvious compaction is `visible[atomicAdd(&count, 1u)] = i` — which is exactly what
+> the meshlet cull does. The meshlet path can afford it because P18.1's subtractive
+> proof plus an opaque depth test make its draw order provably unable to reach the
+> image, so nothing ever compares the list. **Scatter cannot afford it**, for a
+> reason specific to this batch: the LOD cross-fade is a *dithered discard*, so an
+> instance in the fade band emits a stippled subset of its pixels and two overlapping
+> instances at the same depth resolve by draw order at sample granularity. Sorting a
+> readback would make the *audit* deterministic and leave the *frame* nondeterministic
+> — the wrong half. So the order is fixed by construction: an in-workgroup
+> Hillis–Steele scan over two flag lanes, then a one-thread exclusive scan of the
+> per-workgroup partials, then a scatter into dense slots, which makes the compacted
+> list exactly *"the surviving instances in ascending index"* on every adapter, every
+> run. It costs one `u32` per instance and two extra dispatches, and it is entirely
+> integer addition — exactly associative, so even the tree scan is bit-reproducible.
+> The **audit counters stay atomic**, because a sum is order-independent even when its
+> increments are not. Three dispatches per batch, and
+> `shader_constants_match_the_rust_side` asserts the source has not grown an
+> `atomicAdd` into the visible list — the one regression that would still pass every
+> count-based assertion. (That guard was itself too narrow on the first pass: it
+> watched two buffer *names*, and the obvious atomic append touches neither. It now
+> strips comments from the three entry points' bodies and demands that the **only**
+> atomic anywhere in them is on the audit counters.)
+>
+> **Content addressing dedupes the payload and NOTHING else, and the first cut got
+> that wrong.** Keying a batch's whole GPU state by content is the natural reading of
+> "content-addressed", and it is a defect: the compacted list, the indirect args and
+> the two uniforms are per-frame state for **one draw**, so two batches sharing a
+> payload at different anchors wrote the same uniform in sequence and the last anchor
+> won — one of the two fields silently vanished, on precisely the duplicated-stroke
+> case the design cites as its own justification (reproduced at 615 painted pixels
+> against a control's 1223). The upload is now keyed by content and the scratch by
+> `(content key, batch pick id)`, a pair that is unique by construction for
+> everything the projectors emit: a foliage entity's several batches share a pick id
+> but differ in *mesh kind*, which is part of the content key.
+> `two_batches_of_the_same_content_at_different_anchors_both_draw` pins it with the
+> control that makes it non-vacuous — the two fields must **sum**, so a regression
+> that draws one of them twice as densely fails too.
+>
+> **Vertex-pulled, not classic instancing — and a scatter is the textbook case for
+> classic instancing.** Feeding a compacted list to classic instancing needs
+> `first_instance` on the indirect args to address a sub-range of a shared buffer, and
+> `INDIRECT_FIRST_INSTANCE` is a non-portable wgpu feature — the wall P13.1b already
+> hit. Compacting the 48-byte payloads instead of the 4-byte indices would make the
+> compaction write 12× the bytes. So the list stays indices and the vertex stage reads
+> `visible[instance_index]`, which is the vgeom precedent, one array subscript, and
+> portable everywhere. Uniform scale buys a second economy: the inverse-transpose of
+> `R·S` normalizes back to `R`, so a scatter instance needs **no normal matrix** —
+> which is half the reason the record fits in 48 bytes against `InstanceRaw`'s 176.
+>
+> **The impostor is a shaded disc, not a baked snapshot, and the choice is a scope
+> decision rather than a shortcut.** One camera-facing quad per instance out of the
+> second indirect draw, alpha-cut to a circle (a square card gets the silhouette
+> visibly wrong at exactly the distances an impostor covers) and shaded with a
+> **spherical normal** over that disc, so the terminator runs across it the way it ran
+> across the mesh it replaced instead of reading as a flat sticker. Its albedo is the
+> instance's own. That IS the mesh's average albedo here — scatter v1 draws untextured
+> primitives with one flat colour per instance — so a baked snapshot would reproduce
+> the same constant plus a silhouette the disc already approximates within a pixel.
+> What a snapshot would buy is exactly nothing until scatter carries *textured*
+> meshes, and what it would cost is a bake pass, an octahedral view set, an atlas
+> allocator, a new asset kind and committed bytes to bless. Tracked as a remainder,
+> for P19.
+>
+> **The cross-fade has no holes, by complementarity.** In the `fade`-metre band before
+> `mesh_end` an instance is in **both** lists; the mesh keeps the pixels where a
+> screen-position hash falls below `m = (mesh_end − d)/fade` and the impostor keeps
+> exactly the complement. One hash, two complementary tests, so every pixel in the
+> overlap is covered exactly once — the transition never thins the silhouette and
+> never double-shades it. The hash is a pure integer avalanche of the pixel
+> coordinate: **no frame index, no temporal jitter, no instance salt**, because a
+> golden renders one frame from cold and a determinism gate renders two, and anything
+> remembered between frames would make a fade band a function of history.
+> `dither_hash_matches_the_rust_side` pins the avalanche against a Rust twin and
+> checks the *function body*, not the file, for temporal inputs — so the header's own
+> prose about not jittering can neither satisfy nor trip its own gate.
+>
+> The hash returns 24 bits, not 32, and the missing eight were a bug: `f32(h) / 2^32`
+> at `h = 0xFFFFFFFF` is 0.99999999977, which has no `f32` neighbour below 1.0 and
+> rounds to **exactly 1.0** — so every test of the form `h < weight` discarded those
+> pixels even at full weight, scattering deterministic, permanently-located holes
+> through geometry nowhere near a fade band, and falsifying the "never taken outside a
+> band" comment on the discard itself. `h >> 8` maxes at 0.99999994, exactly
+> representable and strictly below 1; the gate now checks the saturating input rather
+> than sampling, because one pixel in 2³² is not something a sweep finds. Neither
+> scatter golden moved (at 320×180 the odds of hitting it are ~1e-5), which is the
+> honest reason it survived review.
+>
+> **Both consumers converge, and a real PIE-vs-shipping divergence dies with them.**
+> A PCG volume becomes one batch; a foliage entity becomes one batch per palette
+> *primitive kind* actually used, emitted in `PrimMesh::ALL` order so the grouping is
+> deterministic. Foliage packs against a **zero** build-anchor while carrying the
+> entity translation on `ScatterBatch::anchor`, which is worth a sentence: foliage
+> instances are already entity-local, so a zero anchor makes "the packed offsets *are*
+> the authored positions" a bit-identity rather than an `x + t − t` round trip — and
+> because the anchor is deliberately outside the content key, two identical strokes
+> painted a thousand kilometres apart share one GPU upload. PCG positions are world,
+> so that batch converts against its entity translation normally. A whole scatter
+> *entity* carries one pick id, so a multi-kind foliage stroke's several batches share
+> it and a click anywhere in the stroke selects the entity that owns it.
+> `PcgVolume::draw_distance` — authored since P10.5 — now rides on the
+> batch and is honoured **inside the cull compute**, which is what finally makes the
+> two hosts agree about it: the editor used to cull against its own camera eye on the
+> CPU while the player ignored the field entirely, so a shipped build drew strictly
+> more scatter than its preview. The content knob clamps the tier's band **down**,
+> never up (`the_authored_draw_distance_only_pulls_the_band_in`), so no schema change
+> was needed to land LOD banding — the cost knobs live on `RenderSettings::scatter`
+> beside `AtmosphereSettings`, for the reason that one has no enable flag either:
+> whether a level has scatter is a property of the content, and what a host owns is
+> how far it is willing to pay to draw it.
+>
+> **The shipped player learned to draw skeletal characters, which closes a second
+> live divergence.** P18.3 gave the *editor viewport* a real `SkeletalMesh`
+> projection and left the player with **no branch at all** — `project_scene` never
+> touched `RenderScene::skinned_meshes` — so a level with a skeletal character
+> previewed correctly in PIE and shipped as nothing. `inf_player::skinned` is the
+> player's half: the `VmeshRegistry` shape applied to skeletal assets, reading a
+> cooked pack (or a `--level` dev dir) where the editor walks a mutable content root.
+>
+> Two functions are kept **character for character** identical to the editor's and
+> pinned as source text by `projector_mirror.rs`: the **pose rule** (no skeleton, or
+> a skeleton with no joints ⇒ keep the placeholder; no `AnimPlayer`, no clip, or an
+> unresolvable clip ⇒ the rest pose; otherwise the clip sampled at the play-head,
+> honouring `looping`) and the **bind-space rebuild** (submeshes concatenated,
+> indices rebased, an unskinned submesh pinned to joint 0 at weight 1). What is
+> host-local is only *where the bytes come from*. Notably the P18.3 **content-hash
+> vs GUID** asymmetry does **not** apply here, and the reason is worth keeping: that
+> one exists because both vgeom nodes cache GPU state by `VgeomAsset::id`, so a
+> re-import under a stable id renders stale — the skinned pass caches by the
+> **pointer identity** of the `Arc<SkinnedMeshData>` instead, so a re-import that
+> produced a new `Arc` is already a new cache entry and an id needs to carry nothing.
+> The player shares one `Arc` per mesh across projections, which is the convention
+> the P18.3 remainder says the renderer cannot enforce — so it is gated instead.
+> `phase18_gate::pie_equals_shipping_on_the_projected_skinned_pose` steps a cooked
+> sim and a PIE sim the same number of fixed steps and compares the projected joint
+> palettes **bit for bit**, with the anti-vacuity guards that matter: the palette
+> must not be all-identity, it must have *moved* between two step counts, and the
+> old 4-argument door must still yield exactly the one placeholder cube that shipped
+> before — so the fixture is provably exercising the new path.
+>
+> **One honest platform carve-out.** The bind-space geometry lives in the authoring
+> `.inf_mesh`, so the player needs `inf_mesh::MeshAsset` — and `inf-mesh` pulls
+> `meshopt`, whose build script compiles C++ through `cc`, which does not
+> cross-compile to `wasm32-unknown-unknown` (the same wall `inf-vgeom` already gates
+> around). The dependency therefore sits under `cfg(not(target_arch = "wasm32"))` and
+> the **browser player keeps drawing a `SkeletalMesh` as its placeholder** —
+> unchanged from before this batch, while every native target draws the real thing.
+> Hand-copying the asset struct instead was the alternative and is exactly the
+> bincode positional-decode desync the schema LAW forbids. Making `meshopt` an
+> optional feature of `inf-mesh` is the ~5-line follow-up that removes the carve-out.
+>
+> **A batch is one object for selection.** It carries one pick id, not one per
+> instance — so the editor's `id_to_guid` map holds one row where it held 100k, and a
+> click on a scattered rock still selects the owning volume. The GPU id pass rasters
+> `instances` only, so scatter reaches picking through P18.3's **analytic** fallback,
+> which now has a second consumer; extending the ID pass covers both at once and is
+> the tracked follow-up.
+>
+> **The shadow regression, found and closed rather than documented.** Before this
+> batch a scatter's instances *were* `scene.instances`, so they cast cascaded shadows
+> for free. Moving them to the GPU path silently deletes every one of those shadows —
+> invisible to the compiler, invisible to a unit test, invisible to a pixel comparison
+> with no shadow in it, and obvious the moment anyone looks at the ground. The shadow
+> node now packs scatter casters beside the rigid ones through the same
+> `pack_fallback`, clipped to `shadows.max_distance × 1.5` (a caster outside the last
+> cascade can still cast *into* it when the sun is low) and to the same bucketed
+> camera lattice, so the caster set stays a pure function of its key.
+> `scatter_casts_cascaded_shadows` isolates the claim by toggling *shadows* rather
+> than the scatter — the ground is flat and the only thing standing on it is scatter,
+> so every ground pixel that darkens is a scatter shadow — and it carries an
+> anti-vacuity control that earned its place: the first draft put the sun 20° above
+> the horizon and found **1** shadowed pixel, which reads exactly like "scatter casts
+> no shadows"; eight rigid cubes in the same fixture found **6**, i.e. the fixture was
+> blind, not the code. The control now fails first and says so.
+>
+> **The caster set escaped every clamp in the renderer, and that is the more
+> interesting half.** The first cut *synthesized* a `ScatterSettings` for the shadow
+> pack by overwriting `cull_distance_m` with the shadow range — and since that was
+> the only field the packer read, the tier's band ceilings, `clamp_scatter` and
+> `mesh_distance_m` all became inert for shadows: a Medium-tier machine that had just
+> been told to draw 240 m of foliage still rasterized full primitive meshes for 600 m
+> of it into three cascades, unbounded in count, and a legal `shadows.max_distance =
+> 0` packed **every instance in the world** because the packer read a zero band as
+> "unlimited" while `scatter_cull.wgsl` reads it as "cull everything". Every one of
+> those is now a `min` against the settings the host already handed the renderer
+> (`shadow_caster_settings`), the zero sentinel agrees with the shader, the pack is
+> bounded by `MAX_CPU_SCATTER_INSTANCES` degrading **nearest-first** through the
+> P18.4 `priority_order` total order, and `ScatterAudit::shadow_casters` publishes
+> what actually got in — the number nobody was in a position to ask for. Measured on
+> the budget scene: **18 313** casters of 99 856 instances under a 60 m shadow range,
+> asserted to be both nonzero and under a quarter of the field.
+>
+> **Only the full-mesh band casts**, which is a decision rather than an optimisation.
+> An impostor is a camera-facing card; from the sun's point of view it is a sliver or
+> a disc depending on the angle and never the object's silhouette, so rasterizing one
+> into a shadow map is geometrically wrong rather than approximate — and casting the
+> *full mesh* for something the camera draws as a disc is exactly the cost the LOD
+> band exists to avoid. Pulling `mesh_distance_m` in below the shadow range therefore
+> stops the far half of a field casting: a bounded softening the tier explicitly asked
+> for, and the reason the CPU fallback's own cost fell from 0.403 ms to 0.095 ms when
+> the same clamp reached it.
+>
+> **That rule was documented one revision before it was implemented**, which is worth
+> recording because the shape recurs. Turning impostors off makes `effective_bands`
+> report `mesh_end == cull`, so `pack_fallback` reads **`cull_distance_m`** as the
+> band — and a `shadow_caster_settings` that clamped `mesh_distance_m` alone produced
+> settings that *read* exactly right and packed to the cull distance anyway. Dead
+> code that looks like the rule. It only bites past
+> `mesh_distance_m / SHADOW_CASTER_MARGIN` (80 m of shadow range at the defaults) and
+> every fixture in the suite sat at 60 m or below, so nothing crossed the line: the
+> settings-level sweep passed, and 307 instances packed where 128 fit. The clamp now
+> lands on `cull_distance_m` too, the band is stated once as
+> `min(mesh_distance_m, cull_distance_m, range × margin)` at both doc sites, and
+> `the_packed_caster_band_stops_at_the_mesh_distance` asserts it on the **packed
+> set** at a 200 m range — mutation-verified, and the only test in the file that
+> crosses that boundary at all.
+>
+> **GI is the other half of that question, and the answer is different on purpose.**
+> Scatter does **not** enter the P18.4 voxelizer, and that is not an oversight: the
+> voxelizer is a budgeted gather ordered nearest-surface-first, so 100k ground-cover
+> instances would have consumed the entire per-frame budget and evicted the actual
+> architecture — the failure `MAX_GI_INSTANCES` used to cause silently, arriving by a
+> different road. At the volume's 0.63 m voxels a 0.8 m tuft is at the lattice's own
+> resolution anyway.
+>
+> **The asymmetry with shadows is deliberate and is worth stating in one place**,
+> because "scatter casts shadows but does not bounce light" reads like an oversight
+> until the two budgets are put side by side. A shadow caster is *bounded by the
+> shadow range* — 18 313 of 99 856 instances at the defaults, clamped again by the
+> tier and again by a hard ceiling — and it produces something a player looks
+> straight at. A GI candidate is bounded by a **global** per-frame budget shared with
+> the whole scene, ordered nearest-surface-first, and produces a 0.63 m occupancy
+> voxel that ground cover is already below. So the same content is affordable and
+> visible in one and unaffordable and invisible in the other. Both halves are now
+> *bounded and measured* rather than merely asserted, which is what makes this a
+> decision instead of a gap.
+>
+> **This node builds its own HZB, and that is a cost decision, not a correctness
+> one.** It runs **last of the opaque passes** — after the rigid mesh pass, both vgeom
+> paths, the skinned pass and terrain — and builds a pyramid from the depth all of
+> them have already written, which is the richest occluder set in the engine and
+> closes, for this consumer, P18.1's honest remainder (2). Sharing the meshlet pyramid
+> would have been cheaper and strictly worse: it is built before the late vgeom draw
+> and before terrain, and it would couple scatter's culling to
+> `VgeomSettings::two_pass` — a setting about a different subsystem. A pyramid is a
+> pure function of the depth target at the moment it is built, so a second one is a
+> cost and never a correctness question, and it costs *nothing* on a scene with no
+> scatter because the node returns before building it. Correctness is inherited rather
+> than re-argued: the test is P18.1's, and
+> `occlusion_on_is_pixel_identical_to_occlusion_off` gates the inheritance with
+> `occluded > 0` asserted separately so the equality cannot be vacuous.
+>
+> **The test moved into one file so the second copy never existed.**
+> `hzb_occlusion.wgsl` now holds the rule and its proof, taking the uniform, the
+> dimensions and the pyramid as *parameters* rather than reading globals, so it serves
+> two different bind layouts; `vgeom_cull.wgsl`'s `occluded` is a one-line forwarder
+> and `vgeom_cull` joined `SHADER_TABLE` as a composed module (so the naga gate covers
+> the composition, not just the fragment). Extracting *before* the second copy exists
+> is the P18-fixture lesson applied prospectively — that batch paid for nine
+> hand-copied generators that were not textually identical.
+>
+> **The tier decides the mechanism, never whether there is any foliage.**
+> `ScatterSettings::gpu` defaults on; `RenderTier::apply` clears it on Medium and Low,
+> as does `clamp_mobile`, and `AdapterCaps::clamp_scatter` clears it without compute
+> or indirect execution. With it off the same batches draw through the rigid mesh
+> pipeline with `InstanceRaw` — no impostors, no per-instance occlusion, same content
+> — CPU-culled against a **bucketed** camera position (the P17.2 sky-view-LUT
+> precedent: the eye is snapped to an 8 m lattice, the snapped value is part of the
+> re-pack key so a walking camera does not re-pack every frame, and the cull radius is
+> widened by the cell's own half-diagonal so a snapped eye can only ever keep *more*
+> instances than the true one). The scatter capability floor is deliberately **6**
+> storage buffers against the meshlet path's 8: ground cover is something a mid-range
+> GPU is expected to carry, and it should not be held back by a meshlet floor it has
+> nothing to do with. The band clamps are **absolute metres, not scale factors**,
+> because the tier clamps have to be idempotent and order-independent —
+> `apply_clamps_down_never_up` applies them twice and demands the same settings, and
+> repeated multiplication is neither. (The first cut multiplied, and that test caught
+> it.)
+>
+> **The residency floor — the P18.4 auditor residual, now CLOSED.**
+> `RenderTerrain::max_lod()` is a max over the *projected* set, and `render_wants`
+> replaces a node by its children whenever the camera is inside the refine radius — so
+> a terrain small enough to sit entirely inside the finest ring refined every root
+> away, published no root tile, and flipped `max_lod` between two regimes at that
+> camera distance, taking the GI voxelizer's level choice with it. `TerrainStreamer`
+> now carries a `floor` — the catalog's coarsest level, minus blocked keys — which is
+> never evicted, always loaded, and charged against the tile ceiling through the same
+> `pin_ceiling` the editor's pins already used. **The published cut is unchanged**:
+> the floor is *residency*, not the cut, which is what keeps `wants.rs`'s "no parent
+> coexists with a child" contract and leaves all eighteen of its tests untouched. It
+> is cheap by construction — `build_pyramid` stops at `min_tiles`, so the coarsest
+> level is a handful of pages.
+>
+> That fix needed a second half to be safe, and the second half took two goes.
+> `superseded`'s "fine wins" clause tested whether a coarse tile's **immediate**
+> children were resident. With the floor pinned, a root can be resident while the cut
+> refined *two* levels past it — its immediate children are not resident, the clause
+> does not fire, and the root draws over the fine terrain and z-fights. So coverage
+> became **transitive**: `covered_tiles` computes, bottom-up in `O(resident × levels)`,
+> the set of tiles whose four children are each resident *or themselves covered*. That
+> also caught its own test helper: the brute-force hole-free sweep's `footprint_drawn`
+> had independently encoded the immediate-children rule and failed at
+> `l1 mask 1110, l0 mask 1111` — a footprint fully covered by grandchildren with
+> nothing resident at level 1. The helper was wrong; the sweep still brute-forces all
+> 256 residency shapes × 4 rings.
+>
+> **And it was still wrong, because both clauses read the same set.** Coverage was
+> computed over the tiles that survived the **frustum cull**, which is right for one
+> clause and a reproduced z-fight for the other. Put the camera *inside* the terrain:
+> the descendants behind it are culled, the pinned root — whose AABB spans the whole
+> grid — is not, so post-cull coverage reads it as uncovered and its decimated surface
+> draws straight over the fine pages in front (root drawn beside eight fine patches,
+> exactly the artefact the transitive test was added to prevent). The two clauses ask
+> different questions and now read different sets:
+>
+> * **"Is this tile redundant?"** is a property of the **projection**, so it reads the
+>   *pre-cull* set. No hole is reachable: a covered tile's ground is drawn by the
+>   descendant whose AABB contains it, and if that descendant was culled then that
+>   ground is off screen — the parent surviving the cull only means its own AABB
+>   clipped the frustum, and that box is one bound over a footprint `4^k` times
+>   wider, i.e. mostly **air**. (Not the *union* of its children's boxes: a decimated
+>   page's height bounds can be vertically narrower than its children's, since
+>   decimation can miss a spike a child keeps. The conclusion needs only the single
+>   wide box, and the no-hole argument needs neither — it runs through the
+>   descendant's AABB.) Dropping it removes overdraw of empty space.
+> * **"Is this tile suppressed by an ancestor?"** is the opposite operation, and an
+>   ancestor that was culled draws nothing — suppressing a visible child in its favour
+>   is sky through the ground. It keeps the *post-cull* set: the P16.3b1 invariant,
+>   unchanged.
+>
+> With the split in place the property is exact and gated rather than asserted: the
+> drawn patch set is **unchanged** for every residency the streamer could already
+> produce (`adding_covered_root_tiles_does_not_move_a_single_patch`), it stays
+> unchanged when the frustum cuts the root
+> (`a_frustum_that_cuts_the_root_still_silences_it`, mutation-verified — reverting
+> clause 1 to the post-cull set fails it with the reproduced z-fight), and `max_lod()`
+> becomes a stable property of the **asset** instead of of where the camera has been.
+>
+> **Cost** (RTX 4070 Ti, 640×360, **99 856 instances** over 400 m — one tenth of the
+> ROADMAP's 1M target, on one batch), measured over a 0.090 ms scatter-free baseline:
+> the full GPU path **+0.147 ms**; the GPU path with the HZB build off **+0.080 ms**,
+> i.e. the pyramid is again the resolution-bound majority of the delta and the three
+> cull dispatches are ~0.08 ms for 100k instances; the CPU fallback **+0.095 ms**;
+> the GPU path **with cascaded shadows +0.381 ms** (18 313 casters admitted by the
+> clamps) and the fallback with shadows **+0.306 ms**. The shape matters more than the
+> numbers: the GPU path's cost is bounded by the **screen**, the fallback's by the
+> **instance count** it is allowed to pack — which is why the fallback looks cheap
+> here (the caster clamps cut it to the 120 m mesh band, where the GPU path is drawing
+> 400 m of impostors) and why the tier that loses the compute path also loses two
+> thirds of its draw distance. Following the P17.4 / P18.1 / P18.2 / P18.4 precedent
+> this adds **no new ratchet constant** (§8 makes each one a standing obligation) and
+> asserts the heaviest configuration stays inside the existing `FRAME_BUDGET_MS`.
+>
+> **Goldens: 39 → 41, two added, thirty-nine byte-identical.** `scatter.png` (the
+> full-mesh band: cull, prefix-sum compaction, vertex-pulled indirect draw, PBR) and
+> `scatter_impostors.png` (the second indirect draw and the dithered cross-fade) are
+> new; a full `INF_BLESS_GOLDENS=1` sweep reports **exactly those two files and
+> nothing else**, and the whole suite passes `INF_GOLDEN_STRICT=1` afterwards. The
+> impostor golden is a separate image rather than an extra assertion on the first
+> because an impostor is *different geometry* out of a *different draw*, and a golden
+> that never rendered one would leave half the path unpinned.
+> `scatter_off_path_is_byte_identical` is the machine-checked half of the claim: every
+> scatter knob wound to a non-default value on a scatter-free scene must return the
+> same bytes.
+>
+> **Gates.** `crates/inf-render/tests/scatter.rs` (determinism of the image *and* the
+> counters across two fresh renderers; occlusion-on == occlusion-off with `occluded >
+> 0` asserted separately; monotone mesh → impostor → culled banding; the authored draw
+> distance clamping down and provably not up; impostors-off still covering the ground;
+> the CPU fallback drawing the same field and being reproducible; the cast-shadow
+> claim with its fixture-blindness control; two same-content batches at different
+> anchors both drawing, against a control that demands they *sum*; the inert-off-path
+> claim);
+> `passes::scatter::tests` (the WGSL constant wire contract, the anti-atomic-append
+> guard over the entry-point bodies, the dither avalanche pinned bit-for-bit with no
+> GPU *and* proven strictly below 1.0, the band rule, the tier clamps, the shadow
+> caster band's three clamps as a swept property over ranges that straddle the
+> mesh-band crossover, the packed-band assertion at a range above it, the zero-band
+> sentinel, the nearest-first pack ceiling, the fallback's eye lattice);
+> `primitives::tests::bounding_radius_bounds_every_vertex` (the cull sphere really
+> bounds the geometry, and is *tight* — a loose bound would cull nothing and make the
+> whole occlusion suite vacuous); `inf-terrain::stream` (a fully-refined tiny terrain
+> still publishing its root level, `max_lod` stable across the regime boundary, a
+> pyramid-less store unaffected, the floor charged against the budget);
+> `passes::terrain` (transitive coverage silencing a root two levels above the cut,
+> the patch-set-unchanged proof, and the frustum-cut case with its own anti-vacuity
+> premise); `projector_mirror` (the `ScatterBatch` literal
+> field for field, the shared projection rules on both sides, and the deleted 50k
+> warning); and `runtime/inf-player/tests/phase18_gate.rs` — **the phase gate**.
+>
+> **THE PHASE 18 GATE.** `runtime/inf-player/tests/phase18_gate.rs` over a new
+> committed sample, `samples/phase18-scatter` — a **12 133-byte** level carrying a
+> four-tile terrain with ~40 m of relief, a 5×5 grid of **standing** meshlet slabs
+> (rotated 90° about X: laid flat, as in the vgeom demo, they occlude nothing, and
+> occluders are what make a subtractive proof non-vacuous), a `PcgVolume` evaluating
+> to **102 400** instances, a 16-instance painted `Foliage` patch on two palette
+> slots, and a `TimeOfDay` + `SkyAtmosphere` authority on a 600× clock. The slabs
+> reference `samples/vgeom-demo/Dense.inf_mesh` **by GUID** rather than duplicating a
+> megabyte of committed binary, and the gate copies both sample directories into its
+> throwaway project. The scatter is split PCG-bulk + small-foliage for a reason the
+> README states and a test enforces: a volume's `evaluated` cache is **derived and
+> never persisted**, so 102 400 instances cost the level nothing, while
+> `Foliage::instances` *is* persisted and 100k of those would be a megabyte of
+> committed level.
+>
+> Ten tests. **(a)** the composed frame trace — pixels, meshlet residency and floor,
+> the GI audit, the instance-cull audit, and the clock and sun as **bits** — reproduces
+> byte for byte across two fresh renderers over six frames under a *binding* VRAM
+> budget, with every layer asserted to have actually moved (the clock advanced, the sun
+> moved, the budget clamped, the meshlet path activated, GI saw the ground, the sweep
+> really amortized at 256 of 2048 probes, the cull saw all 102 416 instances). **(b)**
+> the cooked pack and the editor's PIE payload project the same scene, step for step,
+> with the clock running; a companion asserts the *scene-level* editor-parity claim
+> (vgeom assets and instances, scatter keys/anchors/draw-distance, terrain ids), since
+> the field-for-field source mirror is already `projector_mirror.rs`'s job. **(c)** the
+> 10.6M-triangle flagship still renders **byte-identically** with two-pass occlusion on
+> and off — *with GI, 102 400 scattered instances and a bound streaming budget all
+> enabled*. That is a genuinely different claim from `vgeom_gate::gate_b2`, because
+> scatter builds its HZB from the depth target the meshlet draw wrote: a
+> non-conservative meshlet cull would not merely tint a pixel, it would change the
+> pyramid the scatter cull reads and a different 100k instances would draw. Two
+> individually conservative optimisations composing into a non-conservative one is
+> exactly what a per-feature suite cannot see, so the gate also asserts both audits and
+> the streamer's residency are *identical* either way. **(d)** the instance-cull
+> counters are real and reproducible — over six frames the peaks are 46 961 frustum,
+> 70 284 occluded, 34 946 distance, 17 742 mesh and 16 149 impostor out of 102 416. **(e)**
+> the composed frame is inside `FRAME_BUDGET_MS` with per-system costs measured. **(f)**
+> the golden inventory is exactly the 41 committed PNGs, **listed by name** so a swap —
+> one scene deleted, another added — fails too; nothing is re-blessed here, because a
+> comparison that is no longer run cannot fail. Plus the **skinned-pose parity** arm
+> described above, and two invariants on the committed sample itself (it stays under
+> 48 KB and really carries all four features; the cooked world really evaluates
+> 102 400 instances, deterministically, on the terrain rather than a flat fallback).
+>
+> **Composed cost** (RTX 4070 Ti, 320×180, 25 meshlet instances and **102 416**
+> scattered ones, under a 73 482-byte meshlet budget): baseline (meshlets, unbound)
+> **0.652 ms**; + streaming under the bound budget **1.107 ms (+0.455)**; + GI v2
+> at a 256-probe slice **3.310 ms (+2.658)**; + GPU scatter **0.688 ms (+0.036)**;
+> **everything on 3.038 ms (+2.386)** against the 33 ms budget. GI dominates the
+> composed frame by nearly two orders of magnitude over the scatter, which is the
+> honest headline: what is left to optimise in the flagship frame is Lumen, not
+> Nanite and not the ground cover.
 
 - **P18.1 Two-pass HZB occlusion** — 1. persist the last-frame visible list; 2. early draw →
   HZB from its depth → late cull and draw of the remainder; 3. on by default where supported.

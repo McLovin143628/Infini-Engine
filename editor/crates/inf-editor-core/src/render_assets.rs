@@ -49,13 +49,21 @@
 //!
 //! # Skeletal meshes
 //!
-//! [`resolve_skinned`](EditorRenderAssets::resolve_skinned) is **not** a mirror of
-//! anything: the shipped player does not project `SkeletalMesh` at all yet (its
-//! `project_scene` has no branch for it), so GPU skinning has only ever been
-//! exercised by the `golden_skinned_mesh` headless golden. The editor now drives
-//! the real pass from real assets — rest pose, or the entity's [`AnimPlayer`]
-//! play-head sampled through [`inf_anim::sample_clip`]. Giving the player the same
-//! branch is the matching follow-up (it is outside this batch's file boundary).
+//! [`resolve_skinned`](EditorRenderAssets::resolve_skinned) **is a mirror since
+//! P18.5**, and this note used to say the opposite. When P18.3 wrote it the shipped
+//! player had no `SkeletalMesh` branch at all, so there was nothing to keep in sync
+//! and GPU skinning had only ever been exercised by the `golden_skinned_mesh`
+//! headless golden. P18.5 gave the player the matching branch
+//! (`inf_player::skinned`), which closed that as the PIE-vs-shipping divergence it
+//! had become — so this function and [`skinned_mesh_data`] are now pinned **character
+//! for character** against their player twins by `tests/projector_mirror.rs`
+//! (`the_skinned_pose_rule_is_identical_in_both_stores`,
+//! `the_bind_space_rebuild_is_identical_in_both_stores`), with the receiver
+//! (`&mut self` here, `&self` there — a difference in who owns the cache, not in the
+//! rule) as the single normalized token. Edit either side and the other must follow.
+//!
+//! The rule itself: rest pose, or the entity's [`AnimPlayer`] play-head sampled
+//! through [`inf_anim::sample_clip`].
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

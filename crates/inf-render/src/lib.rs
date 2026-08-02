@@ -76,13 +76,22 @@ pub use renderer::{
 pub use scene::{
     terrain_id_from_guid, Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk,
     RenderLight, RenderLight2D, RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile,
-    RenderTilemap, SkinnedInstance, SkinnedMeshData, SkinnedVertex, SkyParams, SpriteInstance,
-    SpriteTextureUpload, SunParams, TerrainTileKey, TextureHandle, TilemapParams, VgeomAsset,
-    VgeomInstance, VgeomMesh, DEFAULT_SUN_DIR, ID_GIZMO_BASE, ID_NONE,
+    RenderTilemap, ScatterBatch, ScatterData, ScatterInstance, ScatterInstanceRaw, SkinnedInstance,
+    SkinnedMeshData, SkinnedVertex, SkyParams, SpriteInstance, SpriteTextureUpload, SunParams,
+    TerrainTileKey, TextureHandle, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh,
+    DEFAULT_SUN_DIR, ID_GIZMO_BASE, ID_NONE,
 };
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
-    BloomSettings, GiSettings, RenderSettings, ShadowSettings, SsaoSettings, VgeomSettings,
+    BloomSettings, GiSettings, RenderSettings, ScatterSettings, ShadowSettings, SsaoSettings,
+    VgeomSettings,
+};
+// The P18.5 scatter instruments: the GPU instance-cull counters (off by default,
+// free when off) and the pure band rule both the compute pass and the CPU
+// fallback derive their distances from.
+pub use passes::scatter::{
+    effective_bands, shadow_caster_settings, ScatterAudit, MAX_CPU_SCATTER_INSTANCES,
+    SHADOW_CASTER_MARGIN,
 };
 // The GPU meshlet cull readback (P13.1b) — the CPU-vs-GPU parity gate + the
 // player's vgeom-activation check drive it. `VgeomAudit` + `is_camera_cut` are

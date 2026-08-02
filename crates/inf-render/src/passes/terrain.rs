@@ -187,25 +187,119 @@ pub fn patch_mesh_lod(ring: u32, lod: u32) -> u32 {
     ring.saturating_sub(lod).min(TERRAIN_LOD_COUNT - 1)
 }
 
-/// Whether `key` is **fully subdivided**: a coarse tile whose four finer children
-/// are all resident, so the finer pages already cover its whole footprint.
-/// Always `false` at level 0 (nothing is finer).
-fn fully_subdivided(key: TerrainTileKey, resident: &BTreeSet<TerrainTileKey>) -> bool {
-    key.lod >= 1 && key.children().iter().all(|c| resident.contains(c))
+/// The **covered** tiles of a residency set: every coarse key whose whole
+/// footprint is already served by finer resident pages, **transitively** (P18.4).
+///
+/// A tile is covered when each of its four children is *resident or itself
+/// covered*. The recursion matters: since P18.4 the streamer pins a **residency
+/// floor** (the asset's coarsest level, so `RenderTerrain::max_lod` stops being a
+/// function of where the camera has been — see
+/// `inf_terrain::TerrainStreamer::residency_floor`), and a pinned root routinely
+/// sits beside a cut that refined *two or more* levels past it. Its immediate
+/// children are then not resident at all, so the old immediate-children test
+/// ("fully subdivided") would call it uncovered, it would draw over the fine
+/// terrain, and the two surfaces would z-fight. Transitive coverage is what keeps
+/// that root silent.
+///
+/// Computed **bottom-up, once per [`assemble_patches`] call** rather than by
+/// recursing per tile: a naive recursion explores `4^lod` nodes per coarse tile,
+/// while this walks each level once — `O(|resident| · max_lod)` with `BTreeSet`
+/// lookups, and deterministic (every container here is ordered).
+///
+/// Level-0 keys are never covered (nothing is finer), and a level-0-only
+/// residency set yields an empty result — so an inline, non-streamed terrain pays
+/// nothing.
+pub fn covered_tiles(resident: &BTreeSet<TerrainTileKey>) -> BTreeSet<TerrainTileKey> {
+    let mut covered = BTreeSet::new();
+    let Some(max_lod) = resident.iter().map(|k| k.lod).max() else {
+        return covered;
+    };
+    for lod in 1..=max_lod {
+        // Candidates at `lod`: the parents of everything served at `lod − 1`.
+        // Anything else at `lod` has no child coverage to inherit.
+        let below = lod - 1;
+        let candidates: BTreeSet<TerrainTileKey> = resident
+            .iter()
+            .chain(covered.iter())
+            .filter(|k| k.lod == below)
+            .map(|k| k.parent())
+            .collect();
+        // Collected first: the level's verdicts only read levels below it, so a
+        // separate insert pass is both borrow-clean and order-independent.
+        let mut newly = Vec::new();
+        for c in candidates {
+            if c.children()
+                .iter()
+                .all(|k| resident.contains(k) || covered.contains(k))
+            {
+                newly.push(c);
+            }
+        }
+        covered.extend(newly);
+    }
+    covered
 }
 
 /// Whether a resident tile is **served by another resident tile** this frame, and
 /// so must not draw (P16.3b1). The source-selection rule, in two clauses:
 ///
-/// 1. **Fine wins.** A coarse tile whose four children are all resident never
-///    draws: the finer pages cover exactly its footprint, and where both could
-///    serve, the fine one is the better source — regardless of ring.
+/// 1. **Fine wins.** A **covered** tile never draws: finer resident pages already
+///    tile its whole footprint, and where both could serve, the fine one is the
+///    better source — regardless of ring.
 /// 2. **Coarse serves the outer rings.** A tile finer than its ring wants
 ///    ([`ring_source_lod`]) steps aside for a resident ancestor at or below that
-///    level — but *only* if that ancestor is not itself fully subdivided, i.e.
-///    only if the ancestor will really draw.
+///    level — but *only* if that ancestor is not itself covered, i.e. only if the
+///    ancestor will really draw.
 ///
-/// That second qualifier is what makes the swap **hole-free**: a tile is only
+/// Coverage is [`covered_tiles`] — transitive, not just "all four immediate
+/// children are resident", because the P18.5 residency floor routinely parks a
+/// pinned root several levels above the cut. **The two clauses read coverage
+/// computed over two DIFFERENT sets, and that asymmetry is load-bearing:**
+///
+/// * clause 1 (`covered_projected`) is built from every **projected** tile —
+///   pre-frustum-cull;
+/// * clause 2 (`covered_visible`) is built from the tiles that **survived** the
+///   cull, alongside `resident`.
+///
+/// The first cut of P18.5 used the post-cull set for both, and it z-fights. With
+/// the camera *inside* the terrain the pinned root survives the cull while the
+/// descendants behind the camera do not, so the root reads as uncovered and its
+/// decimated surface draws straight over the fine tiles in front — reproduced as
+/// a drawn root beside eight fine patches, exactly the artefact the transitive
+/// test was added to prevent.
+///
+/// **Why clause 1 is safe on the pre-cull set — no hole is reachable.** Take a
+/// fully-covered tile `P`, dropped here, and any point of ground under its
+/// footprint that is actually on screen. That ground is drawn by the covering
+/// descendant `c` whose quad contains it, and `c`'s AABB *contains that ground*
+/// (its height bounds are computed from its own samples). An on-screen point
+/// inside `c`'s AABB means `c`'s AABB intersects the frustum, and `aabb_visible`
+/// is conservative, so `c` survived the cull and draws. Contrapositively: if `c`
+/// was culled, the ground under it is off screen, and `P` surviving the cull only
+/// means `P`'s own AABB clipped the frustum — and that box is one bound over a
+/// footprint `4^k` times wider, i.e. mostly **air** above and below the surface it
+/// encloses. (It is emphatically *not* the union of its children's boxes: this file
+/// states 120 lines down that a decimated page's height bounds can be vertically
+/// *narrower* than its children's, because decimation samples every other height and
+/// can miss a spike a child keeps. The mostly-air conclusion does not need the union
+/// — it follows from a single box spanning a large heightfield footprint — and the
+/// no-hole argument above does not need either, since it runs entirely through the
+/// descendant's AABB.) Dropping `P` there removes overdraw of empty space, never
+/// coverage.
+///
+/// **Why clause 2 must stay on the post-cull set.** It does the opposite thing: it
+/// *suppresses a finer tile* in favour of a coarser ancestor. An ancestor that was
+/// frustum-culled draws nothing, so suppressing a visible child in its favour is a
+/// hole — sky through the ground. That is the P16.3b1 invariant, and it is why
+/// `resident` (and the coverage that qualifies it) is the visible set.
+///
+/// Together these make the P18.5 residency floor **free at the pixel level**: for
+/// every residency set the streamer could already produce, the extra pinned root
+/// pages are covered by construction whenever the cut refined past them, so the
+/// drawn patch set is unchanged — while `RenderTerrain::max_lod` becomes a stable
+/// property of the **asset** rather than of where the camera has been.
+///
+/// Clause 2's qualifier is what makes the swap **hole-free**: a tile is only
 /// suppressed in favour of a coarser page that is guaranteed to be drawn, and by
 /// induction up the parent chain some ancestor always is. The renderer never
 /// punches a hole in geometry it was handed. Under an inconsistent
@@ -216,25 +310,35 @@ fn fully_subdivided(key: TerrainTileKey, resident: &BTreeSet<TerrainTileKey>) ->
 ///
 /// `resident` must be the set of tiles that **survived the frustum cull**, not
 /// every projected tile — see the second pass of [`assemble_patches`] for why a
-/// culled ancestor must not suppress a visible child.
+/// culled ancestor must not suppress a visible child. `covered_visible` must be
+/// built from that same set, for the same reason; `covered_projected` must not.
 ///
-/// For a level-0-only projection `max_lod == 0`, so clause 1 cannot fire (no
-/// coarse tiles) and clause 2's loop never runs (`want == 0`) — the output is
+/// For a level-0-only projection `max_lod == 0`, so clause 1 cannot fire (nothing
+/// is ever covered) and clause 2's loop never runs (`want == 0`) — the output is
 /// bit-identical to the pre-P16.3 assembly.
 pub fn superseded(
     key: TerrainTileKey,
     ring: u32,
     max_lod: u32,
     resident: &BTreeSet<TerrainTileKey>,
+    covered_projected: &BTreeSet<TerrainTileKey>,
+    covered_visible: &BTreeSet<TerrainTileKey>,
 ) -> bool {
-    if fully_subdivided(key, resident) {
+    // Clause 1 — "does THIS tile draw?". Redundancy is a property of the
+    // PROJECTION, not of this frame's frustum: a tile whose footprint is tiled by
+    // finer projected pages is never the better source, whether or not those pages
+    // happen to be on screen right now.
+    if covered_projected.contains(&key) {
         return true;
     }
+    // Clause 2 — "is this tile suppressed in favour of an ancestor?". Only an
+    // ancestor that will really DRAW may suppress a visible child, so both the
+    // residency and the coverage that qualifies it are the post-cull sets.
     let want = ring_source_lod(ring, max_lod);
     let mut ancestor = key;
     while ancestor.lod < want {
         ancestor = ancestor.parent();
-        if resident.contains(&ancestor) && !fully_subdivided(ancestor, resident) {
+        if resident.contains(&ancestor) && !covered_visible.contains(&ancestor) {
             return true;
         }
     }
@@ -331,22 +435,42 @@ pub fn assemble_patches(
         });
     }
 
-    // Pass 2 — source selection, over the tiles that SURVIVED the cull.
+    // Pass 2 — source selection. TWO index sets, and which clause reads which is
+    // the whole correctness argument (spelled out on [`superseded`]):
     //
-    // The index must be built from the visible set, not from every projected
-    // tile: a coarse page's AABB can be *vertically narrower* than its children's
-    // (decimation samples every other height, so it can miss a spike a child
-    // keeps), so an ancestor can be frustum-culled while its child is not.
-    // Suppressing that child in favour of a page nobody draws is a hole — sky
-    // through the ground. Restricting the index to visible tiles is safe in both
-    // directions: a coarse page whose children were culled simply stops counting
-    // as fully subdivided and draws, which is at worst overdraw off-screen.
+    // * **Ancestor suppression** reads the tiles that SURVIVED the cull. A coarse
+    //   page's AABB can be vertically narrower than its children's (decimation
+    //   samples every other height, so it can miss a spike a child keeps), so an
+    //   ancestor can be frustum-culled while its child is not. Suppressing that
+    //   child in favour of a page nobody draws is a hole — sky through the ground.
+    //
+    // * **Redundancy** ("this tile is fully covered by finer pages") reads every
+    //   PROJECTED tile. Coverage is a property of the projection, not of this
+    //   frame's frustum, and computing it post-cull is a bug that was reproduced:
+    //   a camera inside the terrain culls the descendants behind it, the pinned
+    //   root reads as uncovered, and its decimated surface draws over the fine
+    //   tiles in front. No hole is reachable the other way — a covered tile's
+    //   ground is drawn by the descendant whose AABB contains it, and if that
+    //   descendant was culled the ground is off screen, so the parent's surviving
+    //   AABB clipped the frustum through empty air.
     //
     // A level-0-only (inline) terrain has `max_lod == 0`, so this whole pass is
     // skipped and it pays exactly what it paid before P16.3.
     if max_lod > 0 {
+        let projected: BTreeSet<TerrainTileKey> = terrain.tiles.iter().map(|t| t.key).collect();
+        let covered_projected = covered_tiles(&projected);
         let visible: BTreeSet<TerrainTileKey> = out.iter().map(|p| p.key).collect();
-        out.retain(|p| !superseded(p.key, p.ring, max_lod, &visible));
+        let covered_visible = covered_tiles(&visible);
+        out.retain(|p| {
+            !superseded(
+                p.key,
+                p.ring,
+                max_lod,
+                &visible,
+                &covered_projected,
+                &covered_visible,
+            )
+        });
     }
     out
 }
@@ -1390,6 +1514,18 @@ mod tests {
         parent.children().into_iter().chain([parent]).collect()
     }
 
+    /// [`superseded`] against the coverage its own residency set implies — the
+    /// pairing every call site uses, spelled once so the assertions stay readable.
+    fn sup(
+        key: TerrainTileKey,
+        ring: u32,
+        max_lod: u32,
+        resident: &BTreeSet<TerrainTileKey>,
+    ) -> bool {
+        let covered = covered_tiles(resident);
+        superseded(key, ring, max_lod, resident, &covered, &covered)
+    }
+
     #[test]
     fn fine_wins_when_both_could_serve() {
         // A coarse page whose four children are all resident never draws — in ANY
@@ -1398,25 +1534,20 @@ mod tests {
         let parent = TerrainTileKey::new(1, (0, 0));
         for ring in 0..TERRAIN_LOD_COUNT {
             assert!(
-                superseded(parent, ring, 1, &resident),
+                sup(parent, ring, 1, &resident),
                 "fully-subdivided coarse page must yield in ring {ring}"
             );
             for child in parent.children() {
                 assert!(
-                    !superseded(child, ring, 1, &resident),
+                    !sup(child, ring, 1, &resident),
                     "fine page must draw in ring {ring} (fine wins)"
                 );
             }
         }
         // Same on negative coordinates.
         let resident = block_and_parent((-1, -2));
-        assert!(superseded(
-            TerrainTileKey::new(1, (-1, -2)),
-            2,
-            1,
-            &resident
-        ));
-        assert!(!superseded(TerrainTileKey::lod0((-2, -4)), 2, 1, &resident));
+        assert!(sup(TerrainTileKey::new(1, (-1, -2)), 2, 1, &resident));
+        assert!(!sup(TerrainTileKey::lod0((-2, -4)), 2, 1, &resident));
     }
 
     #[test]
@@ -1429,37 +1560,158 @@ mod tests {
 
         // Outer ring (wants level 1): the coarse page draws, the fine ones stand
         // down — one patch over the whole footprint, no double draw.
-        assert!(!superseded(parent, 1, 1, &resident));
+        assert!(!sup(parent, 1, 1, &resident));
         for child in &kids[..3] {
-            assert!(superseded(*child, 1, 1, &resident));
+            assert!(sup(*child, 1, 1, &resident));
         }
 
         // Innermost ring (wants level 0): the fine pages draw. The coarse page is
         // not suppressed — it still covers the missing quadrant, so the frame has
         // overdraw rather than a hole (the documented preference).
         for child in &kids[..3] {
-            assert!(!superseded(*child, 0, 1, &resident));
+            assert!(!sup(*child, 0, 1, &resident));
         }
-        assert!(!superseded(parent, 0, 1, &resident));
+        assert!(!sup(parent, 0, 1, &resident));
+    }
+
+    // ── P18.4: transitive coverage under a pinned residency floor ────────────
+
+    /// **A root pinned two levels above the cut neither draws nor suppresses.**
+    ///
+    /// Since P18.4 the streamer pins the asset's coarsest level so
+    /// `RenderTerrain::max_lod` stops depending on where the camera has been. A
+    /// small terrain refines all the way to level 0, so that pinned root sits
+    /// beside a residency set in which **none of its immediate children exist** —
+    /// the old "all four children are resident" test would have called it
+    /// uncovered, it would have drawn over the fine terrain, and the two surfaces
+    /// would z-fight. Transitive coverage is what keeps it silent, and the guard
+    /// stays narrow: a genuine hole under the root brings it straight back.
+    #[test]
+    fn transitive_coverage_silences_a_root_two_levels_above_the_cut() {
+        let root = TerrainTileKey::new(2, (0, 0));
+        let mid = root.children();
+        let fine: Vec<TerrainTileKey> = mid.iter().flat_map(|m| m.children()).collect();
+        assert_eq!(fine.len(), 16);
+
+        let full: BTreeSet<TerrainTileKey> = fine.iter().copied().chain([root]).collect();
+        assert!(
+            mid.iter().all(|m| !full.contains(m)),
+            "the fixture only bites while the root's IMMEDIATE children are absent"
+        );
+
+        let covered = covered_tiles(&full);
+        assert!(
+            covered.contains(&root),
+            "the root must be covered transitively: {covered:?}"
+        );
+        assert!(mid.iter().all(|m| covered.contains(m)));
+        assert!(
+            fine.iter().all(|k| !covered.contains(k)),
+            "a level-0 page can never be covered"
+        );
+
+        for ring in 0..TERRAIN_LOD_COUNT {
+            assert!(
+                superseded(root, ring, 2, &full, &covered, &covered),
+                "the covered root drew over the fine terrain in ring {ring} — z-fighting"
+            );
+            for &k in &fine {
+                assert!(
+                    !superseded(k, ring, 2, &full, &covered, &covered),
+                    "the covered root suppressed {k:?} in ring {ring} — that is a hole"
+                );
+            }
+        }
+
+        // A GENUINE hole under the root: coverage stops at the branch that lost a
+        // page, the root draws again, and the other three branches stay covered.
+        let holed: BTreeSet<TerrainTileKey> =
+            full.iter().copied().filter(|k| *k != fine[5]).collect();
+        let covered = covered_tiles(&holed);
+        assert!(!covered.contains(&root), "a holed root must keep drawing");
+        assert!(!covered.contains(&fine[5].parent()));
+        assert_eq!(covered.len(), 3, "the guard must stay narrow: {covered:?}");
+        for ring in 0..TERRAIN_LOD_COUNT {
+            assert!(!superseded(root, ring, 2, &holed, &covered, &covered));
+        }
+    }
+
+    /// **The residency floor moves no pixels.** Adding the covered root pages a
+    /// pinned floor contributes leaves the assembled patch list *identical* — the
+    /// "no pixels move" half of the P18.4 claim, gated rather than asserted in
+    /// prose.
+    #[test]
+    fn adding_covered_root_tiles_does_not_move_a_single_patch() {
+        // A full 4 × 4 level-0 residency: the "terrain entirely inside the finest
+        // refine ring" shape that refines every root away.
+        let fine: Vec<TerrainTileKey> = (0..4)
+            .flat_map(|tx| (0..4).map(move |tz| TerrainTileKey::lod0((tx, tz))))
+            .collect();
+        let before_terrain = terrain_of(fine.iter().copied());
+        assert_eq!(before_terrain.max_lod(), 0);
+
+        let view = wide_top_view();
+        let origin = FloatingOrigin::new(DVec3::ZERO);
+        let before = assemble_patches(&before_terrain, &view, &origin);
+        assert_eq!(before.len(), 16, "the fixture must draw every fine page");
+
+        // Now page the root level in beside it. Keys sort by LOD first, so the
+        // root appends and every existing `TerrainPatch::tile` index is preserved.
+        let root = TerrainTileKey::new(2, (0, 0));
+        let after_terrain = terrain_of(fine.iter().copied().chain([root]));
+        assert_eq!(
+            after_terrain.max_lod(),
+            2,
+            "the projection now reports the ASSET's coarsest level — the P18.4 point"
+        );
+
+        let after = assemble_patches(&after_terrain, &view, &origin);
+        assert_eq!(
+            after, before,
+            "pinning a covered root moved the drawn patch set"
+        );
+
+        // …and the claim is not vacuous: the root survived the frustum cull and
+        // was dropped by transitive coverage, not by the camera.
+        let visible: BTreeSet<TerrainTileKey> = after_terrain.tiles.iter().map(|t| t.key).collect();
+        assert!(covered_tiles(&visible).contains(&root));
+        let (lo, hi) = tile_aabb_local(
+            &after_terrain.tiles[16],
+            after_terrain.tile_span_at(2),
+            &origin,
+        );
+        assert!(
+            aabb_visible(lo, hi, &view.view_proj()),
+            "the root must survive the cull for this test to bite"
+        );
     }
 
     /// Recursively: is `key`'s footprint fully covered by drawn pages — either
     /// because `key` itself draws, or because every descendant branch under it
     /// resolves to drawn pages?
+    ///
+    /// The recursion into children is **unconditional** (P18.4): it does not
+    /// require the child itself to be resident, because coverage is transitive —
+    /// a level-2 page can be served by its 16 grandchildren with nothing resident
+    /// at level 1 in between, which is precisely the shape a pinned residency
+    /// floor produces. Requiring residency at every step would mirror the old
+    /// immediate-children rule and call that covered footprint a hole. The
+    /// recursion still terminates: level 0 has no children, so the base case is
+    /// "resident and drawn, or not covered".
     fn footprint_drawn(
         key: TerrainTileKey,
         ring: u32,
         max_lod: u32,
         resident: &BTreeSet<TerrainTileKey>,
     ) -> bool {
-        if resident.contains(&key) && !superseded(key, ring, max_lod, resident) {
+        if resident.contains(&key) && !sup(key, ring, max_lod, resident) {
             return true;
         }
         key.lod >= 1
             && key
                 .children()
                 .iter()
-                .all(|c| resident.contains(c) && footprint_drawn(*c, ring, max_lod, resident))
+                .all(|c| footprint_drawn(*c, ring, max_lod, resident))
     }
 
     #[test]
@@ -1498,9 +1750,7 @@ mod tests {
                         let by_ancestor =
                             std::iter::successors(Some(*key), |k| (k.lod < 2).then(|| k.parent()))
                                 .skip(1)
-                                .any(|a| {
-                                    resident.contains(&a) && !superseded(a, ring, 2, &resident)
-                                });
+                                .any(|a| resident.contains(&a) && !sup(a, ring, 2, &resident));
                         assert!(
                             by_ancestor || footprint_drawn(*key, ring, 2, &resident),
                             "l1 mask {m1:04b}, l0 mask {m0:04b}, ring {ring}: {key:?} was \
@@ -1561,7 +1811,7 @@ mod tests {
         );
         let all: BTreeSet<_> = terrain.tiles.iter().map(|t| t.key).collect();
         assert!(
-            superseded(child, ring, 1, &all),
+            sup(child, ring, 1, &all),
             "…and it WOULD have been suppressed against the unculled set"
         );
     }
@@ -1868,6 +2118,112 @@ mod tests {
             plan.evict.is_empty(),
             "the keys are shared — nothing to free"
         );
+    }
+
+    /// A high, wide top-down camera that sees a whole 4 × 4 level-0 block (and
+    /// the level-2 page over it).
+    /// **The residency floor under a frustum that CUTS the root** — the regression
+    /// the first cut of P18.5 shipped and the audit reproduced.
+    ///
+    /// With the camera low and inside the terrain, looking along it, the fine
+    /// pages behind the camera are frustum-culled while the pinned root — whose
+    /// AABB spans the whole grid and therefore always clips the frustum — is not.
+    /// Computing coverage over the POST-cull set then reads the root as uncovered,
+    /// and its decimated surface draws straight over the fine tiles in front:
+    /// z-fighting, on exactly the configuration the floor exists to create.
+    ///
+    /// Clause 1 answers "is this tile redundant?" from the PROJECTED set, where
+    /// the root is covered whatever the camera is doing, so it stays silent — and
+    /// the fine pages that survived the cull are untouched.
+    #[test]
+    fn a_frustum_that_cuts_the_root_still_silences_it() {
+        let fine: Vec<TerrainTileKey> = (0..4)
+            .flat_map(|tx| (0..4).map(move |tz| TerrainTileKey::lod0((tx, tz))))
+            .collect();
+        let root = TerrainTileKey::new(2, (0, 0));
+        let terrain = terrain_of(fine.iter().copied().chain([root]));
+        assert_eq!(terrain.max_lod(), 2);
+
+        // Inside the grid, low, looking along +X: the pages behind the eye leave
+        // the frustum, the root's grid-spanning AABB cannot.
+        let origin = FloatingOrigin::new(DVec3::ZERO);
+        let view = RenderView {
+            origin,
+            eye_world: DVec3::new(SPAN0 * 2.0, 3.0, SPAN0 * 2.0),
+            forward: Vec3::new(1.0, -0.05, 0.0).normalize(),
+            up: Vec3::Y,
+            fov_y: 50f32.to_radians(),
+            near: 0.05,
+            width: 320,
+            height: 180,
+            ortho: None,
+        };
+
+        let patches = assemble_patches(&terrain, &view, &origin);
+        let keys: BTreeSet<TerrainTileKey> = patches.iter().map(|p| p.key).collect();
+
+        // Anti-vacuity, both halves: the cull must really have bitten (otherwise
+        // the post-cull and pre-cull sets agree and this proves nothing), and the
+        // root must really have survived it (otherwise clause 1 is never reached).
+        assert!(
+            keys.len() < fine.len(),
+            "the fixture culled nothing — it cannot exercise the pre/post-cull split"
+        );
+        let visible_pre_supersede: BTreeSet<TerrainTileKey> = {
+            let view_proj = view.view_proj();
+            terrain
+                .tiles
+                .iter()
+                .filter(|t| {
+                    let span = terrain.tile_span_at(t.key.lod);
+                    let (lo, hi) = tile_aabb_local(t, span, &origin);
+                    let m = Vec3::splat((span * 0.02) as f32);
+                    aabb_visible(lo - m, hi + m, &view_proj)
+                })
+                .map(|t| t.key)
+                .collect()
+        };
+        assert!(
+            visible_pre_supersede.contains(&root),
+            "the root must survive the frustum cull, or clause 1 is never asked"
+        );
+        assert!(
+            !covered_tiles(&visible_pre_supersede).contains(&root),
+            "the fixture must be one where POST-cull coverage misses the root — \
+             that is the bug being pinned"
+        );
+
+        // The claim.
+        assert!(
+            !keys.contains(&root),
+            "the pinned root drew over the fine terrain under a cutting frustum — \
+             this is the reproduced z-fight"
+        );
+        // …and the fine pages that survived are exactly the ones the cull kept:
+        // silencing the root must not have suppressed any of them.
+        let fine_visible: BTreeSet<TerrainTileKey> = visible_pre_supersede
+            .iter()
+            .copied()
+            .filter(|k| k.lod == 0)
+            .collect();
+        assert_eq!(
+            keys, fine_visible,
+            "the fine patch set changed — clause 1 must only ever remove the root"
+        );
+    }
+
+    fn wide_top_view() -> RenderView {
+        RenderView {
+            origin: FloatingOrigin::new(DVec3::ZERO),
+            eye_world: DVec3::new(SPAN0 * 2.0, 200.0, SPAN0 * 2.0),
+            forward: Vec3::new(0.0, -1.0, 0.001).normalize(),
+            up: Vec3::Z,
+            fov_y: 90f32.to_radians(),
+            near: 0.05,
+            width: 320,
+            height: 180,
+            ortho: None,
+        }
     }
 
     /// A camera looking down over the origin tile.

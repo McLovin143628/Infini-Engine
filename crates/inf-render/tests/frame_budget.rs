@@ -517,3 +517,197 @@ fn gi_v2_cost_per_tier() {
         info.name
     );
 }
+
+/// **P18.5 GPU-instanced scatter cost.** Measures the whole scatter path — three
+/// cull dispatches, the HZB build, and up to two indirect draws — against the CPU
+/// fallback that draws the same batches, at 100k instances.
+///
+/// Following the P17.4 / P18.1 / P18.4 precedent this adds **no new ratchet
+/// constant** (§8 makes each one a standing obligation); it asserts the heaviest
+/// configuration stays inside the existing `FRAME_BUDGET_MS` and prints the
+/// per-mode numbers for the ROADMAP cost table, because an absolute millisecond
+/// count on one machine is not a contract.
+///
+/// The interesting comparison is not "GPU vs CPU is faster" — at this instance
+/// count that is not in doubt — it is that the GPU path's cost is *bounded by the
+/// screen* while the fallback's is bounded by the instance count, which is why the
+/// tier that loses the compute path also loses 2/3 of its draw distance.
+#[test]
+fn scatter_cost_at_one_hundred_thousand_instances() {
+    use inf_render::{
+        LightKind, PrimMesh, RenderLight, RenderSettings, RenderTier, ScatterBatch, ScatterData,
+        ScatterInstance,
+    };
+    use std::sync::Arc;
+
+    // Tier clamps first — GPU-free, and the "no lower tier pays for this" claim.
+    let base = RenderSettings::default();
+    assert!(base.scatter.gpu && base.scatter.occlusion && base.scatter.impostors);
+    for tier in [RenderTier::Medium, RenderTier::Low] {
+        let c = tier.apply(base);
+        assert!(
+            !c.scatter.gpu && !c.scatter.occlusion,
+            "{tier:?} must pay nothing for the scatter compute path"
+        );
+        assert!(c.scatter.cull_distance_m < base.scatter.cull_distance_m);
+    }
+
+    let Ok(gpu) = GpuContext::headless() else {
+        eprintln!("SKIP scatter_cost: no GPU adapter");
+        return;
+    };
+    let info = gpu.adapter.get_info();
+    let software = info.device_type == wgpu::DeviceType::Cpu
+        || info.name.to_ascii_lowercase().contains("paravirtual");
+
+    // 100k instances over 400 m — the ROADMAP's biome-population order of
+    // magnitude, one tenth of the 1M target, on one batch.
+    const N: u32 = 316; // 316² = 99 856
+    const SPAN: f64 = 400.0;
+    let step = SPAN / N as f64;
+    let mut insts = Vec::with_capacity((N * N) as usize);
+    for i in 0..N * N {
+        let (gx, gz) = ((i % N) as f64, (i / N) as f64);
+        let mut h = i.wrapping_mul(2_654_435_761);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x27d4_eb2d);
+        let jx = ((h & 0xFFFF) as f64 / 65535.0) - 0.5;
+        let jz = (((h >> 16) & 0xFFFF) as f64 / 65535.0) - 0.5;
+        insts.push(ScatterInstance {
+            position: DVec3::new(
+                (gx - (N as f64 - 1.0) * 0.5 + jx * 0.7) * step,
+                0.4,
+                (gz - (N as f64 - 1.0) * 0.5 + jz * 0.7) * step,
+            ),
+            rotation: Quat::IDENTITY,
+            scale: 0.8,
+            color: [0.24, 0.52, 0.20, 1.0],
+        });
+    }
+    let count = insts.len();
+    let data = Arc::new(ScatterData::build(PrimMesh::Cube, DVec3::ZERO, insts));
+    let mut scene = RenderScene {
+        scatter: vec![ScatterBatch::lit(data, DVec3::ZERO, 0.85, 90)],
+        lights: vec![RenderLight {
+            kind: LightKind::Directional,
+            direction: Vec3::new(-0.4, 0.78, -0.48).normalize(),
+            color: [1.0, 0.96, 0.88],
+            intensity: 3.2,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    scene.mark_dirty();
+    let view = overlook_view();
+
+    const WARM: usize = 8;
+    const MEASURED: usize = 40;
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let measure = |s: RenderSettings| -> f64 {
+        let mut r = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        r.set_settings(s);
+        for _ in 0..WARM {
+            r.render(&gpu, &scene, &view, &target.view, (W, H));
+        }
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let t0 = std::time::Instant::now();
+        for _ in 0..MEASURED {
+            r.render(&gpu, &scene, &view, &target.view, (W, H));
+        }
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        t0.elapsed().as_secs_f64() * 1000.0 / MEASURED as f64
+    };
+
+    let empty = {
+        let mut bare = scene.clone();
+        bare.scatter.clear();
+        bare.mark_dirty();
+        let mut r = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        for _ in 0..WARM {
+            r.render(&gpu, &bare, &view, &target.view, (W, H));
+        }
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let t0 = std::time::Instant::now();
+        for _ in 0..MEASURED {
+            r.render(&gpu, &bare, &view, &target.view, (W, H));
+        }
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        t0.elapsed().as_secs_f64() * 1000.0 / MEASURED as f64
+    };
+
+    let mut no_occ = RenderSettings::default();
+    no_occ.scatter.occlusion = false;
+    let mut cpu = RenderSettings::default();
+    cpu.scatter.gpu = false;
+    // Scatter WITH cascaded shadows, at the same real scale. The shadow node packs
+    // its caster set on the CPU, so this is the configuration where the P18.5
+    // caster clamps (`shadow_caster_settings` + `MAX_CPU_SCATTER_INSTANCES`) are
+    // load-bearing rather than theoretical — and the one the audit found had been
+    // escaping every clamp the renderer has.
+    let mut shadowed = RenderSettings::default();
+    shadowed.shadows.enabled = true;
+    let mut shadowed_cpu = shadowed;
+    shadowed_cpu.scatter.gpu = false;
+
+    let full = measure(RenderSettings::default());
+    let unocc = measure(no_occ);
+    let fallback = measure(cpu);
+    let with_shadows = measure(shadowed);
+    let shadowed_fallback = measure(shadowed_cpu);
+
+    // What the caster clamps actually admitted, at the settings just measured.
+    let casters = {
+        let mut r = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        r.set_settings(shadowed);
+        r.render(&gpu, &scene, &view, &target.view, (W, H));
+        r.scatter_audit(&gpu).shadow_casters
+    };
+
+    eprintln!(
+        "scatter cost ({count} instances, {W}x{H}, on {}): no scatter {empty:.3} ms | \
+         GPU path {full:.3} ms (+{:.3}) | GPU without HZB {unocc:.3} ms (+{:.3}) | \
+         CPU fallback {fallback:.3} ms (+{:.3}) | GPU + CSM {with_shadows:.3} ms \
+         (+{:.3}, {casters} casters) | CPU + CSM {shadowed_fallback:.3} ms (+{:.3})",
+        info.name,
+        full - empty,
+        unocc - empty,
+        fallback - empty,
+        with_shadows - empty,
+        shadowed_fallback - empty,
+    );
+
+    // The clamps bit: a 400 m field under a 60 m shadow range must not hand every
+    // instance to three cascades, and it must hand them *some*.
+    assert!(
+        casters > 0,
+        "no scatter reached the shadow caster set — the shadow arm is vacuous"
+    );
+    assert!(
+        (casters as usize) < count / 4,
+        "the shadow caster clamps did not bite: {casters} of {count} instances \
+         packed into the cascades under a {} m shadow range",
+        shadowed.shadows.max_distance
+    );
+    assert!(
+        (casters as usize) <= inf_render::MAX_CPU_SCATTER_INSTANCES,
+        "the caster ceiling was exceeded"
+    );
+
+    if software {
+        return;
+    }
+    for (label, ms) in [
+        ("GPU path", full),
+        ("GPU without HZB", unocc),
+        ("CPU fallback", fallback),
+        ("GPU + CSM", with_shadows),
+        ("CPU + CSM", shadowed_fallback),
+    ] {
+        assert!(
+            ms < FRAME_BUDGET_MS,
+            "scatter {label} cost {ms:.3} ms at {count} instances, over the \
+             {FRAME_BUDGET_MS} ms frame budget on {} (§8: investigate, never raise it)",
+            info.name
+        );
+    }
+}

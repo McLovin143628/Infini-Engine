@@ -37,6 +37,7 @@ use inf_runtime::pie::{write_msg, EditorToPlayer, PlayerToEditor};
 use crate::input;
 use crate::render::PlayerRenderHost;
 use crate::runtime_sim::RuntimeSim;
+use crate::skinned::SkinnedRegistry;
 use crate::vmesh::VmeshRegistry;
 
 /// Play-in-editor control channel + report sink attached to a windowed player.
@@ -95,6 +96,11 @@ pub struct PlayerApp {
     /// the render host so asset meshes render real geometry. Empty for
     /// primitive-only / PIE worlds.
     vmeshes: Arc<VmeshRegistry>,
+    /// Skeletal render assets a `SkeletalMesh` resolves to (the P18.3 follow-up);
+    /// attached to the render host so a bound character draws its real posed
+    /// geometry. Inert for primitive-only / PIE / browser worlds, which is why
+    /// [`PlayerApp::new`] starts it empty and only [`run`] replaces it.
+    skinned: Arc<SkinnedRegistry>,
     /// The loaded level's scene-persisted render block (R-P4); the render host
     /// maps it onto the live `RenderSettings` at build (and device-loss rebuild).
     /// `default` for content with no authored block (PIE / web / android v1).
@@ -139,6 +145,7 @@ impl PlayerApp {
             debug_cells: false,
             paused: false,
             vmeshes,
+            skinned: Arc::new(SkinnedRegistry::new()),
             render,
             #[cfg(target_arch = "wasm32")]
             canvas: None,
@@ -305,6 +312,7 @@ impl PlayerApp {
             match Self::build_host(&live.window, self.width, self.height, self.render) {
                 Ok(mut host) => {
                     host.set_vmeshes(self.vmeshes.clone());
+                    host.set_skinned(self.skinned.clone());
                     live.host = host;
                 }
                 Err(e) => {
@@ -354,8 +362,11 @@ impl ApplicationHandler for PlayerApp {
         match Self::build_host(&window, self.width, self.height, self.render) {
             Ok(mut host) => {
                 // Attach the vmesh registry so `MeshRef.asset` entities render real
-                // geometry (meshlet path / classic fallback per the auto-tier).
+                // geometry (meshlet path / classic fallback per the auto-tier),
+                // and the skeletal store so a `SkeletalMesh` renders its real
+                // posed geometry rather than a placeholder cube.
                 host.set_vmeshes(self.vmeshes.clone());
+                host.set_skinned(self.skinned.clone());
                 // Report our native window handle so the editor can reparent us
                 // into the viewport slot (embedded PIE).
                 if let Some(pie) = self.pie.as_mut() {
@@ -450,12 +461,14 @@ pub fn run(
     sim: RuntimeSim,
     map: InputMap,
     vmeshes: Arc<VmeshRegistry>,
+    skinned: Arc<SkinnedRegistry>,
     render: inf_scene::RenderSettingsRecord,
     debug_cells: bool,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = PlayerApp::new(title, width, height, sim, map, vmeshes, render);
+    app.skinned = skinned;
     app.debug_cells = debug_cells;
     event_loop
         .run_app(&mut app)

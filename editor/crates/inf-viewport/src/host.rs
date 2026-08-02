@@ -3,6 +3,7 @@
 //! (win32, macos) own the native window/layer + input and drive this.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use glam::{DQuat, DVec2, DVec3, Vec2, Vec3};
 use inf_ecs::components::{
@@ -25,8 +26,9 @@ use inf_render::{
     DebugDraw, EngineRenderer, GizmoDelta, GizmoDrag, GizmoMode, GpuContext, HAlign, HeightFog,
     LightKind, MeshInstance, NineSliceParams, OrthoParams, Picker, PrebatchedRun, PrecipParams,
     PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderTerrain,
-    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, SkyParams, SpriteInstance,
-    SunParams, SurfaceChain, TerrainTileKey, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
+    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ScatterBatch, ScatterData,
+    ScatterInstance, SkyParams, SpriteInstance, SunParams, SurfaceChain, TerrainTileKey,
+    TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
 };
 use inf_render::{
     detect_tier, BloomSettings, GiSettings, RenderSettings, RenderTier, ShadowSettings,
@@ -1055,6 +1057,11 @@ impl EngineHost {
         self.scene.vgeom_instances.clear();
         self.scene.skinned_meshes.clear();
         self.scene.skinned.clear();
+        // P18.5: GPU-instanced scatter (PCG volumes + painted foliage), rebuilt
+        // from scratch like everything else. The payload behind each batch is
+        // content-keyed, so re-projecting an unchanged scatter re-uses its GPU
+        // buffers even though the list itself is rebuilt.
+        self.scene.scatter.clear();
         self.terrain_slots.clear();
         // `terrain_guid` (the tool target) is deliberately NOT cleared here — it
         // is re-validated against the new slot list at the end of the projection,
@@ -1257,89 +1264,57 @@ impl EngineHost {
             }
 
             // PCG scatter volumes (P10.5b): project the cached evaluated
-            // instances (refreshed on demand by `pcg_evaluate`) into the existing
-            // mesh-instance path as placeholder cubes — kind→GUID→real-mesh upload
-            // is the same documented viewport gap as sprites/tilemaps, so PCG
-            // proves placement/density/orientation with primitives. Draw-distance
-            // culled against the last camera eye. A pick on a scattered cube
-            // resolves to the volume entity (id→guid), so the volume is selectable
-            // by clicking its content.
+            // instances (refreshed on demand by `pcg_evaluate`) as ONE GPU-instanced
+            // scatter batch of placeholder cubes — kind→GUID→real-mesh upload is
+            // the same documented viewport gap as sprites/tilemaps, so PCG proves
+            // placement/density/orientation with primitives.
+            //
+            // P18.5 — **THE CPU DRAW-DISTANCE CULL IS GONE.** This branch used to
+            // skip instances farther than `vol.draw_distance` from
+            // `self.last_eye_world`; the field now rides on the batch and the GPU
+            // cull honours it. That is what finally makes the two hosts agree about
+            // it: the player ignored the field entirely, so a shipped build drew
+            // strictly more scatter than its preview.
+            //
+            // A pick on the scatter resolves to the volume entity (id→guid), so the
+            // volume is selectable by clicking its content.
             if let Some(vol) = w.get::<PcgVolume>(entity) {
                 if visible && !vol.evaluated.is_empty() {
-                    let dd = vol.draw_distance;
-                    for si in &vol.evaluated {
-                        if dd > 0.0 && (si.position - self.last_eye_world).length() > dd {
-                            continue;
-                        }
-                        let id = next_id;
-                        next_id += 1;
-                        self.scene.instances.push(MeshInstance {
-                            translation: si.position,
-                            rotation: si.rotation.as_quat(),
-                            scale: Vec3::splat(si.scale as f32),
-                            color: pcg_kind_color(si.kind),
-                            metallic: 0.0,
-                            roughness: 0.75,
-                            emissive: [0.0; 3],
-                            id,
-                            // PCG scatter stays a placeholder cube (same documented
-                            // gap as mesh-asset viewport rendering).
-                            mesh: PrimMesh::Cube,
-                            // R-P5: PCG scatter placeholders are opaque.
-                            blend: 0,
-                            cutoff: 0.5,
-                        });
-                        // Pick a scattered cube → select the owning volume.
-                        self.id_to_guid.insert(id, guid);
-                    }
-                }
-            }
-
-            // Foliage scatter (E-P6): project every placed instance into the
-            // mesh-instance path, mesh + tint taken from the referenced palette
-            // slot. Instances are entity-LOCAL, so lift them by the entity's world
-            // translation (the auto-created container sits at the origin; applying
-            // the container's rotation/scale to instances is a documented v1
-            // follow-up). A pick on any instance selects the owning Foliage entity
-            // (id→guid), so the scatter is selectable by clicking its content.
-            // MIRROR: the player's `render.rs` runs the same projection (no pick).
-            if let Some(fol) = w.get::<Foliage>(entity) {
-                if visible && !fol.instances.is_empty() {
-                    if fol.instances.len() > 50_000 {
-                        tracing::warn!(
-                            "inf-viewport: Foliage entity has {} instances (>50k) — \
-                             instanced-draw perf path is a follow-up",
-                            fol.instances.len()
-                        );
-                    }
-                    let base = w
+                    let translation = w
                         .get::<GlobalTransform>(entity)
                         .map(|g| g.translation())
                         .unwrap_or(DVec3::ZERO);
-                    for fi in &fol.instances {
-                        let (mesh, color) = fol
-                            .palette
-                            .get(fi.kind as usize)
-                            .map(|p| (prim_mesh(p.primitive), p.tint.to_array()))
-                            .unwrap_or((PrimMesh::Cube, [0.28, 0.52, 0.24, 1.0]));
-                        let id = next_id;
-                        next_id += 1;
-                        self.scene.instances.push(MeshInstance {
-                            translation: base + fi.position.to_dvec3(),
-                            rotation: foliage_rot_quat(fi.rotation),
-                            scale: Vec3::splat(fi.scale as f32),
-                            color,
-                            metallic: 0.0,
-                            roughness: 0.85,
-                            emissive: [0.0; 3],
-                            id,
-                            mesh,
-                            blend: 0,
-                            cutoff: 0.5,
-                        });
-                        // Pick a foliage instance → select the owning entity.
-                        self.id_to_guid.insert(id, guid);
-                    }
+                    let id = next_id;
+                    next_id += 1;
+                    push_pcg_scatter(&mut self.scene, vol, translation, id);
+                    // ONE row per batch, not one per instance: a pick anywhere in
+                    // the scatter selects the owning volume, and the map stops
+                    // carrying 100k rows to say the same thing.
+                    self.id_to_guid.insert(id, guid);
+                }
+            }
+
+            // Foliage scatter (P18.5): painted instances project as GPU-instanced
+            // scatter batches, mesh + tint taken from the referenced palette slot,
+            // one batch per primitive kind the palette resolves. Instances are
+            // entity-LOCAL, so the entity's world translation is the batch ANCHOR
+            // (the auto-created container sits at the origin; applying the
+            // container's rotation/scale to instances is a documented v1
+            // follow-up). A pick on the scatter selects the owning Foliage entity
+            // (id→guid), so it is selectable by clicking its content.
+            // MIRROR: the player's `render.rs` runs the same projection (no pick).
+            if let Some(fol) = w.get::<Foliage>(entity) {
+                if visible && !fol.instances.is_empty() {
+                    let translation = w
+                        .get::<GlobalTransform>(entity)
+                        .map(|g| g.translation())
+                        .unwrap_or(DVec3::ZERO);
+                    let id = next_id;
+                    next_id += 1;
+                    push_foliage_scatter(&mut self.scene, fol, translation, id);
+                    // Every batch this entity emits shares the one id, so this is
+                    // one row however many primitive kinds the palette uses.
+                    self.id_to_guid.insert(id, guid);
                 }
             }
 
@@ -1481,10 +1456,15 @@ impl EngineHost {
             // `SkeletalMesh` with no assets bound (or with a mesh carrying no skin
             // stream) is still authorable content and must stay selectable.
             //
-            // NOT a mirror: the shipped player has no `SkeletalMesh` branch at all,
-            // so there is nothing to keep in sync — giving it one is the matching
-            // follow-up, and until then this is editor-only rendering, not a
-            // divergence from a projection that exists.
+            // MIRROR of `inf_player::render`'s skeletal branch since P18.5, pinned
+            // field for field by `inf-editor-core`'s `tests/projector_mirror.rs`.
+            // Until that batch the player had no `SkeletalMesh` branch at all, so a
+            // level with a character previewed here and shipped as nothing — this
+            // comment used to describe that as "editor-only rendering, not a
+            // divergence", which was true only for as long as nobody shipped one.
+            // Host-local: `translation` (the editor has no fixed-step interpolation
+            // to do) and `id`/`mesh` (each host numbers from its own counter over
+            // its own iteration order).
             if w.get::<MeshRef>(entity).is_none() {
                 if let (true, Some(sm)) = (visible, w.get::<SkeletalMesh>(entity).copied()) {
                     let affine = w
@@ -1928,6 +1908,104 @@ fn pcg_kind_color(kind: u32) -> [f32; 4] {
         [0.35, 0.58, 0.45, 1.0], // shrub teal
     ];
     PALETTE[(kind as usize) % PALETTE.len()]
+}
+
+/// Project a [`PcgVolume`]'s evaluated cache into ONE GPU-instanced scatter batch
+/// (P18.5), anchored at the volume entity's world `translation`.
+///
+/// PCG scatter has always drawn as a placeholder cube — kind→real-mesh upload is
+/// the same documented viewport gap as sprites/tilemaps — and that does not change
+/// here; only how the cubes reach the GPU does. The payload replaces one
+/// `MeshInstance` per scattered instance with a content-keyed buffer uploaded once
+/// per content change and culled per-instance on the GPU.
+///
+/// **`draw_distance` rides on the batch now.** The editor used to cull it against
+/// its own camera eye on the CPU and the player ignored the field entirely, so a
+/// shipped build drew strictly more scatter than its preview. The cull compute
+/// honours it for both hosts, which is what finally makes them agree.
+///
+/// The whole batch takes ONE pick `id`: a scatter is authored, moved and deleted
+/// as a whole, so it is one object as far as selection is concerned.
+///
+/// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
+/// `inf-editor-core`'s `tests/projector_mirror.rs`.
+fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3, id: u32) {
+    if vol.evaluated.is_empty() {
+        return;
+    }
+    let data = ScatterData::build(
+        PrimMesh::Cube,
+        translation,
+        vol.evaluated.iter().map(|si| ScatterInstance {
+            position: si.position,
+            rotation: si.rotation.as_quat(),
+            scale: si.scale as f32,
+            color: pcg_kind_color(si.kind),
+        }),
+    );
+    scene.scatter.push(ScatterBatch {
+        data: Arc::new(data),
+        anchor: translation,
+        metallic: 0.0,
+        roughness: 0.75,
+        emissive: [0.0; 3],
+        id,
+        draw_distance: vol.draw_distance,
+    });
+}
+
+/// Project a [`Foliage`] component's painted instances into GPU-instanced scatter
+/// batches (P18.5): mesh + tint from the referenced palette slot.
+///
+/// Instances are entity-LOCAL, so the batch anchor is the entity `translation` and
+/// the packed offsets are the local positions with **no conversion**. That is what
+/// makes the payload a pure function of the paint stroke: the same stroke placed
+/// twice content-hashes to one GPU upload however far apart the two entities sit
+/// (the anchor is deliberately not part of `ScatterData::key`).
+///
+/// The palette resolves a primitive kind PER INSTANCE and one batch draws exactly
+/// one kind, so instances bucket by resolved kind in authored order and the buckets
+/// emit in [`PrimMesh::ALL`] order — deterministic, and independent of which kinds
+/// the palette happens to use.
+///
+/// Every batch of one entity shares ONE pick `id` (see [`push_pcg_scatter`]).
+///
+/// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
+/// `inf-editor-core`'s `tests/projector_mirror.rs`.
+fn push_foliage_scatter(scene: &mut RenderScene, fol: &Foliage, translation: DVec3, id: u32) {
+    if fol.instances.is_empty() {
+        return;
+    }
+    let mut buckets: [Vec<ScatterInstance>; PrimMesh::ALL.len()] = Default::default();
+    for fi in &fol.instances {
+        let (mesh, color) = fol
+            .palette
+            .get(fi.kind as usize)
+            .map(|p| (prim_mesh(p.primitive), p.tint.to_array()))
+            .unwrap_or((PrimMesh::Cube, [0.28, 0.52, 0.24, 1.0]));
+        buckets[mesh.index()].push(ScatterInstance {
+            // Entity-LOCAL, paired with the ZERO build-anchor below.
+            position: fi.position.to_dvec3(),
+            rotation: foliage_rot_quat(fi.rotation),
+            scale: fi.scale as f32,
+            color,
+        });
+    }
+    for (k, bucket) in buckets.into_iter().enumerate() {
+        if bucket.is_empty() {
+            continue;
+        }
+        let data = ScatterData::build(PrimMesh::ALL[k], DVec3::ZERO, bucket);
+        scene.scatter.push(ScatterBatch {
+            data: Arc::new(data),
+            anchor: translation,
+            metallic: 0.0,
+            roughness: 0.85,
+            emissive: [0.0; 3],
+            id,
+            draw_distance: 0.0,
+        });
+    }
 }
 
 /// Project the level's **sky authority** into the renderer's sun + sky blocks
@@ -2382,13 +2460,18 @@ impl EngineHost {
     /// skinned characters, which live in their own scene lists) would be
     /// **unclickable**: the whole point of the batch is that an imported mesh is
     /// as much an object as a cube, and an object you cannot click is not one.
+    /// P18.5 put GPU-instanced scatter in exactly the same position — a PCG
+    /// volume's cubes and a foliage stroke used to BE `instances`, and moving them
+    /// into their own storage-buffer path would have quietly made a whole class of
+    /// authored content unselectable.
     ///
     /// Extending the ID pass to a vertex-pulled indirect meshlet draw is a
     /// renderer change and belongs with the selection-outline work (see the
     /// remainder recorded in ROADMAP §12 P18.3). The stopgap is the technique the
     /// gizmo already uses and this codebase already trusts — **analytic
     /// picking**: on an id-buffer miss, ray-test the cursor against each vgeom /
-    /// skinned instance's world bounding sphere and take the nearest hit.
+    /// skinned / scattered instance's world bounding sphere and take the nearest
+    /// hit.
     ///
     /// It is deliberately a *fallback*, not a first choice: whenever the id buffer
     /// answers, that answer wins, so nothing about picking a primitive changes.
@@ -2400,7 +2483,10 @@ impl EngineHost {
         if let Some(id) = self.picker.pick(&self.gpu, &self.scene, view, px, py) {
             return Some(id);
         }
-        if self.scene.vgeom_instances.is_empty() && self.scene.skinned.is_empty() {
+        if self.scene.vgeom_instances.is_empty()
+            && self.scene.skinned.is_empty()
+            && self.scene.scatter.is_empty()
+        {
             return None;
         }
         let (ro, rd) = view.pixel_ray(px as f32, py as f32);
@@ -2448,6 +2534,21 @@ impl EngineHost {
                 (r * inst.scale.abs().max_element()).max(0.05) as f64,
                 inst.id,
             );
+        }
+        // P18.5 scatter. The instances live in a storage buffer the cull compute
+        // reads, so nothing about them is rasterized into the id buffer; the same
+        // ray-test keeps a PCG volume and a foliage stroke clickable. Each
+        // scattered instance is a primitive at a known scale, so its bound is
+        // exact-by-construction (`bounding_radius` × scale) rather than the
+        // approximation the vgeom/skinned cases settle for. The batch carries ONE
+        // id, so a hit on any instance selects the owning volume / foliage entity —
+        // which is also what makes the tie-break by id well-defined here.
+        for batch in &self.scene.scatter {
+            let r = batch.data.mesh.bounding_radius();
+            for inst in &batch.data.instances {
+                let center = batch.anchor + Vec3::from_array(inst.offset).as_dvec3();
+                consider(center, (r * inst.scale.abs()) as f64, batch.id);
+            }
         }
         best.map(|(_, id)| id)
     }

@@ -80,6 +80,11 @@ pub struct RenderSettings {
     /// carries `vgeom_instances` — stays byte-identical, and the field is inert
     /// on scenes with no vmesh content.
     pub vgeom: VgeomSettings,
+    /// GPU-instanced scatter (P18.5): how far PCG/foliage instances draw as full
+    /// meshes, how far as impostors, and how wide the cross-fade between them is.
+    /// Inert on a scene with no `scatter` batches, so every existing golden is
+    /// untouched.
+    pub scatter: ScatterSettings,
     /// Cascaded shadow maps (P13.3b). **OFF by default** → every existing golden
     /// stays byte-identical (receivers take the un-shadowed instruction path).
     pub shadows: ShadowSettings,
@@ -316,6 +321,91 @@ impl Default for VgeomSettings {
     }
 }
 
+/// GPU-instanced scatter settings (P18.5).
+///
+/// **Deliberately renderer-side, and there is no enable flag for the *feature*.**
+/// Whether a level has scatter is a property of the content (does it carry a
+/// `PcgVolume` or a `Foliage`?), exactly as `AtmosphereSettings` argues about the
+/// sky; what a host owns is how far it is willing to pay to draw it. The one
+/// *content* knob — `PcgVolume::draw_distance`, authored since P10.5 — rides on
+/// each [`crate::scene::ScatterBatch`] and clamps these bands **down**, so no
+/// schema change was needed to land LOD banding.
+///
+/// [`gpu`](Self::gpu) selects the *mechanism*, not the content: with it off the
+/// same batches draw through a CPU-culled classic instanced path, so a downlevel
+/// adapter still sees its foliage. `RenderTier::apply` clears it below High
+/// (the `ClassicVgeomNode` precedent).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScatterSettings {
+    /// Use the GPU cull + indirect-draw path. **ON by default**; requires compute
+    /// shaders and indirect execution ([`crate::caps::AdapterCaps::clamp_scatter`]).
+    /// Off ⇒ the CPU fallback draws the same instances through the rigid mesh
+    /// pipeline, distance-culled on the CPU with no impostors.
+    pub gpu: bool,
+    /// Distance out to which an instance draws as its **full mesh**, in metres.
+    /// Beyond it the impostor takes over (or, with [`impostors`](Self::impostors)
+    /// off, the mesh simply fades out).
+    pub mesh_distance_m: f32,
+    /// Distance out to which an instance draws **at all**, in metres. Past it the
+    /// instance is culled by the compute pass and costs one thread.
+    pub cull_distance_m: f32,
+    /// Width of the dithered cross-fade band, in metres, applied at *both*
+    /// transitions (mesh↔impostor and impostor↔nothing).
+    pub fade_band_m: f32,
+    /// Draw impostors in the far band. Off ⇒ the mesh band runs all the way to
+    /// [`cull_distance_m`](Self::cull_distance_m) and fades out there instead.
+    pub impostors: bool,
+    /// Per-instance frustum culling in the cull compute.
+    pub frustum_cull: bool,
+    /// Per-instance HZB occlusion culling (P18.1's pyramid, rebuilt after the
+    /// opaque geometry so scatter is occluded by meshes, meshlets and terrain
+    /// alike). **ON by default**: like the meshlet test it is provably
+    /// *subtractive*, so a frame with it on is pixel-identical to one with it off.
+    pub occlusion: bool,
+}
+
+impl Default for ScatterSettings {
+    fn default() -> Self {
+        Self {
+            gpu: true,
+            mesh_distance_m: 120.0,
+            cull_distance_m: 400.0,
+            fade_band_m: 20.0,
+            impostors: true,
+            frustum_cull: true,
+            occlusion: true,
+        }
+    }
+}
+
+impl ScatterSettings {
+    /// Ceilings a tier imposes on the three distance bands, as a fraction of the
+    /// defaults. Absolute metres rather than a scale factor, deliberately: the tier
+    /// clamps must be **idempotent and order-independent** (`caps::tests::
+    /// apply_clamps_down_never_up` applies them twice and demands the same
+    /// settings), and repeated multiplication is neither.
+    pub const MEDIUM_BANDS_M: (f32, f32, f32) = (72.0, 240.0, 12.0);
+    pub const LOW_BANDS_M: (f32, f32, f32) = (42.0, 140.0, 7.0);
+
+    /// A stamp over exactly the fields the **shadow caster pack** reads, so the
+    /// shadow node's re-pack key moves when a tier clamp changes the caster band
+    /// and stays put when an unrelated knob (impostors, occlusion, the GPU path)
+    /// does. Spelled here rather than in the pass so the two cannot drift.
+    pub fn caster_stamp(&self) -> u64 {
+        (self.mesh_distance_m.to_bits() as u64) << 32 | self.cull_distance_m.to_bits() as u64
+    }
+
+    /// Pull the three distance bands in to at most `(mesh, cull, fade)` metres.
+    /// A pure `min` on each, so it only ever lowers, is idempotent, and composes
+    /// in any order with the other clamps.
+    pub fn clamp_bands(mut self, bands: (f32, f32, f32)) -> Self {
+        self.mesh_distance_m = self.mesh_distance_m.min(bands.0);
+        self.cull_distance_m = self.cull_distance_m.min(bands.1);
+        self.fade_band_m = self.fade_band_m.min(bands.2);
+        self
+    }
+}
+
 /// Physical-atmosphere render settings (P17.2).
 ///
 /// Deliberately thin: the atmosphere's *parameters* live on the scene (projected
@@ -350,6 +440,7 @@ impl Default for RenderSettings {
             ssao: SsaoSettings::default(),
             taa: false,
             vgeom: VgeomSettings::default(),
+            scatter: ScatterSettings::default(),
             shadows: ShadowSettings::default(),
             gi: GiSettings::default(),
             atmosphere: AtmosphereSettings::default(),

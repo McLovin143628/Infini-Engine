@@ -27,13 +27,13 @@ use inf_render::{
     CloudVolumes, EngineRenderer, GiAudit, GiQuality, GiSettings, GpuContext, HAlign,
     HeadlessTarget, HeightFog, LightKind, MeshInstance, PrebatchedRun, PrecipParams, PrecipQuality,
     PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
-    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings,
-    SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance, SpriteTextureUpload,
-    SsaoSettings, SunParams, TerrainTileKey, TextParams, TilemapParams, VgeomAsset, VgeomInstance,
-    VgeomMesh, VgeomSettings, ViewMode, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL,
-    BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE,
-    CPU_GPU_EXACT_FRACTION, CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_TEXEL_TOLERANCE, HEADLESS_FORMAT,
-    TILE_CHUNK_DIM,
+    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ScatterBatch, ScatterData,
+    ScatterInstance, ShadowSettings, SkinnedInstance, SkinnedMeshData, SkinnedVertex,
+    SpriteInstance, SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey, TextParams,
+    TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode,
+    BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
+    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, CPU_GPU_EXACT_FRACTION,
+    CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_TEXEL_TOLERANCE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -5702,5 +5702,172 @@ fn precipitation_density_follows_the_render_tier() {
     assert!(
         low < high,
         "the Low tier drew as much rain as High ({low:.4} vs {high:.4})"
+    );
+}
+
+// ── GPU-instanced scatter (P18.5) ────────────────────────────────────────────
+
+/// A deterministic field of scattered cubes for the scatter goldens: an `n×n`
+/// jittered grid on the ground, spanning `span` metres around the origin.
+///
+/// Integer-hashed jitter, no `std` trig — committed golden pixels may not depend
+/// on a platform's libm (the P14 LAW). Irregular rather than a lattice, because a
+/// lattice lets a whole row cross an LOD boundary together and would hide exactly
+/// the off-by-one an LOD golden exists to catch.
+fn scatter_field(n: u32, span: f64, scale: f32, color: [f32; 4]) -> ScatterBatch {
+    let step = span / n as f64;
+    let mut out = Vec::with_capacity((n * n) as usize);
+    for i in 0..n * n {
+        let (gx, gz) = ((i % n) as f64, (i / n) as f64);
+        let mut h = i.wrapping_mul(2_654_435_761);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x27d4_eb2d);
+        let jx = ((h & 0xFFFF) as f64 / 65535.0) - 0.5;
+        let jz = (((h >> 16) & 0xFFFF) as f64 / 65535.0) - 0.5;
+        out.push(ScatterInstance {
+            position: DVec3::new(
+                (gx - (n as f64 - 1.0) * 0.5 + jx * 0.7) * step,
+                scale as f64 * 0.5,
+                (gz - (n as f64 - 1.0) * 0.5 + jz * 0.7) * step,
+            ),
+            rotation: Quat::IDENTITY,
+            scale,
+            color,
+        });
+    }
+    ScatterBatch::lit(
+        Arc::new(ScatterData::build(PrimMesh::Cube, DVec3::ZERO, out)),
+        DVec3::ZERO,
+        0.85,
+        90,
+    )
+}
+
+fn scatter_scene() -> RenderScene {
+    let mut scene = RenderScene {
+        scatter: vec![scatter_field(28, 44.0, 0.9, [0.24, 0.52, 0.20, 1.0])],
+        lights: vec![RenderLight {
+            kind: LightKind::Directional,
+            direction: Vec3::new(-0.4, 0.78, -0.48).normalize(),
+            color: [1.0, 0.96, 0.88],
+            intensity: 3.2,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    // A ground plane so the field reads as ground cover rather than as floating
+    // boxes, and so the frame has something for the scatter to occlude against.
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.05, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(120.0, 0.1, 120.0),
+        [0.20, 0.17, 0.13, 1.0],
+        1,
+    ));
+    scene.mark_dirty();
+    scene
+}
+
+/// **Scatter golden** (P18.5): a GPU-instanced field drawn entirely from the
+/// compacted visible list. The camera sits inside the full-mesh band, so this
+/// golden pins the mesh half of the path — the cull, the prefix-sum compaction,
+/// the vertex-pulled indirect draw and the PBR shading.
+#[test]
+fn golden_scatter() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let scene = scatter_scene();
+    let view = look_view(DVec3::new(0.0, 7.0, -26.0), DVec3::new(0.0, 0.5, 4.0));
+    let mut settings = RenderSettings::default();
+    settings.scatter.mesh_distance_m = 200.0;
+    settings.scatter.cull_distance_m = 400.0;
+
+    let img = check_golden_with(&gpu, "scatter", &scene, &view, settings);
+    // Green ground cover, and a lot of it.
+    let green = img
+        .chunks(4)
+        .filter(|p| p[1] > p[0] + 4 && p[1] > p[2] + 4)
+        .count();
+    assert!(
+        green > 1_500,
+        "expected the scatter field to cover the frame ({green} px)"
+    );
+}
+
+/// **Scatter impostor golden** (P18.5): the same field with the mesh band pulled
+/// in so the far half resolves to camera-facing impostor discs, with a dithered
+/// cross-fade between the two.
+///
+/// It is a separate golden rather than a variant assertion because the impostor is
+/// *different geometry* — one 6-vertex billboard per instance out of the second
+/// indirect draw — and a golden that never rendered one would leave the whole
+/// second half of the path unpinned.
+#[test]
+fn golden_scatter_impostors() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let scene = scatter_scene();
+    let view = look_view(DVec3::new(0.0, 7.0, -26.0), DVec3::new(0.0, 0.5, 4.0));
+    let mut settings = RenderSettings::default();
+    settings.scatter.mesh_distance_m = 22.0;
+    settings.scatter.cull_distance_m = 90.0;
+    settings.scatter.fade_band_m = 8.0;
+
+    let img = check_golden_with(&gpu, "scatter_impostors", &scene, &view, settings);
+    let green = img
+        .chunks(4)
+        .filter(|p| p[1] > p[0] + 4 && p[1] > p[2] + 4)
+        .count();
+    assert!(
+        green > 800,
+        "expected impostors to cover the far field ({green} px)"
+    );
+
+    // The banding is real: the same scene with impostors reaching further draws a
+    // measurably different frame. (What the golden pins is the *look*; this is the
+    // anti-vacuity claim that the band setting reached the GPU at all.)
+    let mut wide = settings;
+    wide.scatter.mesh_distance_m = 200.0;
+    let far = render_with(&gpu, &scene, &view, wide);
+    assert!(
+        changed_fraction(&img, &far, H) > 0.01,
+        "the impostor band made no difference to the frame"
+    );
+}
+
+/// The scatter path is **inert** on a scene that carries none: every knob wound to
+/// a non-default value must leave a scatter-free frame byte-identical.
+///
+/// This is the machine-checked half of "all 39 goldens are byte-identical" — the
+/// off-path discipline P18.4's `gi_v2_off_path_is_byte_identical` established,
+/// applied to the pass this batch adds.
+#[test]
+fn scatter_off_path_is_byte_identical() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        ..Default::default()
+    };
+    scene.instances.push(MeshInstance::lit(
+        DVec3::ZERO,
+        Quat::IDENTITY,
+        Vec3::splat(1.0),
+        [0.80, 0.20, 0.20, 1.0],
+        1,
+    ));
+    scene.mark_dirty();
+    let view = overlook_view();
+    let base = render_with(&gpu, &scene, &view, RenderSettings::default());
+
+    let mut wound = RenderSettings::default();
+    wound.scatter.gpu = false;
+    wound.scatter.impostors = false;
+    wound.scatter.occlusion = false;
+    wound.scatter.frustum_cull = false;
+    wound.scatter.mesh_distance_m = 1.0;
+    wound.scatter.cull_distance_m = 2.0;
+    wound.scatter.fade_band_m = 0.5;
+    let other = render_with(&gpu, &scene, &view, wound);
+    assert_eq!(
+        base, other,
+        "a scene with no scatter batches must be untouched by every scatter knob"
     );
 }

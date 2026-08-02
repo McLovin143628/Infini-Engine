@@ -20,6 +20,11 @@ glam = { workspace = true }
 pollster = { workspace = true }
 bytemuck = { workspace = true }
 tracing = { workspace = true }
+# Content-addressed scatter batch keys (P18.5): `ScatterData::build` folds an
+# xxh3-128 over the packed instance bytes as it packs, so a GPU upload is keyed by
+# what it contains rather than by who asked for it — the P18.3 derived-vmesh id
+# discipline, applied to a payload that is rebuilt on every projection.
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 png = { workspace = true }

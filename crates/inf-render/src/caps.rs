@@ -38,6 +38,18 @@ pub const VGEOM_MIN_STORAGE_BINDING_SIZE: u64 = 128 << 20;
 /// (one workgroup per 64 (instance × meshlet) pairs). 65535 is the portable floor.
 pub const VGEOM_MIN_WORKGROUPS_PER_DIM: u32 = 65535;
 
+/// Storage buffers the P18.5 scatter cull compute binds in one stage: the packed
+/// instances, the per-instance slot words, the per-workgroup partial sums, the
+/// compacted visible list, the indirect draw args and the audit counters. Six —
+/// two under the portable floor of 8, deliberately, so the pass has headroom the
+/// meshlet cull no longer does.
+pub const SCATTER_MIN_STORAGE_BUFFERS_PER_STAGE: u32 = 6;
+
+/// Minimum `max_compute_workgroups_per_dimension` for the scatter cull dispatch
+/// (one workgroup per 256 instances → 65535 workgroups is ~16.7M instances, well
+/// past the 1M ROADMAP target).
+pub const SCATTER_MIN_WORKGROUPS_PER_DIM: u32 = 65535;
+
 /// The chosen render capability tier. Higher tiers are strict supersets of the
 /// features lower tiers enable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,11 +84,25 @@ impl RenderTier {
                 settings.vgeom.enabled = false;
                 settings.vgeom.occlusion = false;
                 settings.vgeom.two_pass = false;
+                // P18.5: the same shape for scatter — the *mechanism* drops to the
+                // CPU-culled classic instanced path, the content still draws, and
+                // the bands pull in so a mid GPU pays for less of it.
+                settings.scatter.gpu = false;
+                settings.scatter.occlusion = false;
+                settings.scatter = settings
+                    .scatter
+                    .clamp_bands(crate::settings::ScatterSettings::MEDIUM_BANDS_M);
             }
             RenderTier::Low => {
                 settings.vgeom.enabled = false;
                 settings.vgeom.occlusion = false;
                 settings.vgeom.two_pass = false;
+                settings.scatter.gpu = false;
+                settings.scatter.occlusion = false;
+                settings.scatter.impostors = false;
+                settings.scatter = settings
+                    .scatter
+                    .clamp_bands(crate::settings::ScatterSettings::LOW_BANDS_M);
                 settings.bloom.enabled = false;
                 settings.ssao.enabled = false;
                 settings.taa = false;
@@ -134,6 +160,14 @@ impl RenderTier {
         settings.vgeom.enabled = false;
         settings.vgeom.occlusion = false;
         settings.vgeom.two_pass = false;
+        // A phone still draws its foliage — through the CPU-culled fallback, at a
+        // third of the distance, with no impostor pass.
+        settings.scatter.gpu = false;
+        settings.scatter.occlusion = false;
+        settings.scatter.impostors = false;
+        settings.scatter = settings
+            .scatter
+            .clamp_bands(crate::settings::ScatterSettings::LOW_BANDS_M);
         settings.ssao.enabled = false;
         settings.gi.enabled = false;
         settings.taa = false;
@@ -231,6 +265,42 @@ impl AdapterCaps {
         if !self.supports_vgeom_occlusion() {
             settings.vgeom.occlusion = false;
             settings.vgeom.two_pass = false;
+        }
+        settings = self.clamp_scatter(settings);
+        settings
+    }
+
+    /// Whether this adapter can run the P18.5 **GPU scatter** path: a cull compute
+    /// writing indirect draw args, over six storage buffers.
+    ///
+    /// A far lower bar than [`supports_vgeom`](AdapterCaps::supports_vgeom) — the
+    /// meshlet path needs eight storage buffers per stage and 128 MiB bindings, a
+    /// scatter cull needs six and a few megabytes — because the content it draws is
+    /// ground cover a mid-range GPU is expected to carry. That asymmetry is the
+    /// point: `RenderTier::Medium` keeps its foliage on the CPU fallback, but an
+    /// adapter that *can* do the compute is not held back by a meshlet floor it has
+    /// nothing to do with.
+    pub fn supports_scatter_gpu(&self) -> bool {
+        self.compute_shaders
+            && self.indirect_execution
+            && self.max_storage_buffers_per_stage >= SCATTER_MIN_STORAGE_BUFFERS_PER_STAGE
+            && self.max_compute_workgroups_per_dim >= SCATTER_MIN_WORKGROUPS_PER_DIM
+    }
+
+    /// Clamp the scatter knobs down to what this adapter supports. Like every
+    /// other clamp on this type it **never turns a feature on**. Losing the GPU
+    /// path costs the impostor band and per-instance occlusion, never the content:
+    /// the CPU fallback draws the same batches through the rigid mesh pipeline.
+    pub fn clamp_scatter(&self, mut settings: RenderSettings) -> RenderSettings {
+        if !self.supports_scatter_gpu() {
+            settings.scatter.gpu = false;
+        }
+        if !settings.scatter.gpu
+            || self.max_storage_textures_per_stage < VGEOM_OCCLUSION_MIN_STORAGE_TEXTURES_PER_STAGE
+        {
+            // The HZB is written through a write-only storage texture, and there is
+            // no pyramid to test against without the GPU path in the first place.
+            settings.scatter.occlusion = false;
         }
         settings
     }

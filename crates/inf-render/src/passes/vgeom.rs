@@ -606,7 +606,7 @@ impl CullPipeline {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("vgeom-cull"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/vgeom_cull.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(super::shader_source("vgeom_cull").into()),
             });
         let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
             binding,
@@ -745,7 +745,7 @@ impl CullPipeline {
 
 /// A 1×1 dummy HZB texture (bound when occlusion is off so the cull bind group is
 /// always complete).
-fn dummy_hzb(gpu: &GpuContext) -> wgpu::TextureView {
+pub(crate) fn dummy_hzb(gpu: &GpuContext) -> wgpu::TextureView {
     gpu.device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some("vgeom-hzb-dummy"),
@@ -999,7 +999,7 @@ pub fn cull_visible_source(
 }
 
 /// Blocking map of a `MAP_READ` buffer into a `Vec<u32>`.
-fn map_u32(gpu: &GpuContext, buf: &wgpu::Buffer) -> Vec<u32> {
+pub(crate) fn map_u32(gpu: &GpuContext, buf: &wgpu::Buffer) -> Vec<u32> {
     let slice = buf.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
@@ -1984,9 +1984,9 @@ impl RenderNode for VgeomNode {
 /// no atmosphere and no GI resource, so borrowing the shared key would rebuild
 /// these bind groups on every GI-quality clamp — a lie about what invalidates them,
 /// and precisely the kind of drift the `GenCache` extraction exists to prevent.
-type HzbKey = (u64, u64);
+pub(crate) type HzbKey = (u64, u64);
 
-struct HzbChain {
+pub(crate) struct HzbChain {
     copy_pipeline: wgpu::ComputePipeline,
     copy_bgl: wgpu::BindGroupLayout,
     down_pipeline: wgpu::ComputePipeline,
@@ -2002,7 +2002,7 @@ struct HzbChain {
 }
 
 impl HzbChain {
-    fn new(gpu: &GpuContext) -> Self {
+    pub(crate) fn new(gpu: &GpuContext) -> Self {
         let shader = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2099,7 +2099,14 @@ impl HzbChain {
         }
     }
 
-    fn dims(&self) -> Option<(u32, u32, u32)> {
+    /// Monotonic stamp bumped whenever the pyramid texture is (re)created — the
+    /// second half of every `HzbKey`, so a bind group holding a view into it is
+    /// dropped when the view stops being valid.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn dims(&self) -> Option<(u32, u32, u32)> {
         self.texture
             .as_ref()
             .map(|_| (self.size.0, self.size.1, self.mip_views.len() as u32))
@@ -2148,7 +2155,7 @@ impl HzbChain {
     /// The full-chain sampled view for the cull compute (valid after [`build`]).
     ///
     /// [`build`]: HzbChain::build
-    fn full_view(&self) -> Option<&wgpu::TextureView> {
+    pub(crate) fn full_view(&self) -> Option<&wgpu::TextureView> {
         self.full_view.as_ref()
     }
 
@@ -2158,7 +2165,12 @@ impl HzbChain {
     /// draw so meshlets occlude meshlets.
     ///
     /// [`full_view`]: HzbChain::full_view
-    fn build(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
+    pub(crate) fn build(
+        &mut self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameData,
+    ) {
         self.ensure(gpu, frame.targets.size, frame.targets.generation);
         let (w, h) = self.size;
         let key: HzbKey = (frame.targets.generation, self.generation);
