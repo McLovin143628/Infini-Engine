@@ -46,6 +46,9 @@ use inf_render::{
     LightKind, RenderLight, RenderScene, RenderSettings, RenderView, VgeomAsset, VgeomInstance,
     VgeomSettings,
 };
+// The page-derived budget helpers, shared with `phase18_gate` and `inf-render`'s
+// streaming suite; `inf_vgeom::test_support`'s header states the rule they enforce.
+use inf_vgeom::test_support::{budget_for_pages, held_pages_for_want};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
@@ -325,7 +328,7 @@ fn gate_b2_occlusion_on_matches_occlusion_off_at_10m_triangles() {
 /// (P18.2): the pools are given a fraction of what the asset needs, so the
 /// streamer must page a prefix and clamp the cut to it.
 ///
-/// Three things have to hold at once, and each is a separate way this feature
+/// Four things have to hold at once, and each is a separate way this feature
 /// could be wrong:
 ///
 /// 1. **The budget is a hard bound.** Resident bytes stay under the ceiling, and
@@ -341,6 +344,11 @@ fn gate_b2_occlusion_on_matches_occlusion_off_at_10m_triangles() {
 ///    loads land when IO says so — and this pins that ours does not, because the
 ///    resident set is a pure function of (wants, budget) at the sync point rather
 ///    than of what happened to arrive.
+/// 4. **A shorter prefix coarsens the cut.** The clamped run's `floor_lod` is
+///    strictly above the unclamped run's — the streamer did not merely hold fewer
+///    bytes, the cut the shader takes actually moved. The budget is built to make
+///    this true on any page ladder (see the derivation below), so a failure here is
+///    the clamp not reaching the shader rather than a fixture that drifted.
 #[test]
 fn gate_b3_streamed_under_budget_is_deterministic_and_hole_free() {
     let Ok(gpu) = GpuContext::headless() else {
@@ -352,7 +360,6 @@ fn gate_b3_streamed_under_budget_is_deterministic_and_hole_free() {
     let (asset, instances) = scene_from_pack(&pack);
     let asset_id = asset.id;
     let full_bytes = asset.source.total_resident_bytes();
-    let root_bytes = asset.source.pages()[0].resident_bytes();
     let pages = asset.source.pages().len();
     assert!(pages >= 3, "the flagship asset must have pages to withhold");
 
@@ -371,6 +378,9 @@ fn gate_b3_streamed_under_budget_is_deterministic_and_hole_free() {
         ..RenderLight::default()
     });
     scene.mark_dirty();
+    // The live page directory the budget below is read off (the asset moved into
+    // the scene; this is the same `Arc<VgeomSource>` the streamer will plan against).
+    let source = &scene.vgeom_assets[0].source;
     let view = ground_camera();
     let (w, h) = (view.width, view.height);
 
@@ -416,19 +426,51 @@ fn gate_b3_streamed_under_budget_is_deterministic_and_hole_free() {
 
     // ── the clamped run: a budget that cannot hold what the camera wants ──
     //
-    // Sized off what the UNCLAMPED run actually HELD, not off the asset's full
-    // size. The streamer already declines the pages this camera cannot use, so a
-    // fraction of the whole asset can still cover the whole want and clamp
-    // nothing — which is the streaming-costs-no-detail theorem doing its job, and
-    // would quietly make this test vacuous. Half the wanted bytes is guaranteed to
-    // bite; the `max` keeps it above the root page, which must never be denied.
-    let budget = (full_report.stats.resident_bytes / 2).max(root_bytes);
+    // Counted in PAGES off the live page directory, never as a fraction of a byte
+    // total. The streamer already declines the pages this camera cannot use, so a
+    // fraction of the whole *asset* can still cover the whole want and clamp
+    // nothing — that is the streaming-costs-no-detail theorem doing its job, and it
+    // would quietly make this test vacuous. But a fraction of the *wanted bytes* is
+    // no better as a premise: whether half the bytes buys `k` pages or `k + 1` is
+    // decided by the per-page sizes meshopt produced on the machine that measured
+    // them, and meshopt is not cross-platform. `phase18_gate` paid for that with a
+    // macOS-only failure; the rule and these two helpers live in
+    // `inf_vgeom::test_support`, whose header carries the law.
+    //
+    // So: take the camera's own want (`wanted_pages` — the streamer's
+    // `ideal_page_count`, a pure function of camera + directory), hold half of it,
+    // and shorten further if that prefix happens to end on the same LOD level the
+    // full want ends on — a ladder where one level spans several pages would
+    // otherwise satisfy "fewer pages" without raising the cut's floor, which is
+    // claim 4 below. Every step is read off THIS platform's directory, so the four
+    // claims hold whatever DAG meshopt built here.
+    let dir = source.pages();
+    let want = full_report.stats.wanted_pages;
+    let unclamped_floor = full_report.floor_lod[&asset_id];
+    assert!(
+        want >= 2 && full_resident >= 2,
+        "the ground camera wants {want} of {total_pages} pages and the unclamped run \
+         held {full_resident}: the root page is granted unconditionally, so with \
+         nothing above it there is no prefix to withhold and no budget can clamp"
+    );
+    let mut held = held_pages_for_want(full_resident);
+    while held > 1 && dir[held - 1].floor_lod <= unclamped_floor {
+        held -= 1;
+    }
+    assert!(
+        dir[held - 1].floor_lod > unclamped_floor,
+        "no prefix shorter than the unclamped run's {full_resident} pages ends above \
+         its LOD floor {unclamped_floor} — every resident page sits at one level on \
+         this ladder, so claim 4 (a shorter prefix raises the floor) is unstateable"
+    );
+    let budget = budget_for_pages(source, held);
     let (clamped, report) = shot(budget, 1);
     let (resident, _) = report.pages[&asset_id];
     eprintln!(
         "gate (b3): {resident} of {total_pages} pages resident under a {budget} B budget \
-         (unclamped holds {full_resident} pages / {} B of a {full_bytes} B asset); {} \
-         | floor_lod {}",
+         built to hold {held} of a {want}-page want (unclamped holds {full_resident} pages \
+         / {} B of a {full_bytes} B asset); {} | floor_lod {} vs the unclamped run's \
+         {unclamped_floor}",
         full_report.stats.resident_bytes,
         report.stats.summary(),
         report.floor_lod[&asset_id],
@@ -437,8 +479,10 @@ fn gate_b3_streamed_under_budget_is_deterministic_and_hole_free() {
     // 1. the budget is a HARD bound.
     assert!(resident >= 1, "the root page is never denied");
     assert!(
-        resident < full_resident,
-        "the budget must actually withhold pages ({resident} vs {full_resident})"
+        resident <= held && held < full_resident,
+        "the budget must admit at most the {held}-page prefix it was built for, and \
+         that prefix must be shorter than the {full_resident} pages the unclamped \
+         run held (got {resident})"
     );
     assert!(
         report.stats.resident_bytes <= budget,
@@ -446,9 +490,17 @@ fn gate_b3_streamed_under_budget_is_deterministic_and_hole_free() {
         report.stats.resident_bytes
     );
     assert!(report.stats.budget_clamped, "the clamp must be reported");
+    // 4. a shorter prefix raises the cut's floor. Guaranteed by the construction
+    //    above (`held` was chosen to end above `wanted_floor`, and `floor_lod` never
+    //    gets finer as the prefix gets shorter), so this checks the construction
+    //    reached the shader's side of the world rather than pinning a number.
     assert!(
         report.floor_lod[&asset_id] > full_report.floor_lod[&asset_id],
-        "a shorter residency prefix must raise the cut's floor"
+        "a shorter residency prefix must raise the cut's floor ({} pages at floor {} \
+         vs {full_resident} at floor {})",
+        resident,
+        report.floor_lod[&asset_id],
+        full_report.floor_lod[&asset_id]
     );
 
     // 2. never a hole: coarser, but the same ground.

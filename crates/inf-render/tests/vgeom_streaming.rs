@@ -102,7 +102,12 @@ fn gpu_or_skip(name: &str) -> Option<GpuContext> {
 // bi-sinusoid so it has real curvature (nontrivial normal cones + several LOD
 // levels, hence several pages). One shared, bit-portable generator — see the
 // module header for what its absence cost.
-use inf_vgeom::test_support::dense_grid_mesh;
+//
+// `budget_for_pages` ships alongside it, for the same reason: a page-derived budget
+// is the operational half of "no test asserts a measured page ladder", and it was
+// mirrored into three test binaries before it was hoisted. `test_support`'s header
+// carries the rule and the list of sites still on the old byte-fraction pattern.
+use inf_vgeom::test_support::{budget_for_pages, dense_grid_mesh};
 
 /// The streaming fixture: one instance of the dense mesh, scaled up to 4 m so a
 /// close camera genuinely wants the finest pages and a distant one does not — the
@@ -674,27 +679,6 @@ fn flythrough() -> Vec<RenderView> {
         .iter()
         .map(|&d| look_from(dir * d, DVec3::ZERO))
         .collect()
-}
-
-/// A budget that holds exactly the `pages` coarsest pages of `source` and provably
-/// not one more — **read off the page directory**, never a fraction of the asset's
-/// total.
-///
-/// It sits at the midpoint of the open interval between "the prefix fits exactly"
-/// and "one more page fits", so it is strictly inside the band on both sides. A
-/// platform whose page bytes differ (see the note above) moves the two endpoints
-/// and the midpoint together, and the resident prefix it admits is unchanged.
-fn budget_for_pages(source: &inf_vgeom::VgeomSource, pages: usize) -> u64 {
-    let dir = source.pages();
-    assert!(
-        pages >= 1 && pages < dir.len(),
-        "a budget for {pages} of {} pages is not a clamp at all",
-        dir.len()
-    );
-    let held: u64 = dir[..pages].iter().map(|p| p.resident_bytes()).sum();
-    let next = dir[pages].resident_bytes();
-    assert!(next >= 2, "page {pages} costs {next} B — nothing to bisect");
-    held + next / 2
 }
 
 /// The pages this camera would ask for if nothing were scarce: the streamer's own

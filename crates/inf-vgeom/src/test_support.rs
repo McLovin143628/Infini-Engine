@@ -96,6 +96,7 @@
 
 use inf_math::{pcos64, psin64};
 
+use crate::asset::VgeomSource;
 use crate::build::{build_vgeom, BuildParams};
 use crate::model::VgeomMesh;
 
@@ -203,6 +204,71 @@ pub fn dense_grid_mesh(n: usize) -> VgeomMesh {
     build_grid(n, DEFAULT_AMPLITUDE, GridNormals::Analytic)
 }
 
+// ── budgets: the corollary of "no test asserts a measured page ladder" ───────
+//
+// The rule in the module header has an operational half that cost three macOS-only
+// CI trips before it was written down here. A suite that wants the streamer to
+// **clamp** needs a budget small enough to withhold pages, and the obvious way to
+// write one — some fraction of a byte total (`total_resident_bytes() / 2`, "half of
+// what the reference run held") — is a *measured page ladder* wearing a different
+// hat: whether that many bytes buys `k` pages or `k + 1` is decided entirely by the
+// per-page sizes `meshopt` happened to produce on the machine that ran it. The
+// third trip was exactly this. `inf-player`'s `phase18_gate::gate (a)` derived
+// `(the last frame's resident_bytes / 2).max(root)` and asserted the budget bound
+// on *every* frame; on x86_64 that landed one page below the run's smallest want
+// and on aarch64-apple-darwin it did not.
+//
+// So: **a test budget is counted in pages read off the live page directory, never
+// in bytes measured somewhere else.** [`budget_for_pages`] is that budget, and
+// [`held_pages_for_want`] turns an observed want into a page count that is
+// guaranteed to clamp it.
+//
+// Still on the old pattern, listed so the next person to touch one converts it
+// rather than copying it: `inf-render/tests/vgeom_streaming.rs` (`total / 6` twice,
+// `total / 4` once), `inf-vgeom/tests/streaming.rs` (`total / 2` twice) and this
+// crate's own `stream.rs` unit tests (`total / 2`, and `page0 * 2 + total / 3`).
+// None of them is *currently* wrong — each rides a wide band on the in-process
+// fixture — but each is a premise nobody has checked on the other platform.
+
+/// A budget that holds exactly the `pages` coarsest pages of `source` and provably
+/// not one more — **read off the live page directory**.
+///
+/// It sits at the midpoint of the open interval between "the prefix fits exactly"
+/// and "one more page fits", so it is strictly inside the band on both sides: a
+/// platform whose page bytes differ moves both endpoints *and* the midpoint
+/// together, and the resident prefix it admits is unchanged. Page 0 is always
+/// inside the held prefix, so the never-a-hole floor is respected by construction
+/// rather than by a `max(root)` patch bolted on afterwards.
+///
+/// Panics rather than returning an error: a budget for zero pages, or for the whole
+/// asset, is not a clamp at all, and a caller that computed one has a broken
+/// premise it should hear about at the call site.
+pub fn budget_for_pages(source: &VgeomSource, pages: usize) -> u64 {
+    let dir = source.pages();
+    assert!(
+        pages >= 1 && pages < dir.len(),
+        "a budget for {pages} of {} pages is not a clamp at all",
+        dir.len()
+    );
+    let held: u64 = dir[..pages].iter().map(|p| p.resident_bytes()).sum();
+    let next = dir[pages].resident_bytes();
+    assert!(next >= 2, "page {pages} costs {next} B — nothing to bisect");
+    held + next / 2
+}
+
+/// Half of `want`, in pages, never below the root page — the prefix a budget should
+/// hold so that a frame wanting `want` pages is **guaranteed** to be clamped.
+///
+/// Halving rather than `want - 1` keeps the clamp a real one (the frame draws a
+/// genuinely coarser cut, which is what makes a "streamed" claim mean something)
+/// while staying a pure function of the want, so it moves with the platform's ladder
+/// instead of pinning a number from one machine. `want >= 2` is the caller's
+/// premise to assert: no budget can clamp a frame that wants only the root page,
+/// because the root is granted unconditionally.
+pub fn held_pages_for_want(want: usize) -> usize {
+    (want / 2).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +310,39 @@ mod tests {
         assert!(
             (len2.sqrt() - 1.0).abs() < 1e-6,
             "analytic normals are unit length"
+        );
+    }
+
+    /// [`budget_for_pages`] is sandwiched: it holds the `n`-page prefix and cannot
+    /// hold `n + 1`, at every depth of whatever ladder this platform's `meshopt`
+    /// produced. That sandwich is the whole reason the helper exists — it is what
+    /// makes "the budget clamps a frame that wants more than `n` pages" a statement
+    /// about the page *directory* rather than about someone's byte totals.
+    #[test]
+    fn a_page_budget_is_sandwiched_between_the_prefix_and_the_next_page() {
+        let src = VgeomSource::from_mesh(&dense_mesh(24)).expect("index the vmesh");
+        let dir = src.pages();
+        assert!(dir.len() >= 3, "the fixture must have pages to withhold");
+        for n in 1..dir.len() {
+            let budget = budget_for_pages(&src, n);
+            let held: u64 = dir[..n].iter().map(|p| p.resident_bytes()).sum();
+            let one_more = held + dir[n].resident_bytes();
+            assert!(
+                held <= budget && budget < one_more,
+                "a {n}-page budget must fit the prefix ({held} B) and not the next \
+                 page ({one_more} B), got {budget} B"
+            );
+            // …and the count it is built from is the one that clamps a bigger want.
+            assert!(
+                held_pages_for_want(n + 1) <= n,
+                "want {} clamps at {n}",
+                n + 1
+            );
+        }
+        assert_eq!(
+            held_pages_for_want(1),
+            1,
+            "the root floor is never cut away"
         );
     }
 }

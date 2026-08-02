@@ -75,6 +75,7 @@ use inf_render::{
     RenderLight, RenderScene, RenderSettings, RenderView, ScatterAudit, ScatterBatch, ScatterData,
     ScatterInstance, VgeomAsset, VgeomAudit, VgeomInstance, VgeomSettings, HEADLESS_FORMAT,
 };
+use inf_vgeom::test_support::{budget_for_pages, held_pages_for_want};
 
 /// Render target size. Small on purpose: the claims are about counters and byte
 /// equality, and a bigger frame buys neither.
@@ -273,43 +274,14 @@ fn composed_settings(stream_budget: u64) -> RenderSettings {
 // byte total measured on one runner is a platform-dependent premise, and every
 // anti-vacuity guard resting on it ("the budget must bind") is a platform-dependent
 // claim. `inf-render`'s `tests/vgeom_streaming.rs` was the first trip on this and
-// `inf-vgeom`'s reimport test the second; the derivation below is the third, and it
-// is written the way those two now are: **budgets are counted in pages read off the
-// live page directory, never in bytes measured somewhere else.**
-
-/// A budget that holds exactly the `pages` coarsest pages of `source` and provably
-/// not one more — **read off the live page directory**.
-///
-/// A mirror of `inf-render`'s `vgeom_streaming::budget_for_pages` (test binaries
-/// cannot share code). It sits at the midpoint of the open interval between "the
-/// prefix fits exactly" and "one more page fits", so it is strictly inside the band
-/// on both sides: a platform whose page bytes differ moves both endpoints *and* the
-/// midpoint together, and the resident prefix it admits is unchanged. Page 0 is
-/// always inside the held prefix, so the never-a-hole floor is respected by
-/// construction rather than by a `max(root)` patch.
-fn budget_for_pages(source: &inf_vgeom::VgeomSource, pages: usize) -> u64 {
-    let dir = source.pages();
-    assert!(
-        pages >= 1 && pages < dir.len(),
-        "a budget for {pages} of {} pages is not a clamp at all",
-        dir.len()
-    );
-    let held: u64 = dir[..pages].iter().map(|p| p.resident_bytes()).sum();
-    let next = dir[pages].resident_bytes();
-    assert!(next >= 2, "page {pages} costs {next} B — nothing to bisect");
-    held + next / 2
-}
-
-/// Half of `want`, in pages, never below the root page — the prefix a budget holds
-/// so that a frame wanting `want` pages is *guaranteed* to be clamped.
-///
-/// Halving rather than `want - 1` keeps the clamp a real one (the frame draws a
-/// genuinely coarser cut, which is what makes the composed trace a *streamed*
-/// trace) while staying a pure function of the want, so it moves with the platform's
-/// ladder instead of pinning a number from this machine.
-fn held_pages_for_want(want: usize) -> usize {
-    (want / 2).max(1)
-}
+// `inf-vgeom`'s reimport test the second; the derivation below is the third.
+//
+// The rule and the two helpers now live in `inf_vgeom::test_support`, next to the
+// fixture generator whose header states the law, so the suites share ONE
+// implementation instead of mirroring it: `budget_for_pages(source, n)` cuts a
+// budget at the midpoint between "the n coarsest pages fit exactly" and "n + 1
+// fits", and `held_pages_for_want(want)` is the page count guaranteed to clamp a
+// frame that wants `want`.
 
 /// A streaming budget that **binds on every frame** of the scripted run, sized in
 /// pages off the live page directory.
