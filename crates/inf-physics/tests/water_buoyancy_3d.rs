@@ -439,12 +439,39 @@ fn a_settled_float_does_not_chatter() {
     }
     assert_eq!(early, vec![WaterEventKind3D::Enter], "{early:?}");
     let mut late = Vec::new();
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    let mut deepest = 0.0f64;
     for _ in 0..1_200 {
         late.extend(step(&mut w, &mut bridge).into_iter().map(|e| e.kind));
+        let y = body_y(&w, BOX);
+        lo = lo.min(y);
+        hi = hi.max(y);
+        deepest = deepest.max(
+            bridge
+                .water_probe(BOX)
+                .expect("still over the lake")
+                .fraction,
+        );
     }
     assert!(
         late.is_empty(),
         "a settled float must not chatter as waves pass: {late:?}"
+    );
+    // **Silence alone is not enough.** A body that quietly sank and stayed
+    // submerged fires nothing either, so the late window has to prove it spent
+    // that whole time *floating* — never leaving the wave it rides, and never
+    // once getting more than a little past its half-submerged equilibrium.
+    let bound = 0.25 + 0.17; // wave amplitude + the P20.1 honest query bound
+    assert!(
+        lo > -bound && hi < bound,
+        "the float left the wave it was riding: [{lo:.4}, {hi:.4}] vs ±{bound:.4}"
+    );
+    assert!(
+        deepest < 0.7,
+        "a density-500 float reached {deepest:.4} submerged at some point in the \
+         late window — it sank, and the silence above was the latch staying LOW, \
+         not the latch holding"
     );
 }
 

@@ -614,20 +614,32 @@ impl PhysicsBridge3D {
             up_speed: f64,
         }
         let mut plans: Vec<Plan> = Vec::new();
+        // Bodies that are buoyant and dynamic but that this pass will NOT plan a
+        // force for — a `Buoyancy` on a body with no collider has nothing to
+        // displace, and one whose handles just went stale has nothing to push.
+        // They still get their accumulator cleared, because a rapier force
+        // persists: the invariant this pass maintains is **"a body that could
+        // ever have felt a water force is reset every step"**, with no exceptions,
+        // so a crate that loses its collider does not keep last step's lift
+        // forever.
+        let mut reset_only: Vec<BodyId3D> = Vec::new();
         for (guid, (desc, _)) in &self.buoyant {
             let Some(rec) = self.entities.get(guid) else {
                 continue;
             };
             // Only the solver's own bodies float: a static wall does not, and a
             // kinematic platform is script-driven by definition. A character
-            // controller is kinematic and gets swim mode instead.
+            // controller is kinematic and gets swim mode instead. A non-dynamic
+            // body needs no reset either — rapier ignores forces on it.
             if rec.kind != BodyKind3D::Dynamic {
                 continue;
             }
             let Some(col) = rec.col.as_ref() else {
+                reset_only.push(rec.body);
                 continue;
             };
             let Some(state) = self.body_state(rec.body) else {
+                reset_only.push(rec.body);
                 continue;
             };
             let geo = water::sample_geometry(&col.shape, col.local_translation);
@@ -657,6 +669,9 @@ impl PhysicsBridge3D {
         // a persistent force to them — there is no `apply_force` Blueprint node,
         // and both hosts use impulses — so the ownership is total rather than
         // shared.
+        for body in reset_only {
+            self.world.reset_forces(body);
+        }
         for plan in plans {
             self.world.reset_forces(plan.body);
             for (force, point) in plan.forces.samples {
@@ -715,6 +730,14 @@ impl PhysicsBridge3D {
     /// A **live** query rather than a read of the force pass's cache, so it
     /// answers for any entity with a collider — a kinematic character has no
     /// `Buoyancy` and still needs to know how deep it is standing.
+    ///
+    /// **Instantaneous, and the events are latched.** `depth_m > 0` here is "the
+    /// lowest point is under a surface *right now*", while
+    /// [`WaterEventKind3D::Enter`]/[`Exit`](WaterEventKind3D::Exit) fire off the
+    /// exit-hysteresis latch (5 % of the body's own height). The two disagree
+    /// inside that band on purpose: a poll wants the truth now, an event wants a
+    /// debounced edge. See the `water.*` node-kit docs for the same statement at
+    /// the Blueprint boundary.
     pub fn water_probe(&self, guid: Uuid) -> Option<WaterProbe> {
         if self.water.is_empty() {
             return None;

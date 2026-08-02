@@ -5182,7 +5182,25 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > **Gates.** `runtime/inf-player/tests/water_physics.rs` (10): determinism, **pool-size
 > invariance**, **PIE == shipping** on a cooked pack, the wave-model bit comparison, the
 > off-path/anti-vacuity pair, swim + its dry twin, the event/audio determinism pair, the splash
-> threshold, and the **editor↔runtime parity** case. That last one is paired with
+> threshold, and the **editor↔runtime parity** case.
+>
+> **The pool-size leg runs in SUBPROCESSES, and the first attempt did not.** `bevy_ecs`'s
+> `ComputeTaskPool` is a process-global `OnceLock`: the first `init_ecs_task_pool` wins and later
+> calls are no-ops reporting the count already chosen, so an in-process "matrix" runs every leg on
+> one pool and is a duplicate of the two-run determinism arm wearing a stronger name. That is
+> exactly what shipped in the first cut of this batch, and the audit caught it — the same trap
+> `crates/inf-runtime/src/bin/replay_probe.rs` was built to avoid for the §8 replay gate.
+> `runtime/inf-player/src/bin/water_probe.rs` is its water twin: it pins the pool, runs the
+> floating-stack trace over a **bare `EcsWorld`** (a `[[bin]]` cannot reach dev-dependencies, so
+> the scene lives once, in the probe) and prints `threads=` / `first=` / `last=` / `trace=`; the
+> test spawns it at 1/2/4/8 and compares the outputs to each other. The `threads=` line is
+> asserted too, so the harness proves each process really got the pool it asked for.
+> **Honestly stated, as `phase17_gate.rs` states it:** the water pass is serial today, so this leg
+> is expected to pass trivially — it is asserted rather than reasoned about because the schedule
+> mode is a startup choice and the first change that moves the buoyancy loop onto the pool is the
+> one that would introduce an ordering dependency nobody was watching for.
+>
+> The parity case is paired with
 > `editor/crates/inf-editor-core/tests/simulate_water.rs`: the two hosts each own a copy of the
 > fixed-step ordering, of the `Host::call` match arms and of the `move_and_slide` path, so "they
 > run the same water physics" is a claim about two files and is checked from the outside — by
@@ -5220,6 +5238,12 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 >   binding it to an `AnimStateMachine` parameter is a `water.is_swimming` node away and is not
 >   in this batch (the three shipped nodes are `is_in_water`, `surface_height`,
 >   `submerged_fraction`).
+> * **The `water.*` queries are INSTANTANEOUS; the events are LATCHED.** `is_in_water` answers
+>   from this step's raw probe, while enter/exit fire off the 5 %-of-body-height hysteresis, so
+>   the two disagree inside the band — a body bobbing at the waterline can make the poll flicker
+>   while no event fires. Deliberate (a poll wants the truth now, an event wants a debounced
+>   edge) and documented at both the node kit and `PhysicsBridge3D::water_probe`, because the
+>   natural reading is that they are the same predicate.
 > * **`water.surface_height` answers `0.0` where there is no water** — the `terrain.height_at`
 >   precedent, because the IR has no optional Float. `0` is a plausible sea level and is
 >   deliberately not a sentinel; pair it with `submerged_fraction` when the question is really
@@ -5229,7 +5253,8 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > `crates/inf-ecs/src/{components,registry,lib}.rs`, `crates/inf-blueprint/src/{semantics,nodekit,
 > lower,raise}.rs`, `crates/inf-scene/src/lib.rs` + `editor/crates/inf-editor-core/src/scene/
 > serialize.rs` (v18) + both fixture dirs, `runtime/inf-player/src/{runtime_sim,level,
-> cell_stream}.rs`, `editor/crates/inf-editor-core/src/simulate.rs`, the 12 re-blessed
+> cell_stream}.rs` + `runtime/inf-player/src/bin/water_probe.rs` (new),
+> `editor/crates/inf-editor-core/src/simulate.rs`, the 12 re-blessed
 > samples/templates, and the gates `crates/inf-physics/tests/water_buoyancy_3d.rs`,
 > `runtime/inf-player/tests/water_physics.rs`,
 > `editor/crates/inf-editor-core/tests/simulate_water.rs`,

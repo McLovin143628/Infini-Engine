@@ -42,11 +42,18 @@ pub enum EventKind {
     Custom(String),
     // ── water (P20.2) ────────────────────────────────────────────────────
     //
-    // **APPENDED, and that is a rule, not a preference.** This enum is
-    // externally tagged for bincode, so a variant's wire tag is its declaration
-    // index: inserting one in the middle would silently turn every committed
-    // `.inf_act`'s `Collision` handler into a `Custom` one. New variants go at
-    // the end, forever — the same law `WaterKind` carries (P19.2).
+    // **What the wire contract actually is.** A `.inf_act` is **pretty JSON**,
+    // not bincode (`BlueprintClass` carries `skip_serializing_if` fields a
+    // non-self-describing stream cannot round-trip — see
+    // `inf_editor_core::samples::encode_actor`), so an externally-tagged variant
+    // is written as its **name**, not as its declaration index. Reordering this
+    // enum is therefore wire-safe and **renaming a variant is not** — the exact
+    // opposite of the positional rule `WaterKind` lives under. The identifiers
+    // that must never move are the [`key`](Self::key) strings, which are also
+    // what a generated Rust handler is named and what `raise`/`lower` match on;
+    // `crates/inf-transpile/tests/water_roundtrip.rs::the_water_event_ids_are_frozen`
+    // is the pin. Appending is still the habit — a variant added in the middle
+    // costs nothing on the wire but churns every `match` in the tree.
     //
     // Three variants rather than one with a phase argument, because the *point*
     // of a splash is that a handler can subscribe to it alone: "play a sound when

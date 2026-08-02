@@ -15,7 +15,12 @@
 //! * **(a) determinism** — the same scripted scene twice is a bit-identical pose
 //!   trace (`to_bits`, not an epsilon), including the water events.
 //! * **(b) pool-size invariance** — the same trace whatever ECS worker-pool size
-//!   the process runs on. "Serial today" is not a property a replay can rely on.
+//!   the process runs on, checked across **subprocesses** (the pool is a
+//!   process-global `OnceLock`, so it cannot be varied in one process — see
+//!   `src/bin/water_probe.rs`). The water pass is serial today, so this leg is
+//!   expected to pass trivially; it is asserted rather than reasoned about
+//!   because the first change that moves the buoyancy loop onto the pool is the
+//!   one that would introduce an ordering dependency nobody was watching for.
 //! * **(c) PIE == shipping** — the cooked-pack world and the PIE-payload world
 //!   produce the same trace, poses and events alike.
 //! * **(d) one wave model** — the Gerstner components the *renderer* would upload
@@ -25,9 +30,12 @@
 //!   level with the water knobs wound, with an anti-vacuity guard that a body in
 //!   the water really does notice them.
 //! * **(f) swim** — submerging a character flips it into swim mode, it surfaces
-//!   under input, and the trace is deterministic.
+//!   against a full gravity step under a real Blueprint's `move_and_slide`, and
+//!   the trace is deterministic.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use glam::DVec2;
 use inf_blueprint::{
@@ -96,8 +104,10 @@ fn frame(sim: &RuntimeSim) -> Frame {
     }
 }
 
-/// Run the scripted scenario. The swimmer holds "forward" and "up" for the whole
-/// run, so swim mode is exercised under input rather than merely entered.
+/// Run the scenario. **No input is held** — the crates are driven by gravity and
+/// the water alone, and the swimmer here has no Blueprint moving it, so this
+/// trace covers the buoyancy pass rather than swim mode. Swimming under input is
+/// `a_submerged_character_swims_and_surfaces`, which attaches a real actor.
 fn run_trace(sim: &mut RuntimeSim) -> Vec<Frame> {
     (0..STEPS)
         .map(|_| {
@@ -300,23 +310,77 @@ fn a_floating_stack_traces_bit_identically_across_two_runs() {
 
 // ── (b) pool-size invariance ────────────────────────────────────────────────
 
-/// The water force pass is serial today, but "serial today" is not a property a
-/// replay can rely on — the parallel schedule is chosen at startup, so the traces
-/// have to be compared rather than reasoned about.
+/// Launch the `water_probe` binary at a fixed pool size and return the
+/// `key=value` lines it printed.
+///
+/// **Subprocesses, not `init_ecs_task_pool` calls.** `bevy_ecs`'s
+/// `ComputeTaskPool` is a process-global `OnceLock` — the first init wins and
+/// later ones are no-ops that report the count already chosen — so an in-process
+/// "matrix" runs every leg on one pool and is a duplicate of the two-run
+/// determinism arm above wearing a stronger name. `crates/inf-runtime` reached the
+/// same conclusion for the replay gate; `water_probe` is the water twin, and the
+/// `threads=` line it prints is what proves each process really got the pool it
+/// was asked for.
+fn probe(threads: usize, steps: usize) -> HashMap<String, String> {
+    let exe = env!("CARGO_BIN_EXE_water_probe");
+    let out = Command::new(exe)
+        .arg(threads.to_string())
+        .arg(steps.to_string())
+        .output()
+        .expect("spawn water_probe");
+    assert!(
+        out.status.success(),
+        "water_probe (threads={threads}) failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .expect("probe stdout utf8")
+        .lines()
+        .filter_map(|l| l.split_once('=').map(|(k, v)| (k.into(), v.into())))
+        .collect()
+}
+
+/// The water trace is invariant to the ECS worker-pool size.
+///
+/// The water force pass is serial **today**, so this leg is expected to be
+/// satisfied trivially — and that is precisely why it is asserted rather than
+/// reasoned about: the schedule mode is a startup choice, and the first change
+/// that moves the buoyancy loop onto the pool is the one that would introduce an
+/// ordering dependency nobody was watching for. Stated so the gate's strength is
+/// not overclaimed.
 #[test]
 fn the_floating_stack_is_identical_across_pool_sizes() {
-    let doc = gate_doc(true, 0.7);
-    let trace_at = |threads: usize| {
-        inf_ecs::init_ecs_task_pool(threads);
-        run_trace(&mut pie_sim(&doc))
-    };
-    let one = trace_at(1);
-    let four = trace_at(4);
-    assert_eq!(
-        one, four,
-        "buoyancy depends on the ECS pool size — it is not replay-safe"
+    const PROBE_STEPS: usize = 240;
+    let sizes = [1usize, 2, 4, 8];
+    let runs: Vec<HashMap<String, String>> = sizes.iter().map(|n| probe(*n, PROBE_STEPS)).collect();
+
+    // The harness itself works: each subprocess really got the pool it asked for,
+    // so the traces below were produced under four genuinely different pools.
+    for (n, run) in sizes.iter().zip(&runs) {
+        assert_eq!(
+            run.get("threads").map(String::as_str),
+            Some(n.to_string().as_str()),
+            "the probe did not get the pool size it was asked for: {run:?}"
+        );
+    }
+
+    let reference = runs[0].get("trace").expect("probe printed trace=");
+    for (n, run) in sizes.iter().zip(&runs) {
+        assert_eq!(
+            run.get("trace").expect("probe printed trace="),
+            reference,
+            "the water trace depends on the ECS pool size (threads={n}) — it is \
+             not replay-safe"
+        );
+    }
+
+    // Not vacuous: the crates really moved over the run, so the equal hashes are
+    // equal traces rather than equal copies of nothing.
+    assert_ne!(
+        runs[0].get("first"),
+        runs[0].get("last"),
+        "nothing moved across {PROBE_STEPS} steps — the comparison is vacuous"
     );
-    assert_not_vacuous(&one);
 }
 
 // ── (c) PIE == shipping ─────────────────────────────────────────────────────

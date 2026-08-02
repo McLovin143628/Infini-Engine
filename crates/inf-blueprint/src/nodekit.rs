@@ -668,10 +668,29 @@ fn sky_nodes() -> Vec<NodeDef> {
 /// with `is_in_water` (or with a non-zero `submerged_fraction`) when the question
 /// is really "is there water here at all"; `0.0` is a plausible sea level and is
 /// deliberately not a sentinel.
+///
+/// ## THE CONTRACT: these queries are **instantaneous**, the events are **latched**
+///
+/// `water.is_in_water` answers from this step's raw probe — is the entity's
+/// lowest point under a surface *right now* — while `On Enter Water` /
+/// `On Exit Water` fire off a **hysteresis latch** (the body must clear the
+/// surface by 5 % of its own height before it counts as out). The two therefore
+/// disagree inside the band: a body bobbing at the waterline can make
+/// `is_in_water` flicker between ticks while no event fires at all.
+///
+/// That is deliberate, not an oversight. A poll wants the truth *now* (should the
+/// swim animation play? is the gun wet?), an event wants a debounced edge (play a
+/// splash once, not sixty times a second). Wiring `is_in_water` into a
+/// `flow.branch` that toggles state is the shape that will bite, and the fix is to
+/// use the events for edges and the query for state — stated here because the
+/// alternative reading (that the two are the same predicate) is the natural one.
 fn water_nodes() -> Vec<NodeDef> {
     vec![
         NodeDef::new("water.is_in_water", "Is In Water", "water")
-            .described("True while any part of the entity is under a water surface.")
+            .described(
+                "True while any part of the entity is under a water surface. \
+                 Instantaneous: use the On Enter/Exit Water events for debounced edges.",
+            )
             .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
             .with_outputs(vec![PortDef::new("in_water", PortType::Bool)]),
         NodeDef::new("water.surface_height", "Water Surface Height", "water")
