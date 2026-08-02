@@ -1,6 +1,6 @@
 /** PCG wire + category colors. Wires are
- *  `Named("density"|"scatter"|"layer"|"span"|"rules")` — every one of them a
- *  `Named`, because the graph substrate is deliberately domain-free. */
+ *  `Named("density"|"scatter"|"layer"|"span"|"rules"|"building")` — every one of
+ *  them a `Named`, because the graph substrate is deliberately domain-free. */
 import type { PortType } from "../../lib/blueprintTypes";
 
 export function pcgPinColor(ty: PortType): string {
@@ -16,6 +16,8 @@ export function pcgPinColor(ty: PortType): string {
         return "#e07ec1"; // grammar span (magenta) — P19.4
       case "rules":
         return "#c9a0ff"; // grammar rule table (violet) — P19.4
+      case "building":
+        return "#e0a06e"; // building archetype (terracotta) — P19.5
       default:
         return "#9aa0a6";
     }
@@ -38,6 +40,8 @@ export function pcgCategoryColor(category: string): string {
       return "#7a5230";
     case "grammar":
       return "#6a2f6f";
+    case "building":
+      return "#7a3550";
     case "layer":
       return "#8a7a2a";
     case "output":

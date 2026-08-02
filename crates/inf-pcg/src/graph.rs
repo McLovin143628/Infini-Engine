@@ -94,6 +94,7 @@ use inf_graph::{
     Graph, NodeDef, NodeId, NodeRegistry, ParamDef, ParamValue, PortDef, PortType, SINK,
 };
 
+use crate::building::{ArchetypeId, BuildingPass};
 use crate::grammar::{
     FootprintMode, Grammar, GrammarPass, Ground, RowAxis, SpanSource, DEFAULT_SPLINE_SAMPLES,
 };
@@ -111,6 +112,8 @@ pub const LAYER_KEY: &str = "layer";
 pub const SPAN_KEY: &str = "span";
 /// A parsed grammar (rule table + module palette) — P19.4.
 pub const RULES_KEY: &str = "rules";
+/// A building archetype (palette + plan parameters) — P19.5.
+pub const BUILDING_KEY: &str = "building";
 
 /// A density-field port.
 fn density(name: &str) -> PortDef {
@@ -135,6 +138,11 @@ fn span(name: &str) -> PortDef {
 /// A grammar rule-table port.
 fn rules(name: &str) -> PortDef {
     PortDef::new(name, PortType::Named(RULES_KEY.into()))
+}
+
+/// A building-archetype port.
+fn building(name: &str) -> PortDef {
+    PortDef::new(name, PortType::Named(BUILDING_KEY.into()))
 }
 
 /// Resolves a texture asset GUID into a **grayscale bitmap** for the `mask.image`
@@ -171,7 +179,8 @@ impl<T: MaskSource + ?Sized> MaskSource for &T {
 
 /// The complete PCG node palette: density sources, terrain filters, terrain-layer
 /// masks (P19.3), combinators, the scatter pass + its merge, the grammar kit
-/// (P19.4), the layer wrapper + its merge, and one output sink.
+/// (P19.4), the building kit (P19.5), the layer wrapper + its merge, and one
+/// output sink.
 ///
 /// Registration order **is** palette order (the frontend groups by first
 /// appearance), so the grammar sits beside scatter — its sibling generator —
@@ -185,6 +194,7 @@ pub fn pcg_registry() -> NodeRegistry {
     reg.register(scatter_node());
     reg.register(scatter_merge_node());
     reg.register_all(grammar_nodes());
+    reg.register_all(building_nodes());
     reg.register_all(layer_nodes());
     reg.register(output_node());
     reg
@@ -427,6 +437,67 @@ fn grammar_nodes() -> Vec<NodeDef> {
     ]
 }
 
+/// The P19.5 **building kit**: an archetype and the planner that stands one on a
+/// lot.
+///
+/// The shape is the grammar kit's, one level up — a *definition* node and an
+/// *expander* node, joined by one wire — and for the same reason: one archetype
+/// can feed several planners (the same office block on three lots), and a
+/// definition that is only ever a param on its consumer cannot be shared.
+///
+/// `building.plan` **outputs a SCATTER**, exactly as `grammar.expand` does, so
+/// it joins the existing merge and layer chains with no third merge node and no
+/// third sink input, and a disabled layer disables its buildings for free.
+fn building_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("building.archetype", "Building Archetype", "building")
+            .described(
+                "One of the seven shipped building palettes: its module set, wall \
+                 grammar, room table and furniture",
+            )
+            .with_outputs(vec![building("out")])
+            .with_params(vec![
+                ParamDef::choice(
+                    "archetype",
+                    ArchetypeId::ALL
+                        .iter()
+                        .map(|a| a.name().to_string())
+                        .collect(),
+                    ArchetypeId::Office.name(),
+                ),
+                ParamDef::int("floors", 0)
+                    .range(0.0, crate::building::MAX_FLOORS as f64)
+                    .described("Storey count (0 → drawn from the archetype's own range)"),
+                ParamDef::toggle("furnish", true)
+                    .described("Populate rooms with the archetype's furniture set"),
+            ]),
+        NodeDef::new("building.plan", "Plan Building", "building")
+            .described(
+                "Stand a building on a lot: floor stack, rooms, doors and windows, \
+                 stairs and furniture",
+            )
+            .with_inputs(vec![building("archetype"), span("lot")])
+            .with_outputs(vec![scatter("out")])
+            .with_params(vec![
+                ParamDef::text("name", "building")
+                    .described("Pass name — what diagnostics call this building"),
+                ParamDef::number("size_x", 0.0)
+                    .range(0.0, 100_000.0)
+                    .described("Lot X size in metres (0 → the PCG volume's own extent)"),
+                ParamDef::number("size_z", 0.0)
+                    .range(0.0, 100_000.0)
+                    .described("Lot Z size in metres (0 → the PCG volume's own extent)"),
+                ParamDef::int("seed", 0),
+                ParamDef::choice("ground", vec!["Terrain".into(), "Span".into()], "Terrain")
+                    .described(
+                        "Take the building's datum from the terrain under its footprint \
+                         centre, or from the volume itself",
+                    ),
+                ParamDef::number("altitude_offset", 0.0),
+            ]),
+    ]
+}
+
 /// The layer wrapper and its merge — the multi-**layer** half (P19.3).
 fn layer_nodes() -> Vec<NodeDef> {
     vec![
@@ -543,6 +614,8 @@ pub struct LoweredPcg {
     /// The grammar passes, in canvas order, each tagged with the layer it was
     /// lowered under (so a disabled layer disables its grammars too).
     pub grammars: Vec<GrammarPass>,
+    /// The P19.5 building passes, on the same terms as `grammars`.
+    pub buildings: Vec<BuildingPass>,
     pub issues: Vec<PcgGraphIssue>,
     pub ok: bool,
 }
@@ -552,6 +625,11 @@ impl LoweredPcg {
     /// the cook and the evaluation sites branch on.
     pub fn has_grammars(&self) -> bool {
         !self.grammars.is_empty()
+    }
+
+    /// `true` when the graph authors at least one building pass.
+    pub fn has_buildings(&self) -> bool {
+        !self.buildings.is_empty()
     }
 }
 
@@ -572,6 +650,7 @@ pub fn lower_graph_with(graph: &Graph, reg: &NodeRegistry, masks: &dyn MaskSourc
         masks,
         issues: Vec::new(),
         grammars: Vec::new(),
+        buildings: Vec::new(),
         layer: "layer".into(),
         layer_enabled: true,
     };
@@ -585,7 +664,7 @@ pub fn lower_graph_with(graph: &Graph, reg: &NodeRegistry, masks: &dyn MaskSourc
         .collect();
     let Some(&output) = outputs.first() else {
         cx.error(None, "graph has no PCG Output node — add one");
-        return LoweredPcg::finish(PcgDocument::default(), cx.grammars, cx.issues);
+        return LoweredPcg::finish(PcgDocument::default(), cx.grammars, cx.buildings, cx.issues);
     };
     for &extra in outputs.iter().skip(1) {
         cx.warn(
@@ -614,11 +693,16 @@ pub fn lower_graph_with(graph: &Graph, reg: &NodeRegistry, masks: &dyn MaskSourc
         }],
         (None, None) => {
             cx.error(Some(output), "PCG Output has no Scatter connected");
-            return LoweredPcg::finish(PcgDocument::default(), cx.grammars, cx.issues);
+            return LoweredPcg::finish(
+                PcgDocument::default(),
+                cx.grammars,
+                cx.buildings,
+                cx.issues,
+            );
         }
     };
 
-    LoweredPcg::finish(PcgDocument { layers }, cx.grammars, cx.issues)
+    LoweredPcg::finish(PcgDocument { layers }, cx.grammars, cx.buildings, cx.issues)
 }
 
 /// The lowering walk's shared state: the graph being read, the registry that
@@ -634,6 +718,8 @@ struct Ctx<'a> {
     /// order — they leave the walk as `Vec<PcgRule>`'s empty tail rather than as
     /// rules, because a grammar is not a scatter.
     grammars: Vec<GrammarPass>,
+    /// P19.5 building passes, collected on exactly the same terms.
+    buildings: Vec<BuildingPass>,
     /// The layer currently being lowered, stamped onto every pass so a layer's
     /// name and toggle govern its grammars exactly as they govern its rules.
     layer: String,
@@ -748,6 +834,12 @@ impl Ctx<'_> {
             // contributes no `PcgRule` and appends to `self.grammars` instead.
             "grammar.expand" => {
                 self.lower_grammar(node_id);
+                Vec::new()
+            }
+            // Same shape, one level up: a building is a third generator on the
+            // SCATTER wire, and lowers to a pass rather than to a rule.
+            "building.plan" => {
+                self.lower_building(node_id);
                 Vec::new()
             }
             other => {
@@ -1014,16 +1106,167 @@ impl Ctx<'_> {
     }
 }
 
+// ── P19.5: the building walk ────────────────────────────────────────────────
+
+impl Ctx<'_> {
+    /// One `building.plan` node → one [`BuildingPass`], appended to
+    /// [`Ctx::buildings`].
+    ///
+    /// Fails closed and node-anchored, like the grammar walk. The one *error* is
+    /// a missing archetype input — without it there is no palette and nothing to
+    /// build; an unknown archetype **name** is a warning that falls back to the
+    /// first palette, because a param whose choice list shifted is a migration
+    /// artefact, not an authoring mistake.
+    fn lower_building(&mut self, node_id: NodeId) {
+        let params = resolved(self.reg, self.graph.node(node_id).expect("checked"));
+
+        // ── the archetype ───────────────────────────────────────────────────
+        let Some(arch_link) = self.graph.link_into(node_id, "archetype") else {
+            self.error(
+                Some(node_id),
+                "Plan Building has no Building Archetype connected — it places nothing",
+            );
+            return;
+        };
+        let arch_node = arch_link.from;
+        let Some(an) = self.graph.node(arch_node) else {
+            return;
+        };
+        if an.type_id != "building.archetype" {
+            self.error(
+                Some(arch_node),
+                format!("`{}` does not produce a building archetype", an.type_id),
+            );
+            return;
+        }
+        let ap = resolved(self.reg, an);
+        let raw = penum(&ap, "archetype");
+        let archetype = match ArchetypeId::parse(&raw) {
+            Some(a) => a,
+            None => {
+                self.warn(
+                    Some(arch_node),
+                    format!(
+                        "unknown building archetype `{raw}` — falling back to `{}`",
+                        ArchetypeId::ALL[0].name()
+                    ),
+                );
+                ArchetypeId::ALL[0]
+            }
+        };
+        let floors = pi(&ap, "floors").clamp(0, crate::building::MAX_FLOORS as i64) as u32;
+        let furnish = pb_default(&ap, "furnish", true);
+
+        // ── the lot (optional) ──────────────────────────────────────────────
+        let lot = match self.graph.link_into(node_id, "lot") {
+            Some(link) => {
+                let span_node = link.from;
+                match self.lower_span(span_node) {
+                    Some(source) => Some(source),
+                    None => return,
+                }
+            }
+            None => None,
+        };
+
+        let name = ptext(&params, "name");
+        self.buildings.push(BuildingPass {
+            name: if name.trim().is_empty() {
+                "building".into()
+            } else {
+                name
+            },
+            layer: self.layer.clone(),
+            enabled: self.layer_enabled,
+            archetype,
+            seed: pi(&params, "seed") as u64,
+            floors,
+            furnish,
+            size: glam::DVec2::new(
+                pf(&params, "size_x").max(0.0),
+                pf(&params, "size_z").max(0.0),
+            ),
+            lot,
+            ground: if penum(&params, "ground") == "Span" {
+                Ground::Span
+            } else {
+                Ground::Terrain
+            },
+            altitude_offset: pf(&params, "altitude_offset"),
+        });
+    }
+
+    /// The [`SpanSource`] a `grammar.spline` / `grammar.footprint` node
+    /// describes, or `None` (with an anchored error) for anything else.
+    ///
+    /// Shared with [`Ctx::lower_grammar`]'s own span handling in *intent* but
+    /// not in code: the grammar's version also reads a corner module and
+    /// validates it against the grammar's palette, which a building has no use
+    /// for. Extracting the common half would leave two callers passing flags to
+    /// say which half they wanted.
+    fn lower_span(&mut self, span_node: NodeId) -> Option<SpanSource> {
+        let sn = self.graph.node(span_node)?;
+        let sn_type = sn.type_id.clone();
+        let sp = resolved(self.reg, sn);
+        match sn_type.as_str() {
+            "grammar.spline" => {
+                let raw = ptext(&sp, "spline");
+                let entity = parse_guid(&raw);
+                if entity.is_none() && !raw.trim().is_empty() {
+                    self.warn(
+                        Some(span_node),
+                        format!(
+                            "Spline Span entity `{raw}` is not a GUID — falling back to \
+                             the entity this graph evaluates on"
+                        ),
+                    );
+                }
+                Some(SpanSource::Spline {
+                    entity,
+                    samples_per_segment: pi(&sp, "samples_per_segment").clamp(1, 256) as usize,
+                })
+            }
+            "grammar.footprint" => {
+                let size = glam::DVec2::new(pf(&sp, "size_x").max(0.0), pf(&sp, "size_z").max(0.0));
+                let mode = if penum(&sp, "mode") == "Rows" {
+                    FootprintMode::Rows {
+                        rows: pi(&sp, "rows").clamp(0, 4096) as u32,
+                        axis: if penum(&sp, "row_axis") == "Z" {
+                            RowAxis::Z
+                        } else {
+                            RowAxis::X
+                        },
+                    }
+                } else {
+                    FootprintMode::Perimeter {
+                        corner_size: pf(&sp, "corner_size").max(0.0),
+                    }
+                };
+                Some(SpanSource::Footprint { size, mode })
+            }
+            other => {
+                self.error(
+                    Some(span_node),
+                    format!("`{other}` does not produce a grammar span"),
+                );
+                None
+            }
+        }
+    }
+}
+
 impl LoweredPcg {
     fn finish(
         document: PcgDocument,
         grammars: Vec<GrammarPass>,
+        buildings: Vec<BuildingPass>,
         issues: Vec<PcgGraphIssue>,
     ) -> Self {
         let ok = !issues.iter().any(|i| i.severity == PcgSeverity::Error);
         Self {
             document,
             grammars,
+            buildings,
             issues,
             ok,
         }
@@ -2572,5 +2815,289 @@ Fence -> Post Panel* Post
         assert_eq!(rules.len(), 2);
         assert_eq!(rules[0].sampler, rules[1].sampler);
         assert!(matches!(rules[0].sampler, SamplerDef::Noise(_)));
+    }
+
+    // ── P19.5: the building kit ─────────────────────────────────────────────
+
+    impl Builder {
+        /// `building.archetype → building.plan`, returning `(plan, archetype)`.
+        fn building(
+            &mut self,
+            arch_params: &[(&str, ParamValue)],
+            plan_params: &[(&str, ParamValue)],
+        ) -> (NodeId, NodeId) {
+            let arch = self.node("building.archetype", arch_params);
+            let plan = self.node("building.plan", plan_params);
+            self.link(arch, "out", plan, "archetype");
+            (plan, arch)
+        }
+    }
+
+    /// The two nodes exist, wear the right wires, and — the load-bearing one —
+    /// `building.plan` outputs a **SCATTER**, so it joins the merge and layer
+    /// chains that already exist rather than needing a third sink input.
+    #[test]
+    fn the_building_kit_is_registered_on_the_scatter_wire() {
+        let reg = pcg_registry();
+        let arch = reg
+            .get("building.archetype")
+            .expect("missing archetype node");
+        let plan = reg.get("building.plan").expect("missing plan node");
+        assert_eq!(arch.category, "building");
+        assert_eq!(plan.category, "building");
+        assert!(arch.inputs.is_empty());
+        assert_eq!(arch.outputs[0].ty, PortType::Named(BUILDING_KEY.into()));
+        assert_eq!(plan.outputs[0].ty, PortType::Named(SCATTER_KEY.into()));
+        // The lot pin takes the SAME span wire the grammar kit produces — which
+        // is what makes a spline-derived lot free rather than a second concept.
+        let lot = plan
+            .inputs
+            .iter()
+            .find(|p| p.name == "lot")
+            .expect("lot pin");
+        assert_eq!(lot.ty, PortType::Named(SPAN_KEY.into()));
+        let a = plan
+            .inputs
+            .iter()
+            .find(|p| p.name == "archetype")
+            .expect("archetype pin");
+        assert_eq!(a.ty, PortType::Named(BUILDING_KEY.into()));
+        // Every shipped palette is offered, in the canonical order.
+        assert_eq!(
+            arch.param("archetype").unwrap().options,
+            ArchetypeId::ALL
+                .iter()
+                .map(|a| a.name().to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A building lowers to a pass carrying every authored param, contributes
+    /// **no rule**, and leaves the document exactly as an empty graph would.
+    #[test]
+    fn a_building_lowers_to_a_pass_beside_an_empty_document() {
+        let mut b = Builder::new();
+        let (plan, _) = b.building(
+            &[
+                ("archetype", ParamValue::Enum("Hotel".into())),
+                ("floors", ParamValue::Int(5)),
+                ("furnish", ParamValue::Bool(false)),
+            ],
+            &[
+                ("name", ParamValue::Text("tower".into())),
+                ("seed", ParamValue::Int(19)),
+                ("size_x", ParamValue::Float(40.0)),
+                ("size_z", ParamValue::Float(22.0)),
+                ("altitude_offset", ParamValue::Float(0.25)),
+                ("ground", ParamValue::Enum("Span".into())),
+            ],
+        );
+        let o = b.node("output.pcg", &[]);
+        b.link(plan, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(lowered.ok, "{:?}", lowered.issues);
+        assert!(lowered.has_buildings());
+        assert_eq!(lowered.buildings.len(), 1);
+        let p = &lowered.buildings[0];
+        assert_eq!(p.name, "tower");
+        assert_eq!(p.archetype, ArchetypeId::Hotel);
+        assert_eq!(p.floors, 5);
+        assert!(!p.furnish);
+        assert_eq!(p.seed, 19);
+        assert_eq!(p.size, glam::DVec2::new(40.0, 22.0));
+        assert_eq!(p.ground, Ground::Span);
+        assert_eq!(p.altitude_offset, 0.25);
+        assert!(p.lot.is_none());
+        assert_eq!(p.layer, "layer");
+        assert!(p.enabled);
+        // The document is what an empty one-layer graph lowers to: a building is
+        // not a scatter rule.
+        assert_eq!(lowered.document.layers.len(), 1);
+        assert!(lowered.document.layers[0].rules.is_empty());
+    }
+
+    /// A connected span becomes the lot, and it is the same `SpanSource` the
+    /// grammar kit produces — no second span concept.
+    #[test]
+    fn a_span_on_the_lot_pin_becomes_the_footprint() {
+        let mut b = Builder::new();
+        let (plan, _) = b.building(&[], &[]);
+        let span = b.node(
+            "grammar.footprint",
+            &[
+                ("size_x", ParamValue::Float(18.0)),
+                ("size_z", ParamValue::Float(12.0)),
+            ],
+        );
+        b.link(span, "out", plan, "lot");
+        let o = b.node("output.pcg", &[]);
+        b.link(plan, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(lowered.ok, "{:?}", lowered.issues);
+        assert!(matches!(
+            lowered.buildings[0].lot,
+            Some(SpanSource::Footprint { size, .. }) if size == glam::DVec2::new(18.0, 12.0)
+        ));
+
+        // A spline works the same way — the closure P19.4's remainder named.
+        let mut b = Builder::new();
+        let (plan, _) = b.building(&[], &[]);
+        let span = b.node("grammar.spline", &[]);
+        b.link(span, "out", plan, "lot");
+        let o = b.node("output.pcg", &[]);
+        b.link(plan, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(lowered.ok, "{:?}", lowered.issues);
+        assert!(matches!(
+            lowered.buildings[0].lot,
+            Some(SpanSource::Spline { entity: None, .. })
+        ));
+    }
+
+    /// Buildings merge and layer exactly like scatters and grammars: a disabled
+    /// layer disables them, and the canvas order is the pass order.
+    #[test]
+    fn buildings_join_the_merge_and_layer_chains() {
+        let mut b = Builder::new();
+        let (b1, _) = b.building(&[], &[("name", ParamValue::Text("first".into()))]);
+        let (b2, _) = b.building(
+            &[("archetype", ParamValue::Enum("Shop".into()))],
+            &[("name", ParamValue::Text("second".into()))],
+        );
+        let s = b.scatter_named("trees", None);
+        let m1 = b.node("scatter.merge", &[]);
+        b.link(b1, "out", m1, "a");
+        b.link(b2, "out", m1, "b");
+        let m2 = b.node("scatter.merge", &[]);
+        b.link(m1, "out", m2, "a");
+        b.link(s, "out", m2, "b");
+        let l = b.node(
+            "layer.layer",
+            &[
+                ("name", ParamValue::Text("town".into())),
+                ("enabled", ParamValue::Bool(false)),
+            ],
+        );
+        b.link(m2, "out", l, "scatter");
+        let o = b.node("output.pcg", &[]);
+        b.link(l, "out", o, "layers");
+        let lowered = b.lower();
+        assert!(lowered.ok, "{:?}", lowered.issues);
+        let names: Vec<&str> = lowered.buildings.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["first", "second"], "canvas order");
+        assert_eq!(lowered.buildings[1].archetype, ArchetypeId::Shop);
+        for p in &lowered.buildings {
+            assert_eq!(p.layer, "town");
+            assert!(!p.enabled, "a disabled layer disables its buildings");
+        }
+        // The scatter beside them is untouched.
+        assert_eq!(lowered.document.layers[0].rules.len(), 1);
+        assert_eq!(lowered.document.layers[0].rules[0].name, "trees");
+    }
+
+    /// Every failure is node-anchored, and only the missing archetype is fatal:
+    /// an unknown archetype NAME is a migration artefact, not an authoring
+    /// mistake, so it warns and falls back.
+    #[test]
+    fn building_diagnostics_are_anchored_and_fail_closed() {
+        // No archetype connected: an error on the plan node, and no pass.
+        let mut b = Builder::new();
+        let plan = b.node("building.plan", &[]);
+        let o = b.node("output.pcg", &[]);
+        b.link(plan, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(!lowered.ok);
+        assert!(lowered.buildings.is_empty());
+        assert!(lowered
+            .issues
+            .iter()
+            .any(|i| i.severity == PcgSeverity::Error
+                && i.node == Some(plan.0)
+                && i.message.contains("Building Archetype")));
+
+        // A wrong node type on the archetype pin errors on THAT node.
+        let mut b = Builder::new();
+        let plan = b.node("building.plan", &[]);
+        let rules = b.node("grammar.rules", &[]);
+        b.g.links.push(Link {
+            from: rules,
+            from_port: "out".into(),
+            to: plan,
+            to_port: "archetype".into(),
+        });
+        let o = b.node("output.pcg", &[]);
+        b.link(plan, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(!lowered.ok);
+        assert!(lowered
+            .issues
+            .iter()
+            .any(|i| i.severity == PcgSeverity::Error && i.node == Some(rules.0)));
+
+        // A wrong node type on the LOT pin errors on that node too.
+        let mut b = Builder::new();
+        let (plan, _) = b.building(&[], &[]);
+        let c = b.node("const.density", &[]);
+        b.g.links.push(Link {
+            from: c,
+            from_port: "out".into(),
+            to: plan,
+            to_port: "lot".into(),
+        });
+        let o = b.node("output.pcg", &[]);
+        b.link(plan, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(!lowered.ok);
+        assert!(lowered.buildings.is_empty());
+        assert!(lowered
+            .issues
+            .iter()
+            .any(|i| i.severity == PcgSeverity::Error && i.node == Some(c.0)));
+
+        // An unknown archetype name WARNS on the archetype node and falls back.
+        // The edit door's `sanitize` resets an out-of-set choice, so the only
+        // way to hold one is a hand-edited or migrated document — which is
+        // exactly the case this branch exists for, and how it is driven here.
+        let mut b = Builder::new();
+        let (plan, arch) = b.building(&[], &[]);
+        b.g.nodes
+            .get_mut(&arch)
+            .expect("archetype node")
+            .params
+            .insert("archetype".into(), ParamValue::Enum("Castle".into()));
+        let o = b.node("output.pcg", &[]);
+        b.link(plan, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(lowered.ok, "an unknown palette is not fatal");
+        assert_eq!(lowered.buildings[0].archetype, ArchetypeId::ALL[0]);
+        assert!(lowered
+            .issues
+            .iter()
+            .any(|i| i.severity == PcgSeverity::Warning
+                && i.node == Some(arch.0)
+                && i.message.contains("Castle")));
+    }
+
+    /// The payload round trip: a building-only graph re-lowers to identical
+    /// passes, and its stored `PcgDocument` is what an empty one-layer graph
+    /// stores — the P19.4 statement, extended to the third generator.
+    #[test]
+    fn a_building_graph_re_lowers_identically_and_stores_an_empty_document() {
+        let mut b = Builder::new();
+        let (plan, _) = b.building(
+            &[("archetype", ParamValue::Enum("Estate".into()))],
+            &[("seed", ParamValue::Int(88))],
+        );
+        let o = b.node("output.pcg", &[]);
+        b.link(plan, "out", o, "scatter");
+        let lowered = b.lower();
+        let payload = crate::asset::PcgAssetPayload::from_graph(&b.g, lowered.document.clone());
+        let bytes = payload.encode().expect("encode");
+        let back = crate::asset::PcgAssetPayload::decode(&bytes).expect("decode");
+        let graph = back.graph().expect("graph");
+        let again = lower_graph(&graph, &pcg_registry());
+        assert_eq!(again.buildings, lowered.buildings);
+        assert_eq!(again.document, lowered.document);
+        assert!(lowered.document.layers[0].rules.is_empty());
     }
 }

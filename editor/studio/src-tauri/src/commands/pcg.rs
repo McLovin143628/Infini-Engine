@@ -541,12 +541,13 @@ pub async fn pcg_evaluate(
 ) -> Result<PcgEvaluateResult, String> {
     // Lower under the store lock.
     let masks = AssetMasks(&assets);
-    let (mut document, grammars, issues, ok) = state.with(|s| {
+    let (mut document, grammars, buildings, issues, ok) = state.with(|s| {
         let doc = s.docs.get(&id).ok_or_else(|| format!("no pcg `{id}`"))?;
         let lowered = lower_graph_with(&doc.graph, &s.registry, &masks);
         Ok((
             lowered.document,
             lowered.grammars,
+            lowered.buildings,
             issue_dtos(&lowered.issues),
             lowered.ok,
         ))
@@ -644,22 +645,28 @@ pub async fn pcg_evaluate(
         };
 
         let mut instances = inf_pcg::evaluate(&document, provider.as_ref(), region);
-        // P19.4: the graph's grammar passes run on the same volume, against the
-        // same height provider, and append after the scatter — a fixed order, so
-        // the cache is a pure function of the content. Everything downstream of
-        // the resolved spans is `inf_pcg::evaluate_grammars`, shared verbatim
-        // with the player's load-time pass; this layer owns only the fetch.
-        instances.extend(inf_pcg::evaluate_grammars(
-            &grammars,
-            &collect_spline_paths(doc.world()),
+        // P19.4/P19.5: the graph's grammar and building passes run on the same
+        // volume, against the same height provider, and append after the scatter
+        // — grammars first, then buildings, a fixed order, so the cache is a
+        // pure function of the content. Everything downstream of the resolved
+        // spans is `inf_pcg::evaluate_grammars` / `inf_pcg::evaluate_buildings`,
+        // shared verbatim with the player's load-time pass; this layer owns only
+        // the fetch.
+        let splines = collect_spline_paths(doc.world());
+        let cx = inf_pcg::GrammarContext {
+            entity: Some(guid),
+            center,
+            extent: DVec2::new(extent.x, extent.y),
+            seed_offset: seed as u64,
+        };
+        let mut generated = inf_pcg::evaluate_grammars(&grammars, &splines, provider.as_ref(), &cx);
+        generated.extend(inf_pcg::evaluate_buildings(
+            &buildings,
+            &splines,
             provider.as_ref(),
-            &inf_pcg::GrammarContext {
-                entity: Some(guid),
-                center,
-                extent: DVec2::new(extent.x, extent.y),
-                seed_offset: seed as u64,
-            },
+            &cx,
         ));
+        instances.extend(generated.instances);
         let baked: Vec<ScatteredInstance> = instances
             .iter()
             .map(|i| ScatteredInstance {
@@ -669,12 +676,22 @@ pub async fn pcg_evaluate(
                 kind: i.kind_index,
             })
             .collect();
+        let solid: Vec<inf_ecs::components::ScatteredSolid> = generated
+            .colliders
+            .iter()
+            .map(|s| inf_ecs::components::ScatteredSolid {
+                center: s.center,
+                half_extents: s.half_extents,
+                rotation: s.rotation,
+            })
+            .collect();
         let placed = baked.len() as u32;
 
         {
             let w = doc.world_mut().world_mut();
             if let Some(mut vol) = w.get_mut::<PcgVolume>(e) {
                 vol.evaluated = baked;
+                vol.set_structures(solid);
             }
         }
         doc.bump_version_for_runtime();

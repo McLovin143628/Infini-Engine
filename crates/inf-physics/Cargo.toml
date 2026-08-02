@@ -24,3 +24,10 @@ glam = { workspace = true }
 inf-ecs = { workspace = true }
 # Entity identity (Guid) keys the deterministic entity↔handle maps.
 uuid = { workspace = true }
+
+[dev-dependencies]
+# P19.5: pins `inf_ecs::ScatteredSolid` against its `inf_pcg::PcgCollider` mirror.
+# Two hand-written copies of one struct is a triplication hazard, so a test
+# converts both ways. Dev-only — the bridge reads the ECS side and never names
+# the PCG one, so the dependency direction stays inf-physics → inf-ecs.
+inf-pcg = { workspace = true }

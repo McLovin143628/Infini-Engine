@@ -156,6 +156,16 @@ fn player_crash_is_isolated_from_the_editor() {
     );
 
     // The panic message is captured for the Output Log.
+    //
+    // `wait_exit` above drained stderr to EOF before returning, which is what
+    // makes this deterministic: process exit and pipe EOF are different events,
+    // and asserting on the capture after only the first is a race that loses
+    // rarely and on a loaded machine — the worst failure rate a test can have.
+    assert!(
+        session.stderr_complete(),
+        "the player's stderr never reached EOF, so this assertion would be \
+         comparing against a truncated capture"
+    );
     let stderr = session.stderr_lines().join("\n");
     assert!(
         stderr.contains("deliberate PIE panic"),

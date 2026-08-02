@@ -38,6 +38,7 @@ inf export --project samples/<name> --out /tmp/<name>-dist
 | [`partitioned-world`](partitioned-world/) | P16.5 (World partition) | A 4×4 grid of 128 m cells whose entities spawn/despawn around a `StreamingSource`, plus the persistent cell. |
 | [`phase16-world`](phase16-world/) | **P16 (the phase gate)** | The composed world: a **wizard-imported** streamed terrain over 8.2 km, a partition on top of it, a **second inline terrain**, and the residency/step budgets. |
 | [`phase18-scatter`](phase18-scatter/) | **P18 (the phase gate)** | The composed frame: standing **meshlet slabs** (sharing vgeom-demo's mesh by GUID) under two-pass HZB occlusion + a bound streaming budget, **GI v2** on a running clock, and **102 400 GPU-scattered instances** with LOD fade. |
+| [`phase19-town`](phase19-town/) | **P19 (the phase gate)** | The composed town: a **biome-painted** terrain, a **spline road** with a solid grammar fence, twelve streamed street lamps on a 128 m partition, and **seven fully enterable, furnished, three-storey buildings — one per archetype** (office, apartment, industrial, house, estate, hotel, shop). |
 
 ## Project templates
 

@@ -56,8 +56,8 @@ pub use dsl::{
 };
 pub use expand::{
     build_spans, derive, evaluate_grammars, evaluate_grammars_in, expand_span, layout, pass_seed,
-    place_corners, FootprintMode, GrammarContext, GrammarPass, Ground, Layout, Slot, SpanSource,
-    LAYOUT_UNITS, MAX_DEPTH, MAX_SLOTS,
+    place_corners, FootprintMode, GrammarContext, GrammarOutput, GrammarPass, Ground, Layout, Slot,
+    SpanSource, LAYOUT_UNITS, MAX_DEPTH, MAX_SLOTS,
 };
 pub use span::{
     euler_deg_to_quat, footprint_perimeter, footprint_rows, yaw_onto, Frame, NoSplines, RowAxis,

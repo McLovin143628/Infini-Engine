@@ -852,6 +852,7 @@ fn the_shipped_passes_are_invariant_under_pool_size() {
                 &height,
                 &cx,
             )
+            .instances
         })
         .collect();
     assert!(runs[0].len() > 30, "only {} instances", runs[0].len());

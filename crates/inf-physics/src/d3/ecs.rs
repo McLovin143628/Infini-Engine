@@ -30,8 +30,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use glam::{DQuat, DVec3};
 use inf_ecs::components::{
     BodyKind3D as SceneBodyKind3D, Collider3D, ColliderShape3DKind,
-    CombineRule as SceneCombineRule, Joint3D, JointKind3D as SceneJointKind3D, RigidBody3D,
-    Transform,
+    CombineRule as SceneCombineRule, Joint3D, JointKind3D as SceneJointKind3D, PcgVolume,
+    RigidBody3D, Transform,
 };
 use inf_ecs::{EcsWorld, Vec3d};
 use uuid::Uuid;
@@ -141,6 +141,11 @@ pub struct PhysicsBridge3D {
     /// `Guid` → its rapier handles. `BTreeMap` gives sorted (deterministic)
     /// iteration for the despawn + write-back passes.
     entities: BTreeMap<Uuid, BodyRecord>,
+    /// Per-`PcgVolume` change stamp for its derived solids (P19.5):
+    /// `guid → (structures_gen, count)`. While both match, the volume's
+    /// colliders are **retained without being re-described** — see
+    /// [`pcg_structure_snaps`].
+    structure_stamps: BTreeMap<Uuid, (u64, usize)>,
     /// Reverse map `collider handle → owning entity Guid`, rebuilt at the end of
     /// every [`sync`](Self::sync) (Wave 3). The collision-event drain resolves
     /// rapier's `ContactEvent3D` collider handles back to entity `Guid`s through
@@ -156,6 +161,7 @@ impl PhysicsBridge3D {
         Self {
             world: PhysicsWorld3D::new(gravity),
             entities: BTreeMap::new(),
+            structure_stamps: BTreeMap::new(),
             collider_to_guid: BTreeMap::new(),
         }
     }
@@ -230,8 +236,48 @@ impl PhysicsBridge3D {
                 joint: joint.and_then(joint_sync),
             });
         }
+        // P19.5: a volume's derived solids. Unchanged volumes are **retained**
+        // rather than re-described — see the doc on `structure_stamps`.
+        let retained = self.gather_structures(world, &mut snaps);
         // `sync` sorts by Guid internally, so the gather order here is irrelevant.
-        self.sync(&snaps);
+        self.sync_retaining(&snaps, &retained);
+    }
+
+    /// Append descriptors for every `PcgVolume` whose solids **changed**, and
+    /// return the guids of the ones that did not (which must survive the despawn
+    /// sweep without being rebuilt).
+    ///
+    /// This is the whole point of the change stamp: a furnished town is ~13 000
+    /// immovable boxes, and describing + sorting them at 60 Hz to learn that a
+    /// wall has not moved is a per-step cost a load-time budget never sees.
+    fn gather_structures(
+        &mut self,
+        world: &EcsWorld,
+        snaps: &mut Vec<EntitySync3D>,
+    ) -> BTreeSet<Uuid> {
+        let mut retained: BTreeSet<Uuid> = BTreeSet::new();
+        let mut live_volumes: BTreeSet<Uuid> = BTreeSet::new();
+        for entity in world.world().iter_entities() {
+            let Some(guid) = entity.get::<inf_ecs::Guid>().map(|g| g.0) else {
+                continue;
+            };
+            let Some(vol) = entity.get::<PcgVolume>() else {
+                continue;
+            };
+            live_volumes.insert(guid);
+            let stamp = (vol.structures_gen, vol.structures.len());
+            if self.structure_stamps.get(&guid) == Some(&stamp) {
+                retained.extend((0..stamp.1).map(|i| pcg_structure_guid(guid, i)));
+                continue;
+            }
+            self.structure_stamps.insert(guid, stamp);
+            snaps.extend(structure_snaps_of(guid, vol));
+        }
+        // A volume that disappeared drops its stamp, so a later volume reusing
+        // the guid cannot inherit a stale one.
+        self.structure_stamps
+            .retain(|g, _| live_volumes.contains(g));
+        retained
     }
 
     /// Reconcile the physics world with a scene snapshot: spawn new
@@ -239,6 +285,13 @@ impl PhysicsBridge3D {
     /// disappeared. Runs in `Guid` order regardless of the input order, so the
     /// result is independent of how the caller gathered the snapshot.
     pub fn sync(&mut self, entities: &[EntitySync3D]) {
+        self.sync_retaining(entities, &BTreeSet::new());
+    }
+
+    /// [`sync`](Self::sync), plus a set of guids that are still alive but were
+    /// deliberately **not** re-described this pass (P19.5's unchanged
+    /// `PcgVolume` solids). They survive the despawn sweep untouched.
+    fn sync_retaining(&mut self, entities: &[EntitySync3D], retained: &BTreeSet<Uuid>) {
         // 1. Sort the snapshot into deterministic Guid order (and drop entities
         //    with neither a body nor a collider — nothing to simulate).
         let mut live: Vec<&EntitySync3D> = entities
@@ -329,7 +382,7 @@ impl PhysicsBridge3D {
         let gone: Vec<Uuid> = self
             .entities
             .keys()
-            .filter(|g| !seen.contains(g))
+            .filter(|g| !seen.contains(g) && !retained.contains(g))
             .copied()
             .collect();
         for guid in gone {
@@ -496,6 +549,65 @@ fn to_phys_combine(r: SceneCombineRule) -> CombineRule {
         SceneCombineRule::Multiply => CombineRule::Multiply,
         SceneCombineRule::Max => CombineRule::Max,
     }
+}
+
+/// The salt that carves the PCG structures' synthetic GUID space out of the
+/// scene's own. Folded with the volume's GUID and the structure's index, it
+/// makes an identity that (a) no authored entity can collide with and (b) is a
+/// pure function of the content, which is what keeps the bridge's `Guid`-ordered
+/// reconciliation deterministic.
+const PCG_STRUCTURE_SALT: u128 = 0x7019_0500_5043_4753_b31f_60e8_9d4e_2c7a;
+
+/// The synthetic identity of structure `index` inside volume `volume`.
+///
+/// Stated as one function so the derivation cannot drift: the bridge is the only
+/// caller today, and a debug view or a save-game hook that ever needs to name
+/// one of these must name it the same way.
+pub fn pcg_structure_guid(volume: Uuid, index: usize) -> Uuid {
+    // A 128-bit mix, not a XOR: XORing an index into a GUID makes two volumes
+    // whose ids differ in the low bits alias each other's structures.
+    let mut x = volume.as_u128() ^ PCG_STRUCTURE_SALT;
+    x ^= (index as u128).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5cec_c5c3);
+    x = x.rotate_left(37) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
+    Uuid::from_u128(x)
+}
+
+/// One static box collider per [`PcgVolume::structures`] entry (P19.5).
+///
+/// **Why this exists at all.** Scattered content has always been render-only: a
+/// `ScatteredInstance` is not an entity, has no `Guid`, and is invisible to the
+/// bridge's world walk. That is right for a million blades of grass and wrong
+/// for a building — "fully enterable" means the floor holds you up and the wall
+/// stops you, which is a statement about colliders, not about geometry. So a
+/// volume's *solid* half is walked here and given synthetic, content-derived
+/// identities.
+///
+/// **Why not real entities.** Spawning one entity per wall panel would put
+/// thousands of derived rows into `.inf_lvl`, need a despawn-before-re-evaluate
+/// pass in two hosts, and make undo mean something new — all to express data
+/// that is already a pure function of the graph and the terrain.
+/// `PcgVolume::structures` is `#[serde(skip)]` derived state on the
+/// `PcgVolume::evaluated` precedent, so **no schema moves in either codec
+/// mirror**.
+///
+/// Every box is **static**: a building does not fall over, and a dynamic body
+/// per wall panel would be a physics bill nobody asked for. Destruction is
+/// Phase 22's, and it will want fracture chunks rather than these.
+fn structure_snaps_of(guid: Uuid, vol: &PcgVolume) -> Vec<EntitySync3D> {
+    vol.structures
+        .iter()
+        .enumerate()
+        .map(|(i, solid)| EntitySync3D {
+            guid: pcg_structure_guid(guid, i),
+            body: None,
+            collider: Some(ColliderDesc3D::new(ColliderShape3D::Box {
+                half_extents: solid.half_extents,
+            })),
+            translation: solid.center,
+            rotation: solid.rotation,
+            joint: None,
+        })
+        .collect()
 }
 
 /// Map a scene [`Collider3D`] onto the facade-local [`ColliderDesc3D`].

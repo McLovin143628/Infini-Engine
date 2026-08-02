@@ -24,6 +24,10 @@
 //! * [`grammar`] — the P19.4 **rule-rewriting grammar**: a rule text DSL, spline
 //!   and footprint spans, and an exact-fill layout that turns them into placed
 //!   modular-mesh instances on the same instancing path as scatter.
+//! * [`building`] — the P19.5 **building & interior grammar**: a footprint
+//!   becomes a floor stack, a room partition, walls with real openings and
+//!   furnished rooms. The 2-D half is its own slice tree; the 1-D half is
+//!   [`grammar`] verbatim (a wall *is* a span).
 //! * [`rules`] — the serializable [`PcgDocument`] rule model + [`evaluate`].
 //! * [`graph`] — the editor node kit over `inf-graph` + [`lower_graph`] (the
 //!   `.inf_pcg` graph → the stable `PcgDocument`; editor preview == runtime).
@@ -43,6 +47,7 @@
 
 pub mod asset;
 pub mod binding;
+pub mod building;
 pub mod fields;
 pub mod grammar;
 pub mod graph;
@@ -55,6 +60,11 @@ pub mod scatter;
 
 pub use asset::{PcgAssetPayload, PcgError};
 pub use binding::{bind_document, biome_seed, BiomeBinding, BiomeGraph, DEFAULT_BIOME_FEATHER};
+pub use building::{
+    archetype, archetypes, evaluate_buildings, evaluate_buildings_in, plans_of, ArchetypeId,
+    BuildingArchetype, BuildingOutput, BuildingParams, BuildingPass, BuildingPlan, Opening,
+    OpeningKind, Rect2, Room, RoomType, Stair, Wall,
+};
 pub use fields::{NoFields, OffsetTerrain, TerrainFields};
 pub use grammar::{
     evaluate_grammars, evaluate_grammars_in, footprint_perimeter, footprint_rows, FootprintMode,
@@ -72,5 +82,6 @@ pub use sampler::{
     Multiply, Noise, SlopeFilter,
 };
 pub use scatter::{
-    scatter_region, scatter_region_in, PcgInstance, Region, RotationMode, ScatterParams,
+    scatter_region, scatter_region_in, PcgCollider, PcgInstance, Region, RotationMode,
+    ScatterParams,
 };

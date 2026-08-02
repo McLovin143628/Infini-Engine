@@ -125,6 +125,60 @@ pub struct PcgInstance {
     pub kind_index: u32,
 }
 
+/// One placed **collision box** — the solid half of a placement, beside
+/// [`PcgInstance`]'s visible half (P19.5).
+///
+/// A scatter pass never produces one: scattered foliage is decoration, and
+/// making a million grass blades solid is not a feature anybody asked for. They
+/// come from grammar modules that declare `collider hx,hy,hz` and from a
+/// building's own structure (slabs, stairs, lintels), which is what turns
+/// "a wall was drawn here" into "you cannot walk through here".
+///
+/// The rotation is a **yaw-only quaternion**, the same shape
+/// [`Frame::rotation`](crate::grammar::span::Frame::rotation) produces, and it is
+/// stored as a quaternion rather than as an angle **precisely so no `atan2` is
+/// ever needed**: recovering an angle from the frame would put `std` trig on the
+/// committed-placement path, which the P14 law forbids. Every query this type
+/// answers about its own orientation is a rational function of the quaternion's
+/// components (see [`xz_half_extents`](Self::xz_half_extents)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PcgCollider {
+    /// World-space centre of the box.
+    pub center: DVec3,
+    /// Half-extents in metres, in the box's own (rotated) frame.
+    pub half_extents: DVec3,
+    /// Yaw-only orientation.
+    pub rotation: DQuat,
+}
+
+impl PcgCollider {
+    /// The XZ half-extents of this box's **axis-aligned bounds**.
+    ///
+    /// No trigonometry: for a yaw-only quaternion `(0, s, 0, c)` the rotation
+    /// angle satisfies `cos θ = 1 − 2s²` and `sin θ = 2sc`, both exact rational
+    /// expressions in the stored components — and both *exactly* `1` and `0` for
+    /// the identity, which is the overwhelmingly common case (a v1 building's
+    /// walls all run along a world axis). An `atan2` here would be `std` trig on
+    /// committed data and would also lose that exactness.
+    pub fn xz_half_extents(&self) -> (f64, f64) {
+        let (s, c) = (self.rotation.y, self.rotation.w);
+        let (cos_t, sin_t) = ((1.0 - 2.0 * s * s).abs(), (2.0 * s * c).abs());
+        (
+            self.half_extents.x * cos_t + self.half_extents.z * sin_t,
+            self.half_extents.x * sin_t + self.half_extents.z * cos_t,
+        )
+    }
+
+    /// The `[min, max]` world-Y band this box occupies.
+    #[inline]
+    pub fn y_band(&self) -> (f64, f64) {
+        (
+            self.center.y - self.half_extents.y,
+            self.center.y + self.half_extents.y,
+        )
+    }
+}
+
 #[inline]
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t

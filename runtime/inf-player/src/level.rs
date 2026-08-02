@@ -753,15 +753,22 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
 /// * Evaluation runs **once at load** (terrain is static in sim v1); a moving
 ///   camera / streaming re-eval is a documented follow-up.
 ///
-/// ## P19.4 grammar passes
+/// ## P19.4 grammar passes and P19.5 buildings
 ///
-/// A graph may also author grammar passes, which lower beside the document
-/// rather than into it. They evaluate here, on the same volume, against the same
-/// height provider, and their instances are appended **after** the scatter
-/// instances — a fixed order, so the cache is a pure function of the content.
-/// Everything downstream of the resolved spans is
-/// [`inf_pcg::evaluate_grammars`], shared verbatim with the editor's
+/// A graph may also author grammar passes and building passes, which lower
+/// beside the document rather than into it. They evaluate here, on the same
+/// volume, against the same height provider, and their instances are appended
+/// **after** the scatter instances — grammars first, then buildings, a fixed
+/// order, so the cache is a pure function of the content. Everything downstream
+/// of the resolved spans is [`inf_pcg::evaluate_grammars`] /
+/// [`inf_pcg::evaluate_buildings`], shared verbatim with the editor's
 /// `pcg_evaluate`; all this function owns is the fetch.
+///
+/// The **solid** half of that evaluation lands on
+/// [`PcgVolume::structures`](inf_ecs::components::PcgVolume::structures), which
+/// the physics bridge turns into static box colliders — the reason a
+/// grammar-built building is enterable rather than merely drawn. Like
+/// `evaluated`, it is derived state and is never serialized.
 pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetPayload>) {
     if pcgs.is_empty() {
         return;
@@ -805,6 +812,7 @@ pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetP
         guid: Uuid,
         document: inf_pcg::PcgDocument,
         grammars: Vec<GrammarPass>,
+        buildings: Vec<inf_pcg::BuildingPass>,
         center: DVec3,
         extent: inf_ecs::math::Vec2d,
         seed: u32,
@@ -816,7 +824,7 @@ pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetP
                 let vol = w.get::<PcgVolume>(e)?;
                 let graph_guid = vol.graph?;
                 let payload = pcgs.get(&graph_guid)?;
-                let (document, grammars) = lowered_program(payload);
+                let (document, grammars, buildings) = lowered_program(payload);
                 let center = w
                     .get::<GlobalTransform>(e)
                     .map(|g| g.translation())
@@ -827,6 +835,7 @@ pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetP
                     guid,
                     document,
                     grammars,
+                    buildings,
                     center,
                     extent: vol.extent,
                     seed: vol.seed,
@@ -857,7 +866,7 @@ pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetP
         // One closure per branch so the scatter and the grammar see the SAME
         // height provider — a grammar snapping to a different ground than the
         // scatter beside it would be invisible until somebody walked the level.
-        let mut raw = match &terrain {
+        let (mut raw, solids) = match &terrain {
             Some((data, o)) => {
                 let data = data.clone();
                 let o = *o;
@@ -866,24 +875,28 @@ pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetP
                         .map(|h| h + o.y)
                 });
                 let mut v = inf_pcg::evaluate(&job.document, &provider, region);
-                v.extend(inf_pcg::evaluate_grammars(
-                    &job.grammars,
+                let mut g = inf_pcg::evaluate_grammars(&job.grammars, &splines, &provider, &cx);
+                g.extend(inf_pcg::evaluate_buildings(
+                    &job.buildings,
                     &splines,
                     &provider,
                     &cx,
                 ));
-                v
+                v.extend(g.instances);
+                (v, g.colliders)
             }
             None => {
                 let provider = FnHeight::new(|_, _| Some(0.0));
                 let mut v = inf_pcg::evaluate(&job.document, &provider, region);
-                v.extend(inf_pcg::evaluate_grammars(
-                    &job.grammars,
+                let mut g = inf_pcg::evaluate_grammars(&job.grammars, &splines, &provider, &cx);
+                g.extend(inf_pcg::evaluate_buildings(
+                    &job.buildings,
                     &splines,
                     &provider,
                     &cx,
                 ));
-                v
+                v.extend(g.instances);
+                (v, g.colliders)
             }
         };
         let baked: Vec<ScatteredInstance> = raw
@@ -895,9 +908,18 @@ pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetP
                 kind: i.kind_index,
             })
             .collect();
+        let solid: Vec<inf_ecs::components::ScatteredSolid> = solids
+            .iter()
+            .map(|s| inf_ecs::components::ScatteredSolid {
+                center: s.center,
+                half_extents: s.half_extents,
+                rotation: s.rotation,
+            })
+            .collect();
 
         if let Some(mut vol) = world.world_mut().get_mut::<PcgVolume>(job.entity) {
             vol.evaluated = baked;
+            vol.set_structures(solid);
         }
     }
 }
@@ -1057,13 +1079,19 @@ fn lowered_document(payload: &PcgAssetPayload) -> Option<inf_pcg::PcgDocument> {
 /// A payload with no stored graph (a v1, document-only `.inf_pcg`) carries no
 /// grammar — the passes live in the authored graph, which is the source of
 /// truth, and the document mirror deliberately never grew a field for them.
-fn lowered_program(payload: &PcgAssetPayload) -> (inf_pcg::PcgDocument, Vec<GrammarPass>) {
+fn lowered_program(
+    payload: &PcgAssetPayload,
+) -> (
+    inf_pcg::PcgDocument,
+    Vec<GrammarPass>,
+    Vec<inf_pcg::BuildingPass>,
+) {
     match payload.graph() {
         Some(g) => {
             let lowered = inf_pcg::lower_graph(&g, &inf_pcg::pcg_registry());
-            (lowered.document, lowered.grammars)
+            (lowered.document, lowered.grammars, lowered.buildings)
         }
-        None => (payload.document.clone(), Vec::new()),
+        None => (payload.document.clone(), Vec::new(), Vec::new()),
     }
 }
 

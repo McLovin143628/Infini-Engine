@@ -104,7 +104,7 @@ const STEPS_PER_FRAME: usize = 60;
 /// budget rather than minting another one. If `frame_budget.rs` ratchets its
 /// number down, this copy follows it down; it may never be raised independently,
 /// and it may never be raised at all.
-const FRAME_BUDGET_MS: f64 = 33.0;
+use inf_core::FRAME_BUDGET_MS;
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")

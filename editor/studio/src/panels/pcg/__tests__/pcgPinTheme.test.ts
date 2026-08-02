@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import { pcgCategoryColor, pcgPinColor } from "../pcgPinTheme";
 
 /** Every `PortType::Named` key `inf_pcg::graph` declares, in registry order. */
-const WIRES = ["density", "scatter", "layer", "span", "rules"] as const;
+const WIRES = ["density", "scatter", "layer", "span", "rules", "building"] as const;
 
 /** Every `NodeDef::category` the PCG registry uses, in registry order. */
 const CATEGORIES = [
@@ -21,6 +21,7 @@ const CATEGORIES = [
   "combine",
   "scatter",
   "grammar",
+  "building",
   "layer",
   "output",
 ] as const;
@@ -56,9 +57,11 @@ describe("pcgCategoryColor", () => {
         `${category} fell through to the unknown-category tint`,
       ).not.toBe(CATEGORY_FALLBACK);
     }
-    // Grammar is visually distinct from scatter — they are sibling generators
-    // and a canvas mixing both should not read as one block.
+    // The three generator families are visually distinct — a canvas mixing
+    // scatter, a grammar and a building should not read as one block.
     expect(pcgCategoryColor("grammar")).not.toBe(pcgCategoryColor("scatter"));
+    expect(pcgCategoryColor("building")).not.toBe(pcgCategoryColor("grammar"));
+    expect(pcgCategoryColor("building")).not.toBe(pcgCategoryColor("scatter"));
   });
 
   it("falls back for an unknown category", () => {

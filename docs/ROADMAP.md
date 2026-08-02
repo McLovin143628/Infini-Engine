@@ -1109,7 +1109,7 @@ material functions, multi-viewport, PIE player options.
 
 ---
 
-## 12. Next-Gen Wave — Phases 16–25 (planned 2026-07-31; **P16–P18 COMPLETE**)
+## 12. Next-Gen Wave — Phases 16–25 (planned 2026-07-31; **P16–P19 COMPLETE**)
 
 The 16-phase master plan (§6) and UE-Parity Wave 1 (§11) are complete and CI-green: the engine
 now does what a mature traditional engine does. This wave pushes past that workflow —
@@ -3533,6 +3533,373 @@ Starting point: no biome, grammar, or interior concept exists; erosion discards 
 sediment state; the `MaskImage` sampler has no graph node; lowering is single-rule even though
 `PcgDocument` already models layers × rules × weighted kinds.
 
+> **STATUS: Phase 19 COMPLETE** (2026-08-02) — **local gates green; CI pending push.** (Written
+> with the commit rather than after the CI run, like Phases 16–18's, and saying so rather than
+> implying a green run that has not happened.)
+>
+> **The five batches, in one line each.** **P19.1** stopped erosion discarding its story —
+> flow / deposition / wear accumulators through the CPU reference, the WGSL mirror, tile
+> persistence, both scene codecs and a PNG16 export, with `Σ deposition − Σ wear == Σ Δb` as
+> the conservation gate. **P19.2** let authors paint *where the world is* — a `BiomeSet` asset,
+> per-sample biome ids sparse on the splat-weight pattern, a paint tool cloning the splat seam.
+> **P19.3** made the two halves do something — per-biome `.inf_pcg` dispatch over the region an
+> id owns, the deferred `mask.image` node, multi-rule × multi-layer lowering, and data-map
+> samplers over P19.1. **P19.4** answered *what sequence of pieces goes along this line* — a
+> rule-rewriting grammar DSL, spline and footprint spans, and an exact-fill layout that turns
+> them into placed modular-mesh instances on scatter's own instancing path. **P19.5** answered
+> *what stands on this lot* — a footprint becomes a floor stack, rooms, walls with real
+> openings, stairs and furniture, in seven archetypes, and you can walk into all of them.
+>
+> **THE SCHEMA ANSWER FOR P19.5: NO — nothing bumps. Scene stays v16, `.inf_pcg` stays v2, no
+> MIRROR moved.** The batch needed two new pieces of per-volume state — the solid boxes a
+> building's structure is, and the building passes a graph lowers to — and neither reached the
+> bytes. `PcgVolume::structures` is `#[serde(skip)] #[reflect(ignore)]` on the exact
+> `PcgVolume::evaluated` precedent: derived from the graph and the terrain, both of which every
+> loading host already has, and pinned by the component's own round-trip guard (the serialized
+> form must not contain the word). `LoweredPcg::buildings` rides beside the document, exactly
+> where P19.4 put `grammars`, because `PcgDocument` is the frozen v2 wire and bincode is
+> positional. **Only what reaches the bytes can force a bump, and this reaches none.** Phase 19
+> spent its one permitted bump on P19.1/P19.2 (v15, then v16) and P19.3/P19.4/P19.5 each spent
+> nothing.
+>
+> **THE DIMENSIONAL SPLIT — the design decision the whole batch turns on.** P19.4's grammar is
+> **one-dimensional**: a rule text expands along an arc length. A building is **two-dimensional
+> in plan and one-dimensional per wall**, and `crates/inf-pcg/src/building/` is exactly that
+> split rather than a second grammar. The 2-D half is a deterministic slice tree
+> (`partition.rs`); the 1-D half is P19.4 **verbatim** — a wall *is* a
+> `Span`, `assemble.rs` hands each run to `expand_span`, and everything already proved about
+> that path (the exact fill, the counter-hashed alternatives, the truncation policy, the
+> `atan2`-free orientation) applies because it is the same function. Nothing here
+> re-implements a layout. The archetype's wall palette is *authored in the same DSL a user
+> types*, parsed by the same parser, so a palette is not a privileged dialect — asserted for
+> all seven.
+>
+> **THE ENTERABILITY INVARIANT, in three parts, all machine-checked.** "Fully enterable" is not
+> a screenshot; it is three statements a `BuildingPlan` answers about itself.
+> 1. **Rooms connect.** Every room on a floor is reachable from every other through doors.
+> 2. **Floors connect to the OUTSIDE.** Exactly one exterior door is placed on the ground
+>    floor, and the gate's walk starts there — through interior doors, up stair cores. Without
+>    this a building can have a perfectly connected room graph and still be sealed, which is
+>    the failure a "rooms are connected" assertion alone would miss. The gate also *severs* the
+>    flights and asserts the upper floors become unreachable, so the walk cannot be passing for
+>    some other reason.
+> 3. **Openings are clear.** No collider — wall module, slab, lintel, parapet, stair tread or
+>    piece of furniture — intrudes into a door's void.
+>
+> **AN OPENING IS THE ABSENCE OF A WALL RUN, NEVER A BOOLEAN CUT.** A wall carrying openings is
+> emitted as the intervals *between* them, each expanded independently, plus a lintel above and
+> (for a window) a parapet below. There is no subtraction and no "delete the modules that
+> overlap the door" pass, so a collider cannot survive inside a doorway by accident: part 3
+> above is a check on arithmetic, not a hopeful assertion about a mesh operation.
+>
+> **AND PART 3 HAS AN ANTI-TAUTOLOGY CONTROL, because the first implementation was vacuous.**
+> `opening_is_clear` built its void from a `thickness` of `0.0` — a 2 µm band — and then shrank
+> it by the caller's margin on **every** axis. That inverts the thin axis, and
+> `Rect2::intersection`'s `max > min` test can never succeed on an inverted rectangle, so *every*
+> solid read as clear: the enterability arm passed for a building that was one solid block.
+> Three things came out of that:
+> * the margin now shrinks the void **along the run and in Y only** — the two axes where a
+>   legitimate touch happens (a wall run ends exactly at the jamb; a slab's top face is exactly
+>   the sill) — and never across the wall, where anything present is by definition *in the
+>   doorway*;
+> * the void is the **full wall thickness**, taken from the archetype rather than passed in, so
+>   no caller can pass a degenerate one;
+> * both the unit suite and the gate now drop a **slab through the whole building and require
+>   every opening to report blocked**. An assertion of the form "nothing is here" is worthless
+>   if the predicate cannot say *no*, and that control is what keeps it from silently disarming
+>   again. Mutation-verified: restoring the old arithmetic fails it.
+>
+> Making the void real also surfaced two genuine intrusions the vacuous version had hidden, and
+> both are fixed at the source rather than papered over. **A stair flight ran wall-to-wall**, so
+> a tread stood in the doorway of every room opening onto the stairwell — the flight is now inset
+> from the core by the wall thickness, which is also what a real stair has. **Furniture was
+> placed by testing its CENTRE**: a bed is a metre deep, so its centre could clear a doorway by
+> more than the door is wide while its back stood squarely in the hole. Placement now tests the
+> piece's **footprint** against the opening voids themselves — the same rectangles the invariant
+> tests — so a rejected piece cannot later fail the assertion. The `DOOR_JAMB` widened from
+> 0.15 m to **0.4 m** for the related reason that a module on the *perpendicular* wall straddles
+> its own line and reaches `collider.x` along this run; 0.4 is wider than the widest cross
+> half-extent any palette declares, and the palette gate now asserts both halves of that
+> sentence.
+>
+> **THE CONNECTIVITY PROOF, and what it does *not* claim.** Every floor is cut the same way —
+> `[slab | core strip | slab]`, the strip split into `[stair | corridor]`, the slabs split
+> recursively on their **longer** axis (never a hashed axis: hashing it makes slivers) at a
+> counter-hashed fraction clamped so both halves clear `min_room`. Then: across any split, both
+> sides' leaves tile the *same* interval, and the first leaf on each side starts at the same
+> coordinate, so they overlap by at least `min_room`; `min_room ≥ 2 · door_width` is a palette
+> invariant, so that overlap always hosts a **full-width** door; by induction the door-capable
+> adjacency graph is connected. What it deliberately does **not** claim is that every pair of
+> touching rooms shares a door-width wall — two leaves whose boundaries nearly align share a
+> sliver, and `connect` simply does not treat a sliver as an edge rather than narrowing a door
+> to fit one. A proof that is never machine-checked is a comment, so the finished plan is
+> re-checked anyway, per floor, for every archetype.
+>
+> **THE CORE CARVE HAS THREE REGIMES, because halving a room that will not fit is always
+> wrong.** The strip's *position* gives as the plate narrows, never the slabs' size:
+> `slack ≥ 2·min_room` is double-loaded (a slab either side); `min_room ≤ slack < 2·min_room` is
+> **single-loaded** (the strip hard against a hashed edge, one slab carrying the whole slack);
+> below that the strip swallows the leftover and the floor is just `[stair | hall]`. The first
+> implementation padded by `min(min_room, slack/2)`, which put *two* sub-minimum slivers on any
+> ordinary narrow lot — a 12 × 6 m house gave two 1.90 m slabs against a 2.6 m minimum. Two
+> related corrections came with it: the strip is sized by **what its leftover becomes** (a
+> corridor may be narrower than a room; a non-corridor archetype's hall may not, and an
+> industrial floor was getting a 3.2 m "workshop" against an 8 m minimum), and a **single-storey
+> building merges its stair rectangle into the hall** rather than demoting it to an ordinary room
+> that `stair_size` may legitimately have sized below the minimum. `min_room` is now swept over
+> nine lot shapes × five seeds × seven archetypes, with the reproduced cases named in the test.
+> The two structural rooms — stair and corridor — are **exempt by design**, and
+> `BuildingArchetype::min_room` says so: a 2.2 m stairwell in a house is right, they are not
+> products of a split, and the connectivity proof (which is about split leaves) does not rest on
+> them.
+>
+> **STAIRS ALIGN BY CONSTRUCTION, NOT BY SEARCH.** The obvious implementation — partition each
+> floor, then look for the room above that overlaps the stair below — needs a tolerance, fails
+> when the partitions disagree, and answers differently per seed. So the core strip is drawn
+> from the **building** hash with no floor index folded in, and every storey is partitioned
+> around the same rectangle. Alignment is then a property of the arithmetic; the gate asserts
+> the stair room's rect is bit-identical on every storey, and the corridor and risers are
+> vertically continuous for free. A single-storey building has no core at all — its stair
+> rectangle becomes an ordinary room — and a lot too small to host a core is forced to one
+> storey, because a floor you cannot reach is not a floor.
+>
+> **THE COLLIDER DECISION: scattered content had none, and buildings needed them.** The audit
+> was unambiguous — `PcgVolume.evaluated` is consumed at three render projectors and by nothing
+> in `inf-physics`; a `ScatteredInstance` is not an entity, has no `Guid`, and the bridge's
+> world walk keys on exactly that. Scattered content was, categorically, walk-through. Three
+> options were weighed and the middle one taken:
+> * **Real ECS entities per wall panel** — thousands of derived rows in `.inf_lvl`, a
+>   despawn-before-re-evaluate pass in two hosts, and undo meaning something new, all to express
+>   data that is already a pure function of the graph and the terrain. Rejected.
+> * **`PcgVolume::structures`, derived and unserialized** (taken): one `ScatteredSolid` per
+>   solid box, and `PhysicsBridge3D::sync_from_world` walks them into static box colliders under
+>   synthetic content-derived GUIDs (`pcg_structure_guid` — a 128-bit mix, not a XOR, so two
+>   volumes cannot alias each other's structures). One bridge site serves the editor and the
+>   player. Zero schema movement, zero projector-mirror movement.
+> * **Doing nothing and calling the buildings "enterable"** — a diagram, not a feature.
+>
+> **And the decision is gated in the simulation, not only in the data.**
+> `crates/inf-physics/tests/pcg_structures_3d.rs` is where "the buildings have colliders" stops
+> being unfalsifiable: two derived solids become two **static** rapier colliders at the
+> transforms they declare; a dropped solid despawns its body (so re-evaluating a volume cannot
+> leak); the synthetic GUIDs are pure and do not alias across volumes; a dynamic body dropped on
+> a structure **lands on it** instead of falling through — the pre-P19.5 behaviour, stated as a
+> test. Mutation-verified: deleting the one new line in `sync_from_world` fails three of them.
+> Without this suite the batch's 13 000 "colliders" were ECS records nothing had shown reaching
+> rapier.
+>
+> **The per-fixed-step cost, found and fixed.** `sync_from_world` runs every fixed step at 60 Hz
+> over the whole world, and the first version re-described and re-sorted all ~13 000 immovable
+> boxes each time — a regression the *load-time* budget arm could never see. Measured on the
+> committed town: **11.62 ms/step against a 16.7 ms 60 Hz budget.** The fix is a change stamp
+> (`PcgVolume::structures_gen`, bumped by `set_structures`; the bridge retains an unchanged
+> volume's colliders rather than rebuilding them) — the same version-stamp shape `SceneDoc` and
+> the terrain tiles already use. Measured after: **4.94 ms/step**, 6.7 ms of the budget
+> reclaimed. Both figures are printed by the gate arm that measures them, and the retention is
+> pinned by a test that requires the *same handles* to survive twenty no-change syncs.
+>
+> The mechanism is the DSL's one P19.5 addition: `collider hx,hy,hz` on a module declaration,
+> **opt-in** (a P19.4 fence that never asked to be solid must not silently start blocking the
+> road it follows), rejected at parse time if any half-extent is non-positive, and oriented by
+> the **slot yaw only** — half-extents are stated in the slot frame, so rotating them by an
+> authored euler would mean the numbers no longer describe what the author typed. Furniture is
+> solid too, deliberately: a furnished building whose desks you walk through is worse than one
+> whose doors you cannot, and it makes the door-clearance rule *gated* rather than cosmetic.
+>
+> **The process note: this crossed the batch's stated file boundary, and there is a memo.**
+> P19.5 was scoped to `inf-pcg` + `inf-ecs` (read-mostly) + the runtime/editor/sample surface;
+> `crates/inf-physics` was not on the list and was modified anyway (~70 lines). §12's doctrine is
+> that deviations require a memo rather than silence, so
+> **`docs/memos/p19-5-physics-scope-deviation.md`** records what was done, the three options
+> weighed, and — the part worth naming — that the option the boundary *literally permitted* was
+> to ship the buildings render-only and call them enterable. A scope boundary exists to keep a
+> batch reviewable, not to license a feature that does not work. The memo also records the
+> per-fixed-step regression the excursion introduced and the change stamp that fixed it, because
+> a crate the batch was not scoped for is exactly where a per-frame cost hides.
+>
+> **The `PcgCollider` carries a quaternion, not an angle, and that is the P14 law again.**
+> Recovering a yaw from a span frame would need `atan2` on committed placement data. Instead
+> every orientation query is a rational function of the stored components: for a yaw-only
+> `(0, s, 0, c)`, `cos θ = 1 − 2s²` and `sin θ = 2sc` — exactly `1` and `0` at the identity,
+> which is every wall a v1 building has, so a clearance predicate compares exact bounds.
+>
+> **The seven palettes are code-shipped constants declaring PRIMITIVES, and that is the honest
+> v1.** Office, apartment, industrial (factory/warehouse), house, estate, hotel, shop: each a
+> grammar text (module palette + wall rules) plus a table of plan parameters, room weights and
+> furniture sets. Every module declares **no mesh GUID**, so a building needs no imported art to
+> exist — it is boxes with honest dimensions and honest colliders, which is what "enterable"
+> requires and what an engine can ship without a licence question. A palette entry gains
+> `mesh <guid>` the day a project has one, with no code change. They are constants rather than
+> assets because an archetype has no identity a user edits yet; making it an asset kind would
+> buy a `.inf_barch` format, a sidecar, a migration ladder and a Content Drawer glyph before
+> anybody has asked to author one. The seam is ready (plain data, one lookup) and the deferral
+> is stated rather than discovered. Their *consistency* is gated, not just their existence:
+> `min_room ≥ 2 · door_width`, a door fits under a storey, a window band fits, a corridor takes
+> a door — the preconditions the connectivity proof rests on.
+>
+> **The node family is the grammar kit's shape one level up.** `building.archetype` (a
+> definition node) → `building.plan` (an expander), joined by one `Named("building")` wire —
+> the same *definition + expander* pair `grammar.rules → grammar.expand` already is, and for the
+> same reason: one archetype can feed several planners. `building.plan` **outputs a SCATTER**,
+> so it joins the existing `scatter.merge` / `layer.layer` chains with no third merge node, no
+> third sink input, and a disabled layer disables its buildings for free. **No new `PortType`
+> variant** — P19.4's argument, unchanged.
+>
+> **The lot pin closes P19.4's own remainder.** P19.4 noted that a biome is a painted *region*
+> and a grammar needs a *span*, and named "footprints-from-a-region" as the natural closure.
+> `building.plan`'s `lot` pin takes the **same SPAN wire** `grammar.footprint` and
+> `grammar.spline` produce, and uses its XZ bounding box — so a spline-derived lot works with no
+> new concept. Unconnected, it falls back to the node's own size, then to the evaluating
+> volume's extent (the P19.4 footprint default). P19.2's `structure_hint` — declared then as
+> inert data "because it is what P19.5 will ask a biome for" — is answered too: it names a real
+> `ArchetypeId`, gated, and is **advisory**, because a biome owns a region and a building needs
+> a lot.
+>
+> **A building levels its site.** Every Y derives from one `base_y`, sampled once at the
+> footprint centre by the evaluation site. Sampling the terrain per module — the scatter idiom,
+> and the right one for a fence — would make a building's floors follow the hill, which is not a
+> building. `Ground::Terrain` fails **closed**: no ground under the footprint centre means no
+> building, not a building at y = 0.
+>
+> **THE STREAMING FINDING, stated rather than hidden.** The sample's seven lots and its road all
+> carry `AlwaysLoaded`, and the reason is a real engine property: **PCG evaluation is a
+> load-time pass.** `evaluate_pcg_volumes` runs once over the world the level builder produced;
+> cell streaming spawns entities *afterwards* and nothing re-runs evaluation for them, so a
+> `PcgVolume` binned into a grid cell would stream in and stay empty — a building lot with no
+> building on it. That is the standing P10.6 remainder, restated by P19.4 and unchanged here; a
+> batch that hid it by never streaming a volume would have hidden it. The level's *streamed*
+> content is therefore twelve street lamps, which bin by position and give the partition arm
+> something real to be about, and what the gate asserts about the buildings is the property that
+> survives the gap: every instance a lot places lies inside the lot's own footprint, so the day
+> evaluation follows streaming the content is already in the right cell. A building larger than
+> a cell would still be one entity in one cell; at the sample's deliberately small 128 m cell a
+> 44 m lot fits comfortably, and a 400 m megastructure would want a larger cell or the same
+> declaration — a content decision the engine should not make.
+>
+> **THE PHASE 19 GATE** (`runtime/inf-player/tests/phase19_gate.rs`, over the committed
+> `samples/phase19-town`: a partitioned 128 m-cell level on a biome-painted four-tile terrain, a
+> spline road with a **solid** grammar fence, twelve streamed lamps, and **seven fully furnished
+> three-storey buildings, one per archetype**, 15 451 instances and 13 204 colliders).
+> **(a) determinism** — two fresh loads agree on the whole trace: the population *and the
+> solids* (a wall that renders in the same place and collides in a different one is the specific
+> failure this batch could introduce) *and* the partition's cell directory; plus the shipped
+> content's own building passes are invariant at 1/2/4/8 workers through the real
+> `evaluate_buildings_in` seam. **(b) cooked == uncooked** — pack and dev-dir, bit for bit on
+> both halves; and the cook reaches all eight `.inf_pcg` graphs plus the biome set from the level
+> alone. **(c) PIE == shipping** — bit for bit on the P19.4 `bits()` standard, extended to a
+> `solid_bits()` sibling. **(d) ENTERABILITY** — the headline, for **every** archetype: rooms
+> connected per floor, every door and window void clear of the colliders the *pack actually
+> shipped*, every floor reachable from outside, the core bit-identical per storey, and the
+> severed-stairs control. **(e) partition** — every lamp is in exactly the cell `cell_of` puts
+> it in, *exactly* the lamps stream (a lot that lost its marker shows up here), and every lot's
+> instances stay inside its footprint. **(f) budget** — the whole town builds in ~8 ms against
+> the 33 ms composed-frame budget, no new ratchet constant.
+>
+> Beside it, `grammar_span_mirror.rs` grew two needles — `inf_pcg::evaluate_buildings(` and
+> `vol.structures =` — because a host that called the first and skipped the second would draw
+> the building and leave it walk-through, which is the exact failure "enterable" names.
+>
+> **Tests.** `inf-pcg::building::palettes` (all seven parse with the *author's* parser; every
+> module the assembler and the furniture tables look up by name resolves; the plan parameters
+> are self-consistent — the proof's own preconditions); `::building::partition` (a partition
+> **tiles** its plate exactly with no overlaps, over every archetype × four plate shapes; no room
+> falls below `min_room`; the adjacency graph is connected and **so is the door-capable
+> subgraph**; corner contact is not adjacency; walls cover interiors and the plate boundary with
+> the perimeter conserved; purity and seed-sensitivity; the core fraction does not depend on a
+> floor); `::building::plan` (**every archetype plans a connected, enterable building** over four
+> seeds; the core is bit-identical on every storey; each floor tiles the footprint; a lot too
+> small for a core is single-storey; a degenerate lot plans nothing rather than panicking;
+> openings are disjoint, inside their runs, and under the slab above; the storey override and
+> the drawn range); `::building::assemble` (**no solid ever blocks a doorway**, and none blocks a
+> window band; floors are slabs and the stairwell is a void; a flight lands **exactly** on the
+> floor above; purity + pool-size invariance; unfurnished is a subset of furnished; furniture
+> keeps out of door swings; everything stands inside the footprint; a building has substance);
+> `::building::pass` (the lot's three-way fallback; a **spline** span becomes a lot; terrain
+> datum and fail-closed over a hole; pool-size invariance; the volume seed decorrelates two
+> volumes and is a different space from the grammar's; `plans_of` matches what evaluation
+> builds); `::grammar::dsl` (a collider is optional and round-trips; a degenerate one is rejected
+> **at its value**, with the anchor asserted); `::grammar::expand` (a collider declaration places
+> a solid beside its instance, scaled, at the slot yaw and **not** the authored euler; a
+> collider-free grammar places none); `::graph` (the kit's wires and the SCATTER output; a
+> building lowers to a pass beside an **empty** document; a span on the lot pin; merge and layer
+> chains with the toggle; diagnostics anchored and failing closed, including the unknown-palette
+> warning driven the only way it can occur — a hand-edited document, since the edit door's
+> `sanitize` resets an out-of-set choice; the payload round trip). Frontend: `pcgPinTheme.test.ts`
+> gained the `building` wire and category, and now pins all three generator families as visually
+> distinct. **42 goldens byte-identical, none re-blessed** — a building is instances and boxes,
+> not pixels.
+>
+> **Human-verified remainders (the honest ledger).** Everything below is *engineering-complete
+> and machine-gated*; what a machine cannot check is stated as itself.
+> * **The subjective bar: "do the buildings look good?"** They are boxes. Every dimension is
+>   honest, every opening is where a door goes, and the plans read as plans — but until the
+>   kind→mesh gap closes (below) a viewer sees placeholder cubes, and nobody has walked one of
+>   these interiors on a screen and said "yes, that is a hotel". That judgement is a human pass,
+>   and it has not happened.
+> * **Nobody has actually walked into one in PIE.** The colliders are real, the bridge builds
+>   them, and the geometry-vs-collider agreement is gated — but a character controller has not
+>   been driven through a doorway and up a flight by a person. CI does not walk.
+> * **The visual passes for P19.1–P19.3** — the erosion data-map overlays, the biome paint tool's
+>   feel, the biome-overlay view mode — are unchanged human remainders from those batches.
+> * **The Phase 19 demo recording.**
+>
+> **THE DEFERRED LEDGER, swept from all five batches.** Nothing below is a bug; each is a
+> decision with a stated reason.
+> * **P19.1** — a **thermal channel** as a fourth data map (excluded so the conservation
+>   identity stays exact); the **coarse-page data maps read zeros above level 0** (P19.3 landed
+>   the decimation rules; the levels themselves are still unpopulated for legacy pyramids); the
+>   **bless-guard asymmetry** (`INF_BLESS_FIXTURES` means *any value* in the editor codec and
+>   *exactly `"1"`* in `inf-scene` — always use `=1`); **`export_data_map` writes to a derived
+>   path** (`Content/DataMaps/<Entity>_<map>.png`, because the editor's Tauri capability set has
+>   no save dialog — a user-chosen destination needs `dialog:allow-save` and is deferred with it).
+> * **P19.2** — **coarse LOD pages carry no biome ids**, so a zoomed-out clipmap ring reads
+>   *unassigned*; **`splat_layer` is declared but never applied** (a biome knows which terrain
+>   layer it shades as and nothing reads it; making it automatic would let painting a biome
+>   destroy authored splat work, so an explicit "apply biome splat" action is the follow-up);
+>   **a shipped player draws the biome overlay neutral** — a **code gap, not a visual pass**:
+>   `inf_player::render::project_terrain` gets the component and its data but no asset database
+>   (the same reason per-layer textures never reached it), so it passes an empty palette and the
+>   renderer pads; the ids project correctly and only the colours are missing. Wiring the
+>   player's pack lookup into the projection is the fix; the **feather knob at v17** (the
+>   per-biome feather width wants a schema slot and Phase 19's bump was already spent).
+> * **P19.3** — the **`mask.image` player chain** (the editor resolves textures, the player
+>   cannot; the cook advises, and closing it needs a texture fetch on the player's load path); a
+>   **kinds palette node** (weighted kinds are still authored as one `mesh` + `weight` pair per
+>   scatter node); **`float_roundtrip`** on params with full 17-digit mantissas, latent since
+>   P10.5b; the **coarse-sampler LOD division** for data maps.
+> * **P19.4** — a flexible slot changes **spacing, not mesh size** (`ScatteredInstance::scale`
+>   is one `f64`; a stretch needs a per-instance scale *vector*, i.e. an ECS field and both
+>   projector mirrors); **repeats resolve greedily left to right** (each reserves the *nominal*
+>   length of everything after it, so two `*` in one sequence means the first wins); the
+>   **scatter half of the cook's mesh edge** and a `PcgKind.mesh` dangling advisory; a
+>   **document-only `.inf_pcg` carries no grammar**; **neither grammars nor buildings are
+>   dispatched by the biome binding** — `BiomeBinding` is untouched and a biome's `.inf_pcg`
+>   still contributes only its *scatter*. P19.5's `lot` pin closes half of what P19.4 named (a
+>   span can now become a footprint), and the other half is open: nothing turns a painted
+>   **region** into the set of lots that should stand in it. That generator is the real closure
+>   and it is not written.
+> * **P19.5 — the shape of the sample, stated as a deviation rather than a design claim.**
+>   **One `PcgVolume` is one lot**, so the seven archetypes are seven small `.inf_pcg` graphs
+>   rather than one canvas. A building's footprint is its volume's own box (the same default a
+>   `grammar.footprint` span has), and putting seven of them on one canvas would need a per-node
+>   lot offset — which is the volume's transform spelt a second way. It reads as what it is
+>   (seven plots on a street) and it costs seven files; a "lots from a region" generator is what
+>   would make one canvas right, and that is the open half of the biome-dispatch remainder above.
+> * **P19.5** — **evaluation still runs once, at load** (inherited from P10.6, and now the
+>   reason every `PcgVolume` in the sample is `AlwaysLoaded`; closing it is the prerequisite for
+>   streamed procedural buildings); **the viewport still draws every scattered instance as a
+>   placeholder cube**, buildings included, so a structural part's *collider* is exact and its
+>   *render* is a cube — the kind→mesh upload gap sprites and tilemaps also have; **footprints
+>   are axis-aligned rectangles** (a rotated or L-shaped lot needs an oriented rect type
+>   throughout); **archetypes are code constants, not assets**; **buildings are not dispatched by
+>   the biome binding** (a biome owns a region, a building needs a lot — the `lot` pin is the
+>   seam, and a "lots from a region" generator is the natural next step); **no destruction
+>   coupling** (Phase 22 will want fracture chunks, not these static boxes); the **adjacency scan
+>   is O(n²)** in a floor's room count, which no shipped palette can reach (the area cap bites at
+>   a few dozen rooms) but a very large lot with a very small `max_room_area` would — recorded
+>   rather than pre-optimized against a case nothing produces, with the depth cap itself now
+>   tested at the cap.
+
 > **STATUS — P19.1 Erosion data maps: COMPLETE (2026-08-02).** Erosion stops discarding its
 > story. Three per-cell accumulators now ride the whole pipeline — CPU reference, WGSL mirror,
 > tile persistence, both scene codecs, the `.inf_terrain` container, undo, and a PNG16 export.
@@ -4351,6 +4718,25 @@ sediment state; the `MaskImage` sampler has no graph node; lowering is single-ru
 > * **The viewport still draws every scattered instance as a placeholder cube**, grammar modules
 >   included. Kind→real-mesh upload is the same documented gap sprites and tilemaps have; it is
 >   why a module's mesh GUID matters to the cook and not yet to the renderer.
+
+> **STATUS — P19.5 Building & interior grammar + THE PHASE 19 GATE: COMPLETE (2026-08-02).**
+> The headline requirement: a footprint becomes a floor stack, the floors become rooms, the
+> rooms become walls with real openings, and **you can walk in**. Seven archetypes — office,
+> apartment, industrial, house, estate, hotel, shop — as code-shipped primitive palettes, a
+> `building.archetype → building.plan` node family on the SCATTER wire, `collider` as the
+> grammar DSL's one addition, `PcgVolume::structures` as derived (unserialized) solid state that
+> the 3-D physics bridge turns into static box colliders, and `samples/phase19-town` +
+> `phase19_gate.rs` composing biomes × grammar × buildings on a partitioned world.
+>
+> **The full argument — the dimensional split, the enterability invariant, the connectivity
+> proof, the collider decision, the streaming finding, the schema answer (nothing bumps), the
+> gate inventory and the deferred ledger for all five batches — is the Phase 19 status block at
+> the top of this section**, because it is the phase's record as much as the batch's. Files:
+> `crates/inf-pcg/src/building/{mod,palettes,partition,plan,assemble,pass}.rs` (the layer),
+> `grammar/dsl.rs` + `grammar/expand.rs` (the `collider` attribute and `GrammarOutput`),
+> `graph.rs` (the node family + lowering), `crates/inf-ecs/src/components.rs`
+> (`ScatteredSolid` + `PcgVolume::structures`), `crates/inf-physics/src/d3/ecs.rs`
+> (`pcg_structure_snaps`), both evaluation sites, `samples.rs`, and the frontend pin theme.
 
 - **P19.1 Erosion data maps** — 1. accumulate flow / deposition / wear maps in the erosion
   passes (CPU reference + WGSL mirror, parity-gated exactly like heights); 2. persist them

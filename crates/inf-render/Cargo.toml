@@ -28,6 +28,10 @@ xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 png = { workspace = true }
+# The §8 composed-frame budget constant (`inf_core::FRAME_BUDGET_MS`) — one copy
+# of a policy number, shared with the phase gates in `inf-player`. Dev-only: the
+# shipping renderer does not need the job system.
+inf-core = { workspace = true }
 # The vgeom suites (goldens, occlusion, streaming, frame budget) all drive the
 # SAME displaced-grid fixture; it lives once in `inf_vgeom::test_support`, behind
 # this test-only feature, with bit-portable trig (the P14 LAW — `std` sin/cos

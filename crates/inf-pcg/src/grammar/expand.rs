@@ -79,7 +79,7 @@ use uuid::Uuid;
 
 use crate::hash::Hash64;
 use crate::height::HeightProvider;
-use crate::scatter::PcgInstance;
+use crate::scatter::{PcgCollider, PcgInstance};
 
 use super::dsl::{Alternative, Element, Grammar, ModuleDef, Primary, Repeat, SizeSpec};
 use super::span::{
@@ -798,7 +798,42 @@ fn apportion(weights: &[f64], span_len: f64) -> Vec<f64> {
 
 // ── stage 3: placement ──────────────────────────────────────────────────────
 
+/// What an expansion produces: the visible instances and the solid boxes the
+/// modules that declared a `collider` contribute (P19.5).
+///
+/// The two lists are parallel in *origin* but not in length — a module without a
+/// `collider` attribute contributes an instance and no box, which is every
+/// module authored before P19.5 — so they are kept as two vectors rather than as
+/// one list of optional pairs. Concatenation is associative, which is what lets
+/// [`evaluate_grammars_in`] fold a `parallel_map`'s per-job outputs in job order
+/// and stay pool-size invariant.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GrammarOutput {
+    pub instances: Vec<PcgInstance>,
+    /// Solid boxes, in the same order their instances were placed.
+    pub colliders: Vec<PcgCollider>,
+}
+
+impl GrammarOutput {
+    /// Append `other`'s lists to this one's.
+    pub fn extend(&mut self, other: GrammarOutput) {
+        self.instances.extend(other.instances);
+        self.colliders.extend(other.colliders);
+    }
+
+    /// `true` when nothing was placed at all.
+    pub fn is_empty(&self) -> bool {
+        self.instances.is_empty() && self.colliders.is_empty()
+    }
+}
+
 /// Place one frame's module, or `None` when the ground is missing there.
+///
+/// The optional second half is the module's collision box: centred on the same
+/// world point as the instance (the module's `offset` is already applied there),
+/// scaled by the module's uniform `scale`, and oriented by the **slot yaw
+/// alone** — see [`ModuleDef::collider`] for why the authored euler is
+/// deliberately not folded in.
 fn place_module(
     frame: &Frame,
     module: &ModuleDef,
@@ -806,7 +841,7 @@ fn place_module(
     ground: Ground,
     altitude_offset: f64,
     height: &dyn HeightProvider,
-) -> Option<PcgInstance> {
+) -> Option<(PcgInstance, Option<PcgCollider>)> {
     let yaw = frame.rotation();
     let offset = yaw * module.offset;
     let x = frame.position.x + offset.x;
@@ -815,12 +850,21 @@ fn place_module(
         Ground::Span => frame.position.y,
         Ground::Terrain => height.height(x, z)?,
     };
-    Some(PcgInstance {
-        pos: DVec3::new(x, base + offset.y + altitude_offset, z),
-        rotation: yaw * super::span::euler_deg_to_quat(module.rotation_deg),
-        scale: module.scale,
-        kind_index: kind,
-    })
+    let pos = DVec3::new(x, base + offset.y + altitude_offset, z);
+    let solid = module.collider.map(|h| PcgCollider {
+        center: pos,
+        half_extents: h * module.scale,
+        rotation: yaw,
+    });
+    Some((
+        PcgInstance {
+            pos,
+            rotation: yaw * super::span::euler_deg_to_quat(module.rotation_deg),
+            scale: module.scale,
+            kind_index: kind,
+        },
+        solid,
+    ))
 }
 
 /// Expand `pass` along one span and place the result.
@@ -829,21 +873,24 @@ pub fn expand_span(
     span: &Span,
     base: Hash64,
     height: &dyn HeightProvider,
-) -> Vec<PcgInstance> {
+) -> GrammarOutput {
     if span.is_degenerate() {
-        return Vec::new();
+        return GrammarOutput::default();
     }
     let derived = derive(&pass.grammar, &pass.axiom, span.length(), base);
     let lay = layout(derived.slots, span.length(), base);
     let modules = pass.grammar.modules();
-    let mut out = Vec::with_capacity(lay.slots.len());
+    let mut out = GrammarOutput {
+        instances: Vec::with_capacity(lay.slots.len()),
+        colliders: Vec::new(),
+    };
     for (i, slot) in lay.slots.iter().enumerate() {
         let Some(kind) = slot.module else { continue };
         let Some(module) = modules.get(kind as usize) else {
             continue;
         };
         let frame = span.frame_at(lay.bounds[i]);
-        if let Some(inst) = place_module(
+        if let Some((inst, solid)) = place_module(
             &frame,
             module,
             kind,
@@ -851,7 +898,8 @@ pub fn expand_span(
             pass.altitude_offset,
             height,
         ) {
-            out.push(inst);
+            out.instances.push(inst);
+            out.colliders.extend(solid);
         }
     }
     out
@@ -862,20 +910,26 @@ pub fn place_corners(
     pass: &GrammarPass,
     corners: &[Frame],
     height: &dyn HeightProvider,
-) -> Vec<PcgInstance> {
+) -> GrammarOutput {
+    let mut out = GrammarOutput::default();
     if pass.corner_module.is_empty() || corners.is_empty() {
-        return Vec::new();
+        return out;
     }
     let Some(kind) = pass.grammar.module_index(&pass.corner_module) else {
-        return Vec::new();
+        return out;
     };
     let Some(module) = pass.grammar.modules().get(kind as usize) else {
-        return Vec::new();
+        return out;
     };
-    corners
-        .iter()
-        .filter_map(|f| place_module(f, module, kind, pass.ground, pass.altitude_offset, height))
-        .collect()
+    for f in corners {
+        if let Some((inst, solid)) =
+            place_module(f, module, kind, pass.ground, pass.altitude_offset, height)
+        {
+            out.instances.push(inst);
+            out.colliders.extend(solid);
+        }
+    }
+    out
 }
 
 /// Build the span set a pass expands along, resolving a spline reference
@@ -937,7 +991,7 @@ pub fn evaluate_grammars(
     splines: &dyn SplineSource,
     height: &dyn HeightProvider,
     cx: &GrammarContext,
-) -> Vec<PcgInstance> {
+) -> GrammarOutput {
     evaluate_grammars_in(inf_core::global(), passes, splines, height, cx)
 }
 
@@ -953,7 +1007,7 @@ pub fn evaluate_grammars_in(
     splines: &dyn SplineSource,
     height: &dyn HeightProvider,
     cx: &GrammarContext,
-) -> Vec<PcgInstance> {
+) -> GrammarOutput {
     /// One unit of work: a pass, and either one of its spans or its corners.
     enum Job {
         Span(usize, Span, Hash64),
@@ -975,17 +1029,63 @@ pub fn evaluate_grammars_in(
         }
     }
     if jobs.is_empty() {
-        return Vec::new();
+        return GrammarOutput::default();
     }
-    let per: Vec<Vec<PcgInstance>> = pool.parallel_map(jobs, |job| match job {
+    let per: Vec<GrammarOutput> = pool.parallel_map(jobs, |job| match job {
         Job::Span(pi, span, base) => expand_span(&passes[pi], &span, base, height),
         Job::Corners(pi, corners) => place_corners(&passes[pi], &corners, height),
     });
-    per.into_iter().flatten().collect()
+    let mut out = GrammarOutput::default();
+    for chunk in per {
+        out.extend(chunk);
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
+    //! The P19.4 tests below were written when expansion returned a bare
+    //! `Vec<PcgInstance>`. P19.5 made it return instances **and** solids, so
+    //! these four shims hand back just the instances — keeping every existing
+    //! assertion about *placement* readable, and leaving the collider half to
+    //! the tests that are about it (`dsl::tests::a_collider_declaration_places_a_solid`
+    //! and the whole `building` module).
+    fn placed(
+        pass: &GrammarPass,
+        span: &Span,
+        base: Hash64,
+        height: &dyn HeightProvider,
+    ) -> Vec<PcgInstance> {
+        super::expand_span(pass, span, base, height).instances
+    }
+
+    fn placed_corners(
+        pass: &GrammarPass,
+        corners: &[Frame],
+        height: &dyn HeightProvider,
+    ) -> Vec<PcgInstance> {
+        super::place_corners(pass, corners, height).instances
+    }
+
+    fn evaluated(
+        passes: &[GrammarPass],
+        splines: &dyn SplineSource,
+        height: &dyn HeightProvider,
+        cx: &GrammarContext,
+    ) -> Vec<PcgInstance> {
+        super::evaluate_grammars(passes, splines, height, cx).instances
+    }
+
+    fn evaluated_in(
+        pool: &inf_core::JobPool,
+        passes: &[GrammarPass],
+        splines: &dyn SplineSource,
+        height: &dyn HeightProvider,
+        cx: &GrammarContext,
+    ) -> Vec<PcgInstance> {
+        super::evaluate_grammars_in(pool, passes, splines, height, cx).instances
+    }
+
     use super::*;
     use crate::height::FnHeight;
     use inf_math::spline::SplineInterp;
@@ -1409,7 +1509,7 @@ mod tests {
             },
         );
         let span = line_span(10.0);
-        let out = expand_span(&pass, &span, Hash64::new(1), &flat());
+        let out = placed(&pass, &span, Hash64::new(1), &flat());
         assert_eq!(out.len(), 6);
         // The span runs +Z from the origin, so anchors sit at the boundaries.
         assert_eq!(out[0].pos, DVec3::ZERO);
@@ -1446,12 +1546,65 @@ mod tests {
             },
         );
         let span = Span::from_points([DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0)], false);
-        let out = expand_span(&pass, &span, Hash64::new(1), &flat());
+        let out = placed(&pass, &span, Hash64::new(1), &flat());
         assert_eq!(out.len(), 1);
         assert!(
             (out[0].pos - DVec3::new(1.0, 0.5, 0.0)).length() < 1e-9,
             "{:?}",
             out[0].pos
+        );
+    }
+
+    /// **P19.5's solid half.** A module that declares a `collider` emits one
+    /// box per instance, centred exactly where the instance is, scaled with it,
+    /// and oriented by the **slot yaw** rather than by the module's authored
+    /// euler — and a module without one emits nothing, so a P19.4 grammar's
+    /// output is unchanged.
+    #[test]
+    fn a_collider_declaration_places_a_solid_beside_its_instance() {
+        let g = Grammar::parse(
+            "module Solid = size 2 offset 0,1.5,1 scale 2 rot 0,90,0 collider 0.1,1.5,1\n\
+             module Airy  = size 2\n\
+             W -> Solid Airy Solid\n",
+        )
+        .unwrap();
+        let mut pass = pass_with(
+            g,
+            "W",
+            SpanSource::Spline {
+                entity: None,
+                samples_per_segment: 8,
+            },
+        );
+        pass.ground = Ground::Span;
+        let span = Span::from_points([DVec3::ZERO, DVec3::new(0.0, 4.0, 6.0)], false);
+        let out = super::expand_span(&pass, &span, Hash64::new(2), &flat());
+        assert_eq!(out.instances.len(), 3, "every module places an instance");
+        assert_eq!(out.colliders.len(), 2, "only the declared ones are solid");
+        // The box sits on its instance and carries the SCALED half-extents.
+        let solids: Vec<&PcgInstance> =
+            out.instances.iter().filter(|i| i.kind_index == 0).collect();
+        for (inst, solid) in solids.iter().zip(out.colliders.iter()) {
+            assert_eq!(solid.center, inst.pos);
+            assert_eq!(solid.half_extents, DVec3::new(0.2, 3.0, 2.0));
+            // The instance carries the authored 90° yaw; the box does NOT.
+            assert_ne!(solid.rotation, inst.rotation);
+            assert_eq!(solid.rotation, span.frame_at(0.0).rotation());
+        }
+        // A grammar with no collider at all is exactly what it was in P19.4.
+        let plain = Grammar::parse("module P = size 2\nW -> P+\n").unwrap();
+        let plain_pass = pass_with(
+            plain,
+            "W",
+            SpanSource::Spline {
+                entity: None,
+                samples_per_segment: 8,
+            },
+        );
+        assert!(
+            super::expand_span(&plain_pass, &span, Hash64::new(2), &flat())
+                .colliders
+                .is_empty()
         );
     }
 
@@ -1472,23 +1625,14 @@ mod tests {
             },
         );
         pass.ground = Ground::Span;
-        assert_eq!(
-            expand_span(&pass, &span, Hash64::new(1), &ramp)[0].pos.y,
-            5.0
-        );
+        assert_eq!(placed(&pass, &span, Hash64::new(1), &ramp)[0].pos.y, 5.0);
         pass.ground = Ground::Terrain;
-        assert_eq!(
-            expand_span(&pass, &span, Hash64::new(1), &ramp)[0].pos.y,
-            100.0
-        );
+        assert_eq!(placed(&pass, &span, Hash64::new(1), &ramp)[0].pos.y, 100.0);
         pass.altitude_offset = 2.0;
-        assert_eq!(
-            expand_span(&pass, &span, Hash64::new(1), &ramp)[0].pos.y,
-            102.0
-        );
+        assert_eq!(placed(&pass, &span, Hash64::new(1), &ramp)[0].pos.y, 102.0);
         // No ground there ⇒ no instance (the scatter kernel's own rule).
         let hole = FnHeight::new(|_, _| None);
-        assert!(expand_span(&pass, &span, Hash64::new(1), &hole).is_empty());
+        assert!(placed(&pass, &span, Hash64::new(1), &hole).is_empty());
     }
 
     #[test]
@@ -1511,14 +1655,14 @@ mod tests {
             &super::super::span::NoSplines,
             &GrammarContext::default(),
         );
-        let corners = place_corners(&pass, &set.corners, &flat());
+        let corners = placed_corners(&pass, &set.corners, &flat());
         assert_eq!(corners.len(), 4);
         assert!(corners.iter().all(|c| c.kind_index == 0));
         // An unknown corner module stamps nothing rather than panicking.
         pass.corner_module = "Nope".into();
-        assert!(place_corners(&pass, &set.corners, &flat()).is_empty());
+        assert!(placed_corners(&pass, &set.corners, &flat()).is_empty());
         pass.corner_module = String::new();
-        assert!(place_corners(&pass, &set.corners, &flat()).is_empty());
+        assert!(placed_corners(&pass, &set.corners, &flat()).is_empty());
     }
 
     #[test]
@@ -1629,7 +1773,7 @@ mod tests {
         let runs: Vec<Vec<PcgInstance>> = [1usize, 2, 4, 8]
             .into_iter()
             .map(|n| {
-                evaluate_grammars_in(
+                evaluated_in(
                     &JobPool::new(n),
                     &passes,
                     &super::super::span::NoSplines,
@@ -1643,7 +1787,7 @@ mod tests {
             assert_eq!(r, &runs[0], "population differs on a {n}-worker pool");
         }
         assert_eq!(
-            evaluate_grammars(&passes, &super::super::span::NoSplines, &flat(), &cx),
+            evaluated(&passes, &super::super::span::NoSplines, &flat(), &cx),
             runs[0]
         );
     }
@@ -1652,20 +1796,17 @@ mod tests {
     fn a_disabled_pass_places_nothing_and_the_volume_seed_moves_things() {
         let mut p = perimeter_pass();
         let cx = GrammarContext::default();
-        let base = evaluate_grammars(&[p.clone()], &super::super::span::NoSplines, &flat(), &cx);
+        let base = evaluated(&[p.clone()], &super::super::span::NoSplines, &flat(), &cx);
         assert!(!base.is_empty());
         p.enabled = false;
-        assert!(
-            evaluate_grammars(&[p.clone()], &super::super::span::NoSplines, &flat(), &cx)
-                .is_empty()
-        );
+        assert!(evaluated(&[p.clone()], &super::super::span::NoSplines, &flat(), &cx).is_empty());
         p.enabled = true;
         // Two volumes sharing one graph must not build the same thing.
         let other = GrammarContext {
             seed_offset: 1,
             ..cx
         };
-        let moved = evaluate_grammars(&[p], &super::super::span::NoSplines, &flat(), &other);
+        let moved = evaluated(&[p], &super::super::span::NoSplines, &flat(), &other);
         assert_eq!(moved.len(), base.len(), "the structure is the same size");
         assert_ne!(pass_seed(7, 0).finish(), pass_seed(7, 1).finish());
     }
@@ -1696,7 +1837,7 @@ mod tests {
             &GrammarContext::default(),
         );
         let kinds = |i: usize| -> Vec<u32> {
-            expand_span(&pass, &set.spans[i], base.mix_u64(i as u64), &flat())
+            placed(&pass, &set.spans[i], base.mix_u64(i as u64), &flat())
                 .iter()
                 .map(|x| x.kind_index)
                 .collect()
@@ -1728,8 +1869,8 @@ mod tests {
                 })
                 .collect()
         };
-        let a = evaluate_grammars(&passes, &super::super::span::NoSplines, &flat(), &cx);
-        let b = evaluate_grammars(&passes, &super::super::span::NoSplines, &flat(), &cx);
+        let a = evaluated(&passes, &super::super::span::NoSplines, &flat(), &cx);
+        let b = evaluated(&passes, &super::super::span::NoSplines, &flat(), &cx);
         assert!(!a.is_empty());
         assert_eq!(bits(&a), bits(&b));
     }

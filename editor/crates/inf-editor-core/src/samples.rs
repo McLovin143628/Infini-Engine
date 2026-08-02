@@ -4177,6 +4177,798 @@ reason: hills put scatter instances behind something.\n\n\
 6. the golden inventory is exactly the 41 committed PNGs.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// ── Phase 19: the town (biomes × grammar × enterable buildings) ─────────────
+//
+// The composed Phase 19 gate scene. A partitioned level over a multi-tile
+// biome-painted terrain, a spline road with a grammar fence running its whole
+// length, and **seven building lots — one per archetype**, each a `PcgVolume`
+// carrying its own tiny `.inf_pcg`.
+//
+// **One volume is one lot, and that is the model rather than a workaround.** A
+// building's footprint is the volume's own box, exactly as a `grammar.footprint`
+// span defaults to it; seven archetypes on one canvas would need a per-node lot
+// offset, which is the volume's transform spelt a second way. The cost is seven
+// small graphs instead of one, and the benefit is that the level reads as what
+// it is: seven plots on a street.
+
+pub const PHASE19_LEVEL_GUID: Uuid = Uuid::from_u128(0x8419_0000);
+pub const PHASE19_TERRAIN_GUID: Uuid = Uuid::from_u128(0x8419_0001);
+/// The road: a `Spline` **and** the `PcgVolume` whose grammar fences it. A blank
+/// `grammar.spline` entity means "the entity this graph evaluates on", so the
+/// two live on one actor and no GUID is typed anywhere.
+pub const PHASE19_ROAD_GUID: Uuid = Uuid::from_u128(0x8419_0002);
+pub const PHASE19_SKY_GUID: Uuid = Uuid::from_u128(0x8419_0003);
+pub const PHASE19_SUN_GUID: Uuid = Uuid::from_u128(0x8419_0004);
+pub const PHASE19_CAMERA_GUID: Uuid = Uuid::from_u128(0x8419_0005);
+/// The walker whose position drives cell activation (the partition's streaming
+/// source), so the gate can watch a building's cell come and go.
+pub const PHASE19_WALKER_GUID: Uuid = Uuid::from_u128(0x8419_0006);
+
+/// Asset GUID of the committed `Town.inf_biomes`.
+pub const PHASE19_BIOME_SET_GUID: Uuid = Uuid::from_u128(0x8419_00A0);
+/// Asset GUID of the committed `Roadside.inf_pcg` (the fence grammar).
+pub const PHASE19_ROAD_PCG_GUID: Uuid = Uuid::from_u128(0x8419_00A1);
+/// Base **entity** GUID of the seven building lots (add the archetype index).
+const PHASE19_LOT_BASE: u128 = 0x8419_0100;
+/// Base **asset** GUID of the seven per-lot `.inf_pcg` graphs.
+const PHASE19_LOT_PCG_BASE: u128 = 0x8419_0200;
+/// Base **entity** GUID of the streamed street lamps (add the index).
+const PHASE19_LAMP_BASE: u128 = 0x8419_0300;
+/// How many street lamps run the length of the road. These are the level's
+/// **streamed** content — see the note on [`phase19_town_scene`].
+pub const PHASE19_LAMPS: usize = 12;
+
+/// Terrain samples per tile side (`17` closes a tile on a 16-cell lattice).
+pub const PHASE19_TERRAIN_RESOLUTION: u32 = 17;
+/// World metres per terrain sample — 16 m, so one tile spans 256 m.
+pub const PHASE19_TERRAIN_MPS: f64 = 16.0;
+/// Authored tiles per side (2 × 2 → a 512 m world).
+pub const PHASE19_TERRAIN_TILES: i32 = 2;
+
+/// Partition cell edge, metres. Deliberately **128 m, half the engine default**,
+/// so the 512 m world holds sixteen cells and the seven lots land in more than
+/// one of them — a gate that binned every building into cell `(0,0)` would prove
+/// nothing about binning.
+pub const PHASE19_CELL_SIZE_M: f64 = 128.0;
+pub const PHASE19_ACTIVATION_RADIUS_M: f64 = 160.0;
+pub const PHASE19_PREFETCH_MARGIN_M: f64 = 128.0;
+
+/// The two painted biome ids: the built-up strip along the road, and the
+/// meadow either side of it.
+pub const PHASE19_BIOME_TOWN: u8 = 1;
+pub const PHASE19_BIOME_MEADOW: u8 = 2;
+/// Half-width of the painted town strip either side of the road's Z line,
+/// metres.
+pub const PHASE19_TOWN_HALF_WIDTH: f64 = 90.0;
+
+/// Half-extent of one building lot in world XZ, metres. The whole footprint is
+/// therefore 44 × 30 m, comfortably above every archetype's `min_room` and big
+/// enough that the partition really partitions.
+pub const PHASE19_LOT_EXTENT: (f64, f64) = (22.0, 15.0);
+/// Metres between lot centres along the road.
+pub const PHASE19_LOT_PITCH: f64 = 62.0;
+/// Metres from the road's Z line to a lot centre.
+pub const PHASE19_LOT_SETBACK: f64 = 34.0;
+/// Storeys every lot is pinned to, so the gate's stair walk has the same shape
+/// for all seven and a retuned archetype range cannot silently make one of them
+/// single-storey.
+pub const PHASE19_LOT_FLOORS: u32 = 3;
+
+/// World edge length of the sample's terrain, metres (512).
+pub fn phase19_world_size() -> f64 {
+    PHASE19_TERRAIN_TILES as f64 * (PHASE19_TERRAIN_RESOLUTION as f64 - 1.0) * PHASE19_TERRAIN_MPS
+}
+
+/// The centre of the sample world in XZ.
+pub fn phase19_world_center() -> DVec3 {
+    let c = phase19_world_size() * 0.5;
+    DVec3::new(c, 0.0, c)
+}
+
+/// The sample's analytic terrain height at world `(x, z)`.
+///
+/// Bit-portable by construction ([`inf_math::psin64`] / [`pcos64`], never `std`
+/// trig — the P14 law), because this becomes committed `.inf_lvl` bytes a cook
+/// on one OS and a run on another must agree about.
+///
+/// Deliberately **gentle** (~6 m over 512 m) where phase18's is steep: a
+/// building levels its site from one datum, so a violent slope would put a lot's
+/// floor slab metres above the ground on one side. Relief enough to prove the
+/// terrain is read, not enough to make the town look posted on stilts.
+pub fn phase19_height(x: f64, z: f64) -> f64 {
+    3.0 * inf_math::psin64(x * 0.0075) * inf_math::pcos64(z * 0.0062)
+        + 1.5 * inf_math::psin64((x + z) * 0.011)
+}
+
+/// The road's Z coordinate — it runs straight along world X down the middle of
+/// the world, which is what makes the painted town strip a simple band.
+pub fn phase19_road_z() -> f64 {
+    phase19_world_center().z
+}
+
+/// The painted biome id at world `(x, z)`: the town strip within
+/// [`PHASE19_TOWN_HALF_WIDTH`] of the road, meadow beyond it.
+pub fn phase19_biome_at(_x: f64, z: f64) -> u8 {
+    if (z - phase19_road_z()).abs() <= PHASE19_TOWN_HALF_WIDTH {
+        PHASE19_BIOME_TOWN
+    } else {
+        PHASE19_BIOME_MEADOW
+    }
+}
+
+/// The **entity** GUID of lot `i` (`0..7`, in [`ArchetypeId::ALL`] order).
+pub fn phase19_lot_guid(i: usize) -> Uuid {
+    Uuid::from_u128(PHASE19_LOT_BASE + i as u128)
+}
+
+/// The **asset** GUID of lot `i`'s `.inf_pcg` graph.
+pub fn phase19_lot_pcg_guid(i: usize) -> Uuid {
+    Uuid::from_u128(PHASE19_LOT_PCG_BASE + i as u128)
+}
+
+/// The world position of lot `i`: laid out along the road, alternating sides so
+/// the street has two frontages.
+///
+/// Derived from `i`, never accumulated (the P17.4 exact-linear rule).
+pub fn phase19_lot_position(i: usize) -> DVec3 {
+    let n = inf_pcg::ArchetypeId::ALL.len();
+    let span = (n as f64 - 1.0) * 0.5 * PHASE19_LOT_PITCH;
+    let x = phase19_world_center().x + i as f64 * PHASE19_LOT_PITCH - span;
+    let side = if i.is_multiple_of(2) { -1.0 } else { 1.0 };
+    let z = phase19_road_z() + side * PHASE19_LOT_SETBACK;
+    DVec3::new(x, phase19_height(x, z), z)
+}
+
+/// The **entity** GUID of street lamp `i`.
+pub fn phase19_lamp_guid(i: usize) -> Uuid {
+    Uuid::from_u128(PHASE19_LAMP_BASE + i as u128)
+}
+
+/// The world position of street lamp `i` — evenly along the road, derived from
+/// `i` rather than accumulated.
+pub fn phase19_lamp_position(i: usize) -> DVec3 {
+    let size = phase19_world_size();
+    let margin = 24.0;
+    let x = margin + (size - 2.0 * margin) * (i as f64 + 0.5) / PHASE19_LAMPS as f64;
+    let z = phase19_road_z() + if i.is_multiple_of(2) { -7.0 } else { 7.0 };
+    DVec3::new(x, phase19_height(x, z), z)
+}
+
+/// The road's control points, in the road entity's **local** frame (it sits at
+/// the world centre, so local X is world X).
+pub fn phase19_road_points() -> Vec<DVec3> {
+    let half = phase19_world_size() * 0.5 - 24.0;
+    (0..5)
+        .map(|i| {
+            let t = i as f64 / 4.0;
+            DVec3::new(-half + 2.0 * half * t, 0.0, 0.0)
+        })
+        .collect()
+}
+
+/// The committed `Town.inf_biomes` set: two biomes, neither carrying a `.inf_pcg`
+/// of its own.
+///
+/// **The binding is deliberately unused here, and that is a stated choice.** A
+/// biome dispatches *scatter* over the region its id owns (P19.3); a building
+/// needs a *lot*, and P19.5's answer to that is the `lot` span pin, not a
+/// per-biome graph. So the painted ids are what they are for in this sample —
+/// vocabulary the terrain carries, gated for round-tripping — and the buildings
+/// arrive through volumes.
+pub fn phase19_biome_set() -> inf_terrain::BiomeSet {
+    let mut set = inf_terrain::BiomeSet::new("Town");
+    let mut town = inf_terrain::BiomeDef::new(PHASE19_BIOME_TOWN, "Town");
+    town.color = [0.62, 0.58, 0.50, 1.0];
+    town.splat_layer = Some(1);
+    // P19.2 declared `structure_hint` as inert plain data "because it is what
+    // P19.5 will ask a biome for". This is that ask, and it is answered
+    // honestly: the hint names a real `ArchetypeId`, and a gate checks that it
+    // parses. It is **advisory** — the buildings in this sample arrive through
+    // volumes, because a biome owns a region and a building needs a lot.
+    town.structure_hint = Some(inf_pcg::ArchetypeId::House.name().to_string());
+    let mut meadow = inf_terrain::BiomeDef::new(PHASE19_BIOME_MEADOW, "Meadow");
+    meadow.color = [0.30, 0.52, 0.22, 1.0];
+    meadow.splat_layer = Some(0);
+    set.biomes = vec![town, meadow];
+    set
+}
+
+/// The roadside graph: a `grammar.rules` fence expanded along the road actor's
+/// own `Spline`, merged with a light ground scatter.
+pub fn phase19_road_graph() -> inf_graph::Graph {
+    let reg = inf_pcg::pcg_registry();
+    let mut g = inf_graph::Graph::empty();
+    let mut next = 1u32;
+    let add = |g: &mut inf_graph::Graph,
+               next: &mut u32,
+               type_id: &str,
+               params: &[(&str, inf_graph::ParamValue)]| {
+        let id = inf_graph::NodeId(*next);
+        *next += 1;
+        let mut m = inf_graph::ParamMap::new();
+        for (k, v) in params {
+            m.insert((*k).to_string(), v.clone());
+        }
+        inf_graph::apply_edits(
+            g,
+            &reg,
+            &[inf_graph::GraphEdit::AddNode {
+                id,
+                type_id: type_id.into(),
+                x: 0.0,
+                y: 0.0,
+                params: m,
+            }],
+        );
+        id
+    };
+    let link = |g: &mut inf_graph::Graph, from: inf_graph::NodeId, fp: &str, to, tp: &str| {
+        inf_graph::apply_edits(
+            g,
+            &inf_pcg::pcg_registry(),
+            &[inf_graph::GraphEdit::Connect {
+                link: inf_graph::Link {
+                    from,
+                    from_port: fp.into(),
+                    to,
+                    to_port: tp.into(),
+                },
+            }],
+        );
+    };
+    use inf_graph::ParamValue as P;
+
+    let rules = add(
+        &mut g,
+        &mut next,
+        "grammar.rules",
+        &[("rules", P::Text(PHASE19_FENCE_RULES.into()))],
+    );
+    let span = add(
+        &mut g,
+        &mut next,
+        "grammar.spline",
+        &[("samples_per_segment", P::Int(8))],
+    );
+    let expand = add(
+        &mut g,
+        &mut next,
+        "grammar.expand",
+        &[
+            ("name", P::Text("roadside-fence".into())),
+            ("seed", P::Int(1905)),
+        ],
+    );
+    link(&mut g, rules, "out", expand, "rules");
+    link(&mut g, span, "out", expand, "span");
+
+    let density = add(
+        &mut g,
+        &mut next,
+        "const.density",
+        &[("value", P::Float(1.0))],
+    );
+    let scatter = add(
+        &mut g,
+        &mut next,
+        "scatter.scatter",
+        &[
+            ("name", P::Text("verge".into())),
+            ("cell_size", P::Float(32.0)),
+            ("base_density", P::Float(0.02)),
+            ("seed", P::Int(1906)),
+            ("scale_min", P::Float(0.6)),
+            ("scale_max", P::Float(1.2)),
+        ],
+    );
+    link(&mut g, density, "out", scatter, "density");
+
+    let merge = add(&mut g, &mut next, "scatter.merge", &[]);
+    link(&mut g, expand, "out", merge, "a");
+    link(&mut g, scatter, "out", merge, "b");
+    let out = add(&mut g, &mut next, "output.pcg", &[]);
+    link(&mut g, merge, "out", out, "scatter");
+    g
+}
+
+/// The rule text the roadside fence expands. Posts at both ends of every span,
+/// panels filling the middle, one bay in five a gate — and every module carries
+/// a `collider`, so the fence is a real barrier rather than a picture of one.
+const PHASE19_FENCE_RULES: &str = "\
+# Roadside fence (P19.5: `collider` makes it solid).
+module Post  = size 0.2 offset 0,0.75,0.1 collider 0.1,0.75,0.1
+module Panel = size 2.4 offset 0,0.6,1.2  collider 0.05,0.6,1.2
+module Gate  = size 2.4 offset 0,0.55,1.2 collider 0.04,0.55,1.2
+
+Fence -> Post Bay* Post
+Bay   -> Panel | Gate@0.25
+";
+
+/// Lot `i`'s graph: one archetype, one planner, straight into the sink.
+pub fn phase19_lot_graph(i: usize) -> inf_graph::Graph {
+    let reg = inf_pcg::pcg_registry();
+    let mut g = inf_graph::Graph::empty();
+    let id = inf_pcg::ArchetypeId::ALL[i];
+    use inf_graph::ParamValue as P;
+    let add = |g: &mut inf_graph::Graph,
+               n: u32,
+               type_id: &str,
+               params: &[(&str, inf_graph::ParamValue)]| {
+        let node = inf_graph::NodeId(n);
+        let mut m = inf_graph::ParamMap::new();
+        for (k, v) in params {
+            m.insert((*k).to_string(), v.clone());
+        }
+        inf_graph::apply_edits(
+            g,
+            &reg,
+            &[inf_graph::GraphEdit::AddNode {
+                id: node,
+                type_id: type_id.into(),
+                x: 0.0,
+                y: 0.0,
+                params: m,
+            }],
+        );
+        node
+    };
+    let arch = add(
+        &mut g,
+        1,
+        "building.archetype",
+        &[
+            ("archetype", P::Enum(id.name().into())),
+            ("floors", P::Int(PHASE19_LOT_FLOORS as i64)),
+            ("furnish", P::Bool(true)),
+        ],
+    );
+    let plan = add(
+        &mut g,
+        2,
+        "building.plan",
+        &[
+            ("name", P::Text(id.name().to_lowercase())),
+            ("seed", P::Int(1900 + i as i64)),
+        ],
+    );
+    let out = add(&mut g, 3, "output.pcg", &[]);
+    for (from, fp, to, tp) in [
+        (arch, "out", plan, "archetype"),
+        (plan, "out", out, "scatter"),
+    ] {
+        inf_graph::apply_edits(
+            &mut g,
+            &inf_pcg::pcg_registry(),
+            &[inf_graph::GraphEdit::Connect {
+                link: inf_graph::Link {
+                    from,
+                    from_port: fp.into(),
+                    to,
+                    to_port: tp.into(),
+                },
+            }],
+        );
+    }
+    g
+}
+
+/// The `.inf_pcg` payload for a graph: the authored graph (the source of truth
+/// since P19.3) plus its lowered document mirror.
+fn phase19_payload(graph: &inf_graph::Graph) -> inf_pcg::PcgAssetPayload {
+    let lowered = inf_pcg::lower_graph(graph, &inf_pcg::pcg_registry());
+    inf_pcg::PcgAssetPayload::from_graph(graph, lowered.document)
+}
+
+/// The roadside `.inf_pcg` payload.
+pub fn phase19_road_payload() -> inf_pcg::PcgAssetPayload {
+    phase19_payload(&phase19_road_graph())
+}
+
+/// Lot `i`'s `.inf_pcg` payload.
+pub fn phase19_lot_payload(i: usize) -> inf_pcg::PcgAssetPayload {
+    phase19_payload(&phase19_lot_graph(i))
+}
+
+/// Build the Phase 19 gate [`SceneDoc`] — the composed town.
+///
+/// # THE `AlwaysLoaded` INTERPLAY, stated
+///
+/// Every `PcgVolume` in this level — the seven lots and the road — carries
+/// [`AlwaysLoaded`](inf_ecs::components::AlwaysLoaded), and the reason is a real
+/// engine property rather than a convenience:
+///
+/// **PCG evaluation is a load-time pass.** `evaluate_pcg_volumes` runs once,
+/// over the world the level builder produced; cell streaming spawns entities
+/// *afterwards*, and nothing re-runs evaluation for them. A `PcgVolume` binned
+/// into a grid cell would therefore stream in and stay empty — a building lot
+/// with no building on it. That is the standing P10.6 remainder ("evaluation
+/// still runs once, at load"), restated by P19.4 and unchanged here; a batch
+/// that hid it by never streaming a volume would have hidden it.
+///
+/// So the volumes are persistent **by declaration**, and the level's *streamed*
+/// content is the twelve street lamps — ordinary placed entities that bin by
+/// position, activate as the walker approaches, and give the partition arm of
+/// the gate something real to be about. What the gate then asserts about the
+/// buildings is the property that survives the gap: a lot's instances all lie
+/// inside the lot's own footprint, so the day evaluation follows streaming they
+/// are already in the right cell.
+///
+/// A building bigger than a cell would still be one entity in one cell. At the
+/// sample's deliberately small 128 m cell a 44 m lot fits comfortably; a 400 m
+/// megastructure would want either a larger cell or the same `AlwaysLoaded`
+/// declaration, and that is a content decision the engine should not make.
+pub fn phase19_town_scene() -> SceneDoc {
+    use crate::scene::serialize::{LevelSettings, PartitionSettings};
+    use inf_ecs::components::{
+        AlwaysLoaded, Camera, Light, LightKind, Material, MeshRef, PcgVolume, Primitive,
+        SkyAtmosphere, Spline, SplineInterp, StreamingSource, Terrain, TimeOfDay,
+    };
+    use inf_ecs::math::Vec3d;
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Phase 19 Town");
+    doc.set_settings(LevelSettings {
+        partition: PartitionSettings {
+            enabled: true,
+            cell_size_m: PHASE19_CELL_SIZE_M,
+            activation_radius_m: PHASE19_ACTIVATION_RADIUS_M,
+            prefetch_margin_m: PHASE19_PREFETCH_MARGIN_M,
+        },
+        ..LevelSettings::default()
+    });
+
+    // ── The ground: four authored tiles, biome-painted, always loaded. ──
+    //
+    // `AlwaysLoaded` for the same reason phase16's terrain carries it: a Terrain
+    // occupies space, so the partitioner would bin the whole heightfield into
+    // one cell and the ground would vanish as the walker left it.
+    doc.create_with_guid(PHASE19_TERRAIN_GUID, SpawnKind::Empty, "Terrain", None);
+    insert!(
+        doc,
+        PHASE19_TERRAIN_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+    insert!(doc, PHASE19_TERRAIN_GUID, AlwaysLoaded);
+    {
+        let mut terrain = Terrain::configured(PHASE19_TERRAIN_RESOLUTION, PHASE19_TERRAIN_MPS);
+        for tz in 0..PHASE19_TERRAIN_TILES {
+            for tx in 0..PHASE19_TERRAIN_TILES {
+                terrain.data.author_tile((tx, tz), phase19_height);
+            }
+        }
+        // Paint the biome ids sample by sample — the same per-sample layer the
+        // P19.2 brush writes, authored analytically so the sample regenerates
+        // bit-identically.
+        let res = PHASE19_TERRAIN_RESOLUTION;
+        let step = PHASE19_TERRAIN_MPS;
+        for tz in 0..PHASE19_TERRAIN_TILES {
+            for tx in 0..PHASE19_TERRAIN_TILES {
+                let Some(tile) = terrain.data.get_tile_mut((tx, tz)) else {
+                    continue;
+                };
+                let origin_x = tx as f64 * (res as f64 - 1.0) * step;
+                let origin_z = tz as f64 * (res as f64 - 1.0) * step;
+                for j in 0..res {
+                    for i in 0..res {
+                        let x = origin_x + i as f64 * step;
+                        let z = origin_z + j as f64 * step;
+                        tile.set_biome_sample(res, i, j, phase19_biome_at(x, z));
+                    }
+                }
+            }
+        }
+        terrain.data.clear_dirty();
+        terrain.biome_set = Some(PHASE19_BIOME_SET_GUID);
+        terrain.macro_variation = 0.2;
+        insert!(doc, PHASE19_TERRAIN_GUID, terrain);
+    }
+
+    // ── The road: a Spline AND the volume whose grammar fences it. ──
+    doc.create_with_guid(PHASE19_ROAD_GUID, SpawnKind::Empty, "Road", None);
+    {
+        let c = phase19_world_center();
+        let z = phase19_road_z();
+        insert!(
+            doc,
+            PHASE19_ROAD_GUID,
+            Transform::from_translation(DVec3::new(c.x, phase19_height(c.x, z), z))
+        );
+        insert!(doc, PHASE19_ROAD_GUID, AlwaysLoaded);
+        insert!(
+            doc,
+            PHASE19_ROAD_GUID,
+            Spline {
+                points: phase19_road_points()
+                    .into_iter()
+                    .map(|p| Vec3d::new(p.x, p.y, p.z))
+                    .collect(),
+                closed: false,
+                interp: SplineInterp::Linear,
+            }
+        );
+        let half = phase19_world_size() * 0.5;
+        insert!(
+            doc,
+            PHASE19_ROAD_GUID,
+            PcgVolume {
+                graph: Some(PHASE19_ROAD_PCG_GUID),
+                extent: Vec2d::new(half, PHASE19_TOWN_HALF_WIDTH),
+                seed: 19,
+                draw_distance: 600.0,
+                ..Default::default()
+            }
+        );
+    }
+
+    // ── The seven lots: one building per archetype, one volume each. ──
+    for (i, id) in inf_pcg::ArchetypeId::ALL.into_iter().enumerate() {
+        let guid = phase19_lot_guid(i);
+        doc.create_with_guid(
+            guid,
+            SpawnKind::Empty,
+            &format!("Lot — {}", id.name()),
+            None,
+        );
+        let p = phase19_lot_position(i);
+        insert!(doc, guid, Transform::from_translation(p));
+        // See the function docs: a streamed volume never evaluates, because
+        // evaluation is a load-time pass.
+        insert!(doc, guid, AlwaysLoaded);
+        insert!(
+            doc,
+            guid,
+            PcgVolume {
+                graph: Some(phase19_lot_pcg_guid(i)),
+                extent: Vec2d::new(PHASE19_LOT_EXTENT.0, PHASE19_LOT_EXTENT.1),
+                // The volume seed folds into the pass seed, so two lots sharing
+                // one archetype would still differ. Here every lot has its own
+                // graph, and the seed is what makes the *plan* per-lot.
+                seed: 100 + i as u32,
+                draw_distance: 600.0,
+                ..Default::default()
+            }
+        );
+    }
+
+    // ── The street lamps: the level's STREAMED content. ──
+    //
+    // Ordinary placed entities with no `AlwaysLoaded` marker, so the partitioner
+    // bins each by its own world XZ and the cell manager activates it as the
+    // walker approaches. They are what makes the partition arm of the gate about
+    // something: with only persistent entities the `.inf_part` would hold one
+    // cell and prove nothing.
+    for i in 0..PHASE19_LAMPS {
+        let guid = phase19_lamp_guid(i);
+        doc.create_with_guid(guid, SpawnKind::Empty, &format!("Lamp {i}"), None);
+        let p = phase19_lamp_position(i);
+        insert!(
+            doc,
+            guid,
+            Transform {
+                translation: Vec3d::new(p.x, p.y + 2.4, p.z),
+                rotation: Vec3d::ZERO,
+                scale: Vec3d::new(0.12, 2.4, 0.12),
+            }
+        );
+        insert!(
+            doc,
+            guid,
+            MeshRef {
+                primitive: Primitive::Cylinder,
+                asset: None,
+            }
+        );
+        insert!(
+            doc,
+            guid,
+            Material {
+                base_color: Color::new(0.18, 0.19, 0.22, 1.0),
+                metallic: 0.6,
+                roughness: 0.45,
+                ..Default::default()
+            }
+        );
+    }
+
+    // ── The walker: the partition's streaming source. ──
+    doc.create_with_guid(PHASE19_WALKER_GUID, SpawnKind::Empty, "Walker", None);
+    {
+        let p = phase19_lot_position(0);
+        insert!(
+            doc,
+            PHASE19_WALKER_GUID,
+            Transform::from_translation(DVec3::new(p.x, p.y + 1.8, p.z))
+        );
+        insert!(
+            doc,
+            PHASE19_WALKER_GUID,
+            StreamingSource {
+                radius_m: PHASE19_ACTIVATION_RADIUS_M,
+            }
+        );
+    }
+
+    // ── Sky, sun, camera. ──
+    doc.create_with_guid(PHASE19_SKY_GUID, SpawnKind::Empty, "Sky", None);
+    insert!(doc, PHASE19_SKY_GUID, AlwaysLoaded);
+    insert!(
+        doc,
+        PHASE19_SKY_GUID,
+        TimeOfDay {
+            // 10:30 UTC — a solid, unambiguous daytime sun.
+            seconds: 10.5 * 3600.0,
+            rate: 0.0,
+            ..Default::default()
+        }
+    );
+    insert!(doc, PHASE19_SKY_GUID, SkyAtmosphere::default());
+
+    doc.create_with_guid(PHASE19_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(doc, PHASE19_SUN_GUID, AlwaysLoaded);
+    insert!(
+        doc,
+        PHASE19_SUN_GUID,
+        Transform {
+            translation: Vec3d::new(0.0, 120.0, 0.0),
+            rotation: Vec3d::new(-52.0, 34.0, 0.0),
+            scale: Vec3d::splat(1.0),
+        }
+    );
+    insert!(
+        doc,
+        PHASE19_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            intensity: 3.4,
+            ..Default::default()
+        }
+    );
+
+    doc.create_with_guid(PHASE19_CAMERA_GUID, SpawnKind::Empty, "Camera", None);
+    insert!(doc, PHASE19_CAMERA_GUID, AlwaysLoaded);
+    {
+        let c = phase19_world_center();
+        insert!(
+            doc,
+            PHASE19_CAMERA_GUID,
+            Transform {
+                translation: Vec3d::new(c.x - 120.0, phase19_height(c.x, c.z) + 34.0, c.z - 140.0),
+                rotation: Vec3d::new(-14.0, 32.0, 0.0),
+                scale: Vec3d::splat(1.0),
+            }
+        );
+    }
+    insert!(doc, PHASE19_CAMERA_GUID, Camera::default());
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+pub fn phase19_town_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/phase19-town")
+}
+
+/// Write the committed Phase 19 gate files: the `.inf_lvl` (+ sidecar), the
+/// biome set, the roadside graph, the seven lot graphs (each with its inf_asset
+/// sidecar so the `PcgVolume.graph` refs resolve through the AssetDb / cooked
+/// pack), and the README.
+pub fn write_phase19_town() -> Result<(), String> {
+    let dir = phase19_town_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    crate::scene::serialize::save(
+        &phase19_town_scene(),
+        &dir.join("Phase19Town.inf_lvl"),
+        Some(PHASE19_LEVEL_GUID),
+    )?;
+
+    let biome_bytes =
+        inf_asset::encode(&phase19_biome_set()).map_err(|e| format!("encode biomes: {e}"))?;
+    write_phase19_asset(
+        &dir.join("Town.inf_biomes"),
+        &biome_bytes,
+        PHASE19_BIOME_SET_GUID,
+        inf_asset::AssetKind::BiomeSet,
+    )?;
+
+    let road_bytes = phase19_road_payload()
+        .encode()
+        .map_err(|e| format!("encode road pcg: {e}"))?;
+    write_phase19_asset(
+        &dir.join("Roadside.inf_pcg"),
+        &road_bytes,
+        PHASE19_ROAD_PCG_GUID,
+        inf_asset::AssetKind::Pcg,
+    )?;
+
+    for (i, id) in inf_pcg::ArchetypeId::ALL.into_iter().enumerate() {
+        let bytes = phase19_lot_payload(i)
+            .encode()
+            .map_err(|e| format!("encode {} pcg: {e}", id.name()))?;
+        write_phase19_asset(
+            &dir.join(format!("Lot{}.inf_pcg", id.name())),
+            &bytes,
+            phase19_lot_pcg_guid(i),
+            inf_asset::AssetKind::Pcg,
+        )?;
+    }
+
+    std::fs::write(dir.join("README.md"), PHASE19_TOWN_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+/// Write one asset payload plus its `inf_asset` sidecar (the stable GUID is what
+/// makes a component's asset ref resolve through the AssetDb and the cook).
+fn write_phase19_asset(
+    path: &std::path::Path,
+    bytes: &[u8],
+    guid: Uuid,
+    kind: inf_asset::AssetKind,
+) -> Result<(), String> {
+    std::fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+    inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(guid),
+        kind,
+        inf_asset::ContentHash::of(bytes),
+    )
+    .save(path)
+    .map_err(|e| format!("write sidecar for {}: {e}", path.display()))
+}
+
+const PHASE19_TOWN_README: &str = "# Phase 19 Town (the phase gate scene)\n\n\
+Generated by `inf_editor_core::samples::phase19_town_scene` -- the **composed**\n\
+gate scene for Phase 19 (biomes, PCG grammar & enterable structures).\n\n\
+- `Phase19Town.inf_lvl` -- a **partitioned** level (128 m cells) over a four-tile\n\
+  biome-painted `Terrain`, a `Spline` road with the `PcgVolume` that fences it,\n\
+  **seven building lots (one per archetype)**, a walker that is the streaming\n\
+  source, a `TimeOfDay` + `SkyAtmosphere` authority, a sun and a camera.\n\
+- `Town.inf_biomes` -- two biomes (Town / Meadow); the strip within 90 m of the\n\
+  road is painted Town, everything beyond it Meadow.\n\
+- `Roadside.inf_pcg` -- a `grammar.rules` fence expanded along the road actor's\n\
+  own spline, merged with a light verge scatter. Every fence module declares a\n\
+  `collider`, so the fence is a barrier rather than a picture of one.\n\
+- `Lot<Archetype>.inf_pcg` (x7) -- `building.archetype -> building.plan ->\n\
+  output.pcg`, one per palette: Office, Apartment, Industrial, House, Estate,\n\
+  Hotel, Shop.\n\n\
+## Why one volume per lot\n\n\
+A building's footprint is its volume's own box -- the same default a\n\
+`grammar.footprint` span has. Seven archetypes on one canvas would need a per-node\n\
+lot offset, which is the volume's transform spelt a second way. So the level reads\n\
+as what it is: seven plots on a street, each with its own tiny graph.\n\n\
+## Why the terrain is authored inline, not streamed from an `.inf_terrain`\n\n\
+Phase 16 already gates heightfield tile streaming end to end\n\
+(`phase16_gate`, `streamed_terrain`). What Phase 19 needs from streaming is that\n\
+**buildings respect cells**, which is the *entity* partition -- so this level turns\n\
+world partition on with a deliberately small 128 m cell (half the engine default)\n\
+and authors its 512 m heightfield inline. Sixteen cells over the world means the\n\
+seven lots land in more than one of them, which is what makes the binning\n\
+assertion non-vacuous; a level whose every building sat in cell (0,0) would prove\n\
+nothing.\n\n\
+## Why the relief is gentle\n\n\
+A building levels its site: `base_y` is sampled once, at the footprint centre, and\n\
+every slab, wall and stair shares that datum. phase18's ~40 m of relief over 512 m\n\
+exists to put scatter behind occluders; here it would post a 44 m lot on stilts.\n\
+~6 m over 512 m is enough to prove the terrain is read and not enough to lift a\n\
+floor slab off the ground.\n\n\
+## The buildings are derived, so the level stays small\n\n\
+`PcgVolume.evaluated` and `PcgVolume.structures` are both `#[serde(skip)]`: the\n\
+instances **and the colliders** are recomputed on load from the committed\n\
+`.inf_pcg` (editor `pcg_evaluate`, shipped/PIE player `evaluate_pcg_volumes`).\n\
+Seven fully furnished three-storey buildings cost the `.inf_lvl` nothing.\n\n\
+## The gate (`runtime/inf-player/tests/phase19_gate.rs`)\n\n\
+1. full-trace determinism across two fresh loads (population + building solids +\n\
+   partition residency);\n\
+2. cooked == uncooked, bit for bit;\n\
+3. PIE == shipping, bit for bit, on the placed set;\n\
+4. **enterability** -- for one building per archetype: the room graph is connected,\n\
+   every door opening's rect holds no collider, and every floor is reachable from\n\
+   OUTSIDE by a graph walk through the entrance, the doors and the stair cores;\n\
+5. the lots bin into the partition cells their transforms say they do;\n\
+6. the composed scene loads inside the frame budget.\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4354,6 +5146,7 @@ mod tests {
             write_partitioned_world().expect("regenerate partitioned world");
             write_phase16_world().expect("regenerate phase16 world");
             write_phase18_scatter().expect("regenerate phase18 scatter");
+            write_phase19_town().expect("regenerate phase19 town");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -4565,6 +5358,41 @@ mod tests {
                 phase18_scatter_pcg_payload().encode().unwrap(),
                 "committed phase18-scatter .inf_pcg drifted from the generator"
             );
+        }
+
+        // Phase 19 gate lock (P19.5): the `.inf_lvl`, the biome set, the roadside
+        // graph and all seven lot graphs are committed.
+        let p19dir = phase19_town_dir();
+        let p19lvl = p19dir.join("Phase19Town.inf_lvl");
+        if p19lvl.exists() {
+            let want_lvl = crate::scene::serialize::encode(
+                &crate::scene::serialize::to_scene_file(&phase19_town_scene()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&p19lvl).unwrap(),
+                want_lvl,
+                "committed phase19-town .inf_lvl drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(p19dir.join("Town.inf_biomes")).unwrap(),
+                inf_asset::encode(&phase19_biome_set()).unwrap(),
+                "committed phase19-town .inf_biomes drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(p19dir.join("Roadside.inf_pcg")).unwrap(),
+                phase19_road_payload().encode().unwrap(),
+                "committed phase19-town roadside .inf_pcg drifted from the generator"
+            );
+            for (i, id) in inf_pcg::ArchetypeId::ALL.into_iter().enumerate() {
+                let path = p19dir.join(format!("Lot{}.inf_pcg", id.name()));
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    phase19_lot_payload(i).encode().unwrap(),
+                    "committed phase19-town {} .inf_pcg drifted from the generator",
+                    id.name()
+                );
+            }
         }
     }
 

@@ -18,6 +18,7 @@
 //!                | 'rot'    num ',' num ',' num        -- euler DEGREES (X, Y, Z), applied before the slot frame
 //!                | 'scale'  num                        -- uniform
 //!                | 'size'   num                        -- default metres consumed along the span
+//!                | 'collider' num ',' num ',' num      -- half-extents (metres) in the slot frame; P19.5
 //!
 //! rule_decl    ::= IDENT '->' alternatives TERM
 //! alternatives ::= alternative { '|' alternative }
@@ -60,6 +61,17 @@
 //! would place a wall of 1 m panels nobody asked for. A non-terminal may not
 //! carry a size at all (its length is whatever it rewrites to), which is also an
 //! error rather than a silent no-op.
+//!
+//! # Colliders are opt-in (P19.5)
+//!
+//! `collider hx,hy,hz` gives a module a **solid box**, as half-extents in the
+//! slot frame, centred on the module's own `offset`. Without it a module is
+//! geometry and nothing else — the P19.4 behaviour, kept as the default because
+//! a fence panel that silently started blocking the road it follows would be a
+//! regression, not a feature. With it, expansion emits a
+//! [`PcgCollider`](crate::scatter::PcgCollider) beside every instance, which is
+//! what makes P19.5's buildings *enterable* rather than merely drawn: a doorway
+//! is a stretch of wall where no module — and therefore no box — was placed.
 //!
 //! # v1 rejects recursion, by construction
 //!
@@ -229,6 +241,21 @@ pub struct ModuleDef {
     /// Default metres consumed along the span when a terminal names this module
     /// without an inline size.
     pub size: Option<f64>,
+    /// **P19.5.** Optional collision box, as half-extents in metres in the
+    /// **slot frame** (`+X` right of travel, `+Y` up, `+Z` along the span),
+    /// centred on the module's own `offset`.
+    ///
+    /// `None` means the module places geometry and nothing solid — the P19.4
+    /// behaviour, and still the default, because a fence panel nobody has asked
+    /// to be solid should not silently start blocking a road.
+    ///
+    /// The box is oriented by the slot's **yaw only**, not by the module's
+    /// authored `rot`: half-extents are stated in the slot frame, so rotating
+    /// them by an authored euler would mean the numbers no longer describe what
+    /// the author typed. A module whose *mesh* is turned inside its slot keeps a
+    /// slot-aligned collider, which is the predictable reading and the one a
+    /// wall wants.
+    pub collider: Option<DVec3>,
 }
 
 impl ModuleDef {
@@ -240,6 +267,7 @@ impl ModuleDef {
             rotation_deg: DVec3::ZERO,
             scale: 1.0,
             size: None,
+            collider: None,
         }
     }
 }
@@ -343,6 +371,28 @@ impl Grammar {
         out.into_iter().collect()
     }
 
+    /// Every module a **rule actually places**, sorted and deduplicated — the
+    /// exact complement of [`gaps`](Self::gaps), which lists the referenced
+    /// symbols that resolve to *no* module.
+    ///
+    /// A palette may declare modules no rule references: P19.5's archetypes do
+    /// exactly that for slabs, stair treads and furniture, which the building
+    /// assembler places directly at plan-derived dimensions. Anything that needs
+    /// to reason about what a *span expansion* can put on a wall — a jamb-width
+    /// check, a future palette linter — wants this list and not
+    /// [`modules`](Self::modules).
+    pub fn placed_modules(&self) -> Vec<&str> {
+        let mut out: BTreeSet<&str> = BTreeSet::new();
+        for rule in &self.rules {
+            visit_symbols(&rule.alternatives, &mut |name, _| {
+                if let Some((n, _)) = self.module_index.get_key_value(name) {
+                    out.insert(n.as_str());
+                }
+            });
+        }
+        out.into_iter().collect()
+    }
+
     /// Every mesh GUID the palette references, sorted and deduplicated — the
     /// cook's `.inf_pcg` → module edge.
     pub fn mesh_refs(&self) -> Vec<Uuid> {
@@ -391,6 +441,9 @@ impl Grammar {
             }
             if let Some(size) = m.size {
                 s.push_str(&format!(" size {size}"));
+            }
+            if let Some(c) = m.collider {
+                s.push_str(&format!(" collider {},{},{}", c.x, c.y, c.z));
             }
             s.push('\n');
         }
@@ -820,7 +873,7 @@ impl Parser<'_> {
         let mut seen: BTreeSet<String> = BTreeSet::new();
         while !self.at_end_of_statement() {
             let (l, c) = self.here();
-            let attr = self.ident("a module attribute (mesh/offset/rot/scale/size)")?;
+            let attr = self.ident("a module attribute (mesh/offset/rot/scale/size/collider)")?;
             if !seen.insert(attr.clone()) {
                 return Err(GrammarError::new(
                     l,
@@ -867,13 +920,30 @@ impl Parser<'_> {
                     }
                     m.size = Some(v);
                 }
+                // P19.5. A **zero** half-extent on any axis is rejected rather
+                // than accepted-and-ignored: `collider 0.1,1.5,0` reads as "a
+                // collider" and would silently be a zero-volume shape no
+                // character could ever touch, which is exactly the failure a
+                // building must not be able to ship.
+                "collider" => {
+                    let at = self.here();
+                    let v = self.parse_triple("collider")?;
+                    if !(v.x > 0.0 && v.y > 0.0 && v.z > 0.0) {
+                        return Err(GrammarError::new(
+                            at.0,
+                            at.1,
+                            "`collider` half-extents must all be positive metres",
+                        ));
+                    }
+                    m.collider = Some(v);
+                }
                 other => {
                     return Err(GrammarError::new(
                         l,
                         c,
                         format!(
                             "unknown module attribute `{other}` \
-                             (expected mesh, offset, rot, scale or size)"
+                             (expected mesh, offset, rot, scale, size or collider)"
                         ),
                     ))
                 }
@@ -1237,6 +1307,55 @@ Bay   -> Panel | Gate[2m]@0.5
             .into_iter()
             .collect::<Vec<_>>()
         );
+    }
+
+    /// **P19.5's one DSL addition.** A `collider` is optional, keeps its
+    /// half-extents verbatim, survives the canonical-text round trip, and is
+    /// absent by default — a P19.4 grammar must not silently start being solid.
+    #[test]
+    fn a_collider_is_optional_and_round_trips() {
+        let g = Grammar::parse(
+            "module Panel = size 2 offset 0,1.5,1 collider 0.1,1.5,1\n\
+             module Ghost = size 2\n\
+             W -> Panel Ghost\n",
+        )
+        .unwrap();
+        assert_eq!(g.modules()[0].collider, Some(DVec3::new(0.1, 1.5, 1.0)));
+        assert_eq!(g.modules()[1].collider, None, "opt-in, not opt-out");
+        // Every P19.4 grammar in this file is collider-free by construction.
+        let fence = Grammar::parse(FENCE).unwrap();
+        assert!(fence.modules().iter().all(|m| m.collider.is_none()));
+        // Round trip: printing and re-parsing reproduces the palette exactly.
+        let again = Grammar::parse(&g.to_text()).unwrap();
+        assert_eq!(again.modules(), g.modules());
+        assert!(g.to_text().contains("collider 0.1,1.5,1"));
+    }
+
+    /// A non-positive half-extent is a **parse error anchored at the value**,
+    /// not a silently-ignored zero-volume box nothing could ever touch.
+    #[test]
+    fn a_degenerate_collider_is_rejected_at_its_value() {
+        for text in [
+            "module M = size 1 collider 0,1,1",
+            "module M = size 1 collider 1,0,1",
+            "module M = size 1 collider 1,1,0",
+            "module M = size 1 collider -1,1,1",
+        ] {
+            let err = Grammar::parse(text).expect_err(text);
+            assert!(
+                err.message.contains("half-extents must all be positive"),
+                "{text}: {}",
+                err.message
+            );
+            assert_eq!((err.line, err.col), (1, 28), "{text}");
+        }
+        // The unknown-attribute message now names `collider` too, so a typo
+        // points at the real list.
+        let err = Grammar::parse("module M = collide 1,1,1").unwrap_err();
+        assert!(err.message.contains("collider"), "{}", err.message);
+        // And it is still a duplicate-checked attribute.
+        let dup = Grammar::parse("module M = size 1 collider 1,1,1 collider 2,2,2").unwrap_err();
+        assert!(dup.message.contains("duplicate"), "{}", dup.message);
     }
 
     #[test]

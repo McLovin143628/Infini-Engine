@@ -116,14 +116,19 @@ fn module_def() -> impl Strategy<Value = ModuleDef> {
         (number(), number(), number()),
         (0.01f64..10.0),
         prop::option::of(0.0f64..10.0),
+        // P19.5: the optional collider. Strictly positive on every axis — the
+        // parser rejects anything else, so generating a zero would only
+        // exercise the error path property 2 already owns.
+        prop::option::of((0.01f64..4.0, 0.01f64..4.0, 0.01f64..4.0)),
     )
-        .prop_map(|(name, mesh, off, rot, scale, size)| ModuleDef {
+        .prop_map(|(name, mesh, off, rot, scale, size, collider)| ModuleDef {
             name,
             mesh: mesh.map(Uuid::from_u128),
             offset: DVec3::new(off.0, off.1, off.2),
             rotation_deg: DVec3::new(rot.0, rot.1, rot.2),
             scale,
             size,
+            collider: collider.map(|c| DVec3::new(c.0, c.1, c.2)),
         })
 }
 

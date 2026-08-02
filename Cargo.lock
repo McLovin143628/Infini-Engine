@@ -3217,6 +3217,7 @@ version = "0.1.0"
 dependencies = [
  "glam 0.33.2",
  "inf-ecs",
+ "inf-pcg",
  "rapier2d-f64",
  "rapier3d-f64",
  "uuid",
@@ -3301,6 +3302,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.2",
  "inf-anim",
+ "inf-core",
  "inf-math",
  "inf-render-2d",
  "inf-vgeom",

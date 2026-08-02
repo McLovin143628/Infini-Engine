@@ -84,6 +84,11 @@ fn both_evaluation_paths_go_through_the_same_grammar_seams() {
     for needle in [
         // The expansion itself: spans, derivation, layout, placement.
         "inf_pcg::evaluate_grammars(",
+        // P19.5: the building generator, and the derived solid cache its output
+        // lands on. A side that skipped the second one would draw the building
+        // and leave it walk-through — the exact failure "enterable" names.
+        "inf_pcg::evaluate_buildings(",
+        "vol.set_structures(",
         // The per-volume inputs. A side that folded the volume seed its own way
         // (the exact mistake `biome_seed` exists to prevent one type down) would
         // not construct this.

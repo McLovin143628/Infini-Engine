@@ -19,7 +19,7 @@ use inf_render::{
 /// this scene in a small fraction of it; the margin absorbs driver/CI variance.
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.** Lower it as the
 /// measured floor drops; never raise it to hide a regression.
-const FRAME_BUDGET_MS: f64 = 33.0;
+use inf_core::FRAME_BUDGET_MS;
 
 const W: u32 = 640;
 const H: u32 = 360;

@@ -1771,6 +1771,29 @@ pub struct ScatteredInstance {
     pub kind: u32,
 }
 
+/// One placed **collision box** a `.inf_pcg` graph produced (P19.5) — the solid
+/// half of [`PcgVolume`]'s evaluation, beside [`ScatteredInstance`]'s visible
+/// half.
+///
+/// A dependency-light mirror of `inf_pcg::PcgCollider`, on exactly the terms
+/// [`ScatteredInstance`] mirrors `inf_pcg::PcgInstance`. Not reflected, not
+/// serialized: it is derived state, recomputed wherever `evaluated` is.
+///
+/// **This is what makes a grammar-built building enterable.** Scattered content
+/// has always been geometry and nothing else; a wall that a character walks
+/// through is a picture of a wall. The physics bridge reads these and builds one
+/// static box collider each, so a doorway — a stretch of wall where no module,
+/// and therefore no box, was placed — is a hole you can walk through.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScatteredSolid {
+    /// World-space centre of the box.
+    pub center: DVec3,
+    /// Half-extents in metres, in the box's own (rotated) frame.
+    pub half_extents: DVec3,
+    /// Yaw-only orientation.
+    pub rotation: DQuat,
+}
+
 /// A procedural scatter volume (P10.5b): a rectangular XZ region, centered on the
 /// entity's [`Transform`], populated by evaluating a `.inf_pcg` graph over the
 /// scene terrain. The editor evaluates on demand (`pcg_evaluate`) and stores the
@@ -1818,6 +1841,36 @@ pub struct PcgVolume {
     #[serde(skip)]
     #[reflect(ignore)]
     pub evaluated: Vec<ScatteredInstance>,
+    /// The same evaluation's **solid boxes** (P19.5) — grammar modules that
+    /// declared a `collider`, and every structural part of a building. Read by
+    /// the physics bridge, which turns each into one static box collider.
+    ///
+    /// `#[serde(skip)]` + `#[reflect(ignore)]`, exactly like
+    /// [`evaluated`](Self::evaluated), and for the same reason: it is derived
+    /// from the graph and the terrain, both of which the loading host already
+    /// has. **That is also why P19.5 bumps no schema** — only what reaches the
+    /// bytes can force a bump, and this reaches none. Pinned by the serializer's
+    /// own round-trip guard.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub structures: Vec<ScatteredSolid>,
+    /// Bumped every time [`structures`](Self::structures) is replaced through
+    /// [`set_structures`](Self::set_structures) — the **change stamp** the
+    /// physics bridge reconciles against.
+    ///
+    /// Without it the bridge would rebuild a descriptor for every solid on every
+    /// fixed step: a furnished town is ~13 000 immovable boxes, and re-describing
+    /// and re-sorting them 60 times a second to discover that a wall has not
+    /// moved is the kind of cost that never shows up in a load-time budget
+    /// measurement. This is the same version-stamp shape `SceneDoc::version` and
+    /// `Terrain`'s tile stamps already use.
+    ///
+    /// `#[serde(skip)]` like the cache it stamps. Starting at `0` on a fresh
+    /// component and at `1` after the first write is what makes an
+    /// unseen-by-the-bridge volume always resync.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub structures_gen: u64,
 }
 
 fn default_pcg_extent() -> Vec2d {
@@ -1835,7 +1888,24 @@ impl Default for PcgVolume {
             seed: 0,
             draw_distance: default_pcg_draw_distance(),
             evaluated: Vec::new(),
+            structures: Vec::new(),
+            structures_gen: 0,
         }
+    }
+}
+
+impl PcgVolume {
+    /// Replace the derived solid cache and **bump its change stamp**.
+    ///
+    /// The one supported way to write [`structures`](Self::structures): the
+    /// physics bridge skips rebuilding a volume's colliders while
+    /// [`structures_gen`](Self::structures_gen) is unchanged, so an assignment
+    /// that bypasses this would leave stale colliders in the world. The field
+    /// stays public for *reads* (and for struct literals, which start at
+    /// generation `0` and therefore always resync once).
+    pub fn set_structures(&mut self, solids: Vec<ScatteredSolid>) {
+        self.structures = solids;
+        self.structures_gen = self.structures_gen.wrapping_add(1);
     }
 }
 
@@ -3340,13 +3410,27 @@ mod tests {
                 scale: 1.5,
                 kind: 2,
             }],
+            // P19.5's solid half is derived state on exactly the same terms —
+            // and **this is the whole schema answer for the batch**: a field
+            // that never reaches the bytes cannot force a bump in either codec
+            // mirror.
+            structures: vec![ScatteredSolid {
+                center: DVec3::new(4.0, 5.0, 6.0),
+                half_extents: DVec3::new(0.1, 1.5, 1.0),
+                rotation: DQuat::IDENTITY,
+            }],
+            structures_gen: 9,
         };
         let json = serde_json::to_string(&v).unwrap();
-        // The skipped cache is absent from the serialized form …
+        // The skipped caches are absent from the serialized form …
         assert!(!json.contains("evaluated"));
+        assert!(!json.contains("structures"));
+        assert!(!json.contains("structures_gen"));
         let back: PcgVolume = serde_json::from_str(&json).unwrap();
-        // … and decodes empty, while the persisted fields round-trip.
+        // … and decode empty, while the persisted fields round-trip.
         assert!(back.evaluated.is_empty());
+        assert!(back.structures.is_empty());
+        assert_eq!(back.structures_gen, 0, "the change stamp is derived too");
         assert_eq!(back.graph, v.graph);
         assert_eq!(back.extent, v.extent);
         assert_eq!(back.seed, 7);

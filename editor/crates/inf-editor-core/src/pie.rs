@@ -52,7 +52,27 @@ pub struct PieSession {
     stdin: ChildStdin,
     events: Receiver<PlayerToEditor>,
     stderr_lines: Arc<Mutex<Vec<String>>>,
+    /// Signalled once by the stderr reader when it reaches **EOF** — i.e. when
+    /// every byte the player ever wrote is in `stderr_lines`.
+    ///
+    /// Process exit and pipe EOF are *different events*, and this is the whole
+    /// reason the field exists. `Child::try_wait` reports the first; a reader
+    /// thread blocked in `read` observes the second some scheduling quantum
+    /// later. Synchronizing on exit and then reading `stderr_lines()` — which is
+    /// what this module used to do — is a race whose losing side is an empty or
+    /// half-written panic message. It loses rarely, on a loaded CI machine, which
+    /// is the worst possible failure rate for a test.
+    stderr_eof: Receiver<()>,
+    /// `true` once `stderr_eof` has fired. Sticky, because the channel yields
+    /// its single message only once.
+    stderr_drained: bool,
 }
+
+/// Pushed into the captured stderr when the reader could not reach EOF inside a
+/// caller's deadline, so **any** assertion that prints the captured output says
+/// so instead of quietly comparing against a truncated string.
+pub const STDERR_TRUNCATED_MARKER: &str =
+    "<inf: the player's stderr did not reach EOF within the deadline — output below is PARTIAL>";
 
 impl PieSession {
     /// Spawn `player_bin --pie`, wire the reader threads, and complete the
@@ -80,13 +100,19 @@ impl PieSession {
             }
         });
 
-        // Player logs (and panic messages) line-buffered off stderr.
+        // Player logs (and panic messages) line-buffered off stderr. The reader
+        // signals `eof_tx` when the pipe closes, which is the only moment the
+        // capture is known to be complete.
         let stderr_lines = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&stderr_lines);
+        let (eof_tx, stderr_eof) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 sink.lock().expect("stderr sink poisoned").push(line);
             }
+            // Sending after the loop is what makes this a happens-before edge:
+            // every push above is visible to whoever receives this.
+            let _ = eof_tx.send(());
         });
 
         let session = PieSession {
@@ -94,6 +120,8 @@ impl PieSession {
             stdin,
             events,
             stderr_lines,
+            stderr_eof,
+            stderr_drained: false,
         };
 
         match session.next_event(Duration::from_secs(10)) {
@@ -224,18 +252,60 @@ impl PieSession {
         }
     }
 
-    /// Poll-wait for the player to exit (used after Stop / a crash).
+    /// Poll-wait for the player to exit, **then drain its stderr to EOF** (used
+    /// after Stop / a crash).
+    ///
+    /// Both halves are load-bearing. Returning on process exit alone leaves the
+    /// reader thread mid-`read`, so a caller that immediately asks for
+    /// [`stderr_lines`](Self::stderr_lines) — to assert on a panic message, say —
+    /// races it. The drain uses whatever is left of the same deadline; if it
+    /// expires, [`STDERR_TRUNCATED_MARKER`] is pushed into the capture so the
+    /// truncation is impossible to miss in a failure message, and
+    /// [`stderr_complete`](Self::stderr_complete) reports `false`.
     pub fn wait_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
         let deadline = Instant::now() + timeout;
-        loop {
+        let status = loop {
             if let Ok(Some(status)) = self.child.try_wait() {
-                return Some(status);
+                break Some(status);
             }
             if Instant::now() >= deadline {
-                return None;
+                break None;
             }
             std::thread::sleep(Duration::from_millis(10));
+        };
+        self.drain_stderr(deadline);
+        status
+    }
+
+    /// Block until the stderr reader reports EOF, or `deadline` passes.
+    ///
+    /// Idempotent and sticky: the channel carries exactly one message, so the
+    /// flag is what later calls read.
+    fn drain_stderr(&mut self, deadline: Instant) {
+        if self.stderr_drained {
+            return;
         }
+        let left = deadline.saturating_duration_since(Instant::now());
+        // A zero-length remaining deadline still gets one non-blocking look, so
+        // an already-finished reader is never reported as truncated.
+        match self
+            .stderr_eof
+            .recv_timeout(left.max(Duration::from_millis(1)))
+        {
+            Ok(()) => self.stderr_drained = true,
+            Err(_) => {
+                let mut sink = self.stderr_lines.lock().expect("stderr sink poisoned");
+                if sink.last().map(String::as_str) != Some(STDERR_TRUNCATED_MARKER) {
+                    sink.push(STDERR_TRUNCATED_MARKER.to_string());
+                }
+            }
+        }
+    }
+
+    /// `true` when the player's stderr has been read all the way to EOF — i.e.
+    /// [`stderr_lines`](Self::stderr_lines) is complete rather than a snapshot.
+    pub fn stderr_complete(&self) -> bool {
+        self.stderr_drained
     }
 
     /// Everything the player wrote to stderr so far (its logs; after a
