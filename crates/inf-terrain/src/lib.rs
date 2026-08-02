@@ -47,6 +47,7 @@ mod data;
 mod delta;
 pub mod erosion;
 pub mod import;
+pub mod maps;
 pub use erosion::{erode, erode_terrain, erode_with, ErosionParams, ErosionStats};
 mod noise;
 pub mod pyramid;
@@ -64,20 +65,23 @@ use glam::DVec3;
 pub use asset::{
     build_terrain_asset, header_len, read_terrain_asset, write_terrain_asset, TerrainAsset,
     TerrainAssetBuilder, TerrainAssetError, TerrainAssetHeader, TerrainAssetReader,
-    TerrainAssetView, TileDirEntry, HEADER_LEN_V1, HEADER_LEN_V2, TERRAIN_ASSET_SCHEMA_VERSION,
-    TILE_ALIGN,
+    TerrainAssetView, TileDirEntry, HEADER_LEN_V1, HEADER_LEN_V2, HEADER_LEN_V3,
+    TERRAIN_ASSET_SCHEMA_VERSION, TILE_ALIGN,
 };
 pub use brush::{apply_brush, dab_positions, BrushOp, BrushParams, Falloff, FlattenTarget, Stroke};
 pub use chunked::{
     import_heightmap, import_heightmap_in, import_heightmap_reader, import_heightmap_reader_in,
     ChunkedImportOptions, ImportProgress, ImportReport,
 };
-pub use data::{TerrainData, DEFAULT_METERS_PER_SAMPLE, DEFAULT_TILE_RESOLUTION};
+pub use data::{
+    TerrainData, TerrainDataFrozenV1, DEFAULT_METERS_PER_SAMPLE, DEFAULT_TILE_RESOLUTION,
+};
 pub use delta::{HeightDelta, TilePatch};
 pub use import::{
     encode_png16, probe_heightmap, probe_heightmap_bytes, HeightImage, HeightMode, HeightmapFormat,
     HeightmapGrid, HeightmapImport, HeightmapProbe, TerrainError,
 };
+pub use maps::{DataMapDelta, DataMapPatch};
 pub use noise::fbm_signed;
 pub use pyramid::{
     build_pyramid, coarsen_coords, downsample_block, plan_pyramid, PyramidLevel, PyramidOptions,
@@ -91,7 +95,10 @@ pub use stream::{
     open_file_tile_store, FileTileStore, PackTileStore, StreamBudget, TerrainStreamStats,
     TerrainStreamer,
 };
-pub use tile::{TerrainTile, TileKey, DEFAULT_WEIGHT};
+pub use tile::{
+    DataMapKind, TerrainTile, TerrainTileFrozenV1, TileKey, DATA_MAP_CHANNELS, DEFAULT_DATA_MAP,
+    DEFAULT_WEIGHT,
+};
 pub use wants::{
     advance_cut, brush_wants, clamp_cut, render_wants, sim_wants, RenderWantsParams, TileCatalog,
     TileGrid, TileIndex, DEFAULT_HYSTERESIS,

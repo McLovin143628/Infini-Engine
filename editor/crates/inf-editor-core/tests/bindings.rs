@@ -11,10 +11,10 @@ use inf_editor_core::ipc::CollisionLayerDto;
 use inf_editor_core::ipc::HeightmapProbeDto;
 use inf_editor_core::ipc::{
     AddableComponentDto, AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot,
-    ComponentDto, DataAssetDto, DataFieldDto, DeleteResult, DetailsDto, ErosionParamsDto,
-    ErosionReportDto, FileEntryDto, FoliageSettingsDto, GitFileDto, GitStatusDto, GizmoModeDto,
-    GizmoSpaceDto, ImportEventDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto,
-    PackageKindCountDto, PackageResultDto, PartitionSettingsDto, ProjectInfoDto,
+    ComponentDto, DataAssetDto, DataFieldDto, DataMapExportDto, DeleteResult, DetailsDto,
+    ErosionParamsDto, ErosionReportDto, FileEntryDto, FoliageSettingsDto, GitFileDto, GitStatusDto,
+    GizmoModeDto, GizmoSpaceDto, ImportEventDto, LayoutSummary, LevelSettingsDto, LogLine,
+    PackageErrorDto, PackageKindCountDto, PackageResultDto, PartitionSettingsDto, ProjectInfoDto,
     ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto, RecentProjectDto,
     SaveResultDto, SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto, SculptOpDto,
     SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto, SeqTrackDto,
@@ -90,6 +90,7 @@ fn export_bindings() {
     ProjectSettingsDto::export_all(&cfg).expect("export ProjectSettingsDto");
     ErosionParamsDto::export_all(&cfg).expect("export ErosionParamsDto");
     ErosionReportDto::export_all(&cfg).expect("export ErosionReportDto");
+    DataMapExportDto::export_all(&cfg).expect("export DataMapExportDto");
     TilemapCellDto::export_all(&cfg).expect("export TilemapCellDto");
     TilemapDto::export_all(&cfg).expect("export TilemapDto");
     PackageKindCountDto::export_all(&cfg).expect("export PackageKindCountDto");

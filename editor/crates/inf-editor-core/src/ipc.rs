@@ -955,10 +955,39 @@ impl Default for ErosionParamsDto {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
 pub struct ErosionReportDto {
     pub cells_changed: u32,
+    /// Data-map samples the bake moved (P19.1) — the flow / deposition / wear
+    /// accumulators it wrote. Always **at least** `cells_changed`: a height only
+    /// moves through the erode/deposit pass, which writes a map in the same
+    /// breath.
+    pub map_cells_changed: u32,
     pub mass_delta: f64,
     pub sediment_moved: Option<f64>,
     pub used_gpu: bool,
     pub steps: u32,
+}
+
+/// Result of a data-map export (`terrain_export_data_map`, P19.1).
+///
+/// The written file is a **16-bit grayscale PNG** normalized over `[min, max]` —
+/// the range the terrain's raw accumulators actually span, reported here so the
+/// mapping is stated rather than implied. The stored data is never normalized;
+/// only this view is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct DataMapExportDto {
+    /// Which map was exported (`"flow"` / `"deposition"` / `"wear"`).
+    pub map: String,
+    /// Absolute path of the PNG written.
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+    /// Bytes written.
+    pub bytes: u32,
+    /// Low end of the exported range (black), in the map's own SI unit.
+    pub min: f32,
+    /// High end of the exported range (white), in the map's own SI unit.
+    pub max: f32,
+    /// SI unit of the accumulator (`"m^3"` for flow, `"m"` for the others).
+    pub unit: String,
 }
 
 /// Per-project editor settings persisted under `<root>/.infinity/settings.toml`

@@ -33,6 +33,7 @@ import type { DeleteResult } from "../bindings/DeleteResult";
 import type { AddableComponentDto } from "../bindings/AddableComponentDto";
 import type { DetailsDto } from "../bindings/DetailsDto";
 import type { ErosionParamsDto } from "../bindings/ErosionParamsDto";
+import type { DataMapExportDto } from "../bindings/DataMapExportDto";
 import type { ErosionReportDto } from "../bindings/ErosionReportDto";
 import type { FileEntryDto } from "../bindings/FileEntryDto";
 import type { GitStatusDto } from "../bindings/GitStatusDto";
@@ -204,6 +205,25 @@ export const terrain = {
     region?: [number, number, number, number],
   ): Promise<ErosionReportDto> =>
     invoke<ErosionReportDto>("terrain_erode", { entity, params, steps, region: region ?? null }),
+
+  /**
+   * Export one erosion data map (P19.1) as a 16-bit grayscale PNG under the
+   * project's `Content/DataMaps/`. `map` is `"flow" | "deposition" | "wear"`.
+   *
+   * The image is normalized over the exported region's own `[min, max]` — the
+   * report states that range, because the stored accumulators are raw and are
+   * never rescaled.
+   */
+  exportDataMap: (
+    entity: string,
+    map: "flow" | "deposition" | "wear",
+    region?: [number, number, number, number],
+  ): Promise<DataMapExportDto> =>
+    invoke<DataMapExportDto>("terrain_export_data_map", {
+      entity,
+      map,
+      region: region ?? null,
+    }),
 
   // ── Terrain Import wizard (P16.4a) ───────────────────────────────────────
 

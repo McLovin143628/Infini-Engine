@@ -24,6 +24,46 @@
 //! | `fl,fr,ft,fb` | outflow flux to the ±x / ±z neighbour (volume · s⁻¹) |
 //! | `u,v` | water velocity |
 //!
+//! # The data maps (P19.1)
+//!
+//! Three more per-cell scalars ride beside that state — the accumulators the
+//! erosion used to discard. They are **not** simulation inputs: nothing reads
+//! them, so adding them cannot change a single height. Each is a raw, monotone,
+//! non-negative sum over every step (see [`crate::DataMapKind`] for the units):
+//!
+//! | map | accumulated | where | unit |
+//! |-----|-------------|-------|------|
+//! | **flow** | `dt · (fl+fr+ft+fb)` after the K clamp | pass 2 | m³ |
+//! | **deposition** | the deposited amount | pass 5 (over-capacity branch) | m |
+//! | **wear** | the eroded amount | pass 5 (under-capacity branch) | m |
+//!
+//! They live in the same fixed-order loops as the fields they are computed from,
+//! so the existing byte-identical determinism guarantee covers them verbatim, and
+//! the WGSL port accumulates them in the same two passes with the same
+//! parenthesization (`dt · (total · k)`, **not** the four scaled pipes summed) so
+//! the parity gates extend to them unchanged.
+//!
+//! **Thermal is deliberately excluded.** Thermal erosion relaxes slopes by moving
+//! material between cells and conserves terrain mass exactly, so folding it in
+//! would (a) count pure relaxation as "wear", and (b) add equal amounts to both
+//! totals. Leaving it out makes the accounting identity **exact**:
+//! `Σ deposition − Σ wear == Σ (b_final − b_init)`, which is the conservation
+//! gate.
+//!
+//! The maps are extracted from and written back to the tiles through the same
+//! [`HeightRegion`] seam as the heights, and the write-back yields a reversible
+//! [`DataMapDelta`](crate::DataMapDelta) beside the [`HeightDelta`].
+//!
+//! **What "bakes compose" does and does not mean.** The *accumulators* compose:
+//! a second bake reads the tiles' existing totals and adds to them, so nothing is
+//! reset or rescaled and `map(A then B) == map(A) + (what B alone contributed)`.
+//! The *simulation* does not: a bake ends by discarding its water depth, sediment
+//! and flux, so `2 × 40 steps` is not `1 × 80 steps` — the second run starts on
+//! dry ground and has to re-wet it, and measures ~34 % less flow than the single
+//! long run over the same step count. That is a property of the model, not of the
+//! maps (the heights diverge the same way), and it is why the compose test asserts
+//! *monotone growth and exact un-composition*, not equality with a long run.
+//!
 //! # One step (fixed `dt`, order is load-bearing — the WGSL port must match)
 //!
 //! 1. **Rain** — `d += dt · rain · R(x,z)`, `R` a seeded world-anchored fBm factor
@@ -98,8 +138,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::TerrainData;
 use crate::delta::HeightDelta;
+use crate::maps::DataMapDelta;
 use crate::noise::fbm_signed;
 use crate::region::HeightRegion;
+use crate::tile::{DataMapKind, DATA_MAP_CHANNELS};
 use glam::DVec2;
 
 /// The 8 neighbour offsets `(dx, dz)` used by thermal erosion, in a fixed order
@@ -243,6 +285,9 @@ struct Sim {
     fb: Vec<f32>,
     u: Vec<f32>,
     v: Vec<f32>,
+    /// P19.1 data-map accumulators, interleaved `[flow, deposition, wear]` per
+    /// cell — seeded from the region (so bakes compose) and folded back into it.
+    maps: Vec<[f32; DATA_MAP_CHANNELS]>,
     authored: Vec<bool>,
     // scratch buffers reused across steps (avoid per-step allocation)
     new_d: Vec<f32>,
@@ -304,6 +349,7 @@ impl Sim {
             fb: vec![0.0; n],
             u: vec![0.0; n],
             v: vec![0.0; n],
+            maps: region.maps().to_vec(),
             authored,
             new_d: vec![0.0; n],
             new_s: vec![0.0; n],
@@ -431,6 +477,10 @@ impl Sim {
                     self.fr[i] = nfr * k;
                     self.ft[i] = nft * k;
                     self.fb[i] = nfb * k;
+                    // P19.1 FLOW: the water volume this cell shipped this step.
+                    // `dt · (total · k)` — the WGSL port must use this exact
+                    // parenthesization, not the four scaled pipes re-summed.
+                    self.maps[i][DataMapKind::Flow.channel()] += p.dt * (total * k);
                 } else {
                     self.fl[i] = 0.0;
                     self.fr[i] = 0.0;
@@ -533,11 +583,15 @@ impl Sim {
                     self.b[i] -= amt;
                     self.s[i] = s + amt;
                     self.sediment_moved += amt as f64 * self.area;
+                    // P19.1 WEAR: metres of terrain dissolved off this cell.
+                    self.maps[i][DataMapKind::Wear.channel()] += amt;
                 } else {
                     // deposit the surplus (never more than is suspended)
                     let amt = (p.deposition * (s - capacity)).min(s).max(0.0);
                     self.b[i] += amt;
                     self.s[i] = s - amt;
+                    // P19.1 DEPOSITION: metres of sediment settled onto this cell.
+                    self.maps[i][DataMapKind::Deposition.channel()] += amt;
                 }
             }
         }
@@ -716,6 +770,18 @@ impl Sim {
         }
     }
 
+    /// Fold the accumulated data maps back into the region (authored cells only —
+    /// a hole is never eroded, so its accumulators stay at the value the region
+    /// carried in).
+    fn flush_maps(&self, region: &mut HeightRegion) {
+        let out = region.maps_mut();
+        for (i, texel) in self.maps.iter().enumerate() {
+            if self.authored[i] {
+                out[i] = *texel;
+            }
+        }
+    }
+
     fn finish_stats(&self) -> ErosionStats {
         let mut b_now = 0.0f64;
         let mut water = 0.0f64;
@@ -744,6 +810,7 @@ pub fn erode(region: &mut HeightRegion, params: &ErosionParams, steps: u32) -> E
         sim.step(params, step);
     }
     sim.flush_terrain(region);
+    sim.flush_maps(region);
     sim.finish_stats()
 }
 
@@ -761,18 +828,21 @@ pub fn erode_with<F: FnMut(u32, &HeightRegion)>(
     for step in 1..=steps {
         sim.step(params, step);
         sim.flush_terrain(region);
+        sim.flush_maps(region);
         on_step(step, region);
     }
     if steps == 0 {
         sim.flush_terrain(region);
+        sim.flush_maps(region);
     }
     sim.finish_stats()
 }
 
 /// Extract the world AABB `[min, max]` (expanded by `margin` samples), erode it,
 /// and write it back through the [`HeightRegion`] seam — yielding an
-/// undo-compatible [`HeightDelta`] alongside the [`ErosionStats`]. This is the
-/// editor-facing entry point (drag an erosion region, get one undo step).
+/// undo-compatible [`HeightDelta`] and the sibling [`DataMapDelta`] (P19.1)
+/// alongside the [`ErosionStats`]. This is the editor-facing entry point (drag an
+/// erosion region, get one undo step covering heights **and** data maps).
 ///
 /// `margin` gives the simulation a border so open-boundary draining happens
 /// outside the region of interest; a few samples is plenty.
@@ -783,10 +853,10 @@ pub fn erode_terrain(
     margin: u32,
     params: &ErosionParams,
     steps: u32,
-) -> (HeightDelta, ErosionStats) {
+) -> (HeightDelta, DataMapDelta, ErosionStats) {
     let mut stats = ErosionStats::default();
-    let delta = data.edit_region(min, max, margin, |region| {
+    let (heights, maps) = data.edit_region_with_maps(min, max, margin, |region| {
         stats = erode(region, params, steps);
     });
-    (delta, stats)
+    (heights, maps, stats)
 }

@@ -45,15 +45,35 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> terrain_out: array<f32>;
 @group(0) @binding(2) var<storage, read_write> sediment_in: array<f32>;
 @group(0) @binding(3) var<storage, read_write> sediment_out: array<f32>;
-@group(0) @binding(4) var<storage, read_write> water: array<f32>;
+// hydro texel = (water depth d, velocity u, velocity v, unused). The CPU's `d`
+// and `(u, v)` share ONE binding because the stage is hard-capped at 8 storage
+// buffers (wgpu's default limit, which the headless context requests), and P19.1
+// needs a slot for the data maps. They are the same cell's water column, both
+// read-write, both written only by their own invocation — so the merge is a
+// layout change and nothing else: same values, same order, same bits.
+@group(0) @binding(4) var<storage, read_write> hydro: array<vec4<f32>>;
 // flux texel = (fl, fr, ft, fb) outflow to the -x / +x / -z / +z neighbour.
 @group(0) @binding(5) var<storage, read_write> flux: array<vec4<f32>>;
-// velocity = (u, v) water velocity.
-@group(0) @binding(6) var<storage, read_write> velocity: array<vec2<f32>>;
+// P19.1 erosion data maps, 3 scalars per cell at `i*3 + channel`:
+// 0 = flow (m^3), 1 = deposition (m), 2 = wear (m). Interleaved exactly like the
+// CPU tile's `[f32; 3]`, so upload and read-back are straight casts. Written
+// only; nothing in the simulation reads them back, which is why adding them
+// cannot move a single height.
+@group(0) @binding(6) var<storage, read_write> maps: array<f32>;
 // aux texel = (rain_factor, authored) — two read-only per-cell fields packed
 // into one buffer to stay within the 8-storage-buffer downlevel limit.
 @group(0) @binding(7) var<storage, read>       aux: array<vec2<f32>>;
 @group(0) @binding(8) var<uniform>             P: Params;
+
+// Data-map channel offsets (mirror `inf_terrain::DataMapKind::channel`).
+const MAP_FLOW: u32 = 0u;
+const MAP_DEPOSITION: u32 = 1u;
+const MAP_WEAR: u32 = 2u;
+
+fn add_map(i: u32, channel: u32, amount: f32) {
+  let k = i * 3u + channel;
+  maps[k] = maps[k] + amount;
+}
 
 const SQRT2: f32 = 1.4142135623730951;
 
@@ -74,7 +94,7 @@ fn rain(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = idx(c, r);
   if (!is_auth(i)) { return; }
   let add = P.dt * P.rain_rate;
-  water[i] = water[i] + add * aux[i].x;
+  hydro[i].x = hydro[i].x + add * aux[i].x;
 }
 
 // New non-negative flux for one pipe (0 for a wall).
@@ -91,33 +111,33 @@ fn flux_update(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = idx(c, r);
   if (!is_auth(i)) { flux[i] = vec4<f32>(0.0); return; }
 
-  let self_surf = terrain_in[i] + water[i];
+  let self_surf = terrain_in[i] + hydro[i].x;
   let scale = P.dt * P.pipe_area * P.gravity / P.l;
   let fo = flux[i];
 
   // left (-x)
   var dh_l = 0.0; var wall_l = false;
-  if (c == 0u) { dh_l = water[i]; } else {
+  if (c == 0u) { dh_l = hydro[i].x; } else {
     let j = idx(c - 1u, r);
-    if (is_auth(j)) { dh_l = self_surf - (terrain_in[j] + water[j]); } else { wall_l = true; }
+    if (is_auth(j)) { dh_l = self_surf - (terrain_in[j] + hydro[j].x); } else { wall_l = true; }
   }
   // right (+x)
   var dh_r = 0.0; var wall_r = false;
-  if (c == P.nx - 1u) { dh_r = water[i]; } else {
+  if (c == P.nx - 1u) { dh_r = hydro[i].x; } else {
     let j = idx(c + 1u, r);
-    if (is_auth(j)) { dh_r = self_surf - (terrain_in[j] + water[j]); } else { wall_r = true; }
+    if (is_auth(j)) { dh_r = self_surf - (terrain_in[j] + hydro[j].x); } else { wall_r = true; }
   }
   // top (-z)
   var dh_t = 0.0; var wall_t = false;
-  if (r == 0u) { dh_t = water[i]; } else {
+  if (r == 0u) { dh_t = hydro[i].x; } else {
     let j = idx(c, r - 1u);
-    if (is_auth(j)) { dh_t = self_surf - (terrain_in[j] + water[j]); } else { wall_t = true; }
+    if (is_auth(j)) { dh_t = self_surf - (terrain_in[j] + hydro[j].x); } else { wall_t = true; }
   }
   // bottom (+z)
   var dh_b = 0.0; var wall_b = false;
-  if (r == P.nz - 1u) { dh_b = water[i]; } else {
+  if (r == P.nz - 1u) { dh_b = hydro[i].x; } else {
     let j = idx(c, r + 1u);
-    if (is_auth(j)) { dh_b = self_surf - (terrain_in[j] + water[j]); } else { wall_b = true; }
+    if (is_auth(j)) { dh_b = self_surf - (terrain_in[j] + hydro[j].x); } else { wall_b = true; }
   }
 
   let nfl = pipe(fo.x, scale, dh_l, wall_l);
@@ -127,9 +147,13 @@ fn flux_update(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let total = nfl + nfr + nft + nfb;
   if (total > 0.0) {
-    let avail = water[i] * P.l * P.l;
+    let avail = hydro[i].x * P.l * P.l;
     let k = min(avail / (total * P.dt), 1.0);
     flux[i] = vec4<f32>(nfl, nfr, nft, nfb) * k;
+    // P19.1 FLOW: `dt · (total · k)` — the CPU reference's exact
+    // parenthesization, NOT the four scaled pipes re-summed (that rounds
+    // differently and would cost the bit-exact early steps).
+    add_map(i, MAP_FLOW, P.dt * (total * k));
   } else {
     flux[i] = vec4<f32>(0.0);
   }
@@ -141,7 +165,7 @@ fn water_update(@builtin(global_invocation_id) gid: vec3<u32>) {
   let c = gid.x; let r = gid.y;
   if (c >= P.nx || r >= P.nz) { return; }
   let i = idx(c, r);
-  if (!is_auth(i)) { water[i] = 0.0; velocity[i] = vec2<f32>(0.0); return; }
+  if (!is_auth(i)) { hydro[i] = vec4<f32>(0.0); return; }
 
   var fr_left = 0.0;
   if (c > 0u) { fr_left = flux[idx(c - 1u, r)].y; }
@@ -155,18 +179,17 @@ fn water_update(@builtin(global_invocation_id) gid: vec3<u32>) {
   let fo = flux[i];
   let inflow = fr_left + fl_right + fb_top + ft_bottom;
   let outflow = fo.x + fo.y + fo.z + fo.w;
-  let d_old = water[i];
+  let d_old = hydro[i].x;
   let d_new = max(d_old + P.dt * (inflow - outflow) / (P.l * P.l), 0.0);
-  water[i] = d_new;
 
   let d_mean = 0.5 * (d_old + d_new);
+  var vel = vec2<f32>(0.0);
   if (d_mean > 1e-6) {
     let dwx = 0.5 * ((fr_left - fo.x) + (fo.y - fl_right));
     let dwz = 0.5 * ((fb_top - fo.z) + (fo.w - ft_bottom));
-    velocity[i] = vec2<f32>(dwx / (P.l * d_mean), dwz / (P.l * d_mean));
-  } else {
-    velocity[i] = vec2<f32>(0.0);
+    vel = vec2<f32>(dwx / (P.l * d_mean), dwz / (P.l * d_mean));
   }
+  hydro[i] = vec4<f32>(d_new, vel.x, vel.y, 0.0);
 }
 
 // Terrain height (from terrain_in) of the authored neighbour at (c+dx, r+dz),
@@ -200,7 +223,7 @@ fn erode_deposit(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (!is_auth(i)) { terrain_out[i] = terrain_in[i]; return; } // hole: copy through
 
   let st = max(sin_tilt(c, r), P.min_tilt);
-  let vel = velocity[i];
+  let vel = hydro[i].yz;
   let speed = sqrt(vel.x * vel.x + vel.y * vel.y);
   let capacity = P.sediment_capacity * st * speed;
   let s = sediment_in[i];
@@ -208,10 +231,12 @@ fn erode_deposit(@builtin(global_invocation_id) gid: vec3<u32>) {
     let amt = max(min(P.dissolving * (capacity - s), P.max_erode_depth), 0.0);
     terrain_out[i] = terrain_in[i] - amt;
     sediment_in[i] = s + amt;
+    add_map(i, MAP_WEAR, amt); // P19.1: metres dissolved off this cell
   } else {
     let amt = max(min(P.deposition * (s - capacity), s), 0.0);
     terrain_out[i] = terrain_in[i] + amt;
     sediment_in[i] = s - amt;
+    add_map(i, MAP_DEPOSITION, amt); // P19.1: metres settled onto this cell
   }
 }
 
@@ -238,7 +263,7 @@ fn advect(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (c >= P.nx || r >= P.nz) { return; }
   let i = idx(c, r);
   if (!is_auth(i)) { sediment_out[i] = 0.0; return; }
-  let vel = velocity[i];
+  let vel = hydro[i].yz;
   let px = f32(c) - vel.x * P.dt / P.l;
   let pz = f32(r) - vel.y * P.dt / P.l;
   sediment_out[i] = sample_s(px, pz);
@@ -252,7 +277,7 @@ fn evaporate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = idx(c, r);
   if (!is_auth(i)) { return; }
   let keep = 1.0 - P.evaporation * P.dt;
-  water[i] = max(water[i] * keep, 0.0);
+  hydro[i].x = max(hydro[i].x * keep, 0.0);
 }
 
 // How much cell (sc,sr) gives to its neighbour at (sc+tdx, sr+tdz) this step —

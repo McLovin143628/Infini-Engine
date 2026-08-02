@@ -7,4 +7,11 @@
  * cumulative eroded volume — present only on the CPU (no-adapter) path, `None`
  * on the GPU path (GPU stat reductions are omitted; see the executor docs).
  */
-export type ErosionReportDto = { cells_changed: number, mass_delta: number, sediment_moved: number | null, used_gpu: boolean, steps: number, };
+export type ErosionReportDto = { cells_changed: number, 
+/**
+ * Data-map samples the bake moved (P19.1) — the flow / deposition / wear
+ * accumulators it wrote. Always **at least** `cells_changed`: a height only
+ * moves through the erode/deposit pass, which writes a map in the same
+ * breath.
+ */
+map_cells_changed: number, mass_delta: number, sediment_moved: number | null, used_gpu: boolean, steps: number, };

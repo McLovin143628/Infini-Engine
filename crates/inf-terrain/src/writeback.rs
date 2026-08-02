@@ -56,7 +56,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::asset::{TerrainAsset, TerrainAssetBuilder, TerrainAssetError};
+use crate::asset::{
+    encode_tile, TerrainAsset, TerrainAssetBuilder, TerrainAssetError, TERRAIN_ASSET_SCHEMA_VERSION,
+};
 use crate::data::TerrainData;
 use crate::pyramid::{downsample_block, plan_pyramid, PyramidOptions};
 use crate::tile::{TerrainTile, TileKey};
@@ -216,7 +218,18 @@ pub fn rewrite_terrain_asset<B: AsRef<[u8]>>(
     builder.build().map(Some)
 }
 
-/// A tile the rewrite is passing through unchanged, as raw blob bytes.
+/// A tile the rewrite is carrying over unchanged.
+///
+/// **Bytes when it can, values when it must.** The rewrite always emits the
+/// *current* schema, so a byte-for-byte copy is only correct when the source is
+/// already at that schema. An older payload's blobs hold an older tile layout
+/// (P19.1 appended the data maps; bincode is positional), and copying them into a
+/// v3 image would produce a file whose header promises a layout its blobs do not
+/// have — the one failure mode that survives every validity check and only
+/// surfaces as a corrupt tile on some later load. So an older source is
+/// **transcoded**: decoded through its own version and re-encoded at the current
+/// one. That is a one-time cost on the first save after an upgrade, and it is why
+/// the migration needs no separate pass.
 ///
 /// Every caller has already established that `source` holds `key` (it either came
 /// out of the source's own directory or survived an `entry(key).is_some()`
@@ -224,11 +237,19 @@ pub fn rewrite_terrain_asset<B: AsRef<[u8]>>(
 /// rather than writing a zero-length blob that would decode to nothing on the
 /// next load.
 fn passthrough<B: AsRef<[u8]>>(source: &TerrainAssetReader<B>, key: TileKey) -> Result<Vec<u8>> {
-    source.tile_bytes(key).map(<[u8]>::to_vec).ok_or_else(|| {
+    if source.header().schema_version == TERRAIN_ASSET_SCHEMA_VERSION {
+        return source.tile_bytes(key).map(<[u8]>::to_vec).ok_or_else(|| {
+            TerrainAssetError::Malformed(format!(
+                "write-back tried to pass through tile {key:?}, which the source asset does not hold"
+            ))
+        });
+    }
+    let tile = source.tile(key)?.ok_or_else(|| {
         TerrainAssetError::Malformed(format!(
             "write-back tried to pass through tile {key:?}, which the source asset does not hold"
         ))
-    })
+    })?;
+    encode_tile(&tile)
 }
 
 /// One tile of the level a coarse level reduces: the recomputed copy when this
@@ -625,5 +646,52 @@ mod tests {
                 "coarse {key:?} leaked weights"
             );
         }
+    }
+
+    /// Erosion data maps ride the tile blob exactly like the splat weights do
+    /// (P19.1): a bake writes back byte-equal to a full rebuild, and the derived
+    /// **coarse** levels stay on the never-eroded sparse default — they are
+    /// streaming pages, not authored content.
+    #[test]
+    fn an_erosion_bake_writes_back_byte_equal() {
+        let base = terrain(8);
+        let source = asset_of(&base);
+        let mut edited = base.clone();
+        let params = crate::ErosionParams {
+            rain_rate: 0.05,
+            ..crate::ErosionParams::default()
+        };
+        let (_, maps, _) = crate::erode_terrain(
+            &mut edited,
+            DVec2::new(8.0, 8.0),
+            DVec2::new(40.0, 40.0),
+            0,
+            &params,
+            25,
+        );
+        assert!(!maps.is_empty(), "the bake must write data maps");
+        assert!(!edited.data_maps_are_default());
+
+        let dirty = edited.dirty_tiles();
+        assert!(!dirty.is_empty());
+        let edits = TerrainEdits::from_dirty(&edited, &dirty);
+        assert_matches_full_rebuild(&source, &edited, &edits);
+
+        let out = rewrite_terrain_asset(&source.reader(), &edits, PyramidOptions::default())
+            .unwrap()
+            .unwrap();
+        let r = out.reader();
+        let mut eroded_lod0 = 0;
+        for key in r.keys() {
+            let tile = r.tile(key).unwrap().unwrap();
+            if key.is_lod0() {
+                if !tile.maps_are_default() {
+                    eroded_lod0 += 1;
+                }
+            } else {
+                assert!(tile.maps_are_default(), "coarse {key:?} leaked data maps");
+            }
+        }
+        assert!(eroded_lod0 > 0, "no level-0 tile carried its maps through");
     }
 }

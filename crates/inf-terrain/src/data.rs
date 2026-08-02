@@ -19,7 +19,7 @@ use glam::{DVec2, DVec3};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::residency::{ResidencyReport, TileStore};
-use crate::tile::{TerrainTile, TileKey};
+use crate::tile::{TerrainTile, TerrainTileFrozenV1, TileKey};
 use crate::HeightSource;
 
 /// Default samples per tile side (256 × 256).
@@ -710,6 +710,14 @@ impl<'de> Deserialize<'de> for TerrainData {
                     "terrain tile ({x},{z}) has {wl} weight samples, expected {expect} or 0"
                 )));
             }
+            // Erosion data maps (P19.1) are stored sparsely on the same rule:
+            // absent (len 0) means never eroded. Present ⇒ exactly resolution².
+            let ml = tile.maps_len();
+            if ml != 0 && ml != expect {
+                return Err(serde::de::Error::custom(format!(
+                    "terrain tile ({x},{z}) has {ml} data-map samples, expected {expect} or 0"
+                )));
+            }
             data.tiles.insert((x, z), tile);
             // A **resident tile always holds a stamp** (P16.3): a freshly loaded
             // tile is resident, so it draws one here exactly like a streamed-in or
@@ -722,5 +730,162 @@ impl<'de> Deserialize<'de> for TerrainData {
             data.stamp(TileKey::lod0((x, z)));
         }
         Ok(data)
+    }
+}
+
+// ── the frozen pre-P19.1 wire form ──────────────────────────────────────────
+
+/// The **pre-P19.1 `TerrainData` wire layout**, frozen forever: the same two
+/// config scalars and flat tile sequence, but carrying [`TerrainTileFrozenV1`] —
+/// tiles with no erosion data maps.
+///
+/// This exists for the same reason [`TerrainTileFrozenV1`] does: bincode is
+/// positional, so P19.1's per-tile `maps` layer is a wire-format change, and
+/// every container written before it holds the old shape. Both scene codecs
+/// (`inf-scene` and the editor's mirror) carry their frozen `Terrain` slots as
+/// this type and lift with [`into_current`](TerrainDataFrozenV1::into_current);
+/// the reverse ([`from_current`](TerrainDataFrozenV1::from_current)) is the
+/// downgrade-bless direction used when a test writes a frozen fixture.
+///
+/// It is a **wire type only** — no queries, no residency, no versions. Anything
+/// that wants to *use* a terrain lifts it first.
+///
+/// # Validation lives here, in `Deserialize`
+///
+/// The live [`TerrainData`] decoder rejects a tile whose height / weight / map
+/// buffer does not match the declared resolution, and it must: a short-but-
+/// non-empty weight buffer is not merely wrong data, it is an **out-of-bounds
+/// index** the first time anything reads or paints that tile
+/// ([`TerrainTile::weight_sample`] resolves only the *empty* case). Every payload
+/// that used to decode through the live record now decodes through this one, so
+/// skipping those checks here would be a regression for every existing file —
+/// they are carried over verbatim, as **hard errors**, at the same place, through
+/// this type's own `Deserializer`. There is no data-map check for the obvious
+/// reason: the frozen wire form cannot carry data maps at all.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TerrainDataFrozenV1 {
+    /// Samples per tile side.
+    pub tile_resolution: u32,
+    /// World units between adjacent samples.
+    pub meters_per_sample: f64,
+    /// Flat `(tx, tz, tile)` sequence in `BTreeMap` order.
+    #[serde(default)]
+    pub tiles: Vec<(i32, i32, TerrainTileFrozenV1)>,
+}
+
+/// The raw wire shape of [`TerrainDataFrozenV1`] — field-for-field identical, and
+/// the only thing that touches the `Deserializer`. Validation runs between this
+/// and the public type.
+#[derive(Deserialize)]
+struct TerrainDataFrozenV1Raw {
+    tile_resolution: u32,
+    meters_per_sample: f64,
+    #[serde(default)]
+    tiles: Vec<(i32, i32, TerrainTileFrozenV1)>,
+}
+
+impl<'de> Deserialize<'de> for TerrainDataFrozenV1 {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = TerrainDataFrozenV1Raw::deserialize(d)?;
+        // The same length contract the live decoder enforces, for the same
+        // reason — see the type docs. `TerrainData::new` clamps the resolution,
+        // so the expected count is computed from the clamped value exactly as the
+        // live path does, and a lift can never disagree with what was validated.
+        let res = raw.tile_resolution.max(2);
+        let expect = (res * res) as usize;
+        for (x, z, tile) in &raw.tiles {
+            if tile.heights.len() != expect {
+                return Err(serde::de::Error::custom(format!(
+                    "terrain tile ({x},{z}) has {} samples, expected {expect}",
+                    tile.heights.len()
+                )));
+            }
+            let wl = tile.weights.len();
+            if wl != 0 && wl != expect {
+                return Err(serde::de::Error::custom(format!(
+                    "terrain tile ({x},{z}) has {wl} weight samples, expected {expect} or 0"
+                )));
+            }
+        }
+        Ok(Self {
+            tile_resolution: raw.tile_resolution,
+            meters_per_sample: raw.meters_per_sample,
+            tiles: raw.tiles,
+        })
+    }
+}
+
+impl Default for TerrainDataFrozenV1 {
+    /// An empty terrain at the live defaults — the value a `#[serde(default)]`
+    /// terrain slot decodes to, matching [`TerrainData::default`] field for field.
+    fn default() -> Self {
+        Self {
+            tile_resolution: DEFAULT_TILE_RESOLUTION,
+            meters_per_sample: DEFAULT_METERS_PER_SAMPLE,
+            tiles: Vec::new(),
+        }
+    }
+}
+
+impl TerrainDataFrozenV1 {
+    /// Lift to a live [`TerrainData`]: every tile's data maps come up **empty**
+    /// (never eroded), which is exactly what a pre-P19.1 level meant.
+    ///
+    /// Mirrors [`TerrainData`]'s own `Deserialize` in every other respect: the
+    /// tile lands in the resident level-0 map with its own `f64` anchor (never
+    /// re-snapped), draws a version stamp, and is **not** dirtied — loading is not
+    /// an edit.
+    ///
+    /// **Total for anything that was decoded**, deliberately: buffer lengths are
+    /// validated in `Deserialize` (see the type docs), so a lift has nothing left
+    /// to reject. It emphatically does not drop pages — a lift that dropped a
+    /// malformed tile would turn a corrupt file into a terrain full of *holes* and
+    /// then save that back over the original.
+    ///
+    /// A value **hand-built** through the public fields is the one path the
+    /// decoder never saw. Violating the length invariant there is a programmer
+    /// error, not a data error, so it trips a `debug_assert` and is logged as a
+    /// bug rather than quietly accepted — an over-long or short buffer would be an
+    /// out-of-bounds index the first time anything sampled the tile.
+    pub fn into_current(self) -> TerrainData {
+        let mut data = TerrainData::new(self.tile_resolution, self.meters_per_sample);
+        let expect = (data.tile_resolution * data.tile_resolution) as usize;
+        for (x, z, tile) in self.tiles {
+            let tile = tile.into_current();
+            let wl = tile.weights_len();
+            let ok = tile.heights().len() == expect && (wl == 0 || wl == expect);
+            debug_assert!(
+                ok,
+                "hand-built TerrainDataFrozenV1 tile ({x},{z}) violates the length invariant: \
+                 {} heights / {wl} weights, expected {expect}",
+                tile.heights().len()
+            );
+            if !ok {
+                tracing::error!(
+                    "inf-terrain: refusing a malformed hand-built legacy tile ({x},{z}) — \
+                     {} heights / {wl} weights, expected {expect}. A DECODED terrain cannot \
+                     reach this branch (Deserialize rejects it); this is a caller bug.",
+                    tile.heights().len()
+                );
+                continue;
+            }
+            data.tiles.insert((x, z), tile);
+            data.stamp(TileKey::lod0((x, z)));
+        }
+        data
+    }
+
+    /// Project a live [`TerrainData`] onto the frozen shape, **dropping** every
+    /// tile's data maps (the downgrade-bless direction).
+    pub fn from_current(data: &TerrainData) -> Self {
+        Self {
+            tile_resolution: data.tile_resolution,
+            meters_per_sample: data.meters_per_sample,
+            tiles: data
+                .tiles
+                .iter()
+                .map(|(&(x, z), t)| (x, z, TerrainTileFrozenV1::from_current(t)))
+                .collect(),
+        }
     }
 }

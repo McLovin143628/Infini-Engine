@@ -39,7 +39,7 @@ use glam::DVec2;
 use inf_editor_core::assets::terrain_import;
 use inf_editor_core::erosion_gpu::ErosionHost;
 use inf_editor_core::ipc::{
-    ErosionParamsDto, ErosionReportDto, HeightmapProbeDto, TerrainImportPlanDto,
+    DataMapExportDto, ErosionParamsDto, ErosionReportDto, HeightmapProbeDto, TerrainImportPlanDto,
     TerrainImportResultDto, TerrainImportSettingsDto,
 };
 use inf_terrain::HeightmapGrid;
@@ -88,11 +88,95 @@ pub async fn terrain_erode(
 
     Ok(ErosionReportDto {
         cells_changed: outcome.cells_changed as u32,
+        map_cells_changed: outcome.map_cells_changed as u32,
         mass_delta: outcome.mass_delta,
         sediment_moved: outcome.sediment_moved,
         used_gpu: outcome.used_gpu,
         steps,
     })
+}
+
+/// Export one of the terrain's **erosion data maps** (P19.1) as a 16-bit
+/// grayscale PNG under `<content root>/DataMaps/`.
+///
+/// `map` is `"flow"` / `"deposition"` / `"wear"`; `region` is the same optional
+/// terrain-local world AABB `[min_x, min_z, max_x, max_z]` the bake takes.
+///
+/// The destination is derived, not chosen: writing into the project's own content
+/// root keeps this to a read-only file dialog's worth of capability (there is no
+/// save-dialog permission in the editor's Tauri capability set) and lands the PNG
+/// where the asset watcher will pick it up as importable content. The returned
+/// path is what the UI reports.
+///
+/// The image is normalized over the exported region's own `[min, max]`, which the
+/// report states: the stored accumulators are raw and are never rescaled.
+#[tauri::command]
+pub async fn terrain_export_data_map(
+    scene: State<'_, SceneState>,
+    assets: State<'_, AssetState>,
+    entity: String,
+    map: String,
+    region: Option<Vec<f64>>,
+) -> Result<DataMapExportDto, String> {
+    let guid = Uuid::parse_str(&entity).map_err(|e| e.to_string())?;
+    let kind = inf_terrain::DataMapKind::from_label(&map)
+        .ok_or_else(|| format!("unknown data map {map:?} (expected flow/deposition/wear)"))?;
+    let region = match region {
+        Some(v) if v.len() == 4 => Some((DVec2::new(v[0], v[1]), DVec2::new(v[2], v[3]))),
+        _ => None,
+    };
+    let root = assets
+        .content_root()
+        .ok_or_else(|| "no project is open".to_string())?;
+
+    let (png, (min, max), width, height, name) = {
+        let doc = scene.doc.lock().map_err(|e| e.to_string())?;
+        let (data, _) = doc
+            .terrain_data_and_origin(guid)
+            .ok_or_else(|| "selected entity has no terrain".to_string())?;
+        let (img, range) = data
+            .to_data_map_image(kind, region)
+            .ok_or_else(|| "the terrain has no authored tiles to export".to_string())?;
+        let png = inf_terrain::encode_png16(&img).map_err(|e| e.to_string())?;
+        let name = doc.display_name(guid);
+        (png, range, img.width, img.height, name)
+    };
+
+    let dir = root.join("DataMaps");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let path = dir.join(format!("{}_{}.png", sanitize(&name), kind.label()));
+    let bytes = png.len() as u32;
+    std::fs::write(&path, &png).map_err(|e| format!("write {}: {e}", path.display()))?;
+
+    Ok(DataMapExportDto {
+        map: kind.label().to_string(),
+        path: path.to_string_lossy().into_owned(),
+        width,
+        height,
+        bytes,
+        min,
+        max,
+        unit: kind.unit().to_string(),
+    })
+}
+
+/// A file-name-safe form of an entity name (the export's only naming input).
+fn sanitize(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "Terrain".into()
+    } else {
+        cleaned
+    }
 }
 
 // ── the import wizard (P16.4a) ──────────────────────────────────────────────

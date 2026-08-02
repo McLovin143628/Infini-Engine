@@ -36,6 +36,8 @@ use glam::DVec2;
 
 use crate::data::TerrainData;
 use crate::delta::{DeltaBuilder, HeightDelta};
+use crate::maps::{DataMapDelta, DataMapDeltaBuilder};
+use crate::tile::{DataMapKind, DATA_MAP_CHANNELS, DEFAULT_DATA_MAP};
 
 /// A dense `nx × nz` grid of `f32` heights sampled on the terrain's lattice,
 /// spanning an AABB across however many tiles it overlaps.
@@ -57,6 +59,13 @@ pub struct HeightRegion {
     /// Row-major authored mask: `false` where the sampled lattice point has no
     /// authored tile (a hole). Holes are never modified or written back.
     authored: Vec<bool>,
+    /// Row-major `nx · nz` erosion data maps (P19.1): `[flow, deposition, wear]`
+    /// **extracted from the tiles**, so a second bake adds to the first's totals
+    /// instead of resetting them. (Only the *accumulators* compose that way — the
+    /// simulation state does not survive a bake boundary; see the
+    /// [`erosion`](crate::erosion) module docs.) The erosion passes add into this
+    /// buffer; [`write_back_maps`](HeightRegion::write_back_maps) folds it home.
+    maps: Vec<[f32; DATA_MAP_CHANNELS]>,
 }
 
 /// Map a global sample index to its owning tile index and local sample (in
@@ -128,6 +137,87 @@ impl HeightRegion {
         &mut self.heights
     }
 
+    /// The raw row-major erosion data-map buffer (P19.1) — the GPU upload source,
+    /// interleaved `[flow, deposition, wear]` per cell.
+    #[inline]
+    pub fn maps(&self) -> &[[f32; DATA_MAP_CHANNELS]] {
+        &self.maps
+    }
+
+    /// Mutable raw data-map buffer — the GPU read-back destination and the CPU
+    /// reference's accumulator.
+    #[inline]
+    pub fn maps_mut(&mut self) -> &mut [[f32; DATA_MAP_CHANNELS]] {
+        &mut self.maps
+    }
+
+    /// One data-map channel at `(c, r)`.
+    #[inline]
+    pub fn map(&self, c: u32, r: u32, kind: DataMapKind) -> f32 {
+        self.maps[self.idx(c, r)][kind.channel()]
+    }
+
+    /// Overwrite one data-map channel at `(c, r)`.
+    #[inline]
+    pub fn set_map(&mut self, c: u32, r: u32, kind: DataMapKind, v: f32) {
+        let i = self.idx(c, r);
+        self.maps[i][kind.channel()] = v;
+    }
+
+    /// Write the region's current data maps back into `data`, recording every
+    /// changed sample into `builder`.
+    ///
+    /// Same rules as [`write_back`](Self::write_back): authored cells only, every
+    /// tile that shares a seam sample gets the identical value, and no tile is
+    /// ever created. A tile still on the sparse never-eroded default is
+    /// materialized on first write and recorded, so undo can drop it back.
+    pub(crate) fn write_back_maps(
+        &self,
+        data: &mut TerrainData,
+        builder: &mut DataMapDeltaBuilder,
+    ) {
+        let res = self.res;
+        for r in 0..self.nz {
+            for c in 0..self.nx {
+                let idx = self.idx(c, r);
+                if !self.authored[idx] {
+                    continue;
+                }
+                let texel = self.maps[idx];
+                let gx = self.gx0 + c as i64;
+                let gz = self.gz0 + r as i64;
+                let (tx, i) = split_index(gx, res);
+                let (tz, j) = split_index(gz, res);
+                let xs: [(i32, u32); 2] = [(tx, i), (tx - 1, res - 1)];
+                let zs: [(i32, u32); 2] = [(tz, j), (tz - 1, res - 1)];
+                let nx_copies = if i == 0 { 2 } else { 1 };
+                let nz_copies = if j == 0 { 2 } else { 1 };
+                for &(ctx, ci) in xs.iter().take(nx_copies) {
+                    for &(ctz, cj) in zs.iter().take(nz_copies) {
+                        let coord = (ctx, ctz);
+                        let Some(tile) = data.get_tile(coord) else {
+                            continue;
+                        };
+                        let cur = tile.map_texel(res, ci, cj);
+                        if texel == cur {
+                            continue;
+                        }
+                        let was_default = tile.maps_are_default();
+                        // `get_tile` succeeded, so `get_tile_mut` does too — and
+                        // taking it only now keeps the tile un-dirtied when the
+                        // bake changed nothing on it.
+                        let tile = data.get_tile_mut(coord).expect("tile present");
+                        if was_default {
+                            builder.mark_materialized(coord);
+                        }
+                        builder.touch(coord, ci, cj, cur);
+                        tile.set_map_texel(res, ci, cj, texel);
+                    }
+                }
+            }
+        }
+    }
+
     /// Write the region's current heights back into `data`, recording every
     /// changed sample into `builder`. Only authored cells are written, and each is
     /// written into **every** tile that shares it (so a sample on a tile seam stays
@@ -196,6 +286,7 @@ impl TerrainData {
 
         let mut heights = vec![0.0f32; (nx * nz) as usize];
         let mut authored = vec![false; (nx * nz) as usize];
+        let mut maps = vec![DEFAULT_DATA_MAP; (nx * nz) as usize];
         for r in 0..nz {
             let gz = gz0 + r as i64;
             let (tz, j) = split_index(gz, res);
@@ -206,6 +297,7 @@ impl TerrainData {
                     let idx = (r * nx + c) as usize;
                     heights[idx] = (tile.world_height(res, i, j) - anchor_y) as f32;
                     authored[idx] = true;
+                    maps[idx] = tile.map_texel(res, i, j);
                 }
             }
         }
@@ -219,6 +311,7 @@ impl TerrainData {
             anchor_y,
             heights,
             authored,
+            maps,
         }
     }
 
@@ -232,10 +325,32 @@ impl TerrainData {
         margin: u32,
         edit: F,
     ) -> HeightDelta {
+        self.edit_region_with_maps(min, max, margin, edit).0
+    }
+
+    /// [`edit_region`](Self::edit_region), also folding the region's **erosion
+    /// data maps** (P19.1) back into the tiles and returning their reversible
+    /// [`DataMapDelta`] beside the [`HeightDelta`].
+    ///
+    /// The two deltas are siblings rather than one record because they undo two
+    /// *different* layers with different lifetimes: a sculpt brush produces only
+    /// the first, an erosion bake produces both, and joining them in one struct
+    /// would put an always-empty map buffer inside every brush stroke. The editor
+    /// records both into **one undo transaction**, so a single Ctrl+Z still
+    /// restores heights *and* maps.
+    pub fn edit_region_with_maps<F: FnOnce(&mut HeightRegion)>(
+        &mut self,
+        min: DVec2,
+        max: DVec2,
+        margin: u32,
+        edit: F,
+    ) -> (HeightDelta, DataMapDelta) {
         let mut region = self.extract_region(min, max, margin);
         edit(&mut region);
         let mut builder = DeltaBuilder::default();
         region.write_back(self, &mut builder);
-        builder.finalize(self)
+        let mut maps = DataMapDeltaBuilder::default();
+        region.write_back_maps(self, &mut maps);
+        (builder.finalize(self), maps.finalize(self))
     }
 }

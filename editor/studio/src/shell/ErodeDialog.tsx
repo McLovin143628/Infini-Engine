@@ -15,7 +15,7 @@
  * native viewport while open (airspace rule).
  */
 import { useEffect, useMemo, useState } from "react";
-import { Waves, X } from "lucide-react";
+import { Download, Waves, X } from "lucide-react";
 
 import type { ErosionParamsDto } from "../bindings/ErosionParamsDto";
 import type { ErosionReportDto } from "../bindings/ErosionReportDto";
@@ -78,6 +78,8 @@ export default function ErodeDialog() {
   const [steps, setSteps] = useState(50);
   const [baking, setBaking] = useState(false);
   const [result, setResult] = useState<ErosionReportDto | null>(null);
+  /** Which data map is mid-export (P19.1), or `null`. */
+  const [exporting, setExporting] = useState<"flow" | "deposition" | "wear" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useViewportOverlay(open);
@@ -131,6 +133,29 @@ export default function ErodeDialog() {
       pushStatus(`Erosion failed: ${String(e)}`);
     } finally {
       setBaking(false);
+    }
+  };
+
+  /**
+   * Export one of the erosion data maps (P19.1) as a 16-bit grayscale PNG under
+   * the project's `Content/DataMaps/`. The status line reports the range the
+   * image was normalized over — the stored accumulators stay raw.
+   */
+  const exportMap = async (map: "flow" | "deposition" | "wear") => {
+    if (!target) return;
+    setExporting(map);
+    setError(null);
+    try {
+      const out = await terrainIpc.exportDataMap(target.guid, map);
+      pushStatus(
+        `Exported ${map} map (${out.width}×${out.height}, 0–${out.max.toPrecision(4)} ${out.unit}) → ${out.path}`,
+        8000,
+      );
+    } catch (e) {
+      setError(String(e));
+      pushStatus(`Data-map export failed: ${String(e)}`);
+    } finally {
+      setExporting(null);
     }
   };
 
@@ -205,10 +230,41 @@ export default function ErodeDialog() {
                 </span>
               </div>
               <div className="text-(--ink-text-dim)">
+                Data-map cells:{" "}
+                <span className="text-(--ink-text)">
+                  {result.map_cells_changed.toLocaleString()}
+                </span>
+              </div>
+              <div className="text-(--ink-text-dim)">
                 Path: <span className="text-(--ink-text)">{result.used_gpu ? "GPU compute" : "CPU reference"}</span>
               </div>
             </div>
           )}
+
+          {/* Data maps (P19.1) — export the flow/deposition/wear accumulators
+              erosion left behind, as normalized 16-bit grayscale PNGs. */}
+          <div className="mt-3 rounded border border-(--ink-border) bg-(--ink-bg-0) p-2">
+            <div className="mb-1 flex items-center gap-1 text-xs font-semibold text-(--ink-text)">
+              <Download size={12} /> Data maps
+            </div>
+            <div className="mb-2 text-[11px] text-(--ink-text-dim)">
+              Export the accumulated flow / deposition / wear as 16-bit grayscale PNGs under
+              <code className="mx-1 text-(--ink-text)">Content/DataMaps/</code>. Normalized for
+              viewing; the stored values stay raw.
+            </div>
+            <div className="flex gap-2">
+              {(["flow", "deposition", "wear"] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => void exportMap(m)}
+                  disabled={baking || exporting !== null || !target}
+                  className="rounded border border-(--ink-border) px-2 py-1 text-xs capitalize text-(--ink-text-dim) hover:bg-(--ink-bg-3) hover:text-(--ink-text) disabled:opacity-40"
+                >
+                  {exporting === m ? "Exporting…" : m}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         <div className="flex items-center justify-between gap-2 border-t border-(--ink-border) px-3 py-2">

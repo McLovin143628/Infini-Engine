@@ -20,6 +20,23 @@
 //! Storage buffers (not textures) are a deliberate substrate choice — see the
 //! shader header; the semantics are identical to the CPU reference pass-for-pass.
 //!
+//! # Data maps (P19.1)
+//!
+//! Three more accumulators ride in one extra storage buffer — flow, deposition
+//! and wear, interleaved per cell exactly as the tile stores them. They are
+//! **write-only** in the simulation (nothing reads them back), so adding them
+//! cannot move a height, and the shader accumulates them in the same two passes
+//! and with the same parenthesization as the CPU reference — which is what lets
+//! the parity gates cover them under the same two-tier envelope as the heights.
+//!
+//! The stage is capped at 8 storage buffers, and it was already full, so the map
+//! buffer's slot was made by merging the water depth and the velocity into one
+//! `hydro` vec4 (same values, same order, same bits — a layout change only). The
+//! host seeds the buffer from the region, so a re-bake adds to the previous
+//! bake's totals rather than resetting them — on both paths, identically.
+//! (Accumulators compose across bakes; the *simulation* does not, since water and
+//! sediment do not survive a bake boundary. See the `inf_terrain::erosion` docs.)
+//!
 //! # Determinism / adapter dependence (READ THIS)
 //!
 //! GPU `f32` reductions and transcendentals (FMA contraction, `sqrt`/`tan`) round
@@ -92,16 +109,19 @@ impl<'a> ErosionGpu<'a> {
         });
 
         // read_only flag per storage binding (see erosion.wgsl bindings 0..7).
-        // authored + rain_factor are packed into one `aux` vec2 buffer (binding
-        // 7) to stay within the 8-storage-buffers-per-stage downlevel limit.
+        // The stage limit is **8 storage buffers** (wgpu's `Limits::default`,
+        // which `GpuContext` requests), and every slot is spoken for — which is
+        // why authored + rain_factor share the `aux` vec2 buffer, and why P19.1's
+        // data maps could only be added by first merging water + velocity into
+        // the single `hydro` vec4 buffer they now share.
         let ro = [
             true,  // 0 terrain_in
             false, // 1 terrain_out
             false, // 2 sediment_in
             false, // 3 sediment_out
-            false, // 4 water
+            false, // 4 hydro (water depth, velocity u, velocity v)
             false, // 5 flux
-            false, // 6 velocity
+            false, // 6 maps (flow, deposition, wear)
             true,  // 7 aux (rain_factor, authored)
         ];
         let mut entries: Vec<wgpu::BindGroupLayoutEntry> = ro
@@ -256,9 +276,17 @@ impl<'a> ErosionGpu<'a> {
             zero("erosion-sed0", n as u64 * f4),
             zero("erosion-sed1", n as u64 * f4),
         ];
-        let water = zero("erosion-water", n as u64 * f4);
+        // (depth, vel.u, vel.v, unused) per cell — see the shader's binding note.
+        let hydro = zero("erosion-hydro", n as u64 * 16);
         let flux = zero("erosion-flux", n as u64 * 16);
-        let velocity = zero("erosion-vel", n as u64 * 8);
+        // P19.1 data maps, seeded from the region so a second bake accumulates
+        // onto the first exactly as the CPU reference does. `[f32; 3]` per cell
+        // is the tile's own layout, so this is a straight cast both ways.
+        let maps = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("erosion-maps"),
+            contents: bytemuck::cast_slice(region.maps()),
+            usage: storage | wgpu::BufferUsages::COPY_SRC,
+        });
         let aux_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("erosion-aux"),
             contents: bytemuck::cast_slice(&aux),
@@ -280,9 +308,9 @@ impl<'a> ErosionGpu<'a> {
                     bind(1, &terr[1 - tp]),
                     bind(2, &sed[sp]),
                     bind(3, &sed[1 - sp]),
-                    bind(4, &water),
+                    bind(4, &hydro),
                     bind(5, &flux),
-                    bind(6, &velocity),
+                    bind(6, &maps),
                     bind(7, &aux_buf),
                     bind(8, &params_buf),
                 ],
@@ -357,33 +385,53 @@ impl<'a> ErosionGpu<'a> {
             queue.submit([enc.finish()]);
         }
 
-        // ── download the final terrain ───────────────────────────────────────
+        // ── download the final terrain + data maps ───────────────────────────
         let bytes = n as u64 * f4;
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("erosion-readback"),
-            size: bytes,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let map_bytes = bytes * inf_terrain::DATA_MAP_CHANNELS as u64;
+        let readback = |label: &str, size: u64| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
+        };
+        let rb_terrain = readback("erosion-readback", bytes);
+        let rb_maps = readback("erosion-readback-maps", map_bytes);
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("erosion-readback-enc"),
         });
-        enc.copy_buffer_to_buffer(&terr[tp], 0, &readback, 0, bytes);
+        enc.copy_buffer_to_buffer(&terr[tp], 0, &rb_terrain, 0, bytes);
+        enc.copy_buffer_to_buffer(&maps, 0, &rb_maps, 0, map_bytes);
         queue.submit([enc.finish()]);
 
-        let slice = readback.slice(..);
+        // One `map_async` per buffer, then ONE wait — mapping both before the
+        // poll means the readback still costs a single device sync.
+        let terrain_slice = rb_terrain.slice(..);
+        let maps_slice = rb_maps.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
+        let tx2 = tx.clone();
+        terrain_slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        // Block until the GPU is done and the mapping is ready.
+        maps_slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx2.send(r);
+        });
+        // Block until the GPU is done and both mappings are ready.
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        if let Ok(Ok(())) = rx.recv() {
-            if let Ok(data) = slice.get_mapped_range() {
+        let both_ok = matches!(rx.recv(), Ok(Ok(()))) && matches!(rx.recv(), Ok(Ok(())));
+        if both_ok {
+            if let Ok(data) = terrain_slice.get_mapped_range() {
                 let out: &[f32] = bytemuck::cast_slice(&data);
                 region.heights_mut().copy_from_slice(&out[..n]);
                 drop(data);
-                readback.unmap();
+                rb_terrain.unmap();
+            }
+            if let Ok(data) = maps_slice.get_mapped_range() {
+                let out: &[[f32; inf_terrain::DATA_MAP_CHANNELS]] = bytemuck::cast_slice(&data);
+                region.maps_mut().copy_from_slice(&out[..n]);
+                drop(data);
+                rb_maps.unmap();
             }
         }
     }
@@ -403,6 +451,9 @@ fn bind(binding: u32, buf: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
 pub struct ErosionOutcome {
     /// Height samples the bake changed.
     pub cells_changed: usize,
+    /// Data-map samples the bake changed (P19.1) — the flow / deposition / wear
+    /// accumulators it moved.
+    pub map_cells_changed: usize,
     /// Net terrain-volume change (world m³; negative = net-eroded), from the
     /// committed delta (adapter-independent).
     pub mass_delta: f64,
@@ -496,6 +547,7 @@ impl ErosionHost {
         };
         Some(ErosionOutcome {
             cells_changed: report.cells_changed,
+            map_cells_changed: report.map_cells_changed,
             mass_delta: report.mass_delta,
             sediment_moved,
             used_gpu,
@@ -507,6 +559,7 @@ impl ErosionHost {
 mod tests {
     use super::*;
     use glam::DVec2;
+    use inf_terrain::DataMapKind;
     use inf_terrain::TerrainData;
 
     fn gpu_or_skip() -> Option<GpuContext> {
@@ -585,6 +638,36 @@ mod tests {
             "GPU diverged from CPU at {steps} steps: max|Δ|={max_abs} >= tol={tol}"
         );
         assert!(mean_abs < tol as f64 * 0.1, "mean|Δ|={mean_abs} too large");
+
+        // P19.1 — the SAME tier-1 claim for the three data maps. They are pure
+        // sums of quantities gate 1 already pins, computed in the same two
+        // passes with the same parenthesization, so at a short horizon they must
+        // agree to the same relative precision. The tolerance is per-map and
+        // relative to that map's own scale (flow is m³ and deposition/wear are
+        // metres — a single absolute tolerance would be meaningless across them).
+        for kind in DataMapKind::ALL {
+            let (mut peak, mut max_abs, mut sum_abs) = (0.0f32, 0.0f32, 0.0f64);
+            for r in 0..nz {
+                for c in 0..nx {
+                    let a = cpu.map(c, r, kind);
+                    let b = gpu_region.map(c, r, kind);
+                    peak = peak.max(a.abs());
+                    max_abs = max_abs.max((a - b).abs());
+                    sum_abs += (a - b).abs() as f64;
+                }
+            }
+            let mean_abs = sum_abs / (nx * nz) as f64;
+            let tol = 1e-3 * peak.max(1e-6);
+            eprintln!(
+                "parity gate 1 map {kind:?}: peak={peak:.6} max|Δ|={max_abs:.8} \
+                 mean|Δ|={mean_abs:.10} tol={tol:.8}"
+            );
+            assert!(peak > 0.0, "{kind:?} accumulated nothing — a vacuous gate");
+            assert!(
+                max_abs < tol,
+                "GPU {kind:?} map diverged at {steps} steps: max|Δ|={max_abs} >= tol={tol}"
+            );
+        }
     }
 
     /// PARITY GATE 2 — aggregate agreement over a LONG run (the task's 50–100
@@ -663,7 +746,87 @@ mod tests {
                 mean_d < 0.5 * activity,
                 "mean|Δ|={mean_d} not << erosion activity={activity} at {steps} steps"
             );
+
+            // P19.1 — the maps get the SAME two-tier treatment as the heights.
+            // Pointwise they cannot be bounded at this horizon for exactly the
+            // reason above (a channel that moved one cell moves its flow with
+            // it), but their **totals** are the well-conditioned quantity: they
+            // are sums over the whole region of the same physics, and the
+            // deposition/wear pair is tied to the mass the gate above already
+            // pinned. So this is the gross-blunder detector at the aggregate
+            // level, on the measured cross-adapter envelope with headroom.
+            for kind in DataMapKind::ALL {
+                let (mut tot_c, mut tot_g) = (0.0f64, 0.0f64);
+                for r in 0..nz {
+                    for c in 0..nx {
+                        tot_c += cpu.map(c, r, kind) as f64;
+                        tot_g += gpu_region.map(c, r, kind) as f64;
+                    }
+                }
+                let rel = (tot_c - tot_g).abs() / tot_c.abs().max(1e-9);
+                eprintln!(
+                    "parity gate 2 map {kind:?} ({steps} steps): cpu={tot_c:.5} \
+                     gpu={tot_g:.5} rel={rel:.3e}"
+                );
+                assert!(tot_c > 0.0, "{kind:?} accumulated nothing — a vacuous gate");
+                assert!(
+                    rel < 5e-2,
+                    "GPU/CPU {kind:?} total diverged at {steps} steps: rel={rel}"
+                );
+            }
         }
+    }
+
+    /// The data maps are **write-only** in the simulation, so switching them on
+    /// cannot move a height: a region carrying pre-existing map values must erode
+    /// to exactly the same terrain as a region whose maps start at zero.
+    ///
+    /// This is the anti-coupling guard. The maps ride in the same bind group as
+    /// the physics and share a buffer's neighbourhood; if any pass ever read one
+    /// back — or wrote past its own cell — this is what catches it, with no GPU
+    /// required (the claim is about the reference too).
+    #[test]
+    fn data_maps_do_not_feed_back_into_the_heights() {
+        let params = ErosionParams {
+            rain_variation: 0.4,
+            rain_rate: 0.05,
+            ..ErosionParams::default()
+        };
+        let mut clean = hilly_region();
+        let mut seeded = hilly_region();
+        for (i, texel) in seeded.maps_mut().iter_mut().enumerate() {
+            *texel = [i as f32 * 0.5, 7.25, 3.0];
+        }
+        inf_terrain::erode(&mut clean, &params, 12);
+        inf_terrain::erode(&mut seeded, &params, 12);
+        assert_eq!(
+            clean.heights(),
+            seeded.heights(),
+            "pre-existing data maps changed the eroded terrain"
+        );
+        // …and the seeded run really did accumulate on top of its seed.
+        let (nx, _) = seeded.dims();
+        assert!(
+            seeded.map(nx / 2, 1, DataMapKind::Deposition)
+                >= clean.map(nx / 2, 1, DataMapKind::Deposition) + 7.25,
+            "the seed was lost instead of accumulated onto"
+        );
+
+        // The GPU path makes the same claim, when there is an adapter.
+        let Some(gpu) = gpu_or_skip() else { return };
+        let ex = ErosionGpu::new(&gpu);
+        let mut g_clean = hilly_region();
+        let mut g_seeded = hilly_region();
+        for (i, texel) in g_seeded.maps_mut().iter_mut().enumerate() {
+            *texel = [i as f32 * 0.5, 7.25, 3.0];
+        }
+        ex.run(&mut g_clean, &params, 12);
+        ex.run(&mut g_seeded, &params, 12);
+        assert_eq!(
+            g_clean.heights(),
+            g_seeded.heights(),
+            "GPU: pre-existing data maps changed the eroded terrain"
+        );
     }
 
     /// Zero steps is an exact no-op (upload == download), on any adapter.

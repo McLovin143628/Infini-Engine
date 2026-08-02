@@ -1,5 +1,5 @@
-schema_version = 14
+schema_version = 15
 guid = "00000000-0000-0000-0000-000084030000"
 title = "Terrain Demo"
 entity_count = 4
-content_hash = "b1607472fed47798"
+content_hash = "b61312584ccba8f9"

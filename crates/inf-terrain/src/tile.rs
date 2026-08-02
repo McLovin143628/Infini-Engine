@@ -90,6 +90,92 @@ impl TileKey {
 /// are `[layer0, layer1, layer2, layer3]` and are kept normalized to sum ≈ 255.
 pub const DEFAULT_WEIGHT: [u8; 4] = [255, 0, 0, 0];
 
+/// Number of **erosion data-map** channels stored per sample (P19.1): flow,
+/// deposition, wear — see [`DataMapKind`].
+pub const DATA_MAP_CHANNELS: usize = 3;
+
+/// The per-sample erosion data-map default: **never eroded** (all three
+/// accumulators at zero). A tile that has never been eroded stores no data maps
+/// at all — see [`TerrainTile::maps`].
+pub const DEFAULT_DATA_MAP: [f32; DATA_MAP_CHANNELS] = [0.0; DATA_MAP_CHANNELS];
+
+/// Which **erosion data map** (P19.1) a sample or export refers to.
+///
+/// All three are **raw, monotone, non-negative accumulators** over every erosion
+/// step a tile has ever been through — never normalized on the way in, so a
+/// second bake adds to the first's totals and a normalized *view* (the PNG
+/// export, a PCG mask) is always derived, never stored. Units follow the
+/// SI doctrine (`docs/memos/units-doctrine.md`): 1 world unit = 1 metre.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DataMapKind {
+    /// **Flow** — `Σ_steps dt · Σ_pipes outflow`, the time-integrated water flux
+    /// leaving the cell over the whole run. Units **m³** (cubic metres of water),
+    /// because the virtual-pipe flux is a volume *rate* (m³·s⁻¹) and `dt` is
+    /// seconds. This is the classic flow-accumulation map: it peaks in the
+    /// channels the water carved.
+    Flow,
+    /// **Deposition** — `Σ_steps` material settled out of suspension onto the
+    /// cell. Units **metres** of terrain height gained (multiply by the cell area
+    /// `l²` for a volume).
+    Deposition,
+    /// **Wear** — `Σ_steps` material dissolved off the cell into suspension.
+    /// Units **metres** of terrain height lost (multiply by `l²` for a volume).
+    Wear,
+}
+
+impl DataMapKind {
+    /// Every kind, in channel order — the order the per-sample `[f32; 3]` is
+    /// stored in, so `ALL[k].channel() == k`.
+    pub const ALL: [DataMapKind; DATA_MAP_CHANNELS] = [
+        DataMapKind::Flow,
+        DataMapKind::Deposition,
+        DataMapKind::Wear,
+    ];
+
+    /// Index of this kind inside a per-sample `[f32; DATA_MAP_CHANNELS]`.
+    #[inline]
+    pub const fn channel(self) -> usize {
+        match self {
+            DataMapKind::Flow => 0,
+            DataMapKind::Deposition => 1,
+            DataMapKind::Wear => 2,
+        }
+    }
+
+    /// Lowercase wire/UI name (`"flow"`, `"deposition"`, `"wear"`) — the string
+    /// the editor command and the exported file name use.
+    #[inline]
+    pub const fn label(self) -> &'static str {
+        match self {
+            DataMapKind::Flow => "flow",
+            DataMapKind::Deposition => "deposition",
+            DataMapKind::Wear => "wear",
+        }
+    }
+
+    /// SI unit of this map's accumulator, for diagnostics and UI.
+    #[inline]
+    pub const fn unit(self) -> &'static str {
+        match self {
+            // Flux is a volume rate; integrating it over time gives a volume.
+            DataMapKind::Flow => "m^3",
+            DataMapKind::Deposition | DataMapKind::Wear => "m",
+        }
+    }
+
+    /// Parse a [`label`](Self::label) (case-insensitive). `None` for anything else
+    /// — the IPC boundary rejects rather than guesses.
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "flow" => Some(DataMapKind::Flow),
+            "deposition" => Some(DataMapKind::Deposition),
+            "wear" => Some(DataMapKind::Wear),
+            _ => None,
+        }
+    }
+}
+
 /// A single terrain tile: `resolution × resolution` height samples (row-major,
 /// `j * resolution + i`, `i` along +X, `j` along +Z) stored as `f32` offsets
 /// from the tile's `f64` [`origin`](TerrainTile::origin).
@@ -110,15 +196,33 @@ pub const DEFAULT_WEIGHT: [u8; 4] = [255, 0, 0, 0];
 /// "every sample is [`DEFAULT_WEIGHT`]" (uniform layer 0). Painting the tile
 /// [materializes](TerrainTile::ensure_weights) the full `resolution²` buffer.
 ///
+/// ## Erosion data maps (P19.1)
+///
+/// A third per-sample layer ([`maps`](TerrainTile::maps)) rides beside the heights
+/// and the weights: one `[f32; 3]` per sample holding the **flow / deposition /
+/// wear** accumulators an erosion bake wrote (see [`DataMapKind`] for the exact
+/// definitions and units). It is stored **sparsely** on the same rule as the splat
+/// weights — an empty `Vec` means "every sample is [`DEFAULT_DATA_MAP`]", i.e.
+/// this tile has never been eroded — so a never-eroded tile costs **zero
+/// per-sample bytes** (and, in bincode, exactly one length byte).
+///
 /// Serde: `origin` (as a portable `[f64; 3]`, since the workspace `glam` pin has
 /// no `serde` feature) + a flat `heights` sequence, and — **only when non-empty**
-/// (`skip_serializing_if`) — a flat `weights` sequence. An old tile (no `weights`
-/// field) decodes with the default (empty) weights, and an unpainted new tile
-/// serializes without a `weights` field, so existing bytes round-trip unchanged;
-/// a painted tile appends the `weights` field. `resolution` is not stored on the
-/// tile (it is a terrain-wide constant on [`super::TerrainData`]); the terrain
-/// validates `heights.len() == resolution²` and, when present,
-/// `weights.len() == resolution²` on load.
+/// (`skip_serializing_if`) — flat `weights` and `maps` sequences. An old tile (no
+/// `weights`/`maps` field) decodes with the defaults, and an unpainted, un-eroded
+/// new tile serializes without either field, so existing human-readable bytes
+/// round-trip unchanged. `resolution` is not stored on the tile (it is a
+/// terrain-wide constant on [`super::TerrainData`]); the terrain validates
+/// `heights.len() == resolution²` and, when present, `weights.len()` /
+/// `maps.len() == resolution²` on load.
+///
+/// **The bincode form is versioned at the container, not the tile.** bincode is
+/// positional, so appending `maps` is a wire-format change: a stream written
+/// before P19.1 has three fields where this build reads four. The pre-P19.1
+/// layout is therefore frozen as [`TerrainTileFrozenV1`] and selected by the
+/// *container's* schema version — `.inf_lvl` schema ≤ 14 and `.inf_terrain`
+/// header ≤ 2 decode through it and lift with empty maps. See
+/// [`crate::asset::decode_tile_at`].
 ///
 /// [`TerrainLayer`]: the ECS `inf_ecs::components::TerrainLayer` (the layer
 /// definitions live on the `Terrain` component; the tile only stores per-sample
@@ -132,34 +236,166 @@ pub struct TerrainTile {
     /// `resolution²` row-major RGBA splat weights, **or empty** for the uniform
     /// [`DEFAULT_WEIGHT`] (layer 0) — see the type docs.
     weights: Vec<[u8; 4]>,
+    /// `resolution²` row-major erosion data maps (`[flow, deposition, wear]`),
+    /// **or empty** for the never-eroded [`DEFAULT_DATA_MAP`] — see the type docs.
+    maps: Vec<[f32; DATA_MAP_CHANNELS]>,
 }
 
 /// Serde wire form for **human-readable** formats (JSON/TOML): `origin` as
 /// `[f64; 3]` (glam `DVec3` isn't serde-derivable without enabling glam's `serde`
-/// feature workspace-wide). `weights` is appended (P10.4) and skipped when empty,
-/// so pre-P10.4 tiles — and unpainted new tiles — encode byte-identically to the
-/// two-field form.
+/// feature workspace-wide). `weights` (P10.4) and `maps` (P19.1) are appended and
+/// skipped when empty, so pre-P10.4 tiles — and unpainted, un-eroded new tiles —
+/// encode byte-identically to the two-field form.
 #[derive(Serialize, Deserialize)]
 struct TerrainTileRaw {
     origin: [f64; 3],
     heights: Vec<f32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     weights: Vec<[u8; 4]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    maps: Vec<[f32; DATA_MAP_CHANNELS]>,
 }
 
 /// Serde wire form for **non-self-describing** formats (bincode — the `.inf_lvl`
-/// terrain persistence path, P10.6). `weights` is **always** encoded (as a plain
-/// length-prefixed sequence — a 0-length count for an unpainted tile), because a
+/// terrain persistence path, P10.6, and the `.inf_terrain` tile blob, P16.3).
+/// `weights` and `maps` are **always** encoded (as plain length-prefixed
+/// sequences — a 0-length count for an unpainted / never-eroded tile), because a
 /// `skip_serializing_if` field desyncs a non-self-describing stream (the
 /// engine-wide bincode constraint; the same reason `.inf_pcg`/`.inf_act` store
-/// their skip-heavy models as JSON strings). An unpainted tile still costs only a
-/// single length byte, so terrain stays compact and byte-stable in bincode too.
+/// their skip-heavy models as JSON strings). An untouched tile still costs only a
+/// single length byte per layer, so terrain stays compact and byte-stable in
+/// bincode too.
 #[derive(Serialize, Deserialize)]
 struct TerrainTileBin {
     origin: [f64; 3],
     heights: Vec<f32>,
     #[serde(default)]
     weights: Vec<[u8; 4]>,
+    #[serde(default)]
+    maps: Vec<[f32; DATA_MAP_CHANNELS]>,
+}
+
+/// **Frozen tile wire layout, generation 1** — `origin + heights + weights`, with
+/// no erosion data maps. The shape every terrain tile had before P19.1.
+///
+/// # Why the name has no container version in it
+///
+/// A tile is written into **two** containers that version themselves
+/// independently, and neither owns the other:
+///
+/// | container | versions carrying THIS layout | first version carrying the current one |
+/// |---|---|---|
+/// | `.inf_lvl` (scene schema) | v1 … **v14** | v15 |
+/// | `.inf_terrain` (asset header) | v1, **v2** | v3 |
+///
+/// Naming this `TerrainTileV14` — as the first cut did — leaks the *scene* codec's
+/// numbering into `inf-terrain`'s public API and silently implies the asset
+/// container agrees, which it does not (it calls the same bytes "v2"). The
+/// generation counter belongs to the tile: this is the first frozen generation,
+/// and a future tile change makes `…FrozenV2` while **both** tables above gain a
+/// row. `frozen_tile_generation_is_pinned_to_both_ladders` is the tripwire that
+/// fails if either container bumps past its row without a new generation.
+///
+/// bincode is positional, so these bytes cannot be fed to the grown
+/// [`TerrainTile`] — the decoder would read past the end of the tile and into
+/// whatever follows it. Each container picks the wire type from *its own* version
+/// stamp and lifts through [`into_current`](Self::into_current); the reverse
+/// projection ([`from_current`](Self::from_current)) is the downgrade-bless
+/// direction, used when a frozen record has to be *written* in a test fixture.
+///
+/// Like [`TerrainTile`] it is format-aware, so the frozen shape is exact in both
+/// the human-readable and the bincode codec.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerrainTileFrozenV1 {
+    /// World position of sample `(0, 0)`.
+    pub origin: DVec3,
+    /// `resolution²` height offsets, row-major.
+    pub heights: Vec<f32>,
+    /// `resolution²` row-major splat weights, or empty for the sparse default.
+    pub weights: Vec<[u8; 4]>,
+}
+
+/// Human-readable wire form of [`TerrainTileFrozenV1`] — the exact pre-P19.1
+/// [`TerrainTileRaw`].
+#[derive(Serialize, Deserialize)]
+struct TerrainTileFrozenV1Raw {
+    origin: [f64; 3],
+    heights: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    weights: Vec<[u8; 4]>,
+}
+
+/// bincode wire form of [`TerrainTileFrozenV1`] — the exact pre-P19.1
+/// [`TerrainTileBin`] (three positional fields, no `maps`).
+#[derive(Serialize, Deserialize)]
+struct TerrainTileFrozenV1Bin {
+    origin: [f64; 3],
+    heights: Vec<f32>,
+    #[serde(default)]
+    weights: Vec<[u8; 4]>,
+}
+
+impl TerrainTileFrozenV1 {
+    /// Lift a frozen tile to the live one: the data maps are **empty**, i.e. never
+    /// eroded — which is exactly what a pre-P19.1 tile meant.
+    pub fn into_current(self) -> TerrainTile {
+        TerrainTile {
+            origin: self.origin,
+            heights: self.heights,
+            weights: self.weights,
+            maps: Vec::new(),
+        }
+    }
+
+    /// Project a live tile onto the frozen shape, **dropping** its data maps (the
+    /// downgrade-bless direction — a pre-P19.1 container cannot carry them).
+    pub fn from_current(tile: &TerrainTile) -> Self {
+        Self {
+            origin: tile.origin,
+            heights: tile.heights.clone(),
+            weights: tile.weights.clone(),
+        }
+    }
+}
+
+impl Serialize for TerrainTileFrozenV1 {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            TerrainTileFrozenV1Raw {
+                origin: self.origin.to_array(),
+                heights: self.heights.clone(),
+                weights: self.weights.clone(),
+            }
+            .serialize(s)
+        } else {
+            TerrainTileFrozenV1Bin {
+                origin: self.origin.to_array(),
+                heights: self.heights.clone(),
+                weights: self.weights.clone(),
+            }
+            .serialize(s)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TerrainTileFrozenV1 {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        if d.is_human_readable() {
+            let raw = TerrainTileFrozenV1Raw::deserialize(d)?;
+            Ok(Self {
+                origin: DVec3::from_array(raw.origin),
+                heights: raw.heights,
+                weights: raw.weights,
+            })
+        } else {
+            let raw = TerrainTileFrozenV1Bin::deserialize(d)?;
+            Ok(Self {
+                origin: DVec3::from_array(raw.origin),
+                heights: raw.heights,
+                weights: raw.weights,
+            })
+        }
+    }
 }
 
 impl Serialize for TerrainTile {
@@ -172,6 +408,7 @@ impl Serialize for TerrainTile {
                 origin: self.origin.to_array(),
                 heights: self.heights.clone(),
                 weights: self.weights.clone(),
+                maps: self.maps.clone(),
             }
             .serialize(s)
         } else {
@@ -179,6 +416,7 @@ impl Serialize for TerrainTile {
                 origin: self.origin.to_array(),
                 heights: self.heights.clone(),
                 weights: self.weights.clone(),
+                maps: self.maps.clone(),
             }
             .serialize(s)
         }
@@ -193,6 +431,7 @@ impl<'de> Deserialize<'de> for TerrainTile {
                 origin: DVec3::from_array(raw.origin),
                 heights: raw.heights,
                 weights: raw.weights,
+                maps: raw.maps,
             })
         } else {
             let raw = TerrainTileBin::deserialize(d)?;
@@ -200,6 +439,7 @@ impl<'de> Deserialize<'de> for TerrainTile {
                 origin: DVec3::from_array(raw.origin),
                 heights: raw.heights,
                 weights: raw.weights,
+                maps: raw.maps,
             })
         }
     }
@@ -213,6 +453,7 @@ impl TerrainTile {
             origin,
             heights: vec![0.0; (resolution * resolution) as usize],
             weights: Vec::new(),
+            maps: Vec::new(),
         }
     }
 
@@ -224,6 +465,7 @@ impl TerrainTile {
             origin,
             heights,
             weights: Vec::new(),
+            maps: Vec::new(),
         })
     }
 
@@ -333,6 +575,95 @@ impl TerrainTile {
         self.weights.len()
     }
 
+    // ── erosion data maps (P19.1) ───────────────────────────────────────────
+
+    /// The raw data-map buffer: either empty (never eroded — every sample is
+    /// [`DEFAULT_DATA_MAP`]) or `resolution²` row-major
+    /// `[flow, deposition, wear]`. Prefer
+    /// [`map_sample`](TerrainTile::map_sample) for a value that already resolves
+    /// the empty case.
+    #[inline]
+    pub fn maps(&self) -> &[[f32; DATA_MAP_CHANNELS]] {
+        &self.maps
+    }
+
+    /// `true` when the tile stores no data maps — i.e. it has **never been
+    /// eroded**. This is the byte-stable default (such a tile serializes without
+    /// a `maps` field at all in JSON/TOML, and as a single zero-length count in
+    /// bincode).
+    #[inline]
+    pub fn maps_are_default(&self) -> bool {
+        self.maps.is_empty()
+    }
+
+    /// One data-map channel at sample `(i, j)`, resolving the sparse default (a
+    /// never-eroded tile reads `0.0` everywhere). Out-of-range indices clamp to
+    /// the edge.
+    #[inline]
+    pub fn map_sample(&self, resolution: u32, kind: DataMapKind, i: u32, j: u32) -> f32 {
+        if self.maps.is_empty() {
+            return DEFAULT_DATA_MAP[kind.channel()];
+        }
+        let r = resolution.max(1);
+        let i = i.min(r - 1);
+        let j = j.min(r - 1);
+        self.maps[(j * r + i) as usize][kind.channel()]
+    }
+
+    /// All three channels at sample `(i, j)`, resolving the sparse default.
+    #[inline]
+    pub fn map_texel(&self, resolution: u32, i: u32, j: u32) -> [f32; DATA_MAP_CHANNELS] {
+        if self.maps.is_empty() {
+            return DEFAULT_DATA_MAP;
+        }
+        let r = resolution.max(1);
+        let i = i.min(r - 1);
+        let j = j.min(r - 1);
+        self.maps[(j * r + i) as usize]
+    }
+
+    /// Materialize the full `resolution²` data-map buffer (filled with
+    /// [`DEFAULT_DATA_MAP`]) if the tile is still on the sparse default, then
+    /// return a mutable handle. An erosion write-back calls this before writing.
+    #[inline]
+    pub fn ensure_maps(&mut self, resolution: u32) -> &mut [[f32; DATA_MAP_CHANNELS]] {
+        if self.maps.is_empty() {
+            self.maps = vec![DEFAULT_DATA_MAP; (resolution * resolution) as usize];
+        }
+        &mut self.maps
+    }
+
+    /// Reset the tile to the never-eroded sparse default (drops any accumulated
+    /// data maps), so it re-serializes byte-identically to a tile erosion never
+    /// touched. Used by erosion **undo** when a bake had materialized the buffer.
+    #[inline]
+    pub fn clear_maps(&mut self) {
+        self.maps = Vec::new();
+    }
+
+    /// Write all three data-map channels at sample `(i, j)`, materializing the
+    /// buffer first. Out-of-range indices are ignored.
+    #[inline]
+    pub fn set_map_texel(
+        &mut self,
+        resolution: u32,
+        i: u32,
+        j: u32,
+        texel: [f32; DATA_MAP_CHANNELS],
+    ) {
+        let r = resolution.max(1);
+        if i < r && j < r {
+            self.ensure_maps(resolution)[(j * r + i) as usize] = texel;
+        }
+    }
+
+    /// Length of the stored data-map buffer (`0` for the sparse default). Used by
+    /// the terrain's serde length validation.
+    #[inline]
+    pub fn maps_len(&self) -> usize {
+        self.maps.len()
+    }
+
     /// Inclusive `(min, max)` of the tile's `f32` offsets (for AABB culling and
     /// height-texture range normalization). An empty buffer yields `(0, 0)`.
     pub fn height_bounds(&self) -> (f32, f32) {
@@ -429,5 +760,252 @@ mod tests {
             let bytes2 = bincode::serde::encode_to_vec(&back, cfg).unwrap();
             assert_eq!(bytes, bytes2, "bincode re-encode is byte-identical");
         }
+    }
+
+    // ── the frozen generation-1 wire type (P19.1) ────────────────────────────
+
+    use crate::data::{TerrainData, TerrainDataFrozenV1};
+
+    /// A frozen heightfield with one well-formed 2×2 tile.
+    fn frozen_ok() -> TerrainDataFrozenV1 {
+        TerrainDataFrozenV1 {
+            tile_resolution: 2,
+            meters_per_sample: 1.0,
+            tiles: vec![(
+                0,
+                0,
+                TerrainTileFrozenV1 {
+                    origin: DVec3::ZERO,
+                    heights: vec![1.0, 2.0, 3.0, 4.0],
+                    weights: Vec::new(),
+                },
+            )],
+        }
+    }
+
+    fn bincode_cfg() -> impl bincode::config::Config {
+        bincode::config::standard()
+    }
+
+    /// **A corrupt legacy height buffer is a decode ERROR, not a hole.**
+    ///
+    /// The live [`TerrainData`] decoder has always rejected a tile whose height
+    /// buffer does not match the declared resolution. The frozen record is the
+    /// path every pre-P19.1 payload now takes, so it has to reject it too — the
+    /// alternative is a corrupt file that loads as a terrain full of holes and
+    /// then gets *saved back* over the original.
+    #[test]
+    fn a_frozen_tile_with_wrong_height_count_fails_to_decode() {
+        let mut bad = frozen_ok();
+        bad.tiles[0].2.heights.pop(); // 3 of 4
+        for label in ["bincode", "json"] {
+            let err = if label == "bincode" {
+                let bytes = bincode::serde::encode_to_vec(&bad, bincode_cfg()).unwrap();
+                bincode::serde::decode_from_slice::<TerrainDataFrozenV1, _>(&bytes, bincode_cfg())
+                    .err()
+                    .map(|e| e.to_string())
+            } else {
+                let json = serde_json::to_string(&bad).unwrap();
+                serde_json::from_str::<TerrainDataFrozenV1>(&json)
+                    .err()
+                    .map(|e| e.to_string())
+            };
+            let err =
+                err.unwrap_or_else(|| panic!("{label}: a short height buffer must not decode"));
+            assert!(
+                err.contains("expected 4"),
+                "{label}: unhelpful rejection: {err}"
+            );
+        }
+        // The live decoder rejects the equivalent bytes for the same reason —
+        // the frozen record is not allowed to be more permissive than the type
+        // it stands in for.
+        let live = serde_json::to_string(&serde_json::json!({
+            "tile_resolution": 2,
+            "meters_per_sample": 1.0,
+            "tiles": [[0, 0, {"origin": [0.0, 0.0, 0.0], "heights": [1.0, 2.0, 3.0]}]],
+        }))
+        .unwrap();
+        assert!(serde_json::from_str::<TerrainData>(&live).is_err());
+    }
+
+    /// **A short-but-non-empty legacy weight buffer is a decode ERROR, not a
+    /// latent panic.**
+    ///
+    /// This is the sharp one. [`TerrainTile::weight_sample`] resolves only the
+    /// *empty* case and indexes otherwise, so a weight buffer with 1 ≤ len < res²
+    /// is an out-of-bounds index the first time anything reads or paints the
+    /// tile. Rejecting it at the door is what keeps that unreachable — see
+    /// [`a_decoded_terrain_can_always_be_painted`].
+    #[test]
+    fn a_frozen_tile_with_short_weights_fails_to_decode() {
+        let mut bad = frozen_ok();
+        bad.tiles[0].2.weights = vec![DEFAULT_WEIGHT; 2]; // 2 of 4 — the OOB shape
+        for label in ["bincode", "json"] {
+            let err = if label == "bincode" {
+                let bytes = bincode::serde::encode_to_vec(&bad, bincode_cfg()).unwrap();
+                bincode::serde::decode_from_slice::<TerrainDataFrozenV1, _>(&bytes, bincode_cfg())
+                    .err()
+                    .map(|e| e.to_string())
+            } else {
+                let json = serde_json::to_string(&bad).unwrap();
+                serde_json::from_str::<TerrainDataFrozenV1>(&json)
+                    .err()
+                    .map(|e| e.to_string())
+            };
+            let err =
+                err.unwrap_or_else(|| panic!("{label}: a short weight buffer must not decode"));
+            assert!(
+                err.contains("weight samples"),
+                "{label}: unhelpful rejection: {err}"
+            );
+        }
+
+        // An EMPTY weight buffer is the sparse default and must still decode —
+        // the check is "0 or exactly res²", not "always res²".
+        let ok = frozen_ok();
+        let bytes = bincode::serde::encode_to_vec(&ok, bincode_cfg()).unwrap();
+        let (back, _): (TerrainDataFrozenV1, usize) =
+            bincode::serde::decode_from_slice(&bytes, bincode_cfg()).unwrap();
+        assert_eq!(back, ok);
+    }
+
+    /// Run the exact calls the splat brush makes over every sample of every tile.
+    /// Panics on an out-of-bounds weight index — which is the point.
+    fn sweep_the_paint_path(data: &mut TerrainData) {
+        let res = data.tile_resolution();
+        let coords: Vec<(i32, i32)> = data.tiles().map(|(&c, _)| c).collect();
+        for c in coords {
+            for j in 0..res {
+                for i in 0..res {
+                    // Read (the brush's gather half) …
+                    let w = data.get_tile(c).unwrap().weight_sample(res, i, j);
+                    // … and write (the brush's commit half, which materializes).
+                    data.get_tile_mut(c)
+                        .unwrap()
+                        .set_weight_sample(res, i, j, w);
+                }
+            }
+        }
+    }
+
+    /// **The hazard, pinned.** A tile whose weight buffer is short but non-empty
+    /// indexes off the end the first time the paint path touches it —
+    /// [`TerrainTile::weight_sample`] resolves only the *empty* case. This is
+    /// what the frozen record's `Deserialize` check exists to keep unreachable,
+    /// and it is asserted here so the check can never be "simplified away" as
+    /// belt-and-braces.
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn a_short_weight_buffer_would_index_out_of_bounds() {
+        let mut data = TerrainData::new(2, 1.0);
+        // Built by hand, bypassing every door — exactly the state the decoder is
+        // responsible for never producing.
+        let tile = TerrainTileFrozenV1 {
+            origin: DVec3::ZERO,
+            heights: vec![0.0; 4],
+            weights: vec![DEFAULT_WEIGHT; 2],
+        }
+        .into_current();
+        let _ = data.insert_tile((0, 0), tile);
+        sweep_the_paint_path(&mut data);
+    }
+
+    /// **…and it is unreachable through the decoder.** Every weight buffer a
+    /// legacy payload can carry either fails to decode (the short case above) or
+    /// lifts to a terrain the paint path sweeps without panicking.
+    ///
+    /// Mutation-verified: deleting the weight-length check in
+    /// `TerrainDataFrozenV1::deserialize` makes the short case decode, and this
+    /// test then fails with the index panic instead of the expected decode error.
+    #[test]
+    fn a_decoded_terrain_can_always_be_painted() {
+        let cases: [(&str, Vec<[u8; 4]>, bool); 3] = [
+            ("sparse default", Vec::new(), true),
+            ("materialized", vec![[10, 20, 30, 195]; 4], true),
+            ("short — must be rejected", vec![DEFAULT_WEIGHT; 2], false),
+        ];
+        for (label, weights, decodes) in cases {
+            let mut src = frozen_ok();
+            src.tiles[0].2.weights = weights;
+            let bytes = bincode::serde::encode_to_vec(&src, bincode_cfg()).unwrap();
+            let decoded =
+                bincode::serde::decode_from_slice::<TerrainDataFrozenV1, _>(&bytes, bincode_cfg());
+            assert_eq!(decoded.is_ok(), decodes, "{label}: wrong decode verdict");
+            let Ok((frozen, _)) = decoded else { continue };
+            let mut data = frozen.into_current();
+            sweep_the_paint_path(&mut data);
+            assert_eq!(
+                data.get_tile((0, 0)).unwrap().weights_len(),
+                4,
+                "{label}: the sweep must have materialized the buffer"
+            );
+        }
+    }
+
+    /// Lifting a legacy terrain preserves **every** tile: no silent drops, and
+    /// nothing is dirtied (a load is not an edit).
+    #[test]
+    fn lifting_a_legacy_terrain_keeps_every_tile() {
+        let mut src = frozen_ok();
+        src.tiles.push((
+            3,
+            -2,
+            TerrainTileFrozenV1 {
+                origin: DVec3::new(3.0, 7.5, -2.0),
+                heights: vec![9.0; 4],
+                weights: vec![DEFAULT_WEIGHT; 4],
+            },
+        ));
+        let data = src.clone().into_current();
+        assert_eq!(data.tile_count(), 2, "a lift must not drop pages");
+        assert!(!data.has_dirty_tiles(), "loading is not an edit");
+        // The `f64` height anchor rides through untouched (never re-snapped).
+        assert_eq!(data.get_tile((3, -2)).unwrap().origin.y, 7.5);
+        // …and the maps come up empty — never eroded, what a legacy level meant.
+        assert!(data.data_maps_are_default());
+        // Round trip back down is lossless for everything v1 could express.
+        assert_eq!(TerrainDataFrozenV1::from_current(&data), src);
+    }
+
+    /// **The two-ladder tripwire.** The frozen generation stands in for a tile
+    /// layout that TWO independently-versioned containers point at (see
+    /// [`TerrainTileFrozenV1`]'s table). If either container bumps past the
+    /// version in that table without a new frozen generation, its old payloads
+    /// start decoding through the wrong wire type — silently, positionally, into
+    /// the next record's bytes.
+    ///
+    /// `inf-terrain` can only see its own half; `inf-scene` and the editor codec
+    /// each carry the mirror assertion for the scene half.
+    #[test]
+    fn frozen_tile_generation_is_pinned_to_both_ladders() {
+        assert_eq!(
+            crate::asset::TERRAIN_ASSET_SCHEMA_VERSION,
+            3,
+            "the .inf_terrain header moved. Generation-1 frozen tiles cover header \
+             versions 1..=2 and the current TerrainTile covers 3. If the tile layout \
+             changed again, add TerrainTileFrozenV2 and extend `decode_tile_at`; if only \
+             the header changed, update this pin and TerrainTileFrozenV1's table."
+        );
+        // The version→wire-type mapping the pin is really about.
+        let tile = TerrainTile::flat(2, DVec3::ZERO);
+        let v1 = TerrainTileFrozenV1::from_current(&tile);
+        let legacy = bincode::serde::encode_to_vec(&v1, bincode_cfg()).unwrap();
+        let current = crate::asset::encode_tile(&tile).unwrap();
+        assert_eq!(
+            current.len(),
+            legacy.len() + 1,
+            "the current tile is the frozen one plus exactly the sparse maps count"
+        );
+        for v in [0u32, 1, 2] {
+            assert!(
+                crate::asset::decode_tile_at(&legacy, v).is_ok(),
+                "header v{v} must decode generation-1 bytes"
+            );
+        }
+        assert!(
+            crate::asset::decode_tile_at(&current, 3).is_ok(),
+            "header v3 must decode current bytes"
+        );
     }
 }

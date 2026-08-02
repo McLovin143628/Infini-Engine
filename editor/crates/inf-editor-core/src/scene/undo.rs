@@ -9,7 +9,7 @@
 
 use inf_ecs::components::{FoliageInstance, Sprite, Transform};
 use inf_ecs::PropValue;
-use inf_terrain::{HeightDelta, SplatDelta};
+use inf_terrain::{DataMapDelta, HeightDelta, SplatDelta};
 use uuid::Uuid;
 
 use crate::scene::serialize::{EntityRecord, LevelSettings};
@@ -101,6 +101,19 @@ pub(crate) enum EditCommand {
     /// redo/undo — redo replays `after` weights, undo replays `before` (and drops
     /// any weight buffers the stroke materialized from the sparse default). Boxed.
     PaintSplat { guid: Uuid, delta: Box<SplatDelta> },
+    /// One erosion bake's **data-map** half (P19.1): a sparse before/after record
+    /// of the flow / deposition / wear accumulators it moved ([`DataMapDelta`]).
+    ///
+    /// Recorded *beside* the bake's [`SculptTerrain`](EditCommand::SculptTerrain)
+    /// inside a single transaction, so one Ctrl+Z restores both layers. It is a
+    /// separate command rather than a field on the height delta because the two
+    /// layers have different producers: every sculpt brush writes heights, only
+    /// erosion writes data maps, and folding them together would put an
+    /// always-empty map buffer inside every stroke on the undo stack. Boxed.
+    WriteDataMaps {
+        guid: Uuid,
+        delta: Box<DataMapDelta>,
+    },
     /// Add / remove a whole component (E-P1). `before`/`after` are full entity
     /// component snapshots ([`EntityRecord`] via `record_of`) — the record is the
     /// complete truth, so replaying either side re-inserts what it holds and
@@ -166,6 +179,9 @@ impl EditCommand {
             }
             EditCommand::PaintSplat { guid, delta } => {
                 doc.raw_apply_splat_delta(*guid, delta);
+            }
+            EditCommand::WriteDataMaps { guid, delta } => {
+                doc.raw_apply_data_map_delta(*guid, delta);
             }
             EditCommand::SwapComponents { guid, after, .. } => {
                 doc.raw_apply_record_components(*guid, after);
@@ -235,6 +251,9 @@ impl EditCommand {
             }
             EditCommand::PaintSplat { guid, delta } => {
                 doc.raw_revert_splat_delta(*guid, delta);
+            }
+            EditCommand::WriteDataMaps { guid, delta } => {
+                doc.raw_revert_data_map_delta(*guid, delta);
             }
             EditCommand::SwapComponents { guid, before, .. } => {
                 doc.raw_apply_record_components(*guid, before);

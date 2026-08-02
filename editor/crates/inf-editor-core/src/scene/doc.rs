@@ -19,7 +19,7 @@ use inf_ecs::components::{
 };
 use inf_ecs::{Color, ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d, Vec3d};
 use inf_terrain::{
-    BrushOp, BrushParams, HeightDelta, SplatDelta, SplatStroke, Stroke, TerrainData,
+    BrushOp, BrushParams, DataMapDelta, HeightDelta, SplatDelta, SplatStroke, Stroke, TerrainData,
 };
 use uuid::Uuid;
 
@@ -35,6 +35,11 @@ use crate::scene::undo::{EditCommand, EditHistory};
 pub struct ErodeReport {
     /// Height samples the bake actually changed (`before != after`).
     pub cells_changed: usize,
+    /// Data-map samples the bake actually changed (P19.1) — the flow /
+    /// deposition / wear accumulators it moved. Always **at least**
+    /// `cells_changed`: a height only moves through the erode/deposit pass,
+    /// which writes a map in the same breath.
+    pub map_cells_changed: usize,
     /// Net terrain-volume change `Σ(after − before)·l²` (world m³); negative =
     /// net-eroded.
     pub mass_delta: f64,
@@ -874,6 +879,39 @@ impl SceneDoc {
         self.touch();
     }
 
+    // ── erosion data maps (P19.1) ────────────────────────────────────────
+
+    /// Redo an erosion bake's **data-map** half: replay its `after` texels,
+    /// materializing any tile that needs it. Non-recording.
+    pub(crate) fn raw_apply_data_map_delta(&mut self, guid: Uuid, delta: &DataMapDelta) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
+            terrain.data.apply_data_map_delta(delta);
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    /// Undo an erosion bake's data-map half: replay its `before` texels and drop
+    /// any map buffers the bake materialized, returning the terrain
+    /// byte-identical to before the bake. Non-recording.
+    pub(crate) fn raw_revert_data_map_delta(&mut self, guid: Uuid, delta: &DataMapDelta) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
+            terrain.data.revert_data_map_delta(delta);
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
     // ── foliage painting (E-P6) ──────────────────────────────────────────
     //
     // The foliage brush mirrors the sculpt seam one component over: the viewport
@@ -1081,11 +1119,11 @@ impl SceneDoc {
         F: FnOnce(&mut inf_terrain::HeightRegion),
     {
         let e = self.world.entity_of(guid)?;
-        let (mps, delta) = {
+        let (mps, delta, maps) = {
             let mut terrain = self.world.world_mut().get_mut::<Terrain>(e)?;
             let mps = terrain.data.meters_per_sample();
-            let delta = terrain.data.edit_region(min, max, margin, run);
-            (mps, delta)
+            let (delta, maps) = terrain.data.edit_region_with_maps(min, max, margin, run);
+            (mps, delta, maps)
         };
         // Cells actually changed + net terrain-volume change, from the delta.
         let area = mps * mps;
@@ -1101,19 +1139,59 @@ impl SceneDoc {
             }
         }
         mass_delta *= area;
-        if !delta.is_empty() {
-            self.history.record(
-                "Erode Terrain",
-                EditCommand::SculptTerrain {
-                    guid,
-                    delta: Box::new(delta),
-                },
-            );
+        let map_cells_changed = maps
+            .patches
+            .iter()
+            .map(|p| {
+                (0..p.before.len())
+                    .filter(|&k| p.after[k] != p.before[k])
+                    .count()
+            })
+            .sum();
+        // ONE undo step, two layers (P19.1). The height and data-map deltas are
+        // separate records — a sculpt brush only ever produces the first — but
+        // they are recorded inside a single transaction, so one Ctrl+Z restores
+        // heights AND maps, byte-identically, and neither can be undone without
+        // the other.
+        //
+        // THE ORDER IS LOAD-BEARING, and this is the only place it is chosen.
+        // `SceneDoc::undo` reverts a transaction's commands in **reverse** order,
+        // so recording heights-then-maps means undo runs maps-then-heights. That
+        // is the safe direction: `revert_delta` may *remove* tiles the stroke
+        // authored from nothing, and `revert_data_map_delta` skips a patch whose
+        // tile is gone — so a map revert after a height revert could silently
+        // lose writes. Reversed, the maps are restored while every tile is still
+        // present. It is benign either way for erosion specifically, because
+        // `HeightRegion::write_back` never creates a tile (an erosion bake's
+        // `created_tiles` is always empty), but the ordering must not depend on
+        // that: swap these two `record` calls and the invariant is gone.
+        if !delta.is_empty() || !maps.is_empty() {
+            self.history.begin("Erode Terrain");
+            if !delta.is_empty() {
+                self.history.record(
+                    "Erode Terrain",
+                    EditCommand::SculptTerrain {
+                        guid,
+                        delta: Box::new(delta),
+                    },
+                );
+            }
+            if !maps.is_empty() {
+                self.history.record(
+                    "Erode Terrain",
+                    EditCommand::WriteDataMaps {
+                        guid,
+                        delta: Box::new(maps),
+                    },
+                );
+            }
+            self.history.commit();
             self.world.mark_dirty();
             self.touch();
         }
         Some(ErodeReport {
             cells_changed,
+            map_cells_changed,
             mass_delta,
         })
     }
@@ -3213,6 +3291,100 @@ mod tests {
         let bn = snap.nodes.iter().find(|n| n.guid == b.to_string()).unwrap();
         assert!(bn.visible, "b's own toggle is still on");
         assert!(!bn.effective_visible, "b hidden because A is hidden");
+    }
+
+    /// The terrain's **saved bytes** — its `.inf_lvl` bincode encoding, which
+    /// covers heights, splat weights and the P19.1 data maps in one shot.
+    ///
+    /// Comparing these rather than a field-by-field hash is the stronger claim
+    /// and the one that matters: "undo restored it" means *the file it would
+    /// write is the file it would have written*, with no layer left out because
+    /// the test's hash forgot about it.
+    fn saved_bytes(data: &inf_terrain::TerrainData) -> Vec<u8> {
+        bincode::serde::encode_to_vec(data, bincode::config::standard())
+            .expect("a terrain always encodes")
+    }
+
+    /// **THE UNDO GATE (P19.1).** An erosion bake writes two layers through two
+    /// separate `EditCommand`s, and the claim that pays for that split is that
+    /// **one** Ctrl+Z restores both, byte-identically. Nothing exercised the
+    /// transaction before this: the delta types were tested at the `TerrainData`
+    /// layer, but the editor's grouping — `history.begin` / two `record`s /
+    /// `commit`, then `undo` reverting them in reverse order — was not.
+    #[test]
+    fn an_erosion_bake_is_one_undo_step_covering_heights_and_maps() {
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Terrain, "", None);
+        let undo_depth_before = doc.history.undo_len();
+
+        let (data, _) = doc.terrain_data_and_origin(g).unwrap();
+        let before = saved_bytes(data);
+        assert!(
+            data.data_maps_are_default(),
+            "a fresh terrain has never been eroded"
+        );
+        let (min, max) = doc
+            .terrain_bounds(g)
+            .expect("the starter terrain has bounds");
+
+        let params = inf_terrain::ErosionParams {
+            rain_rate: 0.05,
+            ..inf_terrain::ErosionParams::default()
+        };
+        let report = doc
+            .edit_erode_region(g, min, max, 0, |region| {
+                inf_terrain::erode(region, &params, 40);
+            })
+            .expect("the entity has a terrain");
+
+        // The bake really moved both layers …
+        assert!(report.cells_changed > 0, "the bake changed no heights");
+        // The map layer covers at least every cell the heights moved: a cell can
+        // accumulate flow without its height budging, but the reverse cannot
+        // happen — a height only moves through the erode/deposit pass, which
+        // writes wear or deposition in the same breath. (On ordinary terrain the
+        // two counts coincide, because `min_tilt` gives every wet cell a non-zero
+        // capacity and so something to erode or settle.)
+        assert!(
+            report.map_cells_changed >= report.cells_changed,
+            "every height the bake moved must have moved a data map too ({} maps vs \
+             {} heights)",
+            report.map_cells_changed,
+            report.cells_changed
+        );
+        let eroded = {
+            let (data, _) = doc.terrain_data_and_origin(g).unwrap();
+            assert!(!data.data_maps_are_default(), "the maps must have landed");
+            saved_bytes(data)
+        };
+        assert_ne!(eroded, before);
+
+        // … as exactly ONE undo step, whatever it took to record it.
+        assert_eq!(
+            doc.history.undo_len(),
+            undo_depth_before + 1,
+            "the bake must be a single transaction, not one entry per layer"
+        );
+        assert_eq!(doc.history.undo_label(), Some("Erode Terrain"));
+
+        assert!(doc.undo(), "one undo");
+        let (data, _) = doc.terrain_data_and_origin(g).unwrap();
+        assert!(
+            data.data_maps_are_default(),
+            "undo must drop the materialized map buffers back to the sparse default"
+        );
+        assert_eq!(
+            saved_bytes(data),
+            before,
+            "one undo step must restore heights AND maps byte-identically"
+        );
+
+        // Redo replays both layers exactly, and is still one step.
+        assert!(doc.redo(), "one redo");
+        let (data, _) = doc.terrain_data_and_origin(g).unwrap();
+        assert_eq!(saved_bytes(data), eroded, "redo must reproduce both layers");
+        assert!(doc.undo());
+        assert_eq!(doc.history.undo_len(), undo_depth_before);
     }
 }
 

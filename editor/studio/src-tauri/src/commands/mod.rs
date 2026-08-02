@@ -72,6 +72,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         material::material_compile,
         material::material_bake,
         terrain::terrain_erode,
+        terrain::terrain_export_data_map,
         terrain::terrain_probe_heightmap,
         terrain::terrain_import_plan,
         terrain::terrain_import,

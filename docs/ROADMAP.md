@@ -3450,7 +3450,8 @@ GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and h
 > warning); and `runtime/inf-player/tests/phase18_gate.rs` — **the phase gate**.
 >
 > **THE PHASE 18 GATE.** `runtime/inf-player/tests/phase18_gate.rs` over a new
-> committed sample, `samples/phase18-scatter` — a **12 133-byte** level carrying a
+> committed sample, `samples/phase18-scatter` — a **12 133-byte** level (12 137 after the
+> P19.1 schema bump: the version byte plus one sparse-data-map count per terrain tile) carrying a
 > four-tile terrain with ~40 m of relief, a 5×5 grid of **standing** meshlet slabs
 > (rotated 90° about X: laid flat, as in the vgeom demo, they occlude nothing, and
 > occluders are what make a subtractive proof non-vacuous), a `PcgVolume` evaluating
@@ -3531,6 +3532,154 @@ palette, deterministic across cooks, PIE == shipping.
 Starting point: no biome, grammar, or interior concept exists; erosion discards its flow and
 sediment state; the `MaskImage` sampler has no graph node; lowering is single-rule even though
 `PcgDocument` already models layers × rules × weighted kinds.
+
+> **STATUS — P19.1 Erosion data maps: COMPLETE (2026-08-02).** Erosion stops discarding its
+> story. Three per-cell accumulators now ride the whole pipeline — CPU reference, WGSL mirror,
+> tile persistence, both scene codecs, the `.inf_terrain` container, undo, and a PNG16 export.
+>
+> **The accumulators, stated in SI** (`inf_terrain::DataMapKind` is the one definition):
+> **flow** = `Σ_steps dt · (Σ_pipes outflow)` after the flux clamp — the time-integrated water
+> volume the cell shipped, **m³** (the pipe flux is a volume *rate*); **deposition** =
+> `Σ_steps` material settled, **metres** of height gained; **wear** = `Σ_steps` material
+> dissolved, **metres** lost. All three are **raw and monotone**: nothing normalizes on the way
+> in, so the **accumulators** sum across bakes and a normalized view (the export, P19.3's mask
+> samplers) is always derived. **Thermal is deliberately excluded** — it relaxes slopes and
+> conserves mass exactly, so folding it in would count relaxation as wear *and* add equal
+> amounts to both totals; leaving it out makes the accounting identity **exact**, and
+> `Σ deposition − Σ wear == Σ Δb` is the conservation gate.
+>
+> **Determinism is inherited, not re-argued.** The accumulators live in the same fixed-order
+> loops as the fields they are computed from, so `erode`'s existing byte-identical guarantee
+> covers them verbatim — machine-checked across repeated runs *and* under four job-pool sizes
+> (the loop is serial by construction; the sweep pins that it stays so).
+>
+> **The unit is gated absolutely, not just relatively.** Every other flow assertion compares one
+> flow number to another — a profile shape, a CPU/GPU agreement, a run-to-run hash — and a
+> coherent mutation that drops the `dt` factor from *both* paths satisfies all of them: the maps
+> would count steps instead of integrating seconds, and nothing relative would notice. What
+> pins the m³ is that flow is a **time integral of a volume rate**, so at a fixed simulated
+> duration it must not depend on how finely that duration is sliced: halving `dt` while doubling
+> `steps` moves the total 2.6 % and then 1.3 % (converging), where the drop-`dt` mutation moves
+> it **105 %**. A second arm pins the *volume* half — the same run on 2 m cells ships ~3.7× the
+> water per cell. Mutation-verified in both directions.
+>
+> **The GPU mirror needed a binding.** The compute stage is hard-capped at **8 storage
+> buffers** (wgpu's `Limits::default`, which `GpuContext` requests) and every slot was already
+> spoken for, so the maps' slot was made by merging the water depth and the velocity into one
+> `hydro` vec4 — same values, same order, same bits, a layout change and nothing else. The maps
+> are **write-only** in the simulation, which is why adding them cannot move a height;
+> `data_maps_do_not_feed_back_into_the_heights` proves it on both paths by eroding a
+> map-seeded region and a clean one to identical terrain. Both parity tiers extend to the maps
+> under the **same envelope discipline as the heights**: at 8 steps max|Δ| is
+> 1.05e-6 (flow) / 6.1e-4 (deposition) / 2.1e-4 (wear) against a 1e-3·peak tolerance — the
+> per-pass arithmetic is exact; at 50/100 steps the *totals* agree to 3.7e-3 / 2.7e-3 / 1.3e-3
+> and 7.7e-3 / 5.2e-3 / 3.1e-3 relative, inside the same 5e-2 cross-adapter envelope the mass
+> check uses, because a chaotic channel that moved one cell carries its flow with it.
+>
+> **Persistence: sparse on the splat-weights rule.** A tile stores `Vec<[f32; 3]>` — empty
+> means *never eroded*. The human-readable form skips the field entirely; bincode always
+> encodes it (the `skip_serializing_if` law), so an un-eroded tile costs **exactly one byte**,
+> priced by test rather than asserted.
+>
+> **THE SCHEMA ANSWER: YES — scene v14 → v15, and `.inf_terrain` header v2 → v3.** The change
+> is one level *below* the component (no `Terrain` field was added and none moved), but it is
+> the same law as v12/v13 for the same reason: bincode is positional, so an extra
+> length-prefixed layer **inside a tile** is a wire-format change, and a v14 payload fed to the
+> grown tile would read past the end of its heights and into the next tile. The
+> format-aware split localizes *where* the frozen record lives, not *whether* one is needed.
+> So: the pre-P19.1 tile and heightfield are frozen once, in `inf-terrain`, as
+> `TerrainTileV14` / `TerrainDataV14` (both codecs already share `inf_terrain::TerrainData`, so
+> sharing its frozen twin is the existing seam, not a new one); each codec then freezes
+> `TerrainV14` + `EntityRecordV14` + `SceneFileV14` and repoints v4..v14's terrain slots at
+> them. v1..v14 payloads load unchanged with every tile's maps **empty** — never eroded, which
+> is exactly what a v14 level meant. The `.inf_terrain` header did **not** change length; the
+> *version* selects the tile wire type (`decode_tile_at`), which is also what makes a
+> write-back over a v1/v2 source **transcode** its passed-through blobs instead of copying
+> bytes — a v3 header over v2 blobs would pass every structural check and surface only as a
+> corrupt tile on some later load.
+>
+> **Committed re-bless, priced.** Eleven `.inf_lvl` samples/templates move: the terrain-free
+> ones by **exactly the version byte**, and the terrain-carrying ones by that plus **one byte
+> per tile** (phase16-world +16, terrain-demo +9, phase18-scatter +4). Two new committed
+> fixtures, `scene_v14.inf_lvl`, written twice and byte-compared across the codecs.
+>
+> **Undo is one step, two layers.** The bake's `DataMapDelta` is a *sibling* of its
+> `HeightDelta`, not a field on it — every sculpt brush produces the first and only erosion
+> produces the second, so merging them would put an always-empty map buffer inside every stroke
+> on the undo stack. Both are recorded inside one `EditHistory` transaction, so one Ctrl+Z
+> restores heights **and** maps byte-identically (including dropping a materialized buffer back
+> to the sparse default) — gated at the `SceneDoc` layer, not just at the delta types. The
+> **record order is load-bearing and documented where it is chosen**: `undo` reverts a
+> transaction in reverse, so heights-then-maps means maps are restored while every tile is still
+> present. (`revert_delta` may remove tiles a stroke authored and `revert_data_map_delta` skips a
+> patch whose tile is gone; benign for erosion specifically, because `HeightRegion::write_back`
+> never creates a tile — but the ordering must not depend on that.) The P16.4b save write-back
+> needs no change: writing a map dirties the tile through the same `get_tile_mut` seam the
+> heights use, asserted by a map-only-edit test that follows it into `TerrainEdits::from_dirty`.
+>
+> **Export** is `TerrainData::export_data_map(kind, region)` → PNG16, normalized over the
+> region's own measured `[min, max]` and **reporting that range**, plus a
+> `terrain_export_data_map` command writing under `Content/DataMaps/` (a derived destination —
+> the editor's capability set has no save dialog) and three buttons in the erosion dialog.
+>
+> **Tests.** `inf-terrain::maps` (sparse-is-free, delta round-trip + byte-identical undo,
+> export normalization/determinism, region clipping); `tests/erosion.rs` (accumulator
+> determinism across runs and pool sizes; the conservation identity against both the measured
+> heights and `ErosionStats`; **known values** — a V-valley's flow profile peaks at the floor,
+> is unimodal, and beats each crest 2×, while the steep flank wears hardest and the valley sits
+> above it on net balance; **flow is a time integral, not a step count** — halving `dt` at fixed
+> simulated time moves the total 2.6 % then 1.3 %, where a dropped-`dt` accumulator moves 105 %, and
+> the same run on 2 m cells ships ~3.7× the volume; a second bake adds to the first's totals and
+> un-composes exactly, while moving a measured 34 % *less* than one long run; holes never
+> accumulate; a map-only edit still dirties its tile for write-back; both
+> codecs round-trip); `inf-terrain::tile` (the legacy-decode contract — see below);
+> `inf-terrain::asset` (a v2 payload loads forever with default maps; a v2 source transcodes on
+> write-back); `erosion_gpu` (both parity tiers over all three maps, plus the no-feedback
+> guard); `SceneDoc` — **the undo gate**: an `edit_erode_region` bake is exactly one history
+> entry, and one `undo` returns the terrain's *saved bytes* (heights + weights + maps in one
+> encode) to what they were, with the materialized buffers dropped back to sparse, redo
+> reproducing both layers; and the v15 ladder in both codecs (fixture provenance, cross-codec
+> byte identity, old-bytes-load-forever, the downgrade's single documented loss, and the wire
+> cost priced per tile). **41 goldens byte-identical** — data maps are data, not pixels.
+>
+> **Legacy reads keep their teeth.** The frozen record is now the *only* path a pre-P19.1
+> payload takes, so it carries the live decoder's length contract verbatim, in its own
+> `Deserialize`, as **hard errors** — a corrupt height buffer is a decode failure, never a
+> terrain full of holes that gets saved back, and a short-but-non-empty weight buffer is
+> rejected at the door rather than becoming an out-of-bounds index the first time the paint
+> path touches the tile. That hazard is pinned by a `#[should_panic]` test on the hand-built
+> shape and a paint-path sweep over every buffer a legacy payload can legally carry; deleting
+> the check makes the sweep fail with the index panic. The frozen type is named
+> `TerrainTileFrozenV1` / `TerrainDataFrozenV1` rather than `…V14`, because one tile layout
+> backs **two** independently-versioned containers (`.inf_lvl` ≤ 14 *and* `.inf_terrain` ≤ 2)
+> and neither owns the other's numbering; three tripwire tests — one per codec plus the asset
+> half in `inf-terrain` — fail if either ladder bumps past its row without a new generation.
+>
+> **Remainders, stated (P19.1).**
+> * **Thermal wear is invisible in the wear map.** Thermal erosion is excluded so the
+>   conservation identity stays exact (above), which means a talus-relaxed cliff face reads as
+>   *unworn*. For a texturing mask that is arguably right — thermal does not carry material away,
+>   it slumps it — but a consumer that wants "how much did this face move" needs a fourth channel.
+>   Deferred until something asks for it; the channel count is one constant.
+> * **Coarse LOD pages carry no data maps.** Like the splat weights, a decimated tile is a
+>   streaming page rather than authored content, so `downsample_block` leaves the maps sparse
+>   (asserted in the write-back gate). **P19.3's samplers therefore read zeros above level 0** —
+>   fine for the editor and for a level-0 evaluation, and a real gap for any future
+>   coarse-resolution PCG pass. The fix is a decimation rule for accumulators (sum, not average,
+>   for flow; mean for the metre channels) and it belongs with the first consumer.
+> * **The bless-guard asymmetry.** The three bless switches do not agree on what "on" means:
+>   `INF_BLESS_SAMPLES` and the editor codec's `bless_v14_fixture` accept **any** value
+>   (`is_ok()` / `is_err()`), while `inf-scene`'s `bless_scene_v14_fixture` demands **exactly
+>   `"1"`** (`as_deref() != Ok("1")`). So `INF_BLESS_FIXTURES=true cargo test --workspace`
+>   rewrites the editor's `scene_v14.inf_lvl` and silently leaves the runtime's alone — the two
+>   diverge, and the only thing that says so is
+>   `v14_fixture_matches_the_runtime_codecs_copy` failing on the next run. It *is* caught (that
+>   is exactly the mirror test's job, and it is why the test exists), but a one-line predicate
+>   mismatch shouldn't be what stands between a bless and a corrupt fixture pair. Inherited, not
+>   introduced here; unifying the three predicates is a cheap follow-up.
+> * **`export_data_map` writes to a derived path.** The editor's Tauri capability set has no save
+>   dialog, so the PNG lands under `Content/DataMaps/<Entity>_<map>.png`. A user-chosen
+>   destination needs `dialog:allow-save` and is deferred with it.
 
 - **P19.1 Erosion data maps** — 1. accumulate flow / deposition / wear maps in the erosion
   passes (CPU reference + WGSL mirror, parity-gated exactly like heights); 2. persist them

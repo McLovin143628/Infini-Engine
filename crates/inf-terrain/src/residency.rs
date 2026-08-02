@@ -40,7 +40,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::asset::{decode_tile, TerrainAssetReader};
+use crate::asset::{decode_tile_at, TerrainAssetReader, TERRAIN_ASSET_SCHEMA_VERSION};
 use crate::data::TerrainData;
 use crate::tile::{TerrainTile, TileKey};
 
@@ -61,11 +61,23 @@ pub trait TileStore {
         self.tile_bytes(key).is_some()
     }
 
+    /// The `.inf_terrain` schema version the store's blobs were **written at** —
+    /// which is what says how to decode them (bincode is positional; see
+    /// [`decode_tile_at`]).
+    ///
+    /// Defaults to the current version, which is right for every store that
+    /// encodes its own blobs (a [`MemoryTileStore`] staged from live tiles). An
+    /// asset-backed store overrides it with its payload's own stamp so a v1/v2
+    /// `.inf_terrain` still pages in.
+    fn tile_schema_version(&self) -> u32 {
+        TERRAIN_ASSET_SCHEMA_VERSION
+    }
+
     /// Decode a tile, or `None` when absent. `Err` only for a corrupt blob.
     fn load_tile(&self, key: TileKey) -> Result<Option<TerrainTile>, String> {
         match self.tile_bytes(key) {
             None => Ok(None),
-            Some(bytes) => decode_tile(bytes).map(Some),
+            Some(bytes) => decode_tile_at(bytes, self.tile_schema_version()).map(Some),
         }
     }
 }
@@ -142,6 +154,12 @@ impl<B: AsRef<[u8]>> TileStore for TerrainAssetReader<B> {
 
     fn tile_keys(&self) -> Vec<TileKey> {
         self.keys().collect()
+    }
+
+    /// The payload's own stamp — an older asset's blobs hold the older tile
+    /// layout, and this is what makes them keep paging in (P19.1).
+    fn tile_schema_version(&self) -> u32 {
+        self.header().schema_version
     }
 }
 
