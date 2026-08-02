@@ -2563,10 +2563,10 @@ GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and h
 > dev-dependency on self reaches `inf-vgeom`'s own `tests/`); the shipping crate is unchanged. Its
 > displacement runs on `psin64`/`pcos64` in f64 and casts once per vertex, and the grid coordinates
 > stay in f32 because divide/subtract/multiply were already IEEE-exact. Every platform now cooks
-> these fixtures to byte-identical vertices, so any `(meshlet_count, page_count, page_bytes)` fact
-> established on one machine is true on all of them — which is what turns that anti-vacuity guard
-> from a local coincidence into a portable one. (The guard stayed; the amplitude pair moved to
-> 0.30 / 0.90, since portable vertices produce a different — now universal — count ladder.)
+> these fixtures to byte-identical **vertices**. (This memo originally drew one further inference —
+> that identical vertices give identical `(meshlet_count, page_count, page_bytes)`, on which the
+> anti-vacuity guard's amplitude pair was re-picked to 0.30 / 0.90. **That inference is false**; see
+> the follow-up memo below.)
 > `dag.rs`'s local wavy grid and the packager's cook fixture were ported for the same reason, as
 > were two synthetic threshold walks.
 >
@@ -2581,6 +2581,39 @@ GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and h
 > The frozen v1 fixture `v1_dense12.inf_vmesh` was deliberately **not** touched: it pins committed
 > *bytes*, not the generator, and its test only ever reads the committed file — its provenance note
 > now records that the generator has since changed and that this is intended.
+
+> **P18 fix, second trip — `meshopt` is not cross-platform, so the re-import fixture stopped
+> pretending otherwise** (2026-08-02). The memo above ended one inference too far. Byte-identical
+> vertices do **not** imply an identical meshlet DAG: `build_vgeom` runs `meshopt`'s native C++
+> clusterizer and simplifier, whose float paths and SIMD differ between arm64 and x86_64.
+> `reimported_content_under_one_id_resets_residency` failed on macos-arm64 a second time — the
+> re-picked (0.30, 0.90) pair, both (38, 5) on x86_64-msvc, measures (37, 5) and (39, 5) on
+> aarch64-apple-darwin, from vertices that were by then *provably* bit-identical between the two.
+> The first fix made the **input** portable, which was right and stays; the **builder** is not
+> portable and cannot be asked to be. Nor should it: cross-platform DAG identity was never a
+> requirement of the format — a `.inf_vmesh` is cook-derived on one machine and shipped, and only
+> the cook's own same-platform determinism is promised (and gated, in `dag.rs` and `asset.rs`).
+>
+> So no amplitude pair can carry that premise, and hunting for a better one is the trap.
+> **Variant B is now a mutation of a built DAG, never a second build:** A is built once, and B is a
+> clone of A's `VgeomMesh` with vertex heights, cluster bounds and object-space errors scaled 3×.
+> The page partition is a pure function of `is_root`/`lod_level` and every section length a pure
+> function of the counts, so `(meshlet_count, page_count)` agree **by construction, on every
+> platform and under every future `meshopt`** — while the scaled errors move the directory's
+> `max_parent_error`/`min_error` and the payload bytes genuinely differ, which is exactly what a
+> re-import looks like to the staleness check. Errors are *scaled*, not shifted, so LOD 0 stays at
+> error 0, a root's `parent_error` stays `+∞` (page 0 must remain unconditionally wanted) and the
+> monotone error chain survives; the test now also asserts the two payloads differ.
+> `test_support::displaced_mesh` — the amplitude-varied second build that invited the fragile
+> premise — is **deleted**, and the module header carries the standing rule: **no test may assert a
+> count, a page ladder or a byte total that was measured on somebody's machine.** Derive it from the
+> build at runtime, or, where two structurally identical DAGs are genuinely needed, build once and
+> mutate a clone. A workspace sweep found no other test resting on cross-build meshopt count
+> equality — the counts quoted in `inf-render`'s vgeom suites are already declared illustration and
+> their assertions read the live page directory. Gates: `inf-vgeom` (42 unit + 11 dag + 7
+> streaming), `inf-render` `vgeom_streaming` + `vgeom_occlusion`, and `INF_GOLDEN_STRICT=1` all
+> green with **no golden re-bless** — the mutation touches a test fixture only, and nothing the
+> goldens draw.
 
 > **P18.4 GI v2 (Lumen-class) — COMPLETE** (2026-08-01, local gates green; CI pending push).
 > The probe GI stops being a rigid-only, gradient-lit, 256-instance demo. Terrain, skinned

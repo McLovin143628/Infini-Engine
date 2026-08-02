@@ -30,7 +30,8 @@
 //! the far side of it on macOS, and
 //! `stream::tests::reimported_content_under_one_id_resets_residency`'s
 //! anti-vacuity premise — two fixture builds agreeing on `(meshlet_count,
-//! page_count)` — held on Windows (41, 5) and failed on macOS.
+//! page_count)` — held on Windows (41, 5) and failed on macOS. The port fixed the
+//! first outright; it only *moved* the second, for the reason below.
 //!
 //! Everything below is built from IEEE-exact operations only: `f32`
 //! add/sub/mul/div and `f64` `sqrt` are correctly rounded (hence identical
@@ -40,13 +41,37 @@
 //! step is lifted into `f64` and cast back once per vertex — the same recipe
 //! `inf_render::primitives` uses for committed primitive geometry.
 //!
-//! Consequence, and the whole point: **every platform now cooks these fixtures to
-//! byte-identical vertices, hence to the identical meshlet DAG.** Any
-//! `(meshlet_count, page_count, page_bytes)` fact a test establishes on one
-//! machine is therefore true on all of them — which is what lets an anti-vacuity
-//! guard like the re-import one above be a *construction* rather than a wish.
-//! Cost of the fix, paid once: the DAG changed on every platform, so the two
-//! vgeom goldens were deliberately re-blessed.
+//! Consequence: **every platform now cooks these fixtures to byte-identical
+//! vertices.** Cost of the fix, paid once: the DAG changed on every platform, so
+//! the two vgeom goldens were deliberately re-blessed.
+//!
+//! # What that does NOT buy: a portable meshlet DAG
+//!
+//! It bought a portable *input*. This header used to go one sentence further and
+//! claim it bought a portable *output* too — "byte-identical vertices, hence the
+//! identical meshlet DAG", therefore any `(meshlet_count, page_count, page_bytes)`
+//! fact measured on one machine holds on all of them. **That was wrong, and it
+//! cost a second macOS-only CI trip.** [`build_vgeom`] runs `meshopt`'s native C++
+//! clusterizer and simplifier, whose float paths and SIMD differ between arm64 and
+//! x86_64: fed the byte-identical vertices this module now guarantees, the `n = 28`
+//! fixture still built **38** meshlets on x86_64-msvc against **37** on
+//! aarch64-apple-darwin. Nor is that a defect to fix — cross-platform DAG identity
+//! was never a requirement of the format. A `.inf_vmesh` is cook-derived on one
+//! machine and shipped; only the *cook's* own determinism (same platform, same
+//! input, same bytes) is a promise, and that one is gated.
+//!
+//! So the rule for every suite built on these fixtures is: **no test may assert a
+//! count, a page ladder or a byte total that was measured on somebody's machine.**
+//! Derive the expectation from the build at runtime; assert shape, monotonicity,
+//! relations and bounds rather than magnitudes; quote measured numbers in prose as
+//! illustration and say so. Where a test genuinely needs two *structurally
+//! identical* DAGs — the re-import staleness gate is the only one — build once and
+//! **mutate a clone**, never build twice and tune parameters until the counts
+//! happen to agree. That last pattern failed twice, so the helper that invited it
+//! (`displaced_mesh`, an amplitude-varied second build) is deliberately gone; use
+//! [`build_grid`] if you want an amplitude, and do not compare its counts to
+//! another build's. Same-platform determinism — one mesh built twice, or paged at
+//! two pool sizes — is untouched by any of this and still gated.
 
 use inf_math::{pcos64, psin64};
 
@@ -130,6 +155,11 @@ pub fn displaced_grid(n: usize, amp: f64, normals: GridNormals) -> MeshStreams {
 }
 
 /// [`displaced_grid`] run through the builder with `BuildParams::default()`.
+///
+/// The vertices this hands [`build_vgeom`] are byte-identical everywhere; **the
+/// DAG that comes back is not** (module header). Two calls with different `amp`
+/// are two independent `meshopt` runs, and nothing relates their meshlet or page
+/// counts — on one platform or across two.
 pub fn build_grid(n: usize, amp: f64, normals: GridNormals) -> VgeomMesh {
     let (positions, nrms, uvs, indices) = displaced_grid(n, amp, normals);
     build_vgeom(&positions, &nrms, &uvs, &indices, BuildParams::default())
@@ -142,19 +172,6 @@ pub fn build_grid(n: usize, amp: f64, normals: GridNormals) -> VgeomMesh {
 /// at more than one level, which is the interesting case the paging tests need.
 pub fn dense_mesh(n: usize) -> VgeomMesh {
     build_grid(n, DEFAULT_AMPLITUDE, GridNormals::Flat)
-}
-
-/// [`dense_mesh`] with a **tunable amplitude** — the same topology, so the
-/// clusterization (and therefore the meshlet and page *counts*) is unchanged,
-/// while every simplification error differs.
-///
-/// That is what a re-import of an edited mesh looks like, and it is precisely the
-/// case a count-only staleness check cannot see. Because the vertices are now
-/// bit-identical on every platform, so is the count agreement between two
-/// amplitudes — which is what
-/// `stream::tests::reimported_content_under_one_id_resets_residency` rests on.
-pub fn displaced_mesh(n: usize, amp: f64) -> VgeomMesh {
-    build_grid(n, amp, GridNormals::Flat)
 }
 
 /// The **rendering** fixture: [`dense_mesh`]'s geometry carrying analytic normals,

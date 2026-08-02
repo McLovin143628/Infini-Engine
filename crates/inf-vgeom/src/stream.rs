@@ -1403,7 +1403,7 @@ fn stage_page(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{dense_mesh, displaced_mesh};
+    use crate::test_support::dense_mesh;
     use crate::VgeomMesh;
 
     // ── allocator ───────────────────────────────────────────────────────────
@@ -1730,6 +1730,53 @@ mod tests {
         }
     }
 
+    /// A **re-import**: the same DAG carrying different content, without going near
+    /// `meshopt` (see `reimported_content_under_one_id_resets_residency` for why
+    /// that matters).
+    ///
+    /// Structure is cloned verbatim — the meshlet vector's length and every
+    /// `vertex_offset`/`vertex_count`/`triangle_offset`/`triangle_count`,
+    /// `lod_level`, `group`, the micro-index buffers, the groups and the level
+    /// ranges. The page partition is a pure function of `is_root` + `lod_level` and
+    /// every section length a pure function of the counts, so the resulting page
+    /// directory has *identical* `page_count`, per-page `meshlet_count`,
+    /// `vertex_start`/`vertex_count`, `mlvert_count`/`mltri_count`, `lod`/
+    /// `floor_lod` and section offsets. Only **content** moves: the vertex heights
+    /// (payload bytes) and the object-space errors — which are the only meshlet
+    /// fields the directory summarizes, as `max_parent_error` and `min_error`.
+    ///
+    /// The errors are **scaled**, not shifted, so every DAG invariant the rest of
+    /// the crate leans on survives: LOD 0 stays at error 0, a root's `parent_error`
+    /// stays `+∞` (page 0 must remain unconditionally wanted), and the monotone
+    /// child-error ≤ group-error ≤ parent-error chain is preserved because a
+    /// positive scale preserves every inequality. Bounds take the same factor, so
+    /// the spheres still contain the points they bound.
+    fn reimported(base: &VgeomMesh) -> VgeomMesh {
+        /// The edit: 3× the displacement. Simplification error is an object-space
+        /// length in that same space, so it takes the same factor.
+        const SCALE: f32 = 3.0;
+        let mut m = base.clone();
+        for v in &mut m.vertices {
+            v.position[1] *= SCALE;
+        }
+        for x in &mut m.meshlets {
+            x.center[1] *= SCALE;
+            // Scaling one axis by `k` grows no distance by more than `k`, so a
+            // `k`-scaled radius still bounds the cluster (conservatively).
+            x.radius *= SCALE;
+            x.error *= SCALE;
+            if x.parent_error.is_finite() {
+                x.parent_error *= SCALE;
+            }
+        }
+        for g in &mut m.groups {
+            g.error *= SCALE;
+        }
+        m.center[1] *= SCALE;
+        m.radius *= SCALE;
+        m
+    }
+
     /// **Re-imported content under a stable id must reset residency** (P18.3).
     ///
     /// In a cooked pack an asset id names immutable bytes, so the old staleness
@@ -1743,43 +1790,63 @@ mod tests {
     /// The fixture is asserted count-identical, so this can never quietly become
     /// vacuous by drifting into a pair the weak check would already separate.
     ///
-    /// # Why the premise now holds everywhere, and how to re-establish it
+    /// # Why variant B is a MUTATION of A's DAG and never a second build
     ///
-    /// `test_support::displaced_mesh` varies **only** the displacement amplitude,
-    /// so both builds share a topology, and its trig is bit-portable — every
-    /// platform computes byte-identical vertices and therefore a byte-identical
-    /// DAG. Amplitude still perturbs `meshopt`'s clusterization enough to move the
-    /// meshlet count by a few, so the two amplitudes below are *picked* to land on
-    /// the same `(meshlet_count, page_count)`; what portability buys is that the
-    /// pick is now a **platform-invariant fact** rather than a local coincidence.
-    /// It used to be the latter: under `std` trig the old (0.30, 0.75) pair
-    /// measured (41, 5) == (41, 5) on x86_64-msvc and (38, 5) ≠ (41, 5) on
-    /// aarch64-apple-darwin, so this assertion turned into a macOS-only CI failure
-    /// with nothing whatsoever wrong in the code under test.
+    /// That guard — B's `(meshlet_count, page_count)` must EQUAL A's, or the weak
+    /// check would already have separated the two and this test would prove
+    /// nothing — has to hold on every machine that runs the suite. It cannot, if B
+    /// is *built*.
     ///
-    /// If a future builder change moves the counts apart, re-pick `B_AMPLITUDE`
-    /// by sweeping amplitudes for one that matches `A_AMPLITUDE`'s counts (they
-    /// are dense — roughly one in three of a 0.05 ladder works) and keep it far
-    /// enough from `A_AMPLITUDE` that "an edited mesh" is a fair description. Do
-    /// **not** relax the assertion: it is the only thing standing between this
-    /// test and vacuity.
+    /// `build_vgeom` runs `meshopt`'s native C++ clusterizer and simplifier, and
+    /// **that library is not bit-portable across architectures**: handed
+    /// byte-identical vertices it still lands on a different meshlet DAG on
+    /// aarch64-apple-darwin than on x86_64-msvc. This cost two macOS-only CI trips.
+    /// The first blamed the *input*, correctly as far as it went — the fixture's
+    /// displacement used `std` trig, which genuinely is unportable — so it moved to
+    /// `inf_math`'s `psin64`/`pcos64` and re-picked the amplitude pair to
+    /// (0.30, 0.90), both measuring (38, 5) on Windows. macOS then built (37, 5) and
+    /// (39, 5) *from vertices that were by then provably bit-identical to Windows'*.
+    /// The input had stopped being the problem; the **builder** was, and it cannot
+    /// be asked not to be — nor should it, since cross-platform DAG identity was
+    /// never a requirement of the format: a `.inf_vmesh` is cooked once, on one
+    /// machine, and shipped.
+    ///
+    /// So **no amplitude pair can carry this premise**, and hunting for a better
+    /// one is the trap that leads back here a third time. B is instead a clone of
+    /// A's *built* mesh with its content mutated (`reimported` above): the structure
+    /// `build_vgeom_asset` pages on is copied verbatim, so the two directories agree
+    /// on every count **by construction, on every platform and under every future
+    /// `meshopt`**, while the errors and the vertices differ — which is exactly what
+    /// a re-import of an edited mesh looks like to the staleness check. Do not relax
+    /// the guard, and do not re-establish it by building twice.
     #[test]
     fn reimported_content_under_one_id_resets_residency() {
-        /// The base payload's displacement amplitude — `dense_mesh`'s own.
-        const A_AMPLITUDE: f64 = 0.30;
-        /// The re-imported payload's: 3× the displacement, so every simplification
-        /// error genuinely moves, chosen for equal counts (see above).
-        const B_AMPLITUDE: f64 = 0.90;
+        let base = dense_mesh(28);
+        // A real multi-level DAG: without non-root meshlets carrying a positive
+        // parent error there would be nothing in the directory for `reimported` to
+        // move, and the "…while differing" assertion below could not be met.
+        assert!(
+            base.meshlets
+                .iter()
+                .any(|m| m.parent_error.is_finite() && m.parent_error > 0.0),
+            "fixture must be a real DAG, not a single level of roots"
+        );
 
-        let a = VgeomSource::from_mesh(&displaced_mesh(28, A_AMPLITUDE)).unwrap();
-        let b = VgeomSource::from_mesh(&displaced_mesh(28, B_AMPLITUDE)).unwrap();
+        let a = VgeomSource::from_mesh(&base).unwrap();
+        let b = VgeomSource::from_mesh(&reimported(&base)).unwrap();
         assert_eq!(
             (a.meshlet_count(), a.pages().len()),
             (b.meshlet_count(), b.pages().len()),
-            "fixture must defeat the count-only check, or this proves nothing \
-             (re-pick B_AMPLITUDE — see this test's doc comment)"
+            "the fixture must defeat the count-only check. These agree BY \
+             CONSTRUCTION — B is A's DAG with mutated content, not a second build — \
+             so a failure here means `reimported` started moving structure, not that \
+             some constant needs re-picking (see this test's doc comment)"
         );
         assert_ne!(a.pages(), b.pages(), "…while differing in the directory");
+        assert!(
+            a.payload().unwrap().as_ref() != b.payload().unwrap().as_ref(),
+            "…and in the payload bytes: a re-import is genuinely new content"
+        );
 
         let mut s = VgeomStreamer::new(VgeomStreamBudget::default());
         s.plan(&[want(&a, 0.0)]);
