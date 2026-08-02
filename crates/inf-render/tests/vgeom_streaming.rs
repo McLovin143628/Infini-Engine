@@ -26,7 +26,7 @@
 //! carry fixed shares, and a share-based split could refuse the roots while the
 //! byte ledger said there was room — see `VgeomPools`), that reduces to the one
 //! honest condition `budget_bytes >= page0.resident_bytes()`; on this fixture
-//! page 0 costs 7 828 B. Below it the asset has **zero** resident pages and the
+//! page 0 costs about 7.8 KB. Below it the asset has **zero** resident pages and the
 //! frame draws nothing, and `AssetResidency::floor_lod` then reports `max_lod` —
 //! the same value a roots-only residency reports — so only `resident_pages == 0`
 //! distinguishes the two. Every budget in the sweeps below is comfortably above
@@ -34,6 +34,25 @@
 //! change that crosses it fails loudly instead of silently testing an empty
 //! frame. (`inf_vgeom`'s `the_root_page_survives_every_budget_that_can_hold_it`
 //! pins the floor itself, with no GPU.)
+//!
+//! # The fixture's page ladder is NOT a portable constant
+//!
+//! Every byte figure and every LOD depth quoted in this file is what the
+//! x86_64-msvc build produces, and it is **illustration, never a contract**.
+//! `dense_grid_mesh` displaces its grid with f32 `sin`/`cos`, which is std trig and
+//! therefore not bit-portable (the P14 LAW); meshopt then simplifies slightly
+//! different vertices into a slightly different DAG. The macOS/aarch64 runner cooks
+//! the same fixture to 138 176 B where this machine gets 138 340 B, with per-page
+//! `max_parent_error` moving by percent, not by ULPs. (`lod_threshold` contributes a
+//! second, ULP-scale platform input by dividing through `tan(fov_y / 2)`.)
+//!
+//! So **no assertion here may rest on a specific page size, or on a threshold
+//! sitting a few percent from a page's error boundary.** Budgets are derived from
+//! the live page directory, and the flythrough's camera distances are decades clear
+//! of every boundary that matters. P18.2's first CI failure was exactly this
+//! (run 30729604364): a flythrough tuned 25 % from a boundary on Windows landed on
+//! the other side of it on macOS and pinned residency flat — see the note above
+//! `FLYTHROUGH_DISTANCES`.
 //!
 //! Skips cleanly with no GPU adapter, like every GPU path in this repo.
 
@@ -357,6 +376,31 @@ fn coverage(img: &[u8], background: &[u8]) -> Vec<bool> {
         .collect()
 }
 
+/// The per-instance screen-error scalar `t` for this camera — the identical
+/// quantity `passes::vgeom` hands the cull shader *and* `VgeomStreamer::plan`
+/// derives its want from, so a test that computes it here is reading the streamer's
+/// own input rather than modelling it.
+fn instance_threshold(
+    mesh: &VgeomMesh,
+    inst: &VgeomInstance,
+    view: &RenderView,
+    pixel_error: f32,
+) -> f32 {
+    let model = view
+        .origin
+        .model_matrix(inst.translation, inst.rotation, inst.scale);
+    let max_scale = inst.scale.abs().max_element().max(1e-6);
+    let center_world = model.transform_point3(Vec3::from(mesh.center));
+    lod_threshold(
+        view.eye_local(),
+        center_world,
+        mesh.radius * max_scale,
+        max_scale,
+        view,
+        pixel_error,
+    )
+}
+
 /// The CPU twin of one instance's GPU cut at residency floor `floor_lod` — the
 /// identical LOD + frustum filter, with the threshold derived from the same
 /// projection the shader's per-instance scalar came from.
@@ -374,15 +418,7 @@ fn cpu_cut(
     let normal_mat = Mat3::from_quat(inst.rotation)
         * Mat3::from_diagonal(inst.scale.max(Vec3::splat(1e-6)).recip());
     let eye = view.eye_local();
-    let center_world = model.transform_point3(Vec3::from(mesh.center));
-    let t = lod_threshold(
-        eye,
-        center_world,
-        mesh.radius * max_scale,
-        max_scale,
-        view,
-        settings.pixel_error,
-    );
+    let t = instance_threshold(mesh, inst, view, settings.pixel_error);
     cpu_visible_set(
         mesh,
         model,
@@ -596,30 +632,112 @@ fn a_budget_clamped_frame_is_coarser_but_never_empty() {
 }
 
 // ── (3) the determinism gate ─────────────────────────────────────────────────
+//
+// ── the flythrough fixture, and why it is built out of decades ──
+//
+// This fixture used to be a linear dolly from 19.2 m to 6.3 m plus a snap to
+// 2.9 m, under a budget of `total_resident_bytes() / 2`. It passed on
+// Windows/Vulkan and went **vacuous** on macOS/aarch64 (CI run 30729604364): every
+// frame sat at 4 resident pages and the "the trace must move" guard fired.
+//
+// The mechanism, and the reason the guard was right to fire:
+//
+// 1. `dense_grid_mesh` displaces its grid with **f32 `sin`/`cos`** — std trig,
+//    which is not bit-portable (the P14 LAW). aarch64-apple-darwin's libm differs
+//    from x86_64-msvc's in the last ULPs, so the two platforms feed meshopt
+//    *different vertices*, meshopt makes different collapse decisions, and the
+//    resulting `.inf_vmesh` has a different page ladder: 138 340 B total here,
+//    138 176 B on the macOS runner (the failure printed its budget, 69 088 B, which
+//    is half of the latter). Per-page `max_parent_error` moves with it, by percent,
+//    not by ULPs. `lod_threshold` adds a second, smaller platform input: it divides
+//    by `tan(fov_y / 2)`, also std trig.
+// 2. So *neither* the page-error ladder nor the threshold `t` is a fixed number
+//    across CI legs, and this file must never depend on one. The old script did:
+//    at 19.2 m it produced `t = 2.18e-2` against a page-2 boundary of `2.72e-2` —
+//    a 25 % margin. macOS landed on the other side, every frame's want reached the
+//    budget cap of 4 pages, and residency was pinned flat.
+//
+// The fix is to stop straddling boundaries. Both ends of the flythrough are now
+// **decades** away from any page boundary, and the budget is derived from the
+// asset's own page directory instead of a fraction of a platform-dependent total:
+//
+// * far end 4096 m ⇒ `t ≈ 6.6`, ~22× **above** the coarsest refinement page's
+//   `max_parent_error` (~0.30) ⇒ `ideal_page_count == 1`, the roots alone;
+// * near end 3 m is *inside* the 5.66 m bounding sphere, so `lod_threshold` clamps
+//   its surface distance to the literal `1e-3` and `t ≈ 1.6e-6`, ~800× **below**
+//   the finest page's `max_parent_error` ⇒ every page is wanted. That end's want is
+//   pinned by a constant in the engine, not by camera math at all.
+//
+// A platform whose ladder moved by a factor of two — let alone by ULPs — still
+// lands on the same side of both. The gate asserts those two wants explicitly, so
+// the by-construction argument is checked rather than asserted in prose.
 
-/// A scripted camera move: dolly in over six frames, back out over five, then a
-/// snap to point-blank range. The dolly walks the want up through several pages,
-/// eviction hysteresis makes the way out *not* retrace the way in, and the snap
-/// is a camera cut that also invalidates the two-pass temporal set — so the trace
-/// exercises loads, evictions, a budget clamp and a conservative frame.
+/// The flythrough's camera distances from the body's centre, in metres.
+///
+/// Geometric, not linear: each step is a factor of 4–21, which swamps both the
+/// 1.5× eviction hysteresis and any platform drift in the page ladder. In order:
+/// approach across three decades, one point-blank frame, retreat back out (which
+/// hysteresis makes lag the way in), a second approach, and a final **cut** from
+/// 64 m to point-blank — a discontinuity that also invalidates the two-pass
+/// temporal set, so the trace covers loads, evictions, a budget clamp and a
+/// conservative frame.
+const FLYTHROUGH_DISTANCES: [f64; 12] = [
+    4096.0, 512.0, 64.0, 12.0, 3.0, 12.0, 64.0, 512.0, 4096.0, 512.0, 64.0, 3.0,
+];
+
+/// How many pages the flythrough's budget is built to hold. Three is the smallest
+/// count that leaves room *both* ways: the far end wants fewer (1), the near end
+/// wants more (all six), so residency is forced to traverse at least 1 → 3.
+const FLYTHROUGH_PAGES: usize = 3;
+
+/// The scripted camera move, along one fixed direction at [`FLYTHROUGH_DISTANCES`].
+///
+/// The direction comes from a `normalize` (IEEE `sqrt` and divide — bit-portable);
+/// there is deliberately no trig anywhere in the script, so the only
+/// platform-dependent input left is the fixture *mesh*, whose ladder the distances
+/// above are decades clear of.
 fn flythrough() -> Vec<RenderView> {
-    let mut views = Vec::new();
-    for k in 0..6 {
-        let f = f64::from(k) / 5.0;
-        views.push(look_from(
-            DVec3::new(0.0, 9.0 - 6.0 * f, 17.0 - 11.5 * f),
-            DVec3::ZERO,
-        ));
-    }
-    for k in 1..6 {
-        let f = f64::from(k) / 5.0;
-        views.push(look_from(
-            DVec3::new(0.0, 3.0 + 6.0 * f, 5.5 + 11.5 * f),
-            DVec3::ZERO,
-        ));
-    }
-    views.push(look_from(DVec3::new(0.0, 1.6, 2.4), DVec3::ZERO));
-    views
+    let dir = DVec3::new(0.0, 0.5, 1.0).normalize();
+    FLYTHROUGH_DISTANCES
+        .iter()
+        .map(|&d| look_from(dir * d, DVec3::ZERO))
+        .collect()
+}
+
+/// A budget that holds exactly the `pages` coarsest pages of `source` and provably
+/// not one more — **read off the page directory**, never a fraction of the asset's
+/// total.
+///
+/// It sits at the midpoint of the open interval between "the prefix fits exactly"
+/// and "one more page fits", so it is strictly inside the band on both sides. A
+/// platform whose page bytes differ (see the note above) moves the two endpoints
+/// and the midpoint together, and the resident prefix it admits is unchanged.
+fn budget_for_pages(source: &inf_vgeom::VgeomSource, pages: usize) -> u64 {
+    let dir = source.pages();
+    assert!(
+        pages >= 1 && pages < dir.len(),
+        "a budget for {pages} of {} pages is not a clamp at all",
+        dir.len()
+    );
+    let held: u64 = dir[..pages].iter().map(|p| p.resident_bytes()).sum();
+    let next = dir[pages].resident_bytes();
+    assert!(next >= 2, "page {pages} costs {next} B — nothing to bisect");
+    held + next / 2
+}
+
+/// The pages this camera would ask for if nothing were scarce: the streamer's own
+/// [`inf_vgeom::ideal_page_count`] fed by the same per-instance threshold the cull
+/// shader gets. The gate below states its flythrough's want ladder with this, so
+/// "the trace must move" rests on the fixture's construction rather than on a
+/// residency sequence that happened to hold on one runner.
+fn ideal_want(mesh: &VgeomMesh, source: &inf_vgeom::VgeomSource, view: &RenderView) -> usize {
+    let t = instance_threshold(
+        mesh,
+        &fixture_instance(),
+        view,
+        VgeomSettings::default().pixel_error,
+    );
+    inf_vgeom::ideal_page_count(source.pages(), t)
 }
 
 /// **A streamed flythrough is reproducible, frame for frame, in pixels and in
@@ -642,7 +760,12 @@ fn flythrough() -> Vec<RenderView> {
 /// image while the counters agreed.
 ///
 /// The trace is also required to *move* — a budget that pinned residency for
-/// twelve frames would make this a very expensive tautology.
+/// twelve frames would make this a very expensive tautology. That guard is kept
+/// exactly as it was; what changed (see the note above [`FLYTHROUGH_DISTANCES`])
+/// is that the fixture now makes it impossible to trip for a *platform* reason.
+/// The premises it rests on are asserted first, so a future fixture edit that
+/// re-narrows the ladder fails on the premise, naming what broke, instead of on
+/// the symptom.
 #[test]
 fn streaming_renders_a_deterministic_pixel_trace() {
     let Some(gpu) = gpu_or_skip("streaming_determinism") else {
@@ -652,11 +775,46 @@ fn streaming_renders_a_deterministic_pixel_trace() {
     let source = inf_vgeom::VgeomSource::from_mesh(&mesh).expect("index the vmesh");
     let scene = streaming_scene(&mesh, true);
     let views = flythrough();
+    let total_pages = source.pages().len();
 
-    // Half the asset's full cost: enough for the far end of the dolly to be
-    // want-limited, not enough for the near end — so the trace both converges and
-    // clamps.
-    let budget = source.total_resident_bytes() / 2;
+    // Derived from the asset's own page directory, not from a fraction of its
+    // (platform-dependent) total: room for the three coarsest pages and provably
+    // not the fourth.
+    let budget = budget_for_pages(&source, FLYTHROUGH_PAGES);
+
+    // ── the by-construction premises ──
+    //
+    // Residency at a cold frame 0 is `min(want, cap)`, and at any frame it is at
+    // most the cap. So `want(far) == 1` and `want(near) == total_pages > cap >= 2`
+    // together force the trace to hold 1 page at one end and `cap` at the other:
+    // the "must move" guard below cannot fail unless the streamer is broken.
+    let wants: Vec<usize> = views
+        .iter()
+        .map(|v| ideal_want(&mesh, &source, v))
+        .collect();
+    eprintln!(
+        "P18.2 flythrough script: distances {FLYTHROUGH_DISTANCES:?} m over {total_pages} pages, \
+         ideal wants {wants:?}, budget {budget} B (holds {FLYTHROUGH_PAGES} pages)"
+    );
+    assert_eq!(
+        wants[0], 1,
+        "the flythrough's far end ({} m) no longer wants the ROOT PAGE ALONE (it wants {} of \
+         {total_pages}) — the script must start decades outside the coarsest page's error \
+         boundary, or the trace's low end drifts with the platform's page ladder",
+        FLYTHROUGH_DISTANCES[0], wants[0]
+    );
+    assert_eq!(
+        *wants.iter().max().expect("the script is non-empty"),
+        total_pages,
+        "no flythrough frame wants EVERY page ({wants:?} of {total_pages}) — the script must \
+         reach inside the bounding sphere, where lod_threshold clamps to its 1e-3 floor and the \
+         want is pinned by a constant rather than by camera math"
+    );
+    assert!(
+        FLYTHROUGH_PAGES >= 2 && FLYTHROUGH_PAGES < total_pages,
+        "the budget must cap the near end strictly between the roots and full residency \
+         ({FLYTHROUGH_PAGES} of {total_pages})"
+    );
 
     let run = |gpu: &GpuContext| -> Vec<(Vec<u8>, Residency)> {
         let mut rig = Rig::new(gpu, render_settings(budget));
@@ -686,6 +844,21 @@ fn streaming_renders_a_deterministic_pixel_trace() {
         pages.iter().any(|p| *p != pages[0]),
         "residency never moved across the flythrough ({pages:?}) — the budget or the camera \
          script no longer exercises paging, so this determinism gate is vacuous"
+    );
+    // The sharper form of the same claim, now that the script guarantees it: the
+    // trace must reach BOTH ends of the ladder, not merely differ somewhere.
+    assert_eq!(
+        pages.iter().min().copied(),
+        Some(1),
+        "the flythrough never fell back to the root page alone ({pages:?}) despite wanting only \
+         it at {} m",
+        FLYTHROUGH_DISTANCES[0]
+    );
+    assert_eq!(
+        pages.iter().max().copied(),
+        Some(FLYTHROUGH_PAGES),
+        "the flythrough never reached the budget's {FLYTHROUGH_PAGES}-page cap ({pages:?}) \
+         despite wanting all {total_pages} pages at point-blank range"
     );
     assert!(
         a.iter().any(|(_, r)| r.budget_clamped),
