@@ -2107,6 +2107,110 @@ Starting point: HZB is a single-pass v1, off by default; whole vmeshes upload at
 eviction; the editor viewport still draws primitive placeholders instead of `MeshRef.asset`;
 GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and has no specular.
 
+> **P18.1 Two-pass HZB occlusion — COMPLETE** (2026-08-01, local gates green; CI pending push).
+> Meshlets now occlude meshlets, and occlusion ships **on by default**. Per frame the vgeom node
+> records `early cull → early draw` (last frame's visible set) → `HZB build` → `late cull → late
+> draw` (the newly-disoccluded remainder), all on the existing vertex-pulled
+> single-`draw_indirect`-per-pass shape. The persisted visible list is a GPU-resident `u32` per
+> `(instance, meshlet)` pair, ping-ponged between two buffers — **never read back**; the late
+> dispatch publishes next frame's early set as a side effect of the work it already does.
+>
+> **The determinism problem, and how it is actually solved.** Two-pass occlusion is temporal, and
+> the house gates assume a frame is a pure function of (scene, view, settings). The resolution is
+> **not** a convergence argument — it is a per-frame proof that occlusion is **purely
+> subtractive**, so the temporal state can only ever decide *when* a meshlet draws, never
+> *whether* the union covers it:
+>
+> * the meshlet's screen rect and its maximum reverse-Z depth are bounded from the **8 corners of
+>   its bounding sphere's world AABB** (a projective map takes that polytope to the convex hull of
+>   its projected corners, and sphere ⊂ AABB), bailing to "visible" if any corner is at or behind
+>   the eye plane;
+> * the mip is `ceil(log2(span_px))`, so one texel spans at least the whole rect and a 2×2 gather
+>   anchored at the rect's **min** corner provably covers it (v1 anchored at the *centre* with an
+>   approximate tangent-projected radius — which is not a covering, and is why v1 could not have
+>   carried this proof);
+> * every clamp rounds the safe way (top mip is 1×1; a wider footprint has a smaller min ⇒ *less*
+>   culling), and `cs_down` extends its gather on odd mip dimensions so the floor'd chain never
+>   drops a trailing row/column — a coverage hole would over-cull;
+> * mip 0 is the **min over the 4 MSAA subsamples**, so a culled meshlet is behind *every*
+>   subsample of every pixel it touches.
+>
+> Therefore `d_max < min_R HZB` ⇒ every fragment fails the `Greater` depth test ⇒ the meshlet
+> contributes zero pixels, and `image(occlusion on) == image(occlusion off)` **byte for byte**.
+> That is the gate, not a tolerance: `crates/inf-render/tests/vgeom_occlusion.rs` asserts exact
+> equality on every frame of the convergence, in both occlusion modes, at two viewport sizes
+> (one deliberately odd, 211×97), and `vgeom_gate.rs::gate_b2` asserts it on the 10.6M-triangle
+> flagship scene.
+>
+> **Conservative-when-there-is-nothing-to-inherit.** With no usable state — first frame, a
+> `scene.version` bump, an instance/meshlet count change, a frame-target reallocation, or a
+> **camera cut** (`is_camera_cut`: >50 m in one frame, >60° snap, or an fov/viewport change) —
+> the early set is the *whole* base cut, so that frame's drawn set is exactly the pre-P18.1
+> single-pass, occlusion-off set. This is a **cost/quality heuristic and is explicitly not a
+> correctness dependency** (the proof above already rules holes out); the test suite pins both
+> halves separately so a future threshold change cannot quietly become load-bearing. It also
+> means every golden — rendered one frame from cold — takes the conservative branch: **all 36
+> goldens are byte-identical with occlusion now on by default, no re-bless**, verified strict.
+>
+> **The HZB source changed, and that is the load-bearing decision.** v1 seeded from the
+> single-sample depth *prepass*. That is a **different rasterization** from the 4× MSAA target
+> meshlets actually depth-test against — at a silhouette the prepass pixel centre can be covered
+> while an MSAA subsample is not — so nothing could be proven from it. The pyramid now
+> min-reduces `targets.depth` (the live MSAA scene depth, already `TEXTURE_BINDING` since P17.3)
+> over its subsamples. Consequences: the classic mesh pass still occludes meshlets exactly as
+> before (it runs earlier into that same target), the early vgeom draw *adds* to it for **no
+> extra depth write and no resolve**, and `needs_depth_prepass` **drops its vgeom clause** — a
+> full-res depth-only pass is no longer forced just to enable occlusion, which is a net *saving*
+> against v1. Honest limitation: passes after this node (terrain, skinned, translucent) are not
+> in the pyramid and so cannot occlude meshlets — that costs culls, never correctness.
+>
+> **Tiers.** `VgeomSettings::occlusion` and the new `two_pass` both default `true`;
+> `RenderTier::apply` clears them on Medium/Low (as does `clamp_mobile`), so **no tier below
+> High pays anything** — asserted as a pure check rather than measured. `AdapterCaps` gained
+> `max_storage_textures_per_stage` + `supports_vgeom_occlusion()` + `clamp_occlusion()` (a strict
+> superset of `supports_vgeom`, so it can only further restrict). The cull compute now binds
+> **7 storage buffers** (was 4), still inside the portable 8 the High tier already demanded.
+> `two_pass = false` keeps the single-pass v1 shape as a settings-selectable fallback, and
+> `cull_visible` — the CPU-parity readback — always runs it with occlusion forced off, so the
+> LOD+frustum+cone cut the CPU reference mirrors is untouched by this batch.
+>
+> **Cost** (RTX 4070 Ti, 640×360, 64 meshlet instances × 206 meshlets, steady state): occlusion
+> off **0.212 ms**, single-pass **0.331 ms (+0.119)**, two-pass **0.369 ms (+0.157)**. The delta
+> is dominated by the resolution-bound HZB build, not by the second cull dispatch. Measured by
+> `frame_budget.rs::vgeom_two_pass_cost`, which — following P17.4's precedent — adds **no new
+> ratchet constant** (§8 makes each one a standing obligation) and instead asserts the heaviest
+> configuration stays inside the existing `FRAME_BUDGET_MS`. Culling yield: **5.6 %** of the
+> base cut proven occluded on the 10.6M ground-camera view, **14.7 %** on the wall fixture.
+>
+> **What the second pass actually buys, measured.** On the wall fixture — pure vgeom, no classic
+> geometry — the single-pass v1 shape proves **zero** meshlets occluded, because its pyramid can
+> only ever hold depth written *before* the node runs. Two-pass proves 14.7 % on the identical
+> scene. That comparison is asserted, not just printed (`defaults_and_fallback`), so "meshlets
+> occlude meshlets" is a gated claim rather than a description.
+>
+> **New instrument.** `EngineRenderer::set_vgeom_audit(bool)` / `vgeom_audit(&gpu)` expose four
+> GPU counters (`base_cut`, `occluded`, `early_drawn`, `late_drawn`) aggregated over the frame's
+> assets. **Off by default and free when off** — the shader skips the atomics and no readback
+> copy is recorded. It exists so the tests can prove the culling is *real* rather than a no-op
+> that trivially satisfies the pixel equality. The HZB's own bind groups are `GenCache`d on
+> `(targets.generation, hzb.generation)` — the P17.2 `ResourceKey` discipline, with the pyramid
+> as a second resizable resource in the key.
+>
+> **Honest remainders.** (1) `detect_and_clamp(gpu, settings)` is the new one-call host seam
+> (tier clamp **and** occlusion floor, so neither can be applied without the other), but the two
+> live hosts — the player's `render.rs` and the editor viewport's `apply_render_settings` — still
+> call `detect_tier(...).apply(...)` and are unchanged by this batch (out of its file boundary).
+> The practical exposure is nil, because `supports_vgeom()` already demands 8 storage buffers per
+> stage and no real adapter clears that while reporting zero storage textures; migrating both
+> call sites is a one-line follow-up, not a fix. (2) The HZB sees only what precedes the vgeom
+> node — the classic mesh pass and the early vgeom draw. Terrain, skinned meshes and translucency
+> draw after it and therefore cannot occlude meshlets; folding them in means either reordering the
+> graph or a second pyramid, and is a cost opportunity rather than a correctness gap.
+> (3) `late_drawn` is 0 on every static converged frame by construction, so the *disocclusion*
+> path (a meshlet re-entering the visible set mid-motion) is exercised by the camera-cut
+> re-convergence loop and by construction of the shader, not yet by a dedicated moving-camera
+> trace; P18.5's GPU-instanced scatter is the natural place to add one.
+
 - **P18.1 Two-pass HZB occlusion** — 1. persist the last-frame visible list; 2. early draw →
   HZB from its depth → late cull and draw of the remainder; 3. on by default where supported.
 - **P18.2 Meshlet streaming** — 1. a residency/page table over the existing coarse-first level

@@ -2226,6 +2226,7 @@ fn vgeom_cpu_gpu_cut_parity() {
         cone_cull: false,
         frustum_cull: true,
         occlusion: false,
+        two_pass: false,
         pixel_error: 1.0,
         debug_meshlets: false,
     };

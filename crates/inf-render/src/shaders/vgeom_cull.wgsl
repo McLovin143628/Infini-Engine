@@ -1,9 +1,9 @@
-// vgeom_cull.wgsl — GPU meshlet culling + LOD selection (P13.1b).
+// vgeom_cull.wgsl — GPU meshlet culling + LOD selection (P13.1b, two-pass P18.1).
 //
 // One thread per (instance, meshlet) pair. Each surviving pair is appended to a
 // visible list via an atomic counter that *is* the indirect draw's
 // `instance_count` (so the raster pass draws exactly the visible meshlets with a
-// single `draw_indexed_indirect`). Culls, in order:
+// single `draw_indirect`). The **base cut**, in order:
 //
 //   1. LOD cut — draw iff `error <= t < parent_error`, where `t` is a **single
 //      per-instance scalar object-space threshold** precomputed on the CPU from
@@ -13,8 +13,35 @@
 //   2. Frustum — the meshlet's world bounding sphere vs the 6 frustum planes.
 //   3. Backface cone — meshopt normal cone: reject iff
 //      `dot(normalize(center - eye), cone_axis) >= cone_cutoff`.
-//   4. HZB occlusion (optional, v1) — the sphere's screen rect vs a min-depth
-//      (reverse-Z ⇒ farthest) hierarchical depth pyramid built from the prepass.
+//
+// HZB occlusion is applied **after** the base cut and is purely subtractive —
+// see `occluded` below for the conservativeness proof.
+//
+// # Pass modes (P18.1)
+//
+// `params.counts.w` selects one of three modes; `params.misc.x` is the
+// conservative flag (no usable temporal state this frame).
+//
+// * `MODE_SINGLE` — the v1 / fallback path: base cut, then the optional HZB test,
+//   then append. Exactly the pre-P18.1 shader, and the path the CPU-parity
+//   readback (`cull_visible`) drives with occlusion forced off.
+// * `MODE_EARLY` — append the pairs that pass the base cut **and** were visible
+//   last frame (`prev_visible[idx] != 0`, or *everything* when conservative).
+//   No occlusion test: these already proved themselves, and drawing them is what
+//   gives the HZB its depth.
+// * `MODE_LATE` — runs over every pair again, against the HZB built from the early
+//   draw. It (a) publishes `cur_visible[idx]` = "passes the base cut and is not
+//   HZB-occluded", the early set for the NEXT frame, and (b) appends the pairs
+//   that were *not* in this frame's early set and are not occluded — the
+//   newly-disoccluded remainder.
+//
+// So the drawn set is `early ∪ late`, and:
+//
+//   early ∪ late = { base(i) ∧ E(i) } ∪ { base(i) ∧ ¬E(i) ∧ ¬occluded(i) }
+//                = base \ { i : ¬E(i) ∧ occluded(i) }
+//
+// i.e. the split only ever removes pairs the HZB *proves* invisible. Temporal
+// state (`E`) decides WHEN a meshlet draws, never WHETHER the union covers it.
 
 struct Meshlet {
     center: vec3<f32>,
@@ -53,10 +80,13 @@ struct CullParams {
     frustum: array<vec4<f32>, 6>,
     eye: vec4<f32>,
     // x = total threads (instance_count * meshlet_count), y = meshlet_count,
-    // z = flags bitset, w unused.
+    // z = cull flags bitset, w = pass mode (see MODE_*).
     counts: vec4<u32>,
     // x = mip count, y = hzb width, z = hzb height, w unused.
     hzb: vec4<f32>,
+    // x = conservative (early set == the whole base cut), y = audit counters on,
+    // z, w unused.
+    misc: vec4<u32>,
 };
 
 // Non-indexed indirect draw args (vertex pulling ⇒ no index buffer). The atomic
@@ -75,47 +105,84 @@ struct DrawArgs {
 @group(0) @binding(3) var<storage, read_write> visible: array<vec2<u32>>;
 @group(0) @binding(4) var<storage, read_write> draw_args: DrawArgs;
 @group(0) @binding(5) var hzb_tex: texture_2d<f32>;
+// Last frame's visibility, one u32 per (instance, meshlet) pair.
+@group(0) @binding(6) var<storage, read> prev_visible: array<u32>;
+// This frame's visibility, published by MODE_LATE for next frame's early set.
+@group(0) @binding(7) var<storage, read_write> cur_visible: array<u32>;
+// Occlusion-audit counters: [base_cut, occluded, early_drawn, late_drawn].
+// Only touched when `params.misc.y != 0` (so the shipping path pays nothing).
+@group(0) @binding(8) var<storage, read_write> stats: array<atomic<u32>, 4>;
 
 const FLAG_FRUSTUM: u32 = 1u;
 const FLAG_CONE: u32 = 2u;
 const FLAG_OCCLUSION: u32 = 4u;
 
-// Reverse-Z HZB occlusion. The pyramid stores the MIN depth (= farthest surface,
-// since reverse-Z maps near→1, far→0) over each texel footprint. The sphere is
-// occluded iff its nearest point (its LARGEST depth) is still behind the farthest
-// occluder across the covered footprint — i.e. every occluder there is closer.
+const MODE_SINGLE: u32 = 0u;
+const MODE_EARLY: u32 = 1u;
+const MODE_LATE: u32 = 2u;
+
+const AUDIT_BASE: u32 = 0u;
+const AUDIT_OCCLUDED: u32 = 1u;
+const AUDIT_EARLY: u32 = 2u;
+const AUDIT_LATE: u32 = 3u;
+
+// Reverse-Z HZB occlusion — **conservative by construction** (P18.1).
+//
+// The pyramid stores the MIN depth over each texel footprint, and mip 0 is the
+// min over the MSAA subsamples, so `HZB[texel]` is the farthest surface anywhere
+// under it. Let `R` be a screen rect that provably contains the meshlet's
+// projection and `d_max` an upper bound on its NDC depth (reverse-Z ⇒ its
+// *nearest* point). If `d_max < min_{p in R} HZB(p)` then for every pixel p and
+// every subsample s covered by the meshlet, `frag_depth <= d_max < D(p, s)`, so
+// every fragment fails the `Greater` depth test. The meshlet contributes **zero
+// pixels** — culling it cannot change the image.
+//
+// Both bounds are therefore computed to over-approximate, never under:
+//
+// * `R` and `d_max` come from the 8 corners of the sphere's **world AABB**. A
+//   perspective map takes the AABB (a convex polytope entirely in front of the
+//   eye) to the convex hull of its projected corners, and sphere ⊂ AABB, so the
+//   corner bbox contains the sphere's projection. Depth is likewise maximised at
+//   a vertex. If ANY corner is at/behind the eye plane the projection is not
+//   well-defined and we return "visible".
+// * the mip is `ceil(log2(span_px))`, so one texel spans at least the rect ⇒ a
+//   2×2 block anchored at the rect's min corner always covers it. Clamping to the
+//   top mip only widens the footprint (the top mip is 1×1), and a wider footprint
+//   has a smaller min ⇒ *less* culling. Same for clamping the rect on-screen:
+//   off-screen fragments are clipped by the rasterizer anyway.
 fn occluded(center: vec3<f32>, radius: f32) -> bool {
-    let clip = params.view_proj * vec4<f32>(center, 1.0);
-    if (clip.w <= 0.0) {
-        return false; // straddles / behind the eye — treat as visible
+    var uv_min = vec2<f32>(1.0e30, 1.0e30);
+    var uv_max = vec2<f32>(-1.0e30, -1.0e30);
+    var d_max = -1.0e30;
+    for (var i = 0u; i < 8u; i = i + 1u) {
+        let o = vec3<f32>(
+            select(-radius, radius, (i & 1u) != 0u),
+            select(-radius, radius, (i & 2u) != 0u),
+            select(-radius, radius, (i & 4u) != 0u),
+        );
+        let clip = params.view_proj * vec4<f32>(center + o, 1.0);
+        if (clip.w <= 1.0e-6) {
+            return false; // straddles / behind the eye plane — treat as visible
+        }
+        let inv = 1.0 / clip.w;
+        let uv = vec2<f32>(clip.x * inv * 0.5 + 0.5, 0.5 - clip.y * inv * 0.5);
+        uv_min = min(uv_min, uv);
+        uv_max = max(uv_max, uv);
+        d_max = max(d_max, clip.z * inv);
     }
-    let inv_w = 1.0 / clip.w;
-    let ndc = clip.xyz * inv_w;
-    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+    // Entirely off-screen: nothing to prove (the rasterizer clips it).
+    if (uv_max.x < 0.0 || uv_min.x > 1.0 || uv_max.y < 0.0 || uv_min.y > 1.0) {
         return false;
     }
-    // Sphere's nearest-point depth (reverse-Z ⇒ largest depth value).
-    let to_eye = normalize(params.eye.xyz - center);
-    let nclip = params.view_proj * vec4<f32>(center + to_eye * radius, 1.0);
-    var sphere_depth = ndc.z;
-    if (nclip.w > 0.0) {
-        sphere_depth = nclip.z / nclip.w;
-    }
-    // Approximate screen-space pixel radius from a tangent offset projection.
-    let w = params.hzb.y;
-    let h = params.hzb.z;
-    let eclip = params.view_proj * vec4<f32>(center + vec3<f32>(radius, 0.0, 0.0), 1.0);
-    var r_px = 2.0;
-    if (eclip.w > 0.0) {
-        let euv = vec2<f32>((eclip.x / eclip.w) * 0.5 + 0.5, 0.5 - (eclip.y / eclip.w) * 0.5);
-        r_px = max(abs(euv.x - uv.x) * w, abs(euv.y - uv.y) * h);
-    }
-    let mip = clamp(ceil(log2(max(r_px, 1.0))), 0.0, params.hzb.x - 1.0);
+    let full = vec2<f32>(params.hzb.y, params.hzb.z);
+    let ext = (uv_max - uv_min) * full;
+    let span = max(max(ext.x, ext.y), 1.0);
+    let mip = clamp(ceil(log2(span)), 0.0, params.hzb.x - 1.0);
     let mlvl = i32(mip);
-    let dim = max(vec2<f32>(w, h) / exp2(mip), vec2<f32>(1.0, 1.0));
-    let base = vec2<i32>(uv * dim);
+    let dim = vec2<f32>(textureDimensions(hzb_tex, mlvl));
     let maxc = vec2<i32>(dim) - vec2<i32>(1, 1);
+    let lo = clamp(uv_min, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+    let base = clamp(vec2<i32>(floor(lo * dim)), vec2<i32>(0, 0), maxc);
     var occ = 1.0;
     for (var dy = 0; dy < 2; dy = dy + 1) {
         for (var dx = 0; dx < 2; dx = dx + 1) {
@@ -123,7 +190,12 @@ fn occluded(center: vec3<f32>, radius: f32) -> bool {
             occ = min(occ, textureLoad(hzb_tex, c, mlvl).r);
         }
     }
-    return sphere_depth < occ;
+    return d_max < occ;
+}
+
+fn append(inst_i: u32, ml_i: u32) {
+    let slot = atomicAdd(&draw_args.instance_count, 1u);
+    visible[slot] = vec2<u32>(inst_i, ml_i);
 }
 
 @compute @workgroup_size(64)
@@ -139,43 +211,91 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     let inst = instances[inst_i];
     let m = meshlets[ml_i];
 
-    // 1. LOD cut (branchless; exact parity with VgeomMesh::select(threshold)).
-    let t = inst.threshold;
-    if (!(m.error <= t && t < m.parent_error)) {
-        return;
-    }
-
+    let mode = params.counts.w;
     let flags = params.counts.z;
+    let audit = params.misc.y != 0u;
+    // The early set: last frame's visible pairs, or EVERYTHING when the temporal
+    // state is not usable (first frame / scene version bump / camera cut), which
+    // makes that frame's drawn set exactly the occlusion-off base cut.
+    let early_set = params.misc.x != 0u || prev_visible[idx] != 0u;
+
+    // ── 1. LOD cut (branchless; exact parity with VgeomMesh::select(threshold)).
+    var base = m.error <= inst.threshold && inst.threshold < m.parent_error;
+
     let center_world = (inst.model * vec4<f32>(m.center, 1.0)).xyz;
     let radius_world = m.radius * inst.max_scale;
 
-    // 2. Frustum.
-    if ((flags & FLAG_FRUSTUM) != 0u) {
+    // ── 2. Frustum.
+    if (base && (flags & FLAG_FRUSTUM) != 0u) {
         for (var p = 0u; p < 6u; p = p + 1u) {
             let pl = params.frustum[p];
             if (dot(pl.xyz, center_world) + pl.w < -radius_world) {
-                return;
+                base = false;
+                break;
             }
         }
     }
 
-    // 3. Backface cone (skip degenerate cones, cone_cutoff >= 1).
-    if ((flags & FLAG_CONE) != 0u && m.cone_cutoff < 1.0) {
+    // ── 3. Backface cone (skip degenerate cones, cone_cutoff >= 1).
+    if (base && (flags & FLAG_CONE) != 0u && m.cone_cutoff < 1.0) {
         let nrm = mat3x3<f32>(inst.n0.xyz, inst.n1.xyz, inst.n2.xyz);
         let axis = normalize(nrm * m.cone_axis);
         let view_dir = normalize(center_world - params.eye.xyz);
         if (dot(view_dir, axis) >= m.cone_cutoff) {
-            return;
+            base = false;
         }
     }
 
-    // 4. HZB occlusion (optional).
+    if (!base) {
+        // MODE_LATE owns `cur_visible` and must publish every slot.
+        if (mode == MODE_LATE) {
+            cur_visible[idx] = 0u;
+        }
+        return;
+    }
+
+    if (mode == MODE_EARLY) {
+        if (early_set) {
+            append(inst_i, ml_i);
+            if (audit) {
+                atomicAdd(&stats[AUDIT_EARLY], 1u);
+            }
+        }
+        return;
+    }
+
+    // ── 4. HZB occlusion (MODE_SINGLE and MODE_LATE).
+    //
+    // Both modes reach here having seen EVERY pair that passed the base cut, so
+    // this is where `base_cut` / `occluded` are counted — the audit means the same
+    // thing in either shape.
+    var occ = false;
     if ((flags & FLAG_OCCLUSION) != 0u) {
-        if (occluded(center_world, radius_world)) {
-            return;
+        occ = occluded(center_world, radius_world);
+    }
+    if (audit) {
+        atomicAdd(&stats[AUDIT_BASE], 1u);
+        if (occ) {
+            atomicAdd(&stats[AUDIT_OCCLUDED], 1u);
         }
     }
 
-    let slot = atomicAdd(&draw_args.instance_count, 1u);
-    visible[slot] = vec2<u32>(inst_i, ml_i);
+    if (mode == MODE_SINGLE) {
+        if (!occ) {
+            append(inst_i, ml_i);
+            if (audit) {
+                atomicAdd(&stats[AUDIT_EARLY], 1u);
+            }
+        }
+        return;
+    }
+
+    // MODE_LATE.
+    cur_visible[idx] = select(1u, 0u, occ);
+    if (!early_set && !occ) {
+        append(inst_i, ml_i);
+        if (audit) {
+            atomicAdd(&stats[AUDIT_LATE], 1u);
+        }
+    }
 }

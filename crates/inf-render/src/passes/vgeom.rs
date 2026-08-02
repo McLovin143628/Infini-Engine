@@ -64,16 +64,76 @@
 //! and depth-tested, so the resulting image is order-independent — byte-stable
 //! across renders of the same frame ([`crate::golden`] asserts it).
 //!
-//! # Occlusion (v1 vs the full two-pass)
+//! # Two-pass HZB occlusion (P18.1)
 //!
-//! [`VgeomSettings::occlusion`] adds an HZB depth test in the cull compute.
-//! **v1 (this pass):** the HZB is built (`vgeom_hzb.wgsl`, reverse-Z min-depth
-//! pyramid) from the **current frame's classic depth prepass**, so meshlets are
-//! occluded by the classic geometry drawn this frame. It is **OFF by default** —
-//! the tested/golden path is frustum + cone + LOD, which matches the CPU reference
-//! exactly. The **full two-pass** technique (draw last-frame-visible meshlets →
-//! build HZB from *their* depth → test the rest and draw newly-visible) is the
-//! documented next step; the roadmap allows this sequencing.
+//! [`VgeomSettings::occlusion`] adds an HZB depth test to the cull compute, and
+//! [`VgeomSettings::two_pass`] makes it the real **two-pass** technique: vgeom
+//! geometry occludes vgeom geometry. Per frame, this node records
+//!
+//! ```text
+//!   for each asset:  early cull  →  early draw          (last-frame-visible)
+//!   build HZB from the live MSAA scene depth            (classic + early vgeom)
+//!   for each asset:  late cull   →  late draw           (newly disoccluded)
+//! ```
+//!
+//! Both draws are the same vertex-pulled `draw_indirect` into the same MSAA
+//! targets; the late pass owns a second visible list + args buffer (a non-zero
+//! `first_instance` would need the non-portable `INDIRECT_FIRST_INSTANCE`
+//! feature, so two buffers it is).
+//!
+//! The HZB seeds from `targets.depth` — the live 4× MSAA scene depth — rather
+//! than the single-sample prepass. See `vgeom_hzb.wgsl` for why (a different
+//! rasterization cannot prove anything about the one the meshlets test against;
+//! min-over-samples can). Consequences: the classic mesh pass still occludes
+//! meshlets exactly as in v1 (it runs earlier and writes that same target), the
+//! early vgeom draw *adds* to it for free, no extra depth write or resolve is
+//! paid, and [`RenderSettings::needs_depth_prepass`] no longer has to force a
+//! full-res prepass just to enable occlusion. Passes that run *after* this node
+//! (terrain, skinned, translucent) are not in the pyramid — they cannot occlude
+//! meshlets, which costs culls, never correctness.
+//!
+//! ## The determinism contract
+//!
+//! Two-pass occlusion is temporal: frame N's *early set* is frame N−1's visible
+//! set (`prev_visible`, a GPU-resident u32 per (instance, meshlet) pair, ping-
+//! ponged — never read back). The house gates assume a frame is a pure function
+//! of (scene, view, settings), so the split is designed so that it **is**:
+//!
+//! 1. **Occlusion is purely subtractive.** The HZB test only ever removes
+//!    meshlets it *proves* contribute zero fragments — the bound is computed from
+//!    the meshlet sphere's world-AABB corners, the mip is chosen so a 2×2 gather
+//!    provably covers the screen rect, and mip 0 is the min over MSAA subsamples.
+//!    The full argument (and where each approximation is rounded to stay
+//!    conservative) is in `vgeom_cull.wgsl::occluded`. So for any frame,
+//!    *whatever* the temporal state:
+//!
+//!    ```text
+//!    image(occlusion on) == image(occlusion off)      — pixel-identical
+//!    ```
+//!
+//!    Temporal state chooses WHEN a meshlet draws (early vs late pass), never
+//!    WHETHER the union covers it. A hole is not reachable, including on the
+//!    first frame after a teleport.
+//! 2. **No usable state ⇒ conservative.** When there is nothing to inherit — the
+//!    first frame, a `scene.version` bump, an instance/meshlet count change, a
+//!    frame-target reallocation, or a **camera cut** ([`is_camera_cut`]) — the
+//!    early set is the *whole* base cut, so that frame's drawn set is exactly the
+//!    single-pass, occlusion-off set: bit-identical to the pre-P18.1 path. This is
+//!    a quality/cost heuristic (a stale early set draws the wrong depth and makes
+//!    the late pass do all the work), **not** a correctness dependency — point 1
+//!    already rules holes out. Nothing downstream may start relying on it.
+//! 3. **The CPU-parity reference is untouched.** [`cull_visible`] always runs
+//!    `MODE_SINGLE` with occlusion forced off, so the GPU cut it reads back is the
+//!    LOD+frustum+cone cut the CPU reference mirrors. Occlusion is a filter
+//!    *after* that cut, never part of it.
+//!
+//! Because a fresh [`crate::EngineRenderer`] has no state, every golden — which
+//! renders one frame from cold — takes the conservative branch and is byte-
+//! identical to its pre-P18.1 self even with occlusion on by default. The
+//! *converged* behaviour is gated separately (`tests/vgeom_occlusion.rs`).
+//!
+//! Set [`VgeomSettings::two_pass`] to `false` to fall back to single-pass v1
+//! (one cull, one draw, HZB from whatever the scene depth holds before this node).
 
 use std::collections::BTreeMap;
 
@@ -136,8 +196,24 @@ struct CullParamsGpu {
     view_proj: [f32; 16],
     frustum: [[f32; 4]; 6],
     eye: [f32; 4],
+    /// x = total threads, y = meshlet count, z = cull flags, w = [`CullMode`].
     counts: [u32; 4],
     hzb: [f32; 4],
+    /// x = conservative (early set == whole base cut), y = audit counters on.
+    misc: [u32; 4],
+}
+
+/// Which of the three cull-compute modes a dispatch runs (`params.counts.w`;
+/// mirrors the `MODE_*` constants in `vgeom_cull.wgsl`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+enum CullMode {
+    /// v1 / fallback: base cut + optional HZB test + append, one dispatch.
+    Single = 0,
+    /// Append the base-cut pairs that were visible last frame (no HZB test).
+    Early = 1,
+    /// Publish this frame's visibility + append the newly-disoccluded remainder.
+    Late = 2,
 }
 
 /// Per-meshlet debug flag uniform (`struct VgeomFlags`, `@group(3) @binding(6)`).
@@ -318,12 +394,16 @@ fn pack_instance(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cull_params(
     view: &RenderView,
     meshlet_count: u32,
     instance_count: u32,
     settings: &VgeomSettings,
     hzb: [f32; 4],
+    mode: CullMode,
+    conservative: bool,
+    audit: bool,
 ) -> CullParamsGpu {
     let vp = view.view_proj();
     let planes = frustum_planes(vp);
@@ -335,10 +415,37 @@ fn cull_params(
             instance_count * meshlet_count,
             meshlet_count,
             cull_flags(settings),
-            0,
+            mode as u32,
         ],
         hzb,
+        misc: [conservative as u32, audit as u32, 0, 0],
     }
+}
+
+/// Whether the view moved discontinuously enough that last frame's visible set is
+/// worthless as an early set — a teleport, a level-load camera placement, a
+/// cut between cameras, an fov/aspect change. Pure (a function of the two views),
+/// so it is unit-tested without a GPU.
+///
+/// **Not load-bearing for correctness**: the occlusion test is subtractive under
+/// *any* early set (see the module docs), so a miss here costs a frame of extra
+/// late-pass work, never a hole. The thresholds are therefore chosen for cost,
+/// not safety: 50 m in one frame is ~3 km/s, and a 60° snap is not a pan.
+pub fn is_camera_cut(prev: &RenderView, cur: &RenderView) -> bool {
+    const CUT_METRES: f64 = 50.0;
+    const CUT_COS: f32 = 0.5; // 60°
+    let ortho = |v: &RenderView| v.ortho.map(|o| (o.half_height, o.near, o.far));
+    if prev.width != cur.width
+        || prev.height != cur.height
+        || prev.fov_y != cur.fov_y
+        || ortho(prev) != ortho(cur)
+    {
+        return true;
+    }
+    if (prev.eye_world - cur.eye_world).length() > CUT_METRES {
+        return true;
+    }
+    prev.forward.dot(cur.forward) < CUT_COS
 }
 
 // ── Per-asset static geometry cache ──────────────────────────────────────────
@@ -484,6 +591,13 @@ impl CullPipeline {
                             multisampled: false,
                         },
                     ),
+                    // P18.1 two-pass: last/this frame's per-pair visibility +
+                    // the occlusion-audit counters. Seven storage buffers in one
+                    // compute stage — inside the portable 8 the High tier already
+                    // demands (`caps::VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE`).
+                    entry(6, storage(true)),
+                    entry(7, storage(false)),
+                    entry(8, storage(false)),
                 ],
             });
         let layout = gpu
@@ -516,6 +630,9 @@ impl CullPipeline {
         visible: &wgpu::Buffer,
         draw_args: &wgpu::Buffer,
         hzb: &wgpu::TextureView,
+        prev_visible: &wgpu::Buffer,
+        cur_visible: &wgpu::Buffer,
+        stats: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vgeom-cull"),
@@ -544,6 +661,18 @@ impl CullPipeline {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(hzb),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: prev_visible.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: cur_visible.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: stats.as_entire_binding(),
                 },
             ],
         })
@@ -575,9 +704,12 @@ fn dummy_hzb(gpu: &GpuContext) -> wgpu::TextureView {
 
 /// Run **only** the cull compute for `instances` of `mesh` under `view`+`settings`
 /// and read back the visible `(instance, meshlet)` pairs, **sorted** (the atomic
-/// append order is nondeterministic; the set is not). Occlusion is forced off
-/// (no depth context). This is the exact machinery the render node uses, exposed
-/// for the CPU-vs-GPU parity gate and the player's activation test.
+/// append order is nondeterministic; the set is not). Always runs
+/// [`CullMode::Single`] with occlusion forced off (there is no depth context) —
+/// so what it reads back is exactly the LOD+frustum+cone **base cut** the CPU
+/// reference mirrors, unchanged by P18.1. This is the exact machinery the render
+/// node uses, exposed for the CPU-vs-GPU parity gate and the player's activation
+/// test.
 pub fn cull_visible(
     gpu: &GpuContext,
     mesh: &VgeomMesh,
@@ -627,6 +759,9 @@ pub fn cull_visible(
         packed.len() as u32,
         &settings,
         [1.0, 1.0, 1.0, 0.0],
+        CullMode::Single,
+        false,
+        false,
     );
     let params_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("vgeom-cull-params"),
@@ -638,6 +773,19 @@ pub fn cull_visible(
         .write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
 
     let hzb = dummy_hzb(gpu);
+    // Single-pass mode reads neither visibility buffer and writes no stats, but
+    // the bind group must still be complete.
+    let vis_flags = storage_buffer(
+        gpu,
+        "vgeom-vis-flags",
+        &vec![0u8; (total as usize * 4).max(16)],
+    );
+    let vis_flags_cur = storage_buffer(
+        gpu,
+        "vgeom-vis-flags",
+        &vec![0u8; (total as usize * 4).max(16)],
+    );
+    let stats = storage_buffer(gpu, "vgeom-stats", &[0u8; 16]);
     let cull = CullPipeline::new(gpu);
     let bg = cull.bind_group(
         gpu,
@@ -647,6 +795,9 @@ pub fn cull_visible(
         &visible,
         &draw_args,
         &hzb,
+        &vis_flags,
+        &vis_flags_cur,
+        &stats,
     );
 
     let mut encoder = gpu
@@ -707,14 +858,44 @@ fn map_u32(gpu: &GpuContext, buf: &wgpu::Buffer) -> Vec<u32> {
 
 // ── Per-asset dynamic draw state (owned by the node) ─────────────────────────
 
+/// What the persisted per-pair visibility (`prev_visible`) is only meaningful
+/// against. Any change invalidates it — slot `i` would name a different
+/// (instance, meshlet) pair, or the frame targets the HZB samples were
+/// reallocated — and the next frame runs conservative. See the module docs:
+/// this is a cost heuristic, not a correctness dependency.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TemporalKey {
+    scene_version: u64,
+    instance_count: u32,
+    meshlet_count: u32,
+    targets_generation: u64,
+}
+
 struct AssetDraw {
     instances: wgpu::Buffer,
     instance_cap: u32,
+    /// Pairs appended by the early cull (and, in single-pass mode, the only list).
     visible: wgpu::Buffer,
+    /// Pairs appended by the late cull — the newly-disoccluded remainder. A second
+    /// buffer rather than an offset into `visible` because a non-zero
+    /// `first_instance` in an indirect draw needs `INDIRECT_FIRST_INSTANCE`, which
+    /// is not portable.
+    visible_late: wgpu::Buffer,
     visible_cap: u32,
+    /// Per-pair "visible last frame" flags, ping-ponged (`prev` is read by both
+    /// dispatches, `cur` is written by the late one; they swap at end of frame).
+    vis_prev: wgpu::Buffer,
+    vis_cur: wgpu::Buffer,
     draw_args: wgpu::Buffer,
+    draw_args_late: wgpu::Buffer,
+    /// Cull uniforms — one per dispatch, because both are recorded into the same
+    /// encoder before submit (a single buffer written twice would apply both
+    /// writes before either dispatch ran).
     params: wgpu::Buffer,
-    flags: wgpu::Buffer,
+    params_late: wgpu::Buffer,
+    debug_flags: wgpu::Buffer,
+    /// `Some` iff `vis_prev` holds a usable early set for this key.
+    state: Option<TemporalKey>,
 }
 
 impl AssetDraw {
@@ -727,6 +908,11 @@ impl AssetDraw {
                 mapped_at_creation: false,
             })
         };
+        let args = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::INDIRECT
+            | wgpu::BufferUsages::COPY_DST;
+        let uniform = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
+        let params_size = std::mem::size_of::<CullParamsGpu>() as u64;
         Self {
             instances: mk(
                 "vgeom-instances",
@@ -735,30 +921,26 @@ impl AssetDraw {
             ),
             instance_cap: 0,
             visible: mk("vgeom-visible", 256, wgpu::BufferUsages::STORAGE),
+            visible_late: mk("vgeom-visible-late", 256, wgpu::BufferUsages::STORAGE),
             visible_cap: 0,
-            draw_args: mk(
-                "vgeom-args",
-                16,
-                wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::INDIRECT
-                    | wgpu::BufferUsages::COPY_DST,
-            ),
-            params: mk(
-                "vgeom-cull-params",
-                std::mem::size_of::<CullParamsGpu>() as u64,
-                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            ),
-            flags: mk(
+            vis_prev: mk("vgeom-vis-prev", 256, wgpu::BufferUsages::STORAGE),
+            vis_cur: mk("vgeom-vis-cur", 256, wgpu::BufferUsages::STORAGE),
+            draw_args: mk("vgeom-args", 16, args),
+            draw_args_late: mk("vgeom-args-late", 16, args),
+            params: mk("vgeom-cull-params", params_size, uniform),
+            params_late: mk("vgeom-cull-params-late", params_size, uniform),
+            debug_flags: mk(
                 "vgeom-flags",
                 std::mem::size_of::<FlagsGpu>() as u64,
-                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                uniform,
             ),
+            state: None,
         }
     }
 
-    /// Ensure the instance + visible buffers hold `instance_count` instances of a
-    /// `meshlet_count`-meshlet asset. Returns whether any buffer was recreated
-    /// (⇒ bind groups must be rebuilt).
+    /// Ensure the instance + visible + visibility buffers hold `instance_count`
+    /// instances of a `meshlet_count`-meshlet asset. Returns whether any buffer was
+    /// recreated (⇒ bind groups must be rebuilt **and** the temporal state is gone).
     fn ensure(&mut self, gpu: &GpuContext, instance_count: u32, meshlet_count: u32) -> bool {
         let mut rebuilt = false;
         if instance_count > self.instance_cap {
@@ -775,12 +957,18 @@ impl AssetDraw {
         let total = instance_count * meshlet_count;
         if total > self.visible_cap {
             let cap = total.next_power_of_two().max(4);
-            self.visible = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("vgeom-visible"),
-                size: cap as u64 * 8,
-                usage: wgpu::BufferUsages::STORAGE,
-                mapped_at_creation: false,
-            });
+            let mk = |label, size| {
+                gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                })
+            };
+            self.visible = mk("vgeom-visible", cap as u64 * 8);
+            self.visible_late = mk("vgeom-visible-late", cap as u64 * 8);
+            self.vis_prev = mk("vgeom-vis-prev", cap as u64 * 4);
+            self.vis_cur = mk("vgeom-vis-cur", cap as u64 * 4);
             self.visible_cap = cap;
             rebuilt = true;
         }
@@ -788,11 +976,80 @@ impl AssetDraw {
     }
 }
 
+// ── Occlusion audit (P18.1 tests + tools) ────────────────────────────────────
+
+/// The four counters the occlusion-audit readback exposes, aggregated over every
+/// vgeom asset in the frame. Meaningful only for a frame [`VgeomNode`] actually
+/// ran (vgeom enabled + the scene carries meshlet content).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VgeomAudit {
+    /// (instance, meshlet) pairs that passed the LOD+frustum+cone **base cut**.
+    /// Counted by whichever dispatch sees every pair — the late one in two-pass
+    /// mode, the only one in single-pass mode — so it means the same in both.
+    pub base_cut: u32,
+    /// Base-cut pairs the HZB proved invisible this frame — the *subtracted* set.
+    pub occluded: u32,
+    /// Pairs the early pass drew (last-frame-visible, or all when conservative).
+    /// In single-pass mode this is that one pass's entire drawn set.
+    pub early_drawn: u32,
+    /// Pairs the late pass drew (newly disoccluded). `0` on a conservative frame,
+    /// and always `0` in single-pass mode (there is no late pass).
+    pub late_drawn: u32,
+}
+
+/// GPU-side storage for [`VgeomAudit`]: a storage quartet the cull compute
+/// atomically increments plus its mappable mirror. Owned by
+/// [`crate::EngineRenderer`] (like the shadow/GI/atmosphere resources) and reached
+/// through [`crate::renderer::FrameData`], so the node stays stateless about it.
+///
+/// **Off by default and free when off** — the shader only touches the counters
+/// when `params.misc.y != 0`, and the readback copy is only recorded when
+/// enabled. The buffer is always bound, because a bind group must be complete.
+pub struct VgeomAuditResources {
+    pub(crate) enabled: bool,
+    pub(crate) stats: wgpu::Buffer,
+    readback: wgpu::Buffer,
+}
+
+impl VgeomAuditResources {
+    pub(crate) fn new(gpu: &GpuContext) -> Self {
+        Self {
+            enabled: false,
+            stats: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vgeom-audit-stats"),
+                size: 16,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            readback: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vgeom-audit-readback"),
+                size: 16,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+        }
+    }
+
+    /// Map the counters recorded by the **last submitted** frame. Blocking — a
+    /// test/tools path, never the hot path.
+    pub(crate) fn read(&self, gpu: &GpuContext) -> VgeomAudit {
+        let v = map_u32(gpu, &self.readback);
+        VgeomAudit {
+            base_cut: v[0],
+            occluded: v[1],
+            early_drawn: v[2],
+            late_drawn: v[3],
+        }
+    }
+}
+
 // ── The render node ──────────────────────────────────────────────────────────
 
-/// The virtualized-geometry render node (P13.1b): cull compute + vertex-pulled
-/// indirect raster. A no-op unless [`VgeomSettings::enabled`] and the scene
-/// carries vmesh assets + instances — so the classic path is byte-stable.
+/// The virtualized-geometry render node (P13.1b, two-pass P18.1): cull compute +
+/// vertex-pulled indirect raster. A no-op unless [`VgeomSettings::enabled`] and
+/// the scene carries vmesh assets + instances — so the classic path is byte-stable.
 pub struct VgeomNode {
     cull: CullPipeline,
     raster: wgpu::RenderPipeline,
@@ -806,6 +1063,8 @@ pub struct VgeomNode {
     geom_cache: BTreeMap<u128, VgeomGpu>,
     draws: BTreeMap<u128, AssetDraw>,
     hzb: HzbChain,
+    /// Last frame's view, for the [`is_camera_cut`] conservative trigger.
+    prev_view: Option<RenderView>,
 }
 
 impl VgeomNode {
@@ -976,6 +1235,7 @@ impl VgeomNode {
             geom_cache: BTreeMap::new(),
             draws: BTreeMap::new(),
             hzb: HzbChain::new(gpu),
+            prev_view: None,
         }
     }
 }
@@ -994,14 +1254,30 @@ impl RenderNode for VgeomNode {
             return;
         }
 
+        // Disjoint field borrows: the HZB build below needs `&mut self.hzb` while
+        // the asset loops hold `&self.geom_cache` / `&mut self.draws`.
+        let Self {
+            cull,
+            raster,
+            raster_bgl,
+            lights_buf,
+            lights_bg,
+            env,
+            dummy_hzb,
+            geom_cache,
+            draws,
+            hzb: hzb_chain,
+            prev_view,
+        } = self;
+
         // Lights (shared with the rigid pass).
         let lights = LightsUniform::from_scene(frame.scene, &frame.view.origin);
         gpu.queue
-            .write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lights));
+            .write_buffer(lights_buf, 0, bytemuck::bytes_of(&lights));
 
         // Build/cache each referenced asset's geometry.
         for asset in &frame.scene.vgeom_assets {
-            self.geom_cache
+            geom_cache
                 .entry(asset.id)
                 .or_insert_with(|| VgeomGpu::build(gpu, &asset.mesh));
         }
@@ -1019,13 +1295,34 @@ impl RenderNode for VgeomNode {
             by_asset.entry(inst.asset).or_default().push(inst);
         }
 
-        // Optional HZB from the current depth prepass (v1 occlusion).
         let occlusion = settings.occlusion;
+        let two_pass = occlusion && settings.two_pass;
+        let audit = frame.vgeom_audit.enabled;
+
+        // The camera-cut trigger is a whole-frame decision (see `is_camera_cut`):
+        // a discontinuous view makes last frame's visible set worthless as an
+        // early set for EVERY asset.
+        let cut = prev_view.is_none_or(|p| is_camera_cut(&p, frame.view));
+        *prev_view = Some(*frame.view);
+
+        if audit {
+            gpu.queue.write_buffer(
+                &frame.vgeom_audit.stats,
+                0,
+                bytemuck::cast_slice(&[0u32; 4]),
+            );
+        }
+
         if occlusion {
-            self.hzb.build(gpu, encoder, frame);
+            hzb_chain.ensure(gpu, frame.targets.size, frame.targets.generation);
+            // Single-pass v1: the pyramid is whatever the scene depth holds when
+            // this node starts (the classic mesh pass), built once up front.
+            if !two_pass {
+                hzb_chain.build(gpu, encoder, frame);
+            }
         }
         let hzb_dims = if occlusion {
-            self.hzb
+            hzb_chain
                 .dims()
                 .map(|(w, h, mips)| [mips as f32, w as f32, h as f32, 0.0])
                 .unwrap_or([1.0, 1.0, 1.0, 0.0])
@@ -1033,96 +1330,23 @@ impl RenderNode for VgeomNode {
             [1.0, 1.0, 1.0, 0.0]
         };
 
-        let env_bg = self.env.bind_group(gpu, frame).clone();
-
-        let flags = FlagsGpu {
+        let env_bg = env.bind_group(gpu, frame).clone();
+        let debug = FlagsGpu {
             flags: [settings.debug_meshlets as u32, 0, 0, 0],
         };
         let origin = frame.view.origin;
 
-        for (asset_id, insts) in &by_asset {
-            let Some(geom) = self.geom_cache.get(asset_id) else {
-                continue;
-            };
-            let Some(mesh) = mesh_of.get(asset_id) else {
-                continue;
-            };
-            if geom.meshlet_count == 0 || geom.max_tri == 0 {
-                continue;
-            }
-            let instance_count = insts.len() as u32;
-
-            let draw = self
-                .draws
-                .entry(*asset_id)
-                .or_insert_with(|| AssetDraw::new(gpu));
-            // `ensure` returns whether it grew (and thus reallocated) the instance /
-            // visible buffers. We intentionally discard that signal: every consumer of
-            // those buffers below is rebound from `draw` this same frame (the storage
-            // bind groups are rebuilt per draw), so a grow is already reflected. If a
-            // future change caches a bind group across frames, it MUST observe this
-            // rebuilt flag and invalidate that cache.
-            let _rebuilt = draw.ensure(gpu, instance_count, geom.meshlet_count);
-
-            // Pack instances (per-frame; the LOD threshold tracks the camera).
-            let packed: Vec<VgeomInstanceGpu> = insts
-                .iter()
-                .map(|i| pack_instance(&origin, frame.view, mesh, i, settings.pixel_error))
-                .collect();
-            gpu.queue
-                .write_buffer(&draw.instances, 0, bytemuck::cast_slice(&packed));
-
-            // Reset draw args: vertex_count = max_tri*3, instance_count = 0.
-            gpu.queue.write_buffer(
-                &draw.draw_args,
-                0,
-                bytemuck::cast_slice(&[geom.max_tri * 3, 0u32, 0u32, 0u32]),
-            );
-
-            // Cull params + flags.
-            let params = cull_params(
-                frame.view,
-                geom.meshlet_count,
-                instance_count,
-                settings,
-                hzb_dims,
-            );
-            gpu.queue
-                .write_buffer(&draw.params, 0, bytemuck::bytes_of(&params));
-            gpu.queue
-                .write_buffer(&draw.flags, 0, bytemuck::bytes_of(&flags));
-
-            let hzb = if occlusion {
-                self.hzb.full_view().unwrap_or(&self.dummy_hzb)
-            } else {
-                &self.dummy_hzb
-            };
-            let cull_bg = self.cull.bind_group(
-                gpu,
-                &draw.params,
-                geom,
-                &draw.instances,
-                &draw.visible,
-                &draw.draw_args,
-                hzb,
-            );
-
-            // Cull compute.
-            let total = instance_count * geom.meshlet_count;
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("vgeom-cull"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.cull.pipeline);
-                pass.set_bind_group(0, &cull_bg, &[]);
-                pass.dispatch_workgroups(total.div_ceil(64).max(1), 1, 1);
-            }
-
-            // Raster: vertex-pulled indirect draw into the MSAA scene targets.
+        // A vertex-pulled indirect draw of `visible`/`args` into the MSAA targets.
+        // Both passes are identical apart from which pair of buffers they read.
+        let raster_draw = |encoder: &mut wgpu::CommandEncoder,
+                           label: &str,
+                           geom: &VgeomGpu,
+                           draw: &AssetDraw,
+                           visible: &wgpu::Buffer,
+                           args: &wgpu::Buffer| {
             let raster_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("vgeom-raster"),
-                layout: &self.raster_bgl,
+                layout: raster_bgl,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -1146,17 +1370,16 @@ impl RenderNode for VgeomNode {
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: draw.visible.as_entire_binding(),
+                        resource: visible.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: draw.flags.as_entire_binding(),
+                        resource: draw.debug_flags.as_entire_binding(),
                     },
                 ],
             });
-
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("vgeom-raster"),
+                label: Some(label),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &frame.targets.color_msaa,
                     resolve_target: None,
@@ -1178,21 +1401,248 @@ impl RenderNode for VgeomNode {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.raster);
+            pass.set_pipeline(raster);
             pass.set_bind_group(0, frame.view_bg, &[]);
-            pass.set_bind_group(1, &self.lights_bg, &[]);
+            pass.set_bind_group(1, &*lights_bg, &[]);
             pass.set_bind_group(2, &env_bg, &[]);
             pass.set_bind_group(3, &raster_bg, &[]);
-            pass.draw_indirect(&draw.draw_args, 0);
+            pass.draw_indirect(args, 0);
+        };
+
+        // ── Pass 1: (early | single) cull + draw ─────────────────────────────
+        //
+        // In two-pass mode this draws last frame's visible set — which is what
+        // gives the HZB below real vgeom depth. On a conservative frame the early
+        // set is the WHOLE base cut, so this draw alone is the occlusion-off
+        // result and pass 2 adds nothing (see the module docs).
+        let mut planned: Vec<(u128, bool)> = Vec::new();
+        for (asset_id, insts) in &by_asset {
+            let Some(geom) = geom_cache.get(asset_id) else {
+                continue;
+            };
+            let Some(mesh) = mesh_of.get(asset_id) else {
+                continue;
+            };
+            if geom.meshlet_count == 0 || geom.max_tri == 0 {
+                continue;
+            }
+            let instance_count = insts.len() as u32;
+            let draw = draws
+                .entry(*asset_id)
+                .or_insert_with(|| AssetDraw::new(gpu));
+            // A grow reallocates the visible/visibility buffers, so every bind
+            // group is rebuilt from `draw` below (they are per-frame) AND the
+            // persisted early set is gone — hence the `state` reset.
+            if draw.ensure(gpu, instance_count, geom.meshlet_count) {
+                draw.state = None;
+            }
+            // Only the late dispatch publishes `vis_cur`, so a frame that skips it
+            // leaves the persisted early set frozen at whatever the last two-pass
+            // frame wrote. Toggling two-pass off and back on would then inherit a
+            // set from an arbitrary earlier frame — still correct (occlusion is
+            // subtractive regardless) but not the documented "no usable state ⇒
+            // conservative" contract, so drop it explicitly.
+            if !two_pass {
+                draw.state = None;
+            }
+            let key = TemporalKey {
+                scene_version: frame.scene.version,
+                instance_count,
+                meshlet_count: geom.meshlet_count,
+                targets_generation: frame.targets.generation,
+            };
+            let conservative = cut || draw.state != Some(key);
+            planned.push((*asset_id, conservative));
+
+            // Pack instances (per-frame; the LOD threshold tracks the camera).
+            let packed: Vec<VgeomInstanceGpu> = insts
+                .iter()
+                .map(|i| pack_instance(&origin, frame.view, mesh, i, settings.pixel_error))
+                .collect();
+            gpu.queue
+                .write_buffer(&draw.instances, 0, bytemuck::cast_slice(&packed));
+
+            // Reset draw args: vertex_count = max_tri*3, instance_count = 0.
+            let reset = [geom.max_tri * 3, 0u32, 0u32, 0u32];
+            gpu.queue
+                .write_buffer(&draw.draw_args, 0, bytemuck::cast_slice(&reset));
+            gpu.queue
+                .write_buffer(&draw.draw_args_late, 0, bytemuck::cast_slice(&reset));
+            gpu.queue
+                .write_buffer(&draw.debug_flags, 0, bytemuck::bytes_of(&debug));
+
+            let mode = if two_pass {
+                CullMode::Early
+            } else {
+                CullMode::Single
+            };
+            let params = cull_params(
+                frame.view,
+                geom.meshlet_count,
+                instance_count,
+                settings,
+                hzb_dims,
+                mode,
+                conservative,
+                audit,
+            );
+            gpu.queue
+                .write_buffer(&draw.params, 0, bytemuck::bytes_of(&params));
+
+            // The early dispatch runs no occlusion test, so it binds the dummy.
+            let hzb_view = if occlusion && !two_pass {
+                hzb_chain.full_view().unwrap_or(&*dummy_hzb)
+            } else {
+                &*dummy_hzb
+            };
+            let cull_bg = cull.bind_group(
+                gpu,
+                &draw.params,
+                geom,
+                &draw.instances,
+                &draw.visible,
+                &draw.draw_args,
+                hzb_view,
+                &draw.vis_prev,
+                &draw.vis_cur,
+                &frame.vgeom_audit.stats,
+            );
+            let total = instance_count * geom.meshlet_count;
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("vgeom-cull-early"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&cull.pipeline);
+                pass.set_bind_group(0, &cull_bg, &[]);
+                pass.dispatch_workgroups(total.div_ceil(64).max(1), 1, 1);
+            }
+            raster_draw(
+                encoder,
+                "vgeom-raster-early",
+                geom,
+                draw,
+                &draw.visible,
+                &draw.draw_args,
+            );
+        }
+
+        if !two_pass {
+            // Single-pass still fills the counters (its one dispatch sees every
+            // pair), so the readback has to be recorded on this exit too.
+            if audit {
+                encoder.copy_buffer_to_buffer(
+                    &frame.vgeom_audit.stats,
+                    0,
+                    &frame.vgeom_audit.readback,
+                    0,
+                    16,
+                );
+            }
+            return;
+        }
+
+        // ── HZB from the depth the early draw just wrote ─────────────────────
+        hzb_chain.build(gpu, encoder, frame);
+        let hzb_view = hzb_chain.full_view().unwrap_or(&*dummy_hzb);
+
+        // ── Pass 2: late cull (publish this frame's visibility) + late draw ──
+        for (asset_id, conservative) in planned {
+            let Some(geom) = geom_cache.get(&asset_id) else {
+                continue;
+            };
+            let Some(draw) = draws.get_mut(&asset_id) else {
+                continue;
+            };
+            let Some(insts) = by_asset.get(&asset_id) else {
+                continue;
+            };
+            let instance_count = insts.len() as u32;
+            let params = cull_params(
+                frame.view,
+                geom.meshlet_count,
+                instance_count,
+                settings,
+                hzb_dims,
+                CullMode::Late,
+                conservative,
+                audit,
+            );
+            gpu.queue
+                .write_buffer(&draw.params_late, 0, bytemuck::bytes_of(&params));
+            let cull_bg = cull.bind_group(
+                gpu,
+                &draw.params_late,
+                geom,
+                &draw.instances,
+                &draw.visible_late,
+                &draw.draw_args_late,
+                hzb_view,
+                &draw.vis_prev,
+                &draw.vis_cur,
+                &frame.vgeom_audit.stats,
+            );
+            let total = instance_count * geom.meshlet_count;
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("vgeom-cull-late"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&cull.pipeline);
+                pass.set_bind_group(0, &cull_bg, &[]);
+                pass.dispatch_workgroups(total.div_ceil(64).max(1), 1, 1);
+            }
+            // Issued unconditionally: on a conservative frame the shader appends
+            // nothing, so this is a zero-instance indirect draw. Deliberately NOT
+            // skipped on the CPU — the drawn set lives entirely on the GPU, and a
+            // CPU-side assumption about it is exactly the kind of shortcut that
+            // turns into missing geometry.
+            raster_draw(
+                encoder,
+                "vgeom-raster-late",
+                geom,
+                draw,
+                &draw.visible_late,
+                &draw.draw_args_late,
+            );
+
+            // Ping-pong: what the late dispatch just published becomes next
+            // frame's early set. The bind groups above hold their own references,
+            // so swapping the handles now is safe.
+            std::mem::swap(&mut draw.vis_prev, &mut draw.vis_cur);
+            draw.state = Some(TemporalKey {
+                scene_version: frame.scene.version,
+                instance_count,
+                meshlet_count: geom.meshlet_count,
+                targets_generation: frame.targets.generation,
+            });
+        }
+
+        if audit {
+            encoder.copy_buffer_to_buffer(
+                &frame.vgeom_audit.stats,
+                0,
+                &frame.vgeom_audit.readback,
+                0,
+                16,
+            );
         }
     }
 }
 
-// ── HZB (v1): reverse-Z min-depth pyramid from the depth prepass ─────────────
+// ── HZB: reverse-Z min-depth pyramid from the MSAA scene depth ───────────────
 
-/// A hierarchical depth pyramid built by compute from the single-sample depth
-/// prepass. Only allocated/used when [`VgeomSettings::occlusion`] is on (off by
-/// default), so the tested path never touches it.
+/// A hierarchical depth pyramid built by compute from the **live 4× MSAA scene
+/// depth** (min over subsamples — see `vgeom_hzb.wgsl` for why that, and not the
+/// single-sample prepass, is what makes occlusion provably subtractive).
+/// Allocated only when [`VgeomSettings::occlusion`] is on, so the occlusion-off
+/// path never touches it.
+///
+/// **Resizable-resource discipline (P17.2):** the pyramid is viewport-sized, so
+/// its own recreation bumps `generation`, and both bind-group sets embed a
+/// [`FrameTargets`](crate::renderer::FrameTargets) view. They are therefore
+/// [`GenCache`](super::GenCache)d on `(targets.generation, hzb.generation)` —
+/// either moving alone must invalidate, exactly like `EnvBinding`.
 struct HzbChain {
     copy_pipeline: wgpu::ComputePipeline,
     copy_bgl: wgpu::BindGroupLayout,
@@ -1202,7 +1652,10 @@ struct HzbChain {
     mip_views: Vec<wgpu::TextureView>,
     full_view: Option<wgpu::TextureView>,
     size: (u32, u32),
+    /// Monotonic, bumped whenever the pyramid texture is (re)created.
     generation: u64,
+    copy_bg: super::GenCache<super::ResourceKey, wgpu::BindGroup>,
+    down_bgs: super::GenCache<super::ResourceKey, Vec<wgpu::BindGroup>>,
 }
 
 impl HzbChain {
@@ -1222,9 +1675,10 @@ impl HzbChain {
                         binding: 0,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Texture {
+                            // P18.1: the MSAA scene depth, loaded per sample.
                             sample_type: wgpu::TextureSampleType::Depth,
                             view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
+                            multisampled: true,
                         },
                         count: None,
                     },
@@ -1296,7 +1750,9 @@ impl HzbChain {
             mip_views: Vec::new(),
             full_view: None,
             size: (0, 0),
-            generation: u64::MAX,
+            generation: 0,
+            copy_bg: super::GenCache::default(),
+            down_bgs: super::GenCache::default(),
         }
     }
 
@@ -1306,7 +1762,11 @@ impl HzbChain {
             .map(|_| (self.size.0, self.size.1, self.mip_views.len() as u32))
     }
 
-    fn ensure(&mut self, gpu: &GpuContext, size: (u32, u32)) {
+    /// Allocate (or reallocate) the pyramid for `size`. `targets_generation` only
+    /// participates through the caller's [`super::ResourceKey`]; the texture
+    /// itself is keyed on its size, and recreating it bumps `generation` so the
+    /// cached bind groups — which hold views into it — are dropped.
+    fn ensure(&mut self, gpu: &GpuContext, size: (u32, u32), _targets_generation: u64) {
         if self.size == size && self.texture.is_some() {
             return;
         }
@@ -1339,6 +1799,7 @@ impl HzbChain {
         self.full_view = Some(tex.create_view(&wgpu::TextureViewDescriptor::default()));
         self.texture = Some(tex);
         self.size = (w, h);
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// The full-chain sampled view for the cull compute (valid after [`build`]).
@@ -1348,29 +1809,34 @@ impl HzbChain {
         self.full_view.as_ref()
     }
 
-    /// Build the pyramid from the frame's depth prepass into [`full_view`].
+    /// Build the pyramid from the frame's **MSAA scene depth** into [`full_view`].
+    /// Call it at the point in the frame whose depth you want to occlude against:
+    /// single-pass builds once before the cull, two-pass builds after the early
+    /// draw so meshlets occlude meshlets.
     ///
     /// [`full_view`]: HzbChain::full_view
     fn build(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
-        self.ensure(gpu, frame.targets.size);
-        if self.generation != frame.targets.generation {
-            self.generation = frame.targets.generation;
-        }
+        self.ensure(gpu, frame.targets.size, frame.targets.generation);
         let (w, h) = self.size;
-        // Pass 0: copy prepass depth → mip 0.
-        let bg0 = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vgeom-hzb-copy"),
-            layout: &self.copy_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&frame.targets.depth_prepass),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.mip_views[0]),
-                },
-            ],
+        let key: super::ResourceKey = (frame.targets.generation, self.generation);
+        let (copy_bgl, down_bgl, mip_views) = (&self.copy_bgl, &self.down_bgl, &self.mip_views);
+
+        // Pass 0: min-over-samples of the MSAA scene depth → mip 0.
+        let bg0 = self.copy_bg.get_or_build(key, || {
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vgeom-hzb-copy"),
+                layout: copy_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&frame.targets.depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&mip_views[0]),
+                    },
+                ],
+            })
         });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1378,25 +1844,33 @@ impl HzbChain {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.copy_pipeline);
-            pass.set_bind_group(0, &bg0, &[]);
+            pass.set_bind_group(0, bg0, &[]);
             pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
         }
+
         // Passes N: min-downsample.
-        for m in 1..self.mip_views.len() {
-            let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("vgeom-hzb-down"),
-                layout: &self.down_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&self.mip_views[m - 1]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.mip_views[m]),
-                    },
-                ],
-            });
+        let bgs = self.down_bgs.get_or_build(key, || {
+            (1..mip_views.len())
+                .map(|m| {
+                    gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("vgeom-hzb-down"),
+                        layout: down_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&mip_views[m - 1]),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&mip_views[m]),
+                            },
+                        ],
+                    })
+                })
+                .collect()
+        });
+        for (i, bg) in bgs.iter().enumerate() {
+            let m = i + 1;
             let mw = (w >> m).max(1);
             let mh = (h >> m).max(1);
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1404,7 +1878,7 @@ impl HzbChain {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.down_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(0, bg, &[]);
             pass.dispatch_workgroups(mw.div_ceil(8), mh.div_ceil(8), 1);
         }
     }
@@ -1461,6 +1935,58 @@ mod tests {
         // Behind the camera.
         let behind = Vec3::new(0.0, 0.0, 100.0);
         assert!(outside_frustum(behind, 0.1, &planes), "behind not culled");
+    }
+
+    /// The `MODE_*` / `AUDIT_*` constants in `vgeom_cull.wgsl` are a wire contract
+    /// with [`CullMode`] and [`VgeomAudit`]'s field order. A silent renumbering on
+    /// either side would make the early dispatch run the late dispatch's branch,
+    /// or report the occluded count as the draw count — both of which produce a
+    /// plausible-looking frame. Pin both ends against the shader source. GPU-free,
+    /// so it runs on every CI leg.
+    #[test]
+    fn shader_constants_match_the_rust_side() {
+        let src = include_str!("../shaders/vgeom_cull.wgsl");
+        for (name, value) in [
+            ("MODE_SINGLE", CullMode::Single as u32),
+            ("MODE_EARLY", CullMode::Early as u32),
+            ("MODE_LATE", CullMode::Late as u32),
+            ("AUDIT_BASE", 0),
+            ("AUDIT_OCCLUDED", 1),
+            ("AUDIT_EARLY", 2),
+            ("AUDIT_LATE", 3),
+        ] {
+            let want = format!("const {name}: u32 = {value}u;");
+            assert!(src.contains(&want), "vgeom_cull.wgsl must declare `{want}`");
+        }
+    }
+
+    /// A pan is not a cut (otherwise the early set would reset every frame in a
+    /// moving game and two-pass would buy nothing); a teleport, a snap turn and a
+    /// viewport resize are.
+    #[test]
+    fn camera_cut_fires_on_discontinuities_only() {
+        let a = view();
+        assert!(!is_camera_cut(&a, &a));
+
+        let mut step = a;
+        step.eye_world.x += 0.4;
+        assert!(!is_camera_cut(&a, &step), "40 cm is a walk, not a cut");
+
+        let mut teleport = a;
+        teleport.eye_world.z += 500.0;
+        assert!(is_camera_cut(&a, &teleport));
+
+        let mut snap = a;
+        snap.forward = Vec3::Z;
+        assert!(is_camera_cut(&a, &snap), "a 180° turn is a cut");
+
+        let mut resized = a;
+        resized.width += 1;
+        assert!(is_camera_cut(&a, &resized));
+
+        let mut zoomed = a;
+        zoomed.fov_y *= 0.5;
+        assert!(is_camera_cut(&a, &zoomed));
     }
 
     #[test]

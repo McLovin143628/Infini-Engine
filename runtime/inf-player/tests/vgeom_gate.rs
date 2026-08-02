@@ -11,6 +11,10 @@
 //! * **(b)** cooked load with vgeom ON: total source triangles ≥ 10M (from the
 //!   vmesh data × instances), and the GPU meshlet cull leaves only a small fraction
 //!   of meshlets visible from a ground-level camera — deterministic across runs.
+//! * **(b2)** (P18.1) the same pack under the shipping defaults — two-pass HZB
+//!   occlusion ON — renders **pixel-identical** to the occlusion-off frame while
+//!   the audit counters show a nonzero proven-occluded set. Occlusion is
+//!   subtractive at flagship scale, not just in a unit fixture.
 //! * **(c)** the SAME cooked pack with vgeom OFF renders through the classic
 //!   discrete-LOD fallback (it activates + draws; a far camera picks a coarser
 //!   level than a near one).
@@ -34,8 +38,8 @@ use inf_player::vmesh::{derived_vmesh_id, VmeshRegistry};
 use inf_project::ProjectManifest;
 use inf_render::{
     caps::{choose_tier, AdapterCaps, RenderTier},
-    classic_lod_selection, cull_visible, GpuContext, RenderView, VgeomAsset, VgeomInstance,
-    VgeomSettings,
+    classic_lod_selection, cull_visible, EngineRenderer, GpuContext, HeadlessTarget, LightKind,
+    RenderLight, RenderScene, RenderSettings, RenderView, VgeomAsset, VgeomInstance, VgeomSettings,
 };
 
 fn workspace_root() -> PathBuf {
@@ -207,6 +211,109 @@ fn gate_b_cooked_vgeom_on_streams_and_culls() {
     );
 }
 
+// ── GATE (b2): the same 10M+ pack under P18.1 two-pass HZB occlusion ─────────
+
+/// The 10.6M-triangle scene must render **identically** with occlusion on and off
+/// — the P18.1 subtractive contract at flagship scale — while the audit counters
+/// prove the HZB is actually removing a meaningful slice of a ground-level view
+/// through 324 dense bodies.
+///
+/// This is the shipping-defaults gate: `VgeomSettings::default()` now carries
+/// `occlusion: true, two_pass: true`, so what runs here is exactly what the player
+/// runs. Both modes are driven for several frames on ONE renderer each, so the
+/// two-pass side is compared *after* its temporal state has converged, not just on
+/// its conservative first frame.
+#[test]
+fn gate_b2_occlusion_on_matches_occlusion_off_at_10m_triangles() {
+    let Ok(gpu) = GpuContext::headless() else {
+        eprintln!("SKIP gate (b2): no adapter");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let pack = cook_vgeom_demo(tmp.path());
+    let (asset, instances) = scene_from_pack(&pack);
+    let total_pairs = asset.mesh.meshlet_count() as u64 * instances.len() as u64;
+
+    let mut scene = RenderScene {
+        vgeom_assets: vec![asset],
+        vgeom_instances: instances,
+        ..Default::default()
+    };
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.97, 0.9],
+        intensity: 3.0,
+        direction: Vec3::new(0.35, 0.75, 0.55).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    let view = ground_camera();
+
+    let settings = |occlusion: bool| RenderSettings {
+        vgeom: VgeomSettings {
+            enabled: true,
+            occlusion,
+            two_pass: occlusion,
+            ..VgeomSettings::default()
+        },
+        ..RenderSettings::default()
+    };
+
+    let (w, h) = (view.width, view.height);
+    let shot = |occlusion: bool, n: usize, audit: bool| {
+        let target = HeadlessTarget::new(&gpu, w, h);
+        let mut r = EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+        r.set_settings(settings(occlusion));
+        r.set_vgeom_audit(audit);
+        let mut img = Vec::new();
+        for _ in 0..n {
+            r.render(&gpu, &scene, &view, &target.view, (w, h));
+            img = target.read_rgba(&gpu).expect("readback");
+        }
+        (img, r.vgeom_audit(&gpu))
+    };
+
+    let (reference, _) = shot(false, 1, false);
+    let painted = reference
+        .chunks(4)
+        .filter(|p| p[0] > 24 || p[1] > 24)
+        .count();
+    assert!(
+        painted > 2_000,
+        "the 10M-triangle ground view must paint real geometry ({painted} px)"
+    );
+
+    let (converged, audit) = shot(true, 6, true);
+    eprintln!(
+        "gate (b2): {} of {total_pairs} pairs in the base cut, {} proven occluded \
+         ({:.1}%), drawn {} early + {} late",
+        audit.base_cut,
+        audit.occluded,
+        100.0 * audit.occluded as f64 / audit.base_cut.max(1) as f64,
+        audit.early_drawn,
+        audit.late_drawn,
+    );
+    assert!(audit.base_cut > 0, "the meshlet path activated");
+    assert!(
+        audit.occluded > 0,
+        "a ground camera looking through 324 dense bodies must occlude something: {audit:?}"
+    );
+    let diff = converged
+        .iter()
+        .zip(&reference)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        diff,
+        0,
+        "two-pass occlusion must be purely subtractive at 10M triangles \
+         ({diff} of {} bytes differ)",
+        reference.len()
+    );
+}
+
 // ── GATE (c): SAME pack, vgeom OFF — classic discrete-LOD fallback ───────────
 
 #[test]
@@ -290,6 +397,7 @@ fn gate_d_low_tier_disables_vgeom() {
         max_storage_buffers_per_stage: 0,
         max_storage_buffer_binding_size: 0,
         max_compute_workgroups_per_dim: 0,
+        max_storage_textures_per_stage: 0,
         is_cpu: true,
         polygon_mode_line: false,
     };

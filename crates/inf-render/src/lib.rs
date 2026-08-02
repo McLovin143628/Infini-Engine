@@ -38,7 +38,7 @@ pub use atmosphere::{
 pub use camera::{
     ortho_reverse_z, OrthoParams, RenderView, DEPTH_CLEAR, DEPTH_COMPARE, DEPTH_FORMAT,
 };
-pub use caps::{choose_tier, detect_tier, AdapterCaps, RenderTier};
+pub use caps::{choose_tier, detect_and_clamp, detect_tier, AdapterCaps, RenderTier};
 pub use clouds::{
     detail_texel, shape_texel, wind_offset, CloudParams, CloudQuality, CloudVolumes,
     CPU_GPU_EXACT_FRACTION, CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_TEXEL_TOLERANCE,
@@ -78,8 +78,9 @@ pub use settings::{
     BloomSettings, GiSettings, RenderSettings, ShadowSettings, SsaoSettings, VgeomSettings,
 };
 // The GPU meshlet cull readback (P13.1b) — the CPU-vs-GPU parity gate + the
-// player's vgeom-activation check drive it.
-pub use passes::vgeom::cull_visible;
+// player's vgeom-activation check drive it. `VgeomAudit` + `is_camera_cut` are
+// the P18.1 two-pass occlusion instruments.
+pub use passes::vgeom::{cull_visible, is_camera_cut, VgeomAudit};
 // The classic-LOD fallback selection (P13.4) — the CI-provable probe of what the
 // classic path draws when vgeom is off (the meshlet path's complement).
 pub use passes::classic_vgeom::{classic_lod_selection, ClassicSelection};

@@ -18,10 +18,16 @@ use crate::gpu::GpuContext;
 use crate::settings::RenderSettings;
 
 /// The virtualized-geometry meshlet path binds up to 6 storage buffers in one
-/// shader stage (the vertex-pulling raster group) + 4 in the cull compute, so a
-/// High-tier GPU must expose at least this many storage buffers per stage. (The
-/// wgpu default limit is 8.)
+/// shader stage (the vertex-pulling raster group) + **7 in the cull compute**
+/// since P18.1 (meshlets, instances, visible, draw args, the two ping-ponged
+/// per-pair visibility buffers, and the audit counters), so a High-tier GPU must
+/// expose at least this many storage buffers per stage. (The wgpu default limit
+/// is 8.)
 pub const VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE: u32 = 8;
+
+/// Storage textures a stage must expose for the P18.1 HZB build: the pyramid's
+/// destination mip is a write-only `r32float` storage texture, one at a time.
+pub const VGEOM_OCCLUSION_MIN_STORAGE_TEXTURES_PER_STAGE: u32 = 1;
 
 /// Minimum `max_storage_buffer_binding_size` (bytes) a High-tier GPU must expose
 /// so a large meshlet/vertex payload fits in one binding. 128 MiB is the wgpu
@@ -64,9 +70,13 @@ impl RenderTier {
             RenderTier::Medium => {
                 // No meshlet path → the classic LOD fallback renders vgeom content.
                 settings.vgeom.enabled = false;
+                settings.vgeom.occlusion = false;
+                settings.vgeom.two_pass = false;
             }
             RenderTier::Low => {
                 settings.vgeom.enabled = false;
+                settings.vgeom.occlusion = false;
+                settings.vgeom.two_pass = false;
                 settings.bloom.enabled = false;
                 settings.ssao.enabled = false;
                 settings.taa = false;
@@ -115,6 +125,8 @@ impl RenderTier {
     /// project that ships custom settings still gets a mobile-safe profile.
     pub fn clamp_mobile(mut settings: RenderSettings) -> RenderSettings {
         settings.vgeom.enabled = false;
+        settings.vgeom.occlusion = false;
+        settings.vgeom.two_pass = false;
         settings.ssao.enabled = false;
         settings.gi.enabled = false;
         settings.taa = false;
@@ -141,6 +153,9 @@ pub struct AdapterCaps {
     pub max_storage_buffer_binding_size: u64,
     /// `max_compute_workgroups_per_dimension`.
     pub max_compute_workgroups_per_dim: u32,
+    /// `max_storage_textures_per_shader_stage` — the P18.1 HZB build writes the
+    /// pyramid mips through a write-only storage texture.
+    pub max_storage_textures_per_stage: u32,
     /// Whether the adapter reports itself as a CPU/software rasterizer
     /// (WARP/lavapipe) — never High even if the limits nominally qualify, since
     /// the meshlet path would be unusably slow.
@@ -169,6 +184,7 @@ impl AdapterCaps {
             max_storage_buffers_per_stage: limits.max_storage_buffers_per_shader_stage,
             max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size,
             max_compute_workgroups_per_dim: limits.max_compute_workgroups_per_dimension,
+            max_storage_textures_per_stage: limits.max_storage_textures_per_shader_stage,
             is_cpu: info.device_type == wgpu::DeviceType::Cpu,
             polygon_mode_line: gpu
                 .adapter
@@ -185,6 +201,31 @@ impl AdapterCaps {
             && self.max_storage_buffers_per_stage >= VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE
             && self.max_storage_buffer_binding_size >= VGEOM_MIN_STORAGE_BINDING_SIZE
             && self.max_compute_workgroups_per_dim >= VGEOM_MIN_WORKGROUPS_PER_DIM
+    }
+
+    /// Whether this adapter can run the P18.1 **two-pass HZB occlusion** path: the
+    /// meshlet path itself, plus a storage texture to write the depth pyramid
+    /// into. A strict superset of [`supports_vgeom`](AdapterCaps::supports_vgeom),
+    /// so it can only ever be a further restriction — an adapter that fails it
+    /// still renders meshlets, just without occlusion culling.
+    ///
+    /// Callers that turn [`VgeomSettings::occlusion`](crate::VgeomSettings) on
+    /// should gate it on this; [`clamp_occlusion`](AdapterCaps::clamp_occlusion)
+    /// does it for them.
+    pub fn supports_vgeom_occlusion(&self) -> bool {
+        self.supports_vgeom()
+            && self.max_storage_textures_per_stage >= VGEOM_OCCLUSION_MIN_STORAGE_TEXTURES_PER_STAGE
+    }
+
+    /// Clamp the occlusion knobs down to what this adapter supports. Like
+    /// [`RenderTier::apply`] it **never turns a feature on**, so it is safe to
+    /// compose in any order with the tier clamp.
+    pub fn clamp_occlusion(&self, mut settings: RenderSettings) -> RenderSettings {
+        if !self.supports_vgeom_occlusion() {
+            settings.vgeom.occlusion = false;
+            settings.vgeom.two_pass = false;
+        }
+        settings
     }
 }
 
@@ -207,9 +248,26 @@ pub fn choose_tier(caps: &AdapterCaps) -> RenderTier {
     }
 }
 
+/// Probe the adapter and return `settings` clamped down by **both** gates a host
+/// has to pass: the render tier ([`RenderTier::apply`]) and the P18.1 occlusion
+/// capability floor ([`AdapterCaps::clamp_occlusion`]). Equivalent to
+/// `detect_tier(gpu, &s).apply(s)` followed by the occlusion clamp, in one call,
+/// so a host cannot apply one and forget the other.
+///
+/// Only ever turns features **off**, and honours
+/// [`RenderSettings::tier_override`] exactly as [`detect_tier`] does — with an
+/// override the *tier* is forced but the occlusion clamp still reflects the real
+/// adapter (a forced tier is a statement about the tier, not a claim that storage
+/// textures exist).
+pub fn detect_and_clamp(gpu: &GpuContext, settings: RenderSettings) -> RenderSettings {
+    let tier = detect_tier(gpu, &settings);
+    AdapterCaps::probe(gpu).clamp_occlusion(tier.apply(settings))
+}
+
 /// Detect the tier for a live GPU, honouring an explicit
 /// [`RenderSettings::tier_override`]. Logs the decision. This is the seam a host
-/// calls once at init; the result feeds [`RenderTier::apply`].
+/// calls once at init; the result feeds [`RenderTier::apply`]. Prefer
+/// [`detect_and_clamp`], which also applies the occlusion capability floor.
 pub fn detect_tier(gpu: &GpuContext, settings: &RenderSettings) -> RenderTier {
     if let Some(forced) = settings.tier_override {
         tracing::info!("inf-render: render tier forced to {forced:?} (override)");
@@ -219,14 +277,16 @@ pub fn detect_tier(gpu: &GpuContext, settings: &RenderSettings) -> RenderTier {
     let tier = choose_tier(&caps);
     let info = gpu.adapter.get_info();
     tracing::info!(
-        "inf-render: render tier {tier:?} for '{}' ({:?}, {:?}) — compute={} indirect={} storage_bufs={} storage_bind={}MiB",
+        "inf-render: render tier {tier:?} for '{}' ({:?}, {:?}) — compute={} indirect={} storage_bufs={} storage_texs={} storage_bind={}MiB occlusion={}",
         info.name,
         info.backend,
         info.device_type,
         caps.compute_shaders,
         caps.indirect_execution,
         caps.max_storage_buffers_per_stage,
+        caps.max_storage_textures_per_stage,
         caps.max_storage_buffer_binding_size >> 20,
+        caps.supports_vgeom_occlusion(),
     );
     tier
 }
@@ -243,6 +303,7 @@ mod tests {
             max_storage_buffers_per_stage: VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE,
             max_storage_buffer_binding_size: VGEOM_MIN_STORAGE_BINDING_SIZE,
             max_compute_workgroups_per_dim: VGEOM_MIN_WORKGROUPS_PER_DIM,
+            max_storage_textures_per_stage: VGEOM_OCCLUSION_MIN_STORAGE_TEXTURES_PER_STAGE,
             is_cpu: false,
             polygon_mode_line: true,
         }
@@ -282,6 +343,7 @@ mod tests {
             max_storage_buffers_per_stage: 0,
             max_storage_buffer_binding_size: 0,
             max_compute_workgroups_per_dim: 0,
+            max_storage_textures_per_stage: 0,
             is_cpu: false,
             polygon_mode_line: false,
         };
@@ -304,6 +366,7 @@ mod tests {
             max_storage_buffers_per_stage: 0,
             max_storage_buffer_binding_size: 0,
             max_compute_workgroups_per_dim: 0,
+            max_storage_textures_per_stage: 0,
             is_cpu: false,
             polygon_mode_line: true,
         };
@@ -368,6 +431,44 @@ mod tests {
         assert_eq!(
             RenderTier::mobile_default(),
             RenderTier::clamp_mobile(RenderSettings::default())
+        );
+    }
+
+    /// P18.1: the occlusion floor is a strict *further* restriction on the vgeom
+    /// floor, and the clamp only ever turns features off.
+    #[test]
+    fn occlusion_floor_is_a_superset_of_the_vgeom_floor() {
+        let high = high_caps();
+        assert!(high.supports_vgeom() && high.supports_vgeom_occlusion());
+
+        // Storage buffers fine, no storage textures → meshlets yes, occlusion no.
+        let mut no_tex = high_caps();
+        no_tex.max_storage_textures_per_stage = 0;
+        assert!(no_tex.supports_vgeom(), "meshlets still run");
+        assert!(!no_tex.supports_vgeom_occlusion());
+
+        // Anything that fails the vgeom floor fails the occlusion floor too.
+        let mut no_compute = high_caps();
+        no_compute.compute_shaders = false;
+        assert!(!no_compute.supports_vgeom_occlusion());
+
+        let wanted = RenderSettings {
+            vgeom: crate::settings::VgeomSettings {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(wanted.vgeom.occlusion && wanted.vgeom.two_pass);
+        // Clamping never enables, is idempotent, and leaves the meshlet path alone.
+        let c = no_tex.clamp_occlusion(wanted);
+        assert!(!c.vgeom.occlusion && !c.vgeom.two_pass);
+        assert!(c.vgeom.enabled, "occlusion is not the meshlet path");
+        assert_eq!(no_tex.clamp_occlusion(c), c);
+        assert_eq!(
+            high.clamp_occlusion(wanted),
+            wanted,
+            "a capable GPU keeps it"
         );
     }
 

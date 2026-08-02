@@ -27,6 +27,7 @@ use crate::passes;
 use crate::passes::gi::GiResources;
 use crate::passes::shadow::ShadowResources;
 use crate::passes::sky_lut::AtmosphereResources;
+use crate::passes::vgeom::{VgeomAudit, VgeomAuditResources};
 use crate::scene::RenderScene;
 use crate::settings::{halton_jitter, mip_chain_sizes, RenderSettings};
 
@@ -213,6 +214,10 @@ pub struct FrameData<'a> {
     /// Shared dynamic-GI resources (P13.3b): the GI node writes the SH probes, the
     /// lit passes sample them (byte-neutral when GI is off).
     pub gi: &'a GiResources,
+    /// Occlusion-audit counters (P18.1): the vgeom cull compute increments them
+    /// only when `enabled`, and the node records the readback copy. Off by
+    /// default, so the shipping path pays nothing.
+    pub vgeom_audit: &'a VgeomAuditResources,
     /// Shared atmosphere resources (P17.2): the two LUTs + the shared uniform the
     /// bake node writes and the sky/lit passes sample. **Resizable** — its
     /// `generation` is part of the `EnvBinding` cache key.
@@ -251,6 +256,8 @@ pub struct EngineRenderer {
     /// size; the shadow/GI graph nodes write them, the lit passes sample them).
     shadow: ShadowResources,
     gi: GiResources,
+    /// P18.1 occlusion-audit counters (see [`EngineRenderer::set_vgeom_audit`]).
+    vgeom_audit: VgeomAuditResources,
     /// Shared atmosphere LUTs + uniform (P17.2). Unlike `shadow`/`gi` these are
     /// **recreated** when [`crate::atmosphere::AtmosphereQuality`] changes, which
     /// is why they carry a generation the env bind-group cache keys on.
@@ -380,6 +387,7 @@ impl EngineRenderer {
             prev_view_proj: None,
             shadow: ShadowResources::new(gpu),
             gi: GiResources::new(gpu),
+            vgeom_audit: VgeomAuditResources::new(gpu),
             atmosphere,
             next_atmosphere_generation: 2,
         }
@@ -398,6 +406,25 @@ impl EngineRenderer {
             self.prev_view_proj = None;
         }
         self.settings = settings;
+    }
+
+    /// Enable/disable the P18.1 vgeom occlusion-audit counters. **Off by
+    /// default**: the cull compute skips the atomics entirely and no readback copy
+    /// is recorded, so the shipping frame is untouched. Turning it on costs four
+    /// atomics per surviving (instance, meshlet) pair plus a 16-byte copy — a
+    /// test/tools instrument, not a shipping counter.
+    pub fn set_vgeom_audit(&mut self, enabled: bool) {
+        self.vgeom_audit.enabled = enabled;
+    }
+
+    /// Read the audit counters recorded by the **last submitted** frame. Blocks on
+    /// a buffer map; returns zeros if the audit was never enabled or the vgeom node
+    /// did not run (vgeom off, or a scene with no meshlet content).
+    pub fn vgeom_audit(&self, gpu: &GpuContext) -> VgeomAudit {
+        if !self.vgeom_audit.enabled {
+            return VgeomAudit::default();
+        }
+        self.vgeom_audit.read(gpu)
     }
 
     /// The shared atmosphere resources (P17.2). Exposed for the LUT-determinism
@@ -530,6 +557,7 @@ impl EngineRenderer {
             taa_history_valid: history_valid,
             shadow: &self.shadow,
             gi: &self.gi,
+            vgeom_audit: &self.vgeom_audit,
             atmosphere: &self.atmosphere,
             view_mode: self.view_mode,
         };

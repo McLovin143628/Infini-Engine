@@ -246,3 +246,201 @@ fn sky_stack_cost_per_tier() {
         );
     }
 }
+
+/// **The P18.1 two-pass occlusion budget**: what real HZB occlusion costs a
+/// vgeom frame, measured against the same frame with occlusion off and with the
+/// single-pass v1 shape.
+///
+/// Following `sky_stack_cost_per_tier`, this deliberately adds **no new ratchet
+/// constant** — §8's rule makes every tripwire a standing maintenance obligation,
+/// and the composed-frame `FRAME_BUDGET_MS` already covers this. What is asserted
+/// is that the heaviest configuration (two-pass, on the meshlet path) stays inside
+/// that existing budget; the per-mode millisecond deltas are *printed* for the
+/// ROADMAP cost table, because an absolute number on one machine is not a
+/// contract.
+///
+/// **"Per tier" is answered by construction, not by measurement.** Only
+/// `RenderTier::High` runs the meshlet path at all, and `RenderTier::apply` clears
+/// `occlusion`/`two_pass` on Medium and Low (as does `clamp_mobile`) — so the
+/// overhead on every tier below High is exactly zero, which the pure assertion at
+/// the end of this test pins. There is no configuration in which a weaker GPU pays
+/// for occlusion culling.
+#[test]
+fn vgeom_two_pass_cost() {
+    use inf_render::{RenderSettings, RenderTier, VgeomAsset, VgeomInstance, VgeomSettings};
+    use std::sync::Arc;
+
+    // Tier clamps first — GPU-free, and the "no lower tier pays for this" claim.
+    let requested = RenderSettings {
+        vgeom: VgeomSettings {
+            enabled: true,
+            ..VgeomSettings::default()
+        },
+        ..RenderSettings::default()
+    };
+    assert!(requested.vgeom.occlusion && requested.vgeom.two_pass);
+    for tier in [RenderTier::Medium, RenderTier::Low] {
+        let c = tier.apply(requested);
+        assert!(
+            !c.vgeom.enabled && !c.vgeom.occlusion && !c.vgeom.two_pass,
+            "{tier:?} must pay nothing for P18.1"
+        );
+    }
+    let m = RenderTier::clamp_mobile(requested);
+    assert!(!m.vgeom.occlusion && !m.vgeom.two_pass);
+
+    let Ok(gpu) = GpuContext::headless() else {
+        eprintln!("SKIP vgeom_two_pass_cost: no GPU adapter");
+        return;
+    };
+    let info = gpu.adapter.get_info();
+    let software = info.device_type == wgpu::DeviceType::Cpu
+        || info.name.to_ascii_lowercase().contains("paravirtual");
+
+    // A dense meshlet body wall-to-wall in front of the camera, with a field of
+    // smaller bodies behind it — the shape the occlusion path exists for.
+    const ASSET: u128 = 0x1801_0000_bd67_0000;
+    let mesh = Arc::new(vgeom_budget_mesh(64));
+    let mut scene = RenderScene {
+        vgeom_assets: vec![VgeomAsset {
+            id: ASSET,
+            mesh: mesh.clone(),
+        }],
+        ..Default::default()
+    };
+    let standing = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    let mut id = 1u32;
+    scene.vgeom_instances.push(VgeomInstance::lit(
+        ASSET,
+        DVec3::ZERO,
+        standing,
+        Vec3::splat(9.0),
+        [0.7, 0.55, 0.35, 1.0],
+        id,
+    ));
+    for gx in -4..=4 {
+        for gy in -3..=3 {
+            id += 1;
+            scene.vgeom_instances.push(VgeomInstance::lit(
+                ASSET,
+                DVec3::new(gx as f64 * 1.6, gy as f64 * 1.6, -14.0),
+                standing,
+                Vec3::splat(0.7),
+                [0.25, 0.6, 0.8, 1.0],
+                id,
+            ));
+        }
+    }
+    scene.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Directional,
+        color: [1.0, 0.97, 0.9],
+        intensity: 3.0,
+        direction: Vec3::new(0.35, 0.55, 0.75).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..inf_render::RenderLight::default()
+    });
+    scene.mark_dirty();
+
+    let eye = DVec3::new(0.0, 0.0, 7.0);
+    let view = RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: eye,
+        forward: Vec3::NEG_Z,
+        up: Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 0.05,
+        width: W,
+        height: H,
+        ortho: None,
+    };
+    let target = HeadlessTarget::new(&gpu, W, H);
+
+    let measure = |occlusion: bool, two_pass: bool| -> f64 {
+        let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        renderer.set_settings(RenderSettings {
+            vgeom: VgeomSettings {
+                enabled: true,
+                occlusion,
+                two_pass,
+                ..VgeomSettings::default()
+            },
+            ..RenderSettings::default()
+        });
+        // The warmup also converges the temporal early set, so what is timed is a
+        // steady-state frame, not the conservative first one.
+        for _ in 0..10 {
+            renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+        }
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        const N: u32 = 60;
+        let start = std::time::Instant::now();
+        for _ in 0..N {
+            renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        start.elapsed().as_secs_f64() * 1000.0 / f64::from(N)
+    };
+
+    let off = measure(false, false);
+    let single = measure(true, false);
+    let two = measure(true, true);
+    eprintln!(
+        "vgeom occlusion (High tier only): off {off:.3} ms | single-pass {single:.3} ms \
+         (+{:.3}) | two-pass {two:.3} ms (+{:.3}) — {} instances, {} meshlets/mesh, on {}",
+        single - off,
+        two - off,
+        scene.vgeom_instances.len(),
+        mesh.meshlet_count(),
+        info.name
+    );
+
+    if software {
+        return;
+    }
+    for (label, ms) in [("single-pass", single), ("two-pass", two)] {
+        assert!(
+            ms < FRAME_BUDGET_MS,
+            "vgeom {label} occlusion cost {ms:.3} ms, over the {FRAME_BUDGET_MS} ms \
+             frame budget on {} (§8: investigate, never raise it)",
+            info.name
+        );
+    }
+}
+
+/// A dense displaced grid plane — the same shape the vgeom goldens use, enough
+/// triangles to produce a real meshlet DAG.
+fn vgeom_budget_mesh(n: usize) -> inf_render::VgeomMesh {
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    for j in 0..=n {
+        for i in 0..=n {
+            let u = i as f32 / n as f32;
+            let v = j as f32 / n as f32;
+            let x = (u - 0.5) * 2.0;
+            let z = (v - 0.5) * 2.0;
+            let y = 0.3 * (x * 3.0).sin() * (z * 3.0).cos();
+            let dydx = 0.3 * 3.0 * (x * 3.0).cos() * (z * 3.0).cos();
+            let dydz = -0.3 * 3.0 * (x * 3.0).sin() * (z * 3.0).sin();
+            positions.push([x, y, z]);
+            normals.push(Vec3::new(-dydx, 1.0, -dydz).normalize().to_array());
+            uvs.push([u, v]);
+        }
+    }
+    let stride = (n + 1) as u32;
+    let mut indices = Vec::new();
+    for j in 0..n as u32 {
+        for i in 0..n as u32 {
+            let a = j * stride + i;
+            indices.extend_from_slice(&[a, a + stride, a + 1, a + 1, a + stride, a + stride + 1]);
+        }
+    }
+    inf_vgeom::build_vgeom(
+        &positions,
+        &normals,
+        &uvs,
+        &indices,
+        inf_vgeom::BuildParams::default(),
+    )
+}

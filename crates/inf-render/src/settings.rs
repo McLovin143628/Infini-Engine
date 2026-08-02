@@ -199,11 +199,28 @@ pub struct VgeomSettings {
     /// Per-meshlet flat debug colouring (hash of meshlet id) instead of PBR
     /// shading — a visual proof of the cluster/LOD structure for the golden.
     pub debug_meshlets: bool,
-    /// HZB occlusion test in the cull compute (**v1**: tested against the current
-    /// frame's classic depth-prepass; see [`crate::passes::vgeom`]). OFF by
-    /// default: the tested/golden path is frustum + cone + LOD only, so the
-    /// GPU visible set matches the CPU reference exactly (no depth dependence).
+    /// HZB occlusion test in the cull compute. **ON by default** since P18.1:
+    /// the test is provably *subtractive* — it only removes meshlets the
+    /// hierarchical depth proves contribute zero fragments — so a frame with it on
+    /// is pixel-identical to a frame with it off (`tests/vgeom_occlusion.rs`), and
+    /// the CPU-reference parity gate is unaffected because occlusion filters the
+    /// LOD+frustum+cone cut rather than being part of it. See
+    /// [`crate::passes::vgeom`] for the proof and
+    /// [`crate::caps::AdapterCaps::supports_vgeom_occlusion`] for the capability
+    /// floor; [`RenderTier::apply`](crate::caps::RenderTier::apply) clamps it off
+    /// below the High tier.
     pub occlusion: bool,
+    /// Real **two-pass** occlusion (P18.1): draw last frame's visible meshlets,
+    /// rebuild the HZB from the depth they wrote, then cull + draw the remainder
+    /// against it — so vgeom geometry occludes vgeom geometry. ON by default;
+    /// requires [`occlusion`](VgeomSettings::occlusion).
+    ///
+    /// `false` falls back to the single-pass v1 shape (one cull, one draw, HZB
+    /// from whatever the scene depth holds when the node starts). That path is
+    /// kept deliberately: it is the temporal-state-free reference the CPU-parity
+    /// machinery mirrors, and the safety valve if a driver mishandles the
+    /// multisampled depth load.
+    pub two_pass: bool,
     /// Backface normal-cone culling in the cull compute.
     pub cone_cull: bool,
     /// Frustum-sphere culling in the cull compute.
@@ -216,7 +233,8 @@ impl Default for VgeomSettings {
             enabled: false,
             pixel_error: 1.0,
             debug_meshlets: false,
-            occlusion: false,
+            occlusion: true,
+            two_pass: true,
             cone_cull: true,
             frustum_cull: true,
         }
@@ -267,10 +285,15 @@ impl Default for RenderSettings {
 
 impl RenderSettings {
     /// Whether a single-sample scene-depth prepass is needed this frame (SSAO
-    /// reads it for AO; TAA reprojects against it; the vgeom HZB occlusion test
-    /// samples it).
+    /// reads it for AO; TAA reprojects against it).
+    ///
+    /// **P18.1:** vgeom occlusion no longer appears here. The HZB used to seed
+    /// from this prepass, which forced a full-res depth-only pass purely to enable
+    /// occlusion; it now min-reduces the live MSAA scene depth instead — the same
+    /// rasterization the meshlets depth-test against, which is what makes the
+    /// occlusion test provably subtractive (see [`crate::passes::vgeom`]).
     pub fn needs_depth_prepass(&self) -> bool {
-        self.ssao.enabled || self.taa || (self.vgeom.enabled && self.vgeom.occlusion)
+        self.ssao.enabled || self.taa
     }
 }
 
