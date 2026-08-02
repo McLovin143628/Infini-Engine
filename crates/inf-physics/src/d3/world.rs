@@ -404,6 +404,49 @@ impl PhysicsWorld3D {
         }
     }
 
+    /// The body's mass, kg — what rapier derived from its colliders' shapes and
+    /// densities. `0` for a static body (infinite mass is reported as zero
+    /// inverse mass) and for a massless one.
+    ///
+    /// Exposed for P20.2's buoyancy: the displaced volume of a floating body is
+    /// `mass / density`, which reads rapier's own **exact per-shape** volume
+    /// rather than a second, hand-written volume table beside it. A cuboid, a
+    /// ball and a capsule all have closed-form volumes in rapier already, and two
+    /// copies of a formula are two chances to disagree.
+    pub fn body_mass(&self, body: BodyId3D) -> Option<f64> {
+        self.bodies.get(body.0).map(|rb| rb.mass())
+    }
+
+    /// Add a force applied at `point` (world space). A force off the centre of
+    /// mass produces a torque as well as an acceleration, which is the whole
+    /// reason P20.2's buoyancy is sampled at several points rather than one: a
+    /// body tipped on a wave has more of itself under water on one side, and that
+    /// difference is the righting moment.
+    ///
+    /// **TWO LAWS, both paid for once, both about rapier's force model.**
+    ///
+    /// 1. **A rapier force is persistent.** It keeps being applied at every step
+    ///    until [`reset_forces`](Self::reset_forces) clears it — unlike an
+    ///    impulse, which is consumed. A per-step force re-added each step
+    ///    therefore accumulates without bound, and a floating box leaves the
+    ///    atmosphere in about fifteen seconds. Anything that re-computes a force
+    ///    every step must clear the previous one first.
+    /// 2. **A force is not an impulse of `F · dt`, for POSITION.** rapier
+    ///    substeps: it integrates gravity (and forces) once per substep, so with
+    ///    `N` substeps a front-loaded impulse of `F · dt` conserves the velocity
+    ///    exactly and still drifts the position by `g · dt² · (N−1) / 2N` every
+    ///    step — a neutrally buoyant body that should hover rises about a
+    ///    millimetre per step. Buoyancy is a **force**, and applying it as one is
+    ///    what makes it cancel gravity substep for substep.
+    pub fn apply_force_at_point(&mut self, body: BodyId3D, force: DVec3, point: DVec3) -> bool {
+        if let Some(rb) = self.bodies.get_mut(body.0) {
+            rb.add_force_at_point(force, point, true);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Add a force applied at the center of mass. Forces accumulate and are
     /// consumed each [`step`](Self::step).
     pub fn apply_force(&mut self, body: BodyId3D, force: DVec3) -> bool {

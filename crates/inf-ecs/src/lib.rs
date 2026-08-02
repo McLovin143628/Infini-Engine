@@ -29,12 +29,13 @@ pub use attach::update_attachments;
 pub use bevy_ecs::prelude::Entity;
 pub use components::{
     ActorClass, AnimPlayer, AnimStateMachine, AtlasRect, AttachedTo, BillboardMode, BodyKind2D,
-    BodyKind3D, Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D,
-    ColliderShape2DKind, ColliderShape3DKind, CombineRule, ComputedVisibility, GlobalTransform,
-    Guid, Joint2D, Joint3D, JointKind2D, JointKind3D, Light, LightKind, Material, MeshRef, Name,
-    PcgVolume, Primitive, RigidBody2D, RigidBody3D, RootMotion, RootMotionMode, ScatteredInstance,
-    ScatteredSolid, SkeletalMesh, SkyAtmosphere, SmRuntimeState, Sprite, Terrain, TileBounds,
-    TileChunk, Tilemap, TimeOfDay, Transform, Visibility, CHUNK_DIM, CHUNK_TILES,
+    BodyKind3D, Buoyancy, Camera, CharacterController2D, CharacterController3D, Collider2D,
+    Collider3D, ColliderShape2DKind, ColliderShape3DKind, CombineRule, ComputedVisibility,
+    GlobalTransform, Guid, Joint2D, Joint3D, JointKind2D, JointKind3D, Light, LightKind, Material,
+    MeshRef, Name, PcgVolume, Primitive, RigidBody2D, RigidBody3D, RootMotion, RootMotionMode,
+    ScatteredInstance, ScatteredSolid, SkeletalMesh, SkyAtmosphere, SmRuntimeState, Sprite,
+    Terrain, TileBounds, TileChunk, Tilemap, TimeOfDay, Transform, Visibility, CHUNK_DIM,
+    CHUNK_TILES,
 };
 pub use hierarchy::{ChildOf, Children};
 pub use math::{Color, Vec2d, Vec3d};

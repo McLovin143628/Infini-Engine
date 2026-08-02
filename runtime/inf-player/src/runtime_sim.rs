@@ -56,6 +56,7 @@ use inf_ecs::components::{
     DistanceModel, GlobalTransform, RootMotion, RootMotionMode, SmRuntimeState, Terrain, Transform,
 };
 use inf_ecs::{sim_snapshot, update_attachments, EcsWorld, Entity, Guid};
+use inf_physics::d3::WaterEventKind3D;
 use inf_physics::{
     CharacterMover2D, CharacterMover3D, ColliderShape2D, ColliderShape3D, ContactPhase,
     PhysicsBridge2D, PhysicsBridge3D,
@@ -476,6 +477,13 @@ impl RuntimeSim {
     }
 
     /// The `debug.print` log accumulated so far.
+    /// The 3D physics bridge, read-only (P20.2) — the seam a gate, a debug view
+    /// or a tool reads water probes and swim latches through without being able
+    /// to perturb the step that produced them.
+    pub fn bridge3d(&self) -> &PhysicsBridge3D {
+        &self.bridge3d
+    }
+
     pub fn logs(&self) -> &[String] {
         &self.logs
     }
@@ -587,8 +595,15 @@ impl RuntimeSim {
         // 1. ECS → physics.
         self.bridge.sync_from_world(&self.world);
         self.bridge3d.sync_from_world(&self.world); // ── P11.3 3D bridge: sync ──
-                                                    // ── Wave 3 input events ── (MIRROR of SimSession) fire Input(action) edges
-                                                    //    BEFORE the Tick pass, then drain any dispatches they queued.
+                                                    // ── P20.2 water forces ── buoyancy + hydrodynamic drag, between the sync
+                                                    //    and the solver: after the sync because a body must be sampled where it
+                                                    //    IS, and before the step because that is the step the forces belong to.
+                                                    //    Also arms this step's enter/exit/splash, drained in the collision slot
+                                                    //    below so the fixed step has ONE event point. One branch on a level with
+                                                    //    no `Buoyancy` component. (MIRROR of `SimSession::fixed_step`.)
+        self.bridge3d.apply_water_forces(dt);
+        // ── Wave 3 input events ── (MIRROR of SimSession) fire Input(action) edges
+        //    BEFORE the Tick pass, then drain any dispatches they queued.
         self.fire_input_events();
         self.drain_dispatch();
         // 2. Blueprint Tick for every actor (Guid order).
@@ -945,6 +960,7 @@ impl RuntimeSim {
                 current_entity,
                 bindings: &mut self.bindings,
                 dispatch_queue: &mut self.dispatch_queue,
+                dt: self.stepper.fixed_dt(),
             };
             if let Err(e) = run_event(
                 &state.class,
@@ -1060,6 +1076,49 @@ impl RuntimeSim {
             let args: HashMap<String, Value> = [("other".to_string(), Value::Int(other_id))].into();
             self.run_on_guid(guid, &EventKind::Collision, &args);
         }
+        self.drain_water_events();
+    }
+
+    /// Fire this step's water crossings on their actors (P20.2) — the MIRROR of
+    /// `SimSession::drain_water_events`.
+    ///
+    /// Drained in the **collision slot**, and that is the design: a crossing is
+    /// sensed from the same pre-step poses a contact is, so giving water its own
+    /// event point would put two different "when did this happen" answers in one
+    /// fixed step. The bridge already produced them in body-`Guid` order with
+    /// `Enter`/`Exit` before the `Splash` that accompanies it, so this loop adds
+    /// no ordering of its own.
+    ///
+    /// **The audio hook is the `audio.*` kit called from these handlers**, not a
+    /// new command type: the P12.3 doctrine is that the audio stream is a pure
+    /// function of sim state, water events *are* sim state, and a `Play` queued
+    /// from an `On Splash` handler therefore lands in the command queue in this
+    /// same deterministic order. Nothing else is needed, and inventing a
+    /// `AudioCommand::Splash` would have made the engine pick the sound.
+    fn drain_water_events(&mut self) {
+        let events = self.bridge3d.drain_water_events();
+        if events.is_empty() {
+            return;
+        }
+        for ev in events {
+            if !self.actors.contains_key(&ev.body) {
+                continue;
+            }
+            let kind = match ev.kind {
+                WaterEventKind3D::Enter => EventKind::WaterEnter,
+                WaterEventKind3D::Exit => EventKind::WaterExit,
+                WaterEventKind3D::Splash => EventKind::WaterSplash,
+            };
+            let args: HashMap<String, Value> = [
+                (
+                    "water".to_string(),
+                    Value::Int(self.entity_id_of(ev.water).unwrap_or(0)),
+                ),
+                ("speed".to_string(), Value::Float(ev.speed_m_s)),
+            ]
+            .into();
+            self.run_on_guid(ev.body, &kind, &args);
+        }
     }
 
     /// Drain the FIFO dispatch queue (Wave 3) — MIRROR of
@@ -1117,6 +1176,13 @@ struct RuntimeHost<'a> {
     bindings: &'a mut BTreeMap<(i64, String), BTreeMap<i64, String>>,
     /// The sim's FIFO dispatch queue (Wave 3 MIRROR of `SimHost::dispatch_queue`).
     dispatch_queue: &'a mut VecDeque<(i64, String)>,
+    /// The fixed timestep, seconds (P20.2). The swim transform is expressed as a
+    /// *velocity* — a speed cap and a buoyancy-balance rate — while
+    /// `move_and_slide` speaks displacement, so the host needs the step it is
+    /// inside. Passed explicitly rather than read back off the physics world, so
+    /// the number is the sim's own rather than whatever the solver was last
+    /// stepped with.
+    dt: f64,
 }
 
 use inf_ecs::components::WeatherPreset;
@@ -1211,6 +1277,37 @@ impl Host for RuntimeHost<'_> {
             (Some("sky"), Some("get_wind_speed")) => {
                 Ok(Value::Float(inf_ecs::sky::weather_wind_speed(self.world)))
             }
+            // water.* (P20.2) — three pure queries against the **fixed step's own**
+            // water index, shared verbatim with the editor SimHost so preview ==
+            // shipped by construction. They read `inf_water`'s height query, the
+            // same evaluator the buoyancy force used this step and the same one the
+            // renderer draws — never render state, and never a camera.
+            //
+            // `surface_height` answers `0.0` where there is no water: the IR has no
+            // optional Float, and the `terrain.height_at` precedent is a plain
+            // default rather than a sentinel (0 is a plausible sea level).
+            //
+            // An id that names no entity answers "dry" rather than erroring: a
+            // query is not an action, and a blueprint asking whether a despawned
+            // actor is wet should get `false`, not a failed handler.
+            (Some("water"), Some("is_in_water")) => Ok(Value::Bool(
+                self.guid_of(arg_i64(args, 0))
+                    .ok()
+                    .and_then(|g| self.bridge3d.water_probe(g))
+                    .is_some_and(|p| p.depth_m > 0.0),
+            )),
+            (Some("water"), Some("submerged_fraction")) => Ok(Value::Float(
+                self.guid_of(arg_i64(args, 0))
+                    .ok()
+                    .and_then(|g| self.bridge3d.water_probe(g))
+                    .map(|p| p.fraction)
+                    .unwrap_or(0.0),
+            )),
+            (Some("water"), Some("surface_height")) => Ok(Value::Float(
+                self.bridge3d
+                    .water_surface_height(arg_f64(args, 0), arg_f64(args, 1))
+                    .unwrap_or(0.0),
+            )),
             // Unknown engine call: log it (matching the editor host) so a
             // partially-authored blueprint still runs rather than aborting.
             _ => {
@@ -1443,12 +1540,21 @@ impl Physics3dHost for RuntimeHost<'_> {
             .ok_or("body vanished")?;
         let exclude = self.bridge3d.collider_of(guid);
         let mover = build_mover3d(self.world, guid);
-        let result = self.bridge3d.world_mut().move_character(
-            &mover,
-            pos,
-            DVec3::new(motion[0], motion[1], motion[2]),
-            exclude,
-        );
+        // ── P20.2 swim mode ── the mover HONOURS the water: a character deep
+        //    enough to swim has its free-fall discarded, its vertical motion
+        //    replaced by a buoyancy balance and its horizontal speed capped. The
+        //    latch and the transform both live in `inf_physics::d3::water`, so
+        //    this host and the editor's run the same thresholds rather than two
+        //    copies of them. Inert — literally the identity — when not swimming.
+        let dt = self.dt;
+        self.bridge3d.update_swim(guid);
+        let motion =
+            self.bridge3d
+                .apply_swim_motion(guid, DVec3::new(motion[0], motion[1], motion[2]), dt);
+        let result = self
+            .bridge3d
+            .world_mut()
+            .move_character(&mover, pos, motion, exclude);
         let new_pos = pos + result.translation;
         self.bridge3d
             .world_mut()

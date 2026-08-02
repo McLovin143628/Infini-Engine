@@ -15,10 +15,11 @@ use std::path::{Path, PathBuf};
 
 use inf_ecs::components::{
     ActorClass, AlwaysLoaded, AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource,
-    BlendMode, Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D, Decal,
-    Foliage, Joint2D, Joint3D, Light, Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume,
-    RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, SkyAtmosphere, Spline, Sprite,
-    StreamingSource, Terrain, Text2D, Tilemap, TimeOfDay, Transform, Visibility, Volume, WaterBody,
+    BlendMode, Buoyancy, Camera, CharacterController2D, CharacterController3D, Collider2D,
+    Collider3D, Decal, Foliage, Joint2D, Joint3D, Light, Light2D, LightKind, Material, MeshRef,
+    NineSlice, PcgVolume, RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, SkyAtmosphere,
+    Spline, Sprite, StreamingSource, Terrain, Text2D, Tilemap, TimeOfDay, Transform, Visibility,
+    Volume, WaterBody,
 };
 use inf_ecs::math::{Color, Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
@@ -235,7 +236,26 @@ use crate::scene::SceneDoc;
 ///   advisory to write. The wire price to a water-free level is **one
 ///   discriminant byte per entity** — the same price every additive slot since v8
 ///   has paid.
-pub const SCHEMA_VERSION: u32 = 17;
+///
+/// * **v18** — P20.2: the entity record appends the **buoyancy** slot —
+///   `buoyancy` ([`Buoyancy`]: opt-in flotation and hydrodynamic drag for a
+///   dynamic 3D body). No component changed shape and [`LevelSettings`] is
+///   untouched, so this is again the [`EntityRecordV10`] *shape* of bump (a new
+///   slot at the tail), not the [`EntityRecordV14`] one (a component that grew).
+///   The pre-v18 entity record is frozen as [`EntityRecordV17`] and lifts with
+///   `buoyancy: None` — a level in which nothing floats, which is exactly what
+///   every pre-v18 level was.
+///
+///   **Why the component exists at all, rather than flotation being a rule:**
+///   it is opt-in because a default-on rule (every dynamic body floats, its
+///   density read from its collider) would have silently rewritten the physics of
+///   every dynamic body in any level that gained water — and
+///   `Collider3D::density` defaults to `1.0`, which is rapier's mass placeholder
+///   and not a material density, so under that rule essentially every existing
+///   body would bob like a cork on a millimetre of draught. The wire price to a
+///   level where nothing floats is **one discriminant byte per non-buoyant
+///   entity** — the same price every additive slot since v8 has paid.
+pub const SCHEMA_VERSION: u32 = 18;
 
 /// File-level simulation settings (P9.5 · schema v3). Replaces the player's
 /// hard-coded `DEFAULT_GRAVITY`/`DEFAULT_HZ`. The serde defaults **preserve the
@@ -557,6 +577,13 @@ pub struct EntityRecord {
     /// cook edge and no dangling-reference advisory.
     #[serde(default)]
     pub water_body: Option<WaterBody>,
+    // ── v18 (P20.2) buoyancy ──────────────────────────────────────────────
+    /// Opt-in flotation + hydrodynamic drag for a dynamic 3D body. Absent means
+    /// the body ignores water, which is what every pre-v18 level meant — see the
+    /// [`SCHEMA_VERSION`] ladder for why this is a component rather than a rule
+    /// applied to every `RigidBody3D`.
+    #[serde(default)]
+    pub buoyancy: Option<Buoyancy>,
 }
 
 /// The pre-v8 `Light` byte layout (schema v8 froze this when `Light` gained its
@@ -3349,6 +3376,7 @@ impl EntityRecordV13 {
             time_of_day: self.time_of_day,
             sky_atmosphere: self.sky_atmosphere.map(SkyAtmosphereV13::into_current),
             water_body: None,
+            buoyancy: None,
         }
     }
 
@@ -3865,11 +3893,15 @@ pub struct EntityRecordV16 {
 }
 
 impl EntityRecordV16 {
-    /// Lift a frozen v16 record to the live (v17) [`EntityRecord`]. Every slot
-    /// carries through unchanged; the one new slot lifts to `None` \u2014 a level with
-    /// no water, which is exactly what a v16 level was.
-    pub fn into_current(self) -> EntityRecord {
-        EntityRecord {
+    /// Lift a frozen v16 record one rung, to the frozen [`EntityRecordV17`].
+    /// Every slot carries through unchanged; the one new slot lifts to `None` \u2014
+    /// a level with no water, which is exactly what a v16 level was.
+    ///
+    /// v18 inserted [`EntityRecordV17`] between this record and [`EntityRecord`],
+    /// and the rung is what keeps a v16 payload loading forever \u2014 the same shape
+    /// v17 gave the v15 rung.
+    pub fn into_v17(self) -> EntityRecordV17 {
+        EntityRecordV17 {
             guid: self.guid,
             name: self.name,
             parent: self.parent,
@@ -3967,6 +3999,195 @@ impl EntityRecordV16 {
     }
 }
 
+/// The **pre-v18** entity byte layout (schema v18 froze this when P20.2 appended
+/// the `buoyancy` slot). Identical to the live [`EntityRecord`] except that it
+/// has **no** `buoyancy` field — that is precisely what v18 added — so this is
+/// the [`EntityRecordV10`] shape of bump (a new slot at the tail), not the
+/// [`EntityRecordV14`] one (a component that grew).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityRecordV17 {
+    pub guid: Uuid,
+    pub name: String,
+    pub parent: Option<Uuid>,
+    pub transform: Transform,
+    pub visible: bool,
+    pub mesh: Option<MeshRef>,
+    pub material: Option<Material>,
+    pub light: Option<Light>,
+    pub camera: Option<Camera>,
+    #[serde(default)]
+    pub sprite: Option<Sprite>,
+    #[serde(default)]
+    pub tilemap: Option<Tilemap>,
+    #[serde(default)]
+    pub nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    pub text2d: Option<Text2D>,
+    #[serde(default)]
+    pub light_2d: Option<Light2D>,
+    #[serde(default)]
+    pub rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    pub collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    pub character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    pub rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    pub collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    pub character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    pub actor: Option<Uuid>,
+    #[serde(default)]
+    pub terrain: Option<Terrain>,
+    #[serde(default)]
+    pub pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    pub skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    pub anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    pub anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    pub root_motion: Option<RootMotion>,
+    #[serde(default)]
+    pub attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    pub joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    pub joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    pub audio_source: Option<AudioSource>,
+    #[serde(default)]
+    pub audio_listener: Option<AudioListener>,
+    #[serde(default)]
+    pub decal: Option<Decal>,
+    #[serde(default)]
+    pub volume: Option<Volume>,
+    #[serde(default)]
+    pub spline: Option<Spline>,
+    #[serde(default)]
+    pub foliage: Option<Foliage>,
+    #[serde(default)]
+    pub streaming_source: Option<StreamingSource>,
+    #[serde(default)]
+    pub always_loaded: Option<AlwaysLoaded>,
+    #[serde(default)]
+    pub time_of_day: Option<TimeOfDay>,
+    #[serde(default)]
+    pub sky_atmosphere: Option<SkyAtmosphere>,
+    /// The v17 slot this record exists to keep carrying — a v17 level's water
+    /// must survive the v18 hop, not merely decode.
+    #[serde(default)]
+    pub water_body: Option<WaterBody>,
+}
+
+impl EntityRecordV17 {
+    /// Lift a frozen v17 record to the live (v18) [`EntityRecord`]. Every slot
+    /// carries through unchanged; the one new slot lifts to `None` — a level in
+    /// which nothing floats, which is exactly what a v17 level was.
+    pub fn into_current(self) -> EntityRecord {
+        EntityRecord {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: self.decal,
+            volume: self.volume,
+            spline: self.spline,
+            foliage: self.foliage,
+            streaming_source: self.streaming_source,
+            always_loaded: self.always_loaded,
+            time_of_day: self.time_of_day,
+            sky_atmosphere: self.sky_atmosphere,
+            water_body: self.water_body,
+            buoyancy: None,
+        }
+    }
+
+    /// Project a live [`EntityRecord`] back onto the frozen v17 shape (the
+    /// **downgrade-bless** path that regenerates the committed v17 fixture). Only
+    /// the buoyancy is lost — asserted as a property, not as a field list, by
+    /// `v17_entity_downgrade_is_lossless_except_for_the_buoyancy`.
+    ///
+    /// Takes the **live** record rather than the frozen one a rung up, so the
+    /// bless path always starts from today's truth.
+    pub fn from_current(r: EntityRecord) -> Self {
+        Self {
+            guid: r.guid,
+            name: r.name,
+            parent: r.parent,
+            transform: r.transform,
+            visible: r.visible,
+            mesh: r.mesh,
+            material: r.material,
+            light: r.light,
+            camera: r.camera,
+            sprite: r.sprite,
+            tilemap: r.tilemap,
+            nine_slice: r.nine_slice,
+            text2d: r.text2d,
+            light_2d: r.light_2d,
+            rigid_body_2d: r.rigid_body_2d,
+            collider_2d: r.collider_2d,
+            character_controller_2d: r.character_controller_2d,
+            rigid_body_3d: r.rigid_body_3d,
+            collider_3d: r.collider_3d,
+            character_controller_3d: r.character_controller_3d,
+            actor: r.actor,
+            terrain: r.terrain,
+            pcg_volume: r.pcg_volume,
+            skeletal_mesh: r.skeletal_mesh,
+            anim_player: r.anim_player,
+            anim_state_machine: r.anim_state_machine,
+            root_motion: r.root_motion,
+            attached_to: r.attached_to,
+            joint_2d: r.joint_2d,
+            joint_3d: r.joint_3d,
+            audio_source: r.audio_source,
+            audio_listener: r.audio_listener,
+            decal: r.decal,
+            volume: r.volume,
+            spline: r.spline,
+            foliage: r.foliage,
+            streaming_source: r.streaming_source,
+            always_loaded: r.always_loaded,
+            time_of_day: r.time_of_day,
+            sky_atmosphere: r.sky_atmosphere,
+            water_body: r.water_body,
+        }
+    }
+}
+
 /// A frozen schema-v14 file layout, holding [`EntityRecordV14`]s. v15 did not
 /// touch [`LevelSettings`], so only `entities` is repointed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4039,6 +4260,36 @@ pub struct SceneFileV16 {
 }
 
 impl SceneFileV16 {
+    /// Lift every record one rung, to the frozen [`SceneFileV17`] shape. Stamped
+    /// v17, not [`SCHEMA_VERSION`] — this is a *rung*, and the version it claims
+    /// must match the records it actually holds; `into_current` on the next rung
+    /// is what stamps the current schema.
+    fn into_v17(self) -> SceneFileV17 {
+        SceneFileV17 {
+            schema_version: 17,
+            title: self.title,
+            entities: self
+                .entities
+                .into_iter()
+                .map(EntityRecordV16::into_v17)
+                .collect(),
+            settings: self.settings,
+        }
+    }
+}
+
+/// A frozen schema-v17 file layout, holding [`EntityRecordV17`]s. v18 did not
+/// touch [`LevelSettings`], so only `entities` is repointed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneFileV17 {
+    pub schema_version: u32,
+    pub title: String,
+    pub entities: Vec<EntityRecordV17>,
+    #[serde(default)]
+    pub settings: LevelSettings,
+}
+
+impl SceneFileV17 {
     /// Lift every record to the current shape and stamp the current version.
     fn into_current(self) -> SceneFile {
         SceneFile {
@@ -4047,7 +4298,7 @@ impl SceneFileV16 {
             entities: self
                 .entities
                 .into_iter()
-                .map(EntityRecordV16::into_current)
+                .map(EntityRecordV17::into_current)
                 .collect(),
             settings: self.settings,
         }
@@ -4199,6 +4450,7 @@ pub fn record_of(doc: &SceneDoc, guid: Uuid) -> Option<EntityRecord> {
         time_of_day: w.get::<TimeOfDay>(e).copied(),
         sky_atmosphere: w.get::<SkyAtmosphere>(e).copied(),
         water_body: w.get::<WaterBody>(e).copied(),
+        buoyancy: w.get::<Buoyancy>(e).copied(),
     })
 }
 
@@ -4477,21 +4729,27 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
             let (v14, _): (SceneFileV14, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v14: {e}"))?;
-            migrate(v14.into_v15().into_v16().into_current())
+            migrate(v14.into_v15().into_v16().into_v17().into_current())
         }
         15 => {
             let (v15, _): (SceneFileV15, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v15: {e}"))?;
-            migrate(v15.into_v16().into_current())
+            migrate(v15.into_v16().into_v17().into_current())
         }
         16 => {
             let (v16, _): (SceneFileV16, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v16: {e}"))?;
-            migrate(v16.into_current())
+            migrate(v16.into_v17().into_current())
         }
         17 => {
+            let (v17, _): (SceneFileV17, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| format!("decode v17: {e}"))?;
+            migrate(v17.into_current())
+        }
+        18 => {
             let (file, _): (SceneFile, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode: {e}"))?;
@@ -4513,7 +4771,7 @@ pub fn migrate(file: SceneFile) -> Result<SceneFile, String> {
         ));
     }
     // Records are already lifted to the current shape by the versioned decode
-    // (v1→…→v16→v17); nothing more to do here. Future upgrades chain in `decode`.
+    // (v1→…→v17→v18); nothing more to do here. Future upgrades chain in `decode`.
     Ok(file)
 }
 
@@ -4613,6 +4871,7 @@ pub(crate) fn write_record_components(
     copy_slot!(&rec.time_of_day, TimeOfDay);
     copy_slot!(&rec.sky_atmosphere, SkyAtmosphere);
     copy_slot!(&rec.water_body, WaterBody);
+    copy_slot!(&rec.buoyancy, Buoyancy);
 }
 
 pub fn apply_to_doc(doc: &mut SceneDoc, file: &SceneFile) {
@@ -9175,6 +9434,7 @@ mod tests {
         let back = EntityRecordV14::from_current(live.clone())
             .into_v15()
             .into_v16()
+            .into_v17()
             .into_current();
 
         // Everything but the maps survives …
@@ -9522,6 +9782,7 @@ mod tests {
         };
         let back = EntityRecordV15::from_current(live.clone())
             .into_v16()
+            .into_v17()
             .into_current();
 
         // Everything but the biome layer survives — the erosion maps included,
@@ -9678,13 +9939,14 @@ mod tests {
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {
         assert_eq!(
-            SCHEMA_VERSION, 17,
+            SCHEMA_VERSION, 18,
             "the scene schema moved. Generation-1 frozen tiles (TerrainTileFrozenV1, via \
              TerrainV14) cover .inf_lvl v1..=v14, generation-2 (TerrainTileFrozenV2, via \
              TerrainV15) covers v15, and the live TerrainTile covers v16+. If the TILE \
              layout changed again, add inf_terrain::TerrainTileFrozenV3 and a new frozen \
              Terrain record; if only the scene changed, update this pin and \
-             TerrainTileFrozenV1's generation table."
+             TerrainTileFrozenV1's generation table. (v17 and v18 are both the latter \
+             case: each appended an entity slot and left every tile layout alone.)"
         );
         // The mapping the pin is about, one rung at a time. Start from a terrain
         // that exercises BOTH post-v14 layers.
@@ -9924,7 +10186,9 @@ mod tests {
                 .into_v13()
                 .into_current()
         };
-        let back = EntityRecordV16::from_current(live.clone()).into_current();
+        let back = EntityRecordV16::from_current(live.clone())
+            .into_v17()
+            .into_current();
 
         // The water is exactly what is lost \u2026
         assert!(back.water_body.is_none());
@@ -9992,9 +10256,11 @@ mod tests {
     }
 
     /// **The v17 price, isolated**: an entity with no water pays exactly one
-    /// discriminant byte. Measured as a delta against the frozen v16 shape of the
-    /// very same record, so it is a *price* rather than an absolute that could
-    /// silently absorb any other growth.
+    /// discriminant byte. Measured as a delta between the frozen v16 and frozen
+    /// v17 shapes of the very same record, so it is a *price* rather than an
+    /// absolute that could silently absorb any other growth — v18's own slot
+    /// included, which is why this prices the frozen v17 shape and not the live
+    /// record it used to.
     #[test]
     fn v17_costs_one_byte_per_water_free_entity() {
         let live = v9_base(uuid::Uuid::from_u128(0xF300), "Dry", None)
@@ -10003,7 +10269,11 @@ mod tests {
             .into_v12()
             .into_v13()
             .into_current();
-        let v17 = bincode::serde::encode_to_vec(&live, bincode_config()).unwrap();
+        let v17 = bincode::serde::encode_to_vec(
+            EntityRecordV17::from_current(live.clone()),
+            bincode_config(),
+        )
+        .unwrap();
         let v16 = bincode::serde::encode_to_vec(
             EntityRecordV16::from_current(live.clone()),
             bincode_config(),
@@ -10016,15 +10286,325 @@ mod tests {
         );
 
         // A record that *carries* water costs more than its own discriminant.
-        let wet = EntityRecord {
+        let wet = EntityRecordV17::from_current(EntityRecord {
             water_body: Some(inf_ecs::components::WaterBody::default()),
             ..live
-        };
+        });
         assert!(
             bincode::serde::encode_to_vec(&wet, bincode_config())
                 .unwrap()
                 .len()
                 > v17.len() + 1
+        );
+    }
+
+    // ── schema v18 (P20.2 buoyancy) ───────────────────────────────────────
+
+    /// An all-`None` frozen v17 entity — the struct-update base for
+    /// [`v17_reference`]. Built through the downgrade hop so the field list can
+    /// never drift from the live record.
+    fn v17_base(guid: uuid::Uuid, name: &str, parent: Option<uuid::Uuid>) -> EntityRecordV17 {
+        EntityRecordV17::from_current(
+            v9_base(guid, name, parent)
+                .into_v10()
+                .into_v11()
+                .into_v12()
+                .into_v13()
+                .into_current(),
+        )
+    }
+
+    /// The **v17** water body the fixture's river carries: a spline river with a
+    /// non-default flow, cross-section, seed and wind — the thing v17 could
+    /// express and v16 could not — so the v18 hop is proven to preserve what v17
+    /// authored rather than merely to produce defaults.
+    ///
+    /// The literals must match `inf-scene`'s `v17_fixture_water` exactly — the two
+    /// committed fixtures are byte-compared by
+    /// [`v17_fixture_matches_the_runtime_codecs_copy`], which is the whole point
+    /// of writing them twice.
+    fn v17_fixture_water() -> WaterBody {
+        use inf_ecs::components::WaterKind;
+        WaterBody {
+            kind: WaterKind::River,
+            level_m: 4.5,
+            river_width_start_m: 6.0,
+            river_width_end_m: 9.5,
+            river_depth_start_m: 1.25,
+            river_depth_end_m: 2.5,
+            river_flow_m_s: 2.75,
+            wave_seed: 0xC0FFEE,
+            wind_from_weather: false,
+            wind_x: 3.5,
+            wind_z: -1.5,
+            ..WaterBody::default()
+        }
+    }
+
+    /// Rebuild the exact schema-v17 file the committed v17 fixture was generated
+    /// from, out of the frozen v17 record types (the provenance lock). Carries the
+    /// v16 fixture's terrain unchanged — v17 touched no tile layout — plus the
+    /// river entity that only v17 could write.
+    fn v17_reference() -> SceneFileV17 {
+        use inf_ecs::components::{Light, LightKind, Material, MeshRef, Primitive};
+        let g = uuid::Uuid::from_u128;
+        SceneFileV17 {
+            schema_version: 17,
+            title: "V17 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV17 {
+                    mesh: Some(MeshRef {
+                        primitive: Primitive::Cube,
+                        asset: Some(g(0xF1A1)),
+                    }),
+                    material: Some(Material::default()),
+                    ..v17_base(g(0xF101), "Cube", None)
+                },
+                EntityRecordV17 {
+                    terrain: Some(v16_fixture_terrain()),
+                    ..v17_base(g(0xF102), "Terrain", None)
+                },
+                EntityRecordV17 {
+                    light: Some(Light {
+                        kind: LightKind::Directional,
+                        color: Color::WHITE,
+                        intensity: 2.0,
+                        ..Default::default()
+                    }),
+                    ..v17_base(g(0xF103), "Sun", None)
+                },
+                // The river: a `Spline` centreline and a `WaterBody` on **one**
+                // entity, which is the composition rule v17 established.
+                EntityRecordV17 {
+                    spline: Some(Spline {
+                        points: vec![
+                            Vec3d::new(0.0, 0.0, 0.0),
+                            Vec3d::new(10.0, 0.0, 4.0),
+                            Vec3d::new(18.0, 0.0, 14.0),
+                        ],
+                        ..Spline::default()
+                    }),
+                    water_body: Some(v17_fixture_water()),
+                    ..v17_base(g(0xF104), "River", None)
+                },
+            ],
+            settings: LevelSettings {
+                gravity_2d: Vec2d::new(0.0, -18.0),
+                gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+                sim_hz: 90.0,
+                render: RenderSettingsRecord {
+                    exposure: 1.1,
+                    ..RenderSettingsRecord::default()
+                },
+                partition: PartitionSettings::default(),
+            },
+        }
+    }
+
+    /// Write the committed v17 fixture from [`v17_reference`] under
+    /// `INF_BLESS_FIXTURES=1` (the temporary-writer discipline). Never hand-edit
+    /// the committed bytes.
+    #[test]
+    fn bless_v17_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").is_err() {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v17_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 17);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v17.inf_lvl");
+        std::fs::write(&path, &bytes).expect("write v17 fixture");
+        eprintln!("blessed v17 fixture: {}", path.display());
+    }
+
+    #[test]
+    fn v17_fixture_is_reproducible_and_genuinely_v17() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v17.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v17 fixture present");
+        assert_eq!(bytes[0], 17, "fixture must be a genuine schema-v17 payload");
+        let rebuilt = bincode::serde::encode_to_vec(v17_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v17 fixture must match our frozen v17 writer"
+        );
+    }
+
+    /// This crate's committed v17 fixture must be **byte-identical** to the Ring-0
+    /// runtime reader's — the two codecs are one wire contract written twice.
+    #[test]
+    fn v17_fixture_matches_the_runtime_codecs_copy() {
+        let mine = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v17.inf_lvl");
+        let theirs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../crates/inf-scene/tests/fixtures/scene_v17.inf_lvl");
+        assert_eq!(
+            std::fs::read(&mine).expect("editor v17 fixture"),
+            std::fs::read(&theirs).expect("runtime v17 fixture"),
+            "the two v18-bump fixtures diverged — the codecs are no longer mirrors"
+        );
+    }
+
+    /// The committed v17 fixture — written by the **pre-v18 codec**, before the
+    /// entity record grew its `buoyancy` slot — still loads, with the v17 content
+    /// (the river's water body included) preserved verbatim and nothing made to
+    /// float. The "old bytes load forever" gate for the v18 bump.
+    #[test]
+    fn v17_loads_and_lifts_without_buoyancy() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v17.inf_lvl");
+        let file = decode(&std::fs::read(&path).unwrap()).expect("v17 fixture decodes");
+        assert_eq!(file.schema_version, SCHEMA_VERSION);
+        assert_eq!(file.title, "V17 Fixture Level");
+        assert_eq!(file.entities.len(), 4);
+        let by_name = |n: &str| file.entities.iter().find(|r| r.name == n).unwrap();
+
+        // The v17 content survives the frozen-record hop intact — including the
+        // slot v17 itself added, which is the half a defaults-only fixture would
+        // never have proven …
+        assert_eq!(
+            by_name("Cube").mesh.unwrap().asset,
+            Some(uuid::Uuid::from_u128(0xF1A1))
+        );
+        assert_eq!(by_name("Sun").light.unwrap().intensity, 2.0);
+        assert_eq!(file.settings.sim_hz, 90.0);
+        let t = by_name("Terrain").terrain.clone().expect("terrain slot");
+        assert_eq!(t.biome_set, Some(uuid::Uuid::from_u128(0xF_00BB)));
+        assert_eq!(t.data.get_tile((0, 0)).unwrap().biome_sample(4, 1, 1), 3);
+        let river = by_name("River");
+        assert_eq!(river.water_body, Some(v17_fixture_water()));
+        assert_eq!(river.spline.as_ref().unwrap().points.len(), 3);
+
+        // … and the one new slot lifts to `None` — a level in which nothing
+        // floats, which is exactly what a v17 level was.
+        for r in &file.entities {
+            assert!(
+                r.buoyancy.is_none(),
+                "a v17 level floats nothing; the lift must not conjure buoyancy"
+            );
+        }
+    }
+
+    /// The v17 downgrade is lossless **except** for the buoyancy — the one thing
+    /// v17 cannot express. Proven as a property (round-trip a live record through
+    /// the frozen shape) rather than by listing fields, so a slot added later
+    /// cannot silently fall out of the ladder.
+    #[test]
+    fn v17_entity_downgrade_is_lossless_except_for_the_buoyancy() {
+        let live = EntityRecord {
+            terrain: Some(v16_fixture_terrain()),
+            spline: Some(Spline::default()),
+            water_body: Some(v17_fixture_water()),
+            buoyancy: Some(Buoyancy {
+                density_kg_m3: 450.0,
+                linear_drag: 3.5,
+                ..Buoyancy::default()
+            }),
+            ..v9_base(uuid::Uuid::from_u128(0xF400), "Raft", None)
+                .into_v10()
+                .into_v11()
+                .into_v12()
+                .into_v13()
+                .into_current()
+        };
+        let back = EntityRecordV17::from_current(live.clone()).into_current();
+
+        // The buoyancy is exactly what is lost — the water, which v17 *can*
+        // express, is not …
+        assert!(back.buoyancy.is_none());
+        assert_eq!(back.water_body, live.water_body);
+        // … and nothing else moved: put it back and the records are equal, which
+        // is the property form of "only this field".
+        assert_eq!(
+            EntityRecord {
+                buoyancy: live.buoyancy,
+                ..back
+            },
+            live,
+            "the v17 downgrade lost something other than the buoyancy"
+        );
+    }
+
+    /// The v18 addition round-trips through the whole editor codec — including
+    /// the **new decode arm**, which only a payload stamped v18 exercises — and a
+    /// buoyancy really does reach an ECS world through `write_record_components`
+    /// (the read half of the codec, which a bytes-only test would never touch).
+    #[test]
+    fn v18_buoyancy_round_trips_through_the_codec_and_the_world() {
+        let float = Buoyancy {
+            enabled: true,
+            density_kg_m3: 500.0,
+            fluid_density_kg_m3: 1025.0,
+            linear_drag: 2.5,
+            angular_drag: 1.25,
+        };
+        let file = SceneFile {
+            schema_version: SCHEMA_VERSION,
+            title: "Floating".into(),
+            entities: vec![EntityRecord {
+                buoyancy: Some(float),
+                ..v9_base(uuid::Uuid::from_u128(0xF500), "Crate", None)
+                    .into_v10()
+                    .into_v11()
+                    .into_v12()
+                    .into_v13()
+                    .into_current()
+            }],
+            settings: LevelSettings::default(),
+        };
+        let bytes = bincode::serde::encode_to_vec(&file, bincode_config()).unwrap();
+        assert_eq!(bytes[0], SCHEMA_VERSION as u8);
+        let back = decode(&bytes).expect("the current schema decodes");
+        assert_eq!(back.entities[0].buoyancy, Some(float));
+        // Re-encoding is byte-identical.
+        assert_eq!(
+            bincode::serde::encode_to_vec(&back, bincode_config()).unwrap(),
+            bytes
+        );
+
+        // … and it lands on a real entity, which is what `record_of` then reads back.
+        let mut doc = SceneDoc::new();
+        apply_to_doc(&mut doc, &back);
+        let guid = uuid::Uuid::from_u128(0xF500);
+        let e = doc.world().entity_of(guid).unwrap();
+        assert_eq!(doc.world().world().get::<Buoyancy>(e).copied(), Some(float));
+        assert_eq!(record_of(&doc, guid).unwrap().buoyancy, Some(float));
+    }
+
+    /// **The v18 price, isolated**: an entity that does not float pays exactly one
+    /// discriminant byte. Measured as a delta against the frozen v17 shape of the
+    /// very same record, so it is a *price* rather than an absolute that could
+    /// silently absorb any other growth.
+    #[test]
+    fn v18_costs_one_byte_per_buoyancy_free_entity() {
+        let live = v9_base(uuid::Uuid::from_u128(0xF600), "Rock", None)
+            .into_v10()
+            .into_v11()
+            .into_v12()
+            .into_v13()
+            .into_current();
+        let v18 = bincode::serde::encode_to_vec(&live, bincode_config()).unwrap();
+        let v17 = bincode::serde::encode_to_vec(
+            EntityRecordV17::from_current(live.clone()),
+            bincode_config(),
+        )
+        .unwrap();
+        assert_eq!(
+            v18.len(),
+            v17.len() + 1,
+            "the v18 slot must cost exactly one discriminant byte on a sinking entity"
+        );
+
+        // A record that *carries* buoyancy costs more than its own discriminant.
+        let afloat = EntityRecord {
+            buoyancy: Some(Buoyancy::default()),
+            ..live
+        };
+        assert!(
+            bincode::serde::encode_to_vec(&afloat, bincode_config())
+                .unwrap()
+                .len()
+                > v18.len() + 1
         );
     }
 }

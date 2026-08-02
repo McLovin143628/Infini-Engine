@@ -22,6 +22,16 @@ glam = { workspace = true }
 # Dependency direction is inf-physics → inf-ecs (both Ring 0); inf-ecs never
 # names physics, so there is no cycle.
 inf-ecs = { workspace = true }
+# P20.2: the water height query the buoyancy pass samples in the fixed step.
+# Ring 0 → Ring 0, and deliberately the SAME crate `inf-render` consumes, so the
+# surface a boat floats on and the surface the shader draws are one evaluator —
+# the terrain-parity class of drift, avoided by not creating a second copy.
+inf-water = { workspace = true }
+# The spline interpolation kind a river centreline is built with. Named directly
+# rather than reached through `inf-ecs` because the ECS `SplineInterp` is the
+# *authoring* enum and `inf_math`'s is the *math* one — the mapping between them
+# is the projection, and hiding one behind the other would hide that.
+inf-math = { workspace = true }
 # Entity identity (Guid) keys the deterministic entity↔handle maps.
 uuid = { workspace = true }
 

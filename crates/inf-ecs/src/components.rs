@@ -3725,6 +3725,136 @@ impl WaterBody {
     }
 }
 
+// ── buoyancy (schema v18 · P20.2) ───────────────────────────────────────────
+
+/// **Buoyancy + hydrodynamic drag** (schema v18, P20.2): the opt-in marker that
+/// makes a dynamic 3D body *float* when a [`WaterBody`]'s surface is over it.
+///
+/// ## Why this is opt-in rather than on for every `RigidBody3D`
+///
+/// The alternative — buoyancy on by default, derived from the collider's
+/// existing `density` — was considered and rejected for two concrete reasons.
+///
+/// 1. **It changes what committed levels mean.** Nothing in a pre-v18 `.inf_lvl`
+///    says "this crate floats"; under a default-on rule, adding a lake to an
+///    existing level silently rewrites the physics of every dynamic body in it,
+///    and a replay recorded before the lake would diverge. Opt-in makes the
+///    change visible in the file that caused it.
+/// 2. **[`Collider3D::density`] defaults to `1.0`, which is not a material
+///    density.** It is rapier's placeholder, and it has never mattered, because a
+///    rigid body's fall is mass-independent. Buoyancy is the first system that
+///    reads it as physics: at 1 kg/m³ against water's 1000, *every* default body
+///    would float like a cork on a millimetre of draught. A default-on rule would
+///    therefore be wrong for essentially all existing content and the fix would be
+///    "go author a density on every collider in your level".
+///
+/// The same trap is why flotation reads [`density_kg_m3`](Self::density_kg_m3)
+/// here rather than the collider's: this field is the body's density *for
+/// flotation* and defaults to seasoned wood, so a body that opts in floats
+/// sensibly the moment the component is added. The collider's `density` keeps
+/// doing its own job — it is what rapier turns into the body's **mass and
+/// inertia**, i.e. how *hard* the body is to move, while this is how *high* it
+/// rides. When the two agree the model is exactly Archimedes; the equilibrium
+/// submerged fraction is always `density_kg_m3 / fluid_density_kg_m3`.
+///
+/// ## The model, stated
+///
+/// Buoyant force is `submerged_fraction × displaced_volume × ρ_fluid × g`, taken
+/// against gravity — with the **displaced volume read from rapier's own exact
+/// per-shape mass properties** (`mass / density_kg_m3`) rather than from a second,
+/// hand-written volume table that could drift from the one the solver uses. Drag
+/// is **linear** in the velocity relative to the water's flow (still water for an
+/// ocean or lake, the river's tangent flow for a river) and scaled by the
+/// submerged fraction: an honest v1 that cannot express a hull's shape-dependent
+/// terminal speed, which quadratic drag would. See `inf_physics::d3::water`.
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Buoyancy {
+    /// Whether this body floats at all. `false` keeps the component (and its
+    /// tuning) on the entity while the water ignores it — the same "authored but
+    /// off" affordance `SkyAtmosphere::enabled` gives the sky.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The body's density **for flotation**, kg/m³. The equilibrium submerged
+    /// fraction is exactly this over [`fluid_density_kg_m3`](Self::fluid_density_kg_m3),
+    /// so `500` against fresh water floats half-submerged and `2000` sinks.
+    /// Defaults to seasoned wood (600 kg/m³) so an opted-in body floats with its
+    /// deck clear rather than awash.
+    #[serde(default = "default_body_density")]
+    pub density_kg_m3: f64,
+    /// Density of the water, kg/m³. Fresh water is 1000; sea water is ~1025, and
+    /// authoring that is the difference between a hull that rides a little higher
+    /// at sea and one that does not.
+    #[serde(default = "default_fluid_density")]
+    pub fluid_density_kg_m3: f64,
+    /// Linear hydrodynamic drag, **s⁻¹** — the same units and the same meaning as
+    /// [`RigidBody3D::linear_damping`], so "2" means the body's speed *relative to
+    /// the water* decays with a ~0.35 s half-life while fully submerged. Scaled by
+    /// the submerged fraction, so a body lifted clear of the water stops paying it.
+    #[serde(default = "default_water_linear_drag")]
+    pub linear_drag: f64,
+    /// Angular hydrodynamic drag, **s⁻¹** — what stops a floating crate spinning
+    /// forever after a wave rolls it. Also scaled by the submerged fraction.
+    #[serde(default = "default_water_angular_drag")]
+    pub angular_drag: f64,
+}
+
+/// Seasoned wood — the density of something that obviously floats, chosen so the
+/// component works the moment it is added. See the type docs on why this is not
+/// read from the collider.
+fn default_body_density() -> f64 {
+    600.0
+}
+/// Fresh water at 4 °C, the SI reference. Sea water is ~1025.
+fn default_fluid_density() -> f64 {
+    1000.0
+}
+fn default_water_linear_drag() -> f64 {
+    2.0
+}
+fn default_water_angular_drag() -> f64 {
+    1.5
+}
+
+impl Default for Buoyancy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            density_kg_m3: default_body_density(),
+            fluid_density_kg_m3: default_fluid_density(),
+            linear_drag: default_water_linear_drag(),
+            angular_drag: default_water_angular_drag(),
+        }
+    }
+}
+
+impl Buoyancy {
+    /// A body of the given flotation density in fresh water, everything else at
+    /// its default. `Buoyancy::of_density(500.0)` floats half-submerged.
+    pub fn of_density(density_kg_m3: f64) -> Self {
+        Self {
+            density_kg_m3,
+            ..Self::default()
+        }
+    }
+
+    /// The submerged fraction this body settles at in still water, `[0, 1]` —
+    /// `density / fluid_density`, saturating at 1 for anything denser than the
+    /// fluid (which sinks rather than settling at all).
+    ///
+    /// Defined here rather than in the physics pass because it is the *contract*:
+    /// the statics tests assert against this number, and a pass that computed a
+    /// different equilibrium would be failing this function, not its own.
+    pub fn equilibrium_fraction(&self) -> f64 {
+        if self.fluid_density_kg_m3 <= 0.0 {
+            return 0.0;
+        }
+        (self.density_kg_m3 / self.fluid_density_kg_m3).clamp(0.0, 1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4752,5 +4882,64 @@ mod tests {
             (1.5, 0.25),
             "a sheltered body must ignore the level's gale"
         );
+    }
+
+    // ── buoyancy (P20.2) ────────────────────────────────────────────────────
+
+    #[test]
+    fn buoyancy_serde_round_trips_and_defaults() {
+        let b = Buoyancy {
+            enabled: false,
+            density_kg_m3: 2500.0,
+            fluid_density_kg_m3: 1025.0,
+            linear_drag: 0.5,
+            angular_drag: 0.25,
+        };
+        let back: Buoyancy = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
+        assert_eq!(b, back);
+
+        // A partial record still decodes — the additive-field guarantee.
+        let d: Buoyancy = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, Buoyancy::default());
+        assert!(d.enabled, "a component you added should do something");
+        assert_eq!(d.density_kg_m3, 600.0);
+        assert_eq!(d.fluid_density_kg_m3, 1000.0);
+
+        let partial: Buoyancy = serde_json::from_str(r#"{"density_kg_m3": 500.0}"#).unwrap();
+        assert_eq!(partial.density_kg_m3, 500.0);
+        assert_eq!(partial.fluid_density_kg_m3, 1000.0);
+
+        // bincode round-trip (the wire the scene records ride).
+        let cfg = bincode::config::standard();
+        let bytes = bincode::serde::encode_to_vec(b, cfg).unwrap();
+        let (rt, _): (Buoyancy, usize) = bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+        assert_eq!(rt, b);
+    }
+
+    /// The **contract** the physics statics tests assert against: where a body
+    /// settles is `density / fluid_density`, and nothing else.
+    #[test]
+    fn the_equilibrium_fraction_is_the_density_ratio() {
+        assert_eq!(Buoyancy::of_density(500.0).equilibrium_fraction(), 0.5);
+        assert_eq!(Buoyancy::of_density(1000.0).equilibrium_fraction(), 1.0);
+        assert_eq!(
+            Buoyancy::of_density(2000.0).equilibrium_fraction(),
+            1.0,
+            "denser than water saturates at 'fully submerged' — it sinks rather \
+             than settling"
+        );
+        assert_eq!(Buoyancy::default().equilibrium_fraction(), 0.6);
+        // Sea water floats a body a touch higher than fresh.
+        let sea = Buoyancy {
+            fluid_density_kg_m3: 1025.0,
+            ..Buoyancy::of_density(500.0)
+        };
+        assert!(sea.equilibrium_fraction() < 0.5);
+        // A degenerate fluid is not a divide by zero.
+        let vacuum = Buoyancy {
+            fluid_density_kg_m3: 0.0,
+            ..Buoyancy::default()
+        };
+        assert_eq!(vacuum.equilibrium_fraction(), 0.0);
     }
 }

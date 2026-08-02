@@ -27,16 +27,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use glam::{DQuat, DVec3};
+use glam::{DAffine3, DQuat, DVec2, DVec3};
 use inf_ecs::components::{
-    BodyKind3D as SceneBodyKind3D, Collider3D, ColliderShape3DKind,
-    CombineRule as SceneCombineRule, Joint3D, JointKind3D as SceneJointKind3D, PcgVolume,
-    RigidBody3D, Transform,
+    BodyKind3D as SceneBodyKind3D, Buoyancy, Collider3D, ColliderShape3DKind,
+    CombineRule as SceneCombineRule, GlobalTransform, Joint3D, JointKind3D as SceneJointKind3D,
+    PcgVolume, RigidBody3D, Spline, Transform, WaterBody,
 };
 use inf_ecs::{EcsWorld, Vec3d};
 use uuid::Uuid;
 
 use super::joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
+use super::water::{
+    self, BodyState, BuoyancyDesc3D, BuoyantMap, SampleGeometry, WaterEvent3D, WaterIndex,
+    WaterProbe, WaterStamp,
+};
 use super::world::{BodyKind3D, ColliderDesc3D, ColliderShape3D, PhysicsWorld3D};
 use super::{BodyId3D, ColliderId3D};
 use crate::filtering::{CollisionLayers, CombineRule};
@@ -152,6 +156,33 @@ pub struct PhysicsBridge3D {
     /// it — the inverse of [`collider_of`](Self::collider_of). Deterministic
     /// (`BTreeMap`, sorted keys).
     collider_to_guid: BTreeMap<ColliderId3D, Uuid>,
+
+    // ── water (P20.2) ─────────────────────────────────────────────────────
+    /// The level's water, spatially indexed. Rebuilt only when
+    /// [`water_stamps`](Self::water_stamps) changes — a river's arc-length
+    /// resample is not a per-step cost.
+    water: WaterIndex,
+    /// What the index was last built from (the P19.5 change-stamp pattern).
+    water_stamps: Vec<WaterStamp>,
+    /// Scratch for this sync's stamps, reused so the steady state allocates
+    /// nothing new.
+    water_scratch: Vec<WaterStamp>,
+    /// The components to build surfaces from when the stamp changed — gathered
+    /// alongside the stamps in `sync_from_world`'s single entity walk.
+    water_sources: Vec<(Uuid, WaterBody, Option<Spline>, DAffine3)>,
+    /// `(level clock seconds, weather wind m/s)` for this step, resolved once per
+    /// sync from [`inf_ecs::sky::water_environment`] — never from a wall clock.
+    water_env: (f64, (f64, f64)),
+    /// Buoyant bodies: their tuning and their per-step latch, in `Guid` order.
+    /// **Empty for every level without a `Buoyancy` component**, which is what
+    /// makes the whole water pass one branch on the off path.
+    buoyant: BuoyantMap,
+    /// Swim latches, keyed by character `Guid` (P20.2). Separate from
+    /// [`buoyant`](Self::buoyant) because a character controller is kinematic and
+    /// never floats — it swims.
+    swimming: BTreeMap<Uuid, bool>,
+    /// This step's crossings, drained by the host in the collision slot.
+    water_events: Vec<WaterEvent3D>,
 }
 
 impl PhysicsBridge3D {
@@ -163,6 +194,14 @@ impl PhysicsBridge3D {
             entities: BTreeMap::new(),
             structure_stamps: BTreeMap::new(),
             collider_to_guid: BTreeMap::new(),
+            water: WaterIndex::default(),
+            water_stamps: Vec::new(),
+            water_scratch: Vec::new(),
+            water_sources: Vec::new(),
+            water_env: (0.0, (0.0, 0.0)),
+            buoyant: BuoyantMap::new(),
+            swimming: BTreeMap::new(),
+            water_events: Vec::new(),
         }
     }
 
@@ -213,10 +252,41 @@ impl PhysicsBridge3D {
     /// [`crate::d2::PhysicsBridge2D::sync_from_world`].
     pub fn sync_from_world(&mut self, world: &EcsWorld) {
         let mut snaps: Vec<EntitySync3D> = Vec::new();
+        // P20.2: the water gather rides in THIS walk rather than in a second one.
+        // A furnished town is 13 000 entities, and walking them twice per fixed
+        // step to learn that a lake has not moved is the cost the change stamp
+        // exists to avoid — spending it on the walk instead would be the same
+        // mistake one level up.
+        self.water_env = inf_ecs::sky::water_environment(world);
+        self.water_scratch.clear();
+        self.water_sources.clear();
+        let mut buoyancy: Vec<(Uuid, BuoyancyDesc3D)> = Vec::new();
         for entity in world.world().iter_entities() {
             let Some(guid) = entity.get::<inf_ecs::Guid>().map(|g| g.0) else {
                 continue;
             };
+            if let Some(water) = entity.get::<WaterBody>() {
+                let affine = entity.get::<GlobalTransform>().map(|g| g.0).unwrap_or({
+                    // A water entity with no computed global transform yet falls
+                    // back to its local one, then to the identity — the same
+                    // tolerance the renderer's projector shows, for the same
+                    // reason: an unpropagated frame is a timing artefact, not an
+                    // authoring error.
+                    entity
+                        .get::<Transform>()
+                        .map(|t| DAffine3::from_translation(t.translation.to_dvec3()))
+                        .unwrap_or(DAffine3::IDENTITY)
+                });
+                let spline = entity.get::<Spline>().cloned();
+                self.water_scratch
+                    .push(WaterStamp::new(guid, *water, spline.as_ref(), affine));
+                self.water_sources.push((guid, *water, spline, affine));
+            }
+            if let Some(b) = entity.get::<Buoyancy>() {
+                if let Some(desc) = BuoyancyDesc3D::from_component(b) {
+                    buoyancy.push((guid, desc));
+                }
+            }
             let rb = entity.get::<RigidBody3D>().copied();
             let col = entity.get::<Collider3D>().copied();
             let joint = entity.get::<Joint3D>().copied();
@@ -236,11 +306,61 @@ impl PhysicsBridge3D {
                 joint: joint.and_then(joint_sync),
             });
         }
+        self.reconcile_water(buoyancy);
         // P19.5: a volume's derived solids. Unchanged volumes are **retained**
         // rather than re-described — see the doc on `structure_stamps`.
         let retained = self.gather_structures(world, &mut snaps);
         // `sync` sorts by Guid internally, so the gather order here is irrelevant.
         self.sync_retaining(&snaps, &retained);
+    }
+
+    /// Bring the water index and the buoyant set in line with what the walk
+    /// found. The index is rebuilt only when the **stamp** moved — see
+    /// [`WaterStamp`].
+    fn reconcile_water(&mut self, mut buoyancy: Vec<(Uuid, BuoyancyDesc3D)>) {
+        // Guid order, always: the index's body indices are what a water event
+        // names, and an index that depended on ECS archetype order would make the
+        // events depend on spawn history.
+        self.water_scratch.sort_by_key(|s| s.guid());
+        if self.water_scratch != self.water_stamps {
+            self.water_stamps.clear();
+            self.water_stamps.extend_from_slice(&self.water_scratch);
+            self.water_sources.sort_by_key(|(g, _, _, _)| *g);
+            let env = self.water_env;
+            let entries = self
+                .water_sources
+                .iter()
+                .filter_map(|(guid, body, spline, affine)| {
+                    water::water_surface_of(body, spline.as_ref(), affine, env)
+                        .map(|s| water::water_entry(*guid, s))
+                })
+                .collect();
+            self.water.rebuild(entries);
+        }
+        // The buoyant set is rebuilt every sync (it is tiny), but each entry's
+        // **latch** is carried over so an enter/exit does not re-fire because a
+        // drag coefficient was edited.
+        buoyancy.sort_by_key(|(g, _)| *g);
+        let mut next = BuoyantMap::new();
+        for (guid, desc) in buoyancy {
+            let state = self.buoyant.get(&guid).map(|(_, s)| *s).unwrap_or_default();
+            next.insert(guid, (desc, state));
+        }
+        // A body that STOPPED being buoyant (its component was removed or
+        // disabled) still carries last step's water force, and a rapier force
+        // persists. Clearing it here is the other half of the ownership the apply
+        // pass claims — without it, deleting a `Buoyancy` would leave the body
+        // rising forever.
+        let dropped: Vec<BodyId3D> = self
+            .buoyant
+            .keys()
+            .filter(|g| !next.contains_key(*g))
+            .filter_map(|g| self.entities.get(g).map(|r| r.body))
+            .collect();
+        for body in dropped {
+            self.world.reset_forces(body);
+        }
+        self.buoyant = next;
     }
 
     /// Append descriptors for every `PcgVolume` whose solids **changed**, and
@@ -404,6 +524,13 @@ impl PhysicsBridge3D {
             .iter()
             .filter_map(|(g, r)| r.collider.map(|c| (c, *g)))
             .collect();
+
+        // 6. P20.2: a despawned character forgets it was swimming, so a later
+        //    entity reusing the guid cannot inherit a stale latch — the same
+        //    reasoning as the `structure_stamps` prune above.
+        let mut swimming = std::mem::take(&mut self.swimming);
+        swimming.retain(|g, _| self.entities.contains_key(g));
+        self.swimming = swimming;
     }
 
     /// Bring one entity's joint in line with its desired snapshot. Resolves the
@@ -453,6 +580,204 @@ impl PhysicsBridge3D {
                 }
             }
         }
+    }
+
+    // ── water (P20.2) ─────────────────────────────────────────────────────
+
+    /// **The water force pass.** Apply buoyancy + hydrodynamic drag to every
+    /// buoyant body, arm this step's enter/exit/splash events, and return.
+    ///
+    /// Runs **between [`sync_from_world`](Self::sync_from_world) and
+    /// [`step`](Self::step)** — after the sync because a body has to be sampled
+    /// where it is, before the step because rapier clears force accumulators every
+    /// step. See the [`water`](super::water) module docs for the full ordering law.
+    ///
+    /// Takes no world: everything it needs was gathered during the sync, which is
+    /// the strongest available statement that a water force cannot depend on
+    /// anything the renderer owns.
+    ///
+    /// **Off-path cost is one branch.** A level with no `Buoyancy` component
+    /// returns immediately, without enumerating a single rigid body.
+    pub fn apply_water_forces(&mut self, dt: f64) {
+        self.water_events.clear();
+        if self.buoyant.is_empty() {
+            return;
+        }
+        let t = self.water_env.0;
+        let gravity = self.world.gravity();
+        // Phase 1 — solve, read-only, in Guid order (the bridge discipline).
+        struct Plan {
+            guid: Uuid,
+            body: BodyId3D,
+            forces: water::WaterForces,
+            hysteresis_m: f64,
+            up_speed: f64,
+        }
+        let mut plans: Vec<Plan> = Vec::new();
+        for (guid, (desc, _)) in &self.buoyant {
+            let Some(rec) = self.entities.get(guid) else {
+                continue;
+            };
+            // Only the solver's own bodies float: a static wall does not, and a
+            // kinematic platform is script-driven by definition. A character
+            // controller is kinematic and gets swim mode instead.
+            if rec.kind != BodyKind3D::Dynamic {
+                continue;
+            }
+            let Some(col) = rec.col.as_ref() else {
+                continue;
+            };
+            let Some(state) = self.body_state(rec.body) else {
+                continue;
+            };
+            let geo = water::sample_geometry(&col.shape, col.local_translation);
+            let forces = water::solve(&self.water, t, &state, &geo, desc, gravity, dt);
+            let up = if gravity.length_squared() > 0.0 {
+                -gravity.normalize()
+            } else {
+                DVec3::Y
+            };
+            plans.push(Plan {
+                guid: *guid,
+                body: rec.body,
+                hysteresis_m: water::exit_hysteresis_m(&geo),
+                up_speed: state.linvel.dot(up),
+                forces,
+            });
+        }
+        // Phase 2 — apply, as real forces. Two rapier laws govern this loop and
+        // both are written out on [`PhysicsWorld3D::apply_force_at_point`]: a
+        // rapier force **persists** until reset (so last step's is cleared first,
+        // for every buoyant body, whether or not it is wet this step), and a force
+        // is **not** an impulse of `F · dt` for the position (rapier substeps, so
+        // a front-loaded impulse leaves a neutrally buoyant body drifting upward
+        // about a millimetre per step while its velocity stays exactly zero).
+        //
+        // The reset is scoped to bodies the water pass owns. Nothing else applies
+        // a persistent force to them — there is no `apply_force` Blueprint node,
+        // and both hosts use impulses — so the ownership is total rather than
+        // shared.
+        for plan in plans {
+            self.world.reset_forces(plan.body);
+            for (force, point) in plan.forces.samples {
+                if force != DVec3::ZERO {
+                    self.world.apply_force_at_point(plan.body, force, point);
+                }
+            }
+            if plan.forces.drag != DVec3::ZERO {
+                self.world.apply_force(plan.body, plan.forces.drag);
+            }
+            if plan.forces.torque != DVec3::ZERO {
+                self.world.apply_torque(plan.body, plan.forces.torque);
+            }
+            if let Some((_, state)) = self.buoyant.get_mut(&plan.guid) {
+                water::crossing_events(
+                    plan.guid,
+                    state,
+                    &plan.forces.probe,
+                    plan.hysteresis_m,
+                    plan.up_speed,
+                    &mut self.water_events,
+                );
+            }
+        }
+    }
+
+    /// Take this step's water crossings, in body-`Guid` order (`Enter`/`Exit`
+    /// before the `Splash` that accompanies it). Drained in the same slot as the
+    /// collision events, so the fixed step has one event point rather than two.
+    pub fn drain_water_events(&mut self) -> Vec<WaterEvent3D> {
+        std::mem::take(&mut self.water_events)
+    }
+
+    /// The level's water index — the seam the `water.*` Blueprint nodes and any
+    /// debug view read.
+    pub fn water(&self) -> &WaterIndex {
+        &self.water
+    }
+
+    /// `(level clock seconds, weather wind m/s)` as of the last sync.
+    pub fn water_env(&self) -> (f64, (f64, f64)) {
+        self.water_env
+    }
+
+    /// The highest water surface over world `(x, z)`, or `None` where there is no
+    /// water — the `water.surface_height` host seam.
+    pub fn water_surface_height(&self, x: f64, z: f64) -> Option<f64> {
+        self.water
+            .highest_surface_at(DVec2::new(x, z), self.water_env.0)
+            .map(|(_, h)| h)
+    }
+
+    /// Probe the water under a tracked entity: submerged fraction, deepest
+    /// submersion, surface height and flow.
+    ///
+    /// A **live** query rather than a read of the force pass's cache, so it
+    /// answers for any entity with a collider — a kinematic character has no
+    /// `Buoyancy` and still needs to know how deep it is standing.
+    pub fn water_probe(&self, guid: Uuid) -> Option<WaterProbe> {
+        if self.water.is_empty() {
+            return None;
+        }
+        let rec = self.entities.get(&guid)?;
+        let col = rec.col.as_ref()?;
+        let state = self.body_state(rec.body)?;
+        let geo = water::sample_geometry(&col.shape, col.local_translation);
+        Some(water::probe(&self.water, self.water_env.0, &state, &geo))
+    }
+
+    /// The sample layout the water pass uses for `guid`, if it is tracked and has
+    /// a collider. Exposed so a test can assert against the same geometry the pass
+    /// used rather than against a second copy of it.
+    pub fn water_sample_geometry(&self, guid: Uuid) -> Option<SampleGeometry> {
+        let rec = self.entities.get(&guid)?;
+        let col = rec.col.as_ref()?;
+        Some(water::sample_geometry(&col.shape, col.local_translation))
+    }
+
+    /// Whether `guid` is currently swimming (the latched state — call
+    /// [`update_swim`](Self::update_swim) to advance it).
+    pub fn is_swimming(&self, guid: Uuid) -> bool {
+        self.swimming.get(&guid).copied().unwrap_or(false)
+    }
+
+    /// Advance `guid`'s swim latch from how submerged it is now, and return it.
+    ///
+    /// Both hosts call this — the editor's Simulate loop and the shipped runtime —
+    /// so the threshold exists once. A per-host copy of "0.6 means swimming" is
+    /// exactly the drift the projector MIRROR gate catches elsewhere, avoided here
+    /// by there being nothing to mirror.
+    pub fn update_swim(&mut self, guid: Uuid) -> bool {
+        let fraction = self.water_probe(guid).map(|p| p.fraction).unwrap_or(0.0);
+        let was = self.is_swimming(guid);
+        let now = water::swim_latch(was, fraction);
+        if now || was {
+            self.swimming.insert(guid, now);
+        }
+        now
+    }
+
+    /// Transform a `move_and_slide` motion for `guid` if it is swimming, else
+    /// return it untouched — the one place the mover's water behaviour lives, so
+    /// the `physics3d.move_and_slide` host path in either host is a call rather
+    /// than a policy.
+    pub fn apply_swim_motion(&self, guid: Uuid, motion: DVec3, dt: f64) -> DVec3 {
+        if !self.is_swimming(guid) {
+            return motion;
+        }
+        let fraction = self.water_probe(guid).map(|p| p.fraction).unwrap_or(0.0);
+        water::swim_motion(motion, fraction, dt)
+    }
+
+    /// A body's pose + velocities + mass, as the water solve wants them.
+    fn body_state(&self, body: BodyId3D) -> Option<BodyState> {
+        Some(BodyState {
+            translation: self.world.body_translation(body)?,
+            rotation: self.world.body_rotation(body)?,
+            linvel: self.world.body_linvel(body).unwrap_or(DVec3::ZERO),
+            angvel: self.world.body_angvel(body).unwrap_or(DVec3::ZERO),
+            mass: self.world.body_mass(body).unwrap_or(0.0),
+        })
     }
 
     /// The simulated **dynamic** poses, in `Guid` order, for the caller to copy

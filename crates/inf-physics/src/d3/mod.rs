@@ -17,6 +17,7 @@ mod ecs;
 mod events;
 mod joint;
 mod query;
+pub mod water;
 mod world;
 
 pub use character::{CharacterMove3D, CharacterMover3D};
@@ -26,6 +27,9 @@ pub use ecs::{
 pub use events::ContactEvent3D;
 pub use joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
 pub use query::RayHit3D;
+pub use water::{
+    BuoyancyDesc3D, SampleGeometry, WaterEvent3D, WaterEventKind3D, WaterIndex, WaterProbe,
+};
 pub use world::{BodyKind3D, ColliderDesc3D, ColliderShape3D, PhysicsWorld3D};
 
 // `ContactPhase` (Started/Stopped) is dimension-agnostic, so `d3` reuses the one

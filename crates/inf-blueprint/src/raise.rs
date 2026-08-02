@@ -72,6 +72,9 @@ fn event_node_spec(fn_id: &str) -> (String, Option<(&'static str, String)>) {
         "begin_play" => ("event.begin_play".into(), None),
         "tick" => ("event.tick".into(), None),
         "collision" => ("event.collision".into(), None),
+        "water_enter" => ("event.water_enter".into(), None),
+        "water_exit" => ("event.water_exit".into(), None),
+        "water_splash" => ("event.water_splash".into(), None),
         other => {
             if let Some(action) = other.strip_prefix("input:") {
                 ("event.input".into(), Some(("action", action.to_string())))
@@ -92,6 +95,9 @@ pub fn event_kind_of(fn_id: &str) -> EventKind {
         "begin_play" => EventKind::BeginPlay,
         "tick" => EventKind::Tick,
         "collision" => EventKind::Collision,
+        "water_enter" => EventKind::WaterEnter,
+        "water_exit" => EventKind::WaterExit,
+        "water_splash" => EventKind::WaterSplash,
         other => {
             if let Some(action) = other.strip_prefix("input:") {
                 EventKind::Input(action.to_string())

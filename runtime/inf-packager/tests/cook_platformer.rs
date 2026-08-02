@@ -536,6 +536,7 @@ fn make_streaming_terrain_project_with(root: &Path, biomes: BiomeSetFixture) -> 
             time_of_day: None,
             sky_atmosphere: None,
             water_body: None,
+            buoyancy: None,
         }],
         settings: Default::default(),
     };

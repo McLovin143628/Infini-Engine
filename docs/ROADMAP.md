@@ -5021,6 +5021,220 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > `runtime/inf-packager/tests/cook_water.rs`,
 > `editor/crates/inf-editor-core/tests/projector_mirror.rs`.
 
+> **STATUS — P20.2 Water volumes & physics: COMPLETE (2026-08-02).**
+> Water became **physical**: bodies float, water pushes back, Blueprints hear it, and a
+> character swims. Schema **v18** (one appended entity slot, `buoyancy`). All 45 goldens
+> byte-identical — this batch draws nothing.
+>
+> **The force is a pure function of `(WaterBody params, body pose, level clock)`.** It samples
+> P20.1's `WaterSurface::height_at` — `f64`, allocation-free, bit-portable, camera-free,
+> frame-free — from inside the fixed step, and the clock is the *document's*
+> (`ResolvedSky::cloud_time_s`). That is the P16.3 sim/render split at its sharpest so far: a
+> buoyant force computed from anything the renderer owns would float a boat at a different
+> height in a shipped build than in the preview, and *it would still look like a sea*, so
+> nothing would notice. **There is one wave model** — the Gerstner sum the shader evaluates and
+> the one the buoyancy samples are the same `inf_water::WaveField`, built by the same
+> `from_spec` from the same component — and `the_sim_and_the_renderer_derive_the_same_waves`
+> pins it as **bits**, comparing the two projections rather than trusting two copies of source.
+>
+> **THE ORDERING LAW.** The pass runs strictly `sync → apply_water_forces(dt) → step`, and its
+> events drain in the **collision slot**. After the sync because a body has to be sampled where
+> it *is*; before the step because rapier clears force accumulators every step; in the collision
+> slot because a crossing is sensed from the same pre-step poses a contact is, and two "when did
+> this happen" answers in one fixed step is one too many.
+>
+> **TWO RAPIER LAWS, both paid for in this batch, both on `apply_force_at_point`'s doc.**
+> (1) **A rapier force is persistent** — it re-applies every step until `reset_forces` clears
+> it. A per-step buoyant "force" re-added each step accumulates without bound, and the first
+> floating box left the atmosphere at 13 km. (2) **A force is not an impulse of `F · dt`, for
+> POSITION.** rapier substeps; a front-loaded impulse conserves the velocity *exactly* and still
+> drifts the position by `g · dt² · (N−1)/2N` per step — the second attempt had a neutrally
+> buoyant box rising a millimetre per step with a measured velocity of `1.4e-17`. Buoyancy is a
+> force; applying it as one is what makes it cancel gravity substep for substep. The pass
+> therefore `reset_forces`es every buoyant body first, and that ownership is total (there is no
+> `apply_force` Blueprint node, and both hosts use impulses) rather than shared.
+>
+> **The model, and its named errors.** Buoyancy is Archimedes: `submerged_fraction × displaced
+> volume × ρ_fluid × g` against gravity, split across **four fixed sample points** on the
+> shape's mid-plane at its quadrant midpoints and weighted by each point's own submersion —
+> four because one point has no lever arm and therefore no righting moment, and two can only
+> right about one axis. The displaced volume is `mass / density_kg_m3`, i.e. **rapier's own
+> exact per-shape volume read back through the mass it already computed**, rather than a second
+> hand-written volume table that could disagree with the one the solver uses (a box, a ball and
+> a capsule all have closed-form volumes in rapier already). That is a deviation from the brief's
+> "per-shape exact volumes, AABB fallback otherwise" with a strictly better property: there is
+> no second formula to drift. The **AABB fallback survives where it is really needed** — the
+> sample *layout* for a trimesh, whose vertices are reduced to their bounding box.
+> Per-column submersion is **linear in depth over the shape's vertical extent**: exact for a box
+> at any depth, exact for a sphere or a capsule at the symmetric half-submerged point (which is
+> the equilibrium the statics tests assert), a shape factor away from exact elsewhere — written
+> down because "approximate" with a named error is engineering and "approximate" without one is
+> a guess. The centre of buoyancy is not computed as an offset at all: applying each sample's
+> force **where it is generated** produces the righting moment as a consequence, and a raft
+> rolled 25° is pushed back (`a_tilted_body_gets_a_righting_moment`), while a level one gets a
+> torque of exactly zero.
+>
+> **Drag is LINEAR and still-water, and both halves are decisions.** Linear in the velocity
+> relative to the water's *flow*, with the coefficient in **s⁻¹** so it means exactly what
+> `RigidBody3D::linear_damping` means, scaled by the submerged fraction, and clamped so
+> `k·dt ≤ 0.9` — a hostile authored coefficient is a mistake, not an instruction to explode the
+> sim. Quadratic drag is the physically right law for a hull and is deferred: it needs a
+> reference area and a shape-dependent drag coefficient, neither of which v1 has anywhere honest
+> to get, and the honest consequence is that a hull's terminal speed cannot depend on its shape.
+> **The water's velocity is `flow_at`, not the wave orbit** — zero for an ocean or a lake by
+> P20.1's explicit decision (a Gerstner orbit averages to no net transport), the tangent flow
+> for a river. Using the *orbital* velocity as the drag reference rather than as a current is
+> defensible and is deferred: it needs a new `WaveField` seam and it oscillates at wave
+> frequency, which is a stiff term at 60 Hz. **Angular drag needs an inertia**, and rather than
+> rotate rapier's local-frame tensor into world space every step it uses the sample points'
+> own second moment `m · mean(|r|²)` — isotropic, exact for a sphere, an approximation for a long
+> hull, and it keeps the coefficient a plain s⁻¹ rate like the linear one.
+>
+> **Schema v18, and the argument for it.** `Buoyancy` ships as an **opt-in component**, and the
+> no-bump alternative — buoyancy on for every `RigidBody3D`, derived from the collider's existing
+> `density` — was considered and rejected for two concrete reasons. First, it changes what
+> committed levels *mean*: nothing in a pre-v18 `.inf_lvl` says "this crate floats", so adding a
+> lake to an existing level would silently rewrite the physics of every dynamic body in it and a
+> replay recorded before the lake would diverge. Second, **`Collider3D::density` defaults to
+> `1.0`, which is not a material density** — it is rapier's placeholder, and it has never
+> mattered because a rigid body's fall is mass-independent. Buoyancy is the first system that
+> reads it as physics: at 1 kg/m³ against water's 1000, *every* default body would float like a
+> cork on a millimetre of draught, so a default-on rule would be wrong for essentially all
+> existing content and the fix would be "go author a density on every collider in your level".
+> The same trap is why flotation reads `Buoyancy::density_kg_m3` (default 600 — seasoned wood)
+> rather than the collider's: the collider's density keeps doing its own job (it is what rapier
+> turns into **mass and inertia**, i.e. how *hard* the body is to move) while the component says
+> how *high* it rides. When the two agree the model is exactly Archimedes; the equilibrium
+> submerged fraction is always `density / fluid_density`, stated once as
+> `Buoyancy::equilibrium_fraction` so the statics tests assert against a **contract** rather than
+> against the pass's own arithmetic. The bump is the `EntityRecordV10` *shape* — one appended
+> slot, `EntityRecordV17`/`SceneFileV17` frozen in both codecs with `into_current` +
+> `from_current`, the v16 rung repointed at v17, an `18 =>` decode arm, and `scene_v17.inf_lvl`
+> blessed in **both** fixture dirs and byte-compared. The v17 fixture carries what only v17 could
+> express (a spline **river** with an authored width/depth taper), so the v18 hop is proven to
+> *preserve* v17 content rather than merely to produce defaults. **Priced:** exactly **one
+> discriminant byte per buoyancy-free entity**, measured as a delta against the frozen v17 shape
+> of the same record, and every sample's delta is exactly its entity count — character-demo +4,
+> streamed-terrain +4, terrain-demo +4, first-person +4, platformer +5, hybrid +5,
+> partitioned-world +20, phase16-world +22, phase19-town +25, physics-playground +28,
+> phase18-scatter +31, vgeom-demo +325. The two-ladder tile tripwire moves to 18.
+>
+> **The spatial index, and why the town is free.** `WaterIndex` is a uniform grid over the union
+> of the **bounded** bodies' XZ bounds (cell target 64 m, side capped at 48 so it is `O(1)`
+> memory however far apart two lakes are authored), plus a separate list of the **unbounded**
+> ones — an ocean is over every point and belongs in no cell. Its two lists are **merged** in
+> ascending body index rather than concatenated, which is load-bearing: it makes
+> `highest_surface_at` give the identical answer a full scan would, tie rule included
+> (`inf_water::highest_surface`: topmost wins, ties to the earlier body), and a spatial structure
+> that changed the answer would only be visible in a level too big to debug.
+> `the_index_answers_exactly_what_a_full_scan_would` compares 14 400 query points against a
+> linear scan. The index is rebuilt only when its **stamp** moves — the P19.5 change-stamp
+> pattern, over `(guid, WaterBody, spline hash, world affine)` and deliberately **not** the
+> clock, because a wave field is a function of the *wind* and time is an argument to `height_at`.
+> A river's arc-length resample is not a 60 Hz cost. The spline is folded to 64 bits rather than
+> cloned, so the steady state does not allocate per point per step.
+> **But the real perf statement is one level up:** the pass iterates the *buoyant set*, not the
+> rigid bodies, and that set is built from `Buoyancy` components inside `sync_from_world`'s
+> **existing** entity walk — no second pass over the world. A furnished town is ~13 000 static
+> colliders and zero `Buoyancy` components, so adding a lake to it costs **one `is_empty()`
+> branch per step**, and `a_town_of_colliders_with_a_lake_in_it_costs_nothing` asserts that the
+> only way it can honestly be asserted from outside: 3 000 colliders traced with and without the
+> lake are **bit-identical**, with an anti-vacuity guard that the lake really is indexed and that
+> the same body *with* a `Buoyancy` really does float.
+>
+> **Events.** `Enter` / `Exit` / `Splash`, on the `EventKind::Collision` precedent: three
+> appended `EventKind` variants (the wire-enum law — `EventKind` is externally tagged for
+> bincode, so a variant's tag is its declaration index and inserting one in the middle would turn
+> every committed `.inf_act`'s `Collision` handler into a `Custom` one), three `event.water_*`
+> nodes carrying `water: Int` + `speed: Float`, and handler ids `water_enter`/`water_exit`/
+> `water_splash` frozen by a test. The latch is **depth hysteresis, not fraction hysteresis**:
+> a floating body always has its underside wet, so "is it in the water" has to be a question
+> about the *lowest point* clearing the surface (by 5 % of the body's own height, floor 1 cm) —
+> a fraction test would report a bobbing cork as dry, which is how the first version failed.
+> **Splash is its own event, not a float to test**, because "play a sound when something hits the
+> water hard" should not have to run on every quiet entry and then branch, and because a splash
+> fires on a fast *exit* too, which a threshold inside `On Enter Water` could not express at all;
+> it fires *in addition to* the enter/exit it accompanies, never instead of it, at 2 m/s of
+> vertical speed (the speed a body reaches after a 20 cm fall — a dropped crate splashes, a boat
+> on a swell does not).
+> **The audio hook is the existing `audio.*` kit called from those handlers, and no new command
+> type** — that is the P12.3 doctrine working as designed: the audio stream is a pure function of
+> sim state, a water crossing *is* sim state, so a `Play` queued from an `On Splash` handler
+> lands in the command queue in the same deterministic order the crossings were produced in.
+> An engine-authored `AudioCommand::Splash` would have meant the engine picking the sound.
+>
+> **Swim mode, and the asymmetry that makes it work.** A character swims at 60 % submerged and
+> stops at 45 % (hysteresis, so standing at chest depth in a rippling lake does not flicker
+> between two locomotion modes every step); it is pulled toward 80 % submerged — head out — at
+> 4 m/s per unit of fraction error; horizontal speed is capped at 2.5 m/s. The **vertical is
+> read as a rate, and downward requests are honoured at a quarter strength**
+> (`SWIM_SINK_AUTHORITY`), and that asymmetry is the whole trick: the host cannot tell a
+> deliberate dive from an accumulated fall, because a character controller integrates gravity
+> into its own velocity every step and has no way to know the water should have stopped it. The
+> first version clamped the incoming vertical symmetrically to 2 m/s and the swimmer sank at
+> 1.4 m/s forever — the balance term could not out-push a clamped free fall. At a quarter
+> strength the balance wins by default (a character that only integrates gravity **surfaces**)
+> while a player really holding "dive" still sinks. `move_and_slide` honours it in **both** hosts
+> through one Ring-0 pair (`water::swim_latch`, `water::swim_motion`), so the thresholds exist
+> once and there is nothing to mirror; `the_same_character_with_no_water_just_falls` is the
+> anti-vacuity twin, and it keeps its authored 6 m/s run.
+>
+> **Gates.** `runtime/inf-player/tests/water_physics.rs` (10): determinism, **pool-size
+> invariance**, **PIE == shipping** on a cooked pack, the wave-model bit comparison, the
+> off-path/anti-vacuity pair, swim + its dry twin, the event/audio determinism pair, the splash
+> threshold, and the **editor↔runtime parity** case. That last one is paired with
+> `editor/crates/inf-editor-core/tests/simulate_water.rs`: the two hosts each own a copy of the
+> fixed-step ordering, of the `Host::call` match arms and of the `move_and_slide` path, so "they
+> run the same water physics" is a claim about two files and is checked from the outside — by
+> pinning **integers** (the step a `WaterEnter` lands on, 58; the enter/exit/splash counts,
+> 2/1/3) rather than a settled `f64`, which would pin the solver's last bit on this machine and
+> fail on someone else's for a reason that is not a bug.
+> `crates/inf-physics/tests/water_buoyancy_3d.rs` (14) carries the statics — density 0.5 floats
+> half submerged, density 2 sinks, neutral hovers to `1e-6`, a body *placed* at its equilibrium
+> does not drift — plus drag direction/magnitude/clamp, the event thresholds, the swim latch, a
+> floating-stack determinism run and the town. **Tolerances are sized against the P20.1
+> height-query bound consciously**: every statics case authors `wave_amplitude_m = 0`, which
+> makes the Gerstner displacement identically zero and the query exact, so what is being absorbed
+> is the solver's own settling; the one wave case budgets `amplitude + 0.17 m`, the **honest**
+> worst case rather than the ≤3 mm typical, because tuning a tolerance to a measurement instead
+> of to a guarantee is how a bound stops meaning anything.
+>
+> **Remainders, stated.**
+> * **Quadratic drag** (above) — v1 cannot make a hull's terminal speed depend on its shape.
+> * **Orbital-velocity drag / Stokes drift** (above) — a body near a crest feels still water.
+> * **No water→body reaction.** A boat displaces water in the model and not in the render: there
+>   is no wake, no bow spray and no local depression of the surface. The surface is authored, and
+>   nothing a body does moves it.
+> * **The submerged fraction is a slab, not an integral.** A sphere at 20 % submerged displaces
+>   less than the linear model says (the true spherical cap is `O(d²)`, not `O(d)`), so a ball
+>   floats slightly high off its equilibrium and slightly low above it. Exact at the symmetric
+>   point, which is where the tests assert.
+> * **`Buoyancy` on a body with no collider does nothing** — there is no shape to displace with,
+>   and rapier gives it no mass. Silent rather than an advisory; P20.4's tools are where an
+>   authoring warning belongs.
+> * **Static and kinematic bodies never float.** A `Buoyancy` on a moving platform is ignored,
+>   which is right (it is script-driven by definition) and undiscoverable.
+> * **A trimesh floats by its AABB.** rapier cannot give a trimesh well-defined mass properties,
+>   so the path is nearly dead in practice; it is written rather than `unreachable!()`d.
+> * **The swim mode has no animation.** Flipping the latch changes the motion, not the pose;
+>   binding it to an `AnimStateMachine` parameter is a `water.is_swimming` node away and is not
+>   in this batch (the three shipped nodes are `is_in_water`, `surface_height`,
+>   `submerged_fraction`).
+> * **`water.surface_height` answers `0.0` where there is no water** — the `terrain.height_at`
+>   precedent, because the IR has no optional Float. `0` is a plausible sea level and is
+>   deliberately not a sentinel; pair it with `submerged_fraction` when the question is really
+>   "is there water here".
+>
+> Files: `crates/inf-physics/src/d3/{water.rs (new),ecs.rs,world.rs,mod.rs}` + `Cargo.toml`,
+> `crates/inf-ecs/src/{components,registry,lib}.rs`, `crates/inf-blueprint/src/{semantics,nodekit,
+> lower,raise}.rs`, `crates/inf-scene/src/lib.rs` + `editor/crates/inf-editor-core/src/scene/
+> serialize.rs` (v18) + both fixture dirs, `runtime/inf-player/src/{runtime_sim,level,
+> cell_stream}.rs`, `editor/crates/inf-editor-core/src/simulate.rs`, the 12 re-blessed
+> samples/templates, and the gates `crates/inf-physics/tests/water_buoyancy_3d.rs`,
+> `runtime/inf-player/tests/water_physics.rs`,
+> `editor/crates/inf-editor-core/tests/simulate_water.rs`,
+> `crates/inf-transpile/tests/water_roundtrip.rs`.
+
 - **P20.1 Water surfaces** — 1. a new `inf-water` (Ring 0) + render passes: ocean (Gerstner v1
   → FFT spectrum v2, deterministic seeds), lake volumes (flat + ripple), and spline rivers
   (flow along the parity-wave splines, width/depth profiles, downhill validation against

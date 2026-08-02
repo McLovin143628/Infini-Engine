@@ -80,6 +80,7 @@ fn rec(guid: u128, name: &str, at: (f64, f64)) -> inf_scene::RuntimeEntity {
         time_of_day: None,
         sky_atmosphere: None,
         water_body: None,
+        buoyancy: None,
     }
 }
 

@@ -49,6 +49,7 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(input_nodes());
     reg.register_all(audio_nodes());
     reg.register_all(sky_nodes());
+    reg.register_all(water_nodes());
     reg
 }
 
@@ -86,6 +87,44 @@ fn event_nodes() -> Vec<NodeDef> {
             .described("A user-named event, invoked explicitly through the dispatcher nodes.")
             .with_outputs(vec![exec_out(EXEC_THEN)])
             .with_params(vec![ParamDef::text("name", "")]),
+        // ── water (P20.2) ──
+        //
+        // The `event.collision` shape exactly: param-less entry points whose data
+        // outputs are the handler's params. `water` is the water body's entity id
+        // (an `Int` pin, like `other`), `speed` is metres per second along
+        // gravity's up-axis at the crossing.
+        //
+        // **Splash is its own event, not a float to test.** "Play a sound when
+        // something hits the water hard" should not have to run on every quiet
+        // entry and then branch — and a splash fires on a fast *exit* too, which a
+        // threshold inside `On Enter Water` could not express at all.
+        NodeDef::new("event.water_enter", "On Enter Water", "events")
+            .described(
+                "Fires when this entity's lowest point goes under a water surface; \
+                 `water` is the water body's entity id and `speed` is how fast it crossed (m/s).",
+            )
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("water", PortType::Int),
+                PortDef::new("speed", PortType::Float),
+            ]),
+        NodeDef::new("event.water_exit", "On Exit Water", "events")
+            .described("Fires when this entity clears a water surface.")
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("water", PortType::Int),
+                PortDef::new("speed", PortType::Float),
+            ]),
+        NodeDef::new("event.water_splash", "On Splash", "events")
+            .described(
+                "Fires alongside enter/exit when the crossing was fast enough to throw water \
+                 (2 m/s or more).",
+            )
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("water", PortType::Int),
+                PortDef::new("speed", PortType::Float),
+            ]),
     ]
 }
 
@@ -609,6 +648,46 @@ fn sky_nodes() -> Vec<NodeDef> {
                 "Wind speed in metres per second — what drifts the clouds and slants the rain.",
             )
             .with_outputs(vec![PortDef::new("speed", PortType::Float)]),
+    ]
+}
+
+/// The water kit (P20.2): pure queries against the level's water, answered from
+/// the **fixed step's** own height query (`inf_water::WaterSurface::height_at`
+/// through the 3D physics bridge's spatial index) — never from anything the
+/// renderer owns. A Blueprint asking "how deep am I" gets the same number the
+/// buoyancy force was computed from, in the same step.
+///
+/// Three **single-output** nodes, the `sky.*` shape and for the same reason: a
+/// `PureCall` with more than one data output fans each pin into its own
+/// `water::<op>::<field>` call, which would force three-segment match arms in
+/// both hosts. One output each keeps the emitted path a plain
+/// `water::submerged_fraction(…)`.
+///
+/// `surface_height` returns **`0.0` where there is no water** — the
+/// `terrain.height_at` precedent, because the IR has no optional Float. Pair it
+/// with `is_in_water` (or with a non-zero `submerged_fraction`) when the question
+/// is really "is there water here at all"; `0.0` is a plausible sea level and is
+/// deliberately not a sentinel.
+fn water_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("water.is_in_water", "Is In Water", "water")
+            .described("True while any part of the entity is under a water surface.")
+            .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
+            .with_outputs(vec![PortDef::new("in_water", PortType::Bool)]),
+        NodeDef::new("water.surface_height", "Water Surface Height", "water")
+            .described(
+                "World Y of the highest water surface over (x, z) right now — 0 where there \
+                 is no water.",
+            )
+            .with_inputs(vec![
+                PortDef::new("x", PortType::Float),
+                PortDef::new("z", PortType::Float),
+            ])
+            .with_outputs(vec![PortDef::new("height", PortType::Float)]),
+        NodeDef::new("water.submerged_fraction", "Submerged Fraction", "water")
+            .described("How much of the entity is under water, 0..1 (0 = dry, 1 = fully under).")
+            .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
+            .with_outputs(vec![PortDef::new("fraction", PortType::Float)]),
     ]
 }
 

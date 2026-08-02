@@ -3219,7 +3219,9 @@ version = "0.1.0"
 dependencies = [
  "glam 0.33.2",
  "inf-ecs",
+ "inf-math",
  "inf-pcg",
+ "inf-water",
  "rapier2d-f64",
  "rapier3d-f64",
  "uuid",

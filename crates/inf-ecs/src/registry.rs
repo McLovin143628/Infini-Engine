@@ -13,7 +13,7 @@ use bevy_reflect::{TypePath, TypeRegistry};
 
 use crate::components::{
     AlwaysLoaded, AnimPlayer, AnimStateMachine, AtlasRect, AudioListener, AudioSource,
-    BillboardMode, BlendMode, BodyKind2D, BodyKind3D, Camera, CharacterController2D,
+    BillboardMode, BlendMode, BodyKind2D, BodyKind3D, Buoyancy, Camera, CharacterController2D,
     CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
     CombineRule, Decal, DistanceModel, Foliage, FoliagePaletteEntry, Joint2D, Joint3D, JointKind2D,
     JointKind3D, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice, PcgVolume,
@@ -129,6 +129,10 @@ impl ComponentRegistry {
             // (the `Light`/`LightKind` shape); a river additionally reads the
             // `Spline` on the same entity.
             WaterBody => "Water Body",
+            // P20.2 — the opt-in that makes a dynamic body float. Sits with the
+            // physics components rather than with the water because it is
+            // authored on the *body*, not on the water.
+            Buoyancy => "Buoyancy",
             RigidBody2D => "Rigid Body 2D",
             Collider2D => "Collider 2D",
             CharacterController2D => "Character Controller 2D",
@@ -233,7 +237,7 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        assert_eq!(reg.editable().len(), 35);
+        assert_eq!(reg.editable().len(), 36);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

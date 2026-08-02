@@ -40,6 +40,29 @@ pub enum EventKind {
     Collision,
     /// A user-named event, invoked explicitly; handler receives no args.
     Custom(String),
+    // ── water (P20.2) ────────────────────────────────────────────────────
+    //
+    // **APPENDED, and that is a rule, not a preference.** This enum is
+    // externally tagged for bincode, so a variant's wire tag is its declaration
+    // index: inserting one in the middle would silently turn every committed
+    // `.inf_act`'s `Collision` handler into a `Custom` one. New variants go at
+    // the end, forever — the same law `WaterKind` carries (P19.2).
+    //
+    // Three variants rather than one with a phase argument, because the *point*
+    // of a splash is that a handler can subscribe to it alone: "play a sound when
+    // something hits the water hard" should not have to run on every quiet entry
+    // and then test a float.
+    /// The entity's lowest point went under a water surface. Handler receives
+    /// `water: Int` (the water body's entity id) and `speed: Float` (m/s along
+    /// gravity's up-axis at the crossing).
+    WaterEnter,
+    /// The entity cleared a water surface. Same signature as
+    /// [`WaterEnter`](Self::WaterEnter).
+    WaterExit,
+    /// A surface crossing — in **either** direction — fast enough to throw water.
+    /// Fires *in addition to* the enter/exit it accompanies, never instead of it,
+    /// so a handler that only cares about wet/dry never has to know it exists.
+    WaterSplash,
 }
 
 impl EventKind {
@@ -58,6 +81,16 @@ impl EventKind {
                 name: "other".into(),
                 ty: Ty::Int,
             }],
+            EventKind::WaterEnter | EventKind::WaterExit | EventKind::WaterSplash => vec![
+                Param {
+                    name: "water".into(),
+                    ty: Ty::Int,
+                },
+                Param {
+                    name: "speed".into(),
+                    ty: Ty::Float,
+                },
+            ],
             EventKind::BeginPlay | EventKind::Custom(_) => vec![],
         }
     }
@@ -69,6 +102,9 @@ impl EventKind {
             EventKind::Tick => "tick".into(),
             EventKind::Input(a) => format!("input:{a}"),
             EventKind::Collision => "collision".into(),
+            EventKind::WaterEnter => "water_enter".into(),
+            EventKind::WaterExit => "water_exit".into(),
+            EventKind::WaterSplash => "water_splash".into(),
             EventKind::Custom(n) => format!("custom:{n}"),
         }
     }
