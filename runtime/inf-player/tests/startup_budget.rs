@@ -5,16 +5,18 @@
 //! and asserts it is under a generous bound. A regression tripwire (the number is
 //! small; the budget only ratchets **down** per §8), not a perf claim. No GPU:
 //! this is the CPU pack-decode + ECS world-build path.
+//!
+//! The bound is the shared [`LOAD_BUDGET_MS`], not a private copy: this test and
+//! the Phase 19 town build measure the same *class* of thing (a one-shot world
+//! build), and a class deserves one number. Its value is unchanged — this test is
+//! the P15.1 precedent the constant was lifted from.
 
 use std::path::{Path, PathBuf};
 
 use inf_packager::{cook, CookOptions};
+use inf_player::budget::LOAD_BUDGET_MS;
 use inf_player::level::{self, InfSceneWorldBuilder, PackLevelSource};
 use inf_project::ProjectManifest;
-
-/// Hard budget for pack-load-to-first-world, in milliseconds. **RATCHET RULE
-/// (§8): only ever DECREASE this.**
-const STARTUP_BUDGET_MS: f64 = 5000.0;
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
@@ -62,12 +64,10 @@ fn pack_load_to_first_world_under_budget() {
         "the loaded world has entities"
     );
 
-    eprintln!(
-        "startup: pack-load-to-first-world {elapsed_ms:.1} ms (budget {STARTUP_BUDGET_MS} ms)"
-    );
+    eprintln!("startup: pack-load-to-first-world {elapsed_ms:.1} ms (budget {LOAD_BUDGET_MS} ms)");
     assert!(
-        elapsed_ms < STARTUP_BUDGET_MS,
-        "pack load {elapsed_ms:.1} ms exceeded the {STARTUP_BUDGET_MS} ms budget \
+        elapsed_ms < LOAD_BUDGET_MS,
+        "pack load {elapsed_ms:.1} ms exceeded the {LOAD_BUDGET_MS} ms load budget \
          (the §8 budget only ratchets DOWN — investigate the regression, do not raise it)"
     );
 }

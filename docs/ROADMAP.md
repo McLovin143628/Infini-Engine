@@ -3793,7 +3793,11 @@ sediment state; the `MaskImage` sampler has no graph node; lowering is single-ru
 > severed-stairs control. **(e) partition** — every lamp is in exactly the cell `cell_of` puts
 > it in, *exactly* the lamps stream (a lot that lost its marker shows up here), and every lot's
 > instances stay inside its footprint. **(f) budget** — the whole town builds in ~8 ms against
-> the 33 ms composed-frame budget, no new ratchet constant.
+> the **load-class** ceiling `inf_player::budget::LOAD_BUDGET_MS` (5 000 ms, the P15.1 startup
+> tripwire's number, now shared by both one-shot-load arms rather than copied). It deliberately
+> does *not* use the 33 ms composed-frame budget: a load happens once, a frame recurs, and
+> holding the first against the second is a hardware claim that duly went red at 34.77 ms on a
+> shared `windows-latest` runner while measuring ~8 ms locally. No new ratchet constant.
 >
 > Beside it, `grammar_span_mirror.rs` grew two needles — `inf_pcg::evaluate_buildings(` and
 > `vol.structures =` — because a host that called the first and skipped the second would draw

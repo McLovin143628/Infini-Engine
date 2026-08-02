@@ -73,7 +73,8 @@ be lowered, never raised.** A regression must be fixed, not accommodated.
 | Sim fixed step (mean, ~275-entity replay world) | `SIM_STEP_BUDGET_MS` | 2.0 ms | `inf-runtime` · `tests/sim_budget.rs` |
 | Render frame (mean, ~484-cube scene, full pipeline) | `FRAME_BUDGET_MS` | 33.0 ms | `inf-render` · `tests/frame_budget.rs` |
 | Editor project-open (asset scan) | `OPEN_BUDGET_MS` | 5000 ms | `inf-editor-core` · `tests/startup_budget.rs` |
-| Player pack-load-to-first-world | `STARTUP_BUDGET_MS` | 5000 ms | `inf-player` · `tests/startup_budget.rs` |
+| Player pack-load-to-first-world | `LOAD_BUDGET_MS` | 5000 ms | `inf-player` · `tests/startup_budget.rs` |
+| Player one-shot world build (the composed phase19 town) | `LOAD_BUDGET_MS` | 5000 ms | `inf-player` · `tests/phase19_gate.rs` |
 | **Streamed** fixed step (mean, cell + terrain streaming live) | `STREAMED_STEP_BUDGET_MS` | 4.0 ms | `inf-player` · `tests/phase16_gate.rs` |
 | Terrain page bytes resident (peak over the flythrough) | `TERRAIN_RESIDENT_BYTES_CEILING` | 16 MiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cell bytes resident (peak) | `CELL_RESIDENT_BYTES_CEILING` | 256 KiB | `inf-player` · `tests/phase16_gate.rs` |
@@ -89,6 +90,17 @@ Notes:
   and cannot catch, and why the **120 fps-class frame-rate claim itself stays
   human-verified on real hardware**: CI can bound the CPU-side streaming work, not
   a frame.
+
+- **A load is never held against a frame budget.** `FRAME_BUDGET_MS` /
+  `SIM_STEP_BUDGET_MS` / `STREAMED_STEP_BUDGET_MS` bound work that **recurs** (per
+  frame, per step); `LOAD_BUDGET_MS` (`inf_player::budget`) and the editor's
+  `OPEN_BUDGET_MS` bound work that happens **once**. Mixing the classes turns a
+  growth check into a hardware claim, and shared CI runners — ~4× slower than
+  developer hardware, and noisy under unknown load — then report the runner rather
+  than the engine. That is precisely how the phase19 town-load arm went red at
+  34.77 ms against the 33 ms frame budget while measuring ~8 ms locally; it now
+  asserts against `LOAD_BUDGET_MS` and still prints its milliseconds, which is
+  where load-time drift is actually read.
 
 - **`frame_budget`** skips when no GPU adapter is present, and on a **software**
   adapter (llvmpipe/WARP on CI) it only *smoke-renders* — the strict budget is

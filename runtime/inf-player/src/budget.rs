@@ -3,10 +3,10 @@
 //!
 //! §8's existing budgets each cover one still frame of one fixed thing:
 //! `FRAME_BUDGET_MS` (a reference render), `SIM_STEP_BUDGET_MS` (a fixed world of
-//! ~275 entities), `STARTUP_BUDGET_MS` (pack-load-to-first-world). None of them
-//! can see the cost this phase introduced: a step that may *page terrain tiles and
-//! spawn a partition cell before it does any of its own work*, and a residency
-//! that grows with how far the player has walked.
+//! ~275 entities), [`LOAD_BUDGET_MS`] (a one-shot pack-load-to-first-world). None
+//! of them can see the cost this phase introduced: a step that may *page terrain
+//! tiles and spawn a partition cell before it does any of its own work*, and a
+//! residency that grows with how far the player has walked.
 //!
 //! So this module adds four constants, asserted headless over the **composed
 //! Phase 16 gate scene** (`samples/phase16-world`: a wizard-imported streamed
@@ -18,6 +18,13 @@
 //! * [`TERRAIN_RESIDENT_BYTES_CEILING`] — peak terrain page bytes;
 //! * [`CELL_RESIDENT_BYTES_CEILING`] / [`CELL_RESIDENT_CEILING`] — peak cell blob
 //!   bytes and peak active cells.
+//!
+//! Alongside them lives [`LOAD_BUDGET_MS`], the player's **load-class** ceiling.
+//! It is deliberately a different *class* of number from everything above and from
+//! `FRAME_BUDGET_MS`: a load is measured once, cold, so it may not be held against
+//! a per-frame or per-step budget. Every arm that times a one-shot world build
+//! shares that one constant — see its docs for why, and for what a wall clock on a
+//! shared runner can and cannot be asked.
 //!
 //! # THE RATCHET RULE (§8), restated because it is the whole point
 //!
@@ -55,6 +62,40 @@
 //! *bounded cut* claim itself is asserted structurally in the gate (the residency
 //! set is a quadtree cut, it churns, and every resident cell is inside the
 //! activation radius), which is the assertion that actually has teeth.
+
+/// Hard ceiling for a **one-shot load**, in milliseconds: opening a cooked pack
+/// and building the world it describes, measured once. The player's own boot path
+/// (`tests/startup_budget.rs`) and the Phase 19 town build (`tests/phase19_gate.rs`)
+/// both assert against this one constant, because they are the same *class* of
+/// measurement and a class deserves one number.
+///
+/// # Why a load may not be held against the frame budget
+///
+/// `inf_core::FRAME_BUDGET_MS` is 33 ms because that is what a *frame* gets —
+/// a thing that must happen thirty times a second, forever. A load happens once.
+/// Asserting that an entire furnished town builds in the time one frame gets is
+/// not a growth check, it is a **hardware claim**, and §8 budgets are not hardware
+/// claims: they are **unbounded-growth tripwires**, deliberately generous, run on
+/// shared CI runners of three operating systems under unknown load. Those runners
+/// are roughly **4× slower than developer hardware and noisy**, so any gate that
+/// reads a wall clock at frame resolution ends up reporting the runner rather than
+/// the engine. The Phase 19 town-load arm did exactly that — ~8 ms locally,
+/// 34.77 ms on a `windows-latest` runner, red, with nothing regressed but the
+/// machine — which is what moved it here.
+///
+/// # What 5 000 ms is
+///
+/// The P15.1 precedent, reused rather than re-invented: the startup tripwire has
+/// shipped at 5 000 ms against 5.6 ms measured — three orders of headroom, on
+/// purpose. It is ~150× the frame budget and ~600× the measured town build (~8 ms
+/// on a developer machine). A load that crosses it is no longer linear in its
+/// content — an O(n²) resolve, a per-instance re-walk, a cache that stopped hitting
+/// — which is the class of regression CI can honestly catch. Drift of tens of
+/// percent is invisible here **on purpose**; every arm prints its measured
+/// milliseconds, and that printed line is where load-time drift is read.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.**
+pub const LOAD_BUDGET_MS: f64 = 5000.0;
 
 /// Hard **mean** fixed-step budget, in milliseconds, for a step that also runs
 /// cell streaming and terrain sim-residency at its top (the composed gate scene).
