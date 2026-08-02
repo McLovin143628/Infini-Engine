@@ -265,43 +265,128 @@ fn composed_settings(stream_budget: u64) -> RenderSettings {
     }
 }
 
-/// A streaming budget that **binds** on the composed scene: half of what the
-/// unclamped run actually held, floored at the root page so the never-a-hole
-/// guarantee is not what is being tested here.
+// ── the streaming budget, and the law it is derived under ────────────────────
+//
+// **meshopt is not cross-platform.** Bit-identical input meshes produce different
+// meshlet DAGs — a different page count, and different page *bytes* — on
+// aarch64-apple-darwin than on x86_64. So a budget computed as a fraction of any
+// byte total measured on one runner is a platform-dependent premise, and every
+// anti-vacuity guard resting on it ("the budget must bind") is a platform-dependent
+// claim. `inf-render`'s `tests/vgeom_streaming.rs` was the first trip on this and
+// `inf-vgeom`'s reimport test the second; the derivation below is the third, and it
+// is written the way those two now are: **budgets are counted in pages read off the
+// live page directory, never in bytes measured somewhere else.**
+
+/// A budget that holds exactly the `pages` coarsest pages of `source` and provably
+/// not one more — **read off the live page directory**.
 ///
-/// Sized off the observed residency rather than the asset's size for the reason
-/// `vgeom_gate::gate_b3` documents: the streamer already declines pages this
-/// camera cannot use, so a fraction of the whole asset can cover the whole want
-/// and clamp nothing.
+/// A mirror of `inf-render`'s `vgeom_streaming::budget_for_pages` (test binaries
+/// cannot share code). It sits at the midpoint of the open interval between "the
+/// prefix fits exactly" and "one more page fits", so it is strictly inside the band
+/// on both sides: a platform whose page bytes differ moves both endpoints *and* the
+/// midpoint together, and the resident prefix it admits is unchanged. Page 0 is
+/// always inside the held prefix, so the never-a-hole floor is respected by
+/// construction rather than by a `max(root)` patch.
+fn budget_for_pages(source: &inf_vgeom::VgeomSource, pages: usize) -> u64 {
+    let dir = source.pages();
+    assert!(
+        pages >= 1 && pages < dir.len(),
+        "a budget for {pages} of {} pages is not a clamp at all",
+        dir.len()
+    );
+    let held: u64 = dir[..pages].iter().map(|p| p.resident_bytes()).sum();
+    let next = dir[pages].resident_bytes();
+    assert!(next >= 2, "page {pages} costs {next} B — nothing to bisect");
+    held + next / 2
+}
+
+/// Half of `want`, in pages, never below the root page — the prefix a budget holds
+/// so that a frame wanting `want` pages is *guaranteed* to be clamped.
+///
+/// Halving rather than `want - 1` keeps the clamp a real one (the frame draws a
+/// genuinely coarser cut, which is what makes the composed trace a *streamed*
+/// trace) while staying a pure function of the want, so it moves with the platform's
+/// ladder instead of pinning a number from this machine.
+fn held_pages_for_want(want: usize) -> usize {
+    (want / 2).max(1)
+}
+
+/// A streaming budget that **binds on every frame** of the scripted run, sized in
+/// pages off the live page directory.
+///
+/// The premise it needs is the run's own per-frame *want*
+/// (`VgeomStreamStats::wanted_pages` — the streamer's `ideal_page_count`, a pure
+/// function of the camera and the page directory that does not depend on the budget
+/// or on residency history), measured here on an unclamped reference run. Cutting
+/// the budget at half the **smallest** want over the run means every frame asks for
+/// strictly more pages than the budget can grant, so `budget_clamped` holds on
+/// every frame by construction, on any platform, whatever meshopt did to the ladder.
+///
+/// This replaces `(the last frame's resident_bytes / 2).max(root)`, which was a
+/// *byte* fraction of the *last* frame's residency asserted to clamp on *every*
+/// frame. The camera flies in toward the slabs, so the want ladder rises across the
+/// run: half of the last frame's bytes can still cover an early frame's whole want,
+/// and then gate (a)'s "the streaming budget never bound" guard fires — which is
+/// exactly what happened on macos-arm64 at `a0e398a`, and never on x86_64, because
+/// the two platforms' page bytes differ. The guard was right; its premise was not
+/// portable.
 fn binding_budget(gpu: &GpuContext, pack: &Path, reg: &VmeshRegistry) -> u64 {
     let mut sim = pack_sim(pack);
     let target = HeadlessTarget::new(gpu, W, H);
     let mut r = EngineRenderer::new(gpu, HEADLESS_FORMAT);
     r.set_settings(composed_settings(inf_vgeom::DEFAULT_VGEOM_BUDGET_BYTES));
     let mut scene = RenderScene::default();
+    let mut wants = Vec::with_capacity(FRAMES);
     for step in 0..FRAMES {
         for _ in 0..STEPS_PER_FRAME {
             sim.step_once(RuntimeInput::default());
         }
         project_scene(&mut scene, &sim, 0.0, reg);
         r.render(gpu, &scene, &gate_camera(step), &target.view, (W, H));
+        let report = r.vgeom_stream_report();
+        assert!(
+            !report.stats.budget_clamped,
+            "the reference run must be unclamped (frame {step})"
+        );
+        wants.push(report.stats.wanted_pages);
     }
-    let report = r.vgeom_stream_report();
     assert!(
-        !report.stats.budget_clamped,
-        "the reference run must be unclamped"
-    );
-    assert!(
-        report.stats.resident_bytes > 0,
+        r.vgeom_stream_report().stats.resident_bytes > 0,
         "the reference run paged nothing — the meshlet path never activated"
     );
-    let root: u64 = scene
-        .vgeom_assets
-        .iter()
-        .map(|a| a.source.pages()[0].resident_bytes())
-        .max()
-        .unwrap_or(0);
-    (report.stats.resident_bytes / 2).max(root)
+    // `wanted_pages` is a SUM across assets, so it is one asset's want only while
+    // the scene lists one asset — which is the composed scene's shape, pinned by
+    // `cooked_equals_uncooked_on_the_composed_scene`.
+    assert_eq!(
+        scene.vgeom_assets.len(),
+        1,
+        "the composed scene must list exactly one meshlet asset for `wanted_pages` \
+         to be that asset's want"
+    );
+    let source = scene.vgeom_assets[0].source.clone();
+    let min_want = *wants.iter().min().expect("FRAMES > 0");
+    assert!(
+        min_want >= 2,
+        "some frame of the scripted run wants only the ROOT page ({wants:?} of {} \
+         pages): the root is granted unconditionally, so NO budget can clamp that \
+         frame and gate (a)'s streamed-scene claim is unstateable. Move the camera \
+         script closer to the slabs — do not weaken the guard",
+        source.pages().len()
+    );
+    let held = held_pages_for_want(min_want);
+    let budget = budget_for_pages(&source, held);
+    eprintln!(
+        "phase18 streaming budget: per-frame wants {wants:?} of {} pages, page \
+         directory {:?} B ⇒ hold the {held} coarsest pages ⇒ {budget} B (binds on \
+         every frame: every want > {held})",
+        source.pages().len(),
+        source
+            .pages()
+            .iter()
+            .map(|p| p.resident_bytes())
+            .collect::<Vec<_>>(),
+    );
+    budget
 }
 
 // ── the recorded trace ───────────────────────────────────────────────────────
@@ -449,9 +534,27 @@ fn the_composed_frame_trace_is_deterministic_across_runs() {
         first.sun, last.sun,
         "the sun never moved — GI's key light is frozen"
     );
+    // The budget bound on every frame — printed as evidence rather than merely
+    // asserted, because "a streamed scene" is the premise the rest of gate (a)
+    // rests on and a reader should be able to see the prefix it held. It is true
+    // by construction (see [`binding_budget`]): the budget holds half the smallest
+    // want in the run, so every frame asks for pages it cannot have.
+    let resident: Vec<(usize, usize)> = a.iter().flat_map(|f| f.pages.values().copied()).collect();
+    eprintln!(
+        "gate (a): under a {budget} B budget the streamer held {resident:?} \
+         (resident, total) pages per frame; clamped {:?}",
+        a.iter().map(|f| f.budget_clamped).collect::<Vec<_>>()
+    );
     assert!(
         a.iter().all(|f| f.budget_clamped),
-        "the streaming budget never bound — gate (a) is not testing a streamed scene"
+        "the streaming budget never bound on every frame (held {resident:?} \
+         (resident, total) pages under {budget} B) — gate (a) is not testing a \
+         streamed scene"
+    );
+    assert!(
+        resident.iter().all(|(res, total)| *res >= 1 && res < total),
+        "the clamped run must hold its root floor and strictly fewer than every \
+         page ({resident:?} (resident, total) under {budget} B)"
     );
     assert!(
         a.iter().all(|f| f.vgeom.base_cut > 0),
@@ -865,7 +968,6 @@ fn the_ten_million_triangle_gate_survives_composition() {
         lod0 * instances.len() as u64 > 10_600_000,
         "the cooked flagship pack must still carry 10.6M+ source triangles"
     );
-    let root_bytes = asset.source.pages()[0].resident_bytes();
 
     // The composed scene: the flagship meshlet grid + 102 400 scattered instances
     // over the same ground, under one sun.
@@ -925,18 +1027,34 @@ fn the_ten_million_triangle_gate_survives_composition() {
         )
     };
 
-    // Size a budget that genuinely withholds pages off what the unclamped run
-    // held (`vgeom_gate::gate_b3`'s rule).
+    // Size a budget that genuinely withholds pages, in PAGES off the live page
+    // directory — never as a fraction of a byte total (see [`binding_budget`] for
+    // the law and the CI failure that paid for it). The reference run reports what
+    // this static camera wants; the budget holds half of that.
     let (_, _, _, unclamped) = shot(false, inf_vgeom::DEFAULT_VGEOM_BUDGET_BYTES, 1, false);
-    assert!(!unclamped.stats.budget_clamped);
-    let budget = (unclamped.stats.resident_bytes / 2).max(root_bytes);
+    assert!(
+        !unclamped.stats.budget_clamped,
+        "the reference run must be unclamped"
+    );
+    let want = unclamped.stats.wanted_pages;
+    let source = &scene.vgeom_assets[0].source;
+    assert!(
+        want >= 2,
+        "the flagship camera wants only the ROOT page ({want} of {} pages): the root \
+         is granted unconditionally, so no budget can clamp this frame and the \
+         streaming half of the composition claim is unstateable",
+        source.pages().len()
+    );
+    let held = held_pages_for_want(want);
+    let budget = budget_for_pages(source, held);
 
     let (reference, _, ref_scatter, ref_report) = shot(false, budget, 6, true);
     let (composed, audit, scatter, report) = shot(true, budget, 6, true);
 
     eprintln!(
         "gate (c): {} of {} pairs in the base cut, {} proven occluded ({:.1}%), \
-         drawn {} early + {} late | streamed {} B of a {} B want (clamped {}) | \
+         drawn {} early + {} late | streamed {}/{} pages ({} B) of a {want}-page \
+         want under a {budget} B budget built to hold {held} (clamped {}) | \
          scatter {:?}",
         audit.base_cut,
         asset_pairs(&scene),
@@ -944,8 +1062,9 @@ fn the_ten_million_triangle_gate_survives_composition() {
         100.0 * audit.occluded as f64 / audit.base_cut.max(1) as f64,
         audit.early_drawn,
         audit.late_drawn,
+        report.stats.resident_pages,
+        source.pages().len(),
         report.stats.resident_bytes,
-        unclamped.stats.resident_bytes,
         report.stats.budget_clamped,
         scatter,
     );
@@ -958,7 +1077,10 @@ fn the_ten_million_triangle_gate_survives_composition() {
     );
     assert!(
         report.stats.budget_clamped,
-        "the streaming budget never bound"
+        "the streaming budget never bound ({} of {} pages resident against a \
+         {want}-page want under {budget} B)",
+        report.stats.resident_pages,
+        source.pages().len()
     );
     assert!(
         report.stats.resident_bytes <= budget,
