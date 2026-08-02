@@ -100,19 +100,20 @@ impl Default for VgeomCookOptions {
     }
 }
 
-/// The fixed salt XORed into a mesh GUID to derive its `.inf_vmesh` GUID.
+/// Derive the deterministic `.inf_vmesh` asset id for a given mesh id.
 ///
 /// XOR with a constant is a bijection, so distinct mesh ids always yield distinct
 /// vmesh ids; the salt makes a collision with any *authored* asset id vanishingly
 /// unlikely (and the cook guards the remaining case). This lets the runtime find
 /// a mesh's virtualized form by computing the id — no side index needed.
-const VMESH_ID_SALT: u128 = 0x7635_4e56_4d45_5348_1f13_1a2b_3c4d_5e6f;
-
-/// Derive the deterministic `.inf_vmesh` asset id for a given mesh id.
+///
+/// **P18.3**: the salt itself moved to Ring 0 ([`inf_vgeom::VMESH_ID_SALT`], the
+/// crate that owns the `.inf_vmesh` format) rather than being hand-copied here and
+/// in the player. The editor derives `.inf_vmesh` too now, and a third copy — with
+/// a third drift test holding it in place — is one past the point where the
+/// duplication is defensible.
 pub fn derived_vmesh_id(mesh_id: AssetId) -> AssetId {
-    AssetId(uuid::Uuid::from_u128(
-        mesh_id.uuid().as_u128() ^ VMESH_ID_SALT,
-    ))
+    inf_vgeom::derived_vmesh_id(mesh_id)
 }
 
 /// The fixed salt XORed into a level GUID to derive its `.inf_part` GUID.
@@ -350,8 +351,17 @@ fn cook_one(input: CookInput, opts: &CookOptions) -> Result<CookOutput> {
     // ── derive virtualized geometry for dense meshes (for a mesh cooked == raw) ─
     let vmesh = if kind == AssetKind::Mesh && opts.vgeom.enabled {
         let _span = tracing::info_span!("derive_vmesh", %guid).entered();
-        derive_vmesh(guid, &cooked, opts.vgeom.min_triangles)?
-            .map(|bytes| (derived_vmesh_id(guid), bytes))
+        match derive_vmesh(guid, &cooked, opts.vgeom.min_triangles)? {
+            Ok(bytes) => Some((derived_vmesh_id(guid), bytes)),
+            // A mesh with real geometry that the threshold turned away ships as a
+            // placeholder cube — say so (P18.3 audit). An empty mesh says nothing:
+            // a cube is the honest rendering of no geometry.
+            Err(VmeshSkip::BelowThreshold { triangles, min }) => {
+                advisories.push(sub_threshold_advisory(guid, &name, triangles, min));
+                None
+            }
+            Err(VmeshSkip::NoGeometry) => None,
+        }
     } else {
         None
     };
@@ -670,19 +680,69 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     })
 }
 
-/// Build the `.inf_vmesh` payload for a `.inf_mesh`, or `None` if the mesh is
-/// below `min_triangles` (stays on the classic path) or has no geometry.
-fn derive_vmesh(guid: AssetId, raw: &[u8], min_triangles: usize) -> Result<Option<Vec<u8>>> {
+/// Why a `.inf_mesh` did not get a derived `.inf_vmesh`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmeshSkip {
+    /// No geometry at all (no triangles / fewer than 3 indices) — nothing to
+    /// virtualize, and nothing to say about it.
+    NoGeometry,
+    /// Real geometry, but below [`VgeomCookOptions::min_triangles`].
+    BelowThreshold { triangles: usize, min: usize },
+}
+
+/// The advisory for a mesh the cook declined to virtualize because it is small
+/// (P18.3 audit).
+///
+/// **Why this is worth a line of output.** `RenderScene` has exactly one door for
+/// real (non-primitive) geometry — virtualized geometry — so a mesh with no
+/// `.inf_vmesh` renders as a **placeholder cube**, in the editor and in the
+/// shipped build alike. Since P18.3 the editor derives from one triangle, so a
+/// 500-triangle prop looks correct while it is being authored and ships as a cube.
+/// That is the worst shape a defect can have: invisible until the build, and
+/// invisible *in* the build until someone walks up to it. The threshold itself is
+/// a defensible cost decision; leaving it silent is not.
+///
+/// Pure, so the wording and the trigger are unit-tested — the
+/// `partition::streamed_actors` / `streamed_terrains` precedent.
+pub fn sub_threshold_advisory(guid: AssetId, name: &str, triangles: usize, min: usize) -> String {
+    format!(
+        "mesh {guid} ({name}) has {triangles} triangles, below the virtualized-geometry          threshold of {min}, so no .inf_vmesh was derived — the shipped build renders it as a          PLACEHOLDER CUBE (the editor derives from one triangle, so it looks correct while you          author it). Lower [vgeom] min_triangles for this build, or merge the mesh into a          denser one."
+    )
+}
+
+/// Classify a mesh the derivation declined, for [`sub_threshold_advisory`].
+///
+/// Pure over the decoded mesh so the rule — *real geometry, but under the bar* —
+/// is testable without a cook.
+fn classify_skip(triangles: usize, indices: usize, min: usize) -> VmeshSkip {
+    if triangles == 0 || indices < 3 {
+        VmeshSkip::NoGeometry
+    } else {
+        VmeshSkip::BelowThreshold {
+            triangles,
+            min: min.max(1),
+        }
+    }
+}
+
+/// Build the `.inf_vmesh` payload for a `.inf_mesh`, or the reason it was skipped
+/// (below `min_triangles` — it stays on the classic path — or no geometry).
+fn derive_vmesh(
+    guid: AssetId,
+    raw: &[u8],
+    min_triangles: usize,
+) -> Result<std::result::Result<Vec<u8>, VmeshSkip>> {
     let mesh: inf_mesh::MeshAsset = inf_asset::decode(raw).map_err(|e| CookError::Mesh {
         guid,
         message: e.to_string(),
     })?;
-    if mesh.triangle_count() < min_triangles.max(1) {
-        return Ok(None);
-    }
     let (positions, normals, uvs, indices) = mesh.vgeom_streams();
-    if indices.len() < 3 {
-        return Ok(None);
+    if mesh.triangle_count() < min_triangles.max(1) || indices.len() < 3 {
+        return Ok(Err(classify_skip(
+            mesh.triangle_count(),
+            indices.len(),
+            min_triangles,
+        )));
     }
     let vgeom = inf_vgeom::build_vgeom(
         &positions,
@@ -702,7 +762,7 @@ fn derive_vmesh(guid: AssetId, raw: &[u8], min_triangles: usize) -> Result<Optio
             message: e.to_string(),
         })?
         .into_bytes();
-    Ok(Some(bytes))
+    Ok(Ok(bytes))
 }
 
 /// Kinds that are cook roots by default: levels (entry points) and script assets
@@ -878,5 +938,55 @@ fn motion_clip_refs(motion: &inf_anim::state_machine::Motion) -> Vec<[u8; 16]> {
         Motion::Clip(c) => vec![*c],
         Motion::Blend1D(space) => space.entries.iter().map(|e| e.clip).collect(),
         Motion::Blend2D(space) => space.entries.iter().map(|e| e.clip).collect(),
+    }
+}
+
+/// The sub-threshold vmesh advisory (P18.3 audit). Pure rules, so the trigger and
+/// the wording are pinned without running a cook — the `partition::streamed_*`
+/// precedent.
+#[cfg(test)]
+mod vmesh_advisory {
+    use super::{classify_skip, sub_threshold_advisory, AssetId, VmeshSkip};
+
+    /// Real geometry under the bar is the advisable case; an empty mesh is not.
+    /// A cube IS the honest rendering of no geometry, so saying anything about it
+    /// would be noise — and noise is how advisories stop being read.
+    #[test]
+    fn only_real_geometry_under_the_bar_is_advisable() {
+        assert_eq!(
+            classify_skip(500, 1500, 2048),
+            VmeshSkip::BelowThreshold {
+                triangles: 500,
+                min: 2048
+            }
+        );
+        assert_eq!(classify_skip(0, 0, 2048), VmeshSkip::NoGeometry);
+        assert_eq!(classify_skip(0, 2, 2048), VmeshSkip::NoGeometry);
+        // A zero/one threshold still means "everything", not "nothing".
+        assert_eq!(
+            classify_skip(3, 9, 0),
+            VmeshSkip::BelowThreshold {
+                triangles: 3,
+                min: 1
+            }
+        );
+    }
+
+    /// The message has to carry all four things a reader needs: which asset, how
+    /// big it is, what the bar was, and what to do. A warning that omits the
+    /// remedy is a warning people learn to scroll past.
+    #[test]
+    fn the_advisory_names_the_asset_the_counts_and_the_remedy() {
+        let guid = AssetId::new();
+        let msg = sub_threshold_advisory(guid, "Barrel", 500, 2048);
+        assert!(msg.contains(&guid.to_string()), "names the asset: {msg}");
+        assert!(msg.contains("Barrel"), "names it readably: {msg}");
+        assert!(msg.contains("500"), "states the triangle count: {msg}");
+        assert!(msg.contains("2048"), "states the threshold: {msg}");
+        assert!(msg.contains("min_triangles"), "states the remedy: {msg}");
+        assert!(
+            msg.contains("PLACEHOLDER CUBE"),
+            "states the consequence — the part that makes it worth reading: {msg}"
+        );
     }
 }

@@ -46,18 +46,16 @@ use uuid::Uuid;
 use inf_asset::{AssetId, AssetKind, PackReader};
 use inf_vgeom::VgeomSource;
 
-/// The fixed salt XORed into a mesh GUID to derive its `.inf_vmesh` GUID.
-///
-/// **Kept in sync with `inf_packager::cook::VMESH_ID_SALT`** (duplicated here so
-/// the shipped player does not depend on the cook pipeline — the same pattern as
-/// [`crate::level::PACK_FILE`]). A drift test asserts the two agree.
-const VMESH_ID_SALT: u128 = 0x7635_4e56_4d45_5348_1f13_1a2b_3c4d_5e6f;
-
 /// Derive the deterministic `.inf_vmesh` asset id for a mesh id. XOR with a
-/// constant is a bijection, so distinct mesh ids always yield distinct vmesh ids;
-/// mirrors `inf_packager::derived_vmesh_id`.
+/// constant is a bijection, so distinct mesh ids always yield distinct vmesh ids.
+///
+/// **P18.3**: the salt used to be hand-copied here (so the shipped player would
+/// not depend on the cook pipeline) with a drift test holding the two together.
+/// It now lives in Ring 0 — [`inf_vgeom::VMESH_ID_SALT`], the crate that owns the
+/// `.inf_vmesh` format — which the player already depends on, so the copy is gone
+/// and the cook, the player and the editor read one constant.
 pub fn derived_vmesh_id(mesh_id: Uuid) -> Uuid {
-    Uuid::from_u128(mesh_id.as_u128() ^ VMESH_ID_SALT)
+    inf_vgeom::derived_vmesh_id(AssetId(mesh_id)).uuid()
 }
 
 /// The indexed `.inf_vmesh` meshlet DAGs available to the player, keyed by vmesh

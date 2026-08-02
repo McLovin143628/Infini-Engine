@@ -642,3 +642,65 @@ fn a_dangling_terrain_reference_warns_without_failing() {
         report.warnings
     );
 }
+
+/// **The sub-threshold advisory reaches the report** (P18.3 audit).
+///
+/// A mesh below `min_triangles` gets no `.inf_vmesh`, and since `RenderScene` has
+/// exactly one door for real geometry, that means the shipped build draws a
+/// placeholder cube — while the editor, which derives from one triangle, shows the
+/// real thing. The threshold is a defensible cost decision; being silent about it
+/// is how "it looked right in the editor" becomes a shipped bug.
+#[test]
+fn cook_advises_when_a_mesh_is_below_the_vgeom_threshold() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let mesh_id = make_mesh_project(&proj);
+    let out = dir.path().join("out");
+
+    // The fixture is ~3k triangles; raise the bar above it so the cook declines.
+    let report = cook(
+        &proj,
+        &out,
+        &CookOptions {
+            roots: Some(vec![mesh_id]),
+            vgeom: inf_packager::VgeomCookOptions {
+                enabled: true,
+                min_triangles: 1_000_000,
+            },
+            ..Default::default()
+        },
+    )
+    .expect("cook succeeds");
+
+    assert_eq!(report.meshlet_meshes_derived, 0, "nothing derived");
+    let advisory = report
+        .warnings
+        .iter()
+        .find(|w| w.contains(&mesh_id.to_string()))
+        .unwrap_or_else(|| panic!("no sub-threshold advisory in {:?}", report.warnings));
+    assert!(advisory.contains("PLACEHOLDER CUBE"), "{advisory}");
+    assert!(
+        advisory.contains("1000000"),
+        "states the threshold: {advisory}"
+    );
+    assert!(advisory.contains("min_triangles"), "{advisory}");
+
+    // …and a mesh the cook DOES virtualize raises nothing, so the advisory cannot
+    // become background noise.
+    let out2 = dir.path().join("out2");
+    let ok = cook(
+        &proj,
+        &out2,
+        &CookOptions {
+            roots: Some(vec![mesh_id]),
+            ..Default::default()
+        },
+    )
+    .expect("cook succeeds");
+    assert_eq!(ok.meshlet_meshes_derived, 1);
+    assert!(
+        !ok.warnings.iter().any(|w| w.contains("PLACEHOLDER CUBE")),
+        "a derived mesh must not be advised about: {:?}",
+        ok.warnings
+    );
+}

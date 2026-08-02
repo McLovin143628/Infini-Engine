@@ -3045,6 +3045,7 @@ dependencies = [
  "inf-render",
  "inf-runtime",
  "inf-terrain",
+ "inf-vgeom",
  "inf-wasm-host",
  "notify",
  "notify-debouncer-full",
@@ -3422,6 +3423,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.19",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

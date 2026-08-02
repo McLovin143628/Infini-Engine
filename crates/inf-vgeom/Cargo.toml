@@ -21,6 +21,9 @@ serde = { workspace = true }
 # rest of the asset system uses, so the section is byte-deterministic.
 bincode = { workspace = true }
 bytemuck = { workspace = true }
+# `derived_vmesh_id` (P18.3): the one place the `.inf_mesh` → `.inf_vmesh` id
+# bijection is defined, so the cook, the player and the editor cannot disagree.
+uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

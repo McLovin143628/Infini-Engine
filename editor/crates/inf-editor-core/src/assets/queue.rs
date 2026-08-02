@@ -84,30 +84,51 @@ enum Job {
         name: Option<String>,
         cancel: CancelToken,
     },
+    /// Derive a `.inf_vmesh` for every `.inf_mesh` that lacks a current one
+    /// (P18.3) — the project-open sweep that covers content imported before the
+    /// editor could derive meshlet DAGs at all.
+    ///
+    /// It rides the import queue rather than the background tick because the tick
+    /// must never block on the project mutex — it carries the very progress events
+    /// a long job reports. But riding the queue is not permission to *hold* the
+    /// mutex either: `build_vgeom` on a real character runs for seconds, and a
+    /// first open of a large project would freeze every asset command, the tick,
+    /// and this job's own Cancel behind it. So the worker runs the P16.4a shape —
+    /// **plan under a short lock, build holding nothing, re-acquire briefly to
+    /// register** — one mesh at a time, checking `cancel` between each.
+    Vmeshes { id: u64, cancel: CancelToken },
 }
 
 impl Job {
     fn id(&self) -> u64 {
         match self {
-            Job::File { id, .. } | Job::Terrain { id, .. } => *id,
+            Job::File { id, .. } | Job::Terrain { id, .. } | Job::Vmeshes { id, .. } => *id,
         }
     }
-    fn source(&self) -> &PathBuf {
+    fn source(&self) -> PathBuf {
         match self {
-            Job::File { source, .. } | Job::Terrain { source, .. } => source,
+            Job::File { source, .. } | Job::Terrain { source, .. } => source.clone(),
+            // The sweep has no source file; it reports under a stable pseudo-path
+            // so the frontend's job model (id + source + phase) needs no new shape.
+            Job::Vmeshes { .. } => PathBuf::from(VMESH_SWEEP_SOURCE),
         }
     }
 }
+
+/// The pseudo-source path the project-wide vmesh sweep reports under.
+pub const VMESH_SWEEP_SOURCE: &str = "<derive meshlet DAGs>";
 
 /// One drain of the progress channel.
 #[derive(Debug, Default)]
 pub struct PollBatch {
     /// The events, in the order the worker produced them.
     pub events: Vec<ImportProgress>,
-    /// A **terrain** job finished in this batch, so a new `.inf_terrain` is on
-    /// disk. Recorded here rather than derived from the asset database, because
-    /// the tick that reads this must never block on the project mutex.
-    pub terrain_finished: bool,
+    /// A job finished in this batch, so an asset the viewport resolves by GUID
+    /// may now be on disk (a terrain, a mesh and its derived DAG, the project-open
+    /// vmesh sweep) and the loose-asset index is stale. Recorded here rather than
+    /// derived from the asset database, because the tick that reads this must
+    /// never block on the project mutex.
+    pub index_stale: bool,
 }
 
 /// The queue: a worker thread + a progress channel.
@@ -147,6 +168,22 @@ impl ImportQueue {
         let id = self.take_id();
         // If the worker has gone away the send fails; the caller sees no events.
         let _ = self.tx.send(Job::File { id, source, dest });
+        id
+    }
+
+    /// Queue the project-wide `.inf_vmesh` derivation sweep (P18.3). Returns the
+    /// job id; progress ticks and the terminal event arrive on the same channel as
+    /// any import, so the frontend needs no new case.
+    ///
+    /// **Cancellable**, and that is not a nicety: closing or switching a project
+    /// drops the `ImportQueue`, whose `Drop` joins the worker. Without a token a
+    /// half-finished sweep of a large project would hold that join — and therefore
+    /// the whole editor — for as long as the remaining meshes take to build.
+    pub fn submit_vmesh_sweep(&mut self) -> u64 {
+        let id = self.take_id();
+        let cancel = CancelToken::new();
+        self.cancels.insert(id, cancel.clone());
+        let _ = self.tx.send(Job::Vmeshes { id, cancel });
         id
     }
 
@@ -195,7 +232,7 @@ impl ImportQueue {
     /// Drain all progress available right now (non-blocking).
     pub fn poll(&mut self) -> PollBatch {
         let events: Vec<ImportProgress> = self.events.try_iter().collect();
-        let mut terrain_finished = false;
+        let mut index_stale = false;
         for ev in &events {
             let terminal = matches!(
                 ev,
@@ -204,15 +241,22 @@ impl ImportQueue {
             if terminal {
                 let id = ev.job_id();
                 self.cancels.remove(&id);
-                let was_terrain = self.terrain_jobs.remove(&id);
-                if was_terrain && matches!(ev, ImportProgress::Finished { .. }) {
-                    terrain_finished = true;
-                }
+                self.terrain_jobs.remove(&id);
+            }
+            // P18.3 generalized the old terrain-only flag: **any** finished job can
+            // have written an asset the viewport resolves by GUID (a terrain, a
+            // mesh and its derived DAG, or the sweep), and the index it resolves
+            // through is a snapshot that predates all of them. Refreshing after a
+            // job that produced nothing streamable costs one directory walk;
+            // missing one leaves a freshly imported mesh drawing a placeholder
+            // forever, which is precisely the bug P18.3 exists to delete.
+            if matches!(ev, ImportProgress::Finished { .. }) {
+                index_stale = true;
             }
         }
         PollBatch {
             events,
-            terrain_finished,
+            index_stale,
         }
     }
 
@@ -241,7 +285,7 @@ impl Drop for ImportQueue {
 fn worker_loop(rx: Receiver<Job>, etx: Sender<ImportProgress>, project: Arc<Mutex<AssetProject>>) {
     while let Ok(job) = rx.recv() {
         let id = job.id();
-        let source = job.source().clone();
+        let source = job.source();
         let _ = etx.send(ImportProgress::Started {
             id,
             source: source.clone(),
@@ -322,6 +366,100 @@ fn worker_loop(rx: Receiver<Job>, etx: Sender<ImportProgress>, project: Arc<Mute
                     },
                 }
             }
+            // The project-open meshlet-DAG sweep (P18.3). Reports the derived
+            // assets as `produced` with no `primary` — nothing here is a headline
+            // the UI should reveal, but the Content Drawer must learn they exist.
+            //
+            // PHASE 1 — plan, under a short lock. Database reads only; meshes whose
+            // derived asset is already current are not planned at all, so a
+            // re-opened project does almost nothing here and nothing at all below.
+            Job::Vmeshes { cancel, .. } => {
+                let plans = {
+                    let proj = lock(&project);
+                    super::vmesh::plan_sweep(&proj)
+                };
+                let total = plans.len() as u64;
+                let tick = |done: u64, stage: &str| {
+                    let _ = etx.send(ImportProgress::Progress {
+                        id,
+                        source: source.clone(),
+                        done,
+                        total,
+                        stage: stage.to_string(),
+                    });
+                };
+                // "0 of N": phase 1 is over and the lock is free again. The only
+                // tick that reports the plan rather than the work.
+                tick(0, "planned");
+
+                let mut produced = Vec::new();
+                for (k, plan) in plans.iter().enumerate() {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    // PHASE 2 — build, with NO project lock held. This is where the
+                    // seconds go, and holding the mutex across it would be the
+                    // P16.4a stall through a new door.
+                    let payload = match super::vmesh::build_vmesh(plan) {
+                        Ok(Some(p)) => p,
+                        // Nothing to virtualize, or an unreadable mesh: skip it.
+                        // One bad asset must not fail a whole project's sweep.
+                        Ok(None) => {
+                            tick(k as u64 + 1, "built");
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "inf-editor-core: vmesh derivation failed for {}: {e}",
+                                plan.mesh
+                            );
+                            tick(k as u64 + 1, "built");
+                            continue;
+                        }
+                    };
+                    // Reported BEFORE the commit on purpose: this tick is the
+                    // observable proof that the heavy phase ran without the
+                    // project, which is the property the contention gate pins.
+                    tick(k as u64 + 1, "built");
+
+                    // PHASE 3 — commit: one atomic write + a database insert.
+                    //
+                    // `try_lock` in a cancel-checking loop rather than a blocking
+                    // `lock`. A worker parked on the mutex cannot see a
+                    // cancellation, so a project held by some other command would
+                    // make Cancel — and therefore closing or switching the project,
+                    // which joins this thread — wait for that command to finish.
+                    // Spinning at 2 ms costs nothing next to a `build_vgeom`.
+                    loop {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        let mut proj = match project.try_lock() {
+                            Ok(p) => p,
+                            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                            Err(std::sync::TryLockError::WouldBlock) => {
+                                std::thread::sleep(std::time::Duration::from_millis(2));
+                                continue;
+                            }
+                        };
+                        match super::vmesh::commit_vmesh(&mut proj, plan, &payload) {
+                            Ok(asset) => produced.push(asset),
+                            Err(e) => tracing::warn!(
+                                "inf-editor-core: vmesh commit failed for {}: {e}",
+                                plan.mesh
+                            ),
+                        }
+                        break;
+                    }
+                }
+                ImportProgress::Finished {
+                    id,
+                    source,
+                    produced,
+                    primary: None,
+                    cached: false,
+                }
+            }
         };
         let _ = etx.send(event);
     }
@@ -346,13 +484,25 @@ pub struct TickOutcome {
     pub events: Vec<ImportProgress>,
     /// The content database changed → emit `assets://changed`.
     pub content_changed: bool,
-    /// A `.inf_terrain` appeared or changed → the viewport's terrain index must
-    /// be refreshed, or a freshly imported terrain resolves to nothing and the
-    /// entity the wizard just spawned draws empty.
-    pub terrain_changed: bool,
+    /// A streamable asset appeared or changed → the viewport's loose-asset index
+    /// must be refreshed, or a freshly imported terrain/mesh resolves to nothing
+    /// and the entity the wizard (or a drag-drop) just spawned draws empty.
+    pub index_stale: bool,
     /// The content version to publish, or `None` when the project was busy.
     pub version: Option<u64>,
 }
+
+/// Extensions whose external change invalidates the viewport's loose-asset index
+/// — the set `inf_editor_core::render_assets` and `terrain_stream` resolve
+/// through. An edit to anything else (a material, a texture, a level) reaches the
+/// viewport through the document instead.
+const INDEXED_ASSET_EXTENSIONS: [&str; 5] = [
+    "inf_terrain",
+    "inf_vmesh",
+    "inf_mesh",
+    "inf_skel",
+    "inf_anim",
+];
 
 /// One pass of the editor's background import/watch tick.
 ///
@@ -376,7 +526,7 @@ pub fn tick(
             .events
             .iter()
             .any(|e| matches!(e, ImportProgress::Finished { .. })),
-        terrain_changed: batch.terrain_finished,
+        index_stale: batch.index_stale,
         events: batch.events,
         version: None,
     };
@@ -391,8 +541,12 @@ pub fn tick(
                     let path = match &c {
                         AssetChange::Upserted(p) | AssetChange::Removed(p) => p.clone(),
                     };
-                    if path.extension().and_then(|s| s.to_str()) == Some("inf_terrain") {
-                        out.terrain_changed = true;
+                    if path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|e| INDEXED_ASSET_EXTENSIONS.contains(&e))
+                    {
+                        out.index_stale = true;
                     }
                     match c {
                         AssetChange::Upserted(p) => {
@@ -609,7 +763,7 @@ mod tests {
         let mut terrain = false;
         while !finished && std::time::Instant::now() < deadline {
             let out = tick(&mut queue, &project, None);
-            terrain |= out.terrain_changed;
+            terrain |= out.index_stale;
             if out.events.iter().any(|e| match e {
                 ImportProgress::Finished { id: j, .. } => *j == id,
                 ImportProgress::Failed { error, .. } => panic!("import failed: {error}"),
@@ -622,7 +776,173 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(finished, "the import never finished");
-        assert!(terrain, "a finished terrain job must flag terrain_changed");
+        assert!(terrain, "a finished terrain job must flag index_stale");
+    }
+
+    /// A grid mesh heavy enough that `build_vgeom` is not instantaneous — the
+    /// sweep has to be observably *doing work* for the contention test below to
+    /// mean anything.
+    fn heavy_mesh(n: u32) -> inf_mesh::MeshAsset {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        for j in 0..=n {
+            for i in 0..=n {
+                vertices.push(inf_mesh::MeshVertex {
+                    position: [i as f32, ((i * j) % 11) as f32 * 0.2, j as f32],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [i as f32 / n as f32, j as f32 / n as f32],
+                    ..Default::default()
+                });
+            }
+        }
+        let idx = |i: u32, j: u32| j * (n + 1) + i;
+        for j in 0..n {
+            for i in 0..n {
+                indices.extend_from_slice(&[idx(i, j), idx(i + 1, j), idx(i + 1, j + 1)]);
+                indices.extend_from_slice(&[idx(i, j), idx(i + 1, j + 1), idx(i, j + 1)]);
+            }
+        }
+        inf_mesh::MeshAsset::new(
+            vec![inf_mesh::SubMesh {
+                name: "grid".into(),
+                vertices,
+                indices,
+                material_slot: None,
+                skin: Vec::new(),
+            }],
+            vec![],
+        )
+    }
+
+    /// **The lock-freedom gate for the vmesh sweep (P18.3 audit).** The same
+    /// property `a_terrain_import_progresses_and_cancels_while_the_project_is_locked`
+    /// pins, through the door P18.3 added: `build_vgeom` runs for seconds per mesh,
+    /// and doing it under the project mutex would freeze every asset command, the
+    /// progress tick, and this job's own Cancel — the P16.4a stall, re-introduced.
+    ///
+    /// The test *is* the contention: it holds the project for the whole sweep and
+    /// asserts progress keeps arriving and Cancel still lands.
+    #[test]
+    fn a_vmesh_sweep_progresses_and_cancels_while_the_project_is_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Arc::new(Mutex::new(AssetProject::open(dir.path()).unwrap()));
+        {
+            let mut proj = lock(&project);
+            let d = proj.content_dir("Meshes").unwrap();
+            for k in 0..6 {
+                proj.write_asset(
+                    &d,
+                    &format!("M{k}"),
+                    &heavy_mesh(40 + k),
+                    None,
+                    vec![],
+                    None,
+                )
+                .unwrap();
+            }
+        }
+        let mut queue = ImportQueue::spawn(project.clone());
+        let id = queue.submit_vmesh_sweep();
+
+        // Wait for the "planned" tick before contending: it is emitted once PHASE 1
+        // has released the lock, so what follows tests the BUILD phase rather than
+        // racing the plan phase (grabbing the mutex first would simply park the
+        // worker in phase 1 and prove nothing).
+        let total = loop {
+            match queue.recv().expect("worker alive") {
+                ImportProgress::Progress {
+                    id: j,
+                    total,
+                    ref stage,
+                    ..
+                } if stage == "planned" => {
+                    assert_eq!(j, id);
+                    break total;
+                }
+                ImportProgress::Started { .. } | ImportProgress::Progress { .. } => {}
+                other => panic!("the sweep ended before planning finished: {other:?}"),
+            }
+        };
+        assert!(
+            total >= 6,
+            "the sweep planned {total} meshes, expected >= 6"
+        );
+
+        // Now hold the project across the build phase.
+        let guard = project.lock().expect("phase 1 released it");
+
+        // A "built" tick still arrives: `build_vgeom` ran to completion while this
+        // thread held the project. If the build phase took the lock, this deadlocks
+        // — which is precisely the P16.4a failure, re-introduced through a new door.
+        loop {
+            match queue.recv().expect("worker alive") {
+                ImportProgress::Progress {
+                    id: j, ref stage, ..
+                } if stage == "built" => {
+                    assert_eq!(j, id);
+                    break;
+                }
+                ImportProgress::Progress { .. } => {}
+                other => panic!("the sweep ended before a contended build: {other:?}"),
+            }
+        }
+
+        // Cancel lands while the lock is still held…
+        assert!(queue.cancel(id), "the sweep is cancellable mid-build");
+
+        // …and the job reports terminally WITHOUT ever taking the project: the
+        // commit phase polls `try_lock` and re-checks the flag, so it is never
+        // parked somewhere a cancellation cannot reach it. Still holding `guard`.
+        loop {
+            match queue.recv().expect("worker alive") {
+                ImportProgress::Finished { produced, .. } => {
+                    assert!(
+                        produced.is_empty(),
+                        "a cancelled sweep committed while the project was locked"
+                    );
+                    break;
+                }
+                ImportProgress::Failed { error, .. } => panic!("sweep failed: {error}"),
+                _ => {}
+            }
+        }
+        assert!(
+            guard
+                .db()
+                .iter()
+                .all(|e| e.kind() != inf_asset::AssetKind::MeshletMesh),
+            "a cancelled sweep registered a derived asset"
+        );
+        drop(guard);
+    }
+
+    /// Uncontended, the sweep does its job: every mesh gains a derived DAG, and a
+    /// second sweep is all cache hits (it plans nothing, so it reports nothing).
+    #[test]
+    fn an_uncontended_sweep_derives_every_mesh_then_goes_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Arc::new(Mutex::new(AssetProject::open(dir.path()).unwrap()));
+        {
+            let mut proj = lock(&project);
+            let d = proj.content_dir("Meshes").unwrap();
+            for k in 0..3 {
+                proj.write_asset(&d, &format!("M{k}"), &heavy_mesh(8 + k), None, vec![], None)
+                    .unwrap();
+            }
+        }
+        let mut queue = ImportQueue::spawn(project.clone());
+
+        let run = |queue: &mut ImportQueue| loop {
+            match queue.recv().expect("worker alive") {
+                ImportProgress::Finished { produced, .. } => return produced,
+                ImportProgress::Failed { error, .. } => panic!("sweep failed: {error}"),
+                _ => {}
+            }
+        };
+        queue.submit_vmesh_sweep();
+        assert_eq!(run(&mut queue).len(), 3, "all three derived");
+        queue.submit_vmesh_sweep();
+        assert!(run(&mut queue).is_empty(), "second sweep is all hits");
     }
 
     #[test]

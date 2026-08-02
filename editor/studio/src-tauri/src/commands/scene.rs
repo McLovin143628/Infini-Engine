@@ -912,7 +912,7 @@ pub async fn scene_open(
     // payload, plus any tile it pinned for an unsaved edit (which nothing would
     // ever unpin). Release them (P16.4b).
     if let Some(viewport) = app.try_state::<crate::commands::ViewportState>() {
-        viewport.clear_terrain_streams();
+        viewport.clear_streams();
     }
     // The opened file becomes the current level (a later plain Save overwrites it).
     *state.current_level_path.lock().map_err(|e| e.to_string())? = Some(path);
@@ -967,7 +967,7 @@ pub async fn scene_new(
     // payload, plus any tile it pinned for an unsaved edit (which nothing would
     // ever unpin). Release them (P16.4b).
     if let Some(viewport) = app.try_state::<crate::commands::ViewportState>() {
-        viewport.clear_terrain_streams();
+        viewport.clear_streams();
     }
     // A brand-new scene is untitled — forget any current-level path.
     *state.current_level_path.lock().map_err(|e| e.to_string())? = None;

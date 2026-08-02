@@ -124,14 +124,14 @@ enum Cmd {
     SetViewMode(ViewMode),
     /// Point terrain streaming at a project's content root (or `None` to disable
     /// it) — the P16.4a `project://changed` wiring.
-    SetTerrainContentRoot(Option<std::path::PathBuf>),
+    SetContentRoot(Option<std::path::PathBuf>),
     /// Rebuild the loose `.inf_terrain` index in place (a terrain import landed).
-    RefreshTerrainIndex,
+    RefreshAssetIndex,
     /// Reopen every live terrain stream's `.inf_terrain` in place — a save just
     /// wrote sculpt/paint edits back into it (P16.4b).
     ReloadTerrainStores,
     /// Release every terrain stream — the document was replaced (P16.4b).
-    ClearTerrainStreams,
+    ClearStreams,
     /// Adopt a foreign (PIE player) window into the viewport slot: reparent it
     /// to our parent, position it at the hole, and hide our own child (embedded
     /// PIE, P9.4). The `isize` is the foreign HWND.
@@ -223,14 +223,14 @@ impl ViewportHandle {
     /// Point terrain streaming at a project's content root (P16.4a). Rescans the
     /// loose `.inf_terrain` index and drops every live stream, so a project
     /// switch can never serve the previous project's pages.
-    pub fn set_terrain_content_root(&self, root: Option<std::path::PathBuf>) {
-        let _ = self.tx.send(Cmd::SetTerrainContentRoot(root));
+    pub fn set_content_root(&self, root: Option<std::path::PathBuf>) {
+        let _ = self.tx.send(Cmd::SetContentRoot(root));
     }
 
     /// Rebuild the loose `.inf_terrain` index without dropping live streams —
     /// pushed when a terrain import finishes (P16.4a).
-    pub fn refresh_terrain_index(&self) {
-        let _ = self.tx.send(Cmd::RefreshTerrainIndex);
+    pub fn refresh_asset_index(&self) {
+        let _ = self.tx.send(Cmd::RefreshAssetIndex);
     }
 
     /// Reopen every live terrain stream's `.inf_terrain` in place — pushed when a
@@ -243,8 +243,8 @@ impl ViewportHandle {
     /// Release every terrain stream (its pages, its edit pins and its
     /// `.inf_terrain` payload) — pushed when the open document is replaced by
     /// File ▸ Open / File ▸ New (P16.4b).
-    pub fn clear_terrain_streams(&self) {
-        let _ = self.tx.send(Cmd::ClearTerrainStreams);
+    pub fn clear_streams(&self) {
+        let _ = self.tx.send(Cmd::ClearStreams);
     }
 
     /// Adopt a foreign (PIE player) window into the viewport slot (embedded PIE,
@@ -920,10 +920,10 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 Ok(Cmd::SetGizmoSpace(s)) => host.set_gizmo_space(s),
                 Ok(Cmd::SetSnap3D(s)) => host.set_snap_3d(s),
                 Ok(Cmd::SetViewMode(m)) => host.set_view_mode(m),
-                Ok(Cmd::SetTerrainContentRoot(root)) => host.set_terrain_content_root(root),
-                Ok(Cmd::RefreshTerrainIndex) => host.refresh_terrain_index(),
+                Ok(Cmd::SetContentRoot(root)) => host.set_content_root(root),
+                Ok(Cmd::RefreshAssetIndex) => host.refresh_asset_index(),
                 Ok(Cmd::ReloadTerrainStores) => host.reload_terrain_stores(),
-                Ok(Cmd::ClearTerrainStreams) => host.clear_terrain_streams(),
+                Ok(Cmd::ClearStreams) => host.clear_streams(),
                 Ok(Cmd::EmbedForeign(foreign)) => {
                     // Position the foreign window at the hole immediately. If no
                     // SetRect has arrived yet, fall back to our child's current

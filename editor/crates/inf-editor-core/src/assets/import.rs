@@ -310,6 +310,32 @@ fn import_mesh_container(
         primary.get_or_insert(id);
     }
 
+    // 6. Derive a `.inf_vmesh` meshlet DAG per imported mesh (P18.3), so the
+    //    interactive viewport can draw the real geometry the moment the asset is
+    //    dropped into a scene. This is the editor's half of what the cook has done
+    //    since P13.1; it runs here rather than lazily on the render thread because
+    //    a multi-second `build_vgeom` must never land inside a frame.
+    //
+    //    The derived assets are appended to `produced` (they *are* products of this
+    //    import — the Content Drawer showing them is honest) but `primary` is left
+    //    alone: the headline of a mesh import is the mesh.
+    let mesh_ids: Vec<AssetId> = produced
+        .iter()
+        .copied()
+        .filter(|id| project.db().get(*id).map(|e| e.kind()) == Some(inf_asset::AssetKind::Mesh))
+        .collect();
+    let mut derived = Vec::new();
+    for mesh_id in mesh_ids {
+        match super::vmesh::ensure_vmesh(project, mesh_id) {
+            Ok(d) => derived.extend(d.asset()),
+            // A DAG that fails to build costs the entity its real geometry (it
+            // falls back to the primitive placeholder) — it must not fail the
+            // import that produced a perfectly good `.inf_mesh`.
+            Err(e) => tracing::warn!("inf-editor-core: vmesh derivation for {mesh_id}: {e}"),
+        }
+    }
+    produced.extend(derived);
+
     // Prefer the first mesh as the headline; fall back to whatever came out.
     let primary = primary.or_else(|| produced.first().copied());
     Ok(ImportOutcome {

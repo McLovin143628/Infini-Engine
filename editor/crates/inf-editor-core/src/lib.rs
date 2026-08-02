@@ -11,6 +11,9 @@ pub mod layouts;
 pub mod mods;
 pub mod pie;
 pub mod project_settings;
+/// The interactive viewport's loose-file render-asset store (P18.3): real
+/// `MeshRef.asset` geometry + skinned `SkeletalMesh` draws.
+pub mod render_assets;
 pub mod samples;
 pub mod scene;
 pub mod sequencer;

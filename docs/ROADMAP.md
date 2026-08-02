@@ -2376,6 +2376,173 @@ GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and h
 > follow-up. (4) The editor viewport still does
 > not carry vgeom content at all — that is P18.3, and it inherits this path unchanged.
 
+> **P18.3 Editor real meshes — COMPLETE** (2026-08-01, local gates green; CI pending push).
+> The oldest documented gap in the engine is closed. Since P4 an imported glTF/OBJ placed in a
+> scene drew a **placeholder cube** in the interactive viewport while the shipped player drew its
+> real geometry — P4's own status note called it "the documented Phase 4→7 follow-up". A
+> `MeshRef.asset` now streams its meshlet DAG in the editor on the same P18.2 path the player
+> uses, and a bound `SkeletalMesh` draws its skinned mesh instead of a slate cube.
+>
+> **The editor has to ASK for that path, and the first cut of this batch forgot.**
+> `VgeomSettings::default()` is `enabled: false`; the player opts in explicitly and the editor
+> never did, so every asset it carried would have gone through `ClassicVgeomNode` — the same
+> geometry, at discrete LODs, with none of P18.2's streaming, budget or eviction. The failure is
+> invisible in a screenshot, which is exactly why it is now gated on both sides
+> (`projector_mirror::both_hosts_request_the_meshlet_path`) and unit-tested as a pure decision
+> (`requested_render_settings`). Requesting is not forcing: `RenderTier::apply` still drops the
+> meshlet path below High and `AdapterCaps::clamp_occlusion` still applies the storage-texture
+> floor — the editor now applies **both**, which also closes P18.1's honest remainder (1) for this
+> host. On Medium/Low the classic fallback draws the same content, so the tier decides the
+> mechanism and never the pixels.
+>
+> **The structural reason it took this long, and what actually unblocked it.** `RenderScene` has
+> exactly **one** door for non-primitive geometry — `VgeomAsset` + `VgeomInstance` — and
+> `.inf_vmesh` was *cook-only*, so the editor had nothing to put through it. Two halves therefore
+> had to land together: the editor derives its own DAGs (`inf_editor_core::assets::vmesh`), and it
+> has a loose-file store to resolve them from (`inf_editor_core::render_assets`). Both live in
+> **Ring 1**, not in `inf_viewport::host`, for the P16.3b2 reason — the host is
+> `#[cfg(any(windows, target_os = "macos"))]`, so logic placed there is invisible to Linux CI. The
+> host is left with call sites; the policy is unit-tested on all three OSes.
+>
+> **Derivation.** On import (and via a project-open sweep that covers content imported before this
+> batch) `build_vgeom` → `build_vgeom_asset` writes the v2 paged image **beside the mesh**, under
+> the GUID `inf_vgeom::derived_vmesh_id(mesh)` — so the viewport finds a mesh's DAG by *computing*
+> the id, with no side index, exactly as the pack does. It is **content-hash cached** the way
+> `ImportCache` and `ThumbnailCache` are: the sidecar's `import` table records the **source mesh's**
+> hash (not the payload's — the question is "would rebuilding produce the same bytes?", which is a
+> property of the input), so an unchanged mesh never rebuilds and a re-import always does.
+> `build_vgeom` is pool-size-invariant and `build_vgeom_asset` is a pure function of the DAG, so two
+> derivations are byte-identical — the property the cook already relied on, now relied on twice.
+> The image is written **atomically** (temp + rename), the `write_terrain_asset` discipline this path
+> already cited for its sidecar but not for its own multi-megabyte payload: the content watcher fires
+> on that write, so a plain `fs::write` leaves a wide window in which a reader sees a truncated image
+> — and `VgeomSource::from_payload` rejects one, turning a race into a mesh that silently stops
+> rendering. Gated the decisive way: a *failed* write must not create or touch the target at all,
+> which is exactly what separates rename-over from write-in-place.
+> The salt that ties the two ids together **moved to Ring 0** (`inf_vgeom::VMESH_ID_SALT`): it was
+> hand-copied in the cook and in the player with a drift test holding them together, and a third
+> copy for the editor is one past the point where that is defensible. Both now delegate.
+>
+> **The one deliberate difference from the player, and why it is not a divergence.** The player
+> keys `VgeomAsset::id` by the derived **GUID**; the editor keys it by the derived payload's
+> **content hash**. The reason is a real asymmetry: a cooked pack is immutable, so an id names one
+> sequence of bytes forever — a content root is not. Both render nodes cache GPU state by that id
+> (`ClassicVgeomNode::geom` never evicts; `VgeomStreamer` holds pool blocks staged from the source
+> it registered), so a content change under a stable id is a **stale render**, not a reload. A
+> content-addressed id makes that unrepresentable: changed bytes are a different asset, the old one
+> leaves `wants` and is fully evicted, the new one pages in. It also deduplicates — two mesh assets
+> with identical geometry share one upload. `AssetResidency::matches` was strengthened alongside
+> (whole page directory, not just its counts), and is documented as the cheap discriminator it is:
+> a directory-identical payload still passes, which is precisely why the *id* carries the guarantee.
+>
+> **Mirror discipline.** `tests/projector_mirror.rs` gained a second gate. `project_sky` is still
+> compared character for character; the `MeshRef` branch cannot be (it is inline in two loops with
+> different iteration orders and id bookkeeping), so it is pinned **field for field**: every field
+> of the `VgeomInstance` both hosts construct, in order, with identical value expressions for all
+> but the two documented host-local ones (`asset`, `id`). A second test asserts the surrounding
+> rules — resolution through the derived id, per-frame asset dedup, the paged source rather than a
+> decoded DAG, the primitive fallback — exist on **both** sides. The failure this catches ("the
+> editor forgot to project `emissive`") reads as *the shipped game looks different from the
+> preview*, which is found by a player, not by a compiler.
+>
+> **Skinned geometry is shared, not copied.** `RenderScene::skinned_meshes` holds
+> `Arc<SkinnedMeshData>` since this batch, and the skinned pass keys its GPU upload on **pointer
+> identity** rather than on `scene.version`. Before that, a host re-projecting on every document
+> change paid a full CPU copy *and* a full GPU re-upload of a character's bind-space stream — for an
+> editor, on every gizmo tick of an unrelated entity (~2.3 MB each, twice). Palettes are still
+> rebuilt and re-uploaded per projection, which is correct: they are the part that actually changes.
+> The cache holds the `Arc` alongside its buffers, which is what makes the pointer a sound key — the
+> allocation cannot be freed and recycled under a live entry — and entries a sync does not touch are
+> dropped, which frees them.
+>
+> **Skinned meshes are not a mirror, and the block says so.** The shipped player has no
+> `SkeletalMesh` branch at all, so there was nothing to keep in sync: this is the first host to
+> drive `RenderScene::skinned` from real assets rather than from a golden's hand-built fixture. The
+> pose rule is: no skeleton ⇒ keep the placeholder; no `AnimPlayer`, no clip, or an unresolvable
+> clip ⇒ **rest pose**; otherwise the clip sampled at the play-head through `inf_anim::sample_clip`.
+> Rest-pose-by-default is what makes a freshly dropped character visible instead of
+> invisible-until-you-press-play. Giving the player the same branch is the matching follow-up.
+>
+> **The placeholder stays, and that is not a hedge.** A primitive `MeshRef` (Cube/Sphere/Plane/
+> Cylinder/Cone) is legitimate authored content, not a stand-in; an unresolved or dangling asset
+> degrades to it rather than vanishing; an unbound `SkeletalMesh` keeps its slate cube down to the
+> tint. Every golden scene is primitives, so **all 36 goldens are byte-identical, verified strict,
+> no re-bless.**
+>
+> **Lifecycle.** Re-import invalidates through `assets://changed` → `refresh_asset_index`, which
+> drops opened `.inf_vmesh` payloads (a vmesh is opened once and then only sliced, so a rewritten
+> payload would otherwise be served from the stale mapping forever) while *keeping* terrain streams
+> (their tiles are re-read per page, and re-pointing the root would re-page terrain the user is
+> flying over). Deleting a mesh takes its derived artifact with it — no dependency edge, on purpose,
+> because an edge would make every mesh undeletable by its own derived form. A level switch releases
+> everything (`clear_streams`), and each projection releases what the document no longer references
+> (`retain_only` — the P16.4b lesson, in mesh form, tested rather than asserted).
+>
+> **`ClassicVgeomNode` had no eviction at all, and content-addressed ids made that a leak.** It
+> materializes a whole DAG per asset into GPU buffers and nothing ever removed an entry — bounded by
+> the pack in a shipped build, unbounded in an editor where a re-import mints a *new* id (~3.6 MB
+> per 100k-triangle mesh, per re-import, until device-lost). It now retains to the frame's live set,
+> mirroring `VgeomNode`'s `plan.dropped` eviction, and does so **before** its early-out so it also
+> releases everything when the meshlet path takes over or the scene stops carrying vgeom — the two
+> transitions the early-out otherwise hid. The rule is a free function over plain maps, so it is
+> pinned without an adapter.
+>
+> **Selection had to follow the geometry.** A `MeshRef.asset` is no longer a `MeshInstance`, and
+> every selection-driven affordance searched that one list: the gizmo snapshot, focus framing, the
+> Local-space basis, the transform write-back. They all read through one `instance_xform` /
+> `set_instance_xform` pair now, so **an imported mesh is exactly as manipulable as a cube** by
+> construction rather than by remembering to add a third branch. Picking needed the same care: the
+> GPU id-buffer pass rasterizes `instances` only, so real geometry would have been *unclickable*.
+> The stopgap is the technique the gizmo already uses — analytic picking: on an id-buffer miss,
+> ray-test the cursor against each vgeom/skinned instance's world bounding sphere, nearest hit wins,
+> ties broken by id. It is a fallback, never a first choice, so nothing about picking a primitive
+> changes.
+>
+> **Gates.** `inf_editor_core::assets::vmesh` (derivation determinism, cache hit, re-import
+> invalidation, delete sweep, degenerate-mesh skip, project sweep idempotence);
+> `inf_editor_core::render_assets` (resolution, cross-store determinism, cheap dangling miss,
+> re-import key change, delete-degrades, level-switch release, skeletal rest pose, `AnimPlayer`-driven
+> palette, unresolvable-clip fallback, dot-directory exclusion);
+> `tests/editor_real_meshes.rs` (the whole chain over a real glTF import: real geometry projected,
+> determinism across two full runs, delete degrades to the entity's **own** primitive kind,
+> primitives unaffected); `tests/projector_mirror.rs` (the two mirror gates above);
+> `inf-vgeom::stream` (re-imported content under one id resets residency, on a fixture asserted
+> count-identical so it cannot go vacuous); `inf-viewport::host` (the analytic pick rule, and the
+> pure render-settings request); `inf-render::passes::classic_vgeom` (the eviction rule, including a
+> re-import replacing rather than accumulating); `inf-packager` (the sub-threshold advisory's rule
+> and wording, plus a cook-level test that it reaches `CookReport::warnings`);
+> `inf_editor_core::assets::queue` (the sweep's contention gate and its uncontended behaviour).
+> **All 36 goldens re-verified byte-identical with the editor opt-in in place** — they render through
+> the golden harness's own `RenderScene`, never through the editor host, so the opt-in cannot reach
+> them; the point of re-verifying is that this is *checked* rather than assumed.
+>
+> **Honest remainders.** (1) **No selection outline on real geometry.** The mask pass draws
+> `PrimMesh` batches, so a selected imported mesh gets no highlight where its placeholder used to.
+> Covering vgeom/skinned there is a renderer change and belongs with extending the ID pass — the
+> two are the same piece of work, and the analytic pick above is explicitly the stopgap for half of
+> it. (2) **The cook still declines small meshes — but it now says so.**
+> `VgeomCookOptions::min_triangles` is 2048; the editor derives from **one** triangle, because vgeom
+> is its only real-geometry path. So a *shipped* build of a scene with a sub-2048-triangle imported
+> mesh still draws the placeholder the editor no longer does. That asymmetry is the worst shape a
+> defect can have — invisible until the build, and invisible in the build until someone walks up to
+> the prop — so the cook now raises a per-asset advisory naming the mesh, its triangle count, the
+> threshold and the remedy (the `partition::streamed_actors` precedent: the rule and the wording
+> unit-tested, the delivery gated at cook level, and a *derived* mesh asserted to raise nothing so it
+> cannot become background noise). Changing the default itself is still a follow-up — it changes
+> shipped bytes — and the advisory is what makes leaving it a decision rather than an oversight.
+> (3) Derived `.inf_vmesh` assets are registered in the DB and therefore
+> visible in the Content Drawer; hiding derived artifacts behind a filter chip is a UI follow-up.
+> (5) The project-open sweep is **cancellable and never holds the project across a build**: it plans
+> under a short lock, builds holding nothing, and commits through a `try_lock` loop that re-checks
+> the cancel flag — the P16.4a shape, because a worker parked on the mutex cannot see a cancellation,
+> and dropping the `ImportQueue` (project close/switch) joins that thread. Pinned by a contention
+> gate that holds the project for the whole sweep and asserts a build still completes and Cancel
+> still lands. What remains is only that a first open of a large project still *does* the work, one
+> mesh at a time, in the background. (6) The editor derives DAGs; it does **not** yet
+> honour per-submesh material slots on them (`build_vgeom` flattens submeshes, a documented v1
+> limitation of the format itself), so a multi-material imported mesh renders with the entity's
+> single `Material` — the same behaviour the shipped player has always had.
+
 - **P18.1 Two-pass HZB occlusion** — 1. persist the last-frame visible list; 2. early draw →
   HZB from its depth → late cull and draw of the remainder; 3. on by default where supported.
 - **P18.2 Meshlet streaming** — 1. a residency/page table over the existing coarse-first level

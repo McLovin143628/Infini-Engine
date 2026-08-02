@@ -78,3 +78,30 @@ pub use stream::{
     VgeomStreamBudget, VgeomStreamPlan, VgeomStreamStats, VgeomStreamer, VgeomWant,
     DEFAULT_VGEOM_BUDGET_BYTES, NOT_RESIDENT,
 };
+
+// ── The derived-asset id rule (Ring 0, P18.3) ───────────────────────────────
+//
+// `.inf_vmesh` is *derived* from a `.inf_mesh`, and every host that wants to find
+// a mesh's virtualized form does it by **computing** the id rather than by
+// consulting a side index. Before P18.3 the salt was written out three times —
+// once in the cook, once in the shipped player, once (about to be) in the editor
+// — each with its own drift test. It lives here now, in the crate that owns the
+// format, so there is exactly one constant to be wrong about. The cook and the
+// player delegate to it and keep their public names.
+
+/// The fixed salt XORed into a mesh GUID to derive its `.inf_vmesh` GUID.
+///
+/// XOR with a constant is a bijection, so distinct mesh ids always yield distinct
+/// vmesh ids; the salt makes a collision with any *authored* asset id vanishingly
+/// unlikely (and the cook guards the remaining case).
+pub const VMESH_ID_SALT: u128 = 0x7635_4e56_4d45_5348_1f13_1a2b_3c4d_5e6f;
+
+/// Derive the deterministic `.inf_vmesh` asset id for a mesh id.
+///
+/// Involutive (`derived_vmesh_id(derived_vmesh_id(x)) == x`), because the salt is
+/// its own inverse under XOR.
+pub fn derived_vmesh_id(mesh_id: inf_asset::AssetId) -> inf_asset::AssetId {
+    inf_asset::AssetId(uuid::Uuid::from_u128(
+        mesh_id.uuid().as_u128() ^ VMESH_ID_SALT,
+    ))
+}

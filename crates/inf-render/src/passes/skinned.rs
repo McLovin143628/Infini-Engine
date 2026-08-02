@@ -180,7 +180,14 @@ pub struct SkinnedMeshNode {
     env: super::EnvBinding,
     lights_buf: wgpu::Buffer,
     lights_bg: wgpu::BindGroup,
-    meshes: Vec<GpuSkinnedMesh>,
+    /// Per `RenderScene::skinned_meshes` entry, its key into
+    /// [`mesh_cache`](Self::mesh_cache) — so `SkinnedInstance::mesh` (an index into
+    /// the scene's list) still resolves in one hop.
+    meshes: Vec<usize>,
+    /// Uploaded geometry by `Arc` identity (P18.3). Holds the `Arc` alongside the
+    /// buffers so the pointer used as the key can never be recycled under a live
+    /// entry; entries not referenced by a sync are dropped, which frees them.
+    mesh_cache: std::collections::HashMap<usize, (std::sync::Arc<SkinnedMeshData>, GpuSkinnedMesh)>,
     instances: Vec<GpuSkinnedInstance>,
     /// One [`InstanceRaw`] per instance, selected per draw by `base_instance`.
     instance_buf: Option<wgpu::Buffer>,
@@ -330,6 +337,7 @@ impl SkinnedMeshNode {
             lights_buf,
             lights_bg,
             meshes: Vec::new(),
+            mesh_cache: std::collections::HashMap::new(),
             instances: Vec::new(),
             instance_buf: None,
             uploaded_version: None,
@@ -352,13 +360,33 @@ impl SkinnedMeshNode {
         gpu.queue
             .write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lights));
 
-        // Mesh geometry.
+        // ── Mesh geometry, keyed on IDENTITY rather than on the frame (P18.3) ──
+        //
+        // Bind-space geometry does not change when a pose does, but this used to
+        // re-upload every vertex of every skinned mesh whenever `scene.version`
+        // moved — which for an editor is every gizmo tick of an unrelated entity.
+        // The scene now shares each buffer as an `Arc`, so "is this the same
+        // geometry I already uploaded?" is a pointer comparison. The cache holds
+        // the `Arc` itself, which is what makes the pointer a sound key: the
+        // allocation cannot be freed and reused under a live entry.
+        //
+        // Palettes below are deliberately NOT cached — they are the per-frame part.
+        let mut cache = std::mem::take(&mut self.mesh_cache);
         self.meshes = frame
             .scene
             .skinned_meshes
             .iter()
-            .map(|m| upload_mesh(gpu, m))
+            .map(|m| {
+                let key = std::sync::Arc::as_ptr(m) as usize;
+                let entry = cache
+                    .remove(&key)
+                    .unwrap_or_else(|| (m.clone(), upload_mesh(gpu, m)));
+                self.mesh_cache.insert(key, entry);
+                key
+            })
             .collect();
+        // Whatever `cache` still holds was not referenced this frame — dropped
+        // here, which releases its GPU buffers.
 
         // Instance transforms (one InstanceRaw each, selected via base_instance).
         let raws: Vec<InstanceRaw> = frame
@@ -490,7 +518,12 @@ impl RenderNode for SkinnedMeshNode {
         pass.set_vertex_buffer(1, instance_buf.slice(..));
 
         for (i, inst) in self.instances.iter().enumerate() {
-            let Some(gpu_mesh) = self.meshes.get(inst.mesh) else {
+            let Some(gpu_mesh) = self
+                .meshes
+                .get(inst.mesh)
+                .and_then(|key| self.mesh_cache.get(key))
+                .map(|(_, m)| m)
+            else {
                 continue;
             };
             if gpu_mesh.index_count == 0 {

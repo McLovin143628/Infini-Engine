@@ -25,7 +25,7 @@
 //! only when it is enabled. Exactly one of the two draws the content, so there is no
 //! double-draw and scenes without vgeom content stay byte-identical (both are no-ops).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use glam::Vec3;
 use inf_math::FloatingOrigin;
@@ -225,6 +225,36 @@ impl ClassicGpu {
     }
 }
 
+/// The asset ids this frame gives the classic node a reason to hold (P18.3).
+///
+/// Empty when the meshlet path is enabled: `VgeomNode` owns the frame, this node
+/// draws nothing, and holding a second full copy of every DAG's geometry for a
+/// path that is not running is pure waste.
+fn live_asset_ids(frame: &FrameData) -> BTreeSet<u128> {
+    if frame.settings.vgeom.enabled {
+        BTreeSet::new()
+    } else {
+        frame.scene.vgeom_assets.iter().map(|a| a.id).collect()
+    }
+}
+
+/// Drop every cached entry whose asset is not in `live`.
+///
+/// Generic over the cached value types so the **rule** — which is the thing that
+/// was missing, and the thing a future edit could get wrong — unit-tests with
+/// plain maps and no GPU. `ClassicGpu` owns `wgpu::Buffer`s and cannot be built
+/// without an adapter, which is exactly why this is not a method.
+fn retain_live<G, B>(
+    geom: &mut BTreeMap<u128, G>,
+    batches: &mut BTreeMap<(u128, usize), B>,
+    batch_caps: &mut BTreeMap<(u128, usize), usize>,
+    live: &BTreeSet<u128>,
+) {
+    geom.retain(|id, _| live.contains(id));
+    batches.retain(|(id, _), _| live.contains(id));
+    batch_caps.retain(|(id, _), _| live.contains(id));
+}
+
 /// The classic-LOD fallback render node (P13.4).
 pub struct ClassicVgeomNode {
     pipeline: wgpu::RenderPipeline,
@@ -364,6 +394,28 @@ impl RenderNode for ClassicVgeomNode {
     }
 
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
+        // ── Eviction (P18.3) ────────────────────────────────────────────────
+        //
+        // This runs BEFORE the early-out, and that placement is the whole point.
+        // `geom` materializes a whole DAG per asset into GPU buffers and nothing
+        // ever removed an entry, so every distinct asset id the node had drawn
+        // stayed resident until device-lost. In a cooked pack that is bounded by
+        // the pack; in the editor (P18.3) an asset id is **content-addressed**, so
+        // re-importing a mesh mints a new one and the superseded geometry would
+        // accumulate for the life of the session.
+        //
+        // The rule is the mirror of `VgeomNode`'s `plan.dropped` eviction: hold
+        // exactly what this frame lists. Running it before the early-out means the
+        // node also releases everything when the meshlet path takes over, or when
+        // the scene stops carrying vgeom at all — the two transitions the early-out
+        // would otherwise make invisible.
+        retain_live(
+            &mut self.geom,
+            &mut self.batches,
+            &mut self.batch_caps,
+            &live_asset_ids(frame),
+        );
+
         // Runs only as the fallback: vgeom OFF + vgeom content present.
         if frame.settings.vgeom.enabled
             || frame.scene.vgeom_instances.is_empty()
@@ -479,5 +531,96 @@ impl RenderNode for ClassicVgeomNode {
             pass.set_index_buffer(index_buf.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..*index_count, 0, 0..raw.len() as u32);
         }
+    }
+}
+
+/// The classic fallback's eviction rule (P18.3). Pure, so the property that was
+/// missing — *nothing is held that this frame does not list* — is pinned without
+/// an adapter.
+#[cfg(test)]
+mod eviction {
+    use super::{retain_live, BTreeMap, BTreeSet};
+
+    /// The three maps the node caches in, with the GPU types stood in for by
+    /// `u32` — the rule under test never looks at the values.
+    type Caches = (
+        BTreeMap<u128, u32>,
+        BTreeMap<(u128, usize), u32>,
+        BTreeMap<(u128, usize), usize>,
+    );
+
+    fn fixture() -> Caches {
+        let geom = (1u128..=3).map(|i| (i, i as u32)).collect();
+        let batches = (1u128..=3)
+            .flat_map(|i| (0..2usize).map(move |l| ((i, l), i as u32)))
+            .collect();
+        let caps = (1u128..=3)
+            .flat_map(|i| (0..2usize).map(move |l| ((i, l), 8usize)))
+            .collect();
+        (geom, batches, caps)
+    }
+
+    /// A projection that shrank releases the assets it dropped — including their
+    /// per-level instance buffers and the capacities that size them, which are
+    /// keyed on `(asset, level)` and would otherwise outlive the geometry.
+    #[test]
+    fn shrinking_the_projection_releases_the_dropped_assets() {
+        let (mut geom, mut batches, mut caps) = fixture();
+        retain_live(&mut geom, &mut batches, &mut caps, &BTreeSet::from([2u128]));
+        assert_eq!(geom.keys().copied().collect::<Vec<_>>(), vec![2]);
+        assert!(batches.keys().all(|(id, _)| *id == 2));
+        assert!(caps.keys().all(|(id, _)| *id == 2));
+        assert_eq!(batches.len(), 2, "both of asset 2's levels survive");
+        assert_eq!(caps.len(), 2);
+    }
+
+    /// An empty live set — the meshlet path took over, or the scene carries no
+    /// vgeom — releases everything. This is the transition the node's early-out
+    /// used to hide, and the one that made a re-import leak.
+    #[test]
+    fn an_empty_live_set_releases_everything() {
+        let (mut geom, mut batches, mut caps) = fixture();
+        retain_live(&mut geom, &mut batches, &mut caps, &BTreeSet::new());
+        assert!(geom.is_empty() && batches.is_empty() && caps.is_empty());
+    }
+
+    /// A stable projection keeps its cache — eviction must not become a rebuild
+    /// every frame.
+    #[test]
+    fn a_stable_projection_keeps_its_cache() {
+        let (mut geom, mut batches, mut caps) = fixture();
+        let live = BTreeSet::from([1u128, 2, 3]);
+        for _ in 0..3 {
+            retain_live(&mut geom, &mut batches, &mut caps, &live);
+        }
+        assert_eq!(geom.len(), 3);
+        assert_eq!(batches.len(), 6);
+        assert_eq!(caps.len(), 6);
+    }
+
+    /// Re-import in the editor mints a **new** content-addressed id for the same
+    /// entity; the superseded one must not survive it. (Before P18.3 this map only
+    /// ever grew — ~3.6 MB of GPU geometry per 100k-triangle mesh, per re-import,
+    /// until device-lost.)
+    #[test]
+    fn a_reimported_asset_replaces_rather_than_accumulates() {
+        let (mut geom, mut batches, mut caps) = fixture();
+        // The user re-imports asset 1; it now presents as id 99.
+        geom.insert(99, 99);
+        batches.insert((99, 0), 99);
+        caps.insert((99, 0), 8);
+        retain_live(
+            &mut geom,
+            &mut batches,
+            &mut caps,
+            &BTreeSet::from([99u128, 2, 3]),
+        );
+        assert!(!geom.contains_key(&1), "the superseded content is released");
+        assert!(geom.contains_key(&99));
+        assert_eq!(
+            geom.len(),
+            3,
+            "one entry per live asset, not one per version"
+        );
     }
 }

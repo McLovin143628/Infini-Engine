@@ -80,7 +80,7 @@ fn apply_open(
     // paging (P16.4a). Switching projects re-points it, which drops every live
     // stream — the previous project's pages can never be served here.
     if let Some(viewport) = app.try_state::<super::ViewportState>() {
-        viewport.set_terrain_content_root(Some(content_root));
+        viewport.set_content_root(Some(content_root));
     }
     let _ = app.emit("project://changed", dto.clone());
     tracing::info!("project opened: {}", dto.name);
@@ -159,7 +159,7 @@ pub async fn project_close(app: AppHandle, state: State<'_, ProjectState>) -> Re
     *state.current.lock().map_err(|e| e.to_string())? = None;
     // Stop streaming the closed project's terrain pages.
     if let Some(viewport) = app.try_state::<super::ViewportState>() {
-        viewport.set_terrain_content_root(None);
+        viewport.set_content_root(None);
     }
     Ok(())
 }

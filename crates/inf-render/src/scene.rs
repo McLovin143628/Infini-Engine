@@ -696,7 +696,16 @@ pub struct RenderScene {
     /// Bind-space geometry for skinned meshes (P11.1), referenced by
     /// [`SkinnedInstance::mesh`]. Empty ⇒ the skinned pass is a no-op (every
     /// pre-P11 scene stays byte-identical).
-    pub skinned_meshes: Vec<SkinnedMeshData>,
+    ///
+    /// **`Arc`, since P18.3, and for two reasons that are really one.** A host
+    /// rebuilds this list on every projection; a character's bind-space stream is
+    /// megabytes, so an owned `SkinnedMeshData` meant a full CPU copy per document
+    /// change *and* — because the pass keyed its uploads on `scene.version` — a
+    /// full GPU re-upload of geometry that had not moved. Sharing the buffer lets
+    /// the pass cache by **pointer identity** instead: same `Arc`, same GPU
+    /// buffers, no copy and no upload. Palettes are still rebuilt every projection,
+    /// which is correct — they are the part that actually changes.
+    pub skinned_meshes: Vec<std::sync::Arc<SkinnedMeshData>>,
     /// GPU-skinned instances (P11.1). Each carries its own joint palette; drawn
     /// by the skinned mesh pass after the rigid mesh pass, into the same targets.
     pub skinned: Vec<SkinnedInstance>,

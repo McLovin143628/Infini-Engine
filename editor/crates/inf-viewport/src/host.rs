@@ -209,6 +209,19 @@ pub struct EngineHost {
     /// content root is set, which makes inline terrain behaviour bit-identical to
     /// before.
     terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams,
+    /// The loose-file render-asset store (P18.3) — the editor's answer to the
+    /// player's `VmeshRegistry`. Resolves a `MeshRef.asset` to its derived
+    /// `.inf_vmesh` and a `SkeletalMesh` to bind-space geometry + a posed skinning
+    /// palette, both from the project's content root.
+    ///
+    /// Owned here, and released here: the projection is the only thing that knows
+    /// which mesh assets a document actually references, so it is the only thing
+    /// that can free the rest ([`EditorRenderAssets::retain_only`]). The policy
+    /// itself lives in Ring 1 for the same reason terrain streaming does — Linux CI
+    /// compiles and tests it, this file it does not.
+    ///
+    /// [`EditorRenderAssets::retain_only`]: inf_editor_core::render_assets::EditorRenderAssets::retain_only
+    render_assets: inf_editor_core::render_assets::EditorRenderAssets,
     /// The last tool-rejection message, for a Ring-2 caller to surface. Drained by
     /// [`take_tool_status`](Self::take_tool_status).
     tool_status: Option<String>,
@@ -241,6 +254,13 @@ pub struct EngineHost {
     /// the first `sync_from_doc` probes it; it clamps the scene-persisted render
     /// settings down (never up) via [`RenderTier::apply`], exactly like the player.
     render_tier: Option<RenderTier>,
+    /// The adapter capabilities probed once alongside [`Self::render_tier`]
+    /// (P18.3). Needed because the editor now *requests* the meshlet path, so the
+    /// occlusion capability floor (`clamp_occlusion`) has to be applied on top of
+    /// the tier — the pair that [`inf_render::detect_and_clamp`] is. Cached rather
+    /// than re-probed because `apply_render_settings` runs on every document
+    /// version, which during a gizmo drag is every frame.
+    render_caps: Option<inf_render::AdapterCaps>,
     /// The last [`RenderSettings`] pushed to the renderer (R-P4), so a redundant
     /// `set_settings` (which would reset TAA history) is skipped when the mapped
     /// value is unchanged.
@@ -286,6 +306,53 @@ fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
             ..d.gi
         },
         ..d
+    }
+}
+
+/// Nearest positive ray/sphere intersection distance, or `None` when the ray
+/// misses (P18.3 analytic pick fallback).
+///
+/// A ray starting *inside* the sphere counts as a hit at `t = 0` — clicking while
+/// the camera is inside an object must select it, not fall through it. Pure, so
+/// the rule is unit-testable without a GPU.
+fn ray_sphere_t(ro: DVec3, rd: DVec3, center: DVec3, radius: f64) -> Option<f64> {
+    let m = ro - center;
+    let b = m.dot(rd);
+    let c = m.dot(m) - radius * radius;
+    if c > 0.0 && b > 0.0 {
+        return None; // pointing away from a sphere we are outside of
+    }
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return None;
+    }
+    Some((-b - disc.sqrt()).max(0.0))
+}
+
+/// The settings the editor viewport **requests** before any tier clamp (P18.3).
+///
+/// MIRROR of the player's request in `PlayerRenderHost::new`: take the level's
+/// authored block and turn the meshlet path **on**, then let the tier and the
+/// adapter capability floor clamp it down. Without this the editor's real-mesh
+/// content would always fall through to the classic discrete-LOD node — the same
+/// geometry, but none of P18.2's streaming, budget or eviction, and a claim of
+/// preview-==-shipping that is not true.
+///
+/// A free function on purpose: it is the whole editor-side render-settings
+/// decision, so it unit-tests without a GPU (below), and
+/// `tests/projector_mirror.rs` pins the opt-in against the player's copy.
+///
+/// The editor deliberately does **not** apply `clamp_mobile`: there is no mobile
+/// editor, and the player's own mobile branch is `cfg`-gated to targets this crate
+/// does not build for.
+fn requested_render_settings(record: &RenderSettingsRecord) -> RenderSettings {
+    let base = apply_record(record);
+    RenderSettings {
+        vgeom: inf_render::VgeomSettings {
+            enabled: true,
+            ..base.vgeom
+        },
+        ..base
     }
 }
 
@@ -708,6 +775,7 @@ impl EngineHost {
             terrain_guid: None,
             terrain_slots: Vec::new(),
             terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams::new(),
+            render_assets: inf_editor_core::render_assets::EditorRenderAssets::new(),
             tool_status: None,
             stream_log_countdown: STREAM_LOG_INTERVAL_FRAMES,
             sculpt_drag: None,
@@ -718,6 +786,7 @@ impl EngineHost {
             foliage_stroke_seq: 0,
             last_eye_world: DVec3::ZERO,
             render_tier: None,
+            render_caps: None,
             applied_render: None,
         })
     }
@@ -834,14 +903,76 @@ impl EngineHost {
         self.snap_2d.translate_snap()
     }
 
+    /// The world transform of the render instance carrying pick id `id`, wherever
+    /// it lives (P18.3).
+    ///
+    /// Until this batch every renderable entity was a [`MeshInstance`], so the
+    /// selection-driven affordances — the gizmo snapshot, focus framing, the
+    /// Local-space basis, the transform write-back — all searched one list. A
+    /// `MeshRef.asset` is now a [`VgeomInstance`](inf_render::VgeomInstance) and a
+    /// bound `SkeletalMesh` a [`SkinnedInstance`](inf_render::SkinnedInstance), and
+    /// **an imported mesh must be exactly as manipulable as a cube**. Every one of
+    /// those call sites reads through here instead, so that is true by construction
+    /// rather than by remembering to add a third branch each time.
+    ///
+    /// Ids are unique across the three lists (one `next_id` feeds them all), so
+    /// the first hit is the only hit.
+    fn instance_xform(&self, id: u32) -> Option<InstanceXform> {
+        if let Some(i) = self.scene.instances.iter().find(|i| i.id == id) {
+            return Some(InstanceXform {
+                translation: i.translation,
+                rotation: i.rotation,
+                scale: i.scale,
+            });
+        }
+        if let Some(i) = self.scene.vgeom_instances.iter().find(|i| i.id == id) {
+            return Some(InstanceXform {
+                translation: i.translation,
+                rotation: i.rotation,
+                scale: i.scale,
+            });
+        }
+        self.scene
+            .skinned
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| InstanceXform {
+                translation: i.translation,
+                rotation: i.rotation,
+                scale: i.scale,
+            })
+    }
+
+    /// Write a transform back onto whichever render list carries `id` — the
+    /// mutable twin of [`instance_xform`](Self::instance_xform).
+    fn set_instance_xform(&mut self, id: u32, x: InstanceXform) {
+        if let Some(i) = self.scene.instances.iter_mut().find(|i| i.id == id) {
+            i.translation = x.translation;
+            i.rotation = x.rotation;
+            i.scale = x.scale;
+            return;
+        }
+        if let Some(i) = self.scene.vgeom_instances.iter_mut().find(|i| i.id == id) {
+            i.translation = x.translation;
+            i.rotation = x.rotation;
+            i.scale = x.scale;
+            return;
+        }
+        if let Some(i) = self.scene.skinned.iter_mut().find(|i| i.id == id) {
+            i.translation = x.translation;
+            i.rotation = x.rotation;
+            i.scale = x.scale;
+        }
+    }
+
     /// World-space center of the current selection, if any. Reads LIVE working
-    /// positions (mesh render instances + selected 2D entities) so it tracks a
-    /// gizmo drag in progress.
+    /// positions (render instances + selected 2D entities) so it tracks a gizmo
+    /// drag in progress.
     fn selection_center(&self) -> Option<DVec3> {
         let mut sum = DVec3::ZERO;
         let mut n = 0.0;
         for id in &self.scene.selected {
-            if let Some(inst) = self.scene.instances.iter().find(|i| i.id == *id) {
+            if let Some(inst) = self.instance_xform(*id) {
                 sum += inst.translation;
                 n += 1.0;
             }
@@ -876,11 +1007,31 @@ impl EngineHost {
     /// skipped (cached in `applied_render`) so an unrelated document edit doesn't
     /// needlessly reset TAA history. Runs from `sync_from_doc` (version-gated), so
     /// an `edit_settings` — which bumps the version — flows straight through.
+    ///
+    /// **P18.3 — the editor asks for the meshlet path.** It never did, which meant
+    /// every vgeom asset the viewport now carries would have drawn through
+    /// `ClassicVgeomNode`'s discrete-LOD fallback: correct pixels, but not the
+    /// streamed, budgeted, evicting P18.2 path the player uses, and therefore not
+    /// "the editor streams meshlets exactly as the player does". The request is the
+    /// player's, character for character (see `requested_render_settings`); the
+    /// clamps below are what decide whether it is granted.
+    ///
+    /// Both clamps apply, from **cached** probes: `RenderTier::apply` (no meshlet
+    /// path below High) and `AdapterCaps::clamp_occlusion` (the storage-texture
+    /// floor two-pass occlusion needs). That pair is exactly
+    /// [`inf_render::detect_and_clamp`], inlined only so the adapter is probed once
+    /// per host rather than on every document version — and it closes P18.1's
+    /// honest remainder (1) for the editor, which noted that this host applied the
+    /// tier without the occlusion floor.
     fn apply_render_settings(&mut self, doc: &SceneDoc) {
         let tier = *self
             .render_tier
             .get_or_insert_with(|| detect_tier(&self.gpu, &RenderSettings::default()));
-        let mapped = tier.apply(apply_record(&doc.settings().render));
+        let caps = *self
+            .render_caps
+            .get_or_insert_with(|| inf_render::AdapterCaps::probe(&self.gpu));
+        let requested = requested_render_settings(&doc.settings().render);
+        let mapped = caps.clamp_occlusion(tier.apply(requested));
         if self.applied_render != Some(mapped) {
             self.renderer.set_settings(mapped);
             self.applied_render = Some(mapped);
@@ -895,6 +1046,15 @@ impl EngineHost {
         self.scene.prebatched.clear();
         self.scene.lights_2d.clear();
         self.scene.terrains.clear();
+        // P18.3: real geometry. `MeshRef.asset` entities project as virtualized
+        // geometry (meshlet path, or the classic discrete-LOD fallback — the tier
+        // decides which node draws it), and `SkeletalMesh` entities project as
+        // real skinned draws. Both lists are rebuilt from scratch every projection,
+        // exactly like `instances`.
+        self.scene.vgeom_assets.clear();
+        self.scene.vgeom_instances.clear();
+        self.scene.skinned_meshes.clear();
+        self.scene.skinned.clear();
         self.terrain_slots.clear();
         // `terrain_guid` (the tool target) is deliberately NOT cleared here — it
         // is re-validated against the new slot list at the end of the projection,
@@ -916,6 +1076,17 @@ impl EngineHost {
         project_sky(&mut self.scene, world);
         let w = world.world();
         let mut next_id: u32 = 1;
+        // Which vgeom assets this projection has already listed (the render node
+        // caches GPU geometry by id, but the asset list must not duplicate), and
+        // which `(mesh, skeleton)` pairs already own a `skinned_meshes` slot.
+        // MIRROR: `vgeom_seen` is the player's `project_scene` local of the same
+        // name and the same purpose.
+        let mut vgeom_seen: BTreeSet<u128> = BTreeSet::new();
+        let mut skinned_slots: HashMap<(Uuid, Uuid), usize> = HashMap::new();
+        // Every render asset this projection actually referenced (meshes,
+        // skeletons, clips) — the input to the end-of-projection `retain_only`
+        // audit (P16.4b's lesson in mesh form).
+        let mut live_render_assets: BTreeSet<Uuid> = BTreeSet::new();
         for &guid in doc.order() {
             let Some(entity) = world.entity_of(guid) else {
                 continue;
@@ -1296,17 +1467,26 @@ impl EngineHost {
                 }
             }
 
-            // Skeletal meshes (P11.1): the interactive viewport can't upload asset
-            // geometry yet (the same documented gap as MeshRef→asset / sprites),
-            // and GPU skinning is proven headlessly by the `golden_skinned_mesh`
-            // golden. A `SkeletalMesh` entity (without a primitive `MeshRef`)
-            // therefore projects as a **selectable placeholder cube** so it is
-            // authorable in the scene; driving a real `RenderScene::skinned`
-            // instance from an uploaded `.inf_mesh` + `.inf_skel` + the entity's
-            // `AnimPlayer` pose is the documented viewport follow-up (v1 skinned
-            // rendering in the editor is placeholder-only, headless-golden-proven).
+            // Skeletal meshes (P11.1 → **P18.3**): a `SkeletalMesh` entity now
+            // draws its REAL skinned geometry. The bind-space mesh comes from the
+            // referenced `.inf_mesh`'s skin streams, the palette from the
+            // `.inf_skel` posed by the entity's `AnimPlayer` — rest pose when there
+            // is no player, no clip, or an unresolvable one, so a freshly dropped
+            // character is visible immediately rather than only once it plays.
+            // Both the resolution and the pose rule live in Ring 1
+            // (`inf_editor_core::render_assets`), which is the only part of this
+            // that Linux CI can see.
+            //
+            // The **placeholder cube survives** as the honest fallback: a
+            // `SkeletalMesh` with no assets bound (or with a mesh carrying no skin
+            // stream) is still authorable content and must stay selectable.
+            //
+            // NOT a mirror: the shipped player has no `SkeletalMesh` branch at all,
+            // so there is nothing to keep in sync — giving it one is the matching
+            // follow-up, and until then this is editor-only rendering, not a
+            // divergence from a projection that exists.
             if w.get::<MeshRef>(entity).is_none() {
-                if visible && w.get::<SkeletalMesh>(entity).is_some() {
+                if let (true, Some(sm)) = (visible, w.get::<SkeletalMesh>(entity).copied()) {
                     let affine = w
                         .get::<GlobalTransform>(entity)
                         .map(|g| g.0)
@@ -1314,21 +1494,69 @@ impl EngineHost {
                     let (scale, rot, translation) = affine.to_scale_rotation_translation();
                     let id = next_id;
                     next_id += 1;
-                    self.scene.instances.push(MeshInstance {
-                        translation,
-                        rotation: rot.as_quat(),
-                        scale: scale.as_vec3(),
-                        color: [0.55, 0.60, 0.72, 1.0],
-                        metallic: 0.0,
-                        roughness: 0.6,
-                        emissive: [0.0; 3],
-                        id,
-                        // Skeletal placeholder is always a cube (no primitive kind).
-                        mesh: PrimMesh::Cube,
-                        // R-P5: skeletal placeholders are opaque.
-                        blend: 0,
-                        cutoff: 0.5,
-                    });
+                    live_render_assets.extend(sm.mesh);
+                    live_render_assets.extend(sm.skeleton);
+                    let player = w.get::<inf_ecs::components::AnimPlayer>(entity).copied();
+                    live_render_assets.extend(player.and_then(|p| p.clip));
+                    match self.render_assets.resolve_skinned(&sm, player.as_ref()) {
+                        Some(draw) => {
+                            // Real skinned geometry. PBR params come from the
+                            // entity's `Material` exactly as they do on the rigid
+                            // path (`Material` is what the Details panel edits);
+                            // an unmaterialed character gets the renderer's neutral.
+                            let (color, metallic, roughness, emissive) = w
+                                .get::<Material>(entity)
+                                .map(|m| {
+                                    let e = m.emissive.to_array();
+                                    (
+                                        m.base_color.to_array(),
+                                        m.metallic,
+                                        m.roughness,
+                                        [e[0], e[1], e[2]],
+                                    )
+                                })
+                                .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3]));
+                            // One `skinned_meshes` entry per (mesh, skeleton)
+                            // pair, and the entry is the store's own `Arc` — no
+                            // copy here, and the pass keys its GPU upload on that
+                            // pointer, so re-projecting an unchanged character
+                            // costs neither a memcpy nor a re-upload (P18.3).
+                            let slot = *skinned_slots.entry(draw.key).or_insert_with(|| {
+                                self.scene.skinned_meshes.push(draw.mesh);
+                                self.scene.skinned_meshes.len() - 1
+                            });
+                            self.scene.skinned.push(inf_render::SkinnedInstance {
+                                translation,
+                                rotation: rot.as_quat(),
+                                scale: scale.as_vec3(),
+                                color,
+                                metallic,
+                                roughness,
+                                emissive,
+                                id,
+                                mesh: slot,
+                                palette: draw.palette,
+                            });
+                        }
+                        // Unbound (or unskinned) — the pre-P18.3 placeholder,
+                        // unchanged down to its slate tint, so authoring a skeletal
+                        // entity before its assets exist looks exactly as it did.
+                        None => self.scene.instances.push(MeshInstance {
+                            translation,
+                            rotation: rot.as_quat(),
+                            scale: scale.as_vec3(),
+                            color: [0.55, 0.60, 0.72, 1.0],
+                            metallic: 0.0,
+                            roughness: 0.6,
+                            emissive: [0.0; 3],
+                            id,
+                            // Skeletal placeholder is always a cube (no primitive kind).
+                            mesh: PrimMesh::Cube,
+                            // R-P5: skeletal placeholders are opaque.
+                            blend: 0,
+                            cutoff: 0.5,
+                        }),
+                    }
                     self.id_to_guid.insert(id, guid);
                     self.guid_to_id.insert(guid, id);
                 }
@@ -1359,27 +1587,65 @@ impl EngineHost {
                     )
                 })
                 .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3], 0, 0.5));
-            // R-P1: project the MeshRef's built-in primitive kind so Sphere/Plane/
-            // Cylinder/Cone render as real geometry (not everything as a cube).
-            let mesh = w
-                .get::<MeshRef>(entity)
-                .map(|r| prim_mesh(r.primitive))
-                .unwrap_or(PrimMesh::Cube);
+            let mesh_ref = w.get::<MeshRef>(entity).copied().unwrap_or_default();
             let id = next_id;
             next_id += 1;
-            self.scene.instances.push(MeshInstance {
-                translation,
-                rotation: rot.as_quat(),
-                scale: scale.as_vec3(),
-                color,
-                metallic,
-                roughness,
-                emissive,
-                id,
-                mesh,
-                blend,
-                cutoff,
-            });
+            live_render_assets.extend(mesh_ref.asset);
+            // P18.3 — THE OLDEST DOCUMENTED GAP, CLOSED. A `MeshRef.asset` with a
+            // derived vmesh renders REAL geometry: the GPU meshlet path (vgeom on)
+            // or the classic discrete-LOD fallback (vgeom off), both driven by the
+            // same vgeom scene content, with the tier deciding which node draws it.
+            // An unresolved asset (or a primitive-only `MeshRef`) falls back to the
+            // built-in primitive — which stays *legitimate content*, not a
+            // placeholder, for the Cube/Sphere/Plane/Cylinder/Cone kinds.
+            //
+            // MIRROR of `inf_player::render::project_scene`'s `MeshRef` branch,
+            // field for field. The one deliberate difference is where the asset id
+            // comes from — the player uses the derived GUID (a pack is immutable),
+            // the editor uses the derived payload's content hash (a content root is
+            // not) — and the reasoning lives in `inf_editor_core::render_assets`,
+            // once, rather than in two comments that could disagree.
+            let vgeom = mesh_ref
+                .asset
+                .and_then(|mesh_id| self.render_assets.resolve_vgeom(mesh_id));
+            match vgeom {
+                Some(loaded) => {
+                    if vgeom_seen.insert(loaded.id) {
+                        // The scene carries the PAGED source, not a decoded DAG
+                        // (P18.2): the render node's streamer decides what of it is
+                        // resident from the camera's own screen-error wants.
+                        self.scene
+                            .vgeom_assets
+                            .push(inf_render::VgeomAsset::new(loaded.id, loaded.source));
+                    }
+                    self.scene.vgeom_instances.push(inf_render::VgeomInstance {
+                        asset: loaded.id,
+                        translation,
+                        rotation: rot.as_quat(),
+                        scale: scale.as_vec3(),
+                        color,
+                        metallic,
+                        roughness,
+                        emissive,
+                        id,
+                    });
+                }
+                // R-P1: an unresolved / primitive-only MeshRef draws its built-in
+                // primitive kind (Sphere/Plane/Cylinder/Cone), not always a cube.
+                None => self.scene.instances.push(MeshInstance {
+                    translation,
+                    rotation: rot.as_quat(),
+                    scale: scale.as_vec3(),
+                    color,
+                    metallic,
+                    roughness,
+                    emissive,
+                    id,
+                    mesh: prim_mesh(mesh_ref.primitive),
+                    blend,
+                    cutoff,
+                }),
+            }
             self.id_to_guid.insert(id, guid);
             self.guid_to_id.insert(guid, id);
         }
@@ -1434,6 +1700,14 @@ impl EngineHost {
         // only place that can do it.
         self.terrain_streams
             .retain_only(self.terrain_slots.iter().map(|s| s.guid));
+
+        // The same audit for mesh assets (P18.3). A `.inf_vmesh` mapping plus its
+        // decoded skinned geometry is real memory held on behalf of entities that
+        // may no longer exist: a mesh unbound in the Details panel, an entity
+        // deleted, or — the case P16.4b was written about — a whole document
+        // replaced by File ▸ Open. The projection is the only place that knows the
+        // live set, so this is the only place that can release the rest.
+        self.render_assets.retain_only(live_render_assets);
 
         // Re-validate the tool target: keep it if that terrain is still projected
         // (so a stroke's status stays about the terrain being sculpted), else fall
@@ -2091,14 +2365,91 @@ impl EngineHost {
         if self.gizmo_drag.is_some() {
             return;
         }
-        self.scene.hovered = self.picker.pick(&self.gpu, &self.scene, view, px, py);
+        self.scene.hovered = self.pick_id(view, px, py);
     }
 
     /// Pick the entity GUID under the cursor (`None` = empty space). Selection
     /// itself lives in the document — the caller applies the pick to it.
     pub fn pick_guid(&mut self, view: &RenderView, px: u32, py: u32) -> Option<Uuid> {
-        let id = self.picker.pick(&self.gpu, &self.scene, view, px, py)?;
+        let id = self.pick_id(view, px, py)?;
         self.id_to_guid.get(&id).copied()
+    }
+
+    /// The render-instance id under a viewport pixel.
+    ///
+    /// The GPU id-buffer pass rasterizes [`RenderScene::instances`] only — the
+    /// rigid primitive path — so P18.3's real geometry (virtualized meshes and
+    /// skinned characters, which live in their own scene lists) would be
+    /// **unclickable**: the whole point of the batch is that an imported mesh is
+    /// as much an object as a cube, and an object you cannot click is not one.
+    ///
+    /// Extending the ID pass to a vertex-pulled indirect meshlet draw is a
+    /// renderer change and belongs with the selection-outline work (see the
+    /// remainder recorded in ROADMAP §12 P18.3). The stopgap is the technique the
+    /// gizmo already uses and this codebase already trusts — **analytic
+    /// picking**: on an id-buffer miss, ray-test the cursor against each vgeom /
+    /// skinned instance's world bounding sphere and take the nearest hit.
+    ///
+    /// It is deliberately a *fallback*, not a first choice: whenever the id buffer
+    /// answers, that answer wins, so nothing about picking a primitive changes.
+    /// Ties are resolved by distance along the ray and then by id, so the result
+    /// is a deterministic function of the scene and the pixel. Its honest
+    /// limitation is that a bounding sphere is coarser than the silhouette: a
+    /// click just outside a concave mesh can select it.
+    fn pick_id(&mut self, view: &RenderView, px: u32, py: u32) -> Option<u32> {
+        if let Some(id) = self.picker.pick(&self.gpu, &self.scene, view, px, py) {
+            return Some(id);
+        }
+        if self.scene.vgeom_instances.is_empty() && self.scene.skinned.is_empty() {
+            return None;
+        }
+        let (ro, rd) = view.pixel_ray(px as f32, py as f32);
+        let ro_world = self.origin.to_world(ro);
+        let rd = rd.as_dvec3();
+
+        let bounds_of: std::collections::BTreeMap<u128, ([f32; 3], f32)> = self
+            .scene
+            .vgeom_assets
+            .iter()
+            .map(|a| (a.id, a.bounds()))
+            .collect();
+        let mut best: Option<(f64, u32)> = None;
+        let mut consider = |center: DVec3, radius: f64, id: u32| {
+            if let Some(t) = ray_sphere_t(ro_world, rd, center, radius) {
+                if best.is_none_or(|(bt, bid)| t < bt || (t == bt && id < bid)) {
+                    best = Some((t, id));
+                }
+            }
+        };
+        for inst in &self.scene.vgeom_instances {
+            let Some((c, r)) = bounds_of.get(&inst.asset).copied() else {
+                continue;
+            };
+            let local = Vec3::from_array(c);
+            let center = inst.translation + (inst.rotation * (local * inst.scale)).as_dvec3();
+            consider(center, (r * inst.scale.abs().max_element()) as f64, inst.id);
+        }
+        for inst in &self.scene.skinned {
+            // Skinned geometry has no cached bounding sphere on the scene DTO, so
+            // the bind-space vertex extent stands in. It is computed from the same
+            // buffer the pass draws, so it can never disagree with what is on
+            // screen — only with where the *pose* moved it, which is the same
+            // approximation the rest of this fallback makes.
+            let Some(mesh) = self.scene.skinned_meshes.get(inst.mesh) else {
+                continue;
+            };
+            let r = mesh
+                .vertices
+                .iter()
+                .map(|v| Vec3::from_array(v.pos).length())
+                .fold(0.0f32, f32::max);
+            consider(
+                inst.translation,
+                (r * inst.scale.abs().max_element()).max(0.05) as f64,
+                inst.id,
+            );
+        }
+        best.map(|(_, id)| id)
     }
 
     /// Screen-constant gizmo world size for the current view (perspective uses
@@ -2121,7 +2472,7 @@ impl EngineHost {
             .iter()
             .filter_map(|id| {
                 let guid = self.id_to_guid.get(id)?;
-                let inst = self.scene.instances.iter().find(|i| i.id == *id)?;
+                let inst = self.instance_xform(*id)?;
                 let mut t = EcsTransform::from_translation(inst.translation);
                 t.set_quat(inst.rotation.as_dquat());
                 t.scale = Vec3d::from_dvec3(inst.scale.as_dvec3());
@@ -2169,7 +2520,7 @@ impl EngineHost {
             return glam::Quat::IDENTITY;
         }
         if let Some(id) = self.scene.selected.first() {
-            if let Some(inst) = self.scene.instances.iter().find(|i| i.id == *id) {
+            if let Some(inst) = self.instance_xform(*id) {
                 return inst.rotation;
             }
         }
@@ -2270,7 +2621,7 @@ impl EngineHost {
         let center = self.selection_center()?;
         let mut radius: f64 = 1.0;
         for id in &self.scene.selected {
-            if let Some(inst) = self.scene.instances.iter().find(|i| i.id == *id) {
+            if let Some(inst) = self.instance_xform(*id) {
                 let extent = inst.scale.abs().max_element() as f64;
                 radius = radius.max((inst.translation - center).length() + extent);
             }
@@ -2318,16 +2669,9 @@ impl EngineHost {
         // cumulative delta is applied to these, not accumulated onto the live
         // instances, so snapping quantizes total displacement.
         self.gizmo_initial.clear();
-        for id in &self.scene.selected {
-            if let Some(inst) = self.scene.instances.iter().find(|i| i.id == *id) {
-                self.gizmo_initial.insert(
-                    *id,
-                    InstanceXform {
-                        translation: inst.translation,
-                        rotation: inst.rotation,
-                        scale: inst.scale,
-                    },
-                );
+        for id in self.scene.selected.clone() {
+            if let Some(inst) = self.instance_xform(id) {
+                self.gizmo_initial.insert(id, inst);
             }
         }
         self.gizmo_initial_2d = self.selected_2d.clone();
@@ -2367,19 +2711,19 @@ impl EngineHost {
             let Some(init) = self.gizmo_initial.get(id).copied() else {
                 continue;
             };
-            if let Some(inst) = self.scene.instances.iter_mut().find(|i| i.id == *id) {
-                match delta {
-                    GizmoDelta::Translate(t) => inst.translation = init.translation + t,
-                    GizmoDelta::Rotate { axis, radians } => {
-                        let q = glam::Quat::from_axis_angle(axis, radians);
-                        inst.rotation = q * init.rotation;
-                        // Orbit the translation about the pivot too.
-                        let rel = (init.translation - pivot).as_vec3();
-                        inst.translation = pivot + (q * rel).as_dvec3();
-                    }
-                    GizmoDelta::Scale(s) => inst.scale = init.scale * s,
+            let mut next = init;
+            match delta {
+                GizmoDelta::Translate(t) => next.translation = init.translation + t,
+                GizmoDelta::Rotate { axis, radians } => {
+                    let q = glam::Quat::from_axis_angle(axis, radians);
+                    next.rotation = q * init.rotation;
+                    // Orbit the translation about the pivot too.
+                    let rel = (init.translation - pivot).as_vec3();
+                    next.translation = pivot + (q * rel).as_dvec3();
                 }
+                GizmoDelta::Scale(s) => next.scale = init.scale * s,
             }
+            self.set_instance_xform(*id, next);
         }
         // Selected 2D (non-mesh) entities move the same way, in f64 (P8.2c).
         for (guid, s) in self.selected_2d.iter_mut() {
@@ -2413,36 +2757,48 @@ impl EngineHost {
         self.tool_mode
     }
 
-    // ── streamed terrain (P16.3b2) ────────────────────────────────────────
+    // ── streamed content: terrain (P16.3b2) + meshes (P18.3) ──────────────
 
-    /// Point terrain streaming at a project's content root (or `None` to disable
-    /// it). Rescans the loose `.inf_terrain` index and drops every live stream, so
-    /// a project switch can never serve the previous project's pages.
+    /// Point the viewport's loose-asset streaming at a project's content root (or
+    /// `None` to disable it). Rescans the `.inf_terrain` **and** render-asset
+    /// indexes and drops every live stream and opened payload, so a project switch
+    /// can never serve the previous project's pages or geometry.
     ///
-    /// Until a root is set nothing streams and an asset-backed terrain draws its
-    /// (empty) inline data — so an editor that never calls this behaves exactly as
-    /// it did before P16.3b2.
+    /// Until a root is set nothing streams, an asset-backed terrain draws its
+    /// (empty) inline data and a `MeshRef.asset` draws its primitive placeholder —
+    /// so an editor that never calls this behaves exactly as it did before P16.3b2
+    /// / P18.3.
     ///
-    /// Pushed from Ring 2's `project://changed` flow (P16.4a): the open project's
-    /// `Content` directory, so a `Terrain.asset` authored by the import wizard
-    /// resolves to a loose `.inf_terrain` and starts paging. Before a project is
-    /// open there is no root and nothing streams — an inline terrain is
-    /// unaffected either way. The streaming *policy* is unit-tested on all three
-    /// OSes in `inf_editor_core::terrain_stream`; this is only the call site.
-    pub fn set_terrain_content_root(&mut self, root: Option<std::path::PathBuf>) {
-        self.terrain_streams.set_content_root(root);
+    /// Pushed from Ring 2's `project://changed` flow: the open project's `Content`
+    /// directory, so a `Terrain.asset` authored by the import wizard resolves to a
+    /// loose `.inf_terrain` and starts paging (P16.4a) and a `MeshRef.asset`
+    /// resolves to its derived `.inf_vmesh` (P18.3). Both *policies* are
+    /// unit-tested on all three OSes in `inf_editor_core`; this is only the call
+    /// site.
+    pub fn set_content_root(&mut self, root: Option<std::path::PathBuf>) {
+        self.terrain_streams.set_content_root(root.clone());
+        self.render_assets.set_content_root(root);
         self.terrain_slots.clear();
         self.synced_version = None; // force a re-projection
     }
 
-    /// Rebuild the loose `.inf_terrain` index **without** dropping live streams.
+    /// Rebuild the loose-asset indexes after the content database changed.
     ///
-    /// Pushed from Ring 2 when a terrain import finishes (P16.4a): the index was
-    /// built when the project opened, so a freshly imported asset is not in it and
-    /// the entity the wizard just spawned would draw nothing. Re-pointing the
-    /// content root would also work but re-pages every terrain; this does not.
-    pub fn refresh_terrain_index(&mut self) {
+    /// Pushed from Ring 2 when an import finishes or the watcher sees an external
+    /// edit: an index built when the project opened does not contain assets
+    /// written after it, so a freshly imported terrain or mesh would resolve to
+    /// nothing and the entity the user just spawned would draw empty (P16.4a).
+    ///
+    /// The two halves treat live state differently, deliberately. Terrain streams
+    /// are **kept** (re-pointing the root would re-page terrain the user is flying
+    /// over, and a terrain's tiles are re-read per page anyway). Opened
+    /// `.inf_vmesh` payloads are **dropped**: a vmesh is opened once and then only
+    /// sliced, so a payload rewritten under the same GUID would otherwise be served
+    /// from the stale mapping forever. Re-opening costs a header + page-directory
+    /// parse each.
+    pub fn refresh_asset_index(&mut self) {
         self.terrain_streams.refresh_index();
+        self.render_assets.refresh_index();
         self.synced_version = None; // force a re-projection
     }
 
@@ -2495,14 +2851,21 @@ impl EngineHost {
     }
 
     /// Release every terrain stream — its resident pages, its edit pins, and its
-    /// `.inf_terrain` payload.
+    /// `.inf_terrain` payload — **and** every opened render asset (P18.3): the
+    /// `.inf_vmesh` mappings and decoded skinned geometry the previous level
+    /// referenced.
     ///
     /// Pushed by `File ▸ Open` / `File ▸ New` (P16.4b audit): those replace the
-    /// document wholesale, so every stream is keyed on entity GUIDs that no longer
-    /// exist. Without this the old document's payload and any tile it pinned for
-    /// an unsaved edit stay alive for the life of the process.
-    pub fn clear_terrain_streams(&mut self) {
+    /// document wholesale, so every terrain stream is keyed on entity GUIDs that no
+    /// longer exist. Without this the old document's payload and any tile it pinned
+    /// for an unsaved edit stay alive for the life of the process. Render assets
+    /// are keyed on *asset* GUIDs rather than entity ones, so nothing there is
+    /// invalidated by the swap — but everything it holds belongs to the outgoing
+    /// level's working set, and the incoming projection's `retain_only` would only
+    /// free it after the first frame that already paid to keep it.
+    pub fn clear_streams(&mut self) {
         self.terrain_streams.clear();
+        self.render_assets.clear();
         self.terrain_slots.clear();
         self.terrain_guid = None;
         self.synced_version = None; // force a re-projection against the new doc
@@ -3855,5 +4218,114 @@ mod sky_projection_tests {
         project_sky(&mut scene, &w);
         assert!(scene.lights.is_empty());
         assert!(scene.sun.direction.y > 0.5, "the sun is still projected");
+    }
+}
+
+/// The analytic pick fallback that keeps real geometry clickable (P18.3).
+///
+/// The rule is pure, so it is testable here without a GPU — which matters,
+/// because the ID-buffer pass it backs up cannot be exercised headlessly at all.
+#[cfg(test)]
+mod analytic_pick {
+    use super::ray_sphere_t;
+    use glam::DVec3;
+
+    const FWD: DVec3 = DVec3::new(0.0, 0.0, -1.0);
+
+    #[test]
+    fn a_ray_through_a_sphere_hits_at_its_near_surface() {
+        // Sphere of radius 1 at z = -10, looking down -Z from the origin.
+        let t = ray_sphere_t(DVec3::ZERO, FWD, DVec3::new(0.0, 0.0, -10.0), 1.0)
+            .expect("a ray straight at a sphere hits it");
+        assert!((t - 9.0).abs() < 1e-9, "near surface, got {t}");
+    }
+
+    #[test]
+    fn a_ray_beside_a_sphere_misses() {
+        assert!(ray_sphere_t(DVec3::ZERO, FWD, DVec3::new(3.0, 0.0, -10.0), 1.0).is_none());
+    }
+
+    /// Pointing away from a sphere is a miss — otherwise clicking the sky would
+    /// select whatever happens to be behind the camera.
+    #[test]
+    fn a_sphere_behind_the_eye_misses() {
+        assert!(ray_sphere_t(DVec3::ZERO, FWD, DVec3::new(0.0, 0.0, 10.0), 1.0).is_none());
+    }
+
+    /// Standing inside an object and clicking must select it, not fall through.
+    #[test]
+    fn a_ray_starting_inside_hits_at_zero() {
+        let t = ray_sphere_t(DVec3::ZERO, FWD, DVec3::new(0.0, 0.0, -0.5), 5.0).unwrap();
+        assert_eq!(t, 0.0);
+    }
+
+    /// Nearest-along-the-ray is the rule the fallback resolves overlaps with, so
+    /// the ordering it depends on has to be the real one.
+    #[test]
+    fn nearer_spheres_report_smaller_t() {
+        let near = ray_sphere_t(DVec3::ZERO, FWD, DVec3::new(0.0, 0.0, -5.0), 1.0).unwrap();
+        let far = ray_sphere_t(DVec3::ZERO, FWD, DVec3::new(0.0, 0.0, -50.0), 1.0).unwrap();
+        assert!(near < far, "{near} !< {far}");
+    }
+}
+
+/// The editor's render-settings request (P18.3). Pure, so the decision that puts
+/// the viewport on the streamed meshlet path is testable without an adapter —
+/// which matters, because the bug this pins was invisible: the classic fallback
+/// draws the *same geometry*, so nothing looked wrong while the editor silently
+/// skipped every part of P18.2.
+#[cfg(test)]
+mod requested_settings {
+    use super::{apply_record, requested_render_settings, RenderSettings, RenderSettingsRecord};
+    use inf_render::RenderTier;
+
+    #[test]
+    fn the_editor_asks_for_the_meshlet_path() {
+        let req = requested_render_settings(&RenderSettingsRecord::default());
+        assert!(
+            req.vgeom.enabled,
+            "the editor must REQUEST vgeom — `VgeomSettings::default()` is off, so \
+             without this every imported mesh draws through the classic fallback"
+        );
+    }
+
+    /// The request changes **only** the vgeom master switch: the level's authored
+    /// block still decides everything else, exactly as before P18.3.
+    #[test]
+    fn nothing_else_moves() {
+        let rec = RenderSettingsRecord {
+            exposure: 1.75,
+            taa: true,
+            gi_enabled: true,
+            ..RenderSettingsRecord::default()
+        };
+        let base = apply_record(&rec);
+        let req = requested_render_settings(&rec);
+        assert_eq!(
+            RenderSettings {
+                vgeom: base.vgeom,
+                ..req
+            },
+            base,
+            "the opt-in must touch nothing but `vgeom.enabled`"
+        );
+        // …and within vgeom, only `enabled`.
+        assert_eq!(
+            inf_render::VgeomSettings {
+                enabled: base.vgeom.enabled,
+                ..req.vgeom
+            },
+            base.vgeom
+        );
+    }
+
+    /// The tier still has the last word: a machine without the meshlet path gets
+    /// the classic fallback, exactly as the player does. Requesting is not forcing.
+    #[test]
+    fn the_tier_still_clamps_it_away() {
+        let req = requested_render_settings(&RenderSettingsRecord::default());
+        assert!(!RenderTier::Medium.apply(req).vgeom.enabled);
+        assert!(!RenderTier::Low.apply(req).vgeom.enabled);
+        assert!(RenderTier::High.apply(req).vgeom.enabled);
     }
 }

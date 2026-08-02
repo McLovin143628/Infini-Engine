@@ -48,20 +48,20 @@ impl ViewportState {
     /// `None` to disable it) — pushed from the `project://changed` flow so a
     /// `Terrain.asset` authored by the import wizard resolves to a loose
     /// `.inf_terrain` and starts paging (P16.4a, the B2 seam).
-    pub fn set_terrain_content_root(&self, root: Option<std::path::PathBuf>) {
+    pub fn set_content_root(&self, root: Option<std::path::PathBuf>) {
         if let Ok(guard) = self.0.lock() {
             if let Some(handle) = guard.as_ref() {
-                handle.set_terrain_content_root(root);
+                handle.set_content_root(root);
             }
         }
     }
 
     /// Rebuild the viewport's loose `.inf_terrain` index in place, keeping live
     /// streams — pushed when a terrain import finishes (P16.4a).
-    pub fn refresh_terrain_index(&self) {
+    pub fn refresh_asset_index(&self) {
         if let Ok(guard) = self.0.lock() {
             if let Some(handle) = guard.as_ref() {
-                handle.refresh_terrain_index();
+                handle.refresh_asset_index();
             }
         }
     }
@@ -82,10 +82,10 @@ impl ViewportState {
     /// (File ▸ Open / File ▸ New, P16.4b). The streams are keyed on the previous
     /// document's entity GUIDs, so keeping them leaks a whole `.inf_terrain`
     /// payload plus any tile it pinned for an unsaved edit.
-    pub fn clear_terrain_streams(&self) {
+    pub fn clear_streams(&self) {
         if let Ok(guard) = self.0.lock() {
             if let Some(handle) = guard.as_ref() {
-                handle.clear_terrain_streams();
+                handle.clear_streams();
             }
         }
     }
@@ -121,7 +121,7 @@ pub async fn viewport_attach(
         .try_state::<super::ProjectState>()
         .and_then(|p| p.current_content_root())
     {
-        handle.set_terrain_content_root(Some(root));
+        handle.set_content_root(Some(root));
     }
     *guard = Some(handle);
     tracing::info!("viewport attached");

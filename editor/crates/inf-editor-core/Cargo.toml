@@ -32,6 +32,9 @@ inf-material = { workspace = true }
 inf-audio = { workspace = true }
 inf-anim = { workspace = true }
 inf-render = { workspace = true }
+# P18.3: the editor derives `.inf_vmesh` meshlet DAGs itself (they stopped being
+# cook-only) and indexes them for the interactive viewport's vgeom projection.
+inf-vgeom = { workspace = true }
 # P14.5 WASM modding: the editor loads/hot-reloads sandboxed mods in Simulate via
 # a ModsSession over the same inf-wasm-host loader the player uses.
 inf-wasm-host = { workspace = true }

@@ -262,7 +262,13 @@ fn build_inner(app: &AppHandle, content_root: &std::path::Path) -> Option<AssetI
     };
     seed_starter_content(&project, content_root);
 
-    let queue = ImportQueue::spawn(project.clone());
+    let mut queue = ImportQueue::spawn(project.clone());
+    // P18.3: derive a `.inf_vmesh` for every mesh that lacks a current one, so a
+    // project whose content was imported before the editor could build meshlet
+    // DAGs shows real geometry rather than placeholder cubes. Queued on the import
+    // worker (never the UI thread, never the tick), and a no-op after the first
+    // run — every mesh is a content-hash hit.
+    queue.submit_vmesh_sweep();
     let watcher = AssetWatcher::watch(content_root, WATCH_DEBOUNCE)
         .map_err(|e| tracing::warn!("asset watcher: {e}"))
         .ok();
@@ -391,12 +397,13 @@ fn spawn_tick(app: AppHandle) {
                     },
                 );
             }
-            // A terrain landed: the viewport's loose-asset index predates it, so
-            // refresh it in place or the entity the wizard just spawned draws
-            // nothing (P16.4a).
-            if outcome.terrain_changed {
+            // An asset the viewport resolves by GUID landed — a terrain (P16.4a),
+            // or a mesh and its derived meshlet DAG (P18.3). The viewport's
+            // loose-asset index predates it, so refresh it in place or the entity
+            // the wizard (or a drag-drop) just spawned draws nothing.
+            if outcome.index_stale {
                 if let Some(viewport) = app.try_state::<super::ViewportState>() {
-                    viewport.refresh_terrain_index();
+                    viewport.refresh_asset_index();
                 }
             }
         })

@@ -15,6 +15,7 @@ pub mod snapshot;
 pub mod sprite_sheet;
 pub mod table_import;
 pub mod terrain_import;
+pub mod vmesh;
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +27,7 @@ use inf_asset::{
 pub use import::ImportOutcome;
 pub use queue::{ImportProgress, ImportQueue};
 pub use terrain_import::{TerrainImportOutcome, TerrainImportSettings, TERRAIN_IMPORT_FOLDER};
+pub use vmesh::{ensure_vmesh, VmeshDerivation};
 
 /// A content project rooted at a directory: the asset database + import cache.
 pub struct AssetProject {
@@ -291,16 +293,27 @@ impl AssetProject {
 
     /// Delete an asset. Unless `force`, refuses (with the list of referrers)
     /// when other assets still reference it — the delete-with-references guard.
+    ///
+    /// Deleting a `.inf_mesh` also removes its **editor-derived** `.inf_vmesh`
+    /// (P18.3). That artifact carries no dependency edge on purpose — an edge
+    /// would make every mesh undeletable, since its own derived form would count
+    /// as a referrer — so nothing else would ever collect it, and the viewport
+    /// resolves a mesh's DAG by *computing* its id, which means a surviving
+    /// artifact keeps drawing geometry for an asset the user just deleted.
     pub fn delete(&mut self, id: AssetId, force: bool) -> Result<Vec<AssetId>> {
         let referrers = self.db.referenced_by(id);
         if !force && !referrers.is_empty() {
             return Ok(referrers); // caller warns; nothing deleted
         }
+        let was_mesh = self.db.get(id).map(|e| e.kind()) == Some(AssetKind::Mesh);
         if let Some(entry) = self.db.remove(id) {
             let _ = std::fs::remove_file(&entry.path);
             let side = inf_asset::sidecar_path(&entry.path);
             let _ = std::fs::remove_file(side);
             self.bump();
+        }
+        if was_mesh {
+            vmesh::remove_derived_vmesh(self, id);
         }
         Ok(Vec::new()) // empty = deleted
     }

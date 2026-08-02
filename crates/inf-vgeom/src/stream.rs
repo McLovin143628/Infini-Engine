@@ -688,8 +688,25 @@ impl AssetResidency {
 
     /// Whether this residency still describes `source` (a re-cooked or swapped
     /// asset must reset rather than be patched).
+    ///
+    /// Compares the **whole page directory**, not just its length. In a cooked
+    /// pack an asset id names immutable bytes, so counts were enough; in the
+    /// editor's content root (P18.3) a re-import can hand the same id a different
+    /// payload, and an edited mesh with unchanged topology produces a DAG that
+    /// agrees on meshlet and page counts while disagreeing on every error in the
+    /// directory. Patching residency across that would draw the *old* geometry out
+    /// of pool blocks staged for it. The directory is a handful of entries, so this
+    /// is a few dozen bytes of comparison once per asset per frame.
+    ///
+    /// **It is a cheap discriminator, not a content hash, and that distinction is
+    /// deliberate.** A payload whose directory is byte-identical — a mesh whose
+    /// vertices were merely translated, say — still passes. Making this exact needs
+    /// a content stamp in the header, i.e. a format change. It is not the editor's
+    /// guarantee either way: `inf_editor_core::render_assets` keys a vgeom asset by
+    /// its payload's content hash precisely so that *changed bytes are a different
+    /// asset* and this check is never asked a question it cannot answer.
     fn matches(&self, source: &VgeomSource) -> bool {
-        self.meshlet_count == source.meshlet_count() && self.pages.len() == source.pages().len()
+        self.meshlet_count == source.meshlet_count() && self.pages == source.pages()
     }
 
     /// Resident prefix length.
@@ -739,6 +756,12 @@ impl AssetResidency {
     /// [`floor_lod`](Self::floor_lod), [`remap`](Self::remap) or
     /// [`resident_bytes`](Self::resident_bytes) instead; those are the content, and
     /// they are what the determinism gates pin.
+    ///
+    /// **In one line: it is a stamp, not a measurement — it must never enter a
+    /// trace or a golden, and the only legal operation on it is `!=` against a
+    /// previously-observed stamp** (the "has this moved since I last looked?"
+    /// question a cache asks). Ordering it, subtracting it, or printing it are all
+    /// ways of pretending it describes something.
     #[inline]
     pub fn generation(&self) -> u64 {
         self.generation
@@ -1704,6 +1727,101 @@ mod tests {
             asset: 1,
             source: src,
             threshold: t,
+        }
+    }
+
+    /// A displaced grid with a tunable amplitude — the same topology, so the
+    /// clusterization (and therefore the meshlet and page **counts**) is
+    /// unchanged, while every simplification error differs. That is what a
+    /// re-import of an edited mesh looks like, and it is precisely the case the
+    /// pre-P18.3 count-only staleness check could not see.
+    fn displaced_mesh(n: usize, amp: f32) -> VgeomMesh {
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut uvs = Vec::new();
+        for j in 0..=n {
+            for i in 0..=n {
+                let u = i as f32 / n as f32;
+                let v = j as f32 / n as f32;
+                let x = (u - 0.5) * 2.0;
+                let z = (v - 0.5) * 2.0;
+                positions.push([x, amp * (x * 3.0).sin() * (z * 3.0).cos(), z]);
+                normals.push([0.0, 1.0, 0.0]);
+                uvs.push([u, v]);
+            }
+        }
+        let stride = (n + 1) as u32;
+        let mut indices = Vec::new();
+        for j in 0..n as u32 {
+            for i in 0..n as u32 {
+                let a = j * stride + i;
+                indices.extend_from_slice(&[
+                    a,
+                    a + stride,
+                    a + 1,
+                    a + 1,
+                    a + stride,
+                    a + stride + 1,
+                ]);
+            }
+        }
+        crate::build::build_vgeom(
+            &positions,
+            &normals,
+            &uvs,
+            &indices,
+            crate::build::BuildParams::default(),
+        )
+    }
+
+    /// **Re-imported content under a stable id must reset residency** (P18.3).
+    ///
+    /// In a cooked pack an asset id names immutable bytes, so the old staleness
+    /// check — meshlet count + page *count* — was enough. The editor's content
+    /// root is not immutable: a re-import hands the same id a different payload,
+    /// and an edited mesh with unchanged topology produces a DAG that agrees on
+    /// both counts while disagreeing on every error in the directory. Patching
+    /// residency across that draws the OLD geometry out of pool blocks staged for
+    /// it, under the NEW source's cut — a stale render no other test would catch.
+    ///
+    /// The fixture is asserted count-identical, so this can never quietly become
+    /// vacuous by drifting into a pair the weak check would already separate.
+    #[test]
+    fn reimported_content_under_one_id_resets_residency() {
+        let a = VgeomSource::from_mesh(&displaced_mesh(28, 0.30)).unwrap();
+        let b = VgeomSource::from_mesh(&displaced_mesh(28, 0.75)).unwrap();
+        assert_eq!(
+            (a.meshlet_count(), a.pages().len()),
+            (b.meshlet_count(), b.pages().len()),
+            "fixture must defeat the count-only check, or this proves nothing"
+        );
+        assert_ne!(a.pages(), b.pages(), "…while differing in the directory");
+
+        let mut s = VgeomStreamer::new(VgeomStreamBudget::default());
+        s.plan(&[want(&a, 0.0)]);
+        assert!(s.residency(1).unwrap().resident_pages() > 0);
+
+        // The same id, different bytes.
+        let plan = s.plan(&[want(&b, 0.0)]);
+        let after = s.residency(1).unwrap();
+        assert_eq!(
+            after.pages(),
+            b.pages(),
+            "residency must describe the NEW source, not be patched onto the old"
+        );
+        assert!(
+            !plan.uploads.is_empty(),
+            "the new payload must actually be staged"
+        );
+        // Every resident meshlet maps into a slot allocated for the new source.
+        let mut seen = BTreeSet::new();
+        for &slot in after.remap() {
+            if slot != NOT_RESIDENT {
+                assert!(
+                    seen.insert(slot),
+                    "pool slot {slot} used twice after a swap"
+                );
+            }
         }
     }
 

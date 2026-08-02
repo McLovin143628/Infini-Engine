@@ -1797,6 +1797,11 @@ fn golden_skinned_mesh() {
         palette,
     };
 
+    // P18.3: the scene shares bind-space geometry as an `Arc`, so a host that
+    // re-projects every frame neither copies nor re-uploads it. Both scenes here
+    // deliberately hold the SAME `Arc`, which is also what makes this golden prove
+    // that two frames sharing geometry still render their own poses.
+    let mesh = std::sync::Arc::new(mesh);
     let mut rest = RenderScene {
         grid_enabled: true,
         skinned_meshes: vec![mesh.clone()],
