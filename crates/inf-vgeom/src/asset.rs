@@ -1325,11 +1325,17 @@ mod tests {
     /// **Provenance:** produced by `regenerate_frozen_v1_fixture` (ignored by
     /// default, in this module) against the P18.1-era encoding — `inf_asset::encode`
     /// of `build_vgeom` over the 12x12 displaced grid `test_support::dense_mesh(12)`
-    /// builds, with `BuildParams::default()`. To regenerate it you must first
-    /// establish that the *old* bytes are genuinely unloadable rather than merely
-    /// inconvenient, and then say so in this comment; it must never be re-blessed
-    /// from the current writer, which emits the v2 paged image and would turn this
-    /// gate into a tautology.
+    /// built *at that time*, with `BuildParams::default()`. **The generator has
+    /// since changed** — `dense_mesh` was ported off `std` trig onto
+    /// `psin64`/`pcos64` (portable fixtures), so re-running the regenerator today
+    /// would emit different bytes. That is not drift, it is the point: this
+    /// fixture pins **BYTES**, not the generator, and the assertions below only
+    /// ever read the committed file. Leave it exactly as it is.
+    ///
+    /// To regenerate it you must first establish that the *old* bytes are
+    /// genuinely unloadable rather than merely inconvenient, and then say so in
+    /// this comment; it must never be re-blessed from the current writer, which
+    /// emits the v2 paged image and would turn this gate into a tautology.
     #[test]
     fn loads_the_frozen_v1_fixture() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1492,7 +1498,10 @@ mod tests {
     /// One-shot generator for the committed v1 fixture. Ignored by default: it
     /// WRITES the fixture, and re-running it against a future builder would silently
     /// re-bless the very bytes the fixture exists to freeze. See
-    /// `loads_the_frozen_v1_fixture` for the provenance contract.
+    /// `loads_the_frozen_v1_fixture` for the provenance contract — note in
+    /// particular that `dense_mesh` has been ported to portable trig *since* the
+    /// committed bytes were produced, so this no longer reproduces them, and must
+    /// not be run to "fix" that.
     #[test]
     #[ignore = "regenerates the frozen v1 fixture; see loads_the_frozen_v1_fixture"]
     fn regenerate_frozen_v1_fixture() {

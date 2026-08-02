@@ -452,43 +452,10 @@ impl AssetPayload for VgeomMesh {
 
 #[cfg(test)]
 mod classic_lod_tests {
-    use crate::build::{build_vgeom, BuildParams};
     use crate::model::pick_classic_level;
-
-    /// A dense displaced grid → a multi-level meshlet DAG (mirrors the cook input).
-    fn dense(n: usize) -> crate::model::VgeomMesh {
-        let mut positions = Vec::new();
-        let mut normals = Vec::new();
-        let mut uvs = Vec::new();
-        for j in 0..=n {
-            for i in 0..=n {
-                let u = i as f32 / n as f32;
-                let v = j as f32 / n as f32;
-                let x = (u - 0.5) * 2.0;
-                let z = (v - 0.5) * 2.0;
-                let y = 0.3 * (x * 3.0).sin() * (z * 3.0).cos();
-                positions.push([x, y, z]);
-                normals.push([0.0, 1.0, 0.0]);
-                uvs.push([u, v]);
-            }
-        }
-        let stride = (n + 1) as u32;
-        let mut indices = Vec::new();
-        for j in 0..n as u32 {
-            for i in 0..n as u32 {
-                let a = j * stride + i;
-                indices.extend_from_slice(&[
-                    a,
-                    a + stride,
-                    a + 1,
-                    a + 1,
-                    a + stride,
-                    a + stride + 1,
-                ]);
-            }
-        }
-        build_vgeom(&positions, &normals, &uvs, &indices, BuildParams::default())
-    }
+    // The shared displaced grid (portable trig — see `test_support`); this module
+    // used to carry its own copy of the generator.
+    use crate::test_support::dense_mesh as dense;
 
     #[test]
     fn classic_lods_cover_each_level_finest_first() {

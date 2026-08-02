@@ -22,6 +22,14 @@ type MeshStreams = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>);
 /// A wavy `n × n` vertex grid: `2·(n-1)²` triangles, a curved (non-planar)
 /// surface so simplification incurs real error and builds a multi-level DAG. Its
 /// outer perimeter is an open boundary (exercises boundary locking).
+///
+/// The displacement uses `psin64`/`pcos64`, never `std` trig (the P14 LAW): f32
+/// std trig is not bit-portable, and a fixture built with it hands `meshopt`
+/// different vertices per platform → a different DAG, which is what made two
+/// sibling suites fail on macOS only. This one asserts structural properties that
+/// survived that, but the fixture has no business being platform-dependent either.
+/// Its shape is dag-specific (a different frequency and extent from the shared
+/// `inf_vgeom::test_support` grid), so it stays local.
 fn wavy_grid(n: usize) -> MeshStreams {
     let mut positions = Vec::new();
     let mut normals = Vec::new();
@@ -30,7 +38,8 @@ fn wavy_grid(n: usize) -> MeshStreams {
         for x in 0..n {
             let fx = x as f32;
             let fz = z as f32;
-            let y = 0.6 * (fx * 0.5).sin() * (fz * 0.5).cos();
+            let y = (0.6 * inf_math::psin64(fx as f64 * 0.5) * inf_math::pcos64(fz as f64 * 0.5))
+                as f32;
             positions.push([fx, y, fz]);
             normals.push([0.0, 1.0, 0.0]);
             uvs.push([fx / (n as f32), fz / (n as f32)]);

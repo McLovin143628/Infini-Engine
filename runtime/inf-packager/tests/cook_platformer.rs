@@ -191,13 +191,20 @@ fn fixed_mesh_id() -> AssetId {
 }
 
 /// A dense grid mesh (> the 2048-triangle default vmesh threshold).
+///
+/// The displacement uses `psin64`/`pcos64`, never `std` trig (the P14 LAW): f32
+/// std trig is not bit-portable, so a fixture built with it feeds `meshopt`
+/// different vertices per platform and the cook derives a different meshlet DAG on
+/// each — the root cause of two macOS-only vgeom CI failures. Nothing here asserts
+/// a count, but a cook fixture has no business being platform-dependent.
 fn dense_mesh() -> inf_mesh::MeshAsset {
     let n = 40usize; // 39·39·2 = 3042 triangles
     let mut vertices = Vec::new();
     for z in 0..n {
         for x in 0..n {
             let (fx, fz) = (x as f32, z as f32);
-            let y = 0.5 * (fx * 0.4).sin() * (fz * 0.4).cos();
+            let y = (0.5 * inf_math::psin64(fx as f64 * 0.4) * inf_math::pcos64(fz as f64 * 0.4))
+                as f32;
             vertices.push(inf_mesh::MeshVertex {
                 position: [fx, y, fz],
                 ..Default::default()

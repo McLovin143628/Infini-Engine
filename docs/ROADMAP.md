@@ -2543,6 +2543,45 @@ GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and h
 > limitation of the format itself), so a multi-material imported mesh renders with the entity's
 > single `Material` — the same behaviour the shipped player has always had.
 
+> **P18 fix — portable vgeom fixture meshes, and the one sanctioned re-bless** (2026-08-01).
+> Two macOS-only CI failures in P18.2/P18.3 had a single root cause, and it was never in the code
+> under test: the displaced-grid **fixture** was built with f32 `sin`/`cos`. Std trig is not
+> bit-portable (the P14 LAW), so `meshopt` was handed different vertices on each platform and
+> simplified them into a genuinely different meshlet DAG — 138 340 B of resident pages on
+> x86_64-msvc against 138 176 B on aarch64-apple-darwin, meshlet counts apart by several, per-page
+> `max_parent_error` moving by percent rather than by ULPs. The visible symptoms were a flythrough
+> tuned clear of an error boundary on Windows landing on the far side of it on macOS, and
+> `reimported_content_under_one_id_resets_residency`'s anti-vacuity premise — two fixture builds
+> agreeing on `(meshlet_count, page_count)` — holding at (41, 5) here and failing there.
+>
+> **The generator is now one function, not nine copies.** It had been hand-copied into
+> `inf-vgeom`'s unit tests, its integration tests, `inf-render`'s three vgeom suites and its
+> frame-budget gate, and `inf-player`'s activation gate — and the copies were *not* textually
+> identical (two normal conventions, one with the constant folded by hand), which is how a fixture
+> quietly stops exercising what its tests claim. It lives in `inf_vgeom::test_support` behind a
+> test-only `test-support` feature that the other crates' **dev**-dependencies switch on (a
+> dev-dependency on self reaches `inf-vgeom`'s own `tests/`); the shipping crate is unchanged. Its
+> displacement runs on `psin64`/`pcos64` in f64 and casts once per vertex, and the grid coordinates
+> stay in f32 because divide/subtract/multiply were already IEEE-exact. Every platform now cooks
+> these fixtures to byte-identical vertices, so any `(meshlet_count, page_count, page_bytes)` fact
+> established on one machine is true on all of them — which is what turns that anti-vacuity guard
+> from a local coincidence into a portable one. (The guard stayed; the amplitude pair moved to
+> 0.30 / 0.90, since portable vertices produce a different — now universal — count ladder.)
+> `dag.rs`'s local wavy grid and the packager's cook fixture were ported for the same reason, as
+> were two synthetic threshold walks.
+>
+> **Two goldens re-blessed, on purpose, once: `vgeom_dense.png` and `vgeom_far.png`.** They are the
+> only goldens that draw this fixture, and the fixture's DAG legitimately changed on *every*
+> platform, not just macOS. The move is small — mean 2.5e-4 / max 3.4e-2 for `vgeom_dense`, mean
+> 1.5e-5 / max 2.1e-2 for `vgeom_far`, against tolerances of 6e-2 / 3.5e-1 — so strict mode
+> actually passed *without* the re-bless; they were re-blessed anyway so the reference is what
+> today's generator produces rather than a stale image quietly spending the tolerance budget. **The
+> other 34 goldens are byte-identical, verified by decoding the pre-change PNGs against the
+> post-change ones (mean = max = 0 for all 34), and all 36 pass `INF_GOLDEN_STRICT=1` afterwards.**
+> The frozen v1 fixture `v1_dense12.inf_vmesh` was deliberately **not** touched: it pins committed
+> *bytes*, not the generator, and its test only ever reads the committed file — its provenance note
+> now records that the generator has since changed and that this is intended.
+
 - **P18.1 Two-pass HZB occlusion** — 1. persist the last-frame visible list; 2. early draw →
   HZB from its depth → late cull and draw of the remainder; 3. on by default where supported.
 - **P18.2 Meshlet streaming** — 1. a residency/page table over the existing coarse-first level

@@ -1403,7 +1403,7 @@ fn stage_page(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::dense_mesh;
+    use crate::test_support::{dense_mesh, displaced_mesh};
     use crate::VgeomMesh;
 
     // ── allocator ───────────────────────────────────────────────────────────
@@ -1730,50 +1730,6 @@ mod tests {
         }
     }
 
-    /// A displaced grid with a tunable amplitude — the same topology, so the
-    /// clusterization (and therefore the meshlet and page **counts**) is
-    /// unchanged, while every simplification error differs. That is what a
-    /// re-import of an edited mesh looks like, and it is precisely the case the
-    /// pre-P18.3 count-only staleness check could not see.
-    fn displaced_mesh(n: usize, amp: f32) -> VgeomMesh {
-        let mut positions = Vec::new();
-        let mut normals = Vec::new();
-        let mut uvs = Vec::new();
-        for j in 0..=n {
-            for i in 0..=n {
-                let u = i as f32 / n as f32;
-                let v = j as f32 / n as f32;
-                let x = (u - 0.5) * 2.0;
-                let z = (v - 0.5) * 2.0;
-                positions.push([x, amp * (x * 3.0).sin() * (z * 3.0).cos(), z]);
-                normals.push([0.0, 1.0, 0.0]);
-                uvs.push([u, v]);
-            }
-        }
-        let stride = (n + 1) as u32;
-        let mut indices = Vec::new();
-        for j in 0..n as u32 {
-            for i in 0..n as u32 {
-                let a = j * stride + i;
-                indices.extend_from_slice(&[
-                    a,
-                    a + stride,
-                    a + 1,
-                    a + 1,
-                    a + stride,
-                    a + stride + 1,
-                ]);
-            }
-        }
-        crate::build::build_vgeom(
-            &positions,
-            &normals,
-            &uvs,
-            &indices,
-            crate::build::BuildParams::default(),
-        )
-    }
-
     /// **Re-imported content under a stable id must reset residency** (P18.3).
     ///
     /// In a cooked pack an asset id names immutable bytes, so the old staleness
@@ -1786,14 +1742,42 @@ mod tests {
     ///
     /// The fixture is asserted count-identical, so this can never quietly become
     /// vacuous by drifting into a pair the weak check would already separate.
+    ///
+    /// # Why the premise now holds everywhere, and how to re-establish it
+    ///
+    /// `test_support::displaced_mesh` varies **only** the displacement amplitude,
+    /// so both builds share a topology, and its trig is bit-portable — every
+    /// platform computes byte-identical vertices and therefore a byte-identical
+    /// DAG. Amplitude still perturbs `meshopt`'s clusterization enough to move the
+    /// meshlet count by a few, so the two amplitudes below are *picked* to land on
+    /// the same `(meshlet_count, page_count)`; what portability buys is that the
+    /// pick is now a **platform-invariant fact** rather than a local coincidence.
+    /// It used to be the latter: under `std` trig the old (0.30, 0.75) pair
+    /// measured (41, 5) == (41, 5) on x86_64-msvc and (38, 5) ≠ (41, 5) on
+    /// aarch64-apple-darwin, so this assertion turned into a macOS-only CI failure
+    /// with nothing whatsoever wrong in the code under test.
+    ///
+    /// If a future builder change moves the counts apart, re-pick `B_AMPLITUDE`
+    /// by sweeping amplitudes for one that matches `A_AMPLITUDE`'s counts (they
+    /// are dense — roughly one in three of a 0.05 ladder works) and keep it far
+    /// enough from `A_AMPLITUDE` that "an edited mesh" is a fair description. Do
+    /// **not** relax the assertion: it is the only thing standing between this
+    /// test and vacuity.
     #[test]
     fn reimported_content_under_one_id_resets_residency() {
-        let a = VgeomSource::from_mesh(&displaced_mesh(28, 0.30)).unwrap();
-        let b = VgeomSource::from_mesh(&displaced_mesh(28, 0.75)).unwrap();
+        /// The base payload's displacement amplitude — `dense_mesh`'s own.
+        const A_AMPLITUDE: f64 = 0.30;
+        /// The re-imported payload's: 3× the displacement, so every simplification
+        /// error genuinely moves, chosen for equal counts (see above).
+        const B_AMPLITUDE: f64 = 0.90;
+
+        let a = VgeomSource::from_mesh(&displaced_mesh(28, A_AMPLITUDE)).unwrap();
+        let b = VgeomSource::from_mesh(&displaced_mesh(28, B_AMPLITUDE)).unwrap();
         assert_eq!(
             (a.meshlet_count(), a.pages().len()),
             (b.meshlet_count(), b.pages().len()),
-            "fixture must defeat the count-only check, or this proves nothing"
+            "fixture must defeat the count-only check, or this proves nothing \
+             (re-pick B_AMPLITUDE — see this test's doc comment)"
         );
         assert_ne!(a.pages(), b.pages(), "…while differing in the directory");
 
@@ -2052,8 +2036,10 @@ mod tests {
     #[test]
     fn identical_want_traces_produce_identical_residency_traces() {
         let (_, src) = fixture();
+        // Portable trig (the P14 LAW) so the *walk itself* is the same sequence on
+        // every platform, not just reproducible against itself on one.
         let thresholds: Vec<f32> = (0..40)
-            .map(|i| (i as f32 * 0.37).sin().abs() * 0.05 + 0.0005)
+            .map(|i| (inf_math::psin64(i as f64 * 0.37).abs() * 0.05 + 0.0005) as f32)
             .collect();
         let trace = || {
             let mut s = VgeomStreamer::new(VgeomStreamBudget {

@@ -11,46 +11,12 @@ use inf_math::FloatingOrigin;
 use inf_player::vmesh::{derived_vmesh_id, pack_has_vmesh, VmeshRegistry};
 use inf_render::{cull_visible_source, GpuContext, RenderView, VgeomInstance, VgeomSettings};
 
-/// A dense procedural mesh (subdivided displaced grid) → a meshlet DAG, exactly
-/// as the cook's `derive_vmesh` builds one from a mesh's streams.
-fn dense_vmesh(n: usize) -> inf_vgeom::VgeomMesh {
-    let mut positions = Vec::new();
-    let mut normals = Vec::new();
-    let mut uvs = Vec::new();
-    for j in 0..=n {
-        for i in 0..=n {
-            let u = i as f32 / n as f32;
-            let v = j as f32 / n as f32;
-            let x = (u - 0.5) * 2.0;
-            let z = (v - 0.5) * 2.0;
-            let y = 0.3 * (x * 3.0).sin() * (z * 3.0).cos();
-            let nrm = Vec3::new(
-                -0.9 * (x * 3.0).cos() * (z * 3.0).cos(),
-                1.0,
-                0.9 * (x * 3.0).sin() * (z * 3.0).sin(),
-            )
-            .normalize();
-            positions.push([x, y, z]);
-            normals.push(nrm.to_array());
-            uvs.push([u, v]);
-        }
-    }
-    let stride = (n + 1) as u32;
-    let mut indices = Vec::new();
-    for j in 0..n as u32 {
-        for i in 0..n as u32 {
-            let a = j * stride + i;
-            indices.extend_from_slice(&[a, a + stride, a + 1, a + 1, a + stride, a + stride + 1]);
-        }
-    }
-    inf_vgeom::build_vgeom(
-        &positions,
-        &normals,
-        &uvs,
-        &indices,
-        inf_vgeom::BuildParams::default(),
-    )
-}
+// A dense procedural mesh (subdivided displaced grid) → a meshlet DAG, exactly as
+// the cook's `derive_vmesh` builds one from a mesh's streams. One shared generator
+// with the renderer's vgeom suites (`inf_vgeom::test_support`), with bit-portable
+// trig — this file used to carry its own copy, written with the `0.3 · 3.0` normal
+// constants folded by hand, which is precisely how nine copies drift.
+use inf_vgeom::test_support::dense_grid_mesh as dense_vmesh;
 
 /// The player's derived-id salt must match the cook's, or the runtime would never
 /// find a cooked vmesh. Drift guard against `inf_packager::derived_vmesh_id`.

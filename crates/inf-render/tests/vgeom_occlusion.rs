@@ -44,47 +44,13 @@ fn gpu_or_skip() -> Option<GpuContext> {
 
 // ── Content ──────────────────────────────────────────────────────────────────
 
-/// The same dense procedural mesh the vgeom goldens use: an `n×n` grid quad-plane
-/// in the local XZ plane, displaced by a smooth bi-sinusoid so it has real
-/// curvature (nontrivial normal cones + several LOD levels).
-fn dense_grid_mesh(n: usize) -> VgeomMesh {
-    let mut positions = Vec::new();
-    let mut normals = Vec::new();
-    let mut uvs = Vec::new();
-    for j in 0..=n {
-        for i in 0..=n {
-            let u = i as f32 / n as f32;
-            let v = j as f32 / n as f32;
-            let x = (u - 0.5) * 2.0;
-            let z = (v - 0.5) * 2.0;
-            let y = 0.3 * (x * 3.0).sin() * (z * 3.0).cos();
-            let dydx = 0.3 * 3.0 * (x * 3.0).cos() * (z * 3.0).cos();
-            let dydz = -0.3 * 3.0 * (x * 3.0).sin() * (z * 3.0).sin();
-            let nrm = Vec3::new(-dydx, 1.0, -dydz).normalize();
-            positions.push([x, y, z]);
-            normals.push(nrm.to_array());
-            uvs.push([u, v]);
-        }
-    }
-    let stride = (n + 1) as u32;
-    let mut indices = Vec::new();
-    for j in 0..n as u32 {
-        for i in 0..n as u32 {
-            let a = j * stride + i;
-            let b = a + 1;
-            let c = a + stride;
-            let d = c + 1;
-            indices.extend_from_slice(&[a, c, b, b, c, d]);
-        }
-    }
-    inf_vgeom::build_vgeom(
-        &positions,
-        &normals,
-        &uvs,
-        &indices,
-        inf_vgeom::BuildParams::default(),
-    )
-}
+// The same dense procedural mesh the vgeom goldens use: an `n×n` grid quad-plane
+// in the local XZ plane, displaced by a smooth bi-sinusoid so it has real
+// curvature (nontrivial normal cones + several LOD levels). One shared generator
+// in `inf_vgeom::test_support`, with bit-portable trig — this file used to carry
+// its own copy, displaced with `std` sin/cos, which cooked a different DAG per
+// platform.
+use inf_vgeom::test_support::dense_grid_mesh;
 
 const ASSET: u128 = 0x1801_0000_0cc1_0000;
 

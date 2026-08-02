@@ -405,39 +405,8 @@ fn vgeom_two_pass_cost() {
     }
 }
 
-/// A dense displaced grid plane — the same shape the vgeom goldens use, enough
-/// triangles to produce a real meshlet DAG.
-fn vgeom_budget_mesh(n: usize) -> inf_render::VgeomMesh {
-    let mut positions = Vec::new();
-    let mut normals = Vec::new();
-    let mut uvs = Vec::new();
-    for j in 0..=n {
-        for i in 0..=n {
-            let u = i as f32 / n as f32;
-            let v = j as f32 / n as f32;
-            let x = (u - 0.5) * 2.0;
-            let z = (v - 0.5) * 2.0;
-            let y = 0.3 * (x * 3.0).sin() * (z * 3.0).cos();
-            let dydx = 0.3 * 3.0 * (x * 3.0).cos() * (z * 3.0).cos();
-            let dydz = -0.3 * 3.0 * (x * 3.0).sin() * (z * 3.0).sin();
-            positions.push([x, y, z]);
-            normals.push(Vec3::new(-dydx, 1.0, -dydz).normalize().to_array());
-            uvs.push([u, v]);
-        }
-    }
-    let stride = (n + 1) as u32;
-    let mut indices = Vec::new();
-    for j in 0..n as u32 {
-        for i in 0..n as u32 {
-            let a = j * stride + i;
-            indices.extend_from_slice(&[a, a + stride, a + 1, a + 1, a + stride, a + stride + 1]);
-        }
-    }
-    inf_vgeom::build_vgeom(
-        &positions,
-        &normals,
-        &uvs,
-        &indices,
-        inf_vgeom::BuildParams::default(),
-    )
-}
+// A dense displaced grid plane — literally the shape the vgeom goldens use, from
+// the one shared generator (`inf_vgeom::test_support`, bit-portable trig), with
+// enough triangles to produce a real meshlet DAG. This file used to carry its own
+// copy of the body.
+use inf_vgeom::test_support::dense_grid_mesh as vgeom_budget_mesh;

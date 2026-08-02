@@ -23,6 +23,12 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 png = { workspace = true }
+# The vgeom suites (goldens, occlusion, streaming, frame budget) all drive the
+# SAME displaced-grid fixture; it lives once in `inf_vgeom::test_support`, behind
+# this test-only feature, with bit-portable trig (the P14 LAW — `std` sin/cos
+# cooked a different meshlet DAG on macOS than on Windows). Dev-only, so the
+# shipping renderer's `inf-vgeom` is unchanged.
+inf-vgeom = { workspace = true, features = ["test-support"] }
 # Validates every composed WGSL variant (scene_shader / lit_scene_shader ×
 # each pass source) without a GPU — the pick-shader composition regression gate.
 naga = { workspace = true }

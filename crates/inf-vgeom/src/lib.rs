@@ -60,8 +60,11 @@ pub mod asset;
 pub mod model;
 pub mod stream;
 
-#[cfg(test)]
-mod test_support;
+// The shared fixture meshes. Test-only twice over: `cfg(test)` inside this crate,
+// the `test-support` feature for everyone else's test targets — and host-only,
+// because it calls the `meshopt`-backed builder above.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+pub mod test_support;
 
 pub use asset::{
     build_vgeom_asset, MeshletRec, VgeomAssetError, VgeomAssetHeader, VgeomAssetImage,

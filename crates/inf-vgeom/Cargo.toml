@@ -26,6 +26,19 @@ bytemuck = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# Bit-portable trig for the SHARED FIXTURE MESHES (`test_support`, behind the
+# `test-support` feature). The P14 LAW: f32 std `sin`/`cos` differ in the low bits
+# between MSVC's CRT, glibc and Apple's libm, so a fixture displaced with them
+# cooks a different meshlet DAG per platform — which is what two macOS-only CI
+# failures actually were. Optional: it is pulled in ONLY by that test-only
+# feature, so a shipping vgeom build is unchanged.
+inf-math = { workspace = true, optional = true }
+
+[features]
+# Exposes `test_support` (the shared fixture meshes) to OTHER crates' test
+# targets — `inf-render`, `inf-player` and this crate's own `tests/` all switch it
+# on from their DEV-dependencies. Never enable it in a shipping build.
+test-support = ["dep:inf-math"]
 
 # meshoptimizer: clusterization (build_meshlets), simplification with border locks
 # (simplify_with_locks), and cluster bounds/cones. Already pinned once in the
@@ -39,3 +52,12 @@ meshopt = { workspace = true }
 
 [dev-dependencies]
 inf-asset = { workspace = true }
+# `test_support` is compiled for this crate's own `cfg(test)` unit tests too, and
+# `cfg(test)` does not turn a feature on — so the portable-trig dep has to be
+# reachable as a dev-dependency as well.
+inf-math = { workspace = true }
+# This crate's INTEGRATION tests (`tests/`) link the lib from OUTSIDE, so a
+# `cfg(test)`-only module is invisible to them; they used to carry a hand-copied
+# fixture generator for exactly that reason. A dev-dependency on self is the
+# supported way to say "build my own lib with `test-support` on for my tests".
+inf-vgeom = { path = ".", features = ["test-support"] }

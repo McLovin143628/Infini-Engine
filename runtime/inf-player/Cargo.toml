@@ -137,4 +137,9 @@ inf-editor-core = { workspace = true }
 # shipped player never depends on the cook pipeline).
 inf-packager = { workspace = true }
 inf-project = { workspace = true }
+# `vgeom_activation` cooks the SAME displaced-grid fixture the renderer's vgeom
+# suites use; it lives once in `inf_vgeom::test_support` behind this test-only
+# feature, with bit-portable trig (the P14 LAW). Dev-only — the shipped player's
+# `inf-vgeom` is unchanged.
+inf-vgeom = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }

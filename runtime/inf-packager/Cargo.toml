@@ -50,3 +50,6 @@ inf-scene = { workspace = true }
 inf-project = { workspace = true }
 inf-mesh = { workspace = true }
 inf-vgeom = { workspace = true }
+# Bit-portable trig for the dense-grid cook fixture (the P14 LAW — `std` sin/cos
+# would make the derived meshlet DAG platform-dependent).
+inf-math = { workspace = true }

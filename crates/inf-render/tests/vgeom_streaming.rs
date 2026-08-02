@@ -35,23 +35,28 @@
 //! frame. (`inf_vgeom`'s `the_root_page_survives_every_budget_that_can_hold_it`
 //! pins the floor itself, with no GPU.)
 //!
-//! # The fixture's page ladder is NOT a portable constant
+//! # The fixture's page ladder is portable now — the assertions still don't lean on it
 //!
-//! Every byte figure and every LOD depth quoted in this file is what the
-//! x86_64-msvc build produces, and it is **illustration, never a contract**.
-//! `dense_grid_mesh` displaces its grid with f32 `sin`/`cos`, which is std trig and
-//! therefore not bit-portable (the P14 LAW); meshopt then simplifies slightly
-//! different vertices into a slightly different DAG. The macOS/aarch64 runner cooks
-//! the same fixture to 138 176 B where this machine gets 138 340 B, with per-page
-//! `max_parent_error` moving by percent, not by ULPs. (`lod_threshold` contributes a
-//! second, ULP-scale platform input by dividing through `tan(fov_y / 2)`.)
+//! The fixture (`inf_vgeom::test_support::dense_grid_mesh`) used to displace its
+//! grid with f32 `sin`/`cos` — std trig, and therefore not bit-portable (the P14
+//! LAW). meshopt simplified slightly different vertices into a genuinely different
+//! DAG: the macOS/aarch64 runner cooked the same fixture to 138 176 B of resident
+//! pages where this machine got 138 340 B, with per-page `max_parent_error` moving
+//! by percent rather than by ULPs. That was the root cause of two macOS-only CI
+//! failures, and it is fixed at the source: the generator now runs on
+//! `psin64`/`pcos64`, so every platform cooks byte-identical vertices and hence the
+//! identical DAG.
 //!
-//! So **no assertion here may rest on a specific page size, or on a threshold
-//! sitting a few percent from a page's error boundary.** Budgets are derived from
-//! the live page directory, and the flythrough's camera distances are decades clear
-//! of every boundary that matters. P18.2's first CI failure was exactly this
-//! (run 30729604364): a flythrough tuned 25 % from a boundary on Windows landed on
-//! the other side of it on macOS and pinned residency flat — see the note above
+//! The discipline below is unchanged regardless, and deliberately so. Byte figures
+//! and LOD depths quoted in this file remain **illustration, never a contract** —
+//! any builder tweak moves them — and `lod_threshold` still divides through
+//! `tan(fov_y / 2)`, a ULP-scale platform input the fixture fix does not touch. So
+//! **no assertion here may rest on a specific page size, or on a threshold sitting
+//! a few percent from a page's error boundary.** Budgets are derived from the live
+//! page directory, and the flythrough's camera distances are decades clear of every
+//! boundary that matters. P18.2's first CI failure was exactly this (run
+//! 30729604364): a flythrough tuned 25 % from a boundary on Windows landed on the
+//! other side of it on macOS and pinned residency flat — see the note above
 //! `FLYTHROUGH_DISTANCES`.
 //!
 //! Skips cleanly with no GPU adapter, like every GPU path in this repo.
@@ -92,48 +97,12 @@ fn gpu_or_skip(name: &str) -> Option<GpuContext> {
 
 // ── Content ──────────────────────────────────────────────────────────────────
 
-/// The same dense procedural mesh the vgeom goldens and the occlusion gates use:
-/// an `n×n` grid quad-plane in the local XZ plane, displaced by a smooth
-/// bi-sinusoid so it has real curvature (nontrivial normal cones + several LOD
-/// levels, hence several pages).
-fn dense_grid_mesh(n: usize) -> VgeomMesh {
-    let mut positions = Vec::new();
-    let mut normals = Vec::new();
-    let mut uvs = Vec::new();
-    for j in 0..=n {
-        for i in 0..=n {
-            let u = i as f32 / n as f32;
-            let v = j as f32 / n as f32;
-            let x = (u - 0.5) * 2.0;
-            let z = (v - 0.5) * 2.0;
-            let y = 0.3 * (x * 3.0).sin() * (z * 3.0).cos();
-            let dydx = 0.3 * 3.0 * (x * 3.0).cos() * (z * 3.0).cos();
-            let dydz = -0.3 * 3.0 * (x * 3.0).sin() * (z * 3.0).sin();
-            let nrm = Vec3::new(-dydx, 1.0, -dydz).normalize();
-            positions.push([x, y, z]);
-            normals.push(nrm.to_array());
-            uvs.push([u, v]);
-        }
-    }
-    let stride = (n + 1) as u32;
-    let mut indices = Vec::new();
-    for j in 0..n as u32 {
-        for i in 0..n as u32 {
-            let a = j * stride + i;
-            let b = a + 1;
-            let c = a + stride;
-            let d = c + 1;
-            indices.extend_from_slice(&[a, c, b, b, c, d]);
-        }
-    }
-    inf_vgeom::build_vgeom(
-        &positions,
-        &normals,
-        &uvs,
-        &indices,
-        inf_vgeom::BuildParams::default(),
-    )
-}
+// The same dense procedural mesh the vgeom goldens and the occlusion gates use:
+// an `n×n` grid quad-plane in the local XZ plane, displaced by a smooth
+// bi-sinusoid so it has real curvature (nontrivial normal cones + several LOD
+// levels, hence several pages). One shared, bit-portable generator — see the
+// module header for what its absence cost.
+use inf_vgeom::test_support::dense_grid_mesh;
 
 /// The streaming fixture: one instance of the dense mesh, scaled up to 4 m so a
 /// close camera genuinely wants the finest pages and a distant one does not — the
@@ -642,20 +611,23 @@ fn a_budget_clamped_frame_is_coarser_but_never_empty() {
 //
 // The mechanism, and the reason the guard was right to fire:
 //
-// 1. `dense_grid_mesh` displaces its grid with **f32 `sin`/`cos`** — std trig,
+// 1. `dense_grid_mesh` displaced its grid with **f32 `sin`/`cos`** — std trig,
 //    which is not bit-portable (the P14 LAW). aarch64-apple-darwin's libm differs
-//    from x86_64-msvc's in the last ULPs, so the two platforms feed meshopt
-//    *different vertices*, meshopt makes different collapse decisions, and the
-//    resulting `.inf_vmesh` has a different page ladder: 138 340 B total here,
+//    from x86_64-msvc's in the last ULPs, so the two platforms fed meshopt
+//    *different vertices*, meshopt made different collapse decisions, and the
+//    resulting `.inf_vmesh` had a different page ladder: 138 340 B total here,
 //    138 176 B on the macOS runner (the failure printed its budget, 69 088 B, which
-//    is half of the latter). Per-page `max_parent_error` moves with it, by percent,
-//    not by ULPs. `lod_threshold` adds a second, smaller platform input: it divides
-//    by `tan(fov_y / 2)`, also std trig.
-// 2. So *neither* the page-error ladder nor the threshold `t` is a fixed number
-//    across CI legs, and this file must never depend on one. The old script did:
-//    at 19.2 m it produced `t = 2.18e-2` against a page-2 boundary of `2.72e-2` —
-//    a 25 % margin. macOS landed on the other side, every frame's want reached the
-//    budget cap of 4 pages, and residency was pinned flat.
+//    is half of the latter). Per-page `max_parent_error` moved with it, by percent,
+//    not by ULPs. That root cause has since been fixed — the shared generator in
+//    `inf_vgeom::test_support` runs on `psin64`/`pcos64` and the ladder is now the
+//    same everywhere — but `lod_threshold` keeps a second, smaller platform input
+//    alive: it divides by `tan(fov_y / 2)`, which is still std trig.
+// 2. So the threshold `t` is still not a fixed number across CI legs, and this
+//    file must never depend on one (nor on a page size, which any builder tweak
+//    moves). The old script did: at 19.2 m it produced `t = 2.18e-2` against a
+//    page-2 boundary of `2.72e-2` — a 25 % margin. macOS landed on the other side,
+//    every frame's want reached the budget cap of 4 pages, and residency was
+//    pinned flat.
 //
 // The fix is to stop straddling boundaries. Both ends of the flythrough are now
 // **decades** away from any page boundary, and the budget is derived from the
@@ -693,9 +665,9 @@ const FLYTHROUGH_PAGES: usize = 3;
 /// The scripted camera move, along one fixed direction at [`FLYTHROUGH_DISTANCES`].
 ///
 /// The direction comes from a `normalize` (IEEE `sqrt` and divide — bit-portable);
-/// there is deliberately no trig anywhere in the script, so the only
-/// platform-dependent input left is the fixture *mesh*, whose ladder the distances
-/// above are decades clear of.
+/// there is deliberately no trig anywhere in the script, and the fixture mesh is
+/// bit-portable too, so the only platform-dependent input left is `lod_threshold`'s
+/// `tan(fov_y / 2)` — a ULP-scale wobble the distances above are decades clear of.
 fn flythrough() -> Vec<RenderView> {
     let dir = DVec3::new(0.0, 0.5, 1.0).normalize();
     FLYTHROUGH_DISTANCES

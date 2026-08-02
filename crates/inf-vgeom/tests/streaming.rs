@@ -15,9 +15,14 @@
 
 use std::collections::BTreeMap;
 
+// `dense_mesh` is the SHARED generator (portable trig — see `test_support`'s
+// header). This file used to carry a hand-copied body, because `test_support` was
+// `#[cfg(test)]`-internal and an integration test cannot see that; the crate's own
+// dev-dependency now turns on the `test-support` feature instead.
+use inf_vgeom::test_support::dense_mesh;
 use inf_vgeom::{
-    build_vgeom, build_vgeom_asset, BuildParams, PoolBlock, VgeomAssetReader, VgeomMesh,
-    VgeomSource, VgeomStreamBudget, VgeomStreamer, VgeomWant, NOT_RESIDENT,
+    build_vgeom_asset, PoolBlock, VgeomAssetReader, VgeomMesh, VgeomSource, VgeomStreamBudget,
+    VgeomStreamer, VgeomWant, NOT_RESIDENT,
 };
 
 // ─────────────────────────── the fixture ───────────────────────────────────
@@ -26,38 +31,6 @@ use inf_vgeom::{
 /// that produces the *interesting* DAG: five LOD levels, five streaming pages, and
 /// roots at more than one level. See [`fixture`].
 const GRID: usize = 26;
-
-/// A dense displaced grid → a multi-level meshlet DAG.
-///
-/// The body is copied verbatim from `src/test_support.rs::dense_mesh` (which is
-/// itself the `dag.rs` generator): `test_support` is `#[cfg(test)]`-internal to the
-/// crate, so an *integration* test cannot reach it and has to carry its own copy.
-fn dense_mesh(n: usize) -> VgeomMesh {
-    let mut positions = Vec::new();
-    let mut normals = Vec::new();
-    let mut uvs = Vec::new();
-    for j in 0..=n {
-        for i in 0..=n {
-            let u = i as f32 / n as f32;
-            let v = j as f32 / n as f32;
-            let x = (u - 0.5) * 2.0;
-            let z = (v - 0.5) * 2.0;
-            let y = 0.3 * (x * 3.0).sin() * (z * 3.0).cos();
-            positions.push([x, y, z]);
-            normals.push([0.0, 1.0, 0.0]);
-            uvs.push([u, v]);
-        }
-    }
-    let stride = (n + 1) as u32;
-    let mut indices = Vec::new();
-    for j in 0..n as u32 {
-        for i in 0..n as u32 {
-            let a = j * stride + i;
-            indices.extend_from_slice(&[a, a + stride, a + 1, a + 1, a + stride, a + stride + 1]);
-        }
-    }
-    build_vgeom(&positions, &normals, &uvs, &indices, BuildParams::default())
-}
 
 /// The fixture mesh and its v2 image, **plus the assertions that it is still the
 /// hard case**.
@@ -712,8 +685,11 @@ fn v1_and_v2_sources_stream_identically() {
     );
 
     let max_err = max_finite_error(&mesh);
+    // Portable trig (the P14 LAW): the walk is the same sequence on every
+    // platform, so the two traces below are compared over identical inputs
+    // everywhere, not merely over inputs identical to themselves.
     let walk: Vec<f32> = (0..24)
-        .map(|k| max_err * ((k as f32 * 0.7).sin().abs() * 2.0))
+        .map(|k| max_err * (inf_math::psin64(k as f64 * 0.7).abs() * 2.0) as f32)
         .collect();
     let budget = paged.total_resident_bytes() / 2;
 
