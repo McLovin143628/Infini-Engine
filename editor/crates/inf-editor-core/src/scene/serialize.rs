@@ -213,6 +213,13 @@ use crate::scene::SceneDoc;
 ///   `biome_set: None` — an unpainted terrain with no biome vocabulary, which is
 ///   exactly what a v15 level meant. An unpainted terrain pays one zero-length
 ///   count per tile plus one discriminant byte for the `None` biome set.
+///
+/// **P19.3 bumped nothing.** The biome→PCG binding gave [`Terrain`] a
+/// `biome_population: Vec<ScatteredInstance>`, but it is `#[serde(skip)]` — a
+/// derived cache rebuilt by the editor's evaluate command and by the player on
+/// level load — so it is **wire-neutral** and every ladder rung below stays
+/// byte-identical. Same precedent as `PcgVolume::evaluated`, and the reason the
+/// schema stays at 16: only what reaches the bytes can force a bump.
 pub const SCHEMA_VERSION: u32 = 16;
 
 /// File-level simulation settings (P9.5 · schema v3). Replaces the player's
@@ -1468,6 +1475,7 @@ impl TerrainV14 {
             macro_variation: self.macro_variation,
             asset: self.asset,
             biome_set: None,
+            biome_population: Vec::new(),
         }
     }
 
@@ -1554,6 +1562,7 @@ impl TerrainV15 {
             macro_variation: self.macro_variation,
             asset: self.asset,
             biome_set: None,
+            biome_population: Vec::new(),
         }
     }
 
@@ -1596,6 +1605,7 @@ impl TerrainV8 {
             macro_variation: self.macro_variation,
             asset: None,
             biome_set: None,
+            biome_population: Vec::new(),
         }
     }
 

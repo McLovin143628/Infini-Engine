@@ -106,14 +106,39 @@ impl AssetState {
     /// [`PcgVolume`](inf_ecs::components::PcgVolume) scatter exactly like the
     /// shipping pack path. `None` if the asset is missing or not a PCG graph.
     pub fn load_pcg_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
+        self.load_asset_bytes(id, AssetKind::Pcg)
+    }
+
+    /// Load an asset's **raw payload bytes** by GUID, refusing anything that is
+    /// not of `kind`.
+    ///
+    /// The shape [`load_pcg_bytes`](Self::load_pcg_bytes) and friends were all
+    /// written by hand; stated once here so a new kind is one line rather than a
+    /// fifth copy of the same lock-walk + kind guard.
+    pub fn load_asset_bytes(&self, id: AssetId, kind: AssetKind) -> Option<Vec<u8>> {
         let guard = self.inner.lock().ok()?;
         let inner = guard.as_ref()?;
         let proj = inner.project.lock().ok()?;
         let entry = proj.db().get(id)?;
-        if entry.kind() != inf_asset::AssetKind::Pcg {
+        if entry.kind() != kind {
             return None;
         }
         std::fs::read(&entry.path).ok()
+    }
+
+    /// Load a `.inf_biomes` [`BiomeSet`] asset's **raw bytes** by its asset GUID
+    /// (P19.3): the bytes the biome→PCG evaluate command decodes, and the ones
+    /// streamed to the PIE player so it runs the same binding as the shipping
+    /// pack path. `None` if the asset is missing or is not a biome set.
+    pub fn load_biome_set_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
+        self.load_asset_bytes(id, AssetKind::BiomeSet)
+    }
+
+    /// Load an `.inf_tex` asset's **raw bytes** by its asset GUID — the pixels a
+    /// PCG `mask.image` node names (P19.3). `None` if the asset is missing or is
+    /// not a texture.
+    pub fn load_texture_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
+        self.load_asset_bytes(id, AssetKind::Texture)
     }
 
     /// Load a P11 animation asset's **raw bytes** by its asset GUID (P11.4): the

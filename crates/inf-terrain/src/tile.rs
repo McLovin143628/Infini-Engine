@@ -124,6 +124,18 @@ pub const MAX_BIOMES: usize = 255;
 /// second bake adds to the first's totals and a normalized *view* (the PNG
 /// export, a PCG mask) is always derived, never stored. Units follow the
 /// SI doctrine (`docs/memos/units-doctrine.md`): 1 world unit = 1 metre.
+///
+/// # THE ORDERING LAW: new kinds go at the **end**, always
+///
+/// This enum is **nested inside a persisted wire form** — `inf_pcg::SamplerDef::DataMap`
+/// carries it, and a `.inf_pcg` is bincode, which encodes an externally-tagged
+/// enum as its **declaration index**. Inserting a kind here (the deferred fourth
+/// *thermal* channel is the obvious candidate — see the P19.1 remainders) would
+/// silently renumber every kind after it and turn a committed `mask.wear` node
+/// into a `mask.deposition`. Appending costs nothing;
+/// [`channel`](Self::channel) already states the storage order separately, so the
+/// two never have to agree by accident. Pinned by
+/// `inf_pcg::rules::sampler_variant_discriminants_are_frozen`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DataMapKind {
@@ -169,6 +181,29 @@ impl DataMapKind {
             DataMapKind::Flow => "flow",
             DataMapKind::Deposition => "deposition",
             DataMapKind::Wear => "wear",
+        }
+    }
+
+    /// Whether this channel is **extensive** — its value scales with the area it
+    /// covers — as opposed to *intensive* (a per-area value that does not).
+    ///
+    /// This is the one place the dimension is stated, and it is what every
+    /// area-changing reduction must branch on. [`Flow`](Self::Flow) is a volume
+    /// (m³): a region twice the size shipped twice the water, so combining cells
+    /// **sums**. [`Deposition`](Self::Deposition) and [`Wear`](Self::Wear) are
+    /// metres of height moved: a region twice the size did not gain twice the
+    /// height, so combining cells **averages** — which also preserves the volume
+    /// integral, since `mean(h) · ΣA == Σ(h · A)` for equal-area children.
+    ///
+    /// The first caller is the LOD pyramid's per-layer reduction
+    /// ([`crate::pyramid`]); a mip/resample path or a coarse-resolution PCG pass
+    /// needs exactly the same branch, which is why it is a property of the kind
+    /// rather than a rule written inside one reducer.
+    #[inline]
+    pub const fn is_extensive(self) -> bool {
+        match self {
+            DataMapKind::Flow => true,
+            DataMapKind::Deposition | DataMapKind::Wear => false,
         }
     }
 

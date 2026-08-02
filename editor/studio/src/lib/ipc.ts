@@ -19,7 +19,7 @@ import type {
   NodeDef,
 } from "./blueprintTypes";
 import type { MaterialCompileResult } from "./materialTypes";
-import type { PcgCompileResult, PcgEvaluateResult } from "./pcgTypes";
+import type { PcgBiomeResult, PcgCompileResult, PcgEvaluateResult } from "./pcgTypes";
 import type { SmClipDto, SmDoc } from "./smTypes";
 import type { AssetRefDto } from "../bindings/AssetRefDto";
 import type { AssetSnapshot } from "../bindings/AssetSnapshot";
@@ -739,6 +739,11 @@ export const pcg = {
   /** Scatter over the scene terrain into the target volume (null → selection). */
   evaluate: (id: string, entity: string | null): Promise<PcgEvaluateResult> =>
     invoke<PcgEvaluateResult>("pcg_evaluate", { id, entity }),
+  /** Run a terrain's biome→PCG binding (P19.3): each painted biome's own graph
+   *  over the region its id owns (null → the first terrain with a biome set).
+   *  Independent of the open document — the graphs come from the biome set. */
+  evaluateBiomes: (entity: string | null): Promise<PcgBiomeResult> =>
+    invoke<PcgBiomeResult>("pcg_evaluate_biomes", { entity }),
 };
 
 /**

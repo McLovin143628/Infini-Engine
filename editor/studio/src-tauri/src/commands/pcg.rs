@@ -12,25 +12,75 @@
 //!   is the on-disk source of truth);
 //! * `pcg_evaluate` — lower + evaluate over the scene's terrain and refresh the
 //!   target `PcgVolume`'s instance cache, then bump the scene so the viewport
-//!   re-projects (world://delta).
+//!   re-projects (world://delta);
+//! * `pcg_evaluate_biomes` — the terrain-level sibling (P19.3): every painted
+//!   biome's own graph over the region its id owns, merged into the terrain's
+//!   `biome_population`. Everything downstream of a GUID is
+//!   [`inf_pcg::BiomeBinding::from_set`], shared verbatim with the player's
+//!   load-time pass (`inf_player::level::evaluate_biome_bindings`) — this layer
+//!   owns only the *fetch*, which is the whole reason the two cannot drift.
+//!
+//! Every lowering here goes through [`AssetMasks`], so a `mask.image` node
+//! resolves to the real `.inf_tex` pixels instead of failing closed.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use glam::{DVec2, DVec3};
+use inf_asset::AssetId;
 use inf_ecs::components::{GlobalTransform, PcgVolume, ScatteredInstance, Terrain, Transform};
 use inf_graph::{
     apply_edits, compile::validate, GraphDoc, GraphEdit, GraphIssue, GraphJournal, Link, NodeDef,
     NodeId, NodeRegistry,
 };
-use inf_pcg::graph::{lower_graph, pcg_registry as build_pcg_registry, PcgSeverity};
+use inf_pcg::graph::{
+    lower_graph_with, pcg_registry as build_pcg_registry, MaskSource, PcgSeverity,
+};
 use inf_pcg::height::{FnHeight, HeightProvider};
 use inf_pcg::scatter::Region;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
+use super::assets::AssetState;
 use super::scene::{emit_world_delta, SceneState};
+
+/// The editor's [`MaskSource`]: resolves a `mask.image` node's texture GUID to
+/// the live project's `.inf_tex` pixels.
+///
+/// The lowerer holds no asset database (it is a pure function of a graph), so
+/// the bitmap arrives through this seam. Decoding reuses
+/// [`inf_material::TextureAsset::level_rgba8`] — the same CPU BC1/BC3 path the
+/// thumbnailer draws texture previews with — rather than a second decoder.
+///
+/// Mip 0 is the mask: a `mask.image` is authored data, not a shading input, so
+/// the author's own resolution is the one the density field should have. RGBA8 →
+/// grayscale uses the standard Rec.709 luma weights, so a colour mask reads the
+/// way an author's eye reads it.
+struct AssetMasks<'a>(&'a AssetState);
+
+impl MaskSource for AssetMasks<'_> {
+    fn mask(&self, texture: Uuid) -> Option<(u32, u32, Vec<u8>)> {
+        let bytes = self.0.load_texture_bytes(AssetId(texture))?;
+        let tex: inf_material::TextureAsset = inf_asset::decode(&bytes).ok()?;
+        let mip = tex.mips.first()?;
+        let (w, h) = (mip.width, mip.height);
+        let rgba = tex.level_rgba8(0)?;
+        let gray: Vec<u8> = rgba
+            .chunks_exact(4)
+            .map(|p| {
+                let luma = 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32;
+                luma.round().clamp(0.0, 255.0) as u8
+            })
+            .collect();
+        // A truncated / mismatched mip would silently shift the mask by a row;
+        // fail closed instead (the `NoMasks` contract).
+        if gray.len() != (w as usize) * (h as usize) {
+            return None;
+        }
+        Some((w, h, gray))
+    }
+}
 
 /// In-memory PCG-graph workspace.
 struct PcgStore {
@@ -115,6 +165,28 @@ pub struct PcgEvaluateResult {
     /// Lowering diagnostics (a compile error → `placed == 0`).
     pub issues: Vec<PcgIssueDto>,
     pub ok: bool,
+}
+
+/// Result of evaluating a terrain's **biome→PCG binding** (P19.3).
+///
+/// Deliberately not a `PcgEvaluateResult`: this command lowers no open document,
+/// so it has no node-anchored diagnostics to report. What it *does* have is a
+/// dispatch count and the blend width they ran under — the two numbers that tell
+/// an author whether the thing they painted is what ran.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PcgBiomeResult {
+    /// Terrain entity GUID the population was written to.
+    pub entity: String,
+    /// How many instances the merged population holds.
+    pub placed: u32,
+    /// How many biomes actually dispatched (biomes whose `pcg_graph` resolved).
+    pub biomes: u32,
+    /// The border blend width the dispatches ran under, in metres.
+    pub feather: f64,
+    pub ok: bool,
+    /// A short human summary (or the reason nothing ran).
+    pub message: String,
 }
 
 fn issue_dtos(issues: &[inf_pcg::graph::PcgGraphIssue]) -> Vec<PcgIssueDto> {
@@ -328,10 +400,12 @@ pub async fn pcg_redo(
 pub async fn pcg_compile(
     id: String,
     state: State<'_, PcgState>,
+    assets: State<'_, AssetState>,
 ) -> Result<PcgCompileResult, String> {
+    let masks = AssetMasks(&assets);
     state.with(|s| {
         let doc = s.docs.get(&id).ok_or_else(|| format!("no pcg `{id}`"))?;
-        let lowered = lower_graph(&doc.graph, &s.registry);
+        let lowered = lower_graph_with(&doc.graph, &s.registry, &masks);
         let rule_count: u32 = lowered
             .document
             .layers
@@ -371,11 +445,12 @@ pub async fn pcg_save(
     id: String,
     name: String,
     state: State<'_, PcgState>,
-    assets: State<'_, super::assets::AssetState>,
+    assets: State<'_, AssetState>,
 ) -> Result<String, String> {
+    let masks = AssetMasks(&assets);
     let (bytes, file_name) = state.with(|s| {
         let doc = s.docs.get(&id).ok_or_else(|| format!("no pcg `{id}`"))?;
-        let lowered = lower_graph(&doc.graph, &s.registry);
+        let lowered = lower_graph_with(&doc.graph, &s.registry, &masks);
         let payload = inf_pcg::PcgAssetPayload::from_graph(&doc.graph, lowered.document);
         let bytes = payload.encode().map_err(|e| e.to_string())?;
         let base = if name.is_empty() { &doc.name } else { &name };
@@ -416,11 +491,13 @@ pub async fn pcg_evaluate(
     entity: Option<String>,
     state: State<'_, PcgState>,
     scene: State<'_, SceneState>,
+    assets: State<'_, AssetState>,
 ) -> Result<PcgEvaluateResult, String> {
     // Lower under the store lock.
+    let masks = AssetMasks(&assets);
     let (mut document, issues, ok) = state.with(|s| {
         let doc = s.docs.get(&id).ok_or_else(|| format!("no pcg `{id}`"))?;
-        let lowered = lower_graph(&doc.graph, &s.registry);
+        let lowered = lower_graph_with(&doc.graph, &s.registry, &masks);
         Ok((lowered.document, issue_dtos(&lowered.issues), lowered.ok))
     })?;
 
@@ -546,6 +623,167 @@ pub async fn pcg_evaluate(
         issues,
         ok: true,
     })
+}
+
+/// Evaluate a terrain's **biome→PCG binding** (P19.3): every painted biome's own
+/// `.inf_pcg` graph over the region its id owns, merged in ascending biome-id
+/// order into the terrain's `biome_population`, then bump the scene so the
+/// viewport re-projects.
+///
+/// The terrain-level **sibling** of [`pcg_evaluate`], not a replacement: a volume
+/// scatters one graph over a box an author placed, a binding scatters many graphs
+/// over the regions an author *painted*. Neither reads the other's output.
+///
+/// This is the editor half of the P19.3 parity gate. From the GUID onward it is
+/// the player's `evaluate_biome_bindings` verbatim — the same
+/// [`BiomeBinding::from_set`](inf_pcg::BiomeBinding::from_set), the same
+/// [`DEFAULT_BIOME_FEATHER`](inf_pcg::DEFAULT_BIOME_FEATHER), the same
+/// [`OffsetTerrain`](inf_pcg::OffsetTerrain) region off
+/// [`xz_bounds`](inf_terrain::TerrainData::xz_bounds) — so all this command owns
+/// is the *fetch* (an [`AssetState`] lookup here, a pack entry there). The one
+/// deliberate difference is [`AssetMasks`]: the editor can resolve a
+/// `mask.image` texture and the load-time pass (which has no asset database)
+/// cannot, so a biome graph that uses one is richer here. Graphs without an
+/// image mask — every graph the binding gate exercises — lower identically.
+///
+/// Target resolution: the explicit `entity` GUID, else the first entity in
+/// creation order whose `Terrain` has both a biome set and authored tiles.
+///
+/// `biome_population` is a derived, never-persisted cache (`#[serde(skip)]`),
+/// exactly like `PcgVolume::evaluated` — which is why re-running this on demand
+/// and re-running it on level load can be compared at all.
+#[tauri::command]
+pub async fn pcg_evaluate_biomes(
+    app: AppHandle,
+    entity: Option<String>,
+    scene: State<'_, SceneState>,
+    assets: State<'_, AssetState>,
+) -> Result<PcgBiomeResult, String> {
+    let masks = AssetMasks(&assets);
+    let registry = build_pcg_registry();
+    let feather = inf_pcg::DEFAULT_BIOME_FEATHER;
+
+    // The evaluation holds the scene lock throughout, exactly as `pcg_evaluate`
+    // does: the terrain data it scatters over and the component it writes back to
+    // are the same document, and a consistent snapshot beats a shorter hold.
+    let outcome = {
+        let mut doc = scene.doc.lock().map_err(|e| e.to_string())?;
+        doc.world_mut().propagate();
+
+        const NO_TERRAIN: &str = "no terrain with a biome set — assign one in the Terrain details";
+
+        let guid = match &entity {
+            Some(s) => Uuid::parse_str(s).map_err(|e| e.to_string())?,
+            None => doc
+                .order()
+                .iter()
+                .copied()
+                .find(|&g| {
+                    doc.entity_of(g)
+                        .and_then(|e| doc.world().world().get::<Terrain>(e))
+                        .is_some_and(|t| t.biome_set.is_some() && !t.data.is_empty())
+                })
+                .ok_or(NO_TERRAIN)?,
+        };
+        let e = doc
+            .entity_of(guid)
+            .ok_or("target entity no longer exists")?;
+
+        // Own the terrain's tiles + its world origin + the set its ids name.
+        let (data, origin, set_guid) = {
+            let w = doc.world().world();
+            let t = w.get::<Terrain>(e).ok_or(NO_TERRAIN)?;
+            let set_guid = t.biome_set.ok_or(NO_TERRAIN)?;
+            let origin = w
+                .get::<GlobalTransform>(e)
+                .map(|g| g.translation())
+                .unwrap_or(DVec3::ZERO);
+            (t.data.clone(), origin, set_guid)
+        };
+
+        let bytes = assets
+            .load_biome_set_bytes(AssetId(set_guid))
+            .ok_or_else(|| format!("biome set {set_guid} is not in this project's content"))?;
+        let set: inf_terrain::BiomeSet = inf_asset::decode(&bytes)
+            .map_err(|err| format!("decode biome set {set_guid}: {err}"))?;
+
+        // The parity seam: which biomes dispatch, in what order, under which
+        // feather is `from_set`, shared verbatim with the player.
+        let binding = inf_pcg::BiomeBinding::from_set(&set, feather, |g| {
+            let bytes = assets.load_pcg_bytes(AssetId(g))?;
+            let payload = inf_pcg::PcgAssetPayload::decode(&bytes).ok()?;
+            // The stored authored graph re-lowered when there is one (the graph
+            // is the source of truth), else the stored lowered mirror — the
+            // player's `lowered_document`, stated the same way.
+            Some(match payload.graph() {
+                Some(graph) => lower_graph_with(&graph, &registry, &masks).document,
+                None => payload.document.clone(),
+            })
+        });
+        let biomes = binding.graphs().len() as u32;
+
+        if binding.is_empty() {
+            // A set whose biomes name no resolvable graph is not a failure — it
+            // is the cook's dangling-reference advisory. Mirroring the player,
+            // which skips such a terrain, the existing population is left alone.
+            PcgBiomeResult {
+                entity: guid.to_string(),
+                placed: 0,
+                biomes: 0,
+                feather,
+                ok: false,
+                message: format!(
+                    "no biome in {} names a PCG graph that resolves — nothing was changed",
+                    set.name
+                ),
+            }
+        } else {
+            // The terrain's own authored extent, in world space, is the region.
+            let (min, max) = data
+                .xz_bounds()
+                .ok_or("the terrain has no authored tiles to populate")?;
+            let region = Region::from_xz(
+                min.x + origin.x,
+                min.y + origin.z,
+                max.x + origin.x,
+                max.y + origin.z,
+            );
+            let fields = inf_pcg::OffsetTerrain::new(&data, origin);
+            let provider = FnHeight::new(|x, z| fields.height_at(x, z));
+            let baked: Vec<ScatteredInstance> = binding
+                .evaluate(&provider, &fields, region)
+                .iter()
+                .map(|i| ScatteredInstance {
+                    position: i.pos,
+                    rotation: i.rotation,
+                    scale: i.scale,
+                    kind: i.kind_index,
+                })
+                .collect();
+            let placed = baked.len() as u32;
+            if let Some(mut t) = doc.world_mut().world_mut().get_mut::<Terrain>(e) {
+                t.biome_population = baked;
+            }
+            doc.bump_version_for_runtime();
+            PcgBiomeResult {
+                entity: guid.to_string(),
+                placed,
+                biomes,
+                feather,
+                ok: true,
+                message: format!(
+                    "{placed} instance(s) from {biomes} biome(s) of {}",
+                    set.name
+                ),
+            }
+        }
+    };
+
+    // Re-emit the scene delta so the viewport re-projects the new population.
+    if outcome.ok {
+        emit_world_delta(&app, &scene);
+    }
+    Ok(outcome)
 }
 
 #[cfg(test)]

@@ -1196,8 +1196,15 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{key:?} did not transcode: {e}"));
             if key == TileKey::lod0((0, 0)) {
                 assert_eq!(tile.biome_sample(5, 0, 0), 3);
-            } else {
+            } else if key.is_lod0() {
                 assert!(tile.biomes_are_default(), "{key:?} conjured biome ids");
+            } else {
+                // A coarse page over the painted block reduces the ids (P19.3);
+                // one over unpainted ground still costs nothing.
+                assert!(
+                    tile.biomes_are_default() || tile.biome_sample(5, 0, 0) == 3,
+                    "{key:?} invented a biome id the fine level never had"
+                );
             }
             // The v3 source's data maps rode through the transcode untouched.
             if key == TileKey::lod0((1, 1)) {
@@ -1247,8 +1254,15 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{key:?} did not transcode: {e}"));
             if key == TileKey::lod0((0, 0)) {
                 assert_eq!(tile.map_texel(5, 0, 0), [9.0, 0.0, 0.0]);
-            } else {
+            } else if key.is_lod0() {
                 assert!(tile.maps_are_default(), "{key:?} conjured data maps");
+            } else {
+                // A coarse page over the eroded block sums the maps (P19.3); the
+                // near corner decimates, so it is the fine value verbatim.
+                assert!(
+                    tile.maps_are_default() || tile.map_texel(5, 0, 0) == [9.0, 0.0, 0.0],
+                    "{key:?} invented a data-map value the fine level never had"
+                );
             }
         }
     }

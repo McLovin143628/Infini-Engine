@@ -17,14 +17,15 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::fields::{NoFields, TerrainFields};
 use crate::hash::Hash64;
 use crate::height::HeightProvider;
 use crate::noise::ValueNoise;
 use crate::sampler::{
-    AltitudeFilter, Constant, DensityField, Invert, MaskImage, Max, Min, Multiply, Noise,
-    SlopeFilter,
+    AltitudeFilter, BiomeMask, Constant, DataMapMask, DensityField, Invert, MaskImage, Max, Min,
+    Multiply, Noise, SlopeFilter,
 };
-use crate::scatter::{scatter_region, PcgInstance, Region, ScatterParams};
+use crate::scatter::{scatter_region_in, PcgInstance, Region, ScatterParams};
 
 /// A serde tree mirroring the [`sampler`](crate::sampler) combinators. Built into
 /// a boxed [`DensityField`] against a terrain provider by [`SamplerDef::build`].
@@ -32,6 +33,17 @@ use crate::scatter::{scatter_region, PcgInstance, Region, ScatterParams};
 /// Uses the *default* (externally-tagged) enum representation — bincode cannot
 /// encode internally-tagged enums (the engine-wide constraint noted in
 /// `inf-asset`).
+///
+/// # THE ORDERING LAW: new variants go at the **end**, always
+///
+/// bincode encodes an externally-tagged enum as its **declaration index**, so
+/// inserting a variant in the middle silently renumbers everything after it and
+/// every committed `.inf_pcg` decodes as the wrong sampler. P19.3 hit exactly
+/// this — adding `DataMap`/`Biome` beside the other sources shifted
+/// `Multiply/Max/Min/Invert` by two and moved a sample's bytes — and the fix is
+/// the rule, not the patch: **append**, never insert, and let the reading order
+/// be documentation's problem rather than the wire's. The P19.3 additions are
+/// marked below.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SamplerDef {
     /// A uniform density (clamped to `[0, 1]`).
@@ -61,13 +73,40 @@ pub enum SamplerDef {
     Min(Box<SamplerDef>, Box<SamplerDef>),
     /// `1 − a`.
     Invert(Box<SamplerDef>),
+    // ── APPENDED IN P19.3 — see the ordering law on the enum ────────────────
+    /// A **normalized** read of one P19.1 erosion data map. The stored
+    /// accumulators are raw (m³ / metres), so the window lives here — see
+    /// [`DataMapMask`]. Reads the [`TerrainFields`] seam; scores `0` without one.
+    DataMap {
+        kind: inf_terrain::DataMapKind,
+        min: f64,
+        max: f64,
+    },
+    /// A **biome-id membership mask**: `1` inside `id`, `0` outside, blended over
+    /// `feather` metres of border — see [`BiomeMask`]. Reads the
+    /// [`TerrainFields`] seam; scores `0` without one.
+    Biome { id: u8, feather: f64 },
 }
 
 impl SamplerDef {
     /// Build this definition into a boxed [`DensityField`] that borrows `height`
     /// for its slope/altitude filters. The returned field lives as long as the
     /// borrow.
+    ///
+    /// The terrain-**layer** masks (`DataMap`, `Biome`) have no source here and
+    /// score `0` — use [`build_with`](Self::build_with) to supply one.
     pub fn build<'a>(&self, height: &'a dyn HeightProvider) -> Box<dyn DensityField + 'a> {
+        self.build_with(height, &NO_FIELDS)
+    }
+
+    /// Build this definition against **both** terrain seams: `height` for the
+    /// slope/altitude filters and `fields` for the P19.3 data-map and biome masks.
+    /// The returned field borrows both.
+    pub fn build_with<'a>(
+        &self,
+        height: &'a dyn HeightProvider,
+        fields: &'a dyn TerrainFields,
+    ) -> Box<dyn DensityField + 'a> {
         match self {
             SamplerDef::Constant(v) => Box::new(Constant(*v)),
             SamplerDef::Noise(n) => Box::new(Noise(*n)),
@@ -98,13 +137,38 @@ impl SamplerDef {
                 height: *h,
                 data: data.clone(),
             }),
-            SamplerDef::Multiply(a, b) => Box::new(Multiply(a.build(height), b.build(height))),
-            SamplerDef::Max(a, b) => Box::new(Max(a.build(height), b.build(height))),
-            SamplerDef::Min(a, b) => Box::new(Min(a.build(height), b.build(height))),
-            SamplerDef::Invert(a) => Box::new(Invert(a.build(height))),
+            SamplerDef::DataMap { kind, min, max } => Box::new(DataMapMask {
+                fields,
+                kind: *kind,
+                min: *min,
+                max: *max,
+            }),
+            SamplerDef::Biome { id, feather } => Box::new(BiomeMask {
+                fields,
+                id: *id,
+                feather: *feather,
+            }),
+            SamplerDef::Multiply(a, b) => Box::new(Multiply(
+                a.build_with(height, fields),
+                b.build_with(height, fields),
+            )),
+            SamplerDef::Max(a, b) => Box::new(Max(
+                a.build_with(height, fields),
+                b.build_with(height, fields),
+            )),
+            SamplerDef::Min(a, b) => Box::new(Min(
+                a.build_with(height, fields),
+                b.build_with(height, fields),
+            )),
+            SamplerDef::Invert(a) => Box::new(Invert(a.build_with(height, fields))),
         }
     }
 }
+
+/// The `'static` empty layer source [`SamplerDef::build`] falls back to, so the
+/// no-terrain path allocates nothing and the two build entry points share one
+/// body.
+static NO_FIELDS: NoFields = NoFields;
 
 /// One spawnable variant of a rule: a mesh asset (by GUID) and a relative weight.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -176,14 +240,43 @@ pub fn evaluate(
     height: &dyn HeightProvider,
     region: Region,
 ) -> Vec<PcgInstance> {
+    evaluate_with(doc, height, &NoFields, region)
+}
+
+/// [`evaluate`] with a terrain **layer** source (P19.3) — the entry point a
+/// document using `mask.flow` / `mask.biome` / … needs. Identical in every other
+/// respect; `evaluate` is this with [`NoFields`].
+pub fn evaluate_with(
+    doc: &PcgDocument,
+    height: &dyn HeightProvider,
+    fields: &dyn TerrainFields,
+    region: Region,
+) -> Vec<PcgInstance> {
+    evaluate_with_in(inf_core::global(), doc, height, fields, region)
+}
+
+/// [`evaluate_with`] on a **caller-supplied pool** — the seam the determinism
+/// guard drives, mirroring
+/// [`scatter_region_in`](crate::scatter::scatter_region_in) one layer up.
+///
+/// The result is independent of the pool's thread count, so a test can prove the
+/// property through the *real* evaluation path (documents, layers, rules, kind
+/// picks and all) rather than through a hand-extracted rule.
+pub fn evaluate_with_in(
+    pool: &inf_core::JobPool,
+    doc: &PcgDocument,
+    height: &dyn HeightProvider,
+    fields: &dyn TerrainFields,
+    region: Region,
+) -> Vec<PcgInstance> {
     let mut out = Vec::new();
     for layer in &doc.layers {
         if !layer.enabled {
             continue;
         }
         for rule in &layer.rules {
-            let field = rule.sampler.build(height);
-            let mut insts = scatter_region(&rule.scatter, field.as_ref(), height, region);
+            let field = rule.sampler.build_with(height, fields);
+            let mut insts = scatter_region_in(pool, &rule.scatter, field.as_ref(), height, region);
             for inst in &mut insts {
                 inst.kind_index = weighted_pick(&rule.kinds, rule.scatter.seed, inst.pos);
             }
@@ -271,6 +364,144 @@ mod tests {
             ],
         };
         PcgDocument::single_layer("vegetation", vec![rule])
+    }
+
+    /// **The ordering tripwire.** bincode writes an externally-tagged enum as its
+    /// declaration index, so this pins every `SamplerDef` variant to the index a
+    /// committed `.inf_pcg` was written with. A variant inserted anywhere but the
+    /// end fails here instead of silently decoding a `Multiply` as a `Min` in
+    /// somebody's project.
+    #[test]
+    fn sampler_variant_discriminants_are_frozen() {
+        let cfg = bincode::config::standard();
+        let tag = |d: &SamplerDef| bincode::serde::encode_to_vec(d, cfg).unwrap()[0];
+        let boxed = || Box::new(SamplerDef::Constant(0.0));
+        assert_eq!(tag(&SamplerDef::Constant(0.0)), 0);
+        assert_eq!(tag(&SamplerDef::Noise(ValueNoise::default())), 1);
+        assert_eq!(
+            tag(&SamplerDef::Slope {
+                min_deg: 0.0,
+                max_deg: 0.0,
+                feather_deg: 0.0
+            }),
+            2
+        );
+        assert_eq!(
+            tag(&SamplerDef::Altitude {
+                min: 0.0,
+                max: 0.0,
+                feather: 0.0
+            }),
+            3
+        );
+        assert_eq!(
+            tag(&SamplerDef::Mask {
+                rect: [0.0; 4],
+                width: 0,
+                height: 0,
+                data: Vec::new()
+            }),
+            4
+        );
+        assert_eq!(tag(&SamplerDef::Multiply(boxed(), boxed())), 5);
+        assert_eq!(tag(&SamplerDef::Max(boxed(), boxed())), 6);
+        assert_eq!(tag(&SamplerDef::Min(boxed(), boxed())), 7);
+        assert_eq!(tag(&SamplerDef::Invert(boxed())), 8);
+        // P19.3 appended these two, in this order.
+        assert_eq!(
+            tag(&SamplerDef::DataMap {
+                kind: inf_terrain::DataMapKind::Flow,
+                min: 0.0,
+                max: 1.0
+            }),
+            9
+        );
+        assert_eq!(
+            tag(&SamplerDef::Biome {
+                id: 1,
+                feather: 0.0
+            }),
+            10
+        );
+
+        // **The NESTED enum is on this wire too, and needs the same law.**
+        // `DataMapKind` lives in `inf-terrain`, where nothing else about it is
+        // persisted — so without this, appending a fourth *thermal* channel in
+        // the middle (the P19.1 remainder contemplates exactly that) would
+        // silently turn every committed `mask.wear` into a `mask.deposition`.
+        // The second byte of an encoded `DataMap` is that kind's own index.
+        let kind_tag = |kind| {
+            bincode::serde::encode_to_vec(
+                &SamplerDef::DataMap {
+                    kind,
+                    min: 0.0,
+                    max: 0.0,
+                },
+                cfg,
+            )
+            .unwrap()[1]
+        };
+        assert_eq!(kind_tag(inf_terrain::DataMapKind::Flow), 0);
+        assert_eq!(kind_tag(inf_terrain::DataMapKind::Deposition), 1);
+        assert_eq!(kind_tag(inf_terrain::DataMapKind::Wear), 2);
+        // Spelled out once as raw bytes, so the encoding itself is visible and
+        // not merely re-derived by the helper above: `Wear` at zeroed bounds.
+        assert_eq!(
+            &bincode::serde::encode_to_vec(
+                &SamplerDef::DataMap {
+                    kind: inf_terrain::DataMapKind::Wear,
+                    min: 0.0,
+                    max: 0.0,
+                },
+                cfg,
+            )
+            .unwrap()[..3],
+            &[9, 2, 0],
+            "SamplerDef::DataMap(Wear) must encode as [variant 9, kind 2, …]"
+        );
+        // …and the kind's storage-channel order is a SEPARATE statement, so the
+        // two can never drift into agreeing only by accident.
+        for (n, kind) in inf_terrain::DataMapKind::ALL.iter().enumerate() {
+            assert_eq!(kind.channel(), n, "{kind:?} moved channel");
+        }
+    }
+
+    /// The two P19.3 variants round-trip through **both** codecs — the permanent
+    /// serde discipline, applied to the new wire content.
+    #[test]
+    fn the_p19_3_variants_round_trip_in_both_codecs() {
+        let cfg = bincode::config::standard();
+        for def in [
+            SamplerDef::DataMap {
+                kind: inf_terrain::DataMapKind::Deposition,
+                min: -1.5,
+                max: 42.0,
+            },
+            SamplerDef::Biome {
+                id: 200,
+                feather: 12.5,
+            },
+            // …and nested, where a shifted discriminant would corrupt silently.
+            SamplerDef::Multiply(
+                Box::new(SamplerDef::Biome {
+                    id: 3,
+                    feather: 4.0,
+                }),
+                Box::new(SamplerDef::DataMap {
+                    kind: inf_terrain::DataMapKind::Wear,
+                    min: 0.0,
+                    max: 2.0,
+                }),
+            ),
+        ] {
+            let json = serde_json::to_string(&def).unwrap();
+            assert_eq!(serde_json::from_str::<SamplerDef>(&json).unwrap(), def);
+            let bytes = bincode::serde::encode_to_vec(&def, cfg).unwrap();
+            let (back, _): (SamplerDef, _) =
+                bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+            assert_eq!(back, def);
+            assert_eq!(bytes, bincode::serde::encode_to_vec(&back, cfg).unwrap());
+        }
     }
 
     #[test]

@@ -35,3 +35,11 @@ inf-graph = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 
+
+[dev-dependencies]
+# The permanent round-trip discipline: every `SamplerDef` shape a graph can lower
+# to must survive both codecs and re-encode byte-identically. Property-generated
+# rather than enumerated, because the tree is recursive and the failure mode
+# (a shifted discriminant, a variant nobody wrote a case for) is exactly the kind
+# a hand-written corpus misses.
+proptest = { workspace = true }

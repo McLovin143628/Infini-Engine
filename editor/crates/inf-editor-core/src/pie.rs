@@ -284,11 +284,12 @@ impl Drop for PieSession {
 /// via `resolve`), falling back to the `CharacterController2D` coyote class for
 /// scenes authored before per-entity bindings. This is the point of PIE:
 /// unsaved edits are previewed exactly.
-pub fn build_scene_payload<F, G, H>(
+pub fn build_scene_payload<F, G, H, B>(
     doc: &SceneDoc,
     mut resolve: F,
     mut resolve_pcg: G,
     mut resolve_anim: H,
+    mut resolve_biome_set: B,
     tick_hz: u32,
     windowed: bool,
 ) -> Result<ScenePayload, PieError>
@@ -296,6 +297,7 @@ where
     F: FnMut(Uuid) -> Option<BlueprintClass>,
     G: FnMut(Uuid) -> Option<Vec<u8>>,
     H: FnMut(Uuid) -> Option<Vec<u8>>,
+    B: FnMut(Uuid) -> Option<Vec<u8>>,
 {
     let level_bytes = serialize::encode(&serialize::to_scene_file(doc))
         .map_err(|e| PieError::Protocol(format!("encode scene: {e}")))?;
@@ -350,6 +352,49 @@ where
         }
     }
 
+    // Referenced biome sets (P19.3): every `Terrain.biome_set` ref resolved to its
+    // `.inf_biomes` bytes, so the PIE player runs the biome→PCG binding against
+    // the same vocabulary the shipping pack path does.
+    //
+    // A set's biomes name **graphs**, and the binding needs those too — so each
+    // resolved set's `pcg_graph` refs are folded into `pcgs` above through the
+    // same `resolve_pcg` closure and the same `seen_pcg` dedupe. That transitive
+    // hop is what the cook does when it walks the level's dependency closure; the
+    // PIE payload has no dependency graph to walk, so it walks the set itself.
+    // Without it a biome-populated level would preview empty while shipping full.
+    let mut biome_sets: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut seen_biome_set: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let Some(set) = world
+            .world()
+            .get::<inf_ecs::components::Terrain>(e)
+            .and_then(|t| t.biome_set)
+        else {
+            continue;
+        };
+        if !seen_biome_set.insert(set) {
+            continue;
+        }
+        let Some(bytes) = resolve_biome_set(set) else {
+            continue;
+        };
+        // A set that does not decode is the cook's advisory, not a load failure:
+        // ship the bytes anyway and let the player report on them.
+        if let Ok(decoded) = inf_asset::decode::<inf_terrain::BiomeSet>(&bytes) {
+            for graph in decoded.biomes.iter().filter_map(|b| b.pcg_graph) {
+                if seen_pcg.insert(graph) {
+                    if let Some(g) = resolve_pcg(graph) {
+                        pcgs.push((graph, g));
+                    }
+                }
+            }
+        }
+        biome_sets.push((set, bytes));
+    }
+
     // Referenced P11 animation assets (P11.4): the directly-referenced
     // `SkeletalMesh.skeleton` / `AnimPlayer.clip` / `AnimStateMachine.sm` GUIDs
     // resolved to their `.inf_skel` / `.inf_anim` / `.inf_sm` bytes, so the PIE
@@ -390,6 +435,7 @@ where
     Ok(
         ScenePayload::new(doc.title(), level_bytes, classes, tick_hz, windowed)
             .with_pcgs(pcgs)
+            .with_biome_sets(biome_sets)
             .with_anim_assets(skeletons, clips, machines),
     )
 }

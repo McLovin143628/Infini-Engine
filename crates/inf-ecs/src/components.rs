@@ -1695,6 +1695,18 @@ pub struct Terrain {
     #[serde(default)]
     #[reflect(ignore)]
     pub biome_set: Option<Uuid>,
+    /// The instances P19.3's **biome binding** scattered over this terrain: each
+    /// painted biome's `.inf_pcg` graph evaluated over the region its id owns,
+    /// merged in ascending biome-id order.
+    ///
+    /// **Derived, exactly like [`PcgVolume::evaluated`]** — `#[serde(skip)]`, so it
+    /// costs the wire nothing and the schema stays where P19.2 left it (bincode is
+    /// positional; a *persisted* field here would have forced v17 in both codec
+    /// mirrors). It is rebuilt by the editor's evaluate command and by the player
+    /// on level load, which is what makes those two paths comparable.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub biome_population: Vec<ScatteredInstance>,
 }
 
 fn default_terrain_mps() -> f64 {
@@ -1715,6 +1727,7 @@ impl Default for Terrain {
             macro_variation: default_macro_variation(),
             asset: None,
             biome_set: None,
+            biome_population: Vec::new(),
         }
     }
 }
@@ -1733,6 +1746,7 @@ impl Terrain {
             macro_variation: default_macro_variation(),
             asset: None,
             biome_set: None,
+            biome_population: Vec::new(),
         }
     }
 }
@@ -3343,6 +3357,52 @@ mod tests {
         assert_eq!(d, PcgVolume::default());
         assert_eq!(d.extent, Vec2d::splat(50.0));
         assert_eq!(d.draw_distance, 1000.0);
+    }
+
+    #[test]
+    fn terrain_biome_population_costs_zero_bytes() {
+        // P19.3's biome population is `#[serde(skip)]` — the terrain-level sibling
+        // of `PcgVolume::evaluated`. THAT IS WHY NO SCHEMA BUMP WAS NEEDED: bincode
+        // is positional, so a *persisted* field here would have grown the wire and
+        // forced v17 in both codec mirrors. A skipped one is byte-neutral, and this
+        // is the proof — the same terrain encodes to the SAME bytes whether its
+        // population is empty or a thousand instances long.
+        let empty = Terrain::configured(5, 1.0);
+        let populated = Terrain {
+            biome_population: (0..1000)
+                .map(|i| ScatteredInstance {
+                    position: DVec3::new(i as f64, 2.0, 3.0),
+                    rotation: DQuat::IDENTITY,
+                    scale: 1.5,
+                    kind: i % 4,
+                })
+                .collect(),
+            ..Terrain::configured(5, 1.0)
+        };
+        assert_ne!(empty, populated, "the two terrains really do differ");
+
+        let cfg = bincode::config::standard();
+        let a = bincode::serde::encode_to_vec(&empty, cfg).unwrap();
+        let b = bincode::serde::encode_to_vec(&populated, cfg).unwrap();
+        assert_eq!(
+            a, b,
+            "`Terrain.biome_population` reached the wire — it is `serde(skip)` \
+             precisely so it costs zero bytes and the `.inf_lvl` schema stays where \
+             P19.2 left it"
+        );
+
+        // …and a decode leaves it empty (rebuilt on demand by the evaluate command
+        // in the editor and by the level load in the player).
+        let (back, _): (Terrain, _) = bincode::serde::decode_from_slice(&b, cfg).unwrap();
+        assert!(back.biome_population.is_empty());
+        assert_eq!(back, empty);
+
+        // The dual-format (TOML/JSON) side skips it too — no key, and a decode
+        // fills it empty exactly like `PcgVolume::evaluated`.
+        let json = serde_json::to_string(&populated).unwrap();
+        assert!(!json.contains("biome_population"));
+        let from_json: Terrain = serde_json::from_str(&json).unwrap();
+        assert!(from_json.biome_population.is_empty());
     }
 
     #[test]

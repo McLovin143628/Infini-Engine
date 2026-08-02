@@ -149,6 +149,10 @@ winit = { workspace = true, features = ["android-native-activity"] }
 
 [dev-dependencies]
 inf-editor-core = { workspace = true }
+# `biome_pcg` authors a real `scatter.merge` graph so the P19.3 multi-rule
+# lowering rides the shipping pipeline in the gate, not only in its unit tests.
+# Test-only: the shipped player never builds a graph, it only lowers one.
+inf-graph = { workspace = true }
 # The cook-and-run + export-and-run integration tests drive the real cook pipeline
 # then boot the built player off its output (both Ring 2; dev-dep only — the
 # shipped player never depends on the cook pipeline).

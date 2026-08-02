@@ -185,6 +185,7 @@ fn pie_sim() -> RuntimeSim {
         |_| None,
         |guid| (guid == PHASE18_PCG_ASSET_GUID).then(|| pcg_bytes.clone()),
         |_| None,
+        |_| None,
         60,
         false,
     )
@@ -1759,9 +1760,16 @@ fn skinned_pack_sim(pack_dir: &Path) -> RuntimeSim {
 
 /// The PIE arm: the world the editor's in-memory payload boots, from the same doc.
 fn skinned_pie_sim(doc: &inf_editor_core::scene::SceneDoc) -> RuntimeSim {
-    let payload =
-        inf_editor_core::pie::build_scene_payload(doc, |_| None, |_| None, |_| None, 60, false)
-            .expect("payload builds");
+    let payload = inf_editor_core::pie::build_scene_payload(
+        doc,
+        |_| None,
+        |_| None,
+        |_| None,
+        |_| None,
+        60,
+        false,
+    )
+    .expect("payload builds");
     let built = inf_player::build_world_from_payload(&payload).expect("PIE world builds");
     inf_player::sim_from_built(built)
 }

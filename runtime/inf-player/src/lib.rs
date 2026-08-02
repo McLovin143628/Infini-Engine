@@ -172,12 +172,14 @@ fn build_world(args: &Args) -> Result<(BuiltWorld, TerrainContent), String> {
             let actors = level::load_actor_classes_from_dir(&content_dir);
             let by_guid = level::load_actor_classes_by_guid_from_dir(&content_dir);
             let pcgs = level::load_pcg_payloads_by_guid_from_dir(&content_dir);
+            let biome_sets = level::load_biome_sets_by_guid_from_dir(&content_dir);
             let (skeletons, clips, machines) = level::load_anim_assets_from_dir(&content_dir);
             let audio = level::load_audio_assets_from_dir(&content_dir);
             let terrains = level::terrain_paths_by_guid_from_dir(&content_dir);
             let builder = InfSceneWorldBuilder::with_defaults(actors)
                 .with_bindings(by_guid)
                 .with_pcgs(pcgs)
+                .with_biome_sets(biome_sets)
                 .with_anim_assets(skeletons, clips, machines)
                 .with_audio(audio);
             Ok((
@@ -241,11 +243,13 @@ pub fn build_world_from_pack(source: &PackLevelSource) -> Result<BuiltWorld, Str
     let actors = source.actor_classes()?;
     let by_guid = source.blueprint_classes_by_guid()?;
     let pcgs = source.pcg_payloads_by_guid()?;
+    let biome_sets = source.biome_sets_by_guid()?;
     let (skeletons, clips, machines) = source.anim_assets()?;
     let audio = source.audio_assets()?;
     let builder = InfSceneWorldBuilder::with_defaults(actors)
         .with_bindings(by_guid)
         .with_pcgs(pcgs)
+        .with_biome_sets(biome_sets)
         .with_anim_assets(skeletons, clips, machines)
         .with_audio(audio)
         // P16.5: a partitioned cooked level resolves its derived `.inf_part` out
@@ -544,9 +548,20 @@ pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, St
             inf_asset::decode(bytes).map_err(|e| format!("decode state machine {guid}: {e}"))?,
         );
     }
+    // Streamed `.inf_biomes` vocabularies (P19.3): the same bytes the cook ships,
+    // so the PIE player dispatches each painted biome's graph exactly like the
+    // shipping player — the binding half of PIE == shipping.
+    let mut biome_sets: HashMap<uuid::Uuid, inf_terrain::BiomeSet> = HashMap::new();
+    for (guid, bytes) in &payload.biome_sets {
+        biome_sets.insert(
+            *guid,
+            inf_asset::decode(bytes).map_err(|e| format!("decode biome set {guid}: {e}"))?,
+        );
+    }
     let builder = InfSceneWorldBuilder::with_defaults(fallback)
         .with_bindings(by_guid)
         .with_pcgs(pcgs)
+        .with_biome_sets(biome_sets)
         .with_anim_assets(skeletons, clips, machines);
     builder.build(&payload.level_bytes)
 }

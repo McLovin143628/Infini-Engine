@@ -22,8 +22,8 @@ use uuid::Uuid;
 
 use inf_ecs::components::{
     BlendMode, ComputedVisibility, Foliage, GlobalTransform, Light, Light2D,
-    LightKind as EcsLightKind, Material, MeshRef, NineSlice, PcgVolume, Primitive, SkeletalMesh,
-    Sprite, Terrain, Text2D, TextAlign, Tilemap,
+    LightKind as EcsLightKind, Material, MeshRef, NineSlice, PcgVolume, Primitive,
+    ScatteredInstance, SkeletalMesh, Sprite, Terrain, Text2D, TextAlign, Tilemap,
 };
 use inf_ecs::{Guid, Vec3d};
 use inf_math::FloatingOrigin;
@@ -425,6 +425,26 @@ pub fn project_scene_with_skinned(
                 push_pcg_scatter(scene, vol, translation, id);
             }
         }
+        // P19.3 — THE TERRAIN'S BIOME POPULATION: the terrain-level sibling of
+        // the volume branch above. Each painted biome's `.inf_pcg` graph is
+        // evaluated over the region its id owns and the merged result lives in
+        // the derived, never-persisted `Terrain::biome_population` (rebuilt by
+        // the editor's evaluate command, and by the player on level load —
+        // which is exactly what makes the two paths comparable).
+        //
+        // It goes through the SAME `push_scatter` body as a volume, so a
+        // population cannot be packed, shaded, culled or picked differently
+        // from a volume's scatter.
+        //
+        // MIRROR: `inf_viewport::host` runs the same branch (plus the visibility
+        // gate and the pick-id map, both host-local).
+        if let Some(terrain) = w.get::<Terrain>(entity) {
+            if !terrain.biome_population.is_empty() {
+                let id = next_id;
+                next_id += 1;
+                push_biome_population(scene, terrain, translation, id);
+            }
+        }
         // Foliage scatter (P18.5): painted instances project as GPU-instanced
         // scatter batches, one per primitive kind the palette resolves.
         // MIRROR: `push_foliage_scatter` matches `inf_viewport::host`'s Foliage
@@ -620,8 +640,11 @@ fn prim_mesh(p: Primitive) -> PrimMesh {
     }
 }
 
-/// Project a [`PcgVolume`]'s evaluated cache into ONE GPU-instanced scatter batch
-/// (P18.5), anchored at the volume entity's world `translation`.
+/// ONE `ScatterBatch` from a list of [`ScatteredInstance`]s anchored at
+/// `translation` (P18.5) — the whole body of every scatter path that speaks in
+/// scattered instances: a [`PcgVolume`]'s evaluated cache and P19.3's terrain
+/// **biome population**. Written once so the two cannot drift, which is the same
+/// argument that pins the two hosts against each other.
 ///
 /// PCG scatter has always drawn as a placeholder cube — kind→real-mesh upload is
 /// the same documented viewport gap as sprites/tilemaps — and that does not change
@@ -632,21 +655,28 @@ fn prim_mesh(p: Primitive) -> PrimMesh {
 /// **`draw_distance` rides on the batch now.** The editor used to cull it against
 /// its own camera eye on the CPU and the player ignored the field entirely, so a
 /// shipped build drew strictly more scatter than its preview. The cull compute
-/// honours it for both hosts, which is what finally makes them agree.
+/// honours it for both hosts, which is what finally makes them agree. `0` means
+/// unlimited — the renderer's own bands then have sole charge.
 ///
 /// The whole batch takes ONE pick `id`: a scatter is authored, moved and deleted
 /// as a whole, so it is one object as far as selection is concerned.
 ///
 /// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
 /// `inf-editor-core`'s `tests/projector_mirror.rs`.
-fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3, id: u32) {
-    if vol.evaluated.is_empty() {
+fn push_scatter(
+    scene: &mut RenderScene,
+    instances: &[ScatteredInstance],
+    translation: DVec3,
+    draw_distance: f64,
+    id: u32,
+) {
+    if instances.is_empty() {
         return;
     }
     let data = ScatterData::build(
         PrimMesh::Cube,
         translation,
-        vol.evaluated.iter().map(|si| ScatterInstance {
+        instances.iter().map(|si| ScatterInstance {
             position: si.position,
             rotation: si.rotation.as_quat(),
             scale: si.scale as f32,
@@ -660,8 +690,36 @@ fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3
         roughness: 0.75,
         emissive: [0.0; 3],
         id,
-        draw_distance: vol.draw_distance,
+        draw_distance,
     });
+}
+
+/// Project a [`PcgVolume`]'s evaluated cache into ONE GPU-instanced scatter batch
+/// (P18.5), anchored at the volume entity's world `translation`, carrying the
+/// volume's authored content draw distance. Body: [`push_scatter`].
+fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3, id: u32) {
+    push_scatter(scene, &vol.evaluated, translation, vol.draw_distance, id)
+}
+
+/// Project a [`Terrain`]'s **biome population** — P19.3's biome→PCG binding, i.e.
+/// each painted biome's `.inf_pcg` graph evaluated over the region its id owns —
+/// into ONE GPU-instanced scatter batch. Body: [`push_scatter`], so a population
+/// and a volume are packed, shaded, culled and picked by the very same code.
+///
+/// Instance positions are already ABSOLUTE world positions (the binding evaluates
+/// against the terrain's world heightfield), so the batch anchors at the terrain's
+/// own origin exactly as a volume anchors at its centre.
+///
+/// **Draw distance `0` = UNLIMITED, deliberately.** A `PcgVolume` has an authored
+/// per-volume knob and it can only clamp the renderer's bands DOWN
+/// (`inf_render::ScatterSettings`); a terrain population has no such authored
+/// field, so `0` leaves the global `ScatterSettings` — the host's own tier-clamped
+/// budget — in sole charge, rather than inventing a content limit nobody authored.
+///
+/// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
+/// `inf-editor-core`'s `tests/projector_mirror.rs`.
+fn push_biome_population(scene: &mut RenderScene, terrain: &Terrain, translation: DVec3, id: u32) {
+    push_scatter(scene, &terrain.biome_population, translation, 0.0, id)
 }
 
 /// Project a [`Foliage`] component's painted instances into GPU-instanced scatter

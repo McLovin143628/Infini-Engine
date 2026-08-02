@@ -1,4 +1,4 @@
-/** PCG wire + category colors. Wires are `Named("density"|"scatter")`. */
+/** PCG wire + category colors. Wires are `Named("density"|"scatter"|"layer")`. */
 import type { PortType } from "../../lib/blueprintTypes";
 
 export function pcgPinColor(ty: PortType): string {
@@ -8,6 +8,8 @@ export function pcgPinColor(ty: PortType): string {
         return "#6ec1e0"; // density field (blue)
       case "scatter":
         return "#7ee06e"; // scatter pass (green)
+      case "layer":
+        return "#e0b36e"; // layer group (gold) — P19.3
       default:
         return "#9aa0a6";
     }
@@ -22,10 +24,14 @@ export function pcgCategoryColor(category: string): string {
       return "#3a6ea5";
     case "filters":
       return "#2f6f5a";
+    case "masks":
+      return "#3a7a7a";
     case "combine":
       return "#6a4a7a";
     case "scatter":
       return "#7a5230";
+    case "layer":
+      return "#8a7a2a";
     case "output":
       return "#8a3a3a";
     default:

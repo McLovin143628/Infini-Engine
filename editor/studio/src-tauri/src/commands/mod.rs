@@ -92,6 +92,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         pcg::pcg_compile,
         pcg::pcg_save,
         pcg::pcg_evaluate,
+        pcg::pcg_evaluate_biomes,
         sm::sm_list,
         sm::sm_create,
         sm::sm_get,

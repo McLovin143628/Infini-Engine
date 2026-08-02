@@ -421,32 +421,7 @@ impl TerrainData {
     /// **Nearest sample, never interpolated** — an id is categorical, so the
     /// midpoint between biome 3 and biome 7 is one of the two, not "biome 5".
     pub fn biome_at(&self, world_xz: glam::DVec2) -> Option<u8> {
-        let res = self.tile_resolution();
-        let span = self.tile_span();
-        let mps = self.meters_per_sample();
-        // Same shared-edge resolution the height query uses: prefer the floored
-        // tile, fall back to the previous tile's far edge exactly on a seam.
-        let axis = |w: f64| -> [(i32, f64); 2] {
-            let th = (w / span).floor() as i32;
-            let u = (w - th as f64 * span) / mps;
-            if u <= 1e-9 {
-                [(th, u), (th - 1, (res - 1) as f64)]
-            } else {
-                [(th, u), (th, u)]
-            }
-        };
-        let xs = axis(world_xz.x);
-        let zs = axis(world_xz.y);
-        for &(tx, u) in xs.iter().take(if xs[0].0 == xs[1].0 { 1 } else { 2 }) {
-            for &(tz, v) in zs.iter().take(if zs[0].0 == zs[1].0 { 1 } else { 2 }) {
-                if let Some(tile) = self.get_tile((tx, tz)) {
-                    let i = u.round().clamp(0.0, (res - 1) as f64) as u32;
-                    let j = v.round().clamp(0.0, (res - 1) as f64) as u32;
-                    return Some(tile.biome_sample(res, i, j));
-                }
-            }
-        }
-        None
+        self.sample_at(world_xz, |tile, res, i, j| tile.biome_sample(res, i, j))
     }
 }
 

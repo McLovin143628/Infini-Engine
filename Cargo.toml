@@ -53,7 +53,17 @@ authors = ["Infinity Engine contributors"]
 [workspace.dependencies]
 # ── shared, version-pinned once here; crates reference with { workspace = true } ──
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip` is NOT optional here (P19.3). serde_json's default parser is
+# a fast path that can land **1 ULP** off the `f64` it was given, and JSON is not
+# a cosmetic format in this engine: a `.inf_pcg` embeds its authored graph as a
+# JSON string (`graph_json` — the model's `skip_serializing_if` fields are not
+# bincode-safe), and the shipped/PIE player **re-lowers that graph** to get the
+# document it scatters from. A param that came back a bit light would give the
+# player a different `ScatterParams`/`ValueNoise` from the editor's, which surfaces
+# as "the shipped world's foliage sits somewhere else" — the exact class of drift
+# every gate in this repo exists to prevent. Found by `inf-pcg`'s round-trip
+# property, not by a report.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

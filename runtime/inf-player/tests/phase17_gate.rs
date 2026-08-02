@@ -271,9 +271,16 @@ fn pack_sim(pack_dir: &Path) -> RuntimeSim {
 }
 
 fn pie_sim(doc: &SceneDoc) -> RuntimeSim {
-    let payload =
-        inf_editor_core::pie::build_scene_payload(doc, |_| None, |_| None, |_| None, 60, false)
-            .expect("payload builds");
+    let payload = inf_editor_core::pie::build_scene_payload(
+        doc,
+        |_| None,
+        |_| None,
+        |_| None,
+        |_| None,
+        60,
+        false,
+    )
+    .expect("payload builds");
     let built = inf_player::build_world_from_payload(&payload).expect("PIE world builds");
     inf_player::sim_from_built(built)
 }

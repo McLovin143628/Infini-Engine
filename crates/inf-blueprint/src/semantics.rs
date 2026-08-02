@@ -324,7 +324,7 @@ pub fn run_event(
 mod tests {
     use super::*;
     use crate::interp::FnHost;
-    use crate::{BinOp, Binding, Expr, LocalId, Stmt};
+    use crate::{BinOp, Binding, Expr, Lit, LocalId, Stmt};
 
     /// The Phase-6 gate handler: "rotate on tick".
     /// fn tick(dt) { let a = vars::get("angle") + dt * vars::get("speed");
@@ -467,5 +467,123 @@ mod tests {
         )
         .unwrap();
         assert!(trace.wires.is_empty());
+    }
+
+    /// **`.inf_act` is JSON, and the player re-decodes it — so every `Lit::Float`
+    /// must survive `serde_json` bit for bit.**
+    ///
+    /// This is the blueprint twin of `inf-pcg`'s
+    /// `an_authored_graph_re_lowers_bit_identically_through_the_payload`, and it
+    /// guards the *higher-traffic* half of the same hazard: a `.inf_act` is
+    /// stored, cooked, packed and streamed as JSON, and the shipped/PIE player
+    /// decodes it at load on every boot path (dev dir, pack, and the PIE
+    /// `ScenePayload.classes` list). `serde_json`'s **default** float parser is a
+    /// fast path that can land one ULP off; a literal that came back a bit light
+    /// makes the shipped actor compute something imperceptibly different from the
+    /// preview — a divergence that no schema check, no hash and no gate below the
+    /// simulation would notice, because both sides are internally consistent.
+    ///
+    /// The workspace pins `serde_json = { features = ["float_roundtrip"] }` for
+    /// exactly this; deleting that feature must fail here as well as in `inf-pcg`,
+    /// so neither crate is the sole reason the pin exists.
+    #[test]
+    fn every_float_literal_survives_the_inf_act_json_round_trip_bit_for_bit() {
+        // Full 17-significant-digit mantissas — what an author's slider, an
+        // imported curve, or a computed default actually produces.
+        let awkward: [f64; 6] = [
+            -114668.51350953568,
+            0.1 + 0.2, // 0.30000000000000004
+            1.7976931348623157e300,
+            f64::MIN_POSITIVE,
+            // The largest *subnormal*, named by its bits rather than by a
+            // decimal literal — the nastiest thing a float parser can be handed,
+            // and immune to anyone "tidying" the digits.
+            f64::from_bits(0x000F_FFFF_FFFF_FFFF),
+            9.007199254740993e15, // just past 2^53, where doubles go sparse
+        ];
+
+        let mut class = BlueprintClass::new("bp.floats", "Floats");
+        let body = BlueprintFn {
+            id: "begin".into(),
+            name: "begin".into(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: awkward
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| Stmt::Let {
+                    id: LocalId(i as u32),
+                    binding: Binding::Named(format!("v{i}")),
+                    ty: Some(Ty::Float),
+                    mutable: false,
+                    // Nested inside a binary op, so the literal is not merely a
+                    // top-level number the parser might special-case.
+                    value: Expr::Binary(
+                        BinOp::Add,
+                        Box::new(Expr::Lit(Lit::Float(f))),
+                        Box::new(Expr::Lit(Lit::Float(0.0))),
+                    ),
+                })
+                .collect(),
+        };
+        class.events.push(EventBinding {
+            event: EventKind::BeginPlay,
+            body,
+        });
+        // …and on a member variable's default, the other place a float persists.
+        class.variables.push(Variable {
+            name: "speed".into(),
+            ty: Ty::Float,
+            default: Lit::Float(awkward[0]),
+            exposed: true,
+        });
+
+        let json = serde_json::to_string(&class).expect("to json");
+        let back: BlueprintClass = serde_json::from_str(&json).expect("from json");
+        assert_eq!(back, class, "the class did not round-trip through JSON");
+
+        // `PartialEq` on `f64` would already have caught a moved bit, but state
+        // it on the bits so a future `PartialEq` that got clever about floats
+        // cannot quietly weaken this.
+        let floats = |c: &BlueprintClass| -> Vec<u64> {
+            let mut out: Vec<u64> = Vec::new();
+            fn walk(e: &Expr, out: &mut Vec<u64>) {
+                match e {
+                    Expr::Lit(Lit::Float(f)) => out.push(f.to_bits()),
+                    Expr::Binary(_, lhs, rhs) => {
+                        walk(lhs, out);
+                        walk(rhs, out);
+                    }
+                    _ => {}
+                }
+            }
+            for ev in &c.events {
+                for st in &ev.body.body {
+                    if let Stmt::Let { value, .. } = st {
+                        walk(value, &mut out);
+                    }
+                }
+            }
+            for v in &c.variables {
+                if let Lit::Float(f) = &v.default {
+                    out.push(f.to_bits());
+                }
+            }
+            out
+        };
+        let (before, after) = (floats(&class), floats(&back));
+        assert_eq!(
+            before.len(),
+            awkward.len() * 2 + 1,
+            "the walk found them all"
+        );
+        assert_eq!(
+            before, after,
+            "a float literal moved a bit crossing `.inf_act` JSON — the \
+             `serde_json` `float_roundtrip` feature is not enabled"
+        );
+        // Re-serializing is byte-identical, so a cook that rewrites a class does
+        // not churn its content hash.
+        assert_eq!(json, serde_json::to_string(&back).unwrap());
     }
 }

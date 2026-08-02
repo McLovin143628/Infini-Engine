@@ -316,7 +316,7 @@ impl TerrainData {
 
     /// The data-map value at global sample `(gx, gz)` of the authored extent,
     /// resolving the owning tile (holes and never-eroded tiles read `0`).
-    fn data_map_at(&self, grid: &SampleGrid, kind: DataMapKind, gx: i64, gz: i64) -> f32 {
+    fn grid_data_map(&self, grid: &SampleGrid, kind: DataMapKind, gx: i64, gz: i64) -> f32 {
         let res = self.tile_resolution();
         let cells = (res - 1) as i64;
         // Clamp the far edge back onto the last authored column/row — shared-edge
@@ -353,7 +353,7 @@ impl TerrainData {
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
         for gz in 0..grid.height as i64 {
             for gx in 0..grid.width as i64 {
-                let v = self.data_map_at(&grid, kind, grid.gx0 + gx, grid.gz0 + gz);
+                let v = self.grid_data_map(&grid, kind, grid.gx0 + gx, grid.gz0 + gz);
                 lo = lo.min(v);
                 hi = hi.max(v);
             }
@@ -380,7 +380,7 @@ impl TerrainData {
         let mut samples = vec![0u16; (grid.width as usize) * (grid.height as usize)];
         for gz in 0..grid.height as i64 {
             for gx in 0..grid.width as i64 {
-                let v = self.data_map_at(&grid, kind, grid.gx0 + gx, grid.gz0 + gz);
+                let v = self.grid_data_map(&grid, kind, grid.gx0 + gx, grid.gz0 + gz);
                 let norm = if span > 0.0 {
                     ((v - lo) as f64 / span).clamp(0.0, 1.0)
                 } else {
@@ -418,6 +418,23 @@ impl TerrainData {
     /// run on this terrain, and the maps cost zero per-sample bytes.
     pub fn data_maps_are_default(&self) -> bool {
         self.tiles().all(|(_, t)| t.maps_are_default())
+    }
+
+    /// One data-map channel at world `(x, z)`, resolving the sparse default (a
+    /// never-eroded tile reads `0.0`). `None` outside the authored extent.
+    ///
+    /// **Nearest sample, not interpolated** — the accumulators are per-cell
+    /// integrals, and the sample spacing (metres) sits far below the scatter cell
+    /// size every consumer works at, so bilinear filtering would buy smoothness
+    /// nobody can see at the cost of four tile lookups per query. The value is
+    /// **raw**, in the channel's own SI unit ([`DataMapKind`]); normalizing is the
+    /// reader's job (see the module docs).
+    ///
+    /// The seam resolution mirrors [`biome_at`](TerrainData::biome_at) exactly:
+    /// prefer the floored tile, falling back to the previous tile's far edge when
+    /// the query lands on a shared edge.
+    pub fn data_map_at(&self, kind: DataMapKind, world_xz: DVec2) -> Option<f32> {
+        self.sample_at(world_xz, |tile, res, i, j| tile.map_sample(res, kind, i, j))
     }
 }
 
@@ -567,6 +584,80 @@ mod tests {
         assert!(
             edits.changed.values().all(|tile| !tile.maps_are_default()),
             "the staged tiles must carry the maps they were dirtied for"
+        );
+    }
+
+    /// The authored extent runs to the far edge of the last tile, not its origin
+    /// — the region the P19.3 binding scatters over.
+    #[test]
+    fn xz_bounds_spans_the_authored_tiles() {
+        let t = terrain(); // res 5, 1 m ⇒ 4 m tile span; tiles (0,0) and (1,0)
+        let (min, max) = t.xz_bounds().expect("authored");
+        assert_eq!(min, DVec2::new(0.0, 0.0));
+        assert_eq!(max, DVec2::new(8.0, 4.0), "two tiles wide, one deep");
+        // Every authored sample lies inside; one span past the end does not.
+        assert!(t.height_at(DVec2::new(7.9, 3.9)).is_some());
+        assert!(t.height_at(DVec2::new(9.0, 1.0)).is_none());
+        // Negative coordinates place the min correctly.
+        let mut neg = TerrainData::new(5, 1.0);
+        neg.author_tile((-2, -1), |_, _| 0.0);
+        assert_eq!(
+            neg.xz_bounds(),
+            Some((DVec2::new(-8.0, -4.0), DVec2::new(-4.0, 0.0)))
+        );
+        assert_eq!(TerrainData::new(5, 1.0).xz_bounds(), None, "empty terrain");
+    }
+
+    /// The world-space read is **nearest, raw and extent-bounded** — the seam the
+    /// P19.3 mask samplers read through.
+    #[test]
+    fn data_map_at_is_nearest_raw_and_bounded() {
+        let mut t = terrain(); // two res-5, 1 m tiles at (0,0) and (1,0)
+        t.get_tile_mut((0, 0))
+            .unwrap()
+            .set_map_texel(5, 3, 1, [7.0, 2.0, 0.5]);
+
+        // Exactly on the sample, and on both sides of it within half a spacing.
+        assert_eq!(
+            t.data_map_at(DataMapKind::Flow, DVec2::new(3.0, 1.0)),
+            Some(7.0)
+        );
+        assert_eq!(
+            t.data_map_at(DataMapKind::Flow, DVec2::new(3.4, 1.0)),
+            Some(7.0)
+        );
+        assert_eq!(
+            t.data_map_at(DataMapKind::Flow, DVec2::new(2.6, 1.0)),
+            Some(7.0)
+        );
+        // …and nearest, never interpolated: one sample over reads the neighbour.
+        assert_eq!(
+            t.data_map_at(DataMapKind::Flow, DVec2::new(2.0, 1.0)),
+            Some(0.0)
+        );
+        // The other channels are independent.
+        assert_eq!(
+            t.data_map_at(DataMapKind::Deposition, DVec2::new(3.0, 1.0)),
+            Some(2.0)
+        );
+        assert_eq!(
+            t.data_map_at(DataMapKind::Wear, DVec2::new(3.0, 1.0)),
+            Some(0.5)
+        );
+        // A never-eroded tile reads the sparse default, not `None`.
+        assert_eq!(
+            t.data_map_at(DataMapKind::Flow, DVec2::new(6.0, 2.0)),
+            Some(0.0)
+        );
+        // Off the authored extent is `None` — the scatter kernel's skip signal.
+        assert_eq!(t.data_map_at(DataMapKind::Flow, DVec2::new(1e6, 1e6)), None);
+        // The value is RAW: no normalization on the way out.
+        t.get_tile_mut((0, 0))
+            .unwrap()
+            .set_map_texel(5, 3, 1, [4200.0, 0.0, 0.0]);
+        assert_eq!(
+            t.data_map_at(DataMapKind::Flow, DVec2::new(3.0, 1.0)),
+            Some(4200.0)
         );
     }
 

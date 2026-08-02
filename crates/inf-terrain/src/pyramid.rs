@@ -46,24 +46,106 @@
 //! whichever fine tile happens to be present, so it agrees across seams by
 //! construction. Tracked as a P16.4+ follow-up.
 //!
-//! # Why weights and biomes stay full-res
+//! # Per-layer reduction rules (P19.3)
 //!
-//! Only **heights** are pyramided. Splat weights are an authoring-resolution paint
-//! layer: at the distance an LOD-`n` tile is drawn, one weight sample is far below
-//! a screen texel, and decimating an already-quantized `[u8; 4]` blend that must
-//! stay normalized to ≈ 255 either drifts the normalization or needs a
-//! renormalizing filter — for pixels nobody can resolve. Coarse tiles therefore
-//! carry the sparse [`DEFAULT_WEIGHT`](crate::DEFAULT_WEIGHT) default (empty
-//! buffer), which also keeps the pyramid's byte cost to heights alone; the
-//! renderer samples the level-0 weight page for near rings, where splat detail is
-//! actually visible. Biome/foliage layers follow the same rule for the same reason.
+//! A tile carries four parallel layers and they do **not** reduce the same way,
+//! because they do not mean the same thing. The rule per layer, stated once:
+//!
+//! | layer | rule | why |
+//! |---|---|---|
+//! | heights (`f32` offsets) | **decimate** — the coarse sample *is* the fine sample | a point value on a lattice; anything else cracks the LOD mesh (above) |
+//! | splat weights (`[u8; 4]`) | **not carried** (sparse default) | an authoring-resolution paint layer nobody can resolve at LOD `n`; see below |
+//! | data map **flow** (`m³`) | **sum** the footprint | *extensive*: a coarse cell covers 4 fine cells' area, so it shipped their total water |
+//! | data maps **deposition / wear** (`m`) | **mean** the footprint | *intensive*: metres of height change is a per-area value, and the mean is the one that survives a level |
+//! | biome ids (`u8`) | **majority vote**, ties to the **lowest id** | categorical: the midpoint of biome 3 and biome 7 is one of the two |
+//!
+//! ## The footprint, and why the shared-edge ring degenerates
+//!
+//! A coarse sample `(I, J)` reduces the fine samples it covers, expressed in the
+//! block's combined index space: `{2I, 2I+1} × {2J, 2J+1}` — the **four children**
+//! (two per axis) the 2:1 reduction assigns to it, the first of which is the very
+//! sample the heights decimate.
+//!
+//! **Except on the shared-edge ring** (`I ∈ {0, res−1}` or `J ∈ {0, res−1}`),
+//! where the window degenerates to the single sample — i.e. the ring *decimates,
+//! exactly like the heights*. That is not an optimization, it is the seam
+//! guarantee: a coarse tile's far edge and its `+X` neighbour's near edge are the
+//! **same fine world sample**, so both reduce to bit-identical bytes only if
+//! neither aggregates. Any non-degenerate window at the ring would have to reach
+//! fine samples from *outside* the 2 × 2 block — which terrain sparsity forbids
+//! (the block may be all that exists) and which would break the invariant the
+//! partial write-back rebuild rests on ([`downsample_block`] is fed only the
+//! block's four members). It is the same trade the heights already make, one
+//! layer up. On the far edge it costs nothing extra: clipping `2I+1` at
+//! `2(res−1)` *is* the degenerate window.
+//!
+//! The ring's window is **not** uniformly one sample: a corner reduces 1 child, a
+//! non-corner edge sample reduces 2 (one axis degenerate, one not), the interior
+//! reduces 4. Only the **mean** channels are unaffected by that (a mean of 1 or 2
+//! equal-area children is still the right per-area value, and a categorical id on
+//! the ring is simply *correct* — it is the id painted there). Only **flow**, the
+//! summed channel, loses anything.
+//!
+//! **What flow loses, measured.** Per axis the windows cover combined indices
+//! `{0} ∪ {2 … 2res−2}`, i.e. `2res−2` of the block's `2res−1` — the single
+//! combined index **`1`** falls in no window (`I = 0` degenerated to `{0}` and
+//! `I = 1` starts at `{2, 3}`). Every other odd index *is* covered: `2res−3`
+//! belongs to `I = res−2`'s window `{2res−4, 2res−3}`. So the uncovered fraction
+//! of the fine block is `1 − ((2res−2)/(2res−1))²` — **0.39 % at `res = 256`**
+//! — and that is the whole of flow's under-count. Stated, not hidden.
+//!
+//! ## Why flow **sums** and the metre channels **average**
+//!
+//! [`DataMapKind`](crate::DataMapKind) defines all three as raw, monotone
+//! **accumulators**, but they are not the same *kind* of quantity, and the
+//! reduction has to follow the dimension rather than the word "accumulator":
+//!
+//! * **flow** is `Σ dt · outflow` in **m³** — a volume the cell shipped. It is
+//!   **extensive**: double the area, double the number. A coarse cell stands for
+//!   four fine cells' area, so it shipped their **total**, and summing is what
+//!   keeps `Σ over a world region` invariant across levels — the property a
+//!   flow-accumulation mask actually reads. (Its per-level *value* therefore
+//!   scales ×4, which is correct: so did the area.)
+//! * **deposition** and **wear** are **metres** of height gained and lost — a
+//!   height change, i.e. a per-area **intensity** (P19.1's own definition says to
+//!   multiply by the cell area `l²` to get a volume). Doubling the area does not
+//!   double a height. The value that survives a level is the **mean**, and it
+//!   preserves the volume integral too: `mean(h) · 4A == Σ(h) · A`. **Summing
+//!   these would 4×-inflate them every level**, so a mask thresholded at level 0
+//!   would stop matching at level 1 — which is exactly backwards from the reason
+//!   flow sums.
+//!
+//! (P19.1's own remainder note stated this split — "sum, not average, for flow;
+//! mean for the metre channels" — and P19.3 briefly got it wrong in both the code
+//! and the argument before the audit caught it. The dimension is the rule.)
+//!
+//! ## Why the splat weights still stay full-res
+//!
+//! Splat weights are an authoring-resolution paint layer: at the distance an
+//! LOD-`n` tile is drawn, one weight sample is far below a screen texel, and
+//! decimating an already-quantized `[u8; 4]` blend that must stay normalized to
+//! ≈ 255 either drifts the normalization or needs a renormalizing filter — for
+//! pixels nobody can resolve. Coarse tiles therefore carry the sparse
+//! [`DEFAULT_WEIGHT`](crate::DEFAULT_WEIGHT) default (empty buffer); the renderer
+//! samples the level-0 weight page for near rings, where splat detail is actually
+//! visible.
+//!
+//! ## Sparsity survives
+//!
+//! A block whose members carry no maps (never eroded) or no ids (never painted)
+//! produces a coarse tile on the **same sparse default** — the reduction is skipped
+//! wholesale, so an un-eroded, unpainted terrain's pyramid costs exactly what it
+//! did before P19.3, byte for byte. A reduction that happens to come out all-zero
+//! is likewise dropped back to the default rather than materialized.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use glam::DVec3;
 
 use crate::data::TerrainData;
-use crate::tile::TerrainTile;
+use crate::tile::{
+    DataMapKind, TerrainTile, DATA_MAP_CHANNELS, DEFAULT_DATA_MAP, UNASSIGNED_BIOME,
+};
 
 /// Default cap on generated coarse levels. 8 levels is a 256 × reduction in
 /// world-space tile count — a 16 k × 16 k source (4096 level-0 tiles at 256²)
@@ -284,7 +366,144 @@ pub fn downsample_block<T: std::borrow::Borrow<TerrainTile>>(
             out.set_sample(res, i, j, off as f32);
         }
     }
+    reduce_layers(&mut out, res, coarse, tiles);
     out
+}
+
+/// The **categorical / integral** layers of a coarse tile (P19.3): biome ids by
+/// majority vote, erosion data maps by sum, over each coarse sample's footprint.
+/// See the module docs for the rules, the footprint, and the shared-edge ring.
+///
+/// Sparsity is preserved on both ends: a block whose members carry no ids / no
+/// maps is skipped entirely (so an unpainted, un-eroded pyramid is byte-identical
+/// to the pre-P19.3 one), and a reduction that comes out entirely default is
+/// dropped back to the sparse default rather than materialized.
+fn reduce_layers<T: std::borrow::Borrow<TerrainTile>>(
+    out: &mut TerrainTile,
+    res: u32,
+    coarse: (i32, i32),
+    tiles: &BTreeMap<(i32, i32), T>,
+) {
+    let members: Vec<&TerrainTile> = BLOCK_SCAN
+        .iter()
+        .filter_map(|&(a, b)| tiles.get(&(2 * coarse.0 + a, 2 * coarse.1 + b)))
+        .map(|t| t.borrow())
+        .collect();
+    let any_maps = members.iter().any(|t| !t.maps_are_default());
+    let any_biomes = members.iter().any(|t| !t.biomes_are_default());
+    if !any_maps && !any_biomes {
+        return;
+    }
+
+    let mut wrote_map = false;
+    let mut wrote_biome = false;
+    for j in 0..res {
+        for i in 0..res {
+            let (window, n) = footprint(res, i, j);
+            let window = &window[..n];
+            if any_maps {
+                // One pass, two reductions: sum every channel, then divide the
+                // **intensive** ones by the number of children that answered.
+                // Fixed scan order ⇒ the `f32` sum is deterministic, and the
+                // divisor is an exact small integer, so the mean is too.
+                let mut acc = DEFAULT_DATA_MAP;
+                let mut children = 0u32;
+                for &(fi, fj) in window {
+                    if let Some(texel) = combined_map(tiles, res, coarse, fi, fj) {
+                        for c in 0..DATA_MAP_CHANNELS {
+                            acc[c] += texel[c];
+                        }
+                        children += 1;
+                    }
+                }
+                if children > 0 {
+                    for kind in DataMapKind::ALL {
+                        if !kind.is_extensive() {
+                            acc[kind.channel()] /= children as f32;
+                        }
+                    }
+                }
+                if acc != DEFAULT_DATA_MAP {
+                    out.set_map_texel(res, i, j, acc);
+                    wrote_map = true;
+                }
+            }
+            if any_biomes {
+                let mut ids = [UNASSIGNED_BIOME; 4];
+                let mut n_ids = 0usize;
+                for &(fi, fj) in window {
+                    if let Some(id) = combined_biome(tiles, res, coarse, fi, fj) {
+                        ids[n_ids] = id;
+                        n_ids += 1;
+                    }
+                }
+                let best = majority(&ids[..n_ids]);
+                if best != UNASSIGNED_BIOME {
+                    out.set_biome_sample(res, i, j, best);
+                    wrote_biome = true;
+                }
+            }
+        }
+    }
+    // An all-default reduction must not cost per-sample bytes.
+    if !wrote_map {
+        out.clear_maps();
+    }
+    if !wrote_biome {
+        out.clear_biomes();
+    }
+}
+
+/// The winning biome id of a footprint: the **most frequent**, ties broken by the
+/// **lowest id**. An empty footprint (every candidate fine tile absent) is
+/// [`UNASSIGNED_BIOME`].
+///
+/// Id `0` votes like any other value — a coarse texel over mostly-unpainted
+/// ground honestly reads *unassigned*, and a tie that includes `0` resolves to it
+/// by the same lowest-id rule rather than by a special case.
+fn majority(ids: &[u8]) -> u8 {
+    let mut best = UNASSIGNED_BIOME;
+    let mut best_count = 0usize;
+    for &candidate in ids {
+        let count = ids.iter().filter(|&&x| x == candidate).count();
+        // Strictly-greater keeps the FIRST maximum; scanning candidates in
+        // ascending order would too, but the footprint is not sorted, so the tie
+        // is broken on the id explicitly.
+        if count > best_count || (count == best_count && candidate < best) {
+            best_count = count;
+            best = candidate;
+        }
+    }
+    best
+}
+
+/// The fine **combined** indices coarse sample `(i, j)` reduces: its 2 × 2
+/// footprint `{2i, 2i+1} × {2j, 2j+1}`, degenerating to the single decimated
+/// sample on the shared-edge ring (`i` or `j` ∈ `{0, res−1}`) so the seam stays
+/// bit-identical between neighbouring coarse tiles. See the module docs.
+///
+/// Returns a fixed array plus its used length so the hot loop allocates nothing;
+/// the scan order is fixed, which is what makes the `f32` sum deterministic.
+fn footprint(res: u32, i: u32, j: u32) -> ([(u32, u32); 4], usize) {
+    let edge = res - 1;
+    let axis = |k: u32| -> ([u32; 2], usize) {
+        if k == 0 || k == edge {
+            ([2 * k, 2 * k], 1)
+        } else {
+            ([2 * k, 2 * k + 1], 2)
+        }
+    };
+    let (xs, nx) = axis(i);
+    let (zs, nz) = axis(j);
+    let mut out = [(0, 0); 4];
+    let mut n = 0;
+    for &fj in zs.iter().take(nz) {
+        for &fi in xs.iter().take(nx) {
+            out[n] = (fi, fj);
+            n += 1;
+        }
+    }
+    (out, n)
 }
 
 /// The 2 × 2 fine-block scan order, fixed so every choice made over it is
@@ -313,6 +532,58 @@ fn combined_sample<T: std::borrow::Borrow<TerrainTile>>(
         }
     }
     None
+}
+
+/// One fine tile's value at combined index `(i, j)` of the 2 × 2 block, resolved
+/// exactly like [`combined_sample`] (same sub-tile preference, same shared-edge
+/// handling) but for a **layer** rather than the height. `None` when every
+/// candidate fine tile is absent — the caller drops that sample from its
+/// reduction rather than counting a zero it never measured.
+fn combined_layer<T, V>(
+    tiles: &BTreeMap<(i32, i32), T>,
+    res: u32,
+    (cx, cz): (i32, i32),
+    i: u32,
+    j: u32,
+    read: impl Fn(&TerrainTile, u32, u32) -> V,
+) -> Option<V>
+where
+    T: std::borrow::Borrow<TerrainTile>,
+{
+    for (a, li) in axis_candidates(res, i) {
+        for (b, lj) in axis_candidates(res, j) {
+            if let Some(t) = tiles.get(&(2 * cx + a, 2 * cz + b)) {
+                return Some(read(t.borrow(), li, lj));
+            }
+        }
+    }
+    None
+}
+
+/// The erosion data-map texel at combined index `(i, j)` of the block.
+fn combined_map<T: std::borrow::Borrow<TerrainTile>>(
+    tiles: &BTreeMap<(i32, i32), T>,
+    res: u32,
+    coarse: (i32, i32),
+    i: u32,
+    j: u32,
+) -> Option<[f32; DATA_MAP_CHANNELS]> {
+    combined_layer(tiles, res, coarse, i, j, |t, li, lj| {
+        t.map_texel(res, li, lj)
+    })
+}
+
+/// The biome id at combined index `(i, j)` of the block.
+fn combined_biome<T: std::borrow::Borrow<TerrainTile>>(
+    tiles: &BTreeMap<(i32, i32), T>,
+    res: u32,
+    coarse: (i32, i32),
+    i: u32,
+    j: u32,
+) -> Option<u8> {
+    combined_layer(tiles, res, coarse, i, j, |t, li, lj| {
+        t.biome_sample(res, li, lj)
+    })
 }
 
 /// `(sub_tile, local_index)` candidates for one combined-index axis value, most
@@ -571,6 +842,449 @@ mod tests {
                     level.lod
                 );
             }
+        }
+    }
+
+    // ── P19.3 per-layer reduction rules ─────────────────────────────────────
+
+    /// The tie-break is stated, not incidental: **lowest id wins**, and the
+    /// footprint's order must not change the answer.
+    #[test]
+    fn the_majority_vote_breaks_ties_on_the_lowest_id() {
+        assert_eq!(
+            majority(&[]),
+            UNASSIGNED_BIOME,
+            "an empty window is unassigned"
+        );
+        assert_eq!(majority(&[7]), 7);
+        assert_eq!(majority(&[7, 7, 3, 1]), 7, "a plain majority wins");
+        // 2 v 2 → the lower id.
+        assert_eq!(majority(&[7, 7, 3, 3]), 3);
+        assert_eq!(majority(&[3, 3, 7, 7]), 3, "…in either order");
+        // Four distinct ids are a four-way tie → the lowest.
+        assert_eq!(majority(&[9, 4, 2, 6]), 2);
+        // Id 0 votes like any other value, including into a tie.
+        assert_eq!(majority(&[0, 0, 5, 5]), UNASSIGNED_BIOME);
+        assert_eq!(
+            majority(&[0, 5, 5, 5]),
+            5,
+            "…but does not outvote a majority"
+        );
+    }
+
+    /// The footprint is the coarse sample's 2 × 2 fine block, degenerating to the
+    /// decimated sample on the shared-edge ring — the seam rule, in one place.
+    #[test]
+    fn the_footprint_degenerates_on_the_shared_edge_ring() {
+        let res = 5;
+        let win = |i, j| {
+            let (w, n) = footprint(res, i, j);
+            w[..n].to_vec()
+        };
+        assert_eq!(win(2, 2), vec![(4, 4), (5, 4), (4, 5), (5, 5)], "interior");
+        assert_eq!(win(0, 0), vec![(0, 0)], "near corner decimates");
+        assert_eq!(win(4, 4), vec![(8, 8)], "far corner decimates");
+        assert_eq!(win(0, 2), vec![(0, 4), (0, 5)], "an edge column is 1 × 2");
+        assert_eq!(win(2, 4), vec![(4, 8), (5, 8)], "…and an edge row is 2 × 1");
+        // Every window contains the sample the heights decimate.
+        for j in 0..res {
+            for i in 0..res {
+                assert!(win(i, j).contains(&(2 * i, 2 * j)), "({i},{j})");
+            }
+        }
+    }
+
+    /// **Biome ids majority-vote, and the vote is deterministic.** A block painted
+    /// with a 3:1 mix per coarse sample reduces to the dominant id, and two
+    /// reductions of the same input agree bit for bit.
+    #[test]
+    fn coarse_biome_ids_are_a_deterministic_majority_vote() {
+        let res = 5;
+        let mut t = poly_terrain(res, 1.0, 2);
+        // Paint the whole 2×2 block: id 4 everywhere, then id 9 on the odd
+        // combined columns of one tile so a couple of interior windows read 2:2.
+        for coord in t.tiles().map(|(&c, _)| c).collect::<Vec<_>>() {
+            let tile = t.get_tile_mut(coord).unwrap();
+            for j in 0..res {
+                for i in 0..res {
+                    tile.set_biome_sample(res, i, j, 4);
+                }
+            }
+        }
+        // Fine tile (1,1)'s samples 1..=3 become id 9 → those coarse windows tie.
+        {
+            let tile = t.get_tile_mut((1, 1)).unwrap();
+            for j in 1..4 {
+                for i in 1..4 {
+                    tile.set_biome_sample(res, i, j, 9);
+                }
+            }
+        }
+        let fine: BTreeMap<(i32, i32), &TerrainTile> = t.tiles().map(|(&c, x)| (c, x)).collect();
+        let a = downsample_block(res, 1.0, (0, 0), &fine);
+        let b = downsample_block(res, 1.0, (0, 0), &fine);
+        assert_eq!(a, b, "the reduction is a pure function of its input");
+        assert!(!a.biomes_are_default(), "a painted block must carry ids");
+        // Every reduced id is one that was actually present.
+        for j in 0..res {
+            for i in 0..res {
+                assert!(
+                    matches!(a.biome_sample(res, i, j), 4 | 9),
+                    "({i},{j}) invented an id"
+                );
+            }
+        }
+        // The near corner decimates: it is fine tile (0,0) sample (0,0) = id 4.
+        assert_eq!(a.biome_sample(res, 0, 0), 4);
+        // A window entirely inside the id-9 patch votes 9 (combined (5,5)+(6,6)
+        // are all id 9 → sample (2,2) of the second sub-tile row).
+        assert_eq!(a.biome_sample(res, 3, 3), 9, "the id-9 patch survives");
+    }
+
+    /// **The dimension is the rule: flow sums, the metre channels average.**
+    ///
+    /// The property that separates them is what a **uniform field** does across a
+    /// level. `deposition` and `wear` are metres of height moved — an *intensive*
+    /// per-area value — so a uniformly-1 m field must still read 1 m one level up;
+    /// summing would report 4 m, and 16 m the level after, so a mask thresholded
+    /// at level 0 would stop matching. `flow` is m³ of water shipped — *extensive*
+    /// — so a uniformly-1 m³ field must read 4 m³ one level up, because the coarse
+    /// cell covers four cells' worth of area.
+    ///
+    /// P19.3 shipped `sum` for all three for one commit; this test is what the
+    /// rule looks like when it follows the dimension instead of the word
+    /// "accumulator".
+    #[test]
+    fn data_maps_reduce_by_dimension_sum_flow_average_metres() {
+        let res = 5;
+        let mut t = poly_terrain(res, 1.0, 2);
+        // A uniform field of exactly 1 in every channel makes each rule readable
+        // straight off the reduced tile, with no arithmetic to mis-copy.
+        for coord in t.tiles().map(|(&c, _)| c).collect::<Vec<_>>() {
+            let tile = t.get_tile_mut(coord).unwrap();
+            for j in 0..res {
+                for i in 0..res {
+                    tile.set_map_texel(res, i, j, [1.0, 1.0, 1.0]);
+                }
+            }
+        }
+        let fine: BTreeMap<(i32, i32), &TerrainTile> = t.tiles().map(|(&c, x)| (c, x)).collect();
+        let c = downsample_block(res, 1.0, (0, 0), &fine);
+        assert!(!c.maps_are_default());
+
+        let dep = DataMapKind::Deposition.channel();
+        let wear = DataMapKind::Wear.channel();
+        let flow = DataMapKind::Flow.channel();
+
+        // **A uniform metre field survives the level, everywhere** — interior
+        // (4 children), edge (2), corner (1). That is the whole point of a mean.
+        for &(i, j, label) in &[
+            (2u32, 2u32, "interior (4 children)"),
+            (0, 2, "edge column (2 children)"),
+            (2, 0, "edge row (2 children)"),
+            (0, 0, "near corner (1 child)"),
+            (res - 1, res - 1, "far corner (1 child)"),
+        ] {
+            let texel = c.map_texel(res, i, j);
+            assert_eq!(texel[dep], 1.0, "deposition moved at {label}");
+            assert_eq!(texel[wear], 1.0, "wear moved at {label}");
+        }
+
+        // **Flow scales with the area it now stands for** — 4× interior, 2× on a
+        // one-axis-degenerate edge, 1× on the decimated corner.
+        assert_eq!(
+            c.map_texel(res, 2, 2)[flow],
+            4.0,
+            "interior flow is the TOTAL"
+        );
+        assert_eq!(
+            c.map_texel(res, 0, 2)[flow],
+            2.0,
+            "an edge covers two cells"
+        );
+        assert_eq!(c.map_texel(res, 0, 0)[flow], 1.0, "a corner decimates");
+
+        // The two rules really are different — a test that passed under "sum
+        // everything" would not distinguish them.
+        assert_ne!(
+            c.map_texel(res, 2, 2)[flow],
+            c.map_texel(res, 2, 2)[dep],
+            "the extensive and intensive channels must not reduce alike"
+        );
+        assert!(DataMapKind::Flow.is_extensive());
+        assert!(!DataMapKind::Deposition.is_extensive());
+        assert!(!DataMapKind::Wear.is_extensive());
+
+        // Non-uniform values reduce by the same two rules.
+        let mut varied = poly_terrain(res, 1.0, 2);
+        let cells = (res - 1) as i32;
+        for coord in varied.tiles().map(|(&c, _)| c).collect::<Vec<_>>() {
+            let tile = varied.get_tile_mut(coord).unwrap();
+            for j in 0..res {
+                for i in 0..res {
+                    // Keyed on the GLOBAL sample index, which for block (0,0) is
+                    // exactly the combined index — so the expected children below
+                    // can be read straight off the window.
+                    let g = (coord.0 * cells + i as i32) + (coord.1 * cells + j as i32);
+                    tile.set_map_texel(res, i, j, [g as f32, g as f32, 0.0]);
+                }
+            }
+        }
+        let vf: BTreeMap<(i32, i32), &TerrainTile> = varied.tiles().map(|(&c, x)| (c, x)).collect();
+        let v = downsample_block(res, 1.0, (0, 0), &vf);
+        // Interior sample (2,2) ⇒ combined children (4,4),(5,4),(4,5),(5,5), whose
+        // `gx + gz` values are 8, 9, 9, 10.
+        let t22 = v.map_texel(res, 2, 2);
+        assert_eq!(t22[flow], 36.0, "sum of 8+9+9+10");
+        assert_eq!(t22[dep], 9.0, "…and their mean");
+
+        // Pure, in both channels.
+        assert_eq!(c, downsample_block(res, 1.0, (0, 0), &fine), "pure");
+    }
+
+    /// **Flow's volume integral survives the level; the metre channels' area
+    /// integral does.** The two conservation statements are different because the
+    /// dimensions are, and this is the pair a consumer actually relies on.
+    #[test]
+    fn each_reduction_conserves_the_integral_its_dimension_names() {
+        let res = 5;
+        let mut t = poly_terrain(res, 1.0, 2);
+        for coord in t.tiles().map(|(&c, _)| c).collect::<Vec<_>>() {
+            let tile = t.get_tile_mut(coord).unwrap();
+            for j in 0..res {
+                for i in 0..res {
+                    tile.set_map_texel(res, i, j, [1.0, 3.0, 0.0]);
+                }
+            }
+        }
+        let fine: BTreeMap<(i32, i32), &TerrainTile> = t.tiles().map(|(&c, x)| (c, x)).collect();
+        let c = downsample_block(res, 1.0, (0, 0), &fine);
+
+        // Interior only, so the ring's degenerate windows do not muddy the sum.
+        let flow = DataMapKind::Flow.channel();
+        let dep = DataMapKind::Deposition.channel();
+        let mut coarse_flow = 0.0f64;
+        let mut coarse_dep_volume = 0.0f64;
+        // A coarse cell has 4× the area of a fine one.
+        const COARSE_AREA: f64 = 4.0;
+        for j in 1..res - 1 {
+            for i in 1..res - 1 {
+                coarse_flow += c.map_texel(res, i, j)[flow] as f64;
+                coarse_dep_volume += c.map_texel(res, i, j)[dep] as f64 * COARSE_AREA;
+            }
+        }
+        // Those (res−2)² interior coarse samples stand for 4 fine samples each.
+        let fine_count = ((res - 2) * (res - 2) * 4) as f64;
+        assert_eq!(
+            coarse_flow, fine_count,
+            "flow's VOLUME total must survive the level"
+        );
+        assert_eq!(
+            coarse_dep_volume,
+            3.0 * fine_count,
+            "deposition's height × area (its volume) must survive the level"
+        );
+    }
+
+    /// **Shared-edge continuity for the categorical and integral layers.** The
+    /// heights' seam guarantee now extends to the ids and the maps: a coarse
+    /// tile's far edge is bit-identical to its `+X` / `+Z` neighbour's near edge,
+    /// which is exactly what the ring's degenerate window buys.
+    #[test]
+    fn coarse_layers_keep_the_shared_edge() {
+        let res = 5;
+        let mut t = poly_terrain(res, 1.0, 8);
+        // A world-position-derived id + map so neighbouring tiles genuinely agree
+        // on their shared samples (the level-0 seam invariant) and the reduction
+        // has something to disagree about.
+        let coords: Vec<(i32, i32)> = t.tiles().map(|(&c, _)| c).collect();
+        for coord in coords {
+            let span = (res - 1) as i32;
+            let tile = t.get_tile_mut(coord).unwrap();
+            for j in 0..res {
+                for i in 0..res {
+                    let gx = coord.0 * span + i as i32;
+                    let gz = coord.1 * span + j as i32;
+                    let id = 1 + (gx.rem_euclid(3) + 3 * gz.rem_euclid(2)) as u8;
+                    tile.set_biome_sample(res, i, j, id);
+                    tile.set_map_texel(res, i, j, [gx as f32, gz as f32, 1.0]);
+                }
+            }
+        }
+        for level in build_pyramid(&t, PyramidOptions::default()) {
+            for (&(cx, cz), tile) in &level.tiles {
+                if let Some(right) = level.tiles.get(&(cx + 1, cz)) {
+                    for j in 0..res {
+                        assert_eq!(
+                            tile.biome_sample(res, res - 1, j),
+                            right.biome_sample(res, 0, j),
+                            "lod {} X-seam biome at ({cx},{cz}) row {j}",
+                            level.lod
+                        );
+                        assert_eq!(
+                            tile.map_texel(res, res - 1, j),
+                            right.map_texel(res, 0, j),
+                            "lod {} X-seam maps at ({cx},{cz}) row {j}",
+                            level.lod
+                        );
+                    }
+                }
+                if let Some(down) = level.tiles.get(&(cx, cz + 1)) {
+                    for i in 0..res {
+                        assert_eq!(
+                            tile.biome_sample(res, i, res - 1),
+                            down.biome_sample(res, i, 0),
+                            "lod {} Z-seam biome at ({cx},{cz}) col {i}",
+                            level.lod
+                        );
+                        assert_eq!(
+                            tile.map_texel(res, i, res - 1),
+                            down.map_texel(res, i, 0),
+                            "lod {} Z-seam maps at ({cx},{cz}) col {i}",
+                            level.lod
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **The seam guarantee is conditional on coverage, and that is inherited.**
+    ///
+    /// A block member that simply is not there contributes nothing to its window
+    /// (`combined_layer` answers `None` and the sample is dropped, rather than
+    /// counting a zero nobody measured). At a seam where the two coarse tiles have
+    /// *different* coverage, the shared sample can therefore disagree — the left
+    /// tile's far edge needs fine tile `2cx+1`, the right tile's near edge needs
+    /// `2cx+2`, and if only one exists only one side can answer.
+    ///
+    /// This is exactly the heights' own behaviour (`coverage_holes_fill_flat…`):
+    /// a coverage hole reads as the default on the side that cannot reach it. It
+    /// is asserted here rather than left implicit, because "the seam is
+    /// bit-identical" is a claim this crate now makes for four layers and it is
+    /// worth knowing precisely where it stops.
+    #[test]
+    fn a_coverage_hole_makes_the_seam_default_on_the_side_that_cannot_reach_it() {
+        let res = 5;
+        let mut t = TerrainData::new(res, 1.0);
+        // Fine tiles 0 and 2 exist; 1 and 3 do not. Coarse block 0 covers fine
+        // {0,1}, coarse block 1 covers fine {2,3}.
+        // (Two tiles deep in Z so the hole is purely an X-axis coverage gap.)
+        for tx in [0, 2] {
+            for tz in 0..2 {
+                t.author_tile((tx, tz), height_fn);
+                let tile = t.get_tile_mut((tx, tz)).unwrap();
+                for j in 0..res {
+                    for i in 0..res {
+                        tile.set_biome_sample(res, i, j, 6);
+                        tile.set_map_texel(res, i, j, [2.0, 4.0, 0.0]);
+                    }
+                }
+            }
+        }
+        let fine: BTreeMap<(i32, i32), &TerrainTile> = t.tiles().map(|(&c, x)| (c, x)).collect();
+        let left = downsample_block(res, 1.0, (0, 0), &fine);
+        let right = downsample_block(res, 1.0, (1, 0), &fine);
+
+        // The right block's near edge reaches fine tile 2 and answers.
+        assert_eq!(right.biome_sample(res, 0, 2), 6);
+        assert_eq!(right.map_texel(res, 0, 2)[0], 4.0, "two children, summed");
+        // The left block's far edge needs fine tile 1, which does not exist, so
+        // it reads the sparse default — the documented, inherited behaviour.
+        assert_eq!(
+            left.biome_sample(res, res - 1, 2),
+            UNASSIGNED_BIOME,
+            "an unreachable seam sample must read the DEFAULT, not a guess"
+        );
+        assert_eq!(left.map_texel(res, res - 1, 2), DEFAULT_DATA_MAP);
+        // …and it is still deterministic, which is what actually matters.
+        assert_eq!(left, downsample_block(res, 1.0, (0, 0), &fine));
+
+        // With full coverage the same seam agrees exactly (the positive control).
+        let mut full = t.clone();
+        for tz in 0..2 {
+            full.author_tile((1, tz), height_fn);
+            let tile = full.get_tile_mut((1, tz)).unwrap();
+            for j in 0..res {
+                for i in 0..res {
+                    tile.set_biome_sample(res, i, j, 6);
+                    tile.set_map_texel(res, i, j, [2.0, 4.0, 0.0]);
+                }
+            }
+        }
+        let ff: BTreeMap<(i32, i32), &TerrainTile> = full.tiles().map(|(&c, x)| (c, x)).collect();
+        let l2 = downsample_block(res, 1.0, (0, 0), &ff);
+        let r2 = downsample_block(res, 1.0, (1, 0), &ff);
+        for j in 0..res {
+            assert_eq!(l2.biome_sample(res, res - 1, j), r2.biome_sample(res, 0, j));
+            assert_eq!(l2.map_texel(res, res - 1, j), r2.map_texel(res, 0, j));
+        }
+    }
+
+    /// The reduction rules must not cost an un-eroded, unpainted terrain a single
+    /// byte — the sparse defaults survive the pyramid, exactly as before P19.3.
+    #[test]
+    fn a_clean_terrain_still_pyramids_to_sparse_layers() {
+        let t = poly_terrain(5, 1.0, 8);
+        for level in build_pyramid(&t, PyramidOptions::default()) {
+            for tile in level.tiles.values() {
+                assert!(tile.maps_are_default(), "lod {} leaked maps", level.lod);
+                assert!(tile.biomes_are_default(), "lod {} leaked ids", level.lod);
+            }
+        }
+        // …and a block whose members carry buffers that happen to be all-default
+        // is dropped back to sparse rather than materialized.
+        let mut zeroed = poly_terrain(5, 1.0, 4);
+        for coord in zeroed.tiles().map(|(&c, _)| c).collect::<Vec<_>>() {
+            let tile = zeroed.get_tile_mut(coord).unwrap();
+            tile.ensure_maps(5);
+            tile.ensure_biomes(5);
+        }
+        for level in build_pyramid(&zeroed, PyramidOptions::default()) {
+            for tile in level.tiles.values() {
+                assert!(tile.maps_are_default());
+                assert!(tile.biomes_are_default());
+            }
+        }
+    }
+
+    /// The write-back's four-member block still reduces **bit-identically** to a
+    /// whole-level reduction with the layers live — the invariant that lets a
+    /// partial pyramid rebuild skip the rest of the terrain.
+    #[test]
+    fn one_block_with_layers_decimates_identically_to_a_whole_level() {
+        let res = 5;
+        let mut t = poly_terrain(res, 2.0, 4);
+        let coords: Vec<(i32, i32)> = t.tiles().map(|(&c, _)| c).collect();
+        for coord in coords {
+            let tile = t.get_tile_mut(coord).unwrap();
+            for j in 0..res {
+                for i in 0..res {
+                    tile.set_biome_sample(
+                        res,
+                        i,
+                        j,
+                        1 + ((i + j + coord.0.unsigned_abs()) % 3) as u8,
+                    );
+                    tile.set_map_texel(res, i, j, [(i + j) as f32, 1.0, 0.25]);
+                }
+            }
+        }
+        let fine: BTreeMap<(i32, i32), &TerrainTile> = t.tiles().map(|(&c, ti)| (c, ti)).collect();
+        let whole = downsample_tiles(res, 2.0, &fine);
+        for (&coarse, expect) in &whole {
+            let block: BTreeMap<(i32, i32), TerrainTile> = BLOCK_SCAN
+                .iter()
+                .filter_map(|&(a, b)| {
+                    let c = (2 * coarse.0 + a, 2 * coarse.1 + b);
+                    fine.get(&c).map(|ti| (c, (*ti).clone()))
+                })
+                .collect();
+            assert_eq!(
+                &downsample_block(res, 2.0, coarse, &block),
+                expect,
+                "block {coarse:?} differs from the whole-level reduction"
+            );
         }
     }
 

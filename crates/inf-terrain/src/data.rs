@@ -316,6 +316,67 @@ impl TerrainData {
         }
     }
 
+    /// The authored extent as a terrain-local world-XZ rectangle `(min, max)`, or
+    /// `None` for an empty terrain.
+    ///
+    /// Tiles share edges, so the extent runs from the lowest tile's origin to the
+    /// highest tile's origin **plus one tile span** — the far edge of the last
+    /// tile, not its origin. Half-open in the sense that matters to a scatter
+    /// region: a candidate exactly on `max` belongs to the tile that is not there.
+    ///
+    /// The one place "how big is this terrain in world units" is computed, so the
+    /// biome-binding pass and anything else that needs a whole-terrain region
+    /// cannot disagree.
+    pub fn xz_bounds(&self) -> Option<(DVec2, DVec2)> {
+        let mut it = self.tiles();
+        let (&(mut min_tx, mut min_tz), _) = it.next()?;
+        let (mut max_tx, mut max_tz) = (min_tx, min_tz);
+        for (&(tx, tz), _) in self.tiles() {
+            min_tx = min_tx.min(tx);
+            min_tz = min_tz.min(tz);
+            max_tx = max_tx.max(tx);
+            max_tz = max_tz.max(tz);
+        }
+        let span = self.tile_span();
+        let min = self.tile_origin_xz((min_tx, min_tz));
+        let max = self.tile_origin_xz((max_tx, max_tz)) + DVec2::splat(span);
+        Some((min, max))
+    }
+
+    /// The **nearest-sample** value of one per-sample layer at world `(x, z)`, or
+    /// `None` outside the authored extent.
+    ///
+    /// The one place the "resolve a world position onto a tile sample" rule lives
+    /// for the *categorical and accumulator* layers — biome ids
+    /// ([`biome_at`](TerrainData::biome_at)) and erosion data maps
+    /// ([`data_map_at`](TerrainData::data_map_at)) both go through it, so they
+    /// cannot drift apart about which tile owns a seam. Tile preference is
+    /// identical to [`height_at`](TerrainData::height_at)'s: the floored tile
+    /// first, the shared-edge neighbour as a fallback.
+    ///
+    /// Nearest, never interpolated: an id has no midpoint, and the accumulators
+    /// are per-cell integrals whose spacing sits far below any consumer's working
+    /// scale (see [`data_map_at`](TerrainData::data_map_at)).
+    pub(crate) fn sample_at<V>(
+        &self,
+        world_xz: DVec2,
+        read: impl Fn(&TerrainTile, u32, u32, u32) -> V,
+    ) -> Option<V> {
+        let res = self.tile_resolution;
+        let xs = self.axis_candidates(world_xz.x);
+        let zs = self.axis_candidates(world_xz.y);
+        for &(tx, u) in xs.iter().take(if xs[0].0 == xs[1].0 { 1 } else { 2 }) {
+            for &(tz, v) in zs.iter().take(if zs[0].0 == zs[1].0 { 1 } else { 2 }) {
+                if let Some(tile) = self.tiles.get(&(tx, tz)) {
+                    let i = u.round().clamp(0.0, (res - 1) as f64) as u32;
+                    let j = v.round().clamp(0.0, (res - 1) as f64) as u32;
+                    return Some(read(tile, res, i, j));
+                }
+            }
+        }
+        None
+    }
+
     /// Bilinearly-sampled absolute world height at world `(x, z)`, or `None` when
     /// no authored tile contains the point. Exact at sample points (including a
     /// single tile's far edge, which resolves back onto that tile).

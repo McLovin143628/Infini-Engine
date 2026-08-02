@@ -747,17 +747,39 @@ mod tests {
             "the reloaded asset does not serve the saved biome ids"
         );
 
-        // The rewritten asset's COARSE pages carry no ids: a decimated tile is a
-        // streaming page, never authored content.
+        // **P19.3 flipped this.** Coarse pages used to carry no ids at all, so a
+        // zoomed-out clipmap ring read *unassigned* and the PCG masks saw zeros
+        // above level 0. They now carry the **majority-voted** reduction — and
+        // the invariant worth asserting is that the vote never invents an id: a
+        // coarse sample is either an id the fine level actually held, or the
+        // sparse default over unpainted ground.
         let bytes = std::fs::read(dir.path().join("World.inf_terrain")).unwrap();
         let asset = inf_terrain::TerrainAssetReader::new(bytes.as_slice()).unwrap();
+        let res = asset.header().tile_resolution;
         let mut coarse_seen = 0usize;
+        let mut coarse_painted = 0usize;
         for key in asset.keys().filter(|k| !k.is_lod0()) {
             let tile = asset.tile(key).unwrap().expect("directory entry");
-            assert!(tile.biomes_are_default(), "coarse {key:?} leaked biome ids");
             coarse_seen += 1;
+            if tile.biomes_are_default() {
+                continue;
+            }
+            coarse_painted += 1;
+            for j in 0..res {
+                for i in 0..res {
+                    let id = tile.biome_sample(res, i, j);
+                    assert!(
+                        id == 0 || id == 3,
+                        "coarse {key:?} sample ({i},{j}) invented biome {id}"
+                    );
+                }
+            }
         }
         assert!(coarse_seen > 0, "the fixture must have a pyramid to check");
+        assert!(
+            coarse_painted > 0,
+            "the coarse pages dropped the painted ids the P19.3 rules must carry"
+        );
     }
 
     /// **Undo of a biome stroke restores the saved bytes exactly (P19.2).** The

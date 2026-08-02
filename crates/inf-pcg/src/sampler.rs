@@ -9,6 +9,9 @@
 //! * **sources** — [`Constant`], [`Noise`], [`MaskImage`];
 //! * **terrain filters** — [`SlopeFilter`], [`AltitudeFilter`] (each reads a
 //!   [`HeightProvider`]);
+//! * **terrain-layer masks** (P19.3) — [`DataMapMask`] over the P19.1 erosion
+//!   maps and [`BiomeMask`] over the P19.2 painted ids (each reads a
+//!   [`TerrainFields`]);
 //! * **combinators** — [`Multiply`], [`Max`], [`Min`], [`Invert`].
 //!
 //! All filters use a **feather**: a soft ramp of the given width on each side of
@@ -17,6 +20,7 @@
 
 use glam::DVec3;
 
+use crate::fields::TerrainFields;
 use crate::height::HeightProvider;
 use crate::noise::ValueNoise;
 
@@ -185,6 +189,145 @@ impl DensityField for MaskImage {
     }
 }
 
+/// A **normalized** read of one P19.1 erosion data map (P19.3).
+///
+/// The stored accumulators are raw and monotone — flow in m³, deposition and wear
+/// in metres — so a `[0, 1]` density has to name the window it divides by. That
+/// window lives on the sampler (and on the `mask.*` node), never on the terrain:
+/// the P19.1 doctrine is that *normalization is a view, never the storage*, and
+/// two masks over the same terrain may legitimately want different windows.
+///
+/// `min` maps to `0`, `max` maps to `1`, and the result is clamped, so a mask is
+/// a linear window, not a threshold. A degenerate window (`max <= min`) becomes a
+/// hard step at `min` — the honest reading of "everything above here". Positions
+/// off the terrain score `0`.
+pub struct DataMapMask<F> {
+    pub fields: F,
+    pub kind: inf_terrain::DataMapKind,
+    /// Raw value mapping to density `0`.
+    pub min: f64,
+    /// Raw value mapping to density `1`.
+    pub max: f64,
+}
+
+impl<F: TerrainFields> DensityField for DataMapMask<F> {
+    fn density(&self, x: f64, z: f64) -> f64 {
+        match self.fields.data_map(self.kind, x, z) {
+            Some(v) => {
+                if self.max <= self.min {
+                    return if v >= self.min { 1.0 } else { 0.0 };
+                }
+                ((v - self.min) / (self.max - self.min)).clamp(0.0, 1.0)
+            }
+            None => 0.0,
+        }
+    }
+}
+
+/// Cap on how many terrain samples the [`BiomeMask`] feather search may walk per
+/// axis, in each direction.
+///
+/// The search is `O(k²)` probes per candidate in the worst case (a point deep
+/// inside a biome finds nothing and scans the whole disc), so the radius is
+/// bounded rather than trusted: a feather wider than `MAX_FEATHER_SAMPLES ·
+/// spacing` saturates instead of costing quadratically more. At the 1–2 m
+/// spacings terrain actually ships with, 64 samples is a 64–128 m blend — far
+/// past any authored border.
+pub const MAX_FEATHER_SAMPLES: i32 = 64;
+
+/// A **biome-id membership mask** (P19.3): `1.0` where the terrain is painted
+/// with `id`, `0.0` everywhere else, ramped across `feather` metres of border.
+///
+/// # The soft consumer P19.2 promised
+///
+/// P19.2 stores biome ids **crisply** on purpose — an id is categorical, and
+/// feathering the storage would throw away exactly the information a blend needs
+/// (the ROADMAP P19.2 block argues this at length). This is the other half: the
+/// consumer feathers, reading the crisp ids.
+///
+/// # How the ramp is computed
+///
+/// Membership is a step function on the sample lattice, so the ramp is driven by
+/// **distance to the nearest unlike sample** — the closest lattice point whose id
+/// is not `id`, including *off-terrain* (a terrain edge is a border like any
+/// other). That distance is found by an expanding ring search over the lattice,
+/// stopped as soon as no further ring can beat the best hit, and capped at
+/// [`MAX_FEATHER_SAMPLES`].
+///
+/// The boundary itself lies about **half a sample** inside the nearest unlike
+/// point, so that half-spacing is subtracted before the ramp — otherwise every
+/// mask would read `smoothstep(spacing)` right at its own edge instead of `0`.
+/// The ramp is [`smoothstep`], so the blend is C¹ and **monotone in distance**:
+/// deeper inside is never less dense.
+///
+/// `feather <= 0` is the crisp mask — no search at all, and the common case.
+pub struct BiomeMask<F> {
+    pub fields: F,
+    /// The biome id this mask selects. Never
+    /// [`UNASSIGNED_BIOME`](inf_terrain::UNASSIGNED_BIOME) in a binding (id `0`
+    /// scatters nothing), but a graph may name it and it behaves like any other.
+    pub id: u8,
+    /// Border blend width in **metres**. `0` (or less) is a hard edge.
+    pub feather: f64,
+}
+
+impl<F: TerrainFields> BiomeMask<F> {
+    /// Distance in metres to the nearest lattice sample whose id is not
+    /// [`id`](Self::id) (off-terrain counts), or `None` when none exists within
+    /// `radius` samples. Squared distances are compared so the search does one
+    /// `sqrt` at the end and stays exact.
+    fn nearest_unlike(&self, x: f64, z: f64, radius: i32, spacing: f64) -> Option<f64> {
+        let mut best_sq = i64::MAX;
+        for r in 1..=radius {
+            // Every sample on ring `r` is at least `r · spacing` away, so once the
+            // best hit is that close no further ring can improve on it.
+            if (r as i64) * (r as i64) >= best_sq {
+                break;
+            }
+            for dj in -r..=r {
+                for di in -r..=r {
+                    // Ring only — the interior was scanned by earlier rounds.
+                    if di.abs() != r && dj.abs() != r {
+                        continue;
+                    }
+                    let d_sq = (di as i64) * (di as i64) + (dj as i64) * (dj as i64);
+                    if d_sq >= best_sq {
+                        continue;
+                    }
+                    let px = x + di as f64 * spacing;
+                    let pz = z + dj as f64 * spacing;
+                    if self.fields.biome_id(px, pz) != Some(self.id) {
+                        best_sq = d_sq;
+                    }
+                }
+            }
+        }
+        (best_sq != i64::MAX).then(|| (best_sq as f64).sqrt() * spacing)
+    }
+}
+
+impl<F: TerrainFields> DensityField for BiomeMask<F> {
+    fn density(&self, x: f64, z: f64) -> f64 {
+        if self.fields.biome_id(x, z) != Some(self.id) {
+            return 0.0;
+        }
+        if self.feather <= 0.0 {
+            return 1.0;
+        }
+        let spacing = self.fields.sample_spacing();
+        if spacing <= 0.0 || spacing.is_nan() {
+            return 1.0;
+        }
+        let radius = ((self.feather / spacing).ceil() as i32).clamp(1, MAX_FEATHER_SAMPLES);
+        match self.nearest_unlike(x, z, radius, spacing) {
+            // The border sits half a sample inside the nearest unlike point.
+            Some(d) => smoothstep(0.0, self.feather, (d - 0.5 * spacing).max(0.0)),
+            // Nothing unlike within the capped radius ⇒ fully interior.
+            None => 1.0,
+        }
+    }
+}
+
 /// Product of two fields (`a · b`) — the intersection combinator.
 pub struct Multiply<A, B>(pub A, pub B);
 
@@ -319,6 +462,191 @@ mod tests {
         // Outside the rect → 0.
         assert_eq!(mask.density(-1.0, 5.0), 0.0);
         assert_eq!(mask.density(11.0, 5.0), 0.0);
+    }
+
+    // ── P19.3 terrain-layer masks ───────────────────────────────────────────
+
+    /// A synthetic layer source with **known values**, so the mask maths is
+    /// pinned without dragging a whole terrain in.
+    struct Synth {
+        /// `biome_id(x, z)` = `id_at(x)`; `None` outside `[0, 32)`.
+        spacing: f64,
+    }
+
+    impl TerrainFields for Synth {
+        fn data_map(&self, kind: inf_terrain::DataMapKind, x: f64, _z: f64) -> Option<f64> {
+            if !(0.0..32.0).contains(&x) {
+                return None;
+            }
+            Some(match kind {
+                inf_terrain::DataMapKind::Flow => x * 100.0,
+                inf_terrain::DataMapKind::Deposition => 4.0,
+                inf_terrain::DataMapKind::Wear => 0.0,
+            })
+        }
+        fn biome_id(&self, x: f64, _z: f64) -> Option<u8> {
+            // Two half-planes meeting at x = 16, on a 1 m lattice.
+            (0.0..32.0)
+                .contains(&x)
+                .then_some(if x < 16.0 { 1 } else { 2 })
+        }
+        fn sample_spacing(&self) -> f64 {
+            self.spacing
+        }
+    }
+
+    /// The data-map mask is a **linear window over raw values**, clamped, and it
+    /// scores `0` off the terrain — the P19.1 "normalization is a view" rule made
+    /// concrete.
+    #[test]
+    fn data_map_mask_normalizes_a_raw_window() {
+        let f = Synth { spacing: 1.0 };
+        let m = DataMapMask {
+            fields: &f,
+            kind: inf_terrain::DataMapKind::Flow,
+            min: 500.0,
+            max: 1500.0,
+        };
+        // Raw flow at x is 100x: 5 → 500 (the window floor), 10 → 1000 (half),
+        // 15 → 1500 (the ceiling), 20 → 2000 (clamped).
+        assert_eq!(m.density(5.0, 0.0), 0.0);
+        assert!((m.density(10.0, 0.0) - 0.5).abs() < 1e-12);
+        assert_eq!(m.density(15.0, 0.0), 1.0);
+        assert_eq!(m.density(20.0, 0.0), 1.0, "above the window clamps to 1");
+        assert_eq!(m.density(2.0, 0.0), 0.0, "below the window clamps to 0");
+        // Off the authored extent scores 0 (fails closed).
+        assert_eq!(m.density(-1.0, 0.0), 0.0);
+        assert_eq!(m.density(99.0, 0.0), 0.0);
+        // A different channel reads a different raw value through the same node.
+        let dep = DataMapMask {
+            fields: &f,
+            kind: inf_terrain::DataMapKind::Deposition,
+            min: 0.0,
+            max: 8.0,
+        };
+        assert!((dep.density(1.0, 0.0) - 0.5).abs() < 1e-12);
+        // A degenerate window is a hard step at `min`, not a divide by zero.
+        let step = DataMapMask {
+            fields: &f,
+            kind: inf_terrain::DataMapKind::Flow,
+            min: 1000.0,
+            max: 1000.0,
+        };
+        assert_eq!(step.density(9.0, 0.0), 0.0);
+        assert_eq!(step.density(10.0, 0.0), 1.0);
+        // With no layer source at all, a mask places nothing.
+        let none = DataMapMask {
+            fields: crate::fields::NoFields,
+            kind: inf_terrain::DataMapKind::Flow,
+            min: 0.0,
+            max: 1.0,
+        };
+        assert_eq!(none.density(10.0, 0.0), 0.0);
+    }
+
+    /// The biome mask is crisp at `feather = 0`, feathers to a **monotone** ramp
+    /// otherwise, and treats the terrain edge as a border.
+    #[test]
+    fn biome_mask_is_crisp_then_feathers_monotonically() {
+        let f = Synth { spacing: 1.0 };
+        let crisp = BiomeMask {
+            fields: &f,
+            id: 1,
+            feather: 0.0,
+        };
+        assert_eq!(crisp.density(0.0, 0.0), 1.0);
+        assert_eq!(
+            crisp.density(15.0, 0.0),
+            1.0,
+            "hard edge right at the border"
+        );
+        assert_eq!(crisp.density(16.0, 0.0), 0.0);
+        assert_eq!(crisp.density(-1.0, 0.0), 0.0, "off-terrain is outside");
+
+        let soft = BiomeMask {
+            fields: &f,
+            id: 1,
+            feather: 4.0,
+        };
+        // Outside is still exactly 0 — the feather never leaks across the line.
+        assert_eq!(soft.density(16.0, 0.0), 0.0);
+        assert_eq!(soft.density(20.0, 0.0), 0.0);
+        // Deep inside (further than the feather from BOTH borders) is exactly 1.
+        assert_eq!(soft.density(8.0, 0.0), 1.0);
+        // The band ramps monotonically from the border inward.
+        let mut prev = -1.0;
+        for step in 0..=10 {
+            let x = 15.0 - step as f64 * 0.5;
+            let d = soft.density(x, 0.0);
+            assert!(d >= prev - 1e-12, "fell at x={x}: {d} < {prev}");
+            assert!((0.0..=1.0).contains(&d));
+            prev = d;
+        }
+        // The nearest unlike sample to x = 15 is x = 16, one spacing away, and
+        // the border sits half a spacing in ⇒ the ramp is barely off zero there.
+        assert!(
+            soft.density(15.0, 0.0) < 0.05,
+            "{}",
+            soft.density(15.0, 0.0)
+        );
+        // The terrain's own edge feathers too (x = 0 is one sample from nothing).
+        assert!(soft.density(0.0, 0.0) < 0.05);
+        // A mask for an id nobody painted is empty everywhere.
+        let absent = BiomeMask {
+            fields: &f,
+            id: 9,
+            feather: 4.0,
+        };
+        assert_eq!(absent.density(8.0, 0.0), 0.0);
+        // With no layer source, nothing is inside anything.
+        let none = BiomeMask {
+            fields: crate::fields::NoFields,
+            id: 1,
+            feather: 4.0,
+        };
+        assert_eq!(none.density(0.0, 0.0), 0.0);
+    }
+
+    /// The feather is in **metres**, so a coarser lattice must not change where
+    /// the ramp lands — and the search radius is capped, not trusted.
+    #[test]
+    fn the_feather_is_metric_and_the_search_radius_is_capped() {
+        // The same 16 m border and the same 4 m feather, sampled on a 1 m and a
+        // 2 m lattice. The blend is a *world-space* width, so both saturate by
+        // 4 m in and both are mid-ramp 1.5 m in — only the number of probe rings
+        // differs. (The values inside the band are not identical: a coarser
+        // lattice estimates the border half a coarser sample in, which is the
+        // honest resolution limit, not a unit bug.)
+        for spacing in [1.0, 2.0] {
+            let m = BiomeMask {
+                fields: &Synth { spacing },
+                id: 1,
+                feather: 4.0,
+            };
+            assert_eq!(m.density(20.0, 0.0), 0.0, "outside, spacing {spacing}");
+            assert_eq!(
+                m.density(11.0, 0.0),
+                1.0,
+                "4 m inside must saturate at spacing {spacing}"
+            );
+            let band = m.density(14.0, 0.0);
+            assert!(
+                band > 0.0 && band < 1.0,
+                "1.5 m inside must be mid-ramp at spacing {spacing}, got {band}"
+            );
+        }
+        // An absurd feather saturates at the cap instead of scanning forever.
+        let huge = BiomeMask {
+            fields: &Synth { spacing: 1.0 },
+            id: 1,
+            feather: 1.0e9,
+        };
+        // Everything inside is < 1 (nothing is 1e9 m from a border) but finite
+        // and computed — the cap bounds the work, it does not change the answer's
+        // shape.
+        let d = huge.density(8.0, 0.0);
+        assert!((0.0..1.0).contains(&d), "d={d}");
+        assert_eq!(MAX_FEATHER_SAMPLES, 64);
     }
 
     #[test]

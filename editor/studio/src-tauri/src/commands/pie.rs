@@ -115,6 +115,7 @@ pub async fn pie_start(
             |guid| assets.load_blueprint_class(inf_asset::AssetId(guid)),
             |guid| assets.load_pcg_bytes(inf_asset::AssetId(guid)),
             |guid| assets.load_anim_bytes(inf_asset::AssetId(guid)),
+            |guid| assets.load_biome_set_bytes(inf_asset::AssetId(guid)),
             PIE_TICK_HZ,
             true,
         )

@@ -218,6 +218,8 @@ fn pie_payload_matches_shipping_for_terrain_and_pcg() {
         |guid| (guid == TERRAIN_DEMO_PCG_ASSET_GUID).then(|| pcg_bytes.clone()),
         // No animation assets in this scene.
         |_guid| None,
+        // No biome sets in this scene.
+        |_guid| None,
         60,
         false,
     )

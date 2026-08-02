@@ -108,6 +108,35 @@ test("pcg wrappers invoke the pcg_* commands with typed payloads", async () => {
   expect(calls[3][1]).toEqual({ id: "pcg:1", name: "PCG Graph" });
 });
 
+test("pcg.evaluateBiomes invokes pcg_evaluate_biomes with only an entity", async () => {
+  const calls: Array<[string, unknown]> = [];
+  mockIPC((cmd, args) => {
+    calls.push([cmd, args]);
+    if (cmd === "pcg_evaluate_biomes")
+      return {
+        entity: "t-guid",
+        placed: 42,
+        biomes: 2,
+        feather: 8,
+        ok: true,
+        message: "42 instance(s) from 2 biome(s) of Gate",
+      };
+  });
+
+  // No document id: the graphs come from the terrain's biome set, not the canvas.
+  await expect(pcg.evaluateBiomes(null)).resolves.toMatchObject({
+    placed: 42,
+    biomes: 2,
+    feather: 8,
+    ok: true,
+  });
+  await expect(pcg.evaluateBiomes("t-guid")).resolves.toMatchObject({ entity: "t-guid" });
+
+  expect(calls.map(([cmd]) => cmd)).toEqual(["pcg_evaluate_biomes", "pcg_evaluate_biomes"]);
+  expect(calls[0][1]).toEqual({ entity: null });
+  expect(calls[1][1]).toEqual({ entity: "t-guid" });
+});
+
 test("biome wrappers invoke the P19.2 commands with typed payloads", async () => {
   const calls: Array<[string, unknown]> = [];
   const set: BiomeSetDto = {

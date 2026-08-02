@@ -591,6 +591,11 @@ fn lightweight_component(terrain: &Terrain) -> Terrain {
         macro_variation: terrain.macro_variation,
         asset: terrain.asset,
         biome_set: terrain.biome_set,
+        // P19.3's biome population is NOT carried: it is a derived cache the
+        // projector reads off the DOCUMENT's component, never off this streaming
+        // mirror, and copying it here would duplicate a potentially huge instance
+        // list once per streamed terrain per document change.
+        biome_population: Vec::new(),
     }
 }
 

@@ -118,7 +118,7 @@ fn run_pie(tick_hz: u32) -> ExitCode {
                 ) {
                     Control::Continue => {}
                     Control::Exit(code) => return code,
-                    Control::RunWindow(payload) => return run_pie_window(payload, rx, stdout),
+                    Control::RunWindow(payload) => return run_pie_window(*payload, rx, stdout),
                 },
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -153,7 +153,7 @@ fn run_pie(tick_hz: u32) -> ExitCode {
                 ) {
                     Control::Continue => {}
                     Control::Exit(code) => return code,
-                    Control::RunWindow(payload) => return run_pie_window(payload, rx, stdout),
+                    Control::RunWindow(payload) => return run_pie_window(*payload, rx, stdout),
                 },
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -171,7 +171,11 @@ enum Control {
     Exit(ExitCode),
     /// A `LoadScene` requested a window: leave the headless loop and run the
     /// windowed player over `payload` (embedded / new-window PIE).
-    RunWindow(inf_runtime::pie::ScenePayload),
+    ///
+    /// Boxed: a `ScenePayload` carries every streamed asset the level references
+    /// and grows each time the envelope does, so inlining it would make *every*
+    /// `Control` — overwhelmingly `Continue` — that big.
+    RunWindow(Box<inf_runtime::pie::ScenePayload>),
 }
 
 /// Advance the active runtime one fixed step and stream a `Frame`. `Some(code)`
@@ -240,7 +244,7 @@ fn handle_msg(
                 *tick_duration = std::time::Duration::from_secs_f64(1.0 / payload.tick_hz as f64);
             }
             if payload.windowed {
-                return Control::RunWindow(payload);
+                return Control::RunWindow(Box::new(payload));
             }
             match inf_player::build_world_from_payload(&payload) {
                 Ok(mut built) => {

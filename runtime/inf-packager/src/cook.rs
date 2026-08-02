@@ -509,6 +509,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     // streams — silently. Say so.
     warnings.extend(dangling_terrain_refs(&db, &closure));
     warnings.extend(dangling_biome_set_refs(&db, &closure));
+    warnings.extend(unresolvable_image_masks(&db, &closure));
 
     // ── 4/5/6. compile blueprints + rewrite levels + derive vmesh ───────────
     //
@@ -1005,6 +1006,56 @@ fn dangling_biome_set_refs(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
             format!(
                 "level {level} references missing biome set {set}; its painted biome ids will \
                  not resolve"
+            )
+        })
+        .collect()
+}
+
+/// `.inf_pcg` graphs in the closure that use a `mask.image` node (P19.3).
+///
+/// **This is a build-time advisory for a stated runtime gap, not a dangling
+/// reference.** The editor resolves an image mask's texture through its live
+/// asset database and lowers real pixels; the shipped and PIE players have no
+/// such database on the evaluation path and lower the node to an **empty** mask,
+/// which scores `0` everywhere. So a graph that uses one places *less* content
+/// once shipped than it did in the preview — and it does so **silently**, because
+/// failing closed is otherwise exactly the right behaviour and nothing downstream
+/// can tell "masked out" from "authored empty".
+///
+/// The cook is the right place to say so: it is the last moment before the
+/// difference becomes a shipped build, and it is the only place that can see both
+/// the graph and the fact that it is being packaged. Non-fatal, because the level
+/// is valid and an author may genuinely be mid-work.
+///
+/// Deduplicated + sorted, like every other advisory here, so the report stays
+/// deterministic.
+fn unresolvable_image_masks(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
+    let mut found: BTreeSet<AssetId> = BTreeSet::new();
+    for &id in closure {
+        let Some(entry) = db.get(id) else { continue };
+        if entry.kind() != AssetKind::Pcg {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&entry.path) else {
+            continue;
+        };
+        let Ok(payload) = inf_pcg::PcgAssetPayload::decode(&raw) else {
+            continue;
+        };
+        let Some(graph) = payload.graph() else {
+            continue;
+        };
+        if graph.nodes.values().any(|n| n.type_id == "mask.image") {
+            found.insert(id);
+        }
+    }
+    found
+        .into_iter()
+        .map(|id| {
+            format!(
+                "pcg graph {id} uses an Image Mask; the shipped and PIE players cannot resolve a \
+                 mask texture at load, so that mask evaluates to zero and the graph places less \
+                 than it does in the editor"
             )
         })
         .collect()

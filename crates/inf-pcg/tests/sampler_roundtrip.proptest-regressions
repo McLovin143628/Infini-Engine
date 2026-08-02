@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 560cf3117a8fe09c79aed42f116bca6cc845c43958650456341a9b698a37a4c7 # shrinks to def = Min(Constant(0.0), Max(Mask { rect: [-403490.34901381115, 0.0, 0.0, 0.0], width: 0, height: 0, data: [] }, Constant(0.0)))
+cc 53e698d09b6585d962aadfd328bde439ad9770a9143691ab69753c1dbd138980 # shrinks to def = Min(Multiply(Multiply(Invert(Noise(ValueNoise { seed: 54, frequency: 2.2250738585072014e-308, octaves: 2, lacunarity: 933212.2333721244, gain: -1.0 })), DataMap { kind: Deposition, min: -1.0, max: -1.0 }), Noise(ValueNoise { seed: 11543836498499944743, frequency: -1.0, octaves: 4, lacunarity: 1.0, gain: -114668.51350953567 })), Multiply(Noise(ValueNoise { seed: 16015258575427590258, frequency: 2.2250738585072014e-308, octaves: 5, lacunarity: -1.0, gain: -642643.6118918267 }), Slope { min_deg: 2.2250738585072014e-308, max_deg: -1.0, feather_deg: 1.0 }))

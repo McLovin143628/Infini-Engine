@@ -286,6 +286,7 @@ fn pie_payload_matches_shipping_for_character_demo() {
         |guid| (guid == CHARACTER_DEMO_ACTOR_GUID).then(|| class.clone()),
         |_guid| None, // no PCG graphs
         anim_bytes,
+        |_guid| None, // no biome sets
         60,
         false,
     )

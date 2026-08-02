@@ -286,6 +286,10 @@ pub struct InfSceneWorldBuilder {
     /// persisted; see [`evaluate_pcg_volumes`]). Built from the [`LevelSource`]
     /// (pack index / dev-dir sidecars) or the streamed PIE payload.
     pcgs: HashMap<Uuid, PcgAssetPayload>,
+    /// `.inf_biomes` payloads keyed by asset GUID (P19.3) — the level's biome
+    /// vocabularies, resolved so a terrain's painted ids can dispatch their
+    /// graphs on load (see [`evaluate_biome_bindings`]).
+    biome_sets: HashMap<Uuid, inf_terrain::BiomeSet>,
     /// `.inf_skel` payloads keyed by asset GUID (P11.4) — resolves the skeleton a
     /// clip / skeletal mesh references.
     skeletons: HashMap<Uuid, SkeletonAsset>,
@@ -312,6 +316,7 @@ impl InfSceneWorldBuilder {
             fallback,
             by_guid: HashMap::new(),
             pcgs: HashMap::new(),
+            biome_sets: HashMap::new(),
             skeletons: HashMap::new(),
             clips: HashMap::new(),
             machines: HashMap::new(),
@@ -339,6 +344,15 @@ impl InfSceneWorldBuilder {
     /// from the source's PCG index (or a PIE payload).
     pub fn with_pcgs(mut self, pcgs: HashMap<Uuid, PcgAssetPayload>) -> Self {
         self.pcgs = pcgs;
+        self
+    }
+
+    /// Attach the `.inf_biomes` payloads (asset GUID → biome set) the P19.3
+    /// biome→PCG binding dispatches from. Builder style, exactly like
+    /// [`with_pcgs`](Self::with_pcgs), so `build_world` wires it from the
+    /// source's biome-set index (or a PIE payload).
+    pub fn with_biome_sets(mut self, biome_sets: HashMap<Uuid, inf_terrain::BiomeSet>) -> Self {
+        self.biome_sets = biome_sets;
         self
     }
 
@@ -462,6 +476,9 @@ impl WorldBuilder for InfSceneWorldBuilder {
         // persisted (`#[serde(skip)]`), so the player recomputes it from the
         // referenced `.inf_pcg` graph against the level's terrain (P10.6).
         evaluate_pcg_volumes(&mut world, &self.pcgs);
+        // …and the terrain-level sibling: each painted biome's graph over the
+        // region its id owns (P19.3). Same reason, same never-persisted cache.
+        evaluate_biome_bindings(&mut world, &self.biome_sets, &self.pcgs);
         // Prefer the level's persisted per-entity actor bindings; fall back to the
         // CC2D heuristic only when the level carries none (legacy levels).
         let actors = resolve_bound_actors(&world, &self.by_guid);
@@ -848,6 +865,125 @@ pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetP
     }
 }
 
+/// Evaluate the **biome→PCG binding** for every terrain that carries a
+/// [`BiomeSet`](inf_terrain::BiomeSet) (P19.3), refreshing its
+/// `biome_population` from the graphs its painted biomes reference.
+///
+/// This is the terrain-level **sibling** of [`evaluate_pcg_volumes`], not a
+/// replacement: a volume scatters one graph over a box an author placed, a
+/// binding scatters many graphs over the regions an author *painted*. Both run
+/// here, in that order, and neither reads the other's output.
+///
+/// Like the volume cache, `biome_population` is `#[serde(skip)]`, so the shipped
+/// and PIE players recompute it on load exactly as the editor's evaluate command
+/// does — which is what makes the two comparable and is the whole content of the
+/// P19.3 parity gate.
+///
+/// Everything downstream of a GUID — which biomes dispatch, in what order, under
+/// which feather — is [`inf_pcg::BiomeBinding::from_set`], shared verbatim with
+/// the editor. All this function owns is the fetch.
+pub fn evaluate_biome_bindings(
+    world: &mut EcsWorld,
+    biome_sets: &HashMap<Uuid, inf_terrain::BiomeSet>,
+    pcgs: &HashMap<Uuid, PcgAssetPayload>,
+) {
+    if biome_sets.is_empty() || pcgs.is_empty() {
+        return;
+    }
+
+    // Deterministic Guid-sorted terrain list, exactly as the volume pass sorts.
+    let terrains: Vec<(inf_ecs::Entity, Uuid, DVec3)> = {
+        let w = world.world();
+        let mut v: Vec<(Uuid, inf_ecs::Entity)> = w
+            .iter_entities()
+            .filter_map(|e| e.get::<Guid>().map(|g| (g.0, e.id())))
+            .collect();
+        v.sort_by_key(|(g, _)| *g);
+        v.into_iter()
+            .filter_map(|(_, e)| {
+                let t = w.get::<Terrain>(e)?;
+                let set = t.biome_set?;
+                if t.data.is_empty() {
+                    return None;
+                }
+                let origin = w
+                    .get::<GlobalTransform>(e)
+                    .map(|g| g.translation())
+                    .unwrap_or(DVec3::ZERO);
+                Some((e, set, origin))
+            })
+            .collect()
+    };
+
+    for (entity, set_guid, origin) in terrains {
+        let Some(set) = biome_sets.get(&set_guid) else {
+            // A dangling biome-set reference is the cook's advisory, not a load
+            // failure: the level is valid, its ids just resolve to nothing.
+            continue;
+        };
+        let binding =
+            inf_pcg::BiomeBinding::from_set(set, inf_pcg::DEFAULT_BIOME_FEATHER, |guid| {
+                lowered_document(pcgs.get(&guid)?)
+            });
+        if binding.is_empty() {
+            continue;
+        }
+        // The terrain's own authored extent, in world space, is the region.
+        let data = {
+            let w = world.world();
+            match w.get::<Terrain>(entity) {
+                Some(t) => t.data.clone(),
+                None => continue,
+            }
+        };
+        let Some((min, max)) = data.xz_bounds() else {
+            continue;
+        };
+        let region = Region::from_xz(
+            min.x + origin.x,
+            min.y + origin.z,
+            max.x + origin.x,
+            max.y + origin.z,
+        );
+        let fields = inf_pcg::OffsetTerrain::new(&data, origin);
+        let provider = FnHeight::new(|x, z| fields.height_at(x, z));
+        let baked: Vec<ScatteredInstance> = binding
+            .evaluate(&provider, &fields, region)
+            .iter()
+            .map(|i| ScatteredInstance {
+                position: i.pos,
+                rotation: i.rotation,
+                scale: i.scale,
+                kind: i.kind_index,
+            })
+            .collect();
+        if let Some(mut t) = world.world_mut().get_mut::<Terrain>(entity) {
+            t.biome_population = baked;
+        }
+    }
+}
+
+/// The runtime document a `.inf_pcg` payload evaluates as: the stored authored
+/// graph re-lowered when there is one (parity with the editor, which lowers on
+/// demand), else the stored lowered mirror (all a v1 payload carries).
+///
+/// Stated once so the volume pass and the biome pass cannot disagree about which
+/// half of the payload is the source of truth.
+fn lowered_document(payload: &PcgAssetPayload) -> Option<inf_pcg::PcgDocument> {
+    Some(match payload.graph() {
+        Some(g) => inf_pcg::lower_graph(&g, &inf_pcg::pcg_registry()).document,
+        None => payload.document.clone(),
+    })
+}
+
+/// Read every `.inf_biomes` payload in `dir` (non-recursive) **keyed by its asset
+/// GUID** — the dev-dir half of the P19.3 binding's fetch. A plain
+/// [`inf_asset::AssetPayload`], so it rides the shared sidecar-keyed loader
+/// rather than growing a fourth copy of it.
+pub fn load_biome_sets_by_guid_from_dir(dir: &Path) -> HashMap<Uuid, inf_terrain::BiomeSet> {
+    load_anim_assets_by_guid_from_dir::<inf_terrain::BiomeSet>(dir, "inf_biomes")
+}
+
 /// Read every `.inf_pcg` payload in `dir` (non-recursive) **keyed by its asset
 /// GUID** (from the sibling inf_asset `.toml` sidecar) — the map the player uses
 /// to evaluate a level's [`PcgVolume`] scatter on load (dev-dir path). Files
@@ -1232,6 +1368,18 @@ impl PackLevelSource {
     /// ships every clip a scene `AudioSource` references.
     pub fn audio_assets(&self) -> Result<HashMap<Uuid, inf_audio::AudioAsset>, String> {
         self.anim_assets_by_guid(AssetKind::Audio)
+    }
+
+    /// Every `.inf_biomes` payload in the pack keyed by asset GUID (P19.3) — what
+    /// the biome→PCG binding dispatches from.
+    ///
+    /// The cook closes the whole chain: level → `Terrain.biome_set` →
+    /// `.inf_biomes` → each `BiomeDef.pcg_graph` → `.inf_pcg`. So a pack that
+    /// holds the set also holds every graph its biomes name, and this map plus
+    /// [`pcg_payloads_by_guid`](Self::pcg_payloads_by_guid) is everything the
+    /// binding needs.
+    pub fn biome_sets_by_guid(&self) -> Result<HashMap<Uuid, inf_terrain::BiomeSet>, String> {
+        self.anim_assets_by_guid(AssetKind::BiomeSet)
     }
 
     /// The pack mapping, shared. A streaming store holds this open for the life of

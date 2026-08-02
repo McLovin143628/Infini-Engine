@@ -404,8 +404,10 @@ const SCATTER_HOST_LOCAL_FIELDS: [&str; 1] = ["id"];
 /// ECS state; every field must be present on both sides, in the same order,
 /// carrying the same expression — except the documented host-local one.
 ///
-/// The literal compared is the **first** in each file, which is the PCG one: both
-/// hosts define `push_pcg_scatter` before `push_foliage_scatter`.
+/// The literal compared is the **first** in each file, which is the shared
+/// `push_scatter` body (P19.3 hoisted it out of `push_pcg_scatter` so the volume
+/// path and the terrain biome population cannot drift): both hosts define
+/// `push_scatter` before `push_foliage_scatter`.
 #[test]
 fn the_scatter_batch_projection_matches_field_for_field() {
     let mine = struct_literal_fields(&read(VIEWPORT), "ScatterBatch");
@@ -452,7 +454,7 @@ fn the_scatter_batch_projection_matches_field_for_field() {
 #[test]
 fn both_projectors_scatter_pcg_and_foliage_the_same_way() {
     // Fragments that must appear in BOTH projectors, verbatim.
-    const SHARED: [&str; 12] = [
+    const SHARED: [&str; 13] = [
         // The Ring-0 pack + content hash, so neither host invents its own layout.
         "ScatterData::build(",
         // THE ANCHOR RULE: offsets are relative to the entity's world translation…
@@ -473,11 +475,15 @@ fn both_projectors_scatter_pcg_and_foliage_the_same_way() {
         "buckets[mesh.index()].push(",
         "for (k, bucket) in buckets.into_iter().enumerate()",
         // The content LOD knob rides on the batch (this is what made the two hosts
-        // finally agree about it) — and foliage has none.
-        "draw_distance: vol.draw_distance,",
+        // finally agree about it) — and foliage has none. P19.3 moved the batch
+        // literal into the shared `push_scatter`, so the volume's authored knob is
+        // now what it *hands* that body; `draw_distance` reaching the literal is
+        // pinned separately, field for field, by the test above.
+        "vol.draw_distance,",
         "draw_distance: 0.0,",
         // Both branches go through the shared helpers rather than open-coding.
         "push_pcg_scatter(",
+        "fn push_scatter(",
     ];
     for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
         let src = read(path).replace("\r\n", "\n");
@@ -533,6 +539,89 @@ fn both_projectors_scatter_pcg_and_foliage_the_same_way() {
                 "the {label}'s {branch} branch no longer calls its scatter helper:\n{region}"
             );
         }
+    }
+}
+
+/// **The P19.3 mirror gate: the terrain's BIOME POPULATION.**
+///
+/// A terrain bound to biomes gains a derived, never-persisted instance population
+/// — each painted biome's `.inf_pcg` graph evaluated over the region its id owns.
+/// It is the terrain-level sibling of `PcgVolume::evaluated`, and it reaches the
+/// GPU the same way: one `ScatterBatch`.
+///
+/// This is exactly the shape of divergence this file exists to catch. A population
+/// projected by the editor and not by the player is *"the biome scatter shows in
+/// the preview and is missing from the shipped build"* — a whole layer of world
+/// content, discovered by a player. So both hosts must carry the branch, and both
+/// must reach the batch through the SAME `push_scatter` body the volume path uses:
+/// two copies of "build a batch from scattered instances" is precisely how the
+/// hosts came to disagree about `draw_distance` for two phases.
+#[test]
+fn both_projectors_project_the_terrain_biome_population_the_same_way() {
+    // Fragments that must appear in BOTH projectors, verbatim.
+    const SHARED: [&str; 4] = [
+        // The branch calls the population helper …
+        "push_biome_population(",
+        // … which reads the derived component field …
+        "&terrain.biome_population",
+        // … and whose body is the SAME one the volume path uses, so a population
+        // cannot be packed, shaded or culled differently from a volume's scatter.
+        "fn push_scatter(",
+        // The empty-population guard: no content ⇒ no batch, on both sides.
+        "terrain.biome_population.is_empty()",
+    ];
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let src = read(path).replace("\r\n", "\n");
+        for fragment in SHARED {
+            assert!(
+                src.contains(fragment),
+                "the {label}'s terrain biome-population projection no longer contains \
+                 `{fragment}` — either the population path was changed on one side \
+                 only (the shipped build would then draw a different world from its \
+                 preview), or this gate needs updating deliberately"
+            );
+        }
+    }
+
+    // The helper is shared *character for character* across the hosts — it is a
+    // self-contained free function on both sides, like `project_sky`, so nothing
+    // weaker than equality is called for.
+    assert_eq!(
+        extract_fn(&read(VIEWPORT), "push_biome_population"),
+        extract_fn(&read(PLAYER), "push_biome_population"),
+        "`push_biome_population` has drifted between the editor viewport and the \
+         shipped player"
+    );
+    assert_eq!(
+        extract_fn(&read(VIEWPORT), "push_scatter"),
+        extract_fn(&read(PLAYER), "push_scatter"),
+        "the shared `push_scatter` body has drifted between the editor viewport and \
+         the shipped player — it is the one place a scattered instance becomes a \
+         `ScatterBatch` on either host"
+    );
+
+    // …and the population branch is instanced, never per-instance mesh draws —
+    // the same absence check the PCG branch gets, for the same reason. The branch
+    // is delimited by its own guard (the `w.get::<Terrain>(entity)` probe opens
+    // the *clipmap* terrain branch far earlier in the loop) and ends where the
+    // foliage branch begins.
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let src = read(path);
+        let region = branch_region(
+            &src,
+            "!terrain.biome_population.is_empty()",
+            "w.get::<Foliage>(entity)",
+        );
+        assert!(
+            !region.contains("instances.push("),
+            "the {label}'s biome-population branch pushes per-instance \
+             `MeshInstance`s — a population is instanced, never per-instance mesh \
+             draws:\n{region}"
+        );
+        assert!(
+            !region.contains("MeshInstance"),
+            "the {label}'s biome-population branch builds a `MeshInstance`:\n{region}"
+        );
     }
 }
 

@@ -15,6 +15,10 @@
 //! * [`noise`] — hand-rolled seedable value-noise + fBm (the procedural density).
 //! * [`height`] — the [`HeightProvider`] terrain seam (bridged to
 //!   `inf_terrain::HeightSource` next batch — see the module docs).
+//! * [`fields`] — the [`TerrainFields`] seam (P19.3): a terrain's *per-sample
+//!   layers*, i.e. the P19.1 erosion data maps and the P19.2 painted biome ids.
+//! * [`binding`] — [`BiomeBinding`] (P19.3): painted biomes dispatch their own
+//!   `.inf_pcg` graphs over the regions their ids own, feathered at the borders.
 //! * [`sampler`] — [`DensityField`] sources, terrain filters, and combinators.
 //! * [`scatter`] — the deterministic, `parallel_map`-parallel scatter kernel.
 //! * [`rules`] — the serializable [`PcgDocument`] rule model + [`evaluate`].
@@ -35,6 +39,8 @@
 //! (P10.5b), and PCG debug visualization (P10.5.5).
 
 pub mod asset;
+pub mod binding;
+pub mod fields;
 pub mod graph;
 pub mod hash;
 pub mod height;
@@ -44,13 +50,15 @@ pub mod sampler;
 pub mod scatter;
 
 pub use asset::{PcgAssetPayload, PcgError};
+pub use binding::{bind_document, biome_seed, BiomeBinding, BiomeGraph, DEFAULT_BIOME_FEATHER};
+pub use fields::{NoFields, OffsetTerrain, TerrainFields};
 pub use graph::{lower_graph, pcg_registry, LoweredPcg, PcgGraphIssue, PcgSeverity};
 pub use height::{FnHeight, HeightProvider};
 pub use noise::ValueNoise;
-pub use rules::{evaluate, PcgDocument, PcgKind, PcgLayer, PcgRule, SamplerDef};
+pub use rules::{evaluate, evaluate_with, PcgDocument, PcgKind, PcgLayer, PcgRule, SamplerDef};
 pub use sampler::{
-    AltitudeFilter, Constant, DensityField, Invert, MaskImage, Max, Min, Multiply, Noise,
-    SlopeFilter,
+    AltitudeFilter, BiomeMask, Constant, DataMapMask, DensityField, Invert, MaskImage, Max, Min,
+    Multiply, Noise, SlopeFilter,
 };
 pub use scatter::{
     scatter_region, scatter_region_in, PcgInstance, Region, RotationMode, ScatterParams,

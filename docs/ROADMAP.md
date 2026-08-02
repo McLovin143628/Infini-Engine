@@ -3821,6 +3821,295 @@ sediment state; the `MaskImage` sampler has no graph node; lowering is single-ru
 >   "fixed" mid-batch: `INF_BLESS_FIXTURES` means *any value* in the editor codec and *exactly
 >   `"1"`* in `inf-scene`. Always use `=1`.
 
+> **STATUS — P19.3 Biome → PCG binding & node-kit completion: COMPLETE (2026-08-02).** The two
+> halves P19.1 and P19.2 laid down finally do something: a painted terrain **grows** what belongs
+> on it, and the node kit stops having documented holes.
+>
+> **THE SCHEMA ANSWER: NO — nothing bumps. Scene stays v16, `.inf_terrain` stays header v4,
+> `.inf_biomes` stays v1, `.inf_pcg` stays v2.** Three separate arguments, one per thing that
+> looked like it might:
+> * **The coarse pages already had a wire form for the layers.** Header v4 selects the *live*
+>   `TerrainTile`, and bincode encodes its `maps` and `biomes` sequences unconditionally (the
+>   `skip_serializing_if` law). A coarse page that now carries a reduction is the same wire form
+>   with a non-empty vector — no new field, no new type, no builder change. The asset builder
+>   needed **nothing**; `encode_tile` already wrote whatever the tile held, and P19.2 simply
+>   never handed it a coarse tile that held anything. Determined by reading the encoder, then
+>   pinned by the write-back test that now asserts the coarse pages *do* carry the reduction.
+> * **`Terrain.biome_population` is `#[serde(skip)]`**, exactly like `PcgVolume.evaluated` — the
+>   established precedent for a derived cache. Priced rather than asserted: encoding a `Terrain`
+>   with a 1000-instance population produces **byte-identical** output to an empty one, and a
+>   decode leaves it empty. No frozen `TerrainVn` record was touched.
+> * **`ScenePayload` v3 → v4** is the one version that moved, and it is the **PIE envelope's own**
+>   — a transient editor↔player IPC frame, not a scene or asset schema. Same append-a-field,
+>   bump-the-envelope move v2 (pcgs) and v3 (anim) already made.
+>
+> **THE ORDERING LAW, paid for in this batch.** Adding `SamplerDef::DataMap` / `::Biome` beside
+> the other *sources* — where they read best — shifted `Multiply/Max/Min/Invert` by two
+> declaration indices, and bincode writes an externally-tagged enum as its **declaration index**.
+> The committed `terrain-demo` `.inf_pcg` changed bytes and `committed_sample_matches_generators`
+> caught it. The fix is the rule, not the patch: **new variants are appended, never inserted**,
+> and `sampler_variant_discriminants_are_frozen` now pins all eleven indices so the next person
+> fails at `cargo test` instead of in somebody's project. (This is the *same* law as the tile's,
+> one type down: positional encodings have no names.)
+>
+> **And the law applies to the enum NESTED inside it.** `SamplerDef::DataMap` carries an
+> `inf_terrain::DataMapKind`, which until now was persisted nowhere and so carried no ordering
+> constraint at all — while P19.1's own remainders contemplate adding a fourth *thermal* channel.
+> Inserting one would silently turn every committed `mask.wear` into a `mask.deposition`. The
+> kind now carries the append-only note where it is declared, its three indices are pinned in the
+> same freeze test (including one spelled out as raw bytes — `DataMap(Wear)` starts `[9, 2, …]`),
+> and `channel()`'s storage order is asserted **separately** so the two can never drift into
+> agreeing by accident.
+>
+> **A SECOND LAW, found by the property and not by a report: `serde_json`'s default parser can
+> land 1 ULP off.** A `.inf_pcg` stores its authored graph as a **JSON string** (`graph_json` —
+> the `inf_graph` model's `skip_serializing_if` fields are not bincode-safe), and the shipped/PIE
+> player **re-lowers that graph** rather than trusting the stored document mirror. So every
+> authored `f64` param crosses JSON on the way to the player — and serde_json's fast float path
+> is not exact. A `base_density` or a noise `gain` that came back a bit light hands the player a
+> different `ScatterParams` from the editor's, which surfaces only as *the shipped world's foliage
+> sits somewhere else*, on somebody's machine, months later. The workspace pin is now
+> `serde_json = { features = ["float_roundtrip"] }`, stated with its reason at the pin, and
+> `an_authored_graph_re_lowers_bit_identically_through_the_payload` compares the editor's and the
+> player's documents **bit for bit** (`to_bits()`, so a future sloppy `PartialEq` cannot hide it)
+> on params with full 17-digit mantissas. This is latent since P10.5b; P19.3 is simply where a
+> round-trip property was pointed at it.
+>
+> **And PCG is not the biggest exposure** — the audit's catch. A `.inf_act` is JSON too, and the
+> player decodes one on **every** boot path (dev dir, cooked pack, and the PIE
+> `ScenePayload.classes` list) — far more traffic than `.inf_pcg`, and a literal that came back a
+> bit light makes the shipped actor compute imperceptibly differently from the preview, with both
+> sides internally consistent so nothing below the simulation notices. `inf-blueprint` now carries
+> the twin test: every `Lit::Float` in a class — nested inside a `BinOp`, and on a member
+> variable's default — round-trips `to_bits()`-identically and re-serializes byte-identically, on
+> the same 17-digit values (including the one the property actually found). Neither crate is now
+> the sole reason the pin exists.
+>
+> **The coarse-page decimation rules (the tracked prerequisite from both P19.1 and P19.2).** A
+> tile has four layers and they do not reduce the same way, because they do not mean the same
+> thing. Stated once, on `pyramid`:
+>
+> | layer | rule | why |
+> |---|---|---|
+> | heights | **decimate** (unchanged) | a point value on a lattice; anything else cracks the LOD mesh |
+> | splat weights | **not carried** (unchanged) | authoring-resolution paint below a screen texel at LOD *n* |
+> | data map **flow** (m³) | **sum** the footprint | *extensive* — a coarse cell covers 4 cells' area, so it shipped their total water |
+> | data maps **deposition / wear** (m) | **mean** the footprint | *intensive* — metres of height change is per-area; the mean is what survives a level |
+> | biome ids | **majority vote**, ties to the **lowest id** | categorical: the midpoint of biome 3 and biome 7 is one of the two |
+>
+> **The reduction follows the DIMENSION, not the word "accumulator" — and P19.3 got that wrong
+> for one commit.** All three maps are raw monotone accumulators, so the first cut summed all
+> three; the audit caught that this 4×-inflates the metre channels every level, and it was
+> already writing into `.inf_terrain` pages. Flow is **m³** of water shipped — extensive, so a
+> coarse cell holds its four children's *total* and `Σ over a world region` survives the level
+> (its per-level value scales ×4, which is correct: so did the area). Deposition and wear are
+> **metres** of height moved — a per-area *intensity*, which P19.1's own definition says to
+> multiply by `l²` to get a volume — so doubling the area does not double a height, and the
+> **mean** is the value that survives; it preserves the volume integral too
+> (`mean(h)·4A == Σ(h)·A`). Summing them would make a mask thresholded at level 0 stop matching
+> at level 1, which is exactly backwards from the reason flow sums. P19.1's own remainder note had
+> stated this split (*"sum, not average, for flow; mean for the metre channels"*) and it was not
+> read closely enough. `DataMapKind::is_extensive()` is now the single place the dimension lives,
+> so the next area-changing consumer branches on a property rather than re-deriving a rule.
+> **The tie-break is the lowest id, and id 0 votes like any other value** — a coarse texel over
+> mostly-unpainted ground honestly reads *unassigned*, rather than being rescued by a special case.
+>
+> **Shared-edge continuity for categorical data, and what it cost.** The footprint is the coarse
+> sample's own 2 × 2 fine block `{2I, 2I+1} × {2J, 2J+1}` — **except on the shared-edge ring**
+> (`I` or `J` ∈ `{0, res−1}`), where it degenerates to the single sample, i.e. the ring
+> *decimates, exactly like the heights*. That is the seam guarantee, not an optimization: a coarse
+> tile's far edge and its `+X` neighbour's near edge are the **same fine world sample**, so they
+> reduce to bit-identical bytes only if neither aggregates. Every non-degenerate window at the
+> ring was tried on paper and every one of them needs fine samples from *outside* the 2 × 2 block
+> — which terrain sparsity forbids (the block may be all that exists) and which would break the
+> invariant the partial write-back rebuild rests on, since `downsample_block` is fed only the
+> block's four members. Widening the write-back to a 3 × 3 fine neighbourhood would also have to
+> widen its staleness propagation *and* `chunked.rs`'s memory-bounded row-band importer — a large
+> blast radius for a streaming page's edge ring. So the ring is decimated, and the price is
+> **only paid by flow**, priced exactly: the ring's window is not uniformly one sample (a corner
+> reduces 1 child, a non-corner edge 2, the interior 4), and a *mean* of 1 or 2 equal-area
+> children is still the right per-area value, so the metre channels and the categorical ids lose
+> nothing at all. What flow loses is the single combined index **`1`** per axis, which falls in
+> no window — every other odd index *is* covered (`2res−3` belongs to `I = res−2`'s window, which
+> an earlier draft of this block got wrong) — for an uncovered fraction of
+> `1 − ((2res−2)/(2res−1))²` = **0.39 % at `res = 256`**. Asserted both ways: X- and Z-seam
+> equality for **ids and maps** at every pyramid level, and the four-member block still reducing
+> **bit-identically** to a whole-level reduction. The seam guarantee is also **conditional on
+> coverage**, and that is now tested rather than implied: a block member that is absent
+> contributes nothing to its window, so where two coarse tiles have different coverage the shared
+> sample reads the sparse default on the side that cannot reach it — exactly the heights' own
+> hole behaviour, with a full-coverage positive control beside it. **Sparsity survives on both ends** — a block
+> whose members carry no maps / no ids skips the reduction wholesale, and a reduction that comes
+> out all-default is dropped back to the sparse default rather than materialized, so an
+> un-eroded, unpainted terrain's pyramid costs exactly what it did before P19.3.
+>
+> **The binding.** `BiomeBinding` is a **terrain-level sibling** of the volume path, not a
+> replacement: a volume scatters one graph over a box an author placed; a binding scatters many
+> graphs over the regions an author *painted*. Both run at the same two moments — the editor's
+> `pcg_evaluate_biomes` command and the player's load-time pass — and neither reads the other's
+> output. Three determinism rules, all machine-checked: **dispatch order is ascending biome id**
+> (the constructor sorts, so a set's declaration order cannot leak into placement); **the biome id
+> is folded into the counter-hash** (`biome_seed(seed, id)`) — the tuple every draw is a pure
+> function of simply grew the biome; and **masking is multiplicative, so it only ever removes** — the scatter kernel's
+> acceptance draw does not depend on the density value, so a bound rule's output is provably a
+> *subset* of the unbound rule's, which is what makes the region property testable at all. The
+> whole GUID-onward half is `BiomeBinding::from_set`, shared **verbatim** between the editor
+> command and the player; the two paths differ only in how they fetch a `.inf_pcg`.
+>
+> **What actually prevents two biomes co-placing today is DISJOINTNESS, not the seed fold** — a
+> correction the audit forced, because the first draft credited the wrong mechanism.
+> `TerrainFields::biome_id` answers with exactly one id per position and `BiomeMask` scores `0`
+> unless it matches, so at most one biome's mask is positive anywhere and the feather only *thins*
+> a biome inside its own region; there is no both-masks-positive band in P19.3, and a
+> two-biomes-on-a-split-terrain test would have passed with `biome_seed` deleted. The fold is a
+> **forward guard** for the moment anything makes the masks overlap (the deferred per-level
+> feather blending across a border, a soft id field), and it is now gated on its own terms: one
+> document run as id 1 and as id 2 against terrains that are *entirely* those ids — the same
+> region, fully-overlapping masks, nothing different but the id — must produce different position
+> sets. Mutation-verified: deleting the fold fails that test, and disjointness itself is asserted
+> separately by sweeping both masks across the border and requiring their product to be zero
+> everywhere (which is also the tripwire for the day the feather starts blending across).
+>
+> **The border blend.** `BiomeMask` feathers by **distance to the nearest unlike sample** —
+> including off-terrain, so a terrain edge is a border like any other — found by an expanding
+> ring search that stops as soon as no further ring can beat the best hit and is capped at
+> `MAX_FEATHER_SAMPLES = 64` (the search is `O(k²)` per candidate in the worst case, so the radius
+> is bounded rather than trusted). The boundary sits about half a sample inside the nearest unlike
+> point, so that half-spacing is subtracted before the `smoothstep` — otherwise every mask would
+> read `smoothstep(spacing)` at its own edge instead of 0. Monotone in depth by construction and
+> tested as such, `feather <= 0` costs no search at all, and the width is *metric*: the same 4 m
+> blend saturates 4 m in on a 1 m and a 2 m lattice alike.
+>
+> **Where the feather is authored, honestly**: nowhere persistent. A per-level value needs either a
+> `Terrain` field (scene v17 in both mirrors) or a `.inf_biomes` bump with a frozen record, and
+> this batch buys no schema bump — so the engine default is `DEFAULT_BIOME_FEATHER = 8.0 m` and the
+> *authored* path is per-graph, through the `mask.biome` node's own `feather` param. Stated as a
+> remainder below.
+>
+> **The multi-rule graph shape: merge nodes, and why.** The substrate enforces one link per input
+> pin, so several scatter chains cannot meet at one port. A variadic/indexed sink
+> (`layer0…layerN`) is an arbitrary cap and a shape no other domain here uses; an explicit `rule`
+> node duplicates what `scatter.scatter` already is. A **binary combinator that associates left**
+> is instead the convention this very registry already has three times over — `combine.multiply` /
+> `max` / `min` join two densities exactly that way, and the lowerer already flattens *those*
+> recursively. So `scatter.merge` (SCATTER × SCATTER) and `layer.merge` (LAYER × LAYER) are the
+> same idea one and two wire types up: no new concept, no cap, and the sink keeps its single-pin
+> shape. `layer.layer` wraps a scatter chain with `name`/`enabled`; `output.pcg` **keeps** its
+> `scatter` input and gains `layers`, so every `.inf_pcg` authored before P19.3 lowers
+> byte-identically (one implicit layer named `layer`) and connecting both is a node-anchored
+> warning with `layers` winning. Merge trees flatten `a`-then-`b` depth-first, so the rule list
+> reads the way the canvas does. `scatter.scatter` gained a `name` param (sparse `ParamMap`, so
+> old graphs resolve the default) because N rules need distinguishable names.
+>
+> **The node kit's holes are closed.** `mask.image` resolves its texture GUID through a new
+> `MaskSource` seam — the lowerer holds no asset database, so the pixels come in from the caller —
+> and **fails closed**: a blank, malformed or unloadable GUID lowers to a `0 × 0` mask that scores
+> `0` everywhere with a node-anchored *warning*, never "place everywhere" and never a hard error.
+> `mask.flow` / `mask.deposition` / `mask.wear` each carry their own `min`/`max` **because the
+> stored data is raw** — normalization is a view the reader chooses (the P19.1 doctrine), and two
+> masks over one terrain may legitimately want different windows. `mask.biome` matches an id with
+> the same feathering seam the binding uses.
+>
+> **The layer seam.** The masks read a new `TerrainFields` trait — `data_map` / `biome_id` /
+> `sample_spacing` — deliberately *not* folded into `HeightProvider`, because a purely procedural
+> height function has no data maps and no biomes and forcing it to answer would make every
+> `FnHeight` in the codebase lie. `NoFields` is the honest empty implementation and is what the
+> old `evaluate` / `SamplerDef::build` entry points pass, so a mask without a terrain places
+> nothing rather than everything. `OffsetTerrain` is the world-offset wrapper both evaluation
+> sites share, so "the terrain is at `origin`" cannot mean two things.
+>
+> **The editor surface.** `pcg_evaluate_biomes` is the terrain-level sibling of `pcg_evaluate` —
+> resolve the terrain, load its `.inf_biomes`, resolve each biome's graph, evaluate, write the
+> population, emit `world://delta` — and a "🌿 Evaluate Biomes" button beside the existing
+> "⚡ Evaluate" on the PCG canvas. The palette gains the `masks` and `layer` categories and the
+> new LAYER wire colour; the frontend needed no new concepts because the registry is served from
+> Rust and the canvas is registry-driven. **Both projector MIRRORs** push the population through
+> one shared `push_scatter` helper — the volume path and the terrain path cannot drift, which is
+> now asserted by the extended mirror gate rather than hoped for.
+>
+> **Gates.** `runtime/inf-player/tests/biome_pcg.rs` builds a two-biome painted terrain whose
+> `.inf_biomes` names two **distinct** `.inf_pcg` graphs — one single-rule, one a real
+> `scatter.merge` two-rule graph, so the new lowering rides the shipping pipeline rather than only
+> its unit tests — and proves: the cook follows the **whole chain** (level → `Terrain.biome_set` →
+> `.inf_biomes` → each `BiomeDef.pcg_graph` → `.inf_pcg`) with only the level as an explicit root
+> (P19.2 landed the first hop; this is the first test of the second); **cooked == uncooked**
+> instance for instance; **PIE == shipping** on the same population; both biomes contribute and
+> every instance lands on ground its own biome owns; an **unpainted** terrain grows nothing; and
+> two loads of one pack are identical. The fixture is built in-test rather than committed, because
+> it exists to pin the *chain* and a temp-dir fixture cannot drift from a `.inf_lvl` nobody
+> regenerated.
+>
+> **Tests.** `inf-terrain::pyramid` (the tie-break's totality and order-independence; the
+> footprint's degeneration on the ring; a deterministic majority vote that never invents an id;
+> **the dimensional split** — a uniform *metre* field surviving a level unchanged at
+> interior/edge/corner while a uniform *flow* field scales ×4/×2/×1, plus each channel's own
+> conservation statement (flow's volume total; deposition's height × area); X/Z seam equality for
+> ids and maps at every level; **the coverage-hole seam** — an unreachable shared sample reads the
+> sparse default rather than a guess — with a full-coverage positive control beside it; a clean
+> terrain still pyramiding to sparse layers; the block-vs-level
+> bit-identity **with layers live**); `inf-terrain::maps` (`data_map_at` nearest/raw/bounded,
+> `xz_bounds` incl. negative coordinates and the empty terrain); `inf-pcg::fields` (the empty
+> source, both layers off a real terrain, the offset wrapper shifting every layer by one origin);
+> `inf-pcg::sampler` (known-value normalization windows incl. the degenerate one, crisp-then-
+> monotone biome feathering, the metric feather across two lattice spacings, the capped radius);
+> `inf-pcg::rules` (**the frozen discriminant table** + both new variants round-tripping in both
+> codecs, nested); `inf-pcg/tests/sampler_roundtrip.rs` — **the round-trip discipline made a
+> property**: arbitrary recursive sampler trees and whole layers × rules documents survive bincode
+> *canonically* (re-encode is byte-identical, which is what keeps a `.inf_pcg`'s content hash
+> stable) and survive JSON, because the failure mode here is "a variant nobody wrote a case for",
+> which is exactly what a hand-written corpus misses; `inf-pcg::graph` (every mask node's lowering + round-trip, param clamping,
+> `mask.image` resolved / unresolved / blank / malformed, ordered `scatter.merge` flattening,
+> N rules × M layers through the payload codec and back, the legacy sink shape unchanged, the
+> both-inputs tie, anchored diagnostics on every new walk, and a shared density subgraph *not*
+> being a cycle); `inf-pcg::binding` (the region property, an unpainted terrain, monotone feather
+> blending with fewer instances than a crisp mask, ascending-id dispatch, the id-in-the-seed
+> no-co-placement proof, subset-not-move, `from_set` skipping unresolvable and reserved ids, the
+> rewrite stated in one place, disjointness swept across the border, **and pool-size invariance
+> through the REAL path** — `BiomeBinding::evaluate_in`, a new caller-supplied-pool seam mirroring
+> `scatter_region_in` with `evaluate_with_in` beneath it, run at 1/2/4/8 workers over two biomes ×
+> two layers × three rules, so the per-biome seed fold, the mask wrapping, the weighted kind picks
+> and the concatenation order all participate; the first version lifted one rule out of a document
+> by hand and therefore covered none of them); `inf-blueprint` (the `.inf_act` float twin);
+> `inf-ecs` (the population costs zero
+> bytes); `inf-editor-core` (the projector MIRROR gate extended; the coarse-page assertion flipped
+> to "never invents an id"; and a **new `biome_binding_mirror` gate** reading both evaluation
+> paths' source text — same Ring-0 seams by name, same `.inf_pcg`→document resolution rule, and
+> the two passes' *seed* rules kept apart, since a copy-paste of the volume's `wrapping_add` into
+> the biome pass would make two biomes sharing one graph co-place, which is the exact bug
+> `biome_seed` exists to prevent). **42 goldens byte-identical** — a population is instances, not
+> pixels, and no golden scene builds a pyramid.
+>
+> **Remainders, stated (P19.3).**
+> * **The border feather has no persisted per-level knob.** `DEFAULT_BIOME_FEATHER` (8 m) is the
+>   engine default and `mask.biome`'s param is the authored path; a per-level override needs a
+>   schema bump this batch deliberately did not take. First thing to add when a `.inf_biomes`
+>   bump is warranted for another reason.
+> * **`mask.image` resolves in the editor and NOT in the player**, and this is the one place
+>   P19.3 knowingly ships a preview/shipping difference. The editor lowers through
+>   `AssetMasks` (the thumbnailer's existing CPU BC decode → Rec.709 luma), so an image mask is
+>   real pixels there; the shipped and PIE players have no asset database on the evaluation path
+>   — the same reason per-layer terrain *textures* never reached the player's projection — so
+>   `NoMasks` gives them a `0 × 0` mask that scores `0`. The divergence **fails closed** (less
+>   content, never wrong content) and is diagnosed on the node, but nothing downstream can tell
+>   "masked out" from "authored empty" — so the **cook now advises** on any `.inf_pcg` in the
+>   closure that uses the node, which is the last moment before it becomes a shipped build.
+>   Closing it properly needs a texture map through the builder, a `LevelSource` lookup, a
+>   **seventh** `ScenePayload` list, *and* a new cook edge (`.inf_pcg` → texture, which does not exist today,
+>   so the texture is not even packed) — a chain, not a patch, and deliberately not taken in a
+>   batch that had already grown a schema-free surface this wide.
+> * **A rule still lowers to a one-entry kind palette.** `PcgDocument` models weighted `PcgKind`
+>   lists and always has; the graph still says `mesh` + `weight` on the scatter node. A `kind`
+>   node plus a third merge would close it, and it was left out because the deliverable was
+>   layers × rules and three merge nodes start to look like a pattern nobody asked for.
+> * **Evaluation still runs once, at load.** Inherited from P10.6 and unchanged: a streamed
+>   terrain that pages in a region after load does not re-evaluate its binding for it. The binding
+>   is regional by construction (`evaluate` takes a `Region`), so the fix is a caller, not a
+>   redesign.
+> * **The coarse pages' ring under-counts its data-map sums** (above). Bounded, stated, and only
+>   fixable by widening the reduction's input beyond one block.
+> * **The bless-guard asymmetry is *still* there.** Third batch running. `INF_BLESS_FIXTURES`
+>   means any value in the editor codec and exactly `"1"` in `inf-scene`. Always use `=1`.
+
 - **P19.1 Erosion data maps** — 1. accumulate flow / deposition / wear maps in the erosion
   passes (CPU reference + WGSL mirror, parity-gated exactly like heights); 2. persist them
   per-tile and sparse on the format-aware serde pattern; 3. export as mask images (Gaea-style

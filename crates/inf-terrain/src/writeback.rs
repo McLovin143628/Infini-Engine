@@ -682,16 +682,26 @@ mod tests {
             .unwrap();
         let r = out.reader();
         let mut eroded_lod0 = 0;
+        let mut eroded_coarse = 0;
         for key in r.keys() {
             let tile = r.tile(key).unwrap().unwrap();
-            if key.is_lod0() {
-                if !tile.maps_are_default() {
+            if !tile.maps_are_default() {
+                if key.is_lod0() {
                     eroded_lod0 += 1;
+                } else {
+                    eroded_coarse += 1;
                 }
-            } else {
-                assert!(tile.maps_are_default(), "coarse {key:?} leaked data maps");
             }
         }
         assert!(eroded_lod0 > 0, "no level-0 tile carried its maps through");
+        // **P19.3**: coarse pages now carry the reduced maps too — flow summed,
+        // the metre channels averaged (see `pyramid`'s per-layer rules). Before
+        // P19.3 the maps stopped at level 0, so a coarse page read as
+        // never-eroded; nothing sampled coarse pages yet, which is precisely why
+        // it was cheap to fix before the first consumer rather than after.
+        assert!(
+            eroded_coarse > 0,
+            "the pyramid rebuild dropped the data maps on the coarse pages"
+        );
     }
 }

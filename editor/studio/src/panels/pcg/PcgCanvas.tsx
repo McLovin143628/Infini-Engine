@@ -70,6 +70,8 @@ function CanvasInner() {
   const evaluate = usePcgStore((s) => s.evaluate);
   const evaluating = usePcgStore((s) => s.evaluating);
   const lastEval = usePcgStore((s) => s.lastEval);
+  const evaluateBiomes = usePcgStore((s) => s.evaluateBiomes);
+  const lastBiomeEval = usePcgStore((s) => s.lastBiomeEval);
   const save = usePcgStore((s) => s.save);
 
   const onSave = useCallback(async () => {
@@ -233,6 +235,21 @@ function CanvasInner() {
                 {lastEval.ok
                   ? `Placed ${lastEval.placed} instance(s).`
                   : "Evaluate failed — see diagnostics."}
+              </div>
+            )}
+            <button
+              className="bp-btn"
+              onClick={() => void evaluateBiomes()}
+              disabled={evaluating}
+              title="Run the terrain's biome→PCG binding: every painted biome's own graph over the region its id owns"
+            >
+              {evaluating ? "Evaluating…" : "🌿 Evaluate Biomes"}
+            </button>
+            {lastBiomeEval && (
+              <div className="pcg-side__eval-result">
+                {lastBiomeEval.ok
+                  ? `${lastBiomeEval.placed} instance(s) across ${lastBiomeEval.biomes} biome(s) · ${lastBiomeEval.feather} m blend`
+                  : lastBiomeEval.message}
               </div>
             )}
           </div>

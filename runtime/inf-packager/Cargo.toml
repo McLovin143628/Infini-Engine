@@ -28,6 +28,10 @@ inf-vgeom = { workspace = true }
 # Cook stage: structurally validate a `.inf_terrain`'s header + tile directory
 # (P16.3). Header/directory only — the cook never decodes a tile.
 inf-terrain = { workspace = true }
+# P19.3: the cook reads a `.inf_pcg`'s authored graph to advise on `mask.image`
+# nodes, whose texture the shipped/PIE players cannot resolve at load. Decode
+# only — the cook never lowers or evaluates a graph.
+inf-pcg = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

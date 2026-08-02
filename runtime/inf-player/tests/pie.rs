@@ -189,6 +189,7 @@ fn platformer_payload() -> ScenePayload {
         },
         |_guid| None, // no PCG graphs in the platformer scene
         |_guid| None, // no animation assets in the platformer scene
+        |_guid| None, // no biome sets in the platformer scene
         0,            // tick-hz 0: no per-frame sleep (step-driven determinism)
         false,
     )

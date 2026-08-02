@@ -52,8 +52,11 @@ pub const PIE_FRAME_MAGIC: u32 = 0x0050_4945;
 /// version carried in the `Ready` handshake).
 pub const PIE_FRAME_VERSION: u16 = 1;
 
-/// Schema version of a [`ScenePayload`] (its own migratable envelope; the
-/// `.inf_lvl` bytes inside carry the scene schema version independently).
+/// Schema version of a [`ScenePayload`] — **the PIE envelope's own version**, not
+/// a scene or asset schema. It versions this wire struct alone; the `.inf_lvl`
+/// bytes inside carry the scene schema version independently, and each attached
+/// asset payload carries its own. Bumping it is therefore *not* a content schema
+/// bump: nothing on disk changes, and no golden is re-blessed.
 ///
 /// * v1 — level bytes + bound blueprint classes.
 /// * v2 — appended `pcgs`: the `.inf_pcg` graph payloads a v4 level's
@@ -63,7 +66,10 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   `skeletons` (`.inf_skel`), `clips` (`.inf_anim`) and `machines` (`.inf_sm`),
 ///   so the PIE player resolves state machines / root-motion clips exactly like
 ///   the shipping pack path (PIE == shipping for animation).
-pub const SCENE_PAYLOAD_VERSION: u32 = 3;
+/// * v4 — appended `biome_sets`: the `.inf_biomes` payloads a v16 level's
+///   `Terrain.biome_set` refs, so the PIE player runs the biome→PCG binding
+///   exactly like the shipping pack path.
+pub const SCENE_PAYLOAD_VERSION: u32 = 4;
 
 /// Upper bound on a single frame; anything larger means a desynced or
 /// corrupt stream and is treated as an error rather than an allocation. A
@@ -101,6 +107,12 @@ pub struct ScenePayload {
     /// a v5 level's `AnimStateMachine.sm` refs (schema v3).
     #[serde(default)]
     pub machines: Vec<(Uuid, Vec<u8>)>,
+    /// Referenced biome sets: `(asset guid, .inf_biomes bincode bytes)` — keyed by
+    /// a v16 level's `Terrain.biome_set` refs (schema v4). The player dispatches
+    /// each painted biome's `pcg_graph` from these against the `pcgs` above, so a
+    /// PIE session grows the same world a cooked pack does.
+    #[serde(default)]
+    pub biome_sets: Vec<(Uuid, Vec<u8>)>,
     /// Fixed update rate (Hz) the player ticks at.
     pub tick_hz: u32,
     /// Open a real window (`true`, the embedded / new-window PIE path) vs run
@@ -126,6 +138,7 @@ impl ScenePayload {
             skeletons: Vec::new(),
             clips: Vec::new(),
             machines: Vec::new(),
+            biome_sets: Vec::new(),
             tick_hz,
             windowed,
         }
@@ -135,6 +148,14 @@ impl ScenePayload {
     /// Builder-style so [`Self::new`]'s signature stays stable.
     pub fn with_pcgs(mut self, pcgs: Vec<(Uuid, Vec<u8>)>) -> Self {
         self.pcgs = pcgs;
+        self
+    }
+
+    /// Attach the referenced `.inf_biomes` payloads (`(asset guid, bytes)`) a
+    /// level's `Terrain.biome_set` refs name (P19.3). Builder-style, exactly like
+    /// [`with_pcgs`](Self::with_pcgs) — the binding needs both.
+    pub fn with_biome_sets(mut self, biome_sets: Vec<(Uuid, Vec<u8>)>) -> Self {
+        self.biome_sets = biome_sets;
         self
     }
 
