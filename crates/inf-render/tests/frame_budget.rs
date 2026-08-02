@@ -302,10 +302,7 @@ fn vgeom_two_pass_cost() {
     const ASSET: u128 = 0x1801_0000_bd67_0000;
     let mesh = Arc::new(vgeom_budget_mesh(64));
     let mut scene = RenderScene {
-        vgeom_assets: vec![VgeomAsset {
-            id: ASSET,
-            mesh: mesh.clone(),
-        }],
+        vgeom_assets: vec![VgeomAsset::from_mesh(ASSET, &mesh).expect("index the vmesh")],
         ..Default::default()
     };
     let standing = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);

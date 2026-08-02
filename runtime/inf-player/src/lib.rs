@@ -362,9 +362,11 @@ fn load_vmeshes(args: &Args) -> vmesh::VmeshRegistry {
             } else {
                 path.clone()
             };
+            // One `Arc<PackReader>` shared by every indexed vmesh: the mapping is
+            // opened once, and a meshlet page is a sub-slice of it (P18.2).
             match inf_asset::PackReader::open(&pack_path)
                 .map_err(|e| e.to_string())
-                .and_then(|r| vmesh::VmeshRegistry::from_pack(&r))
+                .and_then(|r| vmesh::VmeshRegistry::from_pack(std::sync::Arc::new(r)))
             {
                 Ok(reg) => reg,
                 Err(e) => {

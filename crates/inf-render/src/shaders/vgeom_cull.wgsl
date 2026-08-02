@@ -5,17 +5,40 @@
 // `instance_count` (so the raster pass draws exactly the visible meshlets with a
 // single `draw_indirect`). The **base cut**, in order:
 //
-//   1. LOD cut — draw iff `error <= t < parent_error`, where `t` is a **single
-//      per-instance scalar object-space threshold** precomputed on the CPU from
-//      the screen-space pixel tolerance (see passes/vgeom.rs). Using one scalar t
-//      per instance makes this bit-identical to `VgeomMesh::select(t)` and
-//      preserves the DAG cut invariant (which requires one t per mesh instance).
+//   1. LOD cut, CLAMPED TO RESIDENCY (P18.2) — draw iff
+//      `eff_error <= t < parent_error`, where `t` is a **single per-instance
+//      scalar object-space threshold** precomputed on the CPU from the
+//      screen-space pixel tolerance (see passes/vgeom.rs), and
+//      `eff_error = (lod_level <= floor_lod) ? 0 : error`. Using one scalar t per
+//      instance is what preserves the DAG cut invariant (which requires one t per
+//      mesh instance). At full residency `floor_lod == 0`, LOD 0's error is 0
+//      anyway, and this is bit-identical to `VgeomMesh::select(t)`.
 //   2. Frustum — the meshlet's world bounding sphere vs the 6 frustum planes.
 //   3. Backface cone — meshopt normal cone: reject iff
 //      `dot(normalize(center - eye), cone_axis) >= cone_cutoff`.
 //
 // HZB occlusion is applied **after** the base cut and is purely subtractive —
 // see `occluded` below for the conservativeness proof.
+//
+// # Streaming indirection (P18.2)
+//
+// Meshlet records no longer live in a per-asset buffer: they are suballocated out
+// of ONE shared pool, so a thread resolves its asset-local meshlet id through the
+// per-asset `remap` table first. `remap[ml] == NOT_RESIDENT` means that meshlet's
+// page is not in VRAM — the thread contributes nothing, and the *clamp* above is
+// what keeps that from being a hole:
+//
+//   * pages are ordered coarsest-first with page 0 = every ROOT of the DAG, and
+//     residency is always a prefix of that order, so every root-to-leaf path
+//     always has a resident meshlet (page 0 is never evicted);
+//   * zeroing the error at and below `floor_lod` makes the finest resident
+//     meshlet on a path cover `[0, parent_error)` instead of yielding to the finer
+//     ones that are not paged in.
+//
+// So partial residency changes WHICH meshlet on a path draws, never WHETHER one
+// does — the same shape of guarantee two-pass occlusion makes about timing.
+// `VgeomMesh::select_with_residency` is the CPU twin, and the parity gate asserts
+// the two agree under punched-out residency sets.
 //
 // # Pass modes (P18.1)
 //
@@ -85,7 +108,7 @@ struct CullParams {
     // x = mip count, y = hzb width, z = hzb height, w unused.
     hzb: vec4<f32>,
     // x = conservative (early set == the whole base cut), y = audit counters on,
-    // z, w unused.
+    // z = residency floor_lod (the streaming clamp), w unused.
     misc: vec4<u32>,
 };
 
@@ -109,9 +132,12 @@ struct DrawArgs {
 @group(0) @binding(6) var<storage, read> prev_visible: array<u32>;
 // This frame's visibility, published by MODE_LATE for next frame's early set.
 @group(0) @binding(7) var<storage, read_write> cur_visible: array<u32>;
-// Occlusion-audit counters: [base_cut, occluded, early_drawn, late_drawn].
-// Only touched when `params.misc.y != 0` (so the shipping path pays nothing).
-@group(0) @binding(8) var<storage, read_write> stats: array<atomic<u32>, 4>;
+// Audit counters: [base_cut, occluded, early_drawn, late_drawn, clamped, ...].
+// Eight slots so a sixth costs no layout change. Only touched when
+// `params.misc.y != 0` (so the shipping path pays nothing).
+@group(0) @binding(8) var<storage, read_write> stats: array<atomic<u32>, 8>;
+// Asset-local meshlet id -> slot in the shared meshlet pool, or NOT_RESIDENT.
+@group(0) @binding(9) var<storage, read> remap: array<u32>;
 
 const FLAG_FRUSTUM: u32 = 1u;
 const FLAG_CONE: u32 = 2u;
@@ -125,6 +151,13 @@ const AUDIT_BASE: u32 = 0u;
 const AUDIT_OCCLUDED: u32 = 1u;
 const AUDIT_EARLY: u32 = 2u;
 const AUDIT_LATE: u32 = 3u;
+// P18.2: base-cut pairs drawn COARSER than the threshold asked for, because the
+// finer page is not resident — the "requested-but-missing" signal. Audit only:
+// nothing reads it back to decide what to load (see stream.rs for why a GPU
+// readback would make residency depend on frame history).
+const AUDIT_CLAMPED: u32 = 4u;
+
+const NOT_RESIDENT: u32 = 0xFFFFFFFFu;
 
 // Reverse-Z HZB occlusion — **conservative by construction** (P18.1).
 //
@@ -209,9 +242,18 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     let inst_i = idx / meshlet_count;
     let ml_i = idx % meshlet_count;
     let inst = instances[inst_i];
-    let m = meshlets[ml_i];
 
     let mode = params.counts.w;
+    // Streaming indirection: an asset-local meshlet id resolves to a slot in the
+    // shared pool, or to nothing when its page is not resident.
+    let slot = remap[ml_i];
+    if (slot == NOT_RESIDENT) {
+        if (mode == MODE_LATE) {
+            cur_visible[idx] = 0u;
+        }
+        return;
+    }
+    let m = meshlets[slot];
     let flags = params.counts.z;
     let audit = params.misc.y != 0u;
     // The early set: last frame's visible pairs, or EVERYTHING when the temporal
@@ -219,8 +261,14 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     // makes that frame's drawn set exactly the occlusion-off base cut.
     let early_set = params.misc.x != 0u || prev_visible[idx] != 0u;
 
-    // ── 1. LOD cut (branchless; exact parity with VgeomMesh::select(threshold)).
-    var base = m.error <= inst.threshold && inst.threshold < m.parent_error;
+    // ── 1. LOD cut, clamped to residency (branchless; exact parity with
+    //       VgeomMesh::select_with_residency(threshold, floor_lod)).
+    let floor_lod = params.misc.z;
+    let eff_error = select(m.error, 0.0, m.lod_level <= floor_lod);
+    var base = eff_error <= inst.threshold && inst.threshold < m.parent_error;
+    // Drawn coarser than asked for: this meshlet only won because the finer page
+    // is out. Audit only.
+    let clamped = m.error > inst.threshold;
 
     let center_world = (inst.model * vec4<f32>(m.center, 1.0)).xyz;
     let radius_world = m.radius * inst.max_scale;
@@ -277,6 +325,9 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
         atomicAdd(&stats[AUDIT_BASE], 1u);
         if (occ) {
             atomicAdd(&stats[AUDIT_OCCLUDED], 1u);
+        }
+        if (clamped) {
+            atomicAdd(&stats[AUDIT_CLAMPED], 1u);
         }
     }
 

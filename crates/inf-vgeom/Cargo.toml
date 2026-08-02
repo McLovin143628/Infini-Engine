@@ -16,6 +16,10 @@ inf-asset = { workspace = true }
 # reproducible regardless of pool size.
 inf-core = { workspace = true }
 serde = { workspace = true }
+# The `.inf_vmesh` v2 container (P18.2) holds its DAG groups as one bincode
+# section beside the raw, 16-byte-aligned meshlet pages — the same encoder the
+# rest of the asset system uses, so the section is byte-deterministic.
+bincode = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

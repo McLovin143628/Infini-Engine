@@ -273,9 +273,32 @@ fn cook_derives_a_vmesh_for_a_dense_mesh() {
     assert!(reader.contains(vmesh_id), "derived vmesh in pack");
     assert_eq!(reader.entry(vmesh_id).unwrap().kind, AssetKind::MeshletMesh);
 
-    // The derived payload decodes to a real multi-level meshlet DAG.
+    // The derived payload is the **v2 paged image** (P18.2), not a bincode blob:
+    // the runtime indexes its header + page directory without decoding, and the
+    // entry is uncompressed so a page is a borrowed slice of the mapping.
     let vbytes = reader.read(vmesh_id).unwrap();
-    let vgeom: inf_vgeom::VgeomMesh = inf_asset::decode(&vbytes).unwrap();
+    assert!(
+        inf_vgeom::asset::is_v2(&vbytes),
+        "the cook must emit the paged .inf_vmesh image"
+    );
+    assert!(
+        matches!(
+            reader.read_ref(vmesh_id).unwrap(),
+            std::borrow::Cow::Borrowed(_)
+        ),
+        "a streaming-class entry must be readable straight out of the mapping"
+    );
+    let source = inf_vgeom::VgeomSource::from_image(vbytes).expect("index the image");
+    assert!(source.meshlet_count() > 0);
+    assert!(
+        source.pages().len() >= 2,
+        "a dense mesh builds a DAG with pages beyond the roots"
+    );
+    assert!(source.pages()[0].is_root_page());
+    assert!(source.total_resident_bytes() > 0);
+
+    // And it still materializes to the same DAG the pre-streaming path carried.
+    let vgeom = source.to_mesh().expect("materialize");
     assert!(vgeom.meshlet_count() > 0);
     assert!(vgeom.level_count() >= 2, "dense mesh built a DAG");
     assert!(vgeom.total_triangles() > 0);

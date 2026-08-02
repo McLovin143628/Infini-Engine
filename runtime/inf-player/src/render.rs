@@ -412,9 +412,12 @@ pub fn project_scene(
             // renderer settings carry picks which node draws it. An unresolved asset
             // (or a primitive-only MeshRef) falls back to a placeholder cube.
             let vgeom = mesh_ref.asset.and_then(|mesh_id| vmeshes.resolve(mesh_id));
-            if let Some((asset_id, mesh)) = vgeom {
+            if let Some((asset_id, source)) = vgeom {
                 if vgeom_seen.insert(asset_id) {
-                    scene.vgeom_assets.push(VgeomAsset { id: asset_id, mesh });
+                    // The scene carries the PAGED source, not a decoded DAG
+                    // (P18.2): the render node's streamer decides what of it is
+                    // resident from the camera's own screen-error wants.
+                    scene.vgeom_assets.push(VgeomAsset::new(asset_id, source));
                 }
                 scene.vgeom_instances.push(VgeomInstance {
                     asset: asset_id,

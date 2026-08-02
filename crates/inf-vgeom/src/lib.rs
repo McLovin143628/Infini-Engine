@@ -40,20 +40,41 @@
 //! * **METIS-style grouping** — v1 groups meshlets with a deterministic greedy
 //!   shared-edge agglomeration; a graph-partitioner (balanced min-cut) is the
 //!   quality follow-up.
-//! * **Streaming/paging** — the payload is already laid out coarse→fine
-//!   ([`VgeomMesh::levels`]); the actual range-request streamer is P13.1
-//!   deliverable 2 (next wave).
 //! * **Per-material meshlets** — v1 flattens all submeshes into one geometry;
 //!   material-slot tagging per meshlet is a follow-up.
+//!
+//! # Streaming (P18.2 — landed)
+//!
+//! [`model`] is the *shape* of the DAG; [`asset`] is the **container** it ships
+//! in (a paged, 16-byte-aligned image sliced straight out of an mmap'd pack), and
+//! [`stream`] is the residency state machine + suballocator that decides which
+//! pages are in VRAM. `inf-render` owns nothing but the four `wgpu` pools and the
+//! shader that reads them, so the whole policy is testable with no adapter.
 
 // The meshlet DAG BUILDER (uses meshopt's C++). Cook-time only — the browser
 // player loads pre-cooked DAGs, so `build` (and its `meshopt` dep) is host-only.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod build;
-pub mod model;
 
+pub mod asset;
+pub mod model;
+pub mod stream;
+
+#[cfg(test)]
+mod test_support;
+
+pub use asset::{
+    build_vgeom_asset, MeshletRec, VgeomAssetError, VgeomAssetHeader, VgeomAssetImage,
+    VgeomAssetReader, VgeomAssetView, VgeomPageEntry, VgeomPageSections, VgeomSource,
+    VMESH_ASSET_SCHEMA_VERSION,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use build::{build_vgeom, BuildParams};
 pub use model::{
     pick_classic_level, ClassicLod, Group, LevelRange, Meshlet, VgeomMesh, VgeomVertex,
+};
+pub use stream::{
+    ideal_page_count, AssetResidency, PageBlocks, PageUpload, PoolAllocator, PoolBlock, VgeomPools,
+    VgeomStreamBudget, VgeomStreamPlan, VgeomStreamStats, VgeomStreamer, VgeomWant,
+    DEFAULT_VGEOM_BUDGET_BYTES, NOT_RESIDENT,
 };

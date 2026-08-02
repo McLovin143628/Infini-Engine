@@ -9,7 +9,7 @@ use uuid::Uuid;
 use inf_asset::{AssetId, AssetKind, PackReader, PackWriter};
 use inf_math::FloatingOrigin;
 use inf_player::vmesh::{derived_vmesh_id, pack_has_vmesh, VmeshRegistry};
-use inf_render::{cull_visible, GpuContext, RenderView, VgeomInstance, VgeomSettings};
+use inf_render::{cull_visible_source, GpuContext, RenderView, VgeomInstance, VgeomSettings};
 
 /// A dense procedural mesh (subdivided displaced grid) → a meshlet DAG, exactly
 /// as the cook's `derive_vmesh` builds one from a mesh's streams.
@@ -91,7 +91,7 @@ fn vgeom_path_activates_from_pack() {
         pack_has_vmesh(&reader, mesh_id),
         "pack should carry the vmesh"
     );
-    let reg = VmeshRegistry::from_pack(&reader).expect("registry");
+    let reg = VmeshRegistry::from_pack(std::sync::Arc::new(reader)).expect("registry");
     assert_eq!(reg.len(), 1);
 
     assert!(
@@ -134,7 +134,8 @@ fn vgeom_path_activates_from_pack() {
         enabled: true,
         ..VgeomSettings::default()
     };
-    let visible = cull_visible(&gpu, &picked, std::slice::from_ref(&inst), &view, &settings);
+    let visible =
+        cull_visible_source(&gpu, &picked, std::slice::from_ref(&inst), &view, &settings).pairs;
     assert!(
         !visible.is_empty(),
         "vgeom path activated: expected visible meshlets > 0"

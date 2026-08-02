@@ -6,11 +6,12 @@
 //!
 //! # Pipeline (what happens each frame, per referenced vmesh asset)
 //!
-//! 1. **Upload / cache** — a [`VgeomGpu`] holds one asset's geometry in storage
-//!    buffers (positions, meshlet descriptors, meshlet→vertex indices, packed
-//!    meshlet→triangle bytes), built once and cached by asset id
-//!    ([`RenderScene::vgeom_assets`]). Per-instance transforms are re-packed each
-//!    frame (the LOD threshold depends on the live camera distance).
+//! 1. **Stream / page** (P18.2) — the referenced assets' meshlet pages are paged
+//!    into four **shared, suballocated** storage pools (vertices, meshlet
+//!    descriptors, meshlet→vertex indices, packed meshlet→triangle bytes) by the
+//!    node's [`inf_vgeom::VgeomStreamer`], against a VRAM budget and the camera's
+//!    own screen-error wants. Per-instance transforms are re-packed each frame
+//!    (the LOD threshold depends on the live camera distance).
 //! 2. **Cull compute** (`vgeom_cull.wgsl`) — one thread per (instance, meshlet):
 //!    the LOD cut, frustum-sphere, backface-cone, and optional HZB tests; each
 //!    survivor is appended to a `visible` list via an atomic that **is** the
@@ -134,6 +135,52 @@
 //!
 //! Set [`VgeomSettings::two_pass`] to `false` to fall back to single-pass v1
 //! (one cull, one draw, HZB from whatever the scene depth holds before this node).
+//!
+//! # Meshlet streaming (P18.2)
+//!
+//! Nothing uploads a whole vmesh any more. A [`VgeomAsset`](crate::VgeomAsset)
+//! carries a lazily-indexed [`VgeomSource`] — header and page directory only —
+//! and this node owns an [`inf_vgeom::VgeomStreamer`] that pages the DAG in by
+//! **page**: page 0 is every root of the DAG (always resident), pages 1.. are the
+//! non-root meshlets of one LOD level each, coarse to fine. Residency is always a
+//! prefix of that order, so a root-to-leaf path always has a resident meshlet:
+//! partial residency is **softer detail, never a hole**.
+//!
+//! Per frame, before any culling:
+//!
+//! ```text
+//!   wants  = per asset, the SMALLEST per-instance LOD threshold t
+//!   plan   = streamer.plan(wants)        // deterministic, budgeted, bounded
+//!   upload = write plan.uploads into the four shared pools
+//!   cull   = the base cut, clamped to residency, through the per-asset remap
+//! ```
+//!
+//! The four pools (vertices, meshlet records, micro vertex indices, micro triangle
+//! indices) are suballocated across **every** asset, so a meshlet id resolves
+//! through a per-asset `remap` table both the cull compute and the raster read.
+//! `remap[i] == NOT_RESIDENT` is how a non-resident page disappears from the cut.
+//!
+//! The clamp itself is one scalar: `floor_lod`, the finest resident LOD level.
+//! The cut becomes `eff_error ≤ t < parent_error` with
+//! `eff_error = (lod_level ≤ floor_lod) ? 0 : error`, which is
+//! [`VgeomMesh::select_with_residency`](inf_vgeom::VgeomMesh::select_with_residency)
+//! — and at full residency (`floor_lod == 0`) it is **identical** to the
+//! pre-P18.2 cut, term for term.
+//!
+//! The stronger statement, and the one the goldens actually rest on: the cut is
+//! identical at the streamer's *wanted* floor too, not merely at full residency.
+//! [`ideal_page_count`](inf_vgeom::ideal_page_count) grants exactly the pages
+//! whose `max_parent_error` still exceeds the instance threshold, and a page below
+//! that bound holds only meshlets the cut rejects anyway — so a streamed frame
+//! draws the same meshlets while holding a fraction of the asset. Only a **budget**
+//! clamp shorter than that want actually coarsens anything, which is the intended
+//! degradation.
+//!
+//! Determinism: the want is derived from the same `t` the GPU cut uses (never from
+//! a GPU readback, which would be a frame latent and make residency depend on
+//! frame history), loads are `read_ref` slices of an mmap staged through
+//! `parallel_map_ref`, and the whole plan is a pure function of
+//! `(wants, residency, budget)`. See `inf_vgeom::stream` for the full argument.
 
 use std::collections::BTreeMap;
 
@@ -151,24 +198,13 @@ use crate::settings::VgeomSettings;
 
 // ── GPU-side layouts (must match the WGSL structs) ───────────────────────────
 
-/// One meshlet descriptor as the cull/raster shaders read it (64 bytes, 16-byte
-/// aligned lanes). Mirrors `struct Meshlet` in `vgeom_cull.wgsl`/`vgeom_mesh.wgsl`.
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct MeshletGpu {
-    center: [f32; 3],
-    radius: f32,
-    cone_axis: [f32; 3],
-    cone_cutoff: f32,
-    vertex_offset: u32,
-    triangle_offset: u32,
-    vertex_count: u32,
-    triangle_count: u32,
-    error: f32,
-    parent_error: f32,
-    lod_level: u32,
-    _pad: u32,
-}
+/// The meshlet descriptor the cull/raster shaders read is
+/// [`inf_vgeom::MeshletRec`] — the **on-disk record of the `.inf_vmesh` container
+/// itself** (P18.2). Storing the GPU layout on disk is what makes paging a page in
+/// a memcpy plus two `u32` rebases instead of a decode; this assertion is the wire
+/// contract between `MeshletRec`, `struct Meshlet` in `vgeom_cull.wgsl` and
+/// `vgeom_mesh.wgsl`.
+const _: () = assert!(std::mem::size_of::<inf_vgeom::MeshletRec>() == 64);
 
 /// One placed instance as the shaders read it (176 bytes). Mirrors
 /// `struct Instance`. `threshold` is the precomputed per-instance LOD scalar.
@@ -306,9 +342,14 @@ pub fn cull_flags(settings: &VgeomSettings) -> u32 {
 }
 
 /// The **CPU reference** visible meshlet set for a single instance: the identical
-/// LOD cut + frustum + cone filters the GPU cull compute applies, mirrored on the
-/// CPU for the parity gate. Returns sorted meshlet indices. Occlusion is never
-/// part of the reference (the parity scene is occlusion-free).
+/// residency-clamped LOD cut + frustum + cone filters the GPU cull compute
+/// applies, mirrored on the CPU for the parity gate. Returns sorted meshlet
+/// indices. Occlusion is never part of the reference (the parity scene is
+/// occlusion-free).
+///
+/// `floor_lod` is the streamer's finest resident LOD level; `0` is full residency
+/// and reduces the cut to exactly `VgeomMesh::select(threshold)` — so the parity
+/// gate covers both the fully-paged and the punched-out cases with one function.
 #[allow(clippy::too_many_arguments)]
 pub fn cpu_visible_set(
     mesh: &VgeomMesh,
@@ -319,11 +360,12 @@ pub fn cpu_visible_set(
     max_scale: f32,
     planes: &[Vec4; 6],
     flags: u32,
+    floor_lod: u8,
 ) -> Vec<u32> {
     let mut out = Vec::new();
     for (i, m) in mesh.meshlets.iter().enumerate() {
-        // 1. LOD cut (== VgeomMesh::select semantics).
-        if !(m.error <= threshold && threshold < m.parent_error) {
+        // 1. LOD cut (== VgeomMesh::select_with_residency semantics).
+        if !m.selected_at_clamped(threshold, floor_lod) {
             continue;
         }
         let center = model.transform_point3(Vec3::from(m.center));
@@ -356,7 +398,7 @@ fn max_scale_of(scale: Vec3) -> f32 {
 fn pack_instance(
     origin: &FloatingOrigin,
     view: &RenderView,
-    mesh: &VgeomMesh,
+    bounds: ([f32; 3], f32),
     inst: &VgeomInstance,
     pixel_error: f32,
 ) -> VgeomInstanceGpu {
@@ -367,8 +409,8 @@ fn pack_instance(
     let c = nrm.to_cols_array_2d();
 
     let eye = view.eye_local();
-    let center_world = model.transform_point3(Vec3::from(mesh.center));
-    let radius_world = mesh.radius * max_scale;
+    let center_world = model.transform_point3(Vec3::from(bounds.0));
+    let radius_world = bounds.1 * max_scale;
     let threshold = lod_threshold(
         eye,
         center_world,
@@ -404,6 +446,7 @@ fn cull_params(
     mode: CullMode,
     conservative: bool,
     audit: bool,
+    floor_lod: u32,
 ) -> CullParamsGpu {
     let vp = view.view_proj();
     let planes = frustum_planes(vp);
@@ -418,7 +461,7 @@ fn cull_params(
             mode as u32,
         ],
         hzb,
-        misc: [conservative as u32, audit as u32, 0, 0],
+        misc: [conservative as u32, audit as u32, floor_lod, 0],
     }
 }
 
@@ -448,20 +491,7 @@ pub fn is_camera_cut(prev: &RenderView, cur: &RenderView) -> bool {
     prev.forward.dot(cur.forward) < CUT_COS
 }
 
-// ── Per-asset static geometry cache ──────────────────────────────────────────
-
-/// One vmesh asset's geometry, uploaded to GPU storage buffers once and cached by
-/// asset id.
-struct VgeomGpu {
-    positions: wgpu::Buffer,
-    meshlets: wgpu::Buffer,
-    meshlet_verts: wgpu::Buffer,
-    meshlet_tris: wgpu::Buffer,
-    meshlet_count: u32,
-    /// Largest `triangle_count` across the meshlets → the indirect draw's fixed
-    /// `vertex_count = max_tri * 3`.
-    max_tri: u32,
-}
+// ── The shared, suballocated meshlet pools (P18.2) ───────────────────────────
 
 /// A storage buffer holding `data` (padded to ≥16 bytes so a small/empty payload
 /// still creates a valid buffer).
@@ -479,64 +509,87 @@ fn storage_buffer(gpu: &GpuContext, label: &str, data: &[u8]) -> wgpu::Buffer {
     buf
 }
 
-impl VgeomGpu {
-    fn build(gpu: &GpuContext, mesh: &VgeomMesh) -> Self {
-        // Positions: VgeomVertex is 8 f32 (pos.xyz, normal.xyz, uv.xy), read as a
-        // flat `array<f32>` (8 per vertex) — sidesteps vec3 storage alignment.
-        let positions = storage_buffer(
-            gpu,
-            "vgeom-positions",
-            bytemuck::cast_slice::<_, u8>(&mesh.vertices),
-        );
+/// The four GPU buffers the [`inf_vgeom::VgeomStreamer`]'s pools live in.
+///
+/// One set for the **whole scene**, not one per asset: a page's four sections are
+/// suballocated out of these, and a meshlet id is resolved through the asset's
+/// remap table. Sizes track the allocators' capacities, which only ever grow (and
+/// only ever by appending, so a live block never moves).
+///
+/// A growth reallocates the buffer, and the streamer answers by re-staging every
+/// resident page in the same plan — deliberately, rather than copying the old
+/// buffer into the new one inside this frame's encoder: `queue.write_buffer` is
+/// ordered *before* an encoder's commands in a submit, so such a copy would
+/// clobber the very uploads it was meant to preserve.
+struct VgeomPoolBuffers {
+    vertices: wgpu::Buffer,
+    meshlets: wgpu::Buffer,
+    mlverts: wgpu::Buffer,
+    mltris: wgpu::Buffer,
+    /// Byte sizes, mirroring the allocators' capacities.
+    sizes: [u64; 4],
+}
 
-        let meshlets_gpu: Vec<MeshletGpu> = mesh
-            .meshlets
-            .iter()
-            .map(|m| MeshletGpu {
-                center: m.center,
-                radius: m.radius,
-                cone_axis: m.cone_axis,
-                cone_cutoff: m.cone_cutoff,
-                vertex_offset: m.vertex_offset,
-                triangle_offset: m.triangle_offset,
-                vertex_count: m.vertex_count,
-                triangle_count: m.triangle_count,
-                error: m.error,
-                parent_error: m.parent_error,
-                lod_level: m.lod_level as u32,
-                _pad: 0,
-            })
-            .collect();
-        let meshlets = storage_buffer(gpu, "vgeom-meshlets", bytemuck::cast_slice(&meshlets_gpu));
-        let meshlet_verts = storage_buffer(
-            gpu,
-            "vgeom-meshlet-verts",
-            bytemuck::cast_slice(&mesh.meshlet_vertices),
-        );
-
-        // Pack the meshlet triangle bytes (u8) into u32 words for GPU indexing.
-        let tris = &mesh.meshlet_triangles;
-        let mut packed = vec![0u32; tris.len().div_ceil(4).max(1)];
-        for (i, &b) in tris.iter().enumerate() {
-            packed[i / 4] |= (b as u32) << ((i % 4) * 8);
-        }
-        let meshlet_tris = storage_buffer(gpu, "vgeom-meshlet-tris", bytemuck::cast_slice(&packed));
-
-        let max_tri = mesh
-            .meshlets
-            .iter()
-            .map(|m| m.triangle_count)
-            .max()
-            .unwrap_or(0);
-
+impl VgeomPoolBuffers {
+    fn new(gpu: &GpuContext) -> Self {
+        let mk = |label| storage_buffer(gpu, label, &[]);
         Self {
-            positions,
-            meshlets,
-            meshlet_verts,
-            meshlet_tris,
-            meshlet_count: mesh.meshlets.len() as u32,
-            max_tri,
+            vertices: mk("vgeom-pool-vertices"),
+            meshlets: mk("vgeom-pool-meshlets"),
+            mlverts: mk("vgeom-pool-mlverts"),
+            mltris: mk("vgeom-pool-mltris"),
+            sizes: [0; 4],
         }
+    }
+
+    /// Resize any buffer whose allocator capacity outgrew it. Returns whether
+    /// anything was recreated (⇒ every bind group holding one is stale).
+    fn ensure(&mut self, gpu: &GpuContext, pools: &inf_vgeom::VgeomPools) -> bool {
+        let want = [
+            pools.vertices.capacity_bytes(),
+            pools.meshlets.capacity_bytes(),
+            pools.mlverts.capacity_bytes(),
+            pools.mltris.capacity_bytes(),
+        ];
+        if want == self.sizes {
+            return false;
+        }
+        let mk = |label, bytes: u64| {
+            gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: bytes.max(16).next_multiple_of(4),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        self.vertices = mk("vgeom-pool-vertices", want[0]);
+        self.meshlets = mk("vgeom-pool-meshlets", want[1]);
+        self.mlverts = mk("vgeom-pool-mlverts", want[2]);
+        self.mltris = mk("vgeom-pool-mltris", want[3]);
+        self.sizes = want;
+        true
+    }
+
+    /// Write one staged page into the pools.
+    fn write_page(&self, gpu: &GpuContext, up: &inf_vgeom::PageUpload) {
+        let b = &up.blocks;
+        let put = |buf: &wgpu::Buffer, byte_off: u64, data: &[u8]| {
+            if !data.is_empty() {
+                gpu.queue.write_buffer(buf, byte_off, data);
+            }
+        };
+        put(
+            &self.meshlets,
+            b.meshlets.offset * inf_vgeom::asset::MESHLET_REC_LEN as u64,
+            &up.meshlets,
+        );
+        put(&self.mlverts, b.mlverts.offset * 4, &up.mlverts);
+        put(&self.mltris, b.mltris.offset * 4, &up.mltris);
+        put(
+            &self.vertices,
+            b.vertices.offset * inf_vgeom::asset::VERTEX_REC_LEN as u64,
+            &up.vertices,
+        );
     }
 }
 
@@ -598,6 +651,12 @@ impl CullPipeline {
                     entry(6, storage(true)),
                     entry(7, storage(false)),
                     entry(8, storage(false)),
+                    // P18.2 streaming: the per-asset meshlet -> pool-slot remap.
+                    // EIGHT storage buffers in one compute stage — exactly the
+                    // portable floor the High tier already demands
+                    // (`caps::VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE`), with no
+                    // headroom left; a ninth needs a capability bump or a merge.
+                    entry(9, storage(true)),
                 ],
             });
         let layout = gpu
@@ -625,7 +684,8 @@ impl CullPipeline {
         &self,
         gpu: &GpuContext,
         params: &wgpu::Buffer,
-        geom: &VgeomGpu,
+        pools: &VgeomPoolBuffers,
+        remap: &wgpu::Buffer,
         instances: &wgpu::Buffer,
         visible: &wgpu::Buffer,
         draw_args: &wgpu::Buffer,
@@ -644,7 +704,7 @@ impl CullPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: geom.meshlets.as_entire_binding(),
+                    resource: pools.meshlets.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -674,6 +734,10 @@ impl CullPipeline {
                     binding: 8,
                     resource: stats.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: remap.as_entire_binding(),
+                },
             ],
         })
     }
@@ -702,14 +766,42 @@ fn dummy_hzb(gpu: &GpuContext) -> wgpu::TextureView {
 
 // ── Standalone cull readback (tests + player activation check) ───────────────
 
+/// What [`cull_visible_streamed`] read back: the GPU's visible set plus the
+/// residency it was culled under.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CullReadback {
+    /// Visible `(instance, asset-local meshlet)` pairs, **sorted** (the atomic
+    /// append order is nondeterministic; the set is not).
+    pub pairs: Vec<[u32; 2]>,
+    /// The finest resident LOD level the streamer settled on — the parameter
+    /// [`cpu_visible_set`] must be given to reproduce `pairs`.
+    pub floor_lod: u8,
+    /// Resident pages out of the asset's total.
+    pub resident_pages: usize,
+    pub total_pages: usize,
+}
+
+impl CullReadback {
+    /// Nothing to cull (an empty mesh, no instances, or an unreadable payload).
+    const EMPTY: Self = Self {
+        pairs: Vec::new(),
+        floor_lod: 0,
+        resident_pages: 0,
+        total_pages: 0,
+    };
+}
+
 /// Run **only** the cull compute for `instances` of `mesh` under `view`+`settings`
-/// and read back the visible `(instance, meshlet)` pairs, **sorted** (the atomic
-/// append order is nondeterministic; the set is not). Always runs
-/// [`CullMode::Single`] with occlusion forced off (there is no depth context) —
-/// so what it reads back is exactly the LOD+frustum+cone **base cut** the CPU
-/// reference mirrors, unchanged by P18.1. This is the exact machinery the render
-/// node uses, exposed for the CPU-vs-GPU parity gate and the player's activation
-/// test.
+/// and read back the visible `(instance, meshlet)` pairs, **sorted**. Always runs
+/// [`CullMode::Single`] with occlusion forced off (there is no depth context) — so
+/// what it reads back is exactly the residency-clamped LOD+frustum+cone **base
+/// cut** the CPU reference mirrors, unchanged by P18.1. This is the exact
+/// machinery the render node uses, exposed for the CPU-vs-GPU parity gate and the
+/// player's activation test.
+///
+/// The default budget is unlimited enough to hold any test fixture, so this is
+/// the *fully resident* cut; [`cull_visible_streamed`] is the same call with the
+/// budget exposed, which is how the parity gate reaches punched-out residency.
 pub fn cull_visible(
     gpu: &GpuContext,
     mesh: &VgeomMesh,
@@ -717,21 +809,80 @@ pub fn cull_visible(
     view: &RenderView,
     settings: &VgeomSettings,
 ) -> Vec<[u32; 2]> {
-    if mesh.meshlets.is_empty() || instances.is_empty() {
-        return Vec::new();
+    cull_visible_streamed(gpu, mesh, instances, view, settings).pairs
+}
+
+/// [`cull_visible`], reporting the residency it culled under.
+///
+/// The streaming budget comes from `settings.stream`, so a caller that shrinks it
+/// gets a genuinely partially-resident cut through the identical code path the
+/// render node uses — which is what makes the CPU/GPU parity gate meaningful under
+/// streaming rather than only at full residency.
+pub fn cull_visible_streamed(
+    gpu: &GpuContext,
+    mesh: &VgeomMesh,
+    instances: &[VgeomInstance],
+    view: &RenderView,
+    settings: &VgeomSettings,
+) -> CullReadback {
+    match inf_vgeom::VgeomSource::from_mesh(mesh) {
+        Ok(source) => cull_visible_source(gpu, &source, instances, view, settings),
+        Err(_) => CullReadback::EMPTY,
+    }
+}
+
+/// [`cull_visible_streamed`] over an already-indexed `.inf_vmesh` — the shape the
+/// runtime actually holds (the player's registry hands out
+/// [`VgeomSource`](inf_vgeom::VgeomSource)s, never decoded DAGs), so an activation
+/// check costs a page-in of what the camera wants rather than a full decode.
+pub fn cull_visible_source(
+    gpu: &GpuContext,
+    source: &inf_vgeom::VgeomSource,
+    instances: &[VgeomInstance],
+    view: &RenderView,
+    settings: &VgeomSettings,
+) -> CullReadback {
+    if source.meshlet_count() == 0 || instances.is_empty() {
+        return CullReadback::EMPTY;
     }
     let mut settings = *settings;
     settings.occlusion = false;
 
-    let geom = VgeomGpu::build(gpu, mesh);
+    let meshlet_count = source.meshlet_count();
+    let max_tri = source.max_tri();
+    let bounds = source.bounds();
     let origin = view.origin;
     let packed: Vec<VgeomInstanceGpu> = instances
         .iter()
-        .map(|i| pack_instance(&origin, view, mesh, i, settings.pixel_error))
+        .map(|i| pack_instance(&origin, view, bounds, i, settings.pixel_error))
         .collect();
+
+    // Page the mesh in through the real streamer, then read what it settled on.
+    let mut streamer = inf_vgeom::VgeomStreamer::new(settings.stream);
+    let threshold = packed
+        .iter()
+        .map(|p| p.threshold)
+        .fold(f32::INFINITY, f32::min);
+    let mut pools = VgeomPoolBuffers::new(gpu);
+    let plan = streamer.plan(&[inf_vgeom::VgeomWant {
+        asset: 0,
+        source,
+        threshold,
+    }]);
+    pools.ensure(gpu, streamer.pools());
+    for up in &plan.uploads {
+        pools.write_page(gpu, up);
+    }
+    let Some(res) = streamer.residency(0) else {
+        return CullReadback::EMPTY;
+    };
+    let floor_lod = res.floor_lod().min(u8::MAX as u32) as u8;
+    let resident_pages = res.resident_pages();
+    let remap = storage_buffer(gpu, "vgeom-remap", bytemuck::cast_slice(res.remap()));
+
     let inst_buf = storage_buffer(gpu, "vgeom-inst", bytemuck::cast_slice(&packed));
 
-    let total = packed.len() as u32 * geom.meshlet_count;
+    let total = packed.len() as u32 * meshlet_count;
     let visible = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("vgeom-visible"),
         size: (total as u64 * 8).max(16),
@@ -750,18 +901,19 @@ pub fn cull_visible(
     gpu.queue.write_buffer(
         &draw_args,
         0,
-        bytemuck::cast_slice(&[geom.max_tri * 3, 0u32, 0u32, 0u32]),
+        bytemuck::cast_slice(&[max_tri * 3, 0u32, 0u32, 0u32]),
     );
 
     let params = cull_params(
         view,
-        geom.meshlet_count,
+        meshlet_count,
         packed.len() as u32,
         &settings,
         [1.0, 1.0, 1.0, 0.0],
         CullMode::Single,
         false,
         false,
+        floor_lod as u32,
     );
     let params_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("vgeom-cull-params"),
@@ -785,12 +937,13 @@ pub fn cull_visible(
         "vgeom-vis-flags",
         &vec![0u8; (total as usize * 4).max(16)],
     );
-    let stats = storage_buffer(gpu, "vgeom-stats", &[0u8; 16]);
+    let stats = storage_buffer(gpu, "vgeom-stats", &[0u8; AUDIT_BYTES as usize]);
     let cull = CullPipeline::new(gpu);
     let bg = cull.bind_group(
         gpu,
         &params_buf,
-        &geom,
+        &pools,
+        &remap,
         &inst_buf,
         &visible,
         &draw_args,
@@ -833,11 +986,16 @@ pub fn cull_visible(
 
     let count = map_u32(gpu, &args_rb)[1] as usize;
     let vis = map_u32(gpu, &vis_rb);
-    let mut out: Vec<[u32; 2]> = (0..count.min(total as usize))
+    let mut pairs: Vec<[u32; 2]> = (0..count.min(total as usize))
         .map(|i| [vis[i * 2], vis[i * 2 + 1]])
         .collect();
-    out.sort_unstable();
-    out
+    pairs.sort_unstable();
+    CullReadback {
+        pairs,
+        floor_lod,
+        resident_pages,
+        total_pages: source.pages().len(),
+    }
 }
 
 /// Blocking map of a `MAP_READ` buffer into a `Vec<u32>`.
@@ -869,6 +1027,11 @@ struct TemporalKey {
     instance_count: u32,
     meshlet_count: u32,
     targets_generation: u64,
+    /// P18.2: the streamer's residency generation. A page arriving or leaving
+    /// changes which meshlets the base cut selects, so an early set inherited
+    /// across it names a different drawn set — the same class of staleness a
+    /// scene-version bump is, and handled the same conservative way.
+    residency_generation: u64,
 }
 
 struct AssetDraw {
@@ -894,6 +1057,12 @@ struct AssetDraw {
     params: wgpu::Buffer,
     params_late: wgpu::Buffer,
     debug_flags: wgpu::Buffer,
+    /// Asset-local meshlet id → slot in the shared meshlet pool, or
+    /// `inf_vgeom::NOT_RESIDENT` (P18.2). Read by BOTH the cull compute and the
+    /// raster; re-uploaded only when the streamer's residency generation moves.
+    remap: wgpu::Buffer,
+    remap_cap: u32,
+    remap_generation: u64,
     /// `Some` iff `vis_prev` holds a usable early set for this key.
     state: Option<TemporalKey>,
 }
@@ -934,8 +1103,42 @@ impl AssetDraw {
                 std::mem::size_of::<FlagsGpu>() as u64,
                 uniform,
             ),
+            remap: mk(
+                "vgeom-remap",
+                16,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            ),
+            remap_cap: 0,
+            // 0 is never a live residency stamp (they come from a process-global
+            // counter that starts at 1), so the first frame always uploads.
+            remap_generation: 0,
             state: None,
         }
+    }
+
+    /// Push `residency`'s remap table if it moved since the last upload. Returns
+    /// whether the buffer was recreated (⇒ bind groups holding it are stale).
+    fn sync_remap(&mut self, gpu: &GpuContext, res: &inf_vgeom::AssetResidency) -> bool {
+        let table = res.remap();
+        let mut rebuilt = false;
+        if table.len() as u32 > self.remap_cap {
+            let cap = (table.len() as u32).next_power_of_two().max(4);
+            self.remap = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vgeom-remap"),
+                size: cap as u64 * 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.remap_cap = cap;
+            self.remap_generation = 0;
+            rebuilt = true;
+        }
+        if self.remap_generation != res.generation() && !table.is_empty() {
+            gpu.queue
+                .write_buffer(&self.remap, 0, bytemuck::cast_slice(table));
+            self.remap_generation = res.generation();
+        }
+        rebuilt
     }
 
     /// Ensure the instance + visible + visibility buffers hold `instance_count`
@@ -995,7 +1198,21 @@ pub struct VgeomAudit {
     /// Pairs the late pass drew (newly disoccluded). `0` on a conservative frame,
     /// and always `0` in single-pass mode (there is no late pass).
     pub late_drawn: u32,
+    /// **P18.2 streaming**: base-cut pairs drawn *coarser* than the threshold
+    /// asked for, because the finer page is not resident — the
+    /// "requested-but-missing" signal.
+    ///
+    /// Audit **only**. Nothing reads it back to decide what to load: a GPU
+    /// readback is one frame latent, so letting it steer residency would make the
+    /// resident set a function of frame history and break the render-trace gates.
+    /// The streamer derives the identical want CPU-side from the same threshold
+    /// (see `inf_vgeom::stream`). `0` on a fully-resident frame.
+    pub clamped: u32,
 }
+
+/// Bytes of the audit counter buffer. Five live counters, rounded to eight slots
+/// so a sixth costs no layout change.
+const AUDIT_BYTES: u64 = 32;
 
 /// GPU-side storage for [`VgeomAudit`]: a storage quartet the cull compute
 /// atomically increments plus its mappable mirror. Owned by
@@ -1017,7 +1234,7 @@ impl VgeomAuditResources {
             enabled: false,
             stats: gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("vgeom-audit-stats"),
-                size: 16,
+                size: AUDIT_BYTES,
                 usage: wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_DST
                     | wgpu::BufferUsages::COPY_SRC,
@@ -1025,7 +1242,7 @@ impl VgeomAuditResources {
             }),
             readback: gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("vgeom-audit-readback"),
-                size: 16,
+                size: AUDIT_BYTES,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             }),
@@ -1041,9 +1258,31 @@ impl VgeomAuditResources {
             occluded: v[1],
             early_drawn: v[2],
             late_drawn: v[3],
+            clamped: v[4],
         }
     }
 }
+
+/// What the streamer did this frame, published for hosts and gates.
+///
+/// The counters live behind a `Mutex` the [`EngineRenderer`](crate::EngineRenderer)
+/// and the node share, because the node lives inside the render graph and a graph
+/// node is otherwise unreachable from outside. Written once per frame at the end
+/// of the node's run; read by `EngineRenderer::vgeom_stream_report`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VgeomStreamReport {
+    /// The streamer's counters (residency, backlog, budget clamping).
+    pub stats: inf_vgeom::VgeomStreamStats,
+    /// Per asset, the finest resident LOD level — the parameter
+    /// [`VgeomMesh::select_with_residency`](inf_vgeom::VgeomMesh::select_with_residency)
+    /// needs to reproduce what the GPU drew.
+    pub floor_lod: BTreeMap<u128, u32>,
+    /// Per asset, `(resident pages, total pages)`.
+    pub pages: BTreeMap<u128, (usize, usize)>,
+}
+
+/// The shared handle the renderer hands the node.
+pub type SharedStreamReport = std::sync::Arc<std::sync::Mutex<VgeomStreamReport>>;
 
 // ── The render node ──────────────────────────────────────────────────────────
 
@@ -1060,15 +1299,24 @@ pub struct VgeomNode {
     /// AO-only bind, so aerial perspective now reaches meshlet geometry too).
     env: super::EnvBinding,
     dummy_hzb: wgpu::TextureView,
-    geom_cache: BTreeMap<u128, VgeomGpu>,
+    /// The four shared, suballocated GPU pools every asset's pages live in.
+    pools: VgeomPoolBuffers,
+    /// The residency state machine that fills them (P18.2).
+    streamer: inf_vgeom::VgeomStreamer,
     draws: BTreeMap<u128, AssetDraw>,
     hzb: HzbChain,
     /// Last frame's view, for the [`is_camera_cut`] conservative trigger.
     prev_view: Option<RenderView>,
+    /// Published streaming state (shared with the renderer).
+    report: SharedStreamReport,
 }
 
 impl VgeomNode {
-    pub fn new(gpu: &GpuContext, view_bgl: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(
+        gpu: &GpuContext,
+        view_bgl: &wgpu::BindGroupLayout,
+        report: SharedStreamReport,
+    ) -> Self {
         let cull = CullPipeline::new(gpu);
 
         let shader = gpu
@@ -1169,6 +1417,15 @@ impl VgeomNode {
                         },
                         count: None,
                     },
+                    // P18.2: the meshlet -> pool-slot remap, read by the vertex
+                    // stage exactly as the cull compute reads it. Seven storage
+                    // buffers in the vertex stage, inside the portable eight.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: vs,
+                        ty: ro_storage,
+                        count: None,
+                    },
                 ],
             });
 
@@ -1232,12 +1489,19 @@ impl VgeomNode {
             lights_bg,
             env,
             dummy_hzb: dummy_hzb(gpu),
-            geom_cache: BTreeMap::new(),
+            pools: VgeomPoolBuffers::new(gpu),
+            streamer: inf_vgeom::VgeomStreamer::new(inf_vgeom::VgeomStreamBudget::default()),
             draws: BTreeMap::new(),
             hzb: HzbChain::new(gpu),
             prev_view: None,
+            report,
         }
     }
+
+    // The streamer's state is published through `report` each frame rather than
+    // exposed here: a node lives inside the render graph and is not reachable from
+    // outside it, so an accessor on `VgeomNode` would be dead API. See
+    // `EngineRenderer::vgeom_stream_report`.
 }
 
 impl RenderNode for VgeomNode {
@@ -1254,8 +1518,70 @@ impl RenderNode for VgeomNode {
             return;
         }
 
+        // Group instances by asset (deterministic asset order).
+        let mut by_asset: BTreeMap<u128, Vec<&VgeomInstance>> = BTreeMap::new();
+        for inst in &frame.scene.vgeom_instances {
+            by_asset.entry(inst.asset).or_default().push(inst);
+        }
+        let source_of: BTreeMap<u128, &inf_vgeom::VgeomSource> = frame
+            .scene
+            .vgeom_assets
+            .iter()
+            .map(|a| (a.id, a.source.as_ref()))
+            .collect();
+
+        // ── The streaming sync point (P18.2) ────────────────────────────────
+        //
+        // ONE call, before any culling, whose result is a pure function of
+        // (wants, residency, budget). The want per asset is the SMALLEST
+        // per-instance threshold — its closest/largest instance decides how much
+        // detail the asset needs — and it is the *same* scalar the cut compares
+        // meshlet errors against, so the two can never disagree about what
+        // "finer" means. Assets in the scene list with no instances are not
+        // wanted, so they are evicted rather than held.
+        self.streamer.set_budget(settings.stream);
+        let origin = frame.view.origin;
+        let wants: Vec<inf_vgeom::VgeomWant<'_>> = by_asset
+            .iter()
+            .filter_map(|(asset, insts)| {
+                let source = *source_of.get(asset)?;
+                let bounds = source.bounds();
+                let threshold = insts
+                    .iter()
+                    .map(|i| {
+                        pack_instance(&origin, frame.view, bounds, i, settings.pixel_error)
+                            .threshold
+                    })
+                    .fold(f32::INFINITY, f32::min);
+                Some(inf_vgeom::VgeomWant {
+                    asset: *asset,
+                    source,
+                    threshold,
+                })
+            })
+            .collect();
+        let plan = self.streamer.plan(&wants);
+        // A pool that grew was reallocated, so every bind group holding one is
+        // stale; the plan re-stages every resident page to refill it.
+        let pools_rebuilt = self.pools.ensure(gpu, self.streamer.pools());
+        for up in &plan.uploads {
+            self.pools.write_page(gpu, up);
+        }
+        for asset in &plan.dropped {
+            self.draws.remove(asset);
+        }
+        if let Ok(mut r) = self.report.lock() {
+            r.stats = *self.streamer.stats();
+            r.floor_lod.clear();
+            r.pages.clear();
+            for (id, res) in self.streamer.assets() {
+                r.floor_lod.insert(id, res.floor_lod());
+                r.pages.insert(id, (res.resident_pages(), res.page_count()));
+            }
+        }
+
         // Disjoint field borrows: the HZB build below needs `&mut self.hzb` while
-        // the asset loops hold `&self.geom_cache` / `&mut self.draws`.
+        // the asset loops hold `&self.pools` / `&mut self.draws`.
         let Self {
             cull,
             raster,
@@ -1264,36 +1590,18 @@ impl RenderNode for VgeomNode {
             lights_bg,
             env,
             dummy_hzb,
-            geom_cache,
+            pools,
+            streamer,
             draws,
             hzb: hzb_chain,
             prev_view,
+            report: _,
         } = self;
 
         // Lights (shared with the rigid pass).
         let lights = LightsUniform::from_scene(frame.scene, &frame.view.origin);
         gpu.queue
             .write_buffer(lights_buf, 0, bytemuck::bytes_of(&lights));
-
-        // Build/cache each referenced asset's geometry.
-        for asset in &frame.scene.vgeom_assets {
-            geom_cache
-                .entry(asset.id)
-                .or_insert_with(|| VgeomGpu::build(gpu, &asset.mesh));
-        }
-        // Look up the mesh (for the whole-mesh bound in threshold packing).
-        let mesh_of: BTreeMap<u128, &VgeomMesh> = frame
-            .scene
-            .vgeom_assets
-            .iter()
-            .map(|a| (a.id, a.mesh.as_ref()))
-            .collect();
-
-        // Group instances by asset (deterministic asset order).
-        let mut by_asset: BTreeMap<u128, Vec<&VgeomInstance>> = BTreeMap::new();
-        for inst in &frame.scene.vgeom_instances {
-            by_asset.entry(inst.asset).or_default().push(inst);
-        }
 
         let occlusion = settings.occlusion;
         let two_pass = occlusion && settings.two_pass;
@@ -1309,7 +1617,7 @@ impl RenderNode for VgeomNode {
             gpu.queue.write_buffer(
                 &frame.vgeom_audit.stats,
                 0,
-                bytemuck::cast_slice(&[0u32; 4]),
+                bytemuck::cast_slice(&[0u32; (AUDIT_BYTES / 4) as usize]),
             );
         }
 
@@ -1334,13 +1642,12 @@ impl RenderNode for VgeomNode {
         let debug = FlagsGpu {
             flags: [settings.debug_meshlets as u32, 0, 0, 0],
         };
-        let origin = frame.view.origin;
 
         // A vertex-pulled indirect draw of `visible`/`args` into the MSAA targets.
         // Both passes are identical apart from which pair of buffers they read.
         let raster_draw = |encoder: &mut wgpu::CommandEncoder,
                            label: &str,
-                           geom: &VgeomGpu,
+                           pools: &VgeomPoolBuffers,
                            draw: &AssetDraw,
                            visible: &wgpu::Buffer,
                            args: &wgpu::Buffer| {
@@ -1350,19 +1657,19 @@ impl RenderNode for VgeomNode {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: geom.positions.as_entire_binding(),
+                        resource: pools.vertices.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: geom.meshlets.as_entire_binding(),
+                        resource: pools.meshlets.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: geom.meshlet_verts.as_entire_binding(),
+                        resource: pools.mlverts.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: geom.meshlet_tris.as_entire_binding(),
+                        resource: pools.mltris.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -1375,6 +1682,10 @@ impl RenderNode for VgeomNode {
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: draw.debug_flags.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: draw.remap.as_entire_binding(),
                     },
                 ],
             });
@@ -1415,15 +1726,19 @@ impl RenderNode for VgeomNode {
         // gives the HZB below real vgeom depth. On a conservative frame the early
         // set is the WHOLE base cut, so this draw alone is the occlusion-off
         // result and pass 2 adds nothing (see the module docs).
-        let mut planned: Vec<(u128, bool)> = Vec::new();
+        // Per asset: (id, conservative, meshlet_count, floor_lod, residency generation).
+        let mut planned: Vec<(u128, bool, u32, u32, u64)> = Vec::new();
         for (asset_id, insts) in &by_asset {
-            let Some(geom) = geom_cache.get(asset_id) else {
+            let Some(source) = source_of.get(asset_id) else {
                 continue;
             };
-            let Some(mesh) = mesh_of.get(asset_id) else {
+            let Some(residency) = streamer.residency(*asset_id) else {
                 continue;
             };
-            if geom.meshlet_count == 0 || geom.max_tri == 0 {
+            let meshlet_count = source.meshlet_count();
+            let max_tri = source.max_tri();
+            let floor_lod = residency.floor_lod();
+            if meshlet_count == 0 || max_tri == 0 || residency.resident_pages() == 0 {
                 continue;
             }
             let instance_count = insts.len() as u32;
@@ -1433,7 +1748,14 @@ impl RenderNode for VgeomNode {
             // A grow reallocates the visible/visibility buffers, so every bind
             // group is rebuilt from `draw` below (they are per-frame) AND the
             // persisted early set is gone — hence the `state` reset.
-            if draw.ensure(gpu, instance_count, geom.meshlet_count) {
+            if draw.ensure(gpu, instance_count, meshlet_count) {
+                draw.state = None;
+            }
+            // Residency changes what the base cut selects, so an early set
+            // inherited across one is stale in exactly the way a scene-version
+            // bump is. `sync_remap` reporting a rebuild IS that signal — and a
+            // reallocated pool means every buffer the bind groups named is gone.
+            if draw.sync_remap(gpu, residency) || pools_rebuilt {
                 draw.state = None;
             }
             // Only the late dispatch publishes `vis_cur`, so a frame that skips it
@@ -1448,22 +1770,32 @@ impl RenderNode for VgeomNode {
             let key = TemporalKey {
                 scene_version: frame.scene.version,
                 instance_count,
-                meshlet_count: geom.meshlet_count,
+                meshlet_count,
                 targets_generation: frame.targets.generation,
+                residency_generation: residency.generation(),
             };
             let conservative = cut || draw.state != Some(key);
-            planned.push((*asset_id, conservative));
+            planned.push((
+                *asset_id,
+                conservative,
+                meshlet_count,
+                floor_lod,
+                key.residency_generation,
+            ));
 
             // Pack instances (per-frame; the LOD threshold tracks the camera).
+            let bounds = source.bounds();
             let packed: Vec<VgeomInstanceGpu> = insts
                 .iter()
-                .map(|i| pack_instance(&origin, frame.view, mesh, i, settings.pixel_error))
+                .map(|i| pack_instance(&origin, frame.view, bounds, i, settings.pixel_error))
                 .collect();
             gpu.queue
                 .write_buffer(&draw.instances, 0, bytemuck::cast_slice(&packed));
 
             // Reset draw args: vertex_count = max_tri*3, instance_count = 0.
-            let reset = [geom.max_tri * 3, 0u32, 0u32, 0u32];
+            // `max_tri` is the header's whole-mesh maximum, so the draw shape is a
+            // constant of the asset and does not move as pages come and go.
+            let reset = [max_tri * 3, 0u32, 0u32, 0u32];
             gpu.queue
                 .write_buffer(&draw.draw_args, 0, bytemuck::cast_slice(&reset));
             gpu.queue
@@ -1478,13 +1810,14 @@ impl RenderNode for VgeomNode {
             };
             let params = cull_params(
                 frame.view,
-                geom.meshlet_count,
+                meshlet_count,
                 instance_count,
                 settings,
                 hzb_dims,
                 mode,
                 conservative,
                 audit,
+                floor_lod,
             );
             gpu.queue
                 .write_buffer(&draw.params, 0, bytemuck::bytes_of(&params));
@@ -1498,7 +1831,8 @@ impl RenderNode for VgeomNode {
             let cull_bg = cull.bind_group(
                 gpu,
                 &draw.params,
-                geom,
+                pools,
+                &draw.remap,
                 &draw.instances,
                 &draw.visible,
                 &draw.draw_args,
@@ -1507,7 +1841,7 @@ impl RenderNode for VgeomNode {
                 &draw.vis_cur,
                 &frame.vgeom_audit.stats,
             );
-            let total = instance_count * geom.meshlet_count;
+            let total = instance_count * meshlet_count;
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("vgeom-cull-early"),
@@ -1520,7 +1854,7 @@ impl RenderNode for VgeomNode {
             raster_draw(
                 encoder,
                 "vgeom-raster-early",
-                geom,
+                pools,
                 draw,
                 &draw.visible,
                 &draw.draw_args,
@@ -1536,7 +1870,7 @@ impl RenderNode for VgeomNode {
                     0,
                     &frame.vgeom_audit.readback,
                     0,
-                    16,
+                    AUDIT_BYTES,
                 );
             }
             return;
@@ -1547,10 +1881,7 @@ impl RenderNode for VgeomNode {
         let hzb_view = hzb_chain.full_view().unwrap_or(&*dummy_hzb);
 
         // ── Pass 2: late cull (publish this frame's visibility) + late draw ──
-        for (asset_id, conservative) in planned {
-            let Some(geom) = geom_cache.get(&asset_id) else {
-                continue;
-            };
+        for (asset_id, conservative, meshlet_count, floor_lod, residency_generation) in planned {
             let Some(draw) = draws.get_mut(&asset_id) else {
                 continue;
             };
@@ -1560,20 +1891,22 @@ impl RenderNode for VgeomNode {
             let instance_count = insts.len() as u32;
             let params = cull_params(
                 frame.view,
-                geom.meshlet_count,
+                meshlet_count,
                 instance_count,
                 settings,
                 hzb_dims,
                 CullMode::Late,
                 conservative,
                 audit,
+                floor_lod,
             );
             gpu.queue
                 .write_buffer(&draw.params_late, 0, bytemuck::bytes_of(&params));
             let cull_bg = cull.bind_group(
                 gpu,
                 &draw.params_late,
-                geom,
+                pools,
+                &draw.remap,
                 &draw.instances,
                 &draw.visible_late,
                 &draw.draw_args_late,
@@ -1582,7 +1915,7 @@ impl RenderNode for VgeomNode {
                 &draw.vis_cur,
                 &frame.vgeom_audit.stats,
             );
-            let total = instance_count * geom.meshlet_count;
+            let total = instance_count * meshlet_count;
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("vgeom-cull-late"),
@@ -1600,7 +1933,7 @@ impl RenderNode for VgeomNode {
             raster_draw(
                 encoder,
                 "vgeom-raster-late",
-                geom,
+                pools,
                 draw,
                 &draw.visible_late,
                 &draw.draw_args_late,
@@ -1613,8 +1946,11 @@ impl RenderNode for VgeomNode {
             draw.state = Some(TemporalKey {
                 scene_version: frame.scene.version,
                 instance_count,
-                meshlet_count: geom.meshlet_count,
+                meshlet_count,
                 targets_generation: frame.targets.generation,
+                // The SAME value pass 1 keyed on, so a frame that publishes an
+                // early set cannot disagree with the frame that consumes it.
+                residency_generation,
             });
         }
 
@@ -1624,7 +1960,7 @@ impl RenderNode for VgeomNode {
                 0,
                 &frame.vgeom_audit.readback,
                 0,
-                16,
+                AUDIT_BYTES,
             );
         }
     }
@@ -1943,6 +2279,11 @@ mod tests {
     /// or report the occluded count as the draw count — both of which produce a
     /// plausible-looking frame. Pin both ends against the shader source. GPU-free,
     /// so it runs on every CI leg.
+    ///
+    /// The same argument covers `NOT_RESIDENT` (P18.2): it is the sentinel the
+    /// remap table and BOTH shaders must agree on, and a mismatch would silently
+    /// read meshlet slot 0 for every non-resident page — real geometry, at a
+    /// plausible-looking position, from the wrong LOD of the wrong asset.
     #[test]
     fn shader_constants_match_the_rust_side() {
         let src = include_str!("../shaders/vgeom_cull.wgsl");
@@ -1954,10 +2295,30 @@ mod tests {
             ("AUDIT_OCCLUDED", 1),
             ("AUDIT_EARLY", 2),
             ("AUDIT_LATE", 3),
+            ("AUDIT_CLAMPED", 4),
         ] {
             let want = format!("const {name}: u32 = {value}u;");
             assert!(src.contains(&want), "vgeom_cull.wgsl must declare `{want}`");
         }
+        assert_eq!(
+            inf_vgeom::NOT_RESIDENT,
+            u32::MAX,
+            "the remap sentinel is 0xFFFFFFFF on both sides"
+        );
+        let sentinel = "const NOT_RESIDENT: u32 = 0xFFFFFFFFu;";
+        assert!(
+            src.contains(sentinel),
+            "vgeom_cull.wgsl must declare `{sentinel}`"
+        );
+        // The raster resolves through the same table, so it needs the same value.
+        let raster = include_str!("../shaders/vgeom_mesh.wgsl");
+        assert!(
+            raster.contains(sentinel),
+            "vgeom_mesh.wgsl must declare `{sentinel}`"
+        );
+        // The audit buffer's slot count is a layout contract too.
+        assert_eq!(AUDIT_BYTES, 32);
+        assert!(src.contains("array<atomic<u32>, 8>"));
     }
 
     /// A pan is not a cut (otherwise the early set would reset every frame in a

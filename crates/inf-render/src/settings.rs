@@ -225,6 +225,17 @@ pub struct VgeomSettings {
     pub cone_cull: bool,
     /// Frustum-sphere culling in the cull compute.
     pub frustum_cull: bool,
+    /// Meshlet **streaming** budget (P18.2): the VRAM ceiling for the shared
+    /// meshlet pools, the per-frame load cap, and the eviction hysteresis.
+    ///
+    /// There is no enable flag, deliberately — streaming is the only path a
+    /// `.inf_vmesh` reaches the GPU by, exactly as `.inf_terrain` has only the
+    /// streamed path. What a host owns is *how much* it may hold resident. The
+    /// default is generous enough that every shipping sample is fully resident on
+    /// its first frame, which is what makes a streamed frame byte-identical to
+    /// the pre-P18.2 whole-upload frame (the goldens' equivalence gate); a smaller
+    /// budget degrades to coarser meshlets, never to a hole.
+    pub stream: inf_vgeom::VgeomStreamBudget,
 }
 
 impl Default for VgeomSettings {
@@ -237,6 +248,7 @@ impl Default for VgeomSettings {
             two_pass: true,
             cone_cull: true,
             frustum_cull: true,
+            stream: inf_vgeom::VgeomStreamBudget::default(),
         }
     }
 }

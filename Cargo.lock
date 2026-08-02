@@ -3414,6 +3414,7 @@ dependencies = [
 name = "inf-vgeom"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "bytemuck",
  "inf-asset",
  "inf-core",

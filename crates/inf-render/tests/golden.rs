@@ -22,11 +22,11 @@ use inf_render::gizmo::{self, GizmoAxis, GizmoMode};
 use inf_render::golden::{image_diff, within_tolerance};
 use inf_render::passes::vgeom::{cpu_visible_set, cull_flags, frustum_planes, lod_threshold};
 use inf_render::{
-    assemble_patches, cull_visible, detail_texel, expand_text, shape_texel, Ambient2D,
-    AtmosphereParams, AtmosphereQuality, BloomSettings, CloudParams, CloudQuality, CloudVolumes,
-    EngineRenderer, GiSettings, GpuContext, HAlign, HeadlessTarget, HeightFog, LightKind,
-    MeshInstance, PrebatchedRun, PrecipParams, PrecipQuality, PrimMesh, RenderChunk, RenderLight,
-    RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
+    assemble_patches, cull_visible, cull_visible_streamed, detail_texel, expand_text, shape_texel,
+    Ambient2D, AtmosphereParams, AtmosphereQuality, BloomSettings, CloudParams, CloudQuality,
+    CloudVolumes, EngineRenderer, GiSettings, GpuContext, HAlign, HeadlessTarget, HeightFog,
+    LightKind, MeshInstance, PrebatchedRun, PrecipParams, PrecipQuality, PrimMesh, RenderChunk,
+    RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
     RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings, SkinnedInstance, SkinnedMeshData,
     SkinnedVertex, SpriteInstance, SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey,
     TextParams, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode,
@@ -2088,10 +2088,7 @@ const VGEOM_ASSET: u128 = 0x1313_1b00_dead_beef;
 fn vgeom_scene(mesh: Arc<VgeomMesh>, scale: f32) -> RenderScene {
     let mut scene = RenderScene {
         grid_enabled: true,
-        vgeom_assets: vec![VgeomAsset {
-            id: VGEOM_ASSET,
-            mesh,
-        }],
+        vgeom_assets: vec![VgeomAsset::from_mesh(VGEOM_ASSET, &mesh).expect("index the vmesh")],
         ..Default::default()
     };
     scene.vgeom_instances.push(VgeomInstance::lit(
@@ -2229,11 +2226,24 @@ fn vgeom_cpu_gpu_cut_parity() {
         two_pass: false,
         pixel_error: 1.0,
         debug_meshlets: false,
+        ..VgeomSettings::default()
     };
 
-    let gpu_pairs = cull_visible(&gpu, &mesh, std::slice::from_ref(&inst), &view, &settings);
+    let readback =
+        cull_visible_streamed(&gpu, &mesh, std::slice::from_ref(&inst), &view, &settings);
+    // The streamer pages in what this camera can USE, which is a prefix strictly
+    // shorter than the whole asset — this instance's threshold cannot reach the
+    // finest pages. That is the interesting case, not a defect: the assertion
+    // below is that the clamped cut it produces is nevertheless IDENTICAL to the
+    // unclamped one.
+    assert!(
+        readback.resident_pages >= 1 && readback.resident_pages <= readback.total_pages,
+        "residency must be a prefix ({} of {})",
+        readback.resident_pages,
+        readback.total_pages
+    );
     // Single instance ⇒ instance index is always 0; extract the meshlet ids.
-    let gpu_meshlets: Vec<u32> = gpu_pairs.iter().map(|e| e[1]).collect();
+    let gpu_meshlets: Vec<u32> = readback.pairs.iter().map(|e| e[1]).collect();
 
     // CPU reference (same math as the shader).
     let origin = view.origin;
@@ -2262,12 +2272,38 @@ fn vgeom_cpu_gpu_cut_parity() {
         max_scale,
         &planes,
         cull_flags(&settings),
+        readback.floor_lod,
     );
 
     assert!(!cpu_meshlets.is_empty(), "reference cut is empty");
     assert_eq!(
         gpu_meshlets, cpu_meshlets,
         "GPU visible set must equal the CPU reference (frustum + LOD)"
+    );
+
+    // **The equivalence gate, at the cut.** The streamer paged in a strict prefix,
+    // yet the clamped cut it produced is byte-for-byte the cut the pre-P18.2
+    // whole-upload path produced. That is not luck: `ideal_page_count` grants
+    // exactly the pages whose `max_parent_error` still exceeds this instance's
+    // threshold, and a page below that bound holds only meshlets whose
+    // `parent_error <= t` — which the cut rejects anyway. So the pages streaming
+    // declines to load are precisely the ones the cut could never have selected,
+    // and clamping to the wanted floor is a no-op on the drawn set. This is why
+    // all 36 goldens stay byte-identical with streaming on.
+    let unclamped = cpu_visible_set(
+        &mesh,
+        model,
+        normal_mat,
+        eye,
+        t,
+        max_scale,
+        &planes,
+        cull_flags(&settings),
+        0,
+    );
+    assert_eq!(
+        cpu_meshlets, unclamped,
+        "the cut at the streamer's own wanted floor must equal the unclamped cut —          streaming may cost VRAM, never detail the camera asked for"
     );
 
     // And the CPU reference (frustum passes everything here) equals the offline

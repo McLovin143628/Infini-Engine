@@ -11,7 +11,7 @@ use glam::{DVec3, Mat4, Quat, Vec3};
 use crate::debug_draw::DebugDraw;
 use crate::primitives::PrimMesh;
 
-pub use inf_vgeom::VgeomMesh;
+pub use inf_vgeom::{VgeomMesh, VgeomSource};
 
 pub use inf_render_2d::{
     PrebatchedRun, RenderChunk, RenderTilemap, SpriteInstance, TextureHandle, TilemapParams,
@@ -89,18 +89,58 @@ impl MeshInstance {
 }
 
 /// A virtualized-geometry (meshlet DAG) asset referenced by one or more
-/// [`VgeomInstance`]s (P13.1b). The renderer uploads each distinct asset's
-/// meshlets/vertices into GPU storage buffers **once** (cached by [`id`]) and the
-/// cull compute expands every instance × meshlet pair. `id` is the cook-derived
-/// `.inf_vmesh` asset GUID (as a `u128`), so the host keys stable content.
+/// [`VgeomInstance`]s (P13.1b, **streamed since P18.2**).
+///
+/// The scene carries a [`VgeomSource`] — a *lazily indexed* `.inf_vmesh`, header
+/// and page directory only — rather than a decoded [`VgeomMesh`]. The renderer's
+/// [`VgeomStreamer`](inf_vgeom::VgeomStreamer) pages levels of it in and out of
+/// shared GPU pools against a byte budget, so a scene that references a hundred
+/// meshes costs a hundred *directory parses* up front, not a hundred full
+/// decodes, and VRAM tracks what the camera can actually see.
+///
+/// `id` is the cook-derived `.inf_vmesh` asset GUID (as a `u128`), so the host
+/// keys stable content and the streamer's residency survives across frames.
 ///
 /// [`id`]: VgeomAsset::id
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct VgeomAsset {
     /// Stable asset id (the derived `.inf_vmesh` GUID as a `u128`).
     pub id: u128,
-    /// The shared meshlet DAG (uploaded once, cached).
-    pub mesh: Arc<VgeomMesh>,
+    /// The paged `.inf_vmesh` this asset streams from (shared; one per asset).
+    pub source: Arc<VgeomSource>,
+}
+
+impl VgeomAsset {
+    /// Reference an already-indexed source.
+    pub fn new(id: u128, source: Arc<VgeomSource>) -> Self {
+        Self { id, source }
+    }
+
+    /// Lay an in-memory [`VgeomMesh`] out as a `.inf_vmesh` image and index it —
+    /// the door for tests, the editor's in-memory builds, and any host that has a
+    /// decoded DAG rather than a packed asset. Identical downstream to a cooked
+    /// pack: there is only one paged path.
+    pub fn from_mesh(id: u128, mesh: &VgeomMesh) -> Result<Self, String> {
+        Ok(Self {
+            id,
+            source: Arc::new(VgeomSource::from_mesh(mesh)?),
+        })
+    }
+
+    /// Whole-mesh bounding sphere (local space) — read from the header, so the
+    /// per-instance LOD projection never pages anything in.
+    pub fn bounds(&self) -> ([f32; 3], f32) {
+        self.source.bounds()
+    }
+}
+
+impl std::fmt::Debug for VgeomAsset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VgeomAsset")
+            .field("id", &format_args!("{:#034x}", self.id))
+            .field("source", &self.source)
+            .finish()
+    }
 }
 
 /// One placed instance of a [`VgeomAsset`] (P13.1b) — the meshlet-path twin of a

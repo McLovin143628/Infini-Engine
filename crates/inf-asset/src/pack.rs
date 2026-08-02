@@ -509,7 +509,13 @@ struct Align16([u8; BLOB_ALIGN as usize]);
 /// at the mercy of whatever base the allocator happened to hand out — and would
 /// fail in the browser player and nowhere else. Carrying the alignment in the
 /// buffer type makes the promise uniform across both backings.
-struct AlignedBytes {
+///
+/// **Public since P18.2**: every container that ships aligned sections and may be
+/// held *owned* rather than mapped — `.inf_vmesh`'s lifted-v1 and loose-file
+/// backings, `.inf_terrain`'s — needs the same carrier, and re-deriving it per
+/// crate is how one of them ends up with a bare `Vec<u8>` and a
+/// `bytemuck::cast_slice` that panics only in the browser.
+pub struct AlignedBytes {
     /// Storage, over-allocated to a whole number of 16-byte blocks.
     blocks: Vec<Align16>,
     /// The meaningful prefix length in bytes.
@@ -518,7 +524,7 @@ struct AlignedBytes {
 
 impl AlignedBytes {
     /// Copy `bytes` into a fresh 16-byte-aligned allocation.
-    fn copy_from(bytes: &[u8]) -> Self {
+    pub fn copy_from(bytes: &[u8]) -> Self {
         let mut blocks =
             vec![Align16([0u8; BLOB_ALIGN as usize]); bytes.len().div_ceil(BLOB_ALIGN as usize)];
         // SAFETY: `blocks` holds ceil(len/16)*16 >= bytes.len() initialized
@@ -538,14 +544,50 @@ impl AlignedBytes {
         }
     }
 
+    /// The bytes, at a 16-byte-aligned base address.
     #[inline]
-    fn as_slice(&self) -> &[u8] {
+    pub fn as_slice(&self) -> &[u8] {
         // SAFETY: the allocation covers ceil(len/16)*16 >= len initialized bytes
         // and lives as long as `self`; `Align16` is `[u8; 16]` underneath, so
         // reading it as bytes is well-defined. An empty `Vec` still yields the
         // type's dangling-but-aligned pointer, which is valid for a 0-length
         // slice.
         unsafe { std::slice::from_raw_parts(self.blocks.as_ptr().cast::<u8>(), self.len) }
+    }
+
+    /// Bytes held.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl std::ops::Deref for AlignedBytes {
+    type Target = [u8];
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl AsRef<[u8]> for AlignedBytes {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl std::fmt::Debug for AlignedBytes {
+    /// Summarizes; never dumps a payload that may be hundreds of megabytes.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AlignedBytes")
+            .field("len", &self.len)
+            .finish()
     }
 }
 

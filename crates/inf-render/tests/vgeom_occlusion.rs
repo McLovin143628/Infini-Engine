@@ -102,7 +102,7 @@ const ASSET: u128 = 0x1801_0000_0cc1_0000;
 fn occluder_scene(mesh: Arc<VgeomMesh>) -> RenderScene {
     let mut scene = RenderScene {
         grid_enabled: false,
-        vgeom_assets: vec![VgeomAsset { id: ASSET, mesh }],
+        vgeom_assets: vec![VgeomAsset::from_mesh(ASSET, &mesh).expect("index the vmesh")],
         ..Default::default()
     };
     let standing = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);

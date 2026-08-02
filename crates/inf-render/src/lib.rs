@@ -80,7 +80,13 @@ pub use settings::{
 // The GPU meshlet cull readback (P13.1b) — the CPU-vs-GPU parity gate + the
 // player's vgeom-activation check drive it. `VgeomAudit` + `is_camera_cut` are
 // the P18.1 two-pass occlusion instruments.
-pub use passes::vgeom::{cull_visible, is_camera_cut, VgeomAudit};
+// `cull_visible_streamed` is the same call with the residency it culled under, so
+// the parity gate can drive a PUNCHED-OUT resident set (P18.2) rather than only
+// the fully-paged case.
+pub use passes::vgeom::{
+    cull_visible, cull_visible_source, cull_visible_streamed, is_camera_cut, CullReadback,
+    VgeomAudit, VgeomStreamReport,
+};
 // The classic-LOD fallback selection (P13.4) — the CI-provable probe of what the
 // classic path draws when vgeom is off (the meshlet path's complement).
 pub use passes::classic_vgeom::{classic_lod_selection, ClassicSelection};

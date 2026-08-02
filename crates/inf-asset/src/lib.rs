@@ -41,10 +41,14 @@ pub use id::AssetId;
 pub use import_cache::{ImportCache, ImportKey};
 pub use kind::{importable_source_kind, AssetKind};
 pub use pack::{
-    PackEntry, PackReader, PackWriter, BLOB_ALIGN, PACK_FORMAT_VERSION, PACK_MAGIC,
+    AlignedBytes, PackEntry, PackReader, PackWriter, BLOB_ALIGN, PACK_FORMAT_VERSION, PACK_MAGIC,
     PACK_MIN_READ_VERSION,
 };
-pub use payload::{decode, encode, AssetPayload};
+// `bincode_config` is exported so a container format that carries a bincode
+// *section* beside its raw pages (`.inf_terrain`'s tile blobs, `.inf_vmesh`'s DAG
+// groups) encodes it with exactly the codec the framed path uses — one config,
+// one set of bytes, no second place to drift.
+pub use payload::{bincode_config, decode, encode, AssetPayload};
 pub use sidecar::{is_sidecar, sidecar_path, AssetSidecar, SIDECAR_SCHEMA_VERSION};
 #[cfg(not(target_arch = "wasm32"))]
 pub use watch::{AssetChange, AssetWatcher};

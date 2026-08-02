@@ -258,6 +258,8 @@ pub struct EngineRenderer {
     gi: GiResources,
     /// P18.1 occlusion-audit counters (see [`EngineRenderer::set_vgeom_audit`]).
     vgeom_audit: VgeomAuditResources,
+    /// P18.2 meshlet-streaming state, published by the vgeom node each frame.
+    vgeom_stream: passes::vgeom::SharedStreamReport,
     /// Shared atmosphere LUTs + uniform (P17.2). Unlike `shadow`/`gi` these are
     /// **recreated** when [`crate::atmosphere::AtmosphereQuality`] changes, which
     /// is why they carry a generation the env bind-group cache keys on.
@@ -330,7 +332,12 @@ impl EngineRenderer {
         // after the rigid mesh pass, into the same MSAA scene targets; a no-op
         // unless RenderSettings.vgeom is enabled and the scene carries vmesh
         // instances (so the classic path stays byte-identical).
-        graph.add(passes::vgeom::VgeomNode::new(gpu, &view_bgl));
+        let vgeom_stream = passes::vgeom::SharedStreamReport::default();
+        graph.add(passes::vgeom::VgeomNode::new(
+            gpu,
+            &view_bgl,
+            vgeom_stream.clone(),
+        ));
         // Classic discrete-LOD fallback (P13.4): renders the SAME vgeom content as
         // the meshlet path but through the ordinary PBR mesh pipeline, only when
         // RenderSettings.vgeom is DISABLED (the auto-tier picks the path). The exact
@@ -388,6 +395,7 @@ impl EngineRenderer {
             shadow: ShadowResources::new(gpu),
             gi: GiResources::new(gpu),
             vgeom_audit: VgeomAuditResources::new(gpu),
+            vgeom_stream,
             atmosphere,
             next_atmosphere_generation: 2,
         }
@@ -425,6 +433,19 @@ impl EngineRenderer {
             return VgeomAudit::default();
         }
         self.vgeom_audit.read(gpu)
+    }
+
+    /// What the P18.2 meshlet streamer did on the **last rendered frame**:
+    /// residency, backlog, budget clamping, and the per-asset residency floor.
+    ///
+    /// Free and always on — these are CPU counters the streamer already maintains,
+    /// unlike the GPU occlusion audit, which has to be enabled. Zeroed until the
+    /// vgeom node has run (vgeom off, or a scene with no meshlet content).
+    pub fn vgeom_stream_report(&self) -> passes::vgeom::VgeomStreamReport {
+        self.vgeom_stream
+            .lock()
+            .map(|r| r.clone())
+            .unwrap_or_default()
     }
 
     /// The shared atmosphere resources (P17.2). Exposed for the LUT-determinism

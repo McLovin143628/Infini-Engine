@@ -45,15 +45,15 @@ use crate::scene::{MeshInstance, VgeomAsset, VgeomInstance};
 fn instance_threshold(
     origin: &FloatingOrigin,
     view: &RenderView,
-    mesh: &VgeomMesh,
+    bounds: ([f32; 3], f32),
     inst: &VgeomInstance,
     pixel_error: f32,
 ) -> f32 {
     let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
     let max_scale = inst.scale.abs().max_element().max(1e-6);
     let eye = view.eye_local();
-    let center_world = model.transform_point3(Vec3::from(mesh.center));
-    let radius_world = mesh.radius * max_scale;
+    let center_world = model.transform_point3(Vec3::from(bounds.0));
+    let radius_world = bounds.1 * max_scale;
     lod_threshold(
         eye,
         center_world,
@@ -106,6 +106,11 @@ pub struct ClassicSelection {
     pub drawn_instances: u32,
 }
 
+/// One asset's cheap classic-pick data: whole-mesh bounds (for the screen-error
+/// projection), the per-level errors finest-first, and the per-level triangle
+/// counts.
+type ClassicPick = (([f32; 3], f32), Vec<f32>, Vec<u64>);
+
 /// Compute the [`ClassicSelection`] for `instances` of `assets` under `view`,
 /// targeting `pixel_error` px. Deterministic — a pure function of the inputs.
 pub fn classic_lod_selection(
@@ -114,14 +119,23 @@ pub fn classic_lod_selection(
     view: &RenderView,
     pixel_error: f32,
 ) -> ClassicSelection {
-    // Per-asset cheap pick data: (errors finest-first, per-level triangle counts).
-    let per_asset: BTreeMap<u128, (Vec<f32>, Vec<u64>)> = assets
+    // Per-asset cheap pick data: (bounds, errors finest-first, per-level triangle
+    // counts). The classic fallback is the ONE consumer that genuinely needs the
+    // whole DAG — it builds a self-contained index buffer per level — so this is
+    // where a `.inf_vmesh` is materialized out of its paged container rather than
+    // streamed. An asset whose payload cannot be read is skipped, exactly as a
+    // missing one is.
+    let per_asset: BTreeMap<u128, ClassicPick> = assets
         .iter()
-        .map(|a| {
-            let errors = a.mesh.classic_lod_errors();
-            let lods = a.mesh.classic_lods();
-            let tris: Vec<u64> = lods.iter().map(|l| l.triangle_count() as u64).collect();
-            (a.id, (errors, tris))
+        .filter_map(|a| {
+            let mesh = a.source.to_mesh().ok()?;
+            let errors = mesh.classic_lod_errors();
+            let tris: Vec<u64> = mesh
+                .classic_lods()
+                .iter()
+                .map(|l| l.triangle_count() as u64)
+                .collect();
+            Some((a.id, (a.bounds(), errors, tris)))
         })
         .collect();
 
@@ -132,7 +146,7 @@ pub fn classic_lod_selection(
         drawn_instances: 0,
     };
     for inst in instances {
-        let Some((errors, tris)) = per_asset.get(&inst.asset) else {
+        let Some((bounds, errors, tris)) = per_asset.get(&inst.asset) else {
             out.picks.push(None);
             continue;
         };
@@ -140,14 +154,7 @@ pub fn classic_lod_selection(
             out.picks.push(None);
             continue;
         }
-        // Look up the mesh for the projection (bounds).
-        let mesh = assets
-            .iter()
-            .find(|a| a.id == inst.asset)
-            .map(|a| a.mesh.as_ref());
-        let threshold = mesh
-            .map(|m| instance_threshold(&origin, view, m, inst, pixel_error))
-            .unwrap_or(0.0);
+        let threshold = instance_threshold(&origin, view, *bounds, inst, pixel_error);
         let level = pick_classic_level(errors, threshold);
         out.drawn_triangles += tris.get(level).copied().unwrap_or(0);
         out.drawn_instances += 1;
@@ -365,17 +372,28 @@ impl RenderNode for ClassicVgeomNode {
             return;
         }
 
-        // Cache each referenced asset's classic geometry.
+        // Cache each referenced asset's classic geometry. Materializing the whole
+        // DAG out of the paged container is this path's price for being a
+        // discrete-LOD fallback; it happens once per asset, never per frame.
         for asset in &frame.scene.vgeom_assets {
-            self.geom
-                .entry(asset.id)
-                .or_insert_with(|| ClassicGpu::build(gpu, &asset.mesh));
+            if self.geom.contains_key(&asset.id) {
+                continue;
+            }
+            match asset.source.to_mesh() {
+                Ok(mesh) => {
+                    self.geom.insert(asset.id, ClassicGpu::build(gpu, &mesh));
+                }
+                Err(e) => tracing::warn!(
+                    "inf-render: classic-vgeom could not materialize vmesh {:#034x}: {e}",
+                    asset.id
+                ),
+            }
         }
-        let mesh_of: BTreeMap<u128, &VgeomMesh> = frame
+        let bounds_of: BTreeMap<u128, ([f32; 3], f32)> = frame
             .scene
             .vgeom_assets
             .iter()
-            .map(|a| (a.id, a.mesh.as_ref()))
+            .map(|a| (a.id, a.bounds()))
             .collect();
 
         // Lights (shared model with the rigid mesh pass).
@@ -395,10 +413,10 @@ impl RenderNode for ClassicVgeomNode {
             if geom.errors.is_empty() {
                 continue;
             }
-            let Some(mesh) = mesh_of.get(&inst.asset) else {
+            let Some(bounds) = bounds_of.get(&inst.asset) else {
                 continue;
             };
-            let threshold = instance_threshold(&origin, frame.view, mesh, inst, pixel_error);
+            let threshold = instance_threshold(&origin, frame.view, *bounds, inst, pixel_error);
             let level = pick_classic_level(&geom.errors, threshold);
             grouped
                 .entry((inst.asset, level))

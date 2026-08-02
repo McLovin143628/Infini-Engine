@@ -5,7 +5,10 @@
 // meshlet) pairs and an indirect draw of `visible_count` instances, each drawing
 // `MAX_TRIS*3` indices from a shared `0,1,2,…` index buffer. This shader pulls
 // everything from storage:
-//   * @builtin(instance_index) → visible[i] → (global instance, meshlet id)
+//   * @builtin(instance_index) → visible[i] → (global instance, asset-local
+//     meshlet id) → v_remap[id] → the meshlet's slot in the SHARED pool (P18.2:
+//     meshlet/vertex/micro-index data is suballocated across all assets, so every
+//     read goes through the per-asset remap table the cull compute also reads)
 //   * @builtin(vertex_index)   → triangle = vidx/3, corner = vidx%3
 //   * unused triangles (corner beyond the meshlet's triangle_count) collapse to a
 //     zero-area (degenerate) triangle off-screen — the standard fixed-index-count
@@ -53,6 +56,10 @@ struct Instance {
 @group(3) @binding(3) var<storage, read> v_meshlet_tris: array<u32>; // packed u8
 @group(3) @binding(4) var<storage, read> v_instances: array<Instance>;
 @group(3) @binding(5) var<storage, read> v_visible: array<vec2<u32>>;
+// Asset-local meshlet id -> slot in the shared meshlet pool (P18.2).
+@group(3) @binding(7) var<storage, read> v_remap: array<u32>;
+
+const NOT_RESIDENT: u32 = 0xFFFFFFFFu;
 
 // Debug flag pushed via the view uniform's spare slot is awkward; instead we bake
 // a specialization through a small uniform. Reuse mode: a dedicated tiny uniform.
@@ -84,10 +91,20 @@ fn vs(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> V
     var out: VsOut;
     let pair = v_visible[iidx];
     let inst = v_instances[pair.x];
-    let m = v_meshlets[pair.y];
+    let slot = v_remap[pair.y];
 
     let tri = vidx / 3u;
     let corner = vidx % 3u;
+
+    // The cull compute only ever appends resident pairs, so this cannot fire —
+    // but a stale visible list must degenerate rather than read a freed pool slot.
+    if (slot == NOT_RESIDENT) {
+        out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        out.color = vec4<f32>(0.0);
+        out.pbr = vec4<f32>(0.0);
+        return out;
+    }
+    let m = v_meshlets[slot];
 
     // Degenerate padding for unused triangles: emit a fixed off-screen point (all
     // three corners of the unused triangle map here ⇒ zero area ⇒ no fragments).

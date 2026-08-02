@@ -37,7 +37,10 @@
 //! 6. **Derive virtualized geometry** (P13.1) — for every `.inf_mesh` in the
 //!    closure whose triangle count is at least
 //!    [`VgeomCookOptions::min_triangles`], build a meshlet LOD DAG
-//!    ([`inf_vgeom::build_vgeom`]) and pack it beside the mesh as an `.inf_vmesh`
+//!    ([`inf_vgeom::build_vgeom`]), lay it out as the v2 **paged** `.inf_vmesh`
+//!    image ([`inf_vgeom::build_vgeom_asset`] — a raw image, never
+//!    `inf_asset::encode`, so a runtime can slice a meshlet page straight out of
+//!    the mmap'd pack) and pack it beside the mesh as an `.inf_vmesh`
 //!    ([`AssetKind::MeshletMesh`]). The source `.inf_mesh` stays authoring-clean;
 //!    the render-optimized form is *derived* at cook (roadmap P13.1). The derived
 //!    asset's GUID is a deterministic function of the mesh GUID
@@ -688,10 +691,17 @@ fn derive_vmesh(guid: AssetId, raw: &[u8], min_triangles: usize) -> Result<Optio
         &indices,
         inf_vgeom::BuildParams::default(),
     );
-    let bytes = inf_asset::encode(&vgeom).map_err(|e| CookError::Mesh {
-        guid,
-        message: e.to_string(),
-    })?;
+    // P18.2: the packed payload is the **v2 paged image**, not `inf_asset::encode`
+    // output. A bincode length prefix would shift every section off its 16-byte
+    // boundary and defeat the whole layout — the same rule, and the same reason,
+    // as `.inf_terrain`'s raw image (see `inf_vgeom::asset`). The image is a pure
+    // function of the DAG, so the cook stays byte-identical run to run.
+    let bytes = inf_vgeom::build_vgeom_asset(&vgeom)
+        .map_err(|e| CookError::Mesh {
+            guid,
+            message: e.to_string(),
+        })?
+        .into_bytes();
     Ok(Some(bytes))
 }
 

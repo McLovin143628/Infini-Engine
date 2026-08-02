@@ -15,6 +15,10 @@
 //!   occlusion ON — renders **pixel-identical** to the occlusion-off frame while
 //!   the audit counters show a nonzero proven-occluded set. Occlusion is
 //!   subtractive at flagship scale, not just in a unit fixture.
+//! * **(b3)** (P18.2) the same pack **streamed under a hard VRAM budget**: the
+//!   meshlet pools hold a fraction of the asset, the frame is still deterministic
+//!   pixel-for-pixel across runs, the cut is coarser but covers the same ground
+//!   (never a hole), and the residency trace is reproducible.
 //! * **(c)** the SAME cooked pack with vgeom OFF renders through the classic
 //!   discrete-LOD fallback (it activates + draws; a far camera picks a coarser
 //!   level than a near one).
@@ -38,8 +42,9 @@ use inf_player::vmesh::{derived_vmesh_id, VmeshRegistry};
 use inf_project::ProjectManifest;
 use inf_render::{
     caps::{choose_tier, AdapterCaps, RenderTier},
-    classic_lod_selection, cull_visible, EngineRenderer, GpuContext, HeadlessTarget, LightKind,
-    RenderLight, RenderScene, RenderSettings, RenderView, VgeomAsset, VgeomInstance, VgeomSettings,
+    classic_lod_selection, cull_visible_source, EngineRenderer, GpuContext, HeadlessTarget,
+    LightKind, RenderLight, RenderScene, RenderSettings, RenderView, VgeomAsset, VgeomInstance,
+    VgeomSettings,
 };
 
 fn workspace_root() -> PathBuf {
@@ -76,11 +81,11 @@ fn scene_from_pack(pack_dir: &Path) -> (VgeomAsset, Vec<VgeomInstance>) {
         // The registry is loaded from the same pack the level source wraps.
         let reader = inf_asset::PackReader::open(&pack_dir.join(inf_player::level::PACK_FILE))
             .expect("open pack for registry");
-        VmeshRegistry::from_pack(&reader).expect("vmesh registry")
+        VmeshRegistry::from_pack(std::sync::Arc::new(reader)).expect("vmesh registry")
     };
     assert!(!reader_reg.is_empty(), "cook derived at least one vmesh");
 
-    let (asset_id, mesh_arc) = reader_reg
+    let (asset_id, vmesh_source) = reader_reg
         .pick(VGEOM_DEMO_MESH_GUID, true)
         .expect("the derived vmesh for the dense mesh is present in the pack");
     assert_eq!(
@@ -88,10 +93,7 @@ fn scene_from_pack(pack_dir: &Path) -> (VgeomAsset, Vec<VgeomInstance>) {
         derived_vmesh_id(VGEOM_DEMO_MESH_GUID).as_u128(),
         "vmesh keyed by the cook-derived id"
     );
-    let asset = VgeomAsset {
-        id: asset_id,
-        mesh: mesh_arc,
-    };
+    let asset = VgeomAsset::new(asset_id, vmesh_source);
 
     let level = inf_scene::RuntimeLevel::decode(&source.level_bytes().unwrap()).expect("decode");
     let mut instances = Vec::new();
@@ -163,7 +165,10 @@ fn gate_b_cooked_vgeom_on_streams_and_culls() {
     let (asset, instances) = scene_from_pack(&pack);
 
     // Source triangles: the vmesh's finest (LOD-0) triangle count × instances.
-    let lod0_tris = asset.mesh.classic_lods()[0].triangle_count() as u64;
+    // The classic-LOD view is the one thing that genuinely needs the whole DAG, so
+    // this materializes it once — the streamed render path never does.
+    let full = asset.source.to_mesh().expect("materialize the vmesh");
+    let lod0_tris = full.classic_lods()[0].triangle_count() as u64;
     let total_source = lod0_tris * instances.len() as u64;
     assert_eq!(instances.len(), VGEOM_DEMO_GRID * VGEOM_DEMO_GRID);
     assert!(
@@ -188,10 +193,10 @@ fn gate_b_cooked_vgeom_on_streams_and_culls() {
         enabled: true,
         ..VgeomSettings::default()
     };
-    let total_pairs = asset.mesh.meshlet_count() as u64 * instances.len() as u64;
+    let total_pairs = asset.source.meshlet_count() as usize as u64 * instances.len() as u64;
 
-    let vis1 = cull_visible(&gpu, &asset.mesh, &instances, &view, &settings);
-    let vis2 = cull_visible(&gpu, &asset.mesh, &instances, &view, &settings);
+    let vis1 = cull_visible_source(&gpu, &asset.source, &instances, &view, &settings).pairs;
+    let vis2 = cull_visible_source(&gpu, &asset.source, &instances, &view, &settings).pairs;
     assert_eq!(
         vis1, vis2,
         "the visible meshlet SET is deterministic across runs"
@@ -232,7 +237,7 @@ fn gate_b2_occlusion_on_matches_occlusion_off_at_10m_triangles() {
     let tmp = tempfile::tempdir().unwrap();
     let pack = cook_vgeom_demo(tmp.path());
     let (asset, instances) = scene_from_pack(&pack);
-    let total_pairs = asset.mesh.meshlet_count() as u64 * instances.len() as u64;
+    let total_pairs = asset.source.meshlet_count() as usize as u64 * instances.len() as u64;
 
     let mut scene = RenderScene {
         vgeom_assets: vec![asset],
@@ -312,6 +317,172 @@ fn gate_b2_occlusion_on_matches_occlusion_off_at_10m_triangles() {
          ({diff} of {} bytes differ)",
         reference.len()
     );
+}
+
+// ── GATE (b3): the same 10M+ pack STREAMED under a hard VRAM budget ──────────
+
+/// The flagship scene with **meshlet streaming forced into partial residency**
+/// (P18.2): the pools are given a fraction of what the asset needs, so the
+/// streamer must page a prefix and clamp the cut to it.
+///
+/// Three things have to hold at once, and each is a separate way this feature
+/// could be wrong:
+///
+/// 1. **The budget is a hard bound.** Resident bytes stay under the ceiling, and
+///    the streamer says so (`budget_clamped`). A soft budget is not a budget.
+/// 2. **Never a hole.** The clamped frame is *not* pixel-identical to the
+///    fully-wanted one — the clamp genuinely coarsened the geometry, so the test
+///    is not vacuous — yet it still paints essentially the same ground. A missing
+///    page must read as softer detail, never as a gap. Page 0 (every root of the
+///    DAG) is what guarantees that, and it is never evicted.
+/// 3. **Determinism survives it.** Two fresh renderers driven through the same
+///    frame sequence produce byte-identical images *and* an identical residency
+///    trace. Streaming is where a renderer usually stops being reproducible —
+///    loads land when IO says so — and this pins that ours does not, because the
+///    resident set is a pure function of (wants, budget) at the sync point rather
+///    than of what happened to arrive.
+#[test]
+fn gate_b3_streamed_under_budget_is_deterministic_and_hole_free() {
+    let Ok(gpu) = GpuContext::headless() else {
+        eprintln!("SKIP gate (b3): no adapter");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let pack = cook_vgeom_demo(tmp.path());
+    let (asset, instances) = scene_from_pack(&pack);
+    let asset_id = asset.id;
+    let full_bytes = asset.source.total_resident_bytes();
+    let root_bytes = asset.source.pages()[0].resident_bytes();
+    let pages = asset.source.pages().len();
+    assert!(pages >= 3, "the flagship asset must have pages to withhold");
+
+    let mut scene = RenderScene {
+        vgeom_assets: vec![asset],
+        vgeom_instances: instances,
+        ..Default::default()
+    };
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.97, 0.9],
+        intensity: 3.0,
+        direction: Vec3::new(0.35, 0.75, 0.55).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    let view = ground_camera();
+    let (w, h) = (view.width, view.height);
+
+    let settings = |budget: u64| RenderSettings {
+        vgeom: VgeomSettings {
+            enabled: true,
+            stream: inf_vgeom::VgeomStreamBudget {
+                budget_bytes: budget,
+                ..inf_vgeom::VgeomStreamBudget::default()
+            },
+            ..VgeomSettings::default()
+        },
+        ..RenderSettings::default()
+    };
+
+    // Render `frames` frames on ONE fresh renderer, returning the last image and
+    // the streaming report it published.
+    let shot = |budget: u64, frames: usize| {
+        let target = HeadlessTarget::new(&gpu, w, h);
+        let mut r = EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+        r.set_settings(settings(budget));
+        let mut img = Vec::new();
+        for _ in 0..frames {
+            r.render(&gpu, &scene, &view, &target.view, (w, h));
+            img = target.read_rgba(&gpu).expect("readback");
+        }
+        (img, r.vgeom_stream_report())
+    };
+
+    // ── the fully-wanted reference: the budget never bites ──
+    let (reference, full_report) = shot(inf_vgeom::DEFAULT_VGEOM_BUDGET_BYTES, 1);
+    let (full_resident, total_pages) = full_report.pages[&asset_id];
+    assert!(
+        !full_report.stats.budget_clamped,
+        "the reference must be unclamped"
+    );
+    let covered = |img: &[u8]| img.chunks(4).filter(|p| p[0] > 24 || p[1] > 24).count();
+    let reference_px = covered(&reference);
+    assert!(
+        reference_px > 2_000,
+        "the 10M-triangle ground view must paint real geometry ({reference_px} px)"
+    );
+
+    // ── the clamped run: a budget that cannot hold what the camera wants ──
+    //
+    // Sized off what the UNCLAMPED run actually HELD, not off the asset's full
+    // size. The streamer already declines the pages this camera cannot use, so a
+    // fraction of the whole asset can still cover the whole want and clamp
+    // nothing — which is the streaming-costs-no-detail theorem doing its job, and
+    // would quietly make this test vacuous. Half the wanted bytes is guaranteed to
+    // bite; the `max` keeps it above the root page, which must never be denied.
+    let budget = (full_report.stats.resident_bytes / 2).max(root_bytes);
+    let (clamped, report) = shot(budget, 1);
+    let (resident, _) = report.pages[&asset_id];
+    eprintln!(
+        "gate (b3): {resident} of {total_pages} pages resident under a {budget} B budget \
+         (unclamped holds {full_resident} pages / {} B of a {full_bytes} B asset); {} \
+         | floor_lod {}",
+        full_report.stats.resident_bytes,
+        report.stats.summary(),
+        report.floor_lod[&asset_id],
+    );
+
+    // 1. the budget is a HARD bound.
+    assert!(resident >= 1, "the root page is never denied");
+    assert!(
+        resident < full_resident,
+        "the budget must actually withhold pages ({resident} vs {full_resident})"
+    );
+    assert!(
+        report.stats.resident_bytes <= budget,
+        "resident bytes {} exceed the {budget}-byte ceiling",
+        report.stats.resident_bytes
+    );
+    assert!(report.stats.budget_clamped, "the clamp must be reported");
+    assert!(
+        report.floor_lod[&asset_id] > full_report.floor_lod[&asset_id],
+        "a shorter residency prefix must raise the cut's floor"
+    );
+
+    // 2. never a hole: coarser, but the same ground.
+    let clamped_px = covered(&clamped);
+    assert_ne!(
+        clamped, reference,
+        "a clamped frame that is byte-identical means the clamp did nothing"
+    );
+    let ratio = clamped_px as f64 / reference_px as f64;
+    assert!(
+        ratio > 0.97,
+        "a coarser cut may move silhouettes, never open a gap: covered {clamped_px} \
+         of {reference_px} px (ratio {ratio:.4})"
+    );
+
+    // 3. determinism: two fresh renderers, same frames, identical everything.
+    let (again, report_again) = shot(budget, 1);
+    assert_eq!(clamped, again, "a streamed frame must be reproducible");
+    assert_eq!(
+        report.pages, report_again.pages,
+        "the resident-set trace must be reproducible"
+    );
+    assert_eq!(report.floor_lod, report_again.floor_lod);
+    assert_eq!(report.stats, report_again.stats);
+
+    // ...and across a multi-frame convergence, where the streamer has state.
+    let (conv_a, rep_a) = shot(budget, 5);
+    let (conv_b, rep_b) = shot(budget, 5);
+    assert_eq!(
+        conv_a, conv_b,
+        "a converged streamed frame must be reproducible"
+    );
+    assert_eq!(rep_a.pages, rep_b.pages);
+    assert_eq!(rep_a.stats, rep_b.stats);
 }
 
 // ── GATE (c): SAME pack, vgeom OFF — classic discrete-LOD fallback ───────────

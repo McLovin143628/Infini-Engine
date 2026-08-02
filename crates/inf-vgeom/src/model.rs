@@ -42,13 +42,24 @@
 //! the selected surface stays watertight (crack-free, hole-free) at every
 //! threshold.
 //!
-//! # Streaming shape (next wave)
+//! # Streaming shape (P18.2 — landed)
 //!
 //! Meshlets are laid out **level-major, coarsest first** in [`VgeomMesh::meshlets`]
-//! (and [`VgeomMesh::levels`] lists the ranges coarse→fine). A future range-request
-//! streamer can therefore load the coarse roots first and refine by appending
-//! finer levels — a monotone forward read through the payload. Actual paging is
-//! P13.1 deliverable 2 (next wave); this module only fixes the *order*.
+//! (and [`VgeomMesh::levels`] lists the ranges coarse→fine). This module fixes the
+//! *order*; [`crate::asset`] turns it into byte ranges (a paged `.inf_vmesh`
+//! container sliced straight out of an mmap'd pack) and [`crate::stream`] decides
+//! which pages are in VRAM.
+//!
+//! Two rules of that design reach back into this module:
+//!
+//! * the paging unit is a **page**, not a LOD level, because roots live at many
+//!   levels (a group that fails to simplify leaves its members roots wherever
+//!   they are). Page 0 is every root and is never evicted, which is what makes
+//!   "never a hole" structural — see [`crate::asset`];
+//! * the cut clamps to residency through
+//!   [`VgeomMesh::select_with_residency`] / [`Meshlet::selected_at_clamped`],
+//!   which reduce to [`VgeomMesh::select`] / [`Meshlet::selected_at`] exactly at
+//!   full residency.
 
 use bytemuck::{Pod, Zeroable};
 use inf_asset::{AssetKind, AssetPayload};
@@ -130,6 +141,42 @@ impl Meshlet {
     /// `error ≤ threshold < parent_error`.
     pub fn selected_at(&self, threshold: f32) -> bool {
         self.error <= threshold && threshold < self.parent_error
+    }
+
+    /// Whether this meshlet's data is **resident** when the streamer's finest
+    /// resident LOD level is `floor_lod` (P18.2).
+    ///
+    /// Residency is a prefix of the `.inf_vmesh` page order: page 0 is every
+    /// *root*, from every level, and is never evicted; page `p ≥ 1` is the
+    /// non-roots at one level, coarse to fine. So a meshlet is resident iff it is
+    /// a root **or** sits at or above the floor. See
+    /// [`crate::asset`] for why the paging unit cannot be the LOD level alone.
+    #[inline]
+    pub fn resident_at(&self, floor_lod: u8) -> bool {
+        self.is_root() || self.lod_level >= floor_lod
+    }
+
+    /// The cut test **clamped to residency** (P18.2): the same rule as
+    /// [`selected_at`](Self::selected_at), except a meshlet at or below the
+    /// residency floor has its error treated as **0** — so it covers the whole
+    /// interval below its parent's error instead of yielding to the finer meshlets
+    /// that are not paged in.
+    ///
+    /// `selected_at_clamped(t, 0) == selected_at(t)` for every meshlet at every
+    /// threshold (LOD 0's error is 0 by construction, and a root below the floor
+    /// has `parent_error == +∞`), which is what makes full residency
+    /// bit-identical to the pre-streaming path.
+    #[inline]
+    pub fn selected_at_clamped(&self, threshold: f32, floor_lod: u8) -> bool {
+        if !self.resident_at(floor_lod) {
+            return false;
+        }
+        let error = if self.lod_level <= floor_lod {
+            0.0
+        } else {
+            self.error
+        };
+        error <= threshold && threshold < self.parent_error
     }
 }
 
@@ -277,6 +324,33 @@ impl VgeomMesh {
             .iter()
             .enumerate()
             .filter(move |(_, m)| m.selected_at(threshold))
+    }
+
+    /// The cut at `threshold` **clamped to residency** (P18.2) — the CPU reference
+    /// for the streamed GPU cut, exactly as `vgeom_cull.wgsl` applies it.
+    ///
+    /// `floor_lod` is the streamer's finest resident LOD level (the finest
+    /// resident page's [`floor_lod`](crate::asset::VgeomPageEntry::floor_lod)).
+    /// The selected surface stays **complete and non-overlapping at every
+    /// threshold and every floor** — never a hole, only softer detail:
+    ///
+    /// * along a root-to-leaf path the intervals `[error, parent_error)` tile
+    ///   `[0, ∞)` in level order;
+    /// * zeroing the error at and below the floor makes the floor's meshlet cover
+    ///   `[0, e_floor+1)`, so the resident meshlets' intervals still tile `[0, ∞)`;
+    /// * a path whose root sits *below* the floor keeps exactly that root (page 0
+    ///   is never evicted), whose clamped interval is `[0, ∞)`.
+    ///
+    /// `select_with_residency(t, 0) == select(t)`.
+    pub fn select_with_residency(
+        &self,
+        threshold: f32,
+        floor_lod: u8,
+    ) -> impl Iterator<Item = (usize, &Meshlet)> {
+        self.meshlets
+            .iter()
+            .enumerate()
+            .filter(move |(_, m)| m.selected_at_clamped(threshold, floor_lod))
     }
 
     /// Extract the discrete **classic-LOD chain** from the meshlet levels

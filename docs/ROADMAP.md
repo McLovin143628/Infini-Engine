@@ -2211,6 +2211,171 @@ GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and h
 > re-convergence loop and by construction of the shader, not yet by a dedicated moving-camera
 > trace; P18.5's GPU-instanced scatter is the natural place to add one.
 
+> **P18.2 Meshlet streaming — COMPLETE** (2026-08-01, local gates green; CI pending push).
+> Nothing uploads a whole vmesh any more. A `.inf_vmesh` reaches the GPU one **page** at a
+> time, sliced out of the mmap'd pack, into four suballocated pools under a VRAM budget, with
+> the LOD cut clamped to what is resident.
+>
+> **The format: v2, paged — and the paging unit is not the LOD level.** v1 was
+> `inf_asset::encode(&VgeomMesh)`: one bincode stream whose `Vec` fields are varint-packed runs,
+> so there is no byte offset for "level 3's meshlets" that does not require decoding everything
+> before it. v2 is the `.inf_terrain` shape — 128-byte header, a 96-byte-per-entry directory,
+> 16-byte-aligned sections, cooked **uncompressed** so a page is a borrowed sub-slice of the
+> mapping. `crates/inf-vgeom/src/asset.rs` owns it; the cook emits the raw image (never
+> `inf_asset::encode`, which would shift every section off its boundary), and a **v1 payload
+> keeps loading forever** — the magic is sniffed and an old payload is lifted into the paged form
+> at open, so a pack cooked before this batch still runs with no second code path downstream.
+>
+> The load-bearing design decision is that **the paging unit is a page, not a LOD level**. The
+> obvious unit is the level, and it is wrong: a group that fails to simplify leaves its members
+> as *roots* (`parent_error == +inf`) at whatever level they reached (`build.rs`:
+> `if !res.progressed { continue }`), so roots live at many levels. Evicting "everything finer
+> than level F" would evict a level-2 root whose path has nothing coarser at all — a hole, the
+> exact failure this design exists to make unreachable. So **page 0 is every root, from every
+> level, and is never evicted**; page `p >= 1` is the *non-root* meshlets of one level, coarse to
+> fine. Residency is always a prefix of that order, which makes ancestor closure structural and
+> "every root-to-leaf path always has a resident meshlet" true by construction rather than by
+> check.
+>
+> **Vertices are stored once.** `VgeomMesh::vertices` is one welded buffer and a coarse meshlet's
+> vertices are a *subset* of the finer ones', so naive per-page blocks would store a vertex once
+> per page that touches it. The image instead **permutes** the vertex buffer into page order
+> (`page(v)` = the coarsest page referencing `v`) and gives each page the *increment*, so page `p`
+> references exactly `[0, prefix(p))` and a prefix residency holds a complete, contiguous vertex
+> prefix. The permutation is internal to the container; `to_mesh()` hands back the same geometry.
+>
+> **The clamp is one scalar, and it is provably free at the wanted floor.** The cut becomes
+> `eff_error <= t < parent_error` with `eff_error = (lod_level <= floor_lod) ? 0 : error`, where
+> `floor_lod` is the finest resident page's. `VgeomMesh::select_with_residency` is the CPU twin
+> and `vgeom_cull.wgsl` applies the identical rule. The surprising and load-bearing part is that
+> at the streamer's *own* want — `ideal_page_count(t)`, the pages whose `max_parent_error` still
+> exceeds `t` — the clamped cut is **identical to the unclamped one**: a page past that bound
+> holds only meshlets that fail `t < parent_error` anyway, and the error-zeroing cannot add one
+> because a floor-level meshlet's `error` *is* its children's `parent_error`, which is past the
+> bound. So streaming costs VRAM and never detail the camera asked for — only a *budget* clamp
+> shorter than the want actually coarsens anything. That theorem, not "everything happens to fit",
+> is why **all 36 goldens are byte-identical, verified strict, with no re-bless**, while the
+> streamer declines to page in most of the asset. It is asserted, not assumed
+> (`golden.rs::vgeom_cpu_gpu_cut_parity` compares the clamped cut against the unclamped one).
+>
+> **Determinism.** Streaming is where a renderer usually stops being reproducible, because loads
+> land when IO says so. Here the plan is a pure function of `(wants, residency, budget)` at one
+> sync point per frame: the want comes from the **same** per-instance screen-error scalar `t` the
+> cut uses (never from a GPU readback, which is a frame latent and would make residency depend on
+> frame history); grants are auctioned worst-error-first through a total order tie-broken on the
+> asset id; fetches are `read_ref` slices of an mmap and the staging runs through
+> `parallel_map_ref`, the deterministic in-order pure map — terrain's B2 precedent exactly; and
+> `max_loads_per_sync` bounds the batch while leaving every asset holding a prefix. The
+> "requested-but-missing" cull feedback survives as an **audit counter only**
+> (`VgeomAudit::clamped`, off by default), with no path from it to what gets loaded — stated in
+> `stream.rs` so a future edit cannot quietly wire it up.
+>
+> **Suballocation, and the per-pool share that had to go.** Four pools (vertices / meshlet
+> records / micro vertex indices / micro triangle indices), each a first-fit free-list allocator
+> that is deterministic by construction (sorted, coalesced free list; growth only ever *appends*,
+> so a live block never moves). They **share one budget**: a pool may grow only into the headroom
+> the other three have not claimed, so total capacity can never exceed `budget_bytes` and there is
+> no second ceiling to drift from it. A page's four sections are reserved **transactionally**
+> (`VgeomPools::alloc_page`): the first attempt lets growth overshoot — doubling, so the
+> reallocate-and-restage a growth costs is amortized — and if any section then fails, the partial
+> reservation is rolled back, every pool's *untaken* tail slack is returned to the budget (growth
+> only appends, so the tail is exactly the speculation nothing claimed), and the page is retried
+> with growth that takes precisely what each section needs.
+>
+> **That retry is a fix, not a flourish, and the audit is why it exists.** Without it a first
+> growth rounded every section up to 1 024 units and charged the slack to the shared budget, so an
+> asset whose root page was smaller than the overshoot ended with **zero** resident pages — and
+> `VgeomNode` skips an asset with no residency, so the object *silently vanished from the frame*
+> instead of degrading to coarser detail. It was not an edge: the band covers ordinary meshlet
+> counts (the regression sweep reproduces it at n = 14). Two tests pin it now —
+> `a_page_fits_whenever_the_budget_equals_its_bytes` sweeps 1..=2048 units x five section shapes at
+> the allocator in microseconds, and `the_root_page_survives_every_budget_that_can_hold_it` proves
+> it survives the streamer, the want rules and the budget auction on a **~1 300-meshlet** fixture
+> that straddles the 1 024-unit boundary in both directions (the narrow fixture the rest of the
+> module uses never reaches it, which is how the defect got past the first round of tests). The
+> guarantee is now exactly statable: **if the budget can hold the page's bytes, the page is
+> resident.**
+>
+> The first design gave each pool a fixed *share* of the budget, and it was wrong in a way worth
+> recording. The format suggests a split, but the ratio is not constant across an asset: a coarse
+> page carries a handful of meshlets with very few vertices each, so its descriptor share climbs
+> past 7 % where a fine page's is ~3 %. Any fixed split therefore makes *some* pool, rather than
+> the byte budget, the binding constraint — and it binds hardest on the coarse pages, which is
+> exactly backwards, because **page 0 is the always-resident floor that makes "never a hole"
+> true**. Measured on the render-side fixture: page 0 cost 7 828 B, of which 6 176 B were
+> vertices, and the 60 % vertex share meant any budget under 10 293 B left the asset with **zero**
+> resident pages drawing nothing — a silent empty frame, not softer detail. The GPU test agent
+> found it by bisection while writing the sweep. Sharing one budget deletes the failure mode
+> rather than tuning around it, and
+> `the_root_page_survives_every_budget_that_can_hold_it` pins the property with no GPU: if the
+> budget can hold the roots, the roots are resident, whatever their mix.
+>
+> A meshlet id resolves through a per-asset **remap** table both the cull compute and the raster
+> read; `NOT_RESIDENT` is how a page that is out disappears from the cut, and the sentinel is
+> pinned against both shaders by `shader_constants_match_the_rust_side`.
+>
+> **Reading a payload is a trust boundary.** The build side validated micro-index ranges for a mesh
+> *this process* was about to write, which says nothing about bytes that arrived from disk — and
+> `to_mesh` slices with those offsets directly, so a doctored `vertex_offset` panics on a 64-bit
+> host and yields a wrong slice on wasm32, both reachable from a shipped pack through
+> `classic_vgeom`'s `to_mesh().ok()?`, which cannot catch a panic. Every stored record's ranges are
+> now checked against its page's sections **once, at parse** (`validate_records`, `O(meshlets)`),
+> and the header's `vertex_count` / `meshlet_count` are bounded from **above** by the payload that
+> would have to store them — `u32::MAX` vertices previously passed parse and turned into a
+> `Vec::with_capacity` request for ~127 GiB, an abort rather than an error. Same discipline
+> `inf_asset::pack` applies to blob offsets. Owned payload backings are `inf_asset::AlignedBytes`
+> (now public) rather than `Vec<u8>`, so a section's 16-byte alignment inside the file is an aligned
+> *address* on every backing — the P16.1 reasoning, and the difference between a `cast_slice` that
+> works and one that panics only in the browser. The cull compute now
+> binds **eight** storage buffers — exactly the portable floor the High tier already demands, with
+> **no headroom left**: a ninth needs a capability bump or a merge.
+>
+> **`VmeshRegistry` is lazy.** It used to decode every `.inf_vmesh` in the pack at load; it now
+> holds a `VgeomSource` per asset — header and page directory, a few hundred bytes — over one
+> shared `Arc<PackReader>`, so a level with a thousand virtualized meshes costs a thousand
+> directory parses instead of a thousand full decodes. The loose-file path (dev-dir `--level`,
+> and the editor path P18.3 will use) is identical after open. `RenderScene`'s `VgeomAsset`
+> carries the source, not a decoded DAG. The one consumer that genuinely still needs the whole
+> mesh is the **classic discrete-LOD fallback**, which builds a self-contained index buffer per
+> level — it materializes once per asset, never per frame.
+>
+> **Gates.** `crates/inf-vgeom/tests/streaming.rs` brute-forces never-a-hole over every residency
+> floor x a threshold sweep (non-empty, resident-only, watertight, exactly one meshlet per
+> root-to-leaf chain), plus full-residency equivalence, monotone coarsening, streamer-vs-CPU-clamp
+> agreement, cross-asset pool disjointness, the corrupt-page blocked set, and v1-vs-v2 trace
+> equality. `crates/inf-render/tests/vgeom_streaming.rs` extends CPU/GPU cut parity to
+> **punched-out** residency and pins the pixel + residency traces of a scripted flythrough.
+> `vgeom_gate.rs::gate_b3` runs the 10.6M-triangle flagship pack under a hard budget: the ceiling
+> holds, the frame is coarser but covers the same ground, and two fresh renderers agree byte for
+> byte on both the image and the residency trace. A **frozen v1 `.inf_vmesh`** is committed
+> (`tests/fixtures/v1_dense12.inf_vmesh`, the `pack.rs` fixture standard: provenance recorded, never
+> re-blessed from the current writer) so "v1 loads forever" gates yesterday's bytes rather than
+> today's round-trip.
+>
+> **Cost** (RTX 4070 Ti, 320x180, a 115-meshlet / 6-page fixture, budget 34 585 B forcing 3 of 6
+> pages resident): the cold frame — where the whole wanted prefix pages in — is **4.79 ms**, and
+> the steady state, where the sync point re-derives the same wants and does nothing, is
+> **0.498 ms/frame** over 60 frames against a 33 ms budget. Following the P17.4 / P18.1
+> precedent this adds **no new ratchet constant** (§8 makes each one a standing obligation) and
+> instead asserts the streamed configuration stays inside the existing `FRAME_BUDGET_MS`. The
+> VRAM side is gated rather than measured: the budget is a hard bound by construction and
+> `gate_b3` asserts it on the flagship pack.
+>
+> **Honest remainders.** (1) The want is per **asset**, driven by its closest instance, so a scene
+> where one instance of a mesh is at arm's length and a hundred are on the horizon pages in the
+> near one's detail for all of them. Per-instance or per-region residency is the natural follow-up
+> and needs a second remap level. (2) A pool that grows re-stages every resident page rather than
+> copying the old buffer, because `queue.write_buffer` is ordered *before* an encoder's commands
+> in a submit and a same-frame copy would clobber the uploads it was meant to preserve. Growth is
+> O(log budget) times per session, so this is cheap — but it is a re-upload, not a copy, and worth
+> knowing before someone "optimizes" it. (3) `AssetResidency::floor_lod()` reports `max_lod` when
+> nothing is resident at all, which is the *same* value a roots-only residency reports — only
+> `resident_pages == 0` distinguishes the two, and it is now only reachable with a budget smaller
+> than a single root page. The node skips such an asset rather than drawing it, and both test
+> files say so; making the state unrepresentable (`floor_lod() -> Option<u32>`) is the tidier
+> follow-up. (4) The editor viewport still does
+> not carry vgeom content at all — that is P18.3, and it inherits this path unchanged.
+
 - **P18.1 Two-pass HZB occlusion** — 1. persist the last-frame visible list; 2. early draw →
   HZB from its depth → late cull and draw of the remainder; 3. on by default where supported.
 - **P18.2 Meshlet streaming** — 1. a residency/page table over the existing coarse-first level
