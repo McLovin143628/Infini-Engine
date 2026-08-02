@@ -55,9 +55,11 @@ use inf_project::ProjectManifest;
 use inf_scene::partition::{cell_of, CellCoord, PartitionAssetReader};
 
 // Budgets are imported, never redeclared: a phase does not get its own budget for
-// being new, and a private copy is somewhere for one to be quietly raised. The (f)
-// arm times a *load*, so it takes the load-class ceiling; `inf_core::FRAME_BUDGET_MS`
-// is the per-frame tripwire and a different class of number entirely.
+// being new, and a private copy is somewhere for one to be quietly raised. Each arm
+// takes the budget of its own *class* — the recurring-work arm the per-frame
+// tripwire, the one-shot-load arm the load-class ceiling. They are not
+// interchangeable, and neither may be restated as a literal here.
+use inf_core::FRAME_BUDGET_MS;
 use inf_player::budget::LOAD_BUDGET_MS;
 
 /// Every committed file of the sample, so the fixture copy cannot silently miss
@@ -822,12 +824,24 @@ fn the_painted_biomes_survive_the_cook() {
 /// claim is measured rather than asserted.
 ///
 /// The absolute figure is printed, not asserted (a number from one machine is not
-/// a contract). What is asserted is the shape: a step over a fully collidered
-/// town stays a small fraction of the 60 Hz budget.
+/// a contract). What is asserted is the shape: a step over a fully collidered town
+/// stays a small fraction of a frame, against the imported [`FRAME_BUDGET_MS`] —
+/// the right *class* of budget for recurring work, and the only per-frame number
+/// this repo has.
 ///
 /// **Measured on this machine, 12 908 colliders:** 11.62 ms/step with the stamp
-/// disabled, 4.94 ms/step with it — 6.7 ms of a 16.7 ms budget, reclaimed by not
-/// re-describing walls that cannot move.
+/// disabled, 4.94 ms/step with it — 6.7 ms of a 16.7 ms 60 Hz frame, reclaimed by
+/// not re-describing walls that cannot move. That engineering claim is what the
+/// two numbers above are for.
+///
+/// **Why the assertion is not against 16.6.** It used to be, as a private literal,
+/// which made it a 60 fps *hardware* claim on machines that cannot make one:
+/// `FRAME_BUDGET_MS` is 33 ms rather than 16.7 precisely because these gates run on
+/// shared CI runners (~4× slower than dev hardware, noisy), and its own doc says a
+/// budget nobody can meet is a budget everybody disables. The margin was already
+/// thin — this arm measured **7.577 ms/step** merely because another cargo job was
+/// running alongside it, and a 4× runner crosses 16.6 with nothing regressed. The
+/// same category error took the load arm below red at 34.77 ms.
 #[test]
 fn stepping_the_town_stays_cheap_with_thirteen_thousand_colliders() {
     let dir = tempfile::tempdir().unwrap();
@@ -850,12 +864,14 @@ fn stepping_the_town_stays_cheap_with_thirteen_thousand_colliders() {
     let per_step_ms = start.elapsed().as_secs_f64() * 1000.0 / steps as f64;
     eprintln!(
         "phase19 step cost: {colliders} colliders — first step {first_ms:.2} ms, \
-         steady {per_step_ms:.3} ms/step (60 Hz budget is 16.7 ms)"
+         steady {per_step_ms:.3} ms/step (a 60 Hz frame is 16.7 ms; tripwire \
+         {FRAME_BUDGET_MS} ms — read this number, it is where drift shows)"
     );
     assert!(
-        per_step_ms < 16.6,
+        per_step_ms < FRAME_BUDGET_MS,
         "a steady step costs {per_step_ms:.3} ms with {colliders} static colliders — \
-         over the 60 Hz budget"
+         over the {FRAME_BUDGET_MS} ms frame budget (§8: investigate the regression, \
+         never raise it)"
     );
 }
 

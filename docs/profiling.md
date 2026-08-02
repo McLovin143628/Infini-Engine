@@ -75,6 +75,7 @@ be lowered, never raised.** A regression must be fixed, not accommodated.
 | Editor project-open (asset scan) | `OPEN_BUDGET_MS` | 5000 ms | `inf-editor-core` · `tests/startup_budget.rs` |
 | Player pack-load-to-first-world | `LOAD_BUDGET_MS` | 5000 ms | `inf-player` · `tests/startup_budget.rs` |
 | Player one-shot world build (the composed phase19 town) | `LOAD_BUDGET_MS` | 5000 ms | `inf-player` · `tests/phase19_gate.rs` |
+| Fixed step over the phase19 town's ~13 000 static colliders | `FRAME_BUDGET_MS` | 33.0 ms | `inf-player` · `tests/phase19_gate.rs` |
 | **Streamed** fixed step (mean, cell + terrain streaming live) | `STREAMED_STEP_BUDGET_MS` | 4.0 ms | `inf-player` · `tests/phase16_gate.rs` |
 | Terrain page bytes resident (peak over the flythrough) | `TERRAIN_RESIDENT_BYTES_CEILING` | 16 MiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cell bytes resident (peak) | `CELL_RESIDENT_BYTES_CEILING` | 256 KiB | `inf-player` · `tests/phase16_gate.rs` |

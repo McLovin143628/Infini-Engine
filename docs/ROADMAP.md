@@ -3691,7 +3691,10 @@ sediment state; the `MaskImage` sampler has no graph node; lowering is single-ru
 > **The per-fixed-step cost, found and fixed.** `sync_from_world` runs every fixed step at 60 Hz
 > over the whole world, and the first version re-described and re-sorted all ~13 000 immovable
 > boxes each time — a regression the *load-time* budget arm could never see. Measured on the
-> committed town: **11.62 ms/step against a 16.7 ms 60 Hz budget.** The fix is a change stamp
+> committed town: **11.62 ms/step against a 16.7 ms 60 Hz frame.** (That 16.7 is the engineering
+> claim; the *assertion* is against the imported `FRAME_BUDGET_MS` — a per-step measurement is the
+> right class for it, but a 60 fps literal is a hardware claim a shared runner cannot make.)
+> The fix is a change stamp
 > (`PcgVolume::structures_gen`, bumped by `set_structures`; the bridge retains an unchanged
 > volume's colliders rather than rebuilding them) — the same version-stamp shape `SceneDoc` and
 > the terrain tiles already use. Measured after: **4.94 ms/step**, 6.7 ms of the budget
