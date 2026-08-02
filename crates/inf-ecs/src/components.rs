@@ -3348,6 +3348,383 @@ impl Default for SkyAtmosphere {
     }
 }
 
+// ── water (schema v17 · P20.1) ──────────────────────────────────────────────
+
+/// Which kind of water body a [`WaterBody`] describes.
+///
+/// A **flat reflected enum** with per-kind fields carried flat on the component,
+/// exactly like [`LightKind`] (whose Directional / Point / Spot share one
+/// `Light`) and [`VolumeKind`]. A data-carrying enum would read more tidily in
+/// Rust and would be the wrong shape here for two concrete reasons: the Details
+/// reflection walker surfaces flat scalars and enum *dropdowns*, so struct
+/// variants would have no widget at all; and a variant-dependent field set makes
+/// the bincode record's length depend on the variant, which is a worse wire
+/// contract than one record with `serde(default)` fields.
+///
+/// **THE ORDERING LAW (P19.2): new variants go at the end, always.** bincode
+/// encodes this as its declaration index, so inserting a kind in the middle
+/// silently renumbers the ones after it and every committed level's oceans become
+/// lakes. Pinned by `water_kind_discriminants_are_frozen`.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WaterKind {
+    /// An unbounded sea at [`WaterBody::level_m`], carrying wind-driven Gerstner
+    /// waves. The default: it is the body that needs the fewest other components
+    /// to mean something.
+    #[default]
+    Ocean,
+    /// A bounded rectangle in world XZ — [`WaterBody::extent`] either side of the
+    /// entity's transform — at [`WaterBody::level_m`], carrying a gentle ripple.
+    Lake,
+    /// A ribbon following the [`Spline`] **on the same entity**, with width and
+    /// depth profiles and a flow speed. An entity with `WaterKind::River` and no
+    /// `Spline` has no centreline and draws nothing.
+    River,
+}
+
+impl WaterKind {
+    /// Stable identifier for logs, advisories and tooling. Never localized and
+    /// never reordered — the string half of the discriminant freeze.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WaterKind::Ocean => "ocean",
+            WaterKind::Lake => "lake",
+            WaterKind::River => "river",
+        }
+    }
+}
+
+/// **A water body** (schema v17, P20.1): an ocean, a lake or a spline river,
+/// with its wave state, its shading, and — for a river — its cross-section.
+///
+/// ## One component, three bodies
+///
+/// The three kinds differ in their *footprint* and in the frame their waves are
+/// evaluated in, not in the wave model: an ocean and a lake evaluate a Gerstner
+/// sum in world XZ, a river evaluates one in its own `(arc length, offset)`
+/// frame so the ripple travels downstream. That is why there is one component
+/// here, one [`inf_water::WaveField`] behind it and one water pass in the
+/// renderer — and why a "lake" is just a bounded ocean with a small amplitude.
+///
+/// ## The river's spline is a **same-entity component**, not a reference
+///
+/// A river reads the [`Spline`] on its own entity. That is deliberately not an
+/// asset reference and not an entity reference: composition on one entity is how
+/// [`Terrain`] and [`Transform`] already relate, it cannot dangle, it needs no
+/// cook edge and no dangling-reference advisory, and it makes "select the river,
+/// drag its points" the obvious authoring gesture. The one cost is that a river
+/// cannot share a centreline with a road; if that is ever wanted, an
+/// `EntityRef` field is the additive change, and it would be the thing that
+/// introduced a reference to keep alive.
+///
+/// ## Units
+///
+/// SI, per the units doctrine: metres, seconds, m/s, m⁻¹. Angles are **degrees**
+/// at this boundary (the Details grid's convention, like `Light::inner_cone_deg`)
+/// and radians everywhere below it.
+///
+/// Additive component: every field carries `#[serde(default)]`, so a hand-written
+/// or partial record still decodes — though the schema bump is forced regardless,
+/// because bincode is positional (the v12/v13/v15/v16 law).
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct WaterBody {
+    /// Ocean, lake or river.
+    #[serde(default)]
+    pub kind: WaterKind,
+    /// Still-water surface elevation in **metres of world Y** — an absolute
+    /// altitude, not an offset from the entity (a sea level that moved when you
+    /// nudged the entity would be a trap). Ignored by [`WaterKind::River`], whose
+    /// surface follows its spline.
+    #[serde(default)]
+    pub level_m: f64,
+    /// Half-extent of a [`WaterKind::Lake`]'s region in world XZ, **metres**,
+    /// centred on the entity's transform — the same convention
+    /// [`PcgVolume::extent`] uses.
+    #[serde(default = "default_water_extent")]
+    pub extent: Vec2d,
+
+    // ── waves ─────────────────────────────────────────────────────────────
+    /// Peak surface displacement from the still level, **metres**. A *bound*:
+    /// the derived component amplitudes sum to exactly this (times the wind
+    /// gain), so `|height − level| ≤ amplitude_m` always. `0` gives a mirror.
+    #[serde(default = "default_wave_amplitude")]
+    pub wave_amplitude_m: f64,
+    /// Wavelength of the longest component, **metres**. Shorter components follow
+    /// on a geometric ladder.
+    #[serde(default = "default_wave_length")]
+    pub wave_length_m: f64,
+    /// Gerstner steepness, `[0, 1]`. `0` is a sine surface; `1` is the physical
+    /// limit at which a crest cusps. Above ~0.8 the horizontal crowding is very
+    /// visible, which is the look "stormy" wants.
+    #[serde(default = "default_wave_steepness")]
+    pub wave_steepness: f64,
+    /// Number of Gerstner components, clamped to `1..=8`.
+    #[serde(default = "default_wave_count")]
+    pub wave_count: u32,
+    /// Half-angle of the directional spread about the wind, **degrees**. `0` is a
+    /// perfectly unidirectional (and obviously artificial) sea.
+    #[serde(default = "default_wave_spread_deg")]
+    pub wave_spread_deg: f64,
+    /// Seed for the per-component hash. Two bodies with identical settings and
+    /// different seeds carry different — but each internally deterministic — seas.
+    #[serde(default)]
+    pub wave_seed: u32,
+    /// Whether the waves follow the **level's weather wind**
+    /// (`ResolvedSky::weather()`), which is what makes a storm raise the sea.
+    /// When `false` the body uses [`wind_x`](Self::wind_x) /
+    /// [`wind_z`](Self::wind_z) instead, so a sheltered inlet can stay calm
+    /// through a gale.
+    #[serde(default = "default_wind_from_weather")]
+    pub wind_from_weather: bool,
+    /// Body-local wind in world **+X**, m/s — used when
+    /// [`wind_from_weather`](Self::wind_from_weather) is `false`.
+    #[serde(default = "default_water_wind_x")]
+    pub wind_x: f64,
+    /// Body-local wind in world **+Z**, m/s.
+    #[serde(default)]
+    pub wind_z: f64,
+
+    // ── river profile ─────────────────────────────────────────────────────
+    /// Full width at the **start** of a river's spline, metres.
+    #[serde(default = "default_river_width")]
+    pub river_width_start_m: f64,
+    /// Full width at the **end**, metres. Linear in arc length between the two.
+    #[serde(default = "default_river_width")]
+    pub river_width_end_m: f64,
+    /// Depth from surface to bed at the start, metres. Drives the absorption tint
+    /// and the shallow-water foam band.
+    #[serde(default = "default_river_depth")]
+    pub river_depth_start_m: f64,
+    /// Depth at the end, metres.
+    #[serde(default = "default_river_depth")]
+    pub river_depth_end_m: f64,
+    /// Surface flow speed along the spline, **m/s**. Negative reverses the river
+    /// without re-authoring its points.
+    #[serde(default = "default_river_flow")]
+    pub river_flow_m_s: f64,
+
+    // ── shading ───────────────────────────────────────────────────────────
+    /// Linear colour of **shallow** water — what the surface tends toward where
+    /// the column under it is thin.
+    #[serde(default = "default_shallow_color")]
+    pub shallow_color: Color,
+    /// Linear colour of **deep** water — the asymptote the absorption drives
+    /// toward as the column thickens.
+    #[serde(default = "default_deep_color")]
+    pub deep_color: Color,
+    /// Per-channel **Beer-Lambert extinction** of the water column, in **m⁻¹**
+    /// (SI) — the same shape as [`SkyAtmosphere::fog_density`]. Red is absorbed
+    /// roughly an order of magnitude faster than blue in real water, which is why
+    /// the default is so lopsided and why deep water is blue without anyone
+    /// painting it blue.
+    #[serde(default = "default_absorption")]
+    pub absorption: Vec3d,
+    /// Surface roughness for the specular lobe, `[0, 1]`. Water is very smooth;
+    /// the default is a calm-sea sheen rather than a mirror, because a true
+    /// mirror shows every flaw in the reflection source.
+    #[serde(default = "default_water_roughness")]
+    pub roughness: f64,
+    /// Screen-space **refraction** offset at grazing incidence, metres of
+    /// apparent displacement at the water plane. `0` disables refraction (the
+    /// background is sampled straight through).
+    #[serde(default = "default_refraction")]
+    pub refraction_m: f64,
+    /// Depth of the **shore fade** band, metres: the surface's opacity ramps from
+    /// zero where the ground meets the water to full at this depth. The CPU twin
+    /// is `inf_water::shore_blend`, and both use the same smoothstep.
+    #[serde(default = "default_shore_fade")]
+    pub shore_fade_m: f64,
+    /// Maximum surface opacity, `[0, 1]` — what the water reaches once it is
+    /// deeper than the shore band. Below `1` the geometry behind shows through
+    /// even in deep water, which stylised water sometimes wants.
+    #[serde(default = "default_one_f64")]
+    pub opacity: f64,
+
+    // ── foam ──────────────────────────────────────────────────────────────
+    /// Linear colour of foam.
+    #[serde(default = "default_foam_color")]
+    pub foam_color: Color,
+    /// Crest factor above which wave foam appears, `[0, 1]`. The crest factor is
+    /// the surface-folding measure the Gerstner model already contains, so this
+    /// is "how close to breaking before it goes white", not a taste dial with no
+    /// referent. `1` disables crest foam.
+    #[serde(default = "default_foam_crest")]
+    pub foam_crest_threshold: f64,
+    /// Width of the **shoreline** foam band, metres of water depth. Foam fills the
+    /// band from the waterline down to this depth. `0` disables shore foam.
+    #[serde(default = "default_foam_shore")]
+    pub foam_shore_m: f64,
+    /// Flow speed, m/s, at which a river is fully foamed. Rapids go white;
+    /// a slow river does not. `0` disables flow foam.
+    #[serde(default = "default_foam_flow")]
+    pub foam_flow_m_s: f64,
+}
+
+fn default_water_extent() -> Vec2d {
+    Vec2d::splat(50.0)
+}
+fn default_wave_amplitude() -> f64 {
+    0.6
+}
+fn default_wave_length() -> f64 {
+    40.0
+}
+fn default_wave_steepness() -> f64 {
+    0.5
+}
+fn default_wave_count() -> u32 {
+    4
+}
+fn default_wave_spread_deg() -> f64 {
+    45.0
+}
+fn default_wind_from_weather() -> bool {
+    true
+}
+fn default_water_wind_x() -> f64 {
+    6.0
+}
+fn default_river_width() -> f64 {
+    8.0
+}
+fn default_river_depth() -> f64 {
+    1.5
+}
+fn default_river_flow() -> f64 {
+    1.5
+}
+fn default_shallow_color() -> Color {
+    Color::new(0.20, 0.48, 0.50, 1.0)
+}
+fn default_deep_color() -> Color {
+    Color::new(0.015, 0.075, 0.13, 1.0)
+}
+/// Extinction of clear natural water, m⁻¹ — red goes first. Rounded from the
+/// standard clear-ocean absorption spectrum sampled at 620/540/460 nm; the point
+/// is the *ratio*, which is what makes a 10 m column blue-green and a 40 m one
+/// nearly black.
+fn default_absorption() -> Vec3d {
+    Vec3d::new(0.45, 0.09, 0.035)
+}
+fn default_water_roughness() -> f64 {
+    0.04
+}
+fn default_refraction() -> f64 {
+    0.35
+}
+fn default_shore_fade() -> f64 {
+    1.2
+}
+fn default_one_f64() -> f64 {
+    1.0
+}
+fn default_foam_color() -> Color {
+    Color::new(0.92, 0.95, 0.97, 1.0)
+}
+fn default_foam_crest() -> f64 {
+    0.65
+}
+fn default_foam_shore() -> f64 {
+    0.5
+}
+fn default_foam_flow() -> f64 {
+    4.0
+}
+
+impl Default for WaterBody {
+    fn default() -> Self {
+        Self {
+            kind: WaterKind::Ocean,
+            level_m: 0.0,
+            extent: default_water_extent(),
+            wave_amplitude_m: default_wave_amplitude(),
+            wave_length_m: default_wave_length(),
+            wave_steepness: default_wave_steepness(),
+            wave_count: default_wave_count(),
+            wave_spread_deg: default_wave_spread_deg(),
+            wave_seed: 0,
+            wind_from_weather: default_wind_from_weather(),
+            wind_x: default_water_wind_x(),
+            wind_z: 0.0,
+            river_width_start_m: default_river_width(),
+            river_width_end_m: default_river_width(),
+            river_depth_start_m: default_river_depth(),
+            river_depth_end_m: default_river_depth(),
+            river_flow_m_s: default_river_flow(),
+            shallow_color: default_shallow_color(),
+            deep_color: default_deep_color(),
+            absorption: default_absorption(),
+            roughness: default_water_roughness(),
+            refraction_m: default_refraction(),
+            shore_fade_m: default_shore_fade(),
+            opacity: default_one_f64(),
+            foam_color: default_foam_color(),
+            foam_crest_threshold: default_foam_crest(),
+            foam_shore_m: default_foam_shore(),
+            foam_flow_m_s: default_foam_flow(),
+        }
+    }
+}
+
+impl WaterBody {
+    /// A lake preset: bounded, still, with a gentle ripple.
+    pub fn lake(level_m: f64, extent: Vec2d) -> Self {
+        Self {
+            kind: WaterKind::Lake,
+            level_m,
+            extent,
+            // A lake is a bounded ocean with small numbers — see the type docs.
+            wave_amplitude_m: 0.05,
+            wave_length_m: 7.0,
+            wave_steepness: 0.12,
+            wave_count: 3,
+            // A lake has fetch measured in hundreds of metres, not hundreds of
+            // kilometres, so a storm does not raise a swell on it. Decoupling it
+            // from the weather wind is what keeps a lake a lake in a gale.
+            wind_from_weather: false,
+            wind_x: 1.0,
+            ..Self::default()
+        }
+    }
+
+    /// A river preset: reads the [`Spline`] on the same entity.
+    pub fn river(width_m: f64, depth_m: f64, flow_m_s: f64) -> Self {
+        Self {
+            kind: WaterKind::River,
+            river_width_start_m: width_m,
+            river_width_end_m: width_m,
+            river_depth_start_m: depth_m,
+            river_depth_end_m: depth_m,
+            river_flow_m_s: flow_m_s,
+            wave_amplitude_m: 0.06,
+            wave_length_m: 4.0,
+            wave_steepness: 0.12,
+            wave_count: 3,
+            wind_from_weather: false,
+            // A river's ripple travels downstream, so its "wind" is `+arc length`
+            // in the body's own frame — never a world direction.
+            wind_x: 1.0,
+            wind_z: 0.0,
+            ..Self::default()
+        }
+    }
+
+    /// The wind this body's waves respond to, m/s in world XZ, given the level's
+    /// resolved weather wind.
+    ///
+    /// Defined **here, once**, because both scene projectors need it and a
+    /// per-host copy of "does this body follow the weather" is exactly the
+    /// divergence the MIRROR gate exists to stop — the same reasoning that put
+    /// `ResolvedSky::cloud_time_s` in Ring 0.
+    pub fn effective_wind(&self, weather_wind: (f64, f64)) -> (f64, f64) {
+        if self.wind_from_weather {
+            weather_wind
+        } else {
+            (self.wind_x, self.wind_z)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4274,5 +4651,106 @@ mod tests {
         let bytes =
             bincode::serde::encode_to_vec(Some(AlwaysLoaded), bincode::config::standard()).unwrap();
         assert_eq!(bytes.len(), 1);
+    }
+
+    // ── water (P20.1) ────────────────────────────────────────────────────
+
+    #[test]
+    fn water_body_serde_round_trips_and_defaults() {
+        let w = WaterBody {
+            kind: WaterKind::River,
+            level_m: -3.5,
+            river_flow_m_s: -2.0,
+            wind_from_weather: false,
+            wave_seed: 0xDEAD_BEEF,
+            ..WaterBody::default()
+        };
+        let back: WaterBody = serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
+        assert_eq!(w, back);
+        // Every field is `serde(default)`, so an empty record is the default
+        // component — the additive-component contract.
+        let d: WaterBody = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, WaterBody::default());
+        assert_eq!(d.kind, WaterKind::Ocean);
+        assert_eq!(d.level_m, 0.0);
+        assert!(d.wind_from_weather);
+        // …and the same through bincode, which is the codec that actually ships.
+        let cfg = bincode::config::standard();
+        let bytes = bincode::serde::encode_to_vec(w, cfg).unwrap();
+        let (rt, _): (WaterBody, usize) = bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+        assert_eq!(rt, w);
+    }
+
+    /// **THE WIRE-ENUM LAW (P19.2), applied to the first new scene enum since it
+    /// was written down.** bincode encodes an externally-tagged enum as its
+    /// *declaration index*, so inserting a kind in the middle silently renumbers
+    /// every kind after it — and every committed level's oceans decode as lakes.
+    /// New variants go at the end, always.
+    ///
+    /// The string identifiers are pinned in the same breath: they reach cook
+    /// advisories and logs, and a silently-renamed one makes an old report
+    /// unreadable.
+    #[test]
+    fn water_kind_discriminants_are_frozen() {
+        let cfg = bincode::config::standard();
+        let tag = |k: WaterKind| bincode::serde::encode_to_vec(k, cfg).unwrap()[0];
+        assert_eq!(tag(WaterKind::Ocean), 0);
+        assert_eq!(tag(WaterKind::Lake), 1);
+        assert_eq!(tag(WaterKind::River), 2);
+        assert_eq!(WaterKind::Ocean.as_str(), "ocean");
+        assert_eq!(WaterKind::Lake.as_str(), "lake");
+        assert_eq!(WaterKind::River.as_str(), "river");
+        // The default is variant 0, which is what makes a defaulted record's
+        // first byte a zero and keeps a hand-written JSON record honest.
+        assert_eq!(WaterKind::default(), WaterKind::Ocean);
+        // Spelled out once as raw bytes, so the encoding itself is visible rather
+        // than inferred from the helper above.
+        assert_eq!(
+            &bincode::serde::encode_to_vec(WaterKind::River, cfg).unwrap()[..],
+            &[2]
+        );
+    }
+
+    #[test]
+    fn the_water_presets_are_what_they_claim() {
+        let lake = WaterBody::lake(12.0, Vec2d::new(40.0, 25.0));
+        assert_eq!(lake.kind, WaterKind::Lake);
+        assert_eq!(lake.level_m, 12.0);
+        assert_eq!(lake.extent, Vec2d::new(40.0, 25.0));
+        assert!(lake.wave_amplitude_m < WaterBody::default().wave_amplitude_m);
+        assert!(
+            !lake.wind_from_weather,
+            "a lake has no fetch — a gale must not raise a swell on it"
+        );
+
+        let river = WaterBody::river(9.0, 2.0, 3.0);
+        assert_eq!(river.kind, WaterKind::River);
+        assert_eq!(river.river_width_start_m, 9.0);
+        assert_eq!(river.river_width_end_m, 9.0);
+        assert_eq!(river.river_depth_start_m, 2.0);
+        assert_eq!(river.river_flow_m_s, 3.0);
+        assert!(!river.wind_from_weather);
+    }
+
+    /// The one derivation both projectors share. A host that inlined its own
+    /// `if wind_from_weather` is exactly the drift the MIRROR gate exists to stop,
+    /// so the rule lives on the component and is pinned here.
+    #[test]
+    fn effective_wind_picks_weather_or_the_body() {
+        let follows = WaterBody::default();
+        assert!(follows.wind_from_weather);
+        assert_eq!(follows.effective_wind((13.0, -4.0)), (13.0, -4.0));
+
+        let sheltered = WaterBody {
+            wind_from_weather: false,
+            wind_x: 1.5,
+            wind_z: 0.25,
+            ..WaterBody::default()
+        };
+        assert_eq!(
+            sheltered.effective_wind((13.0, -4.0)),
+            (1.5, 0.25),
+            "a sheltered body must ignore the level's gale"
+        );
     }
 }

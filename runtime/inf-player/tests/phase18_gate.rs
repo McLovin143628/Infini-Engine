@@ -1332,9 +1332,13 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// Every golden scene committed under `crates/inf-render/tests/goldens/`, by name.
 ///
 /// 39 scenes entered Phase 18; P18.5 added two (`scatter.png`,
-/// `scatter_impostors.png`) and **P19.2 added `biomes.png`** — the Biomes view
-/// mode's overlay, the one thing that phase drew that nothing else did.
-const GOLDENS: [&str; 42] = [
+/// `scatter_impostors.png`), **P19.2 added `biomes.png`** — the Biomes view
+/// mode's overlay, the one thing that phase drew that nothing else did — and
+/// **P20.1 added three**: `water_ocean_noon.png`, `water_lake_dusk.png` and
+/// `water_river.png`, one per water body kind, because an ocean, a lake and a
+/// river are three different tessellations and three different shading regimes
+/// (absorption, Fresnel, flow foam) sharing one shader.
+const GOLDENS: [&str; 45] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1374,12 +1378,15 @@ const GOLDENS: [&str; 42] = [
     "unlit.png",
     "vgeom_dense.png",
     "vgeom_far.png",
+    "water_lake_dusk.png",
+    "water_ocean_noon.png",
+    "water_river.png",
     "weather_fog_dawn.png",
     "weather_snow_dusk.png",
     "weather_storm_noon.png",
 ];
 
-/// **GATE (f).** The golden *inventory* is exactly these 42 PNGs.
+/// **GATE (f).** The golden *inventory* is exactly these 45 PNGs.
 ///
 /// Nothing is re-blessed here, and no pixel is compared — that stays in
 /// `inf-render`'s own harness, which is where the renderer and the images live.
@@ -1410,7 +1417,7 @@ fn the_golden_inventory_is_exactly_the_committed_set() {
          deliberate act: update `GOLDENS` here in the same commit, and say in the \
          message which scene changed and why. Never re-bless as a side effect."
     );
-    assert_eq!(found.len(), 42);
+    assert_eq!(found.len(), 45);
 }
 
 // ── the composed scene's own invariants ──────────────────────────────────────

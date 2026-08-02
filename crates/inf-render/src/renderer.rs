@@ -402,6 +402,14 @@ impl EngineRenderer {
         // A no-op unless the weather block is precipitating, so dry scenes stay
         // byte-identical.
         graph.add(passes::precip::PrecipNode::new(gpu, &view_bgl));
+        // Water surfaces (P20.1): oceans, lakes and spline rivers, depth-tested
+        // with READ-ONLY depth so the same buffer can be sampled for the water
+        // column. AFTER every opaque pass (the column, the shore fade and the
+        // refraction all read the scene behind the surface) and AFTER clouds and
+        // rain (so a sea reflects the sky it is under), BEFORE translucency (so
+        // glass composites over water like any other surface). A no-op unless the
+        // scene carries water, so every existing golden stays byte-identical.
+        graph.add(passes::water::WaterNode::new(gpu, &view_bgl));
         // Translucent forward pass (R-P5): alpha-blended, depth-tested but not
         // depth-writing, back-to-front sorted. Draws after all opaque geometry +
         // terrain, into the same MSAA scene target, before the grid. A no-op unless

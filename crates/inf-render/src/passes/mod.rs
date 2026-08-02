@@ -27,6 +27,7 @@ pub mod terrain;
 pub mod tonemap;
 pub mod translucent;
 pub mod vgeom;
+pub mod water;
 
 use crate::gpu::GpuContext;
 use crate::renderer::FrameData;
@@ -76,6 +77,11 @@ pub(crate) enum ShaderKind {
     /// else. The GPU culls (meshlet, P18.1; scatter, P18.5) have no view uniform
     /// and no lights — what they share is one proven-conservative depth test.
     HzbCull,
+    /// [`water_shader`]: common_view + the atmosphere library at `@group(1)`
+    /// bindings 0..3 — the water pass (P20.1), which reflects the sky-view LUT and
+    /// applies aerial perspective, but binds no lighting env (water is shaded by
+    /// its own Fresnel + absorption model, not by the PBR path).
+    Water,
     /// [`gi_probe_shader`]: the atmosphere library at `@group(0)` bindings 3..6
     /// and nothing else — the P18.4 GI probe march, which has no view uniform and
     /// no lights but needs the sky-view LUT for its ray-miss term.
@@ -209,6 +215,21 @@ pub(crate) fn precip_shader(source: &str) -> String {
         atmosphere_lut_source(1, 1, 2, 3),
         atmosphere_apply_source(),
         cloud_noise_source(),
+        source
+    )
+}
+
+/// The water module (P20.1): common_view + the atmosphere at `@group(1)`
+/// bindings 0..3. Everything else water binds — the per-body uniform, the river
+/// frames, the scene depth and the resolved scene colour — is declared by
+/// `water.wgsl` itself at bindings 4..8, since it is the only consumer.
+pub(crate) fn water_shader(source: &str) -> String {
+    format!(
+        "{}\n{}\n{}\n{}\n{}",
+        include_str!("../shaders/common_view.wgsl"),
+        atmosphere_source(1, 0),
+        atmosphere_lut_source(1, 1, 2, 3),
+        atmosphere_apply_source(),
         source
     )
 }
@@ -381,6 +402,11 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
         include_str!("../shaders/scatter_mesh.wgsl"),
         ShaderKind::Lit(2),
     ),
+    (
+        "water",
+        include_str!("../shaders/water.wgsl"),
+        ShaderKind::Water,
+    ),
 ];
 
 /// Compose the named [`SHADER_TABLE`] entry. Panics on an unknown label —
@@ -402,6 +428,7 @@ pub(crate) fn shader_source(label: &str) -> String {
         ShaderKind::Precip => precip_shader(source),
         ShaderKind::HzbCull => hzb_cull_shader(source),
         ShaderKind::GiProbes => gi_probe_shader(source),
+        ShaderKind::Water => water_shader(source),
     }
 }
 

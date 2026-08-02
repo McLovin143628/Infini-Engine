@@ -14,6 +14,7 @@ members = [
     "crates/inf-vgeom",
     "crates/inf-material",
     "crates/inf-terrain",
+    "crates/inf-water",
     "crates/inf-pcg",
     "crates/inf-physics",
     "crates/inf-audio",
@@ -320,6 +321,7 @@ inf-mesh = { path = "crates/inf-mesh" }
 inf-vgeom = { path = "crates/inf-vgeom" }
 inf-material = { path = "crates/inf-material" }
 inf-terrain = { path = "crates/inf-terrain" }
+inf-water = { path = "crates/inf-water" }
 inf-pcg = { path = "crates/inf-pcg" }
 inf-physics = { path = "crates/inf-physics" }
 inf-audio = { path = "crates/inf-audio" }

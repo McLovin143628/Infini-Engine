@@ -589,6 +589,7 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
             always_loaded,
             time_of_day,
             sky_atmosphere,
+            water_body,
         } = e;
 
         let entity = world.spawn_with_guid(guid, &name, None);
@@ -711,6 +712,14 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
                 em.insert(c);
             }
             if let Some(c) = always_loaded {
+                em.insert(c);
+            }
+            // ── v17 water (P20.1) ──
+            //
+            // A `River` additionally needs the `spline` slot above, which is on
+            // the same entity and is therefore already inserted by the time this
+            // runs — component composition, not a reference to resolve.
+            if let Some(c) = water_body {
                 em.insert(c);
             }
         }
@@ -1693,6 +1702,7 @@ mod tests {
             always_loaded: None,
             time_of_day: None,
             sky_atmosphere: None,
+            water_body: None,
         };
         parent.sprite = Some(Sprite {
             size: Vec2d::new(1.0, 1.0),

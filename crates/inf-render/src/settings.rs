@@ -100,6 +100,12 @@ pub struct RenderSettings {
     /// [`AtmosphereQuality::High`]; [`RenderTier::apply`](crate::caps::RenderTier::apply)
     /// clamps it **down** like every other capability knob.
     pub atmosphere: AtmosphereSettings,
+    /// Water rendering quality (P20.1): grid density and whether screen-space
+    /// refraction is paid for. Like [`atmosphere`](Self::atmosphere) and unlike
+    /// bloom or SSAO this has **no enable flag** — whether there is water is a
+    /// property of the *scene*, not of the renderer. Defaults to
+    /// [`crate::water::WaterQuality::High`]; the tier clamps it **down**.
+    pub water: crate::water::WaterSettings,
     /// GPU-capability auto-tier override (P13.4.2). `None` → the host probes the
     /// adapter and picks a [`RenderTier`](crate::caps::RenderTier)
     /// ([`detect_tier`](crate::caps::detect_tier)); `Some(tier)` forces it
@@ -444,6 +450,7 @@ impl Default for RenderSettings {
             shadows: ShadowSettings::default(),
             gi: GiSettings::default(),
             atmosphere: AtmosphereSettings::default(),
+            water: crate::water::WaterSettings::default(),
             tier_override: None,
         }
     }

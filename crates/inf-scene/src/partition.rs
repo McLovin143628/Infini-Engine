@@ -1302,6 +1302,7 @@ mod tests {
             always_loaded: None,
             time_of_day: None,
             sky_atmosphere: None,
+            water_body: None,
         }
     }
 

@@ -173,6 +173,21 @@ impl ResolvedSky {
         day * 86_400.0 + self.time_of_day.seconds
     }
 
+    /// The clock and wind a **water body** responds to: `(level clock in seconds,
+    /// (wind_x, wind_z) in m/s)`.
+    ///
+    /// One derivation, in Ring 0, for the same reason [`cloud_time_s`](Self::cloud_time_s)
+    /// is here: both scene projectors need it, and two byte-identical MIRROR
+    /// bodies deciding for themselves what a wave's clock is would eventually
+    /// stop agreeing. A body that has opted out of the weather
+    /// (`WaterBody::wind_from_weather == false`) still gets the clock from here —
+    /// only the wind is its own.
+    #[inline]
+    pub fn water_environment(&self) -> (f64, (f64, f64)) {
+        let w = self.weather();
+        (self.cloud_time_s(), (w.wind_x as f64, w.wind_z as f64))
+    }
+
     /// The weather in force (P17.4): the `weather_*` block when
     /// [`SkyAtmosphere::weather_enabled`], else the authored cloud/fog fields
     /// with no precipitation.
@@ -502,6 +517,19 @@ pub fn advance_weather(world: &mut EcsWorld, dt: f64) -> Option<WeatherParams> {
 // two hand-written match arms agreeing. Units per architecture rule 6: seconds
 // for the clock, a dimensionless multiplier for the rate.
 
+/// The clock and wind every water body in `world` responds to (P20.1), resolved
+/// **once per projection**.
+///
+/// A world with no sky authority answers `(0, (0, 0))` — a defined value rather
+/// than an error, matching how `terrain.height_at` reads a flat plane out of a
+/// terrain-less world. That is also what makes a water body render identically
+/// in a level that has never heard of a clock.
+pub fn water_environment(world: &EcsWorld) -> (f64, (f64, f64)) {
+    resolve_sky(world)
+        .map(|s| s.water_environment())
+        .unwrap_or((0.0, (0.0, 0.0)))
+}
+
 /// The level clock's current time, UTC seconds since midnight. `0` when the
 /// level has no clock — a defined answer rather than an error, matching how
 /// `terrain.height_at` reads a flat plane out of a terrain-less world.
@@ -812,6 +840,38 @@ mod tests {
         assert_eq!(a_sun.x.to_bits(), b_sun.x.to_bits());
         assert_eq!(a_sun.y.to_bits(), b_sun.y.to_bits());
         assert_eq!(a_sun.z.to_bits(), b_sun.z.to_bits());
+    }
+
+    /// The P20.1 water seam: one Ring-0 derivation of the clock and wind a wave
+    /// responds to, so two MIRROR projectors cannot disagree about it.
+    #[test]
+    fn water_environment_is_the_clock_and_the_weather_wind() {
+        // No authority at all: a defined answer, never an error.
+        assert_eq!(water_environment(&EcsWorld::new()), (0.0, (0.0, 0.0)));
+
+        let mut w = weather_world(SkyAtmosphere {
+            weather_enabled: true,
+            ..SkyAtmosphere::default()
+        });
+        assert!(set_weather(&mut w, WeatherPreset::Storm, 0.0));
+        let (t, (wx, wz)) = water_environment(&w);
+        let storm = WeatherPreset::Storm.params();
+        assert_eq!(wx, storm.wind_x as f64);
+        assert_eq!(wz, storm.wind_z as f64);
+        // The clock is the DOCUMENT's, continuous across midnight — the same one
+        // the clouds drift on, not a second definition of "now".
+        let sky = resolve_sky(&w).unwrap();
+        assert_eq!(t, sky.cloud_time_s());
+
+        // Weather OFF falls back to the authored cloud wind, which is what keeps
+        // a pre-P17.4 level's sea responding to something rather than nothing.
+        let calm = weather_world(SkyAtmosphere {
+            weather_enabled: false,
+            cloud_wind_x: 3.5,
+            cloud_wind_z: -1.25,
+            ..SkyAtmosphere::default()
+        });
+        assert_eq!(water_environment(&calm).1, (3.5, -1.25));
     }
 
     #[test]

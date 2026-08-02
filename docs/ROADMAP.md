@@ -4767,6 +4767,253 @@ sediment state; the `MaskImage` sampler has no graph node; lowering is single-ru
 spline river fed by a lake — carries buoyant physics objects, replays deterministically on the
 physics/audio trace, holds water goldens, and PIE == shipping.
 
+> **STATUS — P20.1 Water surfaces: COMPLETE (2026-08-02).**
+> Oceans, lakes and spline rivers, on **one** wave model, **one** shader and **one** pass.
+> A lake is a bounded ocean with small numbers; a river is the same evaluator run in the
+> river's own `(arc length, lateral)` frame so its ripple travels *downstream* rather than
+> with the wind. Schema **v17** (one appended entity slot). All 42 pre-P20.1 goldens
+> byte-identical; three new ones blessed once.
+>
+> **The wave model, and where it is evaluated.** `crates/inf-water` (Ring 0, new) derives the
+> Gerstner components — direction, wavenumber `k = 2π/λ`, amplitude, `ω = √(g k)` (deep-water
+> gravity dispersion, so `T = √(2πλ/g)` and long swells outrun short chop), steepness `Q` and
+> phase — as a **pure function of `(seed, wind)`** through an integer SplitMix64 hash, in
+> bit-portable `f64`, with every trig call going through `inf_math::portable::psin64/pcos64`
+> (the P14 LAW). Amplitudes are renormalized so `Σ Aᵢ` is exactly the authored bound, and `Qᵢ`
+> is solved so `Σ Qᵢ Aᵢ kᵢ` is exactly the authored steepness — which is what makes
+> `|height − level| ≤ amplitude_m` and "the trochoid never self-intersects" *properties*
+> rather than hopes. Wind response: direction from the wind vector (never `atan2` — not
+> bit-portable), amplitude from a monotone gain saturating at 12 m/s with a 0.25 floor,
+> because an ocean whose wind has just dropped is swell, not glass.
+>
+> **The CPU derives, the GPU only evaluates.** The parameters are uploaded already solved, so
+> there is no second, `f32`, platform-dependent copy of the wave model in WGSL beside the one
+> P20.2's buoyancy will sample — the terrain-parity class of drift, avoided by not creating it.
+> Two consequences fall out. **Time never reaches the GPU**: a wave arrives with its phase
+> already reduced (`wrap(φ − ωt)`) in `f64`, the `CloudParams::wind_offset` trick, so a level
+> clock in the millions of seconds does not quantise into visible steps. And the **floating
+> origin rides in the same reduction** (`+ k·(d·origin_xz)`), so the shader evaluates at
+> render-local coordinates, gets the world-space phase, and a rebase moves no wave —
+> `a_rebase_moves_no_wave` pins it.
+>
+> **The height query is designed for the fixed step, now.** `WaterSurface::height_at(p, t)` is
+> pure `f64`, allocation-free, camera-free and frame-free; `t` is the *document's* clock
+> (`ResolvedSky::cloud_time_s`). A Gerstner surface is parametric, so "how high is the water at
+> my boat" is an **inverse** problem: it is solved by a fixed 6-iteration fixed point
+> (`pₙ₊₁ = p − Δxz(pₙ)`), never a convergence test, so the operation count — and the answer —
+> is identical on every machine. Measured residual ≤ 3 mm on the steepest sea the tests author;
+> the honest worst-case bound is ~17 cm and quoting it would overstate the error by two orders
+> of magnitude, so both numbers are written down. `submersion_m` and `flow_at` are the other
+> two P20.2 seams. Ocean/lake current is **zero**, and that is a decision: a Gerstner orbit
+> averages to no net transport, and reporting the instantaneous orbital velocity as a current
+> would push a boat across the sea at wave speed. Stokes drift is P20.2's question.
+>
+> **Rivers.** `RiverPath` samples the P19.4 arc-length machinery at even **distance** (never at
+> even spline `t`, which bunches on curves), giving frames with a centre, a flow tangent, a
+> horizontal across-vector and the width/depth profile interpolated along arc length. The
+> across-vector is `normalize(tangent × up)` recomputed per frame, **not** parallel-transported:
+> transport accumulates roll and a closed loop generally does not return to the frame it
+> started from (the curve's holonomy), which reads as a ribbon visibly banked at its own seam.
+> The price is that a river cannot bank — which water does not do — and the purchase is exact
+> continuity on closed splines, asserted by `a_closed_river_closes_exactly`. A hairpin keeps
+> its frames (`a_hairpin_keeps_its_frames`).
+>
+> **The river's centreline is the `Spline` on the SAME ENTITY**, not a reference. Composition,
+> the way `Terrain` and `Transform` already relate: it cannot dangle, it needs no cook edge and
+> no dangling-reference advisory, and "select the river, drag its points" is the obvious
+> gesture. **So the cook's dependency closure is unchanged** — stated because the batch brief
+> asked. The cost is that a river cannot share a centreline with a road; an `EntityRef` field
+> is the additive change if that is ever wanted, and it would be the thing that introduced a
+> reference to keep alive.
+>
+> **The reflection source is the sky-view LUT, not SSR — and that is a decision, not a
+> shortcut.** A wave-perturbed normal at the grazing angles that dominate a water surface
+> reflects *toward the horizon*, which is exactly where a screen-space march has nothing to
+> hit: the ray leaves the frame in a few steps and essentially every pixel takes the miss path.
+> The miss path IS the sky, so v1 asks the sky directly — one fetch, no march, no per-pixel
+> failure mode, and the same authority the sky pass samples, so water and sky agree by
+> construction. With the atmosphere off it falls back to the authored three-colour gradient, so
+> a level with no clock still gets a plausible reflection. Reflecting *scene* geometry (a boat,
+> a cliff) needs the P18.4 SSR machinery running after the opaque resolve; named as the P20.3
+> follow-up.
+>
+> **The pass sits after opaques, after clouds and rain, before translucency** — the `CloudNode`
+> placement argument applied to a surface rather than a medium. After opaque because every
+> interesting thing water does reads *what is behind it*; after clouds so a sea reflects the sky
+> it is under; before translucency so glass composites over water like any other surface. It is
+> **not inside** the translucent pass: that pass is a back-to-front sort of `MeshInstance`s
+> through the `mesh` shader, and water is one procedural surface per body with its own vertex
+> generation and a fragment stage that reads the frame buffer. Depth is bound **read-only**
+> (`depth_ops: None`) with the same view additionally bound as
+> `texture_depth_multisampled_2d` — the P17.3 arrangement, and the only one WebGPU permits.
+>
+> **Screen-space refraction costs one extra resolve, and only when it is used.** The colour
+> behind the water is the MSAA target being rendered into, which cannot be sampled while it is
+> an attachment — so the node first records a **resolve-only render pass** (`color_msaa` in,
+> `scene_hdr` out, zero draws; wgpu resolves at pass end regardless). `scene_hdr` is
+> overwritten by the real `ResolveNode` later, so nothing downstream sees it. Skipped entirely
+> at `WaterQuality::Low`.
+>
+> **Geometry.** One index-buffer-only grid (no vertex buffer — the position comes from
+> `vertex_index`), mapped three ways in the vertex stage: an ocean's **graded** (`sign(q)·q²`),
+> camera-following, 4 m-**snapped** 8 km patch (a uniform 8 km grid at 64 quads would put three
+> wavelengths in a cell — the waves would not exist; snapping makes the vertex set
+> piecewise-constant in camera position so the tessellation stops crawling); a lake's uniform
+> rectangle; and a river's ribbon interpolated across a storage buffer of frames. Per-body
+> uniforms ride one buffer at a 512-byte dynamic-offset stride (the uniform is 448 bytes —
+> `the_uniform_matches_the_shader_struct` pins that it cannot outgrow its slot and silently
+> overlap the next body).
+>
+> **Shading**: Fresnel with `F0 = 0.02` (water's IOR 1.333, derived not tuned) → sky;
+> Beer-Lambert absorption `exp(−σ·d)` over the screen-space water column with the default `σ`
+> at the clear-water ratio (red absorbed ~13× faster than blue), which is why deep water is blue
+> without anyone painting it blue; a smoothstep shore fade on the same depth difference, so it
+> works against terrain, a jetty and a boat hull in one expression; and foam from **three**
+> sources combined by `max` (foam is a coverage fraction, and two causes do not make more than
+> white): the wave **crest factor** — `Σ Q A k sin θ`, the surface-folding measure the Gerstner
+> model already contains, so "how close to breaking" rather than a dial with no referent — the
+> shallow-water band, and river flow speed (plus a bank term).
+>
+> **Shore is computed twice, deliberately, and it is written down.** In the shader it is a
+> screen-space depth difference; on the CPU (`inf_water::shore`) it is a world-space question
+> about terrain heights, for the cook, gameplay, P20.2 and P20.4. Neither is derived from the
+> other. The CPU `shore_distance` is honestly labelled **SDF-class**, not an SDF: a 16-direction
+> bounded radial probe with fixed bisection — never under-reports, exact for a straight shore
+> probed head-on, error bounded by the angular step on a concave one.
+>
+> **Schema v17** — the five-step dance, both codec mirrors. One appended entity slot
+> (`water_body`), so this is the `EntityRecordV10` *shape* of bump, not the `EntityRecordV14`
+> one: `EntityRecordV16` / `SceneFileV16` frozen in both codecs with `into_current` +
+> `from_current`, the v15 rung repointed at v16, a `17 =>` decode arm, and `scene_v16.inf_lvl`
+> blessed in **both** fixture dirs and byte-compared (`v16_fixture_matches_the_runtime_codecs_copy`).
+> The v16 fixture carries what only v16 could express — a painted biome id and a `biome_set` —
+> so the v17 hop is proven to *preserve* v16 content rather than merely to produce defaults.
+> **Priced:** the slot costs exactly **one discriminant byte per entity**
+> (`v17_costs_one_byte_per_water_free_entity`, measured as a delta against the frozen v16 shape
+> of the same record). The 12 samples/templates re-blessed accordingly, and every delta is
+> exactly its entity count: character-demo +4, streamed-terrain +4, terrain-demo +4,
+> first-person +4, platformer +5, hybrid +5, partitioned-world +20, phase16-world +22,
+> phase19-town +25, physics-playground +28, phase18-scatter +31, vgeom-demo +325. The
+> **wire-enum law** applies to the first new scene enum since P19.2 wrote it down:
+> `water_kind_discriminants_are_frozen` pins Ocean=0 / Lake=1 / River=2 and their string ids.
+> The two-ladder tile tripwire moves to 17 with the note that v17 is the *scene-only* case.
+>
+> **Dependency ledger.** `inf-render` gained `inf-water` (Ring 0 → Ring 0) — it consumes the
+> *derived* `Wave`/`WaveField`/`RiverFrame`, never re-deriving one, which is what keeps the
+> wave model single-sourced. `inf-packager` gained `inf-water` + `glam` outright and
+> **promoted `inf-ecs` and `inf-math` from dev-dependencies to real ones**: the river advisory
+> reads `WaterBody`/`Spline`/`Transform` off a decoded level and maps the ECS spline
+> interpolation onto `inf_math::spline`'s. Both former dev-dep comments were rewritten in place
+> rather than deleted, so the reason each crate is there is still readable. No new third-party
+> crate enters the tree, and `cargo deny` is unmoved.
+>
+> **The component is flat, and that is a deviation with a reason.** The brief asked for an
+> enum-shaped `WaterBody`; it ships as a flat `WaterKind` enum + flat fields, exactly like
+> `Light`/`LightKind` and `Volume`/`VolumeKind`. Two concrete reasons: the Details reflection
+> walker surfaces flat scalars and enum *dropdowns*, so struct variants would have no widget at
+> all; and a variant-dependent field set makes a bincode record's length depend on its variant,
+> which is a worse wire contract than one record of `serde(default)` fields.
+>
+> **The MIRRORs.** `project_water` is byte-identical in both projectors and compared
+> character-for-character (`project_water_is_identical_in_both_projectors`), like
+> `project_sky`. The two things that *could* silently diverge are in Ring 0 instead:
+> `inf_ecs::sky::water_environment` decides what clock and wind a body sees, and
+> `WaterBody::effective_wind` decides whether *this* body follows them — a lake sets
+> `wind_from_weather: false` because a lake has no fetch, and a gale must not raise a swell on
+> it. The PIE-vs-shipping gate proves the pairing: over a 120-step storm blend the ocean's
+> derived components change every step while the lake's stay **bit-identical**.
+>
+> **The downhill advisory** reads the spline's own arc-length elevation profile through the
+> same `RiverPath` the renderer and the sim build. **No terrain is queried on this path**, so
+> the 0.5 m **merged-span** tolerance is absorbing Catmull-Rom overshoot between knots plus
+> arc-length resampling — centimetres — not heightfield noise; the constant's doc says exactly
+> that, because a justification describing a measurement the code never performs is worse than
+> none. It composes the parent chain, honours a **negative** `river_flow_m_s` by reading the
+> profile backwards, and skips closed loops (a loop cannot help regaining what it loses —
+> `a_closed_river_is_never_reported`).
+>
+> **THE ORDERING LAW, paid for in the P20.1 audit.** The advisory runs **before** the
+> partition branch, because partitioning MOVES a level's entities into the derived `.inf_part`
+> and clears `level.entities` in place. The first version ran after it, and therefore reported
+> **nothing at all** on partitioned levels — silently, and on exactly the level type most likely
+> to hold a kilometre of river. It also had to become `advisories.extend(notes)` rather than
+> `advisories = notes`, or the partition's own advisories would have clobbered the water one.
+> *Every future per-entity advisory on this path belongs above that branch.* Pinned from the
+> outside by `an_uphill_river_is_reported_on_a_partitioned_level_too` and
+> `the_partition_advisories_survive_the_water_one`, both verified to fail against the old
+> ordering.
+>
+> **Goldens: 42 → 45.** `water_ocean_noon`, `water_lake_dusk`, `water_river` — one per body
+> kind, because three tessellations and three shading regimes share one shader. All 42
+> pre-existing PNGs are byte-identical, verified the house way (the whole suite under
+> `INF_BLESS_GOLDENS=1`, `git status` reporting only the three new files) **and** pinned from
+> the inside by `water_off_path_is_byte_identical`, which winds every water knob on a
+> water-free scene *and* on a scene whose only body is undrawable, with an anti-vacuity guard
+> that a real body does move the frame.
+>
+> **Remainders, stated.**
+> * **An ocean is a finite 8 km patch**, so a camera on a flat horizon can see it end. A
+>   projected-grid (screen-space, truly infinite) ocean is different work, named rather than
+>   half-built. In practice the P17 aerial-perspective term has washed the surface into the sky
+>   well before the edge.
+> * **No SSR on water** (above), and therefore **no reflected geometry** — a boat reflects the
+>   sky, not itself. P20.3.
+> * **No underwater view.** Looking up from below draws the surface's back face with the same
+>   shading as the front; underwater fog and light shafts are P20.3's whole subject.
+> * **The advisory checks the water surface, not the BED.** "Is the river's water above the
+>   ground under it?" is the natural companion and is not implemented: the answer lives in tile
+>   payloads inside a `.inf_terrain` the cook validates structurally and never pages in.
+>   `RiverPath::bed_profile` is the seam (already written and tested, including the
+>   terrain-hole skip); P20.4's tools, which have the terrain resident, are where it belongs.
+> * **The uphill check has a documented escape: a sawtooth.** A climb broken into sub-tolerance
+>   rises by intervening falls is reported by nothing, because each merged span closes at the
+>   fall. The alternative — a net-elevation test — fires on every river that crosses a ridge on
+>   its way down a valley, i.e. on correct content, so this is the lesser gap. Pinned as a
+>   *property* by `a_sawtooth_climb_escapes_the_per_span_tolerance` so it stays known.
+> * **P19.1 flow maps are not yet an input.** The plumbing a river needs is the terrain's
+>   `data_map_at(DataMapKind::Flow, ..)`, and the shader term it would drive (foam and speed
+>   modulation) exists — what is missing is the projector edge from a terrain's maps to a
+>   river's frames, which wants the authoring story P20.4 brings.
+> * **The refraction resolve is per-frame, not per-region.** Water in 2 % of the frame still
+>   pays a full-resolution MSAA resolve. A scissored resolve needs the bodies' screen bounds,
+>   which the CPU does not currently compute.
+> * **A river's depth profile is linear in arc length** (two ends, interpolated). A keyframed
+>   profile is a `Vec<(s, width, depth)>` and needs no change beyond the interpolator.
+> * **`MAX_BODIES = 32` per frame**, extra bodies skipped deterministically in projection order.
+> * **No authoring tools** — a `WaterBody` is added through the Details "Add Component" menu and
+>   its rows come free through reflection. Placement tools, per-biome water-level hints (the
+>   P19.2 `water_hint` field is still unread) and the erosion→water pipeline are P20.4.
+>
+> **Two environment artifacts, both now hit twice — recorded so the third time costs nothing.**
+> * **"crate `X` required to be available in rlib format, but was not found in this form" /
+>   "can't find crate for `inf_player`" is a DISK-FULL symptom**, not a code failure. Seen on
+>   `gimli`, `wasmtime_environ`, `wgpu_hal`, `windows_sys`, `inf_mesh`, then on our own libs.
+>   The P20.1 occurrence was diagnosed properly the second time: `df` showed **5.1 GB free on a
+>   1.9 TB volume**, and `target/` was holding 121 GB. rustc had been writing truncated or
+>   partial artifacts, so the rlibs existed on disk but no longer matched the fingerprints
+>   cargo was asking for — which is why a plain retry sometimes appears to clear it and
+>   sometimes does not. **Check `df -h .` FIRST.** `cargo clean -p <the named packages>` (121 GB
+>   freed here, 159 green legs immediately after) is the fix; the phase-11 law — *clean between
+>   phases* — is the prevention, and this is its second citation. Do not "fix" it by editing the
+>   crates named.
+> * **Blessing fixtures/goldens with a multi-package `-p A -p B` invocation can produce phantom
+>   churn**, because cargo unifies features across the selected set and a crate can then bless
+>   under a feature set it does not ship with. **Bless one package at a time**, and always
+>   confirm with `git status --porcelain` on the artifact directory rather than trusting the
+>   test's exit code. The P20.1 bless-diff was run exactly that way: the whole golden suite
+>   under `INF_BLESS_GOLDENS=1`, then `git status` showing only the three new PNGs.
+>   (A related third: a test that *writes* a committed file can leave pure line-ending churn on
+>   Windows — `git diff --numstat` reporting zero changed lines is the tell, and
+>   `git checkout --` on those paths is the fix. It hit the ts-rs bindings here.)
+>
+> Files: `crates/inf-water/**` (new), `crates/inf-ecs/src/{components,registry,sky}.rs`,
+> `crates/inf-scene/src/lib.rs` + `editor/crates/inf-editor-core/src/scene/serialize.rs` (v17),
+> `crates/inf-render/src/{water.rs,passes/water.rs,shaders/water.wgsl,passes/mod.rs,scene.rs,
+> settings.rs,caps.rs,renderer.rs,lib.rs}`, both projectors, `runtime/inf-packager/src/cook.rs`,
+> and the gates `runtime/inf-player/tests/water_projection.rs`,
+> `runtime/inf-packager/tests/cook_water.rs`,
+> `editor/crates/inf-editor-core/tests/projector_mirror.rs`.
+
 - **P20.1 Water surfaces** — 1. a new `inf-water` (Ring 0) + render passes: ocean (Gerstner v1
   → FFT spectrum v2, deterministic seeds), lake volumes (flat + ripple), and spline rivers
   (flow along the parity-wave splines, width/depth profiles, downhill validation against

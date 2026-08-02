@@ -277,10 +277,21 @@ fn cook_one(input: CookInput, opts: &CookOptions) -> Result<CookOutput> {
             let mut level =
                 inf_scene::decode(&raw).map_err(|source| CookError::Scene { guid, source })?;
             is_level = true;
+            // P20.1: water flows downhill. A river spline authored the wrong way
+            // up a valley is a mistake the cook can SEE and the runtime can only
+            // LOOK WRONG about — the `dangling_terrain_refs` shape of advisory.
+            //
+            // **BEFORE the partition branch, and that ordering is load-bearing.**
+            // Partitioning MOVES the entities into the `.inf_part` and clears them
+            // here, so anything reading `level.entities` afterwards reads an empty
+            // list and reports nothing — silently, and on exactly the levels most
+            // likely to hold a kilometre of river. Every future per-entity advisory
+            // on this path belongs above the branch for the same reason.
+            advisories.extend(uphill_rivers(guid, &level));
             if level.settings.partition.enabled {
                 let (bytes, cells, notes) = build_partition(guid, &level)?;
                 partition = Some((derived_partition_id(guid), bytes, cells));
-                advisories = notes;
+                advisories.extend(notes);
                 // The entities now live in the `.inf_part`. Shipping them here too
                 // would double the level's bytes AND give the runtime two
                 // authorities for the same world — so the cooked level keeps only
@@ -1011,6 +1022,165 @@ fn dangling_terrain_refs(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// How much elevation a river must gain, in metres, before the cook says so.
+///
+/// **What it actually bounds, on this path.** The profile read here is the
+/// *spline's own* elevation, sampled at even arc length — no terrain is queried,
+/// so there is no heightfield sampling noise to absorb. What there is:
+///
+/// * **Catmull-Rom overshoot.** A smooth curve through strictly descending
+///   control points can still bulge *upward* between knots — that is what C¹
+///   interpolation does — so a polyline an author would call monotone can show
+///   centimetre rises in the sampled profile.
+/// * **Arc-length quantization.** Frames land at even distances, not on knots, so
+///   the profile is a resampling of the curve rather than the control points; the
+///   sampled extrema sit slightly off the real ones.
+///
+/// Half a metre is comfortably above both and comfortably below anything an
+/// author would call a rise. It is a **merged-span** tolerance, applied to a
+/// contiguous climb's *total*, so a long gentle ascent made of individually tiny
+/// steps is still caught — see `uphill_spans` for the shape, and
+/// `a_sawtooth_climb_escapes_the_per_span_tolerance` for the case it does NOT
+/// catch, which is documented rather than papered over.
+///
+/// (The same constant would also have to absorb bilinear heightfield wobble if
+/// the *bed* check ever lands — `RiverPath::bed_profile`, deferred to P20.4 —
+/// which is why the value has that much headroom.)
+const RIVER_UPHILL_TOLERANCE_M: f64 = 0.5;
+
+/// Advisory: rivers, in the levels being cooked, whose surface **gains
+/// elevation** in the direction they flow (P20.1).
+///
+/// Non-fatal, like every other advisory here: the level is valid and cooks fine,
+/// and a stylised game may genuinely want a river running up a hill. What it is
+/// not is *accidental* — and an accidental one is invisible until somebody
+/// notices the water is wrong, because nothing crashes and nothing is missing.
+///
+/// ## What is checked, and what is not
+///
+/// The **water surface** is the spline, so this reads the spline's own elevation
+/// profile along arc length — the same [`inf_water::RiverPath`] the renderer and
+/// the sim build, sampled at the same frames, so the advisory and the picture
+/// agree. That is deliberately the strongest check available at cook time: it
+/// needs no terrain at all, so it works for a level whose ground streams from an
+/// `.inf_terrain` the cook never decodes.
+///
+/// The **bed** — "is the river's water above the ground under it?" — is the
+/// natural companion and is *not* checked here, because the answer lives in tile
+/// payloads inside a `.inf_terrain` the cook validates structurally and never
+/// pages in. `inf_water::RiverPath::bed_profile` is the seam for it; P20.4's
+/// authoring tools, which have the terrain resident, are where it belongs.
+///
+/// A river entity's transform is applied translation-and-rotation-wise through
+/// [`Transform::affine`], and parent chains are followed, so a river under a
+/// moved or rotated parent is judged where it actually is.
+///
+/// Deduplicated + sorted (by entity) so the report stays deterministic.
+fn uphill_rivers(guid: AssetId, level: &inf_scene::RuntimeLevel) -> Vec<String> {
+    use inf_ecs::components::{SplineInterp, WaterKind};
+
+    // World transform of an entity: its local affine composed with its parents'.
+    // Depth-guarded, because a merge-mangled level can contain a parent cycle and
+    // an advisory must never hang a build.
+    fn world_affine(
+        level: &inf_scene::RuntimeLevel,
+        start: &inf_scene::RuntimeEntity,
+    ) -> glam::DAffine3 {
+        let mut e = start;
+        let mut affine = e.transform.affine();
+        let mut depth = 0u32;
+        while let Some(pg) = e.parent {
+            depth += 1;
+            if depth > 64 {
+                break;
+            }
+            let Some(parent) = level.entity(pg) else {
+                break;
+            };
+            affine = parent.transform.affine() * affine;
+            e = parent;
+        }
+        affine
+    }
+
+    let mut out: Vec<(uuid::Uuid, String)> = Vec::new();
+    for e in &level.entities {
+        let Some(water) = e.water_body else { continue };
+        if water.kind != WaterKind::River {
+            continue;
+        }
+        let Some(spline) = e.spline.as_ref() else {
+            continue;
+        };
+        if spline.points.len() < 2 {
+            continue;
+        }
+        let affine = world_affine(level, e);
+        let points: Vec<glam::DVec3> = spline
+            .points
+            .iter()
+            .map(|p| affine.transform_point3(p.to_dvec3()))
+            .collect();
+        let interp = match spline.interp {
+            SplineInterp::Linear => inf_math::spline::SplineInterp::Linear,
+            SplineInterp::CatmullRom => inf_math::spline::SplineInterp::CatmullRom,
+        };
+        let profile = inf_water::RiverProfile {
+            width_start_m: water.river_width_start_m,
+            width_end_m: water.river_width_end_m,
+            depth_start_m: water.river_depth_start_m,
+            depth_end_m: water.river_depth_end_m,
+            flow_speed_m_s: water.river_flow_m_s,
+        };
+        let path = inf_water::RiverPath::from_points(&points, spline.closed, interp, &profile);
+        if path.is_empty() {
+            continue;
+        }
+        // A NEGATIVE flow speed reverses the river without re-authoring the
+        // spline, so "downhill" reverses with it: read the profile backwards.
+        let mut elevations = path.surface_profile();
+        if water.river_flow_m_s < 0.0 {
+            let total = path.length_m;
+            elevations.reverse();
+            for (s, _) in elevations.iter_mut() {
+                *s = total - *s;
+            }
+        }
+        // A CLOSED river cannot help gaining every metre it loses — it is a loop.
+        // Advising on it would be advising on a circle, so it is skipped and said
+        // so rather than silently filtered.
+        if path.closed {
+            continue;
+        }
+        let spans = inf_water::river::uphill_spans(&elevations, RIVER_UPHILL_TOLERANCE_M);
+        if spans.is_empty() {
+            continue;
+        }
+        let total: f64 = spans.iter().map(|s| s.rise_m).sum();
+        let worst = spans
+            .iter()
+            .max_by(|a, b| a.rise_m.total_cmp(&b.rise_m))
+            .copied()
+            .unwrap_or(spans[0]);
+        out.push((
+            e.guid,
+            format!(
+                "level {guid}: river entity {} climbs {total:.2} m across {} stretch(es) in the \
+                 direction it flows (the worst gains {:.2} m over {:.1} m, a gradient of \
+                 {:.1}%) — water does not flow uphill, so either re-order the spline points, \
+                 lower them, or set a negative `river_flow_m_s` to reverse the flow",
+                e.guid,
+                spans.len(),
+                worst.rise_m,
+                worst.length_m(),
+                worst.gradient() * 100.0,
+            ),
+        ));
+    }
+    out.sort_by_key(|(g, _)| *g);
+    out.into_iter().map(|(_, m)| m).collect()
 }
 
 /// Advisory: `Terrain.biome_set` references, in the levels being cooked, that

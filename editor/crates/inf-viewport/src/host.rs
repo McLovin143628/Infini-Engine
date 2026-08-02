@@ -11,7 +11,7 @@ use inf_ecs::components::{
     ComputedVisibility, Foliage, FoliageInstance, GlobalTransform, Joint2D, Joint3D, Light,
     Light2D, LightKind as EcsLightKind, Material, MeshRef, NineSlice, PcgVolume, Primitive,
     ScatteredInstance, SkeletalMesh, Spline, SplineInterp as EcsSplineInterp, Sprite, Terrain,
-    Text2D, TextAlign, Tilemap, Volume,
+    Text2D, TextAlign, Tilemap, Volume, WaterBody, WaterKind,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::ipc::SpawnKind;
@@ -26,9 +26,9 @@ use inf_render::{
     DebugDraw, EngineRenderer, GizmoDelta, GizmoDrag, GizmoMode, GpuContext, HAlign, HeightFog,
     LightKind, MeshInstance, NineSliceParams, OrthoParams, Picker, PrebatchedRun, PrecipParams,
     PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderTerrain,
-    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ScatterBatch, ScatterData,
-    ScatterInstance, SkyParams, SpriteInstance, SunParams, SurfaceChain, TerrainTileKey,
-    TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
+    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, RenderWater, ScatterBatch,
+    ScatterData, ScatterInstance, SkyParams, SpriteInstance, SunParams, SurfaceChain,
+    TerrainTileKey, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
 };
 use inf_render::{
     detect_tier, BloomSettings, GiSettings, RenderSettings, RenderTier, ShadowSettings,
@@ -1097,6 +1097,10 @@ impl EngineHost {
         // content-keyed, so re-projecting an unchanged scatter re-uses its GPU
         // buffers even though the list itself is rebuilt.
         self.scene.scatter.clear();
+        // P20.1: water bodies are rebuilt from scratch every projection, like
+        // `scatter` — a body's whole state is a pure function of its component, its
+        // spline and the level clock, so there is nothing to carry over.
+        self.scene.waters.clear();
         self.terrain_slots.clear();
         // `terrain_guid` (the tool target) is deliberately NOT cleared here — it
         // is re-validated against the new slot list at the end of the projection,
@@ -1116,6 +1120,11 @@ impl EngineHost {
         // when a clock is present, pushes the sun/moon directional light as
         // `lights[0]` — a stable index on both projector sides.
         project_sky(&mut self.scene, world);
+        // The clock and wind every water body responds to, resolved ONCE per
+        // projection in Ring 0 (`inf_ecs::sky`) so the two MIRROR projectors cannot
+        // disagree about what "now" and "the wind" mean — the same reasoning that put
+        // `ResolvedSky::cloud_time_s` there.
+        let water_env = inf_ecs::sky::water_environment(world);
         let w = world.world();
         let mut next_id: u32 = 1;
         // Which vgeom assets this projection has already listed (the render node
@@ -1366,6 +1375,30 @@ impl EngineHost {
                 }
             }
 
+            // Water surfaces (P20.1): an ocean, a lake or a spline river. A river
+            // reads the `Spline` on THIS SAME ENTITY for its centreline — component
+            // composition, not a reference, so there is nothing to resolve and
+            // nothing to dangle.
+            // MIRROR: `inf_player::render` runs the same branch (minus the pick-id
+            // map, which is host-local), through the same `project_water` body.
+            if let Some(water) = w.get::<WaterBody>(entity) {
+                if visible {
+                    let affine = w
+                        .get::<GlobalTransform>(entity)
+                        .map(|g| g.0)
+                        .unwrap_or(glam::DAffine3::IDENTITY);
+                    let id = next_id;
+                    next_id += 1;
+                    let body =
+                        project_water(water, w.get::<Spline>(entity), &affine, water_env, id);
+                    if body.drawable() {
+                        self.scene.waters.push(body);
+                        // ONE row per body: a pick anywhere on the surface selects
+                        // the owning entity.
+                        self.id_to_guid.insert(id, guid);
+                    }
+                }
+            }
             // Foliage scatter (P18.5): painted instances project as GPU-instanced
             // scatter batches, mesh + tint taken from the referenced palette slot,
             // one batch per primitive kind the palette resolves. Instances are
@@ -2139,6 +2172,121 @@ fn push_foliage_scatter(scene: &mut RenderScene, fol: &Foliage, translation: DVe
 /// first, before the entity loop, so its index is stable on both sides. A level
 /// that would rather author its own suns sets `SkyAtmosphere::enabled = false`,
 /// which keeps the clock and the tint but projects no light.
+/// Project a [`WaterBody`] (+ the [`Spline`] on the **same entity**, for a river)
+/// into a [`RenderWater`] (P20.1).
+///
+/// MIRROR: this body is byte-identical in `inf_viewport::host` and
+/// `inf_player::render`, and `projector_mirror.rs` compares it character for
+/// character — like `project_sky`, and for the same reason: neither Ring-0 crate
+/// can host it (`inf-render` does not depend on `inf-ecs`, and `inf-ecs` must not
+/// depend on `inf-render`), so it is written twice on purpose and gated.
+///
+/// The two things that *could* silently diverge live in Ring 0 instead:
+/// [`inf_ecs::sky::water_environment`] decides what clock and wind a body sees,
+/// and [`WaterBody::effective_wind`] decides whether this body follows them. A
+/// host that inlined either would be exactly the drift this gate exists to stop.
+///
+/// `env` is `(level clock in seconds, weather wind (m/s))` — resolved once per
+/// projection, never per body, and never from a wall clock.
+fn project_water(
+    water: &WaterBody,
+    spline: Option<&Spline>,
+    affine: &glam::DAffine3,
+    env: (f64, (f64, f64)),
+    id: u32,
+) -> RenderWater {
+    let (time_s, weather_wind) = env;
+    let (wind_x, wind_z) = water.effective_wind(weather_wind);
+    // A river's ripple travels DOWNSTREAM: its wave frame is (arc length,
+    // lateral), so the "wind" is +1 along the river rather than a world
+    // direction. Everything else responds to the level's wind.
+    let river = water.kind == WaterKind::River;
+    let spec = inf_render::WaveSpec {
+        amplitude_m: water.wave_amplitude_m,
+        wavelength_m: water.wave_length_m,
+        steepness: water.wave_steepness,
+        wind_x: if river { 1.0 } else { wind_x },
+        wind_z: if river { 0.0 } else { wind_z },
+        // Degrees at the component boundary, radians below it (the units
+        // doctrine); the conversion is a multiply, so it stays bit-portable.
+        spread_rad: water.wave_spread_deg.to_radians(),
+        seed: water.wave_seed,
+        count: water.wave_count,
+    };
+    let mut out = RenderWater {
+        id,
+        kind: match water.kind {
+            WaterKind::Ocean => inf_render::WaterKindGpu::Ocean,
+            WaterKind::Lake => inf_render::WaterKindGpu::Lake,
+            WaterKind::River => inf_render::WaterKindGpu::River,
+        },
+        level_m: water.level_m,
+        center: glam::DVec2::new(affine.translation.x, affine.translation.z),
+        half_extent: glam::DVec2::new(water.extent.x.max(0.0), water.extent.y.max(0.0)),
+        frames: Vec::new(),
+        waves: inf_render::WaveField::from_spec(&spec),
+        time_s,
+        flow_speed_m_s: 0.0,
+        shallow_color: [
+            water.shallow_color.r,
+            water.shallow_color.g,
+            water.shallow_color.b,
+        ],
+        deep_color: [water.deep_color.r, water.deep_color.g, water.deep_color.b],
+        absorption: [
+            water.absorption.x.max(0.0) as f32,
+            water.absorption.y.max(0.0) as f32,
+            water.absorption.z.max(0.0) as f32,
+        ],
+        roughness: water.roughness.clamp(0.0, 1.0) as f32,
+        refraction_m: water.refraction_m.max(0.0) as f32,
+        shore_fade_m: water.shore_fade_m.max(0.0) as f32,
+        opacity: water.opacity.clamp(0.0, 1.0) as f32,
+        foam_color: [water.foam_color.r, water.foam_color.g, water.foam_color.b],
+        foam_crest_threshold: water.foam_crest_threshold.clamp(0.0, 1.0) as f32,
+        foam_shore_m: water.foam_shore_m.max(0.0) as f32,
+        foam_flow_m_s: water.foam_flow_m_s.max(0.0) as f32,
+    };
+    // A river's centreline is the spline on this same entity, in world space.
+    // No spline ⇒ no ribbon, and `RenderWater::drawable` skips it: an authoring
+    // state, not an error.
+    if river {
+        if let Some(sp) = spline {
+            let points: Vec<DVec3> = sp
+                .points
+                .iter()
+                .map(|p| affine.transform_point3(p.to_dvec3()))
+                .collect();
+            let interp = match sp.interp {
+                inf_ecs::components::SplineInterp::Linear => inf_math::spline::SplineInterp::Linear,
+                inf_ecs::components::SplineInterp::CatmullRom => {
+                    inf_math::spline::SplineInterp::CatmullRom
+                }
+            };
+            let profile = inf_render::RiverProfile {
+                width_start_m: water.river_width_start_m.max(0.0),
+                width_end_m: water.river_width_end_m.max(0.0),
+                depth_start_m: water.river_depth_start_m.max(0.0),
+                depth_end_m: water.river_depth_end_m.max(0.0),
+                flow_speed_m_s: water.river_flow_m_s,
+            };
+            let path = inf_render::RiverPath::from_points(&points, sp.closed, interp, &profile);
+            out.flow_speed_m_s = path.flow_speed_m_s;
+            out.level_m = path
+                .frames
+                .first()
+                .map(|f| f.center.y)
+                .unwrap_or(water.level_m);
+            out.frames = path
+                .frames
+                .iter()
+                .map(inf_render::WaterFrame::from)
+                .collect();
+        }
+    }
+    out
+}
+
 fn project_sky(scene: &mut RenderScene, world: &inf_ecs::EcsWorld) {
     let Some(sky) = inf_ecs::sky::resolve_sky(world) else {
         scene.sun = SunParams::default();

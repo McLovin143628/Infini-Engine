@@ -3171,6 +3171,7 @@ name = "inf-packager"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "glam 0.33.2",
  "inf-anim",
  "inf-asset",
  "inf-blueprint",
@@ -3184,6 +3185,7 @@ dependencies = [
  "inf-terrain",
  "inf-transpile",
  "inf-vgeom",
+ "inf-water",
  "serde",
  "serde_json",
  "tempfile",
@@ -3306,6 +3308,7 @@ dependencies = [
  "inf-math",
  "inf-render-2d",
  "inf-vgeom",
+ "inf-water",
  "naga",
  "png 0.18.1",
  "pollster",
@@ -3472,6 +3475,14 @@ dependencies = [
  "tracing",
  "wasmtime",
  "wat",
+]
+
+[[package]]
+name = "inf-water"
+version = "0.1.0"
+dependencies = [
+ "glam 0.33.2",
+ "inf-math",
 ]
 
 [[package]]

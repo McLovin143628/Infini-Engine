@@ -19,7 +19,7 @@ use crate::components::{
     JointKind3D, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice, PcgVolume,
     Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, SkyAtmosphere, Spline, SplineInterp, Sprite,
     StreamingSource, Terrain, Text2D, TextAlign, Tilemap, TimeOfDay, Transform, Visibility, Volume,
-    VolumeKind, WeatherPreset,
+    VolumeKind, WaterBody, WaterKind, WeatherPreset,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -79,6 +79,7 @@ impl ComponentRegistry {
         types.register::<BlendMode>();
         types.register::<VolumeKind>();
         types.register::<SplineInterp>();
+        types.register::<WaterKind>();
         types.register::<FoliagePaletteEntry>();
         // P17.4 — `SkyAtmosphere::weather_target`. Registered as a value type so
         // the Details grid surfaces it as the preset dropdown it is.
@@ -124,6 +125,10 @@ impl ComponentRegistry {
             Volume => "Volume",
             Spline => "Spline",
             Foliage => "Foliage",
+            // P20.1 — oceans, lakes and spline rivers. One component, three kinds
+            // (the `Light`/`LightKind` shape); a river additionally reads the
+            // `Spline` on the same entity.
+            WaterBody => "Water Body",
             RigidBody2D => "Rigid Body 2D",
             Collider2D => "Collider 2D",
             CharacterController2D => "Character Controller 2D",
@@ -228,7 +233,7 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        assert_eq!(reg.editable().len(), 34);
+        assert_eq!(reg.editable().len(), 35);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

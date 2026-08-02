@@ -941,6 +941,18 @@ pub struct RenderScene {
     /// batch's own [`ScatterData::key`] instead: a projection that rebuilds the
     /// list without the scatter changing re-uses the GPU buffers.
     pub scatter: Vec<ScatterBatch>,
+    /// Water bodies (P20.1) — oceans, lakes and spline rivers. Empty ⇒ the
+    /// [`crate::passes::water`] node returns before touching the encoder, so every
+    /// scene without water (including all 42 pre-P20.1 goldens) records the exact
+    /// command stream it always did.
+    ///
+    /// Ordering is the projector's and is what the draw order follows, so it must
+    /// be deterministic per side. It is **not** the same order in both projectors
+    /// (the player walks `Guid` order, the viewport document order) — the same
+    /// arrangement `terrains` has, and for the same reason: what makes a
+    /// cross-side comparison meaningful is each body's `id`, which both derive
+    /// from the entity.
+    pub waters: Vec<crate::water::RenderWater>,
     /// Scene lights (directional + point). Empty ⇒ the shader falls back to a
     /// default editor sun so unlit demo scenes still render.
     pub lights: Vec<RenderLight>,

@@ -59,6 +59,7 @@ use inf_ecs::components::{
     Joint2D, Joint3D, Light, Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume,
     RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, SkyAtmosphere, Spline, Sprite,
     StreamingSource, Terrain, TerrainLayer, Text2D, Tilemap, TimeOfDay, Transform, Volume,
+    WaterBody,
 };
 use inf_ecs::math::{Color, Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
@@ -186,7 +187,21 @@ use uuid::Uuid;
 /// level load — so it is **wire-neutral** and every ladder rung below stays
 /// byte-identical. Same precedent as `PcgVolume::evaluated`, and the reason the
 /// schema stays at 16: only what reaches the bytes can force a bump.
-pub const SCHEMA_VERSION: u32 = 16;
+/// * **v17** — P20.1: the entity record appends the **water** slot — `water_body`
+///   ([`WaterBody`]: an ocean, a lake or a spline river, with its Gerstner wave
+///   state, its river cross-section and its shading). No component changed shape
+///   and the file settings are untouched, so this is the [`EntityRecordV10`]
+///   *shape* of bump (a new slot at the tail), not the [`EntityRecordV14`] one.
+///   The pre-v17 entity record is frozen as [`EntityRecordV16`] and lifts with
+///   `water_body: None` — a level with no water, which is exactly what every
+///   pre-v17 level was.
+///
+///   **A river's centreline is the [`Spline`] on the same entity**, not a
+///   reference, so v17 introduces no new asset edge and the cook's dependency
+///   closure is unchanged. The wire cost to a water-free level is **one
+///   discriminant byte per entity** — the `None` tag — which is the same price
+///   every additive slot since v8 has paid.
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// File-level simulation settings (schema v3+), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -423,6 +438,12 @@ pub struct RuntimeEntity {
     /// Sits on the same entity as `time_of_day`.
     #[serde(default)]
     pub sky_atmosphere: Option<SkyAtmosphere>,
+    // ── v17 (P20.1) water ───────────────────────────────────────────
+    /// An ocean, a lake or a spline river. A `River` reads the `spline` slot on
+    /// **this same entity** for its centreline — there is no reference to
+    /// resolve, and therefore no cook edge and no dangling-reference advisory.
+    #[serde(default)]
+    pub water_body: Option<WaterBody>,
 }
 
 /// A decoded level ready for the runtime to instantiate.
@@ -442,7 +463,7 @@ impl RuntimeLevel {
         decode(bytes)
     }
 
-    /// Encode to the **current** schema (v16) — a deterministic bincode payload.
+    /// Encode to the **current** schema (v17) — a deterministic bincode payload.
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode(self)
     }
@@ -479,12 +500,25 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v16 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v17 file layout (current). `entities` reuses [`RuntimeEntity`].
 #[derive(Serialize, Deserialize)]
-struct SceneFileV16 {
+struct SceneFileV17 {
     schema_version: u32,
     title: String,
     entities: Vec<RuntimeEntity>,
+    #[serde(default)]
+    settings: RuntimeSettings,
+}
+
+/// A frozen schema-v16 file layout. It carried the **live** settings shape (v17
+/// did not touch [`RuntimeSettings`]), so only `entities` is repointed at the
+/// frozen [`EntityRecordV16`].
+#[derive(Serialize, Deserialize)]
+struct SceneFileV16 {
+    #[allow(dead_code)]
+    schema_version: u32,
+    title: String,
+    entities: Vec<EntityRecordV16>,
     #[serde(default)]
     settings: RuntimeSettings,
 }
@@ -1112,6 +1146,7 @@ impl EntityRecordV1 {
             always_loaded: None,
             time_of_day: None,
             sky_atmosphere: None,
+            water_body: None,
         }
     }
 }
@@ -1159,6 +1194,7 @@ impl EntityRecordV2 {
             always_loaded: None,
             time_of_day: None,
             sky_atmosphere: None,
+            water_body: None,
         }
     }
 }
@@ -1206,6 +1242,7 @@ impl EntityRecordV3 {
             always_loaded: None,
             time_of_day: None,
             sky_atmosphere: None,
+            water_body: None,
         }
     }
 }
@@ -1253,6 +1290,7 @@ impl EntityRecordV4 {
             always_loaded: None,
             time_of_day: None,
             sky_atmosphere: None,
+            water_body: None,
         }
     }
 }
@@ -1300,6 +1338,7 @@ impl EntityRecordV5 {
             always_loaded: None,
             time_of_day: None,
             sky_atmosphere: None,
+            water_body: None,
         }
     }
 }
@@ -1350,6 +1389,7 @@ impl EntityRecordV6 {
             always_loaded: None,
             time_of_day: None,
             sky_atmosphere: None,
+            water_body: None,
         }
     }
 }
@@ -1672,6 +1712,7 @@ impl EntityRecordV7 {
             always_loaded: None,
             time_of_day: None,
             sky_atmosphere: None,
+            water_body: None,
         }
     }
 }
@@ -1806,6 +1847,7 @@ impl EntityRecordV8 {
             always_loaded: None,
             time_of_day: None,
             sky_atmosphere: None,
+            water_body: None,
         }
     }
 }
@@ -1939,6 +1981,7 @@ impl EntityRecordV9 {
             always_loaded: None,
             time_of_day: None,
             sky_atmosphere: None,
+            water_body: None,
         }
     }
 }
@@ -2064,6 +2107,7 @@ impl EntityRecordV10 {
             always_loaded: self.always_loaded,
             time_of_day: None,
             sky_atmosphere: None,
+            water_body: None,
         }
     }
 
@@ -2346,6 +2390,7 @@ impl EntityRecordV11 {
             always_loaded: self.always_loaded,
             time_of_day: self.time_of_day,
             sky_atmosphere: self.sky_atmosphere.map(SkyAtmosphereV11::into_current),
+            water_body: None,
         }
     }
 
@@ -2700,6 +2745,7 @@ impl EntityRecordV12 {
             always_loaded: self.always_loaded,
             time_of_day: self.time_of_day,
             sky_atmosphere: self.sky_atmosphere.map(SkyAtmosphereV12::into_current),
+            water_body: None,
         }
     }
 
@@ -3141,6 +3187,7 @@ impl EntityRecordV13 {
             always_loaded: self.always_loaded,
             time_of_day: self.time_of_day,
             sky_atmosphere: self.sky_atmosphere.map(SkyAtmosphereV13::into_current),
+            water_body: None,
         }
     }
 
@@ -3321,6 +3368,7 @@ impl EntityRecordV14 {
             always_loaded: self.always_loaded,
             time_of_day: self.time_of_day,
             sky_atmosphere: self.sky_atmosphere,
+            water_body: None,
         }
     }
 
@@ -3502,6 +3550,7 @@ impl EntityRecordV15 {
             always_loaded: self.always_loaded,
             time_of_day: self.time_of_day,
             sky_atmosphere: self.sky_atmosphere,
+            water_body: None,
         }
     }
 
@@ -3535,6 +3584,187 @@ impl EntityRecordV15 {
             character_controller_3d: r.character_controller_3d,
             actor: r.actor,
             terrain: r.terrain.map(TerrainV15::from_current),
+            pcg_volume: r.pcg_volume,
+            skeletal_mesh: r.skeletal_mesh,
+            anim_player: r.anim_player,
+            anim_state_machine: r.anim_state_machine,
+            root_motion: r.root_motion,
+            attached_to: r.attached_to,
+            joint_2d: r.joint_2d,
+            joint_3d: r.joint_3d,
+            audio_source: r.audio_source,
+            audio_listener: r.audio_listener,
+            decal: r.decal,
+            volume: r.volume,
+            spline: r.spline,
+            foliage: r.foliage,
+            streaming_source: r.streaming_source,
+            always_loaded: r.always_loaded,
+            time_of_day: r.time_of_day,
+            sky_atmosphere: r.sky_atmosphere,
+        }
+    }
+}
+
+/// The **pre-v17** entity byte layout (schema v17 froze this when P20.1 appended
+/// the `water_body` slot). Identical to the live [`RuntimeEntity`] except that it
+/// has **no** `water_body` field \u2014 that is precisely what v17 added \u2014 so this is
+/// the [`EntityRecordV10`] shape of bump (a new slot at the tail), not the
+/// [`EntityRecordV14`] one (a component that grew).
+#[derive(Clone, Serialize, Deserialize)]
+struct EntityRecordV16 {
+    guid: Uuid,
+    name: String,
+    parent: Option<Uuid>,
+    transform: Transform,
+    visible: bool,
+    mesh: Option<MeshRef>,
+    material: Option<Material>,
+    light: Option<Light>,
+    camera: Option<Camera>,
+    #[serde(default)]
+    sprite: Option<Sprite>,
+    #[serde(default)]
+    tilemap: Option<Tilemap>,
+    #[serde(default)]
+    nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    text2d: Option<Text2D>,
+    #[serde(default)]
+    light_2d: Option<Light2D>,
+    #[serde(default)]
+    rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    actor: Option<Uuid>,
+    #[serde(default)]
+    terrain: Option<Terrain>,
+    #[serde(default)]
+    pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    root_motion: Option<RootMotion>,
+    #[serde(default)]
+    attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    audio_source: Option<AudioSource>,
+    #[serde(default)]
+    audio_listener: Option<AudioListener>,
+    #[serde(default)]
+    decal: Option<Decal>,
+    #[serde(default)]
+    volume: Option<Volume>,
+    #[serde(default)]
+    spline: Option<Spline>,
+    #[serde(default)]
+    foliage: Option<Foliage>,
+    #[serde(default)]
+    streaming_source: Option<StreamingSource>,
+    #[serde(default)]
+    always_loaded: Option<AlwaysLoaded>,
+    #[serde(default)]
+    time_of_day: Option<TimeOfDay>,
+    #[serde(default)]
+    sky_atmosphere: Option<SkyAtmosphere>,
+}
+
+impl EntityRecordV16 {
+    /// Lift a frozen v16 record to the live (v17) [`RuntimeEntity`]. Every slot
+    /// carries through unchanged; the one new slot lifts to `None` \u2014 a level with
+    /// no water, which is what a v16 level was.
+    fn into_runtime(self) -> RuntimeEntity {
+        RuntimeEntity {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: self.decal,
+            volume: self.volume,
+            spline: self.spline,
+            foliage: self.foliage,
+            streaming_source: self.streaming_source,
+            always_loaded: self.always_loaded,
+            time_of_day: self.time_of_day,
+            sky_atmosphere: self.sky_atmosphere,
+            water_body: None,
+        }
+    }
+
+    /// Project a live [`RuntimeEntity`] back onto the frozen v16 shape (the
+    /// downgrade-bless path that regenerates the committed v16 fixture). Only the
+    /// water body is lost \u2014 asserted as a property by the editor codec's
+    /// `v16_entity_downgrade_is_lossless_except_for_the_water_body`.
+    #[cfg(test)]
+    fn from_current(r: RuntimeEntity) -> Self {
+        Self {
+            guid: r.guid,
+            name: r.name,
+            parent: r.parent,
+            transform: r.transform,
+            visible: r.visible,
+            mesh: r.mesh,
+            material: r.material,
+            light: r.light,
+            camera: r.camera,
+            sprite: r.sprite,
+            tilemap: r.tilemap,
+            nine_slice: r.nine_slice,
+            text2d: r.text2d,
+            light_2d: r.light_2d,
+            rigid_body_2d: r.rigid_body_2d,
+            collider_2d: r.collider_2d,
+            character_controller_2d: r.character_controller_2d,
+            rigid_body_3d: r.rigid_body_3d,
+            collider_3d: r.collider_3d,
+            character_controller_3d: r.character_controller_3d,
+            actor: r.actor,
+            terrain: r.terrain,
             pcg_volume: r.pcg_volume,
             skeletal_mesh: r.skeletal_mesh,
             anim_player: r.anim_player,
@@ -3778,8 +4008,22 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v16: {e}")))?;
             Ok(RuntimeLevel {
                 title: v16.title,
-                entities: v16.entities,
+                entities: v16
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV16::into_runtime)
+                    .collect(),
                 settings: v16.settings,
+            })
+        }
+        17 => {
+            let (v17, _): (SceneFileV17, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v17: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v17.title,
+                entities: v17.entities,
+                settings: v17.settings,
             })
         }
         found => Err(SceneError::SchemaTooNew {
@@ -3789,9 +4033,9 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     }
 }
 
-/// Encode a level to the current schema (v16) as a deterministic bincode payload.
+/// Encode a level to the current schema (v17) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV16 {
+    let file = SceneFileV17 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -5531,9 +5775,12 @@ mod tests {
         // block's 38 (broken down in `v14_weather_is_wider_on_the_wire_than_v13`)
         // — one growth per bump, all on the one entity that carries an
         // atmosphere.
+        // …and **every** entity pays the v17 `water_body: None` discriminant, which
+        // is the whole price of P20.1 for a level with no water.
+        let entities = RuntimeLevel::decode(&v11).unwrap().entities.len();
         assert_eq!(
             lifted.len(),
-            v11.len() + 61 + 62 + 38,
+            v11.len() + 61 + 62 + 38 + entities * WATER_SLOT_BYTES,
             "the one entity carrying an atmosphere grew by the physical block"
         );
     }
@@ -5972,9 +6219,10 @@ mod tests {
         // `encode` writes the **current** schema, so the lift also appends the
         // v14 weather block — priced in `v14_weather_is_wider_on_the_wire_than_v13`
         // and named here rather than folded into the number.
+        let entities = RuntimeLevel::decode(&v12).unwrap().entities.len();
         assert_eq!(
             lifted.len(),
-            v12.len() + expected + WEATHER_WIRE_BYTES,
+            v12.len() + expected + WEATHER_WIRE_BYTES + entities * WATER_SLOT_BYTES,
             "the one entity carrying an atmosphere grew by the cloud block"
         );
     }
@@ -6380,9 +6628,10 @@ mod tests {
         );
         assert_eq!(expected, 38, "the weather block is 38 bytes on the wire");
 
+        let entities = RuntimeLevel::decode(&v13).unwrap().entities.len();
         assert_eq!(
             lifted.len(),
-            v13.len() + expected,
+            v13.len() + expected + entities * WATER_SLOT_BYTES,
             "the one entity carrying an atmosphere grew by the weather block"
         );
     }
@@ -6901,13 +7150,14 @@ mod tests {
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {
         assert_eq!(
-            SCHEMA_VERSION, 16,
+            SCHEMA_VERSION, 17,
             "the scene schema moved. Generation-1 frozen tiles (TerrainTileFrozenV1, via \
              TerrainV14) cover .inf_lvl v1..=v14, generation-2 (TerrainTileFrozenV2, via \
              TerrainV15) covers v15, and the live TerrainTile covers v16+. If the TILE \
              layout changed again, add inf_terrain::TerrainTileFrozenV3 and a new frozen \
              Terrain record; if only the scene changed, update this pin and \
-             TerrainTileFrozenV1's generation table."
+             TerrainTileFrozenV1's generation table. (v17 is the latter case: P20.1 \
+             appended an entity slot and left every tile layout alone.)"
         );
         // The mapping the pin is about, one rung at a time. Start from a terrain
         // that exercises BOTH post-v14 layers.
@@ -6945,6 +7195,219 @@ mod tests {
         assert_eq!(
             gen2.biome_set, None,
             "TerrainV15 has no biome_set field to round-trip"
+        );
+    }
+
+    // \u2500\u2500 v17 water (P20.1) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+    /// What the v17 `water_body` slot costs an entity that has no water: the
+    /// `Option` discriminant, and nothing else. Named once so the three older
+    /// wire-price tests price it by reference rather than by re-deriving `1`.
+    const WATER_SLOT_BYTES: usize = 1;
+
+    /// **The v17 price, isolated.** An entity with no water pays exactly one
+    /// discriminant byte; an entity *with* water pays the component.
+    ///
+    /// Priced as a delta between two otherwise-identical levels rather than as an
+    /// absolute number, because the absolute number would silently absorb any
+    /// other growth and stop being a price at all.
+    #[test]
+    fn v17_costs_one_byte_per_water_free_entity() {
+        use inf_ecs::components::{WaterBody, WaterKind};
+
+        let dry = RuntimeLevel {
+            title: "dry".into(),
+            entities: vec![v9_rec(uuid::Uuid::from_u128(1), "A", None).into_runtime()],
+            settings: RuntimeSettings::default(),
+        };
+        let mut wet = dry.clone();
+        wet.entities[0].water_body = Some(WaterBody::default());
+
+        let dry_bytes = encode(&dry).unwrap();
+        let wet_bytes = encode(&wet).unwrap();
+        assert_eq!(dry_bytes[0], SCHEMA_VERSION as u8);
+        assert!(
+            wet_bytes.len() > dry_bytes.len() + WATER_SLOT_BYTES,
+            "a water body must cost more than its own discriminant"
+        );
+
+        // The `None` half of the price, measured against the frozen v16 shape of
+        // the very same record: exactly one byte per entity, which is what the
+        // three older wire-price tests reference.
+        let v16 = SceneFileV16 {
+            schema_version: 16,
+            title: dry.title.clone(),
+            entities: dry
+                .entities
+                .iter()
+                .cloned()
+                .map(EntityRecordV16::from_current)
+                .collect(),
+            settings: dry.settings,
+        };
+        let v16_bytes = bincode::serde::encode_to_vec(&v16, bincode_config()).unwrap();
+        assert_eq!(
+            dry_bytes.len(),
+            v16_bytes.len() + WATER_SLOT_BYTES,
+            "the v17 slot must cost exactly one discriminant byte on a dry entity"
+        );
+
+        // …and the whole component round-trips through the live codec.
+        let back = decode(&wet_bytes).unwrap();
+        assert_eq!(back.entities[0].water_body, Some(WaterBody::default()));
+        assert_eq!(back.entities[0].water_body.unwrap().kind, WaterKind::Ocean);
+    }
+
+    /// An all-`None` frozen v16 entity \u2014 the struct-update base for
+    /// [`v16_scene_reference`]. Built through the downgrade hop so the field list
+    /// can never drift from the live record.
+    fn v16_rec(guid: Uuid, name: &str, parent: Option<Uuid>) -> EntityRecordV16 {
+        EntityRecordV16::from_current(v9_rec(guid, name, parent).into_runtime())
+    }
+
+    /// The **v16** terrain the fixture carries: two authored tiles, a painted
+    /// splat sample, a materialized erosion data map, **a painted biome id and a
+    /// `biome_set` reference** (the two things v16 could express that v15 could
+    /// not), a non-default macro variation and an asset reference \u2014 so the v17 hop
+    /// is proven to preserve what v16 authored, not merely to produce defaults.
+    ///
+    /// The literals must match the editor codec's `v16_fixture_terrain` exactly:
+    /// the two committed fixtures are byte-compared by the editor's
+    /// `v16_fixture_matches_the_runtime_codecs_copy`, which is the whole point of
+    /// writing them twice.
+    fn v16_fixture_terrain() -> Terrain {
+        let mut t = Terrain::configured(4, 2.0);
+        let f = |x: f64, z: f64| x * 0.5 - z * 0.25 + 3.0;
+        t.data.author_tile((0, 0), f);
+        t.data.author_tile((1, 0), f);
+        t.data
+            .get_tile_mut((0, 0))
+            .unwrap()
+            .set_weight_sample(4, 1, 2, [40, 100, 80, 35]);
+        t.data
+            .get_tile_mut((0, 0))
+            .unwrap()
+            .set_map_texel(4, 1, 1, [7.5, 0.5, 2.25]);
+        t.data
+            .get_tile_mut((0, 0))
+            .unwrap()
+            .set_biome_sample(4, 1, 1, 3);
+        t.macro_variation = 0.25;
+        t.asset = Some(Uuid::from_u128(0xF_00AA));
+        t.biome_set = Some(Uuid::from_u128(0xF_00BB));
+        t
+    }
+
+    /// Rebuild the exact schema-v16 file the committed v16 fixture was generated
+    /// from, out of the frozen v16 record types (the provenance lock).
+    fn v16_scene_reference() -> SceneFileV16 {
+        use inf_ecs::components::Primitive;
+        let g = Uuid::from_u128;
+        SceneFileV16 {
+            schema_version: 16,
+            title: "V16 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV16 {
+                    mesh: Some(MeshRef {
+                        primitive: Primitive::Cube,
+                        asset: Some(g(0xF0A1)),
+                    }),
+                    material: Some(Material::default()),
+                    ..v16_rec(g(0xF001), "Cube", None)
+                },
+                EntityRecordV16 {
+                    terrain: Some(v16_fixture_terrain()),
+                    ..v16_rec(g(0xF002), "Terrain", None)
+                },
+                EntityRecordV16 {
+                    light: Some(Light {
+                        kind: LightKind::Directional,
+                        color: Color::WHITE,
+                        intensity: 2.0,
+                        ..Default::default()
+                    }),
+                    ..v16_rec(g(0xF003), "Sun", None)
+                },
+            ],
+            settings: RuntimeSettings {
+                gravity_2d: Vec2d::new(0.0, -18.0),
+                gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+                sim_hz: 90.0,
+                render: RenderSettingsRecord {
+                    exposure: 1.1,
+                    ..RenderSettingsRecord::default()
+                },
+                partition: PartitionSettings::default(),
+            },
+        }
+    }
+
+    /// Regenerate `tests/fixtures/scene_v16.inf_lvl` \u2014 the **downgrade-bless**
+    /// path, walked only under `INF_BLESS_FIXTURES=1` (exactly `1`, matching this
+    /// crate's other bless guards).
+    #[test]
+    fn bless_scene_v16_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v16_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 16);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v16.inf_lvl");
+        std::fs::write(&path, &bytes).unwrap();
+        eprintln!("blessed {} ({} bytes)", path.display(), bytes.len());
+    }
+
+    /// A committed **v16** payload still loads, keeps everything v16 could
+    /// express, and lifts with **no water** \u2014 which is exactly what a v16 level
+    /// was. The "old bytes load forever" gate for the v17 bump.
+    #[test]
+    fn v16_loads_and_lifts_without_water() {
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v16.inf_lvl"),
+        )
+        .expect("committed v16 fixture present");
+        assert_eq!(bytes[0], 16, "the fixture must really be v16");
+        let level = decode(&bytes).unwrap();
+        assert_eq!(level.title, "V16 Fixture Level");
+        assert_eq!(level.entities.len(), 3);
+        let by_name = |n: &str| level.entities.iter().find(|e| e.name == n).unwrap();
+
+        // The v16 content survives the frozen-record hop intact \u2026
+        assert_eq!(
+            by_name("Cube").mesh.unwrap().asset,
+            Some(Uuid::from_u128(0xF0A1))
+        );
+        assert_eq!(by_name("Sun").light.unwrap().intensity, 2.0);
+        assert_eq!(level.settings.sim_hz, 90.0);
+        let t = by_name("Terrain").terrain.clone().expect("terrain slot");
+        assert_eq!(t.biome_set, Some(Uuid::from_u128(0xF_00BB)));
+        assert_eq!(t.data.get_tile((0, 0)).unwrap().biome_sample(4, 1, 1), 3);
+        assert_eq!(
+            t.data.get_tile((0, 0)).unwrap().map_texel(4, 1, 1),
+            [7.5, 0.5, 2.25]
+        );
+
+        // \u2026 and the one new slot lifts to `None` on every entity.
+        for e in &level.entities {
+            assert!(e.water_body.is_none(), "a v16 level has no water to lift");
+        }
+
+        // Re-encoding writes the current schema and round-trips.
+        let re = encode(&level).unwrap();
+        assert_eq!(re[0], SCHEMA_VERSION as u8);
+        assert_eq!(decode(&re).unwrap(), level);
+    }
+
+    #[test]
+    fn v16_fixture_is_reproducible_and_genuinely_v16() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v16.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v16 fixture present");
+        assert_eq!(bytes[0], 16, "fixture must be a genuine schema-v16 payload");
+        let rebuilt =
+            bincode::serde::encode_to_vec(v16_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v16 fixture must match our frozen v16 writer"
         );
     }
 }

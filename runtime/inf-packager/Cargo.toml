@@ -32,6 +32,15 @@ inf-terrain = { workspace = true }
 # nodes, whose texture the shipped/PIE players cannot resolve at load. Decode
 # only — the cook never lowers or evaluates a graph.
 inf-pcg = { workspace = true }
+# P20.1: the cook reads a river's spline and asks `inf-water` for its arc-length
+# elevation profile, so the downhill advisory and the picture the renderer draws
+# come from the SAME frames rather than from two guesses. Pure math, no GPU.
+inf-water = { workspace = true }
+inf-math = { workspace = true }
+# The river advisory reads `WaterBody` / `Spline` / `Transform` off a decoded
+# level. Promoted from dev-dependencies at P20.1.
+inf-ecs = { workspace = true }
+glam = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -42,10 +51,8 @@ tracing = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 # Integration tests inspect the cooked pack + decode a level/vmesh out of it.
-# `inf-ecs` (P16.3) is test-only: the terrain cook tests author a level carrying a
-# `Terrain` component pointing at a `.inf_terrain`. (`inf-terrain` itself is a real
-# dependency above — the cook validates terrain assets.)
-inf-ecs = { workspace = true }
+# (`inf-ecs` became a real dependency at P20.1 — the river advisory reads
+# `WaterBody`/`Spline` off a decoded level — so it is no longer listed here.)
 # Forges the "bincode-framed .inf_terrain" corrupt-payload case — the exact
 # mistake a generic asset writer would make.
 bincode = { workspace = true }
@@ -54,6 +61,7 @@ inf-scene = { workspace = true }
 inf-project = { workspace = true }
 inf-mesh = { workspace = true }
 inf-vgeom = { workspace = true }
-# Bit-portable trig for the dense-grid cook fixture (the P14 LAW — `std` sin/cos
-# would make the derived meshlet DAG platform-dependent).
-inf-math = { workspace = true }
+# (`inf-math` became a real dependency at P20.1 — the river advisory maps the
+# ECS spline interpolation onto `inf_math::spline`'s — so it is no longer listed
+# here. The dense-grid cook fixture still uses its bit-portable trig, per the P14
+# LAW: `std` sin/cos would make the derived meshlet DAG platform-dependent.)

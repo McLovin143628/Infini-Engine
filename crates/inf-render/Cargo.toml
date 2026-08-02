@@ -10,6 +10,12 @@ publish = false
 
 [dependencies]
 inf-math = { workspace = true }
+# P20.1: the DERIVED Gerstner parameters (`inf_water::Wave`/`WaveField`) and the
+# river frames a projector hands the water pass. Ring-0 → Ring-0, and pure math:
+# the renderer never re-derives a wave, it only evaluates the sum it is given.
+# That is what stops a second, f32, platform-dependent copy of the wave model
+# existing in WGSL beside the one P20.2's buoyancy samples.
+inf-water = { workspace = true }
 inf-render-2d = { workspace = true }
 # Virtualized geometry (P13.1b GPU meshlet path): the renderer uploads a
 # `VgeomMesh` (meshlet DAG) into storage buffers and culls/selects on the GPU.

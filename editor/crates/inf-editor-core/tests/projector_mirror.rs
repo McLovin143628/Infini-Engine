@@ -902,3 +902,110 @@ fn both_projectors_draw_skeletal_meshes_the_same_way() {
         }
     }
 }
+
+// ── P20.1: the water (`WaterBody`) projection ────────────────────────────────
+
+/// **The P20.1 mirror gate.** `project_water` is a self-contained free function
+/// on both sides — like `project_sky` — so nothing weaker than character-for-
+/// character equality is called for.
+///
+/// The divergence this catches is the one a player finds: a sea that is a
+/// different colour, a different height or a different *phase* in the shipped
+/// build than in the preview. Water is worse than most content for this, because
+/// its whole appearance is derived rather than authored: one host reading the
+/// weather wind and the other reading the body's own would produce two plausible
+/// seas that never agree.
+#[test]
+fn project_water_is_identical_in_both_projectors() {
+    let mine = extract_fn(&read(VIEWPORT), "project_water");
+    let theirs = extract_fn(&read(PLAYER), "project_water");
+    assert_eq!(
+        mine, theirs,
+        "the two `project_water` projectors have drifted — PIE would stop \
+         matching shipping. Keep them byte-identical, or move the shared part \
+         into `inf_ecs::sky` / `inf-water` (which is where the clock, the wind \
+         rule and the wave derivation already live)."
+    );
+}
+
+/// A guard on the guard: two stubs are identical too. The shared body has to do
+/// the work — derive the wave field, honour the wind rule, and build a river's
+/// ribbon from the spline on the same entity.
+#[test]
+fn the_shared_water_projector_is_not_a_stub() {
+    let body = extract_fn(&read(PLAYER), "project_water");
+    for fragment in [
+        // The wind rule is the component's, not the host's — the one thing here
+        // that could silently diverge.
+        "water.effective_wind(weather_wind)",
+        // The wave field is DERIVED in Ring 0, never re-derived per host.
+        "inf_render::WaveField::from_spec(&spec)",
+        "spread_rad: water.wave_spread_deg.to_radians()",
+        "seed: water.wave_seed",
+        // A river's ripple travels downstream, so its wave frame is the river's
+        // own — a host that fed it the world wind would show a river whose
+        // wavelets cross it sideways.
+        "let river = water.kind == WaterKind::River;",
+        "wind_x: if river { 1.0 } else { wind_x },",
+        // The centreline is the spline on the SAME entity, in world space.
+        "affine.transform_point3(p.to_dvec3())",
+        "inf_render::RiverPath::from_points(&points, sp.closed, interp, &profile)",
+        ".map(inf_render::WaterFrame::from)",
+        // The level clock reaches the body — a host that dropped it would render
+        // a frozen sea that still passed every other assertion here.
+        "time_s,",
+        // The kind mapping, all three arms.
+        "WaterKind::Ocean => inf_render::WaterKindGpu::Ocean,",
+        "WaterKind::Lake => inf_render::WaterKindGpu::Lake,",
+        "WaterKind::River => inf_render::WaterKindGpu::River,",
+    ] {
+        assert!(
+            body.contains(fragment),
+            "`project_water` no longer contains `{fragment}` — either it was \
+             gutted, or this gate needs updating deliberately:\n{body}"
+        );
+    }
+}
+
+/// The surrounding *rules* — not just the shared body — must hold on both sides:
+/// the list is rebuilt from scratch, the clock and wind are resolved ONCE per
+/// projection through the Ring-0 seam, the spline comes from the same entity, and
+/// a body with no geometry is skipped rather than drawn degenerate.
+#[test]
+fn both_projectors_project_water_the_same_way() {
+    const SHARED: [&str; 6] = [
+        // Rebuilt every projection, like `scatter` — a body's state is a pure
+        // function of its component, its spline and the clock.
+        "waters.clear()",
+        // The clock + wind come from Ring 0, once, never per body and never from
+        // a wall clock. A host that inlined `resolve_sky(...).weather()` here
+        // would be the divergence this file exists to stop.
+        "inf_ecs::sky::water_environment(world)",
+        // The branch itself, and the same-entity spline.
+        "w.get::<WaterBody>(entity)",
+        "project_water(water, w.get::<Spline>(entity), &affine, water_env, id)",
+        // Nothing degenerate reaches the renderer.
+        "if body.drawable()",
+        "waters.push(body)",
+    ];
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let src = read(path).replace("\r\n", "\n");
+        for fragment in SHARED {
+            assert!(
+                src.contains(fragment),
+                "the {label}'s water projection no longer contains `{fragment}` — \
+                 either the water path was changed on one side only, or this gate \
+                 needs updating deliberately"
+            );
+        }
+        // A river's centreline must NOT be looked up through a reference: the
+        // whole point of same-entity composition is that there is nothing to
+        // resolve, and a host that started resolving one would need a cook edge
+        // the other side does not have.
+        let region = branch_region(&src, "w.get::<WaterBody>(entity)", "project_water(water,");
+        assert!(
+            !region.contains("entity_of("),
+            "the {label} resolves a river's spline through a reference:\n{region}"
+        );
+    }
+}

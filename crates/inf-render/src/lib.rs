@@ -30,6 +30,7 @@ pub mod renderer;
 pub mod scene;
 pub mod settings;
 pub mod surface;
+pub mod water;
 
 pub use atmosphere::{
     camera_radius_km, extinction, height_fog_optical_depth, height_fog_transmittance,
@@ -85,6 +86,10 @@ pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
     BloomSettings, GiSettings, RenderSettings, ScatterSettings, ShadowSettings, SsaoSettings,
     VgeomSettings,
+};
+pub use water::{
+    RenderWater, RiverPath, RiverProfile, WaterFrame, WaterKindGpu, WaterQuality, WaterSettings,
+    Wave, WaveField, WaveSpec, MAX_WAVES, OCEAN_EXTENT_M, OCEAN_SNAP_M,
 };
 // The P18.5 scatter instruments: the GPU instance-cull counters (off by default,
 // free when off) and the pure band rule both the compute pass and the CPU

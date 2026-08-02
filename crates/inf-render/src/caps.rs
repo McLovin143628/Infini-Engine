@@ -110,6 +110,11 @@ impl RenderTier {
                 settings.gi.enabled = false;
             }
         }
+        // Water, like the atmosphere, is never turned *off* by a tier — a sea a
+        // level authored must still be a sea on a weak GPU — but its tessellation
+        // drops and, at Low, screen-space refraction goes with it. `clamp_to` only
+        // ever lowers, so a caller that already asked for Low keeps Low.
+        settings.water.quality = settings.water.quality.clamp_to(self);
         // The atmosphere is never turned *off* by a tier — a sky the level
         // authored must still be a sky on a weak GPU — but its LUT sizes and
         // march counts scale down (P17.2). `clamp_to` only ever lowers.

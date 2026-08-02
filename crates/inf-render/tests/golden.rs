@@ -27,13 +27,14 @@ use inf_render::{
     CloudVolumes, EngineRenderer, GiAudit, GiQuality, GiSettings, GpuContext, HAlign,
     HeadlessTarget, HeightFog, LightKind, MeshInstance, PrebatchedRun, PrecipParams, PrecipQuality,
     PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
-    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ScatterBatch, ScatterData,
-    ScatterInstance, ShadowSettings, SkinnedInstance, SkinnedMeshData, SkinnedVertex,
+    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, RenderWater, ScatterBatch,
+    ScatterData, ScatterInstance, ShadowSettings, SkinnedInstance, SkinnedMeshData, SkinnedVertex,
     SpriteInstance, SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey, TextParams,
-    TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode,
-    BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
-    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, CPU_GPU_EXACT_FRACTION,
-    CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_TEXEL_TOLERANCE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode, WaterKindGpu,
+    WaterQuality, WaveField, WaveSpec, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL,
+    BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE,
+    CPU_GPU_EXACT_FRACTION, CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_TEXEL_TOLERANCE, HEADLESS_FORMAT,
+    TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -6030,4 +6031,491 @@ fn scatter_off_path_is_byte_identical() {
         base, other,
         "a scene with no scatter batches must be untouched by every scatter knob"
     );
+}
+
+// ── P20.1 water (oceans, lakes, spline rivers) ───────────────────────────────
+//
+// Three scenes, one per body kind, each built from `WaterBody` component
+// defaults mapped the way both projectors map them — so what these images show
+// is what a level actually gets when you add water, not a hand-tuned demo of the
+// shader.
+//
+// The clock is a FIXED `time_s` in every one of them. Everything the surface
+// does is a pure function of that number (the phase each wave arrives with is
+// `wrap(φ − ωt + k·(d·origin))`, computed in f64 on the CPU), so a golden
+// pictures one instant of a moving sea and is exactly reproducible — the same
+// choice `weather_scene` makes for cloud drift.
+//
+// **None of the 42 pre-P20.1 goldens moves.** The water node returns before
+// touching the encoder on a scene with no `waters`, so those frames record the
+// command stream they always did; verified the house way — the whole suite under
+// `INF_BLESS_GOLDENS=1`, `git status` reporting only the three new PNGs — and
+// pinned from the inside by `water_off_path_is_byte_identical`.
+
+/// The sea state a `WaterBody::default()` produces, mapped exactly as
+/// `project_water` maps it: amplitude 0.6 m over a 40 m swell, steepness 0.5,
+/// four components, a 45° spread about a 6 m/s wind from +X, seed 0.
+fn default_ocean_waves() -> WaveField {
+    WaveField::from_spec(&WaveSpec {
+        amplitude_m: 0.6,
+        wavelength_m: 40.0,
+        steepness: 0.5,
+        wind_x: 6.0,
+        wind_z: 0.0,
+        spread_rad: 45f64.to_radians(),
+        seed: 0,
+        count: 4,
+    })
+}
+
+/// A water body at the component defaults, with the fixed clock every water
+/// golden uses.
+fn water_body(kind: WaterKindGpu, waves: WaveField) -> RenderWater {
+    RenderWater {
+        id: 1,
+        kind,
+        waves,
+        // The one instant these goldens picture. A pure function of this number.
+        time_s: 1_234.5,
+        ..RenderWater::default()
+    }
+}
+
+/// The ocean scene: a default sea at `level_m`, under the default sky authority
+/// at `seconds`, with a hill terrain rising out of it so the shore blend, the
+/// absorption and the shallow-water foam all have something to act against. An
+/// ocean with nothing in it is a picture of a Fresnel term.
+fn ocean_scene(seconds: f64, level_m: f64) -> RenderScene {
+    let (mut scene, _) = tod_scene(seconds);
+    scene.grid_enabled = false;
+    scene.terrains = vec![hill_terrain(33, 4.0, 2, 2)];
+    scene.waters = vec![RenderWater {
+        level_m,
+        ..water_body(WaterKindGpu::Ocean, default_ocean_waves())
+    }];
+    scene
+}
+
+/// The same scene with the water removed — the control every water golden is
+/// measured against, and the frame the off-path test asserts is byte-identical
+/// to the pre-P20.1 renderer.
+fn without_water(scene: &RenderScene) -> RenderScene {
+    let mut s = scene.clone();
+    s.waters.clear();
+    s
+}
+
+/// How much of the frame two renders disagree about, as a fraction of pixels
+/// whose sRGB byte differs by more than 6/255 in any channel. Adapter-robust in
+/// a way an absolute pixel comparison is not.
+fn water_changed_fraction(a: &[u8], b: &[u8]) -> f64 {
+    let mut n = 0usize;
+    for i in 0..(W * H) as usize {
+        let (pa, pb) = (&a[i * 4..i * 4 + 3], &b[i * 4..i * 4 + 3]);
+        if pa
+            .iter()
+            .zip(pb)
+            .any(|(x, y)| (*x as i32 - *y as i32).abs() > 6)
+        {
+            n += 1;
+        }
+    }
+    n as f64 / (W * H) as f64
+}
+
+/// **GOLDEN — ocean at noon.** A Gerstner sea against a hill coast, with the sun
+/// high: the frame where absorption, the shore blend and the sky reflection all
+/// read at once.
+#[test]
+fn golden_water_ocean_noon() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let scene = ocean_scene(12.0 * 3600.0, 3.0);
+    let view = look_view(DVec3::new(-30.0, 14.0, -30.0), DVec3::new(60.0, 0.0, 60.0));
+    let img = check_golden(&gpu, "water_ocean_noon", &scene, &view);
+
+    // The water really is in the frame: removing it moves a large part of it.
+    let dry = render(&gpu, &without_water(&scene), &view);
+    let moved = water_changed_fraction(&img, &dry);
+    assert!(
+        moved > 0.10,
+        "the ocean changed only {:.1}% of the frame — is it drawing at all?",
+        moved * 100.0
+    );
+
+    // …and it is WATER, not a grey plane: absorption removes red an order of
+    // magnitude faster than blue, so the surface must read blue-dominant. Sampled
+    // low in the frame, where the sea is, and compared as a ratio (adapter-robust).
+    let c = mean_rgb(&img, W / 8, H * 5 / 8, W * 7 / 8, H);
+    let (r, b) = (c[0], c[2]);
+    assert!(
+        b > r * 1.15,
+        "the sea is not blue-dominant (r {r:.3}, b {b:.3}) — the Beer-Lambert \
+         absorption is not reaching the surface"
+    );
+}
+
+/// **GOLDEN — a lake at dusk.** A bounded rectangle with a gentle ripple, lit by
+/// a low sun: the frame where the Fresnel term dominates and the sky reflection
+/// is the whole appearance.
+#[test]
+fn golden_water_lake_dusk() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, bodies) = tod_scene(20.0 * 3600.0);
+    scene.grid_enabled = false;
+    scene.terrains = vec![hill_terrain(33, 4.0, 2, 2)];
+    // The `WaterBody::lake` preset, mapped as `project_water` maps it: a small,
+    // long, low-steepness ripple rather than a sea.
+    let ripple = WaveField::from_spec(&WaveSpec {
+        amplitude_m: 0.05,
+        wavelength_m: 7.0,
+        steepness: 0.12,
+        wind_x: 1.0,
+        wind_z: 0.0,
+        spread_rad: 45f64.to_radians(),
+        seed: 0,
+        count: 3,
+    });
+    // Level 5 m against a terrain whose hills span [-0.5, 7.5] m: the lake fills
+    // the basins and the ridges stand out of it, which is the frame a shore blend
+    // is actually about.
+    scene.waters = vec![RenderWater {
+        level_m: 5.0,
+        center: glam::DVec2::new(60.0, 60.0),
+        half_extent: glam::DVec2::new(55.0, 55.0),
+        ..water_body(WaterKindGpu::Lake, ripple)
+    }];
+    let view = look_view(DVec3::new(6.0, 16.0, 6.0), DVec3::new(70.0, 3.0, 70.0));
+    let img = check_golden(&gpu, "water_lake_dusk", &scene, &view);
+
+    let dry = render(&gpu, &without_water(&scene), &view);
+    let moved = water_changed_fraction(&img, &dry);
+    assert!(
+        moved > 0.02,
+        "the lake changed only {:.1}% of the frame",
+        moved * 100.0
+    );
+
+    // A lake is BOUNDED: shrinking it to nothing must return the frame to the dry
+    // control exactly. That is the property an unbounded plane would fail, and it
+    // is what distinguishes a lake from an ocean in one assertion.
+    let mut tiny = scene.clone();
+    tiny.waters[0].half_extent = glam::DVec2::ZERO;
+    let none = render(&gpu, &tiny, &view);
+    assert_eq!(
+        none, dry,
+        "a zero-extent lake still drew something — `drawable()` is not gating it"
+    );
+
+    // The sun is low, so this is the Fresnel-dominated frame by construction.
+    assert!(
+        bodies.sun.y < 0.35,
+        "20:00 is not a low sun: {}",
+        bodies.sun.y
+    );
+}
+
+/// **GOLDEN — a spline river.** A ribbon following a Catmull-Rom centreline down
+/// a hillside, with a width profile and flow foam. The frame that proves a river
+/// is geometry derived from a spline rather than a rectangle.
+#[test]
+fn golden_water_river() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, _) = tod_scene(15.0 * 3600.0);
+    scene.grid_enabled = false;
+    scene.terrains = vec![hill_terrain(33, 4.0, 2, 2)];
+
+    // The `WaterBody::river` preset's ripple, and a centreline the same
+    // `inf_water::RiverPath` both projectors build.
+    let ripple = WaveField::from_spec(&WaveSpec {
+        amplitude_m: 0.06,
+        wavelength_m: 4.0,
+        steepness: 0.12,
+        wind_x: 1.0,
+        wind_z: 0.0,
+        spread_rad: 60f64.to_radians(),
+        seed: 0,
+        count: 3,
+    });
+    let points = [
+        DVec3::new(4.0, 9.0, 4.0),
+        DVec3::new(40.0, 7.0, 24.0),
+        DVec3::new(70.0, 5.0, 60.0),
+        DVec3::new(110.0, 3.0, 90.0),
+    ];
+    let path = inf_render::RiverPath::from_points(
+        &points,
+        false,
+        inf_math::spline::SplineInterp::CatmullRom,
+        &inf_render::RiverProfile {
+            width_start_m: 6.0,
+            width_end_m: 14.0,
+            depth_start_m: 1.0,
+            depth_end_m: 2.5,
+            flow_speed_m_s: 3.5,
+        },
+    );
+    scene.waters = vec![RenderWater {
+        level_m: 9.0,
+        flow_speed_m_s: path.flow_speed_m_s,
+        frames: path
+            .frames
+            .iter()
+            .map(inf_render::WaterFrame::from)
+            .collect(),
+        ..water_body(WaterKindGpu::River, ripple)
+    }];
+    let view = look_view(DVec3::new(-10.0, 30.0, 10.0), DVec3::new(70.0, 0.0, 60.0));
+    let img = check_golden(&gpu, "water_river", &scene, &view);
+
+    let dry = render(&gpu, &without_water(&scene), &view);
+    let moved = water_changed_fraction(&img, &dry);
+    assert!(
+        moved > 0.01,
+        "the river changed only {:.2}% of the frame",
+        moved * 100.0
+    );
+
+    // A river is a RIBBON: widening its profile must widen what it covers. That
+    // separates "the spline was used" from "a rectangle was drawn somewhere".
+    let mut wide = scene.clone();
+    let wide_path = inf_render::RiverPath::from_points(
+        &points,
+        false,
+        inf_math::spline::SplineInterp::CatmullRom,
+        &inf_render::RiverProfile {
+            width_start_m: 18.0,
+            width_end_m: 30.0,
+            depth_start_m: 1.0,
+            depth_end_m: 2.5,
+            flow_speed_m_s: 3.5,
+        },
+    );
+    wide.waters[0].frames = wide_path
+        .frames
+        .iter()
+        .map(inf_render::WaterFrame::from)
+        .collect();
+    let wider = render(&gpu, &wide, &view);
+    let a = water_changed_fraction(&img, &dry);
+    let b = water_changed_fraction(&wider, &dry);
+    assert!(
+        b > a * 1.3,
+        "widening the river's profile barely changed its coverage ({:.2}% → \
+         {:.2}%) — the ribbon is not following the width profile",
+        a * 100.0,
+        b * 100.0
+    );
+
+    // …and a river with no frames draws nothing at all (the no-`Spline`
+    // authoring state), returning the frame to the dry control exactly.
+    let mut unrouted = scene.clone();
+    unrouted.waters[0].frames.clear();
+    assert_eq!(render(&gpu, &unrouted, &view), dry);
+}
+
+/// **The off-path gate** (the P18.4 `gi_v2_off_path_is_byte_identical` shape,
+/// applied to water).
+///
+/// This is the machine-checked half of "all 42 pre-P20.1 goldens are
+/// byte-identical": a scene with no `waters` must render the exact same bytes
+/// however hard the new knobs are wound, because the node returns before it
+/// records a resolve, a render pass, a pipeline bind or a draw.
+///
+/// Both directions are checked. Winding the water QUALITY on a water-free scene
+/// must be inert (the settings half), and so must every per-body knob on a scene
+/// whose only body is not drawable (the content half) — the second is what stops
+/// a future refactor from "helpfully" drawing a zero-extent lake.
+#[test]
+fn water_off_path_is_byte_identical() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (mut scene, _) = tod_scene(12.0 * 3600.0);
+    scene.grid_enabled = false;
+    scene.terrains = vec![hill_terrain(33, 4.0, 2, 2)];
+    let view = look_view(DVec3::new(-30.0, 14.0, -30.0), DVec3::new(60.0, 0.0, 60.0));
+
+    let base = render_with(&gpu, &scene, &view, RenderSettings::default());
+
+    // (1) Every water setting wound, on a scene that carries no water.
+    for quality in [WaterQuality::Low, WaterQuality::Medium, WaterQuality::High] {
+        let mut fiddled = RenderSettings::default();
+        fiddled.water.quality = quality;
+        assert_eq!(
+            base,
+            render_with(&gpu, &scene, &view, fiddled),
+            "a water-free scene moved when the P20.1 quality knob changed to \
+             {quality:?} — the off path is not neutral"
+        );
+    }
+
+    // (2) A scene carrying a body that is NOT drawable, with every per-body knob
+    // wound to a non-default value. Nothing may reach the frame.
+    let mut lake = scene.clone();
+    lake.waters = vec![RenderWater {
+        kind: WaterKindGpu::Lake,
+        half_extent: glam::DVec2::ZERO, // ⇒ !drawable()
+        level_m: 5.0,
+        waves: default_ocean_waves(),
+        time_s: 999.0,
+        flow_speed_m_s: 4.0,
+        shallow_color: [1.0, 0.0, 0.0],
+        deep_color: [0.0, 1.0, 0.0],
+        absorption: [0.0, 0.0, 0.0],
+        roughness: 1.0,
+        refraction_m: 5.0,
+        shore_fade_m: 20.0,
+        opacity: 1.0,
+        foam_color: [1.0, 0.0, 1.0],
+        foam_crest_threshold: 0.0,
+        foam_shore_m: 50.0,
+        foam_flow_m_s: 0.1,
+        ..RenderWater::default()
+    }];
+    assert!(!lake.waters[0].drawable(), "the fixture must be undrawable");
+    assert_eq!(
+        base,
+        render_with(&gpu, &lake, &view, RenderSettings::default()),
+        "an undrawable water body reached the frame"
+    );
+
+    // …and a river with a single frame is the other undrawable shape.
+    let mut river = scene.clone();
+    river.waters = vec![RenderWater {
+        kind: WaterKindGpu::River,
+        frames: vec![inf_render::WaterFrame {
+            center: DVec3::new(10.0, 5.0, 10.0),
+            tangent: DVec3::X,
+            right: DVec3::Z,
+            s: 0.0,
+            width_m: 8.0,
+            depth_m: 2.0,
+        }],
+        ..RenderWater::default()
+    }];
+    assert!(!river.waters[0].drawable());
+    assert_eq!(
+        base,
+        render_with(&gpu, &river, &view, RenderSettings::default())
+    );
+
+    // A guard on the guard: with a REAL body the frame does move, so the
+    // assertions above are not passing vacuously.
+    let mut wet = scene.clone();
+    wet.waters = vec![RenderWater {
+        level_m: 3.0,
+        ..water_body(WaterKindGpu::Ocean, default_ocean_waves())
+    }];
+    assert_ne!(
+        base,
+        render_with(&gpu, &wet, &view, RenderSettings::default()),
+        "water that IS drawable changed nothing — every assertion above is vacuous"
+    );
+}
+
+/// The quality tier really reaches the GPU: the same sea rendered at three tiers
+/// must differ, and the Low tier must differ *most* (it drops both the
+/// tessellation and screen-space refraction).
+///
+/// The inverse of the off-path test, and needed for the same reason
+/// `gi_quality_switch_rebuilds_the_env_bind` is: a tier that silently did nothing
+/// would satisfy every neutrality assertion ever written.
+#[test]
+fn water_quality_reaches_the_gpu() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let scene = ocean_scene(12.0 * 3600.0, 3.0);
+    let view = look_view(DVec3::new(-30.0, 14.0, -30.0), DVec3::new(60.0, 0.0, 60.0));
+
+    let at = |q: WaterQuality| {
+        let mut s = RenderSettings::default();
+        s.water.quality = q;
+        render_with(&gpu, &scene, &view, s)
+    };
+    let high = at(WaterQuality::High);
+    let medium = at(WaterQuality::Medium);
+    let low = at(WaterQuality::Low);
+
+    assert_ne!(high, medium, "Medium rendered identically to High");
+    assert_ne!(medium, low, "Low rendered identically to Medium");
+    // Low drops refraction as well as tessellation, so it is the furthest from
+    // High — a tier that only halved the grid would fail this.
+    let d_med = water_changed_fraction(&high, &medium);
+    let d_low = water_changed_fraction(&high, &low);
+    assert!(
+        d_low > d_med,
+        "Low ({:.2}%) is not further from High than Medium ({:.2}%) — is the \
+         refraction clamp reaching the shader?",
+        d_low * 100.0,
+        d_med * 100.0
+    );
+}
+
+/// **Determinism, and the clock.** The sea is a pure function of `time_s`: two
+/// renders at the same clock are identical, and two at different clocks are not.
+///
+/// This is the property that lets a golden picture one instant of a moving
+/// surface, and it is the same property P20.2's replay gate will rest on.
+#[test]
+fn the_sea_is_a_pure_function_of_the_level_clock() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let scene = ocean_scene(12.0 * 3600.0, 3.0);
+    let view = look_view(DVec3::new(-30.0, 14.0, -30.0), DVec3::new(60.0, 0.0, 60.0));
+
+    let a = render(&gpu, &scene, &view);
+    let b = render(&gpu, &scene, &view);
+    assert_eq!(a, b, "the same clock rendered two different seas");
+
+    let mut later = scene.clone();
+    later.waters[0].time_s += 3.0;
+    assert_ne!(
+        a,
+        render(&gpu, &later, &view),
+        "advancing the level clock moved no water — the wave phase is not \
+         reaching the shader"
+    );
+
+    // …and it really is the CLOCK, not the frame counter: rendering the same
+    // clock twice in a row after a different one still reproduces the original.
+    assert_eq!(a, render(&gpu, &scene, &view));
+}
+
+/// The **wind response**, end to end: a stronger wind raises a bigger sea, and it
+/// does so through the same `WaveField::from_spec` the sim will sample.
+#[test]
+fn a_stronger_wind_raises_a_bigger_sea() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = ocean_scene(12.0 * 3600.0, 3.0);
+    let view = look_view(DVec3::new(-30.0, 8.0, -30.0), DVec3::new(60.0, 0.0, 60.0));
+
+    let calm = WaveField::from_spec(&WaveSpec {
+        wind_x: 0.0,
+        wind_z: 0.0,
+        ..WaveSpec {
+            amplitude_m: 0.6,
+            wavelength_m: 40.0,
+            steepness: 0.5,
+            wind_x: 0.0,
+            wind_z: 0.0,
+            spread_rad: 45f64.to_radians(),
+            seed: 0,
+            count: 4,
+        }
+    });
+    let gale = WaveField::from_spec(&WaveSpec {
+        amplitude_m: 0.6,
+        wavelength_m: 40.0,
+        steepness: 0.5,
+        wind_x: 20.0,
+        wind_z: 0.0,
+        spread_rad: 45f64.to_radians(),
+        seed: 0,
+        count: 4,
+    });
+    // The Ring-0 claim, restated here so a shader change cannot quietly decouple
+    // the picture from the model.
+    assert!(gale.max_amplitude_m() > calm.max_amplitude_m() * 2.0);
+
+    scene.waters[0].waves = calm;
+    let calm_img = render(&gpu, &scene, &view);
+    scene.waters[0].waves = gale;
+    let gale_img = render(&gpu, &scene, &view);
+    assert_ne!(calm_img, gale_img, "the wind moved nothing");
 }
