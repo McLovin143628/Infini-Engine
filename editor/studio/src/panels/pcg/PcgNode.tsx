@@ -74,6 +74,25 @@ function ParamField({ nodeId, def, value }: { nodeId: number; def: ParamDef; val
       </label>
     );
   }
+  if (def.ui === "multiline") {
+    // P19.4: an authored document (the grammar rule text) lives on its node, so
+    // the node is its editor — there is deliberately no rule-text panel.
+    // Uncontrolled + commit-on-blur, exactly like the single-line `text` branch,
+    // so typing never round-trips through the store mid-edit.
+    const s = cur.type === "text" ? cur.value : "";
+    return (
+      <label className="pcg-field pcg-field--multiline">
+        <span className="pcg-field__label">{def.label}</span>
+        <textarea
+          className="bp-input nodrag nowheel"
+          spellCheck={false}
+          defaultValue={s}
+          title={def.description ?? undefined}
+          onBlur={(e) => commit({ type: "text", value: e.target.value })}
+        />
+      </label>
+    );
+  }
   if (def.ui === "text") {
     const s = cur.type === "text" ? cur.value : "";
     return (

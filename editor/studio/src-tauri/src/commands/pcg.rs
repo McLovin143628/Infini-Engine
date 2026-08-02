@@ -12,7 +12,10 @@
 //!   is the on-disk source of truth);
 //! * `pcg_evaluate` — lower + evaluate over the scene's terrain and refresh the
 //!   target `PcgVolume`'s instance cache, then bump the scene so the viewport
-//!   re-projects (world://delta);
+//!   re-projects (world://delta). Since P19.4 that includes the graph's
+//!   **grammar passes**: the same `PcgVolume`, the same height provider, spans
+//!   resolved from the live scene's `Spline` components, instances appended
+//!   after the scatter;
 //! * `pcg_evaluate_biomes` — the terrain-level sibling (P19.3): every painted
 //!   biome's own graph over the region its id owns, merged into the terrain's
 //!   `biome_population`. Everything downstream of a GUID is
@@ -28,7 +31,9 @@ use std::sync::Mutex;
 
 use glam::{DVec2, DVec3};
 use inf_asset::AssetId;
-use inf_ecs::components::{GlobalTransform, PcgVolume, ScatteredInstance, Terrain, Transform};
+use inf_ecs::components::{
+    GlobalTransform, PcgVolume, ScatteredInstance, Spline, Terrain, Transform,
+};
 use inf_graph::{
     apply_edits, compile::validate, GraphDoc, GraphEdit, GraphIssue, GraphJournal, Link, NodeDef,
     NodeId, NodeRegistry,
@@ -58,6 +63,47 @@ use super::scene::{emit_world_delta, SceneState};
 /// grayscale uses the standard Rec.709 luma weights, so a colour mask reads the
 /// way an author's eye reads it.
 struct AssetMasks<'a>(&'a AssetState);
+
+/// Every entity's [`Spline`] resolved into **world space**, keyed by its stable
+/// `Guid` — the P19.4 `grammar.spline` seam's fetch.
+///
+/// Unlike `mask.image`, this resolves identically in the editor, in PIE and in a
+/// shipped build: a `Spline` is a persisted scene component in both codecs, so
+/// every host has already built the entity by the time PCG evaluates. There is
+/// no preview/shipping divergence here and therefore no cook advisory for it.
+///
+/// MIRROR: identical in `inf_player::level::collect_spline_paths`, pinned by
+/// `inf-editor-core`'s `tests/grammar_span_mirror.rs`.
+fn collect_spline_paths(
+    world: &inf_ecs::EcsWorld,
+) -> std::collections::HashMap<Uuid, inf_pcg::SplinePath> {
+    let w = world.world();
+    let mut out = std::collections::HashMap::new();
+    for e in w.iter_entities() {
+        let (Some(guid), Some(spline)) = (e.get::<inf_ecs::Guid>(), e.get::<Spline>()) else {
+            continue;
+        };
+        let to_world = e
+            .get::<GlobalTransform>()
+            .map(|g| g.0)
+            .unwrap_or(glam::DAffine3::IDENTITY);
+        out.insert(
+            guid.0,
+            inf_pcg::SplinePath::from_local(
+                spline.points.iter().map(|p| p.to_dvec3()),
+                spline.closed,
+                match spline.interp {
+                    inf_ecs::components::SplineInterp::Linear => inf_pcg::SplineInterp::Linear,
+                    inf_ecs::components::SplineInterp::CatmullRom => {
+                        inf_pcg::SplineInterp::CatmullRom
+                    }
+                },
+                to_world,
+            ),
+        );
+    }
+    out
+}
 
 impl MaskSource for AssetMasks<'_> {
     fn mask(&self, texture: Uuid) -> Option<(u32, u32, Vec<u8>)> {
@@ -495,10 +541,15 @@ pub async fn pcg_evaluate(
 ) -> Result<PcgEvaluateResult, String> {
     // Lower under the store lock.
     let masks = AssetMasks(&assets);
-    let (mut document, issues, ok) = state.with(|s| {
+    let (mut document, grammars, issues, ok) = state.with(|s| {
         let doc = s.docs.get(&id).ok_or_else(|| format!("no pcg `{id}`"))?;
         let lowered = lower_graph_with(&doc.graph, &s.registry, &masks);
-        Ok((lowered.document, issue_dtos(&lowered.issues), lowered.ok))
+        Ok((
+            lowered.document,
+            lowered.grammars,
+            issue_dtos(&lowered.issues),
+            lowered.ok,
+        ))
     })?;
 
     if !ok {
@@ -592,7 +643,23 @@ pub async fn pcg_evaluate(
             None => Box::new(FnHeight::new(|_, _| Some(0.0))),
         };
 
-        let instances = inf_pcg::evaluate(&document, provider.as_ref(), region);
+        let mut instances = inf_pcg::evaluate(&document, provider.as_ref(), region);
+        // P19.4: the graph's grammar passes run on the same volume, against the
+        // same height provider, and append after the scatter — a fixed order, so
+        // the cache is a pure function of the content. Everything downstream of
+        // the resolved spans is `inf_pcg::evaluate_grammars`, shared verbatim
+        // with the player's load-time pass; this layer owns only the fetch.
+        instances.extend(inf_pcg::evaluate_grammars(
+            &grammars,
+            &collect_spline_paths(doc.world()),
+            provider.as_ref(),
+            &inf_pcg::GrammarContext {
+                entity: Some(guid),
+                center,
+                extent: DVec2::new(extent.x, extent.y),
+                seed_offset: seed as u64,
+            },
+        ));
         let baked: Vec<ScatteredInstance> = instances
             .iter()
             .map(|i| ScatteredInstance {

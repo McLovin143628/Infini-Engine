@@ -18,6 +18,11 @@ inf-core = { workspace = true }
 inf-terrain = { workspace = true }
 # f64 world coordinates (DVec3) + orientations (DQuat) — architecture rule 3.
 glam = { workspace = true }
+# P19.4: the shared Catmull-Rom / arc-length spline evaluator a grammar span
+# samples, and the BIT-PORTABLE trigonometry (`portable::psin64`) a module's
+# authored euler rotation goes through — `std` trig is not bit-identical across
+# platforms (the P14 law) and grammar placement is committed content.
+inf-math = { workspace = true }
 serde = { workspace = true }
 # The editor graph is embedded in the `.inf_pcg` payload as a JSON string (the
 # `inf-graph` model's `skip_serializing_if` fields are not bincode-safe).

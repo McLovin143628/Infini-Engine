@@ -22,6 +22,26 @@
 //!   `scatter.merge` joins two passes into one.
 //! * [`LAYER_KEY`] — a named, toggleable group of passes (P19.3).
 //!   `layer.layer` wraps a scatter chain; `layer.merge` joins two layers.
+//! * [`SPAN_KEY`] / [`RULES_KEY`] — the P19.4 grammar's two feeds:
+//!   `grammar.spline` / `grammar.footprint` produce a SPAN, `grammar.rules`
+//!   produces a RULES, and `grammar.expand` consumes one of each.
+//!
+//! All five are `PortType::Named`, and P19.4 deliberately added **no new
+//! `PortType` variant**. The substrate is domain-free on purpose — `Named` is
+//! the mechanism it offers for exactly this — and a real variant would have to
+//! be threaded through the blueprint, material and state-machine editors'
+//! type tables, colour maps and TS mirrors to buy a grammar wire nothing else
+//! can see.
+//!
+//! ## Where a grammar joins the population (P19.4)
+//!
+//! `grammar.expand` **outputs a SCATTER**, so it plugs into the `scatter.merge`
+//! and `layer.layer` chains that already exist: no third merge node, no third
+//! sink input, and a grammar inherits its layer's name and `enabled` flag for
+//! free. What it lowers to is *not* a [`PcgRule`] — a grammar is a different
+//! generator — so it goes into [`LoweredPcg::grammars`] beside the document
+//! rather than into it. See [`crate::grammar`] for why the serialized
+//! `PcgDocument` is deliberately left alone.
 //!
 //! ## Lowering semantics (P19.3: layers × rules)
 //!
@@ -74,6 +94,9 @@ use inf_graph::{
     Graph, NodeDef, NodeId, NodeRegistry, ParamDef, ParamValue, PortDef, PortType, SINK,
 };
 
+use crate::grammar::{
+    FootprintMode, Grammar, GrammarPass, Ground, RowAxis, SpanSource, DEFAULT_SPLINE_SAMPLES,
+};
 use crate::noise::ValueNoise;
 use crate::rules::{PcgDocument, PcgKind, PcgLayer, PcgRule, SamplerDef};
 use crate::scatter::{RotationMode, ScatterParams};
@@ -84,6 +107,10 @@ pub const DENSITY_KEY: &str = "density";
 pub const SCATTER_KEY: &str = "scatter";
 /// A layer wire (a named, toggleable group of scatter passes) — P19.3.
 pub const LAYER_KEY: &str = "layer";
+/// A 1-D grammar domain (spline arc length, footprint perimeter or rows) — P19.4.
+pub const SPAN_KEY: &str = "span";
+/// A parsed grammar (rule table + module palette) — P19.4.
+pub const RULES_KEY: &str = "rules";
 
 /// A density-field port.
 fn density(name: &str) -> PortDef {
@@ -98,6 +125,16 @@ fn scatter(name: &str) -> PortDef {
 /// A layer port.
 fn layer(name: &str) -> PortDef {
     PortDef::new(name, PortType::Named(LAYER_KEY.into()))
+}
+
+/// A grammar-span port.
+fn span(name: &str) -> PortDef {
+    PortDef::new(name, PortType::Named(SPAN_KEY.into()))
+}
+
+/// A grammar rule-table port.
+fn rules(name: &str) -> PortDef {
+    PortDef::new(name, PortType::Named(RULES_KEY.into()))
 }
 
 /// Resolves a texture asset GUID into a **grayscale bitmap** for the `mask.image`
@@ -133,8 +170,12 @@ impl<T: MaskSource + ?Sized> MaskSource for &T {
 }
 
 /// The complete PCG node palette: density sources, terrain filters, terrain-layer
-/// masks (P19.3), combinators, the scatter pass + its merge, the layer wrapper +
-/// its merge, and one output sink.
+/// masks (P19.3), combinators, the scatter pass + its merge, the grammar kit
+/// (P19.4), the layer wrapper + its merge, and one output sink.
+///
+/// Registration order **is** palette order (the frontend groups by first
+/// appearance), so the grammar sits beside scatter — its sibling generator —
+/// rather than at the end.
 pub fn pcg_registry() -> NodeRegistry {
     let mut reg = NodeRegistry::new();
     reg.register_all(source_nodes());
@@ -143,6 +184,7 @@ pub fn pcg_registry() -> NodeRegistry {
     reg.register_all(combine_nodes());
     reg.register(scatter_node());
     reg.register(scatter_merge_node());
+    reg.register_all(grammar_nodes());
     reg.register_all(layer_nodes());
     reg.register(output_node());
     reg
@@ -311,6 +353,80 @@ fn scatter_merge_node() -> NodeDef {
         .with_outputs(vec![scatter("out")])
 }
 
+/// The default rule text a fresh `grammar.rules` node carries: a complete,
+/// working fence, so the node teaches the DSL rather than starting blank.
+const DEFAULT_RULES: &str = "\
+# Modules are what a terminal places. `size` is the metres it consumes.
+module Post  = size 0.2
+module Panel = size 2
+
+# The first rule is the default axiom.
+Fence -> Post Panel* Post
+";
+
+/// The P19.4 **grammar kit**: a rule text, two span sources, and the expander
+/// that joins them into the population.
+fn grammar_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("grammar.rules", "Grammar Rules", "grammar")
+            .described(
+                "The rule text and module palette — a token grammar that rewrites \
+                 along a span",
+            )
+            .with_outputs(vec![rules("out")])
+            .with_params(vec![ParamDef::multiline("rules", DEFAULT_RULES).described(
+                "`Symbol -> A B* C` rules and `module X = mesh <guid> size 2` \
+                 palette entries, one per line",
+            )]),
+        NodeDef::new("grammar.spline", "Spline Span", "grammar")
+            .described("A span following a scene entity's Spline, by arc length")
+            .with_outputs(vec![span("out")])
+            .with_params(vec![
+                ParamDef::text("spline", "")
+                    .described("Spline entity GUID (blank → the entity this graph evaluates on)"),
+                ParamDef::int("samples_per_segment", DEFAULT_SPLINE_SAMPLES as i64)
+                    .range(1.0, 256.0)
+                    .described("Polyline samples per spline segment (arc-length accuracy)"),
+            ]),
+        NodeDef::new("grammar.footprint", "Footprint Span", "grammar")
+            .described("A span set from a rectangle: its four walls, or parallel rows")
+            .with_outputs(vec![span("out")])
+            .with_params(vec![
+                ParamDef::choice("mode", vec!["Perimeter".into(), "Rows".into()], "Perimeter"),
+                ParamDef::number("size_x", 0.0)
+                    .range(0.0, 100_000.0)
+                    .described("Rectangle X size in metres (0 → the PCG volume's own extent)"),
+                ParamDef::number("size_z", 0.0)
+                    .range(0.0, 100_000.0)
+                    .described("Rectangle Z size in metres (0 → the PCG volume's own extent)"),
+                ParamDef::int("rows", 4)
+                    .range(0.0, 4096.0)
+                    .described("Rows mode: how many parallel spans"),
+                ParamDef::choice("row_axis", vec!["X".into(), "Z".into()], "X")
+                    .described("Rows mode: which world axis the rows run along"),
+                ParamDef::text("corner", "")
+                    .described("Perimeter mode: the module stamped on each corner (blank → none)"),
+                ParamDef::number("corner_size", 0.0)
+                    .range(0.0, 1000.0)
+                    .described("Perimeter mode: metres each corner reserves (insets both edges)"),
+            ]),
+        NodeDef::new("grammar.expand", "Expand Grammar", "grammar")
+            .described("Rewrite the rules along the span and place the module instances")
+            .with_inputs(vec![span("span"), rules("rules")])
+            .with_outputs(vec![scatter("out")])
+            .with_params(vec![
+                ParamDef::text("name", "grammar")
+                    .described("Pass name — what diagnostics call this expansion"),
+                ParamDef::text("axiom", "")
+                    .described("The symbol expansion starts from (blank → the first rule)"),
+                ParamDef::int("seed", 0),
+                ParamDef::choice("ground", vec!["Terrain".into(), "Span".into()], "Terrain")
+                    .described("Take Y from the terrain under each slot, or from the span itself"),
+                ParamDef::number("altitude_offset", 0.0),
+            ]),
+    ]
+}
+
 /// The layer wrapper and its merge — the multi-**layer** half (P19.3).
 fn layer_nodes() -> Vec<NodeDef> {
     vec![
@@ -341,6 +457,38 @@ fn output_node() -> NodeDef {
         .described("The final population this volume or biome evaluates")
         .with_inputs(vec![scatter("scatter"), layer("layers")])
         .with_flags(SINK)
+}
+
+/// Every mesh GUID a graph's grammar **module palettes** declare, sorted and
+/// deduplicated — the cook's `.inf_pcg` → module edge (P19.4).
+///
+/// # Why this reads the nodes and not the lowered passes
+///
+/// A palette is declared by a `grammar.rules` node's own text, and that text
+/// parses (or does not) entirely on its own. Lowering, by contrast, has five
+/// ways to give up before a pass exists — an unconnected Span pin, an
+/// unconnected Rules pin, a wrong node type on either, a rule text that does not
+/// parse — and every one of them is an **ordinary mid-authoring state**. Driving
+/// the cook's dependency edge off the lowered passes would mean a graph with a
+/// wire not yet dragged ships without the meshes it plainly declares, and
+/// without the advisory that would have said so.
+///
+/// So this walks the nodes. It is **over-inclusive by design**: a `grammar.rules`
+/// node wired to nothing still contributes its meshes. That asymmetry is the
+/// right one — packing a mesh an unwired node names costs bytes, missing one a
+/// wired node names costs a hole in a wall.
+pub fn grammar_mesh_refs(graph: &Graph, reg: &NodeRegistry) -> Vec<Uuid> {
+    let mut out: std::collections::BTreeSet<Uuid> = std::collections::BTreeSet::new();
+    for node in graph.nodes.values() {
+        if node.type_id != "grammar.rules" {
+            continue;
+        }
+        let text = ptext(&resolved(reg, node), "rules");
+        if let Ok(g) = Grammar::parse(&text) {
+            out.extend(g.mesh_refs());
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// Diagnostic severity for a lowering issue.
@@ -378,13 +526,33 @@ impl PcgGraphIssue {
     }
 }
 
-/// The result of lowering a PCG graph: the runtime document plus node-anchored
-/// diagnostics. `ok` is true when no error-severity issue was raised.
+/// The result of lowering a PCG graph: the runtime document, the P19.4 grammar
+/// passes, and node-anchored diagnostics. `ok` is true when no error-severity
+/// issue was raised.
+///
+/// **Two outputs, not one, and deliberately.** The document is the frozen,
+/// serialization-locked scatter model a `.inf_pcg` stores a mirror of; the
+/// grammar passes are a *different generator* whose lowered form has no place on
+/// that bincode-positional wire. Since P19.3 the authored graph JSON is the
+/// source of truth and every evaluation site re-lowers it, so a pass reaching
+/// the runtime through this struct is exactly as available as a rule — see
+/// [`crate::grammar`] for the argument in full.
 #[derive(Debug, Clone)]
 pub struct LoweredPcg {
     pub document: PcgDocument,
+    /// The grammar passes, in canvas order, each tagged with the layer it was
+    /// lowered under (so a disabled layer disables its grammars too).
+    pub grammars: Vec<GrammarPass>,
     pub issues: Vec<PcgGraphIssue>,
     pub ok: bool,
+}
+
+impl LoweredPcg {
+    /// `true` when the graph authors at least one grammar pass — the predicate
+    /// the cook and the evaluation sites branch on.
+    pub fn has_grammars(&self) -> bool {
+        !self.grammars.is_empty()
+    }
 }
 
 /// Lower a PCG editor graph into the stable [`PcgDocument`] runtime model.
@@ -403,6 +571,9 @@ pub fn lower_graph_with(graph: &Graph, reg: &NodeRegistry, masks: &dyn MaskSourc
         reg,
         masks,
         issues: Vec::new(),
+        grammars: Vec::new(),
+        layer: "layer".into(),
+        layer_enabled: true,
     };
 
     // Locate the sink(s). BTreeMap iteration → the lowest NodeId wins.
@@ -414,7 +585,7 @@ pub fn lower_graph_with(graph: &Graph, reg: &NodeRegistry, masks: &dyn MaskSourc
         .collect();
     let Some(&output) = outputs.first() else {
         cx.error(None, "graph has no PCG Output node — add one");
-        return LoweredPcg::finish(PcgDocument::default(), cx.issues);
+        return LoweredPcg::finish(PcgDocument::default(), cx.grammars, cx.issues);
     };
     for &extra in outputs.iter().skip(1) {
         cx.warn(
@@ -443,11 +614,11 @@ pub fn lower_graph_with(graph: &Graph, reg: &NodeRegistry, masks: &dyn MaskSourc
         }],
         (None, None) => {
             cx.error(Some(output), "PCG Output has no Scatter connected");
-            return LoweredPcg::finish(PcgDocument::default(), cx.issues);
+            return LoweredPcg::finish(PcgDocument::default(), cx.grammars, cx.issues);
         }
     };
 
-    LoweredPcg::finish(PcgDocument { layers }, cx.issues)
+    LoweredPcg::finish(PcgDocument { layers }, cx.grammars, cx.issues)
 }
 
 /// The lowering walk's shared state: the graph being read, the registry that
@@ -459,6 +630,14 @@ struct Ctx<'a> {
     reg: &'a NodeRegistry,
     masks: &'a dyn MaskSource,
     issues: Vec<PcgGraphIssue>,
+    /// P19.4 grammar passes collected as the scatter walk meets them, in canvas
+    /// order — they leave the walk as `Vec<PcgRule>`'s empty tail rather than as
+    /// rules, because a grammar is not a scatter.
+    grammars: Vec<GrammarPass>,
+    /// The layer currently being lowered, stamped onto every pass so a layer's
+    /// name and toggle govern its grammars exactly as they govern its rules.
+    layer: String,
+    layer_enabled: bool,
 }
 
 impl Ctx<'_> {
@@ -491,6 +670,16 @@ impl Ctx<'_> {
             "layer.layer" => {
                 let params = resolved(self.reg, node);
                 let name = ptext(&params, "name");
+                let name = if name.trim().is_empty() {
+                    "layer".to_string()
+                } else {
+                    name
+                };
+                let enabled = pb_default(&params, "enabled", true);
+                // Grammar passes lowered below this point belong to this layer.
+                let outer = (self.layer.clone(), self.layer_enabled);
+                self.layer = name.clone();
+                self.layer_enabled = enabled;
                 let rules = match self.graph.link_into(node_id, "scatter") {
                     Some(link) => self.lower_rules(link.from, visiting),
                     None => {
@@ -501,13 +690,10 @@ impl Ctx<'_> {
                         Vec::new()
                     }
                 };
+                (self.layer, self.layer_enabled) = outer;
                 vec![PcgLayer {
-                    name: if name.trim().is_empty() {
-                        "layer".into()
-                    } else {
-                        name
-                    },
-                    enabled: pb_default(&params, "enabled", true),
+                    name,
+                    enabled,
                     rules,
                 }]
             }
@@ -557,6 +743,13 @@ impl Ctx<'_> {
                 a
             }
             "scatter.scatter" => vec![self.lower_scatter(node_id, visiting)],
+            // A grammar rides the SCATTER wire so it can join the same merge and
+            // layer chains, but it lowers to a pass, not a rule — so it
+            // contributes no `PcgRule` and appends to `self.grammars` instead.
+            "grammar.expand" => {
+                self.lower_grammar(node_id);
+                Vec::new()
+            }
             other => {
                 self.error(
                     Some(node_id),
@@ -637,11 +830,200 @@ impl Ctx<'_> {
     }
 }
 
+// ── P19.4: the grammar walk ─────────────────────────────────────────────────
+
+impl Ctx<'_> {
+    /// One `grammar.expand` node → one [`GrammarPass`], appended to
+    /// [`Ctx::grammars`].
+    ///
+    /// Every failure is **node-anchored and fails closed**: a pass that cannot
+    /// be built is simply not built, so the graph still lowers and the rest of
+    /// the population is unaffected. Only a rule text that does not *parse* is
+    /// an error — that is a mistake in authored source, and the message carries
+    /// the DSL's own `line:col`, exactly like the WGSL emitter's.
+    fn lower_grammar(&mut self, node_id: NodeId) {
+        let params = resolved(self.reg, self.graph.node(node_id).expect("checked"));
+
+        // ── the rule text ───────────────────────────────────────────────────
+        let Some(rules_link) = self.graph.link_into(node_id, "rules") else {
+            self.error(
+                Some(node_id),
+                "Expand Grammar has no Grammar Rules connected — it places nothing",
+            );
+            return;
+        };
+        let rules_node = rules_link.from;
+        let Some(rn) = self.graph.node(rules_node) else {
+            return;
+        };
+        if rn.type_id != "grammar.rules" {
+            self.error(
+                Some(rules_node),
+                format!("`{}` does not produce a grammar rule table", rn.type_id),
+            );
+            return;
+        }
+        let text = ptext(&resolved(self.reg, rn), "rules");
+        let grammar = match Grammar::parse(&text) {
+            Ok(g) => g,
+            Err(e) => {
+                // Anchored on the RULES node — that is where the text lives.
+                self.error(Some(rules_node), format!("grammar {e}"));
+                return;
+            }
+        };
+        if grammar.is_empty() && grammar.modules().is_empty() {
+            self.warn(
+                Some(rules_node),
+                "Grammar Rules is empty — nothing to place",
+            );
+        }
+        // A terminal with no module is a legal gap; say so once, listing them,
+        // so a typo is visible rather than silently becoming empty space.
+        let gaps = grammar.gaps();
+        if !gaps.is_empty() {
+            self.warn(
+                Some(rules_node),
+                format!(
+                    "these symbols place nothing (no `module` declares them) and are \
+                     treated as gaps: {}",
+                    gaps.join(", ")
+                ),
+            );
+        }
+
+        // ── the span ────────────────────────────────────────────────────────
+        let Some(span_link) = self.graph.link_into(node_id, "span") else {
+            self.error(
+                Some(node_id),
+                "Expand Grammar has no Span connected — it places nothing",
+            );
+            return;
+        };
+        let span_node = span_link.from;
+        let Some(sn) = self.graph.node(span_node) else {
+            return;
+        };
+        let sn_type = sn.type_id.clone();
+        let sp = resolved(self.reg, sn);
+        let (span, corner_module) = match sn_type.as_str() {
+            "grammar.spline" => {
+                let raw = ptext(&sp, "spline");
+                let entity = parse_guid(&raw);
+                if entity.is_none() && !raw.trim().is_empty() {
+                    self.warn(
+                        Some(span_node),
+                        format!(
+                            "Spline Span entity `{raw}` is not a GUID — falling back to \
+                             the entity this graph evaluates on"
+                        ),
+                    );
+                }
+                (
+                    SpanSource::Spline {
+                        entity,
+                        samples_per_segment: pi(&sp, "samples_per_segment").clamp(1, 256) as usize,
+                    },
+                    String::new(),
+                )
+            }
+            "grammar.footprint" => {
+                let size = glam::DVec2::new(pf(&sp, "size_x").max(0.0), pf(&sp, "size_z").max(0.0));
+                let corner = ptext(&sp, "corner");
+                let mode = if penum(&sp, "mode") == "Rows" {
+                    if !corner.trim().is_empty() {
+                        self.warn(
+                            Some(span_node),
+                            "Rows mode has no corners — the `corner` module is ignored",
+                        );
+                    }
+                    FootprintMode::Rows {
+                        rows: pi(&sp, "rows").clamp(0, 4096) as u32,
+                        axis: if penum(&sp, "row_axis") == "Z" {
+                            RowAxis::Z
+                        } else {
+                            RowAxis::X
+                        },
+                    }
+                } else {
+                    FootprintMode::Perimeter {
+                        corner_size: pf(&sp, "corner_size").max(0.0),
+                    }
+                };
+                let corner = corner.trim().to_string();
+                if !corner.is_empty() && grammar.module_index(&corner).is_none() {
+                    self.warn(
+                        Some(span_node),
+                        format!(
+                            "corner module `{corner}` is not declared in the grammar — \
+                             no corner is placed"
+                        ),
+                    );
+                }
+                (SpanSource::Footprint { size, mode }, corner)
+            }
+            other => {
+                self.error(
+                    Some(span_node),
+                    format!("`{other}` does not produce a grammar span"),
+                );
+                return;
+            }
+        };
+
+        // ── the pass ────────────────────────────────────────────────────────
+        let axiom = {
+            let authored = ptext(&params, "axiom");
+            let authored = authored.trim();
+            if authored.is_empty() {
+                grammar.default_axiom().unwrap_or_default().to_string()
+            } else {
+                if grammar.rule(authored).is_none() && grammar.module_index(authored).is_none() {
+                    self.warn(
+                        Some(node_id),
+                        format!(
+                            "axiom `{authored}` names no rule and no module — this pass \
+                             places nothing"
+                        ),
+                    );
+                }
+                authored.to_string()
+            }
+        };
+        let name = ptext(&params, "name");
+        self.grammars.push(GrammarPass {
+            name: if name.trim().is_empty() {
+                "grammar".into()
+            } else {
+                name
+            },
+            layer: self.layer.clone(),
+            enabled: self.layer_enabled,
+            seed: pi(&params, "seed") as u64,
+            grammar,
+            axiom,
+            span,
+            corner_module,
+            ground: if penum(&params, "ground") == "Span" {
+                Ground::Span
+            } else {
+                Ground::Terrain
+            },
+            altitude_offset: pf(&params, "altitude_offset"),
+        });
+    }
+}
+
 impl LoweredPcg {
-    fn finish(document: PcgDocument, issues: Vec<PcgGraphIssue>) -> Self {
+    fn finish(
+        document: PcgDocument,
+        grammars: Vec<GrammarPass>,
+        issues: Vec<PcgGraphIssue>,
+    ) -> Self {
         let ok = !issues.iter().any(|i| i.severity == PcgSeverity::Error);
         Self {
             document,
+            grammars,
             issues,
             ok,
         }
@@ -1571,6 +1953,604 @@ mod tests {
             .iter()
             .any(|i| i.severity == PcgSeverity::Warning && i.node == Some(l.0)));
         assert!(lowered.document.layers[0].rules.is_empty());
+    }
+
+    // ── P19.4: the grammar kit ──────────────────────────────────────────────
+
+    const RULE_TEXT: &str = "\
+module Post = mesh 6f9619ff-8b86-d011-b42d-00c04fc964ff size 0.2
+module Panel = mesh 6f9619ff-8b86-d011-b42d-00c04fc964f0 size 2
+Fence -> Post Panel* Post
+";
+
+    impl Builder {
+        /// `grammar.rules → grammar.expand ← span_node`, returning
+        /// `(expand, rules, span)`.
+        fn grammar(
+            &mut self,
+            span_type: &str,
+            span_params: &[(&str, ParamValue)],
+            expand_params: &[(&str, ParamValue)],
+            text: &str,
+        ) -> (NodeId, NodeId, NodeId) {
+            let rules = self.node("grammar.rules", &[("rules", ParamValue::Text(text.into()))]);
+            let span = self.node(span_type, span_params);
+            let expand = self.node("grammar.expand", expand_params);
+            self.link(rules, "out", expand, "rules");
+            self.link(span, "out", expand, "span");
+            (expand, rules, span)
+        }
+    }
+
+    /// The four nodes exist, wear the right wire types, and the rule text is a
+    /// **multiline** param — the node IS the editor for it.
+    #[test]
+    fn the_grammar_kit_is_registered_with_its_own_wires() {
+        let reg = pcg_registry();
+        for id in [
+            "grammar.rules",
+            "grammar.spline",
+            "grammar.footprint",
+            "grammar.expand",
+        ] {
+            let def = reg.get(id).unwrap_or_else(|| panic!("missing {id}"));
+            assert_eq!(def.category, "grammar", "{id}");
+        }
+        let rules_def = reg.get("grammar.rules").unwrap();
+        assert!(rules_def.inputs.is_empty());
+        assert_eq!(rules_def.outputs[0].ty, PortType::Named(RULES_KEY.into()));
+        assert_eq!(
+            rules_def.param("rules").unwrap().ui,
+            inf_graph::UiHint::Multiline,
+            "the rule text must render as a text area, not a one-line input"
+        );
+        // The shipped default text is itself a valid grammar — a fresh node
+        // teaches the DSL rather than erroring.
+        let default = match &rules_def.param("rules").unwrap().default {
+            ParamValue::Text(t) => t.clone(),
+            other => panic!("default is {other:?}"),
+        };
+        let parsed = crate::grammar::Grammar::parse(&default).expect("default rules must parse");
+        assert_eq!(parsed.default_axiom(), Some("Fence"));
+
+        for id in ["grammar.spline", "grammar.footprint"] {
+            let def = reg.get(id).unwrap();
+            assert!(def.inputs.is_empty(), "{id} is a source");
+            assert_eq!(def.outputs[0].ty, PortType::Named(SPAN_KEY.into()), "{id}");
+        }
+        let ex = reg.get("grammar.expand").unwrap();
+        assert_eq!(
+            ex.input("span").unwrap().ty,
+            PortType::Named(SPAN_KEY.into())
+        );
+        assert_eq!(
+            ex.input("rules").unwrap().ty,
+            PortType::Named(RULES_KEY.into())
+        );
+        // …and it emits a SCATTER, which is what lets it join the P19.3 merge
+        // and layer chains with no new combinator and no new sink input.
+        assert_eq!(
+            ex.outputs[0].ty,
+            PortType::Named(SCATTER_KEY.into()),
+            "a grammar must ride the scatter wire"
+        );
+        // No new PortType variant was introduced for any of this.
+        for def in reg.ordered() {
+            for p in def.inputs.iter().chain(&def.outputs) {
+                assert!(
+                    matches!(p.ty, PortType::Named(_)),
+                    "{}.{} is not a Named wire",
+                    def.type_id,
+                    p.name
+                );
+            }
+        }
+    }
+
+    /// A grammar graph lowers to a pass carrying every authored param, and the
+    /// **document is untouched** — a grammar is not a rule.
+    #[test]
+    fn a_grammar_graph_lowers_to_a_pass_beside_an_empty_document() {
+        let mut b = Builder::new();
+        let (expand, _, _) = b.grammar(
+            "grammar.footprint",
+            &[
+                ("mode", ParamValue::Enum("Perimeter".into())),
+                ("size_x", ParamValue::Float(20.0)),
+                ("size_z", ParamValue::Float(12.0)),
+                ("corner", ParamValue::Text("Post".into())),
+                ("corner_size", ParamValue::Float(0.2)),
+            ],
+            &[
+                ("name", ParamValue::Text("walls".into())),
+                ("seed", ParamValue::Int(4242)),
+                ("altitude_offset", ParamValue::Float(0.25)),
+                ("ground", ParamValue::Enum("Span".into())),
+            ],
+            RULE_TEXT,
+        );
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+
+        let lowered = b.lower();
+        assert!(lowered.ok, "{:?}", lowered.issues);
+        assert!(lowered.has_grammars());
+        assert_eq!(lowered.grammars.len(), 1);
+        let p = &lowered.grammars[0];
+        assert_eq!(p.name, "walls");
+        assert_eq!(p.seed, 4242);
+        assert_eq!(p.altitude_offset, 0.25);
+        assert_eq!(p.ground, crate::grammar::Ground::Span);
+        assert_eq!(p.corner_module, "Post");
+        assert_eq!(p.axiom, "Fence", "a blank axiom takes the first rule");
+        assert_eq!(p.layer, "layer");
+        assert!(p.enabled);
+        assert_eq!(
+            p.span,
+            SpanSource::Footprint {
+                size: glam::DVec2::new(20.0, 12.0),
+                mode: FootprintMode::Perimeter { corner_size: 0.2 },
+            }
+        );
+        assert_eq!(p.grammar.modules().len(), 2);
+        // The scatter document is empty — a grammar contributes NO rule, and the
+        // frozen `PcgDocument` wire therefore never sees it.
+        assert_eq!(lowered.document.layers.len(), 1);
+        assert!(lowered.document.layers[0].rules.is_empty());
+    }
+
+    #[test]
+    fn a_spline_span_lowers_its_entity_ref_and_sample_density() {
+        let guid = uuid::Uuid::from_u128(0xFEED);
+        let mut b = Builder::new();
+        let (expand, _, _) = b.grammar(
+            "grammar.spline",
+            &[
+                ("spline", ParamValue::Text(guid.to_string())),
+                ("samples_per_segment", ParamValue::Int(32)),
+            ],
+            &[],
+            RULE_TEXT,
+        );
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(lowered.ok, "{:?}", lowered.issues);
+        assert_eq!(
+            lowered.grammars[0].span,
+            SpanSource::Spline {
+                entity: Some(guid),
+                samples_per_segment: 32
+            }
+        );
+
+        // A blank ref means "this entity's own spline" — the zero-config case.
+        let mut b = Builder::new();
+        let (expand, _, _) = b.grammar("grammar.spline", &[], &[], RULE_TEXT);
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(lowered.ok);
+        assert!(matches!(
+            lowered.grammars[0].span,
+            SpanSource::Spline { entity: None, .. }
+        ));
+
+        // A malformed ref warns on the span node and falls back to self.
+        let mut b = Builder::new();
+        let (expand, _, span) = b.grammar(
+            "grammar.spline",
+            &[("spline", ParamValue::Text("not-a-guid".into()))],
+            &[],
+            RULE_TEXT,
+        );
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(lowered.ok, "a bad GUID is not fatal");
+        assert!(lowered
+            .issues
+            .iter()
+            .any(|i| i.severity == PcgSeverity::Warning && i.node == Some(span.0)));
+    }
+
+    #[test]
+    fn rows_mode_lowers_its_count_and_axis() {
+        let mut b = Builder::new();
+        let (expand, _, span) = b.grammar(
+            "grammar.footprint",
+            &[
+                ("mode", ParamValue::Enum("Rows".into())),
+                ("rows", ParamValue::Int(7)),
+                ("row_axis", ParamValue::Enum("Z".into())),
+                ("corner", ParamValue::Text("Post".into())),
+            ],
+            &[],
+            RULE_TEXT,
+        );
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(lowered.ok);
+        assert_eq!(
+            lowered.grammars[0].span,
+            SpanSource::Footprint {
+                size: glam::DVec2::ZERO,
+                mode: FootprintMode::Rows {
+                    rows: 7,
+                    axis: RowAxis::Z
+                },
+            }
+        );
+        // Rows have no corners; the ignored param says so on its own node.
+        assert!(lowered
+            .issues
+            .iter()
+            .any(|i| i.node == Some(span.0) && i.message.contains("no corners")));
+    }
+
+    /// **The parse error is anchored on the rules node and carries the DSL's own
+    /// `line:col`** — the diagnostics contract the WGSL emitter and the density
+    /// walk already keep.
+    #[test]
+    fn grammar_diagnostics_are_anchored() {
+        // A rule text that does not parse.
+        let mut b = Builder::new();
+        let (expand, rules, _) = b.grammar(
+            "grammar.footprint",
+            &[],
+            &[],
+            "module P = size 2\nWall -> P\nBad -> Missing\n",
+        );
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(!lowered.ok);
+        let err = lowered
+            .issues
+            .iter()
+            .find(|i| i.severity == PcgSeverity::Error)
+            .unwrap();
+        assert_eq!(err.node, Some(rules.0));
+        assert!(err.message.contains("line 3"), "{}", err.message);
+        assert!(err.message.contains("has no size"), "{}", err.message);
+        assert!(lowered.grammars.is_empty(), "a broken pass is not built");
+
+        // No rules connected → anchored error on the expand node.
+        let mut b = Builder::new();
+        let span = b.node("grammar.footprint", &[]);
+        let expand = b.node("grammar.expand", &[]);
+        b.link(span, "out", expand, "span");
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(!lowered.ok);
+        assert!(lowered
+            .issues
+            .iter()
+            .any(|i| i.severity == PcgSeverity::Error && i.node == Some(expand.0)));
+
+        // No span connected → likewise.
+        let mut b = Builder::new();
+        let rules = b.node(
+            "grammar.rules",
+            &[("rules", ParamValue::Text(RULE_TEXT.into()))],
+        );
+        let expand = b.node("grammar.expand", &[]);
+        b.link(rules, "out", expand, "rules");
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(!lowered.ok);
+        assert!(lowered
+            .issues
+            .iter()
+            .any(|i| i.severity == PcgSeverity::Error && i.node == Some(expand.0)));
+
+        // Wrong node types on either input error on the OFFENDING node.
+        for (bad_type, port) in [("const.density", "rules"), ("const.density", "span")] {
+            let mut b = Builder::new();
+            let bad = b.node(bad_type, &[]);
+            let rules = b.node(
+                "grammar.rules",
+                &[("rules", ParamValue::Text(RULE_TEXT.into()))],
+            );
+            let span = b.node("grammar.footprint", &[]);
+            let expand = b.node("grammar.expand", &[]);
+            b.link(rules, "out", expand, "rules");
+            b.link(span, "out", expand, "span");
+            let o = b.node("output.pcg", &[]);
+            b.link(expand, "out", o, "scatter");
+            // The edit door forbids the mismatch; a hand-edited document can
+            // still hold it, and the lowerer must diagnose rather than panic.
+            b.g.links.retain(|l| !(l.to == expand && l.to_port == port));
+            b.g.links.push(Link {
+                from: bad,
+                from_port: "out".into(),
+                to: expand,
+                to_port: port.into(),
+            });
+            let lowered = b.lower();
+            assert!(!lowered.ok, "{port}");
+            assert!(
+                lowered
+                    .issues
+                    .iter()
+                    .any(|i| i.severity == PcgSeverity::Error && i.node == Some(bad.0)),
+                "{port} did not anchor on the offending node"
+            );
+        }
+
+        // Gap symbols are a WARNING listing them — legal, and visible.
+        let mut b = Builder::new();
+        let (expand, rules, _) = b.grammar(
+            "grammar.footprint",
+            &[],
+            &[],
+            "module P = size 2\nWall -> P Gap[1] Spacer[2]\n",
+        );
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(lowered.ok);
+        let warn = lowered
+            .issues
+            .iter()
+            .find(|i| i.node == Some(rules.0) && i.severity == PcgSeverity::Warning)
+            .unwrap();
+        assert!(warn.message.contains("Gap"), "{}", warn.message);
+        assert!(warn.message.contains("Spacer"), "{}", warn.message);
+
+        // An undeclared corner module warns on the footprint node.
+        let mut b = Builder::new();
+        let (expand, _, span) = b.grammar(
+            "grammar.footprint",
+            &[("corner", ParamValue::Text("Turret".into()))],
+            &[],
+            RULE_TEXT,
+        );
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(lowered.ok);
+        assert!(lowered
+            .issues
+            .iter()
+            .any(|i| i.node == Some(span.0) && i.message.contains("Turret")));
+
+        // An axiom naming nothing warns on the expand node.
+        let mut b = Builder::new();
+        let (expand, _, _) = b.grammar(
+            "grammar.footprint",
+            &[],
+            &[("axiom", ParamValue::Text("Nope".into()))],
+            RULE_TEXT,
+        );
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(lowered.ok);
+        assert!(lowered
+            .issues
+            .iter()
+            .any(|i| i.node == Some(expand.0) && i.message.contains("axiom")));
+    }
+
+    /// **A grammar mixes into the P19.3 chains untouched**: merged beside a
+    /// scatter, wrapped in a layer, and taking that layer's name and toggle.
+    #[test]
+    fn a_grammar_merges_into_layers_and_rules_like_any_scatter() {
+        let mut b = Builder::new();
+        let s = b.scatter_named("grass", None);
+        let (expand, _, _) = b.grammar("grammar.footprint", &[], &[], RULE_TEXT);
+        let m = b.node("scatter.merge", &[]);
+        b.link(s, "out", m, "a");
+        b.link(expand, "out", m, "b");
+        let l = b.node(
+            "layer.layer",
+            &[
+                ("name", ParamValue::Text("village".into())),
+                ("enabled", ParamValue::Bool(false)),
+            ],
+        );
+        b.link(m, "out", l, "scatter");
+        let o = b.node("output.pcg", &[]);
+        b.link(l, "out", o, "layers");
+
+        let lowered = b.lower();
+        assert!(lowered.ok, "{:?}", lowered.issues);
+        // The scatter half is one rule in one layer …
+        assert_eq!(lowered.document.layers.len(), 1);
+        assert_eq!(lowered.document.layers[0].name, "village");
+        assert_eq!(
+            lowered.document.layers[0]
+                .rules
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["grass"]
+        );
+        // … and the grammar half carries the SAME layer identity.
+        assert_eq!(lowered.grammars.len(), 1);
+        assert_eq!(lowered.grammars[0].layer, "village");
+        assert!(
+            !lowered.grammars[0].enabled,
+            "a disabled layer must disable its grammars too"
+        );
+    }
+
+    /// Two grammars merge in canvas order, `a` before `b` — the same
+    /// depth-first flattening the rule list gets.
+    #[test]
+    fn grammar_passes_keep_their_canvas_order() {
+        let mut b = Builder::new();
+        let (e1, _, _) = b.grammar(
+            "grammar.footprint",
+            &[],
+            &[("name", ParamValue::Text("one".into()))],
+            RULE_TEXT,
+        );
+        let (e2, _, _) = b.grammar(
+            "grammar.footprint",
+            &[],
+            &[("name", ParamValue::Text("two".into()))],
+            RULE_TEXT,
+        );
+        let (e3, _, _) = b.grammar(
+            "grammar.footprint",
+            &[],
+            &[("name", ParamValue::Text("three".into()))],
+            RULE_TEXT,
+        );
+        let m1 = b.node("scatter.merge", &[]);
+        b.link(e1, "out", m1, "a");
+        b.link(e2, "out", m1, "b");
+        let m2 = b.node("scatter.merge", &[]);
+        b.link(m1, "out", m2, "a");
+        b.link(e3, "out", m2, "b");
+        let o = b.node("output.pcg", &[]);
+        b.link(m2, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(lowered.ok, "{:?}", lowered.issues);
+        assert_eq!(
+            lowered
+                .grammars
+                .iter()
+                .map(|g| g.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one", "two", "three"]
+        );
+    }
+
+    /// **The permanent transpile discipline, and the no-schema-movement claim.**
+    /// A grammar graph survives the `.inf_pcg` payload codec and re-lowers to
+    /// the identical passes — the property the player leans on, since it
+    /// re-lowers the stored graph rather than trusting the document mirror. And
+    /// the encoded payload of a grammar-only graph is byte-identical to that of
+    /// the same graph with the grammar chain removed *plus its graph JSON*, i.e.
+    /// nothing about the grammar reached the frozen document wire.
+    #[test]
+    fn a_grammar_graph_round_trips_through_the_payload_and_re_lowers() {
+        let mut b = Builder::new();
+        let (expand, _, _) = b.grammar(
+            "grammar.spline",
+            &[("samples_per_segment", ParamValue::Int(24))],
+            &[
+                ("name", ParamValue::Text("fence".into())),
+                ("seed", ParamValue::Int(31337)),
+            ],
+            RULE_TEXT,
+        );
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(lowered.ok, "{:?}", lowered.issues);
+
+        let payload = crate::PcgAssetPayload::from_graph(&b.g, lowered.document.clone());
+        let bytes = payload.encode().unwrap();
+        let back = crate::PcgAssetPayload::decode(&bytes).unwrap();
+        assert_eq!(back.schema_version, 2, "no schema bump was taken");
+        let re = lower_graph(&back.graph().unwrap(), &pcg_registry());
+        assert_eq!(re.document, lowered.document);
+        assert_eq!(re.grammars, lowered.grammars);
+        assert_eq!(re.grammars[0].name, "fence");
+        assert_eq!(re.grammars[0].seed, 31337);
+        // Re-encoding is byte-identical, so a `.inf_pcg`'s content hash is stable.
+        assert_eq!(bytes, back.encode().unwrap());
+
+        // The document mirror of a grammar-only graph is EXACTLY an empty
+        // one-layer document — the frozen wire never learned a new field.
+        let empty = crate::PcgAssetPayload::new(lowered.document.clone());
+        assert_eq!(
+            empty.encode().unwrap(),
+            crate::PcgAssetPayload::new(PcgDocument::single_layer("layer", Vec::new()))
+                .encode()
+                .unwrap()
+        );
+    }
+
+    /// **The cook's module edge survives a graph that does not lower.**
+    ///
+    /// `grammar_mesh_refs` reads the `grammar.rules` nodes, not the lowered
+    /// passes — because a Span pin nobody has dragged yet is an ordinary
+    /// mid-authoring state, and a cook that dropped the meshes for it would ship
+    /// a wall with pieces missing and no advisory. Deduplicated and sorted, so
+    /// the closure and the advisory are both deterministic.
+    #[test]
+    fn grammar_mesh_refs_reads_the_palette_not_the_lowered_passes() {
+        let post = uuid::Uuid::parse_str("6f9619ff-8b86-d011-b42d-00c04fc964ff").unwrap();
+        let panel = uuid::Uuid::parse_str("6f9619ff-8b86-d011-b42d-00c04fc964f0").unwrap();
+
+        // A fully wired graph declares both.
+        let mut b = Builder::new();
+        let (expand, _, _) = b.grammar("grammar.footprint", &[], &[], RULE_TEXT);
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+        assert!(b.lower().ok);
+        assert_eq!(grammar_mesh_refs(&b.g, &b.reg), vec![panel, post]);
+
+        // …and so does a graph whose Span pin was never connected, which does
+        // NOT lower. This is the finding: the edge must not depend on wiring.
+        let mut b = Builder::new();
+        let rules = b.node(
+            "grammar.rules",
+            &[("rules", ParamValue::Text(RULE_TEXT.into()))],
+        );
+        let expand = b.node("grammar.expand", &[]);
+        b.link(rules, "out", expand, "rules");
+        let o = b.node("output.pcg", &[]);
+        b.link(expand, "out", o, "scatter");
+        let lowered = b.lower();
+        assert!(!lowered.ok, "an unconnected Span must still fail to lower");
+        assert!(lowered.grammars.is_empty(), "…and produce no pass");
+        assert_eq!(
+            grammar_mesh_refs(&b.g, &b.reg),
+            vec![panel, post],
+            "the cook edge must survive a graph that does not lower"
+        );
+
+        // A rules node wired to NOTHING at all still declares its meshes —
+        // over-inclusive on purpose (bytes, not a hole in a wall).
+        let mut b = Builder::new();
+        b.node(
+            "grammar.rules",
+            &[("rules", ParamValue::Text(RULE_TEXT.into()))],
+        );
+        assert_eq!(grammar_mesh_refs(&b.g, &b.reg), vec![panel, post]);
+
+        // **Deduplicated across nodes, and sorted.** Two rules nodes naming the
+        // same mesh contribute one edge, in a stable order.
+        let mut b = Builder::new();
+        for _ in 0..3 {
+            b.node(
+                "grammar.rules",
+                &[("rules", ParamValue::Text(RULE_TEXT.into()))],
+            );
+        }
+        let refs = grammar_mesh_refs(&b.g, &b.reg);
+        assert_eq!(refs, vec![panel, post], "not deduplicated or not sorted");
+        assert!(refs.windows(2).all(|w| w[0] < w[1]));
+
+        // A rule text that does not parse contributes nothing rather than
+        // panicking …
+        let mut b = Builder::new();
+        b.node(
+            "grammar.rules",
+            &[("rules", ParamValue::Text("A -> ) (".into()))],
+        );
+        assert!(grammar_mesh_refs(&b.g, &b.reg).is_empty());
+        // … and a graph with no grammar at all contributes nothing, so the
+        // advisory built on this stays silent for every pre-P19.4 `.inf_pcg`.
+        let mut b = Builder::new();
+        let s = b.scatter_named("grass", None);
+        let o = b.node("output.pcg", &[]);
+        b.link(s, "out", o, "scatter");
+        assert!(grammar_mesh_refs(&b.g, &b.reg).is_empty());
+        // The default (unmodified) rules node names no mesh, so dropping one on
+        // the canvas does not invent a dependency.
+        let mut b = Builder::new();
+        b.node("grammar.rules", &[]);
+        assert!(grammar_mesh_refs(&b.g, &b.reg).is_empty());
     }
 
     /// One density subgraph feeding **two** scatter nodes is a legal diamond, not

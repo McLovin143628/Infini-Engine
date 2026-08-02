@@ -110,3 +110,23 @@
 .pcg-field .bp-input {
   width: 72px;
 }
+
+/* P19.4 — the grammar rule text is a document, so its node IS its editor. The
+   `nodrag`/`nowheel` classes keep @xyflow from stealing the pointer while an
+   author is selecting text or scrolling inside the area. */
+.pcg-field--multiline {
+  align-items: stretch;
+}
+
+.pcg-field--multiline .bp-input {
+  width: 100%;
+  min-width: 260px;
+  min-height: 120px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+}

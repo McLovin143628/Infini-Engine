@@ -41,6 +41,9 @@ export function categoryColor(category: string): string {
       return "#b8860b";
     case "debug":
       return "#555b66";
+    // PCG categories reach this map through the shared NodePalette's group dot.
+    case "grammar":
+      return "#6a2f6f";
     default:
       return "#4a5058";
   }

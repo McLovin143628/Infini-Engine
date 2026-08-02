@@ -3202,6 +3202,7 @@ dependencies = [
  "inf-asset",
  "inf-core",
  "inf-graph",
+ "inf-math",
  "inf-terrain",
  "proptest",
  "serde",

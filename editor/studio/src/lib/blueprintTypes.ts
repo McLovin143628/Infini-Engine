@@ -25,7 +25,9 @@ export type BpValue =
   | { type: "text"; value: string }
   | { type: "enum"; value: string };
 
-export type UiHint = "number" | "text" | "toggle" | "choice";
+/** Which inspector control renders a param. `multiline` (P19.4) stores the same
+ *  `text` value; only the control differs — see `UiHint` in `inf-graph`. */
+export type UiHint = "number" | "text" | "toggle" | "choice" | "multiline";
 
 export interface PortDef {
   name: string;

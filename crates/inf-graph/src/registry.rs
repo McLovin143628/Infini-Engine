@@ -64,6 +64,16 @@ impl PortType {
 }
 
 /// Which inspector control renders for a parameter.
+///
+/// # This enum is safe to grow, and here is why
+///
+/// It is serialized **as its variant name** (`"number"`, `"multiline"`, …), not
+/// as a positional index, and it appears only on a [`NodeDef`] — a registry DTO
+/// the backend serves fresh on every editor session. Nothing persists a
+/// `UiHint`: a saved graph stores [`ParamValue`](crate::ParamValue)s, which are
+/// unchanged. So a new variant costs one arm in the frontend's param-editor
+/// switch and nothing else — none of the append-only discriminant reasoning that
+/// governs `SamplerDef` or a component's bincode layout applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UiHint {
@@ -71,6 +81,11 @@ pub enum UiHint {
     Text,
     Toggle,
     Choice,
+    /// A multi-line text area (P19.4). The value is still a
+    /// [`ParamValue::Text`](crate::ParamValue::Text); only the control differs.
+    /// Added for the PCG grammar's rule text, which is an authored *document*
+    /// living on its node rather than in a panel of its own.
+    Multiline,
 }
 
 /// One declared port on a node type. Ports live on the *type*, never on the
@@ -150,6 +165,12 @@ impl ParamDef {
 
     pub fn text(name: impl Into<String>, default: impl Into<String>) -> Self {
         Self::scalar(name, ParamValue::Text(default.into()), UiHint::Text)
+    }
+
+    /// A multi-line text parameter: same [`ParamValue::Text`] storage as
+    /// [`text`](Self::text), rendered as a text area (see [`UiHint::Multiline`]).
+    pub fn multiline(name: impl Into<String>, default: impl Into<String>) -> Self {
+        Self::scalar(name, ParamValue::Text(default.into()), UiHint::Multiline)
     }
 
     pub fn choice(

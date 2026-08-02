@@ -510,6 +510,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     warnings.extend(dangling_terrain_refs(&db, &closure));
     warnings.extend(dangling_biome_set_refs(&db, &closure));
     warnings.extend(unresolvable_image_masks(&db, &closure));
+    warnings.extend(dangling_grammar_modules(&db, &closure));
 
     // ── 4/5/6. compile blueprints + rewrite levels + derive vmesh ───────────
     //
@@ -840,6 +841,9 @@ fn dependency_closure(db: &AssetDb, roots: &[AssetId]) -> Vec<AssetId> {
 ///   (P19.2's `pcg_graph`, the P19.3 hook). This closes the
 ///   `level → biome set → graph` chain, so an explicit-roots cook of just a level
 ///   ships the graphs its painted biomes will evaluate.
+/// * **Pcg** (`.inf_pcg`) — the `.inf_mesh` assets its **grammar modules** place
+///   (P19.4), closing `level → PcgVolume.graph → module mesh`. Grammar only; see
+///   the arm for why a scatter kind's mesh is deliberately still not an edge.
 fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
     let Some(entry) = db.get(id) else {
         return Vec::new();
@@ -925,8 +929,47 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
             };
             set.dependencies()
         }
+        // P19.4: a `.inf_pcg` references the `.inf_mesh` assets its **grammar
+        // modules** place. Without this edge a cooked level's fence would expand
+        // to a full derivation naming meshes the pack does not contain — a hole
+        // in a building, discovered by a player.
+        //
+        // **The edge is grammar-only, deliberately.** A scatter rule's
+        // `PcgKind.mesh` is an older hole with a different shape: it has been a
+        // blank-tolerant palette slot since P10.5, a document can carry
+        // thousands of them, and the renderer still draws every scattered
+        // instance as a placeholder cube — so closing it would change what every
+        // existing project packs, for bytes nothing currently reads. A grammar
+        // module is named in authored text and is the only thing that makes a
+        // wall a wall. The scatter half is a stated remainder, not an oversight.
+        AssetKind::Pcg => grammar_module_refs(&raw).into_iter().map(AssetId).collect(),
         _ => Vec::new(),
     }
+}
+
+/// The mesh GUIDs every grammar module in a `.inf_pcg` payload names, sorted and
+/// deduplicated (P19.4).
+///
+/// Reads the payload's **authored graph** — the source of truth every evaluation
+/// site re-lowers — and asks it for the palettes its `grammar.rules` nodes
+/// declare. A document-only (v1) payload carries no graph and so contributes
+/// nothing.
+///
+/// **Deliberately NOT driven off the lowered passes.** Lowering has five ways to
+/// give up before a pass exists, and every one of them is an ordinary
+/// mid-authoring state (a Span pin not yet dragged, most obviously). Taking the
+/// edge from the lowered passes would let a graph that plainly declares its
+/// meshes ship without them, and without the advisory that would have said so.
+/// [`inf_pcg::grammar_mesh_refs`] carries the full argument and the
+/// over-inclusiveness it trades for.
+fn grammar_module_refs(raw: &[u8]) -> Vec<uuid::Uuid> {
+    let Ok(payload) = inf_pcg::PcgAssetPayload::decode(raw) else {
+        return Vec::new();
+    };
+    let Some(graph) = payload.graph() else {
+        return Vec::new();
+    };
+    inf_pcg::grammar_mesh_refs(&graph, &inf_pcg::pcg_registry())
 }
 
 /// Advisory: `Terrain.asset` references, in the levels being cooked, that name an
@@ -1056,6 +1099,43 @@ fn unresolvable_image_masks(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
                 "pcg graph {id} uses an Image Mask; the shipped and PIE players cannot resolve a \
                  mask texture at load, so that mask evaluates to zero and the graph places less \
                  than it does in the editor"
+            )
+        })
+        .collect()
+}
+
+/// Advisory: grammar modules, in the `.inf_pcg` graphs being cooked, that name a
+/// mesh the project database does not have (P19.4).
+///
+/// The dangling-reference twin of [`dangling_terrain_refs`], one asset kind
+/// over. [`dependency_closure`] can only follow edges it can resolve, so a
+/// module whose mesh GUID is a typo (or points at a deleted asset) is silently
+/// skipped — and a grammar fails *quietly*: the derivation still runs, the slot
+/// still consumes its span, and the wall simply has a piece missing. Non-fatal,
+/// because the level is valid and an author may be mid-work; deduplicated and
+/// sorted, like every other advisory here, so the report stays deterministic.
+fn dangling_grammar_modules(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
+    let mut missing: BTreeSet<(AssetId, AssetId)> = BTreeSet::new();
+    for &id in closure {
+        let Some(entry) = db.get(id) else { continue };
+        if entry.kind() != AssetKind::Pcg {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&entry.path) else {
+            continue;
+        };
+        for mesh in grammar_module_refs(&raw) {
+            if !db.contains(AssetId(mesh)) {
+                missing.insert((id, AssetId(mesh)));
+            }
+        }
+    }
+    missing
+        .into_iter()
+        .map(|(pcg, mesh)| {
+            format!(
+                "pcg graph {pcg} declares a grammar module whose mesh {mesh} is not in the \
+                 project; that module places nothing and its slot stays empty"
             )
         })
         .collect()

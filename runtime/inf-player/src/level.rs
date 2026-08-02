@@ -49,11 +49,12 @@ use inf_anim::{AnimClip, AnimClipAsset, Skeleton, SkeletonAsset, StateMachine, S
 use inf_asset::{AssetId, AssetKind, PackReader};
 use inf_blueprint::BlueprintClass;
 use inf_ecs::components::{
-    CharacterController2D, GlobalTransform, PcgVolume, ScatteredInstance, Terrain, Transform,
+    CharacterController2D, GlobalTransform, PcgVolume, ScatteredInstance, Spline, Terrain,
+    Transform,
 };
 use inf_ecs::{EcsWorld, Guid};
 use inf_pcg::height::FnHeight;
-use inf_pcg::{PcgAssetPayload, Region};
+use inf_pcg::{GrammarPass, PcgAssetPayload, Region};
 use inf_scene::partition::PartitionSettings;
 use inf_scene::{RenderSettingsRecord, RuntimeEntity};
 
@@ -751,6 +752,16 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
 ///   bridge (which is exactly `TerrainHeight(data)` when that origin is zero).
 /// * Evaluation runs **once at load** (terrain is static in sim v1); a moving
 ///   camera / streaming re-eval is a documented follow-up.
+///
+/// ## P19.4 grammar passes
+///
+/// A graph may also author grammar passes, which lower beside the document
+/// rather than into it. They evaluate here, on the same volume, against the same
+/// height provider, and their instances are appended **after** the scatter
+/// instances — a fixed order, so the cache is a pure function of the content.
+/// Everything downstream of the resolved spans is
+/// [`inf_pcg::evaluate_grammars`], shared verbatim with the editor's
+/// `pcg_evaluate`; all this function owns is the fetch.
 pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetPayload>) {
     if pcgs.is_empty() {
         return;
@@ -784,10 +795,16 @@ pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetP
         })
     };
 
-    // Gather the volumes to evaluate: (entity, document, center, extent, seed).
+    // The world's splines, in world space — the P19.4 `grammar.spline` seam.
+    // MIRROR: `commands::pcg::collect_spline_paths` in the editor.
+    let splines = collect_spline_paths(world);
+
+    // Gather the volumes to evaluate: (entity, program, center, extent, seed).
     struct Job {
         entity: inf_ecs::Entity,
+        guid: Uuid,
         document: inf_pcg::PcgDocument,
+        grammars: Vec<GrammarPass>,
         center: DVec3,
         extent: inf_ecs::math::Vec2d,
         seed: u32,
@@ -795,17 +812,11 @@ pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetP
     let jobs: Vec<Job> = {
         let w = world.world();
         ents.iter()
-            .filter_map(|&(_, e)| {
+            .filter_map(|&(guid, e)| {
                 let vol = w.get::<PcgVolume>(e)?;
                 let graph_guid = vol.graph?;
                 let payload = pcgs.get(&graph_guid)?;
-                // Prefer lowering the stored authored graph (parity with the
-                // editor's on-demand evaluate); fall back to the stored lowered
-                // document mirror (a v1 payload carries only that).
-                let document = match payload.graph() {
-                    Some(g) => inf_pcg::lower_graph(&g, &inf_pcg::pcg_registry()).document,
-                    None => payload.document.clone(),
-                };
+                let (document, grammars) = lowered_program(payload);
                 let center = w
                     .get::<GlobalTransform>(e)
                     .map(|g| g.translation())
@@ -813,7 +824,9 @@ pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetP
                     .unwrap_or(DVec3::ZERO);
                 Some(Job {
                     entity: e,
+                    guid,
                     document,
+                    grammars,
                     center,
                     extent: vol.extent,
                     seed: vol.seed,
@@ -835,7 +848,16 @@ pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetP
             job.center.x + job.extent.x,
             job.center.z + job.extent.y,
         );
-        let baked: Vec<ScatteredInstance> = match &terrain {
+        let cx = inf_pcg::GrammarContext {
+            entity: Some(job.guid),
+            center: job.center,
+            extent: glam::DVec2::new(job.extent.x, job.extent.y),
+            seed_offset: job.seed as u64,
+        };
+        // One closure per branch so the scatter and the grammar see the SAME
+        // height provider — a grammar snapping to a different ground than the
+        // scatter beside it would be invisible until somebody walked the level.
+        let mut raw = match &terrain {
             Some((data, o)) => {
                 let data = data.clone();
                 let o = *o;
@@ -843,26 +865,82 @@ pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetP
                     data.height_at(DVec2::new(x - o.x, z - o.z))
                         .map(|h| h + o.y)
                 });
-                inf_pcg::evaluate(&job.document, &provider, region)
+                let mut v = inf_pcg::evaluate(&job.document, &provider, region);
+                v.extend(inf_pcg::evaluate_grammars(
+                    &job.grammars,
+                    &splines,
+                    &provider,
+                    &cx,
+                ));
+                v
             }
             None => {
                 let provider = FnHeight::new(|_, _| Some(0.0));
-                inf_pcg::evaluate(&job.document, &provider, region)
+                let mut v = inf_pcg::evaluate(&job.document, &provider, region);
+                v.extend(inf_pcg::evaluate_grammars(
+                    &job.grammars,
+                    &splines,
+                    &provider,
+                    &cx,
+                ));
+                v
             }
-        }
-        .iter()
-        .map(|i| ScatteredInstance {
-            position: i.pos,
-            rotation: i.rotation,
-            scale: i.scale,
-            kind: i.kind_index,
-        })
-        .collect();
+        };
+        let baked: Vec<ScatteredInstance> = raw
+            .drain(..)
+            .map(|i| ScatteredInstance {
+                position: i.pos,
+                rotation: i.rotation,
+                scale: i.scale,
+                kind: i.kind_index,
+            })
+            .collect();
 
         if let Some(mut vol) = world.world_mut().get_mut::<PcgVolume>(job.entity) {
             vol.evaluated = baked;
         }
     }
+}
+
+/// Every entity's [`Spline`] resolved into **world space**, keyed by its stable
+/// [`Guid`] — the P19.4 `grammar.spline` seam's fetch.
+///
+/// Unlike `mask.image`, this resolves identically in the editor, in PIE and in a
+/// shipped build: a `Spline` is a persisted scene component in both codecs, so
+/// every host has already built the entity by the time PCG evaluates. There is
+/// no preview/shipping divergence here and therefore no cook advisory for it.
+///
+/// MIRROR: identical in `inf_player::level` and the editor's `commands::pcg`,
+/// pinned by `inf-editor-core`'s `tests/grammar_span_mirror.rs`.
+pub fn collect_spline_paths(
+    world: &inf_ecs::EcsWorld,
+) -> std::collections::HashMap<Uuid, inf_pcg::SplinePath> {
+    let w = world.world();
+    let mut out = std::collections::HashMap::new();
+    for e in w.iter_entities() {
+        let (Some(guid), Some(spline)) = (e.get::<inf_ecs::Guid>(), e.get::<Spline>()) else {
+            continue;
+        };
+        let to_world = e
+            .get::<GlobalTransform>()
+            .map(|g| g.0)
+            .unwrap_or(glam::DAffine3::IDENTITY);
+        out.insert(
+            guid.0,
+            inf_pcg::SplinePath::from_local(
+                spline.points.iter().map(|p| p.to_dvec3()),
+                spline.closed,
+                match spline.interp {
+                    inf_ecs::components::SplineInterp::Linear => inf_pcg::SplineInterp::Linear,
+                    inf_ecs::components::SplineInterp::CatmullRom => {
+                        inf_pcg::SplineInterp::CatmullRom
+                    }
+                },
+                to_world,
+            ),
+        );
+    }
+    out
 }
 
 /// Evaluate the **biome→PCG binding** for every terrain that carries a
@@ -970,10 +1048,23 @@ pub fn evaluate_biome_bindings(
 /// Stated once so the volume pass and the biome pass cannot disagree about which
 /// half of the payload is the source of truth.
 fn lowered_document(payload: &PcgAssetPayload) -> Option<inf_pcg::PcgDocument> {
-    Some(match payload.graph() {
-        Some(g) => inf_pcg::lower_graph(&g, &inf_pcg::pcg_registry()).document,
-        None => payload.document.clone(),
-    })
+    Some(lowered_program(payload).0)
+}
+
+/// The full lowered program: the scatter document **and** the P19.4 grammar
+/// passes.
+///
+/// A payload with no stored graph (a v1, document-only `.inf_pcg`) carries no
+/// grammar — the passes live in the authored graph, which is the source of
+/// truth, and the document mirror deliberately never grew a field for them.
+fn lowered_program(payload: &PcgAssetPayload) -> (inf_pcg::PcgDocument, Vec<GrammarPass>) {
+    match payload.graph() {
+        Some(g) => {
+            let lowered = inf_pcg::lower_graph(&g, &inf_pcg::pcg_registry());
+            (lowered.document, lowered.grammars)
+        }
+        None => (payload.document.clone(), Vec::new()),
+    }
 }
 
 /// Read every `.inf_biomes` payload in `dir` (non-recursive) **keyed by its asset

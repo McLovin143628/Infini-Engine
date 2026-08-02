@@ -1,4 +1,6 @@
-/** PCG wire + category colors. Wires are `Named("density"|"scatter"|"layer")`. */
+/** PCG wire + category colors. Wires are
+ *  `Named("density"|"scatter"|"layer"|"span"|"rules")` — every one of them a
+ *  `Named`, because the graph substrate is deliberately domain-free. */
 import type { PortType } from "../../lib/blueprintTypes";
 
 export function pcgPinColor(ty: PortType): string {
@@ -10,6 +12,10 @@ export function pcgPinColor(ty: PortType): string {
         return "#7ee06e"; // scatter pass (green)
       case "layer":
         return "#e0b36e"; // layer group (gold) — P19.3
+      case "span":
+        return "#e07ec1"; // grammar span (magenta) — P19.4
+      case "rules":
+        return "#c9a0ff"; // grammar rule table (violet) — P19.4
       default:
         return "#9aa0a6";
     }
@@ -30,6 +36,8 @@ export function pcgCategoryColor(category: string): string {
       return "#6a4a7a";
     case "scatter":
       return "#7a5230";
+    case "grammar":
+      return "#6a2f6f";
     case "layer":
       return "#8a7a2a";
     case "output":

@@ -4110,6 +4110,248 @@ sediment state; the `MaskImage` sampler has no graph node; lowering is single-ru
 > * **The bless-guard asymmetry is *still* there.** Third batch running. `INF_BLESS_FIXTURES`
 >   means any value in the editor codec and exactly `"1"` in `inf-scene`. Always use `=1`.
 
+> **STATUS — P19.4 PCG grammar core: COMPLETE (2026-08-02).** Scatter answers *how many of
+> these, over this area*. A grammar answers *what sequence of pieces goes along this line* — and
+> that is the difference between a meadow and a fence, a colonnade, a wall. A rule text expands
+> along a spline's arc length or a footprint's edges into placed modular-mesh instances, under
+> the same counter-hash determinism as scatter, on the same GPU-instanced path, through the same
+> cook.
+>
+> **THE SCHEMA ANSWER: NO — nothing bumps. `.inf_pcg` stays v2, scene stays v16, no MIRROR
+> moved.** Three statements, each load-bearing:
+> * **A grammar pass is not in `PcgDocument`, deliberately.** That type is the frozen v2 wire and
+>   bincode is positional, so growing it by one field makes every committed `.inf_pcg` fail to
+>   *decode* — a real schema bump with a frozen record, bought for a value nothing needs on disk.
+>   Since P19.3 the **authored graph JSON is the source of truth** and every evaluation site
+>   re-lowers it (the player included; the stored `document` is explicitly "a convenience
+>   mirror"). So `lower_graph` now returns **two** things — the document and
+>   `LoweredPcg::grammars` — and the serialized surface is byte-for-byte what it was. Pinned:
+>   the payload of a grammar-only graph encodes identically to an empty one-layer document.
+> * **Grammar instances ARE `ScatteredInstance`s.** They ride `PcgVolume.evaluated`, which means
+>   P18.5's GPU instancing, the draw-distance cull, picking and both projector MIRRORs consumed
+>   the feature for free. Zero projection change was the design target and it was met.
+> * **No new `PortType` variant.** The two new wires (`SPAN`, `RULES`) are `Named`, like
+>   `density`/`scatter`/`layer` before them. The substrate is domain-free on purpose; a real
+>   variant would have to be threaded through the blueprint, material and state-machine editors'
+>   type tables, colour maps and hand-written TS mirrors to buy a wire nothing else can see.
+>   The **one** `inf-graph` change is `UiHint::Multiline` (+ `ParamDef::multiline`), and it is
+>   free by inspection: `UiHint` serializes as its *variant name*, appears only on a `NodeDef`
+>   the backend serves fresh each session, and is persisted nowhere — a graph stores
+>   `ParamValue`s, which are untouched. None of the append-only discriminant reasoning applies,
+>   and that argument now lives on the enum.
+>
+> **THE EXACT-FILL ALGORITHM, stated as an identity rather than a tolerance.** The requirement is
+> that slot intervals **partition the span exactly**, because "to within an epsilon" is a
+> tolerance somebody later widens. Fixed sizes are authored; flexible ones (`Gap[0.5..1.5m]`) are
+> drawn from the counter hash and water-filled toward the span length. Then the desired lengths
+> are **apportioned into integers**: `LAYOUT_UNITS = 2^40` ticks by largest-remainder (Hamilton),
+> `q_i = floor(d_i/Σd · UNITS)`, leftovers to the biggest fractional remainders, ties by
+> ascending index. **The tick sum is exactly `UNITS` — an integer identity, not a float
+> comparison** (the degenerate all-zero-weight branch has to hand its own remainder to the last
+> slot to keep that true: `UNITS / n · n` undershoots for every `n` that is not a power of two,
+> and `n = 3/5/7/100` are now enumerated cases). A boundary is then `b_k = L · (T_k / UNITS)`
+> from the *prefix* of ticks: `UNITS` is a power of two and `T_k ≤ 2^40 < 2^53`, so the fraction
+> is an exact `f64`. Every interior boundary is **one multiply off the span length, never a
+> running sum** — the P17.4 exact-linear lesson (derive the k-th value from k; do not add k
+> times). **The exactness itself comes from the ENDPOINTS being assigned rather than computed**
+> — `b_0` is the literal `0.0` and `b_n` the literal `span_len`; the apportionment's job is to
+> place the *interior* boundaries proportionally and monotonically, and no float identity is
+> relied on for the ends. The price is priced, not hidden: a fixed size is honoured to
+> within one tick, `L/2^40` ≈ **0.9 nanometres on a kilometre span**. Asserted on `to_bits()`
+> over a corpus and as a proptest over arbitrary legal grammars × arbitrary span lengths.
+>
+> **Overflow truncates; underflow tails.** If the minimum lengths exceed the span, slots are
+> dropped **from the end** — a wall that cannot fit its last post is short a post, never squeezed,
+> because squeezing silently shrinks authored module sizes. If even the maxima under-fill, the
+> slack folds into the final interval as a **tail**; a module is anchored at its interval's
+> *start*, so an oversized last interval is invisible and the span simply ends with empty space,
+> which is the honest result of a greedy fill.
+>
+> **The DSL, and the three decisions inside it.** Statements end at a `;` **or a newline**, so
+> the ordinary one-per-line layout needs no punctuation; `#` and `//` comment to end of line.
+> `module X = mesh <guid> offset x,y,z rot x,y,z scale s size m` declares the palette;
+> `Sym -> A B* C | D@0.5` declares a rule; `*` `+` `?` `{n}` repeat, `[2m]` / `[1..3m]` size,
+> `@w` weights an alternative, `( … | … )` groups. Then:
+> * **A terminal with no module is a gap** — it consumes its size and places nothing. That is the
+>   `Gap[0.5..1.5m]` idiom, so a spacer needs no palette entry. Because a typo would otherwise
+>   vanish, `Grammar::gaps()` lists every such symbol and the lowerer emits **one node-anchored
+>   warning naming them all**.
+> * **Sizes are mandatory on terminals and forbidden on rules.** A layout cannot be computed
+>   without one, and defaulting would build a wall of 1 m panels nobody asked for; a rule's length
+>   is whatever it rewrites to, so a size there is a misunderstanding, not a no-op.
+> * **v1 rejects recursion, by construction.** The rule reference graph must be acyclic and a
+>   cycle is a parse error naming the loop — tested in **fifteen shapes** (through groups, later
+>   elements, non-first and weighted alternatives, every repetition operator, indirect chains,
+>   and rules unreachable from the axiom) with acyclic twins beside them, so a future `refs_of`
+>   fast path cannot reintroduce non-termination green. Self-similarity is expressed with
+>   repetition, which the span bounds. (The cycle check is an explicit-stack DFS: a 2000-deep
+>   chain must not blow the native stack.)
+>
+> **THREE NATIVE-STACK GUARDS, and the one that was missing.** "Terminates by construction" was
+> true of the *grammar* and false of the *text*: `parse_alternatives` → `parse_alternative` →
+> `parse_element` → group → `parse_alternatives` is native recursion driven straight by authored
+> characters, so ~10 KB of `(((…` aborted the process — uncatchably, and in the editor, the cook
+> **and** the shipped player alike, since every one of them re-lowers a stored `graph_json`. The
+> acyclic-rule check that the termination claim rests on sits one layer *downstream* and never
+> saw the input. So the parser now counts its own nesting (`MAX_NESTING = 64`, far past anything
+> readable) and returns an ordinary anchored error; a depth-5000 input, balanced and unbalanced,
+> is a direct test, and the never-panics property grew a deep-nesting arm past its 400-char cap
+> with a long-**flat** twin so the cap cannot pass by rejecting size. The other two guards are
+> stated beside it because neither subsumes the others: `MAX_DEPTH = 128` bounds the
+> *derivation's* recursion, which a long **acyclic** chain (`R0 -> R1 -> … -> R2000`, perfectly
+> legal) drives once per link; and `MAX_SLOTS` bounds the output. Each has its own test.
+>
+> **And a fourth hazard the same reading found: the nominal-length walk was exponential.** A
+> rule's nominal length needs its references', so `A -> B B`, `B -> C C`, … — thirty readable
+> lines — is 2³⁰ walks by recursive descent, i.e. a hang in the cook and in the player on
+> content that parses and validates cleanly. `rule_nominals` now evaluates every rule **once,
+> bottom-up, on an explicit stack**, and the derivation reads a table. Linear, and the diamond is
+> a test.
+>
+> **THE PORTABILITY ANSWER: the whole grammar path is bit-portable, and one short-circuit was
+> the price.** The span math is `inf_math::spline` — Catmull-Rom and arc length in `+ − × ÷` and
+> `sqrt`, all exactly specified by IEEE-754, no `std` trig anywhere. Orientation deliberately
+> avoids `atan2`: `Frame::rotation` builds the yaw quaternion from the half-angle identity
+> `cos(θ/2) = √((1+cosθ)/2)` off the unit tangent's own components (unit by construction, since
+> `s² + c² = (1−cosθ)/2 + (1+cosθ)/2`). The only trigonometry is a module's authored euler
+> rotation, which goes through `inf_math::portable::psin64/pcos64` — the P14 law applied to
+> committed placement data. **And that surfaced a real bug the law did not predict:** `pcos64(0)`
+> is the polynomial's `0.999_999_943_741_051_1` — short of `1` by **5.63e-8** — so an unrotated
+> module carried a residual tilt. A zero angle now short-circuits to the exact identity and each
+> axis quaternion is normalized. The shortfall is *asserted* rather than described, so the prose
+> cannot drift from the polynomial.
+>
+> **The span IS the arc-length LUT, not a second opinion of it.** Arc length on a cubic has no
+> closed form, so *every* implementation samples. Making the sampled polyline the domain — rather
+> than sampling to build a table and then evaluating the curve again — means the length a slot is
+> measured against and the position it is placed at come from the **same points**. Pinned:
+> `Span::from_spline` uses `arc_length_lut`'s own `t` sequence and its length matches
+> `lut_length` **bit for bit**, for both interpolations, open and closed.
+>
+> **The merge shape: `grammar.expand` outputs a SCATTER.** It joins the P19.3 `scatter.merge` and
+> `layer.layer` chains untouched — no third merge node (P19.3's own remainder warned that three
+> would start to look like a pattern nobody asked for), no third sink input, and a grammar
+> inherits its layer's name and `enabled` flag for free, which is what makes a disabled layer
+> disable its grammars. What it lowers *to* is not a `PcgRule`, so it appends to
+> `LoweredPcg::grammars` and contributes an empty rule tail. Four nodes: `grammar.rules` (the
+> rule text as a **multiline node param** — the node is its editor, there is no rule-text panel),
+> `grammar.spline`, `grammar.footprint`, `grammar.expand`.
+>
+> **The corner rule, v1, stated.** A perimeter is **four independent edge spans**, not one loop:
+> `Wall -> Post Panel* Post` should put a post at each end of each side, not run one expansion
+> around the ring and land its only two posts on an arbitrary corner. `corner_size` insets every
+> edge by half of it at both ends, and a named `corner` module is stamped on each vertex facing
+> along the *outgoing* edge. `corner_size = 0` runs the edges corner to corner; an edge too short
+> to host its own insets degenerates rather than folding back on itself. Perimeter conservation
+> (4 edges + 4 corners = the rectangle) is asserted.
+>
+> **`grammar.spline` has no preview/shipping divergence, and that is the contrast worth drawing.**
+> P19.3 shipped `mask.image` knowing the editor resolves textures and the player cannot, and had
+> to buy a cook advisory for it. A `Spline` is a **persisted scene component in both codecs**, so
+> the editor, PIE and a shipped build all resolve it from the world they already built. The
+> `SplineSource` seam has the same shape as `MaskSource` and none of its asymmetry. A blank
+> entity ref means *the evaluating entity's own spline*, so a spline and a volume on one actor
+> need no GUID typed anywhere.
+>
+> **The cook grew one edge and one advisory.** `.inf_pcg` → each grammar module's `.inf_mesh`,
+> so an explicit-roots cook of just a level ships the pieces its walls are made of; a module
+> naming a mesh the project does not have is a **deduplicated, sorted warning** naming both,
+> because a grammar fails *quietly* — the derivation runs, the slot consumes its span, and the
+> wall simply has a piece missing. **The edge is read from the `grammar.rules` nodes, NOT from
+> the lowered passes**, and that distinction is load-bearing: lowering has five ways to give up
+> before a pass exists and every one of them is an ordinary mid-authoring state — most obviously
+> a Span pin nobody has dragged yet — so a pass-driven edge would ship a wall missing its pieces
+> *and* stay silent about the dangling one. It is over-inclusive in exchange (an unwired rules
+> node still declares its meshes), which is the right asymmetry: bytes, not a hole in a wall.
+> Gated by a fixture whose Span pin is deliberately unconnected. **The edge is grammar-only, deliberately:** a scatter rule's
+> `PcgKind.mesh` is an older hole with a different shape (blank-tolerant since P10.5, thousands
+> per document, still drawn as a placeholder cube), and closing it would change what every
+> existing project packs for bytes nothing reads. Stated as a remainder rather than smuggled in.
+>
+> **Gates.** `runtime/inf-player/tests/grammar_pcg.rs` builds a volume whose `.inf_pcg` carries
+> **three passes on one canvas** — a scatter rule, a spline grammar following a real `Spline`
+> entity, and a footprint perimeter grammar around the volume's own box, merged through
+> `scatter.merge` — so P19.3's multi-pass lowering carries a P19.4 generator through the shipping
+> pipeline rather than only its unit tests. It proves: the cook follows level → `PcgVolume.graph`
+> → `.inf_pcg` → module `.inf_mesh` with only the level as an explicit root; the dangling module
+> is advised by name; **cooked == uncooked** and **PIE == shipping**, each arm instance for
+> instance *and* **bit for bit** (`to_bits()` on every position, rotation and scale — the PIE arm
+> to the same standard as its sibling, since a wall three nanometres out on one host is still a
+> wall that moved when you shipped it); the structure is real
+> (instances on the spline's own line, on the footprint's perimeter, exactly on the terrain);
+> two loads of one pack agree; **the shipped content's own passes are invariant at 1/2/4/8
+> workers** through `evaluate_grammars_in`, read back out of the pack; and a graph with no
+> grammar still evaluates to exactly its scatter; and the cook's module edge survives a graph
+> that does **not** lower, with a grammar-free negative control so the advisory is evidence
+> rather than noise. `inf-editor-core`'s new `grammar_span_mirror.rs` compares the editor's and
+> the player's spline fetch **character for character** (whitespace-collapsed), because that
+> function — the ECS walk — is the only part of the grammar path each host writes for itself;
+> everything downstream is one Ring-0 `evaluate_grammars`. **It is a source-text gate, not a
+> behavioural one** — the same technique and the same admission as `projector_mirror.rs` and
+> `biome_binding_mirror.rs`, because Ring 1 cannot link the `inf-studio` binary; what proves the
+> two hosts actually agree is the PIE == shipping arm above.
+>
+> **Tests.** `inf-pcg::grammar::dsl` (the worked example; newline-or-semicolon termination;
+> comments; fixed/flexible/unit-suffixed sizes; every repeat and group; epsilon productions;
+> canonical-text round trip; **a 30-case error corpus asserting the message and BOTH anchor
+> coordinates** — exact columns, including indented statements, because an `err.col >= 1`
+> assertion on a `u32` cannot fail and the caret position is the product; **the parser's own
+> depth cap** (at the cap, past it, 5000 balanced and unbalanced, nested inside an alternative,
+> and a 20 000-element flat sequence that must still parse); **fifteen cycle shapes with acyclic
+> twins**; exact GUID lexing; the 2000-deep chain; negative and exponent numbers);
+> `::grammar::span`
+> (exact endpoints via the `a(1−t)+bt` form; the LUT bit-identity; arc length against an analytic
+> circle; NaN-free degenerates; closed wrap; zero-length segments borrowing a direction; the yaw
+> against `from_rotation_y` over 720 angles plus the antiparallel case; portable euler against
+> glam's `YXZ`; perimeter order/corners/insets/conservation; row centring and axes; the sample
+> cap); `::grammar::expand` (**the exact-fill identity over a corpus of grammars × lengths ×
+> seeds**; fixed sizes surviving quantization; apportionment exactness for degenerate weight
+> vectors including all-zero, NaN, negative and sub-tick, with the even-split check at counts
+> that do not divide 2⁴⁰; **the diamond rule graph that would be 2³⁰ walks without the nominal
+> table**; **a 4000-link chain capped rather than overflowing**; a known grammar's **exact
+> expected sequence**;
+> truncation from the end; every repeat operator; weighted alternatives; gaps consuming span;
+> flexible slots absorbing the remainder in range; purity in the seed; the slot cap; a
+> zero-size `*` not looping; anchoring and the slot frame; ground modes; corner stamping;
+> footprint-from-extent; spline self-reference; **pool-size invariance**; cross-run bit
+> identity); `inf-pcg/tests/grammar_dsl.rs` (**properties**: any legal grammar round-trips
+> through its own text and printing is idempotent; arbitrary text and DSL-alphabet text never
+> panic the parser and every rejection is 1-based-anchored; **deeply nested text errors instead
+> of aborting, at depths up to 6000 and under three different prefixes, with a long-flat twin**;
+> any layout partitions its span exactly and every slot stays in range); `inf-pcg::graph` (the
+> kit's wires and the multiline
+> hint; the shipped default rule text *parsing*; the pass carrying every authored param beside an
+> **empty** document; spline and rows lowering; **the parse error anchored on the rules node with
+> the DSL's own `line:col`**; missing rules/span; wrong node types; the gaps warning; an
+> undeclared corner; an unknown axiom; merging into layers and inheriting the toggle; canvas
+> order; the payload round trip re-lowering to identical passes; **`grammar_mesh_refs` reading
+> the palette rather than the lowered passes** — wired, half-wired, unwired, deduplicated across
+> nodes, sorted, and silent for a grammar-free graph). Frontend:
+> `pcgPinTheme.test.ts` pins every wire the Rust registry declares to a distinct colour — the one
+> place a new backend wire silently renders grey.
+> **42 goldens byte-identical** — a grammar is instances, not pixels.
+>
+> **Remainders, stated (P19.4).**
+> * **A flexible slot changes SPACING, not mesh size.** `ScatteredInstance::scale` is one `f64`,
+>   so there is no non-uniform stretch on the instancing path a grammar rides. A palette entry
+>   recentres itself with `offset 0,0,<half>`; stretching to fit needs a per-instance scale
+>   *vector*, i.e. an ECS field and both projector MIRRORs, and was not taken for a v1.
+> * **Grammar passes are not dispatched by the biome binding.** A biome is a painted *region* and
+>   a grammar needs a *span*; `BiomeBinding` is untouched and a biome's `.inf_pcg` contributes
+>   only its scatter. The natural closure is P19.5's footprints-from-a-region, not a patch here.
+> * **Repeats resolve greedily left to right**, each reserving the *nominal* length of everything
+>   after it (a `*` reserves nothing, an optional reserves its full body — over-reserving leaves a
+>   tail, which is gentler than the truncation under-reserving causes). Two `*` in one sequence
+>   means the first wins. Documented on `Deriver`, not discovered.
+> * **The scatter half of the cook's mesh edge is still open** (above), as is a `PcgKind.mesh`
+>   dangling advisory.
+> * **A document-only (v1) `.inf_pcg` carries no grammar** — the passes live in the authored
+>   graph. Same shape as a v1 payload having no image mask and no merge tree.
+> * **Evaluation still runs once, at load.** Inherited from P10.6 and unchanged by this batch.
+> * **The viewport still draws every scattered instance as a placeholder cube**, grammar modules
+>   included. Kind→real-mesh upload is the same documented gap sprites and tilemaps have; it is
+>   why a module's mesh GUID matters to the cook and not yet to the renderer.
+
 - **P19.1 Erosion data maps** — 1. accumulate flow / deposition / wear maps in the erosion
   passes (CPU reference + WGSL mirror, parity-gated exactly like heights); 2. persist them
   per-tile and sparse on the format-aware serde pattern; 3. export as mask images (Gaea-style
