@@ -267,10 +267,18 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     let up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
-    let amb = mix(vec3<f32>(0.03, 0.03, 0.035), vec3<f32>(0.10, 0.13, 0.18), up);
+    // P18.4: meshlet geometry now both CONTRIBUTES to the GI volume (its root-page
+    // meshlet spheres are voxelized) and RECEIVES from it. Before this it took the
+    // hemispheric constant even with GI on — a gap, since the rigid path had read
+    // probes since P13.3b. The branch is not taken with GI off, so every vgeom
+    // golden stays byte-identical.
+    var amb = mix(vec3<f32>(0.03, 0.03, 0.035), vec3<f32>(0.10, 0.13, 0.18), up);
+    if (gi.params.x > 0.5) {
+        amb = gi_irradiance(in.world_pos, n);
+    }
     let ao = textureSampleLevel(ao_tex, ao_smp, in.pos.xy / view.grid_axis_viewport.zw, 0.0).r;
     lo += amb * albedo * (1.0 - metallic) * ao;
-    lo += amb * f0 * 0.5 * ao;
+    lo += gi_ambient_specular(in.world_pos, n, v, rough, f0, amb) * ao;
 
     lo += in.emissive;
 

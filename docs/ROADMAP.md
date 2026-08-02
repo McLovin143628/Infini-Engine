@@ -2582,6 +2582,194 @@ GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and h
 > *bytes*, not the generator, and its test only ever reads the committed file — its provenance note
 > now records that the generator has since changed and that this is intended.
 
+> **P18.4 GI v2 (Lumen-class) — COMPLETE** (2026-08-01, local gates green; CI pending push).
+> The probe GI stops being a rigid-only, gradient-lit, 256-instance demo. Terrain, skinned
+> characters and meshlet geometry now occlude and bounce; the ray-miss term reads the P17.2
+> sky-view LUT; emissive surfaces inject radiance; a specular term lands; probe updates can
+> amortize without giving up determinism; the instance cap is gone; and cascades blend.
+>
+> **What the cap actually was.** `MAX_GI_INSTANCES = 256` did not "limit quality" — it took
+> `scene.instances.iter().take(256)` and threw the rest away in **scene order**, so which
+> geometry lit a room was a function of the outliner. It existed because the voxelizer is a
+> *gather* (one thread per voxel, first hit wins) and a gather over an unbounded list is
+> `O(voxels × instances)`; a scatter would be `O(instances × their voxels)` but would race on the
+> voxel word, and a race is nondeterminism. The fix keeps the gather and shortens it:
+> primitives are ordered nearest-**surface**-first (`priority_order`, `f32::total_cmp` with the
+> source index as tie-break, so a degenerate transform still yields *an* order), clipped to a
+> per-frame budget, and binned into 8³-voxel macro cells as CSR offsets+items
+> (`bin_macro_cells`) so each voxel walks only the primitives that can reach it. Cell lists are
+> ascending in priority, which is what makes "first hit wins" a *choice* rather than a race. The
+> overflow is now **reported**, not swallowed: `EngineRenderer::gi_audit()` publishes candidates
+> / voxelized / dropped / cell entries / terrain columns / probes updated, free and always on
+> like the P18.2 streaming report. Measured: 600 lattice boxes voxelize with zero drops, and a
+> deliberately tight budget of 100 reports 500 dropped rather than pretending.
+>
+> **Coverage, and the fidelity/cost argument for each shape.** Rigid instances stay oriented
+> boxes. **Skinned** instances become *per-joint* boxes — the bind-space AABB of each joint's
+> dominant vertices (weight ≥ 0.35; a lower threshold inflates every joint toward its neighbours
+> until a character voxelizes as one slab), cached per mesh by the `Arc` pointer identity P18.3
+> introduced, then carried by the live palette. So a character costs one AABB pass *ever* and a
+> handful of matrix multiplies per frame, and it bends. **vgeom** instances become the per-meshlet
+> spheres of the **root page** — the coarsest cut, which P18.2's residency floor guarantees is
+> always resident. Reading the *live* resident cut would have been higher fidelity and was
+> rejected deliberately: it would make GI a function of what the streamer happened to have paged
+> in, i.e. of frame history, which is the opposite of what a determinism gate can hold. At the
+> volume's 0.6 m voxels the coarse cluster spheres are at or below the grid's own resolution
+> anyway. **Terrain** is not an instance at all: it arrives as one height + splat-blended albedo
+> per voxel *column*, so it costs `O(1)` per voxel however many tiles are resident.
+>
+> **Residency interplay — and the same trap, caught a second time.** The first cut of this batch
+> sampled *the finest resident tile*, which reads well and is wrong for exactly the reason the
+> vgeom decision one paragraph up avoids: `RenderTerrain::tiles` is the streamer's
+> **camera-driven** working set, so GI occupancy and albedo would have become a function of where
+> the camera had *been*. Invisible to CI, too — every golden renders a fully-resident terrain.
+> The voxelizer now reads only the projection's **coarsest asset level**
+> (`gi::voxelization_tiles`), the terrain analogue of the always-resident root page: small by
+> construction (`build_pyramid` stops at `PyramidOptions::min_tiles`), covering the whole terrain,
+> and seeded/reseeded into `TerrainStreamer`'s published cut whatever the camera does. It settles
+> the *albedo* half for free — coarse pyramid pages are heights-only, so they project the uniform
+> default weight and GI cannot see one splat blend near the camera and another far from it.
+> **Fidelity tradeoff, stated plainly:** GI voxels are 0.63 m at the default 40 m volume while a
+> level-`n` terrain sample is `mps · 2ⁿ`, so on a deep pyramid the coarse lattice is the coarser
+> of the two and near-field terrain occupancy is blockier than the drawn surface. That is the
+> right way round — a slightly wrong occluder everywhere beats a differently wrong one depending
+> on where the player walked — and an inline (non-streamed) terrain has `max_lod() == 0`, so it
+> voxelizes at full authored detail with its painted weights and pays nothing. Gated by
+> `gi_terrain_voxelization_is_independent_of_residency`, which drives one scene through a
+> fully-resident and a punched-out residency and byte-compares the **voxel volume and probe
+> buffer** rather than the pixels (the two states legitimately *draw* different detail — the test
+> asserts that too, so it cannot pass on a fixture that isn't exercising anything). `GiResources`
+> grew `COPY_SRC` + `read_voxels`/`read_sh` for it; mutation-checked by reverting the level filter,
+> which fails the gate. A column with no covering tile is a hole, exactly as an unauthored tile has
+> always drawn as nothing. vgeom also now *receives* GI, which it never did: it took the
+> hemispheric constant even with GI on, a gap since P13.3b.
+>
+> **The sky term closes the tracked P17 deferral.** `gi_probes.wgsl` is now a *composed* module
+> (it joined `SHADER_TABLE`, so the naga gate covers it): the atmosphere medium at
+> `@group(0) @binding(3)` and the LUT samplers at 4/5/6, and its ray-miss term is
+> `atmos_sample_skyview` — the same LUT the sky pass draws. That required splitting
+> `atmosphere_lut.wgsl`: `atmos_apply` reads the `View` uniform and the probe march is a compute
+> pass with none, so aerial perspective moved to `atmosphere_apply.wgsl`, included by the four
+> composers that *have* a view. A scene with no atmosphere still takes the authored-gradient
+> path, byte-identically — which is why `gi_bleed`'s sky term did not move. Time of day
+> propagates for free at the default full-probe update, and restarts the sweep when amortizing
+> (the sun direction is part of the sweep key).
+>
+> **Amortization is a schedule, not an approximation.** `ProbeSchedule` is a renderer-side
+> cursor, **never a frame index** — deriving the slice from the frame counter would desync two
+> renders the moment a host drew a warm-up frame. Three properties are gated on the GPU: two
+> *cold* renders of the same content agree; a converged static scene reproduces across runs; and
+> a converged amortized frame is **byte-identical to the full-update frame**. The default is
+> `probe_budget = 0` (full update), which is what every golden and every determinism gate
+> renders with — a full update makes a frame a pure function of the scene with no convergence
+> transient to reason about. A moving camera trades probe latency for the saving, which is why
+> it is opt-in rather than default. The sweep resets on scene version, GI settings, probe
+> geometry, GI generation and the sun; camera *motion* is deliberately absent, because the volume
+> follows the camera and resetting on that would mean never amortizing at all.
+>
+> **The sun enters that key QUANTIZED, and the first cut got it wrong.** With raw `f32::to_bits()`
+> a running `TimeOfDay` clock moves the projected direction in the low bits every frame, so the
+> sweep would reset every frame and the cursor would never leave its first slice — amortization
+> paying a full update's CPU cost for one slice of freshness, precisely where it was meant to pay
+> off, and silently. `gi::sun_bucket` quantizes the direction onto a `1/200` component lattice
+> (≈ **0.50°** in-bucket, `√3/200 rad`) and the radiance onto a `1/64` one, following the P17.2
+> precedent where the sky-view LUT's camera radius is bucketed so a walking camera does not re-bake
+> the sky. Sized against the clock, not the shader: the sun sweeps 15°/hour, so at `rate = 1` a
+> bucket lasts ≈ **2 sim-minutes** — an 8-frame sweep always completes inside one. **Bounded
+> staleness:** within a bucket the probes are integrated against a sun up to 0.50° stale, and an
+> unvisited probe lags by at most one further sweep; a bucket crossing restarts the sweep, so the
+> lag never accumulates. At the default full update none of it is reachable. `GiAudit` gained
+> `probe_cursor` because the sweep is otherwise unobservable from outside — the bug pins it at
+> `probe_budget` forever and no rendered frame would say so — and
+> `gi_amortization_survives_a_running_time_of_day_clock` drives a rate-1 sun (cursor sweeps
+> `256 → … → 1792 → 0`, a full wrap in 8 frames) against a 2°/frame one (pinned at `256`, i.e. the
+> key still resets on real motion — only the resolution changed).
+>
+> **Specular, and what SSR v1 honestly is.** (a) The ambient specular becomes L1-SH radiance
+> reconstructed along the reflection vector, sharpened by `1 − roughness`, times Karis' analytic
+> split-sum BRDF. It **reduces to the flat `ambient × f0 × 0.5` it replaced** in the
+> rough/uniform limit (pinned in the pure half, where a uniform field can actually be
+> constructed), so turning it on adds directionality rather than energy — which is why it can
+> default to on. (b) **SSR v1 is a screen-space *hit finder*, not a colour fetch, and the code
+> says so.** The renderer is forward: when a lit fragment shades, the scene colour it would want
+> to reflect does not exist yet, there is no G-buffer to defer against and no colour history
+> bound. What screen space *can* answer is where the reflection ray lands, so a hit re-anchors
+> the SH probe fetch at the hit point instead of at the shading point — the reflection then
+> follows the geometry causing it rather than smearing the receiver's own probe lobe. Fixed
+> 24-step march, no jitter, no history ⇒ deterministic by construction; the penetration test is a
+> **ratio** (`1 − ndc.z / scene_z`) rather than a metric thickness, because reverse-infinite-Z
+> has no far plane to linearize against and a relative tolerance works at every scale. It is
+> **off by default** (it forces the depth prepass on), and with it off the lit shaders run the
+> identical instruction stream. Two limitations, both real: the depth prepass covers rigid meshes
+> only (P13.3a's own scope), so SSR does not see terrain/skinned/vgeom surfaces; and a
+> colour-sourced SSR needs either a deferred pass or a reprojected history — the documented
+> follow-up.
+>
+> **Cascade blending closes the P13 deferral.** `shadow_factor` was refactored so the per-cascade
+> bias+PCF exists once (`csm_cascade_pcf`, returning `-1` for "not in this cascade"), and across
+> the last `cascade_blend ×` of a cascade's range the receiver additionally samples the next one
+> and lerps. `0` restores the hard switch *exactly* — the branch is not taken and the second PCF
+> never issues. The continuity property is a pure function (`csm::cascade_blend_weight`), so it
+> is unit-tested on every CI leg including the adapter-free ones; the GPU gate proves the effect
+> is **localized**: with a 14 m shadow range the differing pixels sit only in the two blend
+> bands, with the last cascade (nothing to blend into) and the middle of cascade 0 byte-identical.
+>
+> **Resizable resources spend the exclusion the P13 comment granted.** `GiQuality` (Low 32³/8×4×8,
+> Medium 48³/12×6×12, High 64³/16×8×16 = exactly the pre-P18.4 geometry) makes `GiResources`
+> recreatable, so `ResourceKey` is now the **three**-tuple `(targets, atmosphere, gi)` — the case
+> `EnvBinding::bind_group`'s doc comment predicted would arrive "if either ever becomes
+> resizable". A stale key here is silent: wgpu keeps the old, *larger* SH buffer alive, so a Low
+> frame would come back byte-identical to the High one instead of erroring. Both halves are
+> gated — pointer identity in the adapter-free `GenCache` test, and a High→Low→Medium→High sweep
+> on the GPU. `HzbChain` got a key type of its own rather than borrowing `ResourceKey`: it embeds
+> no GI resource, and rebuilding its bind groups on a GI-quality clamp would be a lie about what
+> invalidates them.
+>
+> **Cost** (RTX 4070 Ti, 640×360, 484-cube field, GPU-fenced, over a 0.2–0.4 ms GI-less frame,
+> against the 33 ms budget): **Low +0.72 ms, Medium +1.14 ms, High +1.85 ms**; High with
+> amortization at 256 probes/frame **+1.29 ms**; High + SSR **+1.74 ms** (SSR is inside the noise
+> of High here — the depth prepass is cheap at this resolution and most reflection rays leave the
+> screen in a few steps). Below High the tier clamp governs by construction, not by luck:
+> `RenderTier::apply` lowers `GiQuality` on Medium and turns GI **off** on Low, as does
+> `clamp_mobile`. Always-on VRAM at High is 2 MB of voxels (two words per voxel now — albedo +
+> occupancy, then emissive) + 128 KB of SH.
+>
+> **Golden evolution — two changed, three new, thirty-four untouched.** A full
+> `INF_BLESS_GOLDENS=1` sweep reports exactly: `csm.png` (cascade blending, `cascade_blend`
+> defaults to 0.1) and `gi_bleed.png` (the SH specular replacing the flat ambient specular, plus
+> the voxelizer's priority-ordered upload) modified; `gi_emissive.png`, `gi_specular.png`,
+> `gi_terrain.png` added — the suite goes 36 → **39**. Every one of the other 34 is byte-identical,
+> which is the off-path discipline made checkable, and is itself gated by
+> `gi_v2_off_path_is_byte_identical`, which winds every new knob to a non-default value on a
+> GI-off, shadow-off scene and demands the same bytes. That 34 **includes `vgeom_dense.png` and
+> `vgeom_far.png`**, which the portable-fixture batch above re-blessed for its own reasons: the two
+> evolutions are disjoint, and a full bless on the rebased branch reports exactly this batch's five
+> files and nothing else. The two audit fixes moved **no** golden either: `gi_terrain`'s fixture is
+> a level-0-only terrain, so `max_lod() == 0` selects exactly the tiles it always did, and the sun
+> bucket is unreachable at the default full probe update.
+>
+> **Honest scope.** The volume still **revoxelizes every frame** at the defaults; probe
+> amortization is the opt-in half of the temporal story and a *voxel* cache keyed on the volume's
+> snapped origin is the remaining follow-up. Occupancy is binary and single-bounce — no
+> multi-bounce feedback, no distance field, no cone tracing. Every primitive is a box or a
+> sphere, so a `PrimMesh::Sphere` instance still voxelizes as its bounding box exactly as in v1.
+> The 40 m default volume is near-field only; a cascaded or world-space clipmap volume is the
+> next structural step. Emissive is quantized to an RGBA8 word with a shared 16.0 ceiling
+> (relative, so hue survives; anything brighter clamps). SSR's two limits are above.
+> **The residency fix has a residual the auditor named and this batch does not close:**
+> `RenderTerrain::max_lod()` is a max over the *resident* set, so a terrain small enough to sit
+> entirely inside the finest refine ring publishes no root tile at all, and voxelization detail
+> flips between two stable regimes at that camera distance — camera-independent *within* each
+> regime, which is strictly better than the per-tile drift it replaced, but not yet one regime;
+> the honest fix is a **streamer residency floor pinning the root level**, which lives in
+> `inf-terrain` and is outside this batch's file boundary. And the
+> P18.3 remainder the auditor flagged is untouched by this batch and still stands: the skinned
+> pass caches its GPU geometry by `Arc` pointer identity, so a host that rebuilds a
+> `SkinnedMeshData` rather than sharing it re-uploads megabytes per projection — the sharing is a
+> convention the projectors follow, not something the renderer can enforce. The visual pass —
+> that emissive bounce, reflections and blended cascades actually *look* right — is
+> human-verified, as every GPU path here is.
+
 - **P18.1 Two-pass HZB occlusion** — 1. persist the last-frame visible list; 2. early draw →
   HZB from its depth → late cull and draw of the remainder; 3. on by default where supported.
 - **P18.2 Meshlet streaming** — 1. a residency/page table over the existing coarse-first level

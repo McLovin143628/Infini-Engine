@@ -44,7 +44,8 @@ const SHADOW_DEPTH_CLEAR: f32 = 1.0;
 pub struct ShadowDataGpu {
     /// Per-cascade forward-Z light `view_proj`.
     pub cascade_vp: [[f32; 16]; SHADOW_CASCADES],
-    /// Cascade far distances (x,y,z); w unused.
+    /// Cascade far distances (x,y,z); **w = the P18.4 cascade blend fraction**
+    /// ([`crate::ShadowSettings::cascade_blend`]) — the slot that was spare.
     pub splits: [f32; 4],
     /// Per-cascade world texel size (x,y,z); w unused (drives normal-offset bias).
     pub texel_world: [f32; 4],
@@ -419,6 +420,10 @@ impl RenderNode for ShadowNode {
                 }),
             );
         }
+        // P18.4 cascade blending: the receiver lerps into the next cascade across
+        // the last `blend × range` of this one. `0` restores the hard switch
+        // exactly (the shader branch is not taken and the second PCF never issues).
+        data.splits[3] = s.cascade_blend.clamp(0.0, 0.5);
         gpu.queue
             .write_buffer(&frame.shadow.uniform, 0, bytemuck::bytes_of(&data));
 

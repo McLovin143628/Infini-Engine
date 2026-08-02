@@ -71,6 +71,10 @@ pub(crate) enum ShaderKind {
     /// (P17.4), which places particles from an integer hash and lights them from
     /// the sky LUTs, and binds no volume and no depth texture.
     Precip,
+    /// [`gi_probe_shader`]: the atmosphere library at `@group(0)` bindings 3..6
+    /// and nothing else — the P18.4 GI probe march, which has no view uniform and
+    /// no lights but needs the sky-view LUT for its ray-miss term.
+    GiProbes,
 }
 
 // ── atmosphere composition (P17.2) ───────────────────────────────────────────
@@ -92,6 +96,11 @@ const ENV_ATMOS_UNIFORM: u32 = 10;
 /// the lit passes. It reuses [`ENV_ATMOS_SAMPLER`] (clamp-to-edge, linear), which
 /// is exactly what it wants, and its parameters ride in the atmosphere uniform.
 const ENV_CLOUD_SHADOW: u32 = 11;
+/// The single-sample scene depth (P18.4) — the **one** binding SSR adds. Read with
+/// `textureLoad`, so it needs no sampler of its own; it is the SSAO/TAA depth
+/// prepass target, which [`crate::RenderSettings::needs_depth_prepass`] now forces
+/// on whenever SSR is enabled.
+const ENV_SCENE_DEPTH: u32 = 12;
 
 /// The atmosphere *medium* library, bound at `group`/`binding`.
 pub(crate) fn atmosphere_source(group: u32, binding: u32) -> String {
@@ -111,15 +120,24 @@ pub(crate) fn atmosphere_lut_source(group: u32, t: u32, s: u32, smp: u32) -> Str
         .replace("ATMOS_SMPBIND", &smp.to_string())
 }
 
+/// Aerial perspective + height fog (`atmos_apply`). Split out of
+/// [`atmosphere_lut_source`] in P18.4: it reads the `View` uniform, and the GI
+/// probe march is a compute pass that has none — it wants the LUT samplers alone.
+/// Binding-free, so it needs no token substitution.
+pub(crate) fn atmosphere_apply_source() -> &'static str {
+    include_str!("../shaders/atmosphere_apply.wgsl")
+}
+
 /// The sky pass module: common_view + the whole atmosphere library at
 /// `@group(1)` (uniform at 1, transmittance 2, sky view 3, sampler 4 — binding 0
 /// is the authored gradient the sky pass already had).
 pub(crate) fn sky_shader(source: &str) -> String {
     format!(
-        "{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}",
         include_str!("../shaders/common_view.wgsl"),
         atmosphere_source(1, 1),
         atmosphere_lut_source(1, 2, 3, 4),
+        atmosphere_apply_source(),
         source
     )
 }
@@ -156,10 +174,11 @@ pub(crate) fn cloud_field_source(group: u32, shape: u32, detail: u32, smp: u32) 
 /// declared by `cloud.wgsl` itself, since it is the only consumer.
 pub(crate) fn cloud_shader(source: &str) -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../shaders/common_view.wgsl"),
         atmosphere_source(1, 0),
         atmosphere_lut_source(1, 1, 2, 3),
+        atmosphere_apply_source(),
         cloud_noise_source(),
         cloud_field_source(1, 4, 5, 6),
         source
@@ -178,11 +197,27 @@ pub(crate) fn precip_shader(source: &str) -> String {
 {}
 {}
 {}
+{}
 {}",
         include_str!("../shaders/common_view.wgsl"),
         atmosphere_source(1, 0),
         atmosphere_lut_source(1, 1, 2, 3),
+        atmosphere_apply_source(),
         cloud_noise_source(),
+        source
+    )
+}
+
+/// The GI probe-march module (P18.4): the atmosphere medium at
+/// `@group(0) @binding(3)` + the LUT sampling library at 4/5/6, and nothing else.
+/// The probe pass has no view uniform and no lights; what it needs from the
+/// atmosphere is exactly `atmos_sample_skyview` for its ray-**miss** term, which is
+/// how the P17 sky finally reaches the bounce.
+pub(crate) fn gi_probe_shader(source: &str) -> String {
+    format!(
+        "{}\n{}\n{}",
+        atmosphere_source(0, 3),
+        atmosphere_lut_source(0, 4, 5, 6),
         source
     )
 }
@@ -304,6 +339,11 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
         include_str!("../shaders/precip.wgsl"),
         ShaderKind::Precip,
     ),
+    (
+        "gi_probes",
+        include_str!("../shaders/gi_probes.wgsl"),
+        ShaderKind::GiProbes,
+    ),
 ];
 
 /// Compose the named [`SHADER_TABLE`] entry. Panics on an unknown label —
@@ -323,6 +363,7 @@ pub(crate) fn shader_source(label: &str) -> String {
         ShaderKind::CloudBake => cloud_bake_shader(source),
         ShaderKind::CloudShadowBake => cloud_shadow_bake_shader(source),
         ShaderKind::Precip => precip_shader(source),
+        ShaderKind::GiProbes => gi_probe_shader(source),
     }
 }
 
@@ -342,7 +383,7 @@ pub(crate) fn lit_scene_shader(source: &str, env_group: u32) -> String {
     let cloud_shadow =
         include_str!("../shaders/cloud_shadow.wgsl").replace("GROUP_ENV", &env_group.to_string());
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../shaders/common_view.wgsl"),
         env,
         atmosphere_source(env_group, ENV_ATMOS_UNIFORM),
@@ -352,23 +393,34 @@ pub(crate) fn lit_scene_shader(source: &str, env_group: u32) -> String {
             ENV_ATMOS_SKYVIEW,
             ENV_ATMOS_SAMPLER,
         ),
+        atmosphere_apply_source(),
         cloud_shadow,
         source
     )
 }
 
 /// The cache key every bind group that embeds a **resizable** resource is keyed
-/// on: `(frame targets generation, atmosphere resources generation)`.
+/// on: `(frame targets generation, atmosphere resources generation, GI resources
+/// generation)`.
 ///
-/// A tuple rather than a single counter because the two resources are recreated
-/// for unrelated reasons — the targets on a viewport resize, the atmosphere LUTs
-/// on a render-tier / quality clamp — and either alone must invalidate.
-pub(crate) type ResourceKey = (u64, u64);
+/// A tuple rather than a single counter because the three resources are recreated
+/// for unrelated reasons — the targets on a viewport resize, the atmosphere LUTs on
+/// a render-tier / atmosphere-quality clamp, the GI voxel/SH buffers on a
+/// **GI**-quality clamp — and any one alone must invalidate.
+///
+/// The GI component is the P18.4 addition, and it is exactly what the P13 version
+/// of the [`EnvBinding::bind_group`] comment predicted would be needed "if either
+/// ever becomes resizable". It has.
+pub(crate) type ResourceKey = (u64, u64, u64);
 
 /// The current [`ResourceKey`] for a frame.
 #[inline]
 pub(crate) fn resource_key(frame: &FrameData) -> ResourceKey {
-    (frame.targets.generation, frame.atmosphere.generation)
+    (
+        frame.targets.generation,
+        frame.atmosphere.generation,
+        frame.gi.generation,
+    )
 }
 
 /// A generation-keyed single-slot cache: hands back the stored value while the
@@ -424,8 +476,9 @@ impl<K: PartialEq, T> GenCache<K, T> {
 /// `3` shadow_smp (comparison), `4` shadow uniform, `5` gi SH storage, `6` gi
 /// uniform, `7` atmosphere transmittance LUT, `8` atmosphere sky-view LUT,
 /// `9` atmosphere LUT sampler, `10` atmosphere uniform, `11` cloud-shadow map
-/// (P17.3 — which borrows the sampler at `9` rather than adding a twelfth entry).
-/// All fragment-stage.
+/// (P17.3 — which borrows the sampler at `9` rather than adding a twelfth entry),
+/// `12` single-sample scene depth (P18.4 SSR — read with `textureLoad`, so no
+/// thirteenth sampler either). All fragment-stage.
 pub(crate) struct EnvBinding {
     pub bgl: wgpu::BindGroupLayout,
     ao_sampler: wgpu::Sampler,
@@ -553,6 +606,17 @@ impl EnvBinding {
                         },
                         count: None,
                     },
+                    // ── P18.4 SSR ──
+                    wgpu::BindGroupLayoutEntry {
+                        binding: ENV_SCENE_DEPTH,
+                        visibility: frag,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let ao_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -605,9 +669,16 @@ impl EnvBinding {
     ///   would be a bug is a cloud resource recreated on some *other* trigger
     ///   without a key component of its own, so if one is ever added, add its
     ///   generation here too.
-    /// * `frame.shadow.*` and `frame.gi.*` are still created **once** (in
-    ///   `EngineRenderer::new`) and never recreated, so they need no key
-    ///   component. If either ever becomes resizable, add its generation here too.
+    /// * `frame.gi.sh` / `frame.gi.voxels` are **quality**-dependent since P18.4:
+    ///   [`crate::gi::GiQuality`] can be clamped down at runtime by the render tier,
+    ///   which recreates both buffers at a new size → `gi.generation`. This is the
+    ///   other case the P13 version of this comment warned about, arriving as
+    ///   predicted, and the exclusion it granted is now formally spent.
+    /// * `frame.targets.depth_prepass` (P18.4 SSR) is size-dependent → already
+    ///   covered by `targets.generation`; it needs no component of its own.
+    /// * `frame.shadow.*` is still created **once** (in `EngineRenderer::new`) and
+    ///   never recreated, so it needs no key component. If it ever becomes
+    ///   resizable, add its generation here too.
     pub fn bind_group(&mut self, gpu: &GpuContext, frame: &FrameData) -> &wgpu::BindGroup {
         let (bgl, ao_sampler, shadow_sampler) = (&self.bgl, &self.ao_sampler, &self.shadow_sampler);
         self.bg.get_or_build(resource_key(frame), || {
@@ -667,6 +738,10 @@ impl EnvBinding {
                             &frame.atmosphere.cloud_shadow,
                         ),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: ENV_SCENE_DEPTH,
+                        resource: wgpu::BindingResource::TextureView(&frame.targets.depth_prepass),
+                    },
                 ],
             })
         })
@@ -713,15 +788,15 @@ mod gen_cache_tests {
         let mut cache: GenCache<ResourceKey, Rc<u32>> = GenCache::default();
         let mut builds = 0u32;
 
-        let first = fetch(&mut cache, (1, 1), &mut builds);
+        let first = fetch(&mut cache, (1, 1, 1), &mut builds);
         // Same key ⇒ the SAME allocation, and the builder never ran again.
-        let again = fetch(&mut cache, (1, 1), &mut builds);
+        let again = fetch(&mut cache, (1, 1, 1), &mut builds);
         assert!(Rc::ptr_eq(&first, &again), "an unchanged key rebuilt");
         assert_eq!(builds, 1, "an unchanged key must not rebuild");
 
         // The atmosphere generation alone must invalidate — this is the key
         // component P17.2 added, and the one a regression would drop.
-        let after_atmos = fetch(&mut cache, (1, 2), &mut builds);
+        let after_atmos = fetch(&mut cache, (1, 2, 1), &mut builds);
         assert!(
             !Rc::ptr_eq(&after_atmos, &first),
             "an atmosphere-generation bump did not rebuild the bind group"
@@ -729,30 +804,45 @@ mod gen_cache_tests {
         assert_eq!(builds, 2);
 
         // ...and so must the frame-targets generation alone (the P13 component).
-        let after_targets = fetch(&mut cache, (2, 2), &mut builds);
+        let after_targets = fetch(&mut cache, (2, 2, 1), &mut builds);
         assert!(
             !Rc::ptr_eq(&after_targets, &after_atmos),
             "a targets-generation bump did not rebuild the bind group"
         );
         assert_eq!(builds, 3);
 
+        // ...and the GI generation alone (the P18.4 component). GI resources became
+        // resizable when `GiQuality` landed, which is precisely the case the P13
+        // exclusion comment said would have to join this key.
+        let after_gi = fetch(&mut cache, (2, 2, 2), &mut builds);
+        assert!(
+            !Rc::ptr_eq(&after_gi, &after_targets),
+            "a GI-generation bump did not rebuild the bind group"
+        );
+        assert_eq!(builds, 4);
+
         // Returning to a previously-seen key still rebuilds: the cache is one
         // slot, not a map, so it can never hand back a handle to a resource that
         // has since been recreated under the same number.
-        let back = fetch(&mut cache, (1, 1), &mut builds);
+        let back = fetch(&mut cache, (1, 1, 1), &mut builds);
         assert!(!Rc::ptr_eq(&back, &first));
-        assert_eq!(builds, 4);
+        assert_eq!(builds, 5);
     }
 
     /// A key that ignores one of its inputs is exactly the regression this guards,
-    /// so assert the tuple is injective in both components rather than trusting
+    /// so assert the tuple is injective in every component rather than trusting
     /// the call site.
     #[test]
-    fn resource_key_is_injective_in_both_components() {
-        let base: ResourceKey = (7, 11);
-        assert_ne!(base, (8, 11), "targets generation dropped from the key");
-        assert_ne!(base, (7, 12), "atmosphere generation dropped from the key");
-        assert_eq!(base, (7, 11));
+    fn resource_key_is_injective_in_every_component() {
+        let base: ResourceKey = (7, 11, 13);
+        assert_ne!(base, (8, 11, 13), "targets generation dropped from the key");
+        assert_ne!(
+            base,
+            (7, 12, 13),
+            "atmosphere generation dropped from the key"
+        );
+        assert_ne!(base, (7, 11, 14), "GI generation dropped from the key");
+        assert_eq!(base, (7, 11, 13));
     }
 
     /// The cloud bake's key type, given the same pointer-identity treatment as
@@ -896,7 +986,8 @@ mod shader_compose_tests {
             ("bloom", include_str!("../shaders/bloom.wgsl")),
             ("composite", include_str!("../shaders/composite.wgsl")),
             ("gi_voxelize", include_str!("../shaders/gi_voxelize.wgsl")),
-            ("gi_probes", include_str!("../shaders/gi_probes.wgsl")),
+            // `gi_probes` moved into SHADER_TABLE in P18.4 — it is a composed
+            // module now (it includes the atmosphere library for its sky term).
             ("vgeom_cull", include_str!("../shaders/vgeom_cull.wgsl")),
             ("vgeom_hzb", include_str!("../shaders/vgeom_hzb.wgsl")),
             ("shadow_depth", include_str!("../shaders/shadow_depth.wgsl")),

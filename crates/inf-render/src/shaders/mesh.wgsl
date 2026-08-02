@@ -212,7 +212,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
     let ao = textureSampleLevel(ao_tex, ao_smp, in.pos.xy / view.grid_axis_viewport.zw, 0.0).r;
     lo += amb * albedo * (1.0 - metallic) * ao;
-    lo += amb * f0 * 0.5 * ao;
+    // P18.4: the ambient specular becomes a real directional term when GI is on
+    // (SH radiance along the reflection vector, optionally re-anchored at an SSR
+    // hit); otherwise it is exactly the constant it always was.
+    lo += gi_ambient_specular(in.world_pos, n, v, rough, f0, amb) * ao;
 
     lo += in.emissive;
 

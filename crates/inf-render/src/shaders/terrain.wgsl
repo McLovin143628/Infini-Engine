@@ -275,7 +275,14 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         spec_term = spec_term * cf;
     }
     let ao = textureSampleLevel(ao_tex, ao_smp, in.clip.xy / view.grid_axis_viewport.zw, 0.0).r;
-    let lo = albedo * (ambient * ao + direct) + spec_term;
+    var lo = albedo * (ambient * ao + direct) + spec_term;
+    // P18.4 GI specular. Terrain has no `f0` of its own (it is a dielectric splat
+    // blend, and its existing glint is a direct-sun Blinn lobe), so this is an
+    // ADDITIVE environment term at the dielectric 0.04 rather than a replacement —
+    // which also means a terrain golden with GI off runs the identical arithmetic.
+    if (gi.params.x > 0.5 && gi.params2.x > 0.5) {
+        lo = lo + gi_specular(in.world_local, n, view_dir, roughness, vec3<f32>(0.04)) * ao;
+    }
 
     // HDR-linear haze; the post tonemap pass (ACES + exposure) runs afterward.
     // P17.2: replaced by physical aerial perspective + height fog when the scene

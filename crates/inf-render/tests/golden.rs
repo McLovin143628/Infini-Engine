@@ -24,15 +24,16 @@ use inf_render::passes::vgeom::{cpu_visible_set, cull_flags, frustum_planes, lod
 use inf_render::{
     assemble_patches, cull_visible, cull_visible_streamed, detail_texel, expand_text, shape_texel,
     Ambient2D, AtmosphereParams, AtmosphereQuality, BloomSettings, CloudParams, CloudQuality,
-    CloudVolumes, EngineRenderer, GiSettings, GpuContext, HAlign, HeadlessTarget, HeightFog,
-    LightKind, MeshInstance, PrebatchedRun, PrecipParams, PrecipQuality, PrimMesh, RenderChunk,
-    RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
-    RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings, SkinnedInstance, SkinnedMeshData,
-    SkinnedVertex, SpriteInstance, SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey,
-    TextParams, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode,
-    BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
-    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, CPU_GPU_EXACT_FRACTION,
-    CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_TEXEL_TOLERANCE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    CloudVolumes, EngineRenderer, GiAudit, GiQuality, GiSettings, GpuContext, HAlign,
+    HeadlessTarget, HeightFog, LightKind, MeshInstance, PrebatchedRun, PrecipParams, PrecipQuality,
+    PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
+    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, ShadowSettings,
+    SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance, SpriteTextureUpload,
+    SsaoSettings, SunParams, TerrainTileKey, TextParams, TilemapParams, VgeomAsset, VgeomInstance,
+    VgeomMesh, VgeomSettings, ViewMode, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL,
+    BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE,
+    CPU_GPU_EXACT_FRACTION, CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_TEXEL_TOLERANCE, HEADLESS_FORMAT,
+    TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -2365,6 +2366,121 @@ fn golden_csm() {
     assert!(lit, "expected the CSM scene to stay lit");
 }
 
+/// **Cascade blending** (P18.4 deliverable 6) — the P13 deferral: cascades used to
+/// switch instantly, so the resolution change drew a hard line across the ground
+/// wherever a split fell inside the frame.
+///
+/// The shadow range is squeezed to 14 m so both split boundaries land on the
+/// visible floor. The metric is the largest **row-to-row** luminance step down the
+/// receiving floor: a hard switch puts a step there that the blend band spreads
+/// out. `cascade_blend = 0` must reproduce the pre-P18.4 frame exactly.
+#[test]
+fn csm_cascade_blend_softens_the_split_seam() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    // A long floor running away from the camera, so successive cascades cover
+    // successive screen rows.
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.25, -8.0),
+        Quat::IDENTITY,
+        Vec3::new(30.0, 0.5, 40.0),
+        [0.80, 0.80, 0.82, 1.0],
+        1,
+    ));
+    // A picket of casters spread across X and Z: their long shadows sweep across
+    // both split lines, so the seam has plenty of penumbra to show up in (a
+    // single caster leaves the split crossing only a handful of pixels).
+    let mut id = 2u32;
+    for z in [1.0f64, -1.0, -3.0, -5.5] {
+        for x in [-3.0f64, -0.5, 2.0, 4.5] {
+            scene.instances.push(MeshInstance::lit(
+                DVec3::new(x, 0.7, z),
+                Quat::from_rotation_y(0.3),
+                Vec3::new(0.7, 1.4, 0.7),
+                [0.80, 0.42, 0.32, 1.0],
+                id,
+            ));
+            id += 1;
+        }
+    }
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.97, 0.9],
+        intensity: 3.0,
+        direction: Vec3::new(0.55, 0.42, 0.45).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    // Low and pitched down, so the two split boundaries (≈1.6 m and ≈4.3 m at a
+    // 14 m shadow range) land inside the frame rather than under the camera.
+    let view = look_view(DVec3::new(0.0, 1.2, 4.0), DVec3::ZERO);
+
+    let with_blend = |blend: f32| RenderSettings {
+        shadows: ShadowSettings {
+            enabled: true,
+            max_distance: 14.0,
+            cascade_blend: blend,
+            ..ShadowSettings::default()
+        },
+        ..RenderSettings::default()
+    };
+
+    let hard = render_with(&gpu, &scene, &view, with_blend(0.0));
+    let soft = render_with(&gpu, &scene, &view, with_blend(0.3));
+    assert_ne!(hard, soft, "the cascade blend changed nothing");
+
+    // Where the blend acts, by screen row. A floor row maps monotonically to a
+    // view distance, so this is a distance profile: the blend must move pixels
+    // ONLY in the bands ending at a split, and must leave the last cascade (there
+    // is no cascade 3 to blend into) untouched.
+    let row_diffs: Vec<u32> = (0..H)
+        .map(|y| {
+            (0..W)
+                .filter(|&x| px(&hard, x, y) != px(&soft, x, y))
+                .count() as u32
+        })
+        .collect();
+    for d in 0..10u32 {
+        let s: u32 = row_diffs[(H * d / 10) as usize..(H * (d + 1) / 10) as usize]
+            .iter()
+            .sum();
+        eprintln!("csm blend decile {d}: {s} differing pixels");
+    }
+    let touched: u32 = row_diffs.iter().sum();
+    assert!(
+        touched > 200,
+        "the blend barely touched anything ({touched})"
+    );
+    // The far field — the LAST cascade and the sky above it — must be untouched:
+    // `shadow_factor` only blends where there IS a next cascade to blend into.
+    let far: u32 = row_diffs[..(H * 30 / 100) as usize].iter().sum();
+    assert_eq!(
+        far, 0,
+        "the blend reached the last cascade / the sky, which have nothing to \
+         blend into ({far} pixels)"
+    );
+    // ...and the near field, well inside cascade 0, is untouched too: this is a
+    // band at the boundary, not a global change of how shadows are sampled.
+    let near: u32 = row_diffs[(H * 80 / 100) as usize..].iter().sum();
+    assert_eq!(
+        near, 0,
+        "the blend reached the middle of cascade 0 ({near})"
+    );
+
+    // The escape hatch really is an escape hatch: `0` is the old code path, and a
+    // project that wants it back pays nothing for the option.
+    assert_eq!(
+        hard,
+        render_with(&gpu, &scene, &view, with_blend(0.0)),
+        "the zero-blend path is not deterministic"
+    );
+}
+
 /// Mean red/green ratio of the floor pixels in a screen band (rows `y0..y1`,
 /// central columns), skipping near-black (unlit / off-floor) pixels. The proof
 /// metric for `golden_gi_bleed`.
@@ -2442,6 +2558,7 @@ fn golden_gi_bleed() {
             extent: 40.0,
             rays: 48,
             intensity: 2.5,
+            ..GiSettings::default()
         },
         ..RenderSettings::default()
     };
@@ -2469,6 +2586,1084 @@ fn golden_gi_bleed() {
     assert!(
         near > 1.03,
         "near-wall floor not reddened (ratio {near:.3})"
+    );
+}
+
+// ── P18.4 GI v2 ──────────────────────────────────────────────────────────────
+//
+// Everything below drives the rebuilt GI: full-scene voxelization (terrain,
+// skinned, vgeom), the lifted instance cap, the atmosphere sky term, emissive
+// injection, the specular term + SSR, temporal amortization, and the resizable
+// resources joining the `ResourceKey`.
+
+/// Mean `num`/`den` channel ratio of the LIT pixels in a screen rectangle,
+/// skipping near-black ones. The generalization of [`band_red_ratio`] the P18.4
+/// scenes need (green bleed from an emissive, red bleed from a wall).
+fn region_channel_ratio(
+    img: &[u8],
+    x: std::ops::Range<u32>,
+    y: std::ops::Range<u32>,
+    num: usize,
+    den: usize,
+) -> f32 {
+    let (mut a, mut b, mut n) = (0.0f64, 0.0f64, 0u32);
+    for yy in y {
+        for xx in x.clone() {
+            let p = px(img, xx, yy);
+            if (p[0] as u16 + p[1] as u16 + p[2] as u16) < 12 {
+                continue;
+            }
+            a += p[num] as f64;
+            b += p[den] as f64;
+            n += 1;
+        }
+    }
+    if n == 0 || b == 0.0 {
+        return 0.0;
+    }
+    (a / b.max(1.0)) as f32
+}
+
+/// Mean luminance (0..255) of a screen rectangle.
+fn region_mean(img: &[u8], x: std::ops::Range<u32>, y: std::ops::Range<u32>) -> f32 {
+    let (mut s, mut n) = (0.0f64, 0u32);
+    for yy in y {
+        for xx in x.clone() {
+            let p = px(img, xx, yy);
+            s += (p[0] as f64 + p[1] as f64 + p[2] as f64) / 3.0;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        0.0
+    } else {
+        (s / n as f64) as f32
+    }
+}
+
+/// Render `frames` consecutive frames through **one** renderer (so its temporal
+/// state — the GI probe cursor — actually advances) and return the last frame plus
+/// the GI audit it published.
+fn render_frames_with(
+    gpu: &GpuContext,
+    scene: &RenderScene,
+    view: &RenderView,
+    settings: RenderSettings,
+    frames: u32,
+) -> (Vec<u8>, GiAudit) {
+    let target = HeadlessTarget::new(gpu, W, H);
+    let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
+    renderer.set_settings(settings);
+    for _ in 0..frames.max(1) {
+        renderer.render(gpu, scene, view, &target.view, (W, H));
+    }
+    (
+        target.read_rgba(gpu).expect("readback"),
+        renderer.gi_audit(),
+    )
+}
+
+/// GI settings with the P18.4 defaults and an explicit extent/rays/intensity.
+fn gi_settings(extent: f32, rays: u32, intensity: f32) -> RenderSettings {
+    RenderSettings {
+        gi: GiSettings {
+            enabled: true,
+            extent,
+            rays,
+            intensity,
+            ..GiSettings::default()
+        },
+        ..RenderSettings::default()
+    }
+}
+
+/// **Emissive injection** (P18.4 deliverable 5) — `golden_gi_emissive`.
+///
+/// A white floor and a **green emissive** bar, and *no analytic light at all*: the
+/// scene's one directional light has zero intensity, so `sun_color` in the GI
+/// uniform is black and a voxel's bounce term is `albedo × 0 + emissive`. Anything
+/// green on that floor arrived through the voxel volume's emissive word.
+#[test]
+fn golden_gi_emissive() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    // White floor slab (top surface at y = 0).
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.25, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(14.0, 0.5, 14.0),
+        [0.92, 0.92, 0.92, 1.0],
+        1,
+    ));
+    // A near-black bar that GLOWS green, floating over the floor.
+    scene.instances.push(MeshInstance {
+        emissive: [0.10, 3.6, 0.10],
+        ..MeshInstance::lit(
+            DVec3::new(0.0, 1.5, -2.2),
+            Quat::IDENTITY,
+            Vec3::new(7.0, 0.5, 0.5),
+            [0.02, 0.02, 0.02, 1.0],
+            2,
+        )
+    });
+    // The whole point: a directional light with ZERO radiance. Present so the
+    // shaders take the light-loop path (not the fallback editor sun), contributing
+    // nothing — so the bar is the only source in the scene.
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [0.0, 0.0, 0.0],
+        intensity: 0.0,
+        direction: Vec3::Y,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+
+    let view = look_view(DVec3::new(0.0, 3.2, 6.0), DVec3::new(0.0, 0.2, -1.6));
+    let gi_on = gi_settings(24.0, 64, 2.0);
+
+    let img = check_golden_with(&gpu, "gi_emissive", &scene, &view, gi_on);
+    let off = render_with(&gpu, &scene, &view, RenderSettings::default());
+
+    // The floor, well below the bar.
+    let (fx, fy) = (
+        (W * 30 / 100)..(W * 70 / 100),
+        (H * 72 / 100)..(H * 95 / 100),
+    );
+    let green_on = region_channel_ratio(&img, fx.clone(), fy.clone(), 1, 0);
+    let green_off = region_channel_ratio(&off, fx.clone(), fy.clone(), 1, 0);
+    eprintln!("gi_emissive floor green/red: GI on {green_on:.3}, off {green_off:.3}");
+    assert!(
+        green_on > green_off + 0.08,
+        "the emissive bar did not bleed green onto the floor \
+         (on {green_on:.3} vs off {green_off:.3})"
+    );
+    assert!(
+        green_on > 1.08,
+        "floor is not green at all (ratio {green_on:.3}) — emissive injection is dead"
+    );
+    // The floor is genuinely lit by it, not merely tinted noise.
+    assert!(
+        region_mean(&img, fx.clone(), fy.clone()) > region_mean(&off, fx, fy) + 1.0,
+        "an emissive source lit nothing"
+    );
+}
+
+/// **Specular** (P18.4 deliverable 4a) — `golden_gi_specular`.
+///
+/// A smooth, semi-metallic floor under a bright red wall. With the SH specular on,
+/// the floor reconstructs radiance along its **reflection vector** (which points at
+/// the wall) instead of the cosine-weighted hemisphere average, so the reflected
+/// red is stronger and falls off with the reflection geometry rather than with the
+/// diffuse lobe.
+#[test]
+fn golden_gi_specular() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    // A SMOOTH, semi-metallic floor: metallic kills the diffuse term, so what is
+    // left on it is (almost) purely the specular path this golden is about.
+    scene.instances.push(MeshInstance {
+        metallic: 0.85,
+        roughness: 0.18,
+        ..MeshInstance::lit(
+            DVec3::new(0.0, -0.25, 0.5),
+            Quat::IDENTITY,
+            Vec3::new(12.0, 0.5, 11.0),
+            [0.85, 0.85, 0.88, 1.0],
+            1,
+        )
+    });
+    // A tall RED wall along the far edge.
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, 1.5, -4.0),
+        Quat::IDENTITY,
+        Vec3::new(11.0, 3.0, 0.5),
+        [0.92, 0.05, 0.05, 1.0],
+        2,
+    ));
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.95],
+        intensity: 2.0,
+        direction: Vec3::new(0.0, 0.5, 1.0).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+
+    let view = look_view(DVec3::new(0.0, 3.2, 7.0), DVec3::new(0.0, 0.0, -1.5));
+    let mut spec_on = gi_settings(40.0, 48, 2.0);
+    spec_on.gi.specular = true;
+    let mut spec_off = spec_on;
+    spec_off.gi.specular = false;
+
+    let img = check_golden_with(&gpu, "gi_specular", &scene, &view, spec_on);
+    let flat = render_with(&gpu, &scene, &view, spec_off);
+
+    assert_ne!(img, flat, "the SH specular term changed nothing");
+
+    let cols = (W * 25 / 100)..(W * 75 / 100);
+    let near = (H * 40 / 100)..(H * 50 / 100); // floor close to the wall
+    let far = (H * 90 / 100)..(H * 100 / 100); // floor close to the camera
+
+    // (a) A smooth metal floor reflects MORE than the flat `f0 × 0.5` constant it
+    // replaced — the grazing-angle Fresnel the split-sum term carries and the
+    // constant could not.
+    let lit_spec = region_mean(&img, cols.clone(), far.clone());
+    let lit_flat = region_mean(&flat, cols.clone(), far.clone());
+    eprintln!("gi_specular grazing floor: specular {lit_spec:.1}, flat {lit_flat:.1}");
+    assert!(
+        lit_spec > lit_flat + 8.0,
+        "the grazing floor did not brighten (specular {lit_spec:.1} vs flat {lit_flat:.1})"
+    );
+
+    // (b) Directionality: the floor near the wall reflects it and the floor under
+    // the camera does not, because the reflection vector points somewhere else.
+    let red_near = region_channel_ratio(&img, cols.clone(), near.clone(), 0, 1);
+    let red_far = region_channel_ratio(&img, cols.clone(), far.clone(), 0, 1);
+    eprintln!("gi_specular red/green: near-wall {red_near:.3}, far {red_far:.3}");
+    assert!(
+        red_near > red_far + 0.08,
+        "the reflection is not direction-dependent (near {red_near:.3}, far {red_far:.3})"
+    );
+
+    // (c) **Roughness reads.** The lobe sharpening (`1 − roughness`) is what makes
+    // this a reflection rather than a second ambient constant, so a smooth floor
+    // must depart from the term it replaced further than a matte one does. (The
+    // exact reduction — that a *uniform* radiance field at full roughness gives
+    // back the retired `f0 × 0.5` — is a statement about the arithmetic, and is
+    // pinned in the pure half where a uniform field can actually be constructed:
+    // `gi::tests::specular_reduces_to_the_retired_ambient_constant`.)
+    let diff_at = |r: f32| {
+        let mut sc = scene.clone();
+        sc.instances[0].roughness = r;
+        sc.mark_dirty();
+        let on = render_with(&gpu, &sc, &view, spec_on);
+        let off = render_with(&gpu, &sc, &view, spec_off);
+        image_diff(&on, &off, W, H).0
+    };
+    let (smooth, matte) = (diff_at(0.18), diff_at(1.0));
+    eprintln!("gi_specular roughness: mean diff smooth {smooth:.4}, matte {matte:.4}");
+    assert!(
+        smooth > matte * 1.2,
+        "roughness does not read: smooth {smooth:.4} vs matte {matte:.4}"
+    );
+
+    // SSR (deliverable 4b): deterministic, and it actually re-anchors the fetch.
+    let mut ssr = spec_on;
+    ssr.gi.ssr = true;
+    let a = render_with(&gpu, &scene, &view, ssr);
+    let b = render_with(&gpu, &scene, &view, ssr);
+    assert_eq!(a, b, "SSR is not deterministic");
+    assert_ne!(
+        a, img,
+        "SSR changed nothing — the screen-space march never found a hit"
+    );
+}
+
+/// **Terrain voxelization** (P18.4 deliverable 1) — `golden_gi_terrain`.
+///
+/// A **red** heightfield with a tall white wall standing on it. The wall's lit face
+/// picks up a red bounce off the sunlit ground — the same proof `golden_gi_bleed`
+/// makes for a rigid box, except the bouncing surface is *terrain*, which before
+/// P18.4 was invisible to the voxelizer: a landscape neither occluded a bounce nor
+/// contributed one, so GI over open ground was GI over a void.
+///
+/// The control is the identical scene with the terrain projection **removed**. The
+/// measured band is wall in both renders, so the only thing that can move it is the
+/// probe field.
+#[test]
+fn golden_gi_terrain() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    // A flat, RED terrain: one 2×2-tile patch centred near the origin.
+    let res = 33u32;
+    let mps = 1.0f64;
+    let span = (res - 1) as f64 * mps;
+    let mut tiles = Vec::new();
+    for tz in 0..2 {
+        for tx in 0..2 {
+            tiles.push(RenderTerrainTile {
+                key: TerrainTileKey::lod0((tx, tz)),
+                origin: DVec3::new(tx as f64 * span - span, 0.0, tz as f64 * span - span),
+                heights: vec![0.0; (res * res) as usize],
+                weights: Vec::new(),
+                height_bounds: (0.0, 0.0),
+                version: 1,
+            });
+        }
+    }
+    let terrain = RenderTerrain {
+        id: 7,
+        tile_resolution: res,
+        meters_per_sample: mps,
+        tiles,
+        layers: [
+            RenderTerrainLayer {
+                albedo: [0.95, 0.06, 0.06, 1.0],
+                roughness: 0.9,
+                tex_scale: 8.0,
+            },
+            RenderTerrainLayer::default(),
+            RenderTerrainLayer::default(),
+            RenderTerrainLayer::default(),
+        ],
+        macro_variation: 0.0,
+    };
+
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        terrains: vec![terrain],
+        ..Default::default()
+    };
+    // A tall WHITE wall standing on the ground, facing the camera.
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, 2.5, -4.0),
+        Quat::IDENTITY,
+        Vec3::new(12.0, 5.0, 0.5),
+        [0.94, 0.94, 0.94, 1.0],
+        1,
+    ));
+    // Sun from +Z and above: the wall's +Z face is lit, and so is the ground in
+    // front of it (the ground the bounce has to come from).
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.94],
+        intensity: 1.2,
+        direction: Vec3::new(0.0, 0.55, 0.84).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+
+    let view = look_view(DVec3::new(0.0, 2.6, 6.0), DVec3::new(0.0, 1.6, -4.0));
+    let gi_on = gi_settings(40.0, 64, 1.0);
+
+    let img = check_golden_with(&gpu, "gi_terrain", &scene, &view, gi_on);
+
+    // The same scene with the terrain projection removed — everything drawn in the
+    // measured band is identical, so any difference there is GI.
+    let mut no_terrain = scene.clone();
+    no_terrain.terrains.clear();
+    no_terrain.mark_dirty();
+    let bare = render_with(&gpu, &no_terrain, &view, gi_on);
+
+    // The wall's mid-height band: wall pixels in BOTH renders (the ground line is
+    // below it and the sky above), so nothing but the probe field can move it.
+    let band = (
+        (W * 35 / 100)..(W * 65 / 100),
+        (H * 30 / 100)..(H * 55 / 100),
+    );
+    let red_with = region_channel_ratio(&img, band.0.clone(), band.1.clone(), 0, 1);
+    let red_without = region_channel_ratio(&bare, band.0.clone(), band.1.clone(), 0, 1);
+    eprintln!("gi_terrain wall red/green: with terrain {red_with:.3}, without {red_without:.3}");
+    assert!(
+        region_mean(&img, band.0.clone(), band.1.clone()) > 100.0,
+        "the measured band is not the lit wall"
+    );
+    assert!(
+        red_with > red_without + 0.10,
+        "the terrain did not bounce red onto the wall \
+         (with {red_with:.3} vs without {red_without:.3}) — terrain is invisible to GI"
+    );
+
+    // ...and the audit says the columns were actually sampled.
+    let (_, audit) = render_frames_with(&gpu, &scene, &view, gi_on, 1);
+    assert!(
+        audit.terrain_columns > 0,
+        "no terrain column reached the voxelizer"
+    );
+}
+
+/// **The GI volume does not depend on terrain residency** (P18.4, audit finding).
+///
+/// `RenderTerrain::tiles` is the streamer's **camera-driven** working set, so a
+/// voxelizer that sampled "the finest resident tile" would make GI occupancy and
+/// albedo a function of where the camera has *been* — and no golden would notice,
+/// because every golden renders a fully-resident terrain. The voxelizer therefore
+/// reads only the projection's coarsest asset level (`gi::voxelization_tiles`), the
+/// terrain analogue of vgeom's always-resident root page.
+///
+/// This drives the same scene through two genuinely different residency states —
+/// fully resident (level 0 + 1 + 2) versus punched out (the coarse pyramid alone,
+/// what the streamer publishes with the camera far away) — and byte-compares the
+/// **GI volume and probe buffers**, not the pixels. Pixels would be the wrong
+/// instrument: the two states legitimately *draw* different terrain detail, and
+/// only the voxel volume can say whether GI saw the same world.
+#[test]
+fn gi_terrain_voxelization_is_independent_of_residency() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let res = 33;
+    let full = streamed_terrain(res, 1.0);
+    // The far-camera residency: the coarse pyramid alone. `streamed_terrain`
+    // deliberately omits level-2 page (1,1), so this also covers a hole.
+    let coarse_only = RenderTerrain {
+        tiles: full
+            .tiles
+            .iter()
+            .filter(|t| t.key.lod == 2)
+            .cloned()
+            .collect(),
+        ..full.clone()
+    };
+    assert_eq!(full.max_lod(), 2);
+    assert_eq!(coarse_only.max_lod(), 2);
+    assert!(
+        coarse_only.tiles.len() < full.tiles.len(),
+        "the punched-out state must actually be smaller"
+    );
+
+    let scene_with = |terrain: RenderTerrain| {
+        let mut s = RenderScene {
+            grid_enabled: false,
+            terrains: vec![terrain],
+            ..Default::default()
+        };
+        s.instances.push(MeshInstance::lit(
+            DVec3::new(40.0, 12.0, 40.0),
+            Quat::IDENTITY,
+            Vec3::new(6.0, 4.0, 0.5),
+            [0.9, 0.9, 0.9, 1.0],
+            1,
+        ));
+        s.lights.push(RenderLight {
+            kind: LightKind::Directional,
+            color: [1.0, 0.98, 0.94],
+            intensity: 1.4,
+            direction: Vec3::new(0.3, 0.7, 0.6).normalize(),
+            ..RenderLight::default()
+        });
+        s.mark_dirty();
+        s
+    };
+    // Sitting on the terrain, where a residency difference is at its loudest.
+    let view = look_view(DVec3::new(40.0, 14.0, 60.0), DVec3::new(40.0, 6.0, 20.0));
+    let gi_on = gi_settings(40.0, 48, 1.0);
+
+    let gi_state = |terrain: RenderTerrain| -> (Vec<u8>, Vec<u8>, GiAudit) {
+        let scene = scene_with(terrain);
+        let target = HeadlessTarget::new(&gpu, W, H);
+        let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        renderer.set_settings(gi_on);
+        renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+        let _ = target.read_rgba(&gpu).expect("readback");
+        let r = renderer.gi_resources();
+        (r.read_voxels(&gpu), r.read_sh(&gpu), renderer.gi_audit())
+    };
+
+    let (vox_full, sh_full, audit_full) = gi_state(full.clone());
+    let (vox_coarse, sh_coarse, audit_coarse) = gi_state(coarse_only.clone());
+
+    // The terrain has to actually be reaching the voxelizer, or this test would
+    // pass on two empty volumes.
+    assert!(
+        audit_full.terrain_columns > 0,
+        "no terrain column reached the voxelizer ({audit_full:?})"
+    );
+    assert_eq!(audit_full.terrain_columns, audit_coarse.terrain_columns);
+    assert!(
+        vox_full.iter().any(|&b| b != 0),
+        "the voxel volume is empty — nothing was voxelized at all"
+    );
+
+    // Summarize rather than `assert_eq!` on the raw buffers: the volume is 2 MB at
+    // High, and a failing `assert_eq!` would print all of it twice.
+    let mismatch = |a: &[u8], b: &[u8]| -> Option<(usize, usize)> {
+        if a.len() != b.len() {
+            return Some((0, a.len().max(b.len())));
+        }
+        let differing = a.iter().zip(b).filter(|(x, y)| x != y).count();
+        let first = a.iter().zip(b).position(|(x, y)| x != y);
+        first.map(|i| (i, differing))
+    };
+    assert!(
+        mismatch(&vox_full, &vox_coarse).is_none(),
+        "the GI voxel volume changed with terrain residency — GI occupancy is a \
+         function of camera history ({:?} = (first differing byte, count of {}))",
+        mismatch(&vox_full, &vox_coarse),
+        vox_full.len()
+    );
+    assert!(
+        mismatch(&sh_full, &sh_coarse).is_none(),
+        "the GI probe buffer changed with terrain residency ({:?} of {})",
+        mismatch(&sh_full, &sh_coarse),
+        sh_full.len()
+    );
+
+    // Sanity that the two states are genuinely different inputs: they DRAW
+    // differently (fine pages carry detail the coarse ones decimated away), which
+    // is exactly why the comparison above is on the volume and not on pixels.
+    assert_ne!(
+        render_with(&gpu, &scene_with(full), &view, gi_on),
+        render_with(&gpu, &scene_with(coarse_only), &view, gi_on),
+        "the two residency states rendered identically — the fixture is not \
+         exercising a residency difference at all"
+    );
+}
+
+/// **A running time-of-day clock must not starve the amortization sweep** (P18.4,
+/// audit finding). The sweep key holds a *bucketed* sun (`gi::sun_bucket`, ≈0.50°);
+/// with raw `f32` bits it would reset every frame under a live clock, pinning the
+/// cursor in its first slice forever — amortization paying a full update's CPU
+/// cost for one slice of freshness, precisely where it was meant to help.
+///
+/// The cursor is otherwise unobservable from outside, which is why `GiAudit`
+/// carries it.
+#[test]
+fn gi_amortization_survives_a_running_time_of_day_clock() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut base = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    base.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.25, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(12.0, 0.5, 12.0),
+        [0.9, 0.9, 0.9, 1.0],
+        1,
+    ));
+    base.mark_dirty();
+    let view = look_view(DVec3::new(0.0, 4.0, 7.0), DVec3::ZERO);
+    let mut settings = gi_settings(40.0, 32, 1.0);
+    settings.gi.probe_budget = 256; // 2048 probes ⇒ an 8-frame sweep
+
+    // Drive the sun through `scene.sun` (the P17.1 projected sun, which is what a
+    // live TimeOfDay clock moves), stepping it by `deg_per_frame`.
+    let run = |deg_per_frame: f64, frames: u32| -> Vec<GiAudit> {
+        let target = HeadlessTarget::new(&gpu, W, H);
+        let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        renderer.set_settings(settings);
+        let mut out = Vec::new();
+        for f in 0..frames {
+            let deg = 40.0 + deg_per_frame * f as f64;
+            let r = deg.to_radians();
+            let mut scene = base.clone();
+            scene.sun = SunParams {
+                direction: Vec3::new(r.cos() as f32, r.sin() as f32, 0.3),
+                ..SunParams::default()
+            };
+            scene.mark_dirty();
+            // `scene.version` is part of the sweep key on purpose — a changed
+            // world must restart the sweep — so hold it fixed across frames and
+            // let the SUN be the only thing moving, which is the question here.
+            scene.version = base.version;
+            renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+            let _ = target.read_rgba(&gpu).expect("readback");
+            out.push(renderer.gi_audit());
+        }
+        out
+    };
+
+    // A real-time clock at rate = 1: 15°/hour, i.e. 1/14400° per frame at 60 fps.
+    // Sub-bucket by three orders of magnitude — the cursor must sweep freely.
+    let slow = run(1.0 / 14_400.0, 10);
+    let cursors: Vec<u32> = slow.iter().map(|a| a.probe_cursor).collect();
+    eprintln!("gi TOD sweep (rate 1): cursors {cursors:?}");
+    assert_eq!(
+        cursors[0], 256,
+        "the first frame should have taken one slice"
+    );
+    assert!(
+        cursors.iter().any(|&c| c > 256),
+        "the cursor never advanced past its first slice — a running clock is \
+         resetting the sweep every frame ({cursors:?})"
+    );
+    // Eight frames is a full sweep at this budget, so the cursor must wrap.
+    assert_eq!(
+        cursors[7], 0,
+        "the sweep did not complete in 8 frames ({cursors:?})"
+    );
+
+    // A sun that crosses a bucket every frame DOES reset — the key still does its
+    // job, it is only the resolution that changed.
+    let fast = run(2.0, 6);
+    let fast_cursors: Vec<u32> = fast.iter().map(|a| a.probe_cursor).collect();
+    eprintln!("gi TOD sweep (2°/frame): cursors {fast_cursors:?}");
+    assert!(
+        fast_cursors.iter().all(|&c| c == 256),
+        "a bucket-crossing sun did not restart the sweep ({fast_cursors:?})"
+    );
+}
+
+/// **The instance cap is gone** (P18.4 deliverable 1) — the regression this replaces
+/// is `MAX_GI_INSTANCES = 256`, which silently ignored everything past the 257th
+/// instance *in scene order*, so which geometry lit a room depended on the outliner.
+#[test]
+fn gi_lifts_the_instance_cap_and_reports_overflow() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    // 600 small boxes on a lattice inside a 24 m volume — comfortably past the
+    // retired 256 cap.
+    let mut id = 1u32;
+    for iz in 0..10 {
+        for iy in 0..6 {
+            for ix in 0..10 {
+                scene.instances.push(MeshInstance::lit(
+                    DVec3::new(ix as f64 - 4.5, iy as f64 - 2.5, iz as f64 - 4.5),
+                    Quat::IDENTITY,
+                    Vec3::splat(0.4),
+                    [0.7, 0.4, 0.3, 1.0],
+                    id,
+                ));
+                id += 1;
+            }
+        }
+    }
+    assert_eq!(scene.instances.len(), 600);
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0; 3],
+        intensity: 2.0,
+        direction: Vec3::new(0.3, 0.9, 0.3).normalize(),
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    // The camera centres the volume, so a 48 m extent covers the whole lattice —
+    // otherwise the volume clip, not the budget, would be what limits the count.
+    let view = look_view(DVec3::new(0.0, 3.0, 12.0), DVec3::ZERO);
+
+    // Generous budget: everything inside the volume is voxelized, nothing dropped.
+    let generous = gi_settings(48.0, 32, 1.0);
+    let (_, audit) = render_frames_with(&gpu, &scene, &view, generous, 1);
+    eprintln!("gi cap-lift audit: {audit:?}");
+    assert!(
+        audit.candidates > 256,
+        "the test scene did not exceed the retired cap ({} candidates)",
+        audit.candidates
+    );
+    assert_eq!(
+        audit.voxelized, audit.candidates,
+        "a generous budget still dropped geometry"
+    );
+    assert_eq!(audit.dropped, 0);
+    assert!(
+        audit.cell_entries >= audit.voxelized,
+        "every voxelized primitive must land in at least one macro cell"
+    );
+
+    // A deliberately tight budget REPORTS the overflow instead of swallowing it.
+    let mut tight = generous;
+    tight.gi.instance_budget = 100;
+    let (_, tight_audit) = render_frames_with(&gpu, &scene, &view, tight, 1);
+    assert_eq!(tight_audit.voxelized, 100);
+    assert_eq!(
+        tight_audit.dropped,
+        tight_audit.candidates - 100,
+        "the budget overflow was not reported"
+    );
+    assert!(tight_audit.dropped > 0);
+
+    // The bigger budget genuinely changes the lighting — proof that the extra
+    // primitives are doing work rather than being uploaded and ignored.
+    let (full_img, _) = render_frames_with(&gpu, &scene, &view, generous, 1);
+    let (tight_img, _) = render_frames_with(&gpu, &scene, &view, tight, 1);
+    assert_ne!(
+        full_img, tight_img,
+        "voxelizing 600 primitives lit the scene identically to voxelizing 100"
+    );
+}
+
+/// **Skinned and vgeom geometry reach the voxelizer** (P18.4 deliverable 1).
+///
+/// Before this, a character cast no bounce and a Nanite-class mesh might as well
+/// not have been in the room: the voxelizer saw rigid `MeshInstance` boxes and
+/// nothing else. The control in both halves is the **same geometry recoloured** —
+/// red versus grey — so the rasterized silhouette, the depth, and the direct
+/// lighting of the measured floor band are all identical and the only thing that
+/// can move it is what the probes saw.
+#[test]
+fn gi_sees_skinned_and_vgeom_geometry() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let gi_on = gi_settings(40.0, 48, 1.6);
+    let view = look_view(DVec3::new(0.0, 3.0, 7.0), DVec3::new(0.0, 0.6, -2.0));
+    let sun = RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.95],
+        intensity: 1.6,
+        direction: Vec3::new(0.0, 0.55, 0.84).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    };
+    let floor = MeshInstance::lit(
+        DVec3::new(0.0, -0.25, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(18.0, 0.5, 18.0),
+        [0.92, 0.92, 0.92, 1.0],
+        1,
+    );
+    // A floor band to the RIGHT of the occluder (which stands left of centre), so
+    // the band is bare floor in both renders.
+    let band = (
+        (W * 55 / 100)..(W * 85 / 100),
+        (H * 62 / 100)..(H * 88 / 100),
+    );
+
+    // ── skinned: per-joint boxes carried by the live palette ──
+    let (sk, clip, mesh) = skinned_cylinder();
+    let mesh = std::sync::Arc::new(mesh);
+    let skinned_scene = |color: [f32; 4]| {
+        let mut s = RenderScene {
+            grid_enabled: false,
+            skinned_meshes: vec![mesh.clone()],
+            ..Default::default()
+        };
+        s.instances.push(floor);
+        s.skinned.push(SkinnedInstance {
+            translation: DVec3::new(-2.2, 0.0, -1.5),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::splat(2.4),
+            color,
+            metallic: 0.0,
+            roughness: 0.6,
+            emissive: [0.0; 3],
+            id: 2,
+            mesh: 0,
+            palette: palette_at(&sk, &clip, 0.0),
+        });
+        s.lights.push(sun);
+        s.mark_dirty();
+        s
+    };
+    let red = skinned_scene([0.95, 0.05, 0.05, 1.0]);
+    let grey = skinned_scene([0.5, 0.5, 0.5, 1.0]);
+    let (_, audit) = render_frames_with(&gpu, &red, &view, gi_on, 1);
+    assert!(
+        audit.candidates >= 2,
+        "the skinned instance staged no joint boxes (audit {audit:?})"
+    );
+    let red_img = render_with(&gpu, &red, &view, gi_on);
+    let grey_img = render_with(&gpu, &grey, &view, gi_on);
+    let r_red = region_channel_ratio(&red_img, band.0.clone(), band.1.clone(), 0, 1);
+    let r_grey = region_channel_ratio(&grey_img, band.0.clone(), band.1.clone(), 0, 1);
+    eprintln!("gi skinned bounce: red {r_red:.4}, grey {r_grey:.4} (audit {audit:?})");
+    assert!(
+        r_red > r_grey + 0.002,
+        "a red skinned character bounced no red onto the floor \
+         (red {r_red:.4} vs grey {r_grey:.4}) — skinned geometry is invisible to GI"
+    );
+
+    // ── vgeom: the root page's meshlet spheres ──
+    let vmesh = Arc::new(dense_grid_mesh(24));
+    let vgeom_scene_at = |color: [f32; 4]| {
+        let mut s = RenderScene {
+            grid_enabled: false,
+            vgeom_assets: vec![VgeomAsset::from_mesh(VGEOM_ASSET, &vmesh).expect("index the vmesh")],
+            ..Default::default()
+        };
+        s.instances.push(floor);
+        // The displaced grid stood on edge: a wall facing the camera.
+        s.vgeom_instances.push(VgeomInstance::lit(
+            VGEOM_ASSET,
+            DVec3::new(-2.4, 1.6, -1.6),
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            Vec3::splat(1.8),
+            color,
+            2,
+        ));
+        s.lights.push(sun);
+        s.mark_dirty();
+        s
+    };
+    let vred = vgeom_scene_at([0.95, 0.05, 0.05, 1.0]);
+    let vgrey = vgeom_scene_at([0.5, 0.5, 0.5, 1.0]);
+    let (_, vaudit) = render_frames_with(&gpu, &vred, &view, gi_on, 1);
+    assert!(
+        vaudit.candidates >= 2,
+        "the vgeom instance staged no meshlet spheres (audit {vaudit:?})"
+    );
+    let vred_img = render_with(&gpu, &vred, &view, gi_on);
+    let vgrey_img = render_with(&gpu, &vgrey, &view, gi_on);
+    let v_red = region_channel_ratio(&vred_img, band.0.clone(), band.1.clone(), 0, 1);
+    let v_grey = region_channel_ratio(&vgrey_img, band.0.clone(), band.1.clone(), 0, 1);
+    eprintln!("gi vgeom bounce: red {v_red:.4}, grey {v_grey:.4} (audit {vaudit:?})");
+    assert!(
+        v_red > v_grey + 0.002,
+        "a red vgeom mesh bounced no red onto the floor \
+         (red {v_red:.4} vs grey {v_grey:.4}) — meshlet geometry is invisible to GI"
+    );
+}
+
+/// **Temporal amortization determinism** (P18.4 deliverable 3).
+///
+/// Three properties, which together are what "deterministic amortization" means:
+///
+/// 1. **cold == cold** — two fresh renderers running the same frame count agree
+///    (the schedule comes from a renderer-side cursor starting at 0, never from a
+///    frame index, so a warm-up frame cannot desync them);
+/// 2. **converged == converged** — once a full sweep has completed, a static scene
+///    reproduces across runs;
+/// 3. **converged == full update** — and it reproduces the *non*-amortized frame
+///    byte for byte, which is the strong statement: amortization is a schedule, not
+///    an approximation.
+#[test]
+fn gi_amortization_is_deterministic_and_converges() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.25, 0.5),
+        Quat::IDENTITY,
+        Vec3::new(12.0, 0.5, 11.0),
+        [0.90, 0.90, 0.90, 1.0],
+        1,
+    ));
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, 1.5, -4.0),
+        Quat::IDENTITY,
+        Vec3::new(11.0, 3.0, 0.5),
+        [0.90, 0.05, 0.05, 1.0],
+        2,
+    ));
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.95],
+        intensity: 2.0,
+        direction: Vec3::new(0.0, 0.5, 1.0).normalize(),
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(0.0, 4.5, 7.0), DVec3::new(0.0, 0.0, -1.5));
+
+    let full = gi_settings(40.0, 48, 2.5);
+    let mut amortized = full;
+    // 2048 probes at High / 256 per frame → a sweep completes in 8 frames.
+    amortized.gi.probe_budget = 256;
+
+    // (1) cold == cold, at a frame count that has NOT yet converged (3 of 8).
+    let (cold_a, audit_a) = render_frames_with(&gpu, &scene, &view, amortized, 3);
+    let (cold_b, audit_b) = render_frames_with(&gpu, &scene, &view, amortized, 3);
+    assert_eq!(cold_a, cold_b, "two cold amortized renders diverged");
+    assert_eq!(audit_a.probes_updated, 256);
+    assert_eq!(audit_a.probes_updated, audit_b.probes_updated);
+
+    // (2) converged == converged.
+    let (conv_a, _) = render_frames_with(&gpu, &scene, &view, amortized, 12);
+    let (conv_b, _) = render_frames_with(&gpu, &scene, &view, amortized, 12);
+    assert_eq!(conv_a, conv_b, "two converged amortized renders diverged");
+
+    // The sweep really is a transient: an unconverged frame differs from a
+    // converged one, or this test would prove nothing about convergence.
+    assert_ne!(
+        cold_a, conv_a,
+        "the amortized sweep had already converged at frame 3 — pick a smaller budget"
+    );
+
+    // (3) converged == full update, byte for byte.
+    let (full_img, full_audit) = render_frames_with(&gpu, &scene, &view, full, 12);
+    assert_eq!(full_audit.probes_updated, 16 * 8 * 16, "full update");
+    let (mean, max) = image_diff(&conv_a, &full_img, W, H);
+    assert!(
+        conv_a == full_img,
+        "a converged amortized frame is not the full-update frame \
+         (mean {mean}, max {max})"
+    );
+}
+
+/// **SSR off-path neutrality + the whole P18.4 knob set being inert while GI is
+/// off** (deliverables 4b and the off-path discipline the golden suite depends on).
+///
+/// A non-GI scene rendered with every new knob wound to a non-default value must be
+/// **byte-identical** to the same scene at the defaults. This is the property that
+/// lets 33 of the 36 pre-P18.4 goldens stay untouched.
+#[test]
+fn gi_v2_off_path_is_byte_identical() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        ..Default::default()
+    };
+    for (i, x) in [-2.0f64, 0.0, 2.4].into_iter().enumerate() {
+        scene.instances.push(MeshInstance {
+            metallic: 0.4,
+            roughness: 0.25,
+            ..MeshInstance::lit(
+                DVec3::new(x, 0.5, 0.0),
+                Quat::from_rotation_y(0.4),
+                Vec3::splat(1.0),
+                [0.7, 0.5, 0.4, 1.0],
+                i as u32 + 1,
+            )
+        });
+    }
+    scene.mark_dirty();
+    let view = overlook_view();
+
+    let base = render_with(&gpu, &scene, &view, RenderSettings::default());
+    let mut fiddled = RenderSettings::default();
+    fiddled.gi.ssr = true;
+    fiddled.gi.specular = false;
+    fiddled.gi.probe_budget = 37;
+    fiddled.gi.instance_budget = 3;
+    fiddled.gi.quality = GiQuality::Low;
+    fiddled.shadows.cascade_blend = 0.5;
+    assert!(!fiddled.gi.enabled && !fiddled.shadows.enabled);
+    let same = render_with(&gpu, &scene, &view, fiddled);
+    assert_eq!(
+        base, same,
+        "a GI-off scene moved when the P18.4 knobs changed — the off path is not neutral"
+    );
+
+    // ...and with GI ON but SSR off, the SSR tuning knobs are equally inert.
+    let gi_on = gi_settings(40.0, 32, 1.0);
+    let a = render_with(&gpu, &scene, &view, gi_on);
+    let mut tuned = gi_on;
+    tuned.gi.ssr_distance = 64.0;
+    tuned.gi.ssr_thickness = 0.9;
+    let b = render_with(&gpu, &scene, &view, tuned);
+    assert_eq!(a, b, "SSR tuning moved pixels while SSR is off");
+}
+
+/// **GI resources joined the `ResourceKey`** (P18.4 deliverable 7) — the GPU-side
+/// twin of `passes::gen_cache_tests::pointer_identity_changes_only_when_the_key_does`.
+///
+/// A [`GiQuality`] change recreates the voxel + SH buffers. If `EnvBinding` did not
+/// key on the GI generation, the lit passes would keep sampling the **previous**
+/// tier's SH buffer while the GI node wrote the new one — no validation error, no
+/// black frame (the old buffer is larger and stays alive), just a Low-quality frame
+/// that is byte-identical to the High one. Which is exactly what this asserts is not
+/// the case.
+#[test]
+fn gi_quality_switch_rebuilds_the_env_bind() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.25, 0.5),
+        Quat::IDENTITY,
+        Vec3::new(12.0, 0.5, 11.0),
+        [0.90, 0.90, 0.90, 1.0],
+        1,
+    ));
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, 1.5, -4.0),
+        Quat::IDENTITY,
+        Vec3::new(11.0, 3.0, 0.5),
+        [0.90, 0.05, 0.05, 1.0],
+        2,
+    ));
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.95],
+        intensity: 2.0,
+        direction: Vec3::new(0.0, 0.5, 1.0).normalize(),
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(0.0, 4.5, 7.0), DVec3::new(0.0, 0.0, -1.5));
+
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    let mut settings = gi_settings(40.0, 48, 2.5);
+    let mut frames = Vec::new();
+    for q in [
+        GiQuality::High,
+        GiQuality::Low,
+        GiQuality::Medium,
+        GiQuality::High,
+    ] {
+        settings.gi.quality = q;
+        renderer.set_settings(settings);
+        renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+        frames.push(target.read_rgba(&gpu).expect("readback"));
+    }
+    assert_ne!(
+        frames[1], frames[0],
+        "Low and High GI rendered identically — the env bind group is still \
+         holding the previous quality's SH buffer"
+    );
+    assert_ne!(
+        frames[2], frames[1],
+        "Medium and Low GI rendered identically"
+    );
+    assert_eq!(
+        frames[3], frames[0],
+        "returning to High did not reproduce the High frame"
+    );
+}
+
+/// **The GI sky comes from the P17.2 atmosphere** (P18.4 deliverable 2) — closing
+/// the tracked P17 deferral: the probes' ray-miss term was two authored gradient
+/// constants, so a heavy overcast dimmed the sun on the ground but not the bounce,
+/// and dawn and noon bounced the same colour.
+///
+/// Measured on a NEAR receiver (~3 m), where aerial perspective and height fog are
+/// numerically nothing, so what moves the floor is the probe field.
+#[test]
+fn gi_sky_radiance_comes_from_the_atmosphere() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let noon = 43_200.0;
+    let (mut scene, _) = tod_scene(noon);
+    // A near white floor + a small box, with NO analytic light: the only thing
+    // lighting the floor is the probe field, whose miss term is the sky.
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.25, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(10.0, 0.5, 10.0),
+        [0.9, 0.9, 0.9, 1.0],
+        1,
+    ));
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [0.0; 3],
+        intensity: 0.0,
+        direction: Vec3::Y,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(0.0, 1.6, 3.0), DVec3::new(0.0, 0.0, -1.0));
+    let gi_on = gi_settings(24.0, 64, 1.0);
+
+    let floor = (
+        (W * 30 / 100)..(W * 70 / 100),
+        (H * 65 / 100)..(H * 92 / 100),
+    );
+    let with_atmos = render_with(&gpu, &scene, &view, gi_on);
+
+    // The identical scene with the atmosphere switched off: the probes fall back
+    // to the authored gradient (the pre-P18.4 behaviour).
+    let mut gradient = scene.clone();
+    gradient.atmosphere.enabled = false;
+    gradient.mark_dirty();
+    let with_gradient = render_with(&gpu, &gradient, &view, gi_on);
+
+    let lit_sky = region_mean(&with_atmos, floor.0.clone(), floor.1.clone());
+    let lit_grad = region_mean(&with_gradient, floor.0.clone(), floor.1.clone());
+    eprintln!("gi sky source: atmosphere {lit_sky:.2}, gradient {lit_grad:.2}");
+    assert!(
+        lit_sky > lit_grad + 2.0,
+        "a real noon sky did not brighten the bounce over the dark authored \
+         gradient (atmosphere {lit_sky:.2} vs gradient {lit_grad:.2})"
+    );
+
+    // ...and the time of day propagates: a dusk sky bounces a different colour.
+    let dusk = 68_400.0; // 19:00 UTC
+    let (mut dusk_scene, _) = tod_scene(dusk);
+    dusk_scene.instances = scene.instances.clone();
+    dusk_scene.lights = scene.lights.clone();
+    dusk_scene.mark_dirty();
+    let at_dusk = render_with(&gpu, &dusk_scene, &view, gi_on);
+    let blue_noon = region_channel_ratio(&with_atmos, floor.0.clone(), floor.1.clone(), 2, 0);
+    let blue_dusk = region_channel_ratio(&at_dusk, floor.0.clone(), floor.1.clone(), 2, 0);
+    eprintln!("gi sky TOD: noon blue/red {blue_noon:.3}, dusk {blue_dusk:.3}");
+    assert!(
+        (blue_noon - blue_dusk).abs() > 0.02,
+        "the bounce colour did not track the time of day \
+         (noon {blue_noon:.3}, dusk {blue_dusk:.3})"
     );
 }
 

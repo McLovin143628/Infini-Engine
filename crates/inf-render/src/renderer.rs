@@ -252,10 +252,17 @@ pub struct EngineRenderer {
     frame_index: u64,
     /// Jittered view-proj we rendered last frame (TAA reprojection source).
     prev_view_proj: Option<[f32; 16]>,
-    /// Shared shadow + GI GPU resources (created once, independent of viewport
-    /// size; the shadow/GI graph nodes write them, the lit passes sample them).
+    /// Shared shadow GPU resources (created once, independent of viewport size;
+    /// the shadow graph node writes them, the lit passes sample them).
     shadow: ShadowResources,
+    /// Shared GI voxel/SH buffers + uniform. **Recreated** when
+    /// [`crate::gi::GiQuality`] changes (P18.4), which is why they carry a
+    /// generation the env bind-group cache keys on — exactly like the atmosphere.
     gi: GiResources,
+    /// Monotonic source of `gi.generation`.
+    next_gi_generation: u64,
+    /// What the GI voxelizer consumed on the last rendered frame (P18.4).
+    gi_audit: passes::gi::SharedGiAudit,
     /// P18.1 occlusion-audit counters (see [`EngineRenderer::set_vgeom_audit`]).
     vgeom_audit: VgeomAuditResources,
     /// P18.2 meshlet-streaming state, published by the vgeom node each frame.
@@ -319,9 +326,12 @@ impl EngineRenderer {
         // cascades + publishes the shared shadow uniform. A no-op (uniform only)
         // unless RenderSettings.shadows is enabled.
         graph.add(passes::shadow::ShadowNode::new(gpu));
-        // Dynamic GI (P13.3b): voxelize the scene + march the probe grid to SH.
+        // Dynamic GI (P13.3b, rebuilt P18.4): voxelize the scene (rigid + skinned
+        // + vgeom + terrain) and march the probe grid to SH. It must follow the
+        // atmosphere bake, whose sky-view LUT it now samples for the ray-miss term.
         // A no-op (uniform only) unless RenderSettings.gi is enabled.
-        graph.add(passes::gi::GiNode::new(gpu));
+        let gi_audit = passes::gi::SharedGiAudit::default();
+        graph.add(passes::gi::GiNode::new(gpu, gi_audit.clone()));
         // SSAO/TAA scene-depth prepass (rigid meshes only); a no-op unless SSAO
         // or TAA is enabled. Runs before SSAO so the AO can sample it, and before
         // the lit passes so they can multiply AO into their ambient term.
@@ -393,7 +403,9 @@ impl EngineRenderer {
             frame_index: 0,
             prev_view_proj: None,
             shadow: ShadowResources::new(gpu),
-            gi: GiResources::new(gpu),
+            gi: GiResources::new(gpu, settings.gi.quality, 1),
+            next_gi_generation: 2,
+            gi_audit,
             vgeom_audit: VgeomAuditResources::new(gpu),
             vgeom_stream,
             atmosphere,
@@ -446,6 +458,25 @@ impl EngineRenderer {
             .lock()
             .map(|r| r.clone())
             .unwrap_or_default()
+    }
+
+    /// What the P18.4 GI voxelizer consumed on the **last rendered frame**:
+    /// candidate primitives, how many fitted the per-frame budget, how many were
+    /// dropped, the macro-cell bin size, terrain columns and probes updated.
+    ///
+    /// Free and always on — CPU counters the pass already computes, like the P18.2
+    /// streaming report and unlike the GPU occlusion audit. Zeroed while GI is off.
+    /// `dropped > 0` is the signal that replaced `MAX_GI_INSTANCES`' silence.
+    pub fn gi_audit(&self) -> crate::gi::GiAudit {
+        self.gi_audit.lock().map(|a| *a).unwrap_or_default()
+    }
+
+    /// The shared GI resources (P18.4). Exposed for the gates that compare the GI
+    /// **inputs** rather than the pixels — the residency-independence gate reads
+    /// the voxel volume and the probe buffer back and byte-compares two residency
+    /// states that legitimately draw different terrain detail.
+    pub fn gi_resources(&self) -> &GiResources {
+        &self.gi
     }
 
     /// The shared atmosphere resources (P17.2). Exposed for the LUT-determinism
@@ -515,6 +546,18 @@ impl EngineRenderer {
                 self.next_atmosphere_generation,
             );
             self.next_atmosphere_generation += 1;
+        }
+
+        // The GI voxel/SH buffers are sized by GI quality, which a host may clamp
+        // down at any time (P18.4). Recreating them bumps `generation`, which is
+        // the third component of `passes::ResourceKey` — without it, the lit passes
+        // would keep a bind group pointing at the previous tier's buffers and
+        // sample a probe grid whose dimensions no longer match the uniform. That
+        // reads as *wrong pixels*, not a validation error, which is why the key
+        // exists.
+        if self.gi.quality != self.settings.gi.quality {
+            self.gi = GiResources::new(gpu, self.settings.gi.quality, self.next_gi_generation);
+            self.next_gi_generation += 1;
         }
 
         // Camera sub-pixel jitter (TAA only), applied to the projection.

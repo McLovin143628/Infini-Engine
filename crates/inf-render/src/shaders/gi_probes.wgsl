@@ -1,11 +1,30 @@
-// Dynamic-GI probe march (P13.3b): one compute thread per probe (16×8×16 grid)
-// marches `rays` fixed golden-spiral directions through the voxel volume, gathers
-// single-bounce radiance, and projects it to L1 spherical harmonics (4 coeffs ×
-// RGB) written to a storage buffer the lit passes sample. Deterministic (fixed
-// directions, no temporal jitter). Mirrors `crate::gi`.
+// Dynamic-GI probe march (P13.3b, rebuilt in P18.4): one compute thread per
+// **scheduled** probe marches `rays` fixed golden-spiral directions through the
+// voxel volume, gathers single-bounce radiance, and projects it to L1 spherical
+// harmonics (4 coeffs × RGB) written to a storage buffer the lit passes sample.
+// Deterministic (fixed directions, no temporal jitter). Mirrors `crate::gi`.
 //
-//   hit  → radiance = albedo × sun_radiance × sun_visibility(hit)   (single bounce)
-//   miss → radiance = sky gradient (horizon→zenith by ray.y)
+//   hit  → radiance = albedo × sun_radiance × sun_visibility(hit) + emissive
+//   miss → radiance = the P17.2 SKY-VIEW LUT in that direction, or the authored
+//          gradient when the scene has no atmosphere
+//
+// P18.4 changes, all visible in the two lines above plus the dispatch shape:
+//
+// * **Sky from the atmosphere.** `sched.w` selects the source. With a time-of-day
+//   authority the miss term samples the same Hillaire sky-view LUT the sky pass
+//   draws, so the bounce tracks dawn/noon/dusk instead of two authored constants —
+//   the tracked P17 deferral. Without one, the gradient path runs the identical
+//   arithmetic it always did, which is what keeps `gi_bleed`'s sky term stable.
+// * **Emissive injection.** A voxel's second word carries emissive radiance, added
+//   on hit — so an emissive surface lights the room with no analytic light at all.
+// * **Temporal amortization.** The dispatch covers `sched.y` probes starting at
+//   `sched.x` (wrapping modulo `sched.z`), a deterministic round-robin driven by a
+//   renderer-side cursor (`crate::gi::ProbeSchedule`), never by a frame index.
+//   Full update = `sched.x = 0, sched.y = sched.z`, which is what the goldens and
+//   the determinism gates render with.
+
+// The atmosphere library (medium at binding 3, LUTs at 4/5/6) is composed in
+// front of this file by `passes::gi_probe_shader`.
 
 struct GiData {
     vol_min: vec4<f32>,
@@ -16,12 +35,15 @@ struct GiData {
     sun_color: vec4<f32>,
     sky_zenith: vec4<f32>,
     sky_horizon: vec4<f32>,
+    params2: vec4<f32>,
+    sched: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> gi: GiData;
 @group(0) @binding(1) var<storage, read> voxels: array<u32>;
 @group(0) @binding(2) var<storage, read_write> sh: array<vec4<f32>>;
 
 const PI: f32 = 3.14159265359;
+const GI_EMISSIVE_MAX: f32 = 16.0;
 
 fn unpack_rgba8(v: u32) -> vec4<f32> {
     return vec4<f32>(
@@ -32,19 +54,39 @@ fn unpack_rgba8(v: u32) -> vec4<f32> {
     ) / 255.0;
 }
 
-fn voxel_at(c: vec3<i32>) -> vec4<f32> {
+// Mirrors `gi::unpack_emissive`.
+fn gi_unpack_emissive(v: u32) -> vec3<f32> {
+    let c = unpack_rgba8(v);
+    return c.rgb * (c.a * GI_EMISSIVE_MAX);
+}
+
+struct GiVoxel {
+    albedo: vec3<f32>,
+    solid: f32,
+    emissive: vec3<f32>,
+};
+
+fn voxel_at(c: vec3<i32>) -> GiVoxel {
     let dim = i32(gi.dims.x);
+    var out: GiVoxel;
+    out.albedo = vec3<f32>(0.0);
+    out.solid = 0.0;
+    out.emissive = vec3<f32>(0.0);
     if (any(c < vec3<i32>(0)) || any(c >= vec3<i32>(dim))) {
-        return vec4<f32>(0.0); // outside → empty
+        return out; // outside → empty
     }
     let d = u32(dim);
     let uc = vec3<u32>(c);
     let idx = (uc.z * d + uc.y) * d + uc.x;
-    return unpack_rgba8(voxels[idx]);
+    let a = unpack_rgba8(voxels[idx * 2u + 0u]);
+    out.albedo = a.rgb;
+    out.solid = a.a;
+    out.emissive = gi_unpack_emissive(voxels[idx * 2u + 1u]);
+    return out;
 }
 
-// Sample occupancy+albedo at render-local point `p`.
-fn sample_point(p: vec3<f32>) -> vec4<f32> {
+// Sample occupancy+albedo+emissive at render-local point `p`.
+fn sample_point(p: vec3<f32>) -> GiVoxel {
     let coord = (p - gi.vol_min.xyz) / gi.vol_min.w;
     return voxel_at(vec3<i32>(floor(coord)));
 }
@@ -71,7 +113,7 @@ fn sun_visibility(p: vec3<f32>) -> f32 {
     var pos = p + dir * vsize * 1.5; // step off the surface
     let steps = i32(dim);
     for (var s = 0; s < steps; s = s + 1) {
-        if (sample_point(pos).w > 0.5) {
+        if (sample_point(pos).solid > 0.5) {
             return 0.0;
         }
         pos = pos + dir * vsize;
@@ -79,14 +121,31 @@ fn sun_visibility(p: vec3<f32>) -> f32 {
     return 1.0;
 }
 
+// The miss term. `sched.w > 0.5` ⇒ the scene has a physical atmosphere and the
+// probes read the SAME sky-view LUT the sky pass draws (P18.4, closing the P17
+// deferral); otherwise the authored two-colour gradient, byte-identical to v1.
+fn gi_sky_radiance(dir: vec3<f32>) -> vec3<f32> {
+    if (gi.sched.w > 0.5) {
+        return atmos_sample_skyview(atmos.planet.z, dir);
+    }
+    let t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+    return mix(gi.sky_horizon.rgb, gi.sky_zenith.rgb, t);
+}
+
 @compute @workgroup_size(64)
 fn cs_probes(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = u32(gi.dims.y);
     let py = u32(gi.dims.z);
     let pz = u32(gi.dims.w);
-    let total = px * py * pz;
-    let pi = gid.x;
-    if (pi >= total) {
+    let total = max(u32(gi.sched.z), 1u);
+    let scheduled = u32(gi.sched.y);
+    if (gid.x >= scheduled) {
+        return;
+    }
+    // Round-robin slice, wrapping so no probe is starved when `total` is not a
+    // multiple of the budget.
+    let pi = (u32(gi.sched.x) + gid.x) % total;
+    if (pi >= px * py * pz) {
         return;
     }
     let ix = pi % px;
@@ -118,17 +177,19 @@ fn cs_probes(@builtin(global_invocation_id) gid: vec3<u32>) {
         let steps = i32(dim) * 2;
         for (var s = 0; s < steps; s = s + 1) {
             let v = sample_point(pos);
-            if (v.w > 0.5) {
+            if (v.solid > 0.5) {
                 let vis = sun_visibility(pos);
-                radiance = v.rgb * gi.sun_color.rgb * vis;
+                // Single bounce + injected emission. Emissive is added rather
+                // than multiplied by visibility: a light source does not need the
+                // sun's permission to glow.
+                radiance = v.albedo * gi.sun_color.rgb * vis + v.emissive;
                 hit = true;
                 break;
             }
             pos = pos + dir * vsize;
         }
         if (!hit) {
-            let t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
-            radiance = mix(gi.sky_horizon.rgb, gi.sky_zenith.rgb, t);
+            radiance = gi_sky_radiance(dir);
         }
         let b = sh_basis(dir);
         c0 = c0 + radiance * b.x;

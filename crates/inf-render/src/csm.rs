@@ -153,9 +153,75 @@ pub fn cascade_matrix(
     (ortho * view, texel)
 }
 
+/// The **cascade blend weight** (P18.4): how much of the *next* cascade a receiver
+/// at view distance `dist` mixes in, given the current cascade's range
+/// `[near_edge, far]` and a blend band of `blend` × that range.
+///
+/// `0` everywhere except the last `blend` fraction of the cascade, ramping linearly
+/// to `1` exactly at `far` — so the transition is continuous in `dist`, and the two
+/// cascades agree at the hand-over point instead of switching mid-surface. `blend =
+/// 0` returns `0` everywhere, which is the pre-P18.4 hard switch exactly.
+///
+/// Mirrors the arithmetic in `shadow_factor` (`shaders/env_lighting.wgsl`); it
+/// lives here so the continuity property is unit-tested with no GPU, which is the
+/// only way that property runs on every CI leg.
+pub fn cascade_blend_weight(dist: f32, near_edge: f32, far: f32, blend: f32) -> f32 {
+    let blend = blend.clamp(0.0, 0.5);
+    if blend <= 0.0 {
+        return 0.0;
+    }
+    let band = (far - near_edge).max(1e-4) * blend;
+    ((dist - (far - band)) / band.max(1e-4)).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of the P13 deferral this closes: the shadow factor must be
+    /// **continuous** across a cascade boundary, not a step.
+    #[test]
+    fn cascade_blend_is_continuous_and_reaches_both_ends() {
+        let (near_edge, far, blend) = (0.1f32, 10.0, 0.1);
+        // Zero well inside the cascade, one exactly at the hand-over.
+        assert_eq!(cascade_blend_weight(0.5, near_edge, far, blend), 0.0);
+        assert_eq!(cascade_blend_weight(8.0, near_edge, far, blend), 0.0);
+        assert!((cascade_blend_weight(far, near_edge, far, blend) - 1.0).abs() < 1e-6);
+        // Clamped past the end (the next cascade owns it from here).
+        assert_eq!(cascade_blend_weight(50.0, near_edge, far, blend), 1.0);
+
+        // Continuous: no step larger than the sample spacing's own slope anywhere
+        // across the band, INCLUDING at the band's opening edge (the seam a naive
+        // `if dist > threshold` implementation would leave).
+        let mut prev = cascade_blend_weight(0.0, near_edge, far, blend);
+        let mut d = 0.0f32;
+        while d <= far {
+            let w = cascade_blend_weight(d, near_edge, far, blend);
+            assert!((0.0..=1.0).contains(&w));
+            assert!(w + 1e-6 >= prev, "not monotonic at {d}");
+            assert!(
+                (w - prev) < 0.05,
+                "discontinuity of {} at distance {d}",
+                w - prev
+            );
+            prev = w;
+            d += 0.01;
+        }
+        assert!(prev > 0.99, "the band never reached the next cascade");
+    }
+
+    #[test]
+    fn zero_blend_is_the_pre_p18_4_hard_switch() {
+        for d in [0.0f32, 5.0, 9.999, 10.0, 100.0] {
+            assert_eq!(
+                cascade_blend_weight(d, 0.1, 10.0, 0.0),
+                0.0,
+                "blend 0 must never mix the next cascade in (at {d})"
+            );
+        }
+        // ...and a degenerate cascade range cannot divide by zero.
+        assert!(cascade_blend_weight(5.0, 10.0, 10.0, 0.1).is_finite());
+    }
 
     #[test]
     fn splits_are_monotonic_within_range() {

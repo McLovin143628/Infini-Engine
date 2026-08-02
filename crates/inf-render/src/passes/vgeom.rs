@@ -1979,6 +1979,13 @@ impl RenderNode for VgeomNode {
 /// [`FrameTargets`](crate::renderer::FrameTargets) view. They are therefore
 /// [`GenCache`](super::GenCache)d on `(targets.generation, hzb.generation)` —
 /// either moving alone must invalidate, exactly like `EnvBinding`.
+///
+/// A key of its **own** rather than [`super::ResourceKey`] (P18.4): the HZB embeds
+/// no atmosphere and no GI resource, so borrowing the shared key would rebuild
+/// these bind groups on every GI-quality clamp — a lie about what invalidates them,
+/// and precisely the kind of drift the `GenCache` extraction exists to prevent.
+type HzbKey = (u64, u64);
+
 struct HzbChain {
     copy_pipeline: wgpu::ComputePipeline,
     copy_bgl: wgpu::BindGroupLayout,
@@ -1990,8 +1997,8 @@ struct HzbChain {
     size: (u32, u32),
     /// Monotonic, bumped whenever the pyramid texture is (re)created.
     generation: u64,
-    copy_bg: super::GenCache<super::ResourceKey, wgpu::BindGroup>,
-    down_bgs: super::GenCache<super::ResourceKey, Vec<wgpu::BindGroup>>,
+    copy_bg: super::GenCache<HzbKey, wgpu::BindGroup>,
+    down_bgs: super::GenCache<HzbKey, Vec<wgpu::BindGroup>>,
 }
 
 impl HzbChain {
@@ -2099,7 +2106,7 @@ impl HzbChain {
     }
 
     /// Allocate (or reallocate) the pyramid for `size`. `targets_generation` only
-    /// participates through the caller's [`super::ResourceKey`]; the texture
+    /// participates through the caller's [`HzbKey`]; the texture
     /// itself is keyed on its size, and recreating it bumps `generation` so the
     /// cached bind groups — which hold views into it — are dropped.
     fn ensure(&mut self, gpu: &GpuContext, size: (u32, u32), _targets_generation: u64) {
@@ -2154,7 +2161,7 @@ impl HzbChain {
     fn build(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
         self.ensure(gpu, frame.targets.size, frame.targets.generation);
         let (w, h) = self.size;
-        let key: super::ResourceKey = (frame.targets.generation, self.generation);
+        let key: HzbKey = (frame.targets.generation, self.generation);
         let (copy_bgl, down_bgl, mip_views) = (&self.copy_bgl, &self.down_bgl, &self.mip_views);
 
         // Pass 0: min-over-samples of the MSAA scene depth → mip 0.

@@ -410,3 +410,110 @@ fn vgeom_two_pass_cost() {
 // enough triangles to produce a real meshlet DAG. This file used to carry its own
 // copy of the body.
 use inf_vgeom::test_support::dense_grid_mesh as vgeom_budget_mesh;
+
+/// **The P18.4 GI v2 budget**: what full-scene voxelization + the probe march +
+/// the specular term cost per [`GiQuality`] tier, measured against the same frame
+/// with GI off.
+///
+/// Following `sky_stack_cost_per_tier` and `vgeom_two_pass_cost`, this adds **no
+/// new ratchet constant** — §8 makes every tripwire a standing maintenance
+/// obligation, and the composed-frame `FRAME_BUDGET_MS` already covers this. What
+/// is asserted is that the heaviest configuration (High + SSR, over a 484-cube
+/// field that puts hundreds of primitives in the volume) stays inside that budget;
+/// the per-tier millisecond deltas are *printed* for the ROADMAP cost table,
+/// because an absolute number on one machine is not a contract.
+///
+/// The tier story below High is answered by construction as well as by
+/// measurement: `RenderTier::apply` clamps `GiQuality` down and turns GI **off**
+/// entirely on Low, which the pure assertion at the end pins.
+#[test]
+fn gi_v2_cost_per_tier() {
+    use inf_render::{GiQuality, GiSettings, RenderSettings, RenderTier};
+
+    let Ok(gpu) = GpuContext::headless() else {
+        eprintln!("SKIP gi_v2_cost: no GPU adapter");
+        return;
+    };
+    let info = gpu.adapter.get_info();
+    let software = info.device_type == wgpu::DeviceType::Cpu
+        || info.name.to_ascii_lowercase().contains("paravirtual");
+
+    let scene = cube_field(11); // 484 cubes — a real primitive load for the volume
+    let view = overlook_view();
+    let target = HeadlessTarget::new(&gpu, W, H);
+
+    let measure = |settings: RenderSettings| -> f64 {
+        let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        renderer.set_settings(settings);
+        for _ in 0..10 {
+            renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+        }
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        const N: u32 = 60;
+        let start = std::time::Instant::now();
+        for _ in 0..N {
+            renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        start.elapsed().as_secs_f64() * 1000.0 / f64::from(N)
+    };
+
+    let gi = |quality: GiQuality, probe_budget: u32, ssr: bool| RenderSettings {
+        gi: GiSettings {
+            enabled: true,
+            quality,
+            probe_budget,
+            ssr,
+            ..GiSettings::default()
+        },
+        ..RenderSettings::default()
+    };
+
+    let baseline = measure(RenderSettings::default());
+    let mut worst = 0.0f64;
+    for q in [GiQuality::Low, GiQuality::Medium, GiQuality::High] {
+        let ms = measure(gi(q, 0, false));
+        worst = worst.max(ms);
+        eprintln!(
+            "gi_v2 {q:?}: {ms:.3} ms/frame (+{:.3} over a GI-less {baseline:.3} ms) on {}",
+            ms - baseline,
+            info.name
+        );
+    }
+    // Amortization: the same tier with an eighth of the probes per frame.
+    let amortized = measure(gi(GiQuality::High, 256, false));
+    eprintln!(
+        "gi_v2 High amortized (256 probes/frame): {amortized:.3} ms/frame \
+         (+{:.3} over baseline)",
+        amortized - baseline
+    );
+    // The heaviest thing a project can ask for.
+    let with_ssr = measure(gi(GiQuality::High, 0, true));
+    worst = worst.max(with_ssr);
+    eprintln!(
+        "gi_v2 High + SSR: {with_ssr:.3} ms/frame (+{:.3} over baseline) on {}",
+        with_ssr - baseline,
+        info.name
+    );
+
+    // Below High, the tier clamp is what governs — by construction, not by luck.
+    let asked = gi(GiQuality::High, 0, true);
+    assert_eq!(
+        RenderTier::Medium.apply(asked).gi.quality,
+        GiQuality::Medium
+    );
+    assert!(!RenderTier::Low.apply(asked).gi.enabled);
+    assert!(!RenderTier::clamp_mobile(asked).gi.enabled);
+
+    if software {
+        // A CPU rasterizer's timing is not representative of anything; the frame
+        // pipeline having run at all is the whole claim here.
+        return;
+    }
+    assert!(
+        worst < FRAME_BUDGET_MS,
+        "GI v2 at its heaviest cost {worst:.3} ms, over the {FRAME_BUDGET_MS} ms \
+         frame budget on {} (§8: investigate, never raise it)",
+        info.name
+    );
+}

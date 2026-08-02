@@ -96,6 +96,13 @@ impl RenderTier {
         // 256x64 transmittance LUT can afford a 128^3 cloud volume, and letting
         // them disagree would only ever produce combinations nobody tests.
         settings.atmosphere.quality = settings.atmosphere.quality.clamp_to(self);
+        // The same shape for GI (P18.4): a tier never turns the *feature* on, and
+        // on Low it has already turned it off above — what this does is scale the
+        // voxel/probe geometry and the per-frame primitive budget for the tiers
+        // that keep it. `clamp_to` only ever lowers, so a High tier is a no-op and
+        // the byte-stable default (`GiQuality::High` == the pre-P18.4 geometry) is
+        // preserved.
+        settings.gi.quality = settings.gi.quality.clamp_to(self);
         settings
     }
 
@@ -411,6 +418,29 @@ mod tests {
         assert!(!m.shadows.enabled);
         // Still a valid HDR profile (the base render path is unchanged).
         assert!(m.hdr);
+    }
+
+    /// P18.4: the GI quality knob follows the atmosphere's rule — clamped down by
+    /// the tier, never up, and High is a no-op so the default GI geometry is the
+    /// pre-P18.4 one on any capable machine.
+    #[test]
+    fn tier_clamps_gi_quality_down_only() {
+        use crate::gi::GiQuality;
+        let s = RenderSettings::default();
+        assert_eq!(s.gi.quality, GiQuality::High);
+        assert_eq!(RenderTier::High.apply(s).gi.quality, GiQuality::High);
+        assert_eq!(RenderTier::Medium.apply(s).gi.quality, GiQuality::Medium);
+        // Low turns GI off entirely; the quality is still clamped (a total map).
+        let low = RenderTier::Low.apply(s);
+        assert!(!low.gi.enabled);
+        assert_eq!(low.gi.quality, GiQuality::Low);
+        // A caller that already asked for Low keeps Low on a High tier.
+        let mut want_low = s;
+        want_low.gi.quality = GiQuality::Low;
+        assert_eq!(RenderTier::High.apply(want_low).gi.quality, GiQuality::Low);
+        // Idempotent.
+        let m = RenderTier::Medium.apply(s);
+        assert_eq!(RenderTier::Medium.apply(m), m);
     }
 
     #[test]

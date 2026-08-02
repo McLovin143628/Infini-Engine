@@ -134,6 +134,16 @@ pub struct ShadowSettings {
     /// along its normal by this many cascade texels before projection (slope acne).
     /// Default 2.0.
     pub normal_bias: f32,
+    /// **Cascade blend band** (P18.4), as a fraction of each cascade's own view
+    /// range. Across the last `blend × range` metres of a cascade the receiver
+    /// additionally samples the *next* cascade and lerps between the two, so the
+    /// resolution change stops showing up as a hard seam across the ground — the
+    /// P13 deferral.
+    ///
+    /// `0.0` restores the pre-P18.4 hard switch **exactly**: the blend branch in
+    /// `shadow_factor` is not taken and the second PCF is never issued, so a
+    /// project that wants the old look pays nothing for the option. Default 0.1.
+    pub cascade_blend: f32,
 }
 
 impl Default for ShadowSettings {
@@ -144,6 +154,7 @@ impl Default for ShadowSettings {
             lambda: 0.7,
             depth_bias: 0.0015,
             normal_bias: 2.0,
+            cascade_blend: 0.1,
         }
     }
 }
@@ -172,6 +183,51 @@ pub struct GiSettings {
     /// Multiplier on the reconstructed SH irradiance before it feeds the ambient
     /// term. Default 1.0.
     pub intensity: f32,
+    /// Voxel/probe resolution + per-frame primitive budget (P18.4). Defaults to
+    /// [`GiQuality::High`], which is **exactly** the pre-P18.4 geometry (64³ /
+    /// 16×8×16), so the tiering itself moves no pixels;
+    /// [`RenderTier::apply`](crate::RenderTier::apply) clamps it **down** like every
+    /// other capability knob.
+    pub quality: crate::gi::GiQuality,
+    /// Ceiling on primitives voxelized per frame, before the
+    /// [`quality`](GiSettings::quality) cap is applied on top (the effective budget
+    /// is the smaller of the two). Overflow is *reported*
+    /// ([`EngineRenderer::gi_audit`](crate::EngineRenderer::gi_audit)), never
+    /// silently dropped: the nearest primitives are kept, so what is lost is
+    /// distant. Default 4096 — the P18.4 replacement for `MAX_GI_INSTANCES = 256`.
+    pub instance_budget: u32,
+    /// Probes re-integrated per frame (**temporal amortization**, P18.4).
+    ///
+    /// `0` = **full update**, every probe every frame — the default, and what the
+    /// goldens and determinism gates render with, because a full update makes a
+    /// frame a pure function of the scene with no convergence transient to reason
+    /// about. A non-zero budget sweeps the probe grid round-robin on a
+    /// renderer-side cursor ([`crate::gi::ProbeSchedule`]): two cold renders still
+    /// match, and a static scene's converged steady state is byte-identical to the
+    /// full update — but a *moving* camera trades probe latency for the saving,
+    /// which is why it is opt-in rather than default.
+    pub probe_budget: u32,
+    /// SH-derived **specular** (P18.4): the ambient specular term becomes radiance
+    /// reconstructed along the reflection vector instead of a flat
+    /// `ambient × f0 × 0.5`. Cheap (it reuses the probe fetch the diffuse term
+    /// already does) and therefore **on by default** — but only reachable when
+    /// [`enabled`](GiSettings::enabled) is set, so no non-GI golden is affected.
+    pub specular: bool,
+    /// **SSR v1** (P18.4): a screen-space raymarch against the scene depth that
+    /// re-anchors the specular probe fetch at the ray's hit point. **Off by
+    /// default** — it forces the depth prepass on
+    /// ([`needs_depth_prepass`](RenderSettings::needs_depth_prepass)) and the march
+    /// is 24 taps, so it is a deliberate opt-in; with it off the lit shaders take
+    /// the identical instruction stream.
+    pub ssr: bool,
+    /// SSR march length in metres. Default 8 m — contact reflections, not mirrors.
+    pub ssr_distance: f32,
+    /// SSR **relative** depth-thickness tolerance: a hit is accepted when the ray
+    /// sample sits behind the depth buffer by less than this fraction of its own
+    /// view distance. Relative rather than absolute so one number works at every
+    /// scale under the reverse-infinite-Z projection (which has no far plane to
+    /// linearize against). Default 0.15.
+    pub ssr_thickness: f32,
 }
 
 impl Default for GiSettings {
@@ -181,6 +237,13 @@ impl Default for GiSettings {
             extent: 40.0,
             rays: 48,
             intensity: 1.0,
+            quality: crate::gi::GiQuality::High,
+            instance_budget: 4096,
+            probe_budget: 0,
+            specular: true,
+            ssr: false,
+            ssr_distance: 8.0,
+            ssr_thickness: 0.15,
         }
     }
 }
@@ -304,8 +367,11 @@ impl RenderSettings {
     /// occlusion; it now min-reduces the live MSAA scene depth instead — the same
     /// rasterization the meshlets depth-test against, which is what makes the
     /// occlusion test provably subtractive (see [`crate::passes::vgeom`]).
+    /// **P18.4:** SSR appears here — the screen-space reflection march in the lit
+    /// passes reads this exact texture, so turning SSR on without the prepass would
+    /// march against whatever the last frame left behind.
     pub fn needs_depth_prepass(&self) -> bool {
-        self.ssao.enabled || self.taa
+        self.ssao.enabled || self.taa || (self.gi.enabled && self.gi.ssr)
     }
 }
 
@@ -427,6 +493,30 @@ mod tests {
         s2.ssao.enabled = false;
         s2.taa = true;
         assert!(s2.needs_depth_prepass());
+    }
+
+    /// P18.4 off-path discipline: the new GI knobs must not reach any pass while
+    /// GI itself is off — SSR in particular must not conjure a depth prepass for a
+    /// scene that never asked for GI.
+    #[test]
+    fn gi_v2_defaults_are_inert_until_gi_is_enabled() {
+        let mut s = RenderSettings::default();
+        assert!(!s.gi.enabled);
+        assert_eq!(s.gi.quality, crate::gi::GiQuality::High);
+        assert_eq!(s.gi.probe_budget, 0, "goldens render at full probe update");
+        assert!(s.gi.specular, "the cheap SH specular is the default");
+        assert!(!s.gi.ssr, "SSR is opt-in");
+
+        // SSR requested but GI off → no prepass, nothing changes.
+        s.gi.ssr = true;
+        assert!(!s.needs_depth_prepass());
+        // With GI on it forces the prepass it marches against.
+        s.gi.enabled = true;
+        assert!(s.needs_depth_prepass());
+
+        // The cascade blend defaults on but is inert while shadows are off.
+        assert_eq!(RenderSettings::default().shadows.cascade_blend, 0.1);
+        assert!(!RenderSettings::default().shadows.enabled);
     }
 
     #[test]

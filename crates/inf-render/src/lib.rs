@@ -47,6 +47,13 @@ pub use debug_draw::{
     collider_outline_2d, collider_outline_3d, ColliderOutline2D, ColliderOutline3D, DebugDraw,
     DebugVertex,
 };
+// The P18.4 GI v2 surface: the cost tier, the amortization schedule, the
+// voxelization audit, and the pure SH/terrain math the shaders mirror.
+pub use gi::{
+    bin_macro_cells, env_brdf_ab, intersects_volume, priority_order, sample_terrain_column,
+    sh_dominant_direction, sh_radiance, sun_bucket, voxelization_tiles, GiAudit, GiBounds,
+    GiQuality, ProbeSchedule, TerrainColumn, EMISSIVE_MAX, GI_DIM, MACRO_DIM, PROBE_DIMS,
+};
 pub use gizmo::{GizmoAxis, GizmoDelta, GizmoDrag, GizmoMode};
 pub use gpu::{create_instance, GpuContext};
 pub use headless::{HeadlessTarget, HEADLESS_FORMAT};
