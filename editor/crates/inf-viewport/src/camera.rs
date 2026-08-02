@@ -483,6 +483,51 @@ pub enum ToolMode {
     /// Scatter foliage instances onto the terrain under an LMB-drag brush (E-P6,
     /// terrain-only placement v1). Perspective-only, like [`ToolMode::Sculpt`].
     Foliage,
+    /// Paint per-sample **biome ids** onto the terrain under an LMB-drag brush
+    /// (P19.2). Perspective-only, like [`ToolMode::Sculpt`].
+    ///
+    /// A tool mode of its own rather than a [`SculptOp`] sub-mode — the Foliage
+    /// precedent, not the Paint one — because it edits a different layer with a
+    /// different meaning: its "strength" moves a hard boundary rather than a blend
+    /// (see `inf_terrain::biomepaint`), and it needs a *biome* picker where the
+    /// sculpt controls need a layer picker. Folding it into [`SculptOp`] would
+    /// have made [`SculptSettings::strength`] mean a third thing depending on the
+    /// op.
+    Biome,
+}
+
+/// Biome-brush configuration pushed from the viewport toolbar (P19.2). The host
+/// reads it when starting a stroke.
+///
+/// `radius` is world metres. `strength` is **not** a blend fraction: a biome id
+/// is categorical, so the brush writes a crisp edge and `strength` decides where
+/// that edge falls — see `inf_terrain::biomepaint::biome_claims`, which is the
+/// one place the rule lives. `biome` is the id painted; `0`
+/// (`inf_terrain::UNASSIGNED_BIOME`) is the eraser.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BiomeSettings {
+    /// Brush radius, world metres.
+    pub radius: f64,
+    /// Where the hard boundary falls, `[0, 1]` — `1` stamps the whole disk.
+    pub strength: f64,
+    /// The falloff curve the boundary contour is taken from.
+    pub falloff: SculptFalloff,
+    /// The biome id to write. `0` erases back to *unassigned*.
+    pub biome: u8,
+}
+
+impl Default for BiomeSettings {
+    fn default() -> Self {
+        Self {
+            radius: 8.0,
+            // Full strength by default: a biome stamp is what an author reaches
+            // for first, and a partial-strength default would look like a broken
+            // brush rather than a smaller one.
+            strength: 1.0,
+            falloff: SculptFalloff::Smooth,
+            biome: inf_terrain::UNASSIGNED_BIOME,
+        }
+    }
 }
 
 /// Foliage-brush configuration pushed from the viewport toolbar (E-P6). The host

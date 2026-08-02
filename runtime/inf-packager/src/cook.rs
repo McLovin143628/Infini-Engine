@@ -344,6 +344,19 @@ fn cook_one(input: CookInput, opts: &CookOptions) -> Result<CookOutput> {
             })?;
             raw
         }
+        // A `.inf_biomes` rides through verbatim too, but is **decoded** first
+        // (P19.2). Unlike a terrain this is cheap — a short list of names — and
+        // unlike a terrain it cannot be checked structurally at runtime: the
+        // per-sample ids are already in the tiles, so an ambiguous vocabulary
+        // surfaces as terrain that resolves to the wrong biome rather than as a
+        // load failure. `BiomeSet::migrate` runs the whole validation.
+        AssetKind::BiomeSet => {
+            inf_asset::decode::<inf_terrain::BiomeSet>(&raw).map_err(|e| CookError::BiomeSet {
+                guid,
+                message: e.to_string(),
+            })?;
+            raw
+        }
         // Data assets ride through verbatim (already deterministic bincode).
         _ => raw,
     };
@@ -495,6 +508,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     // simply cannot follow that edge, which would ship a level whose ground never
     // streams — silently. Say so.
     warnings.extend(dangling_terrain_refs(&db, &closure));
+    warnings.extend(dangling_biome_set_refs(&db, &closure));
 
     // ── 4/5/6. compile blueprints + rewrite levels + derive vmesh ───────────
     //
@@ -821,6 +835,10 @@ fn dependency_closure(db: &AssetDb, roots: &[AssetId]) -> Vec<AssetId> {
 ///   (`Motion::Clip` + blend entries) **and** its skeleton ref. This closes the
 ///   `state-machine → clip` edge so the clips a machine plays ship in the pack.
 /// * **AnimClip** (`.inf_anim`) — the skeleton GUID it was authored against.
+/// * **BiomeSet** (`.inf_biomes`) — the `.inf_pcg` graphs its biomes scatter with
+///   (P19.2's `pcg_graph`, the P19.3 hook). This closes the
+///   `level → biome set → graph` chain, so an explicit-roots cook of just a level
+///   ships the graphs its painted biomes will evaluate.
 fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
     let Some(entry) = db.get(id) else {
         return Vec::new();
@@ -847,6 +865,13 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
                 // `PackWriter::compresses_kind`) so the runtime pages individual
                 // tiles out of the mapping.
                 deps.extend(e.terrain.as_ref().and_then(|t| t.asset).map(AssetId));
+                // P19.2: a Terrain.biome_set pulls its `.inf_biomes` into the
+                // closure. The per-sample biome ids ride inside the tiles (they
+                // need no edge of their own); this edge is what ships the
+                // *vocabulary* those ids name — without it a cooked level's
+                // terrain would carry ids nothing can resolve, and P19.3's
+                // per-biome PCG dispatch would find no graphs at all.
+                deps.extend(e.terrain.as_ref().and_then(|t| t.biome_set).map(AssetId));
                 if let Some(sk) = &e.skeletal_mesh {
                     deps.extend(sk.skeleton.map(AssetId));
                     deps.extend(sk.mesh.map(AssetId));
@@ -884,6 +909,20 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
                 .map(|b| AssetId(uuid::Uuid::from_bytes(b)))
                 .into_iter()
                 .collect()
+        }
+        // P19.2: a `.inf_biomes` references the `.inf_pcg` graph each of its
+        // biomes scatters with. Empty today — nothing populates `pcg_graph` until
+        // P19.3 binds them — and that is exactly why the edge is derived here and
+        // now rather than when the first graph appears: every other referencing
+        // kind re-derives its edges from the payload, and a `biome_set` whose
+        // graphs the cook could not reach would ship a level whose biomes
+        // evaluate to nothing, silently, the same failure `Terrain.biome_set`
+        // itself has an advisory for.
+        AssetKind::BiomeSet => {
+            let Ok(set) = inf_asset::decode::<inf_terrain::BiomeSet>(&raw) else {
+                return Vec::new();
+            };
+            set.dependencies()
         }
         _ => Vec::new(),
     }
@@ -925,6 +964,47 @@ fn dangling_terrain_refs(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
             format!(
                 "level {level} references missing terrain asset {asset}; its tiles will not \
                  stream"
+            )
+        })
+        .collect()
+}
+
+/// Advisory: `Terrain.biome_set` references, in the levels being cooked, that
+/// name an asset the project database does not have (P19.2).
+///
+/// The exact twin of [`dangling_terrain_refs`], and non-fatal for the same
+/// reason: the level is still valid — its per-sample biome ids are stored on the
+/// tiles and cook fine — but nothing can *resolve* them, so the biome overlay is
+/// blank and P19.3's per-biome dispatch finds no graphs. That is a real silent
+/// hole, and the closure cannot follow the edge to complain about it on its own.
+/// Deduplicated + sorted so the report stays deterministic.
+fn dangling_biome_set_refs(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
+    let mut missing: BTreeSet<(AssetId, AssetId)> = BTreeSet::new();
+    for &id in closure {
+        let Some(entry) = db.get(id) else { continue };
+        if entry.kind() != AssetKind::Level {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&entry.path) else {
+            continue;
+        };
+        let Ok(level) = inf_scene::decode(&raw) else {
+            continue;
+        };
+        for e in &level.entities {
+            if let Some(set) = e.terrain.as_ref().and_then(|t| t.biome_set) {
+                if !db.contains(AssetId(set)) {
+                    missing.insert((id, AssetId(set)));
+                }
+            }
+        }
+    }
+    missing
+        .into_iter()
+        .map(|(level, set)| {
+            format!(
+                "level {level} references missing biome set {set}; its painted biome ids will \
+                 not resolve"
             )
         })
         .collect()

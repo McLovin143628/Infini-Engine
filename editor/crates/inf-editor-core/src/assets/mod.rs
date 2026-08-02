@@ -6,6 +6,7 @@
 //! dependency edges the importer discovers, and enforces the
 //! delete-with-references safety check that is the Phase 4 gate.
 
+pub mod biome_set;
 pub mod collections;
 pub mod data;
 pub mod import;

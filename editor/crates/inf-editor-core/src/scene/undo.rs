@@ -9,7 +9,7 @@
 
 use inf_ecs::components::{FoliageInstance, Sprite, Transform};
 use inf_ecs::PropValue;
-use inf_terrain::{DataMapDelta, HeightDelta, SplatDelta};
+use inf_terrain::{BiomeDelta, DataMapDelta, HeightDelta, SplatDelta};
 use uuid::Uuid;
 
 use crate::scene::serialize::{EntityRecord, LevelSettings};
@@ -101,6 +101,18 @@ pub(crate) enum EditCommand {
     /// redo/undo — redo replays `after` weights, undo replays `before` (and drops
     /// any weight buffers the stroke materialized from the sparse default). Boxed.
     PaintSplat { guid: Uuid, delta: Box<SplatDelta> },
+    /// One terrain **biome-paint** stroke (P19.2): a sparse before/after record of
+    /// the per-sample biome ids it wrote ([`BiomeDelta`]).
+    ///
+    /// A sibling of [`PaintSplat`](EditCommand::PaintSplat), not a field on it,
+    /// for the same reason `PaintSplat` is a sibling of
+    /// [`SculptTerrain`](EditCommand::SculptTerrain): the payloads are genuinely
+    /// different layers with different producers, and merging them would put an
+    /// always-empty buffer inside every stroke on the undo stack. Like both, the
+    /// live stroke already mutated the terrain, so `apply`/`revert` are pure
+    /// redo/undo — undo replays `before` and drops any id buffers the stroke
+    /// materialized from the sparse default. Boxed.
+    PaintBiome { guid: Uuid, delta: Box<BiomeDelta> },
     /// One erosion bake's **data-map** half (P19.1): a sparse before/after record
     /// of the flow / deposition / wear accumulators it moved ([`DataMapDelta`]).
     ///
@@ -180,6 +192,9 @@ impl EditCommand {
             EditCommand::PaintSplat { guid, delta } => {
                 doc.raw_apply_splat_delta(*guid, delta);
             }
+            EditCommand::PaintBiome { guid, delta } => {
+                doc.raw_apply_biome_delta(*guid, delta);
+            }
             EditCommand::WriteDataMaps { guid, delta } => {
                 doc.raw_apply_data_map_delta(*guid, delta);
             }
@@ -251,6 +266,9 @@ impl EditCommand {
             }
             EditCommand::PaintSplat { guid, delta } => {
                 doc.raw_revert_splat_delta(*guid, delta);
+            }
+            EditCommand::PaintBiome { guid, delta } => {
+                doc.raw_revert_biome_delta(*guid, delta);
             }
             EditCommand::WriteDataMaps { guid, delta } => {
                 doc.raw_revert_data_map_delta(*guid, delta);

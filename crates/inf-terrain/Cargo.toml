@@ -37,6 +37,10 @@ png = { workspace = true }
 exr = { workspace = true }
 half = { workspace = true }
 thiserror = { workspace = true }
+# The `.inf_biomes` BiomeSet (P19.2) carries a PCG-graph asset reference per biome
+# (the P19.3 hook), so the crate now names GUIDs directly rather than smuggling
+# them as `[u8; 16]`. Ring-0 → a leaf data crate; already the workspace pin.
+uuid = { workspace = true }
 # Streaming diagnostics: a page that fails to decode is warned about, never
 # silently turned into geometry.
 tracing = { workspace = true }
@@ -48,4 +52,3 @@ xxhash-rust = { workspace = true }
 # The `.inf_terrain` round trip through a real cooked pack (P16.3): build a pack
 # on disk, `PackReader::open` it, and slice tiles out of the mapping.
 tempfile = { workspace = true }
-uuid = { workspace = true }

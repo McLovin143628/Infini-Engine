@@ -5,6 +5,8 @@
  * HTML there; airspace rule). All state lives in `viewportStore`, which mirrors
  * each change to the native viewport over typed IPC.
  */
+import { linearToCssHex } from "../lib/biomeColor";
+import { terrain } from "../lib/ipc";
 import { useViewportStore } from "../stores/viewportStore";
 import { useShellStore } from "../stores/shellStore";
 import type { SculptFalloffDto } from "../bindings/SculptFalloffDto";
@@ -25,12 +27,14 @@ const VIEW_MODES: [ViewModeDto, string, string][] = [
   ["Lit", "Lit", "Full lighting (default)"],
   ["Unlit", "Unlit", "Flat albedo + emissive (no lighting)"],
   ["Wireframe", "Wireframe", "Edge wireframe (falls back to Unlit if the GPU can't raster lines)"],
+  ["Biomes", "Biomes", "Tint terrain by painted biome; other geometry unlit"],
 ];
 
 const TOOLS: [ToolModeDto, string, string][] = [
   ["Select", "Select", "Pick + transform (Q/W/E/R gizmos)"],
   ["Sculpt", "Sculpt", "Terrain height brush (perspective only)"],
   ["Foliage", "Foliage", "Scatter foliage onto the terrain (perspective only)"],
+  ["Biome", "Biome", "Paint named biomes onto the terrain (perspective only)"],
 ];
 
 const SCULPT_OPS: [SculptOpDto, string][] = [
@@ -53,6 +57,11 @@ const LAYER_SWATCHES: [string, string][] = [
   ["#aa9273", "Dirt"],
   ["#eef1f8", "Snow"],
 ];
+
+/** The *unassigned* biome's swatch (id 0, the eraser). Mirrors
+ *  `inf_terrain::UNASSIGNED_BIOME_COLOR` — a neutral mid grey, stated here
+ *  because id 0 is reserved and can never be a `BiomeDef` the backend sends. */
+const UNASSIGNED_SWATCH = linearToCssHex([0.22, 0.22, 0.24, 1.0]);
 
 /** Why the brush tools are off on a streamed terrain whose asset is read-only. */
 const READONLY_TERRAIN_HINT =
@@ -185,7 +194,8 @@ export default function ViewportToolbar() {
               // refusal left is an asset the editor cannot write, which the
               // viewport host also rejects; say so up front rather than letting
               // the stroke bounce.
-              const blocked = terrainStreamed && !terrainEditable && id === "Sculpt";
+              const blocked =
+                terrainStreamed && !terrainEditable && (id === "Sculpt" || id === "Biome");
               return (
                 <button
                   key={id}
@@ -229,6 +239,7 @@ export default function ViewportToolbar() {
           )}
           {toolMode === "Sculpt" && <SculptControls />}
           {toolMode === "Foliage" && <FoliageControls />}
+          {toolMode === "Biome" && <BiomeControls />}
         </>
       )}
     </div>
@@ -318,6 +329,157 @@ function FoliageControls() {
         />
       </label>
     </>
+  );
+}
+
+/**
+ * Biome picker / set picker / radius / strength / falloff for the Biome tool
+ * (P19.2).
+ *
+ * The swatches are the biome definitions of whichever `.inf_biomes` the terrain
+ * binds, so with nothing bound there is nothing to paint — that case renders a
+ * hint plus the set picker rather than an empty control group.
+ */
+function BiomeControls() {
+  const radius = useViewportStore((s) => s.biomeRadius);
+  const strength = useViewportStore((s) => s.biomeStrength);
+  const falloff = useViewportStore((s) => s.biomeFalloff);
+  const biomeId = useViewportStore((s) => s.biomeId);
+  const biomes = useViewportStore((s) => s.terrainBiomes);
+  const setRadius = useViewportStore((s) => s.setBiomeRadius);
+  const setStrength = useViewportStore((s) => s.setBiomeStrength);
+  const setFalloff = useViewportStore((s) => s.setBiomeFalloff);
+  const setBiomeId = useViewportStore((s) => s.setBiomeId);
+  const refreshBiomes = useViewportStore((s) => s.refreshBiomes);
+
+  const rebind = async (asset: string) => {
+    if (!biomes) return;
+    try {
+      await terrain.setBiomeSet(biomes.entity, asset === "" ? null : asset);
+    } catch (e) {
+      console.error("terrain.setBiomeSet failed", e);
+    }
+    // Re-read either way: a failed bind still leaves the picker showing a value
+    // the document never took.
+    await refreshBiomes();
+  };
+
+  return (
+    <>
+      {/* Set picker. Present even with nothing bound — it is the way to bind. */}
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Set
+        <select
+          value={biomes?.biome_set ?? ""}
+          disabled={!biomes}
+          title="The .inf_biomes asset this terrain's painted biome ids name"
+          onChange={(e) => void rebind(e.target.value)}
+          className="h-6 max-w-40 rounded border border-(--ink-border) bg-(--ink-bg-0) px-1 text-(--ink-text) disabled:opacity-40"
+        >
+          <option value="">(none)</option>
+          {(biomes?.available ?? []).map(([id, name]) => (
+            <option key={id} value={id}>
+              {name}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {biomes && biomes.biomes.length > 0 ? (
+        <div
+          className="flex items-center gap-1 rounded bg-(--ink-bg-0) p-0.5"
+          role="group"
+          aria-label="Biome"
+        >
+          {/* The eraser is id 0 — reserved, never a definition, so it is stated
+              here rather than coming from the set. */}
+          <BiomeSwatch
+            color={UNASSIGNED_SWATCH}
+            label="—"
+            title="Unassigned (erase): paints the reserved id 0 back over the brush"
+            selected={biomeId === 0}
+            onSelect={() => setBiomeId(0)}
+          />
+          {biomes.biomes.map((b) => (
+            <BiomeSwatch
+              key={b.id}
+              color={linearToCssHex(b.color)}
+              label={String(b.id)}
+              title={`${b.name} (id ${b.id})`}
+              selected={biomeId === b.id}
+              onSelect={() => setBiomeId(b.id)}
+            />
+          ))}
+        </div>
+      ) : (
+        <span className="text-(--ink-text-faint)">
+          {biomes ? "Bind a Biome Set to paint" : "No terrain in this level"}
+        </span>
+      )}
+
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Radius
+        <NumberField
+          value={Math.round(radius * 100) / 100}
+          min={0.5}
+          step={0.5}
+          onChange={setRadius}
+          title="Brush radius (world metres)"
+          suffix="m"
+        />
+      </label>
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Strength
+        <NumberField
+          value={strength}
+          min={0}
+          step={0.05}
+          onChange={setStrength}
+          title="Where the hard biome boundary falls, 0..1 — 1 stamps the whole disk"
+        />
+      </label>
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Falloff
+        <select
+          value={falloff}
+          title="The curve the boundary contour is taken from"
+          onChange={(e) => setFalloff(e.target.value as SculptFalloffDto)}
+          className="h-6 rounded border border-(--ink-border) bg-(--ink-bg-0) px-1 text-(--ink-text)"
+        >
+          {SCULPT_FALLOFFS.map((f) => (
+            <option key={f} value={f}>
+              {f}
+            </option>
+          ))}
+        </select>
+      </label>
+    </>
+  );
+}
+
+/** One biome swatch in the picker (also used for the id-0 eraser). */
+function BiomeSwatch(props: {
+  color: string;
+  label: string;
+  title: string;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={props.selected}
+      title={props.title}
+      onClick={props.onSelect}
+      className={`flex h-6 min-w-6 items-center justify-center rounded px-1 text-[10px] font-medium ${
+        props.selected
+          ? "ring-2 ring-(--ink-accent)"
+          : "ring-1 ring-(--ink-border) hover:ring-(--ink-text-dim)"
+      }`}
+      style={{ backgroundColor: props.color, color: "#111" }}
+    >
+      {props.label}
+    </button>
   );
 }
 

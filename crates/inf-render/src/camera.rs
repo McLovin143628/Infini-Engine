@@ -142,10 +142,13 @@ pub struct ViewUniforms {
     /// Camera **up** basis vector (render-local), xyz; w unused. See `cam_right`.
     pub cam_up: [f32; 4],
     /// View-mode flags (R-P2): `x` = unlit (1.0 ⇒ the lit scene passes return
-    /// albedo+emissive directly, skipping the light loop — drives both the Unlit
-    /// and Wireframe view modes); `yzw` reserved. Appended last so every pass that
-    /// declares the shorter `View` struct is unaffected and every pre-R-P2 golden
-    /// stays byte-identical (the renderer writes 0 here for the default Lit mode).
+    /// albedo+emissive directly, skipping the light loop — drives the Unlit,
+    /// Wireframe **and** Biomes view modes); `y` = biome overlay (P19.2: 1.0 ⇒ the
+    /// terrain pass tints by biome id instead of shading, set **only** by
+    /// `ViewMode::Biomes`, which sets `x` too); `zw` reserved. Appended last so
+    /// every pass that declares the shorter `View` struct is unaffected and every
+    /// pre-R-P2 golden stays byte-identical (the renderer writes 0 in both slots
+    /// for the default Lit mode).
     pub flags: [f32; 4],
 }
 
@@ -188,8 +191,9 @@ impl ViewUniforms {
             .to_array(),
             cam_right: cam_right.extend(0.0).to_array(),
             cam_up: cam_up.extend(0.0).to_array(),
-            // Default Lit: no unlit flag. The renderer overwrites `flags[0]` per
-            // frame from its active view mode (Unlit/Wireframe set it to 1.0).
+            // Default Lit: no view-mode flags. The renderer overwrites `flags[0]`
+            // (unlit) and `flags[1]` (biome overlay) per frame from its active view
+            // mode; Lit leaves both at 0.
             flags: [0.0; 4],
         }
     }
@@ -283,7 +287,8 @@ mod tests {
             (16 + 16 + 4 + 4 + 4 + 4 + 4 + 4 + 4) * 4
         );
         // The view-mode flags default to Lit (all zero) — this is what keeps every
-        // pre-R-P2 golden byte-identical (the shaders branch only on `flags.x`).
+        // pre-R-P2 golden byte-identical: `x` (unlit) and `y` (the P19.2 biome
+        // overlay) are both exactly 0, so every shader branch on them is false.
         assert_eq!(u.flags, [0.0; 4]);
         // Perspective packs mode flag 0; the origin's Y still populates the 2D
         // axis slot (only read by the grid shader in ortho).

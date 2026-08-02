@@ -12,15 +12,16 @@ use std::time::Duration;
 
 use inf_asset::{AssetId, AssetKind, AssetWatcher};
 use inf_editor_core::assets::{
-    data, material_instance, queue::tick as asset_tick, snapshot, sprite_sheet, AssetProject,
-    ImportProgress, ImportQueue,
+    biome_set, data, material_instance, queue::tick as asset_tick, snapshot, sprite_sheet,
+    AssetProject, ImportProgress, ImportQueue,
 };
 use inf_editor_core::ipc::{
-    AssetChanged, AssetRefDto, AssetSnapshot, DataAssetDto, DeleteResult, ImportEventDto,
-    MatOverridesDto, MatValuesDto, MaterialInstanceDto, SpriteSheetDto,
+    AssetChanged, AssetRefDto, AssetSnapshot, BiomeDefDto, BiomeSetDto, DataAssetDto, DeleteResult,
+    ImportEventDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto, SpriteSheetDto,
 };
 use inf_editor_core::thumbnail::{ThumbnailCache, Thumbnailer};
 use inf_material::MaterialAsset;
+use inf_terrain::{BiomeDef, BiomeSet};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// The debounce for the content watcher, and the background tick interval.
@@ -549,8 +550,9 @@ pub async fn asset_import(
     Ok(jobs)
 }
 
-/// Create a new authored asset: "mat" (Material), or a data kind
-/// "struct"/"enum"/"table" (P4.5). Returns the new GUID.
+/// Create a new authored asset: "mat" (Material), "biomeset" (a `.inf_biomes`
+/// seeded with the starter biomes, P19.2), or a data kind "struct"/"enum"/"table"
+/// (P4.5). Returns the new GUID.
 #[tauri::command]
 pub async fn asset_create(
     app: AppHandle,
@@ -561,6 +563,7 @@ pub async fn asset_create(
 ) -> Result<String, String> {
     let default_folder = match kind.as_str() {
         "mat" => "Materials",
+        "biomeset" => biome_set::BIOME_SET_FOLDER,
         _ => "Data",
     };
     let sub = folder.unwrap_or_else(|| default_folder.to_string());
@@ -569,6 +572,7 @@ pub async fn asset_create(
         "struct" => "NewStruct".into(),
         "enum" => "NewEnum".into(),
         "table" => "NewTable".into(),
+        "biomeset" => "NewBiomes".into(),
         _ => "New Asset".into(),
     });
     let id = state.with_project(|p| {
@@ -580,6 +584,7 @@ pub async fn asset_create(
             "struct" | "enum" | "table" => {
                 data::create_default(p, &kind, &dir, &name).map_err(|e| e.to_string())
             }
+            "biomeset" => biome_set::create_default(p, &dir, &name).map_err(|e| e.to_string()),
             other => Err(format!("cannot create asset kind: {other}")),
         }
     })?;
@@ -641,6 +646,105 @@ pub async fn asset_save_material_instance(
         material_instance::save_material_instance(p, id, overrides).map_err(|e| e.to_string())
     })?;
     emit_changed(&app, &state);
+    Ok(())
+}
+
+// ── biome sets (P19.2) ──────────────────────────────────────────────────────
+
+/// A biome definition as the inline editor sees it. `pub(super)` so the terrain
+/// commands can project the same shape into `TerrainBiomesDto` — one conversion,
+/// so the toolbar's swatches and the editor's rows can never disagree.
+pub(super) fn biome_def_dto(b: &BiomeDef) -> BiomeDefDto {
+    BiomeDefDto {
+        id: b.id,
+        name: b.name.clone(),
+        color: b.color,
+        splat_layer: b.splat_layer,
+        pcg_graph: b.pcg_graph.map(|g| AssetId(g).to_string()),
+        water_hint: b.water_hint,
+        structure_hint: b.structure_hint.clone(),
+    }
+}
+
+/// The inverse. An **unparseable** `pcg_graph` is an error rather than a silent
+/// `None`: dropping it would quietly break the biome's P19.3 scatter binding (and
+/// the sidecar dependency edge that keeps the graph alive through a
+/// delete-with-references check) at the moment the author believed they had set
+/// it. Absent (`null`) and empty are both simply "no graph".
+fn biome_def_from_dto(d: &BiomeDefDto) -> Result<BiomeDef, String> {
+    let pcg_graph = match d.pcg_graph.as_deref() {
+        Some(s) if !s.is_empty() => Some(
+            s.parse::<AssetId>()
+                .map_err(|e| format!("biome {} has an invalid pcg_graph {s:?}: {e}", d.id))?
+                .uuid(),
+        ),
+        _ => None,
+    };
+    Ok(BiomeDef {
+        id: d.id,
+        name: d.name.clone(),
+        color: d.color,
+        splat_layer: d.splat_layer,
+        pcg_graph,
+        water_hint: d.water_hint,
+        structure_hint: d.structure_hint.clone(),
+    })
+}
+
+/// Load a `.inf_biomes` for the inline editor. Errors when the asset is missing,
+/// is not a biome set, or fails to decode (the payload's `migrate` validates, so
+/// a hand-edited file surfaces here rather than as an ambiguous lookup later).
+#[tauri::command]
+pub async fn asset_get_biome_set(
+    id: String,
+    state: State<'_, AssetState>,
+) -> Result<BiomeSetDto, String> {
+    let asset_id = parse_id(&id)?;
+    state.with_project(|p| {
+        let set = biome_set::get(p, asset_id).map_err(|e| e.to_string())?;
+        // The DISPLAY name is the asset entry's — that is what the Content Drawer
+        // shows, what Rename changes, and what the toolbar's set picker lists. The
+        // payload's own `name` is only a fallback for an entry we cannot read.
+        let name = p
+            .db()
+            .get(asset_id)
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| set.name.clone());
+        Ok(BiomeSetDto {
+            id: id.clone(),
+            name,
+            biomes: set.biomes.iter().map(biome_def_dto).collect(),
+        })
+    })
+}
+
+/// Save an edited `.inf_biomes`.
+///
+/// [`biome_set::save`] **validates** — duplicate ids, the reserved id `0`, a blank
+/// name or an out-of-range splat layer are refused and the file is left alone —
+/// so the error string this returns is the message the editor surfaces.
+#[tauri::command]
+pub async fn asset_save_biome_set(
+    app: AppHandle,
+    id: String,
+    set: BiomeSetDto,
+    state: State<'_, AssetState>,
+) -> Result<(), String> {
+    let asset_id = parse_id(&id)?;
+    let mut biomes = Vec::with_capacity(set.biomes.len());
+    for b in &set.biomes {
+        biomes.push(biome_def_from_dto(b)?);
+    }
+    let payload = BiomeSet {
+        schema_version: inf_terrain::BIOME_SET_SCHEMA_VERSION,
+        name: set.name,
+        biomes,
+    };
+    state.with_project(|p| biome_set::save(p, asset_id, payload).map_err(|e| e.to_string()))?;
+    emit_changed(&app, &state);
+    // A colour edit changes what the Biomes overlay must tint with, so every
+    // terrain bound to this set has a stale palette the instant the save lands.
+    super::terrain::push_biome_palettes(&app, &state);
     Ok(())
 }
 

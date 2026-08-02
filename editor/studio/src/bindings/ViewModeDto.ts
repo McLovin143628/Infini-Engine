@@ -2,7 +2,7 @@
 
 /**
  * Viewport shading view mode (R-P2; `viewport_set_view_mode`). Serializes as the
- * tag string `"Lit"`/`"Unlit"`/`"Wireframe"`. `Wireframe` degrades to `Unlit` in
- * the renderer when the adapter lacks `POLYGON_MODE_LINE`.
+ * tag string `"Lit"`/`"Unlit"`/`"Wireframe"`/`"Biomes"`. `Wireframe` degrades to
+ * `Unlit` in the renderer when the adapter lacks `POLYGON_MODE_LINE`.
  */
-export type ViewModeDto = "Lit" | "Unlit" | "Wireframe";
+export type ViewModeDto = "Lit" | "Unlit" | "Wireframe" | "Biomes";

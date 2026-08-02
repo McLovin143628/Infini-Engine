@@ -155,7 +155,31 @@ use uuid::Uuid;
 ///   `Option<TerrainV8>`). v1..v14 payloads load unchanged, with every tile's
 ///   maps lifted to **empty** — never eroded, which is exactly what a v14 level
 ///   meant. The cost to an un-eroded terrain is one zero-length count per tile.
-pub const SCHEMA_VERSION: u32 = 15;
+/// * **v16** — P19.2: every terrain **tile** gained its sparse per-sample
+///   **biome id** layer (`Vec<u8>`; empty means every sample is
+///   [`inf_terrain::UNASSIGNED_BIOME`]), and [`Terrain`] itself gained a
+///   `biome_set: Option<Uuid>` reference to the `.inf_biomes` vocabulary those
+///   ids name.
+///
+///   **The tile layer is what forces the bump**, not the component field: bincode
+///   is positional, so an extra length-prefixed layer *inside a tile* is a
+///   wire-format change even though the field is `#[serde(default)]` — a v15
+///   payload fed to the grown tile reads past the end of its data maps and into
+///   the next tile. Fourth instance of the same law (v12, v13 and v15 were the
+///   others). `biome_set` alone would have been an ordinary append at the tail of
+///   one component, but it rides along for free once the bump is unavoidable.
+///
+///   So the pre-v16 heightfield is frozen as
+///   [`inf_terrain::TerrainDataFrozenV2`], the pre-v16 component as [`TerrainV15`]
+///   (which has **no** `biome_set` field — that is precisely what v16 added), and
+///   the pre-v16 entity record as [`EntityRecordV15`] (which carries `terrain` as
+///   `Option<TerrainV15>`, exactly as v9..v14 carry it as `Option<TerrainV14>`).
+///   v1..v15 payloads load unchanged, with every tile's biome ids lifted to
+///   **empty** and `biome_set: None` — an unpainted terrain with no biome
+///   vocabulary, which is exactly what a v15 level meant. The cost to an unpainted
+///   terrain is one zero-length count per tile plus one discriminant byte for the
+///   `None` biome set.
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// File-level simulation settings (schema v3+), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -411,7 +435,7 @@ impl RuntimeLevel {
         decode(bytes)
     }
 
-    /// Encode to the **current** schema (v13) — a deterministic bincode payload.
+    /// Encode to the **current** schema (v16) — a deterministic bincode payload.
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode(self)
     }
@@ -448,12 +472,25 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v15 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v16 file layout (current). `entities` reuses [`RuntimeEntity`].
 #[derive(Serialize, Deserialize)]
-struct SceneFileV15 {
+struct SceneFileV16 {
     schema_version: u32,
     title: String,
     entities: Vec<RuntimeEntity>,
+    #[serde(default)]
+    settings: RuntimeSettings,
+}
+
+/// A frozen schema-v15 file layout. It carried the **live** settings shape (v16
+/// did not touch [`RuntimeSettings`]), so only `entities` is repointed at the
+/// frozen [`EntityRecordV15`].
+#[derive(Serialize, Deserialize)]
+struct SceneFileV15 {
+    #[allow(dead_code)]
+    schema_version: u32,
+    title: String,
+    entities: Vec<EntityRecordV15>,
     #[serde(default)]
     settings: RuntimeSettings,
 }
@@ -1365,7 +1402,8 @@ struct TerrainV14 {
 
 impl TerrainV14 {
     /// Lift to the live [`Terrain`]: every tile's data maps come up **empty**
-    /// (never eroded), which is exactly what a pre-P19.1 level meant.
+    /// (never eroded) and its biome ids likewise, with no biome vocabulary
+    /// (`biome_set: None`) — exactly what a pre-P19.1 level meant.
     fn into_current(self) -> Terrain {
         Terrain {
             meters_per_sample: self.meters_per_sample,
@@ -1374,18 +1412,87 @@ impl TerrainV14 {
             layers: self.layers,
             macro_variation: self.macro_variation,
             asset: self.asset,
+            biome_set: None,
         }
     }
 
     /// Project a live [`Terrain`] back onto the frozen shape (the downgrade-bless
-    /// path). The data maps have no v14 home and are dropped — a lossy direction,
-    /// used only to regenerate old fixtures from a current sample.
+    /// path). The data maps have no v14 home and are dropped — as are P19.2's
+    /// biome ids and `biome_set` — a lossy direction, used only to regenerate old
+    /// fixtures from a current sample.
     #[cfg(test)]
     fn from_current(t: Terrain) -> Self {
         Self {
             meters_per_sample: t.meters_per_sample,
             tile_resolution: t.tile_resolution,
             data: inf_terrain::TerrainDataFrozenV1::from_current(&t.data),
+            layers: t.layers,
+            macro_variation: t.macro_variation,
+            asset: t.asset,
+        }
+    }
+}
+
+/// The **pre-v16** `Terrain` byte layout (schema v16 froze this when P19.2 gave
+/// every terrain tile its sparse per-sample **biome id** layer). Frozen entity
+/// record [`EntityRecordV15`] carries `terrain` as `Option<TerrainV15>`;
+/// [`TerrainV15::into_current`] lifts it.
+///
+/// Two things changed at v16 and this record is the negative image of both. The
+/// *tile* grew a length-prefixed `Vec<u8>` of biome ids — and bincode is
+/// positional, so that is a wire-format change however defaulted the field is: a
+/// v15 payload fed to the grown tile would read past the end of its data maps and
+/// into the next tile. That is the fourth instance of the v12/v13/v15 law, and it
+/// is the reason for the bump. The *component* separately gained
+/// `biome_set: Option<Uuid>`; note this record deliberately has **no such field**,
+/// because a v15 payload's bytes end at `asset`. Reading one back therefore always
+/// yields a terrain with no biome vocabulary and nothing painted, which is exactly
+/// what a v15 level meant.
+#[derive(Clone, Serialize, Deserialize)]
+struct TerrainV15 {
+    #[serde(default = "default_terrain_mps")]
+    meters_per_sample: f64,
+    #[serde(default = "default_terrain_resolution")]
+    tile_resolution: u32,
+    /// The **pre-v16** heightfield shape: tiles with erosion data maps but no
+    /// biome ids (generation 2 of the frozen-tile ladder).
+    #[serde(default)]
+    data: inf_terrain::TerrainDataFrozenV2,
+    #[serde(default = "inf_ecs::components::default_terrain_layers")]
+    layers: [TerrainLayer; inf_ecs::components::TERRAIN_LAYERS],
+    #[serde(default = "default_macro_variation")]
+    macro_variation: f64,
+    #[serde(default)]
+    asset: Option<Uuid>,
+}
+
+impl TerrainV15 {
+    /// Lift to the live [`Terrain`]: every tile's biome ids come up **empty**
+    /// (nothing painted, every sample [`inf_terrain::UNASSIGNED_BIOME`]) and
+    /// `biome_set` at `None` (no vocabulary to paint from) — exactly what a
+    /// pre-P19.2 level meant.
+    fn into_current(self) -> Terrain {
+        Terrain {
+            meters_per_sample: self.meters_per_sample,
+            tile_resolution: self.tile_resolution,
+            data: self.data.into_current(),
+            layers: self.layers,
+            macro_variation: self.macro_variation,
+            asset: self.asset,
+            biome_set: None,
+        }
+    }
+
+    /// Project a live [`Terrain`] back onto the frozen shape (the downgrade-bless
+    /// path). Both P19.2 additions are dropped — the per-tile biome ids and the
+    /// `biome_set` reference — a lossy direction, used only to regenerate old
+    /// fixtures from a current sample.
+    #[cfg(test)]
+    fn from_current(t: Terrain) -> Self {
+        Self {
+            meters_per_sample: t.meters_per_sample,
+            tile_resolution: t.tile_resolution,
+            data: inf_terrain::TerrainDataFrozenV2::from_current(&t.data),
             layers: t.layers,
             macro_variation: t.macro_variation,
             asset: t.asset,
@@ -1406,6 +1513,7 @@ fn default_macro_variation() -> f64 {
 impl TerrainV8 {
     /// Lift to the live [`Terrain`]: `asset` defaults to `None`, i.e. the inline
     /// `data` remains the terrain's only authority — what a pre-v9 level meant.
+    /// `biome_set` likewise (P19.2 did not exist).
     fn into_current(self) -> Terrain {
         Terrain {
             meters_per_sample: self.meters_per_sample,
@@ -1414,6 +1522,7 @@ impl TerrainV8 {
             layers: self.layers,
             macro_variation: self.macro_variation,
             asset: None,
+            biome_set: None,
         }
     }
 
@@ -3256,6 +3365,188 @@ impl EntityRecordV14 {
     }
 }
 
+/// The **pre-v16** entity byte layout (schema v16 froze this when P19.2 gave
+/// every terrain tile its sparse per-sample biome id layer, and [`Terrain`] its
+/// `biome_set` reference). Identical to the live [`RuntimeEntity`] except that
+/// `terrain` is typed as the frozen [`TerrainV15`] — v16 added **no** entity slot
+/// and moved none, so this is the `EntityRecordV14` shape of bump, not the
+/// `EntityRecordV10` shape.
+#[derive(Clone, Serialize, Deserialize)]
+struct EntityRecordV15 {
+    guid: Uuid,
+    name: String,
+    parent: Option<Uuid>,
+    transform: Transform,
+    visible: bool,
+    mesh: Option<MeshRef>,
+    material: Option<Material>,
+    light: Option<Light>,
+    camera: Option<Camera>,
+    #[serde(default)]
+    sprite: Option<Sprite>,
+    #[serde(default)]
+    tilemap: Option<Tilemap>,
+    #[serde(default)]
+    nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    text2d: Option<Text2D>,
+    #[serde(default)]
+    light_2d: Option<Light2D>,
+    #[serde(default)]
+    rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    actor: Option<Uuid>,
+    #[serde(default)]
+    terrain: Option<TerrainV15>,
+    #[serde(default)]
+    pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    root_motion: Option<RootMotion>,
+    #[serde(default)]
+    attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    audio_source: Option<AudioSource>,
+    #[serde(default)]
+    audio_listener: Option<AudioListener>,
+    #[serde(default)]
+    decal: Option<Decal>,
+    #[serde(default)]
+    volume: Option<Volume>,
+    #[serde(default)]
+    spline: Option<Spline>,
+    #[serde(default)]
+    foliage: Option<Foliage>,
+    #[serde(default)]
+    streaming_source: Option<StreamingSource>,
+    #[serde(default)]
+    always_loaded: Option<AlwaysLoaded>,
+    #[serde(default)]
+    time_of_day: Option<TimeOfDay>,
+    #[serde(default)]
+    sky_atmosphere: Option<SkyAtmosphere>,
+}
+
+impl EntityRecordV15 {
+    /// Lift a frozen v15 record to the live (v16) [`RuntimeEntity`]. Every slot
+    /// carries through unchanged; only the terrain is lifted, through
+    /// [`TerrainV15::into_current`].
+    fn into_runtime(self) -> RuntimeEntity {
+        RuntimeEntity {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain.map(TerrainV15::into_current),
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: self.decal,
+            volume: self.volume,
+            spline: self.spline,
+            foliage: self.foliage,
+            streaming_source: self.streaming_source,
+            always_loaded: self.always_loaded,
+            time_of_day: self.time_of_day,
+            sky_atmosphere: self.sky_atmosphere,
+        }
+    }
+
+    /// Project a live [`RuntimeEntity`] back onto the frozen v15 shape (the
+    /// downgrade-bless path that regenerates the committed v15 fixture). Only the
+    /// per-tile biome ids and the `biome_set` reference are lost — asserted as a
+    /// property by the editor codec's
+    /// `v15_entity_downgrade_is_lossless_except_for_the_biome_ids`.
+    #[cfg(test)]
+    fn from_current(r: RuntimeEntity) -> Self {
+        Self {
+            guid: r.guid,
+            name: r.name,
+            parent: r.parent,
+            transform: r.transform,
+            visible: r.visible,
+            mesh: r.mesh,
+            material: r.material,
+            light: r.light,
+            camera: r.camera,
+            sprite: r.sprite,
+            tilemap: r.tilemap,
+            nine_slice: r.nine_slice,
+            text2d: r.text2d,
+            light_2d: r.light_2d,
+            rigid_body_2d: r.rigid_body_2d,
+            collider_2d: r.collider_2d,
+            character_controller_2d: r.character_controller_2d,
+            rigid_body_3d: r.rigid_body_3d,
+            collider_3d: r.collider_3d,
+            character_controller_3d: r.character_controller_3d,
+            actor: r.actor,
+            terrain: r.terrain.map(TerrainV15::from_current),
+            pcg_volume: r.pcg_volume,
+            skeletal_mesh: r.skeletal_mesh,
+            anim_player: r.anim_player,
+            anim_state_machine: r.anim_state_machine,
+            root_motion: r.root_motion,
+            attached_to: r.attached_to,
+            joint_2d: r.joint_2d,
+            joint_3d: r.joint_3d,
+            audio_source: r.audio_source,
+            audio_listener: r.audio_listener,
+            decal: r.decal,
+            volume: r.volume,
+            spline: r.spline,
+            foliage: r.foliage,
+            streaming_source: r.streaming_source,
+            always_loaded: r.always_loaded,
+            time_of_day: r.time_of_day,
+            sky_atmosphere: r.sky_atmosphere,
+        }
+    }
+}
+
 /// Decode a `.inf_lvl` payload, lifting older schemas to [`RuntimeLevel`].
 pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     let (header, _): (Header, usize) = bincode::serde::decode_from_slice(bytes, bincode_config())
@@ -3463,8 +3754,22 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v15: {e}")))?;
             Ok(RuntimeLevel {
                 title: v15.title,
-                entities: v15.entities,
+                entities: v15
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV15::into_runtime)
+                    .collect(),
                 settings: v15.settings,
+            })
+        }
+        16 => {
+            let (v16, _): (SceneFileV16, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v16: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v16.title,
+                entities: v16.entities,
+                settings: v16.settings,
             })
         }
         found => Err(SceneError::SchemaTooNew {
@@ -3474,9 +3779,9 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     }
 }
 
-/// Encode a level to the current schema (v15) as a deterministic bincode payload.
+/// Encode a level to the current schema (v16) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV15 {
+    let file = SceneFileV16 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -6283,6 +6588,11 @@ mod tests {
     /// diffing files: an un-eroded tile grows by exactly one byte (the
     /// zero-length count of the sparse `maps` sequence), and an eroded one by its
     /// dense buffer.
+    ///
+    /// Priced **frozen against frozen** ([`TerrainV14`] vs [`TerrainV15`]) rather
+    /// than against the live component. The live type is a moving target — v16
+    /// grew it again — and a v15-vs-live measurement would silently start pricing
+    /// every later addition too. The frozen pair is what v15 actually was.
     #[test]
     fn v15_costs_one_byte_per_un_eroded_tile() {
         let frozen = v14_fixture_terrain();
@@ -6290,7 +6600,9 @@ mod tests {
         assert_eq!(tiles, 2);
         let v14_bytes = bincode::serde::encode_to_vec(&frozen, bincode_config()).unwrap();
         let live = frozen.clone().into_current();
-        let v15_bytes = bincode::serde::encode_to_vec(&live, bincode_config()).unwrap();
+        let v15_bytes =
+            bincode::serde::encode_to_vec(TerrainV15::from_current(live.clone()), bincode_config())
+                .unwrap();
         assert_eq!(
             v15_bytes.len(),
             v14_bytes.len() + tiles,
@@ -6304,27 +6616,274 @@ mod tests {
             .get_tile_mut((0, 0))
             .unwrap()
             .set_map_texel(4, 1, 1, [7.5, 0.5, 2.25]);
-        let dense = bincode::serde::encode_to_vec(&eroded, bincode_config()).unwrap();
+        let dense =
+            bincode::serde::encode_to_vec(TerrainV15::from_current(eroded), bincode_config())
+                .unwrap();
         assert_eq!(
             dense.len(),
             v15_bytes.len() + 4 * 4 * inf_terrain::DATA_MAP_CHANNELS * 4,
             "a materialized tile costs exactly its dense buffer"
         );
-        let (back, _): (Terrain, usize) =
+        let (back, _): (TerrainV15, usize) =
             bincode::serde::decode_from_slice(&dense, bincode_config()).unwrap();
         assert_eq!(
-            back.data.get_tile((0, 0)).unwrap().map_texel(4, 1, 1),
+            back.into_current()
+                .data
+                .get_tile((0, 0))
+                .unwrap()
+                .map_texel(4, 1, 1),
             [7.5, 0.5, 2.25]
         );
     }
 
-    /// **The two-ladder tripwire, scene half.** One frozen tile layout
-    /// (`inf_terrain::TerrainTileFrozenV1`) stands in for payloads from *two*
-    /// independently-versioned containers: this schema at **≤ v14** and the
-    /// `.inf_terrain` header at **≤ v2**. Neither container knows about the
-    /// other's numbering, so nothing but a pin stops one of them bumping past its
-    /// row and quietly decoding its own old payloads through the wrong wire type
-    /// — positionally, into the next record's bytes.
+    // ── schema v16 (P19.2 biome ids) ──────────────────────────────────────
+
+    /// An all-`None` frozen v15 entity — the struct-update base for
+    /// [`v15_scene_reference`]. Built through the downgrade hop so the field list
+    /// can never drift from the live record.
+    fn v15_rec(guid: Uuid, name: &str, parent: Option<Uuid>) -> EntityRecordV15 {
+        EntityRecordV15::from_current(v9_rec(guid, name, parent).into_runtime())
+    }
+
+    /// The **v15** terrain the fixture carries: two shared-edge tiles from one
+    /// **polynomial** height field (never `sin`/`cos` — the P14 bit-portability
+    /// law), a painted splat sample, a **materialized erosion data map** (the one
+    /// thing v15 could express that v14 could not), a non-default macro variation
+    /// and an asset reference. Its tiles have **no** biome ids and it has no
+    /// `biome_set`, because v15 could express neither; that is exactly what the
+    /// v16 lift has to reproduce — while the data maps must survive untouched, or
+    /// the fixture would only be re-proving the v15 bump.
+    ///
+    /// Spelled out in **literals**, and identical to the editor codec's
+    /// `v15_fixture_terrain` — the two committed fixtures are byte-compared by
+    /// the editor's `v15_fixture_matches_the_runtime_codecs_copy`.
+    fn v15_fixture_terrain() -> TerrainV15 {
+        let mut t = Terrain::configured(4, 2.0);
+        let f = |x: f64, z: f64| x * 0.5 - z * 0.25 + 3.0;
+        t.data.author_tile((0, 0), f);
+        t.data.author_tile((1, 0), f);
+        t.data
+            .get_tile_mut((0, 0))
+            .unwrap()
+            .set_weight_sample(4, 1, 2, [40, 100, 80, 35]);
+        t.data
+            .get_tile_mut((0, 0))
+            .unwrap()
+            .set_map_texel(4, 1, 1, [7.5, 0.5, 2.25]);
+        t.macro_variation = 0.25;
+        t.asset = Some(uuid::Uuid::from_u128(0xE_00AA));
+        TerrainV15::from_current(t)
+    }
+
+    /// A representative frozen schema-v15 scene — the provenance source for the
+    /// committed `scene_v15.inf_lvl`. Carries a terrain (the thing v16 changed)
+    /// plus a mesh and a light, so the pre-v16 entity byte layout is pinned by
+    /// committed bytes.
+    fn v15_scene_reference() -> SceneFileV15 {
+        use inf_ecs::components::Primitive;
+        let g = uuid::Uuid::from_u128;
+        SceneFileV15 {
+            schema_version: 15,
+            title: "V15 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV15 {
+                    mesh: Some(MeshRef {
+                        primitive: Primitive::Cube,
+                        asset: Some(g(0xE0A1)),
+                    }),
+                    material: Some(Material::default()),
+                    ..v15_rec(g(0xE001), "Cube", None)
+                },
+                EntityRecordV15 {
+                    terrain: Some(v15_fixture_terrain()),
+                    ..v15_rec(g(0xE002), "Terrain", None)
+                },
+                EntityRecordV15 {
+                    light: Some(Light {
+                        kind: LightKind::Directional,
+                        color: Color::WHITE,
+                        intensity: 2.0,
+                        ..Default::default()
+                    }),
+                    ..v15_rec(g(0xE003), "Sun", None)
+                },
+            ],
+            settings: RuntimeSettings {
+                gravity_2d: Vec2d::new(0.0, -18.0),
+                gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+                sim_hz: 90.0,
+                render: RenderSettingsRecord {
+                    exposure: 1.1,
+                    ..RenderSettingsRecord::default()
+                },
+                partition: PartitionSettings::default(),
+            },
+        }
+    }
+
+    /// Bless the committed `scene_v15.inf_lvl` from [`v15_scene_reference`] under
+    /// `INF_BLESS_FIXTURES=1` (inert otherwise). Never hand-edit the committed
+    /// bytes.
+    #[test]
+    fn bless_scene_v15_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v15_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 15);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v15.inf_lvl");
+        std::fs::write(&path, &bytes).unwrap();
+        eprintln!("blessed scene_v15 fixture: {}", path.display());
+    }
+
+    /// The committed schema-v15 fixture — written by the **pre-v16 codec**, before
+    /// every terrain tile grew its per-sample biome-id layer — still decodes here,
+    /// with the v15 content (erosion data maps included) preserved verbatim, every
+    /// tile's biome ids at the unpainted default, and no biome vocabulary. The
+    /// "old bytes load forever" gate for the v16 bump.
+    #[test]
+    fn v15_loads_and_lifts_the_biomes() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v15.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v15 fixture present");
+        assert_eq!(bytes[0], 15, "fixture is a genuine schema-v15 payload");
+        // Reproducibility lock: the frozen v15 writer still emits those exact bytes.
+        let rebuilt =
+            bincode::serde::encode_to_vec(v15_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "committed v15 fixture matches the frozen writer"
+        );
+
+        let level = RuntimeLevel::decode(&bytes).expect("v15 fixture decodes");
+        assert_eq!(level.title, "V15 Fixture Level");
+        assert_eq!(level.entities.len(), 3);
+        let by_name = |n: &str| level.entities.iter().find(|e| e.name == n).unwrap();
+
+        // The v15 content survives the frozen-record hop intact …
+        assert_eq!(
+            by_name("Cube").mesh.unwrap().asset,
+            Some(uuid::Uuid::from_u128(0xE0A1))
+        );
+        assert_eq!(by_name("Sun").light.unwrap().intensity, 2.0);
+        assert_eq!(level.settings.sim_hz, 90.0);
+
+        let t = by_name("Terrain").terrain.clone().expect("terrain slot");
+        assert_eq!(t.tile_resolution, 4);
+        assert_eq!(t.meters_per_sample, 2.0);
+        assert_eq!(t.macro_variation, 0.25);
+        assert_eq!(t.asset, Some(uuid::Uuid::from_u128(0xE_00AA)));
+        assert_eq!(t.data.tile_count(), 2);
+        assert_eq!(
+            t.data.get_tile((0, 0)).unwrap().weight_sample(4, 1, 2),
+            [40, 100, 80, 35],
+            "v15 could author splat weights, and they must survive"
+        );
+        // … the erosion maps above all: v15 is the generation that could express
+        // them, so their survival is what proves this is a v15→v16 hop and not a
+        // v14 one wearing a new number.
+        assert!(!t.data.data_maps_are_default());
+        assert_eq!(
+            t.data.get_tile((0, 0)).unwrap().map_texel(4, 1, 1),
+            [7.5, 0.5, 2.25],
+            "v15 could author erosion data maps, and they must survive"
+        );
+
+        // … and the two P19.2 additions lift to their documented defaults:
+        // nothing painted, and no vocabulary to have painted from.
+        assert!(
+            t.data.biomes_are_default(),
+            "a v15 level had no biome ids; the lift must not conjure any"
+        );
+        for (coord, tile) in t.data.tiles() {
+            assert_eq!(
+                tile.biomes_len(),
+                0,
+                "tile {coord:?} conjured a biome buffer"
+            );
+            assert_eq!(
+                tile.biome_sample(4, 1, 2),
+                inf_terrain::UNASSIGNED_BIOME,
+                "tile {coord:?} must read as unassigned everywhere"
+            );
+        }
+        assert_eq!(
+            t.biome_set, None,
+            "a v15 payload's bytes end at `asset`; there is no biome set to find"
+        );
+    }
+
+    /// The **wire cost** of the v16 addition, priced rather than asserted by
+    /// diffing files. Two independent contributions, both measured here:
+    ///
+    /// * one byte *per tile* — the zero-length count of the sparse `biomes`
+    ///   sequence, exactly as v15 charged for `maps`; and
+    /// * the component's own new `biome_set: Option<Uuid>`, which at `None` is a
+    ///   bare bincode `Option` discriminant. Priced separately below, on a
+    ///   **tile-less** terrain, so the two contributions cannot mask each other.
+    ///
+    /// A painted tile then pays `res²` bytes — one `u8` per sample, *not* `×4`
+    /// like the splat weights and not `×4×channels` like the erosion maps.
+    #[test]
+    fn v16_costs_one_byte_per_unpainted_tile() {
+        // Price `biome_set` alone: with no tiles in play, the whole delta between
+        // the frozen and live shapes is the component's new tail field.
+        let bare_v15 = TerrainV15::from_current(Terrain::configured(4, 2.0));
+        assert!(bare_v15.data.tiles.is_empty());
+        let biome_set_cost =
+            bincode::serde::encode_to_vec(bare_v15.clone().into_current(), bincode_config())
+                .unwrap()
+                .len()
+                - bincode::serde::encode_to_vec(&bare_v15, bincode_config())
+                    .unwrap()
+                    .len();
+
+        let frozen = v15_fixture_terrain();
+        let tiles = frozen.data.tiles.len();
+        assert_eq!(tiles, 2);
+        let v15_bytes = bincode::serde::encode_to_vec(&frozen, bincode_config()).unwrap();
+        let live = frozen.clone().into_current();
+        let v16_bytes = bincode::serde::encode_to_vec(&live, bincode_config()).unwrap();
+        assert_eq!(
+            v16_bytes.len(),
+            v15_bytes.len() + tiles + biome_set_cost,
+            "an unpainted terrain must cost exactly one extra byte per tile ({tiles}) \
+             for the empty biome sequence, plus {biome_set_cost} for `biome_set: None`"
+        );
+
+        // A painted tile pays its dense buffer — one `u8` per sample — and the
+        // round trip is exact.
+        let mut painted = live;
+        painted
+            .data
+            .get_tile_mut((0, 0))
+            .unwrap()
+            .set_biome_sample(4, 1, 1, 3);
+        let dense = bincode::serde::encode_to_vec(&painted, bincode_config()).unwrap();
+        assert_eq!(
+            dense.len(),
+            v16_bytes.len() + 4 * 4,
+            "a painted tile costs exactly its dense res² buffer of u8 biome ids"
+        );
+        let (back, _): (Terrain, usize) =
+            bincode::serde::decode_from_slice(&dense, bincode_config()).unwrap();
+        assert_eq!(back.data.get_tile((0, 0)).unwrap().biome_sample(4, 1, 1), 3);
+        assert_eq!(
+            back.data.get_tile((0, 0)).unwrap().biome_sample(4, 0, 0),
+            inf_terrain::UNASSIGNED_BIOME
+        );
+    }
+
+    /// **The two-ladder tripwire, scene half.** Each frozen tile layout stands in
+    /// for payloads from *two* independently-versioned containers, and neither
+    /// container knows about the other's numbering — so nothing but a pin stops
+    /// one of them bumping past its row and quietly decoding its own old payloads
+    /// through the wrong wire type, positionally, into the next record's bytes:
+    ///
+    /// | frozen tile shape | carries | `.inf_lvl` | `.inf_terrain` |
+    /// |---|---|---|---|
+    /// | `TerrainTileFrozenV1` | origin + heights + weights | v1..=v14 | v1..=v2 |
+    /// | `TerrainTileFrozenV2` | + erosion data maps | v15 | v3 |
+    /// | live `TerrainTile` | + per-sample biome ids | v16+ | v4+ |
     ///
     /// `inf-terrain` carries the asset half of this assertion
     /// (`frozen_tile_generation_is_pinned_to_both_ladders`); this is the scene
@@ -6332,25 +6891,50 @@ mod tests {
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {
         assert_eq!(
-            SCHEMA_VERSION, 15,
-            "the scene schema moved. Generation-1 frozen tiles cover .inf_lvl v1..=v14 \
-             and the live TerrainTile covers v15+. If the TILE layout changed again, add \
-             inf_terrain::TerrainTileFrozenV2 and a new frozen Terrain record; if only \
-             the scene changed, update this pin and TerrainTileFrozenV1's table."
+            SCHEMA_VERSION, 16,
+            "the scene schema moved. Generation-1 frozen tiles (TerrainTileFrozenV1, via \
+             TerrainV14) cover .inf_lvl v1..=v14, generation-2 (TerrainTileFrozenV2, via \
+             TerrainV15) covers v15, and the live TerrainTile covers v16+. If the TILE \
+             layout changed again, add inf_terrain::TerrainTileFrozenV3 and a new frozen \
+             Terrain record; if only the scene changed, update this pin and \
+             TerrainTileFrozenV1's generation table."
         );
-        // The mapping the pin is about: a v14 record's terrain slot decodes
-        // through the frozen type and lifts with empty maps; a v15 one carries
-        // the live type and keeps them.
+        // The mapping the pin is about, one rung at a time. Start from a terrain
+        // that exercises BOTH post-v14 layers.
         let mut live = fixture_terrain();
-        live.data
-            .get_tile_mut((0, 0))
-            .unwrap()
-            .set_map_texel(4, 1, 1, [1.0, 2.0, 3.0]);
+        {
+            let tile = live.data.get_tile_mut((0, 0)).unwrap();
+            tile.set_map_texel(4, 1, 1, [1.0, 2.0, 3.0]);
+            tile.set_biome_sample(4, 1, 1, 5);
+        }
         assert!(!live.data.data_maps_are_default());
-        let frozen = TerrainV14::from_current(live.clone());
+        assert!(!live.data.biomes_are_default());
+
+        // Rung 1 — generation 1 can carry neither addition.
+        let gen1 = TerrainV14::from_current(live.clone()).into_current();
         assert!(
-            frozen.into_current().data.data_maps_are_default(),
-            "the frozen generation cannot carry data maps — that is what makes it frozen"
+            gen1.data.data_maps_are_default() && gen1.data.biomes_are_default(),
+            "generation 1 cannot carry data maps or biome ids — that is what makes it frozen"
+        );
+
+        // Rung 2 — generation 2 carries the maps but still not the biome ids,
+        // and has no `biome_set` field at all.
+        let gen2 = TerrainV15::from_current(live.clone()).into_current();
+        assert!(
+            !gen2.data.data_maps_are_default(),
+            "generation 2 exists precisely to carry the erosion data maps"
+        );
+        assert_eq!(
+            gen2.data.get_tile((0, 0)).unwrap().map_texel(4, 1, 1),
+            [1.0, 2.0, 3.0]
+        );
+        assert!(
+            gen2.data.biomes_are_default(),
+            "generation 2 cannot carry biome ids — that is what makes it frozen"
+        );
+        assert_eq!(
+            gen2.biome_set, None,
+            "TerrainV15 has no biome_set field to round-trip"
         );
     }
 }

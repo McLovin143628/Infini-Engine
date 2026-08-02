@@ -31,22 +31,32 @@
 //!
 //! `terrain_spawn_streamed` then puts a `Terrain` entity referencing the new
 //! asset into the scene as one undoable edit — the "walk it immediately" step.
+//!
+//! # Biome binding (P19.2)
+//!
+//! `terrain_biomes` reads the vocabulary the Biome tool paints with (which
+//! `.inf_biomes` a terrain names, plus every set in the project for the picker)
+//! and `terrain_set_biome_set` rebinds it as one undo step. Both end by pushing
+//! the **overlay palettes** to the viewport — see [`push_biome_palettes`].
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use glam::DVec2;
-use inf_editor_core::assets::terrain_import;
+use inf_asset::AssetId;
+use inf_editor_core::assets::{biome_set, terrain_import};
 use inf_editor_core::erosion_gpu::ErosionHost;
 use inf_editor_core::ipc::{
-    DataMapExportDto, ErosionParamsDto, ErosionReportDto, HeightmapProbeDto, TerrainImportPlanDto,
-    TerrainImportResultDto, TerrainImportSettingsDto,
+    DataMapExportDto, ErosionParamsDto, ErosionReportDto, HeightmapProbeDto, TerrainBiomesDto,
+    TerrainImportPlanDto, TerrainImportResultDto, TerrainImportSettingsDto,
 };
+use inf_editor_core::scene::SceneDoc;
 use inf_terrain::HeightmapGrid;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
-use super::assets::AssetState;
+use super::assets::{biome_def_dto, AssetState};
 use super::scene::{emit_world_delta, SceneState};
 
 /// Holds the lazily-created erosion GPU host (shared across bakes).
@@ -353,4 +363,186 @@ pub async fn terrain_spawn_streamed(
     emit_world_delta(&app, &scene);
     tracing::info!("terrain: spawned streamed terrain {guid} from {asset_id}");
     Ok(guid.to_string())
+}
+
+// ── biome binding + the overlay palette push (P19.2) ─────────────────────────
+
+/// Every terrain entity in the document, in creation order.
+///
+/// [`SceneDoc::streamed_terrain_entities`] lists only *asset-backed* terrains,
+/// and an inline terrain paints biomes exactly like a streamed one — so this
+/// filters the document's creation order by "carries a `Terrain`", probed through
+/// the existing [`SceneDoc::terrain_data_and_origin`] accessor (a borrow, not a
+/// copy) rather than by adding a method to Ring 1.
+fn terrain_entities(doc: &SceneDoc) -> Vec<Uuid> {
+    doc.order()
+        .iter()
+        .copied()
+        .filter(|&g| doc.terrain_data_and_origin(g).is_some())
+        .collect()
+}
+
+/// Re-push every terrain's biome **overlay palette** to the viewport.
+///
+/// The viewport keeps one palette per terrain entity, and it has no way to
+/// resolve a `.inf_biomes` itself (Ring 1's asset project lives on this side), so
+/// every path that can change a binding or a set's colours has to re-push:
+/// `terrain_set_biome_set`, `asset_save_biome_set`, and `terrain_biomes` (cheap,
+/// and it means opening a level re-syncs the palettes on the toolbar's first poll
+/// without inventing an event for it).
+///
+/// An unbound — or missing, or unloadable — set pushes an **empty** palette,
+/// which clears the viewport's entry. Anything else would leave the Biomes view
+/// mode tinting with a vocabulary the terrain no longer names.
+///
+/// Three locks are reachable here (document, asset project, viewport handle) and
+/// none is ever held across a call into another: the document read is collected
+/// first, the asset project is entered once for the distinct sets, and only then
+/// does the viewport get written.
+pub(super) fn push_biome_palettes(app: &AppHandle, assets: &AssetState) {
+    let Some(scene) = app.try_state::<SceneState>() else {
+        return;
+    };
+    let bindings: Vec<(Uuid, Option<Uuid>)> = {
+        let Ok(doc) = scene.doc.lock() else { return };
+        terrain_entities(&doc)
+            .into_iter()
+            .map(|g| (g, doc.terrain_biome_set(g)))
+            .collect()
+    };
+    if bindings.is_empty() {
+        return;
+    }
+
+    // Resolve each DISTINCT bound set once, under a single short asset-lock hold
+    // (several terrains commonly share one set).
+    let mut palettes: HashMap<Uuid, Vec<[f32; 4]>> = HashMap::new();
+    let wanted: Vec<Uuid> = bindings.iter().filter_map(|&(_, set)| set).collect();
+    if !wanted.is_empty() {
+        let _ = assets.with_project(|proj| {
+            for set in wanted {
+                if palettes.contains_key(&set) {
+                    continue;
+                }
+                let palette = biome_set::get(proj, AssetId(set))
+                    .map(|s| s.palette())
+                    .unwrap_or_default();
+                palettes.insert(set, palette);
+            }
+            Ok(())
+        });
+    }
+
+    let Some(viewport) = app.try_state::<super::ViewportState>() else {
+        return;
+    };
+    for (entity, set) in bindings {
+        let palette = set
+            .and_then(|s| palettes.get(&s))
+            .cloned()
+            .unwrap_or_default();
+        viewport.set_biome_palette(entity, palette);
+    }
+}
+
+/// The biome vocabulary the viewport toolbar paints with, for one terrain.
+///
+/// `entity` names a terrain; `None` resolves to the **first** terrain in the
+/// level (creation order), which is what the toolbar wants — it polls this
+/// without a selection.
+///
+/// Deliberately total: a level with no terrain returns `null`, and a terrain with
+/// no bound set (or a set that has been deleted, or fails to decode) returns a
+/// DTO with `biome_set: null` and an empty `biomes` list. This command is polled
+/// every time the tool is entered, and "there is no vocabulary here" is an answer,
+/// not a failure — only a malformed entity GUID is an error.
+#[tauri::command]
+pub async fn terrain_biomes(
+    app: AppHandle,
+    entity: Option<String>,
+    scene: State<'_, SceneState>,
+    assets: State<'_, AssetState>,
+) -> Result<Option<TerrainBiomesDto>, String> {
+    let requested = match entity.as_deref() {
+        Some(s) => Some(Uuid::parse_str(s).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let resolved = {
+        let doc = scene.doc.lock().map_err(|e| e.to_string())?;
+        let terrains = terrain_entities(&doc);
+        let guid = match requested {
+            Some(g) => terrains.into_iter().find(|&t| t == g),
+            None => terrains.into_iter().next(),
+        };
+        guid.map(|g| (g, doc.terrain_biome_set(g)))
+    };
+    let Some((guid, bound)) = resolved else {
+        return Ok(None);
+    };
+
+    let dto = assets.with_project(|proj| {
+        let available = biome_set::list(proj)
+            .into_iter()
+            .map(|(id, name)| (id.to_string(), name))
+            .collect();
+        // The set's DISPLAY name is the asset entry's, not the payload's: renaming
+        // the asset is what an author sees in the drawer, and the picker below has
+        // to agree with it.
+        let loaded = bound.and_then(|s| {
+            let id = AssetId(s);
+            let set = biome_set::get(proj, id).ok()?;
+            let name = proj.db().get(id).map(|e| e.name.clone())?;
+            Some((id, name, set))
+        });
+        Ok(match loaded {
+            Some((id, name, set)) => TerrainBiomesDto {
+                entity: guid.to_string(),
+                biome_set: Some(id.to_string()),
+                biome_set_name: name,
+                biomes: set.biomes.iter().map(biome_def_dto).collect(),
+                available,
+            },
+            None => TerrainBiomesDto {
+                entity: guid.to_string(),
+                biome_set: None,
+                biome_set_name: String::new(),
+                biomes: Vec::new(),
+                available,
+            },
+        })
+    })?;
+
+    // Both locks are released; keep the viewport's palettes in step with what we
+    // just reported (this is the path that re-syncs them after a level open).
+    push_biome_palettes(&app, &assets);
+    Ok(Some(dto))
+}
+
+/// Bind (or clear, with `asset: null`) the `.inf_biomes` set a terrain's painted
+/// biome ids name — ONE undo step. Returns whether anything changed (rebinding to
+/// the same set records nothing).
+#[tauri::command]
+pub async fn terrain_set_biome_set(
+    app: AppHandle,
+    entity: String,
+    asset: Option<String>,
+    scene: State<'_, SceneState>,
+    assets: State<'_, AssetState>,
+) -> Result<bool, String> {
+    let guid = Uuid::parse_str(&entity).map_err(|e| e.to_string())?;
+    let set = match asset.as_deref() {
+        Some(s) => Some(s.parse::<AssetId>().map_err(|e| e.to_string())?.uuid()),
+        None => None,
+    };
+    let changed = {
+        let mut doc = scene.doc.lock().map_err(|e| e.to_string())?;
+        doc.edit_set_terrain_biome_set(guid, set)
+    };
+    if changed {
+        emit_world_delta(&app, &scene);
+    }
+    // Push unconditionally: a rebind that recorded nothing can still be the call
+    // that first arms an entity the viewport has no palette for.
+    push_biome_palettes(&app, &assets);
+    Ok(changed)
 }

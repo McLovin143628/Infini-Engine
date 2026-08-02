@@ -1201,6 +1201,8 @@ mod tests {
                 origin: DVec3::new(0.0, 0.0, 0.0),
                 heights: vec![height; (res * res) as usize],
                 weights: vec![[255, 0, 0, 0]; (res * res) as usize],
+                // Unpainted: GI reads heights + splat albedo, never biome ids.
+                biomes: Vec::new(),
                 height_bounds: (height, height),
                 version: 1,
             }],
@@ -1217,6 +1219,7 @@ mod tests {
                 RenderTerrainLayer::default(),
             ],
             macro_variation: 0.0,
+            biome_palette: Vec::new(),
         }
     }
 
@@ -1261,6 +1264,7 @@ mod tests {
             origin: DVec3::ZERO,
             heights: vec![9.0; (res * res) as usize],
             weights: vec![[255, 0, 0, 0]; (res * res) as usize],
+            biomes: Vec::new(),
             height_bounds: (9.0, 9.0),
             version: 1,
         });
@@ -1289,6 +1293,7 @@ mod tests {
             origin: DVec3::ZERO,
             heights: vec![9.0; (res * res) as usize],
             weights: vec![[255, 0, 0, 0]; (res * res) as usize],
+            biomes: Vec::new(),
             height_bounds: (9.0, 9.0),
             version: 1,
         });

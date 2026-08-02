@@ -17,6 +17,10 @@
 // The per-tile splat-weight texture (Rgba8Unorm; texel = the four normalized
 // layer weights), bound per patch beside the height texture (P10.4).
 @group(1) @binding(1) var weight_tex: texture_2d<f32>;
+// The per-tile biome-id texture (R8Uint; texel = one categorical biome id, 0 =
+// unassigned), bound per patch beside the two above (P19.2). Integer-typed on
+// purpose — see `load_biome`.
+@group(1) @binding(2) var biome_tex: texture_2d<u32>;
 
 // Terrain splat material (@group(2)): four layers + macro variation. Mirrors
 // `MaterialRaw` in passes/terrain.rs. `params[k].x` = roughness, `.y` = tex_scale.
@@ -26,6 +30,16 @@ struct TerrainMaterial {
     macro_amp: vec4<f32>,
 };
 @group(2) @binding(0) var<uniform> material: TerrainMaterial;
+
+// Biome id → debug colour (P19.2), INDEXED BY ID. Mirrors `BiomePaletteRaw` in
+// passes/terrain.rs: a fixed 256 slots so a `u8` id is always in range and the
+// fragment needs no bounds logic. Every undefined id (including the reserved 0)
+// was padded with the unassigned colour on the CPU side. A separate binding from
+// `material` so the layer material's bytes are untouched by this mode.
+struct BiomePalette {
+    colors: array<vec4<f32>, 256>,
+};
+@group(2) @binding(1) var<uniform> biome_palette: BiomePalette;
 
 // AO + cascaded shadows + dynamic GI ride the shared env bind group at @group(3)
 // (declared in env_lighting.wgsl, prepended by `lit_scene_shader`): `ao_tex`/`ao_smp`
@@ -100,6 +114,26 @@ fn sample_weights(uv: vec2<f32>, res: f32) -> vec4<f32> {
         w = vec4<f32>(1.0, 0.0, 0.0, 0.0);
     }
     return w;
+}
+
+// ── biome ids (P19.2) ────────────────────────────────────────────────────────
+
+// One biome id at integer texel `ij`, clamped to the tile (mirrors `load_weight`).
+// `textureLoad` on an integer texture: a biome id is CATEGORICAL, so it must never
+// be filtered — the "average" of ids 1 and 3 is not id 2, it is nonsense.
+fn load_biome(ij: vec2<i32>, res: f32) -> u32 {
+    let m = i32(res) - 1;
+    let c = clamp(ij, vec2<i32>(0, 0), vec2<i32>(m, m));
+    return textureLoad(biome_tex, c, 0).r;
+}
+
+// The biome id at unit patch coord `uv`, resolved NEAREST (round to the closest
+// sample) for the same reason: ids are labels, not quantities. This is the one
+// terrain input that is deliberately not bilinear, so a painted boundary shows as
+// the hard edge it actually is instead of a gradient through ids nobody painted.
+fn sample_biome(uv: vec2<f32>, res: f32) -> u32 {
+    let p = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * (res - 1.0);
+    return load_biome(vec2<i32>(round(p)), res);
 }
 
 // Cheap 2D value-noise (hash lattice → smooth interpolation), range [0, 1].
@@ -232,6 +266,28 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     albedo = albedo * (1.0 + material.macro_amp.x * macro_fbm);
     albedo = clamp(albedo, vec3<f32>(0.0), vec3<f32>(1.0));
     // ───────────────────────────────────────────────────────────────────────
+
+    // Biomes view mode (P19.2): tint by the per-sample biome id instead of by the
+    // splat material — the terrain reads as a map of the painted vocabulary. This
+    // is checked BEFORE the unlit branch because Biomes sets BOTH flags (`flags.x`
+    // makes every other kind of geometry in the frame render unlit); testing unlit
+    // first would swallow the tint.
+    //
+    // The colour is the palette entry, shaped by a wrapped N·L so the landform's
+    // relief still reads under a flat fill (0.55…1.0 of the tint). It is a pure
+    // function of the surface normal and the view's sun direction — no lights, no
+    // shadows, no GI, no fog — so the mode is deterministic frame to frame and
+    // between adapters, which is what makes it goldenable.
+    //
+    // Like `flags.x`, `flags.y` is EXACTLY 0.0 in every other mode, so this branch
+    // is present-but-false and the arithmetic below runs instruction-for-instruction
+    // unchanged — every pre-P19.2 terrain golden stays byte-stable.
+    if (view.flags.y > 0.5) {
+        let id = sample_biome(in.uv, res);
+        let tint = biome_palette.colors[id].rgb;
+        let ndl_b = clamp(dot(n, normalize(view.sun_dir.xyz)), 0.0, 1.0);
+        return vec4<f32>(tint * (0.55 + 0.45 * ndl_b), 1.0);
+    }
 
     // Unlit view mode (R-P2): return the splat-blended albedo directly, skipping
     // the sun/ambient/spec lighting below. Terrain carries no emissive term. The

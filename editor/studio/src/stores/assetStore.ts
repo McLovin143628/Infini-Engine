@@ -50,6 +50,8 @@ interface AssetState {
   editing: string | null;
   /** Id of the material instance open in the override editor, or null (E-P2). */
   editingInstance: string | null;
+  /** Id of the `.inf_biomes` open in the biome-set editor, or null (P19.2). */
+  editingBiomeSet: string | null;
   favorites: string[]; // favorited folder paths
   /** Named content collections (persisted backend state) (E-P8). */
   collections: CollectionDto[];
@@ -72,6 +74,8 @@ interface AssetState {
   closeEditor: () => void;
   openInstanceEditor: (id: string) => void;
   closeInstanceEditor: () => void;
+  openBiomeSetEditor: (id: string) => void;
+  closeBiomeSetEditor: () => void;
   toggleFavorite: (path: string) => void;
 
   // ── collections (E-P8) ─────────────────────────────────────────────────
@@ -86,7 +90,7 @@ interface AssetState {
   loadThumbnail: (id: string) => void;
   importFiles: (sources: string[], dest?: string | null) => Promise<void>;
   createMaterial: () => Promise<void>;
-  createAsset: (kind: "mat" | "struct" | "enum" | "table") => Promise<void>;
+  createAsset: (kind: "mat" | "struct" | "enum" | "table" | "biomeset") => Promise<void>;
   deleteAsset: (id: string, force?: boolean) => Promise<DeleteResult>;
   rename: (id: string, name: string) => Promise<void>;
   duplicate: (id: string) => Promise<void>;
@@ -115,6 +119,7 @@ export const useAssetStore = create<AssetState>((set, get) => ({
   selected: null,
   editing: null,
   editingInstance: null,
+  editingBiomeSet: null,
   favorites: [],
   collections: [],
   activeCollection: null,
@@ -165,10 +170,17 @@ export const useAssetStore = create<AssetState>((set, get) => ({
   setSearch: (q) => set({ search: q }),
   setKindFilter: (kind) => set((s) => ({ kindFilter: s.kindFilter === kind ? null : kind })),
   setSelected: (id) => set({ selected: id }),
-  openEditor: (id) => set({ editing: id, editingInstance: null, selected: id }),
+  // The three inline editors share the drawer's content area, so opening one
+  // closes the others (the drawer renders whichever slot is set).
+  openEditor: (id) =>
+    set({ editing: id, editingInstance: null, editingBiomeSet: null, selected: id }),
   closeEditor: () => set({ editing: null }),
-  openInstanceEditor: (id) => set({ editingInstance: id, editing: null, selected: id }),
+  openInstanceEditor: (id) =>
+    set({ editingInstance: id, editing: null, editingBiomeSet: null, selected: id }),
   closeInstanceEditor: () => set({ editingInstance: null }),
+  openBiomeSetEditor: (id) =>
+    set({ editingBiomeSet: id, editing: null, editingInstance: null, selected: id }),
+  closeBiomeSetEditor: () => set({ editingBiomeSet: null }),
 
   toggleFavorite: (path) =>
     set((s) => ({
@@ -274,8 +286,11 @@ export const useAssetStore = create<AssetState>((set, get) => ({
   createAsset: async (kind) => {
     try {
       const id = await assetsIpc.create(kind);
-      // Materials have no editor; data kinds open the inline editor.
-      set(kind === "mat" ? { selected: id } : { selected: id, editing: id });
+      // Materials have no inline editor (they open the graph panel); data kinds
+      // and biome sets each open their own.
+      if (kind === "mat") set({ selected: id });
+      else if (kind === "biomeset") get().openBiomeSetEditor(id);
+      else get().openEditor(id);
     } catch (e) {
       console.error("asset.create failed", e);
     }

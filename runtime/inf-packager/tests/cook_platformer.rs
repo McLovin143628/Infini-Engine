@@ -422,6 +422,39 @@ fn streaming_terrain() -> inf_terrain::TerrainData {
 /// Scaffold a project holding one level whose `Terrain` streams from a
 /// `.inf_terrain` asset, plus that asset. Returns the terrain asset's GUID.
 fn make_streaming_terrain_project(root: &Path) -> AssetId {
+    make_streaming_terrain_project_with(root, BiomeSetFixture::None)
+}
+
+/// What (if anything) the scaffolded level's `Terrain.biome_set` points at
+/// (P19.2). The three cases are the three cook behaviours worth pinning: no
+/// edge at all, a resolvable edge that must be *followed*, and a dangling edge
+/// that must be *advised about*.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BiomeSetFixture {
+    /// No `biome_set` — the pre-P19.2 shape.
+    None,
+    /// A real `.inf_biomes` on disk, with NO sidecar dependency declared — so the
+    /// cook can only reach it by walking `Terrain.biome_set`.
+    Present,
+    /// A `biome_set` GUID that names nothing. Non-fatal: the level still cooks,
+    /// but the painted ids resolve to nothing, and the cook must say so.
+    Dangling,
+    /// A real `.inf_biomes` whose first biome names a `.inf_pcg` — the P19.3
+    /// hook. Neither sidecar declares a dependency, so the `.inf_pcg` is only
+    /// reachable by walking `Terrain.biome_set` and then the SET's own payload.
+    PresentWithGraph,
+}
+
+/// The GUID the [`BiomeSetFixture::PresentWithGraph`] scatter graph is written
+/// under.
+const BIOME_GRAPH_ID: AssetId = AssetId(uuid::Uuid::from_u128(0x1902_0200));
+
+/// The GUID a [`BiomeSetFixture::Present`] set is written under.
+const BIOME_SET_ID: AssetId = AssetId(uuid::Uuid::from_u128(0x1902_0100));
+/// The GUID a [`BiomeSetFixture::Dangling`] level points at — deliberately absent.
+const MISSING_BIOME_SET_ID: AssetId = AssetId(uuid::Uuid::from_u128(0x1902_0DEA));
+
+fn make_streaming_terrain_project_with(root: &Path, biomes: BiomeSetFixture) -> AssetId {
     ProjectManifest::new("Terrain Streaming", "blank-3d")
         .save(root)
         .unwrap();
@@ -475,6 +508,13 @@ fn make_streaming_terrain_project(root: &Path) -> AssetId {
             actor: None,
             terrain: Some(inf_ecs::components::Terrain {
                 asset: Some(terrain_id.uuid()),
+                biome_set: match biomes {
+                    BiomeSetFixture::None => None,
+                    BiomeSetFixture::Present | BiomeSetFixture::PresentWithGraph => {
+                        Some(BIOME_SET_ID.uuid())
+                    }
+                    BiomeSetFixture::Dangling => Some(MISSING_BIOME_SET_ID.uuid()),
+                },
                 ..inf_ecs::components::Terrain::configured(9, 2.0)
             }),
             pcg_volume: None,
@@ -498,6 +538,35 @@ fn make_streaming_terrain_project(root: &Path) -> AssetId {
         }],
         settings: Default::default(),
     };
+    // The `.inf_biomes` (P19.2), when the fixture wants one. Its sidecar declares
+    // no dependencies either, so — exactly like the terrain — the only way the
+    // cook can find it is by walking the level's persisted `Terrain.biome_set`.
+    if matches!(
+        biomes,
+        BiomeSetFixture::Present | BiomeSetFixture::PresentWithGraph
+    ) {
+        let mut set = inf_terrain::BiomeSet::starter();
+        if biomes == BiomeSetFixture::PresentWithGraph {
+            set.biomes[0].pcg_graph = Some(BIOME_GRAPH_ID.uuid());
+            // The cook treats a `.inf_pcg` payload as opaque (it rides through
+            // verbatim), so a stub body is enough to prove the EDGE is walked —
+            // which is the whole claim here — without pulling `inf-pcg` in for a
+            // dependency test.
+            let graph = b"stub .inf_pcg payload".to_vec();
+            let gpath = content.join("BiomeScatter.inf_pcg");
+            std::fs::write(&gpath, &graph).unwrap();
+            AssetSidecar::new(BIOME_GRAPH_ID, AssetKind::Pcg, ContentHash::of(&graph))
+                .save(&gpath)
+                .unwrap();
+        }
+        let bytes = inf_asset::encode(&set).unwrap();
+        let path = content.join("World.inf_biomes");
+        std::fs::write(&path, &bytes).unwrap();
+        AssetSidecar::new(BIOME_SET_ID, AssetKind::BiomeSet, ContentHash::of(&bytes))
+            .save(&path)
+            .unwrap();
+    }
+
     let level_bytes = level.encode().unwrap();
     let level_path = content.join("World.inf_lvl");
     std::fs::write(&level_path, &level_bytes).unwrap();
@@ -565,6 +634,138 @@ fn cook_with_a_terrain_asset_is_deterministic() {
         std::fs::read(b.join(DEFAULT_PACK_NAME)).unwrap(),
         "two cooks of one terrain project are byte-identical"
     );
+}
+
+// ── P19.2: the Terrain.biome_set → .inf_biomes cook edge ─────────────────────
+
+/// **The edge is followed.** A level whose terrain names a `.inf_biomes` ships
+/// that set in the pack, found only by walking `Terrain.biome_set` — the sidecar
+/// declares no dependency at all.
+///
+/// Without this edge a cooked level would carry per-sample biome ids with no
+/// vocabulary to resolve them: the overlay is blank and P19.3's per-biome
+/// dispatch finds no graphs, with nothing on disk saying anything is wrong.
+#[test]
+fn cook_follows_the_biome_set_edge_and_compresses_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    make_streaming_terrain_project_with(&proj, BiomeSetFixture::Present);
+    let out = dir.path().join("out");
+
+    let report = cook(&proj, &out, &CookOptions::default()).expect("cook succeeds");
+    assert_eq!(report.asset_count, 3, "level + .inf_terrain + .inf_biomes");
+    assert_eq!(report.kinds.get("biome_set"), Some(&1));
+    assert!(
+        report.warnings.iter().all(|w| !w.contains("biome set")),
+        "a resolvable edge must not advise: {:?}",
+        report.warnings
+    );
+
+    let reader = PackReader::open(&out.join(DEFAULT_PACK_NAME)).unwrap();
+    let entry = reader
+        .entry(BIOME_SET_ID)
+        .expect("biome set packed via the edge");
+    assert_eq!(entry.kind, AssetKind::BiomeSet);
+
+    // …and it decodes back to the set that was authored. (A biome set is authored
+    // data, not a streaming page, so — unlike the terrain — it takes the ordinary
+    // compression policy; whether zstd actually shrinks this particular tiny
+    // payload is not the claim, so the round trip is.)
+    let payload = reader.read(BIOME_SET_ID).unwrap();
+    let set: inf_terrain::BiomeSet = inf_asset::decode(&payload).unwrap();
+    assert_eq!(set, inf_terrain::BiomeSet::starter());
+}
+
+/// **The chain is two links long.** `level → biome set → .inf_pcg`: a graph a
+/// biome scatters with ships because the cook re-derives the set's edges from its
+/// **payload**, exactly like every other referencing kind. Neither sidecar
+/// declares the dependency, so a `Vec::new()` fall-through in `asset_deps` would
+/// leave the graph out of the pack.
+///
+/// Latent until P19.3 populates `pcg_graph` — which is precisely why it is pinned
+/// now: nothing else would fail if the arm went missing.
+#[test]
+fn cook_follows_a_biome_sets_pcg_graph_edge() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    make_streaming_terrain_project_with(&proj, BiomeSetFixture::PresentWithGraph);
+    let out = dir.path().join("out");
+
+    let report = cook(&proj, &out, &CookOptions::default()).expect("cook succeeds");
+    assert_eq!(
+        report.asset_count, 4,
+        "level + .inf_terrain + .inf_biomes + the biome's .inf_pcg"
+    );
+    assert_eq!(report.kinds.get("pcg"), Some(&1));
+
+    let reader = PackReader::open(&out.join(DEFAULT_PACK_NAME)).unwrap();
+    assert!(
+        reader.entry(BIOME_GRAPH_ID).is_some(),
+        "the biome's scatter graph was not pulled in through the set's payload"
+    );
+
+    // The edge really is payload-derived: nothing declared it.
+    let sidecar = AssetSidecar::load(&proj.join("Content").join("World.inf_biomes")).unwrap();
+    assert!(
+        sidecar.dependencies.is_empty(),
+        "the fixture must not declare the dependency — that is the whole point"
+    );
+}
+
+/// **A dangling edge is advised about, not fatal.** The level is still valid —
+/// its ids are stored on the tiles and cook fine — but nothing can resolve them,
+/// which is precisely the silent hole an advisory exists for.
+#[test]
+fn a_dangling_biome_set_reference_is_a_cook_advisory() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    make_streaming_terrain_project_with(&proj, BiomeSetFixture::Dangling);
+    let out = dir.path().join("out");
+
+    let report = cook(&proj, &out, &CookOptions::default()).expect("a dangling ref is not fatal");
+    assert_eq!(report.asset_count, 2, "level + .inf_terrain, and no set");
+    let advisory = report
+        .warnings
+        .iter()
+        .find(|w| w.contains("missing biome set"))
+        .unwrap_or_else(|| panic!("no advisory raised: {:?}", report.warnings));
+    assert!(
+        advisory.contains(&MISSING_BIOME_SET_ID.to_string()),
+        "the advisory must name the missing GUID: {advisory}"
+    );
+}
+
+/// **An invalid biome set fails the BUILD.** Ambiguous ids cannot be recovered
+/// from at runtime — the per-sample values are already baked into the tiles — so
+/// the cook refuses, where it is one edit to fix.
+#[test]
+fn an_invalid_biome_set_fails_the_cook() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    make_streaming_terrain_project_with(&proj, BiomeSetFixture::Present);
+
+    // Overwrite the set with one that claims the reserved id 0. The encode side
+    // has no validation, so this is exactly the hand-edited / corrupt-file case.
+    let mut bad = inf_terrain::BiomeSet::starter();
+    bad.biomes.push(inf_terrain::BiomeDef::new(
+        inf_terrain::UNASSIGNED_BIOME,
+        "Void",
+    ));
+    let bytes = inf_asset::encode(&bad).unwrap();
+    let path = proj.join("Content").join("World.inf_biomes");
+    std::fs::write(&path, &bytes).unwrap();
+    AssetSidecar::new(BIOME_SET_ID, AssetKind::BiomeSet, ContentHash::of(&bytes))
+        .save(&path)
+        .unwrap();
+
+    let out = dir.path().join("out");
+    match cook(&proj, &out, &CookOptions::default()) {
+        Err(CookError::BiomeSet { guid, message }) => {
+            assert_eq!(guid, BIOME_SET_ID);
+            assert!(message.contains("reserved"), "unhelpful message: {message}");
+        }
+        other => panic!("expected CookError::BiomeSet, got {other:?}"),
+    }
 }
 
 #[test]

@@ -19,7 +19,8 @@ use inf_ecs::components::{
 };
 use inf_ecs::{Color, ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d, Vec3d};
 use inf_terrain::{
-    BrushOp, BrushParams, DataMapDelta, HeightDelta, SplatDelta, SplatStroke, Stroke, TerrainData,
+    BiomeDelta, BiomeStroke, BrushOp, BrushParams, DataMapDelta, HeightDelta, SplatDelta,
+    SplatStroke, Stroke, TerrainData,
 };
 use uuid::Uuid;
 
@@ -872,6 +873,146 @@ impl SceneDoc {
         };
         if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
             terrain.data.revert_splat_delta(delta);
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    // ── terrain biome painting (P19.2) ───────────────────────────────────
+    //
+    // The splat seam again, one layer over — and deliberately a *separate*
+    // `EditCommand` for the same reason `PaintSplat` is separate from
+    // `SculptTerrain`: the payloads are genuinely different (per-sample `u8` ids
+    // versus `[u8; 4]` weights), and keeping them apart leaves both existing undo
+    // paths byte-stable instead of folding an always-empty buffer into every
+    // stroke on the stack.
+
+    /// The GUID of the `.inf_biomes` set a terrain entity's ids name, or `None`
+    /// when no set is bound (and every sample therefore reads *unassigned*).
+    /// `None` too if the entity has no `Terrain`.
+    pub fn terrain_biome_set(&self, guid: Uuid) -> Option<Uuid> {
+        let e = self.world.entity_of(guid)?;
+        self.world.world().get::<Terrain>(e)?.biome_set
+    }
+
+    /// Bind (or clear) the `.inf_biomes` set a terrain's biome ids name, as one
+    /// undo step.
+    ///
+    /// Recorded as a whole-component swap rather than a reflected property write
+    /// because `Terrain.biome_set` is `#[reflect(ignore)]` — an asset reference,
+    /// not a Details-grid scalar — exactly like `MeshRef.asset`. Returns whether
+    /// anything changed (rebinding to the same set records nothing).
+    pub fn edit_set_terrain_biome_set(&mut self, guid: Uuid, set: Option<Uuid>) -> bool {
+        if self.terrain_biome_set(guid) == set && self.has_terrain(guid) {
+            return false;
+        }
+        let Some(before) = crate::scene::serialize::record_of(self, guid) else {
+            return false;
+        };
+        let Some(e) = self.world.entity_of(guid) else {
+            return false;
+        };
+        {
+            let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) else {
+                return false;
+            };
+            terrain.biome_set = set;
+        }
+        self.world.mark_dirty();
+        self.touch();
+        let Some(after) = crate::scene::serialize::record_of(self, guid) else {
+            return false;
+        };
+        self.history.record(
+            "Set Biome Set",
+            EditCommand::SwapComponents {
+                guid,
+                before: Box::new(before),
+                after: Box::new(after),
+            },
+        );
+        true
+    }
+
+    /// `true` when `guid` names an entity carrying a `Terrain` component.
+    fn has_terrain(&self, guid: Uuid) -> bool {
+        self.world
+            .entity_of(guid)
+            .is_some_and(|e| self.world.world().get::<Terrain>(e).is_some())
+    }
+
+    /// Apply one biome dab into an ongoing `stroke`, mutating the entity's live
+    /// biome-id buffers, and bump the version so the render biome texture
+    /// re-uploads next frame (live paint feedback). No-op without a `Terrain`.
+    /// Non-recording — the merged delta is recorded at commit.
+    pub fn biome_apply_dab(&mut self, guid: Uuid, stroke: &mut BiomeStroke, params: BrushParams) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
+            stroke.add_dab(&mut terrain.data, params);
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    /// Finish a biome `stroke` and record it as one undo step. An empty stroke
+    /// records nothing. Returns whether an undo entry was recorded.
+    pub fn edit_commit_biome(&mut self, guid: Uuid, stroke: BiomeStroke) -> bool {
+        let Some(e) = self.world.entity_of(guid) else {
+            return false;
+        };
+        // The label names what the stroke did, so the undo menu distinguishes
+        // erasing from assigning without the user having to remember.
+        let label = if stroke.is_eraser() {
+            "Erase Biome"
+        } else {
+            "Paint Biome"
+        };
+        let Some(terrain) = self.world.world().get::<Terrain>(e) else {
+            return false;
+        };
+        let delta = stroke.finish(&terrain.data);
+        if delta.is_empty() {
+            return false;
+        }
+        self.history.record(
+            label,
+            EditCommand::PaintBiome {
+                guid,
+                delta: Box::new(delta),
+            },
+        );
+        true
+    }
+
+    /// Redo a biome stroke: replay its `after` ids. Non-recording.
+    pub(crate) fn raw_apply_biome_delta(&mut self, guid: Uuid, delta: &BiomeDelta) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
+            terrain.data.apply_biome_delta(delta);
+        } else {
+            return;
+        }
+        self.world.mark_dirty();
+        self.touch();
+    }
+
+    /// Undo a biome stroke: replay its `before` ids and drop any id buffers the
+    /// stroke materialized, returning the terrain byte-identical to before the
+    /// stroke. Non-recording.
+    pub(crate) fn raw_revert_biome_delta(&mut self, guid: Uuid, delta: &BiomeDelta) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        if let Some(mut terrain) = self.world.world_mut().get_mut::<Terrain>(e) {
+            terrain.data.revert_biome_delta(delta);
         } else {
             return;
         }
@@ -3385,6 +3526,136 @@ mod tests {
         assert_eq!(saved_bytes(data), eroded, "redo must reproduce both layers");
         assert!(doc.undo());
         assert_eq!(doc.history.undo_len(), undo_depth_before);
+    }
+
+    /// **THE BIOME UNDO GATE (P19.2).** One stroke is one undo step, and that one
+    /// step returns the terrain's **saved bytes** to what they were — including
+    /// dropping the materialized id buffers back to the sparse default, so an
+    /// undone stroke costs the file nothing.
+    ///
+    /// Compared as saved bytes (the whole encode: heights + weights + maps + ids)
+    /// rather than as a biome-layer hash, for the reason `saved_bytes` states:
+    /// "undo restored it" has to mean the file it would write is the file it
+    /// would have written.
+    #[test]
+    fn a_biome_stroke_is_one_undo_step_and_undoes_to_the_saved_bytes() {
+        use inf_terrain::{BiomeStroke, BrushParams};
+
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Terrain, "", None);
+        let undo_depth_before = doc.history.undo_len();
+
+        let (data, _) = doc.terrain_data_and_origin(g).unwrap();
+        let before = saved_bytes(data);
+        assert!(data.biomes_are_default(), "a fresh terrain is unpainted");
+        let (min, max) = doc
+            .terrain_bounds(g)
+            .expect("the starter terrain has bounds");
+        let centre = (min + max) * 0.5;
+        let radius = ((max.x - min.x).min(max.y - min.y) * 0.25).max(1.0);
+
+        // One stroke, several dabs — exactly what a mouse drag produces.
+        let mut stroke = BiomeStroke::begin(2);
+        for k in 0..4 {
+            let c = centre + glam::DVec2::new(k as f64 * radius * 0.3, 0.0);
+            doc.biome_apply_dab(g, &mut stroke, BrushParams::new(c, radius, 1.0));
+        }
+        assert!(doc.edit_commit_biome(g, stroke), "the stroke must record");
+
+        let painted = {
+            let (data, _) = doc.terrain_data_and_origin(g).unwrap();
+            assert!(!data.biomes_are_default(), "the ids must have landed");
+            assert_eq!(data.biome_at(centre), Some(2));
+            saved_bytes(data)
+        };
+        assert_ne!(painted, before);
+
+        assert_eq!(
+            doc.history.undo_len(),
+            undo_depth_before + 1,
+            "a stroke must be ONE undo step, not one per dab"
+        );
+        assert_eq!(doc.history.undo_label(), Some("Paint Biome"));
+
+        assert!(doc.undo(), "one undo");
+        let (data, _) = doc.terrain_data_and_origin(g).unwrap();
+        assert!(
+            data.biomes_are_default(),
+            "undo must drop the materialized id buffers back to the sparse default"
+        );
+        assert_eq!(saved_bytes(data), before, "undo must be byte-identical");
+
+        assert!(doc.redo(), "one redo");
+        let (data, _) = doc.terrain_data_and_origin(g).unwrap();
+        assert_eq!(saved_bytes(data), painted, "redo must reproduce the stroke");
+    }
+
+    /// The **eraser** is a stroke like any other: it records its own undo step,
+    /// labelled so the menu distinguishes it, and it undoes exactly.
+    #[test]
+    fn an_erasing_stroke_is_labelled_and_undoes_exactly() {
+        use inf_terrain::{BiomeStroke, BrushParams, UNASSIGNED_BIOME};
+
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Terrain, "", None);
+        let (min, max) = doc.terrain_bounds(g).unwrap();
+        let centre = (min + max) * 0.5;
+        let radius = ((max.x - min.x).min(max.y - min.y) * 0.25).max(1.0);
+        let params = BrushParams::new(centre, radius, 1.0);
+
+        let mut paint = BiomeStroke::begin(5);
+        doc.biome_apply_dab(g, &mut paint, params);
+        assert!(doc.edit_commit_biome(g, paint));
+        let painted = saved_bytes(doc.terrain_data_and_origin(g).unwrap().0);
+
+        let mut erase = BiomeStroke::begin(UNASSIGNED_BIOME);
+        doc.biome_apply_dab(g, &mut erase, params);
+        assert!(doc.edit_commit_biome(g, erase), "erasing is a real edit");
+        assert_eq!(doc.history.undo_label(), Some("Erase Biome"));
+        assert_eq!(
+            doc.terrain_data_and_origin(g).unwrap().0.biome_at(centre),
+            Some(UNASSIGNED_BIOME)
+        );
+
+        assert!(doc.undo());
+        assert_eq!(
+            saved_bytes(doc.terrain_data_and_origin(g).unwrap().0),
+            painted,
+            "undoing an erase must restore the painted bytes"
+        );
+    }
+
+    /// Binding a `.inf_biomes` to a terrain is one undo step, and rebinding to the
+    /// same set records nothing (so a toolbar that re-pushes its selection cannot
+    /// flood the undo stack).
+    #[test]
+    fn binding_a_biome_set_is_one_undo_step_and_is_idempotent() {
+        let mut doc = SceneDoc::new();
+        let g = doc.edit_create(SpawnKind::Terrain, "", None);
+        let depth = doc.history.undo_len();
+        let set = Uuid::from_u128(0xB10E);
+
+        assert_eq!(doc.terrain_biome_set(g), None);
+        assert!(doc.edit_set_terrain_biome_set(g, Some(set)));
+        assert_eq!(doc.terrain_biome_set(g), Some(set));
+        assert_eq!(doc.history.undo_len(), depth + 1);
+
+        assert!(
+            !doc.edit_set_terrain_biome_set(g, Some(set)),
+            "rebinding the same set must record nothing"
+        );
+        assert_eq!(doc.history.undo_len(), depth + 1);
+
+        assert!(doc.undo());
+        assert_eq!(doc.terrain_biome_set(g), None, "undo must unbind");
+        assert!(doc.redo());
+        assert_eq!(doc.terrain_biome_set(g), Some(set));
+
+        // Clearing it is also a step, and an entity with no terrain is a no-op.
+        assert!(doc.edit_set_terrain_biome_set(g, None));
+        assert_eq!(doc.terrain_biome_set(g), None);
+        let cube = doc.edit_create(SpawnKind::Cube, "", None);
+        assert!(!doc.edit_set_terrain_biome_set(cube, Some(set)));
     }
 }
 

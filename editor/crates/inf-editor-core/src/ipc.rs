@@ -730,13 +730,16 @@ pub enum ViewportModeDto {
 }
 
 /// Viewport shading view mode (R-P2; `viewport_set_view_mode`). Serializes as the
-/// tag string `"Lit"`/`"Unlit"`/`"Wireframe"`. `Wireframe` degrades to `Unlit` in
-/// the renderer when the adapter lacks `POLYGON_MODE_LINE`.
+/// tag string `"Lit"`/`"Unlit"`/`"Wireframe"`/`"Biomes"`. `Wireframe` degrades to
+/// `Unlit` in the renderer when the adapter lacks `POLYGON_MODE_LINE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub enum ViewModeDto {
     Lit,
     Unlit,
     Wireframe,
+    /// Terrain tinted by its per-sample biome id, everything else unlit (P19.2).
+    /// Needs no GPU feature, so it never degrades.
+    Biomes,
 }
 
 /// 2D-mode snapping configuration pushed from the viewport toolbar
@@ -805,6 +808,9 @@ pub enum ToolModeDto {
     Sculpt,
     /// Scatter foliage onto the terrain under a brush (E-P6). Perspective-only.
     Foliage,
+    /// Paint per-sample biome ids onto the terrain under a brush (P19.2).
+    /// Perspective-only.
+    Biome,
 }
 
 /// The sculpt brush operation. Serializes as its tag string. `Paint` is the
@@ -841,6 +847,78 @@ pub struct SculptSettingsDto {
     /// Target splat layer `0..=3` for the `Paint` op (P10.4). Ignored by the
     /// height ops.
     pub paint_layer: u8,
+}
+
+// ── Biome brush + biome sets (P19.2) ─────────────────────────────────────
+//
+// The Biome tool paints per-sample biome **ids** onto a terrain. The ids name
+// entries in a `.inf_biomes` `BiomeSet` bound to the terrain entity, so the
+// toolbar needs both the brush push and a read of the terrain's current
+// vocabulary (`terrain_biomes`) to draw its swatches.
+
+/// Biome-brush configuration (`viewport_set_biome`). `radius` is world metres.
+///
+/// `strength` is **not** a blend fraction — a biome id is categorical, so the
+/// brush writes a hard boundary and `strength` selects which falloff contour that
+/// boundary lands on (`1` stamps the whole disk). `biome` is the id painted; `0`
+/// is the reserved *unassigned* value and erases.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct BiomeSettingsDto {
+    pub radius: f64,
+    pub strength: f64,
+    pub falloff: SculptFalloffDto,
+    pub biome: u8,
+}
+
+/// One biome definition inside a [`BiomeSetDto`].
+///
+/// `color` is **linear** RGBA (it is uploaded straight into the overlay palette).
+/// `pcg_graph` is a GUID string (the P19.3 hook); `water_hint` is a still-water
+/// level in **metres** of absolute world height; `structure_hint` names a
+/// building palette (P19.5). Both hints are plain advisory data in P19.2.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct BiomeDefDto {
+    /// Stable id `1..=255`. `0` is reserved for *unassigned* and cannot be
+    /// defined — the backend rejects a set that tries.
+    pub id: u8,
+    pub name: String,
+    pub color: [f32; 4],
+    /// Which of the terrain's four splat layers this biome shades as, if any.
+    pub splat_layer: Option<u8>,
+    pub pcg_graph: Option<String>,
+    pub water_hint: Option<f32>,
+    pub structure_hint: Option<String>,
+}
+
+/// A `.inf_biomes` asset as the inline editor sees it (`asset_get_biome_set` /
+/// `asset_save_biome_set`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct BiomeSetDto {
+    /// The asset GUID.
+    pub id: String,
+    /// Display name of the set.
+    pub name: String,
+    pub biomes: Vec<BiomeDefDto>,
+}
+
+/// The biome vocabulary the viewport toolbar paints with (`terrain_biomes`).
+///
+/// Resolved for **one terrain entity**: which set is bound (if any) and the
+/// definitions it holds. `biomes` is empty when nothing is bound, which is
+/// exactly when the tool has nothing to offer — the toolbar shows the picker and
+/// a "bind a set" affordance rather than an empty swatch row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct TerrainBiomesDto {
+    /// The terrain entity GUID these biomes belong to.
+    pub entity: String,
+    /// The bound `.inf_biomes` GUID, or `null`.
+    pub biome_set: Option<String>,
+    /// Display name of the bound set (empty when unbound).
+    pub biome_set_name: String,
+    pub biomes: Vec<BiomeDefDto>,
+    /// Every `.inf_biomes` in the project as `[guid, name]`, for the picker.
+    /// Sorted by name — deterministic, so the dropdown never reorders itself.
+    pub available: Vec<(String, String)>,
 }
 
 // ── Foliage brush (E-P6) ─────────────────────────────────────────────────

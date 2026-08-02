@@ -652,6 +652,177 @@ mod tests {
         );
     }
 
+    /// **The biome twin of the write-back gate (P19.2).**
+    ///
+    /// Biome ids ride *inside* the tile blob, so nothing in this module mentions
+    /// them — `TerrainEdits::from_dirty` clones whole tiles and carries every
+    /// layer for free. That is exactly why it needs a test: "for free" is a claim
+    /// about a seam (`get_tile_mut` stamps and dirties), and a future optimization
+    /// that wrote ids through an immutable back door would drop every biome stroke
+    /// on save without a single existing test noticing.
+    ///
+    /// Three claims in one script: a biome-only edit **schedules** a write-back;
+    /// the rewritten asset **serves** the ids back to a fresh streamer; and the
+    /// coarse pyramid pages stay **unpainted** (a decimated tile is a streaming
+    /// page, not authored content — the same rule the weights and the data maps
+    /// keep).
+    #[test]
+    fn a_biome_only_edit_writes_back_and_a_fresh_stream_reads_it() {
+        use inf_terrain::BiomeStroke;
+
+        let (dir, mut doc, mut streams) = fixture();
+        ensure_stream(&doc, &mut streams);
+
+        let center = DVec2::new(100.0, 100.0);
+        let radius = 9.0;
+        assert!(
+            streams
+                .page_brush_footprint(STREAMED_TERRAIN_TERRAIN_GUID, &mut doc, center, radius)
+                .is_some(),
+            "the terrain must be streamed"
+        );
+
+        let heights_before: Vec<f64> = {
+            let (data, _) = doc
+                .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+                .unwrap();
+            data.tiles()
+                .flat_map(|(_, t)| t.heights().iter().map(|&h| h as f64))
+                .collect()
+        };
+
+        let mut stroke = BiomeStroke::begin(3);
+        doc.biome_apply_dab(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &mut stroke,
+            BrushParams::new(center, radius, 1.0),
+        );
+        assert!(
+            doc.edit_commit_biome(STREAMED_TERRAIN_TERRAIN_GUID, stroke),
+            "the stroke must record one undo step"
+        );
+        assert!(
+            doc.has_unsaved_terrain_edits(),
+            "a biome-only edit must schedule a write-back"
+        );
+
+        // Not one height moved — this really is a biome-only edit.
+        let (data, _) = doc
+            .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+            .unwrap();
+        let heights_after: Vec<f64> = data
+            .tiles()
+            .flat_map(|(_, t)| t.heights().iter().map(|&h| h as f64))
+            .collect();
+        assert_eq!(heights_before, heights_after, "a biome edit moved a height");
+        assert!(!data.biomes_are_default(), "…but the ids did move");
+        assert_eq!(
+            data.biome_at(center),
+            Some(3),
+            "the brush centre must carry the painted id"
+        );
+
+        let report = flush_terrain_edits(&mut doc, dir.path());
+        assert_eq!(report.written.len(), 1);
+        assert!(report.tiles() > 0);
+        assert!(!doc.has_unsaved_terrain_edits(), "the marks must clear");
+
+        // A FRESH streamer over the rewritten asset serves the ids back.
+        let mut fresh = EditorTerrainStreams::new();
+        fresh.set_content_root(Some(dir.path().to_path_buf()));
+        let mut fresh_doc = streamed_terrain_scene();
+        ensure_stream(&fresh_doc, &mut fresh);
+        fresh.page_brush_footprint(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &mut fresh_doc,
+            center,
+            radius,
+        );
+        let (reloaded, _) = fresh_doc
+            .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+            .unwrap();
+        assert_eq!(
+            reloaded.biome_at(center),
+            Some(3),
+            "the reloaded asset does not serve the saved biome ids"
+        );
+
+        // The rewritten asset's COARSE pages carry no ids: a decimated tile is a
+        // streaming page, never authored content.
+        let bytes = std::fs::read(dir.path().join("World.inf_terrain")).unwrap();
+        let asset = inf_terrain::TerrainAssetReader::new(bytes.as_slice()).unwrap();
+        let mut coarse_seen = 0usize;
+        for key in asset.keys().filter(|k| !k.is_lod0()) {
+            let tile = asset.tile(key).unwrap().expect("directory entry");
+            assert!(tile.biomes_are_default(), "coarse {key:?} leaked biome ids");
+            coarse_seen += 1;
+        }
+        assert!(coarse_seen > 0, "the fixture must have a pyramid to check");
+    }
+
+    /// **Undo of a biome stroke restores the saved bytes exactly (P19.2).** The
+    /// blob-level twin of the splat/data-map undo gates: a stroke that
+    /// materialized a tile's sparse id buffer must undo back to a tile that
+    /// encodes byte-identically to the one that was never painted.
+    #[test]
+    fn undoing_a_biome_stroke_restores_byte_identical_tiles() {
+        use inf_terrain::BiomeStroke;
+
+        let (_dir, mut doc, mut streams) = fixture();
+        ensure_stream(&doc, &mut streams);
+        let center = DVec2::new(100.0, 100.0);
+        streams.page_brush_footprint(STREAMED_TERRAIN_TERRAIN_GUID, &mut doc, center, 9.0);
+
+        let before: Vec<((i32, i32), Vec<u8>)> = {
+            let (data, _) = doc
+                .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+                .unwrap();
+            data.tiles().map(|(&c, t)| (c, blob_of(t))).collect()
+        };
+
+        let mut stroke = BiomeStroke::begin(7);
+        doc.biome_apply_dab(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &mut stroke,
+            BrushParams::new(center, 9.0, 1.0),
+        );
+        assert!(doc.edit_commit_biome(STREAMED_TERRAIN_TERRAIN_GUID, stroke));
+
+        doc.undo();
+        let (data, _) = doc
+            .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+            .unwrap();
+        let after: Vec<((i32, i32), Vec<u8>)> =
+            data.tiles().map(|(&c, t)| (c, blob_of(t))).collect();
+        assert_eq!(
+            before, after,
+            "undo did not restore the tiles byte-for-byte"
+        );
+        assert!(
+            data.biomes_are_default(),
+            "the materialized id buffers must be dropped back to the sparse default"
+        );
+        // THE RULE (asserted by the height twin for the same reason): an undo is
+        // an edit against the asset. The restored tiles are dirty again, so the
+        // next save writes the restoration back — otherwise undoing a stroke
+        // would leave the painted ids on disk while the document showed clean
+        // ground, and only a reload would reveal it.
+        assert!(
+            doc.has_unsaved_terrain_edits(),
+            "undo-restored tiles must be re-marked dirty"
+        );
+        assert!(!doc
+            .terrain_dirty_tiles(STREAMED_TERRAIN_TERRAIN_GUID)
+            .is_empty());
+
+        // …and redo reproduces the stroke.
+        doc.redo();
+        let (data, _) = doc
+            .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+            .unwrap();
+        assert_eq!(data.biome_at(center), Some(7));
+    }
+
     /// **The no-dirty save (gate g).** A save with no terrain edits does not
     /// rewrite the asset at all — the file's bytes *and* its modification time are
     /// untouched.

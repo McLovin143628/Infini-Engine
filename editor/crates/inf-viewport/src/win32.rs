@@ -40,8 +40,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use glam::DVec2;
 
 use crate::camera::{
-    Bookmarks, Camera2D, EditorCamera, FlyInput, FoliageSettings, GizmoSpace, NavInput, NavMode,
-    SculptSettings, Snap2DSettings, SnapSettings, ToolMode, ViewportMode,
+    BiomeSettings, Bookmarks, Camera2D, EditorCamera, FlyInput, FoliageSettings, GizmoSpace,
+    NavInput, NavMode, SculptSettings, Snap2DSettings, SnapSettings, ToolMode, ViewportMode,
 };
 use crate::host::EngineHost;
 use crate::{KeyChord, SharedScene, SurfaceTarget, ViewportEvent, ViewportEventSink, ViewportRect};
@@ -65,6 +65,8 @@ fn to_view_mode(d: ViewModeDto) -> ViewMode {
         ViewModeDto::Lit => ViewMode::Lit,
         ViewModeDto::Unlit => ViewMode::Unlit,
         ViewModeDto::Wireframe => ViewMode::Wireframe,
+        // P19.2: needs no GPU feature, so it never degrades.
+        ViewModeDto::Biomes => ViewMode::Biomes,
     }
 }
 
@@ -111,6 +113,11 @@ enum Cmd {
     SetSculpt(SculptSettings),
     /// Replace the foliage brush configuration from the toolbar (E-P6).
     SetFoliage(FoliageSettings),
+    /// Replace the biome brush configuration from the toolbar (P19.2).
+    SetBiome(BiomeSettings),
+    /// Push a terrain entity's resolved biome overlay palette (P19.2) — Ring 2
+    /// owns the asset lookup, the viewport only draws it.
+    SetBiomePalette(uuid::Uuid, Vec<[f32; 4]>),
     /// Set the transform-gizmo mode (translate/rotate/scale) from the toolbar or
     /// palette (Wave 2). The viewport echoes changes back on `viewport://gizmo`.
     SetGizmo(GizmoMode),
@@ -195,6 +202,17 @@ impl ViewportHandle {
     /// Replace the foliage brush configuration (radius / density / kind / …).
     pub fn set_foliage(&self, foliage: FoliageSettings) {
         let _ = self.tx.send(Cmd::SetFoliage(foliage));
+    }
+
+    /// Replace the biome brush configuration (radius / strength / falloff / id).
+    pub fn set_biome(&self, biome: BiomeSettings) {
+        let _ = self.tx.send(Cmd::SetBiome(biome));
+    }
+
+    /// Push a terrain's resolved biome overlay palette (P19.2). An empty palette
+    /// clears it.
+    pub fn set_biome_palette(&self, entity: uuid::Uuid, palette: Vec<[f32; 4]>) {
+        let _ = self.tx.send(Cmd::SetBiomePalette(entity, palette));
     }
 
     /// Set the transform-gizmo mode (translate/rotate/scale) from the toolbar or
@@ -912,6 +930,8 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 Ok(Cmd::SetToolMode(m)) => host.set_tool_mode(m),
                 Ok(Cmd::SetSculpt(s)) => host.set_sculpt(s),
                 Ok(Cmd::SetFoliage(f)) => host.set_foliage(f),
+                Ok(Cmd::SetBiome(b)) => host.set_biome(b),
+                Ok(Cmd::SetBiomePalette(e, p)) => host.set_biome_palette(e, p),
                 Ok(Cmd::SetGizmo(m)) => {
                     host.set_gizmo_mode(m);
                     // Echo so the toolbar reflects an IPC-driven change too.
@@ -1081,7 +1101,12 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 // stroke instead of selecting/gizmo-dragging. The stroke lives on the
                 // viewport thread (like a gizmo drag) and commits one undo step at
                 // mouse-up (P10.2b). 2D mode keeps Select regardless of the tool.
-                let sculpting = host.tool_mode() == ToolMode::Sculpt && !two_d;
+                // P19.2: the biome brush rides the SAME stroke machinery — it
+                // needs the identical terrain pick, footprint paging, streamed
+                // read-only gate and one-command-per-stroke commit, and only the
+                // dab differs. `host.begin_sculpt` branches on the tool mode.
+                let sculpting =
+                    matches!(host.tool_mode(), ToolMode::Sculpt | ToolMode::Biome) && !two_d;
                 let foliage = host.tool_mode() == ToolMode::Foliage && !two_d;
                 if sculpting {
                     if let Some((x, y, ctrl)) = input.left_press {

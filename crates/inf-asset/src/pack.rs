@@ -155,6 +155,7 @@ fn kind_code(kind: AssetKind) -> u16 {
         AssetKind::MeshletMesh => 16,
         AssetKind::Terrain => 17,
         AssetKind::Partition => 18,
+        AssetKind::BiomeSet => 19,
     }
 }
 
@@ -179,6 +180,7 @@ fn kind_from_code(code: u16) -> AssetKind {
         16 => AssetKind::MeshletMesh,
         17 => AssetKind::Terrain,
         18 => AssetKind::Partition,
+        19 => AssetKind::BiomeSet,
         _ => AssetKind::Unknown,
     }
 }
@@ -291,7 +293,10 @@ impl PackWriter {
             | AssetKind::Pcg
             | AssetKind::Skeleton
             | AssetKind::AnimClip
-            | AssetKind::StateMachine => true,
+            | AssetKind::StateMachine
+            // P19.2: a biome set is a short list of names + colours — authored,
+            // never paged, so it compresses like every other data asset.
+            | AssetKind::BiomeSet => true,
         }
     }
 
@@ -1049,6 +1054,7 @@ mod tests {
         assert_eq!(kind_code(AssetKind::MeshletMesh), 16);
         assert_eq!(kind_code(AssetKind::Terrain), 17, "P16.3 appended 17");
         assert_eq!(kind_code(AssetKind::Partition), 18, "P16.5 appended 18");
+        assert_eq!(kind_code(AssetKind::BiomeSet), 19, "P19.2 appended 19");
         // …and an unknown future code degrades to `Unknown` rather than erroring,
         // so a newer pack's extra kinds never break an older reader's index parse.
         assert_eq!(kind_from_code(9999), AssetKind::Unknown);

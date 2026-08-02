@@ -1330,12 +1330,14 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 
 /// Every golden scene committed under `crates/inf-render/tests/goldens/`, by name.
 ///
-/// 39 pre-existing scenes plus the two P18.5 additions (`scatter.png`,
-/// `scatter_impostors.png`).
-const GOLDENS: [&str; 41] = [
+/// 39 scenes entered Phase 18; P18.5 added two (`scatter.png`,
+/// `scatter_impostors.png`) and **P19.2 added `biomes.png`** — the Biomes view
+/// mode's overlay, the one thing that phase drew that nothing else did.
+const GOLDENS: [&str; 42] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
+    "biomes.png",
     "clouds_dusk.png",
     "clouds_night.png",
     "clouds_overcast.png",
@@ -1376,7 +1378,7 @@ const GOLDENS: [&str; 41] = [
     "weather_storm_noon.png",
 ];
 
-/// **GATE (f).** The golden *inventory* is exactly these 41 PNGs.
+/// **GATE (f).** The golden *inventory* is exactly these 42 PNGs.
 ///
 /// Nothing is re-blessed here, and no pixel is compared — that stays in
 /// `inf-render`'s own harness, which is where the renderer and the images live.
@@ -1407,7 +1409,7 @@ fn the_golden_inventory_is_exactly_the_committed_set() {
          deliberate act: update `GOLDENS` here in the same commit, and say in the \
          message which scene changed and why. Never re-bless as a side effect."
     );
-    assert_eq!(found.len(), 41);
+    assert_eq!(found.len(), 42);
 }
 
 // ── the composed scene's own invariants ──────────────────────────────────────

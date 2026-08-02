@@ -616,6 +616,19 @@ pub struct RenderTerrainTile {
     /// beside the height texture. Coarse (LOD ≥ 1) tiles carry no painted weights
     /// — the pyramid is heights-only — so they project the uniform default.
     pub weights: Vec<[u8; 4]>,
+    /// `resolution²` row-major **biome ids** (P19.2), one `u8` per sample, resolved
+    /// from the tile's sparse store exactly like [`weights`](Self::weights) — this
+    /// vec is ALWAYS dense, the projector expands the sparse default. A tile that
+    /// has never been painted projects all-`0` (`inf_terrain::UNASSIGNED_BIOME`),
+    /// and coarse (LOD ≥ 1) pyramid pages carry no painted data at all — the
+    /// pyramid is heights-only — so they project that same uniform default. The
+    /// terrain pass uploads these into a per-tile `R8Uint` texture beside the
+    /// height + weight ones; only the Biomes view mode reads it.
+    ///
+    /// A biome id is **categorical**: it indexes
+    /// [`RenderTerrain::biome_palette`] and is never filtered or interpolated (the
+    /// shader loads it nearest — the midpoint of ids 1 and 3 is not id 2).
+    pub biomes: Vec<u8>,
     /// Inclusive `(min, max)` of `heights` (for the tile's AABB cull bound).
     pub height_bounds: (f32, f32),
     /// The tile's **monotone change stamp** (P16.3b1), projected from
@@ -654,10 +667,11 @@ impl Default for RenderTerrainLayer {
 /// The renderer's terrain input: the **resident** page set of a paged heightfield
 /// projected from the ECS `Terrain` component. The
 /// [`TerrainNode`](crate::passes::terrain) uploads a per-tile R32Float height
-/// texture + a per-tile Rgba8Unorm splat-weight texture (both cached, gated by
-/// each tile's own [`version`](RenderTerrainTile::version)) and assembles
-/// concentric clipmap LOD rings around the camera each frame, blending the four
-/// `layers` by the splat weights.
+/// texture, a per-tile Rgba8Unorm splat-weight texture and a per-tile R8Uint
+/// biome-id texture (all cached, gated by each tile's own
+/// [`version`](RenderTerrainTile::version)) and assembles concentric clipmap LOD
+/// rings around the camera each frame, blending the four `layers` by the splat
+/// weights.
 ///
 /// ## Residency (P16.3b1)
 ///
@@ -672,9 +686,9 @@ impl Default for RenderTerrainLayer {
 /// it): the per-tile stamps are strictly more precise, and a single global
 /// counter is exactly the field a projector forgets to bump — the shipped player
 /// pinned it to a constant, which would have frozen the GPU cache the moment
-/// residency started changing. The one terrain-wide GPU upload left (the splat
-/// material uniform) is gated by comparing the packed value, which cannot
-/// desync.
+/// residency started changing. The terrain-wide GPU uploads left (the splat
+/// material uniform and the P19.2 biome palette) are each gated by comparing the
+/// packed value, which cannot desync.
 ///
 /// ## Multi-terrain (P16.6)
 ///
@@ -709,6 +723,19 @@ pub struct RenderTerrain {
     pub layers: [RenderTerrainLayer; 4],
     /// Amplitude of the large-scale fBm albedo modulation (`0` = off).
     pub macro_variation: f32,
+    /// Biome id → debug colour for the **Biomes** view mode (P19.2), **indexed by
+    /// id**: `biome_palette[id]` is the colour a sample carrying that id is tinted
+    /// with. The array position IS the id — never an ordinal into the level's
+    /// biome list, which is a sparse set of authored ids. Slot 0 is the reserved
+    /// "unassigned" colour, and an id the set never defined reads it too;
+    /// `inf_terrain::BiomeSet::palette` builds exactly that shape.
+    ///
+    /// **May be empty**: a terrain with no `BiomeSet` bound — or a projector that
+    /// cannot resolve one — passes `Vec::new()` and the renderer pads every slot
+    /// with the unassigned colour, so the mode still draws something honest
+    /// (uniform neutral grey = "no biome vocabulary here") instead of failing.
+    /// Ids past the end of a short palette pad the same way.
+    pub biome_palette: Vec<[f32; 4]>,
 }
 
 impl RenderTerrain {

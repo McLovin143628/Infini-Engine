@@ -590,6 +590,7 @@ fn lightweight_component(terrain: &Terrain) -> Terrain {
         layers: terrain.layers,
         macro_variation: terrain.macro_variation,
         asset: terrain.asset,
+        biome_set: terrain.biome_set,
     }
 }
 
@@ -1164,6 +1165,88 @@ mod tests {
             edited,
             "the camera paged the pre-edit bytes back over an unsaved edit"
         );
+        // A second overlay pass with nothing new copies nothing.
+        assert_eq!(
+            s.overlay_document_edits(STREAMED_TERRAIN_TERRAIN_GUID, &doc),
+            0
+        );
+    }
+
+    /// **The biome twin of the pinning gate (P19.2).**
+    ///
+    /// This is the only test in the tree that puts an edit under *genuine
+    /// eviction pressure*, and the biome layer has a render-side consumer the
+    /// height twin cannot exercise: the per-tile **id buffer** the Biomes overlay
+    /// uploads as an `R8Uint` texture. A stroke that survived in the document but
+    /// got paged over in the render set would leave the overlay tinting the
+    /// on-disk ids — a stale picture of a level the author just repainted, with
+    /// nothing in the document wrong to point at.
+    ///
+    /// It also pins the *negative* half, which matters more for a categorical
+    /// layer than for heights: ground the brush never claimed must still read
+    /// `UNASSIGNED_BIOME` after the camera has walked away and back, or the
+    /// overlay paints biomes nobody authored.
+    #[test]
+    fn an_edited_biome_tile_is_pinned_into_the_render_set() {
+        let (_dir, mut doc, mut s) = edit_fixture();
+        let center = DVec2::new(100.0, 100.0);
+        s.page_brush_footprint(STREAMED_TERRAIN_TERRAIN_GUID, &mut doc, center, 6.0);
+        assert_eq!(
+            s.overlay_document_edits(STREAMED_TERRAIN_TERRAIN_GUID, &doc),
+            0
+        );
+        assert_eq!(s.pinned_tiles(STREAMED_TERRAIN_TERRAIN_GUID), 0);
+
+        let mut stroke = inf_terrain::BiomeStroke::begin(4);
+        doc.biome_apply_dab(
+            STREAMED_TERRAIN_TERRAIN_GUID,
+            &mut stroke,
+            inf_terrain::BrushParams::new(center, 6.0, 1.0),
+        );
+        assert!(doc.edit_commit_biome(STREAMED_TERRAIN_TERRAIN_GUID, stroke));
+
+        let mirrored = s.overlay_document_edits(STREAMED_TERRAIN_TERRAIN_GUID, &doc);
+        assert!(mirrored > 0, "the biome edit was not mirrored");
+        assert_eq!(s.pinned_tiles(STREAMED_TERRAIN_TERRAIN_GUID), mirrored);
+
+        let key = inf_terrain::TileKey::lod0(
+            doc.terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+                .unwrap()
+                .0
+                .tile_coord_of(center.x, center.y),
+        );
+        assert_eq!(
+            s.render_data(STREAMED_TERRAIN_TERRAIN_GUID)
+                .unwrap()
+                .biome_at(center),
+            Some(4),
+            "the render set does not show the painted biome"
+        );
+        // A point well outside the 6 m brush — but still inside a mirrored tile —
+        // must NOT have been claimed. The id buffer the overlay uploads is
+        // materialized now, so "unpainted" has to survive materialization, not
+        // merely sparsity.
+        let far = center + DVec2::new(10.0, 0.0);
+        assert_eq!(
+            s.render_data(STREAMED_TERRAIN_TERRAIN_GUID)
+                .unwrap()
+                .biome_at(far),
+            Some(inf_terrain::UNASSIGNED_BIOME),
+            "the brush claimed ground outside its radius"
+        );
+
+        // Fly far away for a long time: the cut moves, but the pinned page holds.
+        for step in 0..40 {
+            s.sync_render(streamed_terrain_camera_a(step));
+        }
+        let render = s.render_data(STREAMED_TERRAIN_TERRAIN_GUID).unwrap();
+        assert!(render.is_resident(key));
+        assert_eq!(
+            render.biome_at(center),
+            Some(4),
+            "the camera paged the pre-edit ids back over an unsaved biome stroke"
+        );
+        assert_eq!(render.biome_at(far), Some(inf_terrain::UNASSIGNED_BIOME));
         // A second overlay pass with nothing new copies nothing.
         assert_eq!(
             s.overlay_document_edits(STREAMED_TERRAIN_TERRAIN_GUID, &doc),

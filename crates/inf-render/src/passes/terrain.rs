@@ -483,7 +483,7 @@ pub fn assemble_patches(
 pub struct CachedTile {
     /// The [`RenderTerrainTile::version`] the cached texels reflect.
     pub version: u64,
-    /// The texture dimension the cached pair was created at.
+    /// The texture dimension the cached set was created at.
     pub resolution: u32,
 }
 
@@ -626,12 +626,13 @@ fn build_lod_geometry(cells: u32) -> (Vec<[f32; 3]>, Vec<u32>) {
     (verts, indices)
 }
 
-/// A cached per-tile pair of textures — R32Float height + Rgba8Unorm splat
-/// weights — sharing one bind group (`@group(1)`), plus the [`CachedTile`]
-/// identity the upload gate compares against.
+/// A cached per-tile trio of textures — R32Float height + Rgba8Unorm splat
+/// weights + R8Uint biome ids (P19.2) — sharing one bind group (`@group(1)`), plus
+/// the [`CachedTile`] identity the upload gate compares against.
 struct TileTextures {
     _height: wgpu::Texture,
     _weights: wgpu::Texture,
+    _biomes: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     cached: CachedTile,
 }
@@ -663,15 +664,64 @@ impl MaterialRaw {
     }
 }
 
-/// One terrain's splat-material uniform (`@group(2)`) + the packed value the
-/// buffer currently holds — the gate for the one terrain-wide upload left (a value
-/// compare, so it cannot desync). One of these per [`RenderTerrain::id`] (P16.6):
-/// the layers are per-terrain, so a single shared uniform would have made the last
-/// terrain drawn recolour every other one.
+/// Palette slots in [`BiomePaletteRaw`] — one per possible `u8` biome id, so the
+/// shader can index it with the raw texel and need no bounds logic at all
+/// (`inf_terrain::MAX_BIOMES` is 255 definable ids + the reserved 0). 4 KiB.
+const BIOME_PALETTE_SLOTS: usize = 256;
+
+/// Neutral colour for [`inf_terrain::UNASSIGNED_BIOME`] and for every id a
+/// [`RenderTerrain::biome_palette`] does not define. Mirrors
+/// `inf_terrain::UNASSIGNED_BIOME_COLOR`; kept local so the renderer stays
+/// independent of inf-terrain, exactly like `DEFAULT_WEIGHT` below.
+const UNASSIGNED_BIOME_COLOR: [f32; 4] = [0.22, 0.22, 0.24, 1.0];
+
+/// The biome-id → colour palette uniform (`@group(2) @binding(1)`, P19.2): a fixed
+/// 256-slot table so `colors[id]` is always in range for a `u8` id. Mirrors
+/// `BiomePalette` in terrain.wgsl. Only the Biomes view mode reads it; the buffer
+/// exists (and uploads once per terrain) regardless, because a bind group must be
+/// complete whether or not the branch that samples it is taken.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct BiomePaletteRaw {
+    colors: [[f32; 4]; BIOME_PALETTE_SLOTS],
+}
+
+impl BiomePaletteRaw {
+    /// Pad every slot with [`UNASSIGNED_BIOME_COLOR`], then overwrite from the
+    /// projection. The padding is what lets a terrain with no `BiomeSet` bound
+    /// (an EMPTY palette) still render the mode: everything reads neutral, which
+    /// is the truthful answer — nothing is painted. Ids ≥ 256 cannot exist, so a
+    /// longer palette is simply truncated.
+    fn from_terrain(terrain: &RenderTerrain) -> Self {
+        let mut colors = [UNASSIGNED_BIOME_COLOR; BIOME_PALETTE_SLOTS];
+        for (id, color) in terrain
+            .biome_palette
+            .iter()
+            .take(BIOME_PALETTE_SLOTS)
+            .enumerate()
+        {
+            colors[id] = *color;
+        }
+        // Slot 0 is reserved: whatever a projection puts there, "unassigned" is
+        // what the mode must show, so the id that means "no biome" can never be
+        // mistaken for a painted one.
+        colors[0] = UNASSIGNED_BIOME_COLOR;
+        BiomePaletteRaw { colors }
+    }
+}
+
+/// One terrain's splat-material uniform + biome palette (`@group(2)`) + the packed
+/// values the buffers currently hold — the gate for the terrain-wide uploads (a
+/// value compare, so it cannot desync). One of these per [`RenderTerrain::id`]
+/// (P16.6): the layers are per-terrain, so a single shared uniform would have made
+/// the last terrain drawn recolour every other one — and the palette is
+/// per-terrain for the same reason (each terrain names its own `BiomeSet`).
 struct MaterialSlot {
     _buffer: wgpu::Buffer,
+    _palette_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     uploaded: MaterialRaw,
+    uploaded_palette: BiomePaletteRaw,
 }
 
 pub struct TerrainNode {
@@ -679,14 +729,16 @@ pub struct TerrainNode {
     tile_bgl: wgpu::BindGroupLayout,
     /// One grid mesh per LOD (index 0 = finest).
     lod_meshes: Vec<LodMesh>,
-    /// Per-tile height + weight textures, keyed by [`TileCacheKey`] (terrain id +
-    /// asset LOD + coord), so level-0 and coarse pages of the same ground — and
-    /// same-coordinate pages of *different* terrains — cache side by side.
-    /// `BTreeMap` ⇒ deterministic iteration.
+    /// Per-tile height + weight + biome-id textures, keyed by [`TileCacheKey`]
+    /// (terrain id + asset LOD + coord), so level-0 and coarse pages of the same
+    /// ground — and same-coordinate pages of *different* terrains — cache side by
+    /// side. `BTreeMap` ⇒ deterministic iteration.
     textures: BTreeMap<TileCacheKey, TileTextures>,
-    /// Layout of the per-terrain splat-material bind group (`@group(2)`).
+    /// Layout of the per-terrain splat-material + biome-palette bind group
+    /// (`@group(2)`).
     material_bgl: wgpu::BindGroupLayout,
-    /// Per-terrain splat material uniforms, keyed by [`RenderTerrain::id`].
+    /// Per-terrain splat material + biome palette uniforms, keyed by
+    /// [`RenderTerrain::id`].
     materials: BTreeMap<u64, MaterialSlot>,
     /// AO + shadows + GI env bind at `@group(3)` (P13.3b).
     env: super::EnvBinding,
@@ -744,28 +796,48 @@ impl TerrainNode {
             },
             count: None,
         };
+        // …plus the R8Uint biome-id texture (binding 2, P19.2). A separate entry
+        // because an id is an INTEGER sample type, not an unfilterable float: the
+        // shader declares `texture_2d<u32>` and reads it with textureLoad, which is
+        // exactly what keeps a categorical id from ever being blended. Fragment-only
+        // — a biome tints, it never displaces geometry.
+        let uint_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
         let tile_bgl = gpu
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("terrain-tile"),
-                entries: &[tex_entry(0), tex_entry(1)],
+                entries: &[tex_entry(0), tex_entry(1), uint_entry(2)],
             });
 
-        // Splat material uniform bind group (@group(2)).
+        // Splat material uniform bind group (@group(2)): the layer material at
+        // binding 0 and the biome palette at binding 1 (P19.2). The palette is a
+        // SEPARATE buffer on purpose — folding 4 KiB of debug colours into
+        // `MaterialRaw` would have rewritten the material bytes every existing
+        // terrain uploads, for a mode that is off in every shipped frame.
+        let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
         let material_bgl = gpu
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("terrain-material"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
+                entries: &[uniform_entry(0), uniform_entry(1)],
             });
         let env = super::EnvBinding::new(gpu);
         let layout = gpu
@@ -908,6 +980,7 @@ impl TerrainNode {
         self.materials.retain(|id, _| live_ids.contains(id));
         for terrain in terrains {
             let material = MaterialRaw::from_terrain(terrain);
+            let palette = BiomePaletteRaw::from_terrain(terrain);
             match self.materials.get_mut(&terrain.id) {
                 Some(slot) => {
                     if slot.uploaded != material {
@@ -915,11 +988,24 @@ impl TerrainNode {
                             .write_buffer(&slot._buffer, 0, bytemuck::bytes_of(&material));
                         slot.uploaded = material;
                     }
+                    // The palette rides its own value compare (P19.2). Repainting a
+                    // tile does not touch it; re-binding the level's `BiomeSet` —
+                    // the only thing that can change it — does.
+                    if slot.uploaded_palette != palette {
+                        gpu.queue.write_buffer(
+                            &slot._palette_buffer,
+                            0,
+                            bytemuck::bytes_of(&palette),
+                        );
+                        slot.uploaded_palette = palette;
+                    }
                 }
                 None => {
-                    let slot = create_material_slot(gpu, &self.material_bgl, material);
+                    let slot = create_material_slot(gpu, &self.material_bgl, material, palette);
                     gpu.queue
                         .write_buffer(&slot._buffer, 0, bytemuck::bytes_of(&material));
+                    gpu.queue
+                        .write_buffer(&slot._palette_buffer, 0, bytemuck::bytes_of(&palette));
                     self.materials.insert(terrain.id, slot);
                 }
             }
@@ -1009,6 +1095,42 @@ impl TerrainNode {
                         depth_or_array_layers: 1,
                     },
                 );
+
+                // Biome ids (P19.2): the same defensive fallback as the weights —
+                // a tile that projected no (or a malformed) id buffer reads the
+                // reserved "unassigned" id everywhere, so the Biomes view shows
+                // neutral grey rather than whatever was left in the texture.
+                // Coarse pyramid pages always take this path, exactly as above.
+                // (Mirrors inf_terrain::UNASSIGNED_BIOME; kept local so the
+                // renderer stays independent of inf-terrain.)
+                const DEFAULT_BIOME: u8 = 0;
+                let default_biomes;
+                let biomes: &[u8] = if tile.biomes.len() == expect {
+                    &tile.biomes
+                } else {
+                    default_biomes = vec![DEFAULT_BIOME; expect];
+                    &default_biomes
+                };
+                gpu.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tex._biomes,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    biomes,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        // One byte per texel — R8Uint.
+                        bytes_per_row: Some(res),
+                        rows_per_image: Some(res),
+                    },
+                    wgpu::Extent3d {
+                        width: res,
+                        height: res,
+                        depth_or_array_layers: 1,
+                    },
+                );
             }
         }
         debug_assert!(
@@ -1018,12 +1140,14 @@ impl TerrainNode {
     }
 }
 
-/// Create one terrain's splat-material uniform buffer + bind group, recording
-/// `material` as the value the caller is about to write into it.
+/// Create one terrain's splat-material + biome-palette uniform buffers and their
+/// shared bind group, recording `material`/`palette` as the values the caller is
+/// about to write into them.
 fn create_material_slot(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
     material: MaterialRaw,
+    palette: BiomePaletteRaw,
 ) -> MaterialSlot {
     let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("terrain-material"),
@@ -1031,24 +1155,38 @@ fn create_material_slot(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let palette_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("terrain-biome-palette"),
+        size: std::mem::size_of::<BiomePaletteRaw>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("terrain-material"),
         layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: buffer.as_entire_binding(),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: palette_buffer.as_entire_binding(),
+            },
+        ],
     });
     MaterialSlot {
         _buffer: buffer,
+        _palette_buffer: palette_buffer,
         bind_group,
         uploaded: material,
+        uploaded_palette: palette,
     }
 }
 
 /// Create an empty `res × res` R32Float height texture + Rgba8Unorm weight
-/// texture, sharing one bind group. `version` records the stamp the caller is
-/// about to write into them.
+/// texture + R8Uint biome-id texture, sharing one bind group. `version` records
+/// the stamp the caller is about to write into them.
 fn create_tile_textures(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
@@ -1074,8 +1212,13 @@ fn create_tile_textures(
     };
     let height = make("terrain-height", wgpu::TextureFormat::R32Float);
     let weights = make("terrain-weights", wgpu::TextureFormat::Rgba8Unorm);
+    // R8Uint, not R8Unorm: the shader must read the id back as the integer it was
+    // painted as. A normalized format would hand the fragment `id / 255`, and every
+    // palette lookup would become a float→index guess.
+    let biomes = make("terrain-biomes", wgpu::TextureFormat::R8Uint);
     let hview = height.create_view(&wgpu::TextureViewDescriptor::default());
     let wview = weights.create_view(&wgpu::TextureViewDescriptor::default());
+    let bview = biomes.create_view(&wgpu::TextureViewDescriptor::default());
     let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("terrain-tile"),
         layout,
@@ -1088,11 +1231,16 @@ fn create_tile_textures(
                 binding: 1,
                 resource: wgpu::BindingResource::TextureView(&wview),
             },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&bview),
+            },
         ],
     });
     TileTextures {
         _height: height,
         _weights: weights,
+        _biomes: biomes,
         bind_group,
         cached: CachedTile {
             version,
@@ -1243,6 +1391,7 @@ mod tests {
             origin: DVec3::new(key.coord.0 as f64 * span, 0.0, key.coord.1 as f64 * span),
             heights: vec![0.0; (RES * RES) as usize],
             weights: Vec::new(),
+            biomes: Vec::new(),
             height_bounds: (0.0, 0.0),
             version,
         }
@@ -1263,6 +1412,7 @@ mod tests {
             tiles: keys.into_iter().map(|k| tile_at(k, 1)).collect(),
             layers: Default::default(),
             macro_variation: 0.0,
+            biome_palette: Vec::new(),
         }
     }
 
@@ -1421,6 +1571,77 @@ mod tests {
         assert_eq!(raw.params[2][0], 0.25);
         assert_eq!(raw.params[2][1], 3.0);
         assert_eq!(raw.macro_amp[0], 0.7);
+    }
+
+    /// The biome palette is **indexed by id** and padded (P19.2). Every rule the
+    /// shader relies on when it does a bare `colors[id]` lookup lives here, and
+    /// none of it needs a GPU — which matters, because the `biomes` golden skips
+    /// on an adapter-less machine and this does not.
+    #[test]
+    fn biome_palette_pads_undefined_ids() {
+        let mut terrain = flat_terrain(1);
+        // The `BiomeSet::palette` shape: index = id, gaps already neutral.
+        terrain.biome_palette = vec![
+            UNASSIGNED_BIOME_COLOR, // 0 — reserved
+            [1.0, 0.0, 0.0, 1.0],   // 1
+            UNASSIGNED_BIOME_COLOR, // 2 — a gap the set never defined
+            [0.0, 0.0, 1.0, 1.0],   // 3
+        ];
+        let p = BiomePaletteRaw::from_terrain(&terrain);
+        assert_eq!(p.colors[1], [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(p.colors[3], [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(p.colors[2], UNASSIGNED_BIOME_COLOR, "a gap reads neutral");
+        assert_eq!(p.colors[0], UNASSIGNED_BIOME_COLOR, "id 0 is reserved");
+        // Past the end of the projected palette — the whole point of the fixed
+        // 256 slots: an id the shader loads can never index past the array.
+        assert_eq!(p.colors[4], UNASSIGNED_BIOME_COLOR);
+        assert_eq!(p.colors[255], UNASSIGNED_BIOME_COLOR);
+    }
+
+    /// A terrain with no `BiomeSet` bound projects an EMPTY palette; the mode must
+    /// still be renderable (uniform neutral), never a missing binding.
+    #[test]
+    fn empty_biome_palette_is_all_unassigned() {
+        let terrain = flat_terrain(1);
+        assert!(terrain.biome_palette.is_empty());
+        let p = BiomePaletteRaw::from_terrain(&terrain);
+        assert!(p.colors.iter().all(|c| *c == UNASSIGNED_BIOME_COLOR));
+        // …and the uniform is exactly the 4 KiB the shader's `array<vec4<f32>,256>`
+        // expects (a mismatch here is a validation error at pipeline creation).
+        assert_eq!(std::mem::size_of::<BiomePaletteRaw>(), 256 * 16);
+    }
+
+    /// Slot 0 is the reserved "unassigned" id: even a projection that puts a
+    /// colour there reads neutral, so "nothing painted" can never masquerade as a
+    /// real biome.
+    #[test]
+    fn reserved_biome_slot_ignores_a_projected_colour() {
+        let mut terrain = flat_terrain(1);
+        terrain.biome_palette = vec![[1.0, 0.0, 1.0, 1.0], [0.0, 1.0, 0.0, 1.0]];
+        let p = BiomePaletteRaw::from_terrain(&terrain);
+        assert_eq!(p.colors[0], UNASSIGNED_BIOME_COLOR);
+        assert_eq!(p.colors[1], [0.0, 1.0, 0.0, 1.0]);
+    }
+
+    /// The upload gate is a value compare (like the material's): two projections
+    /// carrying the same palette are equal, and one changed colour is not.
+    #[test]
+    fn biome_palette_compares_by_value() {
+        let mut a = flat_terrain(1);
+        a.biome_palette = vec![UNASSIGNED_BIOME_COLOR, [0.4, 0.7, 0.2, 1.0]];
+        let b = a.clone();
+        // Compared with `assert!`, not `assert_eq!`: a 256-slot dump is not a
+        // failure message anybody wants to read.
+        assert!(
+            BiomePaletteRaw::from_terrain(&a) == BiomePaletteRaw::from_terrain(&b),
+            "identical palettes must compare equal (an upload the gate skips)"
+        );
+        let mut c = a.clone();
+        c.biome_palette[1] = [0.4, 0.7, 0.3, 1.0];
+        assert!(
+            BiomePaletteRaw::from_terrain(&a) != BiomePaletteRaw::from_terrain(&c),
+            "one changed colour must re-upload"
+        );
     }
 
     #[test]

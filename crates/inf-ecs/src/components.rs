@@ -1679,6 +1679,22 @@ pub struct Terrain {
     #[serde(default)]
     #[reflect(ignore)]
     pub asset: Option<Uuid>,
+    /// GUID of the `.inf_biomes` [`BiomeSet`](inf_terrain::BiomeSet) this
+    /// terrain's per-sample biome ids name (schema v16, P19.2).
+    ///
+    /// `None` means the terrain has no biome vocabulary: the paint tool has
+    /// nothing to offer, and every sample reads
+    /// [`UNASSIGNED_BIOME`](inf_terrain::UNASSIGNED_BIOME). Setting it is what
+    /// arms biome painting and the Biomes view mode; the cook follows the edge to
+    /// pack the set beside the level, exactly like [`asset`](Self::asset).
+    ///
+    /// `#[reflect(ignore)]` (an asset reference, not a Details-grid scalar) and
+    /// `#[serde(default)]` so every pre-v16 payload decodes with it absent —
+    /// though the v16 bump is forced by the *tile* layout below it, not by this
+    /// field.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub biome_set: Option<Uuid>,
 }
 
 fn default_terrain_mps() -> f64 {
@@ -1698,6 +1714,7 @@ impl Default for Terrain {
             layers: default_terrain_layers(),
             macro_variation: default_macro_variation(),
             asset: None,
+            biome_set: None,
         }
     }
 }
@@ -1715,6 +1732,7 @@ impl Terrain {
             layers: default_terrain_layers(),
             macro_variation: default_macro_variation(),
             asset: None,
+            biome_set: None,
         }
     }
 }

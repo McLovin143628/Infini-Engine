@@ -7,7 +7,8 @@
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, expect, test } from "vitest";
 
-import { app, layouts, pcg, sim, viewport } from "../ipc";
+import { app, assets, layouts, pcg, sim, terrain, viewport } from "../ipc";
+import type { BiomeSetDto } from "../ipc";
 
 afterEach(() => {
   clearMocks();
@@ -105,4 +106,62 @@ test("pcg wrappers invoke the pcg_* commands with typed payloads", async () => {
   expect(calls[0][1]).toEqual({ id: "pcg:1", edits: [], label: "Edit" });
   expect(calls[2][1]).toEqual({ id: "pcg:1", entity: null });
   expect(calls[3][1]).toEqual({ id: "pcg:1", name: "PCG Graph" });
+});
+
+test("biome wrappers invoke the P19.2 commands with typed payloads", async () => {
+  const calls: Array<[string, unknown]> = [];
+  const set: BiomeSetDto = {
+    id: "bs-1",
+    name: "World Biomes",
+    biomes: [
+      {
+        id: 1,
+        name: "Grassland",
+        color: [0.29, 0.45, 0.19, 1],
+        splat_layer: 0,
+        pcg_graph: null,
+        water_hint: null,
+        structure_hint: null,
+      },
+    ],
+  };
+  mockIPC((cmd, args) => {
+    calls.push([cmd, args]);
+    if (cmd === "terrain_biomes")
+      return {
+        entity: "e-1",
+        biome_set: "bs-1",
+        biome_set_name: "World Biomes",
+        biomes: set.biomes,
+        available: [["bs-1", "World Biomes"]],
+      };
+    if (cmd === "terrain_set_biome_set") return true;
+    if (cmd === "asset_get_biome_set") return set;
+  });
+
+  await viewport.setBiome({ radius: 8, strength: 1, falloff: "Smooth", biome: 3 });
+  await expect(terrain.biomes()).resolves.toMatchObject({ biome_set: "bs-1" });
+  await terrain.biomes("e-1");
+  await expect(terrain.setBiomeSet("e-1", null)).resolves.toBe(true);
+  await expect(assets.getBiomeSet("bs-1")).resolves.toEqual(set);
+  await assets.saveBiomeSet("bs-1", set);
+
+  expect(calls.map(([cmd]) => cmd)).toEqual([
+    "viewport_set_biome",
+    "terrain_biomes",
+    "terrain_biomes",
+    "terrain_set_biome_set",
+    "asset_get_biome_set",
+    "asset_save_biome_set",
+  ]);
+  expect(calls[0][1]).toEqual({
+    biome: { radius: 8, strength: 1, falloff: "Smooth", biome: 3 },
+  });
+  // An omitted entity must cross as an explicit null (the backend's `Option`),
+  // never as `undefined` — Tauri would drop the key entirely.
+  expect(calls[1][1]).toEqual({ entity: null });
+  expect(calls[2][1]).toEqual({ entity: "e-1" });
+  expect(calls[3][1]).toEqual({ entity: "e-1", asset: null });
+  expect(calls[4][1]).toEqual({ id: "bs-1" });
+  expect(calls[5][1]).toEqual({ id: "bs-1", set });
 });

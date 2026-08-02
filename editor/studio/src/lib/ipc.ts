@@ -23,6 +23,9 @@ import type { PcgCompileResult, PcgEvaluateResult } from "./pcgTypes";
 import type { SmClipDto, SmDoc } from "./smTypes";
 import type { AssetRefDto } from "../bindings/AssetRefDto";
 import type { AssetSnapshot } from "../bindings/AssetSnapshot";
+import type { BiomeDefDto } from "../bindings/BiomeDefDto";
+import type { BiomeSetDto } from "../bindings/BiomeSetDto";
+import type { BiomeSettingsDto } from "../bindings/BiomeSettingsDto";
 import type { CollectionDto } from "../bindings/CollectionDto";
 import type { MaterialInstanceDto } from "../bindings/MaterialInstanceDto";
 import type { MatOverridesDto } from "../bindings/MatOverridesDto";
@@ -60,6 +63,7 @@ import type { Snap3DDto } from "../bindings/Snap3DDto";
 import type { GizmoModeDto } from "../bindings/GizmoModeDto";
 import type { GizmoSpaceDto } from "../bindings/GizmoSpaceDto";
 import type { SortingLayerDto } from "../bindings/SortingLayerDto";
+import type { TerrainBiomesDto } from "../bindings/TerrainBiomesDto";
 import type { TerrainImportPlanDto } from "../bindings/TerrainImportPlanDto";
 import type { TerrainImportResultDto } from "../bindings/TerrainImportResultDto";
 import type { TerrainImportSettingsDto } from "../bindings/TerrainImportSettingsDto";
@@ -77,6 +81,9 @@ import type { ViewportRect } from "../bindings/ViewportRect";
 export type {
   AssetRefDto,
   AssetSnapshot,
+  BiomeDefDto,
+  BiomeSetDto,
+  BiomeSettingsDto,
   CollectionDto,
   MaterialInstanceDto,
   MatOverridesDto,
@@ -104,6 +111,7 @@ export type {
   SortingLayerDto,
   SpawnKind,
   SpriteSheetDto,
+  TerrainBiomesDto,
   TilemapCellDto,
   TilemapDto,
   ViewportDrop,
@@ -172,6 +180,13 @@ export const viewport = {
   /** Push the foliage brush configuration (radius / density / kind / …) (E-P6). */
   setFoliage: (foliage: FoliageSettingsDto): Promise<void> =>
     invoke("viewport_set_foliage", { foliage }),
+  /**
+   * Push the biome brush configuration (radius / strength / falloff / id) (P19.2).
+   * `strength` is not a blend fraction — it picks which falloff contour the
+   * painted biome's hard boundary lands on. `biome: 0` erases (unassigned).
+   */
+  setBiome: (biome: BiomeSettingsDto): Promise<void> =>
+    invoke("viewport_set_biome", { biome }),
   /**
    * Set the transform-gizmo mode (translate/rotate/scale) (Wave 2). The viewport
    * echoes mode changes (incl. W/E/R keypresses over it) on `viewport://gizmo`.
@@ -271,6 +286,27 @@ export const terrain = {
    */
   spawnStreamed: (assetId: string): Promise<string> =>
     invoke<string>("terrain_spawn_streamed", { assetId }),
+
+  // ── biome binding (P19.2) ────────────────────────────────────────────────
+
+  /**
+   * The biome vocabulary the Biome tool paints with, for one terrain — omit
+   * `entity` for the first terrain in the level (the toolbar has no selection).
+   *
+   * `null` when the level has no terrain at all. An unbound (or deleted, or
+   * undecodable) set is NOT an error: the DTO comes back with `biome_set: null`
+   * and an empty `biomes` list, which is what the toolbar's "bind a set" hint
+   * reads.
+   */
+  biomes: (entity?: string): Promise<TerrainBiomesDto | null> =>
+    invoke<TerrainBiomesDto | null>("terrain_biomes", { entity: entity ?? null }),
+
+  /**
+   * Bind (or clear, with `asset: null`) the `.inf_biomes` set a terrain's painted
+   * biome ids name — ONE undo step. `false` when nothing changed.
+   */
+  setBiomeSet: (entity: string, asset: string | null): Promise<boolean> =>
+    invoke<boolean>("terrain_set_biome_set", { entity, asset }),
 };
 
 /**
@@ -490,6 +526,16 @@ export const assets = {
   /** Save edited overrides onto a material instance (E-P2). */
   saveMaterialInstance: (id: string, overrides: MatOverridesDto): Promise<void> =>
     invoke("asset_save_material_instance", { id, overrides }),
+  /** Load a `.inf_biomes` for the inline biome-set editor (P19.2). */
+  getBiomeSet: (id: string): Promise<BiomeSetDto> =>
+    invoke<BiomeSetDto>("asset_get_biome_set", { id }),
+  /**
+   * Save an edited `.inf_biomes` (P19.2). The backend VALIDATES — duplicate ids,
+   * the reserved id 0, a blank name or an out-of-range splat layer reject the
+   * save and leave the file alone — so a rejection arrives as a thrown message.
+   */
+  saveBiomeSet: (id: string, set: BiomeSetDto): Promise<void> =>
+    invoke("asset_save_biome_set", { id, set }),
   /** Delete; when still referenced (and not forced) returns the blockers. */
   delete: (id: string, force = false): Promise<DeleteResult> =>
     invoke<DeleteResult>("asset_delete", { id, force }),

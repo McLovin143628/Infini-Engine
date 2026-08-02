@@ -3681,6 +3681,146 @@ sediment state; the `MaskImage` sampler has no graph node; lowering is single-ru
 >   dialog, so the PNG lands under `Content/DataMaps/<Entity>_<map>.png`. A user-chosen
 >   destination needs `dialog:allow-save` and is deferred with it.
 
+> **STATUS — P19.2 Biome painting: COMPLETE (2026-08-02).** Authors now paint *where the world
+> is* the way they paint what it is made of. A `.inf_biomes` asset defines the level's biomes,
+> a per-sample id layer rides the tile beside the heights / weights / data maps, a brush writes
+> it with full undo, and a Biomes view mode shows the result.
+>
+> **THE HARD-EDGE DECISION, and what it cost to make it honest.** A biome id is **categorical**:
+> there is no "half forest, half desert" id, so the brush writes a crisp boundary and the falloff
+> and strength decide *where that boundary falls* —
+> `claimed ⇔ weight(d, r) > 0 ∧ weight(d, r) ≥ 1 − strength`. Strength 1 stamps the whole disk;
+> strength ½ claims the half-weight contour (a smaller disk under a soft falloff, the whole disk
+> under `Plateau(1.0)`); strength 0 claims nothing. Monotone in both parameters, pure, and every
+> slider position does something visible — machine-checked, including that a **flat** falloff is
+> strength-independent, which is what proves the curve (not the number) is doing the work.
+> **The briefed "soft radius writes a majority vote" was considered and rejected**, and the
+> reason is not aesthetic: a majority vote over each sample's neighbourhood makes a dab depend on
+> ids the *previous* dabs wrote, so a stroke stops being a function of its path (the editor
+> resamples a drag into dabs at ~⅓ radius — a timing-dependent count), and re-applying the same
+> dab keeps changing the terrain, which breaks the `apply(revert(apply)) == apply` identity every
+> delta in the crate rests on. Boundary *feathering* is a real requirement and it belongs at the
+> **consumer**: P19.3 blends adjacent biomes' PCG graphs across a feather width, reading the crisp
+> ids stored here. Feathering the storage would throw away exactly the information that blend needs.
+>
+> **THE SCHEMA ANSWER: YES — scene v15 → v16, and `.inf_terrain` header v3 → v4.** Same law as
+> v15, one generation on: bincode is positional, so an extra length-prefixed layer inside a tile
+> is a wire-format change. The generation table now has three rows and it lives, stated once, on
+> `TerrainTileFrozenV1`:
+>
+> | tile generation | layout | `.inf_lvl` | `.inf_terrain` |
+> |---|---|---|---|
+> | `TerrainTileFrozenV1` | origin + heights + weights | v1 … v14 | v1, v2 |
+> | `TerrainTileFrozenV2` | + erosion data maps (P19.1) | **v15** | **v3** |
+> | `TerrainTile` (live) | + biome ids (P19.2) | v16 | v4 |
+>
+> Three tripwires (one per codec plus the asset half in `inf-terrain`) fail if any container bumps
+> past its row without a new generation, and the asset-half one now proves the *whole* mapping —
+> each generation's bytes decode at exactly its own header versions and produce the same tile.
+> The `Terrain` component also gained `biome_set: Option<Uuid>` (additive, `serde(default)`,
+> `reflect(ignore)` — an asset reference like `MeshRef::asset`), but the **tile** change is what
+> forced the bump; the field would have ridden a `serde(default)` for free.
+>
+> **The wire cost, measured rather than assumed.** `biome_set: None` costs **exactly 1 byte**
+> (the bare bincode `Option` discriminant) — measured on a *tile-less* terrain so the per-tile
+> counts cannot mask it. An unpainted tile costs **exactly 1 byte** (the zero-length count of the
+> sparse `biomes` sequence); a painted one costs **exactly `res²`** (one `u8` per sample — *not*
+> ×4, which is the mistake a copy of the data-map pricing test would have made). Eleven `.inf_lvl`
+> samples/templates re-blessed: the terrain-free ones move **zero bytes** (v15 and v16 are the same
+> varint width), and the terrain-carrying ones by the biome_set byte plus one per tile —
+> streamed-terrain +1 (no inline tiles), phase18-scatter +5, character-demo +7, terrain-demo +10,
+> phase16-world +18. Two new committed fixtures, `scene_v15.inf_lvl` (1243 B), written twice and
+> byte-compared across the codecs.
+>
+> **The `BiomeSet` asset (`.inf_biomes`, kind code 19).** `Vec<BiomeDef { id, name, colour,
+> splat_layer, pcg_graph, water_hint, structure_hint }>`, deterministic bincode, **compressed**
+> (it is a short list of names, not a streaming page). **Id 0 is reserved** and undefinable —
+> that reservation is *what makes the storage sparse*, because an unpainted tile's default has to
+> mean something coherent, and it is enforced on validate **and on decode**, so a hand-edited file
+> fails at the door rather than becoming an ambiguous lookup. `water_hint` / `structure_hint` are
+> inert plain data, declared now because they are what P20 and P19.5 will ask a biome for and
+> adding a bincode field later costs a migration on every `.inf_biomes` in every project; storing
+> them as *hints* rather than references keeps them honest (an empty hint is not a dangling edge).
+> `pcg_graph` **is** a real reference: it becomes a sidecar dependency edge, so a set that names a
+> graph protects it through delete-with-references and pulls it into the cook closure.
+> `splat_layer` is **advisory** — painting a biome deliberately does *not* rewrite the splat
+> weights, because silently overwriting one authored layer from another makes a paint stroke
+> unpredictably destructive.
+>
+> **The paint tool is the splat seam, one layer over.** `BiomeDelta`/`BiomePatch`/`BiomeStroke`
+> mirror `SplatDelta`/`SplatPatch`/`SplatStroke` exactly, `materialized_tiles` on the P19.1
+> `is_empty` standard (both halves, so a stroke that only materialized a buffer still has undo
+> work). `EditCommand::PaintBiome` is a **sibling** of `PaintSplat`, not a field on it, for the
+> reason `PaintSplat` is a sibling of `SculptTerrain`: merging them would put an always-empty
+> buffer inside every stroke on the undo stack. `ToolMode::Biome` is likewise its own tool rather
+> than a `SculptOp` sub-mode (the Foliage precedent) — folding it in would have made
+> `SculptSettings::strength` mean a third thing depending on the op. It rides the **same** stroke
+> machinery: one terrain pick, one footprint page per dab, the streamed read-only gate, one
+> command per stroke. **Ctrl erases** (writes the reserved id), and the undo entry is labelled
+> "Erase Biome" so the menu distinguishes it. Streamed terrain needed **zero** new write-back
+> code — ids live inside the tile blob, so `TerrainEdits::from_dirty` carries them for free —
+> which is exactly why it got a test: "for free" is a claim about the `get_tile_mut` seam, and a
+> future optimization writing ids through an immutable back door would drop every biome stroke on
+> save with nothing else noticing.
+>
+> **The overlay is a uniform flag, not a pipeline.** `ViewMode::Biomes` sets `view.flags.y`;
+> `unlit_flag()` returns 1.0 for it too, so `mesh`/`skinned_mesh`/`vgeom_mesh`/`scatter_mesh` need
+> **no edit at all** and non-terrain geometry simply renders unlit — the smallest honest
+> treatment. Terrain gains an `R8Uint` per-tile id texture at `@group(1) @binding(2)`, sampled with
+> `textureLoad` and **never interpolated** (an id is categorical; the midpoint of biome 3 and
+> biome 7 is one of the two), and a 256-slot palette uniform at `@group(2) @binding(1)` in its own
+> buffer, so `MaterialRaw`'s bytes are untouched. Terrain already spent all four bind groups, which
+> is why both are new *bindings* rather than a `@group(4)`. The tint is palette × wrapped N·L, so
+> the landform's relief still reads. **Off-path byte-stability**: `flags.y` is exactly 0.0 in every
+> other mode, the branch is present-but-false, and a full `INF_BLESS_GOLDENS=1` sweep moved
+> **nothing** — `git status` showed only the new `biomes.png`. **42 goldens**, 41 byte-identical.
+>
+> **Cook.** `Terrain.biome_set` is a real level→asset edge (found only by walking the persisted
+> component — the fixture's sidecar declares no dependency), a dangling one is a **deduplicated
+> advisory** rather than a failure (the level is still valid; its ids just resolve to nothing), and
+> an **invalid** set is a hard `CookError::BiomeSet`: ambiguous ids cannot be recovered from at
+> runtime because the per-sample values are already baked into the tiles.
+>
+> **Tests.** `inf-terrain::biome` (starter round-trip + determinism, id-0 rejected on validate
+> *and* on decode, duplicate/blank/bad-layer, a full 255-biome set and the 256th refused,
+> `next_free_id` gap-skipping, the id-indexed palette's padding and purity, schema-too-new, the
+> kind wiring); `inf-terrain::biomepaint` (the claim rule's monotonicity/totality/zero-strength
+> no-op and its documented ½ contour; **strength shrinks the disk instead of fading it** on a fine
+> lattice; a flat falloff is strength-independent; paint determinism; byte-identical undo + exact
+> redo; a stroke merges dabs so one revert walks all the way back; the eraser is a first-class
+> stroke; no tile authoring; a repeat dab is a no-op that materializes nothing; seam continuity;
+> **sparse-is-free priced in bytes**; a biome edit dirties its tile for write-back; `biome_at` is
+> nearest, never interpolated); `inf-terrain::tile` (generation-2 wire shape both codecs, the
+> three-row tripwire, clamp/ignore parity with the other layers); `inf-terrain::asset` (a **v3**
+> payload loads forever *keeping its maps*, a v3 source transcodes on write-back, the v4 per-tile
+> price); `inf-editor-core::assets::biome_set` (create/get/save/list, **saving validates** and
+> leaves the file untouched when it refuses, `pcg_graph` becomes a dependency edge, wrong kind
+> refused); `terrain_edit` (a biome-only edit writes back, a fresh streamer reads the ids, coarse
+> pages stay unpainted, and an undone stroke restores byte-identical tile blobs); `SceneDoc` —
+> **the undo gate**: one stroke is one entry and one Ctrl+Z returns the terrain's *saved bytes*
+> (heights + weights + maps + ids in one encode) with the materialized buffers dropped back to
+> sparse, plus the eraser's label and the idempotent biome-set binding; both codecs' v16 ladders;
+> `inf-packager` (the edge is followed, a dangling one advises, an invalid set fails the build);
+> `inf-render` (`golden_biomes` + GPU-free palette unit tests + the naga gate).
+>
+> **Remainders, stated (P19.2).**
+> * **A shipped player draws the overlay neutral.** `inf_player::render::project_terrain` receives
+>   only the component and its data — there is no asset database on the player's projection path
+>   (the same reason per-layer *textures* never reached it) — so it passes an empty palette and the
+>   renderer pads. The ids themselves project correctly; only the colours are missing, and only in
+>   a mode that is an authoring aid. Wiring the player's pack lookup into the projection is the fix.
+> * **Coarse LOD pages carry no biome ids**, exactly like the splat weights and the P19.1 data
+>   maps: a decimated tile is a streaming page, not authored content (asserted in the write-back
+>   test). So a zoomed-out clipmap ring reads *unassigned*, and P19.3's samplers see zeros above
+>   level 0. The fix is a decimation rule for a categorical channel — majority vote, not average —
+>   and it belongs with the first consumer.
+> * **`splat_layer` is declared but never applied.** A biome knows which terrain layer it "shades
+>   as" and nothing reads it. An "apply biome splat" action is a small, obvious follow-up; it was
+>   left out because making it automatic would make painting a biome destroy authored splat work.
+> * **The bless-guard asymmetry is still there.** Inherited from P19.1 and deliberately not
+>   "fixed" mid-batch: `INF_BLESS_FIXTURES` means *any value* in the editor codec and *exactly
+>   `"1"`* in `inf-scene`. Always use `=1`.
+
 - **P19.1 Erosion data maps** — 1. accumulate flow / deposition / wear maps in the erosion
   passes (CPU reference + WGSL mirror, parity-gated exactly like heights); 2. persist them
   per-tile and sparse on the format-aware serde pattern; 3. export as mask images (Gaea-style

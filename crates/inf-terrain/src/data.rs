@@ -19,7 +19,7 @@ use glam::{DVec2, DVec3};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::residency::{ResidencyReport, TileStore};
-use crate::tile::{TerrainTile, TerrainTileFrozenV1, TileKey};
+use crate::tile::{TerrainTile, TerrainTileFrozenV1, TerrainTileFrozenV2, TileKey};
 use crate::HeightSource;
 
 /// Default samples per tile side (256 × 256).
@@ -718,6 +718,15 @@ impl<'de> Deserialize<'de> for TerrainData {
                     "terrain tile ({x},{z}) has {ml} data-map samples, expected {expect} or 0"
                 )));
             }
+            // Biome ids (P19.2), same sparse rule again: absent means unpainted.
+            // A short-but-non-empty buffer is an out-of-bounds index the first
+            // time the biome brush touches the tile, so it is rejected here.
+            let bl = tile.biomes_len();
+            if bl != 0 && bl != expect {
+                return Err(serde::de::Error::custom(format!(
+                    "terrain tile ({x},{z}) has {bl} biome samples, expected {expect} or 0"
+                )));
+            }
             data.tiles.insert((x, z), tile);
             // A **resident tile always holds a stamp** (P16.3): a freshly loaded
             // tile is resident, so it draws one here exactly like a streamed-in or
@@ -885,6 +894,166 @@ impl TerrainDataFrozenV1 {
                 .tiles
                 .iter()
                 .map(|(&(x, z), t)| (x, z, TerrainTileFrozenV1::from_current(t)))
+                .collect(),
+        }
+    }
+
+    /// Lift one generation, to [`TerrainDataFrozenV2`] with every tile's data maps
+    /// empty (never eroded). The single-step hop the editor codec's **chained**
+    /// ladder needs — see [`TerrainTileFrozenV1::into_v2`].
+    ///
+    /// Lossless and total: v1 carries a strict subset of v2's layers, and the
+    /// buffer lengths it was validated against are unchanged.
+    pub fn into_v2(self) -> TerrainDataFrozenV2 {
+        TerrainDataFrozenV2 {
+            tile_resolution: self.tile_resolution,
+            meters_per_sample: self.meters_per_sample,
+            tiles: self
+                .tiles
+                .into_iter()
+                .map(|(x, z, t)| (x, z, t.into_v2()))
+                .collect(),
+        }
+    }
+}
+
+// ── the frozen pre-P19.2 wire form ──────────────────────────────────────────
+
+/// The **pre-P19.2 `TerrainData` wire layout**, frozen forever: the same two
+/// config scalars and flat tile sequence, carrying [`TerrainTileFrozenV2`] —
+/// tiles with erosion data maps but no biome ids.
+///
+/// Generation 2 of the tile ladder (see [`TerrainTileFrozenV1`]'s generation
+/// table): `.inf_lvl` schema **v15** and `.inf_terrain` header **v3** wrote these
+/// bytes. Both scene codecs carry their v15 `Terrain` slot as this type and lift
+/// with [`into_current`](TerrainDataFrozenV2::into_current); the reverse
+/// ([`from_current`](TerrainDataFrozenV2::from_current)) is the downgrade-bless
+/// direction used when a test writes a v15 fixture.
+///
+/// Wire type only — no queries, no residency, no versions.
+///
+/// # Validation lives here, in `Deserialize`
+///
+/// Exactly as for [`TerrainDataFrozenV1`], and for exactly the same reason: a
+/// short-but-non-empty weight (or data-map) buffer is not merely wrong data, it is
+/// an **out-of-bounds index** the first time anything reads or paints the tile.
+/// The live decoder's length contract is carried over verbatim, as hard errors, at
+/// the same place. There is no biome check for the obvious reason: this wire form
+/// cannot carry biome ids at all.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TerrainDataFrozenV2 {
+    /// Samples per tile side.
+    pub tile_resolution: u32,
+    /// World units between adjacent samples.
+    pub meters_per_sample: f64,
+    /// Flat `(tx, tz, tile)` sequence in `BTreeMap` order.
+    #[serde(default)]
+    pub tiles: Vec<(i32, i32, TerrainTileFrozenV2)>,
+}
+
+/// The raw wire shape of [`TerrainDataFrozenV2`] — field-for-field identical, and
+/// the only thing that touches the `Deserializer`.
+#[derive(Deserialize)]
+struct TerrainDataFrozenV2Raw {
+    tile_resolution: u32,
+    meters_per_sample: f64,
+    #[serde(default)]
+    tiles: Vec<(i32, i32, TerrainTileFrozenV2)>,
+}
+
+impl<'de> Deserialize<'de> for TerrainDataFrozenV2 {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = TerrainDataFrozenV2Raw::deserialize(d)?;
+        let res = raw.tile_resolution.max(2);
+        let expect = (res * res) as usize;
+        for (x, z, tile) in &raw.tiles {
+            if tile.heights.len() != expect {
+                return Err(serde::de::Error::custom(format!(
+                    "terrain tile ({x},{z}) has {} samples, expected {expect}",
+                    tile.heights.len()
+                )));
+            }
+            let wl = tile.weights.len();
+            if wl != 0 && wl != expect {
+                return Err(serde::de::Error::custom(format!(
+                    "terrain tile ({x},{z}) has {wl} weight samples, expected {expect} or 0"
+                )));
+            }
+            let ml = tile.maps.len();
+            if ml != 0 && ml != expect {
+                return Err(serde::de::Error::custom(format!(
+                    "terrain tile ({x},{z}) has {ml} data-map samples, expected {expect} or 0"
+                )));
+            }
+        }
+        Ok(Self {
+            tile_resolution: raw.tile_resolution,
+            meters_per_sample: raw.meters_per_sample,
+            tiles: raw.tiles,
+        })
+    }
+}
+
+impl Default for TerrainDataFrozenV2 {
+    /// An empty terrain at the live defaults — the value a `#[serde(default)]`
+    /// terrain slot decodes to, matching [`TerrainData::default`] field for field.
+    fn default() -> Self {
+        Self {
+            tile_resolution: DEFAULT_TILE_RESOLUTION,
+            meters_per_sample: DEFAULT_METERS_PER_SAMPLE,
+            tiles: Vec::new(),
+        }
+    }
+}
+
+impl TerrainDataFrozenV2 {
+    /// Lift to a live [`TerrainData`]: every tile's biome ids come up **empty**
+    /// (nothing painted), which is exactly what a pre-P19.2 level meant. Otherwise
+    /// identical to [`TerrainDataFrozenV1::into_current`] — including the
+    /// hand-built-value `debug_assert` (see there for why a lift is total for
+    /// anything that was actually decoded).
+    pub fn into_current(self) -> TerrainData {
+        let mut data = TerrainData::new(self.tile_resolution, self.meters_per_sample);
+        let expect = (data.tile_resolution * data.tile_resolution) as usize;
+        for (x, z, tile) in self.tiles {
+            let tile = tile.into_current();
+            let wl = tile.weights_len();
+            let ml = tile.maps_len();
+            let ok = tile.heights().len() == expect
+                && (wl == 0 || wl == expect)
+                && (ml == 0 || ml == expect);
+            debug_assert!(
+                ok,
+                "hand-built TerrainDataFrozenV2 tile ({x},{z}) violates the length invariant: \
+                 {} heights / {wl} weights / {ml} maps, expected {expect}",
+                tile.heights().len()
+            );
+            if !ok {
+                tracing::error!(
+                    "inf-terrain: refusing a malformed hand-built legacy tile ({x},{z}) — \
+                     {} heights / {wl} weights / {ml} maps, expected {expect}. A DECODED \
+                     terrain cannot reach this branch (Deserialize rejects it); this is a \
+                     caller bug.",
+                    tile.heights().len()
+                );
+                continue;
+            }
+            data.tiles.insert((x, z), tile);
+            data.stamp(TileKey::lod0((x, z)));
+        }
+        data
+    }
+
+    /// Project a live [`TerrainData`] onto the frozen shape, **dropping** every
+    /// tile's biome ids (the downgrade-bless direction).
+    pub fn from_current(data: &TerrainData) -> Self {
+        Self {
+            tile_resolution: data.tile_resolution,
+            meters_per_sample: data.meters_per_sample,
+            tiles: data
+                .tiles
+                .iter()
+                .map(|(&(x, z), t)| (x, z, TerrainTileFrozenV2::from_current(t)))
                 .collect(),
         }
     }

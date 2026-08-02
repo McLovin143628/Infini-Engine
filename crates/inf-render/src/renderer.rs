@@ -41,21 +41,43 @@ use crate::settings::{halton_jitter, mip_chain_sizes, RenderSettings};
 /// * `Wireframe` — Unlit shading rendered through a `PolygonMode::Line` pipeline
 ///   variant. Requires [`wgpu::Features::POLYGON_MODE_LINE`]; when the adapter
 ///   lacks it, [`EngineRenderer::set_view_mode`] degrades this to `Unlit`.
+/// * `Biomes` (P19.2) — terrain tinted by its per-sample biome id through
+///   `RenderTerrain::biome_palette`; driven by the `flags.y` uniform. It also sets
+///   `flags.x`, so every **other** kind of geometry in the frame renders unlit —
+///   the smallest honest treatment: a biome id is a terrain-only concept, and
+///   flat-shading the rest keeps the painted map readable without pretending a
+///   mesh has a biome. Needs no GPU feature, so it is never degraded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
     #[default]
     Lit,
     Unlit,
     Wireframe,
+    Biomes,
 }
 
 impl ViewMode {
     /// The `View.flags.x` uniform value: `1.0` when the lit passes must skip
-    /// lighting (Unlit **and** Wireframe both shade unlit), else `0.0`.
+    /// lighting (Unlit, Wireframe **and** Biomes all shade unlit), else `0.0`.
+    ///
+    /// Biomes rides this flag deliberately: the four mesh shaders
+    /// (`mesh`/`skinned_mesh`/`vgeom_mesh`/`scatter_mesh`) then need no edit at
+    /// all, and non-terrain geometry drops to albedo instead of competing with the
+    /// tint for attention.
     pub fn unlit_flag(self) -> f32 {
         match self {
             ViewMode::Lit => 0.0,
-            ViewMode::Unlit | ViewMode::Wireframe => 1.0,
+            ViewMode::Unlit | ViewMode::Wireframe | ViewMode::Biomes => 1.0,
+        }
+    }
+
+    /// The `View.flags.y` uniform value: `1.0` **only** for Biomes (P19.2), which
+    /// is what makes the terrain shader's tint branch present-but-false — and its
+    /// arithmetic instruction-for-instruction unchanged — in every other mode.
+    pub fn biomes_flag(self) -> f32 {
+        match self {
+            ViewMode::Biomes => 1.0,
+            ViewMode::Lit | ViewMode::Unlit | ViewMode::Wireframe => 0.0,
         }
     }
 
@@ -533,11 +555,13 @@ impl EngineRenderer {
         self.view_mode
     }
 
-    /// Set the shading view mode (Lit / Unlit / Wireframe). A `Wireframe` request
-    /// on an adapter without `POLYGON_MODE_LINE` is clamped to `Unlit` (logged once
-    /// via `tracing`) — wireframe is a hard GPU-feature requirement, so we degrade
-    /// gracefully rather than fail. The editor viewport + goldens set this; it is
-    /// never persisted and the player never touches it.
+    /// Set the shading view mode (Lit / Unlit / Wireframe / Biomes). A `Wireframe`
+    /// request on an adapter without `POLYGON_MODE_LINE` is clamped to `Unlit`
+    /// (logged once via `tracing`) — wireframe is a hard GPU-feature requirement,
+    /// so we degrade gracefully rather than fail. `Biomes` is **never** clamped: it
+    /// is a uniform flag plus one texture, so every adapter that can draw terrain
+    /// at all can draw it. The editor viewport + goldens set this; it is never
+    /// persisted and the player never touches it.
     pub fn set_view_mode(&mut self, mode: ViewMode) {
         let effective = if mode == ViewMode::Wireframe && !self.polygon_mode_line {
             if !self.wireframe_warned {
@@ -623,6 +647,9 @@ impl EngineRenderer {
         // short-circuit (Unlit AND Wireframe both shade unlit). Lit writes 0, so
         // every pre-R-P2 golden stays byte-identical.
         uniforms.flags[0] = self.view_mode.unlit_flag();
+        // P19.2 Biomes: the terrain pass tints by biome id. Every other mode
+        // writes 0 here, so the branch is dead in the frames the goldens capture.
+        uniforms.flags[1] = self.view_mode.biomes_flag();
         if self.settings.taa {
             uniforms.view_proj = jvp.to_cols_array();
             uniforms.inv_view_proj = jvp.inverse().to_cols_array();

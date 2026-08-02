@@ -31,6 +31,7 @@ import {
   Minus,
   Music2,
   Paintbrush,
+  Palette,
   Pencil,
   Plus,
   Save,
@@ -55,6 +56,7 @@ import {
   visibleAssets,
   type AssetDto,
 } from "../stores/assetStore";
+import BiomeSetEditor from "./BiomeSetEditor";
 import DataAssetEditor from "./DataAssetEditor";
 import MaterialInstanceEditor from "./MaterialInstanceEditor";
 
@@ -70,6 +72,7 @@ const KIND_TINT: Record<string, string> = {
   struct: "text-(--ink-info)",
   enum: "text-(--ink-info)",
   table: "text-(--ink-text-dim)",
+  biome_set: "text-(--ink-success)",
 };
 function kindTint(kind: string): string {
   return KIND_TINT[kind] ?? "text-(--ink-text-dim)";
@@ -92,6 +95,8 @@ function KindGlyph({ kind, size, className }: { kind: string; size: number; clas
       return <FileCode2 {...p} />;
     case "audio":
       return <Music2 {...p} />;
+    case "biome_set":
+      return <Palette {...p} />;
     case "struct":
     case "enum":
       return <Layers {...p} />;
@@ -119,6 +124,7 @@ export default function ContentDrawer() {
 
   const editing = useAssetStore((s) => s.editing);
   const editingInstance = useAssetStore((s) => s.editingInstance);
+  const editingBiomeSet = useAssetStore((s) => s.editingBiomeSet);
   const collections = useAssetStore((s) => s.collections);
   const activeCollection = useAssetStore((s) => s.activeCollection);
 
@@ -131,6 +137,8 @@ export default function ContentDrawer() {
   const closeEditor = useAssetStore((s) => s.closeEditor);
   const openInstanceEditor = useAssetStore((s) => s.openInstanceEditor);
   const closeInstanceEditor = useAssetStore((s) => s.closeInstanceEditor);
+  const openBiomeSetEditor = useAssetStore((s) => s.openBiomeSetEditor);
+  const closeBiomeSetEditor = useAssetStore((s) => s.closeBiomeSetEditor);
   const createAsset = useAssetStore((s) => s.createAsset);
 
   // The active collection's member id set (cross-folder grid scope).
@@ -149,6 +157,7 @@ export default function ContentDrawer() {
   const onCellOpen = (asset: AssetDto) => {
     if (DATA_KINDS.has(asset.kind)) openEditor(asset.id);
     else if (asset.kind === "material_instance") openInstanceEditor(asset.id); // E-P2
+    else if (asset.kind === "biome_set") openBiomeSetEditor(asset.id); // P19.2
     else if (asset.kind === "material")
       useDockLayout.getState().openPanel("material"); // P7.2 material editor
     else if (asset.kind === "pcg")
@@ -205,6 +214,7 @@ export default function ContentDrawer() {
                   ["struct", "Struct"],
                   ["enum", "Enum"],
                   ["table", "Data Table"],
+                  ["biomeset", "Biome Set"],
                 ] as const
               ).map(([kind, label]) => (
                 <button
@@ -315,6 +325,12 @@ export default function ContentDrawer() {
               key={editingInstance}
               id={editingInstance}
               onClose={closeInstanceEditor}
+            />
+          ) : editingBiomeSet ? (
+            <BiomeSetEditor
+              key={editingBiomeSet}
+              id={editingBiomeSet}
+              onClose={closeBiomeSetEditor}
             />
           ) : !ready ? (
             <div className="p-4 text-xs text-(--ink-text-faint)">Loading content…</div>

@@ -801,6 +801,7 @@ fn hill_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
                 origin: DVec3::new(ox, 0.0, oz),
                 heights,
                 weights: Vec::new(),
+                biomes: Vec::new(),
                 height_bounds: (lo, hi),
                 version: 1,
             });
@@ -813,6 +814,7 @@ fn hill_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
         tiles,
         layers: default_layers(),
         macro_variation: 0.15,
+        biome_palette: Vec::new(),
     }
 }
 
@@ -953,6 +955,8 @@ fn splat_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
                 origin: DVec3::new(ox, 0.0, oz),
                 heights,
                 weights,
+                // Unpainted — the biomes golden paints this fixture's ids itself.
+                biomes: Vec::new(),
                 height_bounds: (lo, hi),
                 version: 1,
             });
@@ -965,6 +969,7 @@ fn splat_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
         tiles,
         layers: default_layers(),
         macro_variation: 0.15,
+        biome_palette: Vec::new(),
     }
 }
 
@@ -1003,6 +1008,157 @@ fn golden_terrain_splat() {
     assert!(snow, "expected the snow (bright) layer band");
 }
 
+/// The reserved "no biome" colour (mirrors `inf_terrain::UNASSIGNED_BIOME_COLOR`,
+/// which the renderer also mirrors locally — see `passes::terrain`).
+const UNASSIGNED_BIOME_COLOR: [f32; 4] = [0.22, 0.22, 0.24, 1.0];
+
+/// A biome palette in the shape `inf_terrain::BiomeSet::palette` produces:
+/// **index = biome id**, slot 0 reserved, three strongly-separated hues so a
+/// structural per-channel assertion can name which biome a pixel came from.
+fn biome_palette() -> Vec<[f32; 4]> {
+    vec![
+        UNASSIGNED_BIOME_COLOR,  // 0 — reserved / unpainted
+        [0.90, 0.10, 0.10, 1.0], // 1 — red
+        [0.10, 0.85, 0.15, 1.0], // 2 — green
+        [0.15, 0.25, 0.95, 1.0], // 3 — blue
+    ]
+}
+
+/// The [`splat_terrain`] fixture with **biome ids painted** across +X (P19.2):
+/// four equal bands carrying ids 0, 1, 2, 3, so one frame shows both a real biome
+/// vocabulary and the reserved "nothing painted here" id. Authored from one global
+/// world function, so the bands are seamless across the tile edges.
+fn biome_terrain(res: u32, mps: f64, ntx: i32, ntz: i32, palette: Vec<[f32; 4]>) -> RenderTerrain {
+    let mut terrain = splat_terrain(res, mps, ntx, ntz);
+    let span = (res as f64 - 1.0) * mps;
+    let total_w = ntx as f64 * span;
+    for tile in &mut terrain.tiles {
+        let ox = tile.origin.x;
+        let mut ids = vec![0u8; (res * res) as usize];
+        for j in 0..res {
+            for i in 0..res {
+                let u = ((ox + i as f64 * mps) / total_w).clamp(0.0, 1.0);
+                ids[(j * res + i) as usize] = (u * 4.0).floor().clamp(0.0, 3.0) as u8;
+            }
+        }
+        tile.biomes = ids;
+    }
+    terrain.biome_palette = palette;
+    terrain
+}
+
+/// Biomes view-mode golden (P19.2): the splat-painted heightfield with biome ids
+/// banded across +X, rendered with `set_view_mode(Biomes)` so the terrain is
+/// tinted by `RenderTerrain::biome_palette` instead of shaded. Determinism gate
+/// (render twice), a new committed golden `biomes.png` (bless with
+/// `INF_BLESS_GOLDENS=1`), and four structural gates:
+///
+/// * the Biomes frame differs from the Lit one (the flag genuinely changed the
+///   shading);
+/// * the painted bands read the colours the palette gave them (a per-channel
+///   dominance count, not a pixel hash — adapter-robust);
+/// * **swapping two palette entries changes the frame** — the proof that ids index
+///   the palette *by id*, rather than the shader inventing a colour per band;
+/// * the *Lit* frame stays byte-identical to the plain renderer, which is the
+///   OFF-path guarantee: `flags.y` is exactly 0 in every other mode, so no
+///   pre-P19.2 golden can move.
+///
+/// The grid is off on purpose: its world axes draw in red/blue, which would put
+/// those hues in the frame from something that is not a biome.
+#[test]
+fn golden_biomes() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let res = 33;
+    let palette = biome_palette();
+    let terrain = biome_terrain(res, 1.0, 2, 2, palette.clone());
+    let scene = RenderScene {
+        grid_enabled: false,
+        terrains: vec![terrain],
+        ..Default::default()
+    };
+    // The splat golden's camera: angled overlook, side-on to the cliff, all four
+    // bands in frame.
+    let view = look_view(DVec3::new(4.0, 22.0, -10.0), DVec3::new(40.0, 3.0, 32.0));
+
+    // Determinism + golden write/compare for the Biomes render.
+    let a = render_view_mode(&gpu, &scene, &view, ViewMode::Biomes);
+    let b = render_view_mode(&gpu, &scene, &view, ViewMode::Biomes);
+    let (mean, max) = image_diff(&a, &b, W, H);
+    assert!(
+        mean < 0.005 && max < 0.05,
+        "biomes: renderer not deterministic (mean {mean}, max {max})"
+    );
+    let path = goldens_dir().join("biomes.png");
+    if std::env::var("INF_BLESS_GOLDENS").is_ok() || read_png(&path).is_none() {
+        write_png(&path, &a);
+        eprintln!("golden biomes: wrote {}", path.display());
+    } else if std::env::var("INF_GOLDEN_STRICT").is_ok() {
+        let golden = read_png(&path).expect("golden png");
+        let (m, mx) = image_diff(&a, &golden, W, H);
+        assert!(
+            within_tolerance(m, mx),
+            "biomes: differs from golden (mean {m}, max {mx})"
+        );
+    }
+
+    // The tinted frame differs from the lit one.
+    let lit = render_view_mode(&gpu, &scene, &view, ViewMode::Lit);
+    let (dmean, _dmax) = image_diff(&a, &lit, W, H);
+    assert!(
+        dmean > 0.002,
+        "biomes should differ from lit (mean {dmean})"
+    );
+
+    // The painted bands read their palette colours. The tint is scaled by a
+    // wrapped N·L (0.55…1.0), which cannot move a hue between channels, so
+    // per-channel dominance is a safe structural claim.
+    let (mut red, mut green) = (0u32, 0u32);
+    for chunk in a.chunks(4) {
+        let (r, g, b) = (chunk[0] as i32, chunk[1] as i32, chunk[2] as i32);
+        if r > 60 && r - g > 40 && r - b > 40 {
+            red += 1;
+        }
+        if g > 60 && g - r > 40 && g - b > 40 {
+            green += 1;
+        }
+    }
+    assert!(
+        red > 200,
+        "expected the id-1 (red) biome band, saw {red} px"
+    );
+    assert!(
+        green > 200,
+        "expected the id-2 (green) biome band, saw {green} px"
+    );
+
+    // Swap the colours of ids 1 and 2 in the palette — the SAME painted ids must
+    // now draw differently. This is what pins "the palette is indexed by id": a
+    // shader that derived a colour from the band, or read the palette by array
+    // position within the level's biome list, would be unmoved by this.
+    let mut swapped_palette = palette.clone();
+    swapped_palette.swap(1, 2);
+    let swapped_scene = RenderScene {
+        grid_enabled: false,
+        terrains: vec![biome_terrain(res, 1.0, 2, 2, swapped_palette)],
+        ..Default::default()
+    };
+    let swapped = render_view_mode(&gpu, &swapped_scene, &view, ViewMode::Biomes);
+    let (smean, _smax) = image_diff(&a, &swapped, W, H);
+    assert!(
+        smean > 0.002,
+        "swapping two palette entries must repaint the bands (mean {smean})"
+    );
+
+    // The default Lit path is byte-stable vs the plain renderer — view mode never
+    // perturbs Lit, so no committed golden can move (the OFF-path proof).
+    let plain = render(&gpu, &scene, &view);
+    let (lmean, lmax) = image_diff(&lit, &plain, W, H);
+    assert!(
+        lmean < 1e-6 && lmax < 1e-6,
+        "Lit view mode must match the default renderer exactly (mean {lmean}, max {lmax})"
+    );
+}
+
 /// A synthetic **streamed** terrain (P16.3b1): three asset LOD levels over one
 /// global height function, handed to the renderer as a quadtree cut instead of a
 /// fully-resident heightfield.
@@ -1039,6 +1195,7 @@ fn streamed_terrain(res: u32, mps: f64) -> RenderTerrain {
             origin: DVec3::new(ox, 0.0, oz),
             heights,
             weights: Vec::new(),
+            biomes: Vec::new(),
             height_bounds: (lo, hi),
             version: 1 + version,
         }
@@ -1062,6 +1219,7 @@ fn streamed_terrain(res: u32, mps: f64) -> RenderTerrain {
         tiles,
         layers: default_layers(),
         macro_variation: 0.15,
+        biome_palette: Vec::new(),
     }
 }
 
@@ -2893,6 +3051,7 @@ fn golden_gi_terrain() {
                 origin: DVec3::new(tx as f64 * span - span, 0.0, tz as f64 * span - span),
                 heights: vec![0.0; (res * res) as usize],
                 weights: Vec::new(),
+                biomes: Vec::new(),
                 height_bounds: (0.0, 0.0),
                 version: 1,
             });
@@ -2914,6 +3073,7 @@ fn golden_gi_terrain() {
             RenderTerrainLayer::default(),
         ],
         macro_variation: 0.0,
+        biome_palette: Vec::new(),
     };
 
     let mut scene = RenderScene {

@@ -9,10 +9,11 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use inf_editor_core::ipc::{
-    FoliageSettingsDto, GizmoModeDto, GizmoSpaceDto, SculptFalloffDto, SculptOpDto,
-    SculptSettingsDto, Snap2DDto, Snap3DDto, ToolModeDto, ViewModeDto, ViewportDrop, ViewportKey,
-    ViewportModeDto, ViewportRect,
+    BiomeSettingsDto, FoliageSettingsDto, GizmoModeDto, GizmoSpaceDto, SculptFalloffDto,
+    SculptOpDto, SculptSettingsDto, Snap2DDto, Snap3DDto, ToolModeDto, ViewModeDto, ViewportDrop,
+    ViewportKey, ViewportModeDto, ViewportRect,
 };
+use inf_viewport::camera::BiomeSettings;
 use inf_viewport::{
     FoliageSettings, GizmoSpace, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings,
     SnapSettings, ToolMode, ViewportEvent, ViewportMode,
@@ -86,6 +87,21 @@ impl ViewportState {
         if let Ok(guard) = self.0.lock() {
             if let Some(handle) = guard.as_ref() {
                 handle.clear_streams();
+            }
+        }
+    }
+
+    /// Push a terrain entity's biome **overlay palette** (linear RGBA, indexed by
+    /// biome id) to the viewport (P19.2). An EMPTY palette clears the entry, which
+    /// is what an unbound terrain must send — otherwise the Biomes view mode would
+    /// keep tinting with a vocabulary the terrain no longer names.
+    ///
+    /// Public so the terrain/asset commands can re-push after a bind or a
+    /// `.inf_biomes` save without reaching into the handle themselves.
+    pub fn set_biome_palette(&self, entity: uuid::Uuid, palette: Vec<[f32; 4]>) {
+        if let Ok(guard) = self.0.lock() {
+            if let Some(handle) = guard.as_ref() {
+                handle.set_biome_palette(entity, palette);
             }
         }
     }
@@ -298,9 +314,22 @@ pub async fn viewport_set_tool_mode(
             ToolModeDto::Select => ToolMode::Select,
             ToolModeDto::Sculpt => ToolMode::Sculpt,
             ToolModeDto::Foliage => ToolMode::Foliage,
+            ToolModeDto::Biome => ToolMode::Biome,
         });
     }
     Ok(())
+}
+
+/// Map the IPC falloff DTO to the viewport's curve enum. Shared by the sculpt and
+/// biome brush pushes — the two brushes take the same curve, and a second copy of
+/// this match is a place for them to drift apart.
+fn to_falloff(d: SculptFalloffDto) -> SculptFalloff {
+    match d {
+        SculptFalloffDto::Smooth => SculptFalloff::Smooth,
+        SculptFalloffDto::Linear => SculptFalloff::Linear,
+        SculptFalloffDto::Sphere => SculptFalloff::Sphere,
+        SculptFalloffDto::Sharp => SculptFalloff::Sharp,
+    }
 }
 
 /// Push the sculpt brush configuration (op / radius / strength / falloff) to the
@@ -323,13 +352,33 @@ pub async fn viewport_set_sculpt(
             },
             radius: sculpt.radius.max(0.0),
             strength: sculpt.strength,
-            falloff: match sculpt.falloff {
-                SculptFalloffDto::Smooth => SculptFalloff::Smooth,
-                SculptFalloffDto::Linear => SculptFalloff::Linear,
-                SculptFalloffDto::Sphere => SculptFalloff::Sphere,
-                SculptFalloffDto::Sharp => SculptFalloff::Sharp,
-            },
+            falloff: to_falloff(sculpt.falloff),
             paint_layer: sculpt.paint_layer.min(3),
+        });
+    }
+    Ok(())
+}
+
+/// Push the biome brush configuration (radius / strength / falloff / id) to the
+/// viewport (P19.2).
+///
+/// `strength` is clamped to `[0, 1]` because it is not a rate here: it selects
+/// which falloff contour the painted biome's hard boundary lands on (see
+/// `inf_terrain::biomepaint`), so a value outside the unit range names no
+/// contour at all. `biome` needs no clamp — it is a `u8`, and every value
+/// including the reserved `0` (the eraser) is meaningful.
+#[tauri::command]
+pub async fn viewport_set_biome(
+    biome: BiomeSettingsDto,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        handle.set_biome(BiomeSettings {
+            radius: biome.radius.max(0.0),
+            strength: biome.strength.clamp(0.0, 1.0),
+            falloff: to_falloff(biome.falloff),
+            biome: biome.biome,
         });
     }
     Ok(())
@@ -405,10 +454,13 @@ pub async fn viewport_set_gizmo_space(
     Ok(())
 }
 
-/// Set the shading view mode (Lit / Unlit / Wireframe) from the viewport toolbar
-/// (R-P2). `Wireframe` degrades to `Unlit` in the renderer when the adapter lacks
-/// `POLYGON_MODE_LINE`. Editor-transient (never persisted; the player never sets
-/// it).
+/// Set the shading view mode (Lit / Unlit / Wireframe / Biomes) from the viewport
+/// toolbar (R-P2, P19.2). `Wireframe` degrades to `Unlit` in the renderer when the
+/// adapter lacks `POLYGON_MODE_LINE`; `Biomes` needs no GPU feature and never
+/// degrades. Editor-transient (never persisted; the player never sets it).
+///
+/// The DTO crosses whole — the DTO→`inf_render::ViewMode` mapping lives in
+/// `inf-viewport`'s per-platform `to_view_mode`, not here.
 #[tauri::command]
 pub async fn viewport_set_view_mode(
     mode: ViewModeDto,

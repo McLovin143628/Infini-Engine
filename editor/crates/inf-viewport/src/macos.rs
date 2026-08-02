@@ -25,8 +25,8 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
 use crate::camera::{
-    Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptSettings, Snap2DSettings,
-    SnapSettings, ToolMode, ViewportMode,
+    BiomeSettings, Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptSettings,
+    Snap2DSettings, SnapSettings, ToolMode, ViewportMode,
 };
 use crate::host::EngineHost;
 use crate::{SharedScene, SurfaceTarget, ViewportEventSink, ViewportRect};
@@ -48,6 +48,8 @@ fn to_view_mode(d: ViewModeDto) -> ViewMode {
         ViewModeDto::Lit => ViewMode::Lit,
         ViewModeDto::Unlit => ViewMode::Unlit,
         ViewModeDto::Wireframe => ViewMode::Wireframe,
+        // P19.2: needs no GPU feature, so it never degrades.
+        ViewModeDto::Biomes => ViewMode::Biomes,
     }
 }
 
@@ -64,6 +66,8 @@ enum Cmd {
     SetToolMode(ToolMode),
     SetSculpt(SculptSettings),
     SetFoliage(FoliageSettings),
+    SetBiome(BiomeSettings),
+    SetBiomePalette(uuid::Uuid, Vec<[f32; 4]>),
     SetGizmo(GizmoMode),
     SetGizmoSpace(GizmoSpace),
     SetSnap3D(SnapSettings),
@@ -133,6 +137,16 @@ impl ViewportHandle {
     /// yet, so this only sets the host state (the brush drives once input lands).
     pub fn set_foliage(&self, foliage: FoliageSettings) {
         let _ = self.tx.send(Cmd::SetFoliage(foliage));
+    }
+
+    /// Replace the biome brush configuration (P19.2).
+    pub fn set_biome(&self, biome: BiomeSettings) {
+        let _ = self.tx.send(Cmd::SetBiome(biome));
+    }
+
+    /// Push a terrain's resolved biome overlay palette (P19.2).
+    pub fn set_biome_palette(&self, entity: uuid::Uuid, palette: Vec<[f32; 4]>) {
+        let _ = self.tx.send(Cmd::SetBiomePalette(entity, palette));
     }
 
     /// Set the transform-gizmo mode (Wave 2). macOS input isn't wired yet, so
@@ -314,6 +328,8 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedSce
                 Ok(Cmd::SetToolMode(m)) => host.set_tool_mode(m),
                 Ok(Cmd::SetSculpt(s)) => host.set_sculpt(s),
                 Ok(Cmd::SetFoliage(f)) => host.set_foliage(f),
+                Ok(Cmd::SetBiome(b)) => host.set_biome(b),
+                Ok(Cmd::SetBiomePalette(e, p)) => host.set_biome_palette(e, p),
                 Ok(Cmd::SetGizmo(m)) => host.set_gizmo_mode(m),
                 Ok(Cmd::SetGizmoSpace(s)) => host.set_gizmo_space(s),
                 Ok(Cmd::SetSnap3D(s)) => host.set_snap_3d(s),

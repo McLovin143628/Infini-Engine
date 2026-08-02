@@ -785,9 +785,9 @@ fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
 
 /// Project an ECS [`Terrain`] (+ world translation) into a [`RenderTerrain`],
 /// mirroring `inf_viewport::host::project_terrain`: each **resident** tile becomes
-/// a [`RenderTerrainTile`] (heights + resolved RGBA8 splat weights + precomputed
-/// height bounds + its monotone change stamp), plus the four material layers +
-/// macro variation.
+/// a [`RenderTerrainTile`] (heights + resolved RGBA8 splat weights + resolved
+/// biome ids + precomputed height bounds + its monotone change stamp), plus the
+/// four material layers + macro variation.
 ///
 /// `data` is the working set to draw and is passed **explicitly** (P16.3b2): for
 /// an inline terrain it is `terrain.data`, for a streamed one it is the
@@ -831,11 +831,23 @@ pub fn project_terrain(
                 .map(|(i, j)| tile.weight_sample(res, i, j))
                 .collect()
         };
+        // Biome ids (P19.2) resolve exactly like the weights: the sparse default is
+        // expanded here so the DTO the renderer sees is always dense, and a coarse
+        // pyramid page — never painted — is all-`UNASSIGNED_BIOME`.
+        let biomes: Vec<u8> = if tile.biomes_are_default() {
+            vec![inf_terrain::UNASSIGNED_BIOME; n]
+        } else {
+            (0..res)
+                .flat_map(|j| (0..res).map(move |i| (i, j)))
+                .map(|(i, j)| tile.biome_sample(res, i, j))
+                .collect()
+        };
         RenderTerrainTile {
             key: TerrainTileKey::new(key.lod, key.coord),
             origin: tile.origin + translation,
             heights: tile.heights().to_vec(),
             weights,
+            biomes,
             height_bounds: tile.height_bounds(),
             version: data.tile_version(key),
         }
@@ -863,6 +875,16 @@ pub fn project_terrain(
         tiles,
         layers,
         macro_variation: terrain.macro_variation as f32,
+        // EMPTY on purpose (P19.2). The palette is a property of the level's
+        // `BiomeSet` asset, and `Terrain::biome_set` is a GUID: resolving it needs
+        // an asset DB, which this projection deliberately does not have (it takes
+        // an ECS component + a heightfield and nothing else — the same reason
+        // layer *textures* never reached it either). The renderer pads every slot
+        // with the unassigned colour, so a shipped build that somehow lands in the
+        // Biomes view draws uniform neutral rather than reading a stale palette.
+        // The mode is an EDITOR view mode — the viewport host, which does hold the
+        // DB, is where a real palette is projected from.
+        biome_palette: Vec::new(),
     }
 }
 

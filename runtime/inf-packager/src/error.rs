@@ -50,6 +50,15 @@ pub enum CookError {
     #[error("terrain {guid}: {message}")]
     Terrain { guid: AssetId, message: String },
 
+    /// A `.inf_biomes` failed to decode or validate at cook (P19.2).
+    ///
+    /// A biome set whose ids are duplicated — or that claims the reserved id `0` —
+    /// makes every per-sample lookup ambiguous, and the ids are already baked into
+    /// the terrain tiles by the time a player reads them. There is no sane
+    /// runtime recovery, so it fails the BUILD, where it is one edit to fix.
+    #[error("biome set {guid}: {message}")]
+    BiomeSet { guid: AssetId, message: String },
+
     /// A level's world partition could not be built (P16.5).
     ///
     /// A partitioned level ships **no entities of its own** — they live in the

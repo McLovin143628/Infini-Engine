@@ -24,6 +24,14 @@
 //! explicit set of wanted `(coord, lod)` keys, with per-tile versions and a dirty
 //! set for write-back.
 //!
+//! ## Biomes (P19.2)
+//!
+//! A terrain also carries a per-sample **biome id** layer beside its heights,
+//! splat weights and erosion data maps — sparse on the same rule, so an unpainted
+//! terrain costs nothing. The ids name entries in a [`BiomeSet`] (`.inf_biomes`),
+//! the asset that defines a level's biomes; [`biomepaint`] is the brush, and its
+//! module docs state why the boundary is deliberately **hard-edged**.
+//!
 //! [`residency`] executes wants; [`wants`] **computes** them (pure functions: a
 //! camera-driven quadtree cut with hysteresis, and the sim's level-0
 //! neighbourhood); [`stream`] holds the state that drives them — the cold stores
@@ -41,6 +49,8 @@
 //! conventional.
 
 pub mod asset;
+pub mod biome;
+pub mod biomepaint;
 mod brush;
 pub mod chunked;
 mod data;
@@ -65,16 +75,21 @@ use glam::DVec3;
 pub use asset::{
     build_terrain_asset, header_len, read_terrain_asset, write_terrain_asset, TerrainAsset,
     TerrainAssetBuilder, TerrainAssetError, TerrainAssetHeader, TerrainAssetReader,
-    TerrainAssetView, TileDirEntry, HEADER_LEN_V1, HEADER_LEN_V2, HEADER_LEN_V3,
+    TerrainAssetView, TileDirEntry, HEADER_LEN_V1, HEADER_LEN_V2, HEADER_LEN_V3, HEADER_LEN_V4,
     TERRAIN_ASSET_SCHEMA_VERSION, TILE_ALIGN,
 };
+pub use biome::{
+    BiomeDef, BiomeSet, BiomeSetError, BIOME_SET_SCHEMA_VERSION, UNASSIGNED_BIOME_COLOR,
+};
+pub use biomepaint::{apply_paint_biome, biome_claims, BiomeDelta, BiomePatch, BiomeStroke};
 pub use brush::{apply_brush, dab_positions, BrushOp, BrushParams, Falloff, FlattenTarget, Stroke};
 pub use chunked::{
     import_heightmap, import_heightmap_in, import_heightmap_reader, import_heightmap_reader_in,
     ChunkedImportOptions, ImportProgress, ImportReport,
 };
 pub use data::{
-    TerrainData, TerrainDataFrozenV1, DEFAULT_METERS_PER_SAMPLE, DEFAULT_TILE_RESOLUTION,
+    TerrainData, TerrainDataFrozenV1, TerrainDataFrozenV2, DEFAULT_METERS_PER_SAMPLE,
+    DEFAULT_TILE_RESOLUTION,
 };
 pub use delta::{HeightDelta, TilePatch};
 pub use import::{
@@ -96,8 +111,8 @@ pub use stream::{
     TerrainStreamer,
 };
 pub use tile::{
-    DataMapKind, TerrainTile, TerrainTileFrozenV1, TileKey, DATA_MAP_CHANNELS, DEFAULT_DATA_MAP,
-    DEFAULT_WEIGHT,
+    DataMapKind, TerrainTile, TerrainTileFrozenV1, TerrainTileFrozenV2, TileKey, DATA_MAP_CHANNELS,
+    DEFAULT_BIOME, DEFAULT_DATA_MAP, DEFAULT_WEIGHT, MAX_BIOMES, UNASSIGNED_BIOME,
 };
 pub use wants::{
     advance_cut, brush_wants, clamp_cut, render_wants, sim_wants, RenderWantsParams, TileCatalog,

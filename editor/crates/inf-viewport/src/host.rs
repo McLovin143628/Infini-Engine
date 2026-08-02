@@ -37,13 +37,13 @@ use inf_render::{
 use uuid::Uuid;
 
 use inf_terrain::{
-    dab_positions, raycast_terrain, BrushOp, BrushParams, Falloff, FlattenTarget, SplatStroke,
-    Stroke, TerrainData,
+    dab_positions, raycast_terrain, BiomeStroke, BrushOp, BrushParams, Falloff, FlattenTarget,
+    SplatStroke, Stroke, TerrainData,
 };
 
 use crate::camera::{
-    Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptFalloff, SculptOp, SculptSettings,
-    Snap2DSettings, SnapSettings, ToolMode, ViewportMode, TWO_D_FAR, TWO_D_NEAR,
+    BiomeSettings, Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptFalloff, SculptOp,
+    SculptSettings, Snap2DSettings, SnapSettings, ToolMode, ViewportMode, TWO_D_FAR, TWO_D_NEAR,
 };
 use crate::SurfaceTarget;
 
@@ -183,6 +183,19 @@ pub struct EngineHost {
     tool_mode: ToolMode,
     /// Sculpt brush configuration pushed from the toolbar (P10.2b).
     sculpt: SculptSettings,
+    /// Biome brush configuration pushed from the toolbar (P19.2).
+    biome: BiomeSettings,
+    /// Per-terrain biome overlay palettes, indexed by biome id — pushed from
+    /// Ring 2, which is the only layer that has both the scene and the asset
+    /// database and can therefore resolve a `Terrain.biome_set` to a
+    /// `BiomeSet::palette()`.
+    ///
+    /// Viewport-local *render* state, exactly like the view mode: it is derived
+    /// from an asset, never authored here, and nothing in Ring 0/1 has to learn
+    /// about the asset DB for the overlay to work. An entry is absent until Ring 2
+    /// pushes one, and an absent palette renders every sample as *unassigned* —
+    /// which is the honest picture of a terrain with no biome set bound.
+    biome_palettes: std::collections::BTreeMap<Uuid, Vec<[f32; 4]>>,
     /// GUID of the terrain entity the terrain tools currently target (P16.6).
     ///
     /// Set to the **first** projected terrain on each projection — so a
@@ -503,6 +516,10 @@ struct SculptDrag {
 enum DragStroke {
     Height(Stroke),
     Splat(SplatStroke),
+    /// A biome-id paint gesture (P19.2). Like the splat arm it captures its
+    /// target at `begin`, so retargeting the toolbar mid-drag cannot corrupt an
+    /// in-flight stroke.
+    Biome(BiomeStroke),
 }
 
 /// An in-flight foliage scatter gesture (E-P6): the mouse-down→up stroke that
@@ -774,6 +791,8 @@ impl EngineHost {
             selected_2d: HashMap::new(),
             tool_mode: ToolMode::Select,
             sculpt: SculptSettings::default(),
+            biome: BiomeSettings::default(),
+            biome_palettes: std::collections::BTreeMap::new(),
             terrain_guid: None,
             terrain_slots: Vec::new(),
             terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams::new(),
@@ -879,11 +898,11 @@ impl EngineHost {
         self.snap_2d = snap;
     }
 
-    /// Switch the active tool (Select / Sculpt / Foliage) from the toolbar.
-    /// Leaving the brush tools drops any hovered brush ring.
+    /// Switch the active tool (Select / Sculpt / Foliage / Biome) from the
+    /// toolbar. Leaving the brush tools drops any hovered brush ring.
     pub fn set_tool_mode(&mut self, mode: ToolMode) {
         self.tool_mode = mode;
-        if mode != ToolMode::Sculpt && mode != ToolMode::Foliage {
+        if !matches!(mode, ToolMode::Sculpt | ToolMode::Foliage | ToolMode::Biome) {
             self.sculpt_ring.clear();
         }
     }
@@ -891,6 +910,22 @@ impl EngineHost {
     /// Replace the sculpt brush configuration (from the toolbar).
     pub fn set_sculpt(&mut self, sculpt: SculptSettings) {
         self.sculpt = sculpt;
+    }
+
+    /// Replace the biome brush configuration (from the toolbar, P19.2).
+    pub fn set_biome(&mut self, biome: BiomeSettings) {
+        self.biome = biome;
+    }
+
+    /// Push a terrain entity's resolved biome palette (P19.2) — see
+    /// [`biome_palettes`](Self::biome_palettes). An empty palette clears the
+    /// entry, so unbinding a biome set does not leave a stale overlay behind.
+    pub fn set_biome_palette(&mut self, guid: Uuid, palette: Vec<[f32; 4]>) {
+        if palette.is_empty() {
+            self.biome_palettes.remove(&guid);
+        } else {
+            self.biome_palettes.insert(guid, palette);
+        }
     }
 
     /// Replace the foliage brush configuration (from the toolbar, E-P6).
@@ -1241,13 +1276,24 @@ impl EngineHost {
                     if streamed {
                         self.terrain_streams.overlay_document_edits(guid, doc);
                     }
+                    let palette: &[[f32; 4]] = self
+                        .biome_palettes
+                        .get(&guid)
+                        .map(|p| p.as_slice())
+                        .unwrap_or(&[]);
                     let projected = if streamed {
                         self.terrain_streams
                             .render_data(guid)
                             .filter(|d| d.tile_count() + d.coarse_tile_count() > 0)
-                            .map(|d| project_terrain(guid, terrain, d, translation))
+                            .map(|d| project_terrain(guid, terrain, d, translation, palette))
                     } else if !terrain.data.is_empty() {
-                        Some(project_terrain(guid, terrain, &terrain.data, translation))
+                        Some(project_terrain(
+                            guid,
+                            terrain,
+                            &terrain.data,
+                            translation,
+                            palette,
+                        ))
                     } else {
                         None
                     };
@@ -2296,6 +2342,7 @@ fn project_terrain(
     terrain: &Terrain,
     data: &TerrainData,
     translation: DVec3,
+    biome_palette: &[[f32; 4]],
 ) -> RenderTerrain {
     let res = data.tile_resolution();
     let n = (res * res) as usize;
@@ -2311,11 +2358,23 @@ fn project_terrain(
                 .map(|(i, j)| tile.weight_sample(res, i, j))
                 .collect()
         };
+        // Same sparse resolution for the P19.2 biome ids: an unpainted tile — and
+        // every coarse pyramid page, which is a streaming page rather than
+        // authored content — projects as uniform `UNASSIGNED_BIOME`.
+        let biomes: Vec<u8> = if tile.biomes_are_default() {
+            vec![inf_terrain::UNASSIGNED_BIOME; n]
+        } else {
+            (0..res)
+                .flat_map(|j| (0..res).map(move |i| (i, j)))
+                .map(|(i, j)| tile.biome_sample(res, i, j))
+                .collect()
+        };
         RenderTerrainTile {
             key: TerrainTileKey::new(key.lod, key.coord),
             origin: tile.origin + translation,
             heights: tile.heights().to_vec(),
             weights,
+            biomes,
             height_bounds: tile.height_bounds(),
             version: data.tile_version(key),
         }
@@ -2343,6 +2402,7 @@ fn project_terrain(
         tiles,
         layers,
         macro_variation: terrain.macro_variation as f32,
+        biome_palette: biome_palette.to_vec(),
     }
 }
 
@@ -3042,7 +3102,12 @@ impl EngineHost {
                 self.terrain_streams.projection_inputs(slot_guid)
             {
                 if data.tile_count() + data.coarse_tile_count() > 0 {
-                    let rt = project_terrain(slot_guid, component, data, translation);
+                    let palette: &[[f32; 4]] = self
+                        .biome_palettes
+                        .get(&slot_guid)
+                        .map(|p| p.as_slice())
+                        .unwrap_or(&[]);
+                    let rt = project_terrain(slot_guid, component, data, translation, palette);
                     if let Some(dst) = self.scene.terrains.get_mut(i) {
                         *dst = rt;
                     }
@@ -3155,7 +3220,35 @@ impl EngineHost {
             return;
         }
         self.terrain_streams
-            .page_brush_footprint(guid, doc, center, self.sculpt.radius);
+            .page_brush_footprint(guid, doc, center, self.brush_radius());
+    }
+
+    /// The radius of whichever terrain brush is active — the biome tool has its
+    /// own, and residency paging / the hover ring must follow the tool the user
+    /// is actually holding, not the sculpt slider.
+    fn brush_radius(&self) -> f64 {
+        if self.tool_mode == ToolMode::Biome {
+            self.biome.radius
+        } else {
+            self.sculpt.radius
+        }
+    }
+
+    /// The ring colour for the biome tool: the **selected** biome's palette
+    /// entry, or the *unassigned* grey when nothing resolves — no set bound, an
+    /// id the set no longer defines, or the eraser (id `0`), whose palette slot
+    /// **is** that grey. The same fallback the shader applies, so the ring under
+    /// the cursor never promises a colour the terrain will not take.
+    ///
+    /// It follows the toolbar selection, not the Ctrl modifier: Ctrl is a
+    /// momentary flip read at mouse-down, and recolouring the hover ring on a
+    /// keypress would make the brush look like it had changed tools.
+    fn biome_swatch(&self, guid: Option<Uuid>) -> [f32; 4] {
+        let id = self.biome.biome as usize;
+        guid.and_then(|g| self.biome_palettes.get(&g))
+            .and_then(|p| p.get(id))
+            .copied()
+            .unwrap_or(inf_terrain::UNASSIGNED_BIOME_COLOR)
     }
 
     /// Mirror the document's edited tiles into the render set and refresh the
@@ -3172,7 +3265,12 @@ impl EngineHost {
         self.terrain_slots[index].unsaved = !doc.terrain_dirty_tiles(guid).is_empty();
         if let Some((component, data, translation)) = self.terrain_streams.projection_inputs(guid) {
             if data.tile_count() + data.coarse_tile_count() > 0 {
-                let rt = project_terrain(guid, component, data, translation);
+                let palette: &[[f32; 4]] = self
+                    .biome_palettes
+                    .get(&guid)
+                    .map(|p| p.as_slice())
+                    .unwrap_or(&[]);
+                let rt = project_terrain(guid, component, data, translation, palette);
                 if let Some(dst) = self.scene.terrains.get_mut(index) {
                     *dst = rt;
                 }
@@ -3192,9 +3290,12 @@ impl EngineHost {
             .map(|d| d.op)
             .unwrap_or(self.sculpt.op);
         // Paint recolours the ring by the target layer's albedo (so the swatch
-        // under the cursor reads as the layer being painted); sculpt ops use
+        // under the cursor reads as the layer being painted); the biome tool by
+        // its target biome's palette colour, for the same reason; sculpt ops use
         // their fixed op colour.
-        let color = if op == SculptOp::Paint {
+        let color = if self.tool_mode == ToolMode::Biome {
+            self.biome_swatch(guid)
+        } else if op == SculptOp::Paint {
             guid.and_then(|g| doc.terrain_layer_albedo(g, self.sculpt.paint_layer))
                 .unwrap_or_else(|| op_color(op))
         } else {
@@ -3203,7 +3304,7 @@ impl EngineHost {
         self.sculpt_ring_color = color;
         if let Some(guid) = guid {
             if let Some((data, translation)) = self.terrain_probe(doc, guid) {
-                let ring = build_ring(data, translation, center, self.sculpt.radius);
+                let ring = build_ring(data, translation, center, self.brush_radius());
                 self.sculpt_ring = ring;
                 return;
             }
@@ -3292,7 +3393,14 @@ impl EngineHost {
         self.page_brush_footprint(doc, guid, center);
         let op = effective_op(self.sculpt.op, ctrl);
         let settings = self.sculpt;
-        let kind = if op == SculptOp::Paint {
+        let kind = if self.tool_mode == ToolMode::Biome {
+            // Ctrl is the eraser modifier — the biome twin of Ctrl flipping
+            // Raise↔Lower, and the only way to unpaint without hunting for the
+            // "Unassigned" entry in the picker.
+            let mut stroke = BiomeStroke::begin(effective_biome(&self.biome, ctrl));
+            doc.biome_apply_dab(guid, &mut stroke, biome_params(&self.biome, center));
+            DragStroke::Biome(stroke)
+        } else if op == SculptOp::Paint {
             let mut stroke = SplatStroke::begin(settings.paint_layer);
             doc.paint_apply_dab(guid, &mut stroke, paint_params(&settings, center));
             DragStroke::Splat(stroke)
@@ -3330,7 +3438,8 @@ impl EngineHost {
             return; // cursor slid off the terrain — hold the stroke, add nothing
         };
         let settings = self.sculpt;
-        let spacing = (0.35 * settings.radius).max(0.05);
+        let biome = self.biome;
+        let spacing = (0.35 * self.brush_radius()).max(0.05);
         // `dab_positions` re-emits the start (`last`); skip it — already placed.
         let dabs = dab_positions(&[last, cur], spacing);
         let mut new_last = last;
@@ -3346,6 +3455,9 @@ impl EngineHost {
                     }
                     DragStroke::Splat(stroke) => {
                         doc.paint_apply_dab(guid, stroke, paint_params(&settings, c));
+                    }
+                    DragStroke::Biome(stroke) => {
+                        doc.biome_apply_dab(guid, stroke, biome_params(&biome, c));
                     }
                 }
             }
@@ -3368,6 +3480,7 @@ impl EngineHost {
         let recorded = match drag.kind {
             DragStroke::Height(stroke) => doc.edit_commit_sculpt(drag.guid, stroke),
             DragStroke::Splat(stroke) => doc.edit_commit_paint(drag.guid, stroke),
+            DragStroke::Biome(stroke) => doc.edit_commit_biome(drag.guid, stroke),
         };
         self.after_terrain_edit(doc, drag.guid);
         recorded
@@ -3635,6 +3748,28 @@ fn falloff_of(f: SculptFalloff) -> Falloff {
         SculptFalloff::Linear => Falloff::Linear,
         SculptFalloff::Sphere => Falloff::Sphere,
         SculptFalloff::Sharp => Falloff::Sharp,
+    }
+}
+
+/// The biome a dab actually writes: `Ctrl` erases (writes the reserved
+/// *unassigned* id) — the biome twin of Ctrl flipping Raise↔Lower.
+fn effective_biome(s: &BiomeSettings, ctrl: bool) -> u8 {
+    if ctrl {
+        inf_terrain::UNASSIGNED_BIOME
+    } else {
+        s.biome
+    }
+}
+
+/// Brush params for a biome dab (P19.2). `strength` is **not** a blend fraction
+/// here — it selects which falloff contour the hard boundary lands on; see
+/// `inf_terrain::biomepaint`.
+fn biome_params(s: &BiomeSettings, center: DVec2) -> BrushParams {
+    BrushParams {
+        center,
+        radius: s.radius,
+        strength: s.strength,
+        falloff: falloff_of(s.falloff),
     }
 }
 

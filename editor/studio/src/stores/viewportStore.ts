@@ -9,7 +9,8 @@ import { create } from "zustand";
 
 import { getCommand, registerCommands, setCommandHandler } from "../lib/commands";
 import { listenTo } from "../lib/events";
-import { projectSettings, viewport } from "../lib/ipc";
+import { projectSettings, terrain, viewport } from "../lib/ipc";
+import type { BiomeSettingsDto } from "../bindings/BiomeSettingsDto";
 import type { FoliageSettingsDto } from "../bindings/FoliageSettingsDto";
 import type { GizmoModeDto } from "../bindings/GizmoModeDto";
 import type { GizmoSpaceDto } from "../bindings/GizmoSpaceDto";
@@ -18,6 +19,7 @@ import type { SculptOpDto } from "../bindings/SculptOpDto";
 import type { SculptSettingsDto } from "../bindings/SculptSettingsDto";
 import type { Snap2DDto } from "../bindings/Snap2DDto";
 import type { Snap3DDto } from "../bindings/Snap3DDto";
+import type { TerrainBiomesDto } from "../bindings/TerrainBiomesDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
 import type { ViewModeDto } from "../bindings/ViewModeDto";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
@@ -51,7 +53,8 @@ interface ViewportUiState {
   /** Per-project pixels-per-unit (persisted). */
   pixelsPerUnit: number;
 
-  /** Shading view mode (Lit / Unlit / Wireframe), perspective only (R-P2). */
+  /** Shading view mode (Lit / Unlit / Wireframe / Biomes), perspective only
+   * (R-P2, P19.2). */
   viewMode: ViewModeDto;
 
   /** Active tool: pick/gizmo (`Select`) or terrain sculpt (`Sculpt`). (P10.2b) */
@@ -94,6 +97,22 @@ interface ViewportUiState {
   foliageScaleJitter: number;
   foliageSeed: number;
 
+  /** Biome brush (P19.2). Radius is world metres; `biomeStrength` is NOT a blend
+   * — it picks which falloff contour the painted biome's hard boundary lands on
+   * (`1` stamps the whole disk); `biomeId` is the painted id, `0` = the reserved
+   * *unassigned* value, which erases. */
+  biomeRadius: number;
+  biomeStrength: number;
+  biomeFalloff: SculptFalloffDto;
+  biomeId: number;
+  /**
+   * The vocabulary the Biome tool paints with, for the terrain the toolbar is
+   * pointed at (P19.2). `null` until the first `refreshBiomes`, and again
+   * whenever the level has no terrain — the toolbar shows a hint rather than an
+   * empty swatch row.
+   */
+  terrainBiomes: TerrainBiomesDto | null;
+
   /** Transform-gizmo mode (translate/rotate/scale), two-way synced (Wave 2). */
   gizmoMode: GizmoModeDto;
   /** Gizmo orientation frame (World ↔ Local). */
@@ -106,7 +125,7 @@ interface ViewportUiState {
 
   setMode: (mode: ViewportModeDto) => void;
   toggleMode: () => void;
-  /** Set the shading view mode + push to the viewport (R-P2). */
+  /** Set the shading view mode + push to the viewport (R-P2, P19.2). */
   setViewMode: (mode: ViewModeDto) => void;
   setGridSnapEnabled: (v: boolean) => void;
   setGridSnapSize: (v: number) => void;
@@ -129,6 +148,18 @@ interface ViewportUiState {
   setFoliageKind: (n: number) => void;
   setFoliageScaleJitter: (v: number) => void;
   setFoliageSeed: (n: number) => void;
+
+  setBiomeRadius: (r: number) => void;
+  setBiomeStrength: (s: number) => void;
+  setBiomeFalloff: (f: SculptFalloffDto) => void;
+  setBiomeId: (id: number) => void;
+  /**
+   * Re-read the terrain's biome vocabulary into `terrainBiomes` (P19.2). Also
+   * repairs the selection: an id that the (re)bound set no longer defines would
+   * paint an invisible biome, so it falls back to the first defined id, or to 0
+   * (the eraser) when the set is empty.
+   */
+  refreshBiomes: () => Promise<void>;
 
   /** Set the gizmo mode + push to the viewport (Wave 2). */
   setGizmoMode: (mode: GizmoModeDto) => void;
@@ -180,6 +211,20 @@ function pushFoliage(s: ViewportUiState): void {
   } catch {
     // ignore quota / privacy-mode failures
   }
+}
+
+/** Send the current biome brush settings to the native viewport (P19.2).
+ *  Deliberately NOT persisted: the ids are only meaningful against whichever
+ *  `.inf_biomes` the open level's terrain binds, so a remembered id would arm the
+ *  brush with a biome the next project has never heard of. */
+function pushBiome(s: ViewportUiState): void {
+  const dto: BiomeSettingsDto = {
+    radius: s.biomeRadius,
+    strength: s.biomeStrength,
+    falloff: s.biomeFalloff,
+    biome: s.biomeId,
+  };
+  void viewport.setBiome(dto).catch(() => {});
 }
 
 /** Send the current snap settings to the native viewport. */
@@ -236,6 +281,14 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   foliageKind: 0,
   foliageScaleJitter: 0.2,
   foliageSeed: 1,
+  biomeRadius: 8,
+  // Full strength by default (mirrors `inf_viewport::camera::BiomeSettings`): a
+  // stamp is what an author reaches for first, and a partial-strength default
+  // reads as a broken brush rather than a smaller one.
+  biomeStrength: 1,
+  biomeFalloff: "Smooth",
+  biomeId: 0,
+  terrainBiomes: null,
   gizmoMode: "Translate",
   gizmoSpace: "World",
   snap3dEnabled: false,
@@ -279,6 +332,12 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
     // Sync the brush config whenever we enter a brush tool so it's armed.
     if (toolMode === "Sculpt") pushSculpt(get());
     if (toolMode === "Foliage") pushFoliage(get());
+    if (toolMode === "Biome") {
+      pushBiome(get());
+      // …and re-read the vocabulary: the bound set may have changed (or been
+      // edited) since the toolbar last showed its swatches.
+      void get().refreshBiomes();
+    }
   },
   setSculptOp: (sculptOp) => {
     set({ sculptOp });
@@ -334,6 +393,42 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
     pushFoliage(get());
   },
 
+  setBiomeRadius: (r) => {
+    set({ biomeRadius: clampSculptRadius(r) });
+    pushBiome(get());
+  },
+  setBiomeStrength: (s) => {
+    // A contour selector, not a rate: outside [0,1] it names no contour at all.
+    set({ biomeStrength: Number.isFinite(s) ? Math.min(Math.max(s, 0), 1) : 1 });
+    pushBiome(get());
+  },
+  setBiomeFalloff: (biomeFalloff) => {
+    set({ biomeFalloff });
+    pushBiome(get());
+  },
+  setBiomeId: (id) => {
+    const biomeId = Number.isFinite(id) ? Math.min(Math.max(Math.round(id), 0), 255) : 0;
+    set({ biomeId });
+    pushBiome(get());
+  },
+  refreshBiomes: async () => {
+    try {
+      const terrainBiomes = await terrain.biomes();
+      // Repair the selection before it can paint: an id the (re)bound set no
+      // longer defines writes samples nothing can name. 0 (erase) is always
+      // valid, so it is the floor.
+      const defined = terrainBiomes?.biomes ?? [];
+      const current = get().biomeId;
+      const biomeId =
+        current === 0 || defined.some((b) => b.id === current) ? current : (defined[0]?.id ?? 0);
+      set({ terrainBiomes, biomeId });
+      if (biomeId !== current) pushBiome(get());
+    } catch {
+      // Swallowed like the other pushes — the toolbar polls this, and a level
+      // with no terrain is a normal state, not an error to surface.
+    }
+  },
+
   setGizmoMode: (gizmoMode) => {
     set({ gizmoMode });
     void viewport.setGizmoMode(gizmoMode).catch(() => {});
@@ -372,9 +467,11 @@ export function registerViewportCommands(): void {
     { id: "view.lit", title: "View Mode: Lit", category: "View" },
     { id: "view.unlit", title: "View Mode: Unlit", category: "View" },
     { id: "view.wireframe", title: "View Mode: Wireframe", category: "View" },
+    { id: "view.biomes", title: "View Mode: Biomes", category: "View" },
     { id: "tool.select", title: "Tool: Select", category: "Tools" },
     { id: "tool.sculpt", title: "Tool: Sculpt Terrain", category: "Tools" },
     { id: "tool.foliage", title: "Tool: Paint Foliage", category: "Tools" },
+    { id: "tool.biome", title: "Tool: Paint Biomes", category: "Tools" },
   ]);
   if (getCommand("view.toggle2D")) {
     setCommandHandler("view.toggle2D", () => useViewportStore.getState().toggleMode());
@@ -402,8 +499,14 @@ export function registerViewportCommands(): void {
   if (getCommand("tool.sculpt")) {
     setCommandHandler("tool.sculpt", () => useViewportStore.getState().setToolMode("Sculpt"));
   }
+  if (getCommand("view.biomes")) {
+    setCommandHandler("view.biomes", () => useViewportStore.getState().setViewMode("Biomes"));
+  }
   if (getCommand("tool.foliage")) {
     setCommandHandler("tool.foliage", () => useViewportStore.getState().setToolMode("Foliage"));
+  }
+  if (getCommand("tool.biome")) {
+    setCommandHandler("tool.biome", () => useViewportStore.getState().setToolMode("Biome"));
   }
 }
 

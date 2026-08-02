@@ -60,6 +60,13 @@ pub enum AssetKind {
     /// slice one cell straight out of an mmap'd pack
     /// (`PackWriter::compresses_kind`).
     Partition,
+    /// A level's named **biomes** (`.inf_biomes`) — id, display colour, splat
+    /// mapping, PCG-graph reference and water/structure hints per biome (P19.2,
+    /// [`inf_terrain::BiomeSet`]). Small and text-like, so it compresses like
+    /// every other authored payload (`PackWriter::compresses_kind`).
+    ///
+    /// [`inf_terrain::BiomeSet`]: the terrain crate's `BiomeSet` payload.
+    BiomeSet,
     /// Anything else living under the content root.
     Unknown,
 }
@@ -86,6 +93,7 @@ impl AssetKind {
             AssetKind::StateMachine => "inf_sm",
             AssetKind::Terrain => "inf_terrain",
             AssetKind::Partition => "inf_part",
+            AssetKind::BiomeSet => "inf_biomes",
             AssetKind::Unknown => return None,
         })
     }
@@ -111,6 +119,7 @@ impl AssetKind {
             "inf_sm" => AssetKind::StateMachine,
             "inf_terrain" => AssetKind::Terrain,
             "inf_part" => AssetKind::Partition,
+            "inf_biomes" => AssetKind::BiomeSet,
             _ => AssetKind::Unknown,
         }
     }
@@ -144,6 +153,7 @@ impl AssetKind {
             AssetKind::StateMachine => "state_machine",
             AssetKind::Terrain => "terrain",
             AssetKind::Partition => "partition",
+            AssetKind::BiomeSet => "biome_set",
             AssetKind::Unknown => "unknown",
         }
     }
@@ -169,6 +179,7 @@ impl AssetKind {
             AssetKind::StateMachine => "State Machine",
             AssetKind::Terrain => "Terrain",
             AssetKind::Partition => "World Partition",
+            AssetKind::BiomeSet => "Biome Set",
             AssetKind::Unknown => "File",
         }
     }
@@ -195,6 +206,7 @@ impl AssetKind {
             AssetKind::StateMachine,
             AssetKind::Terrain,
             AssetKind::Partition,
+            AssetKind::BiomeSet,
         ]
     }
 }
