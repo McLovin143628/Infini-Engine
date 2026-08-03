@@ -302,6 +302,46 @@ fn the_bed_advisory_honours_a_reversed_flow() {
     assert!(mine[1].contains("BED climbs"), "{mine:?}");
 }
 
+/// **The cook and the tool sanitize identically** (P20.4 audit).
+///
+/// A negative authored depth used to reach the cook's `RiverProfile` raw while
+/// every other consumer clamped it, so the cook judged a bed the renderer, the
+/// sim and the editor's report never showed. `RiverProfile::authored` is now the
+/// one sanitizer; this pins the consequence from outside.
+#[test]
+fn a_negative_authored_depth_is_clamped_before_the_bed_is_judged() {
+    // Surface falls 30 -> 27. Depth −6 -> 0.5. CLAMPED that is 0 -> 0.5, so the
+    // bed goes 30 -> 26.5: it FALLS, and nothing is reported. Read raw, the bed
+    // would go 36 -> 26.5 and likewise fall — so the discriminating case is the
+    // reverse taper below.
+    let mut a = river(0xB040, "Clamped", &[30.0, 29.0, 28.0, 27.0], 1.2);
+    {
+        let w = a.water_body.as_mut().unwrap();
+        w.river_depth_start_m = -6.0;
+        w.river_depth_end_m = 0.5;
+    }
+    let warnings = cook_warnings(level(vec![a]));
+    assert!(
+        !warnings.iter().any(|w| w.contains(&g(0xB040).to_string())),
+        "{warnings:?}"
+    );
+
+    // The discriminating case: depth 0.5 -> −6. Clamped that is 0.5 -> 0, so the
+    // bed goes 29.5 -> 27 and FALLS (silent). Read raw it would go 29.5 -> 33 and
+    // CLIMB 3.5 m, which is what the cook used to report and nothing else did.
+    let mut b = river(0xB041, "Reversed taper", &[30.0, 29.0, 28.0, 27.0], 1.2);
+    {
+        let w = b.water_body.as_mut().unwrap();
+        w.river_depth_start_m = 0.5;
+        w.river_depth_end_m = -6.0;
+    }
+    let warnings = cook_warnings(level(vec![b]));
+    assert!(
+        !warnings.iter().any(|w| w.contains(&g(0xB041).to_string())),
+        "the cook judged an unclamped bed: {warnings:?}"
+    );
+}
+
 /// A `WaterKind::River` with **no `Spline`** has no centreline. That is an
 /// authoring state (you added the component and have not drawn the path yet), not
 /// a hazard, and the cook must not nag about it — nor panic on the empty path.

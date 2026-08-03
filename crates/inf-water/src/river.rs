@@ -87,6 +87,39 @@ pub struct RiverProfile {
     pub flow_speed_m_s: f64,
 }
 
+impl RiverProfile {
+    /// **The one place authored river numbers are sanitized** (P20.4).
+    ///
+    /// Widths and depths are clamped to `>= 0` — a negative width is not a
+    /// mirrored river, it is a ribbon whose banks have swapped, and a negative
+    /// depth puts the bed above the surface. The flow speed is **not** clamped:
+    /// a negative one reverses the river without re-authoring its spline, which
+    /// is a documented `WaterBody` feature.
+    ///
+    /// Every consumer of a `WaterBody`'s river fields goes through here — both
+    /// scene projectors, `PhysicsBridge3D`'s surface builder, the cook's
+    /// advisories and the editor's river report. Before P20.4 the cook built its
+    /// profile from the raw fields while everyone else clamped, so a negative
+    /// authored depth produced a *different taper* in the build from the one the
+    /// tool and the renderer showed — which breaks the one thing the tool's
+    /// re-run of the cook checks is for: saying what the build will say.
+    pub fn authored(
+        width_start_m: f64,
+        width_end_m: f64,
+        depth_start_m: f64,
+        depth_end_m: f64,
+        flow_speed_m_s: f64,
+    ) -> Self {
+        Self {
+            width_start_m: width_start_m.max(0.0),
+            width_end_m: width_end_m.max(0.0),
+            depth_start_m: depth_start_m.max(0.0),
+            depth_end_m: depth_end_m.max(0.0),
+            flow_speed_m_s,
+        }
+    }
+}
+
 impl Default for RiverProfile {
     /// A modest stream: 6 m wide, 1.5 m deep, ambling at 1 m/s.
     fn default() -> Self {
@@ -711,6 +744,30 @@ mod tests {
             let d = w[0].center.distance(w[1].center);
             assert!((d - step).abs() < step * 0.05, "chord {d} vs step {step}");
         }
+    }
+
+    /// The one sanitizer: widths and depths floor at zero, the flow keeps its
+    /// sign, and a clean profile passes through untouched.
+    #[test]
+    fn authored_profiles_are_clamped_in_exactly_one_place() {
+        let p = RiverProfile::authored(-4.0, 12.0, -1.0, 3.0, -2.5);
+        assert_eq!(p.width_start_m, 0.0);
+        assert_eq!(p.width_end_m, 12.0);
+        assert_eq!(p.depth_start_m, 0.0);
+        assert_eq!(p.depth_end_m, 3.0);
+        assert_eq!(p.flow_speed_m_s, -2.5, "a reversed river is not a mistake");
+        // Anti-vacuity: a valid profile is passed through unchanged.
+        let ok = RiverProfile::authored(6.0, 14.0, 1.2, 2.0, 2.2);
+        assert_eq!(
+            ok,
+            RiverProfile {
+                width_start_m: 6.0,
+                width_end_m: 14.0,
+                depth_start_m: 1.2,
+                depth_end_m: 2.0,
+                flow_speed_m_s: 2.2,
+            }
+        );
     }
 
     #[test]

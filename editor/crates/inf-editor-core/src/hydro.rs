@@ -119,25 +119,55 @@ impl RiverReport {
     }
 }
 
-/// The world-space terrain height under `(x, z)` — the editor twin of the
-/// player's `terrain_height_at`, and the sampler every function here feeds to
-/// `inf-water`.
+/// **THE AUTHORING TERRAIN AUTHORITY** (P20.4): the *topmost* ground under
+/// `(x, z)`, and which terrain produced it.
+///
+/// One rule, used by every authoring query in this module and mirrored by the
+/// viewport's own `EngineHost::water_level_for` — **the highest ground that
+/// answers here** wins, with ties going to the lower `Guid` so the answer is a
+/// function of the level rather than of a traversal order.
+///
+/// Topmost rather than the runtime's lowest-`Guid`-first, and the difference is
+/// deliberate. `inf_ecs::hydro::terrain_flow` and the player's
+/// `terrain_height_at` answer *the simulation's* question ("which terrain owns
+/// this point"), where a stable authority matters more than which surface is
+/// visible. These functions answer *the author's* question — "what am I
+/// pointing at" — and on overlapping terrains the author is pointing at the one
+/// they can see. The brush ring and the foliage drop height already use the same
+/// topmost rule (`topmost_surface` in `inf-viewport`), so the water tools agree
+/// with the tools beside them rather than with the fixed step.
 ///
 /// `None` where no terrain answers (a hole, off the authored extent, or a level
-/// with no terrain). It resolves terrains in ascending `Guid` order and takes the
-/// first answer, which is the same rule `inf_ecs::hydro::terrain_flow` uses —
-/// stated in both places because two different rules would put a river's
-/// validation on a different ground from its foam.
-pub fn terrain_height_at(doc: &SceneDoc, x: f64, z: f64) -> Option<f64> {
+/// with no terrain).
+fn topmost_ground(
+    doc: &SceneDoc,
+    x: f64,
+    z: f64,
+) -> Option<(f64, &inf_terrain::TerrainData, DVec3)> {
+    let mut best: Option<(f64, &inf_terrain::TerrainData, DVec3)> = None;
     for (origin, data) in terrains(doc) {
-        if let Some(h) = data.height_at(DVec2::new(x - origin.x, z - origin.z)) {
-            return Some(h + origin.y);
+        let Some(h) = data.height_at(DVec2::new(x - origin.x, z - origin.z)) else {
+            continue;
+        };
+        let y = h + origin.y;
+        if best.is_none_or(|(by, _, _)| y > by) {
+            best = Some((y, data, origin));
         }
     }
-    None
+    best
+}
+
+/// The world-space terrain height under `(x, z)` — the sampler every function
+/// here feeds to `inf-water`. See [`topmost_ground`] for the rule.
+pub fn terrain_height_at(doc: &SceneDoc, x: f64, z: f64) -> Option<f64> {
+    topmost_ground(doc, x, z).map(|(y, _, _)| y)
 }
 
 /// `(origin, data)` for every non-empty terrain, ascending by `Guid`.
+///
+/// The `Guid` order is what makes [`topmost_ground`]'s tie rule
+/// ("ties to the earlier terrain") a property of the level rather than of bevy's
+/// archetype layout.
 fn terrains(doc: &SceneDoc) -> Vec<(DVec3, &inf_terrain::TerrainData)> {
     let world = doc.world();
     let w = world.world();
@@ -169,14 +199,17 @@ fn terrains(doc: &SceneDoc) -> Vec<(DVec3, &inf_terrain::TerrainData)> {
         .collect()
 }
 
-/// The painted biome id under `(x, z)`, and the terrain that answered.
+/// The painted biome id under `(x, z)`, read off **the terrain that produced the
+/// topmost ground** — the same one [`terrain_height_at`] answered from, so the
+/// suggested level and the biome that suggested it can never come from two
+/// different terrains.
 fn biome_at(doc: &SceneDoc, x: f64, z: f64) -> u8 {
-    for (origin, data) in terrains(doc) {
-        if let Some(id) = data.biome_at(DVec2::new(x - origin.x, z - origin.z)) {
-            return id;
-        }
+    match topmost_ground(doc, x, z) {
+        Some((_, data, origin)) => data
+            .biome_at(DVec2::new(x - origin.x, z - origin.z))
+            .unwrap_or(inf_terrain::UNASSIGNED_BIOME),
+        None => inf_terrain::UNASSIGNED_BIOME,
     }
-    inf_terrain::UNASSIGNED_BIOME
 }
 
 /// Suggested numbers for a new water body at `(x, z)` (P20.4).
@@ -265,13 +298,14 @@ pub fn river_path_of(doc: &SceneDoc, guid: Uuid) -> Option<RiverPath> {
         SplineInterp::Linear => inf_math::spline::SplineInterp::Linear,
         SplineInterp::CatmullRom => inf_math::spline::SplineInterp::CatmullRom,
     };
-    let profile = RiverProfile {
-        width_start_m: body.river_width_start_m.max(0.0),
-        width_end_m: body.river_width_end_m.max(0.0),
-        depth_start_m: body.river_depth_start_m.max(0.0),
-        depth_end_m: body.river_depth_end_m.max(0.0),
-        flow_speed_m_s: body.river_flow_m_s,
-    };
+    // ONE sanitizer, in Ring 0 (P20.4) — see `RiverProfile::authored`.
+    let profile = RiverProfile::authored(
+        body.river_width_start_m,
+        body.river_width_end_m,
+        body.river_depth_start_m,
+        body.river_depth_end_m,
+        body.river_flow_m_s,
+    );
     let path = RiverPath::from_points(&points, spline.closed, interp, &profile);
     (!path.is_empty()).then_some(path)
 }
@@ -384,6 +418,62 @@ mod tests {
         assert!(terrain_height_at(&doc, 100_000.0, 0.0).is_none());
         // A doc with no terrain at all likewise.
         assert!(terrain_height_at(&SceneDoc::new(), 0.0, 0.0).is_none());
+    }
+
+    /// **THE AUTHORING AUTHORITY IS TOPMOST, not lowest-`Guid`** (P20.4 audit).
+    ///
+    /// Two overlapping terrains, the *higher* one carrying the *higher* `Guid`:
+    /// a lowest-`Guid`-first rule would answer from the buried one. The author is
+    /// pointing at the one they can see, and the biome must come off the same
+    /// terrain the height did.
+    #[test]
+    fn overlapping_terrains_answer_from_the_one_the_author_can_see() {
+        let mut doc = doc_with_terrain();
+        // A second, HIGHER terrain with a higher Guid, overlapping the first, and
+        // painted with biome 7 where the first is unpainted.
+        let high = Uuid::from_u128(0x2004_1099);
+        doc.create_with_guid(high, SpawnKind::Empty, "Mesa", None);
+        {
+            let e = doc.world().entity_of(high).unwrap();
+            let mut t = Terrain {
+                meters_per_sample: 4.0,
+                tile_resolution: 65,
+                data: inf_terrain::TerrainData::new(65, 4.0),
+                ..Terrain::default()
+            };
+            t.data.author_tile((0, 0), |_, _| 80.0);
+            let res = t.tile_resolution;
+            let tile = t.data.get_tile_mut((0, 0)).unwrap();
+            for j in 0..res {
+                for i in 0..res {
+                    tile.set_biome_sample(res, i, j, 7);
+                }
+            }
+            doc.world_mut().world_mut().entity_mut(e).insert(t);
+        }
+        doc.world_mut().mark_dirty();
+        doc.world_mut().propagate();
+
+        assert!(high > TERRAIN, "the fixture needs the higher terrain later");
+        let h = terrain_height_at(&doc, 100.0, 50.0).expect("both terrains cover this");
+        assert!(
+            (h - 80.0).abs() < 1e-6,
+            "answered from the buried terrain: {h}"
+        );
+        // …and the biome came off the SAME terrain, not the one underneath.
+        assert_eq!(biome_at(&doc, 100.0, 50.0), 7);
+        // Anti-vacuity: the buried terrain really does answer here, and really is
+        // lower — so a lowest-Guid rule would have produced 15, not 80.
+        assert!((phase_probe(&doc) - 15.0).abs() < 1e-6);
+    }
+
+    /// The lower terrain's own height at the probe point, for the anti-vacuity
+    /// half of the test above.
+    fn phase_probe(doc: &SceneDoc) -> f64 {
+        let world = doc.world();
+        let e = world.entity_of(TERRAIN).unwrap();
+        let t = world.world().get::<Terrain>(e).unwrap();
+        t.data.height_at(DVec2::new(100.0, 50.0)).unwrap()
     }
 
     /// **The biome water hint's first reader** (P19.2 → P20.4).
@@ -520,6 +610,68 @@ mod tests {
         let r3 = river_report(&doc3, g3, 0.5);
         assert!(!r3.bed_climbs.is_empty(), "{r3:?}");
         assert!(r3.surface_climbs.is_empty());
+    }
+
+    /// **THE LATCH, UNWEDGED** (P20.4 audit, Blocker 3).
+    ///
+    /// A `WaterKind::River` added through the Details "Add Component" menu has no
+    /// `Spline`. `edit_append_spline_point` used to refuse it, so the water tool
+    /// resolved to the same selection on every click, did nothing, and said
+    /// nothing. It now CREATES the spline, which is the only reading of the
+    /// gesture that makes sense — and undo takes it away again.
+    #[test]
+    fn appending_to_a_river_with_no_spline_creates_one() {
+        let mut doc = doc_with_terrain();
+        let guid = Uuid::from_u128(0x2004_1500);
+        doc.create_with_guid(guid, SpawnKind::Empty, "Unrouted", None);
+        {
+            let e = doc.world().entity_of(guid).unwrap();
+            doc.world_mut()
+                .world_mut()
+                .entity_mut(e)
+                .insert(WaterBody::river(8.0, 1.5, 1.0));
+        }
+        doc.world_mut().mark_dirty();
+        doc.world_mut().propagate();
+        assert!(river_path_of(&doc, guid).is_none(), "no centreline yet");
+
+        // First click: the spline appears with one point.
+        assert!(doc.edit_append_spline_point(guid, DVec3::new(40.0, 18.0, 128.0)));
+        let e = doc.world().entity_of(guid).unwrap();
+        assert_eq!(
+            doc.world().world().get::<Spline>(e).unwrap().points.len(),
+            1
+        );
+        // Second click: a real ribbon, so the report has something to say.
+        assert!(doc.edit_append_spline_point(guid, DVec3::new(140.0, 13.0, 128.0)));
+        assert_eq!(
+            doc.world().world().get::<Spline>(e).unwrap().points.len(),
+            2
+        );
+        assert!(river_path_of(&doc, guid).is_some());
+
+        // ONE undo step per click, and the first undo removes the component
+        // rather than leaving an empty spline behind.
+        doc.undo();
+        assert_eq!(
+            doc.world()
+                .world()
+                .get::<Spline>(doc.world().entity_of(guid).unwrap())
+                .unwrap()
+                .points
+                .len(),
+            1
+        );
+        doc.undo();
+        assert!(
+            doc.world()
+                .world()
+                .get::<Spline>(doc.world().entity_of(guid).unwrap())
+                .is_none(),
+            "undo left a spline the author never authored"
+        );
+        // …and a missing entity is still refused rather than panicking.
+        assert!(!doc.edit_append_spline_point(Uuid::nil(), DVec3::ZERO));
     }
 
     #[test]

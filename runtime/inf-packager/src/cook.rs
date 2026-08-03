@@ -1121,13 +1121,18 @@ fn uphill_rivers(guid: AssetId, level: &inf_scene::RuntimeLevel) -> Vec<String> 
             SplineInterp::Linear => inf_math::spline::SplineInterp::Linear,
             SplineInterp::CatmullRom => inf_math::spline::SplineInterp::CatmullRom,
         };
-        let profile = inf_water::RiverProfile {
-            width_start_m: water.river_width_start_m,
-            width_end_m: water.river_width_end_m,
-            depth_start_m: water.river_depth_start_m,
-            depth_end_m: water.river_depth_end_m,
-            flow_speed_m_s: water.river_flow_m_s,
-        };
+        // ONE sanitizer, in Ring 0 (P20.4). This call site used the RAW fields
+        // until the P20.4 audit: a negative authored depth tapered the cook's bed
+        // differently from the renderer's, the sim's and the tool's, which is
+        // exactly the disagreement the editor's re-run of this check exists to
+        // rule out.
+        let profile = inf_water::RiverProfile::authored(
+            water.river_width_start_m,
+            water.river_width_end_m,
+            water.river_depth_start_m,
+            water.river_depth_end_m,
+            water.river_flow_m_s,
+        );
         let path = inf_water::RiverPath::from_points(&points, spline.closed, interp, &profile);
         if path.is_empty() {
             continue;

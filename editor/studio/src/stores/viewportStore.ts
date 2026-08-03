@@ -9,7 +9,7 @@ import { create } from "zustand";
 
 import { getCommand, registerCommands, setCommandHandler } from "../lib/commands";
 import { listenTo } from "../lib/events";
-import { projectSettings, terrain, viewport } from "../lib/ipc";
+import { projectSettings, terrain, viewport, water } from "../lib/ipc";
 import type { BiomeSettingsDto } from "../bindings/BiomeSettingsDto";
 import type { FoliageSettingsDto } from "../bindings/FoliageSettingsDto";
 import type { GizmoModeDto } from "../bindings/GizmoModeDto";
@@ -20,11 +20,13 @@ import type { SculptSettingsDto } from "../bindings/SculptSettingsDto";
 import type { Snap2DDto } from "../bindings/Snap2DDto";
 import type { Snap3DDto } from "../bindings/Snap3DDto";
 import type { TerrainBiomesDto } from "../bindings/TerrainBiomesDto";
+import type { RiverReportDto } from "../bindings/RiverReportDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
 import type { WaterSettingsDto } from "../bindings/WaterSettingsDto";
 import type { WaterToolKindDto } from "../bindings/WaterToolKindDto";
 import type { ViewModeDto } from "../bindings/ViewModeDto";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
+import { useSceneStore } from "./sceneStore";
 import { useShellStore } from "./shellStore";
 
 /** localStorage key for the persisted 3D gizmo snap settings (Wave 2). */
@@ -126,6 +128,14 @@ interface ViewportUiState {
   waterDepth: number;
   waterFlow: number;
   waterLevelOffset: number;
+  /**
+   * The river tool's verdict on the selected river (P20.4): the two COOK
+   * advisories re-run plus the terrain-aware bed conflicts only the editor can
+   * make. `null` when the Water tool is off, nothing is selected, or the
+   * selection is not a river — which the toolbar shows as "select a river",
+   * not as a clean bill of health.
+   */
+  waterRiverReport: RiverReportDto | null;
 
   /** Transform-gizmo mode (translate/rotate/scale), two-way synced (Wave 2). */
   gizmoMode: GizmoModeDto;
@@ -180,6 +190,15 @@ interface ViewportUiState {
   setWaterDepth: (d: number) => void;
   setWaterFlow: (f: number) => void;
   setWaterLevelOffset: (o: number) => void;
+  /**
+   * Re-read the river report for the first selected entity (P20.4).
+   *
+   * Called on entering the tool, on selection change and after each placement,
+   * because all three change the answer. A non-river selection reports
+   * `total_frames == 0`, which is how "not a river" and "a river with no
+   * centreline yet" both arrive as "nothing to say".
+   */
+  refreshRiverReport: () => Promise<void>;
 
   /** Set the gizmo mode + push to the viewport (Wave 2). */
   setGizmoMode: (mode: GizmoModeDto) => void;
@@ -342,6 +361,7 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   waterDepth: 1.5,
   waterFlow: 1.5,
   waterLevelOffset: 0,
+  waterRiverReport: null,
   gizmoMode: "Translate",
   gizmoSpace: "World",
   snap3dEnabled: false,
@@ -390,6 +410,21 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
       // …and re-read the vocabulary: the bound set may have changed (or been
       // edited) since the toolbar last showed its swatches.
       void get().refreshBiomes();
+    }
+    if (toolMode === "Water") {
+      pushWater(get());
+      // …and re-read the vocabulary TOO (P20.4 audit). `terrain.biomes` is what
+      // makes the backend push the id-indexed water-level hints beside the
+      // overlay palette, and the water tool resolves the biome `water_hint` per
+      // click out of that table. Without this arm the table stayed empty until
+      // the author happened to visit the Biome tool — so a fresh session that
+      // went straight to Water committed a lake at the picked GROUND, while the
+      // same click after a detour through Biome committed it at the HINT. A
+      // committed level is not allowed to depend on which tools the session
+      // visited.
+      void get().refreshBiomes();
+      // The river report follows the selection, so arm it on entry too.
+      void get().refreshRiverReport();
     }
   },
   setSculptOp: (sculptOp) => {
@@ -485,6 +520,22 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
     // Also signed: a lake BELOW the clicked ground is how you author a sinkhole.
     set({ waterLevelOffset: Number.isFinite(o) ? o : get().waterLevelOffset });
     pushWater(get());
+  },
+  refreshRiverReport: async () => {
+    const selection = useSceneStore.getState().selection;
+    const entity = selection[0];
+    if (!entity) {
+      set({ waterRiverReport: null });
+      return;
+    }
+    try {
+      const report = await water.riverReport(entity);
+      // A report with no frames is not a river (or is a river with no
+      // centreline yet); either way there is nothing to report ON.
+      set({ waterRiverReport: report.total_frames > 0 ? report : null });
+    } catch {
+      set({ waterRiverReport: null });
+    }
   },
   refreshBiomes: async () => {
     try {
@@ -672,6 +723,19 @@ export function initViewportSync(): () => void {
     }).catch(() => {});
   };
   track(listenTo("project://changed", () => reload()));
+  // P20.4: while the Water tool is active, keep the river verdict in step with
+  // the document. Every water placement emits a delta, and so does every
+  // selection change — the two things that change the answer. Subscribed at the
+  // store rather than in a React effect, matching every other live projection in
+  // this file (and keeping the components free of the banned set-state-in-effect
+  // shape). Off the Water tool this costs one enum comparison per delta.
+  track(
+    listenTo("world://delta", () => {
+      if (useViewportStore.getState().toolMode === "Water") {
+        void useViewportStore.getState().refreshRiverReport();
+      }
+    }),
+  );
   // The viewport echoes gizmo-mode changes (W/E/R keypress or an IPC set); mirror
   // them into the store WITHOUT calling back into IPC (no loop).
   track(

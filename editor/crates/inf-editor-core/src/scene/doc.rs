@@ -1609,8 +1609,16 @@ impl SceneDoc {
     /// undo step per click, recorded as a `SwapComponents` because a `Vec<Vec3d>`
     /// is not a reflection-addressable scalar.
     ///
-    /// Returns `false` for an entity with no `Spline`, so the tool can tell
-    /// "extend this river" from "start a new one" without a second query.
+    /// **Creates the `Spline` when the entity has none.** That is not a
+    /// convenience: an entity carrying a `WaterKind::River` and no spline is
+    /// precisely the state "I added the component through the Details menu and
+    /// have not drawn the path yet", and it is the state the water tool meets
+    /// most often. Refusing it wedged the tool — every click resolved to the same
+    /// spline-less selection, did nothing, and said nothing (found in the P20.4
+    /// audit). `SwapComponents` round-trips a component *addition* natively, so
+    /// undo removes the spline again exactly as `edit_add_component` does.
+    ///
+    /// Returns `false` only when the entity is gone.
     ///
     /// The point is converted into the entity's own frame through its
     /// `GlobalTransform`, so appending to a river under a moved or rotated parent
@@ -1623,9 +1631,6 @@ impl SceneDoc {
         let Some(e) = self.world.entity_of(guid) else {
             return false;
         };
-        if self.world.world().get::<Spline>(e).is_none() {
-            return false;
-        }
         let affine = self
             .world
             .world()
@@ -1633,12 +1638,19 @@ impl SceneDoc {
             .map(|g| g.0)
             .unwrap_or(glam::DAffine3::IDENTITY);
         let local = affine.inverse().transform_point3(world);
+        let point = Vec3d::new(local.x, local.y, local.z);
         {
             let w = self.world.world_mut();
-            let Some(mut spline) = w.get_mut::<Spline>(e) else {
-                return false;
-            };
-            spline.points.push(Vec3d::new(local.x, local.y, local.z));
+            match w.get_mut::<Spline>(e) {
+                Some(mut spline) => spline.points.push(point),
+                None => {
+                    w.entity_mut(e).insert(Spline {
+                        points: vec![point],
+                        closed: false,
+                        interp: SplineInterp::CatmullRom,
+                    });
+                }
+            }
         }
         let Some(after) = crate::scene::serialize::record_of(self, guid) else {
             return false;

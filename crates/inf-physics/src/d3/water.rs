@@ -564,13 +564,14 @@ pub fn water_surface_of(
                 SceneSplineInterp::Linear => inf_math::spline::SplineInterp::Linear,
                 SceneSplineInterp::CatmullRom => inf_math::spline::SplineInterp::CatmullRom,
             };
-            let profile = RiverProfile {
-                width_start_m: water.river_width_start_m.max(0.0),
-                width_end_m: water.river_width_end_m.max(0.0),
-                depth_start_m: water.river_depth_start_m.max(0.0),
-                depth_end_m: water.river_depth_end_m.max(0.0),
-                flow_speed_m_s: water.river_flow_m_s,
-            };
+            // ONE sanitizer, in Ring 0 (P20.4) — see `RiverProfile::authored`.
+            let profile = RiverProfile::authored(
+                water.river_width_start_m,
+                water.river_width_end_m,
+                water.river_depth_start_m,
+                water.river_depth_end_m,
+                water.river_flow_m_s,
+            );
             let path = RiverPath::from_points(&points, sp.closed, interp, &profile);
             if path.frames.is_empty() {
                 return None;

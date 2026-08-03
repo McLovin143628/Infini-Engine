@@ -5520,9 +5520,16 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > pushed over `viewport_set_water`). It is **not** a brush and does not pretend to be: a
 > **river** click *appends a control point* (the first click on empty space starts a river and
 > lays two points a metre apart, so the author sees a ribbon immediately rather than a
-> degenerate path), and a **lake** press-drag-release *defines a rectangle*. Both resolve the
-> world point through the same `pick_world_point` every other terrain tool uses, so water lands
-> on the ground being looked at rather than on a plane at `y = 0`. Every mutation goes through a
+> degenerate path), and a **lake** press-drag-release *defines a rectangle*. **The water tool's world pick REFUSES rather than guessing.** Every other terrain tool resolves
+> a click through `pick_world_point`, which falls through to the `y = 0` ground plane on a terrain
+> miss. That is right for a drag-drop and wrong here, because a water click **commits geometry**:
+> over a coarsely-paged streamed terrain, or a hole, the fallback would silently plant a control
+> point or a lake corner at sea level — and two authors at different camera distances would commit
+> *different geometry from the same click*. `water_pick` hits terrain or rejects, on the same
+> `reject_tool` seam the sculpt brush already guards its own commits with; a level with **no
+> terrain at all** is not a miss (there the ground plane *is* the ground). A sub-metre lake drag
+> now says so too, instead of refusing silently. Found in the audit — it is the P16.6 "reading the
+> document's own terrain set was the bug" lesson applying one tool over. Every mutation goes through a
 > `SceneDoc::edit_*` — `edit_create_river`, `edit_create_lake`, `edit_append_spline_point`,
 > `edit_set_river_profile`, `edit_set_water_level` — so each is exactly **one undo step**, taken
 > around the complete change on the `edit_create_streamed_terrain` pattern (components attached
@@ -5530,6 +5537,13 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > point edits ride the existing `SwapComponents` command rather than a new variant, because a
 > `Vec<Vec3d>` is not a reflection-addressable scalar and the P19-era mechanism already covers
 > exactly this.
+>
+> **`edit_append_spline_point` CREATES the `Spline` when the entity has none**, and that is not a
+> convenience. A `WaterKind::River` added through the Details "Add Component" menu is exactly the
+> state "I have declared a river and not drawn it yet", and it is the state the tool meets most
+> often; refusing it *wedged* the tool — every click resolved to the same spline-less selection,
+> did nothing, and said nothing (audit). `SwapComponents` round-trips a component *addition*
+> natively, so undo removes the spline again exactly as `edit_add_component` does.
 >
 > **There was no spline editor to reuse, and this batch did not build a second one.** The audit
 > question the brief asked was answered by looking: `Spline` is authored today through the
@@ -5539,6 +5553,20 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > the same `Spline` component the Details grid edits — the two are the same data, and the
 > polyline the viewport already draws is the river's preview for free. A general per-control-
 > point drag gizmo is ledgered.
+>
+> **BOTH HALVES OF THE REPORTING REACH THE AUTHOR — and that was an audit fix.** The river verdict
+> is a toolbar readout on the selected river: "✓ 210 m, falls 32 m", or
+> "⚠ 2 issues: buried in the ground for 40 m (worst 3.1 m)" — the worst span of each kind, ground
+> problems before surface ones because that is the order an author fixes them, the full list on
+> hover, a click to re-check. It re-reads on entering the tool and on every `world://delta`,
+> subscribed at the store like every other live projection in that file (so no component carries
+> the banned set-state-in-effect shape). The lake drag's **coverage, max/mean depth and sample
+> count** ride the existing `viewport://tool-status` seam as a live readout while the rectangle is
+> being dragged, on a new `report_tool` beside `reject_tool` — split because a rejection belongs
+> in the Output Log and a per-frame measurement does not, and because "there is no ground here"
+> and "the lake is empty" must not both render as 0 %. Both were computed and dropped in the
+> first cut of this batch: a capability the ledger claims and no author can reach is a false
+> ledger entry, which is why the audit called it a blocker.
 >
 > **The lake's fill-level preview is a real marching-squares waterline**, not a rectangle with a
 > number beside it. `inf_water::hydro::fill_preview` samples the ground on a clamped
@@ -5579,6 +5607,25 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > comment. The terrain-aware checks use their own, larger `BED_TOLERANCE_M` (1 m), because they
 > additionally sample a bilinear heightfield along a curve that crosses tile diagonals.
 >
+> **ONE TERRAIN AUTHORITY FOR AUTHORING, AND ONE RIVER-PROFILE SANITIZER.** Two audit smalls of
+> the same shape — a doc claiming an agreement the code did not have.
+>
+> (1) The viewport resolved the biome hint through the **topmost** ground while Ring 1's
+> `water_defaults` resolved it through the **lowest-`Guid` first answer**, under a comment saying
+> they matched. Ring 1 now uses topmost too (`hydro::topmost_ground`, ties to the lower `Guid`),
+> which is what the brush ring and the foliage drop height beside it already use: the author's
+> question is "what am I pointing at", and on overlapping terrains that is the surface they can
+> see. The **simulation's** authority stays lowest-`Guid`-first, deliberately, and now says so —
+> a stable owner matters more to a fixed step than a visible surface. The biome and the height now
+> come off the *same* terrain by construction, which they did not before.
+>
+> (2) The **cook** built its `RiverProfile` from the raw authored fields while both projectors,
+> `PhysicsBridge3D` and the editor all clamped, so a negative authored depth tapered the cook's
+> bed differently from everyone else's — breaking the one thing the tool's re-run of the cook
+> checks is for. `RiverProfile::authored` is now the single sanitizer and all five call sites go
+> through it: widths and depths floor at zero, and the flow speed keeps its sign, because a
+> negative one reverses the river.
+>
 > **THE BIOME WATER HINT, READ AT LAST.** `BiomeDef::water_hint` has been inert plain data since
 > P19.2 — declared, round-tripped through the DTO and the editor, and consumed by nothing. It is
 > now the **default provider** for a new body's level: `water_defaults(x, z)` answers the painted
@@ -5589,6 +5636,16 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > would be a generator wearing a hint's name. River width and depth are *not* derived from it,
 > because a biome carries a still-water **level** and inventing per-biome river dimensions from
 > one would be making data up.
+>
+> **Entering the Water tool ARMS the hint table**, and the first cut did not — an audit blocker,
+> because the consequence reached *committed content*. The table is filled by the same Ring-2 push
+> that answers `terrain_biomes`, so a fresh session that went straight to Water committed a lake
+> at the picked **ground**, while the identical click after a detour through the Biome tool
+> committed it at the **hint**. A committed level is not allowed to depend on which tools the
+> session happened to visit. The `Water` arm of `setToolMode` now re-reads the vocabulary exactly
+> as the `Biome` arm does. The same fix deleted a dead `WaterSettings::biome_level_hint_m` that
+> was *documented* as pushed from Ring 2 and passed `None` unconditionally — the hint is resolved
+> per click out of the id-indexed table, so a single pre-resolved one had nothing to say.
 >
 > The hint reaches the native viewport the way the biome *palette* does: id-indexed, resolved
 > once in Ring 2 and pushed (`BiomeSet::water_hints`, the exact shape and length rule of
@@ -5641,7 +5698,8 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > `runtime/inf-player/tests/phase20_gate.rs`, six arms: **determinism** (two fresh loads of one
 > cooked pack, 900 steps, bit-identical), **PIE == shipping** (the editor payload vs the pack,
 > bit-identical), **anti-vacuity** (crates settle at draughts that *depend on their densities* —
-> the lightest rides higher than the heaviest — the lake crates settle at 33.6 m rather than at
+> the lightest rides higher than the heaviest **by at least half the 0.25 m Archimedes predicts**,
+> because a bare `>` would pass on a millimetre — the lake crates settle at 33.6 m rather than at
 > sea level, and the swimmer *rises*), **the river's mouth is finite in the shipped pack** (a
 > probe 30 m past the mouth gets the sea's level, not the river's; the P20.4 fix asserted through
 > the shipped `water.surface_height` seam rather than only in Ring 0), **the cook is silent**
@@ -5661,14 +5719,25 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 >   shows where that lands; it does not find the level that fills a depression to its rim. The
 >   preview makes the manual search cheap, which is the v1 trade.
 > * **No river→terrain carve.** Placing a river does not sculpt the channel under it; the tool
->   *reports* a bed conflict and leaves the sculpting to the sculpt brush. Carving is a terrain
->   edit with its own undo record and its own erosion interaction, and doing it silently inside a
->   water placement would be the worst of both.
+>   *reports* the bed conflict — in the toolbar, on the selected river, as "⚠ 1 issue: buried in
+>   the ground for 40 m (worst 3.1 m)", with the full verdict on hover — and leaves the sculpting
+>   to the sculpt brush. Carving is a terrain edit with its own undo record and its own erosion
+>   interaction, and doing it silently inside a water placement would be the worst of both.
 > * **The flow coupling is foam only.** Flow does not modulate a river's *speed*, its width, or
 >   its absorption, and it never reaches the sim — a rapid looks faster and is not.
 > * **`bed_conflicts` samples the centreline, not the banks.** A river whose left bank is buried
 >   in a cliff while its centre is clear reports nothing. Sampling the ribbon's cross-section is
 >   the obvious v2 and is `frames × width` work rather than `frames`.
+> * **The lake readout is a STATUS LINE, not a panel.** Coverage, max/mean depth and the
+>   ground-sample count arrive on `viewport://tool-status` while the rectangle is being dragged,
+>   which is where the shell shows one line. A hydrology *panel* — the verdict, the fill preview
+>   and the profile editor in one place, with a jump-to-conflict button off `worst_x/worst_z`
+>   (which the DTO already carries and nothing yet reads) — is the obvious follow-up and is not
+>   in this batch.
+> * **The river verdict follows the FIRST selected entity.** A multi-select reports on one river;
+>   a level with several is checked one at a time. There is no "check every river in this level"
+>   sweep short of cooking it, which the cook advisories then answer for the two terrain-free
+>   halves.
 > * **The tools are terrain-only.** Water placed over a mesh floor, a scattered solid or a
 >   grammar building answers from the ground plane, exactly as the sculpt and foliage brushes do.
 > * **The biome hint resolves through the level's FIRST bound terrain**, matching how
@@ -5718,6 +5787,56 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > P20.3's engagement-counter off-path gate, the two cook-advisory suites, the projector MIRROR
 > gate and 47 goldens.
 >
+> **THE PHASE'S REMAINDER LEDGER, swept across all four batches.** Each batch's own block carries
+> its full list; this is the consolidated carry-forward, in the shape Phases 18 and 19 close with.
+>
+> *Surfaces and shading (P20.1, P20.3).* An ocean is a **finite 8 km patch** — a camera on a flat
+> horizon can see it end, and a projected-grid ocean is different work. There is **no SSR on
+> water**, so a boat reflects the sky and not itself. The surface seen **from below** is still
+> P20.1's above-water shading (Fresnel, the sky reflection and total internal reflection are all
+> wrong-side-of-the-interface). "One absorption story" **does not hold at `WaterQuality::Low`**,
+> where the surface composites `mix(deep, shallow, T)` instead of `scene·T + deep·(1−T)`. The
+> fog's **depth path is not antialiased** (the column is `textureLoad`ed at sample 0). The
+> **column cap is one plane** at the displaced surface over the camera, treated as flat for every
+> pixel. Partial submersion is a **whole-screen switch**, ramped rather than split at the near
+> plane. Light shafts are **not volumetric** and have **no moonlit variant** — they fade to zero
+> by sun elevation and stay there all night. Wetness is applied by `terrain.wgsl` and `mesh.wgsl`
+> **only**: `skinned_mesh`, `vgeom_mesh` and `scatter_mesh` declare the binding and do not call
+> `wet_apply`, so characters, meshlet geometry and scattered foliage do not darken at a shoreline
+> (one line each when P22 arrives). The wetness band is a **shading-time loop**, not a baked
+> field, bounded at 8 bodies and 32 shared river segments. FFT v2, a keyframed depth profile, a
+> scissored (per-region) refraction resolve and `MAX_BODIES > 32` are all named and unbuilt.
+>
+> *Physics (P20.2).* Drag is **linear and still-water**: quadratic drag is deferred, so a hull's
+> terminal speed cannot depend on its shape, and a body near a crest feels still water because the
+> reference is `flow_at` and not the wave orbit (**no Stokes drift**). There is **no water→body
+> reaction** — no wake, no bow spray, no local depression; the surface is authored and nothing a
+> body does moves it. The submerged fraction is a **slab, not an integral** (exact at the
+> symmetric point, where the tests assert). `Buoyancy` on a body with **no collider** does nothing
+> and says nothing; **static and kinematic bodies never float**; a **trimesh floats by its AABB**.
+> Swim mode has **no animation** — flipping the latch changes the motion, not the pose. The
+> `water.*` **queries are instantaneous while the events are latched**, so a body bobbing at the
+> waterline can make `is_in_water` flicker while no enter/exit fires — deliberate (a poll wants
+> the truth now, an event wants a debounced edge) and documented at both ends, but it is a real
+> asymmetry an author can trip over. `water.surface_height` answers **`0.0` where there is no
+> water**, which is a plausible sea level and deliberately not a sentinel.
+>
+> *Authoring (P20.4).* No control-point **drag** (points are appended by click and edited in the
+> Details list; per-point picking is the general spline-gizmo work). No **basin solver**. No
+> **river→terrain carve** — the tool reports, the sculpt brush carves. The flow coupling is
+> **foam only** and never reaches the sim. `bed_conflicts` samples the **centreline, not the
+> banks**. The tools are **terrain-only**. The biome hint resolves through the level's **first
+> bound terrain**. Viewport interaction is **human-verified**, as every native-viewport gesture in
+> this repository is. A **hidden water body still simulates** — the decided law, with no per-body
+> `enabled` field yet.
+>
+> *Dependency hygiene.* P20.1 promoted `inf-ecs` and `inf-math` from dev-dependencies to real ones
+> in `inf-packager` and added `inf-water` + `glam` there outright; P20.4 added `inf-water` to
+> `inf-ecs` (for the one flow-gain curve) and to `inf-editor-core`, plus a dev-dependency on it in
+> `inf-player`. Every edge is Ring-0 → Ring-0 or Ring-1 → Ring-0, every one carries its reason in
+> the manifest, and `cargo deny` is unmoved across the whole phase — **no new third-party crate
+> entered the tree for water**.
+>
 > **Laws this phase paid for.** *One wave model, derived on the CPU* — the terrain-parity class
 > of drift avoided by not creating it. *Time never reaches the GPU* — a wave arrives with its
 > phase already reduced in `f64`, and the floating origin rides in the same reduction. *A rapier
@@ -5746,8 +5865,8 @@ physics/audio trace, holds water goldens, and PIE == shipping.
   2. per-biome water-level hints; 3. the erosion → water pipeline: carve with P10 erosion, fill
   with P20 water. *(Shipped 1 and 2 in full, plus the two inherited sim fixes and the phase gate.
   For 3, the P19.1 flow map now drives a river's foam — the erosion→water edge exists and is
-  gated — while the **carve** half is ledgered: placing a river reports a bed conflict rather
-  than sculpting the channel under it. See the P20.4 status block.)*
+  gated — while the **carve** half is ledgered: placing a river *reports* the bed conflict in the
+  toolbar and leaves the sculpting to the sculpt brush. See the P20.4 status block.)*
 
 ### Phase 21 — Volumetric terrain: caves, tunnels & excavation
 

@@ -13,7 +13,12 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { RiverReportDto } from "../../bindings/RiverReportDto";
+
 vi.mock("../../lib/ipc", () => ({
+  water: {
+    riverReport: vi.fn(),
+  },
   viewport: {
     setMode: vi.fn().mockResolvedValue(undefined),
     setSnap2d: vi.fn().mockResolvedValue(undefined),
@@ -32,8 +37,26 @@ vi.mock("../../lib/ipc", () => ({
   },
 }));
 
-import { viewport } from "../../lib/ipc";
+import { terrain, water, viewport } from "../../lib/ipc";
+import { riverIssues } from "../../viewport/ViewportToolbar";
+import { useSceneStore } from "../sceneStore";
 import { useViewportStore } from "../viewportStore";
+
+/** A clean report over a fully-sampled river. */
+function report(over: Partial<RiverReportDto> = {}): RiverReportDto {
+  return {
+    entity: "aaaaaaaa-0000-4000-8000-000000000001",
+    length_m: 210,
+    points: 5,
+    fall_m: 32,
+    surface_climbs: [],
+    bed_climbs: [],
+    bed_conflicts: [],
+    sampled_frames: 49,
+    total_frames: 49,
+    ...over,
+  };
+}
 
 /** The most recent DTO pushed to the viewport. */
 function lastPush() {
@@ -49,8 +72,12 @@ beforeEach(() => {
     waterDepth: 1.5,
     waterFlow: 1.5,
     waterLevelOffset: 0,
+    waterRiverReport: null,
+    toolMode: "Select",
   });
+  useSceneStore.setState({ selection: [] });
   vi.clearAllMocks();
+  vi.mocked(water.riverReport).mockResolvedValue(report());
 });
 
 describe("water tool store", () => {
@@ -127,5 +154,75 @@ describe("water tool store", () => {
     expect(useViewportStore.getState().waterWidth).toBe(0);
     useViewportStore.getState().setWaterDepth(0);
     expect(useViewportStore.getState().waterDepth).toBe(0);
+  });
+});
+
+describe("the river verdict", () => {
+  it("is null with nothing selected, and holds a real river's report", async () => {
+    await useViewportStore.getState().refreshRiverReport();
+    expect(useViewportStore.getState().waterRiverReport).toBeNull();
+    expect(water.riverReport).not.toHaveBeenCalled();
+
+    useSceneStore.setState({ selection: ["aaaaaaaa-0000-4000-8000-000000000001"] });
+    await useViewportStore.getState().refreshRiverReport();
+    expect(water.riverReport).toHaveBeenCalledWith("aaaaaaaa-0000-4000-8000-000000000001");
+    expect(useViewportStore.getState().waterRiverReport?.length_m).toBe(210);
+  });
+
+  it("treats a frameless report as 'not a river' rather than as a clean bill", async () => {
+    useSceneStore.setState({ selection: ["bbbbbbbb-0000-4000-8000-000000000001"] });
+    vi.mocked(water.riverReport).mockResolvedValue(
+      report({ total_frames: 0, points: 0, length_m: 0 }),
+    );
+    await useViewportStore.getState().refreshRiverReport();
+    expect(useViewportStore.getState().waterRiverReport).toBeNull();
+  });
+
+  it("survives a failing command without wedging on a stale verdict", async () => {
+    useSceneStore.setState({ selection: ["cccccccc-0000-4000-8000-000000000001"] });
+    await useViewportStore.getState().refreshRiverReport();
+    expect(useViewportStore.getState().waterRiverReport).not.toBeNull();
+    vi.mocked(water.riverReport).mockRejectedValue(new Error("no such entity"));
+    await useViewportStore.getState().refreshRiverReport();
+    expect(useViewportStore.getState().waterRiverReport).toBeNull();
+  });
+
+  /**
+   * THE ARMING ARM (P20.4 audit, Blocker 2). Entering the Water tool must
+   * re-read the biome vocabulary — that is the call that makes the backend push
+   * the id-indexed water-level hints — or a fresh session that goes straight to
+   * Water commits a DIFFERENT level from one that visited Biome first.
+   */
+  it("arms the hint table and the verdict on entering the tool", () => {
+    useViewportStore.getState().setToolMode("Water");
+    expect(viewport.setToolMode).toHaveBeenCalledWith("Water");
+    expect(viewport.setWater).toHaveBeenCalled();
+    expect(terrain.biomes).toHaveBeenCalled();
+  });
+
+  it("says nothing about a clean river and names the worst problem otherwise", () => {
+    expect(riverIssues(report())).toEqual([]);
+
+    const dirty = report({
+      bed_conflicts: [
+        { issue: "buried", from_s: 10, to_s: 50, worst_m: 3.1, worst_x: 1, worst_z: 2 },
+        { issue: "buried", from_s: 80, to_s: 90, worst_m: 0.9, worst_x: 3, worst_z: 4 },
+        { issue: "perched", from_s: 120, to_s: 140, worst_m: 12, worst_x: 5, worst_z: 6 },
+      ],
+      surface_climbs: [{ from_s: 0, to_s: 20, rise_m: 2.5, gradient: 0.125 }],
+      bed_climbs: [{ from_s: 0, to_s: 20, rise_m: 1.5, gradient: 0.075 }],
+    });
+    const issues = riverIssues(dirty);
+    expect(issues).toHaveLength(4);
+    // The GROUND problems come first — they are what an author fixes first.
+    expect(issues[0]).toContain("buried");
+    // …and each names the WORST span, not the first one found.
+    expect(issues[0]).toContain("3.1");
+    expect(issues[1]).toContain("perched");
+    expect(issues[2]).toContain("UPHILL");
+    expect(issues[3]).toContain("BED");
+    // The two cook advisories say so, because the tool is quoting the build.
+    expect(issues[2]).toContain("the cook will say so");
+    expect(issues[3]).toContain("the cook will say so");
   });
 });

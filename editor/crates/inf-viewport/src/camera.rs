@@ -534,15 +534,15 @@ pub struct WaterSettings {
     pub flow_m_s: f64,
     /// Added to the suggested still-water level, metres — so "a lake 2 m above
     /// the ground I clicked" needs no arithmetic from the author.
-    pub level_offset_m: f64,
-    /// The still-water level the biome under the cursor hints at, metres, when it
-    /// has one (P19.2's `BiomeDef::water_hint`).
     ///
-    /// Pushed **from Ring 2**, which is the only side that can resolve a
-    /// `.inf_biomes` asset — the viewport thread has a document, not an asset
-    /// database, exactly as it has a biome *palette* pushed to it rather than a
-    /// biome *set*. `None` means "use the ground".
-    pub biome_level_hint_m: Option<f64>,
+    /// There is deliberately **no level field** beside it: the level comes from
+    /// where the author clicks — the painted biome's `water_hint` when it has
+    /// one, otherwise the ground — resolved *per click* from the id-indexed hint
+    /// table `EngineHost::set_water_hints` receives. A toolbar-supplied level (or
+    /// a single pre-resolved hint) would be a number the author has to re-derive
+    /// as they move across the terrain, and the P20.4 audit found exactly that
+    /// field here, documented as pushed and passed `None` unconditionally.
+    pub level_offset_m: f64,
 }
 
 impl Default for WaterSettings {
@@ -555,7 +555,6 @@ impl Default for WaterSettings {
             depth_m: 1.5,
             flow_m_s: 1.5,
             level_offset_m: 0.0,
-            biome_level_hint_m: None,
         }
     }
 }

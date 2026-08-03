@@ -1115,13 +1115,16 @@ fn project_water(
                     inf_math::spline::SplineInterp::CatmullRom
                 }
             };
-            let profile = inf_render::RiverProfile {
-                width_start_m: water.river_width_start_m.max(0.0),
-                width_end_m: water.river_width_end_m.max(0.0),
-                depth_start_m: water.river_depth_start_m.max(0.0),
-                depth_end_m: water.river_depth_end_m.max(0.0),
-                flow_speed_m_s: water.river_flow_m_s,
-            };
+            // ONE sanitizer, in Ring 0 (P20.4): the cook, the fixed step and both
+            // projectors all build their profile here, so a negative authored
+            // depth cannot taper one of them differently from the others.
+            let profile = inf_render::RiverProfile::authored(
+                water.river_width_start_m,
+                water.river_width_end_m,
+                water.river_depth_start_m,
+                water.river_depth_end_m,
+                water.river_flow_m_s,
+            );
             let path = inf_render::RiverPath::from_points(&points, sp.closed, interp, &profile);
             out.flow_speed_m_s = path.flow_speed_m_s;
             out.level_m = path

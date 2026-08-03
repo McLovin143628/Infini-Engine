@@ -945,8 +945,14 @@ impl EngineHost {
     }
 
     /// Replace the water-tool configuration (from the toolbar, P20.4).
+    ///
+    /// Drops any in-flight lake drag: flipping Lake → River mid-drag would
+    /// otherwise leave the anchor set, and the next River click would finish a
+    /// rectangle the author had abandoned.
     pub fn set_water(&mut self, water: WaterSettings) {
         self.water_tool = water;
+        self.water_lake_drag = None;
+        self.water_preview.clear();
     }
 
     /// Push a terrain entity's resolved per-biome water-level hints (P20.4) —
@@ -2333,13 +2339,16 @@ fn project_water(
                     inf_math::spline::SplineInterp::CatmullRom
                 }
             };
-            let profile = inf_render::RiverProfile {
-                width_start_m: water.river_width_start_m.max(0.0),
-                width_end_m: water.river_width_end_m.max(0.0),
-                depth_start_m: water.river_depth_start_m.max(0.0),
-                depth_end_m: water.river_depth_end_m.max(0.0),
-                flow_speed_m_s: water.river_flow_m_s,
-            };
+            // ONE sanitizer, in Ring 0 (P20.4): the cook, the fixed step and both
+            // projectors all build their profile here, so a negative authored
+            // depth cannot taper one of them differently from the others.
+            let profile = inf_render::RiverProfile::authored(
+                water.river_width_start_m,
+                water.river_width_end_m,
+                water.river_depth_start_m,
+                water.river_depth_end_m,
+                water.river_flow_m_s,
+            );
             let path = inf_render::RiverPath::from_points(&points, sp.closed, interp, &profile);
             out.flow_speed_m_s = path.flow_speed_m_s;
             out.level_m = path
@@ -3366,6 +3375,17 @@ impl EngineHost {
         self.tool_status = Some(message.to_string());
     }
 
+    /// Report a tool **readout** on the same seam without logging it (P20.4).
+    ///
+    /// The status channel carries two kinds of message: a *rejection* (something
+    /// was refused — worth a line in the Output Log) and a *readout* (a live
+    /// measurement, e.g. the lake drag's coverage and depth, which changes every
+    /// frame and would drown the log). `reject_tool` is the first; this is the
+    /// second, and the split exists so the second can exist at all.
+    fn report_tool(&mut self, message: String) {
+        self.tool_status = Some(message);
+    }
+
     /// Advance the streamed terrain's camera-driven cut and, when it changed,
     /// re-project the render terrain from the streamer's working set.
     ///
@@ -3830,6 +3850,40 @@ impl EngineHost {
     // host's own state is the *pending* gesture and the preview, both of which
     // are thrown away when the tool is left.
 
+    /// Why the water tool refused a click that missed the ground.
+    const WATER_NO_GROUND_REJECTION: &'static str =
+        "Water: no terrain under the cursor. Aim at ground that has paged in — a water          placement here would commit geometry at sea level.";
+    /// …and why it refused a lake drag too small to be a lake.
+    const WATER_LAKE_TOO_SMALL_REJECTION: &'static str =
+        "Water: that lake is under a metre across. Drag a larger rectangle — a zero-extent          lake draws nothing and would be an invisible entity in the outliner.";
+
+    /// **The water tool's world pick** — like [`pick_world_point`](Self::pick_world_point)
+    /// but it **refuses** rather than falling through to the `y = 0` plane
+    /// (P20.4 audit).
+    ///
+    /// That fallback is right for a drag-drop (a cube on the ground plane is a
+    /// defensible guess) and wrong here, because a water click **commits
+    /// geometry**: over a streamed terrain that has only paged in coarsely, or
+    /// over a hole, the fallback would silently plant a river control point or a
+    /// lake corner at sea level — and two authors at different camera distances
+    /// would commit *different* geometry from the same click. The sculpt brush
+    /// already guards its own commits through `reject_tool`; this routes the
+    /// water tool through the same seam.
+    ///
+    /// A level with **no terrain at all** is not a miss: there the ground plane
+    /// is the only ground there is, and placing water on it is exactly right. The
+    /// refusal is specifically "there IS terrain and the ray did not hit it".
+    fn water_pick(&self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) -> Option<DVec3> {
+        let probes = self.terrain_probes(doc, None);
+        if probes.is_empty() {
+            // No terrain in the level: the ground plane is the ground.
+            return Some(self.pick_world_point(doc, view, px, py));
+        }
+        let (ro, rd) = view.pixel_ray(px as f32, py as f32);
+        let ro_w = self.origin.to_world(ro);
+        nearest_terrain_hit(&probes, ro_w, rd.as_dvec3()).map(|h| h.world)
+    }
+
     /// The still-water level a new body takes at world point `p`.
     ///
     /// The biome's `water_hint` wins over the ground when Ring 2 has pushed one
@@ -3841,7 +3895,6 @@ impl EngineHost {
     fn water_level_for(&self, doc: &SceneDoc, p: DVec3) -> f64 {
         let base = self
             .biome_water_hint(doc, DVec2::new(p.x, p.z))
-            .or(self.water_tool.biome_level_hint_m)
             .unwrap_or(p.y);
         base + self.water_tool.level_offset_m
     }
@@ -3849,8 +3902,14 @@ impl EngineHost {
     /// The water-level hint of the biome painted under world XZ `p`, if the
     /// terrain there has one.
     ///
-    /// Resolved through the **same** topmost-terrain rule the brush ring and the
-    /// foliage height use, so "which ground am I on" has one answer in this file.
+    /// Resolved through the **topmost-ground rule** — the same one the brush ring
+    /// and the foliage drop height use here, and the same one
+    /// `inf_editor_core::hydro::topmost_ground` uses for the `water_defaults`
+    /// command (P20.4 audit: those two were a topmost rule and a
+    /// lowest-`Guid` rule under a doc claiming they matched). The two resolve it
+    /// against different *data* — this against the streamer's paged working set,
+    /// Ring 1 against the document's resident tiles — which is the streamed-
+    /// terrain fact of life and is why the tool answers from what is on screen.
     fn biome_water_hint(&self, doc: &SceneDoc, p: DVec2) -> Option<f64> {
         if self.water_hints.is_empty() {
             return None;
@@ -3871,7 +3930,12 @@ impl EngineHost {
     ///
     /// Returns `true` when the document changed, so the caller emits a delta.
     pub fn begin_water(&mut self, doc: &mut SceneDoc, view: &RenderView, px: u32, py: u32) -> bool {
-        let p = self.pick_world_point(doc, view, px, py);
+        let Some(p) = self.water_pick(doc, view, px, py) else {
+            self.reject_tool(Self::WATER_NO_GROUND_REJECTION);
+            self.water_lake_drag = None;
+            self.water_preview.clear();
+            return false;
+        };
         match self.water_tool.kind {
             WaterToolKind::Lake => {
                 self.water_lake_drag = Some(p);
@@ -3892,7 +3956,15 @@ impl EngineHost {
                             .find(|g| Self::is_river(doc, *g))
                     });
                 let changed = match target {
-                    Some(guid) => doc.edit_append_spline_point(guid, p),
+                    Some(guid) => {
+                        // `edit_append_spline_point` CREATES the `Spline` when the
+                        // entity has none (P20.4 audit): a `WaterKind::River` added
+                        // through the Details menu is exactly the state "I have
+                        // declared a river and not drawn it yet", and refusing it
+                        // wedged the tool — every click resolved to the same
+                        // spline-less selection and did nothing, with no message.
+                        doc.edit_append_spline_point(guid, p)
+                    }
                     None => {
                         // A river needs two points to be a ribbon; the first click
                         // lays both, a metre apart along +X, so the author sees
@@ -3925,7 +3997,11 @@ impl EngineHost {
         let Some(anchor) = self.water_lake_drag else {
             return;
         };
-        let p = self.pick_world_point(doc, view, px, py);
+        let Some(p) = self.water_pick(doc, view, px, py) else {
+            self.reject_tool(Self::WATER_NO_GROUND_REJECTION);
+            self.water_preview.clear();
+            return;
+        };
         self.rebuild_lake_preview(doc, anchor, p);
     }
 
@@ -3945,9 +4021,14 @@ impl EngineHost {
             return false;
         };
         self.water_preview.clear();
-        let p = self.pick_world_point(doc, view, px, py);
+        let Some(p) = self.water_pick(doc, view, px, py) else {
+            self.reject_tool(Self::WATER_NO_GROUND_REJECTION);
+            return false;
+        };
         let half = DVec2::new((p.x - anchor.x).abs() * 0.5, (p.z - anchor.z).abs() * 0.5);
         if half.x < 0.5 || half.y < 0.5 {
+            // Refusing silently is how a mis-click looks like a broken tool.
+            self.reject_tool(Self::WATER_LAKE_TOO_SMALL_REJECTION);
             return false;
         }
         let center = DVec3::new((anchor.x + p.x) * 0.5, anchor.y, (anchor.z + p.z) * 0.5);
@@ -3967,7 +4048,10 @@ impl EngineHost {
         if self.water_tool.kind != WaterToolKind::River {
             return;
         }
-        let p = self.pick_world_point(doc, view, px, py);
+        self.water_preview.clear();
+        let Some(p) = self.water_pick(doc, view, px, py) else {
+            return;
+        };
         let tail = self
             .water_active_river
             .or_else(|| {
@@ -3977,7 +4061,6 @@ impl EngineHost {
                     .find(|g| Self::is_river(doc, *g))
             })
             .and_then(|g| Self::river_tail(doc, g));
-        self.water_preview.clear();
         if let Some(tail) = tail {
             self.water_preview.push([tail, p]);
         }
@@ -4039,10 +4122,41 @@ impl EngineHost {
         // …and the waterline contour inside it.
         let preview =
             inf_editor_core::hydro::lake_preview(doc, center, half, level, PREVIEW_RESOLUTION);
-        for [a, b] in preview.waterline {
+        for [a, b] in &preview.waterline {
             self.water_preview
                 .push([DVec3::new(a.x, level, a.y), DVec3::new(b.x, level, b.y)]);
         }
+        // The measurements the preview computes reach the AUTHOR, on the status
+        // seam, live as the rectangle is dragged (P20.4 audit: they were computed
+        // and dropped). `known == 0` gets its own sentence, because "there is no
+        // ground under this rectangle" and "this lake is empty" are different
+        // facts that would otherwise both render as 0 %.
+        let msg = if !preview.has_ground() {
+            format!(
+                "Lake {:.0} × {:.0} m at {level:.1} m — NO GROUND under this rectangle",
+                half.x * 2.0,
+                half.y * 2.0
+            )
+        } else {
+            let partial = if preview.known < preview.samples {
+                format!(
+                    " ({} of {} samples have ground)",
+                    preview.known, preview.samples
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "Lake {:.0} × {:.0} m at {level:.1} m — covers {:.0}%, up to {:.1} m deep \
+                 (mean {:.1} m){partial}",
+                half.x * 2.0,
+                half.y * 2.0,
+                preview.covered_fraction * 100.0,
+                preview.max_depth_m,
+                preview.mean_depth_m,
+            )
+        };
+        self.report_tool(msg);
     }
 
     /// The world height foliage lands on at world XZ `p`: the topmost terrain

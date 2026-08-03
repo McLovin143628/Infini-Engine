@@ -235,14 +235,20 @@ fn the_crates_float_at_their_draughts_and_the_swimmer_surfaces() {
             "sea crate {i} (ρ = {density}) rests at {got}, expected about {want}"
         );
     }
-    // The draughts really do differ: the lightest crate rides higher than the
-    // heaviest by very nearly the density difference. Without this the tolerance
-    // above would admit eight crates all sitting at the same height.
+    // The draughts really do differ, BY THE MARGIN THE MODEL PREDICTS. A bare
+    // `light > heavy` would pass on a millimetre and admit eight crates all
+    // sitting at essentially the same height, which is the failure this arm
+    // exists to catch. Archimedes puts the gap at `(600 - 350) / 1000 = 0.25 m`;
+    // half of that is the floor, because the two crates are sampled at
+    // independent points of a 0.55 m swell and the instantaneous gap is the
+    // static one plus the difference of two wave heights.
+    const NOMINAL_GAP_M: f64 = (600.0 - 350.0) / 1000.0;
     let light = final_y(&trace, 0);
     let heavy = final_y(&trace, PHASE20_SEA_CRATES - 1);
     assert!(
-        light > heavy,
-        "a 350 kg/m³ crate must ride higher than a 600 kg/m³ one ({light} vs {heavy})"
+        light - heavy > NOMINAL_GAP_M * 0.5,
+        "a 350 kg/m³ crate must ride about {NOMINAL_GAP_M:.2} m higher than a 600 kg/m³ one,          and rides {:.3} m higher ({light} vs {heavy})",
+        light - heavy
     );
 
     // The lake crates float on the LAKE, ~33.6 m up — not at sea level, which is

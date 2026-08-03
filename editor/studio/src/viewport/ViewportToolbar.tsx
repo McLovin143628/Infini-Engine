@@ -12,6 +12,7 @@ import { useShellStore } from "../stores/shellStore";
 import type { SculptFalloffDto } from "../bindings/SculptFalloffDto";
 import type { SculptOpDto } from "../bindings/SculptOpDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
+import type { RiverReportDto } from "../bindings/RiverReportDto";
 import type { WaterToolKindDto } from "../bindings/WaterToolKindDto";
 import type { ViewModeDto } from "../bindings/ViewModeDto";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
@@ -554,8 +555,98 @@ function WaterControls() {
           suffix="m"
         />
       </label>
+      {kind === "River" && <RiverVerdict />}
     </>
   );
+}
+
+/**
+ * The selected river's verdict (P20.4): the two COOK advisories re-run — so the
+ * toolbar says what the build will say — plus the terrain-aware bed conflicts
+ * only the editor can make (a cook has no heightfield).
+ *
+ * Silent when nothing river-shaped is selected: "no river selected" and "this
+ * river is fine" must not look the same.
+ */
+function RiverVerdict() {
+  const report = useViewportStore((s) => s.waterRiverReport);
+  const refresh = useViewportStore((s) => s.refreshRiverReport);
+
+  if (!report) {
+    return (
+      <span className="text-(--ink-text-faint)" title="Select a river to see its verdict">
+        No river selected
+      </span>
+    );
+  }
+  const issues = riverIssues(report);
+  const partial =
+    report.sampled_frames < report.total_frames
+      ? ` — terrain answered for ${report.sampled_frames}/${report.total_frames} frames`
+      : "";
+  // One tooltip line per fact, joined — a template literal with embedded
+  // newlines would put the file's own indentation inside the tooltip.
+  const title = [
+    `${report.length_m.toFixed(0)} m, falls ${report.fall_m.toFixed(1)} m${partial}`,
+    `${report.points} control points`,
+    ...(issues.length ? issues : ["No hydrology issues."]),
+    "Click to re-check.",
+  ].join("\n");
+  return (
+    <button
+      type="button"
+      onClick={() => void refresh()}
+      title={title}
+      className={`flex h-6 items-center rounded px-2 ${
+        issues.length
+          ? "bg-(--ink-bg-0) text-(--ink-warning)"
+          : "bg-(--ink-bg-0) text-(--ink-text-faint)"
+      }`}
+    >
+      {issues.length
+        ? `⚠ ${issues.length} issue${issues.length > 1 ? "s" : ""}: ${issues[0]}`
+        : `✓ ${report.length_m.toFixed(0)} m, falls ${report.fall_m.toFixed(1)} m`}
+    </button>
+  );
+}
+
+/**
+ * One human line per hydrology problem, in the order an author would fix them:
+ * the ground first (the river is invisible or floating), then the surface, then
+ * the authored bed.
+ *
+ * Exported for the store tests, which pin the wording of the two cook advisories
+ * against the messages the cook itself emits.
+ */
+export function riverIssues(r: RiverReportDto): string[] {
+  const out: string[] = [];
+  const buried = r.bed_conflicts.filter((c) => c.issue === "buried");
+  const perched = r.bed_conflicts.filter((c) => c.issue === "perched");
+  const worst = (
+    xs: { worst_m: number; from_s: number; to_s: number }[],
+  ): { worst_m: number; from_s: number; to_s: number } =>
+    xs.reduce((a, b) => (b.worst_m > a.worst_m ? b : a));
+  if (buried.length) {
+    const w = worst(buried);
+    out.push(
+      `buried in the ground for ${(w.to_s - w.from_s).toFixed(0)} m (worst ${w.worst_m.toFixed(1)} m)`,
+    );
+  }
+  if (perched.length) {
+    const w = worst(perched);
+    out.push(
+      `perched over a drop for ${(w.to_s - w.from_s).toFixed(0)} m (worst ${w.worst_m.toFixed(1)} m)`,
+    );
+  }
+  if (r.surface_climbs.length) {
+    const rise = r.surface_climbs.reduce((a, c) => a + c.rise_m, 0);
+    out.push(`flows UPHILL — climbs ${rise.toFixed(1)} m (the cook will say so)`);
+  }
+  if (r.bed_climbs.length) {
+    const rise = r.bed_climbs.reduce((a, c) => a + c.rise_m, 0);
+    out.push(`its BED climbs ${rise.toFixed(1)} m — a basin (the cook will say so)`);
+  }
+  return out;
 }
 
 /** One biome swatch in the picker (also used for the id-0 eraser). */

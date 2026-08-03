@@ -398,9 +398,9 @@ pub async fn viewport_set_biome(
 /// Push the water-tool configuration (kind / river dimensions / level offset) to
 /// the viewport (P20.4).
 ///
-/// `biome_level_hint_m` is deliberately NOT taken from the frontend: the tool
-/// resolves the hint per click, from the biome painted under the cursor, through
-/// the id-indexed table `push_biome_palettes`' twin pushes. A toolbar-supplied
+/// There is no level field: the tool resolves one per click, from the biome
+/// painted under the cursor, through the id-indexed table
+/// `push_biome_palettes` pushes beside the overlay palette. A toolbar-supplied
 /// hint would be a level the author never chose applied wherever they clicked.
 #[tauri::command]
 pub async fn viewport_set_water(
@@ -420,7 +420,6 @@ pub async fn viewport_set_water(
             // its spline, which is a `WaterBody` feature, not a mistake.
             flow_m_s: water.flow_m_s,
             level_offset_m: water.level_offset_m,
-            biome_level_hint_m: None,
         });
     }
     Ok(())
