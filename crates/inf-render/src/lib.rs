@@ -31,6 +31,7 @@ pub mod scene;
 pub mod settings;
 pub mod surface;
 pub mod water;
+pub mod wetness;
 
 pub use atmosphere::{
     camera_radius_km, extinction, height_fog_optical_depth, height_fog_transmittance,
@@ -88,8 +89,16 @@ pub use settings::{
     VgeomSettings,
 };
 pub use water::{
-    RenderWater, RiverPath, RiverProfile, WaterFrame, WaterKindGpu, WaterQuality, WaterSettings,
-    Wave, WaveField, WaveSpec, MAX_WAVES, OCEAN_EXTENT_M, OCEAN_SNAP_M,
+    camera_underwater, RenderWater, RiverFrame, RiverPath, RiverProfile, Underwater, WaterFrame,
+    WaterKindGpu, WaterQuality, WaterSettings, WaterSurface, Wave, WaveField, WaveSpec, MAX_WAVES,
+    OCEAN_EXTENT_M, OCEAN_SNAP_M, SHAFT_DECAY, SHAFT_GLOW_POWER, SHAFT_INTENSITY, SHAFT_REACH,
+    SHAFT_TINT_DEPTH_M, UNDERWATER_FAR_M, UNDERWATER_RAMP_M,
+};
+// P20.3 shoreline wetness: the packing the renderer feeds the lit passes, and the
+// engine constants whose values are argued in `wetness.rs` rather than authored.
+pub use wetness::{
+    pack_wetness, WetnessResources, WetnessUniform, MAX_WET_BODIES, MAX_WET_SEGMENTS,
+    WET_ALBEDO_SCALE, WET_BAND_M, WET_ROUGHNESS_SCALE, WET_SHORE_MARGIN_M,
 };
 // The P18.5 scatter instruments: the GPU instance-cull counters (off by default,
 // free when off) and the pure band rule both the compute pass and the CPU

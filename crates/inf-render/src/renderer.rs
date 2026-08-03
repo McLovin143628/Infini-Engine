@@ -30,6 +30,7 @@ use crate::passes::sky_lut::AtmosphereResources;
 use crate::passes::vgeom::{VgeomAudit, VgeomAuditResources};
 use crate::scene::RenderScene;
 use crate::settings::{halton_jitter, mip_chain_sizes, RenderSettings};
+use crate::wetness::{pack_wetness, WetnessResources};
 
 /// Viewport shading view mode (R-P2). Editor-transient renderer state — never
 /// persisted, never touched by the player, so it lives on [`EngineRenderer`] and
@@ -252,6 +253,10 @@ pub struct FrameData<'a> {
     pub taa_prev_view_proj: [f32; 16],
     /// False on the first frame / after a resize (history has nothing usable).
     pub taa_history_valid: bool,
+    /// Shoreline wetness (P20.3): the fixed-size uniform `EngineRenderer::render`
+    /// packs from `scene.waters` and the lit passes read through `EnvBinding`.
+    /// **Not resizable** — see `passes::EnvBinding::bind_group`'s invariant.
+    pub wetness: &'a WetnessResources,
     /// Active shading view mode (R-P2). The lit scene passes select their
     /// wireframe pipeline variant on [`ViewMode::wireframe`]; the unlit branch is
     /// driven by the `View.flags.x` uniform instead (so no swap for Unlit).
@@ -301,6 +306,10 @@ pub struct EngineRenderer {
     atmosphere: AtmosphereResources,
     /// Monotonic source of `atmosphere.generation`.
     next_atmosphere_generation: u64,
+    /// Shoreline-wetness uniform (P20.3). Created once, never resized — unlike
+    /// `atmosphere`/`gi` it therefore carries no generation, which is exactly the
+    /// exclusion `passes::EnvBinding::bind_group`'s invariant grants and explains.
+    wetness: WetnessResources,
 }
 
 impl EngineRenderer {
@@ -416,6 +425,15 @@ impl EngineRenderer {
         // the scene carries translucent instances (so opaque scenes stay
         // byte-identical).
         graph.add(passes::translucent::TranslucentNode::new(gpu, &view_bgl));
+        // Underwater post (P20.3): a full-screen depth-graded fog + sun shafts,
+        // applied when the camera is inside a water body. AFTER the water surface
+        // (which is what the shafts are gathered from) and after translucency
+        // (glass in the water is in the water), BEFORE the grid, the sprite layer
+        // and the debug lines — editor furniture is not in the medium. A no-op
+        // unless the camera is actually submerged, so every existing golden
+        // (including the three P20.1 water ones, whose cameras are above their
+        // water) records the command stream it always did.
+        graph.add(passes::underwater::UnderwaterNode::new(gpu, &view_bgl));
         graph.add(passes::grid::GridNode::new(gpu, &view_bgl));
         graph.add(passes::sprite::SpriteNode::new(gpu, &view_bgl));
         graph.add(passes::debug::DebugNode::new(gpu, &view_bgl));
@@ -455,6 +473,7 @@ impl EngineRenderer {
             scatter_audit: passes::scatter::ScatterAuditResources::new(gpu),
             atmosphere,
             next_atmosphere_generation: 2,
+            wetness: WetnessResources::new(gpu),
         }
     }
 
@@ -665,6 +684,17 @@ impl EngineRenderer {
         gpu.queue
             .write_buffer(&self.view_buf, 0, bytemuck::bytes_of(&uniforms));
 
+        // P20.3 shoreline wetness. Derived HERE, from the water bodies both
+        // projectors already publish, rather than added to `RenderScene` — which
+        // is the strongest form the mirror rule takes: two hosts cannot disagree
+        // about a derivation neither of them performs. Pure in the scene + the
+        // render origin; no camera reaches it (`crate::wetness`).
+        gpu.queue.write_buffer(
+            &self.wetness.uniform,
+            0,
+            bytemuck::bytes_of(&pack_wetness(&scene.waters, &view.origin)),
+        );
+
         let history_valid = self.settings.taa && !resized && self.prev_view_proj.is_some();
         let prev_vp = self.prev_view_proj.unwrap_or_else(|| jvp.to_cols_array());
         let cur = (self.frame_index & 1) as usize;
@@ -702,6 +732,7 @@ impl EngineRenderer {
             vgeom_audit: &self.vgeom_audit,
             scatter_audit: &self.scatter_audit,
             atmosphere: &self.atmosphere,
+            wetness: &self.wetness,
             view_mode: self.view_mode,
         };
         self.graph.run(gpu, &mut encoder, &frame);

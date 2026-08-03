@@ -5260,6 +5260,120 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > `editor/crates/inf-editor-core/tests/simulate_water.rs`,
 > `crates/inf-transpile/tests/water_roundtrip.rs`.
 
+> **STATUS — P20.3 Underwater & wetness: COMPLETE (2026-08-02).**
+>
+> Two render-only features, **no schema bump** (Phase 20 has already spent v17 and v18, and
+> neither of these needed a field): the camera inside the medium, and the band a water level
+> leaves on the ground it meets. Goldens 45 → **47**.
+>
+> **ONE ABSORPTION STORY, SEEN FROM BOTH SIDES.** The underwater fog is the *same expression*
+> `water.wgsl` already applies to whatever is behind the surface — `scene·exp(−a·column) +
+> deep·(1 − exp(−a·column))` — with the camera moved to the other side of it. `a` and `deep`
+> are the submerging **body's own** authored fields (`WaterBody`'s P20.1 absorption/colour), not
+> a second set of underwater constants that would have to be kept in step; the
+> `the_fog_absorbs_with_the_body_it_is_inside` unit test pins that byte for byte, and
+> `golden_water_underwater_ocean`'s hue assertion pins it in pixels (wetness is a scalar albedo
+> multiply and cannot move a hue; per-channel absorption is the only thing that can).
+> **The surface caps the column**: a ray that rises through the still-water plane leaves the
+> medium there, which is what keeps the bright disc overhead from being fogged by the sea floor
+> two hundred metres behind it. A **downwelling** term `exp(−a·eye_depth)` dims the medium with
+> depth — the same extinction applied vertically, so "deeper is darker" is a consequence of the
+> absorption rather than a curve someone drew.
+>
+> **THE CAMERA-UNDERWATER TEST REUSES THE RING-0 EVALUATOR — it does not re-derive a surface.**
+> `RenderWater::surface()` reconstructs the `inf_water::WaterSurface` the record describes (a
+> river's `RiverPath` from the frames it already carries; `length_m` is the last frame's arc
+> length and `closed` is unread by `sample`, both pinned by
+> `a_reconstructed_river_answers_like_the_path_it_came_from`), and `camera_underwater` asks
+> `WaterSurface::height_at` + `inf_water::highest_surface` — the same functions P20.2's buoyancy
+> samples and `the_sim_and_the_renderer_derive_the_same_waves` pins. Only `drawable()` bodies
+> count, which is the filter the water pass applies: a body that draws nothing must not fog a
+> camera either, or `water_off_path_is_byte_identical` would be lying.
+>
+> **WETNESS IS CONTENT, NOT A CAMERA EFFECT.** The band is a pure function of a fragment's world
+> position and the frame's water bodies: an ocean's level (unbounded), a lake's authored
+> rectangle, and a **river's centreline** — its surface follows its spline, so the band does too
+> (the nearest of up to 32 decimated segments gives the local level; taking the body's reference
+> level instead would wet a whole hillside at the height of the river's source). The P18.2
+> camera-residency law is what makes this delicate: an ocean's *drawn* patch is snapped to the
+> camera, and sourcing the footprint from that patch instead of from the body's level would slide
+> a shoreline under a moving player. `wetness_is_a_pure_function_of_the_water` (exact, GPU-free)
+> and `the_wet_band_does_not_follow_the_camera` (pixels) pin both halves.
+> The response is `albedo × 0.55` and `roughness × 0.35` inside a `0.75 m` band above the level
+> (everything at or below it is submerged, hence fully wet), with a `2 m` footprint dilation so
+> the band does not stop dead on the authored polygon. **All four are engine constants with the
+> argument in their doc comments** (`crates/inf-render/src/wetness.rs`), not authored knobs —
+> which is what let P20.3 ship without a schema bump. **P22's material response is where a
+> per-material wetness curve belongs**, and it will find the band already computed.
+>
+> **THE GOLDEN DELTA — deliberate, bounded, and re-blessed in one single-package pass.**
+> Wetness is default-on and the three P20.1 water goldens all carry `hill_terrain`, so ground at
+> and below their water levels is now darker. Measured old-vs-new: `water_ocean_noon` 6.3 % of
+> pixels moved (mean luma −0.95/255), `water_river` 2.5 % (−1.04), `water_lake_dusk` 42.6 %
+> (−9.19) — the lake is the big one because its level (5 m) submerges most of a terrain spanning
+> [−0.5, 7.5] m, so most of its visible ground is *fully* wet rather than banded. All three stayed
+> **inside** the strict perceptual tolerance (worst mean 0.030 of 0.06, worst max 0.173 of 0.35),
+> so the strict gate would have passed either way; they were re-blessed anyway because the images
+> no longer showed what the renderer produces. **The other 42 goldens are byte-identical** —
+> the underwater node returns before touching the encoder above the waterline, and `wet.dims.x`
+> is 0 on a scene with no water, so every call site is a present-but-false branch.
+>
+> **NO NEW PROJECTOR STATE — the strongest form the mirror rule takes.** Both hosts already
+> publish `RenderScene::waters` through the character-for-character-gated `project_water`;
+> `pack_wetness` and `camera_underwater` are derivations *over that list*, performed once in
+> `EngineRenderer::render`. Two hosts cannot disagree about a derivation neither of them
+> performs, so `host.rs::rebuild_scene` and `inf-player/src/render.rs::build_scene` are untouched
+> and the P20.1 mirror gate stands unchanged. Likewise **no sim change**: the underwater pass is
+> view-dependent post-processing and nothing under `crates/inf-physics` was touched, so the
+> replay and PIE trace gates ran untouched.
+>
+> **`EnvBinding` grew a binding and NOT a key component.** Wetness rides at `@binding(13)` of the
+> shared env group (so terrain, mesh, skinned, vgeom and scatter all declare it and the layout
+> cannot drift from the declaration), backed by one fixed-size uniform buffer created in
+> `EngineRenderer::new` and only ever written. The `ResourceKey` invariant exists for resources
+> that get **recreated** — a buffer that never is cannot go stale behind a cached bind group —
+> so it is the second entry, after `frame.shadow.*`, in the documented exclusion, and the
+> invariant comment now says so with the same "if it ever becomes resizable" clause.
+>
+> **DEFERRED / v1 LEDGER.**
+> * **Light shafts are v1, and analytic rather than luminance-gathered.** The usual screen-space
+>   god-ray gathers bright pixels toward the sun; from below, the v1 surface shader renders the
+>   deep colour (its Fresnel and reflection terms were written for a camera *above* the water),
+>   so there is nothing bright in the frame to gather. Each of the 24 fixed taps instead asks
+>   whether that pixel's ray reaches the surface unoccluded and how close it is to the sun
+>   (`cos^24` — a ≈12° lobe, because a shaft's root is a patch of roughened surface, not a
+>   point). That gives beams with real *ends* (a rock cuts one off) at a fixed cost, but it is
+>   **not** volumetric: no density variation along a beam, no caustic banding from the wave
+>   field, no shafts from geometry *above* the water, and the sun's screen position is
+>   **unrefracted** (from below the sun really sits inside Snell's window). A wave-modulated or
+>   marched version is the follow-up. Shafts are gated on `WaterQuality::light_shafts()`
+>   (= the refraction tier); the **fog is never gated** — absorption is the content.
+> * **Partial submersion is a whole-screen switch, softened rather than split.** The treatment is
+>   all-or-nothing per frame, with strength ramped over the first `UNDERWATER_RAMP_M` (0.25 m)
+>   so crossing the line has nothing to pop. A camera *straddling* the waterline still gets one
+>   answer for the whole frame; a near-plane waterline split is the named follow-up. The switch
+>   itself uses the **displaced** surface, so a passing crest genuinely submerges you.
+> * **The column cap uses the STILL-WATER plane**, not the displaced surface — a per-pixel
+>   Gerstner inverse in a post pass would be a second surface evaluation for an error of one
+>   wave amplitude on a distance already measured in tens of metres.
+> * **Wetness is applied by `terrain.wgsl` and `mesh.wgsl` only.** `skinned_mesh`, `vgeom_mesh`
+>   and `scatter_mesh` declare the binding (they share the env group) but do not call
+>   `wet_apply` yet — characters, meshlet geometry and scattered foliage do not darken at a
+>   shoreline. One-line additions when P22 arrives.
+> * **The band is a shading-time loop, not a map.** Up to 8 bodies per frame and 32 shared river
+>   segments, evaluated per fragment; a level with rivers pays a bounded inner loop in every lit
+>   fragment. A baked distance field is the optimisation if it ever shows up in a budget ratchet.
+>   Bodies past the eighth are dropped deterministically, in projection order.
+> * **The water surface seen from BELOW is still P20.1's shading.** Fresnel, the sky reflection
+>   and total internal reflection are all wrong-side-of-the-interface; the pass fogs what the
+>   surface draws rather than re-deriving it. Named here because the underwater golden shows it.
+>
+> Files: `crates/inf-render/src/{water.rs,wetness.rs (new),lib.rs,renderer.rs}`,
+> `crates/inf-render/src/passes/{underwater.rs (new),mod.rs}`,
+> `crates/inf-render/src/shaders/{underwater.wgsl (new),wetness.wgsl (new),terrain.wgsl,
+> mesh.wgsl}`, `crates/inf-render/tests/golden.rs` + two new PNGs + three re-blessed ones,
+> `runtime/inf-player/tests/phase18_gate.rs` (the golden inventory, 45 → 47).
+
 - **P20.1 Water surfaces** — 1. a new `inf-water` (Ring 0) + render passes: ocean (Gerstner v1
   → FFT spectrum v2, deterministic seeds), lake volumes (flat + ripple), and spline rivers
   (flow along the parity-wave splines, width/depth profiles, downhill validation against

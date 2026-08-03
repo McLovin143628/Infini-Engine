@@ -1337,8 +1337,16 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// **P20.1 added three**: `water_ocean_noon.png`, `water_lake_dusk.png` and
 /// `water_river.png`, one per water body kind, because an ocean, a lake and a
 /// river are three different tessellations and three different shading regimes
-/// (absorption, Fresnel, flow foam) sharing one shader.
-const GOLDENS: [&str; 45] = [
+/// (absorption, Fresnel, flow foam) sharing one shader. **P20.3 added two**:
+/// `water_underwater_ocean.png` (the camera inside the medium — the absorption
+/// story seen from the other side, plus the v1 surface light shafts) and
+/// `water_wetness_shore.png` (the darkened, glossier band a water level leaves on
+/// the ground it meets).
+///
+/// P20.3 also **re-blessed the three P20.1 water scenes**, deliberately: shoreline
+/// wetness is default-on and all three carry terrain, so their ground at and below
+/// the water level is now darker. Every other image is byte-identical.
+const GOLDENS: [&str; 47] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1381,12 +1389,14 @@ const GOLDENS: [&str; 45] = [
     "water_lake_dusk.png",
     "water_ocean_noon.png",
     "water_river.png",
+    "water_underwater_ocean.png",
+    "water_wetness_shore.png",
     "weather_fog_dawn.png",
     "weather_snow_dusk.png",
     "weather_storm_noon.png",
 ];
 
-/// **GATE (f).** The golden *inventory* is exactly these 45 PNGs.
+/// **GATE (f).** The golden *inventory* is exactly these 47 PNGs.
 ///
 /// Nothing is re-blessed here, and no pixel is compared — that stays in
 /// `inf-render`'s own harness, which is where the renderer and the images live.
@@ -1417,7 +1427,7 @@ fn the_golden_inventory_is_exactly_the_committed_set() {
          deliberate act: update `GOLDENS` here in the same commit, and say in the \
          message which scene changed and why. Never re-bless as a side effect."
     );
-    assert_eq!(found.len(), 45);
+    assert_eq!(found.len(), GOLDENS.len());
 }
 
 // ── the composed scene's own invariants ──────────────────────────────────────

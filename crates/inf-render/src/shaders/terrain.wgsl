@@ -250,7 +250,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         + w.y * material.albedo[1].rgb
         + w.z * material.albedo[2].rgb
         + w.w * material.albedo[3].rgb;
-    let roughness = clamp(
+    var roughness = clamp(
         w.x * material.params[0].x + w.y * material.params[1].x
             + w.z * material.params[2].x + w.w * material.params[3].x,
         0.04, 1.0);
@@ -294,6 +294,21 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     // flag is 0 in the default Lit mode, so the terrain golden stays byte-stable.
     if (view.flags.x > 0.5) {
         return vec4<f32>(albedo, 1.0);
+    }
+
+    // P20.3 SHORELINE WETNESS. Terrain is where this reads: a coastline is a
+    // terrain crossing a water level, and the darkened, glossier band at that
+    // crossing is what makes water look like it is sitting IN the landscape
+    // rather than on top of it. A pure function of the fragment's world position
+    // and the frame's water bodies — no camera, no screen space, no map (see
+    // `shaders/wetness.wgsl`). Placed AFTER the Biomes and Unlit returns so both
+    // debug views keep showing the authored data rather than a wetted version of
+    // it. `wet.dims.x` is 0 on every scene without water, so the branch is
+    // present-but-false and every pre-P20.3 terrain golden is byte-stable.
+    if (wet.dims.x > 0u) {
+        let wetted = wet_apply(in.world_local, albedo, roughness);
+        albedo = wetted.rgb;
+        roughness = clamp(wetted.a, 0.04, 1.0);
     }
 
     let sun = normalize(view.sun_dir.xyz);

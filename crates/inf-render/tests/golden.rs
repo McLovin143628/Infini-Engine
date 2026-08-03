@@ -6519,3 +6519,393 @@ fn a_stronger_wind_raises_a_bigger_sea() {
     let gale_img = render(&gpu, &scene, &view);
     assert_ne!(calm_img, gale_img, "the wind moved nothing");
 }
+
+// ── P20.3 underwater post & shoreline wetness ────────────────────────────────
+//
+// Two new goldens (a submerged camera, a wet shoreline) and the tests that carry
+// the claims a picture cannot: that the fog is the SAME absorption the surface
+// applies from above, that the light shafts really reach the frame, and that the
+// wet band is terrain shading driven by the water rather than a second way of
+// drawing water.
+//
+// **The three P20.1 water goldens moved, deliberately.** Wetness is default-on
+// and all three carry `hill_terrain`, so the ground at and below their water
+// levels is now darker and glossier — which is the feature. They were re-blessed
+// in the same single-package pass that wrote the two new PNGs; the delta is
+// described in the P20.3 commit and in the ROADMAP block. Every other golden is
+// byte-identical: the underwater node returns before touching the encoder above
+// the waterline, and `wet.dims.x` is 0 on a scene with no water.
+
+/// A basin floor of `hill_terrain(33, 4.0, …)`. Its height is
+/// `4·sin(0.15x)·cos(0.15z) + 3.5`, which bottoms out at −0.5 m where
+/// `sin(0.15x) = −1` and `cos(0.15z) = 1` — i.e. at `x = 31.416 + 41.888k`,
+/// `z = 41.888k`. Both scenes below are built around a known-height point so the
+/// camera's submersion is arithmetic rather than a guess.
+const BASIN: (f64, f64) = (198.97, 125.66);
+
+/// A sea deep enough to put a camera under, over the same hill coast the P20.1
+/// water goldens use, plus the view that looks up at the sun through it.
+///
+/// The sun at 17:00 (day 172, 48.9°N) sits 27° above the horizon on a bearing of
+/// roughly −X; flattening its elevation by half puts the camera at a 14.5° pitch,
+/// which keeps the disc on screen (so the shafts have somewhere to converge) while
+/// the sea floor still fills the bottom of the frame.
+fn underwater_scene(level_m: f64, eye_y: f64) -> (RenderScene, RenderView) {
+    let scene = ocean_scene(17.0 * 3600.0, level_m);
+    let sun = scene.sun.unit_direction().as_dvec3();
+    let eye = DVec3::new(BASIN.0, eye_y, BASIN.1);
+    let target = eye + DVec3::new(sun.x, sun.y * 0.5, sun.z) * 60.0;
+    (scene, look_view(eye, target))
+}
+
+/// Frame rows showing the NEAR sea floor in [`underwater_scene`]'s shot, and the
+/// FAR one.
+///
+/// The view is pitched 14.5° up in a 60° vertical FOV, so the horizon sits at row
+/// ~134 and everything below it looks down at the floor: rows 164–180 are ~20 m
+/// of water away, rows 138–150 hundreds. Everything ABOVE row 134 is water
+/// surface — which is why neither band goes there. The surface is what the
+/// quality tier changes, and these bands exist to be free of it.
+const FLOOR_NEAR: (u32, u32) = (164, 180);
+const FLOOR_FAR: (u32, u32) = (138, 150);
+
+/// Frame rows looking UP through the surface — Snell's window. Rows 90–120 rise
+/// at 4.5°–14.5°, so they leave the water after 16–50 m, where [`FLOOR_FAR`] just
+/// below them crosses hundreds of metres of it.
+const WINDOW: (u32, u32) = (90, 120);
+
+/// A 60°-down look into the basin at [`BASIN`], from 26 m up and 15 m back.
+///
+/// The steep pitch is load-bearing for the two wetness isolation tests, not a
+/// composition choice: the top edge of the frame is 30° BELOW the horizontal, so
+/// the furthest ground in shot is ~46 m away. That keeps the whole frame inside
+/// the 256 m terrain — no sky, no horizon, and (the point) **no view past the
+/// terrain's edge to the open ocean beyond it**, which is what a shallower angle
+/// gives you and what would put water pixels in a frame that is supposed to have
+/// none.
+fn basin_view() -> RenderView {
+    look_view(
+        DVec3::new(BASIN.0, 26.0, BASIN.1 + 15.0),
+        DVec3::new(BASIN.0, 0.0, BASIN.1),
+    )
+}
+
+/// Mean relative luminance of a rect, `[0, 1]` from sRGB bytes.
+fn mean_luma(img: &[u8], x0: u32, y0: u32, x1: u32, y1: u32) -> f32 {
+    let c = mean_rgb(img, x0, y0, x1, y1);
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+/// **GOLDEN — a camera under an ocean.** Four metres down in a hill-coast basin
+/// at 17:00, looking up at the sun through the surface: the frame where the
+/// depth-graded absorption fog and the v1 surface light shafts both read.
+#[test]
+fn golden_water_underwater_ocean() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, view) = underwater_scene(15.0, 11.0);
+
+    // The camera really is submerged — and the thing that says so is the Ring-0
+    // evaluator P20.2's buoyancy samples, not a second surface implementation.
+    let under = inf_render::camera_underwater(&scene.waters, view.eye_world)
+        .expect("the fixture camera must be under the sea");
+    assert!(
+        (under.depth_m - 4.0).abs() < 1.0,
+        "the fixture is {} m down, not ~4",
+        under.depth_m
+    );
+    assert_eq!(under.strength, 1.0, "well past the waterline ramp");
+
+    let img = check_golden(&gpu, "water_underwater_ocean", &scene, &view);
+
+    // (1) The whole frame is affected, which no surface-only pass can do: the
+    // P20.1 ocean golden, seen from above, moves 10–40 % of its frame. Part of
+    // this is the P20.3 wet band — under a 15 m sea every terrain sample here is
+    // submerged — which is exactly why the sharper claim is (2).
+    let dry = render(&gpu, &without_water(&scene), &view);
+    let moved = water_changed_fraction(&img, &dry);
+    assert!(
+        moved > 0.85,
+        "the underwater treatment covered only {:.1}% of the frame",
+        moved * 100.0
+    );
+
+    // (2) THE FOG IS RUNNING, isolated from the wet band. Wetness is a scalar
+    // multiply on albedo, so it cannot move a HUE; absorption is per-channel and
+    // removes red an order of magnitude faster than blue, so hue is exactly what
+    // it moves. Measured on the near sea floor — opaque geometry in both frames,
+    // and the one part of this shot that carries no water surface.
+    let ratio = |i: &[u8]| {
+        let c = mean_rgb(i, 0, FLOOR_NEAR.0, W, FLOOR_NEAR.1);
+        c[2] / c[0].max(1e-4)
+    };
+    assert!(
+        ratio(&img) > ratio(&dry) * 1.5,
+        "the sea floor's blue/red ratio is {:.2} submerged and {:.2} dry — the \
+         Beer-Lambert absorption is not reaching the fog",
+        ratio(&img),
+        ratio(&dry)
+    );
+
+    // (3) THE SURFACE CAPS THE COLUMN. A ray that rises out of the medium stops
+    // absorbing at the surface, so rows looking UP through it (16–50 m of water)
+    // must carry visibly less than the rows just below them looking level and
+    // down (hundreds). Without the cap both bands take the far-field column and
+    // this margin collapses — which is what would fog away the bright disc
+    // overhead and leave the shafts with nothing to come out of.
+    let blue = |rows: (u32, u32)| mean_rgb(&img, 0, rows.0, W, rows.1)[2];
+    assert!(
+        blue(WINDOW) > blue(FLOOR_FAR) * 1.25,
+        "looking up carries {:.3} of blue and looking down {:.3} — the water \
+         surface is not capping the column",
+        blue(WINDOW),
+        blue(FLOOR_FAR)
+    );
+}
+
+/// **The one-absorption-story gate, in pixels.** The fog's inscattered term is
+/// weighted by `1 − exp(−a·column)`, so it must grow with the length of water in
+/// front of a pixel — the far sea floor carries more medium than the near one.
+///
+/// Isolated by *removing the medium's colour* rather than by comparing two bands
+/// directly. Two renders that differ only in `deep_color` are bit-identical in
+/// their terrain, haze, sun, shafts and wet band, so the difference at a pixel is
+/// exactly the medium's contribution there — a function of the column and of
+/// nothing else. Comparing two bands of one frame would instead be comparing two
+/// pieces of terrain.
+#[test]
+fn the_underwater_fog_is_graded_by_the_water_column() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, view) = underwater_scene(15.0, 11.0);
+    let base = render(&gpu, &scene, &view);
+    let mut colourless = scene.clone();
+    colourless.waters[0].deep_color = [0.0, 0.0, 0.0];
+    let dark = render(&gpu, &colourless, &view);
+
+    // Blue is the channel that can tell the two bands apart: at 0.035 m⁻¹ the
+    // near floor (~20 m off) is still half transmissive while the far field has
+    // saturated. Red (0.45 m⁻¹) has saturated in both and would compare equal —
+    // a fact about the water, not a weakness of the test.
+    let blue = |i: &[u8], rows: (u32, u32)| mean_rgb(i, 0, rows.0, W, rows.1)[2];
+    let d_near = blue(&base, FLOOR_NEAR) - blue(&dark, FLOOR_NEAR);
+    let d_far = blue(&base, FLOOR_FAR) - blue(&dark, FLOOR_FAR);
+    assert!(
+        d_near > 0.005,
+        "the medium contributes nothing even close to the camera ({d_near:.4}) — \
+         the comparison is vacuous"
+    );
+    assert!(
+        d_far > d_near * 1.15,
+        "the far water carries {d_far:.4} of medium and the near water \
+         {d_near:.4} — the fog is a flat tint, not a column"
+    );
+}
+
+/// The waterline is the switch, and crossing it is the only thing that engages
+/// the pass.
+///
+/// Above the surface, water is a *surface*: it changes the part of the frame it
+/// covers. Below it, water is a *medium*: it changes all of it. The two fractions
+/// must therefore differ by a wide margin, and the Ring-0 evaluator must agree
+/// with the pixels about which side of the line the camera is on.
+#[test]
+fn the_underwater_pass_engages_only_below_the_waterline() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let level = 15.0;
+    let (scene, below_view) = underwater_scene(level, 11.0);
+    // The same shot from above the highest crest.
+    let crest = scene.waters[0].waves.max_amplitude_m();
+    let (_, above_view) = underwater_scene(level, level + crest + 2.0);
+
+    assert!(inf_render::camera_underwater(&scene.waters, below_view.eye_world).is_some());
+    assert!(
+        inf_render::camera_underwater(&scene.waters, above_view.eye_world).is_none(),
+        "a camera above every crest was reported submerged"
+    );
+
+    let dry = without_water(&scene);
+    let below = water_changed_fraction(
+        &render(&gpu, &scene, &below_view),
+        &render(&gpu, &dry, &below_view),
+    );
+    let above = water_changed_fraction(
+        &render(&gpu, &scene, &above_view),
+        &render(&gpu, &dry, &above_view),
+    );
+    assert!(
+        below > 0.85,
+        "submerged, the water changed only {:.1}% of the frame",
+        below * 100.0
+    );
+    assert!(
+        above < below * 0.9,
+        "from above the waterline the water changed {:.1}% of the frame and from \
+         below {:.1}% — the post pass is running on the wrong side of the line",
+        above * 100.0,
+        below * 100.0
+    );
+}
+
+/// **The light shafts reach the frame**, isolated from everything else the
+/// quality tier does.
+///
+/// [`WaterQuality::Low`] drops the shafts — and also the surface tessellation and
+/// the screen-space refraction. Both of those only ever touch *water-surface*
+/// pixels, and this camera sits four metres BELOW its ocean, so no downward ray
+/// can reach the surface: the bottom band of the frame contains no surface pixels
+/// at all. A difference there is the shafts and nothing else, and because they
+/// are additive it must be a brightening.
+#[test]
+fn underwater_light_shafts_reach_the_frame() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, view) = underwater_scene(15.0, 11.0);
+    let at = |q: WaterQuality| {
+        let mut s = RenderSettings::default();
+        s.water.quality = q;
+        render_with(&gpu, &scene, &view, s)
+    };
+    let high = at(WaterQuality::High);
+    let low = at(WaterQuality::Low);
+    assert_ne!(high, low, "the quality tier reached nothing");
+
+    let band = |i: &[u8]| mean_luma(i, 0, FLOOR_NEAR.0, W, FLOOR_NEAR.1);
+    assert!(
+        band(&high) > band(&low),
+        "the sea floor is no brighter with the shafts on ({:.4} vs {:.4}) — the \
+         shaft term is not reaching the frame",
+        band(&high),
+        band(&low)
+    );
+}
+
+/// **GOLDEN — a wet shoreline.** The P20.1 hill coast under a noon sun with the
+/// sea at 3 m: every island and channel now carries a darkened, glossier band at
+/// the waterline. The wetness-*specific* claim — that this is terrain shading
+/// driven by the water level and not another way of drawing water — is carried by
+/// `shoreline_wetness_is_terrain_shading_not_water` below, which measures a frame
+/// containing no water pixels at all.
+#[test]
+fn golden_water_wetness_shore() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let scene = ocean_scene(12.0 * 3600.0, 3.0);
+    let view = look_view(DVec3::new(90.0, 12.0, 40.0), DVec3::new(150.0, 2.0, 100.0));
+    let img = check_golden(&gpu, "water_wetness_shore", &scene, &view);
+
+    // The shot contains both a sea and a shore: the lower band is blue-dominant
+    // water, and moving the sea moves the shoreline — so the picture is of a
+    // water LEVEL rather than of a fixed piece of terrain.
+    let sea = mean_rgb(&img, 0, H * 3 / 4, W, H);
+    assert!(
+        sea[2] > sea[0] * 1.1,
+        "the lower band is not water (r {:.3}, b {:.3})",
+        sea[0],
+        sea[2]
+    );
+    let mut higher = scene.clone();
+    higher.waters[0].level_m = 5.0;
+    assert!(
+        water_changed_fraction(&img, &render(&gpu, &higher, &view)) > 0.05,
+        "raising the sea by 2 m moved nothing"
+    );
+}
+
+/// **The wetness isolation gate.** A frame with a live wet band and *zero water
+/// pixels*, so the only thing that can differ is the terrain shading.
+///
+/// The ocean sits at −0.6 m. The terrain's lowest sample is −0.5 m and the
+/// clipmap interpolates between samples (so the rendered ground never dips below
+/// the sample minimum): the surface is depth-tested away **everywhere** and
+/// contributes nothing. The band, meanwhile, reaches from −0.6 m up to
+/// `−0.6 + WET_BAND_M`, which covers the basin floors this camera points straight
+/// down at.
+///
+/// The control drops the same ocean to −60 m: still no water pixels, and now
+/// nothing within a band of the ground either. The guard below *proves* the "no
+/// water pixels" half rather than assuming it — an occluded ocean must render
+/// byte-identically to no ocean at all.
+#[test]
+fn shoreline_wetness_is_terrain_shading_not_water() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let view = basin_view();
+
+    let at = |level_m: f64| {
+        let mut s = ocean_scene(12.0 * 3600.0, level_m);
+        // A flat calm, so no crest can displace the surface above the ground and
+        // put a water pixel in the frame after all.
+        s.waters[0].waves = WaveField::default();
+        s
+    };
+    let wet_scene = at(-0.6);
+    let dry_scene = at(-60.0);
+
+    // THE GUARD: an ocean below the ground draws nothing. Without it this test
+    // would be comparing two water surfaces and calling the difference wetness.
+    let none = render(&gpu, &without_water(&dry_scene), &view);
+    let dry = render(&gpu, &dry_scene, &view);
+    assert_eq!(
+        dry, none,
+        "an ocean 60 m under the terrain still put pixels in the frame — the \
+         isolation this test rests on does not hold"
+    );
+
+    let wet = render(&gpu, &wet_scene, &view);
+    assert_ne!(
+        wet, dry,
+        "raising the ocean to just under the ground wet nothing — the band is not \
+         reaching the terrain shader"
+    );
+    // Wet ground is DARKER ground: the film scatters light into the substrate
+    // rather than back out of it.
+    let whole = |i: &[u8]| mean_luma(i, 0, 0, W, H);
+    assert!(
+        whole(&wet) < whole(&dry),
+        "the wet frame ({:.4}) is not darker than the dry one ({:.4})",
+        whole(&wet),
+        whole(&dry)
+    );
+    // …and it is a BAND, not a global tint: it must reach a real part of the
+    // frame without reaching all of it.
+    let changed = water_changed_fraction(&wet, &dry);
+    assert!(
+        changed > 0.01 && changed < 0.9,
+        "the wet band covered {:.1}% of the frame — that is a global tint, not a \
+         shoreline",
+        changed * 100.0
+    );
+}
+
+/// Wetness is **camera-independent**: the same ground, seen from the same place,
+/// carries the same band however the camera got there.
+///
+/// The packing half is pinned exactly and GPU-free by
+/// `wetness::tests::wetness_is_a_pure_function_of_the_water`; this is the pixel
+/// half. An ocean's *drawn* patch is snapped to the camera, so a band derived
+/// from that patch instead of from the body's level would slide under a moving
+/// player — the P18.2 camera-residency law, in the one place P20.3 made it easy
+/// to break.
+#[test]
+fn the_wet_band_does_not_follow_the_camera() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = ocean_scene(12.0 * 3600.0, -0.6);
+    scene.waters[0].waves = WaveField::default();
+
+    let view = basin_view();
+    let a = render(&gpu, &scene, &view);
+    // …after the camera has visited somewhere 900 m away, which moves the ocean's
+    // snapped patch by hundreds of cells.
+    let elsewhere = look_view(
+        DVec3::new(BASIN.0 + 900.0, 40.0, BASIN.1 + 900.0),
+        DVec3::new(BASIN.0, 0.0, BASIN.1),
+    );
+    let _ = render(&gpu, &scene, &elsewhere);
+    let b = render(&gpu, &scene, &view);
+    assert_eq!(a, b, "the wet band moved with a camera that came back");
+
+    // The guard on the guard: the band IS in this frame, so the equality above is
+    // not a statement about an empty effect.
+    let dry = {
+        let mut s = scene.clone();
+        s.waters[0].level_m = -60.0;
+        render(&gpu, &s, &view)
+    };
+    assert_ne!(a, dry, "there was no band to be camera-independent about");
+}

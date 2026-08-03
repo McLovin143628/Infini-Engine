@@ -138,9 +138,20 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
     let n = normalize(in.normal);
     let v = normalize(view.eye.xyz - in.world_pos);
-    let albedo = in.color.rgb;
+    var albedo = in.color.rgb;
     let metallic = clamp(in.pbr.x, 0.0, 1.0);
-    let rough = clamp(in.pbr.y, 0.04, 1.0);
+    var rough = clamp(in.pbr.y, 0.04, 1.0);
+    // P20.3 SHORELINE WETNESS: the same band the terrain takes, so a jetty, a
+    // rock and the beach they sit on darken together at the waterline instead of
+    // the ground alone changing colour. Applied before `f0` so a wet metal's
+    // reflectance follows its wetted albedo. `wet.dims.x` is 0 on every scene
+    // without water ⇒ the branch is present-but-false and the pre-P20.3 goldens
+    // run the identical arithmetic.
+    if (wet.dims.x > 0u) {
+        let wetted = wet_apply(in.world_pos, albedo, rough);
+        albedo = wetted.rgb;
+        rough = clamp(wetted.a, 0.04, 1.0);
+    }
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
 
     var lo = vec3<f32>(0.0);

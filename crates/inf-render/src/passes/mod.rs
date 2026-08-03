@@ -26,6 +26,7 @@ pub mod taa;
 pub mod terrain;
 pub mod tonemap;
 pub mod translucent;
+pub mod underwater;
 pub mod vgeom;
 pub mod water;
 
@@ -112,6 +113,12 @@ const ENV_CLOUD_SHADOW: u32 = 11;
 /// prepass target, which [`crate::RenderSettings::needs_depth_prepass`] now forces
 /// on whenever SSR is enabled.
 const ENV_SCENE_DEPTH: u32 = 12;
+/// The shoreline-wetness uniform (P20.3) — the **one** binding wetness adds to
+/// the lit passes. A uniform buffer created once in `EngineRenderer::new` and
+/// only ever written, so unlike the AO/LUT/GI entries it is **not** a resizable
+/// resource and adds no component to [`ResourceKey`]; see the invariant comment
+/// on [`EnvBinding::bind_group`], which now says so explicitly.
+const ENV_WETNESS: u32 = 13;
 
 /// The atmosphere *medium* library, bound at `group`/`binding`.
 pub(crate) fn atmosphere_source(group: u32, binding: u32) -> String {
@@ -407,6 +414,14 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
         include_str!("../shaders/water.wgsl"),
         ShaderKind::Water,
     ),
+    (
+        "underwater",
+        include_str!("../shaders/underwater.wgsl"),
+        // Plain: it needs `view`, `fullscreen_ndc`, `unproject` and `view_ray`
+        // from common_view and nothing else. The absorption it applies arrives in
+        // its own uniform (from the body), not from the atmosphere library.
+        ShaderKind::Plain,
+    ),
 ];
 
 /// Compose the named [`SHADER_TABLE`] entry. Panics on an unknown label —
@@ -447,8 +462,15 @@ pub(crate) fn lit_scene_shader(source: &str, env_group: u32) -> String {
     // fragments — WGSL has no forward declarations.
     let cloud_shadow =
         include_str!("../shaders/cloud_shadow.wgsl").replace("GROUP_ENV", &env_group.to_string());
+    // P20.3: shoreline wetness. Binding-substituted like the rest of the env
+    // group, and composed into EVERY lit shader rather than only the two that
+    // call it — the bind-group layout is shared, so declaring it in one place is
+    // what keeps the declaration and the layout from drifting. The shaders that
+    // do not call `wet_apply` simply carry a dead function.
+    let wetness =
+        include_str!("../shaders/wetness.wgsl").replace("GROUP_ENV", &env_group.to_string());
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../shaders/common_view.wgsl"),
         env,
         atmosphere_source(env_group, ENV_ATMOS_UNIFORM),
@@ -460,6 +482,7 @@ pub(crate) fn lit_scene_shader(source: &str, env_group: u32) -> String {
         ),
         atmosphere_apply_source(),
         cloud_shadow,
+        wetness,
         source
     )
 }
@@ -682,6 +705,17 @@ impl EnvBinding {
                         },
                         count: None,
                     },
+                    // ── P20.3 shoreline wetness ──
+                    wgpu::BindGroupLayoutEntry {
+                        binding: ENV_WETNESS,
+                        visibility: frag,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let ao_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -744,6 +778,12 @@ impl EnvBinding {
     /// * `frame.shadow.*` is still created **once** (in `EngineRenderer::new`) and
     ///   never recreated, so it needs no key component. If it ever becomes
     ///   resizable, add its generation here too.
+    /// * `frame.wetness.uniform` (P20.3) is the second resource in that category:
+    ///   one fixed-size uniform buffer, allocated in `EngineRenderer::new` and
+    ///   only ever `write_buffer`-ed. A buffer that is never *recreated* cannot go
+    ///   stale behind a cached bind group, which is the only failure this key
+    ///   exists to prevent — so it contributes nothing, deliberately, and the same
+    ///   "if it ever becomes resizable" clause applies to it.
     pub fn bind_group(&mut self, gpu: &GpuContext, frame: &FrameData) -> &wgpu::BindGroup {
         let (bgl, ao_sampler, shadow_sampler) = (&self.bgl, &self.ao_sampler, &self.shadow_sampler);
         self.bg.get_or_build(resource_key(frame), || {
@@ -806,6 +846,10 @@ impl EnvBinding {
                     wgpu::BindGroupEntry {
                         binding: ENV_SCENE_DEPTH,
                         resource: wgpu::BindingResource::TextureView(&frame.targets.depth_prepass),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: ENV_WETNESS,
+                        resource: frame.wetness.uniform.as_entire_binding(),
                     },
                 ],
             })

@@ -26,7 +26,9 @@
 
 use glam::{DVec2, DVec3};
 
-pub use inf_water::{RiverPath, RiverProfile, Wave, WaveField, WaveSpec, MAX_WAVES};
+pub use inf_water::{
+    RiverFrame, RiverPath, RiverProfile, WaterSurface, Wave, WaveField, WaveSpec, MAX_WAVES,
+};
 
 /// Which footprint a [`RenderWater`] tessellates. Mirrors
 /// `inf_ecs::components::WaterKind`, kept local because `inf-render` must not
@@ -78,6 +80,22 @@ pub struct WaterFrame {
 
 impl From<&inf_water::RiverFrame> for WaterFrame {
     fn from(f: &inf_water::RiverFrame) -> Self {
+        Self {
+            center: f.center,
+            tangent: f.tangent,
+            right: f.right,
+            s: f.s,
+            width_m: f.width_m,
+            depth_m: f.depth_m,
+        }
+    }
+}
+
+/// The inverse (P20.3): back to the Ring-0 frame, so a render record can be
+/// turned into the [`WaterSurface`] the *evaluator* takes. See
+/// [`RenderWater::surface`] for why that direction is needed at all.
+impl From<&WaterFrame> for inf_water::RiverFrame {
+    fn from(f: &WaterFrame) -> Self {
         Self {
             center: f.center,
             tangent: f.tangent,
@@ -182,6 +200,171 @@ impl RenderWater {
             WaterKindGpu::River => self.frames.len() >= 2,
         }
     }
+
+    /// **The Ring-0 surface this record describes** (P20.3) — the bridge back to
+    /// [`inf_water::WaterSurface`], and therefore to the *one* height evaluator
+    /// the renderer, the cook and the fixed step all share.
+    ///
+    /// P20.3 needs to answer "is the camera under the water?", and the only
+    /// honest way to answer it is to ask the same function P20.2's buoyancy asks
+    /// — the one `the_sim_and_the_renderer_derive_the_same_waves` pins. A second,
+    /// render-side surface implementation would be a second thing to keep in step
+    /// with the sim, and the first frame it drifted the camera would fog while a
+    /// swimmer's head was dry.
+    ///
+    /// The reconstruction is total for oceans and lakes (they carry their whole
+    /// geometry). A river's [`RiverPath`] is rebuilt from the frames this record
+    /// already carries: `length_m` is the last frame's arc length by
+    /// construction, and `closed` is `false` because
+    /// [`RiverPath::sample`](inf_water::RiverPath::sample) — the only thing a
+    /// height query calls — does not read it. Both facts are pinned by
+    /// `a_reconstructed_river_answers_like_the_path_it_came_from`.
+    pub fn surface(&self) -> WaterSurface {
+        match self.kind {
+            WaterKindGpu::Ocean => WaterSurface::Ocean {
+                level_m: self.level_m,
+                waves: self.waves,
+            },
+            WaterKindGpu::Lake => WaterSurface::Lake {
+                level_m: self.level_m,
+                center: self.center,
+                half_extent: self.half_extent,
+                waves: self.waves,
+            },
+            WaterKindGpu::River => WaterSurface::River {
+                path: RiverPath {
+                    frames: self.frames.iter().map(RiverFrame::from).collect(),
+                    length_m: self.frames.last().map(|f| f.s).unwrap_or(0.0),
+                    closed: false,
+                    flow_speed_m_s: self.flow_speed_m_s,
+                },
+                waves: self.waves,
+            },
+        }
+    }
+}
+
+// ── P20.3: the camera under the water ────────────────────────────────────────
+
+/// How deep the camera has to sink before the underwater treatment reaches full
+/// strength, metres.
+///
+/// The v1 submersion model is a **whole-screen** one: the camera is either in the
+/// medium or out of it, with no waterline split across the near plane. A bare
+/// `eye.y < surface` test would therefore pop the entire frame at the instant a
+/// wave crest passed the lens. Ramping over the first 25 cm — about a near-plane
+/// height at the default 60° FOV — makes the switch *continuous in camera depth*
+/// instead: at the waterline the effect is zero, so the hard switch has nothing
+/// to show. It does not make the treatment correct for a half-submerged camera
+/// (see the ROADMAP P20.3 ledger); it makes the error small where it is visible.
+pub const UNDERWATER_RAMP_M: f64 = 0.25;
+
+/// The column length the underwater fog assumes where the depth buffer holds
+/// nothing at all, metres.
+///
+/// Sky seen straight down a ray that never crosses the surface is not a thing
+/// that happens in water; what does happen is a ray that leaves the far plane
+/// still in the medium, and 200 m of any authored absorption has saturated long
+/// since. Chosen larger than [`OCEAN_EXTENT_M`]/40 so the far field is the deep
+/// colour rather than a bright band — the same argument as the surface shader's
+/// `OPEN_WATER_DEPTH_M`, one order up because this ray is horizontal.
+pub const UNDERWATER_FAR_M: f32 = 200.0;
+
+/// How much of the screen a light shaft may sweep toward the sun, as a fraction
+/// of the distance from the shaded pixel to the sun's screen position.
+///
+/// 1.0 would smear every bright pixel all the way to the sun and read as a
+/// radial wipe; 0.55 keeps the shafts short enough to look like beams entering
+/// the water rather than a lens flare.
+pub const SHAFT_REACH: f32 = 0.55;
+
+/// Per-tap exponential decay along a shaft. `0.965^24 ≈ 0.42`, so the far end of
+/// a shaft carries a little under half the weight of its root — a visible taper
+/// without the near end blowing out.
+pub const SHAFT_DECAY: f32 = 0.965;
+
+/// The lobe exponent of the sun seen from **under** the surface.
+///
+/// A shaft's *source* is not a point: it is the patch of surface the sun's light
+/// enters through, roughened by the waves. `cos^24` is a ≈12° half-width lobe —
+/// two orders wider than the sun's own 0.53° disc, which is what makes a beam a
+/// beam rather than a specular pinprick. It is also why the shafts are gathered
+/// from an **analytic** lobe rather than from the frame's own luminance: from
+/// below, the v1 surface shader renders the deep colour, so there would be
+/// nothing bright in the frame to gather.
+pub const SHAFT_GLOW_POWER: f32 = 24.0;
+
+/// Overall shaft intensity, as a multiplier on the decayed mean of the lobe.
+pub const SHAFT_INTENSITY: f32 = 0.35;
+
+/// The column length a shaft's tint is evaluated at, metres.
+///
+/// A shaft is sunlight that has already crossed some water, so it is coloured by
+/// the *same* extinction the fog uses — evaluated at one shaft-length rather
+/// than at the pixel's distance, because the light did not travel the path the
+/// view ray did. Four metres is a beam's own scale.
+pub const SHAFT_TINT_DEPTH_M: f32 = 4.0;
+
+/// **The camera is under the water** — which body, how deep, and how strongly the
+/// treatment applies (P20.3).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Underwater {
+    /// Index into the `waters` slice of the body the camera is inside.
+    pub body: usize,
+    /// How far the eye is below that body's displaced surface, metres (> 0).
+    pub depth_m: f64,
+    /// The absolute world elevation of the surface over the eye, metres.
+    pub surface_y: f64,
+    /// `[0, 1]` — the [`UNDERWATER_RAMP_M`] ramp, smoothstepped.
+    pub strength: f32,
+}
+
+/// Whether `eye_world` is under any of these bodies, and by how much (P20.3).
+///
+/// **Reuses the Ring-0 evaluator, deliberately.** The surface height comes from
+/// [`RenderWater::surface`] → [`inf_water::WaterSurface::height_at`], and the
+/// choice between overlapping bodies from [`inf_water::highest_surface`] — the
+/// rule that crate defines once precisely so a renderer, a cook and a physics
+/// step cannot each invent their own. Nothing here re-derives a wave.
+///
+/// Only **drawable** bodies are considered, which is the same filter
+/// [`crate::passes::water::WaterNode`] applies. A body that draws nothing (a
+/// zero-extent lake, a river with no spline) must not fog a camera either, or
+/// `water_off_path_is_byte_identical` would be lying about the off path.
+///
+/// The clock is the **first body's** `time_s`. Both projectors resolve
+/// `inf_ecs::sky::water_environment` once per projection and hand every body the
+/// same number, so there is one "now" in a frame; taking it from the list rather
+/// than from a wall clock is what keeps this a pure function of the scene.
+pub fn camera_underwater(waters: &[RenderWater], eye_world: DVec3) -> Option<Underwater> {
+    let mut indices: Vec<usize> = Vec::new();
+    let mut surfaces: Vec<WaterSurface> = Vec::new();
+    for (i, w) in waters.iter().enumerate() {
+        if w.drawable() {
+            indices.push(i);
+            surfaces.push(w.surface());
+        }
+    }
+    if surfaces.is_empty() {
+        return None;
+    }
+    let t = waters[indices[0]].time_s;
+    let p = DVec2::new(eye_world.x, eye_world.z);
+    let (k, surface_y) = inf_water::highest_surface(&surfaces, p, t)?;
+    let depth_m = surface_y - eye_world.y;
+    // NaN-safe on purpose: a degenerate body must read as "not submerged" rather
+    // than as an infinitely deep one.
+    if depth_m.is_nan() || depth_m <= 0.0 {
+        return None;
+    }
+    // Smoothstep the ramp so the onset has a zero derivative at the waterline.
+    let x = (depth_m / UNDERWATER_RAMP_M).clamp(0.0, 1.0);
+    Some(Underwater {
+        body: indices[k],
+        depth_m,
+        surface_y,
+        strength: (x * x * (3.0 - 2.0 * x)) as f32,
+    })
 }
 
 /// Water rendering quality (P20.1) — the one knob a render tier clamps.
@@ -215,6 +398,18 @@ impl WaterQuality {
 
     /// Whether this tier pays for the screen-space refraction resolve + sample.
     pub fn refraction(self) -> bool {
+        !matches!(self, WaterQuality::Low)
+    }
+
+    /// Whether this tier pays for the P20.3 underwater **light shafts** — the
+    /// 24-tap radial gather toward the sun's screen position.
+    ///
+    /// Tied to the same tier as refraction rather than to a flag of its own, for
+    /// the reason [`WaterQuality`] has no enable flag at all: whether the camera
+    /// is underwater is a property of the scene, not of the renderer. What the
+    /// renderer owns is whether to pay for the gather. Low still fogs — the
+    /// absorption is the *content*; the shafts are the garnish.
+    pub fn light_shafts(self) -> bool {
         !matches!(self, WaterQuality::Low)
     }
 
@@ -358,6 +553,174 @@ mod tests {
             ..Default::default()
         };
         assert!(!one.drawable(), "one frame is not a ribbon");
+    }
+
+    /// The reconstruction claim in [`RenderWater::surface`]'s doc comment, as a
+    /// test: a river rebuilt from the frames a `RenderWater` carries answers the
+    /// **same height** as the `RiverPath` those frames came from.
+    ///
+    /// This is what makes it legitimate for P20.3 to ask `inf-water` rather than
+    /// to re-derive a surface: if the round trip lost anything, the camera would
+    /// be testing against a different river from the one the sim floats boats on.
+    #[test]
+    fn a_reconstructed_river_answers_like_the_path_it_came_from() {
+        let points = [
+            DVec3::new(0.0, 20.0, 0.0),
+            DVec3::new(60.0, 16.0, 10.0),
+            DVec3::new(120.0, 12.0, -10.0),
+            DVec3::new(180.0, 8.0, 0.0),
+        ];
+        let profile = RiverProfile {
+            width_start_m: 8.0,
+            width_end_m: 14.0,
+            depth_start_m: 1.0,
+            depth_end_m: 2.5,
+            flow_speed_m_s: 1.8,
+        };
+        let path = RiverPath::from_points(
+            &points,
+            false,
+            inf_math::spline::SplineInterp::CatmullRom,
+            &profile,
+        );
+        let waves = WaveField::from_spec(&WaveSpec::ripple(0.06, 4.0, 5));
+        let original = WaterSurface::River {
+            path: path.clone(),
+            waves,
+        };
+        let rendered = RenderWater {
+            kind: WaterKindGpu::River,
+            frames: path.frames.iter().map(WaterFrame::from).collect(),
+            flow_speed_m_s: path.flow_speed_m_s,
+            waves,
+            ..RenderWater::default()
+        };
+        let rebuilt = rendered.surface();
+        // Bit-identical heights, inside the banks and outside them, over a range
+        // of clocks — not "close enough".
+        let mut inside = 0;
+        for i in 0..120 {
+            let p = DVec2::new(i as f64 * 1.7 - 20.0, (i % 17) as f64 - 8.0);
+            let t = i as f64 * 0.31;
+            let a = original.height_at(p, t);
+            let b = rebuilt.height_at(p, t);
+            assert_eq!(
+                a.map(f64::to_bits),
+                b.map(f64::to_bits),
+                "the reconstructed river disagrees at {p:?}, t = {t}"
+            );
+            inside += usize::from(a.is_some());
+        }
+        assert!(
+            inside > 10,
+            "the probe never landed in the river ({inside} hits) — the comparison \
+             is vacuous"
+        );
+        // …and the arc length really did survive, which is what `length_m` is.
+        let WaterSurface::River { path: rp, .. } = &rebuilt else {
+            panic!("not a river")
+        };
+        assert_eq!(rp.length_m, path.length_m);
+        assert_eq!(rp.frames.len(), path.frames.len());
+    }
+
+    /// The camera-underwater query: it fires below the surface, not above it;
+    /// it respects a lake's footprint; and it ignores bodies that do not draw.
+    #[test]
+    fn the_camera_knows_when_it_is_under_the_water() {
+        let ocean = RenderWater {
+            level_m: 4.0,
+            waves: WaveField::from_spec(&WaveSpec::default()),
+            time_s: 12.5,
+            ..RenderWater::default()
+        };
+        // Well below the deepest trough ⇒ under; well above the highest crest ⇒ not.
+        let bound = ocean.waves.max_amplitude_m();
+        let deep = camera_underwater(std::slice::from_ref(&ocean), DVec3::new(3.0, -6.0, -2.0))
+            .expect("a camera 10 m down is underwater");
+        assert_eq!(deep.body, 0);
+        assert!(deep.depth_m > 9.0, "{}", deep.depth_m);
+        assert_eq!(deep.strength, 1.0, "past the ramp the treatment is full");
+        assert!(
+            camera_underwater(
+                std::slice::from_ref(&ocean),
+                DVec3::new(3.0, 4.0 + bound + 1.0, -2.0)
+            )
+            .is_none(),
+            "a camera above every crest is not underwater"
+        );
+
+        // The ramp: just under the surface the treatment is present but faint.
+        let just_under = camera_underwater(
+            std::slice::from_ref(&ocean),
+            DVec3::new(3.0, deep.surface_y - UNDERWATER_RAMP_M * 0.25, -2.0),
+        )
+        .expect("just under the surface");
+        assert!(
+            just_under.strength > 0.0 && just_under.strength < 0.3,
+            "the ramp did not soften the onset: {}",
+            just_under.strength
+        );
+
+        // A lake is bounded: the same depth outside its rectangle is dry air.
+        let lake = RenderWater {
+            kind: WaterKindGpu::Lake,
+            level_m: 10.0,
+            center: DVec2::new(100.0, 0.0),
+            half_extent: DVec2::new(20.0, 20.0),
+            ..RenderWater::default()
+        };
+        assert!(
+            camera_underwater(std::slice::from_ref(&lake), DVec3::new(100.0, 5.0, 0.0)).is_some()
+        );
+        assert!(
+            camera_underwater(std::slice::from_ref(&lake), DVec3::new(400.0, 5.0, 0.0)).is_none()
+        );
+
+        // An UNDRAWABLE body fogs nothing — the same filter the pass applies.
+        let flat = RenderWater {
+            half_extent: DVec2::ZERO,
+            ..lake.clone()
+        };
+        assert!(!flat.drawable());
+        assert!(
+            camera_underwater(std::slice::from_ref(&flat), DVec3::new(100.0, 5.0, 0.0)).is_none(),
+            "a zero-extent lake submerged the camera"
+        );
+        assert!(camera_underwater(&[], DVec3::ZERO).is_none());
+    }
+
+    /// Overlapping bodies resolve through `inf_water::highest_surface`, so the
+    /// **topmost** surface is the one the camera is under — whichever order the
+    /// projector listed them in.
+    #[test]
+    fn the_topmost_body_owns_the_camera() {
+        let low = RenderWater {
+            kind: WaterKindGpu::Lake,
+            level_m: 2.0,
+            half_extent: DVec2::splat(50.0),
+            waves: WaveField::default(),
+            ..RenderWater::default()
+        };
+        let high = RenderWater {
+            level_m: 20.0,
+            ..low.clone()
+        };
+        let eye = DVec3::new(1.0, 1.0, 1.0);
+        let a = camera_underwater(&[low.clone(), high.clone()], eye).unwrap();
+        let b = camera_underwater(&[high, low], eye).unwrap();
+        assert_eq!(a.surface_y, 20.0);
+        assert_eq!(b.surface_y, 20.0);
+        assert_eq!((a.body, b.body), (1, 0), "the index must follow the list");
+        assert_eq!(a.depth_m, b.depth_m);
+    }
+
+    #[test]
+    fn light_shafts_follow_the_same_tier_as_refraction() {
+        for q in [WaterQuality::Low, WaterQuality::Medium, WaterQuality::High] {
+            assert_eq!(q.light_shafts(), q.refraction(), "{q:?}");
+        }
+        assert!(!WaterQuality::Low.light_shafts());
     }
 
     #[test]
