@@ -5298,7 +5298,7 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 >
 > **The off path is pinned by a counter, not by pixels.** `UnderwaterReport` (the house
 > `SharedStreamReport` pattern) is bumped at the point in `run` past which the encoder will be
-> touched, and `underwater_off_path_is_byte_identical` asserts it stays at zero for a scene with
+> touched, and `underwater_off_path_never_engages` asserts it stays at zero for a scene with
 > **drawable** water and a camera above it, at every quality tier — then moves the camera under
 > and asserts it increments. A pixel comparison could not make that claim: a pass that engaged
 > and wrote the scene back unchanged is byte-identical from outside. (The P20.1 water pass's
@@ -5361,7 +5361,15 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 >   concept and arguably has no business reaching the fixed step — and P20.3 is render-only, so
 >   it is **named, not papered over**: the doc on `RenderWater::surface()` states it at the seam.
 >   Deciding it (and, if the sim is the one to change, doing so behind the replay gate) is P20.4's.
-> * **Light shafts are v1, and analytic rather than luminance-gathered.** The usual screen-space
+> * **A boat thirty metres past a river's mouth still floats.** `RiverSample::inside` tests only
+>   the *lateral* offset against the local half-width; `RiverPath::sample` clamps to the end
+>   segment, so the Ring-0 evaluator answers "inside, at the mouth's level" for any point beyond
+>   either end of an **open** river. P20.3 only *met* this designing the cheap reject (a box
+>   around the frames would have dropped points the evaluator accepts) — but the consequence is
+>   P20.2's, and user-visible: buoyancy, drag, swim and the water events all fire past the mouth,
+>   over dry land, for as far as the lateral test keeps passing. Closing it means an arc-length
+>   bound in `inside` for open paths — a **sim change**, so it belongs behind the replay gate
+>   with the other hydrology work: **P20.4's**, alongside the visibility divergence above. The usual screen-space
 >   god-ray gathers bright pixels toward the sun; from below, the v1 surface shader renders the
 >   deep colour (its Fresnel and reflection terms were written for a camera *above* the water),
 >   so there is nothing bright in the frame to gather. Each of the 24 fixed taps instead asks

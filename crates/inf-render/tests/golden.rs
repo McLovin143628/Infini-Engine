@@ -6792,7 +6792,7 @@ fn underwater_light_shafts_reach_the_frame() {
 /// water — that is what a wet shoreline is — so the frames below are not claimed
 /// to equal a water-free scene.
 #[test]
-fn underwater_off_path_is_byte_identical() {
+fn underwater_off_path_never_engages() {
     let Some(gpu) = gpu_or_skip() else { return };
     let level = 15.0;
     let (scene, _) = underwater_scene(level, 11.0);

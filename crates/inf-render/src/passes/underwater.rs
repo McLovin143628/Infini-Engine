@@ -51,7 +51,7 @@
 //! including the three P20.1 water goldens, whose cameras are all above their
 //! water.
 //!
-//! Pinned by `underwater_off_path_is_byte_identical` (golden.rs), which reads
+//! Pinned by `underwater_off_path_never_engages` (golden.rs), which reads
 //! [`UnderwaterReport`] — the node's own engagement counter. That is a stronger
 //! claim than a pixel comparison can make: a pass that engaged but wrote the
 //! colour back unchanged would satisfy any image assertion, and this it cannot.

@@ -493,7 +493,7 @@ impl EngineRenderer {
     /// which is a claim about the command stream that no pixel comparison can
     /// make (a pass that engaged and wrote the scene back unchanged looks
     /// identical from outside). Read by
-    /// `underwater_off_path_is_byte_identical`.
+    /// `underwater_off_path_never_engages`.
     pub fn underwater_engaged_frames(&self) -> u64 {
         self.underwater.load(std::sync::atomic::Ordering::Relaxed)
     }
