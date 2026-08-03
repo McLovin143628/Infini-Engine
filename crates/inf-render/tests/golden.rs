@@ -6777,6 +6777,73 @@ fn underwater_light_shafts_reach_the_frame() {
     );
 }
 
+/// **THE P20.3 OFF-PATH GATE.** Drawable water in the scene, camera above it ⇒
+/// the underwater node records **nothing at all**.
+///
+/// This is a claim about the *command stream*, and the reason it is asserted with
+/// a counter rather than with pixels is that pixels cannot make it: a pass that
+/// engaged and wrote the scene back unchanged — `strength` 0, or a fog that
+/// happened to cancel — is byte-identical from outside. `UnderwaterReport` is
+/// bumped at the point in `run` past which the encoder *will* be touched, so an
+/// unchanged count is the property the module docs actually claim.
+///
+/// Scope, stated because it is easy to over-read: this is about the **underwater
+/// post pass**. Shoreline wetness is a different feature and it *does* run above
+/// water — that is what a wet shoreline is — so the frames below are not claimed
+/// to equal a water-free scene.
+#[test]
+fn underwater_off_path_is_byte_identical() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let level = 15.0;
+    let (scene, _) = underwater_scene(level, 11.0);
+    assert!(
+        scene.waters[0].drawable(),
+        "the fixture must carry DRAWABLE water, or this proves nothing"
+    );
+    let crest = scene.waters[0].waves.max_amplitude_m();
+
+    // Above every crest, looking down at the sea — the ordinary P20.1 shot.
+    let above = look_view(
+        DVec3::new(BASIN.0, level + crest + 6.0, BASIN.1 - 40.0),
+        DVec3::new(BASIN.0, level, BASIN.1 + 30.0),
+    );
+    assert!(
+        inf_render::camera_underwater(&scene.waters, above.eye_world).is_none(),
+        "the fixture camera is not above the water"
+    );
+
+    // Render several frames, at every quality tier, with the camera above: the
+    // node must never engage. A tier loop because `light_shafts()` is the one
+    // setting it reads, and a node that consulted it *before* the submersion test
+    // would engage here.
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    assert_eq!(renderer.underwater_engaged_frames(), 0);
+    for quality in [WaterQuality::Low, WaterQuality::Medium, WaterQuality::High] {
+        let mut settings = RenderSettings::default();
+        settings.water.quality = quality;
+        renderer.set_settings(settings);
+        renderer.render(&gpu, &scene, &above, &target.view, (W, H));
+        assert_eq!(
+            renderer.underwater_engaged_frames(),
+            0,
+            "the underwater pass engaged above the waterline at {quality:?}"
+        );
+    }
+
+    // THE GUARD ON THE GUARD: the same renderer, the same scene, the camera moved
+    // below the surface — the counter must move. Without this the assertions
+    // above would pass on a node that never runs at all.
+    let (_, below) = underwater_scene(level, 11.0);
+    renderer.render(&gpu, &scene, &below, &target.view, (W, H));
+    assert_eq!(
+        renderer.underwater_engaged_frames(),
+        1,
+        "the underwater pass did not engage BELOW the waterline — the off-path \
+         assertions above are vacuous"
+    );
+}
+
 /// **GOLDEN — a wet shoreline.** The P20.1 hill coast under a noon sun with the
 /// sea at 3 m: every island and channel now carries a darkened, glossier band at
 /// the waterline. The wetness-*specific* claim — that this is terrain shading

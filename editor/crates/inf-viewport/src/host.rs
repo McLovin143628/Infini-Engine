@@ -2224,6 +2224,10 @@ fn project_water(
         center: glam::DVec2::new(affine.translation.x, affine.translation.z),
         half_extent: glam::DVec2::new(water.extent.x.max(0.0), water.extent.y.max(0.0)),
         frames: Vec::new(),
+        // Forwarded, not dropped (P20.3): `RenderWater::surface` hands it back to
+        // the Ring-0 `RiverPath` so the renderer's reconstruction is the path the
+        // projector built, flag and all.
+        spline_closed: spline.is_some_and(|sp| sp.closed),
         waves: inf_render::WaveField::from_spec(&spec),
         time_s,
         flow_speed_m_s: 0.0,

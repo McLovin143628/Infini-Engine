@@ -28,10 +28,20 @@
 //! ## Writing back through MSAA loses no antialiasing
 //!
 //! The fog is a full-screen triangle into `color_msaa`, so every sample of a
-//! pixel receives the same value — the fogged *resolved* colour. That is not a
-//! loss: the resolved colour already contains the antialiasing, and the final
-//! [`super::resolve`] averaging four identical samples reproduces it exactly.
-//! What it buys is one fragment invocation per pixel rather than per sample.
+//! pixel receives the same value — the fogged *resolved* colour. **On the colour
+//! path that loses nothing**: the resolved colour already contains the
+//! antialiasing, and the final [`super::resolve`] averaging four identical
+//! samples reproduces it exactly. What it buys is one fragment invocation per
+//! pixel rather than per sample.
+//!
+//! The **depth** path is where it does cost something. `textureLoad`ing sample 0
+//! gives one column length for the whole pixel, so a pixel straddling a
+//! silhouette is fogged entirely at the near depth or entirely at the far one —
+//! an unfiltered, aliased fog edge on the very silhouettes the colour path
+//! antialiased. Inherited from the water pass's arrangement (which measures its
+//! column the same way, for the same reason) rather than introduced here, and
+//! sub-pixel at the distances where the fog is strong. Named in the P20.3
+//! ledger.
 //!
 //! ## Off path
 //!
@@ -39,7 +49,14 @@
 //! encoder**: no resolve, no render pass, no pipeline bind, no draw. Every
 //! pre-P20.3 golden therefore records the exact command stream it did before —
 //! including the three P20.1 water goldens, whose cameras are all above their
-//! water. Pinned from the outside by `underwater_off_path_is_byte_identical`.
+//! water.
+//!
+//! Pinned by `underwater_off_path_is_byte_identical` (golden.rs), which reads
+//! [`UnderwaterReport`] — the node's own engagement counter. That is a stronger
+//! claim than a pixel comparison can make: a pass that engaged but wrote the
+//! colour back unchanged would satisfy any image assertion, and this it cannot.
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytemuck::{Pod, Zeroable};
 
@@ -47,9 +64,21 @@ use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
 use crate::water::{
-    camera_underwater, RenderWater, Underwater, SHAFT_DECAY, SHAFT_GLOW_POWER, SHAFT_INTENSITY,
-    SHAFT_REACH, SHAFT_TINT_DEPTH_M, UNDERWATER_FAR_M,
+    camera_underwater, shaft_sun_fade, RenderWater, Underwater, SHAFT_DECAY, SHAFT_GLOW_POWER,
+    SHAFT_INTENSITY, SHAFT_REACH, SHAFT_TINT_DEPTH_M, UNDERWATER_FAR_M,
 };
+
+/// How many frames the underwater pass has **engaged** on — i.e. actually
+/// recorded a resolve, a render pass and a draw.
+///
+/// The house instrumentation pattern (`SharedStreamReport`, the vgeom/scatter
+/// audits) applied to an off-path claim. It exists because "the node contributed
+/// nothing" is a statement about the *command stream*, and a pixel comparison
+/// cannot make it: a pass that engaged and wrote the scene back unchanged is
+/// invisible to every image assertion in the repo. One relaxed increment on the
+/// frames that engage and nothing at all on the frames that do not, so the off
+/// path stays exactly as free as it claims to be.
+pub type UnderwaterReport = std::sync::Arc<AtomicU64>;
 
 /// The underwater uniform. Mirrors `struct Underwater` in `underwater.wgsl`; the
 /// pair is pinned by `the_uniform_matches_the_shader_struct`.
@@ -62,18 +91,46 @@ pub struct UnderwaterUniform {
     shafts: [f32; 4],
 }
 
+/// The render-local Y of the plane the shader caps its column against.
+///
+/// **The DISPLACED surface over the eye**, not the body's still-water level:
+/// [`Underwater::surface_y`] is what `WaterSurface::height_at` answered at the
+/// camera's own XZ, wave included. Under a 0.6 m swell those differ by a wave
+/// amplitude, and using `level_m` would misplace the cap by exactly the thing
+/// that makes a sea a sea. (The *shader* still treats it as a plane — a
+/// per-pixel Gerstner inverse in a post pass would be a second surface
+/// evaluation — so the approximation is "one plane, placed correctly at the
+/// camera" rather than "one plane at the mean level".)
+///
+/// Split out of `run` so the derivation itself is testable:
+/// `the_column_cap_follows_the_displaced_surface` feeds a body whose
+/// `surface_y != level_m` and catches a swap to either one.
+pub fn surface_plane_local(under: &Underwater, origin: &inf_math::FloatingOrigin) -> f32 {
+    origin
+        .to_render(glam::DVec3::new(0.0, under.surface_y, 0.0))
+        .y
+}
+
 /// Pack the uniform for one submerged camera. Split out of `run` so it is
 /// testable without a GPU.
 ///
-/// `level_local` is the submerging body's **still-water** level converted to
-/// render-local — the same rebase every other water number takes, and the plane
-/// the shader caps its column against.
+/// `level_local` comes from [`surface_plane_local`]. `sun_y` is the scene sun
+/// direction's `y` — the shafts' only time-of-day coupling, via
+/// [`shaft_sun_fade`].
 pub fn pack_uniform(
     under: &Underwater,
     body: &RenderWater,
     level_local: f32,
     shafts: bool,
+    sun_y: f32,
 ) -> UnderwaterUniform {
+    // The shafts fade out as the sun sets and switch OFF once it has: the
+    // shader's lobe knows only the angle between a ray and `view.sun_dir`, and
+    // that angle stays small for a ray rising toward a sun well below the
+    // horizon. Folding the fade in here rather than in the shader keeps it in the
+    // one place a GPU-free test can read.
+    let fade = if shafts { shaft_sun_fade(sun_y) } else { 0.0 };
+    let shafts_on = fade > 0.0;
     UnderwaterUniform {
         params: [
             under.strength,
@@ -87,7 +144,7 @@ pub fn pack_uniform(
             body.absorption[0],
             body.absorption[1],
             body.absorption[2],
-            SHAFT_INTENSITY,
+            SHAFT_INTENSITY * fade,
         ],
         deep: [
             body.deep_color[0],
@@ -98,7 +155,7 @@ pub fn pack_uniform(
         shafts: [
             SHAFT_GLOW_POWER,
             SHAFT_REACH,
-            f32::from(u8::from(shafts)),
+            f32::from(u8::from(shafts_on)),
             SHAFT_TINT_DEPTH_M,
         ],
     }
@@ -115,10 +172,16 @@ pub struct UnderwaterNode {
     /// component — see [`crate::wetness::WetnessResources`] for the same argument
     /// spelled out.
     bind_group: super::GenCache<super::ResourceKey, wgpu::BindGroup>,
+    /// Incremented once per frame this node actually records commands.
+    report: UnderwaterReport,
 }
 
 impl UnderwaterNode {
-    pub fn new(gpu: &GpuContext, view_bgl: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(
+        gpu: &GpuContext,
+        view_bgl: &wgpu::BindGroupLayout,
+        report: UnderwaterReport,
+    ) -> Self {
         let shader = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -247,6 +310,7 @@ impl UnderwaterNode {
             sampler,
             uniform,
             bind_group: super::GenCache::default(),
+            report,
         }
     }
 }
@@ -265,17 +329,17 @@ impl RenderNode for UnderwaterNode {
             return;
         };
         let body = &frame.scene.waters[under.body];
+        // Past this point the encoder WILL be touched, so this is where the
+        // engagement counter belongs — not at the top, where the early return
+        // above would already have bumped it.
+        self.report.fetch_add(1, Ordering::Relaxed);
 
-        let level_local = frame
-            .view
-            .origin
-            .to_render(glam::DVec3::new(0.0, under.surface_y, 0.0))
-            .y;
         let u = pack_uniform(
             &under,
             body,
-            level_local,
+            surface_plane_local(&under, &frame.view.origin),
             frame.settings.water.quality.light_shafts(),
+            frame.scene.sun.unit_direction().y,
         );
         gpu.queue
             .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
@@ -387,7 +451,7 @@ mod tests {
         body.deep_color = [0.011, 0.062, 0.141];
         let under = camera_underwater(std::slice::from_ref(&body), DVec3::new(0.0, -6.0, 0.0))
             .expect("submerged");
-        let u = pack_uniform(&under, &body, 4.0, true);
+        let u = pack_uniform(&under, &body, 4.0, true, 1.0);
         assert_eq!(&u.absorption[..3], &body.absorption[..]);
         assert_eq!(&u.deep[..3], &body.deep_color[..]);
         // …and the depth the downwelling term uses is the eye's real submersion.
@@ -406,15 +470,93 @@ mod tests {
             (WaterQuality::Medium, 1.0),
             (WaterQuality::High, 1.0),
         ] {
-            let u = pack_uniform(&under, &body, 0.0, q.light_shafts());
+            let u = pack_uniform(&under, &body, 0.0, q.light_shafts(), 1.0);
             assert_eq!(u.shafts[2], want, "{q:?}");
         }
         // The tier gates the SHAFTS, never the fog: the absorption is the
         // content, and a Low tier still has to render water you can drown in.
-        let low = pack_uniform(&under, &body, 0.0, false);
-        let high = pack_uniform(&under, &body, 0.0, true);
-        assert_eq!(low.absorption, high.absorption);
+        let low = pack_uniform(&under, &body, 0.0, false, 1.0);
+        let high = pack_uniform(&under, &body, 0.0, true, 1.0);
+        assert_eq!(&low.absorption[..3], &high.absorption[..3]);
         assert_eq!(low.params, high.params);
+    }
+
+    /// **The column cap follows the DISPLACED surface, not the still-water
+    /// level.** The forwarding test hands `pack_uniform` a literal, so nothing
+    /// there would notice a swap to `body.level_m`; this drives the derivation
+    /// `run` actually uses, with a body whose two candidates differ.
+    #[test]
+    fn the_column_cap_follows_the_displaced_surface() {
+        let body = ocean(); // level 4.0, a real swell on top of it
+        let eye = DVec3::new(3.0, -6.0, -2.0);
+        let under = camera_underwater(std::slice::from_ref(&body), eye).expect("submerged");
+        assert_ne!(
+            under.surface_y, body.level_m,
+            "pick a clock/XZ where the wave is not exactly zero, or this is vacuous"
+        );
+
+        let origin = inf_math::FloatingOrigin::default();
+        let plane = surface_plane_local(&under, &origin);
+        assert_eq!(
+            plane, under.surface_y as f32,
+            "the cap is not at the displaced surface"
+        );
+        assert_ne!(
+            plane, body.level_m as f32,
+            "the cap fell back to the still-water level"
+        );
+
+        // …and it rebases like every other water number: under a shifted origin
+        // the plane moves with the world, so the shader's `level - eye.y` is
+        // unchanged.
+        let shifted = inf_math::FloatingOrigin::new(DVec3::new(0.0, 90.0, 0.0));
+        let plane_b = surface_plane_local(&under, &shifted);
+        let eye_a = origin.to_render(eye).y;
+        let eye_b = shifted.to_render(eye).y;
+        assert!(
+            ((plane - eye_a) - (plane_b - eye_b)).abs() < 1e-3,
+            "the cap does not survive a rebase: {plane} - {eye_a} vs {plane_b} - {eye_b}"
+        );
+    }
+
+    /// The sun fade reaches the uniform: it scales the shaft intensity and, once
+    /// the sun is down, clears the enable flag so the 24-tap loop is skipped
+    /// outright. The fade curve itself is pinned in
+    /// `water::tests::light_shafts_fade_out_as_the_sun_sets`.
+    #[test]
+    fn a_set_sun_switches_the_shafts_off_in_the_uniform() {
+        let body = ocean();
+        let under =
+            camera_underwater(std::slice::from_ref(&body), DVec3::new(0.0, -6.0, 0.0)).unwrap();
+
+        let noon = pack_uniform(&under, &body, 0.0, true, 1.0);
+        assert_eq!(noon.shafts[2], 1.0);
+        assert_eq!(noon.absorption[3], SHAFT_INTENSITY);
+
+        // Straight-down sun — the value `SunParams::unit_moon_direction`'s
+        // fallback produces, and one a projector really can hand over.
+        let night = pack_uniform(&under, &body, 0.0, true, -1.0);
+        assert_eq!(
+            night.shafts[2], 0.0,
+            "shafts ran with the sun below the world"
+        );
+        assert_eq!(night.absorption[3], 0.0);
+
+        // Dusk is a fade, not a switch.
+        let dusk = pack_uniform(&under, &body, 0.0, true, 0.0);
+        assert!(
+            dusk.absorption[3] > 0.0 && dusk.absorption[3] < SHAFT_INTENSITY,
+            "the horizon is not mid-fade: {}",
+            dusk.absorption[3]
+        );
+        assert_eq!(dusk.shafts[2], 1.0);
+
+        // The fog is untouched by any of it — the absorption is the content.
+        for u in [noon, night, dusk] {
+            assert_eq!(&u.absorption[..3], &body.absorption[..]);
+            assert_eq!(u.params, noon.params);
+            assert_eq!(&u.deep[..3], &body.deep_color[..]);
+        }
     }
 
     #[test]
@@ -422,8 +564,8 @@ mod tests {
         let body = ocean();
         let under =
             camera_underwater(std::slice::from_ref(&body), DVec3::new(3.0, -2.0, -7.0)).unwrap();
-        let a = pack_uniform(&under, &body, 1.5, true);
-        let b = pack_uniform(&under, &body, 1.5, true);
+        let a = pack_uniform(&under, &body, 1.5, true, 0.7);
+        let b = pack_uniform(&under, &body, 1.5, true, 0.7);
         assert_eq!(bytemuck::bytes_of(&a), bytemuck::bytes_of(&b));
     }
 
@@ -435,14 +577,14 @@ mod tests {
         let body = ocean();
         let deep =
             camera_underwater(std::slice::from_ref(&body), DVec3::new(0.0, -20.0, 0.0)).unwrap();
-        assert_eq!(pack_uniform(&deep, &body, 0.0, true).params[0], 1.0);
+        assert_eq!(pack_uniform(&deep, &body, 0.0, true, 1.0).params[0], 1.0);
 
         let shallow = camera_underwater(
             std::slice::from_ref(&body),
             DVec3::new(0.0, deep.surface_y - 0.01, 0.0),
         )
         .unwrap();
-        let s = pack_uniform(&shallow, &body, 0.0, true).params[0];
+        let s = pack_uniform(&shallow, &body, 0.0, true, 1.0).params[0];
         assert!(s > 0.0 && s < 0.05, "the ramp is not soft at the line: {s}");
     }
 }

@@ -50,8 +50,13 @@
 //! No water in the scene ⇒ `run` returns **before touching the encoder**: no
 //! resolve, no render pass, no pipeline bind, no draw. Every pre-P20.1 golden
 //! therefore renders the exact command stream it did before, which is what
-//! `water_off_path_is_byte_identical` pins from the outside and
-//! `a_scene_without_water_records_nothing` from the inside.
+//! `water_off_path_is_byte_identical` (golden.rs) pins from the outside.
+//!
+//! (This comment also cited an inside test, `a_scene_without_water_records_
+//! nothing`, that was never written — corrected in P20.3, which hit the same
+//! class of claim and answered it with the `UnderwaterReport` engagement counter
+//! in [`super::underwater`]. That instrument would serve this node too if its off
+//! path ever needs pinning from the inside.)
 
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;

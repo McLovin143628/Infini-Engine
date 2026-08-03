@@ -5,27 +5,49 @@
 // The surface shader (`water.wgsl`) already measures a water column and applies
 // Beer-Lambert extinction to whatever is behind it:
 //
-//     behind = scene * exp(-a * column) + deep * (1 - exp(-a * column))
+//     behind = scene * T + deep * (1 - T),   T = exp(-a * column)
 //
 // This pass is that expression with the camera moved to the other side of the
-// surface. Same `a` (the body's authored extinction, m⁻¹), same `deep`, same
-// exponential — nothing is re-tuned for the inside, because there is only one
+// surface, plus one factor the outside does not need:
+//
+//     color = scene * T + (deep * down) * (1 - T),   down = exp(-a * eye_depth)
+//
+// `down` is the light reaching the camera's depth having already crossed that
+// much water on its way down — the SAME extinction applied vertically, which is
+// why "deeper is darker" falls out of the absorption instead of being a curve.
+// Seen from above, `eye_depth` is zero and `down` is 1, so the two are the same
+// expression. Same `a` (the body's authored extinction, m^-1), same `deep`, same
+// exponential; nothing is re-tuned for the inside, because there is only one
 // medium. What changes is where the column is measured: from the eye to whatever
 // is in front of it, capped by the surface itself.
 //
+// ## Where the one-story claim does NOT hold: the Low tier
+//
+// At `WaterQuality::Low` the surface shader has no resolved scene colour to
+// refract, so it composites `mix(deep, shallow, T)` instead of
+// `scene * T + deep * (1 - T)` — an authored two-colour ramp rather than the
+// scene seen through the medium. The EXTINCTION is still the same `exp(-a*d)`,
+// but the composite differs, so at Low the two sides of the interface no longer
+// agree pixel for pixel. Named rather than hidden; a Low-tier surface that also
+// takes the scene-colour form is the follow-up.
+//
 // ## The surface caps the column
 //
-// A ray that rises through the still-water plane LEAVES the medium there, so the
+// A ray that rises through the surface plane LEAVES the medium there, so the
 // column it crossed ends at the plane rather than at the sea floor two hundred
 // metres behind it. Without that cap the bright disc overhead — Snell's window,
 // the whole reason an underwater shot reads as underwater — would be fogged by
 // the depth of whatever the ray eventually hit, and there would be nothing left
 // for the shafts to come out of.
 //
-// The cap uses the STILL-WATER plane, not the displaced surface: a per-pixel
-// Gerstner inverse in a post pass would be a second surface evaluation, and the
-// error it saves is a wave amplitude on a distance that is already tens of
-// metres. The v1 ledger in ROADMAP §12 P20.3 names it.
+// The plane is placed at the DISPLACED surface height over the camera
+// (`Underwater::surface_y` — what `WaterSurface::height_at` answered at the eye's
+// own XZ, wave included) and is then treated as flat for every pixel: a
+// per-pixel Gerstner inverse in a post pass would be a second surface evaluation,
+// and the error it saves is a wave amplitude on a distance already measured in
+// tens of metres. So the approximation is "one plane, placed correctly at the
+// camera", not "one plane at the mean level". The v1 ledger in ROADMAP 12 P20.3
+// names it.
 //
 // ## Light shafts v1
 //
@@ -48,8 +70,8 @@
 
 struct Underwater {
     // x = strength [0,1] (the waterline ramp), y = eye depth below the surface
-    // (m), z = render-local still-water level Y, w = fog distance where the depth
-    // buffer holds nothing (m).
+    // (m), z = render-local surface plane Y (the DISPLACED height over the eye),
+    // w = fog distance where the depth buffer holds nothing (m).
     params: vec4<f32>,
     // rgb = Beer-Lambert extinction (m⁻¹) — the body's own, the same numbers
     // `water.wgsl` absorbs with; a = shaft intensity.
@@ -101,7 +123,7 @@ fn uw_ray(ndc: vec2<f32>) -> vec3<f32> {
 
 // How much sunlight enters the medium through the surface at this pixel, `[0,1]`.
 //
-// Zero unless the pixel's ray (a) rises, (b) reaches the still-water plane, and
+// Zero unless the pixel's ray (a) rises, (b) reaches the surface plane, and
 // (c) is not cut off by geometry first — condition (c) is what gives a shaft an
 // END, and why a rock underwater casts one.
 fn uw_source(uv: vec2<f32>, size: vec2<f32>, sun: vec3<f32>) -> f32 {

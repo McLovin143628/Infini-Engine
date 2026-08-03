@@ -310,6 +310,9 @@ pub struct EngineRenderer {
     /// `atmosphere`/`gi` it therefore carries no generation, which is exactly the
     /// exclusion `passes::EnvBinding::bind_group`'s invariant grants and explains.
     wetness: WetnessResources,
+    /// P20.3 underwater engagement counter (see
+    /// [`EngineRenderer::underwater_engaged_frames`]).
+    underwater: passes::underwater::UnderwaterReport,
 }
 
 impl EngineRenderer {
@@ -433,7 +436,12 @@ impl EngineRenderer {
         // unless the camera is actually submerged, so every existing golden
         // (including the three P20.1 water ones, whose cameras are above their
         // water) records the command stream it always did.
-        graph.add(passes::underwater::UnderwaterNode::new(gpu, &view_bgl));
+        let underwater = passes::underwater::UnderwaterReport::default();
+        graph.add(passes::underwater::UnderwaterNode::new(
+            gpu,
+            &view_bgl,
+            underwater.clone(),
+        ));
         graph.add(passes::grid::GridNode::new(gpu, &view_bgl));
         graph.add(passes::sprite::SpriteNode::new(gpu, &view_bgl));
         graph.add(passes::debug::DebugNode::new(gpu, &view_bgl));
@@ -474,7 +482,20 @@ impl EngineRenderer {
             atmosphere,
             next_atmosphere_generation: 2,
             wetness: WetnessResources::new(gpu),
+            underwater,
         }
+    }
+
+    /// How many frames the P20.3 underwater pass has **engaged** on since this
+    /// renderer was built — the off-path instrument.
+    ///
+    /// Unchanged across a frame ⇒ the node returned before touching the encoder,
+    /// which is a claim about the command stream that no pixel comparison can
+    /// make (a pass that engaged and wrote the scene back unchanged looks
+    /// identical from outside). Read by
+    /// `underwater_off_path_is_byte_identical`.
+    pub fn underwater_engaged_frames(&self) -> u64 {
+        self.underwater.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The active HDR/post settings.

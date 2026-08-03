@@ -5288,7 +5288,23 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > `WaterSurface::height_at` + `inf_water::highest_surface` — the same functions P20.2's buoyancy
 > samples and `the_sim_and_the_renderer_derive_the_same_waves` pins. Only `drawable()` bodies
 > count, which is the filter the water pass applies: a body that draws nothing must not fog a
-> camera either, or `water_off_path_is_byte_identical` would be lying.
+> camera either, or `water_off_path_is_byte_identical` would be lying. A conservative,
+> allocation-free early-out (level + max wave amplitude; plus the rectangle for a lake) runs in
+> front of the query so a camera far above the water does not build a river's centreline every
+> frame — `the_cheap_reject_never_drops_a_submerging_body` pins the one direction that matters,
+> and caught the first version of it: a river gets **no XZ reject**, because
+> `RiverSample::inside` tests only the *lateral* offset, so the Ring-0 evaluator answers for
+> points beyond a river's mouth and a box around its frames would have dropped them.
+>
+> **The off path is pinned by a counter, not by pixels.** `UnderwaterReport` (the house
+> `SharedStreamReport` pattern) is bumped at the point in `run` past which the encoder will be
+> touched, and `underwater_off_path_is_byte_identical` asserts it stays at zero for a scene with
+> **drawable** water and a camera above it, at every quality tier — then moves the camera under
+> and asserts it increments. A pixel comparison could not make that claim: a pass that engaged
+> and wrote the scene back unchanged is byte-identical from outside. (The P20.1 water pass's
+> module doc cited an equivalent inside test, `a_scene_without_water_records_nothing`, that was
+> never written; the citation is corrected in the same commit and the instrument above is what
+> such a test would use.)
 >
 > **WETNESS IS CONTENT, NOT A CAMERA EFFECT.** The band is a pure function of a fragment's world
 > position and the frame's water bodies: an ocean's level (unbounded), a lake's authored
@@ -5336,6 +5352,15 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > invariant comment now says so with the same "if it ever becomes resizable" clause.
 >
 > **DEFERRED / v1 LEDGER.**
+> * **KNOWN DIVERGENCE — hidden water bodies fog nobody but still float boats.** The render
+>   projectors skip a `WaterBody` on a hidden entity (`host.rs`'s `if visible`, mirrored in the
+>   player); `PhysicsBridge3D`'s gather walks **every** `WaterBody` with no visibility test
+>   (`inf-physics/src/d3/ecs.rs`). Hide a lake in the outliner and a swimmer keeps swimming, a
+>   boat keeps floating and the water events keep firing while the camera stays dry and the
+>   surface is gone. Which side is wrong is a genuine design question — visibility is an *editor*
+>   concept and arguably has no business reaching the fixed step — and P20.3 is render-only, so
+>   it is **named, not papered over**: the doc on `RenderWater::surface()` states it at the seam.
+>   Deciding it (and, if the sim is the one to change, doing so behind the replay gate) is P20.4's.
 > * **Light shafts are v1, and analytic rather than luminance-gathered.** The usual screen-space
 >   god-ray gathers bright pixels toward the sun; from below, the v1 surface shader renders the
 >   deep colour (its Fresnel and reflection terms were written for a camera *above* the water),
@@ -5348,14 +5373,40 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 >   **unrefracted** (from below the sun really sits inside Snell's window). A wave-modulated or
 >   marched version is the follow-up. Shafts are gated on `WaterQuality::light_shafts()`
 >   (= the refraction tier); the **fog is never gated** — absorption is the content.
+> * **Shafts are faded out by SUN ELEVATION, and that fade is the only time-of-day coupling they
+>   have.** `uw_source` asks whether a ray rises to an unoccluded surface and how close it points
+>   to `view.sun_dir` — nothing in that question knows whether the sun is *up*, and `sun_dir`
+>   genuinely goes below the horizon (P17.1's clock swings it; a projector may hand over
+>   straight-down). Unfaded, a sun 10° below with a ray rising 2° at the same azimuth gives
+>   `pow(0.978, 24) ≈ 0.59` — 59 %-strength god rays at civil twilight. `shaft_sun_fade`
+>   smoothsteps from **zero at 2° below** the horizon (refraction lifts the disc ~0.57° and it is
+>   ~0.27° in radius, so a geometrically set sun is still lighting the water) to **full at 5°
+>   above**, folded into the packed intensity and clearing the enable flag once it reaches zero
+>   (so the 24-tap loop is skipped outright at night). What it is NOT: moonlit shafts, or any
+>   coupling to the sun's *colour* or *intensity*.
+> * **The fog's depth path is not antialiased.** The colour path loses nothing (the full-screen
+>   write puts the resolved colour in all four samples, and the final resolve reproduces it), but
+>   the column is `textureLoad`ed at sample 0, so a pixel straddling a silhouette is fogged
+>   entirely at the near depth or entirely at the far one. Inherited from the water pass's
+>   arrangement rather than introduced here, and sub-pixel where the fog is strong.
+> * **"One absorption story" does not hold at `WaterQuality::Low`.** With no resolved scene colour
+>   to refract, the *surface* shader composites `mix(deep, shallow, T)` instead of
+>   `scene·T + deep·(1−T)`. The extinction is the same `exp(−a·d)` on both sides; the composite is
+>   not, so at Low the two sides of the interface stop agreeing pixel for pixel. A Low-tier
+>   surface that also takes the scene-colour form is the follow-up.
 > * **Partial submersion is a whole-screen switch, softened rather than split.** The treatment is
 >   all-or-nothing per frame, with strength ramped over the first `UNDERWATER_RAMP_M` (0.25 m)
 >   so crossing the line has nothing to pop. A camera *straddling* the waterline still gets one
 >   answer for the whole frame; a near-plane waterline split is the named follow-up. The switch
 >   itself uses the **displaced** surface, so a passing crest genuinely submerges you.
-> * **The column cap uses the STILL-WATER plane**, not the displaced surface — a per-pixel
->   Gerstner inverse in a post pass would be a second surface evaluation for an error of one
->   wave amplitude on a distance already measured in tens of metres.
+> * **The column cap is ONE PLANE, placed at the displaced surface over the camera.**
+>   `Underwater::surface_y` is what `WaterSurface::height_at` answered at the eye's own XZ (wave
+>   included), so the plane sits at the right height *for the camera*; it is then treated as flat
+>   for every pixel, because a per-pixel Gerstner inverse in a post pass would be a second surface
+>   evaluation for an error of one wave amplitude on a distance already measured in tens of
+>   metres. The derivation is pinned by `the_column_cap_follows_the_displaced_surface`, which
+>   feeds a body whose `surface_y != level_m` — the forwarding test alone would not have caught a
+>   swap to the still-water level.
 > * **Wetness is applied by `terrain.wgsl` and `mesh.wgsl` only.** `skinned_mesh`, `vgeom_mesh`
 >   and `scatter_mesh` declare the binding (they share the env group) but do not call
 >   `wet_apply` yet — characters, meshlet geometry and scattered foliage do not darken at a
@@ -5369,10 +5420,14 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 >   surface draws rather than re-deriving it. Named here because the underwater golden shows it.
 >
 > Files: `crates/inf-render/src/{water.rs,wetness.rs (new),lib.rs,renderer.rs}`,
-> `crates/inf-render/src/passes/{underwater.rs (new),mod.rs}`,
+> `crates/inf-render/src/passes/{underwater.rs (new),water.rs (one corrected citation),mod.rs}`,
 > `crates/inf-render/src/shaders/{underwater.wgsl (new),wetness.wgsl (new),terrain.wgsl,
 > mesh.wgsl}`, `crates/inf-render/tests/golden.rs` + two new PNGs + three re-blessed ones,
-> `runtime/inf-player/tests/phase18_gate.rs` (the golden inventory, 45 → 47).
+> `runtime/inf-player/tests/phase18_gate.rs` (the golden inventory, 45 → 47), and — the one
+> projector touch, made character-identically on both sides so the P20.1 mirror gate stands —
+> `RenderWater::spline_closed` forwarded by `editor/crates/inf-viewport/src/host.rs` and
+> `runtime/inf-player/src/render.rs`, so a river's loop flag reaches the Ring-0 `RiverPath` the
+> reconstruction rebuilds instead of being silently guessed.
 
 - **P20.1 Water surfaces** — 1. a new `inf-water` (Ring 0) + render passes: ocean (Gerstner v1
   → FFT spectrum v2, deterministic seeds), lake volumes (flat + ripple), and spline rivers

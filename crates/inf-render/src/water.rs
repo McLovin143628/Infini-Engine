@@ -127,6 +127,14 @@ pub struct RenderWater {
     pub half_extent: DVec2,
     /// A river's centreline frames, in flow order. Empty for the other kinds.
     pub frames: Vec<WaterFrame>,
+    /// Whether a river's authored spline **loops** (P20.3).
+    ///
+    /// Carried so [`RenderWater::surface`] can hand the Ring-0 evaluator the flag
+    /// its [`RiverPath`] was built with instead of guessing `false`. Nothing reads
+    /// it today — `RiverPath::sample`, the only thing a height query calls, does
+    /// not consult it — which is exactly why dropping it would have been silent
+    /// the day something did.
+    pub spline_closed: bool,
     /// The derived Gerstner components. Evaluated in world XZ for an ocean or a
     /// lake, and in `(arc length, lateral offset)` for a river.
     pub waves: WaveField,
@@ -169,6 +177,7 @@ impl Default for RenderWater {
             center: DVec2::ZERO,
             half_extent: DVec2::splat(50.0),
             frames: Vec::new(),
+            spline_closed: false,
             waves: WaveField::default(),
             time_s: 0.0,
             flow_speed_m_s: 0.0,
@@ -209,8 +218,27 @@ impl RenderWater {
     /// honest way to answer it is to ask the same function P20.2's buoyancy asks
     /// — the one `the_sim_and_the_renderer_derive_the_same_waves` pins. A second,
     /// render-side surface implementation would be a second thing to keep in step
-    /// with the sim, and the first frame it drifted the camera would fog while a
-    /// swimmer's head was dry.
+    /// with the sim, and the first frame the *wave model* drifted, the camera
+    /// would fog while a swimmer's head was dry.
+    ///
+    /// # KNOWN DIVERGENCE: visibility
+    ///
+    /// Sharing the evaluator makes the two sides agree about **what a water
+    /// surface is**. It does not make them agree about **which bodies exist**,
+    /// and today they do not:
+    ///
+    /// * the render projectors skip a `WaterBody` on a hidden entity
+    ///   (`host.rs`'s `if visible` / the player's mirror of it), so it never
+    ///   reaches `RenderScene::waters`;
+    /// * `PhysicsBridge3D`'s gather walks **every** `WaterBody` in the world with
+    ///   no visibility test at all (`inf-physics/src/d3/ecs.rs`).
+    ///
+    /// So hiding a lake in the outliner leaves a swimmer swimming in it while the
+    /// camera stays dry, and the buoyancy that lifts a boat keeps lifting it.
+    /// Which side is wrong is a real design question — visibility is an *editor*
+    /// concept and arguably has no business reaching the sim — and P20.3 is a
+    /// render-only batch, so it is **named here rather than papered over**. See
+    /// the ROADMAP §12 P20.3 ledger.
     ///
     /// The reconstruction is total for oceans and lakes (they carry their whole
     /// geometry). A river's [`RiverPath`] is rebuilt from the frames this record
@@ -235,7 +263,7 @@ impl RenderWater {
                 path: RiverPath {
                     frames: self.frames.iter().map(RiverFrame::from).collect(),
                     length_m: self.frames.last().map(|f| f.s).unwrap_or(0.0),
-                    closed: false,
+                    closed: self.spline_closed,
                     flow_speed_m_s: self.flow_speed_m_s,
                 },
                 waves: self.waves,
@@ -297,6 +325,39 @@ pub const SHAFT_GLOW_POWER: f32 = 24.0;
 /// Overall shaft intensity, as a multiplier on the decayed mean of the lobe.
 pub const SHAFT_INTENSITY: f32 = 0.35;
 
+/// Sun elevation (as `sin`, i.e. the direction's `y`) at which shafts reach
+/// **zero**: 2° below the horizon.
+///
+/// Not 0°, because a sun at geometric elevation 0 is not gone: atmospheric
+/// refraction lifts the disc by ~0.57° and the disc is another ~0.27° in radius,
+/// so a *geometrically* set sun is still above the visible horizon for a few more
+/// minutes. Two degrees below is where the last of it has gone.
+pub const SHAFT_SUN_SET_Y: f32 = -0.0349; // sin(-2°)
+
+/// Sun elevation (as `sin`) at which shafts reach **full** strength: 5° up.
+///
+/// Between [`SHAFT_SUN_SET_Y`] and here the fade is a smoothstep. The band is
+/// deliberately narrow and low: what it exists to prevent is 59 %-strength
+/// god-rays at civil twilight, which is what a bare `pow(dot(ray, sun), 24)` lobe
+/// produces with the sun 10° *below* the horizon and a ray rising 2° at the same
+/// azimuth. Above 5° the sun is properly up and the shafts are the picture.
+pub const SHAFT_SUN_FULL_Y: f32 = 0.0872; // sin(5°)
+
+/// How strongly the sun drives light shafts at elevation `sun_y` (the sun
+/// direction's `y`, i.e. `sin(elevation)`), `[0, 1]`.
+///
+/// **The shafts' one time-of-day coupling.** `uw_source` in the shader asks only
+/// whether a ray rises to an unoccluded surface and how close it points to the
+/// sun; nothing in that question knows whether the sun is *up*. `view.sun_dir`
+/// genuinely goes below the horizon (P17.1's clock swings it, and a projector may
+/// hand over straight-down), so without this factor a night dive is lit by god
+/// rays. Smoothstepped so dusk is a fade rather than a switch.
+pub fn shaft_sun_fade(sun_y: f32) -> f32 {
+    let span = SHAFT_SUN_FULL_Y - SHAFT_SUN_SET_Y;
+    let x = ((sun_y - SHAFT_SUN_SET_Y) / span).clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
 /// The column length a shaft's tint is evaluated at, metres.
 ///
 /// A shaft is sunlight that has already crossed some water, so it is coloured by
@@ -317,6 +378,58 @@ pub struct Underwater {
     pub surface_y: f64,
     /// `[0, 1]` — the [`UNDERWATER_RAMP_M`] ramp, smoothstepped.
     pub strength: f32,
+}
+
+/// A **conservative, allocation-free** "could this body possibly submerge the
+/// eye?" test — the early-out in front of [`camera_underwater`]'s real query.
+///
+/// Conservative in one direction only: it may say `true` for a body that turns
+/// out not to submerge the eye (the exact query then says so), and it must
+/// **never** say `false` for one that does. That asymmetry is what makes it safe
+/// to drop a rejected body entirely rather than feeding it to
+/// [`inf_water::highest_surface`]: the answer is the topmost surface *that
+/// exceeds the eye*, and a body whose surface provably cannot exceed the eye can
+/// never be it — so dropping it changes neither the winner nor the
+/// earliest-wins tie rule (candidates keep projection order).
+///
+/// The bounds are the still-water level plus the wave field's maximum amplitude
+/// — the same bound `the_height_query_stays_near_the_level` pins in Ring 0 — and,
+/// for bounded bodies, the footprint.
+fn could_submerge(w: &RenderWater, eye: DVec3) -> bool {
+    let amp = w.waves.max_amplitude_m();
+    match w.kind {
+        // Unbounded in XZ: only the height can reject.
+        WaterKindGpu::Ocean => eye.y < w.level_m + amp,
+        WaterKindGpu::Lake => {
+            if eye.y >= w.level_m + amp {
+                return false;
+            }
+            (eye.x - w.center.x).abs() <= w.half_extent.x.max(0.0)
+                && (eye.z - w.center.y).abs() <= w.half_extent.y.max(0.0)
+        }
+        // A river's surface follows its spline, so the bound is the highest frame.
+        // O(frames) and allocation-free, where `surface()` is O(frames) *and* a
+        // heap allocation — which is the whole point of testing first.
+        //
+        // **No XZ reject for a river, deliberately.** The obvious one — the
+        // bounding box of the frames widened by half a width — is NOT
+        // conservative, and `the_cheap_reject_never_drops_a_submerging_body`
+        // caught it: [`inf_water::RiverSample::inside`] tests only the *lateral*
+        // offset from the centreline, not the longitudinal one, so
+        // `RiverPath::sample` clamps to the end segment and reports a point
+        // thirty metres beyond the river's mouth as inside its banks. The Ring-0
+        // evaluator therefore treats a river as a ribbon extended along its end
+        // tangents, and a box around the frames would drop cameras it answers
+        // for. The height bound alone is sound, and it is the one that matters
+        // for the case this early-out exists for (a camera far above the water).
+        WaterKindGpu::River => {
+            let top = w
+                .frames
+                .iter()
+                .fold(f64::NEG_INFINITY, |a, f| a.max(f.center.y));
+            eye.y < top + amp
+        }
+    }
 }
 
 /// Whether `eye_world` is under any of these bodies, and by how much (P20.3).
@@ -340,7 +453,11 @@ pub fn camera_underwater(waters: &[RenderWater], eye_world: DVec3) -> Option<Und
     let mut indices: Vec<usize> = Vec::new();
     let mut surfaces: Vec<WaterSurface> = Vec::new();
     for (i, w) in waters.iter().enumerate() {
-        if w.drawable() {
+        // The cheap reject runs BEFORE `surface()`, which allocates a river's
+        // whole centreline. A camera 500 m above a level is not in it, and a
+        // level with three rivers should not pay three heap allocations per frame
+        // to be told so.
+        if w.drawable() && could_submerge(w, eye_world) {
             indices.push(i);
             surfaces.push(w.surface());
         }
@@ -622,6 +739,190 @@ mod tests {
         };
         assert_eq!(rp.length_m, path.length_m);
         assert_eq!(rp.frames.len(), path.frames.len());
+        assert!(!rp.closed);
+
+        // ── the SAME river, authored as a LOOP ──
+        //
+        // A closed spline produces a different frame set (it comes back round), so
+        // the height comparison below is a real test of the round trip rather than
+        // a re-run of the open case. `closed` itself is forwarded by both
+        // projectors and must survive: nothing reads it today —
+        // `RiverPath::sample` does not — which is exactly what would make dropping
+        // it silent until something did.
+        let loop_path = RiverPath::from_points(
+            &points,
+            true,
+            inf_math::spline::SplineInterp::CatmullRom,
+            &profile,
+        );
+        assert_ne!(
+            loop_path.frames.len(),
+            path.frames.len(),
+            "a closed spline must build a different centreline, or this adds nothing"
+        );
+        let loop_original = WaterSurface::River {
+            path: loop_path.clone(),
+            waves,
+        };
+        let loop_rendered = RenderWater {
+            kind: WaterKindGpu::River,
+            frames: loop_path.frames.iter().map(WaterFrame::from).collect(),
+            flow_speed_m_s: loop_path.flow_speed_m_s,
+            spline_closed: true,
+            waves,
+            ..RenderWater::default()
+        };
+        let loop_rebuilt = loop_rendered.surface();
+        let mut loop_inside = 0;
+        for i in 0..120 {
+            let p = DVec2::new(i as f64 * 1.7 - 20.0, (i % 17) as f64 - 8.0);
+            let t = i as f64 * 0.31;
+            let a = loop_original.height_at(p, t);
+            assert_eq!(
+                a.map(f64::to_bits),
+                loop_rebuilt.height_at(p, t).map(f64::to_bits),
+                "the reconstructed CLOSED river disagrees at {p:?}, t = {t}"
+            );
+            loop_inside += usize::from(a.is_some());
+        }
+        assert!(
+            loop_inside > 10,
+            "the closed probe never landed in the river"
+        );
+        let WaterSurface::River { path: lp, .. } = &loop_rebuilt else {
+            panic!("not a river")
+        };
+        assert!(lp.closed, "`closed` was dropped by the reconstruction");
+        assert_eq!(lp.length_m, loop_path.length_m);
+    }
+
+    /// **The sun-elevation fade** — the shafts' one time-of-day coupling.
+    ///
+    /// `uw_source` asks only whether a ray rises to an unoccluded surface and how
+    /// close it points to `view.sun_dir`; nothing in that question knows whether
+    /// the sun is *up*. With the sun 10° below the horizon and a ray rising 2° at
+    /// the same azimuth, `dot ≈ 0.978` and `pow(0.978, 24) ≈ 0.59` — 59 %-strength
+    /// god rays at civil twilight. This is the factor that stops it.
+    #[test]
+    fn light_shafts_fade_out_as_the_sun_sets() {
+        // Full strength with the sun properly up, and the ramp is monotone.
+        assert_eq!(shaft_sun_fade(1.0), 1.0);
+        assert_eq!(shaft_sun_fade(SHAFT_SUN_FULL_Y), 1.0);
+        assert!(shaft_sun_fade(0.5) == 1.0);
+
+        // Zero at and below the set point — this is the assertion the bug had to
+        // pass through.
+        assert_eq!(shaft_sun_fade(SHAFT_SUN_SET_Y), 0.0);
+        assert_eq!(
+            shaft_sun_fade((-10f32).to_radians().sin()),
+            0.0,
+            "the sun 10° below the horizon still drove shafts"
+        );
+        assert_eq!(
+            shaft_sun_fade(-1.0),
+            0.0,
+            "a straight-down sun drove shafts"
+        );
+
+        // The horizon itself is inside the band: a sun at geometric elevation 0 is
+        // refracted above the visible horizon and still lights the water.
+        let at_horizon = shaft_sun_fade(0.0);
+        assert!(
+            at_horizon > 0.0 && at_horizon < 1.0,
+            "the horizon must be mid-fade, not a switch: {at_horizon}"
+        );
+
+        // Monotone non-decreasing across the whole range.
+        let mut prev = 0.0;
+        for i in 0..=200 {
+            let y = -1.0 + i as f32 / 100.0;
+            let f = shaft_sun_fade(y);
+            assert!((0.0..=1.0).contains(&f), "out of range at {y}: {f}");
+            assert!(f >= prev - 1e-6, "not monotone at {y}: {prev} -> {f}");
+            prev = f;
+        }
+    }
+
+    /// The early-out in front of the real query is **conservative**: it may keep a
+    /// body that turns out not to submerge the eye, but it must never drop one
+    /// that does. A `false` where the exact answer is `Some` is a camera that
+    /// stops fogging.
+    #[test]
+    fn the_cheap_reject_never_drops_a_submerging_body() {
+        let ocean = RenderWater {
+            level_m: 4.0,
+            waves: WaveField::from_spec(&WaveSpec::default()),
+            ..RenderWater::default()
+        };
+        let lake = RenderWater {
+            kind: WaterKindGpu::Lake,
+            level_m: 10.0,
+            center: DVec2::new(100.0, 0.0),
+            half_extent: DVec2::new(20.0, 20.0),
+            waves: WaveField::from_spec(&WaveSpec::ripple(0.04, 6.0, 11)),
+            ..RenderWater::default()
+        };
+        let river_path = RiverPath::from_points(
+            &[
+                DVec3::new(0.0, 20.0, 0.0),
+                DVec3::new(60.0, 16.0, 10.0),
+                DVec3::new(120.0, 12.0, -10.0),
+            ],
+            false,
+            inf_math::spline::SplineInterp::CatmullRom,
+            &RiverProfile {
+                width_start_m: 8.0,
+                width_end_m: 14.0,
+                depth_start_m: 1.0,
+                depth_end_m: 2.5,
+                flow_speed_m_s: 1.8,
+            },
+        );
+        let river = RenderWater {
+            kind: WaterKindGpu::River,
+            frames: river_path.frames.iter().map(WaterFrame::from).collect(),
+            flow_speed_m_s: river_path.flow_speed_m_s,
+            waves: WaveField::from_spec(&WaveSpec::ripple(0.06, 4.0, 5)),
+            ..RenderWater::default()
+        };
+
+        let mut kept_and_submerged = 0;
+        let mut rejected = 0;
+        for body in [&ocean, &lake, &river] {
+            let surface = body.surface();
+            for i in 0..400 {
+                // A lattice that straddles every footprint and every level.
+                let eye = DVec3::new(
+                    (i % 20) as f64 * 12.0 - 30.0,
+                    (i / 20) as f64 * 1.6 - 4.0,
+                    ((i * 7) % 23) as f64 * 8.0 - 40.0,
+                );
+                let exact = surface
+                    .height_at(DVec2::new(eye.x, eye.z), 0.0)
+                    .is_some_and(|h| h > eye.y);
+                let cheap = could_submerge(body, eye);
+                assert!(
+                    cheap || !exact,
+                    "the cheap reject dropped a {:?} body that submerges the eye at {eye:?}",
+                    body.kind
+                );
+                kept_and_submerged += usize::from(exact);
+                rejected += usize::from(!cheap);
+            }
+        }
+        // Both halves must be exercised, or the implication above is vacuous.
+        assert!(
+            kept_and_submerged > 20,
+            "{kept_and_submerged} submerged samples"
+        );
+        assert!(
+            rejected > 20,
+            "{rejected} rejected samples — the early-out never fires"
+        );
+
+        // …and the query itself still answers the same thing it did before the
+        // early-out existed: a camera far above every body is dry.
+        assert!(camera_underwater(&[ocean, lake, river], DVec3::new(60.0, 500.0, 0.0)).is_none());
     }
 
     /// The camera-underwater query: it fires below the surface, not above it;
