@@ -163,4 +163,8 @@ inf-project = { workspace = true }
 # feature, with bit-portable trig (the P14 LAW). Dev-only — the shipped player's
 # `inf-vgeom` is unchanged.
 inf-vgeom = { workspace = true, features = ["test-support"] }
+# `water_projection` asserts the P20.4 flow-foam curve against the ONE definition
+# of it rather than restating `1.6` in a test. Dev-only: the shipped player never
+# names `inf-water` — it consumes the derived `RenderWater` its projector builds.
+inf-water = { workspace = true }
 tempfile = { workspace = true }

@@ -51,6 +51,19 @@ const DEGENERATE_CROSS_EPS: f64 = 1e-9;
 /// spacing and the length measurement agree.
 pub const DEFAULT_SAMPLES_PER_SEGMENT: usize = 16;
 
+/// How far past an **open** river's end a point may still count as inside,
+/// metres (P20.4).
+///
+/// The mouth plane is **inclusive**: a query exactly at the last frame answers
+/// "inside", the same way [`RiverSample::bank_fraction`] `== 1.0` — exactly on
+/// the bank — does. It needs a tolerance because the frames are a *resampling*
+/// of the spline: the last one lands on the authored endpoint to within the
+/// arc-length LUT's inversion error rather than exactly on it, so without one,
+/// whether the water reaches its own mouth would depend on the last bit of that
+/// inversion. A micrometre is four orders of magnitude below the finest authored
+/// geometry (frames are spaced in metres) and several above the error.
+pub const RIVER_END_TOLERANCE_M: f64 = 1e-6;
+
 /// The authored cross-section of a river: how wide and how deep it is at each
 /// end, and how fast it flows.
 ///
@@ -136,6 +149,22 @@ pub struct RiverSample {
     /// Unit flow direction here (horizontal component; `y` is kept so a steep
     /// river still reports the slope it flows down).
     pub tangent: DVec3,
+    /// How far **past an end** of an open river the point lies, metres —
+    /// measured along the end segment's own direction, and never negative
+    /// (P20.4).
+    ///
+    /// `0` for every point whose projection lands inside the centreline's
+    /// arc-length span, and **always `0` for a closed path**, which has no ends
+    /// to be past. Positive only beyond the first frame or beyond the last one.
+    ///
+    /// This exists because [`s`](Self::s) cannot express it: `s` is clamped to
+    /// `[0, length_m]` by construction, so a point thirty metres downstream of
+    /// the mouth and a point exactly at the mouth report the same arc length.
+    /// Without a second number, the only test [`inside`](Self::inside) could
+    /// make was the *lateral* one — which is precisely how a boat came to float
+    /// over dry land past a river's mouth (the P20.3 ledger's entry, closed
+    /// here).
+    pub beyond_m: f64,
 }
 
 impl RiverSample {
@@ -150,9 +179,20 @@ impl RiverSample {
     }
 
     /// Whether the sampled point is inside the ribbon.
+    ///
+    /// **Two bounds, not one** (P20.4): across the banks
+    /// ([`bank_fraction`](Self::bank_fraction)) *and* along the centreline
+    /// ([`beyond_m`](Self::beyond_m)). A ribbon is a bounded surface; testing
+    /// only the lateral offset made an open river an infinite strip in the
+    /// direction it points, so buoyancy, drag, swim and the water events all
+    /// fired past its mouth for as far as the lateral test kept passing.
+    ///
+    /// Both bounds are inclusive at the edge — exactly on a bank is wet, exactly
+    /// at the mouth is wet — see [`RIVER_END_TOLERANCE_M`] for why the second
+    /// one carries a tolerance and the first does not.
     #[inline]
     pub fn inside(&self) -> bool {
-        self.bank_fraction() <= 1.0
+        self.bank_fraction() <= 1.0 && self.beyond_m <= RIVER_END_TOLERANCE_M
     }
 }
 
@@ -261,35 +301,60 @@ impl RiverPath {
     /// is deliberate for v1 — it is exact, order-independent and trivially
     /// deterministic, and a river is a few hundred frames. A spatial index is the
     /// documented follow-up if P20.2 ever queries thousands of bodies per step.
+    ///
+    /// # The arc-length bound (P20.4)
+    ///
+    /// The projection onto each segment is **clamped**, so a point past the
+    /// mouth necessarily lands on the last frame and reports `s == length_m`.
+    /// The *unclamped* parameter of the winning segment is therefore kept, and
+    /// the overshoot beyond the first or last segment of an **open** path is
+    /// reported as [`RiverSample::beyond_m`]. It is only ever non-zero on the
+    /// two end segments: a point beyond a hairpin's tip that happens to be
+    /// nearest an interior segment is genuinely beside *that* stretch of river,
+    /// and the lateral test is the right one for it.
     pub fn sample(&self, p: DVec2) -> Option<RiverSample> {
         if self.is_empty() {
             return None;
         }
-        let mut best: Option<(f64, usize, f64)> = None; // (dist², segment, u)
+        // (dist², segment, clamped u, raw u, segment length)
+        let mut best: Option<(f64, usize, f64, f64, f64)> = None;
         for (i, pair) in self.frames.windows(2).enumerate() {
             let (a, b) = (pair[0], pair[1]);
             let a2 = DVec2::new(a.center.x, a.center.z);
             let b2 = DVec2::new(b.center.x, b.center.z);
             let ab = b2 - a2;
             let len2 = ab.length_squared();
-            let u = if len2 > 0.0 {
-                ((p - a2).dot(ab) / len2).clamp(0.0, 1.0)
+            let raw = if len2 > 0.0 {
+                (p - a2).dot(ab) / len2
             } else {
                 0.0
             };
+            let u = raw.clamp(0.0, 1.0);
             let closest = a2 + ab * u;
             let d2 = (p - closest).length_squared();
-            if best.is_none_or(|(bd, _, _)| d2 < bd) {
-                best = Some((d2, i, u));
+            if best.is_none_or(|(bd, _, _, _, _)| d2 < bd) {
+                best = Some((d2, i, u, raw, len2.sqrt()));
             }
         }
-        let (_, i, u) = best?;
+        let (_, i, u, raw, seg_len) = best?;
         let a = self.frames[i];
         let b = self.frames[i + 1];
         let center = a.center.lerp(b.center, u);
         let tangent = norm_or(a.tangent.lerp(b.tangent, u), a.tangent);
         let right = norm_or(a.right.lerp(b.right, u), a.right);
         let lateral = (p - DVec2::new(center.x, center.z)).dot(DVec2::new(right.x, right.z));
+        // A closed path wraps: its "ends" are joined, so there is nothing to be
+        // past and the overshoot is identically zero.
+        let last = self.frames.len() - 2;
+        let beyond_m = if self.closed {
+            0.0
+        } else if i == 0 && raw < 0.0 {
+            -raw * seg_len
+        } else if i == last && raw > 1.0 {
+            (raw - 1.0) * seg_len
+        } else {
+            0.0
+        };
         Some(RiverSample {
             s: lerp(a.s, b.s, u),
             lateral_m: lateral,
@@ -297,6 +362,7 @@ impl RiverPath {
             width_m: lerp(a.width_m, b.width_m, u),
             depth_m: lerp(a.depth_m, b.depth_m, u),
             tangent,
+            beyond_m,
         })
     }
 
@@ -325,6 +391,29 @@ impl RiverPath {
         self.frames.iter().map(|f| (f.s, f.center.y)).collect()
     }
 
+    /// The **authored bed** profile: `(arc length, surface − depth)` per frame
+    /// (P20.4).
+    ///
+    /// This is the bed the *author* described — the water surface lowered by the
+    /// [`RiverProfile`]'s depth taper — and it is a different question from
+    /// [`bed_profile`](Self::bed_profile), which asks the *terrain* how high the
+    /// ground actually is. Neither is derived from the other, exactly as the
+    /// shader's screen-space shore and `shore::shore_distance`'s world-space one
+    /// are not.
+    ///
+    /// It is what the **cook** can check, because it needs no terrain at all: a
+    /// river that descends 2 m over its length while its depth tapers from 5 m
+    /// to 0.5 m has a bed that *climbs* 2.5 m, which is a basin, not a river —
+    /// and nothing at runtime says so, because the surface still slopes the right
+    /// way and the water still renders. Feed it to [`uphill_spans`] exactly like
+    /// the surface profile.
+    pub fn bed_profile_from_depth(&self) -> Vec<(f64, f64)> {
+        self.frames
+            .iter()
+            .map(|f| (f.s, f.center.y - f.depth_m))
+            .collect()
+    }
+
     /// The **bed** elevation profile, sampled from a terrain height function:
     /// `(arc length, terrain height)` for every frame the function answers for.
     ///
@@ -338,6 +427,81 @@ impl RiverPath {
             .collect()
     }
 }
+
+/// Flow accumulation, in **m³**, that drives the foam boost to its full value
+/// (P20.4).
+///
+/// The unit is [`DataMapKind::Flow`](inf_terrain)'s own: the P19.1 erosion pass
+/// integrates `dt · outflow` over the whole bake, so the map is a *volume* of
+/// water that left each cell, peaking in the channels the water carved. The
+/// value matches `mask.flow`'s default `max` in the PCG node kit (1000 m³), and
+/// deliberately so — a flow value that reads as "a real channel" to a scatter
+/// mask should read as one to a river, and two different ceilings for the same
+/// map would be two different opinions about the same terrain.
+pub const FLOW_FOAM_REFERENCE_M3: f64 = 1000.0;
+
+/// How much a fully-channelled cell multiplies a river's flow foam by, on top of
+/// the authored amount (P20.4).
+///
+/// `0.6` — a rapid over a carved channel foams a little over half again as much
+/// as the same river crossing a plain. Chosen to be *visible* and not
+/// *dominant*: the authored `foam_flow_m_s` is still what decides whether a river
+/// foams at all.
+pub const FLOW_FOAM_GAIN: f64 = 0.6;
+
+/// The foam multiplier a river frame takes from the terrain's P19.1 flow map.
+///
+/// **It can only ever ADD foam.** The identity is `1.0`, returned for a frame
+/// over terrain that was never eroded, over a hole in the heightfield, or over
+/// no terrain at all — so wiring the flow map in changes *nothing* about content
+/// that has no flow map, which is what let this ship without moving a single
+/// golden. The upper bound is `1 + FLOW_FOAM_GAIN`.
+///
+/// A subtraction was the other candidate ("a river off-channel is glassy") and
+/// was rejected: it makes the absence of a bake — the default state of every
+/// terrain in the engine — into a visible change to every river already
+/// authored, which is a migration disguised as a feature.
+///
+/// Pure, monotone, allocation-free and `f64`; no trig, so the P14 portability law
+/// is satisfied trivially.
+#[inline]
+pub fn flow_foam_gain(flow_m3: f64) -> f64 {
+    if !flow_m3.is_finite() || flow_m3 <= 0.0 {
+        return 1.0;
+    }
+    let t = (flow_m3 / FLOW_FOAM_REFERENCE_M3).min(1.0);
+    1.0 + FLOW_FOAM_GAIN * t
+}
+
+/// How much elevation a river must gain, in metres, before anything says so.
+///
+/// **One value, in Ring 0, because two callers need it and they must agree**:
+/// the cook's advisory (`inf_packager::cook`) and the editor's river tool
+/// (`inf_editor_core::hydro` via the `water_river_report` command). A tool with a
+/// smaller tolerance would nag about rivers the build accepts; a larger one would
+/// let a build advisory arrive as a surprise at package time. It lived in the
+/// cook alone until P20.4 gave it a second reader.
+///
+/// **What it actually bounds.** Every profile it is applied to is a *resampling*
+/// of the authored curve, not the authored data, and a resampling wobbles:
+///
+/// * **Catmull-Rom overshoot** — a smooth curve through strictly descending
+///   control points can still bulge upward between knots, so a polyline an author
+///   would call monotone shows centimetre rises;
+/// * **arc-length quantization** — frames land at even distances, not on knots,
+///   so the sampled extrema sit slightly off the real ones.
+///
+/// Half a metre is comfortably above both and comfortably below anything an
+/// author would call a rise. It is a **merged-span** tolerance, applied to a
+/// contiguous climb's total (see [`uphill_spans`]), so a long gentle ascent made
+/// of individually tiny steps is still caught —
+/// `a_sawtooth_climb_escapes_the_per_span_tolerance` documents the case it does
+/// not catch.
+///
+/// The editor's *terrain-aware* checks use a larger one
+/// (`inf_editor_core::hydro::BED_TOLERANCE_M`), because those additionally sample
+/// a bilinear heightfield along a curve that crosses tile diagonals.
+pub const UPHILL_TOLERANCE_M: f64 = 0.5;
 
 /// A stretch of river that gains elevation in the direction it flows.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -699,6 +863,122 @@ mod tests {
         assert_eq!(l.lateral_m.signum(), -bank.lateral_m.signum());
     }
 
+    /// **The river-mouth bug, closed (P20.4).**
+    ///
+    /// Before the arc-length bound, `inside()` tested only the lateral offset and
+    /// `sample` clamped to the end segment — so every point on the centreline's
+    /// extension, to infinity, answered "inside, at the mouth's level". A boat
+    /// thirty metres past the mouth floated; swim and the water events fired over
+    /// dry land.
+    #[test]
+    fn a_point_past_an_open_rivers_mouth_is_outside() {
+        let path = RiverPath::from_points(
+            &pts(&[[0.0, 5.0, 0.0], [100.0, 5.0, 0.0]]),
+            false,
+            SplineInterp::Linear,
+            &RiverProfile {
+                width_start_m: 10.0,
+                width_end_m: 10.0,
+                ..RiverProfile::default()
+            },
+        );
+        // Thirty metres downstream of the mouth, dead on the centreline: the
+        // lateral test passes and the arc-length one does not.
+        let past = path.sample(DVec2::new(130.0, 0.0)).unwrap();
+        assert!(past.bank_fraction() <= 1.0, "the lateral test still passes");
+        assert!((past.beyond_m - 30.0).abs() < 1e-6, "{}", past.beyond_m);
+        assert!(!past.inside(), "a boat past the mouth must not float");
+        // …and the same distance BEFORE the source.
+        let before = path.sample(DVec2::new(-30.0, 0.0)).unwrap();
+        assert!((before.beyond_m - 30.0).abs() < 1e-6, "{}", before.beyond_m);
+        assert!(!before.inside());
+
+        // ANTI-VACUITY: the river did not get shorter. The mouth itself, and a
+        // point a centimetre inside it, are still wet.
+        let mouth = path.sample(DVec2::new(100.0, 0.0)).unwrap();
+        assert_eq!(mouth.beyond_m, 0.0);
+        assert!(mouth.inside(), "the mouth plane is inclusive");
+        let inside = path.sample(DVec2::new(99.99, 2.0)).unwrap();
+        assert!(inside.inside());
+        assert_eq!(inside.beyond_m, 0.0);
+        // The whole interior is unaffected.
+        for i in 0..=100 {
+            let s = path.sample(DVec2::new(i as f64, 0.0)).unwrap();
+            assert!(s.inside(), "interior point {i} went dry");
+        }
+    }
+
+    /// A **closed** path has no ends to be past, so the bound is inert on it —
+    /// every point still answers by its lateral offset alone, and the loop's seam
+    /// is not a wall.
+    #[test]
+    fn a_closed_river_has_no_mouth_to_be_past() {
+        let loop_pts = pts(&[
+            [0.0, 3.0, 0.0],
+            [40.0, 3.0, 0.0],
+            [40.0, 3.0, 40.0],
+            [0.0, 3.0, 40.0],
+        ]);
+        let path = RiverPath::from_points(
+            &loop_pts,
+            true,
+            SplineInterp::CatmullRom,
+            &RiverProfile {
+                width_start_m: 8.0,
+                width_end_m: 8.0,
+                ..RiverProfile::default()
+            },
+        );
+        // Walk the whole loop: nothing on it is ever "beyond" anything.
+        for i in 0..200 {
+            let s = path.length_m * i as f64 / 200.0;
+            let f = &path.frames[(i * (path.frames.len() - 1) / 200).min(path.frames.len() - 1)];
+            let p = DVec2::new(f.center.x, f.center.z);
+            let smp = path.sample(p).unwrap();
+            assert_eq!(smp.beyond_m, 0.0, "at s={s}");
+            assert!(smp.inside());
+        }
+        // …and the centre of the loop, which is off the ribbon, is still out by
+        // the LATERAL test — the bound did not become the only one.
+        let centre = path.sample(DVec2::new(20.0, 20.0)).unwrap();
+        assert_eq!(centre.beyond_m, 0.0);
+        assert!(!centre.inside());
+    }
+
+    /// The bound is only ever applied on the two END segments. A hairpin's far
+    /// arm passes back beside its own tip, and a point there is *beside a real
+    /// stretch of river* — it must stay wet.
+    #[test]
+    fn a_hairpin_stays_wet_beside_its_own_far_arm() {
+        let hairpin = pts(&[
+            [0.0, 2.0, 0.0],
+            [30.0, 2.0, 0.0],
+            [34.0, 2.0, 4.0],
+            [30.0, 2.0, 8.0],
+            [0.0, 2.0, 8.0],
+        ]);
+        let path = RiverPath::build(
+            &hairpin,
+            false,
+            SplineInterp::CatmullRom,
+            &RiverProfile {
+                width_start_m: 6.0,
+                width_end_m: 6.0,
+                ..RiverProfile::default()
+            },
+            32,
+        );
+        // A point on the RETURN arm, well past where the outbound arm's x ends —
+        // nearest an interior segment, so no end bound applies.
+        let smp = path.sample(DVec2::new(20.0, 8.0)).unwrap();
+        assert_eq!(smp.beyond_m, 0.0);
+        assert!(smp.inside(), "the return arm went dry");
+        // Past the actual mouth (the far end of the return arm, at x ≈ 0, z = 8).
+        let past = path.sample(DVec2::new(-25.0, 8.0)).unwrap();
+        assert!(past.beyond_m > 20.0, "{}", past.beyond_m);
+        assert!(!past.inside());
+    }
+
     #[test]
     fn flow_follows_the_tangent_and_stops_at_the_bank() {
         let path = RiverPath::from_points(
@@ -873,6 +1153,79 @@ mod tests {
         let spans = uphill_spans(&profile, 0.0);
         assert_eq!(spans.len(), 20);
         assert!(spans.iter().all(|s| s.rise_m < 0.5));
+    }
+
+    /// **The authored-bed advisory (P20.4).** A river whose surface falls the
+    /// whole way can still have a bed that climbs, because the depth taper is
+    /// authored independently of the elevation — and nothing at runtime says so.
+    #[test]
+    fn a_tapering_depth_can_make_the_bed_climb_under_a_falling_surface() {
+        // Surface: 10 m → 8 m over 150 m (falls 2 m). Depth: 5 m → 0.5 m.
+        // Bed: 5 m → 7.5 m. It climbs 2.5 m.
+        let gentle = pts(&[
+            [0.0, 10.0, 0.0],
+            [50.0, 9.33, 0.0],
+            [100.0, 8.67, 0.0],
+            [150.0, 8.0, 0.0],
+        ]);
+        let path = RiverPath::from_points(
+            &gentle,
+            false,
+            SplineInterp::Linear,
+            &RiverProfile {
+                depth_start_m: 5.0,
+                depth_end_m: 0.5,
+                ..RiverProfile::default()
+            },
+        );
+        // The SURFACE is clean — this is exactly the case the P20.1 advisory
+        // cannot see.
+        assert!(uphill_spans(&path.surface_profile(), 0.5).is_empty());
+        let bed = path.bed_profile_from_depth();
+        assert_eq!(bed.len(), path.frames.len());
+        assert!((bed[0].1 - 5.0).abs() < 1e-9, "{:?}", bed[0]);
+        assert!((bed.last().unwrap().1 - 7.5).abs() < 1e-9);
+        let spans = uphill_spans(&bed, 0.5);
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert!((spans[0].rise_m - 2.5).abs() < 0.01, "{:?}", spans[0]);
+
+        // ANTI-VACUITY: the same river with a CONSTANT depth has a bed that
+        // falls exactly as its surface does, and is reported by nothing.
+        let level = RiverPath::from_points(
+            &gentle,
+            false,
+            SplineInterp::Linear,
+            &RiverProfile {
+                depth_start_m: 2.0,
+                depth_end_m: 2.0,
+                ..RiverProfile::default()
+            },
+        );
+        assert!(uphill_spans(&level.bed_profile_from_depth(), 0.5).is_empty());
+    }
+
+    /// The flow-map foam gain: identity where there is no flow, bounded above,
+    /// monotone, and never *less* than the authored amount.
+    #[test]
+    fn the_flow_foam_gain_only_ever_adds() {
+        assert_eq!(flow_foam_gain(0.0), 1.0);
+        assert_eq!(flow_foam_gain(-5.0), 1.0, "a negative map is not a rebate");
+        // A non-finite map value is not data; it reads as "no flow here" rather
+        // than as an infinite rapid.
+        assert_eq!(flow_foam_gain(f64::NAN), 1.0);
+        assert_eq!(flow_foam_gain(f64::INFINITY), 1.0);
+        // Saturates at the reference and never climbs past the bound.
+        assert!((flow_foam_gain(FLOW_FOAM_REFERENCE_M3) - (1.0 + FLOW_FOAM_GAIN)).abs() < 1e-12);
+        assert!((flow_foam_gain(1e9) - (1.0 + FLOW_FOAM_GAIN)).abs() < 1e-12);
+        // Monotone non-decreasing, and strictly above 1 for any real flow.
+        let mut prev = 1.0;
+        for i in 0..=200 {
+            let g = flow_foam_gain(i as f64 * 10.0);
+            assert!(g >= prev - 1e-15, "not monotone at {i}");
+            assert!((1.0..=1.0 + FLOW_FOAM_GAIN + 1e-12).contains(&g));
+            prev = g;
+        }
+        assert!(flow_foam_gain(1.0) > 1.0, "any real flow adds something");
     }
 
     #[test]

@@ -14,8 +14,8 @@ use glam::{DVec2, DVec3};
 use inf_ecs::components::{
     AtlasRect, Camera, Collider3D, ColliderShape3DKind, Foliage, FoliageInstance,
     FoliagePaletteEntry, GlobalTransform, Light, Light2D, LightKind, Material, MeshRef, NineSlice,
-    Primitive, Spline, Sprite, Terrain, Text2D, Tilemap, TimeOfDay, Transform, Visibility, Volume,
-    VolumeKind,
+    Primitive, Spline, SplineInterp, Sprite, Terrain, Text2D, Tilemap, TimeOfDay, Transform,
+    Visibility, Volume, VolumeKind, WaterBody, WaterKind,
 };
 use inf_ecs::{Color, ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d, Vec3d};
 use inf_terrain::{
@@ -1515,6 +1515,257 @@ impl SceneDoc {
         }
         self.touch();
         guid
+    }
+
+    // ── P20.4 hydrology authoring ────────────────────────────────────────
+    //
+    // Three recorded mutations, and between them they are the whole water tool.
+    // They exist here rather than in the Ring-2 command layer for the reason
+    // every other `edit_*` does: the undo record has to be taken around the
+    // *complete* change, and a caller that spawned an entity and then inserted
+    // components through separate calls would put three steps on the stack for
+    // one click.
+
+    /// Create a **lake**: an entity carrying a `WaterBody` at `center`, sized
+    /// `half_extent` (metres, XZ) with its surface at `level_m` (P20.4).
+    ///
+    /// One `Create` undo step, on the `edit_create_streamed_terrain` pattern —
+    /// the component is attached *before* the record is snapshotted, so redo
+    /// restores a lake rather than the bare entity the spawn kind alone makes.
+    ///
+    /// The entity's transform is the lake's **centre**, which is the convention
+    /// the projector reads (`center = affine.translation.xz`); `level_m` is an
+    /// absolute world elevation and deliberately not derived from the transform's
+    /// `y`, because a sea level that moved when you nudged the entity would be a
+    /// trap (`WaterBody::level_m`'s own doc says so).
+    pub fn edit_create_lake(
+        &mut self,
+        name: &str,
+        center: DVec3,
+        half_extent: Vec2d,
+        level_m: f64,
+    ) -> Uuid {
+        let guid = self.create(SpawnKind::Empty, name, None);
+        if let Some(entity) = self.world.entity_of(guid) {
+            let mut t = Transform::IDENTITY;
+            t.translation = Vec3d::new(center.x, center.y, center.z);
+            self.world.world_mut().entity_mut(entity).insert((
+                WaterBody::lake(
+                    level_m,
+                    Vec2d::new(half_extent.x.abs().max(0.0), half_extent.y.abs().max(0.0)),
+                ),
+                t,
+            ));
+        }
+        self.record_create(guid, "Create Lake");
+        guid
+    }
+
+    /// Create a **river**: an entity carrying a `WaterBody::river` *and* the
+    /// `Spline` that is its centreline, on the same entity (P20.4).
+    ///
+    /// `points` are **world** space; they are stored relative to the entity's
+    /// transform, which is placed at the first point. That keeps the spline's
+    /// authored numbers small and makes "drag the river" move the whole
+    /// centreline, which is what the same-entity composition buys.
+    ///
+    /// Fewer than two points yields a river with no ribbon — an authoring state
+    /// (`RenderWater::drawable` skips it), not an error, so the tool can create
+    /// the entity on the first click and keep appending.
+    pub fn edit_create_river(
+        &mut self,
+        name: &str,
+        points: &[DVec3],
+        width_m: f64,
+        depth_m: f64,
+        flow_m_s: f64,
+    ) -> Uuid {
+        let origin = points.first().copied().unwrap_or(DVec3::ZERO);
+        let guid = self.create(SpawnKind::Empty, name, None);
+        if let Some(entity) = self.world.entity_of(guid) {
+            let mut t = Transform::IDENTITY;
+            t.translation = Vec3d::new(origin.x, origin.y, origin.z);
+            self.world.world_mut().entity_mut(entity).insert((
+                WaterBody::river(width_m.max(0.0), depth_m.max(0.0), flow_m_s),
+                Spline {
+                    points: points
+                        .iter()
+                        .map(|p| {
+                            let l = *p - origin;
+                            Vec3d::new(l.x, l.y, l.z)
+                        })
+                        .collect(),
+                    closed: false,
+                    interp: SplineInterp::CatmullRom,
+                },
+                t,
+            ));
+        }
+        self.record_create(guid, "Create River");
+        guid
+    }
+
+    /// Append a **world-space** control point to `guid`'s `Spline` (P20.4) — one
+    /// undo step per click, recorded as a `SwapComponents` because a `Vec<Vec3d>`
+    /// is not a reflection-addressable scalar.
+    ///
+    /// Returns `false` for an entity with no `Spline`, so the tool can tell
+    /// "extend this river" from "start a new one" without a second query.
+    ///
+    /// The point is converted into the entity's own frame through its
+    /// `GlobalTransform`, so appending to a river under a moved or rotated parent
+    /// puts the point where the author clicked rather than where the untransformed
+    /// numbers would land.
+    pub fn edit_append_spline_point(&mut self, guid: Uuid, world: DVec3) -> bool {
+        let Some(before) = crate::scene::serialize::record_of(self, guid) else {
+            return false;
+        };
+        let Some(e) = self.world.entity_of(guid) else {
+            return false;
+        };
+        if self.world.world().get::<Spline>(e).is_none() {
+            return false;
+        }
+        let affine = self
+            .world
+            .world()
+            .get::<GlobalTransform>(e)
+            .map(|g| g.0)
+            .unwrap_or(glam::DAffine3::IDENTITY);
+        let local = affine.inverse().transform_point3(world);
+        {
+            let w = self.world.world_mut();
+            let Some(mut spline) = w.get_mut::<Spline>(e) else {
+                return false;
+            };
+            spline.points.push(Vec3d::new(local.x, local.y, local.z));
+        }
+        let Some(after) = crate::scene::serialize::record_of(self, guid) else {
+            return false;
+        };
+        self.touch();
+        self.world.mark_dirty();
+        self.world.propagate();
+        self.history.record(
+            "Add River Point",
+            EditCommand::SwapComponents {
+                guid,
+                before: Box::new(before),
+                after: Box::new(after),
+            },
+        );
+        true
+    }
+
+    /// Rewrite `guid`'s river profile (width / depth / flow) in one undo step
+    /// (P20.4) — the per-river half of profile editing, beside the per-control-
+    /// point half the Details list already gives.
+    ///
+    /// **No schema growth**: every field already exists on `WaterBody` from
+    /// P20.1. Returns `false` when the entity has no `WaterBody`.
+    pub fn edit_set_river_profile(
+        &mut self,
+        guid: Uuid,
+        width_start_m: f64,
+        width_end_m: f64,
+        depth_start_m: f64,
+        depth_end_m: f64,
+        flow_m_s: f64,
+    ) -> bool {
+        let Some(before) = crate::scene::serialize::record_of(self, guid) else {
+            return false;
+        };
+        let Some(e) = self.world.entity_of(guid) else {
+            return false;
+        };
+        {
+            let w = self.world.world_mut();
+            let Some(mut body) = w.get_mut::<WaterBody>(e) else {
+                return false;
+            };
+            body.river_width_start_m = width_start_m.max(0.0);
+            body.river_width_end_m = width_end_m.max(0.0);
+            body.river_depth_start_m = depth_start_m.max(0.0);
+            body.river_depth_end_m = depth_end_m.max(0.0);
+            body.river_flow_m_s = flow_m_s;
+        }
+        let Some(after) = crate::scene::serialize::record_of(self, guid) else {
+            return false;
+        };
+        if before == after {
+            return false;
+        }
+        self.touch();
+        self.world.mark_dirty();
+        self.world.propagate();
+        self.history.record(
+            "Set River Profile",
+            EditCommand::SwapComponents {
+                guid,
+                before: Box::new(before),
+                after: Box::new(after),
+            },
+        );
+        true
+    }
+
+    /// Move a lake's surface (P20.4) — the fill-level edit the tool's slider
+    /// makes, in one undo step. Returns `false` for an entity with no
+    /// `WaterBody`, or when nothing changed.
+    pub fn edit_set_water_level(&mut self, guid: Uuid, level_m: f64, half_extent: Vec2d) -> bool {
+        let Some(before) = crate::scene::serialize::record_of(self, guid) else {
+            return false;
+        };
+        let Some(e) = self.world.entity_of(guid) else {
+            return false;
+        };
+        {
+            let w = self.world.world_mut();
+            let Some(mut body) = w.get_mut::<WaterBody>(e) else {
+                return false;
+            };
+            body.level_m = level_m;
+            if body.kind == WaterKind::Lake {
+                body.extent = Vec2d::new(half_extent.x.abs(), half_extent.y.abs());
+            }
+        }
+        let Some(after) = crate::scene::serialize::record_of(self, guid) else {
+            return false;
+        };
+        if before == after {
+            return false;
+        }
+        self.touch();
+        self.world.mark_dirty();
+        self.world.propagate();
+        self.history.record(
+            "Set Water Level",
+            EditCommand::SwapComponents {
+                guid,
+                before: Box::new(before),
+                after: Box::new(after),
+            },
+        );
+        true
+    }
+
+    /// Snapshot a freshly-created entity into one `Create` undo step. Shared by
+    /// the P20.4 water spawns; the record is taken *after* their components are
+    /// attached, which is what makes redo restore a lake rather than an empty.
+    fn record_create(&mut self, guid: Uuid, label: &str) {
+        let at = self.order.iter().position(|g| *g == guid).unwrap_or(0);
+        if let Some(record) = crate::scene::serialize::record_of(self, guid) {
+            self.history.record(
+                label,
+                EditCommand::Create {
+                    at,
+                    record: Box::new(record),
+                },
+            );
+        }
+        self.world.mark_dirty();
+        self.world.propagate();
+        self.touch();
     }
 
     /// Delete + record for undo (the whole subtree round-trips on undo).

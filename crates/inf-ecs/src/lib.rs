@@ -15,6 +15,7 @@ pub mod anim;
 pub mod attach;
 pub mod components;
 pub mod hierarchy;
+pub mod hydro;
 pub mod math;
 pub mod props;
 pub mod refs;

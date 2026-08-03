@@ -43,7 +43,8 @@ use inf_terrain::{
 
 use crate::camera::{
     BiomeSettings, Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptFalloff, SculptOp,
-    SculptSettings, Snap2DSettings, SnapSettings, ToolMode, ViewportMode, TWO_D_FAR, TWO_D_NEAR,
+    SculptSettings, Snap2DSettings, SnapSettings, ToolMode, ViewportMode, WaterSettings,
+    WaterToolKind, TWO_D_FAR, TWO_D_NEAR,
 };
 use crate::SurfaceTarget;
 
@@ -259,6 +260,29 @@ pub struct EngineHost {
     /// stroke is independent yet the same input sequence reproduces identical
     /// instances (determinism law — no wall-clock / thread-rng).
     foliage_stroke_seq: u32,
+    /// Water-tool configuration pushed from the toolbar (P20.4).
+    water_tool: WaterSettings,
+    /// Per-terrain **water-level hints by biome id** (P19.2's
+    /// `BiomeDef::water_hint`, read at last), pushed from Ring 2 alongside the
+    /// biome palette.
+    ///
+    /// Pushed rather than resolved here for the same reason the palette is: the
+    /// viewport thread holds a document, not an asset database, and a
+    /// `.inf_biomes` is an asset. Indexed by biome id (`0..=255`); an id past the
+    /// end, or a `None` entry, means "this biome has no hint" and the tool falls
+    /// back to the ground.
+    water_hints: std::collections::BTreeMap<Uuid, Vec<Option<f64>>>,
+    /// The river the next click extends (`None` = the next click starts one).
+    /// Cleared when the tool is left, so switching away and back does not silently
+    /// append to a river the author has stopped thinking about.
+    water_active_river: Option<Uuid>,
+    /// In-flight lake drag: the world point the press landed on. The release
+    /// point completes the rectangle.
+    water_lake_drag: Option<DVec3>,
+    /// The preview the water tool draws: the pending river segment, or the lake
+    /// rectangle plus its waterline contour. World space, rebuilt on hover and on
+    /// drag; drawn as debug lines and never persisted.
+    water_preview: Vec<[DVec3; 2]>,
     /// Camera eye captured on the last rendered frame (P10.5b). PCG scatter
     /// instances are draw-distance-culled against it at projection time; because
     /// projection is doc-version-gated (not per-frame), the cull set refreshes
@@ -804,6 +828,11 @@ impl EngineHost {
             sculpt_ring_color: [1.0; 4],
             foliage: FoliageSettings::default(),
             foliage_drag: None,
+            water_tool: WaterSettings::default(),
+            water_hints: std::collections::BTreeMap::new(),
+            water_active_river: None,
+            water_lake_drag: None,
+            water_preview: Vec::new(),
             foliage_stroke_seq: 0,
             last_eye_world: DVec3::ZERO,
             render_tier: None,
@@ -898,12 +927,37 @@ impl EngineHost {
         self.snap_2d = snap;
     }
 
-    /// Switch the active tool (Select / Sculpt / Foliage / Biome) from the
-    /// toolbar. Leaving the brush tools drops any hovered brush ring.
+    /// Switch the active tool (Select / Sculpt / Foliage / Biome / Water) from
+    /// the toolbar. Leaving the brush tools drops any hovered brush ring, and
+    /// leaving the water tool drops its pending state — an author who switched to
+    /// Select and back should not find the next click extending a river they had
+    /// finished.
     pub fn set_tool_mode(&mut self, mode: ToolMode) {
         self.tool_mode = mode;
         if !matches!(mode, ToolMode::Sculpt | ToolMode::Foliage | ToolMode::Biome) {
             self.sculpt_ring.clear();
+        }
+        if mode != ToolMode::Water {
+            self.water_active_river = None;
+            self.water_lake_drag = None;
+            self.water_preview.clear();
+        }
+    }
+
+    /// Replace the water-tool configuration (from the toolbar, P20.4).
+    pub fn set_water(&mut self, water: WaterSettings) {
+        self.water_tool = water;
+    }
+
+    /// Push a terrain entity's resolved per-biome water-level hints (P20.4) —
+    /// the `set_biome_palette` twin. An empty table clears the entry, so
+    /// unbinding a biome set stops the tool suggesting levels from a set that is
+    /// no longer bound.
+    pub fn set_water_hints(&mut self, guid: Uuid, hints: Vec<Option<f64>>) {
+        if hints.iter().all(|h| h.is_none()) {
+            self.water_hints.remove(&guid);
+        } else {
+            self.water_hints.insert(guid, hints);
         }
     }
 
@@ -1125,6 +1179,11 @@ impl EngineHost {
         // disagree about what "now" and "the wind" mean — the same reasoning that put
         // `ResolvedSky::cloud_time_s` there.
         let water_env = inf_ecs::sky::water_environment(world);
+        // P20.4: the level's terrains, borrowed once, so a river's foam can read
+        // the P19.1 flow map. Resolved HERE rather than per body for the same
+        // reason `water_env` is — the rule for "which terrain answers" is Ring-0
+        // (`inf_ecs::hydro`) so the two MIRROR projectors cannot each invent one.
+        let water_flow = inf_ecs::hydro::terrain_flow(world);
         let w = world.world();
         let mut next_id: u32 = 1;
         // Which vgeom assets this projection has already listed (the render node
@@ -1389,8 +1448,14 @@ impl EngineHost {
                         .unwrap_or(glam::DAffine3::IDENTITY);
                     let id = next_id;
                     next_id += 1;
-                    let body =
-                        project_water(water, w.get::<Spline>(entity), &affine, water_env, id);
+                    let body = project_water(
+                        water,
+                        w.get::<Spline>(entity),
+                        &affine,
+                        water_env,
+                        &water_flow,
+                        id,
+                    );
                     if body.drawable() {
                         self.scene.waters.push(body);
                         // ONE row per body: a pick anywhere on the surface selects
@@ -2193,6 +2258,7 @@ fn project_water(
     spline: Option<&Spline>,
     affine: &glam::DAffine3,
     env: (f64, (f64, f64)),
+    flow: &inf_ecs::hydro::TerrainFlow<'_>,
     id: u32,
 ) -> RenderWater {
     let (time_s, weather_wind) = env;
@@ -2281,10 +2347,21 @@ fn project_water(
                 .first()
                 .map(|f| f.center.y)
                 .unwrap_or(water.level_m);
+            // P20.4: the P19.1 flow map modulates each frame's foam. The gain
+            // is `1.0` wherever the terrain was never eroded, so this loop is
+            // the identity on every level that has no bake — and the whole query
+            // is skipped when the level has none, which is the common case.
+            let mapped = flow.is_mapped();
             out.frames = path
                 .frames
                 .iter()
-                .map(inf_render::WaterFrame::from)
+                .map(|f| {
+                    let mut wf = inf_render::WaterFrame::from(f);
+                    if mapped {
+                        wf.flow_gain = flow.foam_gain_at(glam::DVec2::new(f.center.x, f.center.z));
+                    }
+                    wf
+                })
                 .collect();
         }
     }
@@ -3741,6 +3818,233 @@ impl EngineHost {
         self.sculpt_ring = ground_ring(center_xz, self.foliage.radius);
     }
 
+    // ── the water tool (P20.4) ───────────────────────────────────────────
+    //
+    // Not a brush. A river click *appends a control point*; a lake press-drag
+    // *defines a rectangle*. Both resolve the world point the same way every
+    // other terrain tool does (`pick_world_point`), so a river lands on the
+    // ground the author is looking at rather than on a plane at y = 0.
+    //
+    // Every mutation goes through a `SceneDoc::edit_*`, so each one is exactly
+    // one undo step and the document — not this host — owns the change. The
+    // host's own state is the *pending* gesture and the preview, both of which
+    // are thrown away when the tool is left.
+
+    /// The still-water level a new body takes at world point `p`.
+    ///
+    /// The biome's `water_hint` wins over the ground when Ring 2 has pushed one
+    /// (P19.2's field, read at last), then the tool's own offset is added. The
+    /// same rule as `inf_editor_core::hydro::water_defaults`, and it is stated in
+    /// both places because the viewport thread cannot resolve a `.inf_biomes`
+    /// asset — it gets the resolved hint pushed, exactly as it gets a biome
+    /// *palette* pushed rather than a biome *set*.
+    fn water_level_for(&self, doc: &SceneDoc, p: DVec3) -> f64 {
+        let base = self
+            .biome_water_hint(doc, DVec2::new(p.x, p.z))
+            .or(self.water_tool.biome_level_hint_m)
+            .unwrap_or(p.y);
+        base + self.water_tool.level_offset_m
+    }
+
+    /// The water-level hint of the biome painted under world XZ `p`, if the
+    /// terrain there has one.
+    ///
+    /// Resolved through the **same** topmost-terrain rule the brush ring and the
+    /// foliage height use, so "which ground am I on" has one answer in this file.
+    fn biome_water_hint(&self, doc: &SceneDoc, p: DVec2) -> Option<f64> {
+        if self.water_hints.is_empty() {
+            return None;
+        }
+        let probes = self.terrain_probes(doc, None);
+        let (guid, _) = topmost_surface(&probes, p)?;
+        let probe = probes.iter().find(|q| q.guid == guid)?;
+        let local = DVec2::new(p.x - probe.translation.x, p.y - probe.translation.z);
+        let id = probe.data.biome_at(local)?;
+        self.water_hints
+            .get(&guid)
+            .and_then(|h| h.get(id as usize).copied())
+            .flatten()
+    }
+
+    /// Begin a water gesture. For a **river** this is the whole interaction (one
+    /// click = one control point); for a **lake** it records the first corner.
+    ///
+    /// Returns `true` when the document changed, so the caller emits a delta.
+    pub fn begin_water(&mut self, doc: &mut SceneDoc, view: &RenderView, px: u32, py: u32) -> bool {
+        let p = self.pick_world_point(doc, view, px, py);
+        match self.water_tool.kind {
+            WaterToolKind::Lake => {
+                self.water_lake_drag = Some(p);
+                self.water_preview.clear();
+                false
+            }
+            WaterToolKind::River => {
+                // Extend the active river if there is one, else the selected
+                // river, else start a new one. Consulting the selection is what
+                // makes "click a river, keep drawing it" work after a reload.
+                let target = self
+                    .water_active_river
+                    .filter(|g| doc.world().entity_of(*g).is_some())
+                    .or_else(|| {
+                        doc.selection()
+                            .iter()
+                            .copied()
+                            .find(|g| Self::is_river(doc, *g))
+                    });
+                let changed = match target {
+                    Some(guid) => doc.edit_append_spline_point(guid, p),
+                    None => {
+                        // A river needs two points to be a ribbon; the first click
+                        // lays both, a metre apart along +X, so the author sees
+                        // something immediately and the second click moves the
+                        // mouth rather than creating a degenerate path.
+                        let guid = doc.edit_create_river(
+                            "River",
+                            &[p, p + DVec3::new(1.0, 0.0, 0.0)],
+                            self.water_tool.width_m,
+                            self.water_tool.depth_m,
+                            self.water_tool.flow_m_s,
+                        );
+                        doc.select(&[guid], false);
+                        self.water_active_river = Some(guid);
+                        true
+                    }
+                };
+                if let Some(g) = target {
+                    self.water_active_river = Some(g);
+                }
+                self.water_preview.clear();
+                changed
+            }
+        }
+    }
+
+    /// Continue a lake drag: redraw the rectangle + its waterline preview. A
+    /// river has nothing to continue (its gesture is the click).
+    pub fn update_water(&mut self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) {
+        let Some(anchor) = self.water_lake_drag else {
+            return;
+        };
+        let p = self.pick_world_point(doc, view, px, py);
+        self.rebuild_lake_preview(doc, anchor, p);
+    }
+
+    /// Finish a lake drag: create the lake. Returns whether the document changed.
+    ///
+    /// A drag smaller than a metre on either side is treated as a mis-click and
+    /// creates nothing — a zero-extent lake is undrawable
+    /// (`RenderWater::drawable`) and would be an invisible entity in the outliner.
+    pub fn finish_water(
+        &mut self,
+        doc: &mut SceneDoc,
+        view: &RenderView,
+        px: u32,
+        py: u32,
+    ) -> bool {
+        let Some(anchor) = self.water_lake_drag.take() else {
+            return false;
+        };
+        self.water_preview.clear();
+        let p = self.pick_world_point(doc, view, px, py);
+        let half = DVec2::new((p.x - anchor.x).abs() * 0.5, (p.z - anchor.z).abs() * 0.5);
+        if half.x < 0.5 || half.y < 0.5 {
+            return false;
+        }
+        let center = DVec3::new((anchor.x + p.x) * 0.5, anchor.y, (anchor.z + p.z) * 0.5);
+        let guid = doc.edit_create_lake(
+            "Lake",
+            center,
+            inf_ecs::Vec2d::new(half.x, half.y),
+            self.water_level_for(doc, anchor),
+        );
+        doc.select(&[guid], false);
+        true
+    }
+
+    /// Idle hover in water mode: a river shows the segment the next click would
+    /// add; a lake shows nothing until the drag starts.
+    pub fn update_water_hover(&mut self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) {
+        if self.water_tool.kind != WaterToolKind::River {
+            return;
+        }
+        let p = self.pick_world_point(doc, view, px, py);
+        let tail = self
+            .water_active_river
+            .or_else(|| {
+                doc.selection()
+                    .iter()
+                    .copied()
+                    .find(|g| Self::is_river(doc, *g))
+            })
+            .and_then(|g| Self::river_tail(doc, g));
+        self.water_preview.clear();
+        if let Some(tail) = tail {
+            self.water_preview.push([tail, p]);
+        }
+    }
+
+    /// Whether `guid` is a river (a `WaterBody` of kind River).
+    fn is_river(doc: &SceneDoc, guid: Uuid) -> bool {
+        doc.world()
+            .entity_of(guid)
+            .and_then(|e| doc.world().world().get::<WaterBody>(e))
+            .is_some_and(|b| b.kind == inf_ecs::components::WaterKind::River)
+    }
+
+    /// The world position of a river's last control point, for the hover preview.
+    fn river_tail(doc: &SceneDoc, guid: Uuid) -> Option<DVec3> {
+        let world = doc.world();
+        let e = world.entity_of(guid)?;
+        let w = world.world();
+        let spline = w.get::<Spline>(e)?;
+        let last = spline.points.last()?;
+        let affine = w
+            .get::<GlobalTransform>(e)
+            .map(|g| g.0)
+            .unwrap_or(glam::DAffine3::IDENTITY);
+        Some(affine.transform_point3(last.to_dvec3()))
+    }
+
+    /// Rebuild the lake preview: the rectangle the drag describes, plus the
+    /// **waterline** — where the still-water level meets the ground inside it.
+    ///
+    /// The waterline comes from `inf_editor_core::hydro::lake_preview`, the same
+    /// function the `water_lake_preview` command answers with, so what the author
+    /// sees and what the panel says are one computation. Camera-independent: the
+    /// contour is a function of the rectangle, the level and the terrain, and a
+    /// preview that moved with the eye would be the P18.2 residency law broken in
+    /// authoring.
+    fn rebuild_lake_preview(&mut self, doc: &SceneDoc, anchor: DVec3, cursor: DVec3) {
+        const PREVIEW_RESOLUTION: u32 = 48;
+        self.water_preview.clear();
+        let half = DVec2::new(
+            (cursor.x - anchor.x).abs() * 0.5,
+            (cursor.z - anchor.z).abs() * 0.5,
+        );
+        if half.x <= 0.0 || half.y <= 0.0 {
+            return;
+        }
+        let center = DVec2::new((anchor.x + cursor.x) * 0.5, (anchor.z + cursor.z) * 0.5);
+        let level = self.water_level_for(doc, anchor);
+        // The rectangle itself, at the water level.
+        let corners = [
+            DVec3::new(center.x - half.x, level, center.y - half.y),
+            DVec3::new(center.x + half.x, level, center.y - half.y),
+            DVec3::new(center.x + half.x, level, center.y + half.y),
+            DVec3::new(center.x - half.x, level, center.y + half.y),
+        ];
+        for i in 0..4 {
+            self.water_preview.push([corners[i], corners[(i + 1) % 4]]);
+        }
+        // …and the waterline contour inside it.
+        let preview =
+            inf_editor_core::hydro::lake_preview(doc, center, half, level, PREVIEW_RESOLUTION);
+        for [a, b] in preview.waterline {
+            self.water_preview
+                .push([DVec3::new(a.x, level, a.y), DVec3::new(b.x, level, b.y)]);
+        }
+    }
+
     /// The world height foliage lands on at world XZ `p`: the topmost terrain
     /// surface covering it, else `0.0` (the ground plane) — the pre-P16.6 answer
     /// for a world with no terrain, unchanged.
@@ -4173,6 +4477,19 @@ impl EngineHost {
                         self.scene.debug.line(a, b, SPLINE_MARKER);
                     }
                 }
+            }
+        }
+
+        // Water tool preview (P20.4): the river segment the next click would add,
+        // or the lake rectangle plus the **waterline** — where the still-water
+        // level meets the ground inside it. Editor-only, like every other debug
+        // primitive here; nothing in it is persisted or projected.
+        if self.tool_mode == ToolMode::Water {
+            const WATER_PREVIEW: [f32; 4] = [0.35, 0.75, 1.0, 1.0];
+            for [a, b] in &self.water_preview {
+                let a = self.origin.to_render(*a);
+                let b = self.origin.to_render(*b);
+                self.scene.debug.line(a, b, WATER_PREVIEW);
             }
         }
 

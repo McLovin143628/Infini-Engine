@@ -4969,6 +4969,489 @@ Seven fully furnished three-storey buildings cost the `.inf_lvl` nothing.\n\n\
 6. the composed scene loads inside the frame budget.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// ── Phase 20 coastal (the P20.4 gate scene) ─────────────────────────────────
+//
+// The plan's own done-when sentence, built: "a coastal scene — ocean plus a
+// spline river fed by a lake — carries buoyant physics objects, replays
+// deterministically on the physics trace, and PIE == shipping."
+
+/// World side of the coastal terrain, metres.
+pub const PHASE20_WORLD_M: f64 = 512.0;
+/// Samples per terrain tile side.
+pub const PHASE20_TERRAIN_RESOLUTION: u32 = 129;
+/// Metres between adjacent height samples.
+pub const PHASE20_TERRAIN_MPS: f64 = 4.0;
+/// Terrain tiles per side (129 samples at 4 m ⇒ 512 m per tile ⇒ one tile).
+pub const PHASE20_TERRAIN_TILES: u32 = 1;
+/// Still-water level of the ocean, metres of world Y. Sea level is the datum the
+/// whole scene is authored against.
+pub const PHASE20_SEA_LEVEL_M: f64 = 0.0;
+/// Still-water level of the head lake, metres.
+pub const PHASE20_LAKE_LEVEL_M: f64 = 33.6;
+/// Centre of the head lake in world XZ, metres.
+pub const PHASE20_LAKE_CENTER: (f64, f64) = (60.0, 250.0);
+/// Half-extent of the head lake in world XZ, metres.
+pub const PHASE20_LAKE_HALF_M: f64 = 28.0;
+/// Radius of the basin dug for the head lake, metres.
+pub const PHASE20_BASIN_RADIUS_M: f64 = 30.0;
+/// Depth of that basin at its centre, metres.
+pub const PHASE20_BASIN_DEPTH_M: f64 = 8.0;
+/// Crates floating on the sea.
+pub const PHASE20_SEA_CRATES: usize = 6;
+/// Crates floating on the head lake.
+pub const PHASE20_LAKE_CRATES: usize = 2;
+
+const PHASE20_LEVEL_GUID: Uuid = uuid::uuid!("20040000-0000-4000-8000-000000000001");
+/// The swimmer's blueprint class asset.
+pub const PHASE20_SWIMMER_ACTOR_GUID: Uuid = uuid::uuid!("20040000-0000-4000-8000-000000000002");
+const PHASE20_TERRAIN_GUID: Uuid = uuid::uuid!("20040000-0000-4000-8000-000000000010");
+const PHASE20_SKY_GUID: Uuid = uuid::uuid!("20040000-0000-4000-8000-000000000011");
+const PHASE20_SUN_GUID: Uuid = uuid::uuid!("20040000-0000-4000-8000-000000000012");
+const PHASE20_CAMERA_GUID: Uuid = uuid::uuid!("20040000-0000-4000-8000-000000000013");
+/// The ocean entity.
+pub const PHASE20_OCEAN_GUID: Uuid = uuid::uuid!("20040000-0000-4000-8000-000000000020");
+/// The head lake entity.
+pub const PHASE20_LAKE_GUID: Uuid = uuid::uuid!("20040000-0000-4000-8000-000000000021");
+/// The river entity (its centreline is the `Spline` on this same entity).
+pub const PHASE20_RIVER_GUID: Uuid = uuid::uuid!("20040000-0000-4000-8000-000000000022");
+/// The swimming character.
+pub const PHASE20_SWIMMER_GUID: Uuid = uuid::uuid!("20040000-0000-4000-8000-000000000030");
+const PHASE20_CRATE_BASE: u128 = 0x2004_0000_0000_4000_8000_0000_0000_0100;
+
+/// The `n`-th buoyant crate's GUID. `0..PHASE20_SEA_CRATES` float on the sea, the
+/// rest on the head lake.
+pub fn phase20_crate_guid(i: usize) -> Uuid {
+    Uuid::from_u128(PHASE20_CRATE_BASE + i as u128)
+}
+
+/// Every buoyant crate, sea then lake.
+pub fn phase20_crate_count() -> usize {
+    PHASE20_SEA_CRATES + PHASE20_LAKE_CRATES
+}
+
+/// The **channel centre** in world Z at world `x`, metres — a gentle cubic S with
+/// about ±9 m of meander, zero at both ends and at mid-span.
+///
+/// Polynomial, deliberately: this is committed content, and `std` trigonometry is
+/// not bit-portable (the P14 LAW). Everything here is IEEE add/mul, so the same
+/// terrain is authored on every machine and the `.inf_lvl` round-trips.
+pub fn phase20_channel_z(x: f64) -> f64 {
+    let t = (x / PHASE20_WORLD_M).clamp(0.0, 1.0);
+    256.0 + 96.0 * t * (1.0 - t) * (2.0 * t - 1.0)
+}
+
+/// The coastal terrain: a 42 m headland at `x = 0` falling to −10 m at
+/// `x = 512`, a valley following [`phase20_channel_z`], and a basin dug for the
+/// head lake.
+///
+/// Sea level is `0`, so the shoreline lands near `x ≈ 414` — which is what puts
+/// the ocean's shore blending, the wetness band and the river's mouth in one
+/// scene.
+pub fn phase20_height(x: f64, z: f64) -> f64 {
+    let t = (x / PHASE20_WORLD_M).clamp(0.0, 1.0);
+    let ramp = 42.0 - 52.0 * t;
+    // Valley walls: quadratic, flat at the channel floor, +10 m at 60 m out.
+    let d = ((z - phase20_channel_z(x)).abs() / 60.0).min(1.0);
+    let mut h = ramp + 10.0 * d * d;
+    // The head lake's basin.
+    let (bx, bz) = PHASE20_LAKE_CENTER;
+    let r2 = ((x - bx) * (x - bx) + (z - bz) * (z - bz))
+        / (PHASE20_BASIN_RADIUS_M * PHASE20_BASIN_RADIUS_M);
+    if r2 < 1.0 {
+        h -= PHASE20_BASIN_DEPTH_M * (1.0 - r2);
+    }
+    h
+}
+
+/// The river's authored control points, world space.
+///
+/// Five knots down the channel, each 0.6 m above the valley floor so the water
+/// sits *in* the valley rather than on it, ending at `y ≈ 1 m` where the channel
+/// meets the sea. Monotonically descending, so the P20.1 surface advisory is
+/// silent; the depth taper (1.2 → 2.0 m) lowers the bed monotonically too, so the
+/// P20.4 bed advisory is silent as well — which is what makes the gate's
+/// advisory-free arm a statement about the content rather than about the check.
+pub fn phase20_river_points() -> Vec<DVec3> {
+    [90.0f64, 170.0, 250.0, 330.0, 410.0]
+        .iter()
+        .map(|&x| {
+            let t = x / PHASE20_WORLD_M;
+            DVec3::new(x, 42.0 - 52.0 * t + 0.6, phase20_channel_z(x))
+        })
+        .collect()
+}
+
+/// The swimmer's blueprint class: one Tick that asks for a brisk swim forward
+/// **and a full second of accumulated free fall**.
+///
+/// The downward component is the point. A character controller integrates gravity
+/// into its own velocity and cannot tell a deliberate dive from an accumulated
+/// fall, so a swim mode that honoured it symmetrically would sink forever —
+/// `water::swim_motion`'s quarter-strength sink authority is what makes the
+/// balance win. Authoring the fall here puts that behaviour in the *committed
+/// content* rather than only in a unit test.
+pub fn phase20_swimmer_class() -> BlueprintClass {
+    use inf_blueprint::{BlueprintFn, EventBinding, EventKind, Expr, Lit, Param, Stmt, Ty};
+    let entity = Expr::Call {
+        path: vec!["vars".into(), "get".into()],
+        args: vec![Expr::Lit(Lit::Str("entity".into()))],
+    };
+    let mut class = BlueprintClass::new("act:phase20-swimmer", "Swimmer");
+    class.events = vec![EventBinding {
+        event: EventKind::Tick,
+        body: BlueprintFn {
+            id: "tick".into(),
+            name: "tick".into(),
+            params: vec![Param {
+                name: "dt".into(),
+                ty: Ty::Float,
+            }],
+            ret: Ty::Unit,
+            body: vec![Stmt::ExprStmt(Expr::Call {
+                path: vec!["physics3d".into(), "move_and_slide".into()],
+                args: vec![
+                    entity,
+                    Expr::Lit(Lit::Float(4.0 / 60.0)),
+                    Expr::Lit(Lit::Float(-9.81 / 60.0)),
+                    Expr::Lit(Lit::Float(0.0)),
+                ],
+            })],
+        },
+    }];
+    class
+}
+
+/// Build the committed Phase 20 coastal [`SceneDoc`].
+pub fn phase20_coastal_scene() -> SceneDoc {
+    use crate::scene::serialize::LevelSettings;
+    use inf_ecs::components::{
+        ActorClass, BodyKind3D, Buoyancy, Camera, CharacterController3D, Collider3D,
+        ColliderShape3DKind, Light, LightKind, RigidBody3D, SkyAtmosphere, Spline, SplineInterp,
+        Terrain, TimeOfDay, WaterBody, WaterKind,
+    };
+    use inf_ecs::math::{Vec2d, Vec3d};
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Phase 20 Coastal");
+    // 3D gravity is what makes a crate fall into the sea at all; the runtime
+    // wires the 3D bridge to `gravity_3d`, so an unset one would leave every
+    // buoyant body hovering and every assertion comparing two copies of nothing.
+    doc.set_settings(LevelSettings {
+        gravity_2d: Vec2d::new(0.0, -9.81),
+        gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+        sim_hz: 60.0,
+        ..LevelSettings::default()
+    });
+
+    // ── The coast. ──
+    doc.create_with_guid(PHASE20_TERRAIN_GUID, SpawnKind::Empty, "Coast", None);
+    insert!(
+        doc,
+        PHASE20_TERRAIN_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+    {
+        let mut terrain = Terrain::configured(PHASE20_TERRAIN_RESOLUTION, PHASE20_TERRAIN_MPS);
+        for tz in 0..PHASE20_TERRAIN_TILES as i32 {
+            for tx in 0..PHASE20_TERRAIN_TILES as i32 {
+                terrain.data.author_tile((tx, tz), phase20_height);
+            }
+        }
+        insert!(doc, PHASE20_TERRAIN_GUID, terrain);
+    }
+
+    // ── The sky: a real clock, so the sea is not a still photograph. ──
+    doc.create_with_guid(PHASE20_SKY_GUID, SpawnKind::Empty, "Sky", None);
+    insert!(
+        doc,
+        PHASE20_SKY_GUID,
+        TimeOfDay {
+            seconds: 11.0 * 3600.0,
+            rate: 120.0,
+            ..TimeOfDay::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE20_SKY_GUID,
+        SkyAtmosphere {
+            weather_enabled: true,
+            ..SkyAtmosphere::default()
+        }
+    );
+
+    // ── The three bodies. ──
+    doc.create_with_guid(PHASE20_OCEAN_GUID, SpawnKind::Empty, "Ocean", None);
+    insert!(
+        doc,
+        PHASE20_OCEAN_GUID,
+        WaterBody {
+            kind: WaterKind::Ocean,
+            level_m: PHASE20_SEA_LEVEL_M,
+            wave_amplitude_m: 0.55,
+            wave_length_m: 26.0,
+            wave_steepness: 0.45,
+            wave_count: 5,
+            wave_seed: 0x0C0A_57A1,
+            // Body-local wind: the sea state must not depend on where the weather
+            // blend happens to be when a trace is taken.
+            wind_from_weather: false,
+            wind_x: 7.0,
+            wind_z: -2.0,
+            ..WaterBody::default()
+        }
+    );
+
+    doc.create_with_guid(PHASE20_LAKE_GUID, SpawnKind::Empty, "Head Lake", None);
+    insert!(
+        doc,
+        PHASE20_LAKE_GUID,
+        Transform::from_translation(DVec3::new(
+            PHASE20_LAKE_CENTER.0,
+            PHASE20_LAKE_LEVEL_M,
+            PHASE20_LAKE_CENTER.1
+        ))
+    );
+    insert!(
+        doc,
+        PHASE20_LAKE_GUID,
+        WaterBody::lake(PHASE20_LAKE_LEVEL_M, Vec2d::splat(PHASE20_LAKE_HALF_M))
+    );
+
+    // The river. Its centreline is the `Spline` on THIS SAME ENTITY (P20.1
+    // composition — nothing to resolve, nothing to dangle), authored in world
+    // space under an identity transform so the sample's numbers read as the map
+    // coordinates they are.
+    doc.create_with_guid(PHASE20_RIVER_GUID, SpawnKind::Empty, "River", None);
+    insert!(
+        doc,
+        PHASE20_RIVER_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+    insert!(
+        doc,
+        PHASE20_RIVER_GUID,
+        WaterBody {
+            river_width_start_m: 6.0,
+            river_width_end_m: 14.0,
+            river_depth_start_m: 1.2,
+            river_depth_end_m: 2.0,
+            ..WaterBody::river(6.0, 1.2, 2.2)
+        }
+    );
+    insert!(
+        doc,
+        PHASE20_RIVER_GUID,
+        Spline {
+            points: phase20_river_points()
+                .into_iter()
+                .map(|p| Vec3d::new(p.x, p.y, p.z))
+                .collect(),
+            closed: false,
+            interp: SplineInterp::CatmullRom,
+        }
+    );
+
+    // ── Buoyant cargo: six crates on the sea, two on the head lake. ──
+    //
+    // 350…700 kg/m³ — all comfortably buoyant, at visibly different draughts, and
+    // deliberately short of 1000: a near-neutral crate has almost no restoring
+    // force and takes half a minute to come back up, which would make the gate a
+    // test of patience rather than of buoyancy.
+    for i in 0..phase20_crate_count() {
+        let guid = phase20_crate_guid(i);
+        doc.create_with_guid(guid, SpawnKind::Empty, &format!("Crate{i}"), None);
+        let density = 350.0 + (i % PHASE20_SEA_CRATES) as f64 * 50.0;
+        let pos = if i < PHASE20_SEA_CRATES {
+            // Off the shore, in the open sea.
+            Vec3d::new(
+                460.0 + (i as f64 - 2.5) * 3.0,
+                PHASE20_SEA_LEVEL_M + 2.5 + i as f64 * 0.4,
+                240.0 + (i % 3) as f64 * 4.0,
+            )
+        } else {
+            let k = i - PHASE20_SEA_CRATES;
+            Vec3d::new(
+                PHASE20_LAKE_CENTER.0 + (k as f64 - 0.5) * 6.0,
+                PHASE20_LAKE_LEVEL_M + 2.0 + k as f64 * 0.5,
+                PHASE20_LAKE_CENTER.1 + 4.0,
+            )
+        };
+        insert!(
+            doc,
+            guid,
+            RigidBody3D {
+                kind: BodyKind3D::Dynamic,
+                ..RigidBody3D::default()
+            }
+        );
+        insert!(
+            doc,
+            guid,
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Box,
+                half_extents: Vec3d::splat(0.5),
+                density,
+                ..Collider3D::default()
+            }
+        );
+        insert!(doc, guid, Buoyancy::of_density(density));
+        insert!(
+            doc,
+            guid,
+            Transform {
+                translation: pos,
+                ..Transform::IDENTITY
+            }
+        );
+    }
+
+    // ── The swimmer: a kinematic capsule, mostly under the surface, driven by
+    //     the committed `Swimmer.inf_act`. ──
+    doc.create_with_guid(PHASE20_SWIMMER_GUID, SpawnKind::Empty, "Swimmer", None);
+    insert!(
+        doc,
+        PHASE20_SWIMMER_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Kinematic,
+            ..RigidBody3D::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE20_SWIMMER_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Capsule,
+            half_extents: Vec3d::new(0.3, 0.6, 0.3),
+            radius: 0.3,
+            ..Collider3D::default()
+        }
+    );
+    insert!(doc, PHASE20_SWIMMER_GUID, CharacterController3D::default());
+    insert!(
+        doc,
+        PHASE20_SWIMMER_GUID,
+        ActorClass(PHASE20_SWIMMER_ACTOR_GUID)
+    );
+    insert!(
+        doc,
+        PHASE20_SWIMMER_GUID,
+        Transform {
+            translation: Vec3d::new(455.0, PHASE20_SEA_LEVEL_M - 2.0, 262.0),
+            ..Transform::IDENTITY
+        }
+    );
+
+    // ── A sun and a camera looking down the coast. ──
+    doc.create_with_guid(PHASE20_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        PHASE20_SUN_GUID,
+        Transform {
+            translation: Vec3d::new(256.0, 120.0, 256.0),
+            rotation: Vec3d::new(-48.0, -35.0, 0.0),
+            scale: Vec3d::new(1.0, 1.0, 1.0),
+        }
+    );
+    insert!(
+        doc,
+        PHASE20_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            intensity: 3.2,
+            ..Light::default()
+        }
+    );
+
+    doc.create_with_guid(PHASE20_CAMERA_GUID, SpawnKind::Empty, "Camera", None);
+    insert!(
+        doc,
+        PHASE20_CAMERA_GUID,
+        Transform {
+            translation: Vec3d::new(300.0, 60.0, 150.0),
+            rotation: Vec3d::new(-18.0, 55.0, 0.0),
+            scale: Vec3d::new(1.0, 1.0, 1.0),
+        }
+    );
+    insert!(doc, PHASE20_CAMERA_GUID, Camera::default());
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+/// Where the committed Phase 20 sample lives.
+pub fn phase20_coastal_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/phase20-coastal")
+}
+
+/// Write the committed Phase 20 gate files: the `.inf_lvl` (+ sidecar), the
+/// swimmer's `.inf_act` (+ its `inf_asset` sidecar, so the `ActorClass` binding
+/// resolves through the AssetDb and the cooked pack), and the README.
+pub fn write_phase20_coastal() -> Result<(), String> {
+    let dir = phase20_coastal_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    crate::scene::serialize::save(
+        &phase20_coastal_scene(),
+        &dir.join("Phase20Coastal.inf_lvl"),
+        Some(PHASE20_LEVEL_GUID),
+    )?;
+
+    let act_bytes = encode_actor(&phase20_swimmer_class())?;
+    write_phase19_asset(
+        &dir.join("Swimmer.inf_act"),
+        &act_bytes,
+        PHASE20_SWIMMER_ACTOR_GUID,
+        inf_asset::AssetKind::Blueprint,
+    )?;
+
+    std::fs::write(dir.join("README.md"), PHASE20_COASTAL_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const PHASE20_COASTAL_README: &str = "# Phase 20 Coastal (the phase gate scene)\n\n\
+Generated by `inf_editor_core::samples::phase20_coastal_scene` -- the **composed**\n\
+gate scene for Phase 20 (water & hydrology), and the plan's own done-when sentence\n\
+built: *an ocean plus a spline river fed by a lake, carrying buoyant physics\n\
+objects.*\n\n\
+- `Phase20Coastal.inf_lvl` -- a 512 m coastal heightfield (a 42 m headland falling\n\
+  to -10 m, with a meandering valley and a dug basin), an **ocean** at sea level, a\n\
+  **head lake** in the basin, a **spline river** running the valley from the lake to\n\
+  the shore with a 6 -> 14 m width taper and a 1.2 -> 2.0 m depth taper, **eight\n\
+  buoyant crates** (six at sea, two on the lake) and a **swimmer**.\n\
+- `Swimmer.inf_act` -- one Tick calling `physics3d.move_and_slide` with a brisk\n\
+  forward request and a full second of accumulated free fall, so the committed\n\
+  content exercises the swim mode's asymmetric sink authority rather than only a\n\
+  unit test doing so.\n\n\
+## Why the terrain is authored inline\n\n\
+Phase 16 gates heightfield tile streaming end to end. What Phase 20 needs from the\n\
+ground is a *shoreline* -- somewhere the sea meets land, so shore blending, the\n\
+wetness band and the river's mouth all appear in one scene -- and 512 m of inline\n\
+heightfield is the cheapest way to have one.\n\n\
+## Why the height function is a polynomial\n\n\
+`std` trigonometry is not bit-portable (the P14 LAW), and this is COMMITTED\n\
+content: the terrain has to author identically on every machine or the `.inf_lvl`\n\
+would not round-trip byte-for-byte. The meander is a cubic, the valley walls are a\n\
+quadratic and the basin is a paraboloid -- IEEE add/mul throughout.\n\n\
+## Why the river's numbers are monotone\n\n\
+Both cook advisories -- the P20.1 surface climb and the P20.4 authored-bed climb --\n\
+must be SILENT on this scene, and the gate asserts it. An advisory that fires on\n\
+the engine's own flagship sample is one nobody reads. The surface descends from\n\
+~33.4 m to ~1.0 m and the depth taper widens downstream, so the bed descends too.\n\n\
+## The gate (`runtime/inf-player/tests/phase20_gate.rs`)\n\n\
+1. determinism -- two fresh loads of one pack agree on the whole physics trace,\n\
+   bit for bit;\n\
+2. **PIE == shipping** -- the cooked-pack world and the PIE-payload world float the\n\
+   same crates and swim the same swimmer;\n\
+3. the water is really doing something (crates settle at their draughts, the\n\
+   swimmer surfaces, the river's mouth is finite);\n\
+4. the cook is silent -- no water advisory on correct content;\n\
+5. budget -- the composed scene builds inside the load budget and steps inside the\n\
+   frame budget.\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5147,6 +5630,7 @@ mod tests {
             write_phase16_world().expect("regenerate phase16 world");
             write_phase18_scatter().expect("regenerate phase18 scatter");
             write_phase19_town().expect("regenerate phase19 town");
+            write_phase20_coastal().expect("regenerate phase20 coastal");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -5393,6 +5877,84 @@ mod tests {
                     id.name()
                 );
             }
+        }
+
+        // Phase 20 coastal lock (P20.4): the level AND the swimmer's blueprint.
+        // The `.inf_act` is included because the level's `ActorClass` binding is
+        // a GUID — a drifted class would still bind, and the swimmer would
+        // silently stop swimming.
+        let p20dir = phase20_coastal_dir();
+        let p20lvl = p20dir.join("Phase20Coastal.inf_lvl");
+        if p20lvl.exists() {
+            let want_lvl = crate::scene::serialize::encode(
+                &crate::scene::serialize::to_scene_file(&phase20_coastal_scene()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&p20lvl).unwrap(),
+                want_lvl,
+                "committed phase20-coastal .inf_lvl drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(p20dir.join("Swimmer.inf_act")).unwrap(),
+                encode_actor(&phase20_swimmer_class()).unwrap(),
+                "committed phase20-coastal .inf_act drifted from the generator"
+            );
+        }
+    }
+
+    // ── Phase 20 coastal shape (P20.4) ─────────────────────────────────────
+
+    /// The scene really is a **coast**: the terrain crosses sea level, the river
+    /// descends the whole way, and the head lake actually holds water.
+    ///
+    /// Asserted on the generators rather than on the written bytes so it fails on
+    /// the day someone retunes the numbers, not on the day someone forgets to
+    /// bless — and every claim the gate makes about the content rests on one of
+    /// these.
+    #[test]
+    fn the_coastal_sample_is_actually_coastal() {
+        // A shoreline exists: land at the headland, sea floor at the far end.
+        assert!(phase20_height(0.0, 256.0) > 30.0);
+        assert!(phase20_height(PHASE20_WORLD_M, 256.0) < PHASE20_SEA_LEVEL_M);
+        // …and it is crossed exactly once along the channel (a monotone ramp).
+        let mut crossings = 0;
+        let mut prev = phase20_height(0.0, phase20_channel_z(0.0));
+        for i in 1..=512 {
+            let x = i as f64;
+            let h = phase20_height(x, phase20_channel_z(x));
+            if (prev > PHASE20_SEA_LEVEL_M) != (h > PHASE20_SEA_LEVEL_M) {
+                crossings += 1;
+            }
+            prev = h;
+        }
+        assert_eq!(crossings, 1, "the channel must meet the sea exactly once");
+
+        // The head lake's basin really holds its level: the ground at the centre
+        // is below it, and the ground at the rectangle's corner is above it.
+        let (lx, lz) = PHASE20_LAKE_CENTER;
+        assert!(phase20_height(lx, lz) < PHASE20_LAKE_LEVEL_M - 1.0);
+        assert!(
+            phase20_height(lx + PHASE20_LAKE_HALF_M, lz + PHASE20_LAKE_HALF_M)
+                > PHASE20_LAKE_LEVEL_M,
+            "the lake spills out of its own rectangle"
+        );
+
+        // The river descends monotonically, and its mouth is at the shore.
+        let pts = phase20_river_points();
+        assert_eq!(pts.len(), 5);
+        for w in pts.windows(2) {
+            assert!(w[1].y < w[0].y, "the river climbs: {:?}", w);
+        }
+        assert!(pts.last().unwrap().y > PHASE20_SEA_LEVEL_M);
+        assert!(pts.last().unwrap().y < 2.0, "the mouth is not at the shore");
+        // Each knot sits just above the valley floor it runs in.
+        for p in &pts {
+            let ground = phase20_height(p.x, p.z);
+            assert!(
+                (p.y - ground - 0.6).abs() < 1e-9,
+                "knot {p:?} is not 0.6 m over its own valley floor ({ground})"
+            );
         }
     }
 

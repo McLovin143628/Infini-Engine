@@ -1109,7 +1109,7 @@ material functions, multi-viewport, PIE player options.
 
 ---
 
-## 12. Next-Gen Wave — Phases 16–25 (planned 2026-07-31; **P16–P19 COMPLETE**)
+## 12. Next-Gen Wave — Phases 16–25 (planned 2026-07-31; **P16–P20 COMPLETE**)
 
 The 16-phase master plan (§6) and UE-Parity Wave 1 (§11) are complete and CI-green: the engine
 now does what a mature traditional engine does. This wave pushes past that workflow —
@@ -5437,6 +5437,300 @@ physics/audio trace, holds water goldens, and PIE == shipping.
 > `runtime/inf-player/src/render.rs`, so a river's loop flag reaches the Ring-0 `RiverPath` the
 > reconstruction rebuilds instead of being silently guessed.
 
+> **STATUS — P20.4 Hydrology authoring: COMPLETE (2026-08-02).**
+>
+> The batch that closes Phase 20: two inherited **sim defects** fixed behind the replay gate,
+> the water tools an author needs, the P19.2 biome hint's first reader, the P19.1 flow map's
+> first water consumer, and the phase gate. **No schema bump** — v17 and v18 are still the last
+> two, and every field the tools write already existed on `WaterBody` from P20.1. All 47 goldens
+> byte-identical.
+>
+> ---
+>
+> **THE RIVER-MOUTH BUG, CLOSED — and it was a sim change, so it went behind the gates.**
+> `RiverSample::inside` tested only the *lateral* offset against the local half-width, and
+> `RiverPath::sample` clamps its projection to the end segment, so for an **open** river every
+> point on the centreline's extension — to infinity — answered "inside, at the mouth's level".
+> A boat thirty metres past the mouth floated; buoyancy, drag, swim and the enter/exit/splash
+> events all fired over dry land. The fix is a second bound: `sample` keeps the *unclamped*
+> parameter of the winning segment and reports `RiverSample::beyond_m`, the overshoot past the
+> first or last segment of an open path, and `inside()` now tests **both** bounds. A ribbon is a
+> bounded surface; testing one of its two bounds was the bug.
+>
+> Three details are load-bearing. **The bound applies only on the two END segments**, so a
+> hairpin's return arm — nearest an interior segment, and a genuinely wet stretch of river — is
+> untouched (`a_hairpin_stays_wet_beside_its_own_far_arm`). **A closed path is exempt by
+> construction**: it has no ends, so `beyond_m` is identically `0` and the loop's seam is not a
+> wall. And the mouth plane is **inclusive**, which needs a tolerance — `RIVER_END_TOLERANCE_M`
+> (1 µm) — because the frames are a *resampling* and the last one lands on the authored endpoint
+> to within the arc-length LUT's inversion error, so without one, whether the water reaches its
+> own mouth would depend on the last bit of that inversion. The same reasoning
+> `bank_fraction() <= 1.0` already embodies, made explicit because this edge is not exact.
+>
+> **No existing test was asserting the bug.** Every P20.1/P20.2 case queries inside the banks or
+> laterally outside them; the P20.2 physics gates (determinism, pool-size invariance, PIE ==
+> shipping, swim, events, the editor↔runtime parity case) were re-run and are green untouched,
+> because none of their fixtures put a body past a river's mouth. The one place the old
+> behaviour was *documented* was P20.3's cheap-reject comment in `could_submerge`, which said an
+> XZ reject for a river would be unsound; that comment is now corrected — the reject has become
+> *possible* and is still *absent*, and the difference is written down rather than left to be
+> rediscovered.
+>
+> ---
+>
+> **THE VISIBILITY DIVERGENCE, DECIDED: `Visibility` filters what is DRAWN, never what is
+> SIMULATED.**
+>
+> P20.3 named a KNOWN DIVERGENCE — the render projectors skip a `WaterBody` on a hidden entity,
+> `PhysicsBridge3D`'s gather walks every one of them — and left which side was wrong open. It is
+> not a divergence. It is the engine's existing hidden-entity law showing through the first
+> feature that has both a render half and a sim half, and the evidence that settled it is that
+> **nothing in the simulation has ever read visibility**: the 2D and 3D bridges gather rigid
+> bodies, colliders and joints on component presence alone (a hidden wall still blocks); P19.5's
+> `ScatteredSolid` colliders likewise (hiding a `PcgVolume` removes its instances from the frame
+> and leaves every building collider standing); `terrain.height_at` picks the lowest-`Guid`
+> non-empty terrain with no visibility test; `AudioSource`s keep playing; sensors keep
+> triggering; `partition::occupies_space` bins a hidden entity like any other. Across the whole
+> repository `ComputedVisibility` has exactly **three** readers: the two render projectors and
+> the Outliner's DTO.
+>
+> So **neither side changed**, and the decision is the interesting output. Teaching the fixed
+> step to read visibility — for water alone or for everything — would make an *editor authoring
+> toggle*, one that cooks into the pack and is restored on load, change physics; the alternative
+> (water alone honouring it) would make water the single exception to a rule every other system
+> follows silently. The rationale now lives where P20.3 put the divergence, on
+> `RenderWater::surface()`, and the law is **pinned from both sides** so a future "fix" trips a
+> test rather than shipping: `crates/inf-physics/tests/water_visibility_3d.rs` asserts a hidden
+> lake floats a boat **bit-identically** to a visible one over 900 steps (with the entity's
+> `ComputedVisibility` asserted false, the box asserted to actually float, and a
+> water-removed control that really does diverge) *and* that a hidden **collider** still blocks —
+> the consistency evidence, asserted rather than claimed; `water_projection.rs` asserts the same
+> body reaches no `RenderScene::waters` while `water.surface_height` still answers the lake's
+> level and not the ocean's beneath it. Because no sim behaviour moved, no replay gate needed
+> re-blessing — the gates were re-run and are green as they stood.
+>
+> The authoring answer to "make this lake go away for a moment" is to remove or retune the
+> component. A per-body `enabled` switch that *does* reach the sim is an additive field and is
+> ledgered below, not built.
+>
+> ---
+>
+> **THE TOOLS.** A `ToolMode::Water` in the terrain toolbar with two sub-modes, following the
+> P19.2 biome-paint pattern (one tool mode, a sub-mode picker, brush state in `viewportStore`,
+> pushed over `viewport_set_water`). It is **not** a brush and does not pretend to be: a
+> **river** click *appends a control point* (the first click on empty space starts a river and
+> lays two points a metre apart, so the author sees a ribbon immediately rather than a
+> degenerate path), and a **lake** press-drag-release *defines a rectangle*. Both resolve the
+> world point through the same `pick_world_point` every other terrain tool uses, so water lands
+> on the ground being looked at rather than on a plane at `y = 0`. Every mutation goes through a
+> `SceneDoc::edit_*` — `edit_create_river`, `edit_create_lake`, `edit_append_spline_point`,
+> `edit_set_river_profile`, `edit_set_water_level` — so each is exactly **one undo step**, taken
+> around the complete change on the `edit_create_streamed_terrain` pattern (components attached
+> *before* the record is snapshotted, so redo restores a lake rather than an empty entity). The
+> point edits ride the existing `SwapComponents` command rather than a new variant, because a
+> `Vec<Vec3d>` is not a reflection-addressable scalar and the P19-era mechanism already covers
+> exactly this.
+>
+> **There was no spline editor to reuse, and this batch did not build a second one.** The audit
+> question the brief asked was answered by looking: `Spline` is authored today through the
+> Details `ListField` over `points`, the viewport *draws* splines (cyan polyline, control-point
+> crosses when selected) and picks nothing, and P19.4's grammar binds a spline by **GUID text
+> param**. So the river tool is the engine's first spline *gesture*, and it deliberately writes
+> the same `Spline` component the Details grid edits — the two are the same data, and the
+> polyline the viewport already draws is the river's preview for free. A general per-control-
+> point drag gizmo is ledgered.
+>
+> **The lake's fill-level preview is a real marching-squares waterline**, not a rectangle with a
+> number beside it. `inf_water::hydro::fill_preview` samples the ground on a clamped
+> `(n+1)²` grid and returns the coverage fraction, the max and mean depth, how many samples the
+> terrain **answered for** (a preview whose `known` is 0 says "there is no ground here", which is
+> not the same statement as "the lake is empty"), and the contour as world-XZ segments the
+> viewport draws as debug lines. Holes are **excluded rather than defaulted**, so a rectangle
+> half off the terrain does not report itself half dry and no waterline is drawn along the edge
+> of the *data*. The two ambiguous saddle cases are resolved the same way every time, so the
+> contour is a function of the heights alone.
+>
+> **BED VALIDATION, SPLIT BY WHAT IS KNOWABLE.** The brief asked for a bed advisory; there turned
+> out to be two different questions, with two different remedies, and only one of them is
+> answerable at cook time:
+>
+> * **The authored bed climbs** — `surface(s) − depth(s)` gains elevation in the flow direction.
+>   Needs no terrain at all, so it is a **cook advisory**, a sibling of P20.1's surface check
+>   rather than a stronger version of it. A river descending 2 m while its depth tapers from 5 m
+>   to 0.5 m has a bed 2.5 m *higher* at the mouth than at the source: that is a basin, and
+>   nothing at runtime says so, because the surface still slopes the right way and the water
+>   still renders. It is a second advisory because the remedies differ — one moves spline points,
+>   the other moves depths — and an author told only "your river is wrong" would fix the wrong
+>   one. It honours a negative `river_flow_m_s` exactly as the surface check does, skips closed
+>   loops, and rides **above the partition branch** with the P20.1 ORDERING LAW.
+> * **The river is buried in, or perched over, the ground** — needs a heightfield, which the cook
+>   validates structurally and never pages in. So `inf_water::hydro::bed_conflicts` lives in
+>   Ring 0 and the **editor** runs it, where `Terrain::data` is resident under the author's
+>   cursor. Adjacent offending frames merge into spans carrying their worst frame's world
+>   position, holes close a span rather than bridging it, and the report says how many frames the
+>   terrain answered for — a verdict over 3 of 200 frames is not a clean bill of health, and it
+>   says so instead of implying one.
+>
+> **The tool re-runs both cook advisories itself**, at the cook's own tolerance, so it says what
+> the build will say. That tolerance moved to Ring 0 the moment it acquired a second reader
+> (`inf_water::UPHILL_TOLERANCE_M`, imported by both the cook and the editor command): a tool
+> nagging about rivers the build accepts, or a build advisory arriving as a surprise at package
+> time, are the two failure modes of two copies, and neither is worth a "keep these in sync"
+> comment. The terrain-aware checks use their own, larger `BED_TOLERANCE_M` (1 m), because they
+> additionally sample a bilinear heightfield along a curve that crosses tile diagonals.
+>
+> **THE BIOME WATER HINT, READ AT LAST.** `BiomeDef::water_hint` has been inert plain data since
+> P19.2 — declared, round-tripped through the DTO and the editor, and consumed by nothing. It is
+> now the **default provider** for a new body's level: `water_defaults(x, z)` answers the painted
+> biome's hint if it has one, else the ground under the point, else `0` (a plausible sea level,
+> and the same answer `terrain.height_at` gives a terrain-less world), and reports **which** so
+> the toolbar can say why. Kept v1-honest and said so at the seam: it does not place water, it
+> does not fill basins, and painting a biome makes nothing appear — a hint that spawned geometry
+> would be a generator wearing a hint's name. River width and depth are *not* derived from it,
+> because a biome carries a still-water **level** and inventing per-biome river dimensions from
+> one would be making data up.
+>
+> The hint reaches the native viewport the way the biome *palette* does: id-indexed, resolved
+> once in Ring 2 and pushed (`BiomeSet::water_hints`, the exact shape and length rule of
+> `BiomeSet::palette`, with the reserved id 0 always `None`). The viewport thread holds a
+> document, not an asset database, so it cannot resolve a `.inf_biomes` itself — and the tool
+> needs the hint *per click*, from the biome under the cursor, which is why the toolbar does not
+> send one.
+>
+> **P19.1 FLOW MAPS REACH THE WATER — additively, which is why no golden moved.**
+> `inf_ecs::hydro::TerrainFlow` gathers the level's terrains once per projection (ascending
+> `Guid`, first answer wins — the same rule the height query uses, stated in Ring 0 so the two
+> MIRROR projectors cannot each invent one) and turns `DataMapKind::Flow` into a per-frame foam
+> gain through `inf_water::flow_foam_gain`. The curve **can only ever add**: it returns exactly
+> `1.0` over terrain that was never eroded, over a hole, and in a level with no terrain, and
+> saturates at `1 + 0.6` at 1000 m³ — the same ceiling `mask.flow` already uses, because a flow
+> value that reads as "a real channel" to a scatter mask should read as one to a river.
+> A *subtracting* coupling ("a river off-channel is glassy") was the other candidate and was
+> rejected: it makes the absence of a bake — the default state of every terrain in the engine —
+> into a visible change to every river already authored, which is a migration disguised as a
+> feature.
+>
+> The gain rides on **`inf_render::WaterFrame` and deliberately not on `inf_water::RiverFrame`**:
+> the Ring-0 frame is what the fixed step samples, foam is not a force, and keeping the gain on
+> the render mirror is what makes "the sim and the renderer derive the same waves" still
+> literally true. `FrameGpu` grew a fourth `vec4` rather than stealing a mantissa (all twelve
+> existing lanes are load-bearing), `water.wgsl`'s `VsOut.profile` became a `vec3`, and the
+> fragment stage multiplies the flow-foam *speed* by it — so on an unmapped terrain the
+> expression is bit-identical to P20.1's. Pinned by
+> `the_flow_map_modulates_a_rivers_foam_and_nothing_else`, which asserts the **exact** identity
+> frame-for-frame with no bake and the saturated gain with one, and that the two vectors differ.
+>
+> **Goldens stay at 47, and that is a decision.** The only render surface P20.4 touches is the
+> flow-foam gain, which is provably the identity on every existing golden (none of them carries
+> an eroded terrain), so nothing moved. A new coastal golden would differ from `water_river` by a
+> foam intensity — a claim a PNG makes weakly and a projection test makes as `1.0` vs `1.6`,
+> which is the form it ships in. The re-bless was run the house way regardless (the whole suite
+> under `INF_BLESS_GOLDENS=1`, `git status` on the golden directory) and reported nothing.
+>
+> **THE PHASE 20 GATE.** `samples/phase20-coastal` is the plan's own done-when sentence built as
+> committed content: a 512 m coast (a 42 m headland falling to −10 m, a meandering valley, a dug
+> basin), an **ocean** at sea level, a **head lake** in the basin, a **spline river** running the
+> valley from the lake to the shore with a 6→14 m width taper and a 1.2→2.0 m depth taper,
+> **eight buoyant crates** (six at sea, two on the lake) and a **swimmer** driven by a committed
+> `Swimmer.inf_act` whose Tick asks for a brisk swim *and a full second of accumulated free
+> fall* — so the P20.2 asymmetric sink authority is exercised by shipped content and not only by
+> a unit test. The height function is **polynomial throughout** (a cubic meander, quadratic
+> valley walls, a paraboloid basin): this is committed content and `std` trigonometry is not
+> bit-portable, so a `sin` here would have made the `.inf_lvl` machine-dependent.
+>
+> `runtime/inf-player/tests/phase20_gate.rs`, six arms: **determinism** (two fresh loads of one
+> cooked pack, 900 steps, bit-identical), **PIE == shipping** (the editor payload vs the pack,
+> bit-identical), **anti-vacuity** (crates settle at draughts that *depend on their densities* —
+> the lightest rides higher than the heaviest — the lake crates settle at 33.6 m rather than at
+> sea level, and the swimmer *rises*), **the river's mouth is finite in the shipped pack** (a
+> probe 30 m past the mouth gets the sea's level, not the river's; the P20.4 fix asserted through
+> the shipped `water.surface_height` seam rather than only in Ring 0), **the cook is silent**
+> (neither water advisory fires on the flagship sample — an advisory that fires on correct
+> content is one nobody reads), and **budget** (the composed scene builds inside `LOAD_BUDGET_MS`
+> and steps inside `FRAME_BUDGET_MS`, both imported from their homes, each arm taking the ceiling
+> of its own class — a load measured against the frame budget is the category error that cost a
+> CI failure earlier in this phase).
+>
+> **Remainders, stated.**
+> * **The river tool has no control-point DRAG.** Points are appended by clicking and edited
+>   through the Details list; moving one in the viewport needs per-point picking, which the
+>   viewport has never had for splines (they live in `scene.debug` and consume no pick id). That
+>   is the general spline-gizmo work, and it belongs to whichever batch wants it for roads and
+>   rails too, not to water alone.
+> * **No basin solver.** The lake tool takes its level from the click (or the biome hint) and
+>   shows where that lands; it does not find the level that fills a depression to its rim. The
+>   preview makes the manual search cheap, which is the v1 trade.
+> * **No river→terrain carve.** Placing a river does not sculpt the channel under it; the tool
+>   *reports* a bed conflict and leaves the sculpting to the sculpt brush. Carving is a terrain
+>   edit with its own undo record and its own erosion interaction, and doing it silently inside a
+>   water placement would be the worst of both.
+> * **The flow coupling is foam only.** Flow does not modulate a river's *speed*, its width, or
+>   its absorption, and it never reaches the sim — a rapid looks faster and is not.
+> * **`bed_conflicts` samples the centreline, not the banks.** A river whose left bank is buried
+>   in a cliff while its centre is clear reports nothing. Sampling the ribbon's cross-section is
+>   the obvious v2 and is `frames × width` work rather than `frames`.
+> * **The tools are terrain-only.** Water placed over a mesh floor, a scattered solid or a
+>   grammar building answers from the ground plane, exactly as the sculpt and foliage brushes do.
+> * **The biome hint resolves through the level's FIRST bound terrain**, matching how
+>   `terrain_biomes` resolves the paint tool's vocabulary — so the two tools agree about which
+>   `.inf_biomes` is in play. A multi-terrain level binding *different* sets would take the first
+>   one's hints everywhere; per-terrain resolution is a `water_defaults` signature change away.
+> * **Viewport interaction is human-verified**, like every other native-viewport gesture in this
+>   repository: CI does not create a window. The *logic* is not — every edit, every report and
+>   every preview is a Ring-0/Ring-1 function with its own tests, and the win32 layer is the
+>   press/drag/release plumbing over them.
+> * **A hidden water body still simulates** — the decided law above, not an omission. There is no
+>   per-body `enabled` field yet; adding one is additive and would need its own replay-gated
+>   batch, because it *would* change what a level means.
+
+> **STATUS: Phase 20 COMPLETE** (2026-08-02) — **local gates green; CI pending push.** (Written
+> with the commit rather than after the CI run, like Phases 16–19's, and saying so rather than
+> implying a green run that has not happened.)
+>
+> **The four batches, in one line each.** **P20.1** gave the engine water at all — oceans, lakes
+> and spline rivers on **one** Gerstner model, **one** shader and **one** pass, with the CPU
+> deriving and the GPU only evaluating so there is no second `f32` copy of the wave model to
+> drift, and `WaterSurface::height_at` designed for the fixed step before there was a simulation
+> to design it for. **P20.2** made water **physical** — Archimedes over four sample points on
+> rapier's own exact volumes, linear still-water drag, enter/exit/splash into Blueprints and the
+> audio command queue, and a swim mode whose asymmetric sink authority is the whole trick.
+> **P20.3** put the camera *inside* the medium and the waterline *on the ground* — one absorption
+> story seen from both sides, and a wetness band that is content rather than a camera effect.
+> **P20.4** fixed the two sim defects the earlier batches had named, decided the visibility
+> question, and shipped the authoring: river and lake tools, the bed advisories, the biome hint's
+> first reader, the flow map's first water consumer, and the phase gate.
+>
+> **Schema v16 → v18, in two bumps, both the `EntityRecordV10` *shape*.** v17 appended
+> `water_body`, v18 appended `buoyancy`; each cost exactly **one discriminant byte per entity
+> that does not carry it**, measured as a delta against the frozen previous shape of the same
+> record, with every sample's delta equal to its entity count. P20.3 and P20.4 added no field at
+> all — the underwater constants are engine constants with the argument in their doc comments,
+> the wetness response likewise, and every value the water tools write already existed on
+> `WaterBody` from P20.1. Two bumps in a phase is the ceiling the house rule sets, and the phase
+> spent exactly two.
+>
+> **The gate is `samples/phase20-coastal` + `runtime/inf-player/tests/phase20_gate.rs`**: the
+> plan's done-when sentence as committed content, asserted deterministic across two loads,
+> identical between a cooked pack and a PIE payload, non-vacuous on the physics (density-
+> dependent draughts, a lake 33.6 m above the sea, a swimmer that surfaces), silent in the cook,
+> and inside both budget classes. Beside it stand P20.1's projection gate, P20.2's ten-arm
+> physics gate (including the subprocess pool-size leg and the editor↔runtime parity case),
+> P20.3's engagement-counter off-path gate, the two cook-advisory suites, the projector MIRROR
+> gate and 47 goldens.
+>
+> **Laws this phase paid for.** *One wave model, derived on the CPU* — the terrain-parity class
+> of drift avoided by not creating it. *Time never reaches the GPU* — a wave arrives with its
+> phase already reduced in `f64`, and the floating origin rides in the same reduction. *A rapier
+> force is persistent, and a force is not an impulse of `F·dt` for POSITION* — both on
+> `apply_force_at_point`'s doc, both paid for by a box that left the atmosphere at 13 km and a
+> neutrally-buoyant one that rose a millimetre per step. *The advisory runs above the partition
+> branch* — partitioning clears `level.entities` in place, so every future per-entity advisory
+> belongs there. *Bless one package at a time* — feature unification across a multi-package
+> selection produces phantom churn. *Check `df` FIRST* — "crate X required to be available in
+> rlib format" is a disk-full symptom, now cited three times, and `target/debug/incremental`
+> alone held 44.5 GB in this batch. And, new here: **visibility filters what is drawn, never what
+> is simulated.**
+
 - **P20.1 Water surfaces** — 1. a new `inf-water` (Ring 0) + render passes: ocean (Gerstner v1
   → FFT spectrum v2, deterministic seeds), lake volumes (flat + ripple), and spline rivers
   (flow along the parity-wave splines, width/depth profiles, downhill validation against
@@ -5450,7 +5744,10 @@ physics/audio trace, holds water goldens, and PIE == shipping.
   2. wetness darkening near waterlines, feeding P22's material response.
 - **P20.4 Hydrology authoring** — 1. river and lake placement tools in the terrain toolbar;
   2. per-biome water-level hints; 3. the erosion → water pipeline: carve with P10 erosion, fill
-  with P20 water.
+  with P20 water. *(Shipped 1 and 2 in full, plus the two inherited sim fixes and the phase gate.
+  For 3, the P19.1 flow map now drives a river's foam — the erosion→water edge exists and is
+  gated — while the **carve** half is ledgered: placing a river reports a bed conflict rather
+  than sculpting the channel under it. See the P20.4 status block.)*
 
 ### Phase 21 — Volumetric terrain: caves, tunnels & excavation
 

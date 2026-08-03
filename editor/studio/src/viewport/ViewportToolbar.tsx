@@ -12,6 +12,7 @@ import { useShellStore } from "../stores/shellStore";
 import type { SculptFalloffDto } from "../bindings/SculptFalloffDto";
 import type { SculptOpDto } from "../bindings/SculptOpDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
+import type { WaterToolKindDto } from "../bindings/WaterToolKindDto";
 import type { ViewModeDto } from "../bindings/ViewModeDto";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
 
@@ -35,6 +36,13 @@ const TOOLS: [ToolModeDto, string, string][] = [
   ["Sculpt", "Sculpt", "Terrain height brush (perspective only)"],
   ["Foliage", "Foliage", "Scatter foliage onto the terrain (perspective only)"],
   ["Biome", "Biome", "Paint named biomes onto the terrain (perspective only)"],
+  ["Water", "Water", "Place rivers and lakes against the terrain (perspective only)"],
+];
+
+/** River vs Lake, and what each gesture is. */
+const WATER_KINDS: [WaterToolKindDto, string, string][] = [
+  ["River", "River", "Click the ground to add a control point; the first click starts a river"],
+  ["Lake", "Lake", "Drag a rectangle; the waterline preview shows where it lands"],
 ];
 
 const SCULPT_OPS: [SculptOpDto, string][] = [
@@ -240,6 +248,7 @@ export default function ViewportToolbar() {
           {toolMode === "Sculpt" && <SculptControls />}
           {toolMode === "Foliage" && <FoliageControls />}
           {toolMode === "Biome" && <BiomeControls />}
+          {toolMode === "Water" && <WaterControls />}
         </>
       )}
     </div>
@@ -452,6 +461,98 @@ function BiomeControls() {
             </option>
           ))}
         </select>
+      </label>
+    </>
+  );
+}
+
+/**
+ * River / Lake picker plus the dimensions a NEW body takes (P20.4).
+ *
+ * There is deliberately no *level* field: the level comes from where you click —
+ * the painted biome's `water_hint` when it has one, otherwise the ground — and
+ * `Level +` shifts it. A level typed here would be a number the author has to
+ * keep re-deriving as they move around the terrain.
+ */
+function WaterControls() {
+  const kind = useViewportStore((s) => s.waterKind);
+  const width = useViewportStore((s) => s.waterWidth);
+  const depth = useViewportStore((s) => s.waterDepth);
+  const flow = useViewportStore((s) => s.waterFlow);
+  const offset = useViewportStore((s) => s.waterLevelOffset);
+  const setKind = useViewportStore((s) => s.setWaterKind);
+  const setWidth = useViewportStore((s) => s.setWaterWidth);
+  const setDepth = useViewportStore((s) => s.setWaterDepth);
+  const setFlow = useViewportStore((s) => s.setWaterFlow);
+  const setOffset = useViewportStore((s) => s.setWaterLevelOffset);
+
+  return (
+    <>
+      <div className="flex items-center rounded bg-(--ink-bg-0) p-0.5" role="group" aria-label="Water body">
+        {WATER_KINDS.map(([id, label, title]) => (
+          <button
+            key={id}
+            type="button"
+            aria-pressed={kind === id}
+            title={title}
+            className={`flex h-6 items-center rounded px-2 ${
+              kind === id
+                ? "bg-(--ink-accent) text-(--ink-bg-0)"
+                : "text-(--ink-text-dim) hover:text-(--ink-text)"
+            }`}
+            onClick={() => setKind(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {kind === "River" && (
+        <>
+          <label className="flex items-center gap-1 text-(--ink-text-dim)">
+            Width
+            <NumberField
+              value={width}
+              min={0}
+              step={0.5}
+              onChange={setWidth}
+              title="Full width of a new river (world metres)"
+              suffix="m"
+            />
+          </label>
+          <label className="flex items-center gap-1 text-(--ink-text-dim)">
+            Depth
+            <NumberField
+              value={depth}
+              min={0}
+              step={0.25}
+              onChange={setDepth}
+              title="Depth to the bed of a new river (world metres) — drives the tint and the shallow foam band"
+              suffix="m"
+            />
+          </label>
+          <label className="flex items-center gap-1 text-(--ink-text-dim)">
+            Flow
+            <NumberField
+              value={flow}
+              min={-100}
+              step={0.5}
+              onChange={setFlow}
+              title="Surface flow speed (m/s). NEGATIVE reverses the river without re-authoring its points."
+              suffix="m/s"
+            />
+          </label>
+        </>
+      )}
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Level +
+        <NumberField
+          value={offset}
+          min={-1000}
+          step={0.5}
+          onChange={setOffset}
+          title="Added to the level the click suggests (the biome water hint, else the ground). Negative sinks it."
+          suffix="m"
+        />
       </label>
     </>
   );

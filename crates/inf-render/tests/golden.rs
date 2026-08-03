@@ -6388,6 +6388,7 @@ fn water_off_path_is_byte_identical() {
             s: 0.0,
             width_m: 8.0,
             depth_m: 2.0,
+            flow_gain: 1.0,
         }],
         ..RenderWater::default()
     }];

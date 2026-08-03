@@ -34,13 +34,18 @@
 //! SI throughout, per the units doctrine: metres, seconds, m/s, radians. A water
 //! *level* is an absolute world elevation in metres, not an offset from anything.
 
+pub mod hydro;
 pub mod river;
 pub mod shore;
 pub mod wave;
 
 use glam::{DVec2, DVec3};
 
-pub use river::{RiverFrame, RiverPath, RiverProfile, RiverSample, UphillSpan};
+pub use hydro::{bed_conflicts, fill_preview, BedConflict, BedIssue, FillPreview};
+pub use river::{
+    flow_foam_gain, RiverFrame, RiverPath, RiverProfile, RiverSample, UphillSpan,
+    FLOW_FOAM_REFERENCE_M3, RIVER_END_TOLERANCE_M, UPHILL_TOLERANCE_M,
+};
 pub use shore::{shore_blend, shore_class, shore_distance, ShoreClass};
 pub use wave::{Wave, WaveField, WaveSpec, GRAVITY_M_S2, MAX_WAVES};
 
@@ -387,6 +392,44 @@ mod tests {
         // Outside the banks there is no river.
         assert!(r.height_at(DVec2::new(60.0, 60.0), 0.0).is_none());
         assert!(r.flow_at(DVec2::new(60.0, 60.0)).is_none());
+    }
+
+    /// **The river-mouth fix, seen from the API the sim actually calls (P20.4).**
+    ///
+    /// `height_at` is what P20.2's buoyancy samples, so this is the assertion
+    /// that a boat past the mouth stops floating. Every derived query has to
+    /// agree — a `height_at` that says "dry" beside a `flow_at` that still pushes
+    /// would be a worse bug than the one being fixed.
+    #[test]
+    fn a_river_stops_at_its_mouth() {
+        let r = river();
+        // The river's last control point is x = 180. Thirty metres past it, on
+        // the centreline's extension: the lateral test alone would say "wet".
+        let past = DVec2::new(230.0, 0.0);
+        assert!(!r.contains(past));
+        assert!(r.height_at(past, 0.0).is_none(), "a boat here would float");
+        assert!(r.flow_at(past).is_none());
+        assert!(r.normal_at(past, 0.0).is_none());
+        assert!(r.crest_at(past, 0.0).is_none());
+        assert!(r.submersion_m(DVec3::new(230.0, 0.0, 0.0), 0.0).is_none());
+        // Before the source, likewise.
+        let before = DVec2::new(-40.0, 0.0);
+        assert!(!r.contains(before));
+        assert!(r.height_at(before, 0.0).is_none());
+
+        // ANTI-VACUITY: the river itself is untouched. Its head, its middle and
+        // its mouth all still answer, and `highest_surface` still finds it.
+        for p in [
+            DVec2::new(0.0, 0.0),
+            DVec2::new(60.0, 10.0),
+            DVec2::new(120.0, -10.0),
+        ] {
+            assert!(r.contains(p), "{p:?} went dry");
+            assert!(r.height_at(p, 1.5).is_some());
+            assert!(r.flow_at(p).is_some());
+        }
+        assert!(highest_surface(std::slice::from_ref(&r), DVec2::new(60.0, 10.0), 0.0).is_some());
+        assert!(highest_surface(&[r], past, 0.0).is_none());
     }
 
     #[test]

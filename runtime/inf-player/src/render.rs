@@ -327,6 +327,9 @@ pub fn project_scene_with_skinned(
     // disagree about what "now" and "the wind" mean — the same reasoning that put
     // `ResolvedSky::cloud_time_s` there.
     let water_env = inf_ecs::sky::water_environment(world);
+    // P20.4: the level's terrains, borrowed once, so a river's foam can read the
+    // P19.1 flow map. MIRROR of the editor host's line.
+    let water_flow = inf_ecs::hydro::terrain_flow(world);
     let w = world.world();
 
     // Guid-sorted entity list (mirrors doc.order()'s determinism without a doc).
@@ -469,7 +472,14 @@ pub fn project_scene_with_skinned(
                 .unwrap_or(glam::DAffine3::IDENTITY);
             let id = next_id;
             next_id += 1;
-            let body = project_water(water, w.get::<Spline>(entity), &affine, water_env, id);
+            let body = project_water(
+                water,
+                w.get::<Spline>(entity),
+                &affine,
+                water_env,
+                &water_flow,
+                id,
+            );
             if body.drawable() {
                 scene.waters.push(body);
             }
@@ -1030,6 +1040,7 @@ fn project_water(
     spline: Option<&Spline>,
     affine: &glam::DAffine3,
     env: (f64, (f64, f64)),
+    flow: &inf_ecs::hydro::TerrainFlow<'_>,
     id: u32,
 ) -> RenderWater {
     let (time_s, weather_wind) = env;
@@ -1118,10 +1129,21 @@ fn project_water(
                 .first()
                 .map(|f| f.center.y)
                 .unwrap_or(water.level_m);
+            // P20.4: the P19.1 flow map modulates each frame's foam. The gain
+            // is `1.0` wherever the terrain was never eroded, so this loop is
+            // the identity on every level that has no bake — and the whole query
+            // is skipped when the level has none, which is the common case.
+            let mapped = flow.is_mapped();
             out.frames = path
                 .frames
                 .iter()
-                .map(inf_render::WaterFrame::from)
+                .map(|f| {
+                    let mut wf = inf_render::WaterFrame::from(f);
+                    if mapped {
+                        wf.flow_gain = flow.foam_gain_at(glam::DVec2::new(f.center.x, f.center.z));
+                    }
+                    wf
+                })
                 .collect();
         }
     }

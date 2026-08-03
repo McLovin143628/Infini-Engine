@@ -494,6 +494,70 @@ pub enum ToolMode {
     /// have made [`SculptSettings::strength`] mean a third thing depending on the
     /// op.
     Biome,
+    /// Place rivers and lakes against the terrain (P20.4). Perspective-only.
+    ///
+    /// Unlike the three brushes above this is **not** a drag-dab stroke: a river
+    /// click *appends a control point*, and a lake drag *defines a rectangle*.
+    /// The two sub-modes live in [`WaterSettings::kind`] rather than in two tool
+    /// modes because they share the terrain pick, the "which body am I editing"
+    /// state and the biome-hint defaults — the Sculpt/Paint precedent.
+    Water,
+}
+
+/// Which body the water tool places (P20.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WaterToolKind {
+    /// Click to append a control point to the active river; the first click with
+    /// no river selected starts one.
+    #[default]
+    River,
+    /// Drag a rectangle; the level comes from the ground under the first corner
+    /// (or the biome's `water_hint`).
+    Lake,
+}
+
+/// Water-tool configuration pushed from the viewport toolbar (P20.4).
+///
+/// SI throughout (architecture rule 6): metres and m/s. Every field is a value
+/// for a **new** body — editing an existing one goes through Details or the
+/// tool's own profile command, not through the brush push, so switching the tool
+/// off and on cannot silently rewrite a river you already drew.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WaterSettings {
+    /// River or lake.
+    pub kind: WaterToolKind,
+    /// Full width of a new river, metres.
+    pub width_m: f64,
+    /// Depth to the bed of a new river, metres.
+    pub depth_m: f64,
+    /// Surface flow speed of a new river, m/s. Negative reverses it.
+    pub flow_m_s: f64,
+    /// Added to the suggested still-water level, metres — so "a lake 2 m above
+    /// the ground I clicked" needs no arithmetic from the author.
+    pub level_offset_m: f64,
+    /// The still-water level the biome under the cursor hints at, metres, when it
+    /// has one (P19.2's `BiomeDef::water_hint`).
+    ///
+    /// Pushed **from Ring 2**, which is the only side that can resolve a
+    /// `.inf_biomes` asset — the viewport thread has a document, not an asset
+    /// database, exactly as it has a biome *palette* pushed to it rather than a
+    /// biome *set*. `None` means "use the ground".
+    pub biome_level_hint_m: Option<f64>,
+}
+
+impl Default for WaterSettings {
+    fn default() -> Self {
+        Self {
+            kind: WaterToolKind::River,
+            // The `WaterBody` component's own river defaults, so a river drawn
+            // with the tool and one added through Add Component start identical.
+            width_m: 8.0,
+            depth_m: 1.5,
+            flow_m_s: 1.5,
+            level_offset_m: 0.0,
+            biome_level_hint_m: None,
+        }
+    }
 }
 
 /// Biome-brush configuration pushed from the viewport toolbar (P19.2). The host

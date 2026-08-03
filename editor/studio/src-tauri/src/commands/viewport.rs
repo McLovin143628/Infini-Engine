@@ -11,9 +11,9 @@ use std::sync::Mutex;
 use inf_editor_core::ipc::{
     BiomeSettingsDto, FoliageSettingsDto, GizmoModeDto, GizmoSpaceDto, SculptFalloffDto,
     SculptOpDto, SculptSettingsDto, Snap2DDto, Snap3DDto, ToolModeDto, ViewModeDto, ViewportDrop,
-    ViewportKey, ViewportModeDto, ViewportRect,
+    ViewportKey, ViewportModeDto, ViewportRect, WaterSettingsDto, WaterToolKindDto,
 };
-use inf_viewport::camera::BiomeSettings;
+use inf_viewport::camera::{BiomeSettings, WaterSettings, WaterToolKind};
 use inf_viewport::{
     FoliageSettings, GizmoSpace, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings,
     SnapSettings, ToolMode, ViewportEvent, ViewportMode,
@@ -102,6 +102,16 @@ impl ViewportState {
         if let Ok(guard) = self.0.lock() {
             if let Some(handle) = guard.as_ref() {
                 handle.set_biome_palette(entity, palette);
+            }
+        }
+    }
+
+    /// Push a terrain's id-indexed water-level hints to the native viewport
+    /// (P20.4) — the `set_biome_palette` twin, pushed from the same place.
+    pub fn set_water_hints(&self, entity: uuid::Uuid, hints: Vec<Option<f64>>) {
+        if let Ok(guard) = self.0.lock() {
+            if let Some(handle) = guard.as_ref() {
+                handle.set_water_hints(entity, hints);
             }
         }
     }
@@ -315,6 +325,7 @@ pub async fn viewport_set_tool_mode(
             ToolModeDto::Sculpt => ToolMode::Sculpt,
             ToolModeDto::Foliage => ToolMode::Foliage,
             ToolModeDto::Biome => ToolMode::Biome,
+            ToolModeDto::Water => ToolMode::Water,
         });
     }
     Ok(())
@@ -379,6 +390,37 @@ pub async fn viewport_set_biome(
             strength: biome.strength.clamp(0.0, 1.0),
             falloff: to_falloff(biome.falloff),
             biome: biome.biome,
+        });
+    }
+    Ok(())
+}
+
+/// Push the water-tool configuration (kind / river dimensions / level offset) to
+/// the viewport (P20.4).
+///
+/// `biome_level_hint_m` is deliberately NOT taken from the frontend: the tool
+/// resolves the hint per click, from the biome painted under the cursor, through
+/// the id-indexed table `push_biome_palettes`' twin pushes. A toolbar-supplied
+/// hint would be a level the author never chose applied wherever they clicked.
+#[tauri::command]
+pub async fn viewport_set_water(
+    water: WaterSettingsDto,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        handle.set_water(WaterSettings {
+            kind: match water.kind {
+                WaterToolKindDto::River => WaterToolKind::River,
+                WaterToolKindDto::Lake => WaterToolKind::Lake,
+            },
+            width_m: water.width_m.max(0.0),
+            depth_m: water.depth_m.max(0.0),
+            // NOT clamped: a negative flow reverses a river without re-authoring
+            // its spline, which is a `WaterBody` feature, not a mistake.
+            flow_m_s: water.flow_m_s,
+            level_offset_m: water.level_offset_m,
+            biome_level_hint_m: None,
         });
     }
     Ok(())

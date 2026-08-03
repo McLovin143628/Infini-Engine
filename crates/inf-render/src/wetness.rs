@@ -300,6 +300,7 @@ mod tests {
                     s: i as f64 * 5.0,
                     width_m: 6.0 + i as f64 * 0.1,
                     depth_m: 1.5,
+                    flow_gain: 1.0,
                 })
                 .collect(),
             ..RenderWater::default()

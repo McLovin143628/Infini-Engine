@@ -1026,29 +1026,13 @@ fn dangling_terrain_refs(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
 
 /// How much elevation a river must gain, in metres, before the cook says so.
 ///
-/// **What it actually bounds, on this path.** The profile read here is the
-/// *spline's own* elevation, sampled at even arc length — no terrain is queried,
-/// so there is no heightfield sampling noise to absorb. What there is:
-///
-/// * **Catmull-Rom overshoot.** A smooth curve through strictly descending
-///   control points can still bulge *upward* between knots — that is what C¹
-///   interpolation does — so a polyline an author would call monotone can show
-///   centimetre rises in the sampled profile.
-/// * **Arc-length quantization.** Frames land at even distances, not on knots, so
-///   the profile is a resampling of the curve rather than the control points; the
-///   sampled extrema sit slightly off the real ones.
-///
-/// Half a metre is comfortably above both and comfortably below anything an
-/// author would call a rise. It is a **merged-span** tolerance, applied to a
-/// contiguous climb's *total*, so a long gentle ascent made of individually tiny
-/// steps is still caught — see `uphill_spans` for the shape, and
-/// `a_sawtooth_climb_escapes_the_per_span_tolerance` for the case it does NOT
-/// catch, which is documented rather than papered over.
-///
-/// (The same constant would also have to absorb bilinear heightfield wobble if
-/// the *bed* check ever lands — `RiverPath::bed_profile`, deferred to P20.4 —
-/// which is why the value has that much headroom.)
-const RIVER_UPHILL_TOLERANCE_M: f64 = 0.5;
+/// **The Ring-0 constant, not a local copy** (P20.4). It moved to
+/// [`inf_water::UPHILL_TOLERANCE_M`] the moment it acquired a second reader — the
+/// editor's river tool, which re-runs both climb checks so the tool says what the
+/// build will say. Two copies of a threshold that two different surfaces quote to
+/// the author is exactly the drift a shared constant exists to prevent; the
+/// argument for the *value* lives on the constant.
+use inf_water::UPHILL_TOLERANCE_M as RIVER_UPHILL_TOLERANCE_M;
 
 /// Advisory: rivers, in the levels being cooked, whose surface **gains
 /// elevation** in the direction they flow (P20.1).
@@ -1067,11 +1051,21 @@ const RIVER_UPHILL_TOLERANCE_M: f64 = 0.5;
 /// needs no terrain at all, so it works for a level whose ground streams from an
 /// `.inf_terrain` the cook never decodes.
 ///
-/// The **bed** — "is the river's water above the ground under it?" — is the
-/// natural companion and is *not* checked here, because the answer lives in tile
-/// payloads inside a `.inf_terrain` the cook validates structurally and never
-/// pages in. `inf_water::RiverPath::bed_profile` is the seam for it; P20.4's
-/// authoring tools, which have the terrain resident, are where it belongs.
+/// The **authored bed** is checked too since P20.4, on the same terrain-free
+/// terms: [`inf_water::RiverPath::bed_profile_from_depth`] lowers the surface by
+/// the profile's depth taper, and a bed that *climbs* is a basin however cleanly
+/// the surface falls (a river descending 2 m while its depth tapers from 5 m to
+/// 0.5 m has a bed 2.5 m higher at the mouth than at the source). It is a second
+/// advisory rather than a stronger version of the first, because they have
+/// different remedies — one moves spline points, the other moves depths — and an
+/// author told only "your river is wrong" would fix the wrong one.
+///
+/// What is still **not** checked here is the bed against the *ground*: "does this
+/// river run inside the hill, or hang in the air over a gorge?" needs a
+/// heightfield, and the answer lives in tile payloads inside a `.inf_terrain` the
+/// cook validates structurally and never pages in. That check exists — it is
+/// `inf_water::hydro::bed_conflicts`, over `RiverPath::bed_profile` — and it runs
+/// in the P20.4 authoring tools, where the terrain is resident.
 ///
 /// A river entity's transform is applied translation-and-rotation-wise through
 /// [`Transform::affine`], and parent chains are followed, so a river under a
@@ -1154,33 +1148,73 @@ fn uphill_rivers(guid: AssetId, level: &inf_scene::RuntimeLevel) -> Vec<String> 
         if path.closed {
             continue;
         }
-        let spans = inf_water::river::uphill_spans(&elevations, RIVER_UPHILL_TOLERANCE_M);
-        if spans.is_empty() {
-            continue;
+        // Two profiles, two advisories, one traversal (P20.4). The reversal above
+        // has already been applied to `elevations`, so the bed is read the same
+        // way round — a river whose flow was reversed must have BOTH its surface
+        // and its bed judged in the direction the water actually goes.
+        let mut bed = path.bed_profile_from_depth();
+        if water.river_flow_m_s < 0.0 {
+            let total = path.length_m;
+            bed.reverse();
+            for (s, _) in bed.iter_mut() {
+                *s = total - *s;
+            }
         }
-        let total: f64 = spans.iter().map(|s| s.rise_m).sum();
-        let worst = spans
-            .iter()
-            .max_by(|a, b| a.rise_m.total_cmp(&b.rise_m))
-            .copied()
-            .unwrap_or(spans[0]);
-        out.push((
-            e.guid,
-            format!(
-                "level {guid}: river entity {} climbs {total:.2} m across {} stretch(es) in the \
-                 direction it flows (the worst gains {:.2} m over {:.1} m, a gradient of \
-                 {:.1}%) — water does not flow uphill, so either re-order the spline points, \
-                 lower them, or set a negative `river_flow_m_s` to reverse the flow",
+        let surface_spans = inf_water::river::uphill_spans(&elevations, RIVER_UPHILL_TOLERANCE_M);
+        let bed_spans = inf_water::river::uphill_spans(&bed, RIVER_UPHILL_TOLERANCE_M);
+        if !surface_spans.is_empty() {
+            let total: f64 = surface_spans.iter().map(|s| s.rise_m).sum();
+            let worst = worst_span(&surface_spans);
+            out.push((
                 e.guid,
-                spans.len(),
-                worst.rise_m,
-                worst.length_m(),
-                worst.gradient() * 100.0,
-            ),
-        ));
+                format!(
+                    "level {guid}: river entity {} climbs {total:.2} m across {} stretch(es) in \
+                     the direction it flows (the worst gains {:.2} m over {:.1} m, a gradient of \
+                     {:.1}%) — water does not flow uphill, so either re-order the spline points, \
+                     lower them, or set a negative `river_flow_m_s` to reverse the flow",
+                    e.guid,
+                    surface_spans.len(),
+                    worst.rise_m,
+                    worst.length_m(),
+                    worst.gradient() * 100.0,
+                ),
+            ));
+        }
+        if !bed_spans.is_empty() {
+            let total: f64 = bed_spans.iter().map(|s| s.rise_m).sum();
+            let worst = worst_span(&bed_spans);
+            out.push((
+                e.guid,
+                format!(
+                    "level {guid}: river entity {}'s BED climbs {total:.2} m across {} \
+                     stretch(es) in the direction it flows (the worst gains {:.2} m over {:.1} \
+                     m, a gradient of {:.1}%) — the surface can fall while the depth taper \
+                     lifts the bed under it, which is a basin rather than a river; raise \
+                     `river_depth_end_m`, lower `river_depth_start_m`, or drop the downstream \
+                     spline points",
+                    e.guid,
+                    bed_spans.len(),
+                    worst.rise_m,
+                    worst.length_m(),
+                    worst.gradient() * 100.0,
+                ),
+            ));
+        }
     }
+    // Stable, so an entity carrying BOTH a climbing surface and a climbing bed
+    // keeps them in that order rather than in whichever the sort happened to
+    // produce.
     out.sort_by_key(|(g, _)| *g);
     out.into_iter().map(|(_, m)| m).collect()
+}
+
+/// The worst climb in a non-empty span list — the one an advisory quotes.
+fn worst_span(spans: &[inf_water::UphillSpan]) -> inf_water::UphillSpan {
+    spans
+        .iter()
+        .max_by(|a, b| a.rise_m.total_cmp(&b.rise_m))
+        .copied()
+        .unwrap_or(spans[0])
 }
 
 /// Advisory: `Terrain.biome_set` references, in the levels being cooked, that

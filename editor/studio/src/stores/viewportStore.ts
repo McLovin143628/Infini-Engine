@@ -21,6 +21,8 @@ import type { Snap2DDto } from "../bindings/Snap2DDto";
 import type { Snap3DDto } from "../bindings/Snap3DDto";
 import type { TerrainBiomesDto } from "../bindings/TerrainBiomesDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
+import type { WaterSettingsDto } from "../bindings/WaterSettingsDto";
+import type { WaterToolKindDto } from "../bindings/WaterToolKindDto";
 import type { ViewModeDto } from "../bindings/ViewModeDto";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
 import { useShellStore } from "./shellStore";
@@ -113,6 +115,18 @@ interface ViewportUiState {
    */
   terrainBiomes: TerrainBiomesDto | null;
 
+  /** Water tool (P20.4). `waterKind` picks River or Lake; the rest are the
+   * dimensions a NEW body takes. `waterLevelOffset` is added to whatever level
+   * the click suggests (the biome `water_hint`, else the ground), so "a lake 2 m
+   * above the ground I clicked" needs no arithmetic. Units are SI: metres, m/s.
+   * A NEGATIVE flow is meaningful — it reverses a river without re-authoring its
+   * spline — so it is deliberately not clamped. */
+  waterKind: WaterToolKindDto;
+  waterWidth: number;
+  waterDepth: number;
+  waterFlow: number;
+  waterLevelOffset: number;
+
   /** Transform-gizmo mode (translate/rotate/scale), two-way synced (Wave 2). */
   gizmoMode: GizmoModeDto;
   /** Gizmo orientation frame (World ↔ Local). */
@@ -160,6 +174,12 @@ interface ViewportUiState {
    * (the eraser) when the set is empty.
    */
   refreshBiomes: () => Promise<void>;
+
+  setWaterKind: (kind: WaterToolKindDto) => void;
+  setWaterWidth: (w: number) => void;
+  setWaterDepth: (d: number) => void;
+  setWaterFlow: (f: number) => void;
+  setWaterLevelOffset: (o: number) => void;
 
   /** Set the gizmo mode + push to the viewport (Wave 2). */
   setGizmoMode: (mode: GizmoModeDto) => void;
@@ -227,6 +247,32 @@ function pushBiome(s: ViewportUiState): void {
   void viewport.setBiome(dto).catch(() => {});
 }
 
+/**
+ * Send the current water-tool settings to the native viewport (P20.4).
+ *
+ * NOT persisted, for the biome brush's reason turned around: these are metres
+ * and m/s that mean something about the level being authored, and a remembered
+ * 40 m-wide river from another project would place a lake-sized stream on the
+ * first click.
+ */
+function pushWater(s: ViewportUiState): void {
+  const dto: WaterSettingsDto = {
+    kind: s.waterKind,
+    width_m: s.waterWidth,
+    depth_m: s.waterDepth,
+    flow_m_s: s.waterFlow,
+    level_offset_m: s.waterLevelOffset,
+  };
+  void viewport.setWater(dto).catch(() => {});
+}
+
+/** A finite, non-negative metre value, or the fallback. Shared by the water
+ *  tool's width/depth setters — a NaN from a half-typed number input must not
+ *  reach the viewport. */
+function positiveMetres(v: number, fallback: number): number {
+  return Number.isFinite(v) && v >= 0 ? v : fallback;
+}
+
 /** Send the current snap settings to the native viewport. */
 function pushSnap(s: ViewportUiState): void {
   const dto: Snap2DDto = {
@@ -289,6 +335,13 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   biomeFalloff: "Smooth",
   biomeId: 0,
   terrainBiomes: null,
+  // The `WaterBody` component's own river defaults, so a river drawn with the
+  // tool and one added through Add Component start identical.
+  waterKind: "River",
+  waterWidth: 8,
+  waterDepth: 1.5,
+  waterFlow: 1.5,
+  waterLevelOffset: 0,
   gizmoMode: "Translate",
   gizmoSpace: "World",
   snap3dEnabled: false,
@@ -410,6 +463,28 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
     const biomeId = Number.isFinite(id) ? Math.min(Math.max(Math.round(id), 0), 255) : 0;
     set({ biomeId });
     pushBiome(get());
+  },
+  setWaterKind: (waterKind) => {
+    set({ waterKind });
+    pushWater(get());
+  },
+  setWaterWidth: (w) => {
+    set({ waterWidth: positiveMetres(w, get().waterWidth) });
+    pushWater(get());
+  },
+  setWaterDepth: (d) => {
+    set({ waterDepth: positiveMetres(d, get().waterDepth) });
+    pushWater(get());
+  },
+  setWaterFlow: (f) => {
+    // Signed on purpose: a negative flow reverses the river.
+    set({ waterFlow: Number.isFinite(f) ? f : get().waterFlow });
+    pushWater(get());
+  },
+  setWaterLevelOffset: (o) => {
+    // Also signed: a lake BELOW the clicked ground is how you author a sinkhole.
+    set({ waterLevelOffset: Number.isFinite(o) ? o : get().waterLevelOffset });
+    pushWater(get());
   },
   refreshBiomes: async () => {
     try {

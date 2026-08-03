@@ -14,15 +14,17 @@ use inf_editor_core::ipc::{
     BiomeDefDto, BiomeSetDto, BiomeSettingsDto, ComponentDto, DataAssetDto, DataFieldDto,
     DataMapExportDto, DeleteResult, DetailsDto, ErosionParamsDto, ErosionReportDto, FileEntryDto,
     FoliageSettingsDto, GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto, ImportEventDto,
-    LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto, PackageKindCountDto,
+    LakePreviewDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto, PackageKindCountDto,
     PackageResultDto, PartitionSettingsDto, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto,
-    PropFieldDto, PropValueDto, RecentProjectDto, SaveResultDto, SceneDelta, SceneNode,
-    SceneSnapshot, SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto,
-    SeqInterpDto, SeqKeyDto, SeqTrackDto, SequenceDto, SkyAtmosphereDto, Snap2DDto, Snap3DDto,
-    SortingLayerDto, SpawnKind, SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto,
-    TerrainImportPlanDto, TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto,
-    TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto, ViewportDrop, ViewportKey, ViewportModeDto,
-    ViewportRect, ViewportToolStatusDto, WeatherDto, WeatherPresetDto,
+    PropFieldDto, PropValueDto, RecentProjectDto, RiverBedConflictDto, RiverClimbDto,
+    RiverReportDto, SaveResultDto, SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto,
+    SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto,
+    SeqTrackDto, SequenceDto, SkyAtmosphereDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind,
+    SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto, TerrainImportPlanDto,
+    TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto, TilemapDto, TimeOfDayDto,
+    ToolModeDto, ViewModeDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
+    ViewportToolStatusDto, WaterDefaultsDto, WaterSettingsDto, WaterToolKindDto, WeatherDto,
+    WeatherPresetDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -95,6 +97,15 @@ fn export_bindings() {
     BiomeSetDto::export_all(&cfg).expect("export BiomeSetDto");
     TerrainBiomesDto::export_all(&cfg).expect("export TerrainBiomesDto");
     FoliageSettingsDto::export_all(&cfg).expect("export FoliageSettingsDto");
+    // P20.4 hydrology authoring: the brush push, the biome-hint defaults, the
+    // lake fill preview and the river verdict. Every root listed explicitly.
+    WaterToolKindDto::export_all(&cfg).expect("export WaterToolKindDto");
+    WaterSettingsDto::export_all(&cfg).expect("export WaterSettingsDto");
+    WaterDefaultsDto::export_all(&cfg).expect("export WaterDefaultsDto");
+    LakePreviewDto::export_all(&cfg).expect("export LakePreviewDto");
+    RiverClimbDto::export_all(&cfg).expect("export RiverClimbDto");
+    RiverBedConflictDto::export_all(&cfg).expect("export RiverBedConflictDto");
+    RiverReportDto::export_all(&cfg).expect("export RiverReportDto");
     ProjectSettingsDto::export_all(&cfg).expect("export ProjectSettingsDto");
     ErosionParamsDto::export_all(&cfg).expect("export ErosionParamsDto");
     ErosionReportDto::export_all(&cfg).expect("export ErosionReportDto");

@@ -271,6 +271,27 @@ impl BiomeSet {
         }
         out
     }
+
+    /// The [`water_hint`](BiomeDef::water_hint)s, **id-indexed** exactly as
+    /// [`palette`](Self::palette) is (P20.4) — `out[id]` is that biome's
+    /// still-water level in metres, or `None` for a biome that names none.
+    ///
+    /// Built here rather than in the editor so the two id-indexed projections a
+    /// terrain sends the viewport (colours, water levels) are the same shape and
+    /// the same length rule; the reserved id `0` is always `None`, because
+    /// *unassigned* is not a biome and cannot carry a hint.
+    ///
+    /// `f64` at the boundary: the field is `f32` (it is authored through a
+    /// number input), and everything downstream of it — a water level, a lake
+    /// preview, `WaterBody::level_m` — is `f64` by the world-space rule.
+    pub fn water_hints(&self) -> Vec<Option<f64>> {
+        let top = self.biomes.iter().map(|b| b.id as usize).max().unwrap_or(0);
+        let mut out = vec![None; top + 1];
+        for b in &self.biomes {
+            out[b.id as usize] = b.water_hint.map(|h| h as f64);
+        }
+        out
+    }
 }
 
 impl AssetPayload for BiomeSet {
@@ -400,6 +421,29 @@ mod tests {
         // An empty set still yields the one unassigned entry (never an empty
         // upload the shader would index out of).
         assert_eq!(BiomeSet::new("e").palette(), vec![UNASSIGNED_BIOME_COLOR]);
+    }
+
+    /// The P20.4 twin: `water_hints` is the same shape as `palette`, id-indexed,
+    /// pure, and the reserved id 0 never carries one.
+    #[test]
+    fn water_hints_are_id_indexed_and_the_reserved_id_has_none() {
+        let mut set = BiomeSet::new("W");
+        set.biomes.push(BiomeDef {
+            water_hint: Some(12.5),
+            ..BiomeDef::new(2, "lake")
+        });
+        set.biomes.push(BiomeDef::new(4, "dry"));
+        let h = set.water_hints();
+        assert_eq!(h.len(), 5, "1 + highest id, like the palette");
+        assert_eq!(h.len(), set.palette().len(), "the two projections agree");
+        assert_eq!(h[0], None, "id 0 is unassigned and can never be defined");
+        assert_eq!(h[1], None, "an undefined id has no hint");
+        assert_eq!(h[2], Some(12.5));
+        assert_eq!(h[4], None, "a biome that names no hint reads None");
+        assert_eq!(h, set.water_hints(), "water_hints is pure");
+        // An empty set yields the single unassigned slot, never an empty vec a
+        // caller would index out of.
+        assert_eq!(BiomeSet::new("e").water_hints(), vec![None]);
     }
 
     #[test]

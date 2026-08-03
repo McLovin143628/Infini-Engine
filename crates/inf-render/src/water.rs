@@ -76,6 +76,24 @@ pub struct WaterFrame {
     pub width_m: f64,
     /// Depth to the bed, metres.
     pub depth_m: f64,
+    /// **Foam gain from the terrain's P19.1 flow map** at this frame, `≥ 1`
+    /// (P20.4).
+    ///
+    /// A *shading* term and nothing else: it multiplies the flow-foam speed the
+    /// fragment stage compares against `foam_flow_m_s`, so a river running down a
+    /// channel the erosion pass actually carved foams harder than the same river
+    /// crossing an unmapped plain.
+    ///
+    /// **It deliberately does not exist on [`inf_water::RiverFrame`].** The
+    /// Ring-0 frame is what the fixed step samples, and foam is not a force —
+    /// keeping the gain on the render mirror is what makes "the sim and the
+    /// renderer derive the same waves" still literally true, and makes it
+    /// impossible for a foam term to leak into a physics trace.
+    ///
+    /// `1.0` is the identity and the value a projector uses wherever there is no
+    /// flow map, which is why wiring this in moved no golden. See
+    /// [`inf_water::flow_foam_gain`].
+    pub flow_gain: f64,
 }
 
 impl From<&inf_water::RiverFrame> for WaterFrame {
@@ -87,6 +105,9 @@ impl From<&inf_water::RiverFrame> for WaterFrame {
             s: f.s,
             width_m: f.width_m,
             depth_m: f.depth_m,
+            // Identity: the Ring-0 frame carries no gain, so a conversion from
+            // one cannot invent a boost. A projector overwrites it.
+            flow_gain: 1.0,
         }
     }
 }
@@ -221,24 +242,48 @@ impl RenderWater {
     /// with the sim, and the first frame the *wave model* drifted, the camera
     /// would fog while a swimmer's head was dry.
     ///
-    /// # KNOWN DIVERGENCE: visibility
+    /// # THE VISIBILITY LAW — decided in P20.4
     ///
-    /// Sharing the evaluator makes the two sides agree about **what a water
-    /// surface is**. It does not make them agree about **which bodies exist**,
-    /// and today they do not:
+    /// **`Visibility` filters what is DRAWN. It never filters what is
+    /// SIMULATED.** Hiding a lake in the outliner removes its surface from the
+    /// frame and leaves the swimmer swimming in it, the boat floating on it and
+    /// its enter/exit/splash events firing — and that is *correct*, because it is
+    /// exactly what hiding a wall does to the wall you still walk into.
     ///
-    /// * the render projectors skip a `WaterBody` on a hidden entity
-    ///   (`host.rs`'s `if visible` / the player's mirror of it), so it never
-    ///   reaches `RenderScene::waters`;
-    /// * `PhysicsBridge3D`'s gather walks **every** `WaterBody` in the world with
-    ///   no visibility test at all (`inf-physics/src/d3/ecs.rs`).
+    /// P20.3 recorded this as a KNOWN DIVERGENCE between two sides that might
+    /// each be wrong. It is not a divergence; it is this law showing through the
+    /// first feature that has both a render half and a sim half. The evidence
+    /// that settled it is that **nothing in the engine's simulation has ever read
+    /// visibility**:
     ///
-    /// So hiding a lake in the outliner leaves a swimmer swimming in it while the
-    /// camera stays dry, and the buoyancy that lifts a boat keeps lifting it.
-    /// Which side is wrong is a real design question — visibility is an *editor*
-    /// concept and arguably has no business reaching the sim — and P20.3 is a
-    /// render-only batch, so it is **named here rather than papered over**. See
-    /// the ROADMAP §12 P20.3 ledger.
+    /// * `PhysicsBridge3D` / `PhysicsBridge2D` gather rigid bodies, colliders and
+    ///   joints on component presence alone — a hidden wall still blocks;
+    /// * P19.5's `ScatteredSolid` → collider path likewise — hiding a `PcgVolume`
+    ///   removes its instances from the frame and leaves every building collider
+    ///   standing;
+    /// * `terrain.height_at` picks the lowest-`Guid` non-empty terrain with no
+    ///   visibility test; `AudioSource`s keep playing; sensors keep triggering;
+    ///   `partition::occupies_space` bins a hidden entity like any other.
+    ///
+    /// `ComputedVisibility` has exactly three readers in the whole repository:
+    /// the two render projectors and the Outliner's DTO. Teaching the fixed step
+    /// to read it — for water alone, or for everything — would have made an
+    /// **editor-side authoring toggle** change physics, so a level would simulate
+    /// differently depending on an eye icon that ships inside the pack. The
+    /// alternative (water alone honouring it) would have made water the single
+    /// exception to a rule every other system follows silently.
+    ///
+    /// So neither side changed, and the law is now pinned from both:
+    /// `crates/inf-physics/tests/water_visibility_3d.rs` asserts a hidden lake
+    /// floats a boat **bit-identically** to a visible one (beside its
+    /// hidden-collider twin, so the consistency is asserted and not just
+    /// claimed), and `runtime/inf-player/tests/water_projection.rs` asserts the
+    /// same body reaches no `RenderScene::waters`.
+    ///
+    /// The authoring answer to "I want this lake gone for a moment" is to remove
+    /// or retune the component, not to hide the entity; a per-body `enabled`
+    /// switch that *does* reach the sim is an additive component field and is
+    /// ledgered, not built.
     ///
     /// The reconstruction is total for oceans and lakes (they carry their whole
     /// geometry). A river's [`RiverPath`] is rebuilt from the frames this record
@@ -411,17 +456,18 @@ fn could_submerge(w: &RenderWater, eye: DVec3) -> bool {
         // O(frames) and allocation-free, where `surface()` is O(frames) *and* a
         // heap allocation — which is the whole point of testing first.
         //
-        // **No XZ reject for a river, deliberately.** The obvious one — the
-        // bounding box of the frames widened by half a width — is NOT
-        // conservative, and `the_cheap_reject_never_drops_a_submerging_body`
-        // caught it: [`inf_water::RiverSample::inside`] tests only the *lateral*
-        // offset from the centreline, not the longitudinal one, so
-        // `RiverPath::sample` clamps to the end segment and reports a point
-        // thirty metres beyond the river's mouth as inside its banks. The Ring-0
-        // evaluator therefore treats a river as a ribbon extended along its end
-        // tangents, and a box around the frames would drop cameras it answers
-        // for. The height bound alone is sound, and it is the one that matters
-        // for the case this early-out exists for (a camera far above the water).
+        // **Still no XZ reject for a river, and the reason has changed (P20.4).**
+        // It used to be that one would have been *unsound*: `RiverSample::inside`
+        // tested only the lateral offset, so the Ring-0 evaluator answered for
+        // points thirty metres past a river's mouth and a box around the frames
+        // would have dropped cameras it claimed. That was the river-mouth bug,
+        // and P20.4 closed it — `inside` now carries an arc-length bound too
+        // (`RiverSample::beyond_m`), so the frames' box widened by half the
+        // maximum width IS conservative and the reject is now merely *absent*
+        // rather than *forbidden*. It stays absent because this early-out exists
+        // for a camera far above the water, which the height bound alone already
+        // rejects in `O(frames)` with no allocation; adding the box would trade a
+        // second pass for a case that costs nothing today. Ledgered, not hidden.
         WaterKindGpu::River => {
             let top = w
                 .frames
@@ -666,6 +712,7 @@ mod tests {
                 s: 0.0,
                 width_m: 4.0,
                 depth_m: 1.0,
+                flow_gain: 1.0,
             }],
             ..Default::default()
         };

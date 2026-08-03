@@ -29,6 +29,7 @@ mod sorting;
 mod terminal;
 mod terrain;
 mod viewport;
+mod water;
 
 pub use assets::{init_assets_on_boot, AssetState};
 pub use diagnostics::{install_crash_hook, set_crash_dir};
@@ -81,6 +82,13 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         terrain::terrain_spawn_streamed,
         terrain::terrain_biomes,
         terrain::terrain_set_biome_set,
+        water::water_defaults,
+        water::water_lake_preview,
+        water::water_create_lake,
+        water::water_create_river,
+        water::water_append_river_point,
+        water::water_set_river_profile,
+        water::water_river_report,
         pcg::pcg_registry,
         pcg::pcg_list,
         pcg::pcg_create,
@@ -113,6 +121,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         viewport::viewport_set_sculpt,
         viewport::viewport_set_foliage,
         viewport::viewport_set_biome,
+        viewport::viewport_set_water,
         viewport::viewport_set_gizmo_mode,
         viewport::viewport_set_gizmo_space,
         viewport::viewport_set_snap3d,

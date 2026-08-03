@@ -42,6 +42,7 @@ use glam::DVec2;
 use crate::camera::{
     BiomeSettings, Bookmarks, Camera2D, EditorCamera, FlyInput, FoliageSettings, GizmoSpace,
     NavInput, NavMode, SculptSettings, Snap2DSettings, SnapSettings, ToolMode, ViewportMode,
+    WaterSettings,
 };
 use crate::host::EngineHost;
 use crate::{KeyChord, SharedScene, SurfaceTarget, ViewportEvent, ViewportEventSink, ViewportRect};
@@ -115,9 +116,13 @@ enum Cmd {
     SetFoliage(FoliageSettings),
     /// Replace the biome brush configuration from the toolbar (P19.2).
     SetBiome(BiomeSettings),
+    /// Replace the water-tool configuration (P20.4).
+    SetWater(WaterSettings),
     /// Push a terrain entity's resolved biome overlay palette (P19.2) — Ring 2
     /// owns the asset lookup, the viewport only draws it.
     SetBiomePalette(uuid::Uuid, Vec<[f32; 4]>),
+    /// Per-terrain water-level hints by biome id (P20.4).
+    SetWaterHints(uuid::Uuid, Vec<Option<f64>>),
     /// Set the transform-gizmo mode (translate/rotate/scale) from the toolbar or
     /// palette (Wave 2). The viewport echoes changes back on `viewport://gizmo`.
     SetGizmo(GizmoMode),
@@ -209,10 +214,22 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::SetBiome(biome));
     }
 
+    /// Replace the water-tool configuration (kind / river dimensions / level
+    /// offset / resolved biome hint) — P20.4.
+    pub fn set_water(&self, water: WaterSettings) {
+        let _ = self.tx.send(Cmd::SetWater(water));
+    }
+
     /// Push a terrain's resolved biome overlay palette (P19.2). An empty palette
     /// clears it.
     pub fn set_biome_palette(&self, entity: uuid::Uuid, palette: Vec<[f32; 4]>) {
         let _ = self.tx.send(Cmd::SetBiomePalette(entity, palette));
+    }
+
+    /// Push a terrain's per-biome water-level hints (P20.4). An all-`None` table
+    /// clears them.
+    pub fn set_water_hints(&self, entity: uuid::Uuid, hints: Vec<Option<f64>>) {
+        let _ = self.tx.send(Cmd::SetWaterHints(entity, hints));
     }
 
     /// Set the transform-gizmo mode (translate/rotate/scale) from the toolbar or
@@ -931,7 +948,9 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 Ok(Cmd::SetSculpt(s)) => host.set_sculpt(s),
                 Ok(Cmd::SetFoliage(f)) => host.set_foliage(f),
                 Ok(Cmd::SetBiome(b)) => host.set_biome(b),
+                Ok(Cmd::SetWater(w)) => host.set_water(w),
                 Ok(Cmd::SetBiomePalette(e, p)) => host.set_biome_palette(e, p),
+                Ok(Cmd::SetWaterHints(e, h)) => host.set_water_hints(e, h),
                 Ok(Cmd::SetGizmo(m)) => {
                     host.set_gizmo_mode(m);
                     // Echo so the toolbar reflects an IPC-driven change too.
@@ -1108,6 +1127,12 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 let sculpting =
                     matches!(host.tool_mode(), ToolMode::Sculpt | ToolMode::Biome) && !two_d;
                 let foliage = host.tool_mode() == ToolMode::Foliage && !two_d;
+                // P20.4: the water tool is neither a brush nor a selection. A
+                // river click appends a control point (press only); a lake drags
+                // a rectangle (press → move → release). It rides in front of the
+                // select/gizmo branch for the same reason the brushes do — plain
+                // LMB means something else here.
+                let water = host.tool_mode() == ToolMode::Water && !two_d;
                 if sculpting {
                     if let Some((x, y, ctrl)) = input.left_press {
                         let (px, py) = (x.max(0) as u32, y.max(0) as u32);
@@ -1130,6 +1155,35 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                         let (x, y) = input.cursor;
                         if x >= 0 && y >= 0 {
                             host.update_sculpt_hover(&doc, &interact_view, x as u32, y as u32);
+                        }
+                    }
+                } else if water {
+                    if let Some((x, y, _ctrl)) = input.left_press {
+                        let (px, py) = (x.max(0) as u32, y.max(0) as u32);
+                        if host.begin_water(&mut doc, &interact_view, px, py) {
+                            world_changed = true;
+                        }
+                    }
+                    if input.left_down {
+                        let (x, y) = input.cursor;
+                        host.update_water(&doc, &interact_view, x.max(0) as u32, y.max(0) as u32);
+                    }
+                    if input.left_release {
+                        let (x, y) = input.cursor;
+                        if host.finish_water(
+                            &mut doc,
+                            &interact_view,
+                            x.max(0) as u32,
+                            y.max(0) as u32,
+                        ) {
+                            world_changed = true;
+                        }
+                    }
+                    // Idle hover: a river shows the segment the next click adds.
+                    if !input.left_down && input.capture == Capture::None && input.cursor_moved {
+                        let (x, y) = input.cursor;
+                        if x >= 0 && y >= 0 {
+                            host.update_water_hover(&doc, &interact_view, x as u32, y as u32);
                         }
                     }
                 } else if foliage {

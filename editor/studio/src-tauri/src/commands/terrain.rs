@@ -417,6 +417,10 @@ pub(super) fn push_biome_palettes(app: &AppHandle, assets: &AssetState) {
     // Resolve each DISTINCT bound set once, under a single short asset-lock hold
     // (several terrains commonly share one set).
     let mut palettes: HashMap<Uuid, Vec<[f32; 4]>> = HashMap::new();
+    // P20.4: the id-indexed water-level hints ride the SAME resolution. A second
+    // pass over the same assets, taken under a second lock, is how two
+    // projections of one set come to disagree about which set they are.
+    let mut hints: HashMap<Uuid, Vec<Option<f64>>> = HashMap::new();
     let wanted: Vec<Uuid> = bindings.iter().filter_map(|&(_, set)| set).collect();
     if !wanted.is_empty() {
         let _ = assets.with_project(|proj| {
@@ -424,10 +428,15 @@ pub(super) fn push_biome_palettes(app: &AppHandle, assets: &AssetState) {
                 if palettes.contains_key(&set) {
                     continue;
                 }
-                let palette = biome_set::get(proj, AssetId(set))
-                    .map(|s| s.palette())
-                    .unwrap_or_default();
-                palettes.insert(set, palette);
+                let loaded = biome_set::get(proj, AssetId(set)).ok();
+                palettes.insert(
+                    set,
+                    loaded.as_ref().map(|s| s.palette()).unwrap_or_default(),
+                );
+                hints.insert(
+                    set,
+                    loaded.as_ref().map(|s| s.water_hints()).unwrap_or_default(),
+                );
             }
             Ok(())
         });
@@ -442,6 +451,8 @@ pub(super) fn push_biome_palettes(app: &AppHandle, assets: &AssetState) {
             .cloned()
             .unwrap_or_default();
         viewport.set_biome_palette(entity, palette);
+        let hint = set.and_then(|s| hints.get(&s)).cloned().unwrap_or_default();
+        viewport.set_water_hints(entity, hint);
     }
 }
 

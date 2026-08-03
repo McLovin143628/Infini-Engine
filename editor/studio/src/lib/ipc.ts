@@ -41,6 +41,7 @@ import type { ErosionReportDto } from "../bindings/ErosionReportDto";
 import type { FileEntryDto } from "../bindings/FileEntryDto";
 import type { GitStatusDto } from "../bindings/GitStatusDto";
 import type { HeightmapProbeDto } from "../bindings/HeightmapProbeDto";
+import type { LakePreviewDto } from "../bindings/LakePreviewDto";
 import type { LayoutSummary } from "../bindings/LayoutSummary";
 import type { LevelSettingsDto } from "../bindings/LevelSettingsDto";
 import type { PackageErrorDto } from "../bindings/PackageErrorDto";
@@ -50,9 +51,12 @@ import type { ProjectSettingsDto } from "../bindings/ProjectSettingsDto";
 import type { ProjectTemplateDto } from "../bindings/ProjectTemplateDto";
 import type { PropValueDto } from "../bindings/PropValueDto";
 import type { RecentProjectDto } from "../bindings/RecentProjectDto";
+import type { RiverReportDto } from "../bindings/RiverReportDto";
 import type { SearchHitDto } from "../bindings/SearchHitDto";
 import type { FoliageSettingsDto } from "../bindings/FoliageSettingsDto";
 import type { SculptSettingsDto } from "../bindings/SculptSettingsDto";
+import type { WaterDefaultsDto } from "../bindings/WaterDefaultsDto";
+import type { WaterSettingsDto } from "../bindings/WaterSettingsDto";
 import type { SearchOptsDto } from "../bindings/SearchOptsDto";
 import type { SaveResultDto } from "../bindings/SaveResultDto";
 import type { SceneSnapshot } from "../bindings/SceneSnapshot";
@@ -188,6 +192,13 @@ export const viewport = {
   setBiome: (biome: BiomeSettingsDto): Promise<void> =>
     invoke("viewport_set_biome", { biome }),
   /**
+   * Push the water-tool configuration (river/lake + a new body's dimensions and
+   * level offset) (P20.4). The biome water hint is NOT sent from here — the tool
+   * resolves it per click from the biome painted under the cursor.
+   */
+  setWater: (water: WaterSettingsDto): Promise<void> =>
+    invoke("viewport_set_water", { water }),
+  /**
    * Set the transform-gizmo mode (translate/rotate/scale) (Wave 2). The viewport
    * echoes mode changes (incl. W/E/R keypresses over it) on `viewport://gizmo`.
    */
@@ -307,6 +318,92 @@ export const terrain = {
    */
   setBiomeSet: (entity: string, asset: string | null): Promise<boolean> =>
     invoke<boolean>("terrain_set_biome_set", { entity, asset }),
+};
+
+/**
+ * Hydrology authoring (P20.4): the biome-hint defaults, the lake fill preview,
+ * the placements (each ONE undo step) and the river verdict.
+ *
+ * The native viewport performs the same placements directly on the document it
+ * shares, so these are the entry point for everything that is NOT a viewport
+ * gesture — the command palette, a panel, a test.
+ */
+export const water = {
+  /** What a click at a world point suggests, incl. the biome `water_hint`. */
+  defaults: (x: number, z: number): Promise<WaterDefaultsDto> =>
+    invoke<WaterDefaultsDto>("water_defaults", { x, z }),
+  /** Where a still-water level lands on the ground inside a rectangle. */
+  lakePreview: (
+    centerX: number,
+    centerZ: number,
+    halfX: number,
+    halfZ: number,
+    levelM: number,
+    resolution: number,
+  ): Promise<LakePreviewDto> =>
+    invoke<LakePreviewDto>("water_lake_preview", {
+      centerX,
+      centerZ,
+      halfX,
+      halfZ,
+      levelM,
+      resolution,
+    }),
+  /** Place a lake — ONE undo step. Returns the new entity GUID. */
+  createLake: (
+    centerX: number,
+    centerY: number,
+    centerZ: number,
+    halfX: number,
+    halfZ: number,
+    levelM: number,
+  ): Promise<string> =>
+    invoke<string>("water_create_lake", {
+      centerX,
+      centerY,
+      centerZ,
+      halfX,
+      halfZ,
+      levelM,
+    }),
+  /**
+   * Place a river — ONE undo step. `points` is a FLAT `[x, y, z, …]` array of at
+   * least two world-space control points.
+   */
+  createRiver: (
+    points: number[],
+    widthM: number,
+    depthM: number,
+    flowMS: number,
+  ): Promise<string> =>
+    invoke<string>("water_create_river", { points, widthM, depthM, flowMS }),
+  /** Append a world-space control point to a river — ONE undo step. */
+  appendRiverPoint: (entity: string, x: number, y: number, z: number): Promise<boolean> =>
+    invoke<boolean>("water_append_river_point", { entity, x, y, z }),
+  /** Rewrite a river's width / depth / flow profile — ONE undo step. */
+  setRiverProfile: (
+    entity: string,
+    widthStartM: number,
+    widthEndM: number,
+    depthStartM: number,
+    depthEndM: number,
+    flowMS: number,
+  ): Promise<boolean> =>
+    invoke<boolean>("water_set_river_profile", {
+      entity,
+      widthStartM,
+      widthEndM,
+      depthStartM,
+      depthEndM,
+      flowMS,
+    }),
+  /**
+   * The river tool's verdict: the two COOK advisories re-run (so the tool says
+   * what the build will) plus the terrain-aware bed conflicts only the editor
+   * can make.
+   */
+  riverReport: (entity: string): Promise<RiverReportDto> =>
+    invoke<RiverReportDto>("water_river_report", { entity }),
 };
 
 /**

@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "id": "act:phase20-swimmer",
+  "name": "Swimmer",
+  "components": [],
+  "variables": [],
+  "events": [
+    {
+      "event": "Tick",
+      "body": {
+        "id": "tick",
+        "name": "tick",
+        "params": [
+          {
+            "name": "dt",
+            "ty": "Float"
+          }
+        ],
+        "ret": "Unit",
+        "body": [
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "physics3d",
+                  "move_and_slide"
+                ],
+                "args": [
+                  {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "get"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "entity"
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.06666666666666667
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": -0.1635
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.0
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "functions": []
+}

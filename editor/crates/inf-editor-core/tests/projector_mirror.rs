@@ -950,7 +950,12 @@ fn the_shared_water_projector_is_not_a_stub() {
         // The centreline is the spline on the SAME entity, in world space.
         "affine.transform_point3(p.to_dvec3())",
         "inf_render::RiverPath::from_points(&points, sp.closed, interp, &profile)",
-        ".map(inf_render::WaterFrame::from)",
+        "inf_render::WaterFrame::from(f)",
+        // P20.4: the P19.1 flow map reaches a river's frames, and does so through
+        // the Ring-0 rule rather than a per-host world walk. A host that gathered
+        // terrains itself would be free to disagree about which one answers.
+        "let mapped = flow.is_mapped();",
+        "flow.foam_gain_at(glam::DVec2::new(f.center.x, f.center.z))",
         // The level clock reaches the body — a host that dropped it would render
         // a frozen sea that still passed every other assertion here.
         "time_s,",
@@ -973,7 +978,7 @@ fn the_shared_water_projector_is_not_a_stub() {
 /// a body with no geometry is skipped rather than drawn degenerate.
 #[test]
 fn both_projectors_project_water_the_same_way() {
-    const SHARED: [&str; 6] = [
+    const SHARED: [&str; 8] = [
         // Rebuilt every projection, like `scatter` — a body's state is a pure
         // function of its component, its spline and the clock.
         "waters.clear()",
@@ -983,7 +988,11 @@ fn both_projectors_project_water_the_same_way() {
         "inf_ecs::sky::water_environment(world)",
         // The branch itself, and the same-entity spline.
         "w.get::<WaterBody>(entity)",
-        "project_water(water, w.get::<Spline>(entity), &affine, water_env, id)",
+        // The flow field, likewise resolved ONCE per projection through Ring 0
+        // (P20.4) — same argument as the clock and the wind above.
+        "inf_ecs::hydro::terrain_flow(world)",
+        "w.get::<Spline>(entity),",
+        "&water_flow,",
         // Nothing degenerate reaches the renderer.
         "if body.drawable()",
         "waters.push(body)",
@@ -1002,7 +1011,7 @@ fn both_projectors_project_water_the_same_way() {
         // whole point of same-entity composition is that there is nothing to
         // resolve, and a host that started resolving one would need a cook edge
         // the other side does not have.
-        let region = branch_region(&src, "w.get::<WaterBody>(entity)", "project_water(water,");
+        let region = branch_region(&src, "w.get::<WaterBody>(entity)", "project_water(");
         assert!(
             !region.contains("entity_of("),
             "the {label} resolves a river's spline through a reference:\n{region}"

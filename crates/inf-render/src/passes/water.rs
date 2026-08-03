@@ -118,6 +118,13 @@ struct FrameGpu {
     center_width: [f32; 4],
     tangent_depth: [f32; 4],
     right_s: [f32; 4],
+    /// `x` = the P19.1 flow-map foam gain (P20.4, `≥ 1`); `yzw` reserved.
+    ///
+    /// A fourth `vec4` rather than a bit stolen from one of the three above: all
+    /// twelve lanes are load-bearing (a centre, a tangent, an across-vector, a
+    /// width, a depth and an arc length), and packing a gain into a spare mantissa
+    /// is how a frame buffer stops being readable.
+    flow_extra: [f32; 4],
 }
 
 /// Vertex/index counts for a grid of `n` vertices per side.
@@ -509,6 +516,9 @@ fn pack_frames(w: &RenderWater, origin: &inf_math::FloatingOrigin, out: &mut Vec
                 f.right.z as f32,
                 f.s as f32,
             ],
+            // `max(1)`: the gain can only ever ADD foam, and a projector that
+            // somehow handed over a smaller number must not quiet a river down.
+            flow_extra: [(f.flow_gain.max(1.0)) as f32, 0.0, 0.0, 0.0],
         });
     }
 }
@@ -731,8 +741,11 @@ mod tests {
         // …and it fits inside one dynamic-offset slot, which is what lets every
         // body in a frame share one buffer and one bind group.
         assert!(std::mem::size_of::<WaterUniform>() as u64 <= UNIFORM_STRIDE);
-        // The frame record likewise: three vec4s.
-        assert_eq!(std::mem::size_of::<FrameGpu>(), 3 * 16);
+        // The frame record likewise: FOUR vec4s since P20.4 added the flow-map
+        // foam gain. A storage-buffer element whose Rust stride disagreed with
+        // its WGSL one would misread every frame after the first, which reads on
+        // screen as a ribbon that drifts off its own centreline.
+        assert_eq!(std::mem::size_of::<FrameGpu>(), 4 * 16);
     }
 
     #[test]
@@ -826,6 +839,7 @@ mod tests {
                     s: i as f64 * 10.0,
                     width_m: 6.0,
                     depth_m: 1.5,
+                    flow_gain: 1.0,
                 })
                 .collect(),
             ..RenderWater::default()

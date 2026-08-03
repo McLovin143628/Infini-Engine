@@ -24,6 +24,12 @@ inf-math = { workspace = true }
 # dep (inf-terrain never names bevy/reflect, so no cycle); the tile map is
 # `#[reflect(ignore)]` on `Terrain`, exactly like the tilemap chunk store.
 inf-terrain = { workspace = true }
+# The water math a `WaterBody` describes (P20.4). Ring-0 → Ring-0: `inf-water`
+# names only glam + inf-math, so there is no cycle. It is here for ONE thing —
+# `hydro::TerrainFlow` turns the P19.1 flow map into the foam gain a river's
+# frames carry, and the curve that does it lives once, in `inf_water::river`,
+# rather than being spelt again in each of the two scene projectors.
+inf-water = { workspace = true }
 serde = { workspace = true }
 uuid = { workspace = true }
 # Profiling spans (P15.1): the per-phase sim systems carry `trace`-level

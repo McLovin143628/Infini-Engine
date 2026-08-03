@@ -216,6 +216,92 @@ fn correct_rivers_stay_silent() {
     }
 }
 
+/// A river whose depth taper lifts its **bed** while its surface falls (P20.4).
+///
+/// This is the case the P20.1 surface check is blind to *by construction*: the
+/// water still slopes the right way, so nothing at runtime is wrong to look at —
+/// but the ground under it climbs, which is a basin. It gets its own advisory
+/// with its own remedy, because "lower the spline" would not fix it.
+#[test]
+fn a_bed_that_climbs_under_a_falling_surface_is_reported_separately() {
+    // Surface 30 → 27 (falls 3 m); depth 6 → 0.5 (so the bed goes 24 → 26.5,
+    // climbing 2.5 m).
+    let mut basin = river(0xB030, "Basin", &[30.0, 29.0, 28.0, 27.0], 1.2);
+    {
+        let w = basin.water_body.as_mut().unwrap();
+        w.river_depth_start_m = 6.0;
+        w.river_depth_end_m = 0.5;
+    }
+    let warnings = cook_warnings(level(vec![basin]));
+    let id = g(0xB030).to_string();
+    let mine: Vec<&String> = warnings.iter().filter(|w| w.contains(&id)).collect();
+    assert_eq!(mine.len(), 1, "expected exactly the bed advisory: {mine:?}");
+    let msg = mine[0];
+    assert!(msg.contains("BED climbs"), "{msg}");
+    assert!(msg.contains("2.5"), "the rise must be quoted: {msg}");
+    assert!(
+        msg.contains("river_depth_end_m"),
+        "the remedy must name the depth fields, not the spline: {msg}"
+    );
+    // It is an ADVISORY: the cook still succeeded (`cook_warnings` unwraps the
+    // report), and the surface advisory did NOT fire — the two are independent.
+    assert!(
+        !msg.contains("climbs 2.5 m across 1 stretch(es) in the direction it flows (the worst"),
+        "the surface advisory fired on a falling surface: {msg}"
+    );
+}
+
+/// ANTI-VACUITY for the bed advisory: the *same* river with a constant depth has
+/// a bed that falls exactly as its surface does, and is silent. Without this the
+/// test above would pass against an advisory that fired on every river.
+#[test]
+fn a_constant_depth_river_has_a_silent_bed() {
+    let mut good = river(0xB031, "Even", &[30.0, 29.0, 28.0, 27.0], 1.2);
+    {
+        let w = good.water_body.as_mut().unwrap();
+        w.river_depth_start_m = 2.0;
+        w.river_depth_end_m = 2.0;
+    }
+    let warnings = cook_warnings(level(vec![good]));
+    assert!(
+        !warnings.iter().any(|w| w.contains(&g(0xB031).to_string())),
+        "{warnings:?}"
+    );
+}
+
+/// A **reversed** river's bed is judged in the direction the water goes, exactly
+/// as its surface is. The points climb and the depth widens downstream, so read
+/// forwards the bed climbs — and read the way the water actually flows it does
+/// not.
+#[test]
+fn the_bed_advisory_honours_a_reversed_flow() {
+    let mut back = river(0xB032, "Backwards", &[10.0, 14.0, 18.0, 22.0], -2.0);
+    {
+        let w = back.water_body.as_mut().unwrap();
+        w.river_depth_start_m = 0.5;
+        w.river_depth_end_m = 6.0;
+    }
+    let warnings = cook_warnings(level(vec![back]));
+    assert!(
+        !warnings.iter().any(|w| w.contains(&g(0xB032).to_string())),
+        "a correctly-reversed river was reported: {warnings:?}"
+    );
+    // …and the same geometry read FORWARDS (positive flow) is reported on both
+    // counts, which proves the reversal is what silenced it above.
+    let mut fwd = river(0xB033, "Forwards", &[10.0, 14.0, 18.0, 22.0], 2.0);
+    {
+        let w = fwd.water_body.as_mut().unwrap();
+        w.river_depth_start_m = 0.5;
+        w.river_depth_end_m = 6.0;
+    }
+    let warnings = cook_warnings(level(vec![fwd]));
+    let id = g(0xB033).to_string();
+    let mine: Vec<&String> = warnings.iter().filter(|w| w.contains(&id)).collect();
+    assert_eq!(mine.len(), 2, "surface AND bed: {mine:?}");
+    assert!(!mine[0].contains("BED"), "surface first: {mine:?}");
+    assert!(mine[1].contains("BED climbs"), "{mine:?}");
+}
+
 /// A `WaterKind::River` with **no `Spline`** has no centreline. That is an
 /// authoring state (you added the component and have not drawn the path yet), not
 /// a hazard, and the cook must not nag about it — nor panic on the empty path.

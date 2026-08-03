@@ -355,6 +355,157 @@ fn pie_water_trace_matches_shipping() {
     assert_ne!(river.ends[0], river.ends[1], "the ribbon is degenerate");
 }
 
+/// **THE P19.1 FLOW MAP REACHES A RIVER'S FOAM** (P20.4).
+///
+/// The wiring is additive-only by construction — `inf_water::flow_foam_gain`
+/// returns exactly `1.0` where there is no flow — so this is asserted as a pair:
+/// a river over a terrain that was **never eroded** carries the exact identity in
+/// every frame, and the *same* river over a terrain carrying a flow map carries
+/// more. Without the first half the second would not prove the coupling is
+/// additive; without the second the first would be satisfied by wiring nothing at
+/// all.
+///
+/// Pinned here rather than in a golden because it is a claim about a *number the
+/// projector computes*, not about pixels: the golden that showed it would differ
+/// from `water_river` by a foam intensity, while this differs from a broken
+/// implementation by `1.0` vs `1.6`.
+#[test]
+fn the_flow_map_modulates_a_rivers_foam_and_nothing_else() {
+    use inf_ecs::components::Terrain;
+
+    let flow_gains = |flow: f32| -> Vec<u64> {
+        let mut doc = water_doc();
+        // A terrain under the river, optionally carrying a flow map. 4 m spacing
+        // over 129 samples = 512 m per tile; four tiles cover the river's whole
+        // run, which straddles z = 0 once the river's transform is applied.
+        const RES: u32 = 129;
+        const TILES: [(i32, i32); 4] = [(0, -1), (0, 0), (-1, -1), (-1, 0)];
+        let terrain_guid = Uuid::from_u128(0x20_0005);
+        doc.create_with_guid(terrain_guid, SpawnKind::Empty, "Ground", None);
+        {
+            let e = doc.world().entity_of(terrain_guid).unwrap();
+            let mut t = Terrain {
+                meters_per_sample: 4.0,
+                tile_resolution: RES,
+                data: inf_terrain::TerrainData::new(RES, 4.0),
+                ..Terrain::default()
+            };
+            for key in TILES {
+                t.data.author_tile(key, |_, _| 0.0);
+                if flow != 0.0 {
+                    let tile = t.data.get_tile_mut(key).unwrap();
+                    for j in 0..RES {
+                        for i in 0..RES {
+                            tile.set_map_texel(RES, i, j, [flow, 0.0, 0.0]);
+                        }
+                    }
+                }
+            }
+            doc.world_mut().world_mut().entity_mut(e).insert(t);
+        }
+        doc.world_mut().mark_dirty();
+        doc.world_mut().propagate();
+
+        let mut sim = pie_sim(&doc);
+        sim.step_once(RuntimeInput::default());
+        let mut scene = RenderScene::default();
+        project_scene(&mut scene, &sim, 0.0, &VmeshRegistry::default());
+        let river = scene
+            .waters
+            .iter()
+            .find(|w| w.kind == inf_render::WaterKindGpu::River)
+            .expect("the fixture's river projected");
+        assert!(river.frames.len() > 8, "the ribbon is degenerate");
+        river.frames.iter().map(|f| f.flow_gain.to_bits()).collect()
+    };
+
+    // Never eroded ⇒ the EXACT identity, frame for frame. Not "close to 1".
+    let dry = flow_gains(0.0);
+    assert!(
+        dry.iter().all(|&b| b == 1.0f64.to_bits()),
+        "an unmapped terrain moved a river's foam"
+    );
+
+    // A fully-channelled terrain ⇒ the saturated gain, everywhere the river
+    // crosses it.
+    let wet = flow_gains(inf_water::FLOW_FOAM_REFERENCE_M3 as f32);
+    assert_eq!(wet.len(), dry.len());
+    let want = inf_water::flow_foam_gain(inf_water::FLOW_FOAM_REFERENCE_M3);
+    assert!(want > 1.0, "the curve itself is a no-op");
+    let boosted = wet.iter().filter(|&&b| b == want.to_bits()).count();
+    assert!(
+        boosted * 2 > wet.len(),
+        "only {boosted} of {} frames took the flow boost",
+        wet.len()
+    );
+    // …and the two runs really differ, which is the mutation check on the whole
+    // wiring: a projector that ignored the map would produce identical vectors.
+    assert_ne!(dry, wet);
+}
+
+/// **THE VISIBILITY LAW** (P20.4), pinned from the render side.
+///
+/// Hiding a water body removes it from `RenderScene::waters` — no surface, no
+/// underwater fog, no wetness band — and changes the simulation by nothing. The
+/// sim half is `crates/inf-physics/tests/water_visibility_3d.rs`; the decision
+/// and its evidence live on `RenderWater::surface()`.
+///
+/// The two halves are deliberately in different crates because they are two
+/// different claims about the same law, and a single file asserting both would
+/// let a future change satisfy one by breaking the other.
+#[test]
+fn a_hidden_water_body_is_not_drawn_but_is_still_simulated() {
+    let mut doc = water_doc();
+    let mut sim = pie_sim(&doc);
+    sim.step_once(RuntimeInput::default());
+    let all = sample(&sim);
+    assert_eq!(all.len(), 3, "the fixture must carry ocean + lake + river");
+
+    // Hide the LAKE only.
+    doc.edit_set_visible(LAKE_GUID, false);
+    let mut hidden_sim = pie_sim(&doc);
+    hidden_sim.step_once(RuntimeInput::default());
+    let drawn = sample(&hidden_sim);
+    assert_eq!(
+        drawn.len(),
+        2,
+        "a hidden body still reached the renderer: {drawn:?}"
+    );
+    // The two that remain are exactly the two that were not hidden — the lake's
+    // kind is Lake (code 1), so its absence is checkable rather than assumed.
+    assert!(
+        !drawn.iter().any(|w| w.kind == 1),
+        "the hidden lake is still in the frame: {drawn:?}"
+    );
+    assert!(drawn.iter().any(|w| w.kind == 0), "the ocean vanished too");
+    assert!(drawn.iter().any(|w| w.kind == 2), "the river vanished too");
+
+    // …and the SIM still has it. `water.surface_height` over the lake's own
+    // footprint answers the same number either way — the poll the Blueprint node
+    // makes, so this is the user-visible half of the law rather than a private
+    // one.
+    let shown_h = sim
+        .bridge3d()
+        .water_surface_height(0.0, 0.0)
+        .expect("the fixture's lake covers the origin");
+    let hidden_h = hidden_sim
+        .bridge3d()
+        .water_surface_height(0.0, 0.0)
+        .expect("a hidden lake is still water to the simulation");
+    assert_eq!(
+        shown_h.to_bits(),
+        hidden_h.to_bits(),
+        "hiding the lake moved its surface for the simulation"
+    );
+    // ANTI-VACUITY: the answer is the LAKE's (level 11), not the unbounded
+    // ocean's (level 2) which covers the origin too — so the equality above is a
+    // claim about the hidden body rather than about the one beneath it.
+    assert!(
+        shown_h > 10.0,
+        "the probe answered the ocean, not the lake ({shown_h})"
+    );
+}
+
 /// The cook is **silent** on this level: its river runs downhill, so the P20.1
 /// advisory must not fire. An advisory that fires on correct content is one
 /// nobody reads.

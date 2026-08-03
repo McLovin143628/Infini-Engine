@@ -74,6 +74,8 @@ struct WaterFrame {
     tangent_depth: vec4<f32>,
     // xyz = unit horizontal across-vector, w = arc length (m).
     right_s: vec4<f32>,
+    // x = P19.1 flow-map foam gain (>= 1; 1 = no flow map), yzw reserved.
+    flow_extra: vec4<f32>,
 };
 
 @group(1) @binding(4) var<uniform> water: Water;
@@ -91,8 +93,9 @@ struct VsOut {
     // the normal here, so it must be the PARAMETER point, not the displaced one.
     @location(1) param: vec2<f32>,
     // x = depth to the bed (m; rivers), y = |lateral| / (width/2) for rivers and
-    // 0 elsewhere.
-    @location(2) profile: vec2<f32>,
+    // 0 elsewhere, z = the river frame's flow-map foam gain (1 elsewhere, and on
+    // a river over terrain with no P19.1 bake).
+    @location(2) profile: vec3<f32>,
     // The river frame's tangent/across basis, so the fragment can rotate a
     // river-local normal into the world. Identity (1,0,0)/(0,0,1) elsewhere.
     @location(3) along: vec3<f32>,
@@ -174,6 +177,10 @@ fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
     var param: vec2<f32>;
     var depth_m = water.absorption.w;
     var bank = 0.0;
+    // The flow-map foam gain (P20.4). 1 everywhere but a river, and 1 on a river
+    // whose terrain was never eroded — so this term is the exact identity for
+    // every scene authored before it existed.
+    var flow_gain = 1.0;
     var along = vec3<f32>(1.0, 0.0, 0.0);
     var across = vec3<f32>(0.0, 0.0, 1.0);
 
@@ -200,6 +207,9 @@ fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
         param = vec2<f32>(s, lateral);
         depth_m = mix(a.tangent_depth.w, b.tangent_depth.w, t);
         bank = select(0.0, abs(lateral) / (0.5 * width), width > 0.0);
+        // Interpolated exactly like the width and the depth: the gain is a
+        // per-frame property of the ribbon, not a per-body constant.
+        flow_gain = max(mix(a.flow_extra.x, b.flow_extra.x, t), 1.0);
         // The river's wave frame: +param.x runs downstream, +param.y across.
         along = vec3<f32>(tangent.x, 0.0, tangent.z);
         let along_len = length(along);
@@ -235,7 +245,7 @@ fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
 
     out.world = world;
     out.param = param;
-    out.profile = vec2<f32>(depth_m, bank);
+    out.profile = vec3<f32>(depth_m, bank, flow_gain);
     out.along = along;
     out.across = across;
     out.pos = view.view_proj * vec4<f32>(world, 1.0);
@@ -357,9 +367,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         1.0 - smoothstep(0.0, max(water.foam2.x, 1e-4), column),
         has_floor && water.foam2.x > 0.0,
     );
+    // P20.4: the P19.1 flow map modulates the SPEED the authored threshold sees,
+    // so a river running down a channel the erosion pass carved foams harder than
+    // the same river across an unmapped plain. `in.profile.z` is 1 wherever there
+    // is no map, which makes this expression bit-identical to the P20.1 one for
+    // every scene that has not been eroded.
     let flow_foam = select(
         0.0,
-        smoothstep(0.35, 1.0, abs(water.level_flow.y) / max(water.foam2.y, 1e-4)),
+        smoothstep(0.35, 1.0, abs(water.level_flow.y) * in.profile.z / max(water.foam2.y, 1e-4)),
         water.foam2.y > 0.0,
     );
     // A river also foams against its banks, where the flow drags on the bed.

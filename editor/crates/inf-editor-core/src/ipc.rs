@@ -811,6 +811,142 @@ pub enum ToolModeDto {
     /// Paint per-sample biome ids onto the terrain under a brush (P19.2).
     /// Perspective-only.
     Biome,
+    /// Place rivers and lakes against the terrain (P20.4). Perspective-only.
+    ///
+    /// One tool mode with two sub-modes ([`WaterToolKindDto`]) rather than two
+    /// modes, because they share everything that matters: the same terrain pick,
+    /// the same "which body am I editing" state and the same biome-hint
+    /// defaults. The Sculpt/Paint precedent, not the Sculpt/Biome one.
+    Water,
+}
+
+// ── Water placement (P20.4) ──────────────────────────────────────────────
+
+/// Which water body the [`ToolModeDto::Water`] tool places. Serializes as its tag
+/// string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum WaterToolKindDto {
+    /// Click to append a control point to the active river's centreline; the
+    /// first click on empty space starts a new one.
+    River,
+    /// Drag a rectangle; the still-water level comes from the ground under the
+    /// first corner (or the biome's `water_hint`, when it has one).
+    Lake,
+}
+
+/// Water tool configuration pushed from the viewport toolbar
+/// (`viewport_set_water`).
+///
+/// Units are SI throughout (architecture rule 6): metres and m/s. `level_offset_m`
+/// is added to whatever level the defaults suggest, so "a lake 2 m above the
+/// ground I clicked" needs no arithmetic from the author.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct WaterSettingsDto {
+    pub kind: WaterToolKindDto,
+    /// Full width of a new river, metres.
+    pub width_m: f64,
+    /// Depth to the bed of a new river, metres.
+    pub depth_m: f64,
+    /// Surface flow speed of a new river, m/s. Negative reverses it.
+    pub flow_m_s: f64,
+    /// Added to the suggested still-water level, metres.
+    pub level_offset_m: f64,
+}
+
+impl Default for WaterSettingsDto {
+    fn default() -> Self {
+        Self {
+            kind: WaterToolKindDto::River,
+            width_m: 8.0,
+            depth_m: 1.5,
+            flow_m_s: 1.5,
+            level_offset_m: 0.0,
+        }
+    }
+}
+
+/// What the water tool suggests for a click at a world point (`water_defaults`) —
+/// the P19.2 `BiomeDef::water_hint`'s first reader.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct WaterDefaultsDto {
+    /// Suggested still-water level, metres of world Y.
+    pub level_m: f64,
+    /// Suggested river width / depth, metres.
+    pub river_width_m: f64,
+    pub river_depth_m: f64,
+    /// Terrain height under the point, or `null` where there is no ground.
+    pub ground_m: Option<f64>,
+    /// The painted biome id (`0` = unassigned) and its name (empty when none).
+    pub biome_id: u8,
+    pub biome_name: String,
+    /// Whether `level_m` came from the biome's hint rather than from the ground.
+    /// The toolbar says which, because "why is my lake at 6.5 m?" should have a
+    /// visible answer.
+    pub from_biome_hint: bool,
+}
+
+/// Where a still-water level lands on the terrain inside a rectangle
+/// (`water_lake_preview`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct LakePreviewDto {
+    pub level_m: f64,
+    /// Fraction of the *known* samples at or below the level, `[0, 1]`.
+    pub covered_fraction: f64,
+    pub max_depth_m: f64,
+    pub mean_depth_m: f64,
+    /// Grid samples taken, and how many the terrain answered for. `known == 0`
+    /// means "there is no ground here", which is a different statement from
+    /// "the lake is empty".
+    pub samples: u32,
+    pub known: u32,
+    /// The waterline as flat `[x0, z0, x1, z1]` world-XZ segments. Flat rather
+    /// than nested so the JSON stays one array of numbers for a few thousand
+    /// segments.
+    pub waterline: Vec<f64>,
+}
+
+/// One stretch of a river that climbs, as the tool reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct RiverClimbDto {
+    pub from_s: f64,
+    pub to_s: f64,
+    pub rise_m: f64,
+    /// Rise over run, dimensionless.
+    pub gradient: f64,
+}
+
+/// One stretch where a river disagrees with the ground under it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct RiverBedConflictDto {
+    /// `"buried"` (terrain above the surface) or `"perched"` (terrain below the
+    /// authored bed) — `BedIssue::id()`, a stable id the frontend switches on.
+    pub issue: String,
+    pub from_s: f64,
+    pub to_s: f64,
+    pub worst_m: f64,
+    pub worst_x: f64,
+    pub worst_z: f64,
+}
+
+/// The river tool's verdict on one river (`water_river_report`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct RiverReportDto {
+    /// The river entity's GUID.
+    pub entity: String,
+    pub length_m: f64,
+    pub points: usize,
+    /// Source elevation minus mouth elevation, read the way the water flows.
+    pub fall_m: f64,
+    /// The two **cook** advisories, re-run here so the tool says what the build
+    /// will say.
+    pub surface_climbs: Vec<RiverClimbDto>,
+    pub bed_climbs: Vec<RiverClimbDto>,
+    /// The terrain-aware conflicts, which only the editor can produce.
+    pub bed_conflicts: Vec<RiverBedConflictDto>,
+    /// Frames the terrain answered for, out of the total — a report over 3 of 200
+    /// frames is not a clean bill of health.
+    pub sampled_frames: usize,
+    pub total_frames: usize,
 }
 
 /// The sculpt brush operation. Serializes as its tag string. `Paint` is the
