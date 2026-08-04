@@ -1,0 +1,33 @@
+[package]
+name = "inf-voxel"
+description = "Sparse SDF voxel chunk volumes: the .inf_voxel container, deterministic Surface-Nets meshing, and carve/fill ops that locally extend the heightfield terrain."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+glam = { workspace = true }
+serde = { workspace = true }
+# The `.inf_voxel` chunk blob is the SAME bincode a chunk writes anywhere else,
+# so the container and any future `.inf_lvl` inline form cannot disagree about a
+# chunk's bytes (the discipline `inf-terrain` pays for its tiles).
+bincode = { workspace = true }
+thiserror = { workspace = true }
+# `AssetKind::VoxelVolume` — published as an inherent const on `VoxelAsset`
+# rather than through an `AssetPayload` impl, because the generic encode path
+# would frame the image and misalign every chunk. Ring 0 → Ring 0.
+inf-asset = { workspace = true }
+# NB: no `inf-math`. A volume's world anchor is a plain `DVec3` and every
+# conversion here is grid↔world arithmetic, so there is nothing for the
+# floating-origin helpers to do — the f64→f32 render rebase happens in the two
+# projectors, which already depend on `inf-math`. An unused dependency in a
+# Ring-0 crate is a licence-surface and build-time cost with no payer.
+
+[dev-dependencies]
+# The human-readable half of the format-aware serde gate.
+serde_json = { workspace = true }
+# Loose-file write/read round trips (the one sanctioned `.inf_voxel` writer).
+tempfile = { workspace = true }

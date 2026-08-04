@@ -782,6 +782,169 @@ pub fn terrain_id_from_guid(guid: u128) -> u64 {
     }
 }
 
+/// A projected voxel chunk's identity: its integer position in the volume's
+/// chunk grid (P21.1).
+///
+/// This is the renderer-local mirror of `inf_voxel::ChunkKey` — `inf-render` is
+/// Ring 0 and deliberately does **not** depend on `inf-voxel`, exactly as it does
+/// not depend on `inf-terrain` (see [`TerrainTileKey`]). The two documented
+/// projectors map one onto the other, like every other scene DTO, which is what
+/// keeps the meshed surface the renderer draws *triangle soup* rather than a
+/// second copy of the SDF model.
+///
+/// A chunk is a fixed-size cube of the volume's grid, so the key is a plain 3D
+/// lattice coordinate: unlike a terrain tile there is no LOD component, because a
+/// voxel volume is a **local** extension of the heightfield (a cave, an
+/// excavation, an overhang) rather than a paged world-scale surface — P21.1 meshes
+/// every resident chunk at full resolution.
+///
+/// `Ord` is the **derived, natural field order** (`x`, then `y`, then `z`) rather
+/// than a hand-written `(z, y, x)`: the projector hands chunks over in
+/// `inf_voxel`'s `BTreeMap` order, which is that same derived field order, so the
+/// two orders agree *by construction* instead of by a comment nobody re-checks.
+/// A projection walked in key order is therefore also key-ascending here — the
+/// order [`RenderVoxelVolume::chunks`] is documented to arrive in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct VoxelChunkKey {
+    /// Chunk grid coordinate along world X.
+    pub x: i32,
+    /// Chunk grid coordinate along world Y (voxel volumes are genuinely 3D —
+    /// this is the axis a heightfield tile key does not have).
+    pub y: i32,
+    /// Chunk grid coordinate along world Z.
+    pub z: i32,
+}
+
+impl VoxelChunkKey {
+    /// A key at an explicit lattice coordinate.
+    #[inline]
+    pub const fn new(x: i32, y: i32, z: i32) -> Self {
+        Self { x, y, z }
+    }
+}
+
+/// One meshed voxel-surface vertex (P21.1) — the output of the isosurface
+/// extraction, handed to the [`VoxelNode`](crate::passes::voxel) as plain
+/// triangle soup.
+///
+/// Positions are **chunk-local `f32` metres**: the owning
+/// [`RenderVoxelChunk::origin`] carries the `f64` world anchor and the pass builds
+/// a per-chunk model matrix from it against the frame's floating origin. That is
+/// architecture rule 3 applied at the natural seam — a chunk is metres across, so
+/// its interior needs no `f64` precision at all, and the one place the world's
+/// magnitude enters is the anchor the origin is subtracted from.
+///
+/// Normals arrive **already normalized** (the mesher takes them from the SDF
+/// gradient, which is what makes a voxel surface smooth without a smoothing pass);
+/// the shader re-normalizes after interpolation, which is a different thing.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct RenderVoxelVertex {
+    /// Chunk-local position (metres, relative to the chunk's `origin`).
+    pub pos: [f32; 3],
+    /// Unit surface normal (chunk-local == world, chunks are unrotated).
+    pub normal: [f32; 3],
+    /// Splat-layer index `0..=3`, selecting into [`RenderVoxelVolume::layers`].
+    ///
+    /// **Categorical**, exactly like [`RenderTerrainTile::biomes`]: it names a
+    /// layer, it is not a quantity, so it is passed to the fragment stage
+    /// `@interpolate(flat)` — the midpoint of layers 1 and 3 is not layer 2.
+    /// Values past `3` clamp in the shader rather than reading out of bounds, so a
+    /// projector that grows a fifth material before the renderer does degrades to
+    /// the last layer instead of to undefined behaviour.
+    pub material: u32,
+}
+
+/// One meshed chunk handed to the [`VoxelNode`](crate::passes::voxel) (P21.1).
+///
+/// The renderer never sees the SDF: it sees the triangles a chunk currently
+/// extracts to, plus the stamp that says whether they changed. Everything about
+/// *why* the surface has this shape — the density field, the brush history, the
+/// meshing algorithm — lives in `inf-voxel` and stops at this boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderVoxelChunk {
+    /// Grid position of this chunk within its volume.
+    pub key: VoxelChunkKey,
+    /// `f64` world position of this chunk's local origin — the anchor
+    /// [`vertices`](Self::vertices) are relative to.
+    pub origin: DVec3,
+    /// The chunk's meshed surface vertices (chunk-local, see
+    /// [`RenderVoxelVertex`]).
+    pub vertices: Vec<RenderVoxelVertex>,
+    /// Triangle list into [`vertices`](Self::vertices). Length must be a multiple
+    /// of 3 and every index must be in range; a chunk that fails either is
+    /// **dropped** by the cache planner rather than uploaded (see
+    /// [`plan_chunk_cache`](crate::passes::voxel::plan_chunk_cache)) — a bad page
+    /// never becomes silent geometry.
+    pub indices: Vec<u32>,
+    /// Inclusive chunk-local `(min, max)` AABB of [`vertices`](Self::vertices) —
+    /// the frustum-cull bound. Projected rather than recomputed per frame because
+    /// the mesher already knows it.
+    pub bounds: ([f32; 3], [f32; 3]),
+    /// The chunk's **monotone change stamp**. The GPU buffer cache re-uploads this
+    /// chunk if — and only if — the stamp differs from the one its cached copy was
+    /// built at. `0` means "no stamp" (a chunk the source could not version) and is
+    /// treated conservatively as *always re-upload*, never as a cache hit — exactly
+    /// like [`RenderTerrainTile::version`], and for the same reason: a source that
+    /// cannot version its chunks must degrade to re-uploading, not to a stale
+    /// frame.
+    pub version: u64,
+}
+
+/// A voxel volume's meshed, resident chunk set (P21.1) — the renderer's
+/// volumetric-terrain input, projected from the ECS `VoxelVolume` component.
+///
+/// ## Residency
+///
+/// `chunks` is whatever the projector handed over — it is **not** assumed to be a
+/// complete volume. A missing chunk simply produces no geometry (a hole, exactly
+/// as an unmeshed region always was); the renderer never invents a want. This is
+/// the same contract [`RenderTerrain::tiles`] carries, and for the same reason:
+/// residency selection is a decision about the world, and it lives above this DTO.
+///
+/// ## Relationship to the heightfield
+///
+/// A volume *locally extends* the heightfield rather than replacing it — a cave
+/// mouth, an excavated pit, an overhang the 2.5D surface cannot express. That is
+/// why [`layers`](Self::layers) is deliberately the SAME
+/// [`RenderTerrainLayer`] type the terrain splat uses, at deliberately the same
+/// indices: a cave mouth must shade continuously into the hillside it opens out
+/// of, and two independently-authored material vocabularies could not.
+///
+/// Seam *blending* across that boundary (and shadow/GI participation, and the
+/// depth prepass) is **P21.2** — P21.1 draws the surfaces with their own simple
+/// lit pass and says so in `shaders/voxel.wgsl`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RenderVoxelVolume {
+    /// Stable identity of the volume this projection describes.
+    ///
+    /// The per-chunk GPU buffer cache is keyed by `(id, chunk key)`, so two
+    /// volumes whose grids share a coordinate cannot overwrite each other's
+    /// chunks, and a volume that leaves the scene releases exactly its own
+    /// buffers. Both projectors derive it from the volume entity's `Guid`
+    /// ([`terrain_id_from_guid`] — the same fold, so a voxel volume and a terrain
+    /// are identified by the same rule); `0` is the "unkeyed" value a
+    /// single-volume caller (and every unit test) leaves at its default.
+    ///
+    /// **Distinct volumes in one scene must carry distinct ids.** The renderer
+    /// cannot check that — two projections claiming one id simply share a cache
+    /// slot and fight over it.
+    pub id: u64,
+    /// The resident meshed chunks, ascending by [`VoxelChunkKey`] — a
+    /// deterministic upload/draw order (see the key's `Ord` note).
+    pub chunks: Vec<RenderVoxelChunk>,
+    /// The four splat material layers a vertex's
+    /// [`material`](RenderVoxelVertex::material) index selects.
+    ///
+    /// Deliberately the SAME [`RenderTerrainLayer`] the heightfield uses, and
+    /// deliberately indices `0..=3` **aligned with the terrain splat layers** — a
+    /// cave mouth must shade continuously into the hillside it opens out of, which
+    /// it cannot do if layer 2 means "rock" on one side of the seam and "moss" on
+    /// the other. (`tex_scale` is carried but unused in P21.1: the voxel shader has
+    /// no triplanar detail grain yet — that arrives with the seam blend in P21.2.)
+    pub layers: [RenderTerrainLayer; 4],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkyParams {
     /// Linear colors.
@@ -979,6 +1142,26 @@ pub struct RenderScene {
     /// nothing about another's, and they may legitimately overlap in world space
     /// (the depth test resolves it, exactly as it does for two meshes).
     pub terrains: Vec<RenderTerrain>,
+    /// Volumetric-terrain volumes (P21.1) — SDF voxel chunk sets, already meshed
+    /// into triangle soup by the projector, that locally extend the heightfield
+    /// above. Empty ⇒ the [`crate::passes::voxel`] node returns before touching the
+    /// encoder, so every scene without volumetric terrain (including all 47
+    /// pre-P21.1 goldens) records the exact command stream it always did.
+    ///
+    /// Ordering is the projector's, and it is what the draw order follows — so it
+    /// must be deterministic. It is **not** the same order in both projectors: the
+    /// player walks its world in `Guid` order, the editor viewport walks the
+    /// document's own entity order. Each is deterministic for its own side, which
+    /// is what a per-side determinism gate needs; what makes a *cross-side*
+    /// comparison meaningful is [`id`](RenderVoxelVolume::id), which both derive
+    /// from the volume entity's `Guid`, so a PIE-vs-shipping diff matches volumes
+    /// up by identity rather than by position in a list. The same arrangement
+    /// [`terrains`](Self::terrains) and `waters` have, for the same reason.
+    ///
+    /// Each chunk's own [`version`](RenderVoxelChunk::version) stamp gates its
+    /// vertex/index buffer upload, keyed per volume by
+    /// [`RenderVoxelVolume::id`].
+    pub voxels: Vec<RenderVoxelVolume>,
     /// 2D tilemaps (P8.1b). The sprite pass culls each tilemap's chunks against
     /// the camera and expands the visible ones into prebatched sprite runs, then
     /// batches them together with the loose `sprites`. Because culling depends on

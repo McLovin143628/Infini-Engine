@@ -33,6 +33,13 @@ tracing = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [dev-dependencies]
+# P21.1: the `golden_voxel` scene is meshed by the REAL Surface-Nets mesher
+# rather than by a hand-written triangle soup, so the golden exercises the
+# shipped path end to end. DEV-ONLY — `inf-render` must never depend on
+# `inf-voxel` at build time (the DTOs are deliberately self-contained triangle
+# soup, exactly as `RenderTerrain` is self-contained rather than naming
+# `inf-terrain`). There is no cycle: `inf-voxel` names no renderer type.
+inf-voxel = { workspace = true }
 png = { workspace = true }
 # The §8 composed-frame budget constant (`inf_core::FRAME_BUDGET_MS`) — one copy
 # of a policy number, shared with the phase gates in `inf-player`. Dev-only: the

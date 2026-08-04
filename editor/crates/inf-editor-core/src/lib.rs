@@ -25,3 +25,4 @@ pub mod terrain_edit;
 /// Editor-side camera-driven terrain streaming (P16.3b2).
 pub mod terrain_stream;
 pub mod thumbnail;
+pub mod voxel_store;

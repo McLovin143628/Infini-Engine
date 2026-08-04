@@ -15,6 +15,8 @@ inf-ecs = { workspace = true }
 # Terrain sculpt strokes (P10.2b): the scene doc records `HeightDelta` undo steps
 # and applies live brush strokes to the `Terrain` component's paged data.
 inf-terrain = { workspace = true }
+# P21.1: the sparse SDF chunk volumes that locally extend the heightfield.
+inf-voxel = { workspace = true }
 # The water math the P20.4 authoring tools ask (`hydro`): the lake fill preview,
 # the river bed conflicts and the two climb checks the cook also runs. Ring-0
 # math only — the tools call it, they do not re-implement it.

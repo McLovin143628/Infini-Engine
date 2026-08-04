@@ -28,6 +28,10 @@ inf-vgeom = { workspace = true }
 # Cook stage: structurally validate a `.inf_terrain`'s header + tile directory
 # (P16.3). Header/directory only — the cook never decodes a tile.
 inf-terrain = { workspace = true }
+# P21.1: `.inf_voxel` payloads are structurally validated at cook (header +
+# chunk directory only) before they ride through verbatim — the same discipline,
+# and the same hazard, as `.inf_terrain` above.
+inf-voxel = { workspace = true }
 # P19.3: the cook reads a `.inf_pcg`'s authored graph to advise on `mask.image`
 # nodes, whose texture the shipped/PIE players cannot resolve at load. Decode
 # only — the cook never lowers or evaluates a graph.

@@ -395,6 +395,14 @@ impl EngineRenderer {
         graph.add(passes::classic_vgeom::ClassicVgeomNode::new(gpu, &view_bgl));
         graph.add(passes::skinned::SkinnedMeshNode::new(gpu, &view_bgl));
         graph.add(passes::terrain::TerrainNode::new(gpu, &view_bgl));
+        // Volumetric terrain (P21.1): the meshed isosurface of the scene's SDF
+        // voxel volumes. Beside the terrain in the opaque block on purpose — a
+        // voxel surface is opaque geometry that LOCALLY REPLACES the heightfield
+        // (a cave mouth, an excavation, an overhang), so it belongs with the
+        // ground it extends rather than after the passes that composite over the
+        // ground. A no-op on a scene with no volumes — the node returns before
+        // touching the encoder — so every existing golden is untouched.
+        graph.add(passes::voxel::VoxelNode::new(gpu, &view_bgl));
         // GPU-instanced scatter (P18.5): PCG volumes + painted foliage, culled
         // per-instance on the GPU with LOD/impostor banding. LAST of the opaque
         // passes on purpose — its HZB is built from the depth every other opaque

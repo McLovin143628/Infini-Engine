@@ -1,0 +1,1049 @@
+//! **Deterministic Surface Nets** over the chunk store, and the watertight-seam
+//! policy that is this batch's required gate.
+//!
+//! # The algorithm, in one paragraph
+//!
+//! Every cell of the global voxel grid whose eight corner samples do not share a
+//! sign gets **one** vertex, placed at the average of that cell's sign-change edge
+//! crossings; every grid edge whose two samples differ in sign gets **one** quad,
+//! joining the vertices of the four cells around it. That is Surface Nets (the
+//! dual-contouring family without the QEF solve): it produces a manifold surface
+//! with far fewer, better-shaped triangles than marching cubes and — crucially for
+//! P21.3's excavation tools — a vertex that moves *continuously* as the field is
+//! carved, rather than snapping between marching-cubes cases.
+//!
+//! # THE SEAM POLICY, and why it is the gate
+//!
+//! P18 shipped a meshlet builder whose seam chords overlapped, and roughly one
+//! mesh in ten went out with a visible crack. A voxel volume is *made* of seams —
+//! one every [`CHUNK_DIM`] samples in three axes — so the policy is stated here
+//! and gated by a test rather than hoped for.
+//!
+//! **Cells are partitioned; vertices are duplicated and must be bit-identical.**
+//!
+//! * A chunk **owns** the `CHUNK_DIM³` cells whose minimum corner is one of its
+//!   own samples. Every cell in the world is owned by exactly one chunk, so every
+//!   quad is emitted exactly once and no triangle is ever drawn twice.
+//! * To emit those quads a chunk needs the vertices of cells **one below it** on
+//!   each axis (the four cells around an edge include the cell one step back in
+//!   the two off-axis directions), so it also computes vertices for a one-cell
+//!   apron. Those apron vertices are *duplicates* of vertices its neighbour also
+//!   computes — and the gate is that the two copies are **bit-identical**, not
+//!   merely close.
+//! * They are bit-identical **by construction**: a vertex is a pure function of
+//!   its cell's eight corner samples, both chunks read those same samples from the
+//!   same [`VoxelData`], and the position is accumulated in the cell's own
+//!   `[0, 1]³` frame and then added to the cell's **integer global coordinate** —
+//!   never to a chunk-relative offset that would round differently on the two
+//!   sides. [`seam_vertices_are_bit_identical_from_both_sides`] asserts exact
+//!   `f64` equality, which is the only assertion worth making here.
+//!
+//! The alternative — storing a one-voxel apron *inside* each chunk — was rejected:
+//! it gives every boundary sample two authorities, so a carve has to write both or
+//! the seam silently disagrees, and that is a strictly worse bug than the one it
+//! avoids. Reading the neighbour is free here because residency is already a
+//! `BTreeMap` the mesher can index.
+//!
+//! # Determinism
+//!
+//! The whole pass is a **gather**: one vertex per cell of a fixed integer range,
+//! one quad per edge of a fixed integer range, accumulated in a fixed order, with
+//! no scatter into shared words and no hash map anywhere. Two runs produce
+//! byte-identical buffers, and so do two runs whose chunks were inserted in
+//! different orders — both asserted below.
+//!
+//! # Coordinates
+//!
+//! [`VoxelMesh::positions`] are **global voxel-grid units in `f64`**. That is what
+//! makes the seam claim testable at all (two chunks' copies are directly
+//! comparable), and it keeps the mesher free of both the volume's metre scale and
+//! the renderer's floating origin. The two projectors rebase to chunk-local `f32`
+//! metres through the one shared helper, [`VoxelMesh::local_positions_m`], so they
+//! cannot diverge on the conversion.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::chunk::{ChunkKey, CHUNK_DIM, DEFAULT_MATERIAL};
+use crate::data::VoxelData;
+
+/// Samples per axis in the padded gather: the chunk's own `CHUNK_DIM`, plus one
+/// apron sample below (for the apron cells) and one above (for the last owned
+/// cell's far corner).
+const PAD_SAMPLES: usize = CHUNK_DIM as usize + 2;
+
+/// Cells per axis a chunk computes vertices for: its `CHUNK_DIM` owned cells plus
+/// the one-cell apron below.
+const PAD_CELLS: usize = CHUNK_DIM as usize + 1;
+
+/// Sentinel for "this cell produced no vertex".
+const NO_VERTEX: u32 = u32::MAX;
+
+/// One chunk's meshed surface.
+///
+/// The vertex streams are parallel: `positions[i]`, `normals[i]`, `materials[i]`
+/// and `cells[i]` all describe vertex `i`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VoxelMesh {
+    /// The chunk that emitted this mesh (and therefore owns its quads).
+    pub key: ChunkKey,
+    /// Vertex positions in **global voxel-grid units** (`f64`) — see the module
+    /// docs on why not chunk-local metres.
+    pub positions: Vec<[f64; 3]>,
+    /// Unit outward normals, from the gradient of the cell's trilinear
+    /// interpolant.
+    pub normals: Vec<[f32; 3]>,
+    /// Splat material index (`0..MATERIAL_COUNT`) per vertex.
+    pub materials: Vec<u8>,
+    /// The **global cell coordinate** each vertex came from — the seam-identity
+    /// key. Two chunks' copies of a shared vertex carry the same cell, which is
+    /// what lets a test compare them without guessing at correspondence, and what
+    /// a future stitcher would weld on.
+    pub cells: Vec<[i32; 3]>,
+    /// Triangle indices into the vertex streams (CCW when viewed from outside, so
+    /// back-face culling keeps the cave interior visible from inside it and the
+    /// rock face visible from outside).
+    pub indices: Vec<u32>,
+}
+
+impl VoxelMesh {
+    /// An empty mesh for `key` (no surface crosses this chunk's owned cells).
+    pub fn empty(key: ChunkKey) -> Self {
+        Self {
+            key,
+            ..Default::default()
+        }
+    }
+
+    /// `true` when this chunk emitted no triangles.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    /// Number of vertices.
+    #[inline]
+    pub fn vertex_count(&self) -> usize {
+        self.positions.len()
+    }
+
+    /// Number of triangles.
+    #[inline]
+    pub fn triangle_count(&self) -> usize {
+        self.indices.len() / 3
+    }
+
+    /// Vertex positions rebased into **chunk-local metres** (`f32`) — the form the
+    /// GPU wants, paired with the chunk's own `f64` world origin
+    /// ([`VoxelData::chunk_origin_world`]) as the floating-origin anchor.
+    ///
+    /// Lives here rather than in either projector precisely so the editor viewport
+    /// and the shipped player cannot disagree about it: a host that subtracted a
+    /// different base, or scaled in a different order, would draw a cave a
+    /// fraction of a voxel away from where the other host drew it, and nothing but
+    /// a screenshot comparison would ever notice.
+    pub fn local_positions_m(&self, voxel_size_m: f64) -> Vec<[f32; 3]> {
+        let b = self.key.base_sample();
+        self.positions
+            .iter()
+            .map(|p| {
+                [
+                    ((p[0] - b[0] as f64) * voxel_size_m) as f32,
+                    ((p[1] - b[1] as f64) * voxel_size_m) as f32,
+                    ((p[2] - b[2] as f64) * voxel_size_m) as f32,
+                ]
+            })
+            .collect()
+    }
+
+    /// Inclusive `(min, max)` chunk-local AABB in metres — the per-chunk frustum
+    /// cull bound. `([0;3], [0;3])` for an empty mesh.
+    pub fn local_bounds_m(&self, voxel_size_m: f64) -> ([f32; 3], [f32; 3]) {
+        let local = self.local_positions_m(voxel_size_m);
+        let Some(first) = local.first() else {
+            return ([0.0; 3], [0.0; 3]);
+        };
+        let mut lo = *first;
+        let mut hi = *first;
+        for p in &local {
+            for a in 0..3 {
+                lo[a] = lo[a].min(p[a]);
+                hi[a] = hi[a].max(p[a]);
+            }
+        }
+        (lo, hi)
+    }
+}
+
+/// Mesh one chunk's **owned** cells, reading its neighbours for the padded gather.
+///
+/// The result is a pure function of the samples in
+/// `[base − 1, base + CHUNK_DIM]³` — nothing else about `data` can reach it — so
+/// two calls with the same field produce byte-identical buffers regardless of what
+/// else is resident or in what order it arrived.
+pub fn mesh_chunk(data: &VoxelData, key: ChunkKey) -> VoxelMesh {
+    let base = key.base_sample();
+    let lo = [base[0] - 1, base[1] - 1, base[2] - 1];
+
+    // ── the padded gather ────────────────────────────────────────────────────
+    // One `BTreeMap` probe per sample would be ~5.8k lookups; the samples are
+    // walked x-fastest, and a row crosses a chunk boundary at most twice, so a
+    // one-entry memo of the current chunk collapses that to a handful.
+    let mut sdf = vec![0.0f32; PAD_SAMPLES * PAD_SAMPLES * PAD_SAMPLES];
+    let mut mat = vec![DEFAULT_MATERIAL; PAD_SAMPLES * PAD_SAMPLES * PAD_SAMPLES];
+    let mut any_solid = false;
+    let mut any_empty = false;
+    for sz in 0..PAD_SAMPLES {
+        for sy in 0..PAD_SAMPLES {
+            for sx in 0..PAD_SAMPLES {
+                let g = [lo[0] + sx as i32, lo[1] + sy as i32, lo[2] + sz as i32];
+                let v = data.sample_global(g[0], g[1], g[2]);
+                let i = block_index(sx, sy, sz);
+                sdf[i] = v;
+                mat[i] = data.material_global(g[0], g[1], g[2]);
+                if v < 0.0 {
+                    any_solid = true;
+                } else {
+                    any_empty = true;
+                }
+            }
+        }
+    }
+    // A block of one sign has no surface anywhere in it — the common case for
+    // solid rock and for open air alike.
+    if !(any_solid && any_empty) {
+        return VoxelMesh::empty(key);
+    }
+
+    // ── one vertex per active cell (owned cells plus the one-cell apron) ──────
+    let mut vert_of_cell = vec![NO_VERTEX; PAD_CELLS * PAD_CELLS * PAD_CELLS];
+    let mut mesh = VoxelMesh::empty(key);
+    for cz in 0..PAD_CELLS {
+        for cy in 0..PAD_CELLS {
+            for cx in 0..PAD_CELLS {
+                let corners = corner_indices(cx, cy, cz);
+                let s: [f64; 8] = std::array::from_fn(|m| sdf[corners[m]] as f64);
+                if !crosses(&s) {
+                    continue;
+                }
+                // The global cell coordinate. Integer arithmetic, so both sides of
+                // a seam name the same cell with the same number.
+                let cell = [lo[0] + cx as i32, lo[1] + cy as i32, lo[2] + cz as i32];
+                let offset = cell_vertex_offset(&s);
+                mesh.positions.push([
+                    cell[0] as f64 + offset[0],
+                    cell[1] as f64 + offset[1],
+                    cell[2] as f64 + offset[2],
+                ]);
+                mesh.normals.push(cell_normal(&s));
+                mesh.materials.push(cell_material(&s, &corners, &mat));
+                mesh.cells.push(cell);
+                vert_of_cell[cell_index(cx, cy, cz)] = (mesh.positions.len() - 1) as u32;
+            }
+        }
+    }
+
+    // ── one quad per owned sign-change edge ──────────────────────────────────
+    // "Owned" = the edge's minimum corner is one of this chunk's own samples,
+    // i.e. the cell at that corner is one of the CHUNK_DIM³ this chunk owns. That
+    // partitions the world's quads across chunks exactly once each.
+    for cz in 1..PAD_CELLS {
+        for cy in 1..PAD_CELLS {
+            for cx in 1..PAD_CELLS {
+                let m0 = block_index(cx, cy, cz);
+                let s0 = sdf[m0];
+                for axis in 0..3usize {
+                    let mut step = [0usize; 3];
+                    step[axis] = 1;
+                    let s1 = sdf[block_index(cx + step[0], cy + step[1], cz + step[2])];
+                    if (s0 < 0.0) == (s1 < 0.0) {
+                        continue;
+                    }
+                    // The four cells around this edge: the cell at the edge's
+                    // minimum corner, and its neighbours one step back in the two
+                    // off-axis directions.
+                    let b = (axis + 1) % 3;
+                    let c = (axis + 2) % 3;
+                    let cell = [cx, cy, cz];
+                    let at = |db: usize, dc: usize| -> u32 {
+                        let mut q = cell;
+                        q[b] -= db;
+                        q[c] -= dc;
+                        vert_of_cell[cell_index(q[0], q[1], q[2])]
+                    };
+                    let (v00, v10, v11, v01) = (at(0, 0), at(1, 0), at(1, 1), at(0, 1));
+                    if v00 == NO_VERTEX || v10 == NO_VERTEX || v11 == NO_VERTEX || v01 == NO_VERTEX
+                    {
+                        // Unreachable for a well-formed field — an edge that
+                        // changes sign makes all four surrounding cells active —
+                        // but a missing vertex must drop the quad rather than
+                        // index a sentinel into the vertex buffer.
+                        debug_assert!(false, "a sign-change edge had an inactive neighbour cell");
+                        continue;
+                    }
+                    // Traversing v00 → v10 → v11 → v01 winds CCW about +axis (the
+                    // right-hand rule over the two off-axis steps, which is why the
+                    // off-axis pair is taken cyclically). Solid at the low corner
+                    // ⇒ the surface faces +axis and that order is already outward;
+                    // otherwise it is reversed.
+                    if s0 < 0.0 {
+                        push_quad(&mut mesh.indices, v00, v10, v11, v01);
+                    } else {
+                        push_quad(&mut mesh.indices, v00, v01, v11, v10);
+                    }
+                }
+            }
+        }
+    }
+    mesh
+}
+
+/// Push a quad as two triangles, `(q0, q1, q2)` and `(q0, q2, q3)`.
+#[inline]
+fn push_quad(indices: &mut Vec<u32>, q0: u32, q1: u32, q2: u32, q3: u32) {
+    indices.extend_from_slice(&[q0, q1, q2, q0, q2, q3]);
+}
+
+/// Index of padded-block sample `(sx, sy, sz)`.
+#[inline]
+fn block_index(sx: usize, sy: usize, sz: usize) -> usize {
+    (sz * PAD_SAMPLES + sy) * PAD_SAMPLES + sx
+}
+
+/// Index of padded-block cell `(cx, cy, cz)`.
+#[inline]
+fn cell_index(cx: usize, cy: usize, cz: usize) -> usize {
+    (cz * PAD_CELLS + cy) * PAD_CELLS + cx
+}
+
+/// Block-sample indices of a cell's eight corners, indexed
+/// `m = dx + 2·dy + 4·dz`.
+#[inline]
+fn corner_indices(cx: usize, cy: usize, cz: usize) -> [usize; 8] {
+    std::array::from_fn(|m| block_index(cx + (m & 1), cy + ((m >> 1) & 1), cz + ((m >> 2) & 1)))
+}
+
+/// The twelve cube edges as `(low corner, high corner, axis)`, in a fixed order
+/// (axis-major, then corner index) so the crossing average is accumulated the same
+/// way every time.
+const EDGES: [(usize, usize, usize); 12] = [
+    (0, 1, 0),
+    (2, 3, 0),
+    (4, 5, 0),
+    (6, 7, 0),
+    (0, 2, 1),
+    (1, 3, 1),
+    (4, 6, 1),
+    (5, 7, 1),
+    (0, 4, 2),
+    (1, 5, 2),
+    (2, 6, 2),
+    (3, 7, 2),
+];
+
+/// Whether a cell's corners straddle the surface.
+#[inline]
+fn crosses(s: &[f64; 8]) -> bool {
+    let first = s[0] < 0.0;
+    s.iter().any(|&v| (v < 0.0) != first)
+}
+
+/// The vertex offset inside a cell's own `[0, 1]³` frame: the mean of the
+/// sign-change edge crossings.
+///
+/// Accumulated over [`EDGES`] in order and divided once, so the value is a pure,
+/// order-fixed function of the eight corner distances — which is what makes two
+/// chunks' copies of a seam vertex bit-identical.
+fn cell_vertex_offset(s: &[f64; 8]) -> [f64; 3] {
+    let mut sum = [0.0f64; 3];
+    let mut count = 0.0f64;
+    for &(a, b, axis) in &EDGES {
+        let (sa, sb) = (s[a], s[b]);
+        if (sa < 0.0) == (sb < 0.0) {
+            continue;
+        }
+        // The crossing parameter along the edge. `sa - sb` cannot be zero here:
+        // the two have different signs, and a zero is classified as "not solid",
+        // so `sa == sb` would put them on the same side.
+        let t = sa / (sa - sb);
+        for (axis_i, out) in sum.iter_mut().enumerate() {
+            let da = ((a >> axis_i) & 1) as f64;
+            *out += if axis_i == axis {
+                da + t * (1.0 - 2.0 * da)
+            } else {
+                da
+            };
+        }
+        count += 1.0;
+    }
+    if count == 0.0 {
+        return [0.5, 0.5, 0.5];
+    }
+    [sum[0] / count, sum[1] / count, sum[2] / count]
+}
+
+/// The outward unit normal at a cell's vertex.
+///
+/// The **central difference over the cell's own eight corners** — which is exactly
+/// the gradient of the cell's trilinear interpolant, averaged over the cell. A
+/// six-tap central difference at the vertex position would need a two-voxel apron
+/// (a `±½`-voxel probe reads one sample further out in each direction) and buys
+/// nothing at this resolution: the field is a clamped band, so the extra reach
+/// samples saturated values more often than it samples signal.
+///
+/// The SDF is negative inside solid, so the gradient already points *out* of the
+/// surface — no negation. A degenerate (zero) gradient falls back to `+Y`, which
+/// is a visible-but-harmless choice rather than a `NaN` that would poison every
+/// lighting term downstream.
+fn cell_normal(s: &[f64; 8]) -> [f32; 3] {
+    let mut g = [0.0f64; 3];
+    for (axis, out) in g.iter_mut().enumerate() {
+        let bit = 1usize << axis;
+        let mut acc = 0.0;
+        for m in 0..8usize {
+            if m & bit == 0 {
+                acc += s[m | bit] - s[m];
+            }
+        }
+        *out = acc / 4.0;
+    }
+    let len = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+    if !(len.is_finite() && len > 0.0) {
+        return [0.0, 1.0, 0.0];
+    }
+    [
+        (g[0] / len) as f32,
+        (g[1] / len) as f32,
+        (g[2] / len) as f32,
+    ]
+}
+
+/// The material a cell's vertex carries: the material of its **most solid**
+/// corner (smallest signed distance), ties broken by the lowest corner index.
+///
+/// "Most solid" rather than "majority" because a vertex sits on the surface of the
+/// material that is actually there — a single voxel of ore poking into a wall
+/// should read as ore at the point it pokes through, not be outvoted by the rock
+/// around it. Deterministic either way, which is the requirement.
+fn cell_material(s: &[f64; 8], corners: &[usize; 8], mat: &[u8]) -> u8 {
+    let mut best: Option<(f64, u8)> = None;
+    for m in 0..8usize {
+        if s[m] >= 0.0 {
+            continue;
+        }
+        let material = mat[corners[m]];
+        match best {
+            Some((d, _)) if s[m] >= d => {}
+            _ => best = Some((s[m], material)),
+        }
+    }
+    best.map(|(_, m)| m).unwrap_or(DEFAULT_MATERIAL)
+}
+
+// ── volume-level meshing ────────────────────────────────────────────────────
+
+/// Every chunk key that must be meshed to cover a volume's surface: the resident
+/// set **closed downward by one chunk on each axis**.
+///
+/// The closure is not defensive padding, it is a correctness requirement. A cell
+/// owned by chunk `K` has corners in `K` *and* in `K + 1`, so a cell whose only
+/// solid corner lies in `K + 1` still belongs to `K` — and if `K` is not resident
+/// (an author carved a tunnel that stops exactly on a boundary, so the air-side
+/// chunk was never materialized) that surface would simply be missing. Adding the
+/// eight `K − {0,1}³` keys of every resident chunk covers it; the extra keys
+/// almost always mesh to nothing and cost one uniform-sign early-out each.
+pub fn mesh_keys_for(data: &VoxelData) -> BTreeSet<ChunkKey> {
+    let mut out = BTreeSet::new();
+    for &key in data.chunks().map(|(k, _)| k) {
+        for dz in 0..2 {
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    out.insert(key.offset(-dx, -dy, -dz));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The change stamp a chunk's **mesh** depends on: the greatest stamp in the
+/// 3×3×3 chunk neighbourhood its padded gather can read.
+///
+/// A mesh is a function of its neighbours as well as itself, so gating a re-mesh
+/// on the chunk's own stamp alone would leave a stale seam every time the
+/// neighbour was the one that was carved. Stamps are process-globally monotone, so
+/// a max over the neighbourhood strictly increases whenever anything the mesh can
+/// see changes, and is stable otherwise — which is exactly the invalidation key a
+/// GPU buffer cache wants. `0` means nothing in the neighbourhood is resident.
+pub fn source_version(data: &VoxelData, key: ChunkKey) -> u64 {
+    let mut v = 0;
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                v = v.max(data.chunk_version(key.offset(dx, dy, dz)));
+            }
+        }
+    }
+    v
+}
+
+/// What one [`VoxelMeshCache::sync`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MeshSyncReport {
+    /// Chunks re-meshed because something in their neighbourhood changed.
+    pub remeshed: Vec<ChunkKey>,
+    /// Cached meshes dropped because their chunk left the volume.
+    pub dropped: Vec<ChunkKey>,
+    /// Cached meshes that were already current.
+    pub unchanged: usize,
+}
+
+impl MeshSyncReport {
+    /// `true` when nothing was re-meshed or dropped.
+    pub fn is_noop(&self) -> bool {
+        self.remeshed.is_empty() && self.dropped.is_empty()
+    }
+}
+
+/// A volume's meshed surface, re-meshed only where the field actually moved.
+///
+/// The CPU half of what a renderer needs. Both projectors hold one of these per
+/// volume, [`sync`](Self::sync) it against the resident chunks, and hand the
+/// non-empty meshes over — so a static cave costs one mesh pass and then nothing,
+/// and a carve costs exactly the chunks whose neighbourhood the carve reached.
+#[derive(Debug, Clone, Default)]
+pub struct VoxelMeshCache {
+    meshes: BTreeMap<ChunkKey, (u64, VoxelMesh)>,
+}
+
+impl VoxelMeshCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Re-mesh whatever `data` says has changed, drop whatever left.
+    ///
+    /// Empty meshes are **kept in the cache** (they cost a key and two empty
+    /// vectors) so an air chunk beside a wall is not re-meshed every frame just to
+    /// discover it is still empty; [`meshes`](Self::meshes) skips them, so nothing
+    /// downstream ever sees one.
+    pub fn sync(&mut self, data: &VoxelData) -> MeshSyncReport {
+        let wants = mesh_keys_for(data);
+        let mut report = MeshSyncReport::default();
+
+        for key in self.meshes.keys().copied().collect::<Vec<_>>() {
+            if !wants.contains(&key) {
+                self.meshes.remove(&key);
+                report.dropped.push(key);
+            }
+        }
+        for key in wants {
+            let version = source_version(data, key);
+            if self.meshes.get(&key).map(|(v, _)| *v) == Some(version) {
+                report.unchanged += 1;
+                continue;
+            }
+            self.meshes.insert(key, (version, mesh_chunk(data, key)));
+            report.remeshed.push(key);
+        }
+        report
+    }
+
+    /// The **non-empty** meshes, ascending by key (a deterministic draw order).
+    pub fn meshes(&self) -> impl Iterator<Item = (&ChunkKey, &VoxelMesh)> {
+        self.meshes
+            .iter()
+            .filter(|(_, (_, m))| !m.is_empty())
+            .map(|(k, (_, m))| (k, m))
+    }
+
+    /// The stamp a cached mesh was built at (`0` when not cached) — the value a
+    /// GPU buffer cache gates its upload on.
+    pub fn version(&self, key: ChunkKey) -> u64 {
+        self.meshes.get(&key).map(|(v, _)| *v).unwrap_or(0)
+    }
+
+    /// A cached mesh, empty ones included.
+    pub fn get(&self, key: ChunkKey) -> Option<&VoxelMesh> {
+        self.meshes.get(&key).map(|(_, m)| m)
+    }
+
+    /// Total triangles across the non-empty meshes.
+    pub fn triangle_count(&self) -> usize {
+        self.meshes().map(|(_, m)| m.triangle_count()).sum()
+    }
+
+    /// Cached entries, empty meshes included.
+    pub fn len(&self) -> usize {
+        self.meshes.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.meshes.is_empty()
+    }
+
+    /// Drop everything.
+    pub fn clear(&mut self) {
+        self.meshes.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::VoxelChunk;
+    use crate::residency::chunk_range;
+    use glam::DVec3;
+
+    /// A ball of radius `r` voxels centred on global sample `c`, materialized
+    /// over the chunk box `[min, max]`.
+    fn ball_volume(min: ChunkKey, max: ChunkKey, c: DVec3, r: f64) -> VoxelData {
+        let mut v = VoxelData::new(0.5);
+        for key in chunk_range(min, max) {
+            let b = key.base_sample();
+            v.insert_chunk(
+                key,
+                VoxelChunk::from_fn(|i, j, k| {
+                    DVec3::new(
+                        (b[0] + i as i32) as f64,
+                        (b[1] + j as i32) as f64,
+                        (b[2] + k as i32) as f64,
+                    )
+                    .distance(c)
+                        - r
+                }),
+            );
+        }
+        v.clear_dirty();
+        v
+    }
+
+    /// The batch's flagship shape: a solid slab with a horizontal tunnel bored
+    /// through it — an overhang no heightfield can represent.
+    fn tunnelled_slab() -> VoxelData {
+        let mut v = VoxelData::new(0.5);
+        for key in chunk_range(ChunkKey::new(0, 0, 0), ChunkKey::new(2, 0, 0)) {
+            let b = key.base_sample();
+            v.insert_chunk(
+                key,
+                VoxelChunk::from_fn(|i, j, k| {
+                    let g = DVec3::new(
+                        (b[0] + i as i32) as f64,
+                        (b[1] + j as i32) as f64,
+                        (b[2] + k as i32) as f64,
+                    );
+                    // Solid everywhere …
+                    let solid = -4.0f64;
+                    // … minus a cylinder along x at (y, z) = (8, 8), radius 4.
+                    let tube = 4.0 - ((g.y - 8.0).powi(2) + (g.z - 8.0).powi(2)).sqrt();
+                    solid.max(tube)
+                }),
+            );
+        }
+        v.clear_dirty();
+        v
+    }
+
+    #[test]
+    fn a_uniform_block_meshes_to_nothing() {
+        let mut air = VoxelData::new(0.5);
+        air.insert_chunk(ChunkKey::new(0, 0, 0), VoxelChunk::empty());
+        let m = mesh_chunk(&air, ChunkKey::new(0, 0, 0));
+        assert!(m.is_empty());
+        assert_eq!(m.vertex_count(), 0);
+        assert_eq!(m.key, ChunkKey::new(0, 0, 0));
+
+        // Solid rock surrounded by solid rock likewise has no surface in it.
+        let mut rock = VoxelData::new(0.5);
+        for key in chunk_range(ChunkKey::new(-1, -1, -1), ChunkKey::new(1, 1, 1)) {
+            rock.insert_chunk(key, VoxelChunk::solid(0));
+        }
+        assert!(mesh_chunk(&rock, ChunkKey::new(0, 0, 0)).is_empty());
+    }
+
+    /// **Determinism, twice over**: meshing the same field twice is
+    /// byte-identical, and so is meshing a volume whose chunks were inserted in
+    /// the opposite order. The second is the one that catches an accidental
+    /// `HashMap` or an iteration that leaked insertion order into the output.
+    #[test]
+    fn meshing_is_bit_identical_across_runs_and_insertion_orders() {
+        let v = tunnelled_slab();
+        let key = ChunkKey::new(1, 0, 0);
+        let a = mesh_chunk(&v, key);
+        let b = mesh_chunk(&v, key);
+        assert!(!a.is_empty(), "the fixture must actually produce a surface");
+        assert_eq!(a, b, "two runs over one field must be identical");
+
+        let mut reversed = VoxelData::new(v.voxel_size_m());
+        for (&k, c) in v.chunks().collect::<Vec<_>>().into_iter().rev() {
+            reversed.insert_chunk(k, c.clone());
+        }
+        assert_eq!(
+            mesh_chunk(&reversed, key),
+            a,
+            "chunk insertion order reached the mesh — something is iterating a hash"
+        );
+
+        // And the whole-volume walk agrees, key for key.
+        let mut c1 = VoxelMeshCache::new();
+        let mut c2 = VoxelMeshCache::new();
+        c1.sync(&v);
+        c2.sync(&reversed);
+        let m1: Vec<_> = c1.meshes().map(|(k, m)| (*k, m.clone())).collect();
+        let m2: Vec<_> = c2.meshes().map(|(k, m)| (*k, m.clone())).collect();
+        assert_eq!(m1, m2);
+        assert!(!m1.is_empty());
+    }
+
+    /// **THE WATERTIGHT GATE.** Two adjacent chunks both compute the vertices of
+    /// the cells in their shared apron. Those copies must be **bit-identical** —
+    /// not close, identical — or the seam is a crack, which is the exact bug ~10%
+    /// of P18's meshes shipped with.
+    ///
+    /// Checked on all three axes, and on a field that genuinely crosses every
+    /// boundary (a ball big enough to span the whole 3×3×3 box).
+    #[test]
+    fn seam_vertices_are_bit_identical_from_both_sides() {
+        // Radius 10 about the centre chunk's middle: the sphere's SURFACE crosses
+        // the x = 15, y = 15 and z = 15 boundary planes (cross-section radius
+        // √(100 − 49) ≈ 7.1 there) as well as the x = y = 15 edge, so every
+        // neighbour below shares a genuinely *active* apron. A radius that merely
+        // swallowed the chunk would leave it entirely interior and the gate
+        // vacuous — which is exactly what the `shared > 0` assertions catch.
+        let v = ball_volume(
+            ChunkKey::new(-1, -1, -1),
+            ChunkKey::new(1, 1, 1),
+            DVec3::splat(8.0),
+            10.0,
+        );
+        let center = ChunkKey::new(0, 0, 0);
+        let mine = mesh_chunk(&v, center);
+        assert!(!mine.is_empty());
+
+        let by_cell = |m: &VoxelMesh| -> BTreeMap<[i32; 3], ([f64; 3], [f32; 3], u8)> {
+            m.cells
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| (c, (m.positions[i], m.normals[i], m.materials[i])))
+                .collect()
+        };
+        let ours = by_cell(&mine);
+
+        let mut shared_total = 0usize;
+        // The three face neighbours (a whole plane of shared apron cells) and one
+        // edge neighbour (a line of them). The corner neighbour (1,1,1) shares
+        // exactly ONE cell, whose activity is a property of the fixture rather
+        // than of the seam policy, so it is deliberately not asserted here.
+        for (dx, dy, dz) in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)] {
+            let neighbour = center.offset(dx, dy, dz);
+            let theirs = by_cell(&mesh_chunk(&v, neighbour));
+            let mut shared = 0usize;
+            for (cell, mine_v) in &ours {
+                let Some(their_v) = theirs.get(cell) else {
+                    continue;
+                };
+                shared += 1;
+                assert_eq!(
+                    mine_v.0, their_v.0,
+                    "cell {cell:?} got position {:?} from {center:?} and {:?} from \
+                     {neighbour:?} — the seam is a crack",
+                    mine_v.0, their_v.0
+                );
+                assert_eq!(mine_v.1, their_v.1, "cell {cell:?} normals disagree");
+                assert_eq!(mine_v.2, their_v.2, "cell {cell:?} materials disagree");
+            }
+            assert!(
+                shared > 0,
+                "{center:?} and {neighbour:?} shared no apron cells — the gate is vacuous"
+            );
+            shared_total += shared;
+        }
+        assert!(shared_total > 40, "only {shared_total} shared cells");
+    }
+
+    /// The other half of watertightness: **every quad is emitted exactly once**.
+    /// Cells are partitioned across chunks, so no grid edge may be claimed twice
+    /// (which would double-draw and z-fight) or skipped (a hole).
+    #[test]
+    fn every_surface_edge_is_claimed_by_exactly_one_chunk() {
+        let v = ball_volume(
+            ChunkKey::new(-1, -1, -1),
+            ChunkKey::new(1, 1, 1),
+            DVec3::splat(8.0),
+            14.0,
+        );
+        // Count, per global cell, how many chunks emitted a quad whose FIRST
+        // triangle starts at that cell's vertex — i.e. how many chunks claimed the
+        // edge at that cell's minimum corner.
+        let mut claims: BTreeMap<([i32; 3], usize), usize> = BTreeMap::new();
+        for key in mesh_keys_for(&v) {
+            let m = mesh_chunk(&v, key);
+            // Recover each quad's owning cell from its first index (the quad is
+            // pushed as q0,q1,q2,q0,q2,q3, and q0 IS the owning cell's vertex).
+            for (n, tri) in m.indices.chunks_exact(6).enumerate() {
+                let cell = m.cells[tri[0] as usize];
+                *claims.entry((cell, n % 3)).or_insert(0) += 1;
+            }
+        }
+        assert!(!claims.is_empty());
+        // Every claim must be unique. (The `n % 3` disambiguator is only a
+        // best-effort per-cell axis tag; what matters is that no (cell, slot) is
+        // claimed twice, which would mean two chunks emitted the same quad.)
+        let doubled: Vec<_> = claims.iter().filter(|(_, &c)| c > 1).collect();
+        assert!(
+            doubled.is_empty(),
+            "{} quads were emitted by more than one chunk: {:?}",
+            doubled.len(),
+            &doubled[..doubled.len().min(5)]
+        );
+    }
+
+    /// Every index is in range and every triangle is non-degenerate — the
+    /// "nothing indexes the `NO_VERTEX` sentinel" gate.
+    #[test]
+    fn indices_are_in_range_and_triangles_are_real() {
+        let v = tunnelled_slab();
+        for key in mesh_keys_for(&v) {
+            let m = mesh_chunk(&v, key);
+            assert_eq!(m.indices.len() % 3, 0, "{key:?}");
+            assert_eq!(m.positions.len(), m.normals.len());
+            assert_eq!(m.positions.len(), m.materials.len());
+            assert_eq!(m.positions.len(), m.cells.len());
+            for &i in &m.indices {
+                assert!(
+                    (i as usize) < m.positions.len(),
+                    "{key:?} index {i} past {} vertices",
+                    m.positions.len()
+                );
+            }
+            for tri in m.indices.chunks_exact(3) {
+                assert!(
+                    tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2],
+                    "{key:?} emitted a degenerate triangle {tri:?}"
+                );
+            }
+            for n in &m.normals {
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                assert!((len - 1.0).abs() < 1e-3, "{key:?} normal {n:?} is not unit");
+            }
+        }
+    }
+
+    /// Winding is **outward**: a triangle's geometric normal must agree with the
+    /// SDF gradient its vertices carry, or every face of every cave would be
+    /// back-face culled and the world would look inside out.
+    #[test]
+    fn triangle_winding_faces_outward() {
+        let v = ball_volume(
+            ChunkKey::new(-1, -1, -1),
+            ChunkKey::new(1, 1, 1),
+            DVec3::splat(8.0),
+            10.0,
+        );
+        let mut checked = 0usize;
+        for key in mesh_keys_for(&v) {
+            let m = mesh_chunk(&v, key);
+            for tri in m.indices.chunks_exact(3) {
+                let p: Vec<DVec3> = tri
+                    .iter()
+                    .map(|&i| DVec3::from_array(m.positions[i as usize]))
+                    .collect();
+                let geo = (p[1] - p[0]).cross(p[2] - p[0]);
+                if geo.length() < 1e-9 {
+                    continue;
+                }
+                let shading: DVec3 = tri
+                    .iter()
+                    .map(|&i| {
+                        let n = m.normals[i as usize];
+                        DVec3::new(n[0] as f64, n[1] as f64, n[2] as f64)
+                    })
+                    .sum();
+                assert!(
+                    geo.normalize().dot(shading.normalize()) > 0.0,
+                    "{key:?} wound a triangle inward: geometric {:?} vs shading {:?}",
+                    geo.normalize(),
+                    shading.normalize()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 500, "only {checked} triangles checked");
+    }
+
+    /// A tunnel bored through a slab produces surface with normals pointing in
+    /// **every** direction — the property a heightfield cannot have, and the one
+    /// this whole phase exists for.
+    #[test]
+    fn a_tunnel_produces_an_overhang_a_heightfield_cannot() {
+        let v = tunnelled_slab();
+        let mut cache = VoxelMeshCache::new();
+        let r = cache.sync(&v);
+        assert!(!r.remeshed.is_empty());
+        assert!(cache.triangle_count() > 500, "{}", cache.triangle_count());
+
+        let mut up = 0usize;
+        let mut down = 0usize;
+        for (_, m) in cache.meshes() {
+            for n in &m.normals {
+                if n[1] > 0.7 {
+                    up += 1;
+                }
+                if n[1] < -0.7 {
+                    down += 1;
+                }
+            }
+        }
+        assert!(
+            up > 20 && down > 20,
+            "a bored tunnel must have both a floor ({up} up-facing) and a ROOF \
+             ({down} down-facing) — a heightfield has only the former"
+        );
+    }
+
+    /// Materials come out of the field, per vertex, from the most-solid corner.
+    #[test]
+    fn vertex_materials_follow_the_most_solid_corner() {
+        let mut v = ball_volume(
+            ChunkKey::new(0, 0, 0),
+            ChunkKey::new(0, 0, 0),
+            DVec3::splat(8.0),
+            5.0,
+        );
+        // Paint the whole ball chunk material 2.
+        {
+            let c = v.get_chunk_mut(ChunkKey::new(0, 0, 0)).unwrap();
+            for k in 0..CHUNK_DIM {
+                for j in 0..CHUNK_DIM {
+                    for i in 0..CHUNK_DIM {
+                        c.set_material(i, j, k, 2);
+                    }
+                }
+            }
+        }
+        let m = mesh_chunk(&v, ChunkKey::new(0, 0, 0));
+        assert!(!m.is_empty());
+        assert!(
+            m.materials.iter().all(|&x| x == 2),
+            "a uniformly-painted ball must mesh to one material"
+        );
+    }
+
+    /// The mesh set is the resident set **closed downward**, because a cell owned
+    /// by a non-resident chunk can still be the only place a surface appears.
+    #[test]
+    fn the_mesh_set_closes_the_resident_set_downward() {
+        let mut v = VoxelData::new(0.5);
+        v.insert_chunk(ChunkKey::new(0, 0, 0), VoxelChunk::solid(0));
+        let keys = mesh_keys_for(&v);
+        assert_eq!(keys.len(), 8);
+        for dz in 0..2 {
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    assert!(keys.contains(&ChunkKey::new(-dx, -dy, -dz)));
+                }
+            }
+        }
+        // …and the closure earns its keep. The −x face of a lone solid chunk lies
+        // on the edges whose minimum corner is global sample (−1, y, z), so the
+        // cells that own those edges are (−1, y, z) — owned by the **absent**
+        // chunk (−1, 0, 0). Without the downward closure that whole face would
+        // simply not be meshed by anyone.
+        assert!(
+            !mesh_chunk(&v, ChunkKey::new(-1, 0, 0)).is_empty(),
+            "the −x face would be missing without the downward closure"
+        );
+        assert!(
+            !mesh_chunk(&v, ChunkKey::new(0, -1, 0)).is_empty(),
+            "−y face"
+        );
+        assert!(
+            !mesh_chunk(&v, ChunkKey::new(0, 0, -1)).is_empty(),
+            "−z face"
+        );
+        // The chunk itself owns the three + faces, so it is not empty either.
+        assert!(!mesh_chunk(&v, ChunkKey::new(0, 0, 0)).is_empty());
+    }
+
+    /// The cache re-meshes exactly what moved, and nothing else.
+    #[test]
+    fn the_cache_remeshes_only_what_the_carve_reached() {
+        let mut v = tunnelled_slab();
+        let mut cache = VoxelMeshCache::new();
+        let first = cache.sync(&v);
+        assert!(first.remeshed.len() >= v.chunk_count());
+        assert_eq!(first.unchanged, 0);
+        let tris = cache.triangle_count();
+        assert!(tris > 0);
+
+        // A second sync with nothing changed is a no-op …
+        let again = cache.sync(&v);
+        assert!(again.is_noop(), "{again:?}");
+        assert_eq!(again.unchanged, cache.len());
+        assert_eq!(cache.triangle_count(), tris);
+
+        // … and touching ONE chunk re-meshes only its 3×3×3 neighbourhood.
+        let touched = ChunkKey::new(1, 0, 0);
+        v.get_chunk_mut(touched).unwrap().set_sample(8, 8, 8, -4.0);
+        let after = cache.sync(&v);
+        assert!(!after.remeshed.is_empty());
+        for &k in &after.remeshed {
+            let d = [
+                (k.x - touched.x).abs(),
+                (k.y - touched.y).abs(),
+                (k.z - touched.z).abs(),
+            ];
+            assert!(
+                d[0] <= 1 && d[1] <= 1 && d[2] <= 1,
+                "{k:?} re-meshed but cannot see {touched:?}"
+            );
+        }
+
+        // Removing a chunk drops the meshes that are no longer wanted.
+        let before_len = cache.len();
+        for k in v.resident_keys() {
+            v.remove_chunk(k);
+        }
+        let empty = cache.sync(&v);
+        assert_eq!(empty.dropped.len(), before_len);
+        assert!(cache.is_empty());
+        assert_eq!(cache.triangle_count(), 0);
+        cache.clear();
+        assert_eq!(cache.version(touched), 0);
+        assert!(cache.get(touched).is_none());
+    }
+
+    /// The shared rebase helper both projectors use: chunk-local metres, with the
+    /// chunk's `f64` world origin carrying the rest.
+    #[test]
+    fn local_positions_rebase_into_chunk_local_metres() {
+        let v = tunnelled_slab();
+        let key = ChunkKey::new(1, 0, 0);
+        let m = mesh_chunk(&v, key);
+        assert!(!m.is_empty());
+        let local = m.local_positions_m(0.5);
+        assert_eq!(local.len(), m.vertex_count());
+        let base = key.base_sample();
+        for (i, l) in local.iter().enumerate() {
+            for a in 0..3 {
+                let want = ((m.positions[i][a] - base[a] as f64) * 0.5) as f32;
+                assert_eq!(l[a], want);
+            }
+        }
+        let (lo, hi) = m.local_bounds_m(0.5);
+        for a in 0..3 {
+            assert!(lo[a] <= hi[a]);
+            for l in &local {
+                assert!(l[a] >= lo[a] && l[a] <= hi[a]);
+            }
+        }
+        // The apron reaches at most one voxel outside the chunk's own span.
+        let span = CHUNK_DIM as f32 * 0.5;
+        assert!(
+            lo[0] >= -0.5 - 1e-4 && hi[0] <= span + 0.5 + 1e-4,
+            "{lo:?} {hi:?}"
+        );
+        assert_eq!(
+            VoxelMesh::empty(key).local_bounds_m(0.5),
+            ([0.0; 3], [0.0; 3])
+        );
+    }
+}

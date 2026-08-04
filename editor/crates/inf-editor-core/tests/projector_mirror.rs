@@ -1018,3 +1018,165 @@ fn both_projectors_project_water_the_same_way() {
         );
     }
 }
+
+// ── P21.1: the volumetric-terrain (`VoxelVolume`) projection ─────────────────
+
+/// **The P21.1 mirror gate.** `project_voxel` is a self-contained free function on
+/// both sides — like `project_sky` and `project_water` — so nothing weaker than
+/// character-for-character equality is called for.
+///
+/// The divergence this catches is one a player finds and a compiler cannot: a cave
+/// whose walls sit a fraction of a voxel from where the preview drew them, or
+/// whose rock shades a different colour than the hillside it opens out of. Voxel
+/// surface is worse than most content for this, because none of it is authored
+/// directly — every vertex is *derived* from a field, so two plausible derivations
+/// can differ everywhere while agreeing about the level.
+#[test]
+fn project_voxel_is_identical_in_both_projectors() {
+    let mine = extract_fn(&read(VIEWPORT), "project_voxel");
+    let theirs = extract_fn(&read(PLAYER), "project_voxel");
+    assert_eq!(
+        mine, theirs,
+        "the two `project_voxel` projectors have drifted — PIE would stop matching \
+         shipping. Keep them byte-identical, or move the shared part into \
+         `inf-voxel` (which is where the mesher, the chunk store and the \
+         chunk-local rebase already live)."
+    );
+}
+
+/// A guard on the guard: two stubs are identical too. The shared body has to do
+/// the work — rebase through the Ring-0 helper, take the scale from the asset,
+/// take the palette from the terrain on the same entity, and refuse to emit an
+/// empty volume.
+#[test]
+fn the_shared_voxel_projector_is_not_a_stub() {
+    let body = extract_fn(&read(PLAYER), "project_voxel");
+    for fragment in [
+        // The scale comes from the ASSET, not from the component. A host that read
+        // `volume.voxel_size_m` here would scale vertices against origins derived
+        // from the asset's and tear the volume apart — and it would look fine in
+        // every level where the two happen to agree, which is most of them.
+        "let voxel_size_m = slot.data.voxel_size_m();",
+        // The chunk-local rebase is the ONE shared Ring-0 helper. A host that
+        // subtracted its own base, or scaled in a different order, would draw a
+        // cave a fraction of a voxel from where the other host drew it.
+        ".local_positions_m(voxel_size_m)",
+        "bounds: mesh.local_bounds_m(voxel_size_m),",
+        // The f64 world anchor + the entity transform (the floating-origin split).
+        "origin: slot.data.chunk_origin_world(key) + translation,",
+        // Only the NON-EMPTY meshes reach the renderer, in the cache's ascending
+        // key order (a deterministic draw order per side).
+        ".meshes()",
+        // The GPU cache's invalidation key, which is the mesh's neighbourhood
+        // stamp — NOT the chunk's own, or a carve in the neighbour would leave a
+        // stale seam on screen forever.
+        "version: slot.meshes.version(key),",
+        // A material index is categorical and is the TERRAIN splat index.
+        "material: mesh.materials[i] as u32,",
+        "albedo: t.layers[k].albedo.to_array(),",
+        "None => RenderTerrainLayer::default(),",
+        // Nothing empty reaches the renderer — that is what keeps the voxel pass
+        // off the command encoder on every scene that has no caves.
+        "if chunks.is_empty() {",
+        "return None;",
+    ] {
+        assert!(
+            body.contains(fragment),
+            "`project_voxel` no longer contains `{fragment}` — either it was \
+             gutted, or this gate needs updating deliberately:\n{body}"
+        );
+    }
+}
+
+/// The surrounding *rules* — not just the shared body — must hold on both sides:
+/// the list is rebuilt from scratch, the palette comes from the `Terrain` on the
+/// same entity, the volume's identity is the shared entity fold, and **neither
+/// host meshes inside its projection**.
+#[test]
+fn both_projectors_project_voxel_volumes_the_same_way() {
+    const SHARED: [&str; 6] = [
+        // Rebuilt every projection, like `terrains`.
+        "scene.voxels.clear()",
+        // The branch itself.
+        "w.get::<VoxelVolume>(entity)",
+        // The palette is the Terrain on THIS SAME entity — composition, not a
+        // reference, so there is no cook edge and nothing to dangle.
+        "w.get::<Terrain>(entity),",
+        // Identity is the shared entity fold, so a PIE-vs-shipping diff matches
+        // volumes up by identity rather than by position in a list.
+        "inf_render::terrain_id_from_guid(guid.as_u128()),",
+        // Both go through the SAME Ring-0 slot type, which is what owns parsing,
+        // residency and meshing.
+        "inf_voxel::VolumeSlot",
+        "project_voxel(",
+    ];
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let src = read(path).replace("\r\n", "\n");
+        for fragment in SHARED {
+            assert!(
+                src.contains(fragment),
+                "the {label}'s voxel projection no longer contains `{fragment}` — \
+                 either the voxel path was changed on one side only, or this gate \
+                 needs updating deliberately"
+            );
+        }
+        // Neither host may re-mesh inside the projection: meshing is a `&mut` act
+        // that belongs to the store's sync step, and a host that called the mesher
+        // per frame would burn a chunk's whole cell walk on geometry that did not
+        // move — and could disagree with the other host about *when* it meshed,
+        // which is exactly the class of drift this file exists to stop.
+        let region = branch_region(&src, "w.get::<VoxelVolume>(entity)", "project_voxel(");
+        for banned in ["mesh_chunk(", "VoxelMeshCache::new()", ".meshes.sync("] {
+            assert!(
+                !region.contains(banned),
+                "the {label}'s voxel branch calls `{banned}` — meshing belongs to \
+                 the store's sync step, never to the projection:\n{region}"
+            );
+        }
+    }
+}
+
+/// **The store is the shared half, and it must stay shared.** Both hosts resolve
+/// bytes their own way (a loose file under the content root; a pack entry) and
+/// then hand them to the *same* Ring-0 `inf_voxel::VoxelVolumes`. A host that grew
+/// its own parser, its own residency or its own mesh cache would be free to
+/// disagree about every vertex in the world — and, unlike a projection, nothing
+/// about that would be visible in a source diff of the two projectors.
+#[test]
+fn both_hosts_load_voxel_volumes_through_the_ring_zero_store() {
+    for (label, path, own_store) in [
+        (
+            "editor viewport",
+            VIEWPORT,
+            "inf_editor_core::voxel_store::EditorVoxelVolumes",
+        ),
+        ("shipped player", PLAYER, "inf_voxel::VoxelVolumes"),
+    ] {
+        let src = read(path).replace("\r\n", "\n");
+        assert!(
+            src.contains(own_store),
+            "the {label} no longer holds a voxel store ({own_store})"
+        );
+        // …and it releases what the projection stopped drawing. A loaded volume is
+        // its whole decoded chunk set plus its meshed surface — real megabytes held
+        // on behalf of an entity that may have been deleted.
+        assert!(
+            src.contains("retain_only"),
+            "the {label} never releases dead voxel volumes"
+        );
+    }
+    // The editor's Ring-1 store is a *resolver*, not a second implementation: it
+    // must delegate to the Ring-0 one rather than parse or mesh a payload itself.
+    let store = read("editor/crates/inf-editor-core/src/voxel_store.rs").replace("\r\n", "\n");
+    assert!(
+        store.contains("VoxelVolumes"),
+        "the editor store is not backed by the Ring-0 one"
+    );
+    for banned in ["VoxelAssetReader", "mesh_chunk", "VoxelMeshCache"] {
+        assert!(
+            !store.contains(banned),
+            "the editor's voxel store names `{banned}` — parsing and meshing belong \
+             to `inf_voxel::VoxelVolumes`, which is what makes the two hosts agree"
+        );
+    }
+}

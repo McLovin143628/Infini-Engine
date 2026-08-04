@@ -14,6 +14,7 @@ members = [
     "crates/inf-vgeom",
     "crates/inf-material",
     "crates/inf-terrain",
+    "crates/inf-voxel",
     "crates/inf-water",
     "crates/inf-pcg",
     "crates/inf-physics",
@@ -321,6 +322,11 @@ inf-mesh = { path = "crates/inf-mesh" }
 inf-vgeom = { path = "crates/inf-vgeom" }
 inf-material = { path = "crates/inf-material" }
 inf-terrain = { path = "crates/inf-terrain" }
+# inf-voxel = the sparse SDF chunk volumes that locally extend the heightfield
+# (P21.1). Ring 0, and deliberately dependency-light: glam + serde + bincode +
+# thiserror + inf-math + inf-asset, every one of them already pinned above, so
+# volumetric terrain adds NO new external crate to the tree or to cargo-deny.
+inf-voxel = { path = "crates/inf-voxel" }
 inf-water = { path = "crates/inf-water" }
 inf-pcg = { path = "crates/inf-pcg" }
 inf-physics = { path = "crates/inf-physics" }

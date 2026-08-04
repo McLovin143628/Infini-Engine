@@ -50,6 +50,17 @@ pub enum CookError {
     #[error("terrain {guid}: {message}")]
     Terrain { guid: AssetId, message: String },
 
+    /// A `.inf_voxel` failed its structural check at cook (P21.1).
+    ///
+    /// Exactly the [`Terrain`](CookError::Terrain) hazard one dimension up: the
+    /// runtime pages voxel chunks out of this payload by **trusting the header and
+    /// directory it validated once**, so a truncated, overlapping, misaligned or
+    /// accidentally bincode-framed asset must fail the BUILD rather than reach a
+    /// shipped player as a cave that is missing, doubled, or made of another
+    /// chunk's bytes.
+    #[error("voxel volume {guid}: {message}")]
+    VoxelVolume { guid: AssetId, message: String },
+
     /// A `.inf_biomes` failed to decode or validate at cook (P19.2).
     ///
     /// A biome set whose ids are duplicated — or that claims the reserved id `0` —

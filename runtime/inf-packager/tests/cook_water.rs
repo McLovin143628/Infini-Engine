@@ -74,6 +74,7 @@ fn rec(guid: u128, name: &str) -> inf_scene::RuntimeEntity {
         sky_atmosphere: None,
         water_body: None,
         buoyancy: None,
+        voxel_volume: None,
     }
 }
 

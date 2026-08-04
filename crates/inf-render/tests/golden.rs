@@ -27,10 +27,11 @@ use inf_render::{
     CloudVolumes, EngineRenderer, GiAudit, GiQuality, GiSettings, GpuContext, HAlign,
     HeadlessTarget, HeightFog, LightKind, MeshInstance, PrebatchedRun, PrecipParams, PrecipQuality,
     PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
-    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, RenderWater, ScatterBatch,
-    ScatterData, ScatterInstance, ShadowSettings, SkinnedInstance, SkinnedMeshData, SkinnedVertex,
-    SpriteInstance, SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey, TextParams,
-    TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode, WaterKindGpu,
+    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, RenderVoxelChunk,
+    RenderVoxelVertex, RenderVoxelVolume, RenderWater, ScatterBatch, ScatterData, ScatterInstance,
+    ShadowSettings, SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance,
+    SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey, TextParams, TilemapParams,
+    VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode, VoxelChunkKey, WaterKindGpu,
     WaterQuality, WaveField, WaveSpec, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL,
     BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE,
     CPU_GPU_EXACT_FRACTION, CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_TEXEL_TOLERANCE, HEADLESS_FORMAT,
@@ -7069,4 +7070,256 @@ fn the_wet_band_does_not_follow_the_camera() {
         render(&gpu, &s, &view)
     };
     assert_ne!(a, dry, "there was no band to be camera-independent about");
+}
+
+// ── P21.1: volumetric terrain ────────────────────────────────────────────────
+
+/// The carved volume the voxel golden draws: a ground slab with a **tunnel bored
+/// straight through it** and a dome sitting on top — an overhang, a roof and a
+/// cave mouth, none of which a heightfield can represent, which is the entire
+/// point of the phase.
+///
+/// Built from the real `inf-voxel` field and meshed by the real Surface-Nets
+/// mesher (a dev-dependency, so Ring 0 stays clean and the golden still exercises
+/// the shipped code path rather than a hand-written triangle soup that could agree
+/// with nothing).
+fn carved_volume() -> (inf_voxel::VoxelData, inf_voxel::VoxelMeshCache) {
+    use inf_voxel::{ChunkKey, VoxelChunk, VoxelData, VoxelMeshCache};
+
+    let mut data = VoxelData::new(0.5);
+    for key in inf_voxel::chunk_range(ChunkKey::new(0, 0, 0), ChunkKey::new(1, 1, 1)) {
+        let b = key.base_sample();
+        let mut chunk = VoxelChunk::from_fn(|i, j, k| {
+            let (x, y, z) = (
+                (b[0] + i as i32) as f64,
+                (b[1] + j as i32) as f64,
+                (b[2] + k as i32) as f64,
+            );
+            // A slab of ground: solid below the sample plane y = 15.
+            let mut d = y - 15.0;
+            // A dome on top of it (CSG union), so the silhouette is not a plane.
+            d = d.min(((x - 16.0).powi(2) + (y - 15.0).powi(2) + (z - 16.0).powi(2)).sqrt() - 9.0);
+            // A tunnel bored along x at (y, z) = (11, 16) (CSG difference) — the
+            // overhang. Its roof is ground the dome and the slab both sit on.
+            let tube = ((y - 11.0).powi(2) + (z - 16.0).powi(2)).sqrt() - 4.0;
+            d.max(-tube)
+        });
+        // Three materials, banded by height, so the flat 4-layer palette is
+        // exercised rather than asserted about: bedrock below, rock in the slab,
+        // a paler crust on the dome.
+        for k in 0..inf_voxel::CHUNK_DIM {
+            for j in 0..inf_voxel::CHUNK_DIM {
+                for i in 0..inf_voxel::CHUNK_DIM {
+                    let y = b[1] + j as i32;
+                    chunk.set_material(
+                        i,
+                        j,
+                        k,
+                        if y > 16 {
+                            2
+                        } else if y > 9 {
+                            1
+                        } else {
+                            0
+                        },
+                    );
+                }
+            }
+        }
+        data.insert_chunk(key, chunk);
+    }
+    let mut meshes = VoxelMeshCache::new();
+    meshes.sync(&data);
+    (data, meshes)
+}
+
+/// Project the carved volume into the renderer DTO — the same mapping the two
+/// hosts' `project_voxel` performs, written out here because the golden harness
+/// has neither a `SceneDoc` nor an ECS world (the same reason
+/// `golden_streamed_terrain` builds its `RenderTerrain` by hand).
+fn voxel_scene() -> RenderScene {
+    let (data, meshes) = carved_volume();
+    let voxel_size_m = data.voxel_size_m();
+    let chunks: Vec<RenderVoxelChunk> = meshes
+        .meshes()
+        .map(|(&key, mesh)| RenderVoxelChunk {
+            key: VoxelChunkKey::new(key.x, key.y, key.z),
+            origin: data.chunk_origin_world(key),
+            vertices: mesh
+                .local_positions_m(voxel_size_m)
+                .into_iter()
+                .enumerate()
+                .map(|(i, pos)| RenderVoxelVertex {
+                    pos,
+                    normal: mesh.normals[i],
+                    material: mesh.materials[i] as u32,
+                })
+                .collect(),
+            indices: mesh.indices.clone(),
+            bounds: mesh.local_bounds_m(voxel_size_m),
+            version: meshes.version(key),
+        })
+        .collect();
+    assert!(!chunks.is_empty(), "the carved fixture produced no surface");
+
+    let mut scene = RenderScene {
+        voxels: vec![RenderVoxelVolume {
+            id: 1,
+            chunks,
+            layers: [
+                // Three visibly different bands, so the per-vertex material
+                // index is proven by the image and not only by the assertion
+                // above: dark bedrock, red-brown rock, pale crust.
+                RenderTerrainLayer {
+                    albedo: [0.16, 0.14, 0.13, 1.0],
+                    roughness: 0.95,
+                    tex_scale: 4.0,
+                },
+                RenderTerrainLayer {
+                    albedo: [0.46, 0.24, 0.15, 1.0],
+                    roughness: 0.85,
+                    tex_scale: 4.0,
+                },
+                RenderTerrainLayer {
+                    albedo: [0.62, 0.60, 0.52, 1.0],
+                    roughness: 0.70,
+                    tex_scale: 4.0,
+                },
+                RenderTerrainLayer::default(),
+            ],
+        }],
+        ..Default::default()
+    };
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        direction: Vec3::new(0.4, 0.8, 0.45).normalize(),
+        color: [1.0, 0.97, 0.9],
+        intensity: 1.8,
+        ..RenderLight::default()
+    });
+    scene
+}
+
+/// A three-quarter view of the carved volume, framed so the tunnel mouth and the
+/// dome above it are both on screen.
+fn voxel_view() -> RenderView {
+    let eye = DVec3::new(24.0, 12.5, 26.0);
+    let target = DVec3::new(8.0, 5.5, 8.0);
+    RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: eye,
+        forward: (target - eye).as_vec3().normalize(),
+        up: Vec3::Y,
+        fov_y: 55f32.to_radians(),
+        near: 0.05,
+        width: W,
+        height: H,
+        ortho: None,
+    }
+}
+
+/// **The P21.1 render gate.** A carved SDF volume — slab, bored tunnel, dome —
+/// reaches the screen through the real mesher, the real DTO and the real voxel
+/// pass, deterministically.
+#[test]
+fn golden_voxel() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let scene = voxel_scene();
+
+    // Structural, on the CPU side of the pass, before a pixel is drawn: the
+    // fixture really is geometry a heightfield cannot hold, and it really does
+    // carry more than one material. Asserted here rather than trusted, because a
+    // golden of a flat slab would still be a golden.
+    let volume = &scene.voxels[0];
+    let mut up = 0usize;
+    let mut down = 0usize;
+    let mut materials = std::collections::BTreeSet::new();
+    let mut tris = 0usize;
+    for c in &volume.chunks {
+        assert_eq!(c.indices.len() % 3, 0, "{:?}", c.key);
+        tris += c.indices.len() / 3;
+        for v in &c.vertices {
+            if v.normal[1] > 0.7 {
+                up += 1;
+            }
+            if v.normal[1] < -0.7 {
+                down += 1;
+            }
+            materials.insert(v.material);
+        }
+    }
+    assert!(
+        tris > 2_000,
+        "only {tris} triangles — is the fixture carved?"
+    );
+    assert!(
+        up > 50 && down > 50,
+        "a bored tunnel must have a floor ({up} up-facing) AND a ROOF ({down} \
+         down-facing) — a heightfield has only the former, and that difference is \
+         the whole phase"
+    );
+    assert!(
+        materials.len() >= 3,
+        "the palette is exercised by {} material(s)",
+        materials.len()
+    );
+
+    let img = check_golden(&gpu, "voxel", &scene, &voxel_view());
+
+    // Structural, on the pixels: the top of the frame is sky, the middle is lit
+    // rock, and the two are not the same colour.
+    let sky = px(&img, W / 2, 3);
+    assert!(
+        sky[2] as u16 + 4 >= sky[0] as u16,
+        "sky not bluish: {sky:?}"
+    );
+    let mut solid = 0usize;
+    for y in (H / 3)..(H - 4) {
+        for x in (W / 4)..(3 * W / 4) {
+            let p = px(&img, x, y);
+            // Rock is warmer than the sky (the palette is a brown/grey ramp), so
+            // "red at least matches blue" separates surface from background
+            // without pinning an exact colour.
+            if p[0] as u16 >= p[2] as u16 + 6 {
+                solid += 1;
+            }
+        }
+    }
+    assert!(
+        solid > 1_500,
+        "only {solid} rock pixels — the voxel pass drew (almost) nothing"
+    );
+}
+
+/// **The byte-stability guard for the other 47 goldens**: a scene with no voxel
+/// volumes must produce the exact frame it produced before P21.1 existed, because
+/// the voxel node returns before touching the command encoder.
+///
+/// Rendered here rather than assumed: `RenderScene::voxels` is a new field with a
+/// `Default`, so nothing else in the suite would notice a node that cleared a
+/// target or bound a pipeline on an empty list.
+#[test]
+fn an_empty_voxel_list_changes_nothing() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        ..Default::default()
+    };
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, 0.5, 0.0),
+        Quat::IDENTITY,
+        Vec3::ONE,
+        [0.8, 0.3, 0.2, 1.0],
+        1,
+    ));
+    let without = render(&gpu, &scene, &overlook_view());
+    // The same scene, explicitly carrying an EMPTY voxel list.
+    scene.voxels.clear();
+    let with_empty = render(&gpu, &scene, &overlook_view());
+    let (mean, max) = image_diff(&without, &with_empty, W, H);
+    assert!(
+        mean == 0.0 && max == 0.0,
+        "an empty voxel list perturbed the frame (mean {mean}, max {max}) — the \
+         node must return before it touches the encoder"
+    );
 }

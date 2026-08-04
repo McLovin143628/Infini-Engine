@@ -46,6 +46,7 @@ pub mod skinned;
 /// Camera-driven terrain streaming (P16.3b2) — the sim/render want split.
 pub mod terrain_stream;
 pub mod vmesh;
+pub mod voxel;
 // The browser (wasm32) entry point + fetch/run glue (P14.2). Gated to wasm so
 // the desktop build never names wasm-bindgen/web-sys.
 #[cfg(target_arch = "wasm32")]
@@ -325,7 +326,7 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     // real geometry (meshlet path / classic fallback per the renderer's auto-tier),
     // and (the P18.3 follow-up) the skeletal store so a `SkeletalMesh` renders its
     // real posed geometry instead of a placeholder.
-    let (vmeshes, skinned) = load_render_assets(args);
+    let (vmeshes, skinned, voxel_assets) = load_render_assets(args);
     // R-P4: the level's scene-persisted render block (post/exposure/lighting),
     // captured before `built` is consumed, applied by the render host.
     let render = built.render;
@@ -341,6 +342,7 @@ pub fn run_windowed(args: &Args) -> ExitCode {
         map,
         vmeshes,
         skinned,
+        voxel_assets,
         render,
         args.debug_cells,
     ) {
@@ -366,9 +368,14 @@ fn load_render_assets(
 ) -> (
     std::sync::Arc<vmesh::VmeshRegistry>,
     std::sync::Arc<skinned::SkinnedRegistry>,
+    std::sync::Arc<voxel::VoxelRegistry>,
 ) {
-    let (vmeshes, skinned) = match &args.world {
-        WorldChoice::Demo => (vmesh::VmeshRegistry::new(), skinned::SkinnedRegistry::new()),
+    let (vmeshes, skinned, voxels) = match &args.world {
+        WorldChoice::Demo => (
+            vmesh::VmeshRegistry::new(),
+            skinned::SkinnedRegistry::new(),
+            voxel::VoxelRegistry::new(),
+        ),
         WorldChoice::Level(path) => {
             let content_dir = args
                 .content
@@ -378,6 +385,7 @@ fn load_render_assets(
             (
                 vmesh::VmeshRegistry::from_dir(&content_dir),
                 skinned::SkinnedRegistry::from_dir(&content_dir),
+                voxel::VoxelRegistry::from_dir(&content_dir),
             )
         }
         WorldChoice::Pack(path) => {
@@ -393,22 +401,34 @@ fn load_render_assets(
                 Ok(reader) => {
                     let reader = std::sync::Arc::new(reader);
                     let skinned = skinned::SkinnedRegistry::from_pack(reader.clone());
+                    // P21.1: the `.inf_voxel` source rides the SAME `Arc` — a voxel
+                    // chunk is a sub-slice of the mapping exactly as a meshlet page
+                    // is, so opening the pack a third time would buy nothing.
+                    let voxels = voxel::VoxelRegistry::from_pack(reader.clone());
                     match vmesh::VmeshRegistry::from_pack(reader) {
-                        Ok(reg) => (reg, skinned),
+                        Ok(reg) => (reg, skinned, voxels),
                         Err(e) => {
                             tracing::warn!("inf-player: no vmeshes loaded from pack: {e}");
-                            (vmesh::VmeshRegistry::new(), skinned)
+                            (vmesh::VmeshRegistry::new(), skinned, voxels)
                         }
                     }
                 }
                 Err(e) => {
                     tracing::warn!("inf-player: no render assets loaded from pack: {e}");
-                    (vmesh::VmeshRegistry::new(), skinned::SkinnedRegistry::new())
+                    (
+                        vmesh::VmeshRegistry::new(),
+                        skinned::SkinnedRegistry::new(),
+                        voxel::VoxelRegistry::new(),
+                    )
                 }
             }
         }
     };
-    (std::sync::Arc::new(vmeshes), std::sync::Arc::new(skinned))
+    (
+        std::sync::Arc::new(vmeshes),
+        std::sync::Arc::new(skinned),
+        std::sync::Arc::new(voxels),
+    )
 }
 
 /// Construct a [`RuntimeSim`] from a [`BuiltWorld`], seeding it with the level's

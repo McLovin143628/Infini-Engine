@@ -22,6 +22,8 @@ inf-ecs = { workspace = true }
 # against the shared terrain and applies strokes. Pure Ring-0 (no GPU), so it's
 # a general dependency even though only the windowed hosts drive sculpting.
 inf-terrain = { workspace = true }
+# P21.1: the sparse SDF chunk volumes that locally extend the heightfield.
+inf-voxel = { workspace = true }
 uuid = { workspace = true }
 # Deterministic foliage-scatter RNG (E-P6): the brush seeds an xxh3 hash from
 # (seed, stroke index, sample index) so a stroke reproduces identical instances —

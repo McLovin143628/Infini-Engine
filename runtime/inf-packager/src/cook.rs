@@ -355,6 +355,22 @@ fn cook_one(input: CookInput, opts: &CookOptions) -> Result<CookOutput> {
             })?;
             raw
         }
+        // A `.inf_voxel` rides through verbatim as well (P21.1) — same reasoning
+        // as the terrain above, one dimension up. **Structurally validated**
+        // first: header + chunk directory only, so it is O(chunk_count) and never
+        // decodes a chunk. It is a streaming-class kind, so it cooks uncompressed
+        // and the player sub-slices chunks straight out of the mapping — which
+        // means a directory it cannot trust is a cave made of another chunk's
+        // bytes, discovered by a player rather than by this line.
+        AssetKind::VoxelVolume => {
+            inf_voxel::VoxelAssetReader::new(raw.as_slice()).map_err(|e| {
+                CookError::VoxelVolume {
+                    guid,
+                    message: e.to_string(),
+                }
+            })?;
+            raw
+        }
         // A `.inf_biomes` rides through verbatim too, but is **decoded** first
         // (P19.2). Unlike a terrain this is cheap — a short list of names — and
         // unlike a terrain it cannot be checked structurally at runtime: the
@@ -888,6 +904,14 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
                 // terrain would carry ids nothing can resolve, and P19.3's
                 // per-biome PCG dispatch would find no graphs at all.
                 deps.extend(e.terrain.as_ref().and_then(|t| t.biome_set).map(AssetId));
+                // P21.1: a VoxelVolume.asset pulls its `.inf_voxel` into the
+                // closure — the caves, tunnels and excavations that locally
+                // extend the heightfield. Streaming-class like the terrain, so
+                // the entry is stored **uncompressed** and the runtime
+                // sub-slices chunks straight out of the mapping. Without this
+                // edge a shipped level would draw the ground with its holes and
+                // none of what is behind them.
+                deps.extend(e.voxel_volume.as_ref().and_then(|v| v.asset).map(AssetId));
                 if let Some(sk) = &e.skeletal_mesh {
                     deps.extend(sk.skeleton.map(AssetId));
                     deps.extend(sk.mesh.map(AssetId));
@@ -993,7 +1017,9 @@ fn grammar_module_refs(raw: &[u8]) -> Vec<uuid::Uuid> {
 /// warning rather than a [`CookError`], and it is deduplicated + sorted so the
 /// report stays deterministic.
 fn dangling_terrain_refs(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
-    let mut missing: BTreeSet<(AssetId, AssetId)> = BTreeSet::new();
+    // `(level, asset, is_voxel)` — ONE set, so the report stays deduplicated and
+    // sorted across both kinds rather than concatenating two orderings.
+    let mut missing: BTreeSet<(AssetId, AssetId, bool)> = BTreeSet::new();
     for &id in closure {
         let Some(entry) = db.get(id) else { continue };
         if entry.kind() != AssetKind::Level {
@@ -1008,18 +1034,30 @@ fn dangling_terrain_refs(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
         for e in &level.entities {
             if let Some(asset) = e.terrain.as_ref().and_then(|t| t.asset) {
                 if !db.contains(AssetId(asset)) {
-                    missing.insert((id, AssetId(asset)));
+                    missing.insert((id, AssetId(asset), false));
+                }
+            }
+            // P21.1: the same advisory for a `VoxelVolume.asset`, for the same
+            // reason. A dangling reference is not a build failure — the level
+            // still loads and plays — but it IS a level whose caves silently do
+            // not exist, which is precisely the class of hazard an advisory is
+            // for, and the class this cook has been burned by before.
+            if let Some(asset) = e.voxel_volume.as_ref().and_then(|v| v.asset) {
+                if !db.contains(AssetId(asset)) {
+                    missing.insert((id, AssetId(asset), true));
                 }
             }
         }
     }
     missing
         .into_iter()
-        .map(|(level, asset)| {
-            format!(
-                "level {level} references missing terrain asset {asset}; its tiles will not \
-                 stream"
-            )
+        .map(|(level, asset, is_voxel)| {
+            let (kind, pages) = if is_voxel {
+                ("voxel", "chunks")
+            } else {
+                ("terrain", "tiles")
+            };
+            format!("level {level} references missing {kind} asset {asset}; its {pages} will not stream")
         })
         .collect()
 }

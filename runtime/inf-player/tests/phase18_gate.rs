@@ -1477,7 +1477,7 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// P20.3 also **re-blessed the three P20.1 water scenes**, deliberately: shoreline
 /// wetness is default-on and all three carry terrain, so their ground at and below
 /// the water level is now darker. Every other image is byte-identical.
-const GOLDENS: [&str; 47] = [
+const GOLDENS: [&str; 48] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1517,6 +1517,9 @@ const GOLDENS: [&str; 47] = [
     "unlit.png",
     "vgeom_dense.png",
     "vgeom_far.png",
+    // P21.1: the carved SDF volume — a slab with a bored tunnel and a dome, the
+    // overhang a heightfield cannot represent.
+    "voxel.png",
     "water_lake_dusk.png",
     "water_ocean_noon.png",
     "water_river.png",
@@ -1527,7 +1530,7 @@ const GOLDENS: [&str; 47] = [
     "weather_storm_noon.png",
 ];
 
-/// **GATE (f).** The golden *inventory* is exactly these 47 PNGs.
+/// **GATE (f).** The golden *inventory* is exactly these 48 PNGs.
 ///
 /// Nothing is re-blessed here, and no pixel is compared — that stays in
 /// `inf-render`'s own harness, which is where the renderer and the images live.
@@ -1969,7 +1972,14 @@ fn project_skinned(
     reg: &SkinnedRegistry,
     scene: &mut RenderScene,
 ) -> ProjectedSkinned {
-    project_scene_with_skinned(scene, sim, 0.0, &VmeshRegistry::new(), reg);
+    project_scene_with_skinned(
+        scene,
+        sim,
+        0.0,
+        &VmeshRegistry::new(),
+        reg,
+        &inf_voxel::VoxelVolumes::new(),
+    );
     ProjectedSkinned {
         meshes: scene
             .skinned_meshes

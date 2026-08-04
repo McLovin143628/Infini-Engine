@@ -24,7 +24,7 @@ use inf_ecs::components::{
     BlendMode, ComputedVisibility, Foliage, GlobalTransform, Light, Light2D,
     LightKind as EcsLightKind, Material, MeshRef, NineSlice, PcgVolume, Primitive,
     ScatteredInstance, SkeletalMesh, Spline, Sprite, Terrain, Text2D, TextAlign, Tilemap,
-    WaterBody, WaterKind,
+    VoxelVolume, WaterBody, WaterKind,
 };
 use inf_ecs::{Guid, Vec3d};
 use inf_math::FloatingOrigin;
@@ -43,6 +43,7 @@ use inf_scene::RenderSettingsRecord;
 use crate::runtime_sim::RuntimeSim;
 use crate::skinned::SkinnedRegistry;
 use crate::vmesh::VmeshRegistry;
+use crate::voxel::VoxelRegistry;
 
 /// Owns the GPU stack + the render scene the player draws each frame.
 pub struct PlayerRenderHost {
@@ -62,6 +63,17 @@ pub struct PlayerRenderHost {
     ///
     /// [`set_skinned`]: PlayerRenderHost::set_skinned
     skinned: Arc<SkinnedRegistry>,
+    /// Where a `VoxelVolume.asset` finds its `.inf_voxel` bytes (P21.1) — the
+    /// pack, a dev directory, or nothing. Set via [`set_voxel_assets`].
+    ///
+    /// [`set_voxel_assets`]: PlayerRenderHost::set_voxel_assets
+    voxel_assets: Arc<VoxelRegistry>,
+    /// The loaded voxel volumes this world draws, keyed by entity. Owned here
+    /// rather than passed in because loading is a `&mut` act and projection is
+    /// not: [`project`](Self::project) syncs the store first, then projects from
+    /// it — the same split the editor viewport uses, and the reason
+    /// `project_scene_with_skinned` can keep taking an immutable borrow.
+    voxels: inf_voxel::VoxelVolumes,
     /// Whether the auto-picked [`RenderTier`](inf_render::RenderTier) enables the
     /// GPU meshlet path (High). Off → the classic discrete-LOD fallback renders the
     /// same vgeom content (the renderer's `ClassicVgeomNode`).
@@ -127,6 +139,8 @@ impl PlayerRenderHost {
             origin: FloatingOrigin::default(),
             vmeshes: Arc::new(VmeshRegistry::new()),
             skinned: Arc::new(SkinnedRegistry::new()),
+            voxel_assets: Arc::new(VoxelRegistry::new()),
+            voxels: inf_voxel::VoxelVolumes::new(),
             vgeom_enabled,
         })
     }
@@ -152,6 +166,17 @@ impl PlayerRenderHost {
         self.skinned = skinned;
     }
 
+    /// Attach the `.inf_voxel` source (P21.1) so a `VoxelVolume` entity renders
+    /// the cave it references instead of nothing. Inert for primitive-only worlds.
+    ///
+    /// Swapping the source drops every loaded volume: a different pack (or dev
+    /// directory) is a different world, and a GUID that resolved under the old one
+    /// says nothing about the new one.
+    pub fn set_voxel_assets(&mut self, voxel_assets: Arc<VoxelRegistry>) {
+        self.voxel_assets = voxel_assets;
+        self.voxels.clear();
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         self.chain.request_resize(width, height);
     }
@@ -168,7 +193,52 @@ impl PlayerRenderHost {
 
     /// Rebuild the render scene from the sim's world, interpolated by `alpha`.
     pub fn project(&mut self, sim: &RuntimeSim, alpha: f64) {
-        project_scene_with_skinned(&mut self.scene, sim, alpha, &self.vmeshes, &self.skinned);
+        self.sync_voxels(sim);
+        project_scene_with_skinned(
+            &mut self.scene,
+            sim,
+            alpha,
+            &self.vmeshes,
+            &self.skinned,
+            &self.voxels,
+        );
+    }
+
+    /// Load (and release) voxel volumes to match the world — the `&mut` half that
+    /// has to run *before* the projection's immutable walk.
+    ///
+    /// Walks the world in `Guid` order, so which volume loads first is a function
+    /// of the level rather than of the ECS archetype layout. An entity whose asset
+    /// the world cannot serve stays unloaded and draws nothing; the registry logs
+    /// it once.
+    fn sync_voxels(&mut self, sim: &RuntimeSim) {
+        let world = sim.world();
+        let w = world.world();
+        let mut wants: Vec<(Uuid, Uuid)> = w
+            .iter_entities()
+            .filter_map(|e| {
+                let guid = e.get::<Guid>()?.0;
+                let asset = e.get::<VoxelVolume>()?.asset?;
+                Some((guid, asset))
+            })
+            .collect();
+        wants.sort();
+        // Release volumes whose entity is gone (or whose component lost its
+        // reference) BEFORE loading, so a level switch never holds both.
+        let live: std::collections::BTreeSet<u128> =
+            wants.iter().map(|(g, _)| g.as_u128()).collect();
+        self.voxels.retain_only(&live);
+        for (guid, asset) in wants {
+            if self.voxels.is_bound(guid.as_u128(), asset.as_u128()) {
+                continue;
+            }
+            let Some(bytes) = self.voxel_assets.load(asset) else {
+                continue;
+            };
+            if let Err(e) = self.voxels.ensure(guid.as_u128(), asset.as_u128(), &bytes) {
+                tracing::warn!("inf-player: bad .inf_voxel {asset}: {e}");
+            }
+        }
     }
 
     /// Stroke the **world-partition cell overlay** into the debug-line layer
@@ -266,7 +336,14 @@ pub fn project_scene(
     alpha: f64,
     vmeshes: &VmeshRegistry,
 ) {
-    project_scene_with_skinned(scene, sim, alpha, vmeshes, &SkinnedRegistry::new());
+    project_scene_with_skinned(
+        scene,
+        sim,
+        alpha,
+        vmeshes,
+        &SkinnedRegistry::new(),
+        &inf_voxel::VoxelVolumes::new(),
+    );
 }
 
 /// [`project_scene`] plus the skeletal store a bound `SkeletalMesh` resolves
@@ -283,6 +360,7 @@ pub fn project_scene_with_skinned(
     alpha: f64,
     vmeshes: &VmeshRegistry,
     skinned: &SkinnedRegistry,
+    voxels: &inf_voxel::VoxelVolumes,
 ) {
     scene.instances.clear();
     scene.lights.clear();
@@ -299,6 +377,11 @@ pub fn project_scene_with_skinned(
     scene.skinned_meshes.clear();
     scene.skinned.clear();
     scene.terrains.clear();
+    // P21.1: volumetric terrain. Rebuilt from scratch every projection like
+    // `terrains`; the meshed surface behind each chunk lives in the host's store
+    // and is re-meshed only where the field moved, so re-projecting an unchanged
+    // cave costs a copy of its vertex streams and no meshing at all.
+    scene.voxels.clear();
     // P18.5: GPU-instanced scatter (PCG volumes + painted foliage) is rebuilt from
     // scratch every projection, exactly like `instances`. The payload behind each
     // batch is content-keyed, so re-projecting an unchanged scatter re-uses the
@@ -416,6 +499,29 @@ pub fn project_scene_with_skinned(
                 let mut rt = project_terrain(terrain, data, translation);
                 rt.id = inf_render::terrain_id_from_guid(guid.as_u128());
                 scene.terrains.push(rt);
+            }
+        }
+        // Volumetric terrain (P21.1): the SDF chunk volume that locally extends
+        // the heightfield — caves, tunnels, overhangs. Its chunks live in a
+        // `.inf_voxel` the host loaded before this walk started; a volume the world
+        // could not serve simply has no slot and draws nothing.
+        // MIRROR: `inf_viewport::host` runs the same branch (minus the visibility
+        // gate and the pick-id map, both host-local) through the same
+        // `project_voxel` body.
+        if let Some(volume) = w.get::<VoxelVolume>(entity) {
+            let projected = volume
+                .asset
+                .and_then(|_| voxels.get(guid.as_u128()))
+                .and_then(|slot| {
+                    project_voxel(
+                        slot,
+                        w.get::<Terrain>(entity),
+                        translation,
+                        inf_render::terrain_id_from_guid(guid.as_u128()),
+                    )
+                });
+            if let Some(rv) = projected {
+                scene.voxels.push(rv);
             }
         }
         // PCG scatter volumes (P18.5): the volume's evaluated instance cache
@@ -983,6 +1089,73 @@ pub fn project_terrain(
         // DB, is where a real palette is projected from.
         biome_palette: Vec::new(),
     }
+}
+
+/// Project one loaded voxel volume into a [`RenderVoxelVolume`] (P21.1).
+///
+/// `slot` is the host's loaded working set for this entity — its resident chunks
+/// and its meshed surface — owned by the Ring-0 `inf_voxel::VoxelVolumes` store, so
+/// the two hosts cannot mesh the same field differently. What is left here is the
+/// mapping into renderer types, and three rules that would drift silently if each
+/// host wrote its own:
+///
+/// * **The asset's voxel scale wins.** Chunk origins and vertex positions are both
+///   derived from `slot.data.voxel_size_m()` — the scale recorded in the
+///   `.inf_voxel` header — so the geometry is self-consistent. Reading the
+///   component's `voxel_size_m` here instead would scale vertices against origins
+///   derived from the asset's and tear the volume apart wherever the two disagree;
+///   the component's value is what a *new* asset is authored at, and reporting a
+///   disagreement is a cook advisory, not a render-time fixup.
+/// * **A voxel material index IS a terrain splat index**, so a volume shades with
+///   the `Terrain` on **this same entity** when there is one — composition, not a
+///   reference, so no cook edge and nothing to dangle — and with the default
+///   palette otherwise. A cave mouth has to shade continuously into the hillside it
+///   opens out of, and it cannot if the two sides read different palettes.
+/// * **A volume with no surface projects `None`**, never an empty chunk list: the
+///   scene's `voxels` being empty is exactly what keeps the voxel pass off the
+///   command encoder, and every existing golden depends on that.
+///
+/// **MIRROR** of the other host's `project_voxel` — keep the two byte-identical.
+fn project_voxel(
+    slot: &inf_voxel::VolumeSlot,
+    terrain: Option<&Terrain>,
+    translation: DVec3,
+    id: u64,
+) -> Option<inf_render::RenderVoxelVolume> {
+    let voxel_size_m = slot.data.voxel_size_m();
+    let chunks: Vec<inf_render::RenderVoxelChunk> = slot
+        .meshes
+        .meshes()
+        .map(|(&key, mesh)| inf_render::RenderVoxelChunk {
+            key: inf_render::VoxelChunkKey::new(key.x, key.y, key.z),
+            origin: slot.data.chunk_origin_world(key) + translation,
+            vertices: mesh
+                .local_positions_m(voxel_size_m)
+                .into_iter()
+                .enumerate()
+                .map(|(i, pos)| inf_render::RenderVoxelVertex {
+                    pos,
+                    normal: mesh.normals[i],
+                    material: mesh.materials[i] as u32,
+                })
+                .collect(),
+            indices: mesh.indices.clone(),
+            bounds: mesh.local_bounds_m(voxel_size_m),
+            version: slot.meshes.version(key),
+        })
+        .collect();
+    if chunks.is_empty() {
+        return None;
+    }
+    let layers = std::array::from_fn(|k| match terrain {
+        Some(t) => RenderTerrainLayer {
+            albedo: t.layers[k].albedo.to_array(),
+            roughness: t.layers[k].roughness as f32,
+            tex_scale: t.layers[k].tex_scale as f32,
+        },
+        None => RenderTerrainLayer::default(),
+    });
+    Some(inf_render::RenderVoxelVolume { id, chunks, layers })
 }
 
 /// A distinct placeholder colour per PCG kind index (mirrors the viewport host's

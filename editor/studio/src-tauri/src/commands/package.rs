@@ -109,6 +109,14 @@ fn cook_error_to_dto(err: CookError) -> PackageErrorDto {
             dto.message = message;
             dto.guid = Some(guid.to_string());
         }
+        // P21.1: a `.inf_voxel` that failed its structural check. Its own class,
+        // like `terrain`, so the Package dialog can point at the asset rather than
+        // reporting an internal error the author cannot act on.
+        CookError::VoxelVolume { guid, message } => {
+            dto.class = "voxel_volume".into();
+            dto.message = message;
+            dto.guid = Some(guid.to_string());
+        }
         CookError::BiomeSet { guid, message } => {
             dto.class = "biome_set".into();
             dto.message = message;

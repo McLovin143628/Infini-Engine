@@ -35,8 +35,8 @@ pub use components::{
     GlobalTransform, Guid, Joint2D, Joint3D, JointKind2D, JointKind3D, Light, LightKind, Material,
     MeshRef, Name, PcgVolume, Primitive, RigidBody2D, RigidBody3D, RootMotion, RootMotionMode,
     ScatteredInstance, ScatteredSolid, SkeletalMesh, SkyAtmosphere, SmRuntimeState, Sprite,
-    Terrain, TileBounds, TileChunk, Tilemap, TimeOfDay, Transform, Visibility, CHUNK_DIM,
-    CHUNK_TILES,
+    Terrain, TileBounds, TileChunk, Tilemap, TimeOfDay, Transform, Visibility, VoxelVolume,
+    CHUNK_DIM, CHUNK_TILES,
 };
 pub use hierarchy::{ChildOf, Children};
 pub use math::{Color, Vec2d, Vec3d};

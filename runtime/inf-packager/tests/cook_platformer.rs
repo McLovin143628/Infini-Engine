@@ -537,6 +537,7 @@ fn make_streaming_terrain_project_with(root: &Path, biomes: BiomeSetFixture) -> 
             sky_atmosphere: None,
             water_body: None,
             buoyancy: None,
+            voxel_volume: None,
         }],
         settings: Default::default(),
     };

@@ -1304,6 +1304,7 @@ mod tests {
             sky_atmosphere: None,
             water_body: None,
             buoyancy: None,
+            voxel_volume: None,
         }
     }
 

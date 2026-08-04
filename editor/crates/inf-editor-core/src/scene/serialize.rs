@@ -19,7 +19,7 @@ use inf_ecs::components::{
     Collider3D, Decal, Foliage, Joint2D, Joint3D, Light, Light2D, LightKind, Material, MeshRef,
     NineSlice, PcgVolume, RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, SkyAtmosphere,
     Spline, Sprite, StreamingSource, Terrain, Text2D, Tilemap, TimeOfDay, Transform, Visibility,
-    Volume, WaterBody,
+    Volume, VoxelVolume, WaterBody,
 };
 use inf_ecs::math::{Color, Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
@@ -255,7 +255,37 @@ use crate::scene::SceneDoc;
 ///   body would bob like a cork on a millimetre of draught. The wire price to a
 ///   level where nothing floats is **one discriminant byte per non-buoyant
 ///   entity** — the same price every additive slot since v8 has paid.
-pub const SCHEMA_VERSION: u32 = 18;
+///
+/// * **v19** — P21.1: the entity record appends the **volumetric-terrain** slot —
+///   `voxel_volume` ([`VoxelVolume`]: a sparse SDF voxel volume — the caves,
+///   tunnels and excavations that *locally extend* the heightfield terrain). No
+///   component changed shape and [`LevelSettings`] is untouched, so this is once
+///   again the [`EntityRecordV10`] *shape* of bump (a new slot at the tail), not
+///   the [`EntityRecordV14`] one (a component that grew). The pre-v19 entity
+///   record is frozen as [`EntityRecordV18`] and lifts with `voxel_volume: None`
+///   — a level whose ground is a heightfield and nothing else, which is exactly
+///   what every pre-v19 level was.
+///
+///   **The planet-scale base stays a heightfield**, deliberately: the P16 clipmap
+///   economics are unbeatable at that scale, and v19 does not voxelize the world.
+///   Volumetric capability arrives as chunk volumes that override and extend the
+///   heightfield *locally*, which is the hybrid every serious open-world engine
+///   settles on. In particular **no tile layout moved**, so unlike v15 and v16
+///   this bump costs the frozen-terrain ladder nothing.
+///
+///   A [`VoxelVolume`] is a *reference plus its two authored knobs* — the chunks
+///   live in the `.inf_voxel` asset, which versions itself, and there is no
+///   inline `data` field for them (the asymmetry with [`Terrain`] is deliberate:
+///   `Terrain` carries one because it predates streaming, and a voxel volume has
+///   never had a pre-streaming form to keep loading). So the slot adds exactly one
+///   new edge to the cook's dependency closure — that GUID — and the component
+///   itself can never be the reason a *future* schema has to move: growing it
+///   would cost another bump in both codec mirrors, which is why its three fields
+///   are frozen as shipped.
+///
+///   The wire price to a level with no volumes is **one discriminant byte per
+///   entity** — the same price every additive slot since v8 has paid.
+pub const SCHEMA_VERSION: u32 = 19;
 
 /// File-level simulation settings (P9.5 · schema v3). Replaces the player's
 /// hard-coded `DEFAULT_GRAVITY`/`DEFAULT_HZ`. The serde defaults **preserve the
@@ -584,6 +614,14 @@ pub struct EntityRecord {
     /// applied to every `RigidBody3D`.
     #[serde(default)]
     pub buoyancy: Option<Buoyancy>,
+    // ── v19 (P21.1) volumetric terrain ────────────────────────────────────
+    /// A sparse SDF voxel volume (caves / tunnels / excavations) that locally
+    /// extends the heightfield terrain. The chunks live in the `.inf_voxel` this
+    /// points at — the component is that reference plus its two authored knobs,
+    /// so a level never carries volumetric data inline and the slot's whole cost
+    /// to a volume-free level is its `None` discriminant.
+    #[serde(default)]
+    pub voxel_volume: Option<VoxelVolume>,
 }
 
 /// The pre-v8 `Light` byte layout (schema v8 froze this when `Light` gained its
@@ -3377,6 +3415,7 @@ impl EntityRecordV13 {
             sky_atmosphere: self.sky_atmosphere.map(SkyAtmosphereV13::into_current),
             water_body: None,
             buoyancy: None,
+            voxel_volume: None,
         }
     }
 
@@ -4084,11 +4123,15 @@ pub struct EntityRecordV17 {
 }
 
 impl EntityRecordV17 {
-    /// Lift a frozen v17 record to the live (v18) [`EntityRecord`]. Every slot
-    /// carries through unchanged; the one new slot lifts to `None` — a level in
-    /// which nothing floats, which is exactly what a v17 level was.
-    pub fn into_current(self) -> EntityRecord {
-        EntityRecord {
+    /// Lift a frozen v17 record one rung, to the frozen [`EntityRecordV18`].
+    /// Every slot carries through unchanged; the one new slot lifts to `None` — a
+    /// level in which nothing floats, which is exactly what a v17 level was.
+    ///
+    /// v19 inserted [`EntityRecordV18`] between this record and [`EntityRecord`],
+    /// and the rung is what keeps a v17 payload loading forever — the same shape
+    /// v18 gave the v16 rung.
+    pub fn into_v18(self) -> EntityRecordV18 {
+        EntityRecordV18 {
             guid: self.guid,
             name: self.name,
             parent: self.parent,
@@ -4184,6 +4227,202 @@ impl EntityRecordV17 {
             time_of_day: r.time_of_day,
             sky_atmosphere: r.sky_atmosphere,
             water_body: r.water_body,
+        }
+    }
+}
+
+/// The **pre-v19** entity byte layout (schema v19 froze this when P21.1 appended
+/// the `voxel_volume` slot). Identical to the live [`EntityRecord`] except that it
+/// has **no** `voxel_volume` field — that is precisely what v19 added — so this is
+/// the [`EntityRecordV10`] shape of bump (a new slot at the tail), not the
+/// [`EntityRecordV14`] one (a component that grew).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityRecordV18 {
+    pub guid: Uuid,
+    pub name: String,
+    pub parent: Option<Uuid>,
+    pub transform: Transform,
+    pub visible: bool,
+    pub mesh: Option<MeshRef>,
+    pub material: Option<Material>,
+    pub light: Option<Light>,
+    pub camera: Option<Camera>,
+    #[serde(default)]
+    pub sprite: Option<Sprite>,
+    #[serde(default)]
+    pub tilemap: Option<Tilemap>,
+    #[serde(default)]
+    pub nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    pub text2d: Option<Text2D>,
+    #[serde(default)]
+    pub light_2d: Option<Light2D>,
+    #[serde(default)]
+    pub rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    pub collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    pub character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    pub rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    pub collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    pub character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    pub actor: Option<Uuid>,
+    #[serde(default)]
+    pub terrain: Option<Terrain>,
+    #[serde(default)]
+    pub pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    pub skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    pub anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    pub anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    pub root_motion: Option<RootMotion>,
+    #[serde(default)]
+    pub attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    pub joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    pub joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    pub audio_source: Option<AudioSource>,
+    #[serde(default)]
+    pub audio_listener: Option<AudioListener>,
+    #[serde(default)]
+    pub decal: Option<Decal>,
+    #[serde(default)]
+    pub volume: Option<Volume>,
+    #[serde(default)]
+    pub spline: Option<Spline>,
+    #[serde(default)]
+    pub foliage: Option<Foliage>,
+    #[serde(default)]
+    pub streaming_source: Option<StreamingSource>,
+    #[serde(default)]
+    pub always_loaded: Option<AlwaysLoaded>,
+    #[serde(default)]
+    pub time_of_day: Option<TimeOfDay>,
+    #[serde(default)]
+    pub sky_atmosphere: Option<SkyAtmosphere>,
+    /// The v17 slot this record still carries — a v18 level's water must survive
+    /// the v19 hop, not merely decode.
+    #[serde(default)]
+    pub water_body: Option<WaterBody>,
+    /// The v18 slot this record exists to keep carrying — a v18 level's buoyancy
+    /// must survive the v19 hop, not merely decode.
+    #[serde(default)]
+    pub buoyancy: Option<Buoyancy>,
+}
+
+impl EntityRecordV18 {
+    /// Lift a frozen v18 record to the live (v19) [`EntityRecord`]. Every slot
+    /// carries through unchanged; the one new slot lifts to `None` — a level whose
+    /// ground is a heightfield and nothing else, which is exactly what a v18 level
+    /// was.
+    pub fn into_current(self) -> EntityRecord {
+        EntityRecord {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: self.decal,
+            volume: self.volume,
+            spline: self.spline,
+            foliage: self.foliage,
+            streaming_source: self.streaming_source,
+            always_loaded: self.always_loaded,
+            time_of_day: self.time_of_day,
+            sky_atmosphere: self.sky_atmosphere,
+            water_body: self.water_body,
+            buoyancy: self.buoyancy,
+            voxel_volume: None,
+        }
+    }
+
+    /// Project a live [`EntityRecord`] back onto the frozen v18 shape (the
+    /// **downgrade-bless** path that regenerates the committed v18 fixture). Only
+    /// the voxel volume is lost — asserted as a property, not as a field list, by
+    /// `v18_entity_downgrade_is_lossless_except_for_the_voxel_volume`.
+    ///
+    /// Takes the **live** record rather than the frozen one a rung up, so the
+    /// bless path always starts from today's truth.
+    pub fn from_current(r: EntityRecord) -> Self {
+        Self {
+            guid: r.guid,
+            name: r.name,
+            parent: r.parent,
+            transform: r.transform,
+            visible: r.visible,
+            mesh: r.mesh,
+            material: r.material,
+            light: r.light,
+            camera: r.camera,
+            sprite: r.sprite,
+            tilemap: r.tilemap,
+            nine_slice: r.nine_slice,
+            text2d: r.text2d,
+            light_2d: r.light_2d,
+            rigid_body_2d: r.rigid_body_2d,
+            collider_2d: r.collider_2d,
+            character_controller_2d: r.character_controller_2d,
+            rigid_body_3d: r.rigid_body_3d,
+            collider_3d: r.collider_3d,
+            character_controller_3d: r.character_controller_3d,
+            actor: r.actor,
+            terrain: r.terrain,
+            pcg_volume: r.pcg_volume,
+            skeletal_mesh: r.skeletal_mesh,
+            anim_player: r.anim_player,
+            anim_state_machine: r.anim_state_machine,
+            root_motion: r.root_motion,
+            attached_to: r.attached_to,
+            joint_2d: r.joint_2d,
+            joint_3d: r.joint_3d,
+            audio_source: r.audio_source,
+            audio_listener: r.audio_listener,
+            decal: r.decal,
+            volume: r.volume,
+            spline: r.spline,
+            foliage: r.foliage,
+            streaming_source: r.streaming_source,
+            always_loaded: r.always_loaded,
+            time_of_day: r.time_of_day,
+            sky_atmosphere: r.sky_atmosphere,
+            water_body: r.water_body,
+            buoyancy: r.buoyancy,
         }
     }
 }
@@ -4290,6 +4529,36 @@ pub struct SceneFileV17 {
 }
 
 impl SceneFileV17 {
+    /// Lift every record one rung, to the frozen [`SceneFileV18`] shape. Stamped
+    /// v18, not [`SCHEMA_VERSION`] — this is a *rung*, and the version it claims
+    /// must match the records it actually holds; `into_current` on the next rung
+    /// is what stamps the current schema.
+    fn into_v18(self) -> SceneFileV18 {
+        SceneFileV18 {
+            schema_version: 18,
+            title: self.title,
+            entities: self
+                .entities
+                .into_iter()
+                .map(EntityRecordV17::into_v18)
+                .collect(),
+            settings: self.settings,
+        }
+    }
+}
+
+/// A frozen schema-v18 file layout, holding [`EntityRecordV18`]s. v19 did not
+/// touch [`LevelSettings`], so only `entities` is repointed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneFileV18 {
+    pub schema_version: u32,
+    pub title: String,
+    pub entities: Vec<EntityRecordV18>,
+    #[serde(default)]
+    pub settings: LevelSettings,
+}
+
+impl SceneFileV18 {
     /// Lift every record to the current shape and stamp the current version.
     fn into_current(self) -> SceneFile {
         SceneFile {
@@ -4298,7 +4567,7 @@ impl SceneFileV17 {
             entities: self
                 .entities
                 .into_iter()
-                .map(EntityRecordV17::into_current)
+                .map(EntityRecordV18::into_current)
                 .collect(),
             settings: self.settings,
         }
@@ -4451,6 +4720,7 @@ pub fn record_of(doc: &SceneDoc, guid: Uuid) -> Option<EntityRecord> {
         sky_atmosphere: w.get::<SkyAtmosphere>(e).copied(),
         water_body: w.get::<WaterBody>(e).copied(),
         buoyancy: w.get::<Buoyancy>(e).copied(),
+        voxel_volume: w.get::<VoxelVolume>(e).copied(),
     })
 }
 
@@ -4729,27 +4999,39 @@ pub fn decode(bytes: &[u8]) -> Result<SceneFile, String> {
             let (v14, _): (SceneFileV14, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v14: {e}"))?;
-            migrate(v14.into_v15().into_v16().into_v17().into_current())
+            migrate(
+                v14.into_v15()
+                    .into_v16()
+                    .into_v17()
+                    .into_v18()
+                    .into_current(),
+            )
         }
         15 => {
             let (v15, _): (SceneFileV15, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v15: {e}"))?;
-            migrate(v15.into_v16().into_v17().into_current())
+            migrate(v15.into_v16().into_v17().into_v18().into_current())
         }
         16 => {
             let (v16, _): (SceneFileV16, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v16: {e}"))?;
-            migrate(v16.into_v17().into_current())
+            migrate(v16.into_v17().into_v18().into_current())
         }
         17 => {
             let (v17, _): (SceneFileV17, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode v17: {e}"))?;
-            migrate(v17.into_current())
+            migrate(v17.into_v18().into_current())
         }
         18 => {
+            let (v18, _): (SceneFileV18, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| format!("decode v18: {e}"))?;
+            migrate(v18.into_current())
+        }
+        19 => {
             let (file, _): (SceneFile, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| format!("decode: {e}"))?;
@@ -4771,7 +5053,7 @@ pub fn migrate(file: SceneFile) -> Result<SceneFile, String> {
         ));
     }
     // Records are already lifted to the current shape by the versioned decode
-    // (v1→…→v17→v18); nothing more to do here. Future upgrades chain in `decode`.
+    // (v1→…→v18→v19); nothing more to do here. Future upgrades chain in `decode`.
     Ok(file)
 }
 
@@ -4872,6 +5154,7 @@ pub(crate) fn write_record_components(
     copy_slot!(&rec.sky_atmosphere, SkyAtmosphere);
     copy_slot!(&rec.water_body, WaterBody);
     copy_slot!(&rec.buoyancy, Buoyancy);
+    copy_slot!(&rec.voxel_volume, VoxelVolume);
 }
 
 pub fn apply_to_doc(doc: &mut SceneDoc, file: &SceneFile) {
@@ -9435,6 +9718,7 @@ mod tests {
             .into_v15()
             .into_v16()
             .into_v17()
+            .into_v18()
             .into_current();
 
         // Everything but the maps survives …
@@ -9783,6 +10067,7 @@ mod tests {
         let back = EntityRecordV15::from_current(live.clone())
             .into_v16()
             .into_v17()
+            .into_v18()
             .into_current();
 
         // Everything but the biome layer survives — the erosion maps included,
@@ -9939,14 +10224,16 @@ mod tests {
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {
         assert_eq!(
-            SCHEMA_VERSION, 18,
+            SCHEMA_VERSION, 19,
             "the scene schema moved. Generation-1 frozen tiles (TerrainTileFrozenV1, via \
              TerrainV14) cover .inf_lvl v1..=v14, generation-2 (TerrainTileFrozenV2, via \
              TerrainV15) covers v15, and the live TerrainTile covers v16+. If the TILE \
              layout changed again, add inf_terrain::TerrainTileFrozenV3 and a new frozen \
              Terrain record; if only the scene changed, update this pin and \
-             TerrainTileFrozenV1's generation table. (v17 and v18 are both the latter \
-             case: each appended an entity slot and left every tile layout alone.)"
+             TerrainTileFrozenV1's generation table. (v17, v18 and v19 are all the latter \
+             case: each appended an entity slot and left every tile layout alone — v19's \
+             voxel volume in particular extends the ground LOCALLY, out in its own \
+             .inf_voxel, and does not touch a single heightfield tile.)"
         );
         // The mapping the pin is about, one rung at a time. Start from a terrain
         // that exercises BOTH post-v14 layers.
@@ -10188,6 +10475,7 @@ mod tests {
         };
         let back = EntityRecordV16::from_current(live.clone())
             .into_v17()
+            .into_v18()
             .into_current();
 
         // The water is exactly what is lost \u2026
@@ -10507,7 +10795,9 @@ mod tests {
                 .into_v13()
                 .into_current()
         };
-        let back = EntityRecordV17::from_current(live.clone()).into_current();
+        let back = EntityRecordV17::from_current(live.clone())
+            .into_v18()
+            .into_current();
 
         // The buoyancy is exactly what is lost — the water, which v17 *can*
         // express, is not …
@@ -10572,9 +10862,11 @@ mod tests {
     }
 
     /// **The v18 price, isolated**: an entity that does not float pays exactly one
-    /// discriminant byte. Measured as a delta against the frozen v17 shape of the
-    /// very same record, so it is a *price* rather than an absolute that could
-    /// silently absorb any other growth.
+    /// discriminant byte. Measured as a delta between the frozen v17 and frozen
+    /// v18 shapes of the very same record, so it is a *price* rather than an
+    /// absolute that could silently absorb any other growth — v19's own slot
+    /// included, which is why this prices the frozen v18 shape and not the live
+    /// record it used to.
     #[test]
     fn v18_costs_one_byte_per_buoyancy_free_entity() {
         let live = v9_base(uuid::Uuid::from_u128(0xF600), "Rock", None)
@@ -10583,7 +10875,11 @@ mod tests {
             .into_v12()
             .into_v13()
             .into_current();
-        let v18 = bincode::serde::encode_to_vec(&live, bincode_config()).unwrap();
+        let v18 = bincode::serde::encode_to_vec(
+            EntityRecordV18::from_current(live.clone()),
+            bincode_config(),
+        )
+        .unwrap();
         let v17 = bincode::serde::encode_to_vec(
             EntityRecordV17::from_current(live.clone()),
             bincode_config(),
@@ -10596,15 +10892,338 @@ mod tests {
         );
 
         // A record that *carries* buoyancy costs more than its own discriminant.
-        let afloat = EntityRecord {
+        let afloat = EntityRecordV18::from_current(EntityRecord {
             buoyancy: Some(Buoyancy::default()),
             ..live
-        };
+        });
         assert!(
             bincode::serde::encode_to_vec(&afloat, bincode_config())
                 .unwrap()
                 .len()
                 > v18.len() + 1
+        );
+    }
+
+    // ── schema v19 (P21.1 volumetric terrain) ─────────────────────────────
+
+    /// An all-`None` frozen v18 entity — the struct-update base for
+    /// [`v18_reference`]. Built through the downgrade hop so the field list can
+    /// never drift from the live record.
+    fn v18_base(guid: uuid::Uuid, name: &str, parent: Option<uuid::Uuid>) -> EntityRecordV18 {
+        EntityRecordV18::from_current(
+            v9_base(guid, name, parent)
+                .into_v10()
+                .into_v11()
+                .into_v12()
+                .into_v13()
+                .into_current(),
+        )
+    }
+
+    /// The **v18** buoyancy the fixture's raft carries: non-default in four of the
+    /// five fields — the thing v18 could express and v17 could not — so the v19
+    /// hop is proven to preserve what v18 authored rather than merely to produce
+    /// defaults.
+    ///
+    /// The literals must match `inf-scene`'s `v18_fixture_buoyancy` exactly — the
+    /// two committed fixtures are byte-compared by
+    /// [`v18_fixture_matches_the_runtime_codecs_copy`], which is the whole point
+    /// of writing them twice.
+    fn v18_fixture_buoyancy() -> Buoyancy {
+        Buoyancy {
+            enabled: true,
+            density_kg_m3: 420.0,
+            fluid_density_kg_m3: 1035.0,
+            linear_drag: 3.25,
+            angular_drag: 1.75,
+        }
+    }
+
+    /// Rebuild the exact schema-v18 file the committed v18 fixture was generated
+    /// from, out of the frozen v18 record types (the provenance lock). Carries the
+    /// v16 fixture's terrain and the v17 fixture's river unchanged — v19 touched
+    /// neither a tile layout nor a component's shape — plus the raft entity that
+    /// only v18 could write.
+    fn v18_reference() -> SceneFileV18 {
+        use inf_ecs::components::{Light, LightKind, Material, MeshRef, Primitive};
+        let g = uuid::Uuid::from_u128;
+        SceneFileV18 {
+            schema_version: 18,
+            title: "V18 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV18 {
+                    mesh: Some(MeshRef {
+                        primitive: Primitive::Cube,
+                        asset: Some(g(0xF2A1)),
+                    }),
+                    material: Some(Material::default()),
+                    ..v18_base(g(0xF201), "Cube", None)
+                },
+                EntityRecordV18 {
+                    terrain: Some(v16_fixture_terrain()),
+                    ..v18_base(g(0xF202), "Terrain", None)
+                },
+                EntityRecordV18 {
+                    light: Some(Light {
+                        kind: LightKind::Directional,
+                        color: Color::WHITE,
+                        intensity: 2.0,
+                        ..Default::default()
+                    }),
+                    ..v18_base(g(0xF203), "Sun", None)
+                },
+                // The river: a `Spline` centreline and a `WaterBody` on **one**
+                // entity, which is the composition rule v17 established.
+                EntityRecordV18 {
+                    spline: Some(Spline {
+                        points: vec![
+                            Vec3d::new(0.0, 0.0, 0.0),
+                            Vec3d::new(10.0, 0.0, 4.0),
+                            Vec3d::new(18.0, 0.0, 14.0),
+                        ],
+                        ..Spline::default()
+                    }),
+                    water_body: Some(v17_fixture_water()),
+                    ..v18_base(g(0xF204), "River", None)
+                },
+                // The raft: the dynamic body and the opt-in flotation that v18
+                // added, which is the content this fixture exists to carry.
+                EntityRecordV18 {
+                    rigid_body_3d: Some(RigidBody3D::default()),
+                    buoyancy: Some(v18_fixture_buoyancy()),
+                    ..v18_base(g(0xF205), "Raft", None)
+                },
+            ],
+            settings: LevelSettings {
+                gravity_2d: Vec2d::new(0.0, -18.0),
+                gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+                sim_hz: 90.0,
+                render: RenderSettingsRecord {
+                    exposure: 1.1,
+                    ..RenderSettingsRecord::default()
+                },
+                partition: PartitionSettings::default(),
+            },
+        }
+    }
+
+    /// Write the committed v18 fixture from [`v18_reference`] under
+    /// `INF_BLESS_FIXTURES=1` (the temporary-writer discipline). Never hand-edit
+    /// the committed bytes.
+    #[test]
+    fn bless_v18_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").is_err() {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v18_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 18);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v18.inf_lvl");
+        std::fs::write(&path, &bytes).expect("write v18 fixture");
+        eprintln!(
+            "blessed v18 fixture: {} ({} bytes)",
+            path.display(),
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn v18_fixture_is_reproducible_and_genuinely_v18() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v18.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v18 fixture present");
+        assert_eq!(bytes[0], 18, "fixture must be a genuine schema-v18 payload");
+        let rebuilt = bincode::serde::encode_to_vec(v18_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v18 fixture must match our frozen v18 writer"
+        );
+    }
+
+    /// This crate's committed v18 fixture must be **byte-identical** to the Ring-0
+    /// runtime reader's — the two codecs are one wire contract written twice.
+    #[test]
+    fn v18_fixture_matches_the_runtime_codecs_copy() {
+        let mine = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v18.inf_lvl");
+        let theirs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../crates/inf-scene/tests/fixtures/scene_v18.inf_lvl");
+        assert_eq!(
+            std::fs::read(&mine).expect("editor v18 fixture"),
+            std::fs::read(&theirs).expect("runtime v18 fixture"),
+            "the two v19-bump fixtures diverged — the codecs are no longer mirrors"
+        );
+    }
+
+    /// The committed v18 fixture — written by the **pre-v19 codec**, before the
+    /// entity record grew its `voxel_volume` slot — still loads, with the v18
+    /// content (the raft's buoyancy included) preserved verbatim and no volumetric
+    /// ground conjured. The "old bytes load forever" gate for the v19 bump.
+    #[test]
+    fn v18_loads_and_lifts_without_a_voxel_volume() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scene_v18.inf_lvl");
+        let file = decode(&std::fs::read(&path).unwrap()).expect("v18 fixture decodes");
+        assert_eq!(file.schema_version, SCHEMA_VERSION);
+        assert_eq!(file.title, "V18 Fixture Level");
+        assert_eq!(file.entities.len(), 5);
+        let by_name = |n: &str| file.entities.iter().find(|r| r.name == n).unwrap();
+
+        // The v18 content survives the frozen-record hop intact — including the
+        // slot v18 itself added, which is the half a defaults-only fixture would
+        // never have proven …
+        assert_eq!(
+            by_name("Cube").mesh.unwrap().asset,
+            Some(uuid::Uuid::from_u128(0xF2A1))
+        );
+        assert_eq!(by_name("Sun").light.unwrap().intensity, 2.0);
+        assert_eq!(file.settings.sim_hz, 90.0);
+        let t = by_name("Terrain").terrain.clone().expect("terrain slot");
+        assert_eq!(t.biome_set, Some(uuid::Uuid::from_u128(0xF_00BB)));
+        assert_eq!(t.data.get_tile((0, 0)).unwrap().biome_sample(4, 1, 1), 3);
+        let river = by_name("River");
+        assert_eq!(river.water_body, Some(v17_fixture_water()));
+        assert_eq!(river.spline.as_ref().unwrap().points.len(), 3);
+        let raft = by_name("Raft");
+        assert_eq!(raft.buoyancy, Some(v18_fixture_buoyancy()));
+        assert!(raft.rigid_body_3d.is_some());
+
+        // … and the one new slot lifts to `None` — a level whose ground is a
+        // heightfield and nothing else, which is exactly what a v18 level was.
+        for r in &file.entities {
+            assert!(
+                r.voxel_volume.is_none(),
+                "a v18 level has no volumetric ground; the lift must not conjure any"
+            );
+        }
+    }
+
+    /// The v18 downgrade is lossless **except** for the voxel volume — the one
+    /// thing v18 cannot express. Proven as a property (round-trip a live record
+    /// through the frozen shape) rather than by listing fields, so a slot added
+    /// later cannot silently fall out of the ladder.
+    #[test]
+    fn v18_entity_downgrade_is_lossless_except_for_the_voxel_volume() {
+        let live = EntityRecord {
+            terrain: Some(v16_fixture_terrain()),
+            spline: Some(Spline::default()),
+            water_body: Some(v17_fixture_water()),
+            buoyancy: Some(v18_fixture_buoyancy()),
+            voxel_volume: Some(VoxelVolume {
+                asset: Some(uuid::Uuid::from_u128(0xF_0CA5)),
+                voxel_size_m: 0.25,
+                runtime_carve: false,
+            }),
+            ..v9_base(uuid::Uuid::from_u128(0xF700), "Cavern", None)
+                .into_v10()
+                .into_v11()
+                .into_v12()
+                .into_v13()
+                .into_current()
+        };
+        let back = EntityRecordV18::from_current(live.clone()).into_current();
+
+        // The voxel volume is exactly what is lost — the water and the buoyancy,
+        // which v18 *can* express, are not …
+        assert!(back.voxel_volume.is_none());
+        assert_eq!(back.water_body, live.water_body);
+        assert_eq!(back.buoyancy, live.buoyancy);
+        // … and nothing else moved: put it back and the records are equal, which
+        // is the property form of "only this field".
+        assert_eq!(
+            EntityRecord {
+                voxel_volume: live.voxel_volume,
+                ..back
+            },
+            live,
+            "the v18 downgrade lost something other than the voxel volume"
+        );
+    }
+
+    /// The v19 addition round-trips through the whole editor codec — including
+    /// the **new decode arm**, which only a payload stamped v19 exercises — and a
+    /// voxel volume really does reach an ECS world through
+    /// `write_record_components` (the read half of the codec, which a bytes-only
+    /// test would never touch).
+    #[test]
+    fn v19_voxel_volume_round_trips_through_the_codec_and_the_world() {
+        let volume = VoxelVolume {
+            asset: Some(uuid::Uuid::from_u128(0xF_0CA5)),
+            voxel_size_m: 0.25,
+            runtime_carve: false,
+        };
+        let file = SceneFile {
+            schema_version: SCHEMA_VERSION,
+            title: "Caves".into(),
+            entities: vec![EntityRecord {
+                voxel_volume: Some(volume),
+                ..v9_base(uuid::Uuid::from_u128(0xF800), "Cave", None)
+                    .into_v10()
+                    .into_v11()
+                    .into_v12()
+                    .into_v13()
+                    .into_current()
+            }],
+            settings: LevelSettings::default(),
+        };
+        let bytes = bincode::serde::encode_to_vec(&file, bincode_config()).unwrap();
+        assert_eq!(bytes[0], SCHEMA_VERSION as u8);
+        let back = decode(&bytes).expect("the current schema decodes");
+        assert_eq!(back.entities[0].voxel_volume, Some(volume));
+        // Re-encoding is byte-identical.
+        assert_eq!(
+            bincode::serde::encode_to_vec(&back, bincode_config()).unwrap(),
+            bytes
+        );
+
+        // … and it lands on a real entity, which is what `record_of` then reads back.
+        let mut doc = SceneDoc::new();
+        apply_to_doc(&mut doc, &back);
+        let guid = uuid::Uuid::from_u128(0xF800);
+        let e = doc.world().entity_of(guid).unwrap();
+        assert_eq!(
+            doc.world().world().get::<VoxelVolume>(e).copied(),
+            Some(volume)
+        );
+        assert_eq!(record_of(&doc, guid).unwrap().voxel_volume, Some(volume));
+    }
+
+    /// **The v19 price, isolated**: an entity with no volumetric ground pays
+    /// exactly one discriminant byte. Measured as a delta between the frozen v18
+    /// and live v19 encodings of the very same record, so it is a *price* rather
+    /// than an absolute that could silently absorb any other growth.
+    #[test]
+    fn v19_costs_one_byte_per_voxel_free_entity() {
+        let live = v9_base(uuid::Uuid::from_u128(0xF900), "Bedrock", None)
+            .into_v10()
+            .into_v11()
+            .into_v12()
+            .into_v13()
+            .into_current();
+        let v19 = bincode::serde::encode_to_vec(&live, bincode_config()).unwrap();
+        let v18 = bincode::serde::encode_to_vec(
+            EntityRecordV18::from_current(live.clone()),
+            bincode_config(),
+        )
+        .unwrap();
+        assert_eq!(
+            v19.len(),
+            v18.len() + 1,
+            "the v19 slot must cost exactly one discriminant byte on a solid entity"
+        );
+
+        // A record that *carries* a volume costs more than its own discriminant —
+        // and never more than its three fields, because the chunks live in the
+        // `.inf_voxel` the GUID points at, not in the level.
+        let carved = EntityRecord {
+            voxel_volume: Some(VoxelVolume::default()),
+            ..live
+        };
+        assert!(
+            bincode::serde::encode_to_vec(&carved, bincode_config())
+                .unwrap()
+                .len()
+                > v19.len() + 1
         );
     }
 }

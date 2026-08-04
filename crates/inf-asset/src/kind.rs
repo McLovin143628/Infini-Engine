@@ -67,6 +67,18 @@ pub enum AssetKind {
     ///
     /// [`inf_terrain::BiomeSet`]: the terrain crate's `BiomeSet` payload.
     BiomeSet,
+    /// A **sparse SDF voxel volume** (`.inf_voxel`) — a header + chunk directory +
+    /// 16-byte-aligned per-chunk blobs, holding the caves/tunnels/excavations that
+    /// locally extend the heightfield terrain (P21.1,
+    /// [`inf_voxel::VoxelAsset`]). Authored, not derived: an author places a
+    /// volume and carves it, exactly as they author a `.inf_terrain`.
+    ///
+    /// A **streaming-class** kind, for the same reason [`Terrain`](AssetKind::Terrain)
+    /// is: it cooks uncompressed so a runtime can page individual chunks straight
+    /// out of an mmap'd pack as borrowed slices (`PackWriter::compresses_kind`).
+    ///
+    /// [`inf_voxel::VoxelAsset`]: the voxel crate's `.inf_voxel` container.
+    VoxelVolume,
     /// Anything else living under the content root.
     Unknown,
 }
@@ -94,6 +106,7 @@ impl AssetKind {
             AssetKind::Terrain => "inf_terrain",
             AssetKind::Partition => "inf_part",
             AssetKind::BiomeSet => "inf_biomes",
+            AssetKind::VoxelVolume => "inf_voxel",
             AssetKind::Unknown => return None,
         })
     }
@@ -120,6 +133,7 @@ impl AssetKind {
             "inf_terrain" => AssetKind::Terrain,
             "inf_part" => AssetKind::Partition,
             "inf_biomes" => AssetKind::BiomeSet,
+            "inf_voxel" => AssetKind::VoxelVolume,
             _ => AssetKind::Unknown,
         }
     }
@@ -154,6 +168,7 @@ impl AssetKind {
             AssetKind::Terrain => "terrain",
             AssetKind::Partition => "partition",
             AssetKind::BiomeSet => "biome_set",
+            AssetKind::VoxelVolume => "voxel_volume",
             AssetKind::Unknown => "unknown",
         }
     }
@@ -180,6 +195,7 @@ impl AssetKind {
             AssetKind::Terrain => "Terrain",
             AssetKind::Partition => "World Partition",
             AssetKind::BiomeSet => "Biome Set",
+            AssetKind::VoxelVolume => "Voxel Volume",
             AssetKind::Unknown => "File",
         }
     }
@@ -207,6 +223,7 @@ impl AssetKind {
             AssetKind::Terrain,
             AssetKind::Partition,
             AssetKind::BiomeSet,
+            AssetKind::VoxelVolume,
         ]
     }
 }

@@ -28,6 +28,7 @@ pub mod tonemap;
 pub mod translucent;
 pub mod underwater;
 pub mod vgeom;
+pub mod voxel;
 pub mod water;
 
 use crate::gpu::GpuContext;
@@ -413,6 +414,14 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
         "water",
         include_str!("../shaders/water.wgsl"),
         ShaderKind::Water,
+    ),
+    (
+        "voxel",
+        include_str!("../shaders/voxel.wgsl"),
+        // Plain: common_view and nothing else. The voxel pass binds view + lights
+        // and deliberately has NO env group — see the shader's header comment for
+        // the P21.1/P21.2 split that composition encodes.
+        ShaderKind::Plain,
     ),
     (
         "underwater",

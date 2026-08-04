@@ -591,6 +591,7 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
             sky_atmosphere,
             water_body,
             buoyancy,
+            voxel_volume,
         } = e;
 
         let entity = world.spawn_with_guid(guid, &name, None);
@@ -729,6 +730,15 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
             // water. Which water covers it is resolved per step, so a level that
             // spawns a floating crate before its lake still floats it.
             if let Some(c) = buoyancy {
+                em.insert(c);
+            }
+            // ── v19 volumetric terrain (P21.1) ──
+            //
+            // The reference + its two authored knobs only; the chunks live in the
+            // `.inf_voxel` and are paged by the host, exactly as a streamed
+            // terrain's tiles are. A volume whose asset the pack does not carry
+            // spawns and draws as nothing, which is what "no chunks" means.
+            if let Some(c) = voxel_volume {
                 em.insert(c);
             }
         }
@@ -1713,6 +1723,7 @@ mod tests {
             sky_atmosphere: None,
             water_body: None,
             buoyancy: None,
+            voxel_volume: None,
         };
         parent.sprite = Some(Sprite {
             size: Vec2d::new(1.0, 1.0),

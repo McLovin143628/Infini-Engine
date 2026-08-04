@@ -3047,6 +3047,7 @@ dependencies = [
  "inf-runtime",
  "inf-terrain",
  "inf-vgeom",
+ "inf-voxel",
  "inf-wasm-host",
  "inf-water",
  "notify",
@@ -3187,6 +3188,7 @@ dependencies = [
  "inf-terrain",
  "inf-transpile",
  "inf-vgeom",
+ "inf-voxel",
  "inf-water",
  "serde",
  "serde_json",
@@ -3269,6 +3271,7 @@ dependencies = [
  "inf-scene",
  "inf-terrain",
  "inf-vgeom",
+ "inf-voxel",
  "inf-wasm-host",
  "inf-water",
  "js-sys",
@@ -3313,6 +3316,7 @@ dependencies = [
  "inf-math",
  "inf-render-2d",
  "inf-vgeom",
+ "inf-voxel",
  "inf-water",
  "naga",
  "png 0.18.1",
@@ -3455,6 +3459,7 @@ dependencies = [
  "inf-math",
  "inf-render",
  "inf-terrain",
+ "inf-voxel",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
@@ -3467,6 +3472,19 @@ dependencies = [
  "wgpu",
  "windows 0.62.2",
  "xxhash-rust",
+]
+
+[[package]]
+name = "inf-voxel"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "glam 0.33.2",
+ "inf-asset",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

@@ -33,6 +33,8 @@ inf-physics = { workspace = true }
 # Terrain heightfield projection + the PCG scatter runtime the player evaluates on
 # load (a PcgVolume's instances are never persisted — recomputed from its graph).
 inf-terrain = { workspace = true }
+# P21.1: the sparse SDF chunk volumes that locally extend the heightfield.
+inf-voxel = { workspace = true }
 inf-pcg = { workspace = true }
 inf-blueprint = { workspace = true }
 # P12.3 audio: the runtime sim holds a long-lived `AudioEngine` host resource and

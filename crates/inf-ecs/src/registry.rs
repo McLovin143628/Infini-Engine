@@ -19,7 +19,7 @@ use crate::components::{
     JointKind3D, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice, PcgVolume,
     Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, SkyAtmosphere, Spline, SplineInterp, Sprite,
     StreamingSource, Terrain, Text2D, TextAlign, Tilemap, TimeOfDay, Transform, Visibility, Volume,
-    VolumeKind, WaterBody, WaterKind, WeatherPreset,
+    VolumeKind, VoxelVolume, WaterBody, WaterKind, WeatherPreset,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -117,6 +117,12 @@ impl ComponentRegistry {
             Tilemap => "Tilemap",
             Material => "Material",
             Terrain => "Terrain",
+            // P21.1 — the SDF chunk volume that locally extends the heightfield
+            // (caves, tunnels, excavations). Placed directly after `Terrain`
+            // because that is what it modifies: an author reaching for one has
+            // just been looking at the other, and the Details/Add-Component order
+            // is this list's order.
+            VoxelVolume => "Voxel Volume",
             PcgVolume => "PCG Volume",
             Light => "Light",
             Light2D => "Light 2D",
@@ -237,7 +243,8 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        assert_eq!(reg.editable().len(), 36);
+        // 36 through P20.2, + `VoxelVolume` at P21.1.
+        assert_eq!(reg.editable().len(), 37);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

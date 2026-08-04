@@ -3855,6 +3855,127 @@ impl Buoyancy {
     }
 }
 
+// ── volumetric terrain (schema v19 · P21.1) ─────────────────────────────────
+
+/// **A sparse SDF voxel volume** (schema v19, P21.1): the component that binds an
+/// entity to a `.inf_voxel` asset — the caves, tunnels and excavations that
+/// *locally extend* the heightfield terrain.
+///
+/// ## What it is, and what it deliberately is not
+///
+/// The planet-scale base stays a **heightfield** (the P16 clipmap economics are
+/// unbeatable at that scale). Volumetric capability arrives as chunk volumes that
+/// override and extend it *locally*, which is the hybrid every serious open-world
+/// engine uses. Nothing here voxelizes the world.
+///
+/// The component is a **reference plus its two authored knobs**, exactly like
+/// [`Terrain`]'s asset half: the chunks themselves live in the `.inf_voxel`
+/// ([`inf_voxel::VoxelAsset`]), which is a streaming-class container paged out of
+/// an mmap. There is no inline `data` field, and that asymmetry with [`Terrain`]
+/// is deliberate — `Terrain` carries one because it predates streaming and an
+/// inline heightfield is still a legitimate authoring mode; a voxel volume has
+/// never had a pre-streaming form to keep loading.
+///
+/// ## The fields are FROZEN
+///
+/// bincode is positional, so growing this component is a wire-format change that
+/// costs a scene-schema bump in **both** codec mirrors (the law paid for at v12,
+/// v13, v15 and v16). v19 is Phase 21's only bump, so these three fields are what
+/// the whole phase gets: the asset, the world scale of one voxel, and the
+/// runtime-carve gate P21.4 reads. Anything later either fits in the `.inf_voxel`
+/// (which versions itself) or buys its own bump.
+///
+/// Additive component: every field carries `#[serde(default)]`.
+///
+/// [`inf_voxel::VoxelAsset`]: the `.inf_voxel` container in the `inf-voxel` crate.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct VoxelVolume {
+    /// GUID of the `.inf_voxel` asset holding this volume's chunks, or `None` for
+    /// a volume that has been placed but not yet given content (it draws and
+    /// collides as nothing, which is what "no chunks" means).
+    ///
+    /// `#[reflect(ignore)]` — an asset reference, picked through the asset UI
+    /// rather than typed into the Details grid, exactly like [`MeshRef::asset`]
+    /// and [`Terrain::asset`]. Still serde-persisted, and it is the edge the cook
+    /// follows to pack the `.inf_voxel` with its level.
+    ///
+    /// **A `Uuid`, not an `inf_asset::AssetId`**, because `inf-ecs` does not
+    /// depend on `inf-asset` — every asset reference in this file is a bare
+    /// `Uuid` for that reason, and a fourth spelling of "asset id" in the ECS
+    /// would be the drift, not the fix.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub asset: Option<Uuid>,
+    /// World size of one voxel cell edge, **metres** (SI, architecture rule 6 —
+    /// 1 world unit = 1 metre, no scale factors).
+    ///
+    /// Defaults to `0.5` m: fine enough that a carved tunnel mouth reads as a
+    /// tunnel rather than as a staircase, coarse enough that a chunk
+    /// (`inf_voxel::CHUNK_DIM`³ = 16³ samples) spans 8 m and a cave system costs
+    /// tens of chunks rather than thousands.
+    ///
+    /// This is the *authored* scale and must match the `voxel_size_m` recorded in
+    /// the `.inf_voxel` header; the asset's value is the authority for anything
+    /// already on disk, and a mismatch is what a P21.2 cook advisory will report.
+    #[serde(default = "default_voxel_size_m")]
+    pub voxel_size_m: f64,
+    /// Whether **gameplay** may carve this volume at runtime (P21.4's Blueprint
+    /// carve nodes read exactly this flag before touching a chunk).
+    ///
+    /// Defaults to `true` — a volume you placed to be dug is the common case, and
+    /// the flag exists so an author can *withhold* permission from geometry that
+    /// must stay as built (a level's load-bearing tunnel, a rooftop a player must
+    /// not dig through). It is a **gate**, not a hint: with it `false` a runtime
+    /// carve is refused and reported, never silently applied, so a replay cannot
+    /// diverge on whether some node happened to run.
+    ///
+    /// It says nothing about *editor* carving, which is P21.3 and always allowed —
+    /// an author changing the world is not the same act as a game changing it.
+    #[serde(default = "default_true")]
+    pub runtime_carve: bool,
+}
+
+/// Half a metre per voxel — see [`VoxelVolume::voxel_size_m`].
+fn default_voxel_size_m() -> f64 {
+    0.5
+}
+
+impl Default for VoxelVolume {
+    fn default() -> Self {
+        Self {
+            asset: None,
+            voxel_size_m: default_voxel_size_m(),
+            runtime_carve: true,
+        }
+    }
+}
+
+impl VoxelVolume {
+    /// A volume bound to `asset` at the default half-metre voxel scale.
+    pub fn from_asset(asset: Uuid) -> Self {
+        Self {
+            asset: Some(asset),
+            ..Self::default()
+        }
+    }
+
+    /// The voxel scale to actually use, **clamped to a positive finite length**.
+    ///
+    /// A zero or negative `voxel_size_m` would collapse every chunk to a point
+    /// (and divide by zero in world↔grid conversion); a non-finite one would put
+    /// NaN into world positions. Both are reachable from the Details grid, so the
+    /// door is closed here rather than in each of the several consumers — the same
+    /// discipline `TerrainData::new` applies to its own spacing.
+    pub fn effective_voxel_size_m(&self) -> f64 {
+        if self.voxel_size_m.is_finite() && self.voxel_size_m > 0.0 {
+            self.voxel_size_m
+        } else {
+            default_voxel_size_m()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4941,5 +5062,61 @@ mod tests {
             ..Buoyancy::default()
         };
         assert_eq!(vacuum.equilibrium_fraction(), 0.0);
+    }
+
+    // ── voxel volume (P21.1) ────────────────────────────────────────────────
+
+    #[test]
+    fn voxel_volume_serde_round_trips_and_defaults() {
+        let v = VoxelVolume {
+            asset: Some(Uuid::from_u128(0x1CE)),
+            voxel_size_m: 0.25,
+            runtime_carve: false,
+        };
+        let back: VoxelVolume = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+        assert_eq!(v, back);
+
+        // A partial record still decodes — the additive-field guarantee.
+        let d: VoxelVolume = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, VoxelVolume::default());
+        assert_eq!(d.asset, None);
+        assert_eq!(d.voxel_size_m, 0.5);
+        assert!(
+            d.runtime_carve,
+            "P21.4's carve gate defaults to permitted — see the field docs"
+        );
+
+        let partial: VoxelVolume = serde_json::from_str(r#"{"voxel_size_m": 1.0}"#).unwrap();
+        assert_eq!(partial.voxel_size_m, 1.0);
+        assert!(partial.runtime_carve);
+
+        // bincode round-trip (the wire the scene records ride).
+        let cfg = bincode::config::standard();
+        let bytes = bincode::serde::encode_to_vec(v, cfg).unwrap();
+        let (rt, _): (VoxelVolume, usize) = bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+        assert_eq!(rt, v);
+    }
+
+    /// A voxel scale reachable from the Details grid but meaningless as geometry
+    /// falls back to the default rather than reaching world↔grid conversion,
+    /// where it would divide by zero or conjure NaN world positions.
+    #[test]
+    fn a_degenerate_voxel_size_falls_back_to_the_default() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let v = VoxelVolume {
+                voxel_size_m: bad,
+                ..VoxelVolume::default()
+            };
+            assert_eq!(v.effective_voxel_size_m(), 0.5, "{bad} slipped through");
+        }
+        let good = VoxelVolume {
+            voxel_size_m: 0.125,
+            ..VoxelVolume::default()
+        };
+        assert_eq!(good.effective_voxel_size_m(), 0.125);
+        assert_eq!(
+            VoxelVolume::from_asset(Uuid::from_u128(7)).asset,
+            Some(Uuid::from_u128(7))
+        );
     }
 }

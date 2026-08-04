@@ -156,6 +156,7 @@ fn kind_code(kind: AssetKind) -> u16 {
         AssetKind::Terrain => 17,
         AssetKind::Partition => 18,
         AssetKind::BiomeSet => 19,
+        AssetKind::VoxelVolume => 20,
     }
 }
 
@@ -181,6 +182,7 @@ fn kind_from_code(code: u16) -> AssetKind {
         17 => AssetKind::Terrain,
         18 => AssetKind::Partition,
         19 => AssetKind::BiomeSet,
+        20 => AssetKind::VoxelVolume,
         _ => AssetKind::Unknown,
     }
 }
@@ -277,7 +279,14 @@ impl PackWriter {
     pub fn compresses_kind(kind: AssetKind) -> bool {
         match kind {
             // Streaming-class: paged out of the mapping as borrowed slices.
-            AssetKind::MeshletMesh | AssetKind::Terrain | AssetKind::Partition => false,
+            AssetKind::MeshletMesh
+            | AssetKind::Terrain
+            | AssetKind::Partition
+            // P21.1: a `.inf_voxel` is paged chunk-at-a-time out of the mapping,
+            // exactly like a `.inf_terrain` tile — 16-byte-aligned blobs a reader
+            // sub-slices with no decode and no copy. Compressing it would defeat
+            // the entire container layout.
+            | AssetKind::VoxelVolume => false,
             AssetKind::Unknown
             | AssetKind::Level
             | AssetKind::Mesh
@@ -1055,6 +1064,7 @@ mod tests {
         assert_eq!(kind_code(AssetKind::Terrain), 17, "P16.3 appended 17");
         assert_eq!(kind_code(AssetKind::Partition), 18, "P16.5 appended 18");
         assert_eq!(kind_code(AssetKind::BiomeSet), 19, "P19.2 appended 19");
+        assert_eq!(kind_code(AssetKind::VoxelVolume), 20, "P21.1 appended 20");
         // …and an unknown future code degrades to `Unknown` rather than erroring,
         // so a newer pack's extra kinds never break an older reader's index parse.
         assert_eq!(kind_from_code(9999), AssetKind::Unknown);
@@ -1202,6 +1212,9 @@ mod tests {
             AssetKind::MeshletMesh,
             AssetKind::Terrain,
             AssetKind::Partition,
+            // P21.1: a `.inf_voxel` is paged chunk-at-a-time out of the mapping,
+            // exactly like a `.inf_terrain` tile.
+            AssetKind::VoxelVolume,
         ];
         for &k in STREAMING {
             assert!(!PackWriter::compresses_kind(k), "{k:?} must stay raw");
@@ -1218,9 +1231,11 @@ mod tests {
             .unwrap();
         w.add_bytes(guid(2), AssetKind::Mesh, &payload).unwrap();
         w.add_bytes(guid(3), AssetKind::Terrain, &payload).unwrap();
+        w.add_bytes(guid(4), AssetKind::VoxelVolume, &payload)
+            .unwrap();
         let r = PackReader::from_bytes(w.to_bytes().unwrap()).unwrap();
 
-        for g in [guid(1), guid(3)] {
+        for g in [guid(1), guid(3), guid(4)] {
             let e = r.entry(g).unwrap();
             assert!(!e.compressed, "{:?} blobs must stay mmap-readable", e.kind);
             assert_eq!(e.stored_len, payload.len() as u64);

@@ -11,7 +11,7 @@ use inf_ecs::components::{
     ComputedVisibility, Foliage, FoliageInstance, GlobalTransform, Joint2D, Joint3D, Light,
     Light2D, LightKind as EcsLightKind, Material, MeshRef, NineSlice, PcgVolume, Primitive,
     ScatteredInstance, SkeletalMesh, Spline, SplineInterp as EcsSplineInterp, Sprite, Terrain,
-    Text2D, TextAlign, Tilemap, Volume, WaterBody, WaterKind,
+    Text2D, TextAlign, Tilemap, Volume, VoxelVolume, WaterBody, WaterKind,
 };
 use inf_ecs::{Transform as EcsTransform, Vec3d};
 use inf_editor_core::ipc::SpawnKind;
@@ -225,6 +225,14 @@ pub struct EngineHost {
     /// content root is set, which makes inline terrain behaviour bit-identical to
     /// before.
     terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams,
+    /// The loaded voxel volumes (P21.1) — the caves, tunnels and excavations that
+    /// locally extend the heightfield. The Ring-1 store resolves a
+    /// `VoxelVolume.asset` to a loose `.inf_voxel` under the content root and hands
+    /// the bytes to the Ring-0 `inf_voxel::VoxelVolumes`, which owns parsing,
+    /// residency and meshing — so the viewport and the shipped player cannot mesh
+    /// the same field differently. Disabled until a content root is set, which
+    /// makes a document with no volumes bit-identical to its pre-P21.1 self.
+    voxel_volumes: inf_editor_core::voxel_store::EditorVoxelVolumes,
     /// The loose-file render-asset store (P18.3) — the editor's answer to the
     /// player's `VmeshRegistry`. Resolves a `MeshRef.asset` to its derived
     /// `.inf_vmesh` and a `SkeletalMesh` to bind-space geometry + a posed skinning
@@ -820,6 +828,7 @@ impl EngineHost {
             terrain_guid: None,
             terrain_slots: Vec::new(),
             terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams::new(),
+            voxel_volumes: inf_editor_core::voxel_store::EditorVoxelVolumes::new(),
             render_assets: inf_editor_core::render_assets::EditorRenderAssets::new(),
             tool_status: None,
             stream_log_countdown: STREAM_LOG_INTERVAL_FRAMES,
@@ -1161,6 +1170,11 @@ impl EngineHost {
         // `scatter` — a body's whole state is a pure function of its component, its
         // spline and the level clock, so there is nothing to carry over.
         self.scene.waters.clear();
+        // P21.1: volumetric terrain, rebuilt from scratch like `terrains`. The
+        // meshed surface behind each chunk lives in the store and is re-meshed only
+        // where the field moved, so re-projecting an unchanged cave costs a copy of
+        // its vertex streams and no meshing at all.
+        self.scene.voxels.clear();
         self.terrain_slots.clear();
         // `terrain_guid` (the tool target) is deliberately NOT cleared here — it
         // is re-validated against the new slot list at the end of the projection,
@@ -1203,6 +1217,10 @@ impl EngineHost {
         // skeletons, clips) — the input to the end-of-projection `retain_only`
         // audit (P16.4b's lesson in mesh form).
         let mut live_render_assets: BTreeSet<Uuid> = BTreeSet::new();
+        // Every voxel volume this projection actually drew — the input to the
+        // end-of-projection release below, the same audit `live_render_assets`
+        // feeds and for the same reason (a loaded volume is real megabytes).
+        let mut live_voxel_volumes: Vec<Uuid> = Vec::new();
         for &guid in doc.order() {
             let Some(entity) = world.entity_of(guid) else {
                 continue;
@@ -1379,6 +1397,35 @@ impl EngineHost {
                             editable: streamed && self.terrain_streams.is_editable(guid),
                             unsaved: streamed && terrain.data.has_dirty_tiles(),
                         });
+                    }
+                }
+            }
+
+            // Volumetric terrain (P21.1): the SDF chunk volume that locally
+            // extends the heightfield — caves, tunnels, overhangs. Its chunks live
+            // in a `.inf_voxel` the Ring-1 store resolves under the content root;
+            // a volume it cannot serve simply has no slot and draws nothing.
+            // MIRROR: `inf_player::render` runs the same branch (minus the
+            // visibility gate and the pick-id map, both host-local) through the
+            // same `project_voxel` body.
+            if let Some(volume) = w.get::<VoxelVolume>(entity) {
+                if visible {
+                    let translation = w
+                        .get::<GlobalTransform>(entity)
+                        .map(|g| g.translation())
+                        .unwrap_or(DVec3::ZERO);
+                    self.voxel_volumes.ensure(guid, volume);
+                    let projected = self.voxel_volumes.slot(guid).and_then(|slot| {
+                        project_voxel(
+                            slot,
+                            w.get::<Terrain>(entity),
+                            translation,
+                            inf_render::terrain_id_from_guid(guid.as_u128()),
+                        )
+                    });
+                    if let Some(rv) = projected {
+                        self.scene.voxels.push(rv);
+                        live_voxel_volumes.push(guid);
                     }
                 }
             }
@@ -1864,6 +1911,13 @@ impl EngineHost {
         // replaced by File ▸ Open. The projection is the only place that knows the
         // live set, so this is the only place that can release the rest.
         self.render_assets.retain_only(live_render_assets);
+
+        // The same audit for voxel volumes (P21.1). A loaded volume holds its whole
+        // decoded chunk set AND its meshed surface — real megabytes on behalf of an
+        // entity that may have been deleted, had its reference cleared, or belonged
+        // to a document File ▸ Open has since replaced. The projection is the only
+        // place that knows the live set.
+        self.voxel_volumes.retain_only(live_voxel_volumes);
 
         // Re-validate the tool target: keep it if that terrain is still projected
         // (so a stroke's status stays about the terrain being sculpted), else fall
@@ -2709,6 +2763,73 @@ fn project_terrain(
     }
 }
 
+/// Project one loaded voxel volume into a [`RenderVoxelVolume`] (P21.1).
+///
+/// `slot` is the host's loaded working set for this entity — its resident chunks
+/// and its meshed surface — owned by the Ring-0 `inf_voxel::VoxelVolumes` store, so
+/// the two hosts cannot mesh the same field differently. What is left here is the
+/// mapping into renderer types, and three rules that would drift silently if each
+/// host wrote its own:
+///
+/// * **The asset's voxel scale wins.** Chunk origins and vertex positions are both
+///   derived from `slot.data.voxel_size_m()` — the scale recorded in the
+///   `.inf_voxel` header — so the geometry is self-consistent. Reading the
+///   component's `voxel_size_m` here instead would scale vertices against origins
+///   derived from the asset's and tear the volume apart wherever the two disagree;
+///   the component's value is what a *new* asset is authored at, and reporting a
+///   disagreement is a cook advisory, not a render-time fixup.
+/// * **A voxel material index IS a terrain splat index**, so a volume shades with
+///   the `Terrain` on **this same entity** when there is one — composition, not a
+///   reference, so no cook edge and nothing to dangle — and with the default
+///   palette otherwise. A cave mouth has to shade continuously into the hillside it
+///   opens out of, and it cannot if the two sides read different palettes.
+/// * **A volume with no surface projects `None`**, never an empty chunk list: the
+///   scene's `voxels` being empty is exactly what keeps the voxel pass off the
+///   command encoder, and every existing golden depends on that.
+///
+/// **MIRROR** of the other host's `project_voxel` — keep the two byte-identical.
+fn project_voxel(
+    slot: &inf_voxel::VolumeSlot,
+    terrain: Option<&Terrain>,
+    translation: DVec3,
+    id: u64,
+) -> Option<inf_render::RenderVoxelVolume> {
+    let voxel_size_m = slot.data.voxel_size_m();
+    let chunks: Vec<inf_render::RenderVoxelChunk> = slot
+        .meshes
+        .meshes()
+        .map(|(&key, mesh)| inf_render::RenderVoxelChunk {
+            key: inf_render::VoxelChunkKey::new(key.x, key.y, key.z),
+            origin: slot.data.chunk_origin_world(key) + translation,
+            vertices: mesh
+                .local_positions_m(voxel_size_m)
+                .into_iter()
+                .enumerate()
+                .map(|(i, pos)| inf_render::RenderVoxelVertex {
+                    pos,
+                    normal: mesh.normals[i],
+                    material: mesh.materials[i] as u32,
+                })
+                .collect(),
+            indices: mesh.indices.clone(),
+            bounds: mesh.local_bounds_m(voxel_size_m),
+            version: slot.meshes.version(key),
+        })
+        .collect();
+    if chunks.is_empty() {
+        return None;
+    }
+    let layers = std::array::from_fn(|k| match terrain {
+        Some(t) => RenderTerrainLayer {
+            albedo: t.layers[k].albedo.to_array(),
+            roughness: t.layers[k].roughness as f32,
+            tex_scale: t.layers[k].tex_scale as f32,
+        },
+        None => RenderTerrainLayer::default(),
+    });
+    Some(inf_render::RenderVoxelVolume { id, chunks, layers })
+}
+
 /// Project an ECS [`Light2D`] (+ world position) into a renderer 2D light.
 fn project_light2d(light: &Light2D, translation: DVec3) -> RenderLight2D {
     let c = light.color.to_array();
@@ -3241,6 +3362,7 @@ impl EngineHost {
     /// site.
     pub fn set_content_root(&mut self, root: Option<std::path::PathBuf>) {
         self.terrain_streams.set_content_root(root.clone());
+        self.voxel_volumes.set_content_root(root.clone());
         self.render_assets.set_content_root(root);
         self.terrain_slots.clear();
         self.synced_version = None; // force a re-projection
@@ -3262,6 +3384,7 @@ impl EngineHost {
     /// parse each.
     pub fn refresh_asset_index(&mut self) {
         self.terrain_streams.refresh_index();
+        self.voxel_volumes.refresh_index();
         self.render_assets.refresh_index();
         self.synced_version = None; // force a re-projection
     }

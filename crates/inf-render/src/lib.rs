@@ -65,6 +65,10 @@ pub use passes::terrain::{
     plan_tile_cache, ring_source_lod, superseded, CachedTile, TerrainPatch, TileCacheKey,
     TileCachePlan, TERRAIN_BASE_CELLS, TERRAIN_LOD_COUNT,
 };
+// The P21.1 voxel-surface cache gate — the pure planner the volumetric-terrain
+// pass drives its per-chunk uploads/evictions from, exported like `plan_tile_cache`
+// so hosts and gates can reason about residency without a GPU.
+pub use passes::voxel::{plan_chunk_cache, CachedChunk, ChunkCacheKey, ChunkCachePlan};
 pub use pick::Picker;
 pub use precip::{
     particle_offset, precip_base, wrap_signed, PrecipParams, PrecipQuality, PRECIP_BOX_XZ_M,
@@ -78,9 +82,10 @@ pub use renderer::{
 pub use scene::{
     terrain_id_from_guid, Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk,
     RenderLight, RenderLight2D, RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile,
-    RenderTilemap, ScatterBatch, ScatterData, ScatterInstance, ScatterInstanceRaw, SkinnedInstance,
-    SkinnedMeshData, SkinnedVertex, SkyParams, SpriteInstance, SpriteTextureUpload, SunParams,
-    TerrainTileKey, TextureHandle, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh,
+    RenderTilemap, RenderVoxelChunk, RenderVoxelVertex, RenderVoxelVolume, ScatterBatch,
+    ScatterData, ScatterInstance, ScatterInstanceRaw, SkinnedInstance, SkinnedMeshData,
+    SkinnedVertex, SkyParams, SpriteInstance, SpriteTextureUpload, SunParams, TerrainTileKey,
+    TextureHandle, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VoxelChunkKey,
     DEFAULT_SUN_DIR, ID_GIZMO_BASE, ID_NONE,
 };
 pub use settings::{

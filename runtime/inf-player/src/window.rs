@@ -39,6 +39,7 @@ use crate::render::PlayerRenderHost;
 use crate::runtime_sim::RuntimeSim;
 use crate::skinned::SkinnedRegistry;
 use crate::vmesh::VmeshRegistry;
+use crate::voxel::VoxelRegistry;
 
 /// Play-in-editor control channel + report sink attached to a windowed player.
 /// Present only for the PIE window path; a standalone game leaves it `None`.
@@ -101,6 +102,12 @@ pub struct PlayerApp {
     /// geometry. Inert for primitive-only / PIE / browser worlds, which is why
     /// [`PlayerApp::new`] starts it empty and only [`run`] replaces it.
     skinned: Arc<SkinnedRegistry>,
+    /// Where a `VoxelVolume.asset` finds its `.inf_voxel` bytes (P21.1) — the
+    /// cooked pack or a dev content directory. Attached to the render host so a
+    /// placed cave draws its real carved surface. Inert for primitive-only / PIE /
+    /// browser worlds, like `skinned` and for the same reason, which is why
+    /// [`PlayerApp::new`] starts it empty and only [`run`] replaces it.
+    voxel_assets: Arc<VoxelRegistry>,
     /// The loaded level's scene-persisted render block (R-P4); the render host
     /// maps it onto the live `RenderSettings` at build (and device-loss rebuild).
     /// `default` for content with no authored block (PIE / web / android v1).
@@ -146,6 +153,7 @@ impl PlayerApp {
             paused: false,
             vmeshes,
             skinned: Arc::new(SkinnedRegistry::new()),
+            voxel_assets: Arc::new(VoxelRegistry::new()),
             render,
             #[cfg(target_arch = "wasm32")]
             canvas: None,
@@ -313,6 +321,7 @@ impl PlayerApp {
                 Ok(mut host) => {
                     host.set_vmeshes(self.vmeshes.clone());
                     host.set_skinned(self.skinned.clone());
+                    host.set_voxel_assets(self.voxel_assets.clone());
                     live.host = host;
                 }
                 Err(e) => {
@@ -367,6 +376,9 @@ impl ApplicationHandler for PlayerApp {
                 // posed geometry rather than a placeholder cube.
                 host.set_vmeshes(self.vmeshes.clone());
                 host.set_skinned(self.skinned.clone());
+                // P21.1: and the `.inf_voxel` source, so a placed cave draws its
+                // carved surface rather than nothing.
+                host.set_voxel_assets(self.voxel_assets.clone());
                 // Report our native window handle so the editor can reparent us
                 // into the viewport slot (embedded PIE).
                 if let Some(pie) = self.pie.as_mut() {
@@ -462,6 +474,7 @@ pub fn run(
     map: InputMap,
     vmeshes: Arc<VmeshRegistry>,
     skinned: Arc<SkinnedRegistry>,
+    voxel_assets: Arc<VoxelRegistry>,
     render: inf_scene::RenderSettingsRecord,
     debug_cells: bool,
 ) -> Result<(), String> {
@@ -469,6 +482,7 @@ pub fn run(
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = PlayerApp::new(title, width, height, sim, map, vmeshes, render);
     app.skinned = skinned;
+    app.voxel_assets = voxel_assets;
     app.debug_cells = debug_cells;
     event_loop
         .run_app(&mut app)
