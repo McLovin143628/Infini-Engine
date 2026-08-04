@@ -387,6 +387,82 @@ fn unauthored_holes_never_receive_material() {
     assert!((measured - stats.mass_delta).abs() <= 1e-3 * stats.mass_delta.abs().max(1.0));
 }
 
+/// **The carved twin of `unauthored_holes_never_receive_material`.** A P21.2
+/// hole is a hole to erosion for exactly the same reason an unauthored tile is:
+/// there is no surface there. The distinction matters because the two arrive by
+/// completely different routes — one by never authoring a tile, the other by
+/// carving a cave out of one that is fully authored, fully painted and sitting in
+/// the middle of the region — and only the second can be *surrounded* by material
+/// with somewhere to flow from.
+///
+/// A single tile, sloped so erosion genuinely runs, with an interior patch
+/// carved: the patch must come out of a full erosion bake with nothing in it.
+#[test]
+fn carved_holes_never_receive_material() {
+    let res = 32;
+    let mut t = TerrainData::new(res, 1.0);
+    t.author_tile((0, 0), |x, _z| 30.0 + (x % 15.0) * 0.5);
+
+    // Carve an interior patch — well inside the tile, so it is ringed by material
+    // on all four sides and a leaky implementation has plenty to leak.
+    let tile = t.get_tile_mut((0, 0)).unwrap();
+    for j in 12..20 {
+        for i in 12..20 {
+            tile.set_hole(res, i, j, true);
+        }
+    }
+    assert!(t.get_tile((0, 0)).unwrap().has_holes());
+
+    // Stop one sample short of the shared far edge: sample 31 belongs to tile
+    // (1, 0), which does not exist, and counting THAT as a hole would let the
+    // exact-count assertion below pass without the carve.
+    let mut region = t.extract_region(DVec2::new(0.0, 0.0), DVec2::new(30.0, 30.0), 0);
+    let before = region.heights().to_vec();
+    let (nx, nz) = region.dims();
+
+    let stats = erode(&mut region, &ErosionParams::default(), 200);
+    let after = region.heights().to_vec();
+
+    let mut hole_count = 0;
+    for z in 0..nz {
+        for x in 0..nx {
+            if !region.is_authored(x, z) {
+                hole_count += 1;
+                let idx = (z * nx + x) as usize;
+                assert_eq!(after[idx], 0.0, "carved cell ({x},{z}) got material");
+            }
+        }
+    }
+    // The carve is the ONLY source of unauthored cells here (the tile is whole),
+    // so this also pins that `extract_region` really did read the hole mask.
+    assert_eq!(
+        hole_count, 64,
+        "the region must see exactly the 8×8 carved patch as unauthored"
+    );
+
+    // Non-vacuous: the surrounding, authored terrain really did erode.
+    let changed = before.iter().zip(&after).any(|(a, b)| (a - b).abs() > 1e-3);
+    assert!(changed, "erosion should have altered the authored terrain");
+    let measured = height_sum_delta(&before, &after);
+    assert!((measured - stats.mass_delta).abs() <= 1e-3 * stats.mass_delta.abs().max(1.0));
+
+    // … and writing back cannot fill the cave in either: the write-back guard
+    // reads the same mask, so the tile's holes survive a bake untouched.
+    let delta = t.edit_region(DVec2::new(0.0, 0.0), DVec2::new(30.0, 30.0), 0, |r| {
+        let _ = erode(r, &ErosionParams::default(), 50);
+    });
+    let _ = delta;
+    let tile = t.get_tile((0, 0)).unwrap();
+    for j in 12..20 {
+        for i in 12..20 {
+            assert!(
+                tile.is_hole(res, i, j),
+                "erosion healed the hole at ({i},{j})"
+            );
+        }
+    }
+}
+
 // ── erode_terrain round-trip through the undo delta ──────────────────────────
 
 #[test]

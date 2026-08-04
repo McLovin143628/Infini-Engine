@@ -19,7 +19,9 @@ use glam::{DVec2, DVec3};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::residency::{ResidencyReport, TileStore};
-use crate::tile::{TerrainTile, TerrainTileFrozenV1, TerrainTileFrozenV2, TileKey};
+use crate::tile::{
+    TerrainTile, TerrainTileFrozenV1, TerrainTileFrozenV2, TerrainTileFrozenV3, TileKey,
+};
 use crate::HeightSource;
 
 /// Default samples per tile side (256 × 256).
@@ -214,6 +216,17 @@ impl TerrainData {
     /// buffer length doesn't match `resolution²` (rejected). The horizontal origin
     /// is overwritten to keep the tile grid-aligned; the caller's `origin.y` (the
     /// `f64` height anchor) is preserved.
+    ///
+    /// The `Err` variant is a whole [`TerrainTile`] on purpose, and clippy's
+    /// `result_large_err` is silenced rather than obeyed: this is not an error
+    /// *payload*, it is the caller's own tile being **handed back** unconsumed —
+    /// the standard move-back-on-rejection shape (`HashMap::try_insert`,
+    /// `Vec::push_within_capacity`). Boxing it would put an allocation on the
+    /// rejection path to save moving a struct that the caller already owned and
+    /// is about to drop, and would change a public signature for it. (P21.2's
+    /// hole mask is what pushed the type past the 128-byte lint threshold — one
+    /// more `Vec` header — which says nothing about whether the shape is right.)
+    #[allow(clippy::result_large_err)]
     pub fn insert_tile(
         &mut self,
         coord: (i32, i32),
@@ -394,6 +407,33 @@ impl TerrainData {
                     let j0 = v.floor() as u32;
                     let i1 = (i0 + 1).min(res - 1);
                     let j1 = (j0 + 1).min(res - 1);
+                    // ── THE POISON RULE (P21.2) ──────────────────────────────
+                    // A holed *sample* removes the surface from every cell that
+                    // interpolates it, so one holed corner poisons the whole
+                    // bilinear cell: the query returns `None` — "no heightfield
+                    // here" — for the entire `[i0, i1] × [j0, j1]` quad.
+                    //
+                    // The alternative (interpolate the three live corners) was
+                    // rejected: it invents a surface that the clipmap does not
+                    // draw, so a capsule would stand on nothing visible right at
+                    // the lip of every cave mouth. Poisoning instead makes the
+                    // *query* agree with the *raster* — terrain.wgsl discards a
+                    // fragment on exactly the same rule, one holed corner of the
+                    // cell it samples — and the combined ground query
+                    // ([`crate::ground_height_at`]) is what puts the cave floor
+                    // under the resulting gap.
+                    //
+                    // The cost is that a hole reads one cell wider than it is
+                    // authored, in both directions, which is the correct
+                    // direction to err: the visible gap and the walkable gap are
+                    // the same gap.
+                    if tile.is_hole(res, i0, j0)
+                        || tile.is_hole(res, i1, j0)
+                        || tile.is_hole(res, i0, j1)
+                        || tile.is_hole(res, i1, j1)
+                    {
+                        return None;
+                    }
                     let fx = u - i0 as f64;
                     let fz = v - j0 as f64;
                     let h00 = tile.sample(res, i0, j0) as f64;
@@ -409,9 +449,49 @@ impl TerrainData {
         None
     }
 
+    /// `true` when world `(x, z)` lands on a **holed** part of the heightfield —
+    /// authored terrain with its surface carved away (P21.2).
+    ///
+    /// Distinct from `height_at(..).is_none()`, which is also true out past the
+    /// authored edge: this answers "there is a tile here and it says *no
+    /// surface*", which is what tells a ground query to go look in the voxel
+    /// volumes instead of reporting empty space. Uses the same cell-poisoning
+    /// rule as [`height_at`](Self::height_at) — see there.
+    pub fn is_hole_at(&self, world_xz: DVec2) -> bool {
+        let res = self.tile_resolution;
+        let xs = self.axis_candidates(world_xz.x);
+        let zs = self.axis_candidates(world_xz.y);
+        for &(tx, u) in xs.iter().take(if xs[0].0 == xs[1].0 { 1 } else { 2 }) {
+            for &(tz, v) in zs.iter().take(if zs[0].0 == zs[1].0 { 1 } else { 2 }) {
+                if let Some(tile) = self.tiles.get(&(tx, tz)) {
+                    let u = u.clamp(0.0, (res - 1) as f64);
+                    let v = v.clamp(0.0, (res - 1) as f64);
+                    let i0 = u.floor() as u32;
+                    let j0 = v.floor() as u32;
+                    let i1 = (i0 + 1).min(res - 1);
+                    let j1 = (j0 + 1).min(res - 1);
+                    return tile.is_hole(res, i0, j0)
+                        || tile.is_hole(res, i1, j0)
+                        || tile.is_hole(res, i0, j1)
+                        || tile.is_hole(res, i1, j1);
+                }
+            }
+        }
+        false
+    }
+
+    /// `true` when **any** resident level-0 tile has a holed sample. The cheap
+    /// gate a renderer, a cook advisory or a ground query takes before doing any
+    /// per-sample work on a terrain nobody has carved.
+    pub fn has_holes(&self) -> bool {
+        self.tiles.values().any(|t| t.has_holes())
+    }
+
     /// Surface normal (unit, +Y up) at world `(x, z)` via central differences, or
-    /// `None` when the containing tile is unauthored. Missing neighbours (terrain
-    /// edge) fall back to the centre height (a one-sided slope).
+    /// `None` when the containing tile is unauthored **or the sample is holed**
+    /// (the centre `height_at` carries the poison rule). Missing *neighbours* —
+    /// terrain edge or a hole one sample over — fall back to the centre height, so
+    /// the normal at a hole's lip is a one-sided slope rather than a discontinuity.
     pub fn normal_at(&self, world_xz: DVec2) -> Option<DVec3> {
         let e = self.meters_per_sample;
         let c = self.height_at(world_xz)?;
@@ -726,12 +806,25 @@ impl HeightSource for TerrainData {
 /// Wire form: config scalars + a flat `(x, z, tile)` sequence (a native
 /// `BTreeMap` with tuple keys doesn't encode in JSON; the flat sequence is
 /// portable across bincode/JSON and deterministic via `BTreeMap` iteration).
+///
+/// # The tiles are **generation 3**, not the live shape (P21.2)
+///
+/// `TerrainData` is the only path a tile takes into an `.inf_lvl`, and the scene
+/// schema was frozen at v19 before P21.2 gave tiles their hole mask. bincode is
+/// positional, so writing the live six-field tile here would be a v20 — so this
+/// wire form stays pinned at [`TerrainTileFrozenV3`], and a level's terrain bytes
+/// are byte-identical to what v16 wrote for the same heightfield.
+///
+/// The hole mask therefore **does not persist through a level**; it persists
+/// through `.inf_terrain`, which encodes tiles individually and is free to be v5.
+/// The full statement of that, and what fills the gap, lives on
+/// [`TerrainTileFrozenV1`]'s generation table under *THE EMPTY CELL*.
 #[derive(Serialize, Deserialize)]
 struct TerrainDataRaw {
     tile_resolution: u32,
     meters_per_sample: f64,
     #[serde(default)]
-    tiles: Vec<(i32, i32, TerrainTile)>,
+    tiles: Vec<(i32, i32, TerrainTileFrozenV3)>,
 }
 
 impl Serialize for TerrainData {
@@ -742,7 +835,7 @@ impl Serialize for TerrainData {
             tiles: self
                 .tiles
                 .iter()
-                .map(|(&(x, z), t)| (x, z, t.clone()))
+                .map(|(&(x, z), t)| (x, z, TerrainTileFrozenV3::from_current(t)))
                 .collect(),
         };
         raw.serialize(s)
@@ -788,7 +881,12 @@ impl<'de> Deserialize<'de> for TerrainData {
                     "terrain tile ({x},{z}) has {bl} biome samples, expected {expect} or 0"
                 )));
             }
-            data.tiles.insert((x, z), tile);
+            // The P21.2 hole mask has no rung on this ladder — generation 3 is
+            // what an `.inf_lvl` carries — so `holes_len` is a const `0` and the
+            // check reads as the fourth repetition of one rule rather than as an
+            // absence someone has to notice.
+            debug_assert_eq!(tile.holes_len(), 0);
+            data.tiles.insert((x, z), tile.into_current());
             // A **resident tile always holds a stamp** (P16.3): a freshly loaded
             // tile is resident, so it draws one here exactly like a streamed-in or
             // authored one. Without this a deserialized terrain would report

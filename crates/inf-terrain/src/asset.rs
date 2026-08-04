@@ -14,7 +14,7 @@
 //! │ ── v2+ only, offset 64 ───────────────────────────────────────── │
 //! │  pyr_max_lvls  u32       PyramidOptions::max_levels               │
 //! │  pyr_min_tiles u32       PyramidOptions::min_tiles                │
-//! │  reserved      [u8; 56]  zeros (room for v5 without a re-length)  │
+//! │  reserved      [u8; 56]  zeros (room for v6 without a re-length)  │
 //! ├ tile directory (tile_count × 32 B, sorted by TileKey) ────────────┤
 //! │  lod u32 · tx i32 · tz i32 · reserved u32 · offset u64 · len u64  │
 //! ├ blob section (each tile's bincode bytes, 16-byte-aligned) ────────┤
@@ -22,27 +22,36 @@
 //! └───────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! # Schema v3 / v4: tile blobs grow layers (P19.1, P19.2)
+//! # Schema v3 / v4 / v5: tile blobs grow layers (P19.1, P19.2, P21.2)
 //!
-//! The header has not changed since v2 — v3 and v4 are byte-for-byte v2's
-//! 128-byte layout — but the *tile blob* has, twice: v3 appended the sparse
-//! erosion [`maps`](TerrainTile::maps) layer (flow / deposition / wear, P19.1) and
-//! v4 appended the sparse [`biomes`](TerrainTile::biomes) layer (per-sample biome
-//! ids, P19.2). bincode is **positional**, so each is a wire-format change even
-//! though the new field is `#[serde(default)]`: a v2 blob has three fields where
-//! this build reads five, and decoding it as the grown tile would run off the end
-//! of the blob.
+//! The header has not changed since v2 — v3, v4 and v5 are byte-for-byte v2's
+//! 128-byte layout — but the *tile blob* has, three times: v3 appended the sparse
+//! erosion [`maps`](TerrainTile::maps) layer (flow / deposition / wear, P19.1), v4
+//! appended the sparse [`biomes`](TerrainTile::biomes) layer (per-sample biome
+//! ids, P19.2), and v5 appended the sparse [`holes`](TerrainTile::holes) layer
+//! (the packed per-sample hole mask, P21.2). bincode is **positional**, so each is
+//! a wire-format change even though the new field is `#[serde(default)]`: a v2
+//! blob has three fields where this build reads six, and decoding it as the grown
+//! tile would run off the end of the blob.
 //!
 //! The version is therefore what selects the wire type ([`decode_tile_at`]): a
 //! payload stamped **≤ 2** decodes through the frozen [`TerrainTileFrozenV1`], a
-//! **v3** one through [`TerrainTileFrozenV2`], and a **v4** one as the current
-//! tile — each lifting the layers it cannot carry to their sparse defaults, which
-//! is exactly what a payload of that vintage meant. So **v1..v3 payloads load
-//! forever**, and the only thing a rewrite costs an untouched terrain is one
-//! zero-length count per layer per tile blob. The header length still comes from
-//! [`header_len`] alone, which is why v3 and v4 could reuse v2's without
-//! ambiguity: the *schema version* remains the single source of truth for how to
-//! read everything after the magic.
+//! **v3** one through [`TerrainTileFrozenV2`], a **v4** one through
+//! [`TerrainTileFrozenV3`], and a **v5** one as the current tile — each lifting
+//! the layers it cannot carry to their sparse defaults, which is exactly what a
+//! payload of that vintage meant. So **v1..v4 payloads load forever**, and the
+//! only thing a rewrite costs an untouched terrain is one zero-length count per
+//! layer per tile blob. The header length still comes from [`header_len`] alone,
+//! which is why v3, v4 and v5 could reuse v2's without ambiguity: the *schema
+//! version* remains the single source of truth for how to read everything after
+//! the magic.
+//!
+//! **This is the container that carries holes.** The other one — `.inf_lvl`, via
+//! `TerrainData`'s wire form — is pinned at tile generation 3 because the scene
+//! schema was frozen at v19; see the *THE EMPTY CELL* section of
+//! [`TerrainTileFrozenV1`]'s generation table. So a terrain that has been carved
+//! wants a `.inf_terrain` asset behind it, and P21.2's cook advisory says so when
+//! one is missing.
 //!
 //! # Schema v2: the pyramid options are recorded (P16.6)
 //!
@@ -114,16 +123,18 @@ use inf_asset::AssetKind;
 
 use crate::data::TerrainData;
 use crate::pyramid::{PyramidLevel, PyramidOptions};
-use crate::tile::{TerrainTile, TerrainTileFrozenV1, TerrainTileFrozenV2, TileKey};
+use crate::tile::{
+    TerrainTile, TerrainTileFrozenV1, TerrainTileFrozenV2, TerrainTileFrozenV3, TileKey,
+};
 
 /// Magic at the head of every `.inf_terrain` payload.
 pub const TERRAIN_ASSET_MAGIC: [u8; 8] = *b"INFTERRN";
 
 /// Current `.inf_terrain` payload schema version (**4** since P19.2 — tile blobs
-/// carry the per-sample biome ids; **3** since P19.1 — the erosion data maps;
-/// **2** since P16.6 — the header records the pyramid options; see the module
-/// docs).
-pub const TERRAIN_ASSET_SCHEMA_VERSION: u32 = 4;
+/// carry the packed per-sample hole mask; **4** since P19.2 — the biome ids;
+/// **3** since P19.1 — the erosion data maps; **2** since P16.6 — the header
+/// records the pyramid options; see the module docs).
+pub const TERRAIN_ASSET_SCHEMA_VERSION: u32 = 5;
 
 /// Tile blobs start on multiples of this many bytes (see the module docs).
 pub const TILE_ALIGN: u64 = 16;
@@ -145,8 +156,14 @@ pub const HEADER_LEN_V3: u64 = HEADER_LEN_V2;
 /// layout and not the header — same reasoning as [`HEADER_LEN_V3`].
 pub const HEADER_LEN_V4: u64 = HEADER_LEN_V2;
 
+/// Bytes of the **v5** fixed header. P21.2's hole mask is, once again, a *tile
+/// blob* change only — and v2 left 56 reserved bytes precisely so a version that
+/// needs no new header field costs no re-length. Same reasoning as
+/// [`HEADER_LEN_V3`]; `v5_needed_no_header_re_length` is the check.
+pub const HEADER_LEN_V5: u64 = HEADER_LEN_V2;
+
 /// Bytes of the fixed header **this build writes** (the current schema's).
-pub const HEADER_LEN: u64 = HEADER_LEN_V4;
+pub const HEADER_LEN: u64 = HEADER_LEN_V5;
 
 /// Bytes of the fixed header of a payload at `schema_version`.
 ///
@@ -159,7 +176,8 @@ pub const fn header_len(schema_version: u32) -> u64 {
         0 | 1 => HEADER_LEN_V1,
         2 => HEADER_LEN_V2,
         3 => HEADER_LEN_V3,
-        _ => HEADER_LEN_V4,
+        4 => HEADER_LEN_V4,
+        _ => HEADER_LEN_V5,
     }
 }
 
@@ -226,9 +244,10 @@ pub fn decode_tile(bytes: &[u8]) -> std::result::Result<TerrainTile, String> {
 ///
 /// | payload schema | tile layout |
 /// |---|---|
-/// | ≤ 2 | [`TerrainTileFrozenV1`] — origin + heights + weights, lifted with empty maps and biomes |
-/// | 3 | [`TerrainTileFrozenV2`] — the above plus the P19.1 data maps, lifted with empty biomes |
-/// | ≥ 4 | [`TerrainTile`] — the above plus the sparse P19.2 biome ids |
+/// | ≤ 2 | [`TerrainTileFrozenV1`] — origin + heights + weights, lifted with empty maps, biomes and holes |
+/// | 3 | [`TerrainTileFrozenV2`] — the above plus the P19.1 data maps, lifted with empty biomes and holes |
+/// | 4 | [`TerrainTileFrozenV3`] — the above plus the P19.2 biome ids, lifted with an empty hole mask |
+/// | ≥ 5 | [`TerrainTile`] — the above plus the sparse P21.2 hole mask |
 pub fn decode_tile_at(
     bytes: &[u8],
     schema_version: u32,
@@ -240,6 +259,11 @@ pub fn decode_tile_at(
     }
     if schema_version == 3 {
         return bincode::serde::decode_from_slice::<TerrainTileFrozenV2, _>(bytes, tile_config())
+            .map(|(t, _)| t.into_current())
+            .map_err(|e| e.to_string());
+    }
+    if schema_version == 4 {
+        return bincode::serde::decode_from_slice::<TerrainTileFrozenV3, _>(bytes, tile_config())
             .map(|(t, _)| t.into_current())
             .map_err(|e| e.to_string());
     }
@@ -972,12 +996,12 @@ mod tests {
     ///
     /// Hand-built for the same reason `v1_image` is: the bytes are a pure function
     /// of the tiles, and a committed blob would only be a less-inspectable copy of
-    /// this loop. One helper for both generations, so the two ladder tests cannot
+    /// this loop. One helper for every generation, so the ladder tests cannot
     /// drift apart.
     fn legacy_image(asset: &TerrainAsset, version: u32) -> Vec<u8> {
         assert!(
-            (2..=3).contains(&version),
-            "legacy_image writes generation-1 (v2) or generation-2 (v3) blobs"
+            (2..=4).contains(&version),
+            "legacy_image writes generation-1 (v2), -2 (v3) or -3 (v4) blobs"
         );
         let r = asset.reader();
         let count = r.tile_count() as u32;
@@ -989,18 +1013,22 @@ mod tests {
             .iter()
             .map(|e| {
                 let tile = r.tile(e.key).unwrap().unwrap();
-                if version == 2 {
-                    bincode::serde::encode_to_vec(
+                match version {
+                    2 => bincode::serde::encode_to_vec(
                         TerrainTileFrozenV1::from_current(&tile),
                         tile_config(),
                     )
-                    .unwrap()
-                } else {
-                    bincode::serde::encode_to_vec(
+                    .unwrap(),
+                    3 => bincode::serde::encode_to_vec(
                         TerrainTileFrozenV2::from_current(&tile),
                         tile_config(),
                     )
-                    .unwrap()
+                    .unwrap(),
+                    _ => bincode::serde::encode_to_vec(
+                        TerrainTileFrozenV3::from_current(&tile),
+                        tile_config(),
+                    )
+                    .unwrap(),
                 }
             })
             .collect();
@@ -1054,6 +1082,11 @@ mod tests {
         legacy_image(asset, 3)
     }
 
+    /// The pre-P21.2 image (generation-3 tile blobs — biomes, no hole mask).
+    fn v4_image(asset: &TerrainAsset) -> Vec<u8> {
+        legacy_image(asset, 4)
+    }
+
     /// **A v2 payload loads forever** — every tile decodes through the frozen
     /// pre-P19.1 wire type and comes back with the never-eroded default maps.
     ///
@@ -1103,7 +1136,7 @@ mod tests {
         let key = TileKey::lod0((0, 0));
         assert_eq!(
             asset.reader().tile_bytes(key).unwrap().len(),
-            old.tile_bytes(key).unwrap().len() + 2,
+            old.tile_bytes(key).unwrap().len() + 3,
             "an untouched tile costs exactly one extra byte per layer added since v2"
         );
     }
@@ -1149,12 +1182,74 @@ mod tests {
             assert_eq!(tile.maps(), new.maps(), "{key:?} lost its data maps");
         }
 
-        // The wire cost of v4 over v3, priced: one zero-length count per tile.
+        // The wire cost of v4 + v5 over v3, priced: one zero-length count per
+        // layer per tile.
+        let key = TileKey::lod0((0, 0));
+        assert_eq!(
+            asset.reader().tile_bytes(key).unwrap().len(),
+            old.tile_bytes(key).unwrap().len() + 2,
+            "an unpainted, un-carved tile costs exactly one extra byte per layer              added since v3"
+        );
+    }
+
+    /// **A v4 payload loads forever** — the generation-3 ladder rung. Every tile
+    /// decodes through [`TerrainTileFrozenV3`], **keeps its data maps and biome
+    /// ids**, and comes back with the un-carved default hole mask.
+    ///
+    /// The third rung, written to the same shape as the first two for the same
+    /// reason: "old bytes load" is one claim per generation, and only a per-rung
+    /// test catches a `decode_tile_at` that routes v4 through the wrong wire type
+    /// — which, positionally, would read the biome count as a hole count and then
+    /// run off the end of the blob.
+    #[test]
+    fn a_v4_payload_still_loads_with_default_holes() {
+        // Populate all three post-v2 layers, so nothing can pass by coming back
+        // empty, and carve a hole so the *dropped* layer is a real one too.
+        let mut t = sample_terrain();
+        {
+            let tile = t.get_tile_mut((2, 2)).unwrap();
+            tile.set_map_texel(5, 1, 1, [3.0, 2.0, 1.0]);
+            tile.set_biome_sample(5, 1, 1, 7);
+            tile.set_hole(5, 3, 3, true);
+        }
+        let p = build_pyramid(&t, PyramidOptions::default());
+        let asset = build_terrain_asset(&t, &p, PyramidOptions::default()).unwrap();
+        assert!(asset
+            .reader()
+            .tile(TileKey::lod0((2, 2)))
+            .unwrap()
+            .unwrap()
+            .has_holes());
+
+        let v4 = v4_image(&asset);
+        assert_eq!(v4[8..12], 4u32.to_le_bytes(), "the fixture must be v4");
+        let back = TerrainAsset::from_bytes(v4).expect("a v4 payload must still load");
+        let old = back.reader();
+        assert_eq!(old.header().schema_version, 4);
+        assert_eq!(old.tile_count(), asset.reader().tile_count());
+        for key in old.keys() {
+            let tile = old.tile(key).unwrap().expect("directory entry resolves");
+            assert!(tile.holes_are_default(), "{key:?} conjured a hole mask");
+            let new = asset.reader().tile(key).unwrap().unwrap();
+            assert_eq!(tile.heights(), new.heights(), "{key:?} heights moved");
+            assert_eq!(tile.weights(), new.weights(), "{key:?} weights moved");
+            assert_eq!(tile.maps(), new.maps(), "{key:?} lost its data maps");
+            assert_eq!(tile.biomes(), new.biomes(), "{key:?} lost its biome ids");
+        }
+
+        // The wire cost of v5 over v4 on an UN-carved tile: one zero-length count.
         let key = TileKey::lod0((0, 0));
         assert_eq!(
             asset.reader().tile_bytes(key).unwrap().len(),
             old.tile_bytes(key).unwrap().len() + 1,
-            "an unpainted tile costs exactly one extra byte at v4"
+            "an un-carved tile costs exactly one extra byte at v5"
+        );
+        // … and on a carved one, the packed mask — res² bits, not res² bytes.
+        let carved = TileKey::lod0((2, 2));
+        assert_eq!(
+            asset.reader().tile_bytes(carved).unwrap().len(),
+            old.tile_bytes(carved).unwrap().len() + 1 + crate::hole_mask_bytes(5),
+            "a carved tile costs its packed mask and nothing more"
         );
     }
 

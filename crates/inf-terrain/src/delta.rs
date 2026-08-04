@@ -224,3 +224,212 @@ fn write_patch(tile: &mut crate::TerrainTile, res: u32, patch: &TilePatch, buf: 
         }
     }
 }
+
+// ── the hole-mask undo record (P21.2) ───────────────────────────────────────
+
+/// A dense before/after patch over one tile's `[i0, i0+w) × [j0, j0+h)` sample
+/// rectangle of the **hole mask**. `before`/`after` are row-major `0`/`1` bytes,
+/// length `w · h`.
+///
+/// ## Why bytes here and bits on the tile
+///
+/// [`TerrainTile`](crate::TerrainTile) packs its mask to a bit per sample because
+/// it is a full `resolution²` layer that also goes to the GPU. A patch is bounded
+/// by a **brush footprint**, so the same packing would buy kilobytes at most while
+/// making every `apply`/`revert` a shift-and-mask loop and every `PartialEq` in a
+/// test opaque. One plain byte per sample is the right trade at this size — the
+/// same reasoning [`TilePatch`] applies to `f32` heights, one layer down.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HolePatch {
+    /// Tile grid coordinate this patch belongs to.
+    pub coord: (i32, i32),
+    /// Left sample column of the rectangle.
+    pub i0: u32,
+    /// Top sample row of the rectangle.
+    pub j0: u32,
+    /// Rectangle width in samples.
+    pub w: u32,
+    /// Rectangle height in samples.
+    pub h: u32,
+    /// Pre-edit hole flags (row-major, `w · h`, `0` = surface, `1` = holed).
+    pub before: Vec<u8>,
+    /// Post-edit hole flags (row-major, `w · h`).
+    pub after: Vec<u8>,
+}
+
+impl HolePatch {
+    /// Number of samples in this patch.
+    #[inline]
+    pub fn sample_count(&self) -> usize {
+        (self.w * self.h) as usize
+    }
+}
+
+/// The reversible record a hole edit returns — apply it for redo, revert it for
+/// undo. Empty when the edit opened and closed nothing.
+///
+/// This is the heightfield half of a P21.2 carve. The voxel half is an
+/// `inf_voxel::VoxelDelta`, and the editor pairs them into **one** transaction so
+/// a single undo puts back both the rock and the ground above it.
+///
+/// ## The healing invariant
+///
+/// After [`apply_hole_delta`](TerrainData::apply_hole_delta) or
+/// [`revert_hole_delta`](TerrainData::revert_hole_delta), every touched tile is
+/// [healed](crate::TerrainTile::heal_holes): its mask buffer exists **iff** some
+/// sample is holed. That is what makes carve → undo byte-identical rather than
+/// merely value-identical — an un-healed tile would carry a `resolution²/8` block
+/// of zeros into every container forever.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HoleDelta {
+    /// One dense sub-rect patch per touched tile (deterministic tile order).
+    pub patches: Vec<HolePatch>,
+}
+
+impl HoleDelta {
+    /// `true` when the edit changed no sample.
+    pub fn is_empty(&self) -> bool {
+        self.patches.is_empty()
+    }
+
+    /// Total samples stored across all patches (bounding-rect inclusive).
+    pub fn sample_count(&self) -> usize {
+        self.patches.iter().map(HolePatch::sample_count).sum()
+    }
+
+    /// How many samples this edit **opens** (surface → hole) minus how many it
+    /// closes. Positive for a carve that broke through, negative for a fill that
+    /// healed one, zero for a wash. The number the editor's readout quotes.
+    pub fn net_opened(&self) -> i64 {
+        let mut net = 0i64;
+        for p in &self.patches {
+            for (b, a) in p.before.iter().zip(&p.after) {
+                net += i64::from(*a != 0) - i64::from(*b != 0);
+            }
+        }
+        net
+    }
+}
+
+/// Accumulates the *first-touch* `before` flag per changed sample across one or
+/// more carve dabs, then compresses the result into per-tile dense patches.
+///
+/// The exact shape — and the exact merge contract — of [`DeltaBuilder`], one
+/// layer over: `before` is the flag at the **first** touch and `after` is read
+/// from the terrain at [`finalize`](HoleDeltaBuilder::finalize) time, so a stroke
+/// whose dabs overlap still undoes in one step to where it started.
+#[derive(Default)]
+pub struct HoleDeltaBuilder {
+    /// `coord → (i, j) → first-touch hole flag`.
+    touched: BTreeMap<(i32, i32), BTreeMap<(u32, u32), bool>>,
+}
+
+impl HoleDeltaBuilder {
+    /// A builder with nothing touched.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that sample `(i, j)` of `coord` is about to change; keeps only the
+    /// first `before` seen.
+    #[inline]
+    pub fn touch(&mut self, coord: (i32, i32), i: u32, j: u32, before: bool) {
+        self.touched
+            .entry(coord)
+            .or_default()
+            .entry((i, j))
+            .or_insert(before);
+    }
+
+    /// `true` if nothing has been touched yet.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.touched.is_empty()
+    }
+
+    /// Compress the accumulated touches into per-tile dense patches, reading the
+    /// final (`after`) flags from `data`'s current tiles. Patches whose `before`
+    /// and `after` agree everywhere are dropped, so a wash produces an empty
+    /// delta rather than an undo step that does nothing.
+    pub fn finalize(&self, data: &TerrainData) -> HoleDelta {
+        let res = data.tile_resolution();
+        let mut patches = Vec::with_capacity(self.touched.len());
+        for (&coord, samples) in &self.touched {
+            let Some(tile) = data.get_tile(coord) else {
+                continue;
+            };
+            let mut i_min = u32::MAX;
+            let mut i_max = 0u32;
+            let mut j_min = u32::MAX;
+            let mut j_max = 0u32;
+            for &(i, j) in samples.keys() {
+                i_min = i_min.min(i);
+                i_max = i_max.max(i);
+                j_min = j_min.min(j);
+                j_max = j_max.max(j);
+            }
+            let w = i_max - i_min + 1;
+            let h = j_max - j_min + 1;
+            let mut before = vec![0u8; (w * h) as usize];
+            let mut after = vec![0u8; (w * h) as usize];
+            let mut changed = false;
+            for row in 0..h {
+                for col in 0..w {
+                    let i = i_min + col;
+                    let j = j_min + row;
+                    let idx = (row * w + col) as usize;
+                    let cur = tile.is_hole(res, i, j);
+                    after[idx] = u8::from(cur);
+                    before[idx] = u8::from(samples.get(&(i, j)).copied().unwrap_or(cur));
+                    changed |= before[idx] != after[idx];
+                }
+            }
+            if changed {
+                patches.push(HolePatch {
+                    coord,
+                    i0: i_min,
+                    j0: j_min,
+                    w,
+                    h,
+                    before,
+                    after,
+                });
+            }
+        }
+        HoleDelta { patches }
+    }
+}
+
+impl TerrainData {
+    /// Apply (redo) a [`HoleDelta`]: write each patch's `after` flags, then heal.
+    /// A patch that targets a tile the terrain no longer holds is skipped — a
+    /// hole cannot exist without a heightfield to cut it from.
+    pub fn apply_hole_delta(&mut self, delta: &HoleDelta) {
+        self.write_hole_patches(delta, false);
+    }
+
+    /// Revert (undo) a [`HoleDelta`]: write each patch's `before` flags, then
+    /// heal — so a carve that materialized a mask undoes back to a tile that
+    /// serializes byte-identically to one nothing ever carved.
+    pub fn revert_hole_delta(&mut self, delta: &HoleDelta) {
+        self.write_hole_patches(delta, true);
+    }
+
+    fn write_hole_patches(&mut self, delta: &HoleDelta, revert: bool) {
+        let res = self.tile_resolution();
+        for patch in &delta.patches {
+            if self.get_tile(patch.coord).is_none() {
+                continue;
+            }
+            let buf = if revert { &patch.before } else { &patch.after };
+            let tile = self.get_or_create_tile(patch.coord);
+            for row in 0..patch.h {
+                for col in 0..patch.w {
+                    let idx = (row * patch.w + col) as usize;
+                    tile.set_hole(res, patch.i0 + col, patch.j0 + row, buf[idx] != 0);
+                }
+            }
+            tile.heal_holes();
+        }
+    }
+}

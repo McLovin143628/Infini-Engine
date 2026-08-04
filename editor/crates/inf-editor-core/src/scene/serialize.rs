@@ -10206,6 +10206,48 @@ mod tests {
         );
     }
 
+    /// **The pin's other half: the wire really is generation 3.** The assertion
+    /// above says the scene schema has not moved; this says what that costs, in
+    /// the only currency that matters — a level's terrain bytes.
+    ///
+    /// A carved tile and an un-carved one must serialize **identically** through
+    /// this codec, because generation 3 has no hole field. That is a deliberate,
+    /// stated loss (see the table above), and it is pinned here so that whoever
+    /// eventually bumps to v20 finds a failing test naming exactly which promise
+    /// they are then allowed to keep — rather than discovering the silence by
+    /// shipping it twice.
+    #[test]
+    fn terrain_data_wire_is_pinned_at_generation_three() {
+        let plain = fixture_terrain();
+        let mut carved = plain.clone();
+        {
+            let tile = carved.data.get_tile_mut((0, 0)).unwrap();
+            tile.set_hole(4, 1, 1, true);
+            assert!(tile.has_holes(), "the fixture must actually be carved");
+        }
+        assert_ne!(
+            plain.data.get_tile((0, 0)).unwrap().holes_len(),
+            carved.data.get_tile((0, 0)).unwrap().holes_len(),
+            "the two tiles must differ in memory, or this proves nothing"
+        );
+
+        let a = bincode::serde::encode_to_vec(&plain, bincode_config()).unwrap();
+        let b = bincode::serde::encode_to_vec(&carved, bincode_config()).unwrap();
+        assert_eq!(
+            a, b,
+            "the scene wire grew a hole layer — that is a v20, not a v19"
+        );
+
+        // … and the round trip comes back un-carved, which is the honest shape of
+        // the loss: not corrupted, not half-written. Just absent.
+        let (back, _): (Terrain, usize) =
+            bincode::serde::decode_from_slice(&b, bincode_config()).unwrap();
+        assert!(
+            back.data.get_tile((0, 0)).unwrap().holes_are_default(),
+            "a generation-3 wire cannot bring holes back, and must not pretend to"
+        );
+    }
+
     /// **The two-ladder tripwire, scene half.** Each frozen tile layout stands in
     /// for payloads from *two* independently-versioned containers, and neither
     /// container knows about the other's numbering — so nothing but a pin stops
@@ -10216,7 +10258,17 @@ mod tests {
     /// |---|---|---|---|
     /// | `TerrainTileFrozenV1` | origin + heights + weights | v1..=v14 | v1..=v2 |
     /// | `TerrainTileFrozenV2` | + erosion data maps | v15 | v3 |
-    /// | live `TerrainTile` | + per-sample biome ids | v16+ | v4+ |
+    /// | `TerrainTileFrozenV3` | + per-sample biome ids | v16+ | v4 |
+    /// | live `TerrainTile` | + the P21.2 hole mask | *(none)* | v5+ |
+    ///
+    /// **The last row's `.inf_lvl` cell is empty on purpose.** P21.2 gave tiles a
+    /// hole mask while the scene schema was already frozen at v19 (Phase 21 spent
+    /// its one bump on the P21.1 voxel volume), and bincode is positional — a
+    /// sixth tile field in this stream would be a v20. So `TerrainData`'s wire
+    /// form is pinned at generation 3 and an `.inf_lvl` does not carry holes; the
+    /// `.inf_terrain` asset does, and that is the container every carve tool
+    /// targets. `inf_terrain::TerrainTileFrozenV1`'s generation table states the
+    /// consequence in full under *THE EMPTY CELL*.
     ///
     /// `inf-terrain` carries the asset half of this assertion
     /// (`frozen_tile_generation_is_pinned_to_both_ladders`); this is the scene
@@ -10227,13 +10279,15 @@ mod tests {
             SCHEMA_VERSION, 19,
             "the scene schema moved. Generation-1 frozen tiles (TerrainTileFrozenV1, via \
              TerrainV14) cover .inf_lvl v1..=v14, generation-2 (TerrainTileFrozenV2, via \
-             TerrainV15) covers v15, and the live TerrainTile covers v16+. If the TILE \
-             layout changed again, add inf_terrain::TerrainTileFrozenV3 and a new frozen \
-             Terrain record; if only the scene changed, update this pin and \
-             TerrainTileFrozenV1's generation table. (v17, v18 and v19 are all the latter \
-             case: each appended an entity slot and left every tile layout alone — v19's \
-             voxel volume in particular extends the ground LOCALLY, out in its own \
-             .inf_voxel, and does not touch a single heightfield tile.)"
+             TerrainV15) covers v15, and generation-3 (TerrainTileFrozenV3, which \
+             TerrainData's own wire form is pinned at) covers v16+. If the TILE layout \
+             changed again, add inf_terrain::TerrainTileFrozenV4 and a new frozen Terrain \
+             record; if only the scene changed, update this pin and TerrainTileFrozenV1's \
+             generation table. (v17, v18 and v19 are all the latter case: each appended an \
+             entity slot and left every tile layout alone — v19's voxel volume in \
+             particular extends the ground LOCALLY, out in its own .inf_voxel, and does \
+             not touch a single heightfield tile. P21.2's hole mask DID grow the tile, and \
+             the scene answered by pinning rather than bumping — see the table above.)"
         );
         // The mapping the pin is about, one rung at a time. Start from a terrain
         // that exercises BOTH post-v14 layers.

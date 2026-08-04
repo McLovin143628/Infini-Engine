@@ -193,26 +193,32 @@ pub fn mesh_chunk(data: &VoxelData, key: ChunkKey) -> VoxelMesh {
     // which is where the cost is. The memo is keyed by [`ChunkKey`], so a miss is
     // one comparison; it is deliberately written out rather than delegated to
     // `sample_global`, which cannot hold state across calls.
+    //
+    // The memo caches **absence too** (`Some((key, None))` = "probed, not there"),
+    // and that is load-bearing rather than tidy. `mesh_keys_for` adds up to eight
+    // downward-closure keys per resident chunk and most of them are not resident,
+    // so the *majority* of gathers walk mostly-absent space; a memo that only
+    // remembered hits would re-probe every single one of those samples and the
+    // "three probes per row" claim above would be false exactly where it matters
+    // most. Remembering the miss costs one `Option` and makes the claim true for
+    // absent chunks and present ones alike.
     let mut sdf = vec![0.0f32; PAD_SAMPLES * PAD_SAMPLES * PAD_SAMPLES];
     let mut mat = vec![DEFAULT_MATERIAL; PAD_SAMPLES * PAD_SAMPLES * PAD_SAMPLES];
     let mut any_solid = false;
     let mut any_empty = false;
-    let mut memo: Option<(ChunkKey, &crate::chunk::VoxelChunk)> = None;
+    let mut memo: Option<(ChunkKey, Option<&crate::chunk::VoxelChunk>)> = None;
     for sz in 0..PAD_SAMPLES {
         for sy in 0..PAD_SAMPLES {
             for sx in 0..PAD_SAMPLES {
                 let g = [lo[0] + sx as i32, lo[1] + sy as i32, lo[2] + sz as i32];
                 let ck = ChunkKey::of_sample(g[0], g[1], g[2]);
                 if memo.map(|(k, _)| k) != Some(ck) {
-                    memo = data.get_chunk(ck).map(|c| (ck, c));
-                    if memo.is_none() {
-                        // Absent ⇒ empty space, and the memo stays empty so the
-                        // next sample in this chunk does not probe again either.
-                        memo = None;
-                    }
+                    // Absent ⇒ empty space, and the *miss* is memoized too, so the
+                    // next sample in this chunk does not probe again either.
+                    memo = Some((ck, data.get_chunk(ck)));
                 }
                 let hit = match memo {
-                    Some((k, c)) if k == ck => Some(c),
+                    Some((k, c)) if k == ck => c,
                     _ => None,
                 };
                 let (v, m) = match hit {
@@ -584,13 +590,24 @@ struct CachedMesh {
     /// A **process-globally monotone** stamp minted each time the mesh is built —
     /// the *identity* a GPU buffer cache gates its upload on.
     ///
-    /// Deliberately not the source key folded down to a number. A GPU cache asks
-    /// "are these the bytes I already hold?", and only a value that strictly
-    /// increases on every rebuild answers it: a folded source key could repeat
-    /// (evict a neighbour, restore it, and the mask and the max are both back
-    /// where they were) while the mesh in between was different. Same counter
-    /// discipline, and the same failure it prevents, as
-    /// [`VoxelData::chunk_version`].
+    /// Deliberately not the source key folded down to a number, and the honest
+    /// reason is **width**, not history. A [`MeshSourceKey`] is a `u64` chunk
+    /// version plus a 32-bit residency bitmask — 96 bits — while the DTO carries
+    /// the identity as a single `u64`, so *any* fold is 96 bits into 64 and two
+    /// different keys can collide by counting alone. A cache that answers "are
+    /// these the bytes I already hold?" from a colliding number keeps showing the
+    /// old triangles, forever, with nothing to notice it by.
+    ///
+    /// An earlier draft argued from a *sequence* instead — evict a neighbour,
+    /// restore it, and both the mask and the max are back where they were while
+    /// the mesh in between differed. That claim is false as stated, and it was
+    /// falsified rather than argued away: a brute force over thousands of random
+    /// evict/restore/edit steps
+    /// (`a_folded_source_key_never_repeats_with_a_different_mesh`) found **zero**
+    /// repeats-with-a-different-mesh, because restoring a chunk mints a fresh
+    /// version and the max moves with it. Pigeonhole survives the test;
+    /// storytelling did not. Same counter discipline, and the same failure it
+    /// prevents, as [`VoxelData::chunk_version`].
     version: u64,
     mesh: VoxelMesh,
 }
@@ -675,6 +692,15 @@ impl VoxelMeshCache {
     /// Total triangles across the non-empty meshes.
     pub fn triangle_count(&self) -> usize {
         self.meshes().map(|(_, m)| m.triangle_count()).sum()
+    }
+
+    /// Every cached chunk key, ascending — empty meshes included.
+    ///
+    /// The companion to [`meshes`](Self::meshes) for consumers that care about
+    /// *bookkeeping* rather than triangles (a residency audit, or the no-op
+    /// tripwire that pins every stamp across a settled sync).
+    pub fn cached_keys(&self) -> impl Iterator<Item = ChunkKey> + '_ {
+        self.meshes.keys().copied()
     }
 
     /// Cached entries, empty meshes included.
@@ -1116,6 +1142,27 @@ mod tests {
         let again = cache.sync(&v);
         assert!(again.is_noop(), "{again:?}");
         assert_eq!(again.unchanged, cache.len());
+
+        // … and, said in the currency a GPU cache actually spends: **no mesh
+        // stamp moves**. `is_noop` is a report-level claim; a rebuild that
+        // produced identical triangles would still mint a new stamp and still
+        // report zero re-meshes under a sloppier implementation, and every
+        // consumer would re-upload the whole volume every frame. Pinned across
+        // several consecutive syncs so a stamp that only moves every other pass
+        // cannot hide either.
+        let settled: Vec<(ChunkKey, u64)> =
+            cache.cached_keys().map(|k| (k, cache.version(k))).collect();
+        assert!(!settled.is_empty());
+        for pass in 0..4 {
+            assert!(cache.sync(&v).is_noop(), "pass {pass}");
+            for &(key, stamp) in &settled {
+                assert_eq!(
+                    cache.version(key),
+                    stamp,
+                    "{key:?} re-stamped on no-op sync pass {pass}"
+                );
+            }
+        }
         assert_eq!(cache.triangle_count(), tris);
 
         // … and touching ONE chunk re-meshes only its 3×3×3 neighbourhood.
@@ -1219,6 +1266,15 @@ mod tests {
             cache.version(b) > before_version,
             "the mesh stamp did not move, so a GPU cache would keep the stale buffers"
         );
+        // The observer must actually HAVE a surface, before and after. A fixture
+        // that drifted to a uniform field would still satisfy every assertion
+        // above — empty meshes re-stamp just fine — and the test would silently
+        // degrade from "the seam is re-meshed" to "the bookkeeping is re-stamped",
+        // which is not what it is here to prove.
+        assert!(
+            !cache.get(b).map(VoxelMesh::is_empty).unwrap_or(true),
+            "the observer's mesh is empty, so this test proves nothing about seams"
+        );
 
         // …and a chunk that could NOT see the eviction is left alone: `c`'s
         // neighbourhood spans x ∈ [1, 3], which never contained `a`.
@@ -1228,11 +1284,106 @@ mod tests {
         );
     }
 
+    /// **The falsification.** The monotone stamp's doc used to justify itself with
+    /// a *sequence* story: evict a neighbour, restore it, and both the residency
+    /// mask and the max version are back where they were while the mesh in
+    /// between differed — so a folded key would alias. This brute-forces that
+    /// claim over thousands of random evict / restore / carve steps and counts the
+    /// counterexamples.
+    ///
+    /// The count is **zero**, and structurally so: restoring a chunk draws a fresh
+    /// stamp from the process-global counter, which can only raise a
+    /// neighbourhood's max, so a key that has once moved never comes back. The
+    /// doc now argues from **width** instead (96 key bits into a 64-bit DTO field
+    /// cannot be injective), which needs no sequence at all.
+    ///
+    /// The test is kept, and kept asserting zero, for the reason the correction
+    /// existed: if this ever fires, the old story was right after all and the doc
+    /// owes it a line — and until then, nobody re-derives a justification that was
+    /// already measured false.
+    #[test]
+    fn a_folded_source_key_never_repeats_with_a_different_mesh() {
+        use std::collections::BTreeMap;
+
+        let mut v = tunnelled_slab();
+        let observer = ChunkKey::new(1, 0, 0);
+        let neighbours = [ChunkKey::new(0, 0, 0), ChunkKey::new(2, 0, 0)];
+        // Every key we have ever seen → the mesh that was live when we saw it.
+        let mut seen: BTreeMap<(u64, u32), VoxelMesh> = BTreeMap::new();
+        let mut evicted: BTreeMap<ChunkKey, VoxelChunk> = BTreeMap::new();
+        let mut aliases = 0usize;
+        let mut revisits = 0usize;
+
+        // A tiny deterministic LCG — no dev-dependency, and the sequence is part
+        // of the record: a run that fails is a run that can be replayed.
+        let mut rng = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+
+        for step in 0..4000u32 {
+            match next() % 3 {
+                0 => {
+                    // Evict a resident neighbour.
+                    let k = neighbours[(next() % 2) as usize];
+                    if let Some(c) = v.get_chunk(k).cloned() {
+                        if v.evict_chunk(k) {
+                            evicted.insert(k, c);
+                        }
+                    }
+                }
+                1 => {
+                    // Restore an evicted neighbour, byte-identically.
+                    let k = neighbours[(next() % 2) as usize];
+                    if let Some(c) = evicted.remove(&k) {
+                        v.insert_chunk(k, c);
+                    }
+                }
+                _ => {
+                    // Change the observer's own contents: flip one interior
+                    // sample's sign, which moves the surface for real.
+                    let b = observer.base_sample();
+                    let d = if step % 2 == 0 { 3.0 } else { -3.0 };
+                    v.set_sample_global(b[0] + 8, b[1] + 8, b[2] + 8, d as f32);
+                }
+            }
+            let key = source_key(&v, observer);
+            let mesh = mesh_chunk(&v, observer);
+            let folded = (key.max_chunk_version, key.resident);
+            if let Some(prev) = seen.get(&folded) {
+                revisits += 1;
+                if *prev != mesh {
+                    aliases += 1;
+                }
+            } else {
+                seen.insert(folded, mesh);
+            }
+        }
+
+        assert_eq!(
+            aliases, 0,
+            "the sequence story is true after all: a source key repeated while the              mesh differed. Put the eviction/restore justification back on              CachedMesh::version, beside the width one."
+        );
+        // The brute force has to actually revisit keys, or "zero aliases" is
+        // vacuous — the vacuous-checks lesson from P19, applied to a negative
+        // result.
+        assert!(
+            revisits > 0,
+            "no key was ever seen twice, so this proves nothing"
+        );
+    }
+
     /// The mesh stamp is **monotone and unique across caches**, so "same stamp"
     /// always means "same triangles" — the property a GPU buffer cache keyed by
     /// `(volume, chunk)` actually needs, and one a folded source key could not
-    /// provide (evict a neighbour, restore it, and both the mask and the max are
-    /// back where they were while the mesh in between was different).
+    /// provide: the key is 96 bits (a `u64` version + a 32-bit residency mask) and
+    /// a DTO carries 64, so folding is lossy by counting. (The *sequence* argument
+    /// this doc used to make instead — "the key repeats while the mesh differs" —
+    /// is empirically false; `a_folded_source_key_never_repeats_with_a_different_mesh`
+    /// is kept below precisely so the stated reason stays the true one.)
     #[test]
     fn mesh_stamps_are_monotone_and_unique_across_caches() {
         let v = tunnelled_slab();

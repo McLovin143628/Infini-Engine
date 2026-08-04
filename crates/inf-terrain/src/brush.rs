@@ -253,6 +253,13 @@ fn apply_local<F>(
                         if w <= 0.0 {
                             continue;
                         }
+                        // A P21.2 **holed** sample has no surface to raise or
+                        // lower, so the brush passes straight over it — exactly
+                        // as it passes over an unauthored one. Sculpting the lip
+                        // of a cave mouth must not quietly re-grow its roof.
+                        if existing.map(|t| t.is_hole(res, i, j)).unwrap_or(false) {
+                            continue;
+                        }
                         let old_off = existing.map(|t| t.sample(res, i, j)).unwrap_or(0.0);
                         let old_world = base_y + old_off as f64;
                         let new_off = (value(wx, wz, old_world, w) - base_y) as f32;

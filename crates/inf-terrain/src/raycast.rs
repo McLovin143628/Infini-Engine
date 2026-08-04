@@ -67,7 +67,11 @@ pub fn raycast_terrain(
     // sub-sample for any non-degenerate ray.
     let step = (0.5 * data.meters_per_sample()).max(1e-3);
 
-    // Previous *authored* sample: `(t, residual)`. Reset to `None` across holes.
+    // Previous *authored* sample: `(t, residual)`. Reset to `None` across holes —
+    // both kinds: unauthored space, and (P21.2) an authored sample a carve holed.
+    // `height_at` already collapses them into one `None`, so a cave mouth is
+    // pass-through here for free and a ray fired at one goes *through* the ground
+    // instead of stopping on a surface the clipmap does not draw.
     let mut prev: Option<(f64, f64)> = None;
     let mut t = 0.0;
     // One extra iteration so the final `t == max_t` endpoint is evaluated.
@@ -105,7 +109,8 @@ pub fn raycast_terrain(
 }
 
 /// Signed height residual `ray_y − terrain_height` at world point `p`, or `None`
-/// where the terrain is unauthored (a hole). Positive above the surface.
+/// where the terrain has no surface — unauthored, or holed by a P21.2 carve.
+/// Positive above the surface.
 #[inline]
 fn residual(data: &TerrainData, p: DVec3) -> Option<f64> {
     data.height_at(DVec2::new(p.x, p.z)).map(|h| p.y - h)

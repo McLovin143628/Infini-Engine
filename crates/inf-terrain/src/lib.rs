@@ -76,7 +76,7 @@ pub use asset::{
     build_terrain_asset, header_len, read_terrain_asset, write_terrain_asset, TerrainAsset,
     TerrainAssetBuilder, TerrainAssetError, TerrainAssetHeader, TerrainAssetReader,
     TerrainAssetView, TileDirEntry, HEADER_LEN_V1, HEADER_LEN_V2, HEADER_LEN_V3, HEADER_LEN_V4,
-    TERRAIN_ASSET_SCHEMA_VERSION, TILE_ALIGN,
+    HEADER_LEN_V5, TERRAIN_ASSET_SCHEMA_VERSION, TILE_ALIGN,
 };
 pub use biome::{
     BiomeDef, BiomeSet, BiomeSetError, BIOME_SET_SCHEMA_VERSION, UNASSIGNED_BIOME_COLOR,
@@ -91,7 +91,7 @@ pub use data::{
     TerrainData, TerrainDataFrozenV1, TerrainDataFrozenV2, DEFAULT_METERS_PER_SAMPLE,
     DEFAULT_TILE_RESOLUTION,
 };
-pub use delta::{HeightDelta, TilePatch};
+pub use delta::{HeightDelta, HoleDelta, HoleDeltaBuilder, HolePatch, TilePatch};
 pub use import::{
     encode_png16, probe_heightmap, probe_heightmap_bytes, HeightImage, HeightMode, HeightmapFormat,
     HeightmapGrid, HeightmapImport, HeightmapProbe, TerrainError,
@@ -111,8 +111,9 @@ pub use stream::{
     TerrainStreamer,
 };
 pub use tile::{
-    DataMapKind, TerrainTile, TerrainTileFrozenV1, TerrainTileFrozenV2, TileKey, DATA_MAP_CHANNELS,
-    DEFAULT_BIOME, DEFAULT_DATA_MAP, DEFAULT_WEIGHT, MAX_BIOMES, UNASSIGNED_BIOME,
+    hole_mask_bytes, DataMapKind, TerrainTile, TerrainTileFrozenV1, TerrainTileFrozenV2,
+    TerrainTileFrozenV3, TileKey, DATA_MAP_CHANNELS, DEFAULT_BIOME, DEFAULT_DATA_MAP,
+    DEFAULT_WEIGHT, MAX_BIOMES, UNASSIGNED_BIOME,
 };
 pub use wants::{
     advance_cut, brush_wants, clamp_cut, render_wants, sim_wants, RenderWantsParams, TileCatalog,

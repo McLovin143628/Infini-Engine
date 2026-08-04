@@ -272,21 +272,60 @@ impl DataMapKind {
 /// rather than a fifth splat channel, and why the paint brush writes a crisp
 /// boundary (see [`crate::paint_biome`]).
 ///
+/// ## Hole mask (P21.2)
+///
+/// A fifth per-sample layer ([`holes`](TerrainTile::holes)): **one bit** per
+/// sample saying "there is no heightfield here". A holed sample has no surface at
+/// all — the clipmap discards it, [`height_at`](super::TerrainData::height_at)
+/// returns `None` through it, and what a camera or a capsule finds below is
+/// whatever the P21.1 voxel volume put there. It is the mechanism that lets a
+/// cave mouth open in ground that is otherwise a heightfield.
+///
+/// Same sparse rule as every layer above it — an empty `Vec` means "no sample is
+/// holed", so an un-carved tile costs zero per-sample bytes.
+///
+/// ### Why bits, not one `u8` per sample
+///
+/// The other four layers store a *value* per sample (a weight quad, three
+/// accumulators, an id); this one stores a **predicate**, and a predicate packs.
+/// At the default 257² tile:
+///
+/// * **one `u8` per sample** (the `biomes` shape): 66 049 B per holed tile, and
+///   the same 66 049 B in the renderer's per-tile upload;
+/// * **one bit per sample** (this): 8 257 B, an 8× cut in *both* places.
+///
+/// The layer is also unusually likely to be *present on many tiles at once* — a
+/// cave system that crosses four tiles materializes four masks even though each
+/// holds a few hundred set bits — so the multiplier lands on the common case, not
+/// a corner. And the packed form is exactly what the GPU wants: the terrain pass
+/// uploads it verbatim as `u32` words and tests one bit per fragment
+/// (`inf_render::passes::terrain`), where a byte-per-sample layer would have paid
+/// 8× the bandwidth to carry seven zero bits per sample.
+///
+/// The cost is that indexing is not `buf[j * res + i]`; nothing outside this
+/// module does that arithmetic, because [`is_hole`](TerrainTile::is_hole) /
+/// [`set_hole`](TerrainTile::set_hole) are the only accessors and the raw buffer
+/// is documented as opaque packed bits. Undo does **not** inherit the packing:
+/// [`HoleDelta`](crate::HoleDelta) patches are bounded by a brush footprint, so
+/// they store a plain byte per sample and stay trivially diffable.
+///
 /// Serde: `origin` (as a portable `[f64; 3]`, since the workspace `glam` pin has
 /// no `serde` feature) + a flat `heights` sequence, and — **only when non-empty**
-/// (`skip_serializing_if`) — flat `weights`, `maps` and `biomes` sequences. An old
-/// tile (no `weights`/`maps`/`biomes` field) decodes with the defaults, and an
-/// unpainted, un-eroded new tile serializes without any of them, so existing
-/// human-readable bytes round-trip unchanged. `resolution` is not stored on the
-/// tile (it is a terrain-wide constant on [`super::TerrainData`]); the terrain
-/// validates `heights.len() == resolution²` and, when present, `weights.len()` /
-/// `maps.len()` / `biomes.len() == resolution²` on load.
+/// (`skip_serializing_if`) — flat `weights`, `maps`, `biomes` and `holes`
+/// sequences. An old tile (no `weights`/`maps`/`biomes`/`holes` field) decodes
+/// with the defaults, and an unpainted, un-eroded, un-carved new tile serializes
+/// without any of them, so existing human-readable bytes round-trip unchanged.
+/// `resolution` is not stored on the tile (it is a terrain-wide constant on
+/// [`super::TerrainData`]); the terrain validates `heights.len() == resolution²`
+/// and, when present, `weights.len()` / `maps.len()` / `biomes.len() ==
+/// resolution²` and `holes.len() == `[`hole_mask_bytes`]` on load.
 ///
 /// **The bincode form is versioned at the container, not the tile.** bincode is
 /// positional, so appending a layer is a wire-format change: a stream written
-/// before P19.2 has four fields where this build reads five. Each historical
+/// before P21.2 has five fields where this build reads six. Each historical
 /// layout is therefore frozen — [`TerrainTileFrozenV1`] (pre-P19.1: no maps, no
-/// biomes) and [`TerrainTileFrozenV2`] (P19.1: maps, no biomes) — and selected by
+/// biomes, no holes), [`TerrainTileFrozenV2`] (P19.1: maps only) and
+/// [`TerrainTileFrozenV3`] (P19.2: maps + biomes, no holes) — and selected by
 /// the *container's* schema version. See [`crate::asset::decode_tile_at`] and the
 /// generation table on [`TerrainTileFrozenV1`].
 ///
@@ -308,6 +347,24 @@ pub struct TerrainTile {
     /// `resolution²` row-major biome ids, **or empty** for the unpainted
     /// [`DEFAULT_BIOME`] ([`UNASSIGNED_BIOME`]) — see the type docs.
     biomes: Vec<u8>,
+    /// [`hole_mask_bytes(resolution)`](hole_mask_bytes) **packed bits** (bit
+    /// `n = j * resolution + i`, LSB-first within each byte), **or empty** for
+    /// the un-carved default (no sample is holed) — see the type docs. Opaque
+    /// outside this module: read it with [`is_hole`](TerrainTile::is_hole).
+    holes: Vec<u8>,
+}
+
+/// Bytes a packed hole mask occupies for a `resolution × resolution` tile:
+/// `ceil(resolution² / 8)`.
+///
+/// The bit for sample `(i, j)` is `n = j * resolution + i`, living in byte
+/// `n / 8` at bit `n % 8` (LSB-first). Bits past `resolution²` in the final byte
+/// are always zero — [`TerrainTile::set_hole`] never addresses them — so the
+/// buffer is byte-stable and two tiles with the same holes serialize identically.
+#[inline]
+pub const fn hole_mask_bytes(resolution: u32) -> usize {
+    let n = (resolution as usize) * (resolution as usize);
+    n.div_ceil(8)
 }
 
 /// Serde wire form for **human-readable** formats (JSON/TOML): `origin` as
@@ -325,6 +382,8 @@ struct TerrainTileRaw {
     maps: Vec<[f32; DATA_MAP_CHANNELS]>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     biomes: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    holes: Vec<u8>,
 }
 
 /// Serde wire form for **non-self-describing** formats (bincode — the `.inf_lvl`
@@ -346,6 +405,8 @@ struct TerrainTileBin {
     maps: Vec<[f32; DATA_MAP_CHANNELS]>,
     #[serde(default)]
     biomes: Vec<u8>,
+    #[serde(default)]
+    holes: Vec<u8>,
 }
 
 /// **Frozen tile wire layout, generation 1** — `origin + heights + weights`, with
@@ -363,7 +424,8 @@ struct TerrainTileBin {
 /// |---|---|---|---|
 /// | [`TerrainTileFrozenV1`] | origin + heights + weights | v1 … **v14** | v1, **v2** |
 /// | [`TerrainTileFrozenV2`] | + erosion data maps (P19.1) | **v15** | **v3** |
-/// | [`TerrainTile`] (live) | + biome ids (P19.2) | v16 | v4 |
+/// | [`TerrainTileFrozenV3`] | + biome ids (P19.2) | **v16 …** | **v4** |
+/// | [`TerrainTile`] (live) | + hole mask (P21.2) | *(none yet)* | **v5** |
 ///
 /// Naming generation 1 `TerrainTileV14` — as the first cut did — leaks the
 /// *scene* codec's numbering into `inf-terrain`'s public API and silently implies
@@ -372,6 +434,31 @@ struct TerrainTileBin {
 /// one row here and **both** container columns gain a version.
 /// `frozen_tile_generations_are_pinned_to_both_ladders` is the tripwire that fails
 /// if either container bumps past its row without a new generation.
+///
+/// # THE EMPTY CELL: generation 4 has no `.inf_lvl` column (P21.2)
+///
+/// Every earlier row advanced both containers at once. Generation 4 advances only
+/// the asset one, because the scene schema was **already frozen at v19** when the
+/// hole layer landed (Phase 21 spent its single scene bump on the P21.1
+/// `VoxelVolume` component), and bincode is positional: a sixth tile field in the
+/// `.inf_lvl` stream is a v20, full stop.
+///
+/// So [`super::TerrainData`]'s wire form — the *only* path a tile takes into an
+/// `.inf_lvl` — is pinned at **generation 3**: it serializes every tile through
+/// [`TerrainTileFrozenV3`] and lifts back with an empty hole mask. `.inf_lvl` v19
+/// bytes are therefore byte-identical to v16's for the same terrain, which is the
+/// point. `.inf_terrain` encodes tiles *individually*
+/// ([`crate::asset::encode_tile`]), never through `TerrainData`, so its v5 blobs
+/// carry the holes.
+///
+/// The consequence, stated plainly rather than discovered later: **an
+/// `.inf_lvl`-inline (non-asset-backed) terrain does not persist its holes.**
+/// Carving one is a live, undoable edit that survives until the level is written,
+/// and then the mask is gone. Holes persist on a terrain backed by a
+/// `.inf_terrain` asset — which is the streaming path every carve tool targets,
+/// and the one the P21.2 cook advisory names when it is missing. The next scene
+/// bump fills the empty cell in; `terrain_data_wire_is_pinned_at_generation_three`
+/// is the tripwire that fails when someone tries to fill it early.
 ///
 /// bincode is positional, so these bytes cannot be fed to the grown
 /// [`TerrainTile`] — the decoder would read past the end of the tile and into
@@ -414,8 +501,8 @@ struct TerrainTileFrozenV1Bin {
 
 impl TerrainTileFrozenV1 {
     /// Lift a frozen tile to the live one: the data maps are **empty** (never
-    /// eroded) and the biome ids are **empty** (unassigned) — which is exactly
-    /// what a pre-P19.1 tile meant.
+    /// eroded), the biome ids are **empty** (unassigned) and the hole mask is
+    /// **empty** (nothing carved) — which is exactly what a pre-P19.1 tile meant.
     pub fn into_current(self) -> TerrainTile {
         TerrainTile {
             origin: self.origin,
@@ -423,12 +510,13 @@ impl TerrainTileFrozenV1 {
             weights: self.weights,
             maps: Vec::new(),
             biomes: Vec::new(),
+            holes: Vec::new(),
         }
     }
 
-    /// Project a live tile onto the frozen shape, **dropping** its data maps and
-    /// biome ids (the downgrade-bless direction — a pre-P19.1 container cannot
-    /// carry either).
+    /// Project a live tile onto the frozen shape, **dropping** its data maps,
+    /// biome ids and hole mask (the downgrade-bless direction — a pre-P19.1
+    /// container cannot carry any of them).
     pub fn from_current(tile: &TerrainTile) -> Self {
         Self {
             origin: tile.origin,
@@ -499,7 +587,8 @@ struct TerrainTileFrozenV2Bin {
 
 impl TerrainTileFrozenV2 {
     /// Lift to the live tile: the biome ids come up **empty**, i.e. every sample
-    /// is [`UNASSIGNED_BIOME`] — exactly what a pre-P19.2 tile meant.
+    /// is [`UNASSIGNED_BIOME`], and so does the hole mask — exactly what a
+    /// pre-P19.2 tile meant.
     pub fn into_current(self) -> TerrainTile {
         TerrainTile {
             origin: self.origin,
@@ -507,17 +596,198 @@ impl TerrainTileFrozenV2 {
             weights: self.weights,
             maps: self.maps,
             biomes: Vec::new(),
+            holes: Vec::new(),
         }
     }
 
-    /// Project a live tile onto the frozen shape, **dropping** its biome ids (the
-    /// downgrade-bless direction).
+    /// Project a live tile onto the frozen shape, **dropping** its biome ids and
+    /// hole mask (the downgrade-bless direction).
     pub fn from_current(tile: &TerrainTile) -> Self {
         Self {
             origin: tile.origin,
             heights: tile.heights.clone(),
             weights: tile.weights.clone(),
             maps: tile.maps.clone(),
+        }
+    }
+
+    /// Lift one generation, to [`TerrainTileFrozenV3`] with empty biome ids.
+    ///
+    /// The chained-ladder hop, for exactly the reason
+    /// [`TerrainTileFrozenV1::into_v2`] gives: a codec that walks its versions one
+    /// rung at a time needs the single step, not a jump to the live type.
+    pub fn into_v3(self) -> TerrainTileFrozenV3 {
+        TerrainTileFrozenV3 {
+            origin: self.origin,
+            heights: self.heights,
+            weights: self.weights,
+            maps: self.maps,
+            biomes: Vec::new(),
+        }
+    }
+}
+
+/// **Frozen tile wire layout, generation 3** — `origin + heights + weights +
+/// maps + biomes`, with no hole mask. The shape every terrain tile had between
+/// P19.2 and P21.2 (`.inf_lvl` v16+, `.inf_terrain` header v4).
+///
+/// See [`TerrainTileFrozenV1`]'s generation table for why the name counts tile
+/// generations rather than container versions — and, for this rung in
+/// particular, for **why its `.inf_lvl` column has no end**: the scene schema was
+/// frozen at v19 when P21.2's hole mask landed, so `TerrainData`'s wire form is
+/// pinned here and every `.inf_lvl` written by this build still holds generation-3
+/// tiles.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerrainTileFrozenV3 {
+    /// World position of sample `(0, 0)`.
+    pub origin: DVec3,
+    /// `resolution²` height offsets, row-major.
+    pub heights: Vec<f32>,
+    /// `resolution²` row-major splat weights, or empty for the sparse default.
+    pub weights: Vec<[u8; 4]>,
+    /// `resolution²` row-major erosion data maps, or empty for never-eroded.
+    pub maps: Vec<[f32; DATA_MAP_CHANNELS]>,
+    /// `resolution²` row-major biome ids, or empty for unpainted.
+    pub biomes: Vec<u8>,
+}
+
+/// Human-readable wire form of [`TerrainTileFrozenV3`] — the exact pre-P21.2
+/// [`TerrainTileRaw`].
+#[derive(Serialize, Deserialize)]
+struct TerrainTileFrozenV3Raw {
+    origin: [f64; 3],
+    heights: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    weights: Vec<[u8; 4]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    maps: Vec<[f32; DATA_MAP_CHANNELS]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    biomes: Vec<u8>,
+}
+
+/// bincode wire form of [`TerrainTileFrozenV3`] — the exact pre-P21.2
+/// [`TerrainTileBin`] (five positional fields, no `holes`).
+#[derive(Serialize, Deserialize)]
+struct TerrainTileFrozenV3Bin {
+    origin: [f64; 3],
+    heights: Vec<f32>,
+    #[serde(default)]
+    weights: Vec<[u8; 4]>,
+    #[serde(default)]
+    maps: Vec<[f32; DATA_MAP_CHANNELS]>,
+    #[serde(default)]
+    biomes: Vec<u8>,
+}
+
+impl TerrainTileFrozenV3 {
+    /// Lift to the live tile: the hole mask comes up **empty** (no sample is
+    /// holed) — exactly what a pre-P21.2 tile meant.
+    pub fn into_current(self) -> TerrainTile {
+        TerrainTile {
+            origin: self.origin,
+            heights: self.heights,
+            weights: self.weights,
+            maps: self.maps,
+            biomes: self.biomes,
+            holes: Vec::new(),
+        }
+    }
+
+    /// Project a live tile onto the frozen shape, **dropping** its hole mask.
+    ///
+    /// Unlike the earlier `from_current`s this is **not** test-only: it is the
+    /// production write path for every `.inf_lvl`, because `TerrainData`'s wire
+    /// form is pinned at this generation until the next scene bump (see the
+    /// generation table). That is the one place holes are lost, and it is stated
+    /// there.
+    pub fn from_current(tile: &TerrainTile) -> Self {
+        Self {
+            origin: tile.origin,
+            heights: tile.heights.clone(),
+            weights: tile.weights.clone(),
+            maps: tile.maps.clone(),
+            biomes: tile.biomes.clone(),
+        }
+    }
+
+    /// Length of the stored hole buffer this generation cannot carry: always `0`.
+    /// Spelled out so the length-validation loops read the same for every layer.
+    #[inline]
+    pub fn holes_len(&self) -> usize {
+        0
+    }
+
+    /// Length of the stored weight buffer (`0` for the sparse default), for the
+    /// terrain's serde length validation — the frozen twin of
+    /// [`TerrainTile::weights_len`].
+    #[inline]
+    pub fn weights_len(&self) -> usize {
+        self.weights.len()
+    }
+
+    /// Length of the stored data-map buffer, for the same validation.
+    #[inline]
+    pub fn maps_len(&self) -> usize {
+        self.maps.len()
+    }
+
+    /// Length of the stored biome buffer, for the same validation.
+    #[inline]
+    pub fn biomes_len(&self) -> usize {
+        self.biomes.len()
+    }
+
+    /// The raw row-major height buffer, for the same validation.
+    #[inline]
+    pub fn heights(&self) -> &[f32] {
+        &self.heights
+    }
+}
+
+impl Serialize for TerrainTileFrozenV3 {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            TerrainTileFrozenV3Raw {
+                origin: self.origin.to_array(),
+                heights: self.heights.clone(),
+                weights: self.weights.clone(),
+                maps: self.maps.clone(),
+                biomes: self.biomes.clone(),
+            }
+            .serialize(s)
+        } else {
+            TerrainTileFrozenV3Bin {
+                origin: self.origin.to_array(),
+                heights: self.heights.clone(),
+                weights: self.weights.clone(),
+                maps: self.maps.clone(),
+                biomes: self.biomes.clone(),
+            }
+            .serialize(s)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TerrainTileFrozenV3 {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        if d.is_human_readable() {
+            let raw = TerrainTileFrozenV3Raw::deserialize(d)?;
+            Ok(Self {
+                origin: DVec3::from_array(raw.origin),
+                heights: raw.heights,
+                weights: raw.weights,
+                maps: raw.maps,
+                biomes: raw.biomes,
+            })
+        } else {
+            let raw = TerrainTileFrozenV3Bin::deserialize(d)?;
+            Ok(Self {
+                origin: DVec3::from_array(raw.origin),
+                heights: raw.heights,
+                weights: raw.weights,
+                maps: raw.maps,
+                biomes: raw.biomes,
+            })
         }
     }
 }
@@ -618,6 +888,7 @@ impl Serialize for TerrainTile {
                 weights: self.weights.clone(),
                 maps: self.maps.clone(),
                 biomes: self.biomes.clone(),
+                holes: self.holes.clone(),
             }
             .serialize(s)
         } else {
@@ -627,6 +898,7 @@ impl Serialize for TerrainTile {
                 weights: self.weights.clone(),
                 maps: self.maps.clone(),
                 biomes: self.biomes.clone(),
+                holes: self.holes.clone(),
             }
             .serialize(s)
         }
@@ -643,6 +915,7 @@ impl<'de> Deserialize<'de> for TerrainTile {
                 weights: raw.weights,
                 maps: raw.maps,
                 biomes: raw.biomes,
+                holes: raw.holes,
             })
         } else {
             let raw = TerrainTileBin::deserialize(d)?;
@@ -652,6 +925,7 @@ impl<'de> Deserialize<'de> for TerrainTile {
                 weights: raw.weights,
                 maps: raw.maps,
                 biomes: raw.biomes,
+                holes: raw.holes,
             })
         }
     }
@@ -667,6 +941,7 @@ impl TerrainTile {
             weights: Vec::new(),
             maps: Vec::new(),
             biomes: Vec::new(),
+            holes: Vec::new(),
         }
     }
 
@@ -680,6 +955,7 @@ impl TerrainTile {
             weights: Vec::new(),
             maps: Vec::new(),
             biomes: Vec::new(),
+            holes: Vec::new(),
         })
     }
 
@@ -947,6 +1223,137 @@ impl TerrainTile {
     #[inline]
     pub fn biomes_len(&self) -> usize {
         self.biomes.len()
+    }
+
+    // ── hole mask (P21.2) ───────────────────────────────────────────────────
+
+    /// The raw hole mask: either empty (nothing carved) or
+    /// [`hole_mask_bytes(resolution)`](hole_mask_bytes) of **packed bits**. The
+    /// packing is documented on [`hole_mask_bytes`], and this accessor exists for
+    /// the two consumers that legitimately want the bits whole — the renderer's
+    /// per-tile GPU upload and the serde length check. Everything else asks
+    /// [`is_hole`](TerrainTile::is_hole).
+    #[inline]
+    pub fn holes(&self) -> &[u8] {
+        &self.holes
+    }
+
+    /// `true` when the tile stores no hole mask — i.e. **nothing has been
+    /// carved**. This is the byte-stable default (such a tile serializes without
+    /// a `holes` field at all in JSON/TOML, and as a single zero-length count in
+    /// bincode).
+    ///
+    /// Note the asymmetry with [`has_holes`](TerrainTile::has_holes): a tile whose
+    /// mask was materialized and then cleared bit by bit is **not** on the default
+    /// (it still pays its buffer) even though no sample is holed. Persistence
+    /// cares about the former, queries about the latter, and healing a carve calls
+    /// [`clear_holes`](TerrainTile::clear_holes) to collapse one into the other.
+    #[inline]
+    pub fn holes_are_default(&self) -> bool {
+        self.holes.is_empty()
+    }
+
+    /// `true` when **some** sample of this tile is holed. `false` for a tile on
+    /// the sparse default, and also for one whose materialized mask is all zeros.
+    ///
+    /// This is the predicate a renderer, a query or a cook advisory wants: it
+    /// answers "is there a hole here" without caring how the buffer got that way.
+    #[inline]
+    pub fn has_holes(&self) -> bool {
+        self.holes.iter().any(|&b| b != 0)
+    }
+
+    /// `true` when sample `(i, j)` is holed — there is no heightfield surface
+    /// there. An un-carved tile reads `false` everywhere. Out-of-range indices
+    /// clamp to the edge, matching every other per-sample accessor.
+    #[inline]
+    pub fn is_hole(&self, resolution: u32, i: u32, j: u32) -> bool {
+        if self.holes.is_empty() {
+            return false;
+        }
+        let r = resolution.max(1);
+        let i = i.min(r - 1);
+        let j = j.min(r - 1);
+        let n = (j * r + i) as usize;
+        match self.holes.get(n / 8) {
+            Some(byte) => byte & (1u8 << (n % 8)) != 0,
+            // A mask shorter than the resolution demands cannot happen through
+            // serde (the length check rejects it) or through `ensure_holes`; read
+            // it as unholed rather than panicking on a corrupt in-memory tile.
+            None => false,
+        }
+    }
+
+    /// Materialize the full packed hole mask (all bits clear — nothing holed) if
+    /// the tile is still on the sparse default, then return a mutable handle to
+    /// the **packed bytes**. A carve calls this before setting bits.
+    #[inline]
+    pub fn ensure_holes(&mut self, resolution: u32) -> &mut [u8] {
+        if self.holes.is_empty() {
+            self.holes = vec![0u8; hole_mask_bytes(resolution)];
+        }
+        &mut self.holes
+    }
+
+    /// Reset the tile to the un-carved sparse default (drops the mask entirely),
+    /// so it re-serializes byte-identically to a tile no carve ever touched. Used
+    /// by carve **undo**, and by [`heal_holes`](TerrainTile::heal_holes) when the
+    /// last hole closes.
+    #[inline]
+    pub fn clear_holes(&mut self) {
+        self.holes = Vec::new();
+    }
+
+    /// Set or clear the hole bit at sample `(i, j)`, materializing the mask first
+    /// when opening one. Out-of-range indices are ignored.
+    ///
+    /// Clearing on a tile that is still on the sparse default is a **no-op that
+    /// allocates nothing** — closing a hole that was never open must not cost the
+    /// tile its byte-stable default.
+    #[inline]
+    pub fn set_hole(&mut self, resolution: u32, i: u32, j: u32, hole: bool) {
+        let r = resolution.max(1);
+        if i >= r || j >= r {
+            return;
+        }
+        if !hole && self.holes.is_empty() {
+            return;
+        }
+        let n = (j * r + i) as usize;
+        let mask = 1u8 << (n % 8);
+        let buf = self.ensure_holes(resolution);
+        if let Some(byte) = buf.get_mut(n / 8) {
+            if hole {
+                *byte |= mask;
+            } else {
+                *byte &= !mask;
+            }
+        }
+    }
+
+    /// Collapse an all-zero materialized mask back to the sparse default, and
+    /// report whether it collapsed.
+    ///
+    /// The **inverse** half of the P21.2 carve↔fill round trip: carving
+    /// materializes a mask, filling clears its bits, and this is what turns the
+    /// resulting all-zero buffer back into bytes indistinguishable from a tile
+    /// that was never carved. Without it a carve→fill cycle would leave a
+    /// permanent `resolution²/8` scar in every container.
+    #[inline]
+    pub fn heal_holes(&mut self) -> bool {
+        if !self.holes.is_empty() && !self.has_holes() {
+            self.holes = Vec::new();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Length of the stored hole mask (`0` for the sparse default). Used by the
+    /// terrain's serde length validation.
+    #[inline]
+    pub fn holes_len(&self) -> usize {
+        self.holes.len()
     }
 
     /// Inclusive `(min, max)` of the tile's `f32` offsets (for AABB culling and
@@ -1266,11 +1673,12 @@ mod tests {
     //
     // The bypass door differs, and that difference is the point. A weight buffer
     // can be smuggled in through `TerrainTileFrozenV1`'s public fields; biome ids
-    // have no frozen record (no historical container could carry them), so the way
-    // in is a **hand-built tile** — which is exactly what a corrupt payload
-    // decodes to, because a `TerrainTile` cannot check its own buffers (it does
-    // not know the terrain's resolution). `TerrainData`'s `Deserialize` is
-    // therefore the ONLY door, on both codecs.
+    // reach the same door through `TerrainTileFrozenV3` (P21.2 froze the layout
+    // that carries them, and `TerrainData`'s wire form now goes through it), and
+    // the door that predates both is a **hand-built tile** — which is exactly what
+    // a corrupt payload decodes to, because a `TerrainTile` cannot check its own
+    // buffers (it does not know the terrain's resolution). `TerrainData`'s
+    // `Deserialize` is therefore the ONLY check, on both codecs, for every layer.
 
     /// A tile built by hand, bypassing every door — exactly the state the decoder
     /// is responsible for never producing. Only reachable from inside this module,
@@ -1282,6 +1690,7 @@ mod tests {
             weights: Vec::new(),
             maps: Vec::new(),
             biomes,
+            holes: Vec::new(),
         }
     }
 
@@ -1391,12 +1800,12 @@ mod tests {
     fn frozen_tile_generations_are_pinned_to_both_ladders() {
         assert_eq!(
             crate::asset::TERRAIN_ASSET_SCHEMA_VERSION,
-            4,
+            5,
             "the .inf_terrain header moved. Generation-1 frozen tiles cover header \
-             versions 1..=2, generation-2 covers 3, and the current TerrainTile covers 4. \
-             If the tile layout changed again, add TerrainTileFrozenV3 and extend \
-             `decode_tile_at`; if only the header changed, update this pin and \
-             TerrainTileFrozenV1's generation table."
+             versions 1..=2, generation-2 covers 3, generation-3 covers 4, and the \
+             current TerrainTile covers 5. If the tile layout changed again, add \
+             TerrainTileFrozenV4 and extend `decode_tile_at`; if only the header \
+             changed, update this pin and TerrainTileFrozenV1's generation table."
         );
         // The version→wire-type mapping the pin is really about. Each generation
         // is exactly the previous one plus its own sparse (zero-length) layer, so
@@ -1408,6 +1817,9 @@ mod tests {
         let gen2 =
             bincode::serde::encode_to_vec(TerrainTileFrozenV2::from_current(&tile), bincode_cfg())
                 .unwrap();
+        let gen3 =
+            bincode::serde::encode_to_vec(TerrainTileFrozenV3::from_current(&tile), bincode_cfg())
+                .unwrap();
         let current = crate::asset::encode_tile(&tile).unwrap();
         assert_eq!(
             gen2.len(),
@@ -1415,14 +1827,20 @@ mod tests {
             "generation 2 is generation 1 plus exactly the sparse maps count"
         );
         assert_eq!(
-            current.len(),
+            gen3.len(),
             gen2.len() + 1,
-            "the current tile is generation 2 plus exactly the sparse biomes count"
+            "generation 3 is generation 2 plus exactly the sparse biomes count"
+        );
+        assert_eq!(
+            current.len(),
+            gen3.len() + 1,
+            "the current tile is generation 3 plus exactly the sparse holes count"
         );
         for (bytes, versions, label) in [
             (&gen1, &[0u32, 1, 2][..], "generation-1"),
             (&gen2, &[3][..], "generation-2"),
-            (&current, &[4][..], "current"),
+            (&gen3, &[4][..], "generation-3"),
+            (&current, &[5][..], "current"),
         ] {
             for &v in versions {
                 let got = crate::asset::decode_tile_at(bytes, v)

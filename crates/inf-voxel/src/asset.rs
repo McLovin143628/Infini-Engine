@@ -39,6 +39,35 @@
 //!   is deterministic zeros, and each chunk blob is the *same* bincode a chunk
 //!   writes anywhere else — so two builds of one volume are byte-identical.
 //!
+//! # The reserved bytes are **validated zero**, not merely written zero
+//!
+//! Two fields in the layout above carry no data: the header word at 52..56 and
+//! each directory entry's word at `base + 12 .. base + 16`. They exist so a
+//! future version can grow *without* re-lengthing a fixed-size record, which is
+//! the same room [`inf_terrain`]'s v2 header bought itself with 56 bytes and
+//! spent nothing of across three tile-layout bumps.
+//!
+//! Reserved room is only worth anything if it is **claimable exactly once, by a
+//! version bump**. So [`parse`] rejects a payload whose reserved words are
+//! non-zero, and the rejection is the point: without it, a future writer could
+//! start putting meaning in those bytes and every reader in the wild would keep
+//! loading the file, silently ignoring a field it does not understand — the
+//! precise failure the version ladder exists to prevent, arriving through the one
+//! hole the ladder does not cover. With the check, that writer's files fail to
+//! load until it stamps the version that describes them, which is the correct and
+//! only outcome.
+//!
+//! It costs two comparisons per payload and one per directory entry, catches
+//! truncate-and-refill corruption on the way past, and constrains nothing this
+//! build can legitimately produce: [`write_voxel_asset`] is the only writer and
+//! it writes zeros. **A v2+ reader keeps this check for the v1 branch and defines
+//! its own meaning for the bytes at its own version** — that is what "claimed by
+//! a version bump" means operationally.
+//!
+//! (`inf_terrain`'s reader does not do this. Its reserved tail predates the rule
+//! and adding the check there would be a compatibility decision about files that
+//! already exist, not a free one; `.inf_voxel` is new, so it starts strict.)
+//!
 //! # The version selects the wire type
 //!
 //! bincode is **positional**, so any future growth of the chunk blob (a second
@@ -613,6 +642,12 @@ fn parse(data: &[u8]) -> Result<(VoxelAssetHeader, Vec<ChunkDirEntry>)> {
         return Err(VoxelAssetError::Malformed("origin is not finite".into()));
     }
     let chunk_count = u32_at(48);
+    // Reserved: claimable only by a version bump — see the module docs.
+    if u32_at(52) != 0 {
+        return Err(VoxelAssetError::Malformed(
+            "reserved header word is not zero; a v1 payload may not use it".into(),
+        ));
+    }
     let blob_base = u64_at(56);
 
     let hlen = header_len(schema_version);
@@ -641,6 +676,12 @@ fn parse(data: &[u8]) -> Result<(VoxelAssetHeader, Vec<ChunkDirEntry>)> {
             y: i32::from_le_bytes(data[base + 4..base + 8].try_into().unwrap()),
             z: i32::from_le_bytes(data[base + 8..base + 12].try_into().unwrap()),
         };
+        // Reserved, on the same rule as the header's — see the module docs.
+        if u32::from_le_bytes(data[base + 12..base + 16].try_into().unwrap()) != 0 {
+            return Err(VoxelAssetError::Malformed(format!(
+                "chunk directory entry {i} has a non-zero reserved word; a v1                  payload may not use it"
+            )));
+        }
         let offset = u64::from_le_bytes(data[base + 16..base + 24].try_into().unwrap());
         let len = u64::from_le_bytes(data[base + 24..base + 32].try_into().unwrap());
         if let Some(p) = prev {
@@ -844,6 +885,29 @@ mod tests {
         let mut scale = good.clone();
         scale[16..24].copy_from_slice(&0f64.to_le_bytes());
         assert!(VoxelAsset::from_bytes(scale).is_err());
+
+        // The reserved words are validated zero, not merely written zero — both
+        // of them, so a future writer cannot claim either without a version bump.
+        // (See the module docs for why the alternative is silent misreading.)
+        let mut hdr_reserved = good.clone();
+        hdr_reserved[52..56].copy_from_slice(&1u32.to_le_bytes());
+        let err = VoxelAsset::from_bytes(hdr_reserved)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reserved header word"), "{err}");
+
+        let mut dir_reserved = good.clone();
+        let r = HEADER_LEN as usize + 12;
+        dir_reserved[r..r + 4].copy_from_slice(&7u32.to_le_bytes());
+        let err = VoxelAsset::from_bytes(dir_reserved)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reserved word"), "{err}");
+
+        // … and the good payload really does have zeros there, so the two checks
+        // above are not passing on a coincidence.
+        assert_eq!(&good[52..56], &[0, 0, 0, 0]);
+        assert_eq!(&good[r..r + 4], &[0, 0, 0, 0]);
 
         // A misaligned blob offset in the directory.
         let mut misaligned = good.clone();

@@ -56,8 +56,16 @@ pub struct HeightRegion {
     anchor_y: f64,
     /// Row-major `nx · nz` `f32` heights (offsets from `anchor_y`).
     heights: Vec<f32>,
-    /// Row-major authored mask: `false` where the sampled lattice point has no
-    /// authored tile (a hole). Holes are never modified or written back.
+    /// Row-major authored mask: `false` where the sampled lattice point carries
+    /// **no heightfield surface** — either no authored tile at all, or (P21.2) an
+    /// authored tile whose sample is *holed*. Both are "a hole" to every
+    /// neighbourhood op: excluded from means, never written back.
+    ///
+    /// Folding the two cases into one mask is deliberate. Every consumer already
+    /// asks exactly one question — "is there ground at this lattice point?" — and
+    /// a carved sample and an unauthored one answer it identically. Splitting them
+    /// would need every smooth, flatten and erosion pass to grow a second guard,
+    /// and the first one anybody forgot would silently fill a cave in.
     authored: Vec<bool>,
     /// Row-major `nx · nz` erosion data maps (P19.1): `[flow, deposition, wear]`
     /// **extracted from the tiles**, so a second bake adds to the first's totals
@@ -264,7 +272,9 @@ impl TerrainData {
     /// Extract a dense [`HeightRegion`] covering the world AABB `[min, max]`,
     /// expanded by `margin` lattice samples on every side (neighbourhood ops pass
     /// a margin so edge samples have valid neighbours to read). Lattice points with
-    /// no authored tile are marked unauthored (holes).
+    /// no authored tile — **and lattice points a P21.2 carve holed** — are marked
+    /// unauthored; see [`HeightRegion`]'s `authored` field for why they share one
+    /// mask.
     pub fn extract_region(&self, min: DVec2, max: DVec2, margin: u32) -> HeightRegion {
         let (min, max) = (min.min(max), min.max(max));
         let mps = self.meters_per_sample();
@@ -294,6 +304,12 @@ impl TerrainData {
                 let gx = gx0 + c as i64;
                 let (tx, i) = split_index(gx, res);
                 if let Some(tile) = self.get_tile((tx, tz)) {
+                    if tile.is_hole(res, i, j) {
+                        // Carved away: no surface here, so it stays unauthored and
+                        // its height stays 0. Erosion, smooth and flatten all read
+                        // the mask, so none of them can pour material into a cave.
+                        continue;
+                    }
                     let idx = (r * nx + c) as usize;
                     heights[idx] = (tile.world_height(res, i, j) - anchor_y) as f32;
                     authored[idx] = true;
