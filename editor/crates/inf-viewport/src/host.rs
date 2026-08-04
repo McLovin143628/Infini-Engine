@@ -3619,6 +3619,13 @@ impl EngineHost {
     /// projection, and only on a pass that actually moved a chunk (hysteresis makes
     /// that intermittent even under a flying camera), which is cheaper than keeping
     /// a second copy of the branch in step with the first.
+    ///
+    /// [`sync_voxels`](Self::sync_voxels) calls the same store method once more, on
+    /// the document path, and that overlap is deliberate: a volume bound by a
+    /// document change pages in the same pass rather than a frame later, and the
+    /// second call is a no-op sync (one box-distance test per available chunk, then
+    /// a mesh-cache walk that rebuilds nothing) — which is exactly the property
+    /// `a_no_op_sync_moves_no_mesh_stamp` pins in Ring 0.
     fn sync_streamed_voxels(&mut self) {
         let report = self.voxel_volumes.sync_camera(
             self.last_eye_world,

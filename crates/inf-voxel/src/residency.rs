@@ -10,12 +10,14 @@
 //!   bytes out of a `.inf_voxel` payload — a pack mapping included — with no
 //!   decode and no copy.
 //! * **The caller computes the wants.** [`VoxelData::sync_residency`] takes an
-//!   explicit set of wanted keys. There is deliberately **no camera, no radius and
-//!   no budget policy in Ring 0**: the viewport host and the player each own their
-//!   own view-dependent selection, and this layer only executes it. That keeps
-//!   residency testable as a pure set operation. (Wiring those selections is
-//!   P21.2; the machinery is here now, with its tests, so the wiring has something
-//!   proven to sit on.)
+//!   explicit set of wanted keys and no policy at all — no camera, no radius, no
+//!   budget — which is what keeps residency testable as a pure set operation.
+//!   P21.1 said the *policy* was the hosts'; P21.2 corrected that and put it in
+//!   Ring 0 too ([`crate::wants`]), because a radius and a dead band written once
+//!   in the editor and once in the player is two policies and the shipped build
+//!   would stream a cave differently from its preview. The split that survives is
+//!   **policy vs. execution**, not Ring 0 vs. the hosts: `wants` decides, this
+//!   executes, and the hosts supply only the eye position.
 //! * **Absent ≡ non-resident.** A sample in a non-resident chunk reads as empty
 //!   space, exactly like one that was never carved, so streaming can never
 //!   *change* an answer — only make one available.
