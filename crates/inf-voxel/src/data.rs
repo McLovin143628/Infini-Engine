@@ -389,9 +389,24 @@ impl VoxelData {
 
     /// Drop `key` from residency, returning whether it was resident.
     ///
-    /// A pure paging operation: it marks nothing dirty. Evicting a chunk with
-    /// unsaved edits silently loses them —
-    /// [`sync_residency`](Self::sync_residency) is the safe door, which refuses to.
+    /// A pure paging operation: it marks nothing dirty, and it **does not clear an
+    /// existing dirty mark** either.
+    ///
+    /// # Evicting a dirty chunk DELETES it from the asset
+    ///
+    /// Stated plainly because the consequence is worse than "loses the edit". A
+    /// dirty mark with no resident chunk is exactly how a *deletion* is
+    /// represented ([`remove_chunk`](Self::remove_chunk) leaves the same pair), so
+    /// [`VoxelEdits::from_dirty`](crate::VoxelEdits::from_dirty) reads the evicted
+    /// key as `removed` and the next save **erases that chunk from the
+    /// `.inf_voxel`** — the carved cave, not merely the unsaved carving.
+    ///
+    /// [`sync_residency`](Self::sync_residency) is the safe door: it refuses to
+    /// evict a dirty chunk and reports it as `retained_dirty` instead. This
+    /// function is the unsafe one, kept because a caller that has *just* written
+    /// the chunk back (and cleared its mark) needs it. The behaviour mirrors
+    /// `inf_terrain::TerrainData::evict_tile` deliberately — one paging vocabulary
+    /// for both — and this note is the part that was missing there.
     pub fn evict_chunk(&mut self, key: ChunkKey) -> bool {
         let had = self.chunks.remove(&key).is_some();
         if had {

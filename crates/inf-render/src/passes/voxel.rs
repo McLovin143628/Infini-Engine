@@ -23,9 +23,18 @@
 //!
 //! [`RenderNode::run`] returns before touching the encoder — before any buffer
 //! write — when `scene.voxels` is empty, which is the byte-stability guarantee for
-//! the 47 committed goldens.
+//! the 47 pre-P21.1 goldens.
+//!
+//! That claim is asserted with [`VoxelReport`] — the node's own engagement
+//! counter — and **not** with a pixel comparison, because a pixel comparison
+//! cannot make it. Two renders of a scene that has no volumes are identical
+//! whether the node returned early or opened a render pass, bound a pipeline and
+//! drew nothing; the first cut of this gate compared exactly that and would have
+//! passed on a node with no early-out at all. The house precedent is
+//! `UnderwaterReport` (P20.3).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use glam::Mat4;
 use inf_math::FloatingOrigin;
@@ -36,6 +45,20 @@ use crate::graph::RenderNode;
 use crate::passes::mesh::LightsUniform;
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
 use crate::scene::{RenderVoxelChunk, RenderVoxelVertex, RenderVoxelVolume, VoxelChunkKey};
+
+/// How many frames the voxel pass has **engaged** on — i.e. actually recorded a
+/// render pass and at least one draw.
+///
+/// The house off-path instrument (`UnderwaterReport`, `SharedStreamReport`, the
+/// vgeom/scatter audits). It exists because "the node contributed nothing to the
+/// command stream" is a statement *about the command stream*, and pixels cannot
+/// make it: a pass that engaged and drew zero triangles — or drew them and had
+/// them all depth-rejected — is byte-identical from outside. Bumped at the point
+/// in [`RenderNode::run`] past which the encoder *will* be touched, so an
+/// unchanged count is exactly the property the module docs claim. One relaxed
+/// increment on the frames that engage and nothing at all on the frames that do
+/// not, so the off path stays as free as it says it is.
+pub type VoxelReport = std::sync::Arc<AtomicU64>;
 
 // ── GPU chunk cache planning ────────────────────────────────────────────────
 
@@ -317,10 +340,12 @@ pub struct VoxelNode {
     instance_capacity: usize,
     lights_buf: wgpu::Buffer,
     lights_bg: wgpu::BindGroup,
+    /// The engagement counter (see [`VoxelReport`]).
+    report: VoxelReport,
 }
 
 impl VoxelNode {
-    pub fn new(gpu: &GpuContext, view_bgl: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(gpu: &GpuContext, view_bgl: &wgpu::BindGroupLayout, report: VoxelReport) -> Self {
         let shader = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -417,6 +442,7 @@ impl VoxelNode {
             instance_capacity: 0,
             lights_buf,
             lights_bg,
+            report,
         }
     }
 
@@ -559,6 +585,10 @@ impl RenderNode for VoxelNode {
         };
         let (chunks, pipeline, lights_bg) = (&self.chunks, &self.pipeline, &self.lights_bg);
 
+        // Past this line the encoder WILL be touched — the one place the counter
+        // may move, so an unchanged count is a real statement about the command
+        // stream rather than about the pixels.
+        self.report.fetch_add(1, Ordering::Relaxed);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("voxel"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

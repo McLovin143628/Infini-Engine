@@ -313,6 +313,9 @@ pub struct EngineRenderer {
     /// P20.3 underwater engagement counter (see
     /// [`EngineRenderer::underwater_engaged_frames`]).
     underwater: passes::underwater::UnderwaterReport,
+    /// P21.1 voxel engagement counter (see
+    /// [`EngineRenderer::voxel_engaged_frames`]).
+    voxel: passes::voxel::VoxelReport,
 }
 
 impl EngineRenderer {
@@ -402,7 +405,8 @@ impl EngineRenderer {
         // ground it extends rather than after the passes that composite over the
         // ground. A no-op on a scene with no volumes — the node returns before
         // touching the encoder — so every existing golden is untouched.
-        graph.add(passes::voxel::VoxelNode::new(gpu, &view_bgl));
+        let voxel = passes::voxel::VoxelReport::default();
+        graph.add(passes::voxel::VoxelNode::new(gpu, &view_bgl, voxel.clone()));
         // GPU-instanced scatter (P18.5): PCG volumes + painted foliage, culled
         // per-instance on the GPU with LOD/impostor banding. LAST of the opaque
         // passes on purpose — its HZB is built from the depth every other opaque
@@ -491,6 +495,7 @@ impl EngineRenderer {
             next_atmosphere_generation: 2,
             wetness: WetnessResources::new(gpu),
             underwater,
+            voxel,
         }
     }
 
@@ -504,6 +509,19 @@ impl EngineRenderer {
     /// `underwater_off_path_never_engages`.
     pub fn underwater_engaged_frames(&self) -> u64 {
         self.underwater.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many frames the P21.1 voxel pass has **engaged** on since this renderer
+    /// was built — the off-path instrument for volumetric terrain.
+    ///
+    /// Unchanged across a frame ⇒ the node returned before touching the encoder.
+    /// That is the byte-stability guarantee for every golden that predates
+    /// volumetric terrain, and it is a claim about the *command stream* that a
+    /// pixel comparison cannot make: rendering a volume-free scene twice is
+    /// identical whether the node early-returned or opened a pass and drew
+    /// nothing. Read by `voxel_off_path_never_engages`.
+    pub fn voxel_engaged_frames(&self) -> u64 {
+        self.voxel.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The active HDR/post settings.

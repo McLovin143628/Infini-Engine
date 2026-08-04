@@ -68,7 +68,9 @@ pub use passes::terrain::{
 // The P21.1 voxel-surface cache gate — the pure planner the volumetric-terrain
 // pass drives its per-chunk uploads/evictions from, exported like `plan_tile_cache`
 // so hosts and gates can reason about residency without a GPU.
-pub use passes::voxel::{plan_chunk_cache, CachedChunk, ChunkCacheKey, ChunkCachePlan};
+pub use passes::voxel::{
+    plan_chunk_cache, CachedChunk, ChunkCacheKey, ChunkCachePlan, VoxelReport,
+};
 pub use pick::Picker;
 pub use precip::{
     particle_offset, precip_base, wrap_signed, PrecipParams, PrecipQuality, PRECIP_BOX_XZ_M,

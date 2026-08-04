@@ -104,7 +104,19 @@ pub struct EditorVoxelVolumes {
     /// Assets that failed to resolve or load. Kept so the warning is logged
     /// **once** rather than on every frame of a projection that runs at 60 Hz —
     /// the difference between a diagnosable log and an unusable one.
+    ///
+    /// Cleared only by [`set_content_root`](EditorVoxelVolumes::set_content_root)
+    /// and [`refresh_index`](EditorVoxelVolumes::refresh_index) — the two
+    /// **external** events that can genuinely change the answer. It is emphatically
+    /// NOT cleared by the miss-path rescan: doing so let two unresolvable assets
+    /// un-suppress each other forever, and each rescan walks the whole content
+    /// root and TOML-parses every sidecar under it.
     failed: HashSet<Uuid>,
+    /// How many times the content root has been walked. The engagement counter
+    /// behind the "logged once" claim: a suppression bug shows up here as an
+    /// unbounded number and nowhere else, because the *behaviour* (a volume that
+    /// does not draw) is identical either way.
+    scans: usize,
 }
 
 impl EditorVoxelVolumes {
@@ -120,7 +132,10 @@ impl EditorVoxelVolumes {
         self.volumes.clear();
         self.failed.clear();
         self.index = match &root {
-            Some(dir) => voxel_paths_by_guid(dir),
+            Some(dir) => {
+                self.scans += 1;
+                voxel_paths_by_guid(dir)
+            }
             None => HashMap::new(),
         };
         self.content_root = root;
@@ -131,11 +146,34 @@ impl EditorVoxelVolumes {
     /// through [`ensure`](Self::ensure) when its GUID changes, and a rewrite under
     /// the same GUID is a P21.3 concern the carve path will drive explicitly).
     pub fn refresh_index(&mut self) {
+        self.rescan();
+        // An EXTERNAL refresh is the one event that can turn a permanent failure
+        // back into a success (an import finished, the watcher saw a write), so it
+        // is the one that may forget them.
+        self.failed.clear();
+    }
+
+    /// Re-walk the content root **without** forgetting past failures — the
+    /// miss-path rescan.
+    ///
+    /// Split from [`refresh_index`](Self::refresh_index) because clearing
+    /// `failed` here is a thrash bug, not a nicety: with two unresolvable assets,
+    /// A's rescan forgets B's failure, B's rescan forgets A's, and the projection
+    /// walks the whole content root and TOML-parses every `.inf_voxel` sidecar
+    /// under it **twice per frame, forever**. A single-asset test cannot see it —
+    /// which is exactly why one existed and the bug survived it.
+    fn rescan(&mut self) {
         let Some(dir) = self.content_root.clone() else {
             return;
         };
+        self.scans += 1;
         self.index = voxel_paths_by_guid(&dir);
-        self.failed.clear();
+    }
+
+    /// How many times the content root has been walked since this store was
+    /// created — the bound the "logged once" claim is actually asserted against.
+    pub fn scan_count(&self) -> usize {
+        self.scans
     }
 
     pub fn content_root(&self) -> Option<&Path> {
@@ -163,10 +201,11 @@ impl EditorVoxelVolumes {
         if self.content_root.is_none() || self.failed.contains(&asset) {
             return false;
         }
-        // A miss rescans ONCE: an asset written after the project opened must
-        // resolve without a reopen. `failed` then suppresses the retry storm.
+        // A miss rescans ONCE — an asset written after the project opened must
+        // resolve without a reopen — and `failed` (which `rescan` deliberately
+        // does NOT clear) suppresses every retry after that.
         if !self.index.contains_key(&asset) {
-            self.refresh_index();
+            self.rescan();
         }
         let Some(path) = self.index.get(&asset).cloned() else {
             tracing::warn!("inf-editor-core: no .inf_voxel for asset {asset}");
@@ -331,23 +370,112 @@ mod tests {
         assert_eq!(s.index_len(), 1);
     }
 
-    /// An unresolvable asset is a warning and a `false`, **once** — a projection
-    /// runs every frame, and a store that re-walked the content root each time
-    /// would make the editor unusable and the log unreadable.
+    /// **TWO** unresolvable assets fail quietly after **one rescan each** — a
+    /// projection runs at input rate, and each rescan walks the whole content root
+    /// and TOML-parses every sidecar under it.
+    ///
+    /// Two, not one, deliberately: with a single asset a `failed` set that is
+    /// cleared by the miss-path rescan is indistinguishable from one that is not,
+    /// because there is nobody to un-suppress it. Two assets clear each other and
+    /// the walk count runs away — which is the only observable difference, since
+    /// the *behaviour* (neither volume draws) is identical either way.
     #[test]
-    fn an_unresolvable_asset_fails_quietly_after_the_first_try() {
+    fn two_unresolvable_assets_do_not_un_suppress_each_other() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = EditorVoxelVolumes::new();
         s.set_content_root(Some(dir.path().to_path_buf()));
-        let volume = VoxelVolume::from_asset(Uuid::from_u128(0xDEAD));
-        for _ in 0..5 {
-            assert!(!s.ensure(Uuid::from_u128(1), &volume));
+        let baseline = s.scan_count(); // the walk `set_content_root` itself did
+
+        let (a, b) = (Uuid::from_u128(0xDEAD), Uuid::from_u128(0xBEEF));
+        let (va, vb) = (VoxelVolume::from_asset(a), VoxelVolume::from_asset(b));
+        for _ in 0..30 {
+            assert!(!s.ensure(Uuid::from_u128(1), &va));
+            assert!(!s.ensure(Uuid::from_u128(2), &vb));
         }
         assert!(s.is_empty());
-        // …and a refresh clears the suppression, so a later import is picked up.
-        write_asset(dir.path(), "Found.inf_voxel", Uuid::from_u128(0xDEAD), 10.0);
+        assert_eq!(
+            s.scan_count() - baseline,
+            2,
+            "30 projections over two unresolvable assets walked the content root \
+             {} times — the miss-path rescan is clearing the `failed` set, so the \
+             two assets keep un-suppressing each other",
+            s.scan_count() - baseline
+        );
+
+        // …and an EXTERNAL refresh clears the suppression, so a later import is
+        // picked up — the affordance the miss-path rescan must not duplicate.
+        write_asset(dir.path(), "Found.inf_voxel", a, 10.0);
         s.refresh_index();
-        assert!(s.ensure(Uuid::from_u128(1), &volume));
+        assert!(s.ensure(Uuid::from_u128(1), &va));
+        // The still-missing one is re-suppressed after exactly one more walk.
+        let after = s.scan_count();
+        for _ in 0..10 {
+            assert!(!s.ensure(Uuid::from_u128(2), &vb));
+        }
+        assert_eq!(s.scan_count(), after + 1);
+    }
+
+    /// **THE BIND-PARITY REGRESSION (M2).** A volume whose chunks mesh to **no
+    /// surface** is still a *bound* volume, and must stay bound.
+    ///
+    /// The editor used to build its live set from whatever the projection pushed,
+    /// and `project_voxel` returns `None` for a volume with no drawable chunks —
+    /// so an all-air (or all-rock) asset was released at the end of every
+    /// projection and re-read from disk, re-parsed and re-meshed on the next one.
+    /// A gizmo drag bumps the document version per input event, so that is a disk
+    /// read per mouse move. The shipped player was never affected: it built its
+    /// live set from the *wants*.
+    ///
+    /// Pinned here rather than in the viewport host because the host is
+    /// `#[cfg(any(windows, macos))]` and this is the layer the rule actually lives
+    /// at. The structural half — that neither projector binds inside its
+    /// projection loop — is `projector_mirror`'s.
+    #[test]
+    fn a_volume_that_meshes_to_nothing_stays_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let asset = Uuid::from_u128(0xA17);
+        // A radius the sphere never reaches inside the authored chunks: every
+        // sample is outside, so the field has no sign change and no surface.
+        write_asset(dir.path(), "Airy.inf_voxel", asset, -1.0);
+        let mut s = EditorVoxelVolumes::new();
+        s.set_content_root(Some(dir.path().to_path_buf()));
+        let baseline = s.scan_count();
+
+        let e = Uuid::from_u128(1);
+        let volume = VoxelVolume::from_asset(asset);
+        assert!(s.ensure(e, &volume), "an all-air asset still BINDS");
+        let slot = s.slot(e).expect("…and keeps its slot");
+        assert_eq!(
+            slot.meshes.triangle_count(),
+            0,
+            "the fixture must genuinely produce no surface, or this proves nothing"
+        );
+        assert!(slot.data.chunk_count() > 0, "it did load real chunks");
+
+        // Re-ensure at the rate a gizmo drag bumps the document. Nothing is
+        // re-read, re-parsed or re-meshed, and the store never walks the root.
+        for _ in 0..50 {
+            assert!(s.ensure(e, &volume));
+        }
+        assert_eq!(s.len(), 1, "the volume was released and re-read");
+        assert_eq!(
+            s.scan_count(),
+            baseline,
+            "a bound volume must not touch the filesystem again"
+        );
+    }
+
+    /// A store with no content root never walks anything at all.
+    #[test]
+    fn a_rootless_store_never_walks() {
+        let mut s = EditorVoxelVolumes::new();
+        for _ in 0..5 {
+            assert!(!s.ensure(
+                Uuid::from_u128(1),
+                &VoxelVolume::from_asset(Uuid::from_u128(9))
+            ));
+        }
+        assert_eq!(s.scan_count(), 0);
     }
 
     #[test]

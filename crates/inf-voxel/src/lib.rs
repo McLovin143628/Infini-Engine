@@ -72,7 +72,9 @@ pub use chunk::{
 };
 pub use data::VoxelData;
 pub use delta::{ChunkPatch, VoxelDelta};
-pub use mesh::{mesh_chunk, mesh_keys_for, MeshSyncReport, VoxelMesh, VoxelMeshCache};
+pub use mesh::{
+    mesh_chunk, mesh_keys_for, source_key, MeshSourceKey, MeshSyncReport, VoxelMesh, VoxelMeshCache,
+};
 pub use ops::{OpReport, VoxelOp, VoxelOpKind, VoxelShape};
 pub use residency::{chunk_range, ChunkStore, MemoryChunkStore, ResidencyReport};
 pub use store::{VolumeSlot, VoxelVolumes};

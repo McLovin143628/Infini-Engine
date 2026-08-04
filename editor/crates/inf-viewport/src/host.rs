@@ -1145,6 +1145,21 @@ impl EngineHost {
     }
 
     fn rebuild_scene(&mut self, doc: &SceneDoc) {
+        // P21.1 — the voxel bind PRE-PASS, before anything is projected.
+        //
+        // Loading a volume is a `&mut` act and projecting is not, so it runs here
+        // rather than inside the entity loop, for three reasons that are really
+        // one: (1) the projection stays read-only, which is what lets
+        // `projector_mirror`'s "neither host meshes inside its projection" claim be
+        // true rather than aspirational; (2) the live set is built from
+        // **bound-ness**, not from whether the volume happened to produce
+        // triangles — a volume that meshes to no surface (a chunk set that is all
+        // air, or all rock) used to be released at the end of every projection and
+        // re-read from disk on the next one, which at a gizmo drag's document-bump
+        // rate is a disk read per input event; (3) it is the exact shape
+        // `inf_player::render::PlayerRenderHost::sync_voxels` has, so the two hosts
+        // page the same way.
+        self.sync_voxels(doc);
         self.scene.instances.clear();
         self.scene.lights.clear();
         self.scene.sprites.clear();
@@ -1217,10 +1232,6 @@ impl EngineHost {
         // skeletons, clips) — the input to the end-of-projection `retain_only`
         // audit (P16.4b's lesson in mesh form).
         let mut live_render_assets: BTreeSet<Uuid> = BTreeSet::new();
-        // Every voxel volume this projection actually drew — the input to the
-        // end-of-projection release below, the same audit `live_render_assets`
-        // feeds and for the same reason (a loaded volume is real megabytes).
-        let mut live_voxel_volumes: Vec<Uuid> = Vec::new();
         for &guid in doc.order() {
             let Some(entity) = world.entity_of(guid) else {
                 continue;
@@ -1408,25 +1419,23 @@ impl EngineHost {
             // MIRROR: `inf_player::render` runs the same branch (minus the
             // visibility gate and the pick-id map, both host-local) through the
             // same `project_voxel` body.
-            if let Some(volume) = w.get::<VoxelVolume>(entity) {
-                if visible {
-                    let translation = w
-                        .get::<GlobalTransform>(entity)
-                        .map(|g| g.translation())
-                        .unwrap_or(DVec3::ZERO);
-                    self.voxel_volumes.ensure(guid, volume);
-                    let projected = self.voxel_volumes.slot(guid).and_then(|slot| {
-                        project_voxel(
-                            slot,
-                            w.get::<Terrain>(entity),
-                            translation,
-                            inf_render::terrain_id_from_guid(guid.as_u128()),
-                        )
-                    });
-                    if let Some(rv) = projected {
-                        self.scene.voxels.push(rv);
-                        live_voxel_volumes.push(guid);
-                    }
+            if visible && w.get::<VoxelVolume>(entity).is_some() {
+                let translation = w
+                    .get::<GlobalTransform>(entity)
+                    .map(|g| g.translation())
+                    .unwrap_or(DVec3::ZERO);
+                // READ-ONLY: `sync_voxels` above did the binding, so nothing here
+                // loads, parses or meshes.
+                let projected = self.voxel_volumes.slot(guid).and_then(|slot| {
+                    project_voxel(
+                        slot,
+                        w.get::<Terrain>(entity),
+                        translation,
+                        inf_render::terrain_id_from_guid(guid.as_u128()),
+                    )
+                });
+                if let Some(rv) = projected {
+                    self.scene.voxels.push(rv);
                 }
             }
 
@@ -1911,13 +1920,6 @@ impl EngineHost {
         // replaced by File ▸ Open. The projection is the only place that knows the
         // live set, so this is the only place that can release the rest.
         self.render_assets.retain_only(live_render_assets);
-
-        // The same audit for voxel volumes (P21.1). A loaded volume holds its whole
-        // decoded chunk set AND its meshed surface — real megabytes on behalf of an
-        // entity that may have been deleted, had its reference cleared, or belonged
-        // to a document File ▸ Open has since replaced. The projection is the only
-        // place that knows the live set.
-        self.voxel_volumes.retain_only(live_voxel_volumes);
 
         // Re-validate the tool target: keep it if that terrain is still projected
         // (so a stroke's status stays about the terrain being sculpted), else fall
@@ -2775,9 +2777,13 @@ fn project_terrain(
 ///   derived from `slot.data.voxel_size_m()` — the scale recorded in the
 ///   `.inf_voxel` header — so the geometry is self-consistent. Reading the
 ///   component's `voxel_size_m` here instead would scale vertices against origins
-///   derived from the asset's and tear the volume apart wherever the two disagree;
-///   the component's value is what a *new* asset is authored at, and reporting a
-///   disagreement is a cook advisory, not a render-time fixup.
+///   derived from the asset's and tear the volume apart wherever the two disagree.
+///   The component's value is what a *new* asset is authored at; **a P21.2 cook
+///   advisory will report** a disagreement. There is no such advisory today — it
+///   is named in the future tense because a gate that does not exist is worse than
+///   no claim, and because this doc block is NOT covered by the mirror gate
+///   (`extract_fn` starts at `fn project_voxel(`), so the two copies are
+///   hand-synced and drift here is silent.
 /// * **A voxel material index IS a terrain splat index**, so a volume shades with
 ///   the `Terrain` on **this same entity** when there is one — composition, not a
 ///   reference, so no cook edge and nothing to dangle — and with the default
@@ -3366,6 +3372,42 @@ impl EngineHost {
         self.render_assets.set_content_root(root);
         self.terrain_slots.clear();
         self.synced_version = None; // force a re-projection
+    }
+
+    /// Bind (and release) voxel volumes to match the document — the `&mut` half
+    /// of the P21.1 path, run once before [`rebuild_scene`](Self::rebuild_scene)
+    /// projects anything.
+    ///
+    /// **MIRROR** of `inf_player::render::PlayerRenderHost::sync_voxels`, and the
+    /// two agree on the load-bearing rule: the live set is whatever is **bound**,
+    /// never whatever happened to draw. A volume whose chunks mesh to no surface —
+    /// all air, all rock, or an asset whose caves are entirely outside the view of
+    /// this projection — is still a *loaded* volume, and releasing it because it
+    /// produced no triangles means re-reading and re-meshing it from disk on the
+    /// very next document bump. A gizmo drag bumps the document per input event.
+    ///
+    /// Walks `doc.order()` so which volume binds first is a function of the
+    /// document rather than of the ECS archetype layout.
+    fn sync_voxels(&mut self, doc: &SceneDoc) {
+        let world = doc.world();
+        let w = world.world();
+        let mut live: Vec<Uuid> = Vec::new();
+        for &guid in doc.order() {
+            let Some(entity) = world.entity_of(guid) else {
+                continue;
+            };
+            let Some(volume) = w.get::<VoxelVolume>(entity).copied() else {
+                continue;
+            };
+            if self.voxel_volumes.ensure(guid, &volume) {
+                live.push(guid);
+            }
+        }
+        // Release every volume that is no longer bound (its entity was deleted, its
+        // reference was cleared, or a File ▸ Open replaced the document). A loaded
+        // volume holds its whole decoded chunk set AND its meshed surface — real
+        // megabytes — so this is not bookkeeping.
+        self.voxel_volumes.retain_only(live);
     }
 
     /// Rebuild the loose-asset indexes after the content database changed.

@@ -121,7 +121,6 @@ pub fn rewrite_voxel_asset<B: AsRef<[u8]>>(
 mod tests {
     use super::*;
     use crate::asset::build_voxel_asset;
-    use crate::chunk::CHUNK_DIM;
     use crate::residency::chunk_range;
     use glam::DVec3;
 
@@ -298,6 +297,5 @@ mod tests {
         for k in out.reader().keys() {
             assert_eq!(out.reader().chunk_bytes(k), asset.reader().chunk_bytes(k));
         }
-        let _ = CHUNK_DIM;
     }
 }

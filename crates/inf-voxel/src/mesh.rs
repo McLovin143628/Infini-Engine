@@ -63,8 +63,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::chunk::{ChunkKey, CHUNK_DIM, DEFAULT_MATERIAL};
-use crate::data::VoxelData;
+use crate::chunk::{ChunkKey, CHUNK_DIM, DEFAULT_MATERIAL, EMPTY_SDF};
+use crate::data::{local_of, VoxelData};
 
 /// Samples per axis in the padded gather: the chunk's own `CHUNK_DIM`, plus one
 /// apron sample below (for the apron cells) and one above (for the last owned
@@ -185,21 +185,46 @@ pub fn mesh_chunk(data: &VoxelData, key: ChunkKey) -> VoxelMesh {
     let lo = [base[0] - 1, base[1] - 1, base[2] - 1];
 
     // ── the padded gather ────────────────────────────────────────────────────
-    // One `BTreeMap` probe per sample would be ~5.8k lookups; the samples are
-    // walked x-fastest, and a row crosses a chunk boundary at most twice, so a
-    // one-entry memo of the current chunk collapses that to a handful.
+    // Two `BTreeMap` probes per sample (one for the distance, one for the
+    // material) would be ~11.7k lookups. The samples are walked x-fastest and a
+    // row of `CHUNK_DIM + 2` crosses a chunk boundary at most twice, so a
+    // **one-entry memo** of the chunk currently under the cursor collapses that to
+    // at most three probes per row — and to exactly one per row in the interior,
+    // which is where the cost is. The memo is keyed by [`ChunkKey`], so a miss is
+    // one comparison; it is deliberately written out rather than delegated to
+    // `sample_global`, which cannot hold state across calls.
     let mut sdf = vec![0.0f32; PAD_SAMPLES * PAD_SAMPLES * PAD_SAMPLES];
     let mut mat = vec![DEFAULT_MATERIAL; PAD_SAMPLES * PAD_SAMPLES * PAD_SAMPLES];
     let mut any_solid = false;
     let mut any_empty = false;
+    let mut memo: Option<(ChunkKey, &crate::chunk::VoxelChunk)> = None;
     for sz in 0..PAD_SAMPLES {
         for sy in 0..PAD_SAMPLES {
             for sx in 0..PAD_SAMPLES {
                 let g = [lo[0] + sx as i32, lo[1] + sy as i32, lo[2] + sz as i32];
-                let v = data.sample_global(g[0], g[1], g[2]);
+                let ck = ChunkKey::of_sample(g[0], g[1], g[2]);
+                if memo.map(|(k, _)| k) != Some(ck) {
+                    memo = data.get_chunk(ck).map(|c| (ck, c));
+                    if memo.is_none() {
+                        // Absent ⇒ empty space, and the memo stays empty so the
+                        // next sample in this chunk does not probe again either.
+                        memo = None;
+                    }
+                }
+                let hit = match memo {
+                    Some((k, c)) if k == ck => Some(c),
+                    _ => None,
+                };
+                let (v, m) = match hit {
+                    Some(c) => {
+                        let (i, j, k) = local_of(g[0], g[1], g[2]);
+                        (c.sample(i, j, k), c.material(i, j, k))
+                    }
+                    None => (EMPTY_SDF, DEFAULT_MATERIAL),
+                };
                 let i = block_index(sx, sy, sz);
                 sdf[i] = v;
-                mat[i] = data.material_global(g[0], g[1], g[2]);
+                mat[i] = m;
                 if v < 0.0 {
                     any_solid = true;
                 } else {
@@ -465,25 +490,61 @@ pub fn mesh_keys_for(data: &VoxelData) -> BTreeSet<ChunkKey> {
     out
 }
 
-/// The change stamp a chunk's **mesh** depends on: the greatest stamp in the
-/// 3×3×3 chunk neighbourhood its padded gather can read.
+/// Everything about a volume's residency that a chunk's **mesh** is a function
+/// of: the greatest change stamp in the 3×3×3 chunk neighbourhood its padded
+/// gather can read, **and which of those 27 neighbours are resident at all**.
+///
+/// ## Why the max alone is not enough (and the bug it hid)
 ///
 /// A mesh is a function of its neighbours as well as itself, so gating a re-mesh
-/// on the chunk's own stamp alone would leave a stale seam every time the
-/// neighbour was the one that was carved. Stamps are process-globally monotone, so
-/// a max over the neighbourhood strictly increases whenever anything the mesh can
-/// see changes, and is stable otherwise — which is exactly the invalidation key a
-/// GPU buffer cache wants. `0` means nothing in the neighbourhood is resident.
-pub fn source_version(data: &VoxelData, key: ChunkKey) -> u64 {
-    let mut v = 0;
+/// on the chunk's own stamp would leave a stale seam every time the neighbour was
+/// the one that was carved. That much a max over the neighbourhood fixes. What a
+/// max **cannot** see is an *eviction* of a non-maximal neighbour: with stamps
+/// `A = 1`, `B = 2`, `C = 3`, evicting `B` leaves the max at `3`, the cache reports
+/// "unchanged", and the mesh keeps a seam against samples that are no longer
+/// resident — forever, because nothing will ever move that number again. (A
+/// non-resident chunk reads as empty space, so this is a *visible* wall where
+/// there is now air.)
+///
+/// The residency mask closes it: one bit per neighbour, set when that neighbour is
+/// resident, in the fixed `dz, dy, dx` walk order below. An eviction clears a bit,
+/// the key differs, the chunk re-meshes. **Cost: nothing.** The 27 probes were
+/// already being made for the max, and the mask rides in a `u32` beside the `u64`
+/// that was already stored — 4 bytes per cached mesh, no second walk, no extra
+/// state on `VoxelData` to keep in sync.
+///
+/// (The considered alternative — a per-volume "residency generation" bumped on
+/// every evict — was rejected: it is coarser, so *any* eviction anywhere in the
+/// volume would re-mesh *every* chunk, which is precisely the thundering re-mesh
+/// P21.2's streaming exists to avoid.)
+///
+/// A key of `MeshSourceKey::default()` means nothing in the neighbourhood is
+/// resident.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MeshSourceKey {
+    /// The greatest [`VoxelData::chunk_version`] in the 3×3×3 neighbourhood.
+    pub max_chunk_version: u64,
+    /// Bit `i` set ⇔ neighbour `i` of the fixed walk order is resident.
+    pub resident: u32,
+}
+
+/// The [`MeshSourceKey`] of `key` in `data` — see the type docs.
+pub fn source_key(data: &VoxelData, key: ChunkKey) -> MeshSourceKey {
+    let mut out = MeshSourceKey::default();
+    let mut bit = 0u32;
     for dz in -1..=1 {
         for dy in -1..=1 {
             for dx in -1..=1 {
-                v = v.max(data.chunk_version(key.offset(dx, dy, dz)));
+                let k = key.offset(dx, dy, dz);
+                out.max_chunk_version = out.max_chunk_version.max(data.chunk_version(k));
+                if data.is_resident(k) {
+                    out.resident |= 1 << bit;
+                }
+                bit += 1;
             }
         }
     }
-    v
+    out
 }
 
 /// What one [`VoxelMeshCache::sync`] did.
@@ -512,8 +573,33 @@ impl MeshSyncReport {
 /// and a carve costs exactly the chunks whose neighbourhood the carve reached.
 #[derive(Debug, Clone, Default)]
 pub struct VoxelMeshCache {
-    meshes: BTreeMap<ChunkKey, (u64, VoxelMesh)>,
+    meshes: BTreeMap<ChunkKey, CachedMesh>,
 }
+
+/// One cached mesh: what it was built from, what stamp it carries, and the mesh.
+#[derive(Debug, Clone)]
+struct CachedMesh {
+    /// The residency state this mesh is a function of — the *invalidation* key.
+    source: MeshSourceKey,
+    /// A **process-globally monotone** stamp minted each time the mesh is built —
+    /// the *identity* a GPU buffer cache gates its upload on.
+    ///
+    /// Deliberately not the source key folded down to a number. A GPU cache asks
+    /// "are these the bytes I already hold?", and only a value that strictly
+    /// increases on every rebuild answers it: a folded source key could repeat
+    /// (evict a neighbour, restore it, and the mask and the max are both back
+    /// where they were) while the mesh in between was different. Same counter
+    /// discipline, and the same failure it prevents, as
+    /// [`VoxelData::chunk_version`].
+    version: u64,
+    mesh: VoxelMesh,
+}
+
+/// The single monotone source every **mesh** stamp in the process is drawn from.
+/// Global for the reason [`NEXT_CHUNK_VERSION`](crate::data) is: two volumes must
+/// never mint the same stamp for the same chunk key, or a key-addressed GPU cache
+/// serves one volume's walls as another's after a level switch.
+static NEXT_MESH_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl VoxelMeshCache {
     pub fn new() -> Self {
@@ -537,12 +623,20 @@ impl VoxelMeshCache {
             }
         }
         for key in wants {
-            let version = source_version(data, key);
-            if self.meshes.get(&key).map(|(v, _)| *v) == Some(version) {
+            let source = source_key(data, key);
+            if self.meshes.get(&key).map(|c| c.source) == Some(source) {
                 report.unchanged += 1;
                 continue;
             }
-            self.meshes.insert(key, (version, mesh_chunk(data, key)));
+            let version = NEXT_MESH_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            self.meshes.insert(
+                key,
+                CachedMesh {
+                    source,
+                    version,
+                    mesh: mesh_chunk(data, key),
+                },
+            );
             report.remeshed.push(key);
         }
         report
@@ -552,19 +646,30 @@ impl VoxelMeshCache {
     pub fn meshes(&self) -> impl Iterator<Item = (&ChunkKey, &VoxelMesh)> {
         self.meshes
             .iter()
-            .filter(|(_, (_, m))| !m.is_empty())
-            .map(|(k, (_, m))| (k, m))
+            .filter(|(_, c)| !c.mesh.is_empty())
+            .map(|(k, c)| (k, &c.mesh))
     }
 
-    /// The stamp a cached mesh was built at (`0` when not cached) — the value a
-    /// GPU buffer cache gates its upload on.
+    /// The **monotone stamp** a cached mesh was built at (`0` when not cached) —
+    /// the value a GPU buffer cache gates its upload on.
+    ///
+    /// Strictly increases on every rebuild and is unique across every cache in
+    /// the process, so "same stamp" always means "same triangles" (see
+    /// [`CachedMesh::version`]).
     pub fn version(&self, key: ChunkKey) -> u64 {
-        self.meshes.get(&key).map(|(v, _)| *v).unwrap_or(0)
+        self.meshes.get(&key).map(|c| c.version).unwrap_or(0)
+    }
+
+    /// The residency state a cached mesh is a function of (`None` when not
+    /// cached) — the *invalidation* key, exposed so a streamer can reason about
+    /// what a sync would do without running one.
+    pub fn source(&self, key: ChunkKey) -> Option<MeshSourceKey> {
+        self.meshes.get(&key).map(|c| c.source)
     }
 
     /// A cached mesh, empty ones included.
     pub fn get(&self, key: ChunkKey) -> Option<&VoxelMesh> {
-        self.meshes.get(&key).map(|(_, m)| m)
+        self.meshes.get(&key).map(|c| &c.mesh)
     }
 
     /// Total triangles across the non-empty meshes.
@@ -759,9 +864,18 @@ mod tests {
         assert!(shared_total > 40, "only {shared_total} shared cells");
     }
 
-    /// The other half of watertightness: **every quad is emitted exactly once**.
-    /// Cells are partitioned across chunks, so no grid edge may be claimed twice
-    /// (which would double-draw and z-fight) or skipped (a hole).
+    /// The other half of watertightness: **every surface edge is claimed by
+    /// exactly one chunk — no more, and NO FEWER.**
+    ///
+    /// Cells are partitioned across chunks, so a grid edge claimed twice
+    /// double-draws and z-fights, and one claimed by nobody is a hole. The second
+    /// failure is the one that matters and the one an "is anything doubled?" check
+    /// cannot see, so the count is compared against an **independently derived
+    /// reference**: walk the global sample grid, find every edge whose two samples
+    /// differ in sign, attribute it to the chunk that owns the cell at its minimum
+    /// corner, and demand the mesher's per-chunk quad counts match — chunk for
+    /// chunk, not merely in total (a drop in one chunk and a double in another
+    /// would balance a global sum).
     #[test]
     fn every_surface_edge_is_claimed_by_exactly_one_chunk() {
         let v = ball_volume(
@@ -770,30 +884,54 @@ mod tests {
             DVec3::splat(8.0),
             14.0,
         );
-        // Count, per global cell, how many chunks emitted a quad whose FIRST
-        // triangle starts at that cell's vertex — i.e. how many chunks claimed the
-        // edge at that cell's minimum corner.
-        let mut claims: BTreeMap<([i32; 3], usize), usize> = BTreeMap::new();
-        for key in mesh_keys_for(&v) {
-            let m = mesh_chunk(&v, key);
-            // Recover each quad's owning cell from its first index (the quad is
-            // pushed as q0,q1,q2,q0,q2,q3, and q0 IS the owning cell's vertex).
-            for (n, tri) in m.indices.chunks_exact(6).enumerate() {
-                let cell = m.cells[tri[0] as usize];
-                *claims.entry((cell, n % 3)).or_insert(0) += 1;
+
+        // ── the reference: sign-change edges, attributed by owning cell ──
+        let n = CHUNK_DIM as i32;
+        let (lo, hi) = (-2 * n, 2 * n);
+        let mut want: BTreeMap<ChunkKey, usize> = BTreeMap::new();
+        for gz in lo..hi {
+            for gy in lo..hi {
+                for gx in lo..hi {
+                    let s0 = v.sample_global(gx, gy, gz) < 0.0;
+                    for (dx, dy, dz) in [(1, 0, 0), (0, 1, 0), (0, 0, 1)] {
+                        if (v.sample_global(gx + dx, gy + dy, gz + dz) < 0.0) != s0 {
+                            // The edge belongs to the cell at its minimum corner,
+                            // and that cell belongs to exactly one chunk.
+                            *want.entry(ChunkKey::of_sample(gx, gy, gz)).or_insert(0) += 1;
+                        }
+                    }
+                }
             }
         }
-        assert!(!claims.is_empty());
-        // Every claim must be unique. (The `n % 3` disambiguator is only a
-        // best-effort per-cell axis tag; what matters is that no (cell, slot) is
-        // claimed twice, which would mean two chunks emitted the same quad.)
-        let doubled: Vec<_> = claims.iter().filter(|(_, &c)| c > 1).collect();
-        assert!(
-            doubled.is_empty(),
-            "{} quads were emitted by more than one chunk: {:?}",
-            doubled.len(),
-            &doubled[..doubled.len().min(5)]
-        );
+        let total_want: usize = want.values().sum();
+        assert!(total_want > 2_000, "only {total_want} reference edges");
+
+        // ── what the mesher actually emitted, per chunk ──
+        let mut got: BTreeMap<ChunkKey, usize> = BTreeMap::new();
+        for key in mesh_keys_for(&v) {
+            let m = mesh_chunk(&v, key);
+            assert_eq!(m.indices.len() % 6, 0, "{key:?} emitted a half quad");
+            if !m.is_empty() {
+                got.insert(key, m.indices.len() / 6);
+            }
+        }
+
+        // Chunk for chunk. A drop reads as a missing (or short) entry; a double
+        // reads as a long one; either fails, and the message says which chunk.
+        let keys: BTreeSet<ChunkKey> = want.keys().chain(got.keys()).copied().collect();
+        for key in keys {
+            let (w, g) = (
+                want.get(&key).copied().unwrap_or(0),
+                got.get(&key).copied().unwrap_or(0),
+            );
+            assert_eq!(
+                g, w,
+                "{key:?} claimed {g} surface edges but owns {w} — a chunk that \
+                 claims too few leaves a HOLE, and one that claims too many \
+                 z-fights with its neighbour"
+            );
+        }
+        assert_eq!(got.values().sum::<usize>(), total_want);
     }
 
     /// Every index is in range and every triangle is non-degenerate — the
@@ -1009,6 +1147,130 @@ mod tests {
         cache.clear();
         assert_eq!(cache.version(touched), 0);
         assert!(cache.get(touched).is_none());
+    }
+
+    /// **THE EVICTION REGRESSION.** A max over the neighbourhood cannot see a
+    /// non-maximal neighbour leaving, and the first cut of this cache used exactly
+    /// that as its whole key.
+    ///
+    /// Stamps `A < B < C` in one neighbourhood: evict `B` and the max is still
+    /// `C`, so the old key reported "unchanged" and the chunk kept a seam meshed
+    /// against samples that are no longer resident — permanently, since nothing
+    /// will ever move that number again, and visibly, since a non-resident chunk
+    /// reads as empty space. The residency mask is what closes it.
+    ///
+    /// Asserted three ways, because each catches a different way of getting the
+    /// fix wrong: the **key** must differ, the **sync** must report the re-mesh,
+    /// and the exposed **version** (what a GPU buffer cache gates on) must move.
+    #[test]
+    fn evicting_a_non_maximal_neighbour_remeshes_the_chunks_that_could_see_it() {
+        let mut v = VoxelData::new(0.5);
+        // Three chunks in one neighbourhood, stamped in ascending order so the
+        // middle one is provably NOT the max.
+        let (a, b, c) = (
+            ChunkKey::new(0, 0, 0),
+            ChunkKey::new(1, 0, 0),
+            ChunkKey::new(2, 0, 0),
+        );
+        for key in [a, b, c] {
+            let base = key.base_sample();
+            v.insert_chunk(
+                key,
+                VoxelChunk::from_fn(|i, _, _| ((base[0] + i as i32) as f64) - 20.0),
+            );
+        }
+        v.clear_dirty();
+        assert!(
+            v.chunk_version(a) < v.chunk_version(b) && v.chunk_version(b) < v.chunk_version(c),
+            "the fixture must stamp them in ascending order"
+        );
+
+        let mut cache = VoxelMeshCache::new();
+        cache.sync(&v);
+        // The OBSERVER is the middle chunk `b`: its 3×3×3 neighbourhood is the
+        // only one that contains all three, so `a` is in it and is provably not
+        // its max — `c` is.
+        let before_key = cache.source(b).expect("b is cached");
+        let before_version = cache.version(b);
+        assert_eq!(before_key.max_chunk_version, v.chunk_version(c));
+        assert!(
+            cache.sync(&v).is_noop(),
+            "a settled volume re-meshes nothing"
+        );
+
+        // Evict the NON-MAXIMAL neighbour. The max does not move.
+        assert!(v.evict_chunk(a));
+        let after_key = source_key(&v, b);
+        assert_eq!(
+            after_key.max_chunk_version, before_key.max_chunk_version,
+            "the fixture is pointless unless the max really is unchanged"
+        );
+        assert_ne!(
+            after_key, before_key,
+            "the source key did not notice a neighbour leaving — a max alone              cannot, which is the entire reason for the residency mask"
+        );
+
+        let report = cache.sync(&v);
+        assert!(
+            report.remeshed.contains(&b),
+            "chunk {b:?} kept a seam against a chunk that is no longer resident: {report:?}"
+        );
+        assert!(
+            cache.version(b) > before_version,
+            "the mesh stamp did not move, so a GPU cache would keep the stale buffers"
+        );
+
+        // …and a chunk that could NOT see the eviction is left alone: `c`'s
+        // neighbourhood spans x ∈ [1, 3], which never contained `a`.
+        assert!(
+            !report.remeshed.contains(&c),
+            "{c:?} re-meshed over an eviction it cannot see — the invalidation is              not supposed to be a thundering herd: {report:?}"
+        );
+    }
+
+    /// The mesh stamp is **monotone and unique across caches**, so "same stamp"
+    /// always means "same triangles" — the property a GPU buffer cache keyed by
+    /// `(volume, chunk)` actually needs, and one a folded source key could not
+    /// provide (evict a neighbour, restore it, and both the mask and the max are
+    /// back where they were while the mesh in between was different).
+    #[test]
+    fn mesh_stamps_are_monotone_and_unique_across_caches() {
+        let v = tunnelled_slab();
+        let key = ChunkKey::new(1, 0, 0);
+
+        let mut a = VoxelMeshCache::new();
+        let mut b = VoxelMeshCache::new();
+        a.sync(&v);
+        b.sync(&v);
+        assert!(a.version(key) > 0 && b.version(key) > 0);
+        assert_ne!(
+            a.version(key),
+            b.version(key),
+            "two caches minted the same stamp for one chunk key — a key-addressed              GPU cache would serve one volume's walls as the other's"
+        );
+        assert!(b.version(key) > a.version(key));
+        assert_eq!(
+            a.version(ChunkKey::new(99, 99, 99)),
+            0,
+            "uncached ⇒ no stamp"
+        );
+
+        // A round trip through the same residency state re-mints rather than
+        // reusing: the mesh was rebuilt, so the identity must be new.
+        let mut v2 = v.clone();
+        let neighbour = ChunkKey::new(0, 0, 0);
+        let held = v2.get_chunk(neighbour).unwrap().clone();
+        let first = a.version(key);
+        assert!(v2.evict_chunk(neighbour));
+        a.sync(&v2);
+        let mid = a.version(key);
+        assert!(mid > first);
+        v2.insert_resident_chunk(neighbour, held);
+        a.sync(&v2);
+        assert!(
+            a.version(key) > mid,
+            "restoring a neighbour must mint a NEW stamp, not resurrect the old one"
+        );
     }
 
     /// The shared rebase helper both projectors use: chunk-local metres, with the

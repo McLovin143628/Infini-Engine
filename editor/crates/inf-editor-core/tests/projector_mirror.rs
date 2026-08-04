@@ -1091,10 +1091,17 @@ fn the_shared_voxel_projector_is_not_a_stub() {
 /// The surrounding *rules* — not just the shared body — must hold on both sides:
 /// the list is rebuilt from scratch, the palette comes from the `Terrain` on the
 /// same entity, the volume's identity is the shared entity fold, and **neither
-/// host meshes inside its projection**.
+/// host binds, loads or meshes inside its projection** — both do it in a
+/// `sync_voxels` pre-pass, whose live set is built from BOUND-NESS rather than
+/// from whatever happened to produce triangles.
+///
+/// That last rule is not style. A volume whose chunks mesh to no surface still
+/// projects `None`, so a host that built its live set from the projection would
+/// release it and re-read + re-mesh it from disk on the very next document bump —
+/// and a gizmo drag bumps the document per input event.
 #[test]
 fn both_projectors_project_voxel_volumes_the_same_way() {
-    const SHARED: [&str; 6] = [
+    const SHARED: [&str; 8] = [
         // Rebuilt every projection, like `terrains`.
         "scene.voxels.clear()",
         // The branch itself.
@@ -1109,6 +1116,11 @@ fn both_projectors_project_voxel_volumes_the_same_way() {
         // residency and meshing.
         "inf_voxel::VolumeSlot",
         "project_voxel(",
+        // The bind PRE-PASS, on both sides…
+        "fn sync_voxels(",
+        // …whose live set is bound-ness, never draw-ness: the release runs over
+        // what `ensure` bound, not over what the projection pushed.
+        "retain_only(",
     ];
     for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
         let src = read(path).replace("\r\n", "\n");
@@ -1126,7 +1138,14 @@ fn both_projectors_project_voxel_volumes_the_same_way() {
         // move — and could disagree with the other host about *when* it meshed,
         // which is exactly the class of drift this file exists to stop.
         let region = branch_region(&src, "w.get::<VoxelVolume>(entity)", "project_voxel(");
-        for banned in ["mesh_chunk(", "VoxelMeshCache::new()", ".meshes.sync("] {
+        for banned in [
+            "mesh_chunk(",
+            "VoxelMeshCache::new()",
+            ".meshes.sync(",
+            // …and neither may BIND inside the projection either, which is what
+            // cold-meshes: `ensure` parses a payload and runs a full mesh sync.
+            ".ensure(",
+        ] {
             assert!(
                 !region.contains(banned),
                 "the {label}'s voxel branch calls `{banned}` — meshing belongs to \

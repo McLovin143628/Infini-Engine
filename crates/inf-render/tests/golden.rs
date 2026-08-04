@@ -7291,35 +7291,107 @@ fn golden_voxel() {
     );
 }
 
-/// **The byte-stability guard for the other 47 goldens**: a scene with no voxel
-/// volumes must produce the exact frame it produced before P21.1 existed, because
-/// the voxel node returns before touching the command encoder.
+/// **THE P21.1 OFF-PATH GATE.** A scene with no voxel volumes ⇒ the voxel node
+/// records **nothing at all**, which is the byte-stability guarantee for every
+/// golden that predates volumetric terrain.
 ///
-/// Rendered here rather than assumed: `RenderScene::voxels` is a new field with a
-/// `Default`, so nothing else in the suite would notice a node that cleared a
-/// target or bound a pipeline on an empty list.
+/// Asserted with the node's own engagement counter and **not** with a pixel
+/// comparison, because a pixel comparison cannot make this claim. The first cut of
+/// this gate rendered a volume-free scene twice — once with `voxels` already empty
+/// and once after calling `.clear()` on the same empty list — and compared the two
+/// images. That is `render(X) == render(X)`: it passes on a node that opens a
+/// render pass, binds a pipeline and draws nothing on every single frame, which is
+/// precisely the failure the early-out exists to prevent. The house precedent for
+/// counting instead is `underwater_off_path_never_engages` (P20.3).
+///
+/// Three assertions, each catching a different way to get this wrong:
+///  1. the counter does not move over several frames of a volume-free scene;
+///  2. it moves for a scene that *does* carry volumes (without which 1 would pass
+///     on a node that never runs at all);
+///  3. the two frames genuinely **differ**, so the pass is not merely engaging
+///     but contributing — a node that engaged and drew nothing would satisfy 1
+///     and 2 and still be broken.
+///
+/// # What it does and does not pin, honestly
+///
+/// `VoxelNode::run` has **defence in depth**: the `scene.voxels.is_empty()`
+/// early-out, then a no-drawable-chunks guard, then the instance-buffer check. The
+/// counter sits past all three, so this test fails the moment *the conjunction*
+/// stops holding — mutation-verified by deleting the guards, which flips assertion
+/// 1 to `left: 1`.
+///
+/// Deleting **only** the first early-out is not observable here, and that is a
+/// true statement about the node rather than a weakness in the test: on an empty
+/// list the downstream guards already return before any encoder touch or buffer
+/// write. The first early-out earns its place on a different claim — releasing the
+/// GPU cache on the last-volume-leaves transition — which is stated in `run` and
+/// is not what this gate is about.
 #[test]
-fn an_empty_voxel_list_changes_nothing() {
+fn voxel_off_path_never_engages() {
     let Some(gpu) = gpu_or_skip() else { return };
-    let mut scene = RenderScene {
+
+    // A volume-free scene with real content, so "nothing drew" cannot be the
+    // reason the counter stays put.
+    let mut bare = RenderScene {
         grid_enabled: true,
         ..Default::default()
     };
-    scene.instances.push(MeshInstance::lit(
+    bare.instances.push(MeshInstance::lit(
         DVec3::new(0.0, 0.5, 0.0),
         Quat::IDENTITY,
         Vec3::ONE,
         [0.8, 0.3, 0.2, 1.0],
         1,
     ));
-    let without = render(&gpu, &scene, &overlook_view());
-    // The same scene, explicitly carrying an EMPTY voxel list.
-    scene.voxels.clear();
-    let with_empty = render(&gpu, &scene, &overlook_view());
-    let (mean, max) = image_diff(&without, &with_empty, W, H);
+    assert!(bare.voxels.is_empty());
+
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    assert_eq!(renderer.voxel_engaged_frames(), 0);
+    for _ in 0..3 {
+        renderer.render(&gpu, &bare, &overlook_view(), &target.view, (W, H));
+        assert_eq!(
+            renderer.voxel_engaged_frames(),
+            0,
+            "the voxel pass touched the encoder on a scene with no volumes — every              golden that predates P21.1 depends on it not doing that"
+        );
+    }
+    let without = target.read_rgba(&gpu).expect("readback");
+
+    // THE GUARD ON THE GUARD: the same renderer, a scene that DOES carry volumes.
+    let carved = voxel_scene();
+    assert!(!carved.voxels.is_empty());
+    renderer.render(&gpu, &carved, &voxel_view(), &target.view, (W, H));
+    assert_eq!(
+        renderer.voxel_engaged_frames(),
+        1,
+        "the voxel pass did not engage on a scene full of caves — the off-path          assertions above are vacuous"
+    );
+    let with = target.read_rgba(&gpu).expect("readback");
+
+    // …and it did not merely engage, it CONTRIBUTED: a node that opened a pass and
+    // drew nothing would satisfy both counters above.
+    let (mean, max) = image_diff(&without, &with, W, H);
     assert!(
-        mean == 0.0 && max == 0.0,
-        "an empty voxel list perturbed the frame (mean {mean}, max {max}) — the \
-         node must return before it touches the encoder"
+        mean > 0.02 && max > 0.2,
+        "the engaged frame is indistinguishable from the volume-free one (mean          {mean}, max {max}) — the pass ran but drew nothing"
+    );
+
+    // A volume list that is present but carries no DRAWABLE chunk must also stay
+    // off the encoder: `run` returns after the cache sync and before the pass.
+    let empty_volume = RenderScene {
+        voxels: vec![RenderVoxelVolume {
+            id: 7,
+            chunks: Vec::new(),
+            layers: [RenderTerrainLayer::default(); 4],
+        }],
+        ..bare.clone()
+    };
+    let before = renderer.voxel_engaged_frames();
+    renderer.render(&gpu, &empty_volume, &overlook_view(), &target.view, (W, H));
+    assert_eq!(
+        renderer.voxel_engaged_frames(),
+        before,
+        "a volume with no chunks engaged the encoder"
     );
 }

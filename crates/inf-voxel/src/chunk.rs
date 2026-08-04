@@ -179,7 +179,14 @@ struct VoxelChunkRaw {
 #[derive(Serialize, Deserialize)]
 struct VoxelChunkBin {
     sdf: Vec<f32>,
-    #[serde(default)]
+    /// **No `#[serde(default)]`**, deliberately, and this is the one place in the
+    /// crate where its absence is load-bearing. On a non-self-describing stream
+    /// the attribute is not merely inert: it tells serde to *fill* a trailing
+    /// field the decoder ran out of bytes for, which turns a **truncated blob**
+    /// into a silently unpainted chunk instead of a decode error. Nothing on this
+    /// wire is ever optional — the encoder always writes the count — so the
+    /// attribute could only ever hide corruption. (The human-readable form keeps
+    /// its default, where a genuinely absent key is a legitimate shorthand.)
     materials: Vec<u8>,
 }
 

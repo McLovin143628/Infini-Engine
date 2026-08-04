@@ -578,8 +578,6 @@ mod tests {
             assert!(report.created_chunks > 0, "{label} must materialize chunks");
             assert_eq!(report.created_chunks as usize, v.chunk_count(), "{label}");
             // The material really landed.
-            let c = v.grid_to_world(DVec3::new(8.0, 8.0, 8.0));
-            let _ = c;
             let inside = match shape {
                 VoxelShape::Sphere { center, .. } => center,
                 VoxelShape::Box { center, .. } => center,
@@ -641,14 +639,18 @@ mod tests {
             let after = image(&v);
             assert_ne!(before, after, "{label}");
 
-            v.revert_delta(&delta);
+            assert_eq!(
+                v.revert_delta(&delta),
+                0,
+                "{label}: an op's own delta is always well-formed"
+            );
             assert_eq!(
                 image(&v),
                 before,
                 "{label}: an undo must restore the exact bytes, chunk set included"
             );
 
-            v.apply_delta(&delta);
+            assert_eq!(v.apply_delta(&delta), 0);
             assert_eq!(
                 image(&v),
                 after,
@@ -656,7 +658,7 @@ mod tests {
             );
 
             // …and a second undo still lands on the original.
-            v.revert_delta(&delta);
+            assert_eq!(v.revert_delta(&delta), 0);
             assert_eq!(image(&v), before, "{label}: undo is not idempotent");
         }
     }
@@ -806,7 +808,7 @@ mod tests {
             );
         }
         // …and the whole thing undoes to nothing at all.
-        v.revert_delta(&delta);
+        assert_eq!(v.revert_delta(&delta), 0);
         assert!(v.is_empty());
     }
 }

@@ -863,16 +863,28 @@ mod tests {
         let err = VoxelAsset::from_bytes(unsorted).unwrap_err().to_string();
         assert!(err.contains("ascending"), "{err}");
 
-        // An overlapping blob: stretch the first entry's length past its
-        // neighbour's start. (One chunk's edit corrupting another is invisible to
-        // a reader, which is why this is checked at parse.)
+        // An overlapping blob — and it must trip the **overlap** arm, not the
+        // bounds arm. The first entry's length is stretched to reach one byte past
+        // its neighbour's start while staying comfortably inside the payload, so
+        // the only rule it breaks is the one under test. (An `||` over both arms
+        // would have let a bounds failure stand in for an overlap failure forever,
+        // and the overlap check is the one nothing else can catch: two entries
+        // sharing bytes means one chunk's edit corrupts another, invisibly.)
+        let r = VoxelAsset::from_bytes(good.clone()).unwrap();
+        let dir: Vec<_> = r.reader().directory().to_vec();
+        assert!(dir.len() >= 2, "the fixture needs two blobs to overlap");
+        let reach = dir[1].offset + 1 - dir[0].offset;
+        assert!(
+            dir[0].offset + reach < good.len() as u64,
+            "the mutation must stay in bounds or it proves nothing"
+        );
         let mut overlap = good.clone();
         let len_at = HEADER_LEN as usize + 24;
-        overlap[len_at..len_at + 8].copy_from_slice(&(good.len() as u64 - 32).to_le_bytes());
+        overlap[len_at..len_at + 8].copy_from_slice(&reach.to_le_bytes());
         let err = VoxelAsset::from_bytes(overlap).unwrap_err().to_string();
         assert!(
-            err.contains("overlaps") || err.contains("out of bounds"),
-            "{err}"
+            err.contains("overlaps"),
+            "the in-bounds overlap must trip the OVERLAP arm, got: {err}"
         );
     }
 

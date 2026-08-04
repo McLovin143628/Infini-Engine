@@ -1103,9 +1103,13 @@ pub fn project_terrain(
 ///   derived from `slot.data.voxel_size_m()` — the scale recorded in the
 ///   `.inf_voxel` header — so the geometry is self-consistent. Reading the
 ///   component's `voxel_size_m` here instead would scale vertices against origins
-///   derived from the asset's and tear the volume apart wherever the two disagree;
-///   the component's value is what a *new* asset is authored at, and reporting a
-///   disagreement is a cook advisory, not a render-time fixup.
+///   derived from the asset's and tear the volume apart wherever the two disagree.
+///   The component's value is what a *new* asset is authored at; **a P21.2 cook
+///   advisory will report** a disagreement. There is no such advisory today — it
+///   is named in the future tense because a gate that does not exist is worse than
+///   no claim, and because this doc block is NOT covered by the mirror gate
+///   (`extract_fn` starts at `fn project_voxel(`), so the two copies are
+///   hand-synced and drift here is silent.
 /// * **A voxel material index IS a terrain splat index**, so a volume shades with
 ///   the `Terrain` on **this same entity** when there is one — composition, not a
 ///   reference, so no cook edge and nothing to dangle — and with the default

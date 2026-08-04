@@ -73,25 +73,61 @@ pub struct ChunkPatch {
 }
 
 impl ChunkPatch {
-    /// Samples in this patch's box.
+    /// Samples in this patch's box, or `None` when the extents overflow `usize`.
+    ///
+    /// **Checked, not wrapping.** This is one of the two functions that exist to
+    /// reject a *hostile or corrupt* patch — one arriving from a deserialized undo
+    /// stack, an `.inf_lvl` written by another build, or a file someone edited —
+    /// so it may not itself be the thing that overflows. In a debug build an
+    /// unchecked multiply panics; in a release build it **wraps to a small,
+    /// plausible-looking count** and the patch sails through validation.
     #[inline]
-    pub fn sample_count(&self) -> usize {
-        (self.w as usize) * (self.h as usize) * (self.d as usize)
+    pub fn checked_sample_count(&self) -> Option<usize> {
+        (self.w as usize)
+            .checked_mul(self.h as usize)?
+            .checked_mul(self.d as usize)
     }
 
-    /// `true` when every buffer is the length the box declares — the invariant
-    /// [`VoxelData::apply_delta`] relies on, checked rather than assumed because a
-    /// patch can arrive from a deserialized undo stack.
+    /// Samples in this patch's box, saturating on an overflowing extent.
+    ///
+    /// Safe for reporting ([`VoxelDelta::sample_count`], the footprint estimate)
+    /// because a saturated value can only over-report; **never** use it to size or
+    /// bound a buffer — [`checked_sample_count`](Self::checked_sample_count) is
+    /// the door for that, and [`is_well_formed`](Self::is_well_formed) rejects
+    /// anything it cannot count exactly.
+    #[inline]
+    pub fn sample_count(&self) -> usize {
+        self.checked_sample_count().unwrap_or(usize::MAX)
+    }
+
+    /// `true` when every buffer is the length the box declares **and** the box
+    /// lies wholly inside a chunk — the invariant [`VoxelData::apply_delta`]
+    /// relies on, checked rather than assumed because a patch can arrive from a
+    /// deserialized undo stack.
+    ///
+    /// Every add is [`checked_add`](u32::checked_add). `i0 = u32::MAX, w = 1`
+    /// panics under an unchecked `+` in a debug build and — far worse — **wraps to
+    /// `0`** in a release build, which passes the `<= CHUNK_DIM` bound and then
+    /// reaches [`VoxelChunk::index`], whose `%` folds the coordinate back into
+    /// range and writes a real sample that is then stamped and written to disk.
+    /// The checked form rejects it in both profiles, which is the only acceptable
+    /// answer for a validator.
     pub fn is_well_formed(&self) -> bool {
-        let n = self.sample_count();
+        let Some(n) = self.checked_sample_count() else {
+            return false;
+        };
+        let fits = |lo: u32, len: u32| {
+            lo.checked_add(len)
+                .is_some_and(|end| end <= crate::CHUNK_DIM)
+        };
         n > 0
             && self.sdf_before.len() == n
             && self.sdf_after.len() == n
             && self.mat_before.len() == n
             && self.mat_after.len() == n
-            && self.i0 + self.w <= crate::CHUNK_DIM
-            && self.j0 + self.h <= crate::CHUNK_DIM
-            && self.k0 + self.d <= crate::CHUNK_DIM
+            && fits(self.i0, self.w)
+            && fits(self.j0, self.h)
+            && fits(self.k0, self.d)
     }
 }
 
@@ -117,9 +153,20 @@ impl VoxelDelta {
     }
 
     /// Approximate heap footprint of the stored before/after buffers, in bytes:
-    /// two `f32` plus two `u8` per sample.
+    /// two `f32` plus two `u8` per sample. Saturating, so a malformed patch
+    /// over-reports rather than wrapping to a reassuring small number.
     pub fn memory_bytes(&self) -> usize {
-        self.sample_count() * (2 * std::mem::size_of::<f32>() + 2)
+        self.sample_count()
+            .saturating_mul(2 * std::mem::size_of::<f32>() + 2)
+    }
+
+    /// Patches that would be **skipped** by [`VoxelData::apply_delta`] /
+    /// [`revert_delta`](VoxelData::revert_delta) because they are malformed.
+    ///
+    /// A caller that has one of these is holding an undo record that cannot fully
+    /// round-trip; see the contract on `apply_delta`.
+    pub fn malformed_patches(&self) -> usize {
+        self.patches.iter().filter(|p| !p.is_well_formed()).count()
     }
 }
 
@@ -127,22 +174,50 @@ impl VoxelData {
     /// Apply (redo) a [`VoxelDelta`]: write each patch's `after` buffers,
     /// (re)creating any chunk it targets. Byte-identical to the state right after
     /// the op that produced `delta`.
-    pub fn apply_delta(&mut self, delta: &VoxelDelta) {
+    ///
+    /// # The contract, stated
+    ///
+    /// **Returns the number of patches it SKIPPED** because
+    /// [`ChunkPatch::is_well_formed`] rejected them. A non-zero return means the
+    /// volume is now in a state that is *neither* the before nor the after — the
+    /// well-formed patches landed and the malformed ones did not — and that state
+    /// is stamped and will be written back like any other edit.
+    ///
+    /// It is a return value rather than a panic because the caller is an undo
+    /// stack, and aborting mid-apply would leave exactly the same partial state
+    /// with no way to report it. It is a return value rather than a silent skip
+    /// because a partially-applied undo that says nothing is how a corrupt record
+    /// becomes committed content. **Every caller must check it** — log it at
+    /// minimum, and refuse to write back if it can.
+    ///
+    /// A delta straight out of [`VoxelData::apply_op`] always returns `0`; this
+    /// only fires on a record that was deserialized, hand-built, or corrupted.
+    #[must_use = "a non-zero skip count means the volume is in a partial state"]
+    pub fn apply_delta(&mut self, delta: &VoxelDelta) -> usize {
+        let mut skipped = 0;
         for patch in &delta.patches {
             if !patch.is_well_formed() {
+                skipped += 1;
                 continue;
             }
             let chunk = self.get_or_create_chunk(patch.key);
             write_patch(chunk, patch, &patch.sdf_after, &patch.mat_after);
         }
+        skipped
     }
 
     /// Revert (undo) a [`VoxelDelta`]: write each patch's `before` buffers, then
     /// remove the chunks the op created (now empty again) so the volume returns
     /// **byte-identical** to before the op — including its chunk set.
-    pub fn revert_delta(&mut self, delta: &VoxelDelta) {
+    ///
+    /// Returns the skipped-patch count, with the same contract (and the same
+    /// obligation on the caller) as [`apply_delta`](Self::apply_delta).
+    #[must_use = "a non-zero skip count means the volume is in a partial state"]
+    pub fn revert_delta(&mut self, delta: &VoxelDelta) -> usize {
+        let mut skipped = 0;
         for patch in &delta.patches {
             if !patch.is_well_formed() {
+                skipped += 1;
                 continue;
             }
             let chunk = self.get_or_create_chunk(patch.key);
@@ -151,6 +226,7 @@ impl VoxelData {
         for &key in &delta.created_chunks {
             self.remove_chunk(key);
         }
+        skipped
     }
 }
 
@@ -205,7 +281,11 @@ mod tests {
             patches: vec![patch(key)],
             created_chunks: Vec::new(),
         };
-        v.apply_delta(&delta);
+        assert_eq!(
+            v.apply_delta(&delta),
+            0,
+            "a well-formed patch must not skip"
+        );
         assert_eq!(v.get_chunk(key).unwrap().sample(1, 2, 3), -1.0);
         assert_eq!(v.get_chunk(key).unwrap().material(1, 2, 3), 1);
         assert_ne!(
@@ -213,7 +293,7 @@ mod tests {
             before
         );
 
-        v.revert_delta(&delta);
+        assert_eq!(v.revert_delta(&delta), 0);
         assert_eq!(
             crate::asset::encode_chunk(v.get_chunk(key).unwrap()).unwrap(),
             before,
@@ -235,9 +315,9 @@ mod tests {
             patches: vec![patch(key)],
             created_chunks: vec![key],
         };
-        v.apply_delta(&delta);
+        assert_eq!(v.apply_delta(&delta), 0);
         assert_eq!(v.chunk_count(), 1);
-        v.revert_delta(&delta);
+        assert_eq!(v.revert_delta(&delta), 0);
         assert!(
             v.is_empty(),
             "the volume must return to empty space, not to an empty chunk that \
@@ -270,11 +350,120 @@ mod tests {
                 patches: vec![bad],
                 created_chunks: Vec::new(),
             };
-            v.apply_delta(&d);
-            v.revert_delta(&d);
+            // The malformed patch is COUNTED, not silently swallowed: a
+            // caller must be able to tell that the volume is in a partial state.
+            assert_eq!(v.apply_delta(&d), 1, "a malformed patch must be reported");
+            assert_eq!(v.revert_delta(&d), 1);
+            assert_eq!(d.malformed_patches(), 1);
         }
         assert_eq!(v.get_chunk(key).unwrap().sample(1, 2, 3), EMPTY_SDF);
         assert!(patch(key).is_well_formed());
+    }
+
+    /// **The hostile-patch regression.** `is_well_formed` exists to reject a
+    /// record that was deserialized, hand-built or corrupted, so it may not be the
+    /// thing that overflows.
+    ///
+    /// `i0 = u32::MAX, w = 1` is the case: an unchecked `i0 + w` **panics** in a
+    /// debug build and **wraps to 0** in a release build, which passes the
+    /// `<= CHUNK_DIM` bound. It then reaches `VoxelChunk::index`, whose `%` folds
+    /// the coordinate back into range and writes a real sample at (15, 0, 0) —
+    /// which is stamped, marked dirty, and written back to the `.inf_voxel`. So
+    /// the checked form has to reject it *in both profiles*, which is what this
+    /// asserts: the same call, the same answer, no `cfg!(debug_assertions)`
+    /// anywhere.
+    #[test]
+    fn a_patch_with_overflowing_extents_is_rejected_in_every_profile() {
+        let key = ChunkKey::new(0, 0, 0);
+        let base = patch(key);
+
+        // The wrapping-add case, on each axis.
+        for bad in [
+            ChunkPatch {
+                i0: u32::MAX,
+                w: 1,
+                ..base.clone()
+            },
+            ChunkPatch {
+                j0: u32::MAX,
+                h: 1,
+                ..base.clone()
+            },
+            ChunkPatch {
+                k0: u32::MAX,
+                d: 1,
+                ..base.clone()
+            },
+            ChunkPatch {
+                i0: 1,
+                w: u32::MAX,
+                ..base.clone()
+            },
+        ] {
+            assert!(
+                !bad.is_well_formed(),
+                "an overflowing extent was accepted: i0={} w={} j0={} h={} k0={} d={}",
+                bad.i0,
+                bad.w,
+                bad.j0,
+                bad.h,
+                bad.k0,
+                bad.d
+            );
+        }
+
+        // The wrapping-MULTIPLY case: extents whose product overflows `usize`
+        // cannot be counted at all, so the patch is rejected rather than sized
+        // from a wrapped count.
+        let huge = ChunkPatch {
+            i0: 0,
+            j0: 0,
+            k0: 0,
+            w: u32::MAX,
+            h: u32::MAX,
+            d: u32::MAX,
+            ..base.clone()
+        };
+        assert_eq!(huge.checked_sample_count(), None);
+        assert_eq!(huge.sample_count(), usize::MAX, "reporting saturates");
+        assert!(!huge.is_well_formed());
+        let only_huge = VoxelDelta {
+            patches: vec![huge.clone()],
+            created_chunks: Vec::new(),
+        };
+        assert_eq!(only_huge.memory_bytes(), usize::MAX, "and does not wrap");
+
+        // …and nothing hostile ever reaches a chunk: applying a delta made only of
+        // these writes NOTHING and says so.
+        let mut v = VoxelData::new(0.5);
+        v.insert_chunk(key, VoxelChunk::empty());
+        let virgin = crate::asset::encode_chunk(v.get_chunk(key).unwrap()).unwrap();
+        let d = VoxelDelta {
+            patches: vec![
+                ChunkPatch {
+                    i0: u32::MAX,
+                    w: 1,
+                    ..base.clone()
+                },
+                huge,
+            ],
+            created_chunks: Vec::new(),
+        };
+        assert_eq!(d.malformed_patches(), 2);
+        assert_eq!(
+            v.apply_delta(&d),
+            2,
+            "both patches must be skipped AND counted"
+        );
+        assert_eq!(v.revert_delta(&d), 2);
+        assert_eq!(
+            crate::asset::encode_chunk(v.get_chunk(key).unwrap()).unwrap(),
+            virgin,
+            "a rejected patch must not fold its coordinate back into range and write"
+        );
+        // The sane baseline is still accepted, so the guard is not just "reject
+        // everything".
+        assert!(base.is_well_formed());
     }
 
     #[test]
