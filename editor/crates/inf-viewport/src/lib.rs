@@ -15,7 +15,7 @@ pub mod camera;
 
 pub use camera::{
     Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptFalloff, SculptOp, SculptSettings,
-    Snap2DSettings, SnapSettings, ToolMode, ViewportMode, VoxelOpMode, VoxelSettings,
+    Snap2DSettings, SnapSettings, SpoilMode, ToolMode, ViewportMode, VoxelOpMode, VoxelSettings,
     VoxelToolKind,
 };
 

@@ -455,11 +455,14 @@ mod tests {
             rng.range(0.0, 8.0),
             rng.range(-4.0, 24.0),
         );
-        match rng.next() % 3 {
+        match rng.next() % 4 {
             0 => VoxelShape::Sphere {
                 center: c,
                 radius_m: rng.range(0.5, 6.0),
             },
+            // The **foundation-pit** primitive (P21.3): an axis-aligned box
+            // dragged on the surface. Its mouth is the whole rectangle, so it is
+            // the shape most likely to expose an off-by-one in the sample clip.
             1 => VoxelShape::Box {
                 center: c,
                 half_extents: DVec3::new(
@@ -468,7 +471,7 @@ mod tests {
                     rng.range(0.5, 4.0),
                 ),
             },
-            _ => VoxelShape::Capsule {
+            2 => VoxelShape::Capsule {
                 a: c,
                 b: c + DVec3::new(
                     rng.range(-6.0, 6.0),
@@ -476,6 +479,20 @@ mod tests {
                     rng.range(-6.0, 6.0),
                 ),
                 radius_m: rng.range(0.5, 3.0),
+            },
+            // The **trench** primitive (P21.3): a swept rectangle at an
+            // arbitrary yaw, which no other case here exercises — the tile
+            // rejection above clips against a world AABB, and an oriented solid
+            // is where a too-tight AABB shows up as missed samples.
+            _ => VoxelShape::Trench {
+                a: c,
+                b: c + DVec3::new(
+                    rng.range(-8.0, 8.0),
+                    rng.range(-2.0, 2.0),
+                    rng.range(-8.0, 8.0),
+                ),
+                half_width_m: rng.range(0.5, 3.0),
+                half_height_m: rng.range(0.5, 3.0),
             },
         }
     }

@@ -8,4 +8,4 @@
  * verdict, the carve/fill switch and the material. Only how the author
  * describes the path differs.
  */
-export type VoxelToolKindDto = "Brush" | "Tunnel";
+export type VoxelToolKindDto = "Brush" | "Tunnel" | "BoxCut" | "Trench";

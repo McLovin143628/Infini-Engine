@@ -10,14 +10,15 @@ use std::sync::Mutex;
 
 use inf_editor_core::ipc::{
     BiomeSettingsDto, FoliageSettingsDto, GizmoModeDto, GizmoSpaceDto, SculptFalloffDto,
-    SculptOpDto, SculptSettingsDto, Snap2DDto, Snap3DDto, ToolModeDto, ViewModeDto, ViewportDrop,
-    ViewportKey, ViewportModeDto, ViewportRect, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto,
-    VoxelToolKindDto, WaterSettingsDto, WaterToolKindDto,
+    SculptOpDto, SculptSettingsDto, Snap2DDto, Snap3DDto, SpoilModeDto, ToolModeDto, ViewModeDto,
+    ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect, VoxelOpModeDto, VoxelSettingsDto,
+    VoxelStatusDto, VoxelToolKindDto, WaterSettingsDto, WaterToolKindDto,
 };
 use inf_viewport::camera::{BiomeSettings, WaterSettings, WaterToolKind};
 use inf_viewport::{
     FoliageSettings, GizmoSpace, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings,
-    SnapSettings, ToolMode, ViewportEvent, ViewportMode, VoxelOpMode, VoxelSettings, VoxelToolKind,
+    SnapSettings, SpoilMode, ToolMode, ViewportEvent, ViewportMode, VoxelOpMode, VoxelSettings,
+    VoxelToolKind,
 };
 use tauri::{Emitter, Manager};
 
@@ -497,6 +498,8 @@ pub async fn viewport_set_voxel(
             kind: match voxel.kind {
                 VoxelToolKindDto::Brush => VoxelToolKind::Brush,
                 VoxelToolKindDto::Tunnel => VoxelToolKind::Tunnel,
+                VoxelToolKindDto::BoxCut => VoxelToolKind::BoxCut,
+                VoxelToolKindDto::Trench => VoxelToolKind::Trench,
             },
             radius_m: voxel.radius_m.max(0.0),
             depth_m: voxel.depth_m.max(0.0),
@@ -505,6 +508,13 @@ pub async fn viewport_set_voxel(
                 VoxelOpModeDto::Fill => VoxelOpMode::Fill,
             },
             material: voxel.material,
+            dig_to_depth: voxel.dig_to_depth,
+            spoil: match voxel.spoil {
+                SpoilModeDto::Off => SpoilMode::Off,
+                SpoilModeDto::Auto => SpoilMode::Auto,
+                SpoilModeDto::Site => SpoilMode::Site,
+            },
+            pick_spoil_site: voxel.pick_spoil_site,
         });
     }
     Ok(())

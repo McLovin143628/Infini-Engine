@@ -14,6 +14,7 @@ import type { SculptOpDto } from "../bindings/SculptOpDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
 import type { RiverReportDto } from "../bindings/RiverReportDto";
 import type { WaterToolKindDto } from "../bindings/WaterToolKindDto";
+import type { SpoilModeDto } from "../bindings/SpoilModeDto";
 import type { VoxelOpModeDto } from "../bindings/VoxelOpModeDto";
 import type { VoxelStatusDto } from "../bindings/VoxelStatusDto";
 import type { VoxelToolKindDto } from "../bindings/VoxelToolKindDto";
@@ -41,7 +42,7 @@ const TOOLS: [ToolModeDto, string, string][] = [
   ["Foliage", "Foliage", "Scatter foliage onto the terrain (perspective only)"],
   ["Biome", "Biome", "Paint named biomes onto the terrain (perspective only)"],
   ["Water", "Water", "Place rivers and lakes against the terrain (perspective only)"],
-  ["Voxel", "Voxel", "Carve caves and tunnels out of a voxel volume (perspective only)"],
+  ["Voxel", "Voxel", "Carve caves and excavate pits out of a voxel volume (perspective only)"],
 ];
 
 /** River vs Lake, and what each gesture is. */
@@ -50,10 +51,27 @@ const WATER_KINDS: [WaterToolKindDto, string, string][] = [
   ["Lake", "Lake", "Drag a rectangle; the waterline preview shows where it lands"],
 ];
 
-/** Brush vs Tunnel, and what each gesture is (P21.2). */
+/** The four cuts, and what each gesture is (P21.2 brush/tunnel, P21.3 box/trench). */
 const VOXEL_KINDS: [VoxelToolKindDto, string, string][] = [
   ["Brush", "Brush", "Drag to lay sphere dabs along the stroke; one undo step at mouse-up"],
   ["Tunnel", "Tunnel", "Click waypoints; Ctrl+click closes the path and tube-carves it whole"],
+  ["BoxCut", "Box", "Drag a rectangle on the ground; release excavates it to Depth below grade"],
+  [
+    "Trench",
+    "Trench",
+    "Click waypoints; Ctrl+click cuts a rectangular trench along them, open to the sky",
+  ],
+];
+
+/** Where the excavated soil goes (P21.3). */
+const VOXEL_SPOIL: [SpoilModeDto, string, string][] = [
+  ["Off", "Discard", "The excavated material is removed from the world — right for a cave"],
+  [
+    "Auto",
+    "Auto",
+    "Pile it at the default site: east of the cut, clear of its rim, on the ground there",
+  ],
+  ["Site", "Site", "Pile it where you pick — turn on “Set spoil site” and click"],
 ];
 
 /** Carve vs Fill. Not a checkbox: the Ring-0 ops are named Carve and Fill, and a
@@ -681,11 +699,17 @@ function VoxelControls() {
   const depth = useViewportStore((s) => s.voxelDepth);
   const mode = useViewportStore((s) => s.voxelMode);
   const material = useViewportStore((s) => s.voxelMaterial);
+  const digToDepth = useViewportStore((s) => s.voxelDigToDepth);
+  const spoil = useViewportStore((s) => s.voxelSpoil);
+  const picking = useViewportStore((s) => s.voxelPickSpoilSite);
   const setKind = useViewportStore((s) => s.setVoxelKind);
   const setRadius = useViewportStore((s) => s.setVoxelRadius);
   const setDepth = useViewportStore((s) => s.setVoxelDepth);
   const setMode = useViewportStore((s) => s.setVoxelMode);
   const setMaterial = useViewportStore((s) => s.setVoxelMaterial);
+  const setDigToDepth = useViewportStore((s) => s.setVoxelDigToDepth);
+  const setSpoil = useViewportStore((s) => s.setVoxelSpoil);
+  const togglePicking = useViewportStore((s) => s.toggleVoxelPickSpoilSite);
 
   return (
     <>
@@ -782,10 +806,79 @@ function VoxelControls() {
           ))}
         </div>
       )}
+      {/* Brush only: the other three cuts are open to the sky by construction,
+          so a "dig to grade" toggle there would be a control with no effect. */}
+      {kind === "Brush" && mode === "Carve" && (
+        <label
+          className="flex items-center gap-1 text-(--ink-text-dim)"
+          title={VOXEL_DIG_TO_DEPTH_HINT}
+        >
+          <input
+            type="checkbox"
+            checked={digToDepth}
+            onChange={(e) => setDigToDepth(e.target.checked)}
+          />
+          To grade
+        </label>
+      )}
+      {/* Carve only: a FILL adds material, so there is no spoil to displace. */}
+      {mode === "Carve" && (
+        <>
+          <div
+            className="flex items-center rounded bg-(--ink-bg-0) p-0.5"
+            role="group"
+            aria-label="Spoil"
+          >
+            {VOXEL_SPOIL.map(([id, label, title]) => (
+              <button
+                key={id}
+                type="button"
+                aria-pressed={spoil === id}
+                title={title}
+                className={`flex h-6 items-center rounded px-2 ${
+                  spoil === id
+                    ? "bg-(--ink-accent) text-(--ink-bg-0)"
+                    : "text-(--ink-text-dim) hover:text-(--ink-text)"
+                }`}
+                onClick={() => setSpoil(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {spoil === "Site" && (
+            <button
+              type="button"
+              aria-pressed={picking}
+              title={VOXEL_SPOIL_SITE_HINT}
+              className={`flex h-6 items-center rounded px-2 ${
+                picking
+                  ? "bg-(--ink-accent) text-(--ink-bg-0)"
+                  : "bg-(--ink-bg-0) text-(--ink-text-dim) hover:text-(--ink-text)"
+              }`}
+              onClick={togglePicking}
+            >
+              Set spoil site
+            </button>
+          )}
+        </>
+      )}
       <VoxelVerdict />
     </>
   );
 }
+
+/** What `To grade` does, in the one place an author will look for it. */
+const VOXEL_DIG_TO_DEPTH_HINT =
+  "Dig to grade: each brush dab becomes a COLUMN from Depth below the surface up to daylight, " +
+  "instead of a ball centred at Depth. Every dab reaches the sky, so a stroke leaves an open " +
+  "cut rather than a string of buried bubbles.";
+
+/** …and what the spoil-site button does while it is lit. */
+const VOXEL_SPOIL_SITE_HINT =
+  "While this is on, clicking in the viewport MOVES the spoil heap's site instead of digging. " +
+  "Turn it off to dig again. Until a site is picked the heap goes to the default spot, east of " +
+  "the cut.";
 
 /** What `Depth` means, in the one place an author will look for it. */
 const VOXEL_DEPTH_HINT =

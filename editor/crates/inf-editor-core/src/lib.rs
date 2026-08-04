@@ -28,3 +28,5 @@ pub mod thumbnail;
 /// Carving a voxel volume + the save write-back (P21.2), `terrain_edit`'s twin.
 pub mod voxel_edit;
 pub mod voxel_store;
+/// The dig tools' pure shape policy (P21.3) — the M11 Ring-1 move.
+pub mod voxel_tool;

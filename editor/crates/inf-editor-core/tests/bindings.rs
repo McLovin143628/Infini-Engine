@@ -20,11 +20,12 @@ use inf_editor_core::ipc::{
     RiverReportDto, SaveResultDto, SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto,
     SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto,
     SeqTrackDto, SequenceDto, SkyAtmosphereDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind,
-    SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto, TerrainImportPlanDto,
-    TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto, TilemapDto, TimeOfDayDto,
-    ToolModeDto, ViewModeDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
-    ViewportToolStatusDto, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto,
-    WaterDefaultsDto, WaterSettingsDto, WaterToolKindDto, WeatherDto, WeatherPresetDto,
+    SpoilModeDto, SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto,
+    TerrainImportPlanDto, TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto,
+    TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto, ViewportDrop, ViewportKey, ViewportModeDto,
+    ViewportRect, ViewportToolStatusDto, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto,
+    VoxelToolKindDto, WaterDefaultsDto, WaterSettingsDto, WaterToolKindDto, WeatherDto,
+    WeatherPresetDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -103,6 +104,7 @@ fn export_bindings() {
     WaterSettingsDto::export_all(&cfg).expect("export WaterSettingsDto");
     VoxelToolKindDto::export_all(&cfg).expect("export VoxelToolKindDto");
     VoxelOpModeDto::export_all(&cfg).expect("export VoxelOpModeDto");
+    SpoilModeDto::export_all(&cfg).expect("export SpoilModeDto");
     VoxelSettingsDto::export_all(&cfg).expect("export VoxelSettingsDto");
     VoxelStatusDto::export_all(&cfg).expect("export VoxelStatusDto");
     WaterDefaultsDto::export_all(&cfg).expect("export WaterDefaultsDto");

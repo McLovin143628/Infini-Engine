@@ -525,6 +525,47 @@ pub enum VoxelToolKind {
     /// path and tube-carves it as one capsule chain — one undo step for the whole
     /// tunnel.
     Tunnel,
+    /// **Box cut** (P21.3): press-drag a rectangle on the surface and release to
+    /// excavate it to [`VoxelSettings::depth_m`] below grade — the foundation
+    /// pit, the parking garage, the underground mall.
+    ///
+    /// A drag rather than two clicks, because the shape an author is describing
+    /// is a *rectangle* and a rubber-banded rectangle is how every tool in the
+    /// world describes one. The lake tool's gesture exactly.
+    BoxCut,
+    /// **Trench cut** (P21.3): click waypoints, Ctrl+click to commit, and the
+    /// path becomes a swept **rectangular** cut — the utility trench, the road
+    /// cut, the foundation footing.
+    ///
+    /// The tunnel's gesture with a different section, and deliberately a
+    /// separate sub-mode rather than a "square tunnel" flag: a tunnel is a bore
+    /// through rock at depth and a trench is an open cut from the surface, so
+    /// their defaults, their previews and their readouts differ even though the
+    /// clicks are the same.
+    Trench,
+}
+
+/// Where a [`ToolMode::Voxel`] dig puts the material it removes (P21.3).
+///
+/// Mirrors `inf_editor_core::scene::undo::SpoilChoice`, which is the type the
+/// transaction actually takes; this is the toolbar's half of it, and the
+/// difference between the two is exactly the picked site (which lives on the
+/// host, not in the settings, because the author picks it in the viewport).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpoilMode {
+    /// The material is removed from the world. Right for a cave — nobody
+    /// barrows the spoil out of a tunnel in a level editor — and the P21.2
+    /// behaviour.
+    #[default]
+    Off,
+    /// Pile it at the deterministic default site: east of the cut, clear of its
+    /// rim, standing on the ground there.
+    Auto,
+    /// Pile it where the author picked
+    /// ([`VoxelSettings::pick_spoil_site`]). Falls back to `Auto` until a site
+    /// has been picked, and says so on the readout rather than silently digging
+    /// with a different rule than the toolbar shows.
+    Site,
 }
 
 /// Carve or fill — which way a [`ToolMode::Voxel`] cut runs (P21.2).
@@ -578,6 +619,25 @@ pub struct VoxelSettings {
     /// cave wall shade like the hillside it opens out of; `project_voxel` reads
     /// the palette off the `Terrain` on the same entity.
     pub material: u8,
+    /// **Dig to grade** (P21.3): a brush dab becomes a *column* from `depth_m`
+    /// below the surface up to daylight, instead of a ball centred at depth.
+    ///
+    /// The one setting that turns the P21.2 carve brush into a freehand
+    /// excavation brush: every dab reaches the sky, so a stroke leaves an open
+    /// trench rather than a string of buried bubbles. Ignored by the other three
+    /// sub-modes, which are open to the sky by construction.
+    pub dig_to_depth: bool,
+    /// Where the excavated material goes.
+    pub spoil: SpoilMode,
+    /// While `true`, a viewport click **moves the spoil site** instead of
+    /// digging.
+    ///
+    /// A sticky mode rather than a one-shot arm, deliberately: the toolbar
+    /// button stays lit, every click drags the marker somewhere else, and the
+    /// author turns it off when the heap is where they want it. A one-shot would
+    /// have to disarm itself on the host and re-sync a flag the toolbar owns,
+    /// which is a desync waiting to happen (the `c4bd663` armed-hint lesson).
+    pub pick_spoil_site: bool,
 }
 
 impl Default for VoxelSettings {
@@ -594,6 +654,13 @@ impl Default for VoxelSettings {
             depth_m: 0.0,
             mode: VoxelOpMode::Carve,
             material: 0,
+            // Off, so the carve brush behaves exactly as it did in P21.2 until
+            // an author asks for an excavation. A cave that filled the hillside
+            // beside it with spoil on the first click would be a surprise, and
+            // the whole point of the default is that nothing surprising happens.
+            dig_to_depth: false,
+            spoil: SpoilMode::Off,
+            pick_spoil_site: false,
         }
     }
 }

@@ -24,6 +24,7 @@ import type { RiverReportDto } from "../bindings/RiverReportDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
 import type { WaterSettingsDto } from "../bindings/WaterSettingsDto";
 import type { WaterToolKindDto } from "../bindings/WaterToolKindDto";
+import type { SpoilModeDto } from "../bindings/SpoilModeDto";
 import type { VoxelOpModeDto } from "../bindings/VoxelOpModeDto";
 import type { VoxelSettingsDto } from "../bindings/VoxelSettingsDto";
 import type { VoxelStatusDto } from "../bindings/VoxelStatusDto";
@@ -162,6 +163,28 @@ interface ViewportUiState {
    * makes a cave wall shade like the hillside it opens out of. */
   voxelMaterial: number;
   /**
+   * **Dig to grade** (P21.3): a brush dab becomes a column from `voxelDepth`
+   * below the surface up to daylight instead of a ball at depth, so a freehand
+   * stroke leaves an open cut rather than a string of buried bubbles. Ignored by
+   * the other three sub-modes, which are open to the sky by construction.
+   */
+  voxelDigToDepth: boolean;
+  /**
+   * Where the excavated material goes (P21.3): discarded, piled at the
+   * deterministic default site (east of the cut), or piled where the author
+   * picked.
+   */
+  voxelSpoil: SpoilModeDto;
+  /**
+   * While true, a viewport click MOVES the spoil site instead of digging.
+   *
+   * A sticky mode and not a one-shot arm: the button stays lit, every click
+   * drags the marker, and the author turns it off when the heap is where they
+   * want it. A one-shot would have to disarm itself on the native side and
+   * re-sync a flag this store owns — a desync waiting to happen.
+   */
+  voxelPickSpoilSite: boolean;
+  /**
    * The Voxel tool's verdict on the open level (P21.2): what can be carved, what
    * a surface-crossing cut would be refused for, and how much is unsaved. `null`
    * until the first `refreshVoxelStatus` — "not asked yet", which the toolbar
@@ -237,6 +260,10 @@ interface ViewportUiState {
   setVoxelDepth: (d: number) => void;
   setVoxelMode: (mode: VoxelOpModeDto) => void;
   setVoxelMaterial: (m: number) => void;
+  setVoxelDigToDepth: (on: boolean) => void;
+  setVoxelSpoil: (mode: SpoilModeDto) => void;
+  /** Toggle the sticky "click places the spoil site" mode (P21.3). */
+  toggleVoxelPickSpoilSite: () => void;
   /**
    * Re-read the level's carve verdict (P21.2).
    *
@@ -346,6 +373,9 @@ function pushVoxel(s: ViewportUiState): void {
     depth_m: s.voxelDepth,
     mode: s.voxelMode,
     material: s.voxelMaterial,
+    dig_to_depth: s.voxelDigToDepth,
+    spoil: s.voxelSpoil,
+    pick_spoil_site: s.voxelPickSpoilSite,
   };
   void viewport.setVoxel(dto).catch(() => {});
 }
@@ -434,6 +464,13 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   voxelDepth: 0,
   voxelMode: "Carve",
   voxelMaterial: 0,
+  voxelDigToDepth: false,
+  // Off, so the carve brush behaves exactly as it did in P21.2 until an author
+  // asks for an excavation — a first click that filled the hillside beside it
+  // with spoil would be a surprise, and the point of a default is that nothing
+  // surprising happens.
+  voxelSpoil: "Off",
+  voxelPickSpoilSite: false,
   voxelStatus: null,
   gizmoMode: "Translate",
   gizmoSpace: "World",
@@ -624,6 +661,24 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   setVoxelMaterial: (m) => {
     const voxelMaterial = Number.isFinite(m) ? Math.min(Math.max(Math.round(m), 0), 255) : 0;
     set({ voxelMaterial });
+    pushVoxel(get());
+  },
+  setVoxelDigToDepth: (voxelDigToDepth) => {
+    set({ voxelDigToDepth });
+    pushVoxel(get());
+  },
+  setVoxelSpoil: (voxelSpoil) => {
+    // Leaving Site mode also leaves the picking mode: a lit "Set spoil site"
+    // button over a tool that no longer uses one is a control that does nothing
+    // and explains nothing.
+    set(voxelSpoil === "Site" ? { voxelSpoil } : { voxelSpoil, voxelPickSpoilSite: false });
+    pushVoxel(get());
+  },
+  toggleVoxelPickSpoilSite: () => {
+    const on = !get().voxelPickSpoilSite;
+    // Arming the picker implies the mode that uses the site — otherwise the
+    // author places a marker and the dig ignores it.
+    set(on ? { voxelPickSpoilSite: true, voxelSpoil: "Site" } : { voxelPickSpoilSite: false });
     pushVoxel(get());
   },
   refreshVoxelStatus: async () => {

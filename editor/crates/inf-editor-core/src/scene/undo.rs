@@ -12,8 +12,12 @@ use std::collections::BTreeMap;
 use inf_ecs::components::{FoliageInstance, Sprite, Transform};
 use inf_ecs::PropValue;
 use inf_terrain::{BiomeDelta, DataMapDelta, HeightDelta, HoleDelta, HoleDeltaBuilder, SplatDelta};
-use inf_voxel::{VoxelDelta, VoxelDeltaBuilder, VoxelOp, VoxelOpKind, VoxelShape};
+use inf_voxel::{
+    SpoilPlan, VoxelDelta, VoxelDeltaBuilder, VoxelOp, VoxelOpKind, VoxelShape, MATERIAL_COUNT,
+};
 use uuid::Uuid;
+
+use glam::DVec3;
 
 use crate::scene::serialize::{EntityRecord, LevelSettings};
 use crate::scene::SceneDoc;
@@ -423,6 +427,41 @@ pub const POISONED_STORE_CARVE_REFUSAL: &str =
      so the loaded chunks are in an unknown state. Nothing was carved, and no cave mouth was \
      opened. Save your work and restart the editor.";
 
+/// …and why a **dig** was refused before it started: it is simply too big.
+///
+/// A dig is judged whole (`a4e5844`), so the size gate has to answer *before*
+/// the first sample moves — which is what
+/// [`VoxelShape::affected_sample_count`](inf_voxel::VoxelShape::affected_sample_count)
+/// is for. The number it bounds is not only the cut: the spoil that has to
+/// balance it is bounded by the same count, and both are held in memory as one
+/// undo record.
+pub const DIG_TOO_LARGE_REFUSAL: &str =
+    "Dig refused: this excavation is larger than one transaction may move. Nothing was cut. \
+     Reduce the pit's footprint or its depth, or dig it in several passes — a dig is committed \
+     whole, so half a foundation pit is not an option the editor offers.";
+
+/// …and why a dig was refused because its spoil could not be placed.
+///
+/// **Never seen in practice** — the pile's search region grows until it holds
+/// the count. It exists because "the spoil did not fit" must be a refusal the
+/// author reads rather than a transaction that silently fails conservation.
+pub const SPOIL_SHORTFALL_REFUSAL: &str =
+    "Dig refused: the excavated soil could not be placed — the spoil site is buried in solid \
+     rock for as far as the pile could search. Nothing was cut. Move the spoil site to open \
+     ground, or turn spoil off to discard the material instead.";
+
+/// The most lattice samples one dig transaction may move, cut and spoil
+/// together.
+///
+/// Two million samples is a 63 m cube at half-metre voxels — comfortably past
+/// any foundation pit an author drags, and the point where the undo record, the
+/// spoil search and the re-mesh stop being interactive. The bound is checked
+/// against
+/// [`affected_sample_count`](inf_voxel::VoxelShape::affected_sample_count),
+/// which is the op's whole affected region and therefore never an
+/// underestimate.
+pub const MAX_DIG_SAMPLES: u64 = 2_000_000;
+
 /// **Why a carve did not happen** — every refusal the coupled transaction can
 /// hand back, as a value rather than a `None` the caller has to guess about.
 ///
@@ -440,6 +479,13 @@ pub enum CarveRefusal {
     VolumeNotLoaded,
     /// The shared voxel working set is poisoned.
     PoisonedStore,
+    /// The dig would move more than [`MAX_DIG_SAMPLES`] samples (P21.3).
+    TooLarge {
+        /// The bound the ops actually asked for.
+        samples: u64,
+    },
+    /// The spoil pile could not hold what the cut removed (P21.3).
+    SpoilShortfall,
 }
 
 impl CarveRefusal {
@@ -449,8 +495,33 @@ impl CarveRefusal {
             CarveRefusal::InlineTerrain { .. } => INLINE_TERRAIN_CARVE_REFUSAL,
             CarveRefusal::VolumeNotLoaded => VOLUME_NOT_LOADED_CARVE_REFUSAL,
             CarveRefusal::PoisonedStore => POISONED_STORE_CARVE_REFUSAL,
+            CarveRefusal::TooLarge { .. } => DIG_TOO_LARGE_REFUSAL,
+            CarveRefusal::SpoilShortfall => SPOIL_SHORTFALL_REFUSAL,
         }
     }
+}
+
+/// Where a dig's excavated material goes (P21.3).
+///
+/// Three answers and no fourth, because "somewhere sensible" is not a rule an
+/// author can predict or a test can pin:
+///
+/// * [`Discard`](SpoilChoice::Discard) — the material is removed from the world.
+///   The P21.2 behaviour, and still the right one for a cave (nobody carries
+///   the spoil out of a tunnel in a level editor).
+/// * [`Auto`](SpoilChoice::Auto) — the documented default site: east of the
+///   cut, clear of its rim, dropped onto the ground there.
+/// * [`At`](SpoilChoice::At) — the author picked a spot in the viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum SpoilChoice {
+    /// Remove the material without piling it anywhere.
+    #[default]
+    Discard,
+    /// Pile it at the deterministic default site.
+    Auto,
+    /// Pile it at this world point (metres). A non-finite point falls back to
+    /// discarding rather than writing a pile at infinity.
+    At(DVec3),
 }
 
 /// Running totals of a carve stroke, for the tool's live readout.
@@ -466,6 +537,19 @@ pub struct CarveTally {
     pub created_chunks: u64,
     /// Heightfield samples whose hole bit changed.
     pub holes: u64,
+    /// Samples removed, **by the material they carried** (P21.3).
+    ///
+    /// The excavation ledger's left-hand side. `carved` is its sum, kept
+    /// separately because the readout quotes both and a caller that only wants
+    /// "how much did I dig" should not have to sum an array.
+    pub carved_by_material: [u64; MATERIAL_COUNT],
+    /// Samples placed as **spoil**, by material — the ledger's right-hand side.
+    ///
+    /// Equal to [`carved_by_material`](Self::carved_by_material) element for
+    /// element whenever the dig displaced its soil (see [`Self::conserved`]).
+    /// All zero when spoil is off, which is a deliberate discard and not a
+    /// failure of conservation — the author asked for the material to go away.
+    pub spoiled_by_material: [u64; MATERIAL_COUNT],
 }
 
 impl CarveTally {
@@ -475,11 +559,53 @@ impl CarveTally {
     }
 
     /// Cubic metres of material removed minus added, at `voxel_size_m`. The
-    /// number the readout quotes, and the one P21.3's soil-displacement
-    /// conservation gate will subtract against.
+    /// number the readout quotes, and the one the soil-displacement
+    /// conservation gate subtracts against.
     pub fn net_removed_m3(&self, voxel_size_m: f64) -> f64 {
         let cell = voxel_size_m * voxel_size_m * voxel_size_m;
         (self.carved as f64 - self.filled as f64) * cell
+    }
+
+    /// Total samples placed as spoil.
+    pub fn spoiled(&self) -> u64 {
+        self.spoiled_by_material.iter().sum()
+    }
+
+    /// Cubic metres of spoil placed, at `voxel_size_m`.
+    pub fn spoiled_m3(&self, voxel_size_m: f64) -> f64 {
+        self.spoiled() as f64 * voxel_size_m.powi(3)
+    }
+
+    /// Cubic metres removed, at `voxel_size_m` — the excavation readout's
+    /// left-hand number (gross, not net: a dig quotes what came out of the hole,
+    /// and the spoil it became is the other number beside it).
+    pub fn removed_m3(&self, voxel_size_m: f64) -> f64 {
+        self.carved as f64 * voxel_size_m.powi(3)
+    }
+
+    /// **The conservation predicate.** `true` when every voxel removed was
+    /// placed again, per material, exactly.
+    ///
+    /// Answers `true` for a dig that removed nothing (nothing to conserve) and
+    /// `false` the moment a single voxel of a single material goes missing —
+    /// there is no tolerance here on purpose, because an integer identity that
+    /// is allowed to be nearly true is not an identity (the P10 erosion mass
+    /// gates' rule).
+    pub fn conserved(&self) -> bool {
+        self.carved_by_material == self.spoiled_by_material
+    }
+
+    /// A one-line per-material breakdown for the tool readout, e.g.
+    /// `"layer 0: 412, layer 2: 96"`. Empty when nothing was removed.
+    pub fn material_breakdown(&self) -> String {
+        let parts: Vec<String> = self
+            .carved_by_material
+            .iter()
+            .enumerate()
+            .filter(|(_, &n)| n > 0)
+            .map(|(m, &n)| format!("layer {m}: {n}"))
+            .collect();
+        parts.join(", ")
     }
 }
 
@@ -497,6 +623,14 @@ pub struct CarveStroke {
     /// One builder per terrain the stroke has broken through, in entity order.
     holes: BTreeMap<Uuid, HoleDeltaBuilder>,
     tally: CarveTally,
+    /// World AABB of every shape the stroke has cut, `None` until the first dab
+    /// — what the **default spoil rule** measures from (P21.3).
+    ///
+    /// Accumulated here rather than recomputed by the tools because the default
+    /// site has to be a function of the whole gesture: a spoil heap placed east
+    /// of the *last* dab of a hundred-metre trench would sit in the middle of
+    /// the trench.
+    bounds: Option<(DVec3, DVec3)>,
 }
 
 impl CarveStroke {
@@ -508,6 +642,7 @@ impl CarveStroke {
             voxels: VoxelDeltaBuilder::new(),
             holes: BTreeMap::new(),
             tally: CarveTally::default(),
+            bounds: None,
         }
     }
 
@@ -519,6 +654,47 @@ impl CarveStroke {
     /// Totals so far.
     pub fn tally(&self) -> CarveTally {
         self.tally
+    }
+
+    /// The world AABB of everything this stroke has cut so far, `None` before
+    /// the first dab.
+    pub fn bounds(&self) -> Option<(DVec3, DVec3)> {
+        self.bounds
+    }
+
+    /// Displace this stroke's removed material to `site` as a spoil pile,
+    /// **into the same undo record** (P21.3).
+    ///
+    /// Returns the refusal when the pile could not hold the count; the caller
+    /// then abandons the transaction rather than committing an unbalanced one.
+    /// On success the tally's
+    /// [`spoiled_by_material`](CarveTally::spoiled_by_material) equals its
+    /// [`carved_by_material`](CarveTally::carved_by_material) exactly, which is
+    /// what [`CarveTally::conserved`] reports and what the gate asserts.
+    ///
+    /// Idempotence is **not** claimed and is not wanted: calling this twice
+    /// would place the soil twice. It is called once, by the one door that
+    /// closes a dig.
+    pub fn spoil(&mut self, site: DVec3) -> Result<(), CarveRefusal> {
+        let counts = self.tally.carved_by_material;
+        if counts.iter().all(|&n| n == 0) {
+            return Ok(()); // a dig that removed nothing spoils nothing
+        }
+        let mut volumes = self
+            .volumes
+            .lock()
+            .map_err(|_| CarveRefusal::PoisonedStore)?;
+        let report = volumes
+            .spoil_into(self.volume, &SpoilPlan::new(counts, site), &mut self.voxels)
+            .ok_or(CarveRefusal::VolumeNotLoaded)?;
+        if !report.is_exact() {
+            return Err(CarveRefusal::SpoilShortfall);
+        }
+        self.tally.spoiled_by_material = report.placed;
+        self.tally.filled += report.total_placed();
+        self.tally.touched += report.total_placed();
+        self.tally.created_chunks += report.created_chunks;
+        Ok(())
     }
 
     /// Lay one dab: cut the voxels, then open (or close) the heightfield samples
@@ -569,6 +745,21 @@ impl CarveStroke {
         self.tally.carved += report.total_carved();
         self.tally.filled += report.total_filled();
         self.tally.created_chunks += report.created_chunks;
+        for m in 0..MATERIAL_COUNT {
+            // The excavation ledger's left-hand side, accumulated per dab so a
+            // hundred-dab drag spoils exactly what the whole stroke removed.
+            self.tally.carved_by_material[m] += report.carved[m];
+        }
+        // The gesture's own footprint, for the default spoil rule. Taken from
+        // the shape and not from the report, so it is the region the author
+        // described rather than the subset that happened to contain rock.
+        let (lo, hi) = op.shape.aabb_m(0.0);
+        if lo.is_finite() && hi.is_finite() {
+            self.bounds = Some(match self.bounds {
+                Some((l, h)) => (l.min(lo), h.max(hi)),
+                None => (lo, hi),
+            });
+        }
         moved |= !report.is_noop();
         // Released before the heightfield half so the two locks are never held at
         // once — the fixed order is document first, volumes second, and this
@@ -675,11 +866,20 @@ impl SceneDoc {
     pub fn edit_commit_carve(&mut self, stroke: CarveStroke) -> bool {
         let volume = stroke.volume;
         let volumes = stroke.volumes.clone();
+        // The undo label names what the author did, which is not always a carve:
+        // a dig that displaced its soil is an *excavation*, and "Undo Carve
+        // Voxels" over a step that also removed a spoil heap describes half of
+        // itself.
+        let label = if stroke.tally().spoiled() > 0 {
+            "Excavate"
+        } else {
+            "Carve Voxels"
+        };
         let Some((delta, holes)) = stroke.finish(self) else {
             return false;
         };
         self.record_edit(
-            "Carve Voxels",
+            label,
             EditCommand::CarveVoxels {
                 volume,
                 volumes,
@@ -688,6 +888,36 @@ impl SceneDoc {
             },
         );
         true
+    }
+
+    /// Close a brush stroke as a **dig**: displace its soil, then commit both
+    /// halves as one undo entry (P21.3).
+    ///
+    /// The carve brush's door. It cannot go through [`edit_dig`](Self::edit_dig)
+    /// — a brush stroke's dabs were already cut, live, one frame at a time —
+    /// so this is the tail of that function with the two passes it has already
+    /// run removed.
+    ///
+    /// Returns the **final** ledger (spoil included, which is why the caller
+    /// cannot read it off the stroke it just gave away), whether an undo entry
+    /// was recorded, and the refusal if the soil could not be placed. A failed
+    /// spoil still commits the cut: rock the author can see must be undoable
+    /// (`a4e5844`), and the refusal is what the readout quotes instead of a
+    /// balance it did not achieve.
+    pub fn edit_commit_dig(
+        &mut self,
+        mut stroke: CarveStroke,
+        spoil: SpoilChoice,
+    ) -> (CarveTally, bool, Option<CarveRefusal>) {
+        let voxel_size_m = stroke
+            .volumes
+            .lock()
+            .ok()
+            .and_then(|v| v.slot(stroke.volume).map(|s| s.data.voxel_size_m()))
+            .unwrap_or_else(|| inf_ecs::components::VoxelVolume::default().voxel_size_m);
+        let refusal = self.spoil_stroke(&mut stroke, spoil, voxel_size_m).err();
+        let tally = stroke.tally();
+        (tally, self.edit_commit_carve(stroke), refusal)
     }
 
     /// The one-shot carve: apply `op` and record it, holes included. Returns the
@@ -724,6 +954,60 @@ impl SceneDoc {
         volumes: &SharedVoxelVolumes,
         ops: &[VoxelOp],
     ) -> Result<CarveTally, CarveRefusal> {
+        self.edit_dig(volume, volumes, ops, SpoilChoice::Discard)
+    }
+
+    /// **The excavation transaction** (P21.3): cut a chain of ops and displace
+    /// what they removed, as ONE undo entry.
+    ///
+    /// The dig tools' single door — box cut, spline trench and the carve brush's
+    /// committed stroke all arrive here — and the superset of
+    /// [`edit_carve_path`](Self::edit_carve_path), which is now this with
+    /// [`SpoilChoice::Discard`].
+    ///
+    /// # Judged whole, cut whole, spoiled whole
+    ///
+    /// Four questions are answered **before a single sample moves**:
+    ///
+    /// 1. is the dig within [`MAX_DIG_SAMPLES`]? (a pure function of the shapes)
+    /// 2. is the working set readable?
+    /// 3. is the target volume loaded?
+    /// 4. does any leg break through an **inline** terrain?
+    ///
+    /// Only then does anything cut. That ordering is `a4e5844`'s ruling applied
+    /// to a pit: a refusal discovered halfway through a foundation excavation
+    /// would leave a half-dug hole the author never asked for, and the size gate
+    /// in particular *cannot* be discovered any other way — you find out a dig
+    /// is too big by doing it.
+    ///
+    /// The spoil runs last, inside the same stroke, so the pit, its cave mouths
+    /// and the heap it produced are one `EditCommand` and one Ctrl+Z. A spoil
+    /// that cannot be placed is a refusal **after** the cut, and the transaction
+    /// is committed anyway with the refusal returned — the same ruling the
+    /// mid-chain refusal above gets, and for the same reason: rock the author
+    /// can see, with no undo entry describing it, is the worst of the three
+    /// outcomes.
+    pub fn edit_dig(
+        &mut self,
+        volume: Uuid,
+        volumes: &SharedVoxelVolumes,
+        ops: &[VoxelOp],
+        spoil: SpoilChoice,
+    ) -> Result<CarveTally, CarveRefusal> {
+        // Pass 0 — SIZE. A pure function of the shapes, so it can answer before
+        // anything is read, let alone written.
+        let voxel_size_m = volumes
+            .lock()
+            .ok()
+            .and_then(|v| v.slot(volume).map(|s| s.data.voxel_size_m()))
+            .unwrap_or_else(|| inf_ecs::components::VoxelVolume::default().voxel_size_m);
+        let mut samples = 0u64;
+        for op in ops {
+            samples = samples.saturating_add(op.shape.affected_sample_count(voxel_size_m));
+        }
+        if samples > MAX_DIG_SAMPLES {
+            return Err(CarveRefusal::TooLarge { samples });
+        }
         // Pass 1 — judge. Nothing is cut yet, so a refusal here really is a
         // refusal of the whole op and not of its tail.
         //
@@ -749,10 +1033,9 @@ impl SceneDoc {
         }
         // Pass 2 — cut, into one stroke, so the chain is one undo entry.
         let mut stroke = CarveStroke::begin(volume, volumes.clone());
-        let mut tally = CarveTally::default();
         for (op, terrains) in ops.iter().zip(&plan) {
             match stroke.dab(self, op, terrains) {
-                Ok(t) => tally = t,
+                Ok(_) => {}
                 Err(refusal) => {
                     // A leg refused after earlier legs cut — the volume was
                     // released or its store poisoned *between* two legs, which
@@ -767,8 +1050,92 @@ impl SceneDoc {
                 }
             }
         }
+        // Pass 3 — displace the soil, into the SAME stroke.
+        if let Err(refusal) = self.spoil_stroke(&mut stroke, spoil, voxel_size_m) {
+            self.edit_commit_carve(stroke);
+            return Err(refusal);
+        }
+        let tally = stroke.tally();
         self.edit_commit_carve(stroke);
         Ok(tally)
+    }
+
+    /// Resolve a [`SpoilChoice`] against `stroke`'s own footprint and place the
+    /// pile.
+    ///
+    /// Split out because the brush's committed stroke reaches it from
+    /// `edit_commit_dig` while the box and trench cuts reach it from
+    /// [`edit_dig`](Self::edit_dig), and a second copy of "where does the soil
+    /// go" is how the two would come to answer differently.
+    pub(crate) fn spoil_stroke(
+        &self,
+        stroke: &mut CarveStroke,
+        spoil: SpoilChoice,
+        voxel_size_m: f64,
+    ) -> Result<(), CarveRefusal> {
+        let Some(site) = self.spoil_site(stroke, spoil, voxel_size_m) else {
+            return Ok(());
+        };
+        stroke.spoil(site)
+    }
+
+    /// Where this stroke's soil goes, or `None` when it is discarded / there is
+    /// nothing to displace.
+    ///
+    /// The `Auto` rule is Ring 0's [`inf_voxel::default_spoil_site`] — east of
+    /// the cut, clear of its rim — with **one** thing added that Ring 0 cannot
+    /// know: the pile is dropped onto the ground under that point when this
+    /// level has terrain there. A heap standing at the height of the pit's rim
+    /// on sloping ground would float or bury itself, and neither is what an
+    /// author dragging a pit on a hillside means.
+    pub fn spoil_site(
+        &self,
+        stroke: &CarveStroke,
+        spoil: SpoilChoice,
+        voxel_size_m: f64,
+    ) -> Option<DVec3> {
+        let total: u64 = stroke.tally().carved_by_material.iter().sum();
+        if total == 0 {
+            return None;
+        }
+        match spoil {
+            SpoilChoice::Discard => None,
+            SpoilChoice::At(p) if p.is_finite() => Some(p),
+            SpoilChoice::At(_) => None,
+            SpoilChoice::Auto => {
+                let (lo, hi) = stroke.bounds()?;
+                let mut site = inf_voxel::default_spoil_site(lo, hi, total, voxel_size_m);
+                if let Some(y) = self.ground_surface_y(site.x, site.z) {
+                    site.y = y;
+                }
+                Some(site)
+            }
+        }
+    }
+
+    /// The **topmost** terrain surface at world XZ, over this document's
+    /// terrains in creation order, or `None` where no terrain answers.
+    ///
+    /// Topmost and not nearest, because this answers "what would a heap stand
+    /// on?". `height_at` is the poisoned bilinear query, so a hole reads as no
+    /// ground — which is right: a pile must not be stood on the lid of a cave
+    /// that is not there.
+    pub fn ground_surface_y(&self, x: f64, z: f64) -> Option<f64> {
+        let mut best: Option<f64> = None;
+        for &guid in self.order() {
+            let Some((data, origin)) = self.terrain_data_and_origin(guid) else {
+                continue;
+            };
+            let local = glam::DVec2::new(x - origin.x, z - origin.z);
+            let Some(h) = data.height_at(local) else {
+                continue;
+            };
+            let y = origin.y + h;
+            if best.is_none_or(|b| y > b) {
+                best = Some(y);
+            }
+        }
+        best
     }
 
     /// Redo (`revert = false`) or undo (`revert = true`) a carve: both halves,

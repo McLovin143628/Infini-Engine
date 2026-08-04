@@ -62,6 +62,7 @@ pub mod ground;
 pub mod mesh;
 pub mod ops;
 pub mod residency;
+pub mod spoil;
 pub mod store;
 pub mod wants;
 pub mod writeback;
@@ -85,8 +86,12 @@ pub use ground::{ground_height_at, sim_volume, topmost_voxel_surface, voxel_surf
 pub use mesh::{
     mesh_chunk, mesh_keys_for, source_key, MeshSourceKey, MeshSyncReport, VoxelMesh, VoxelMeshCache,
 };
-pub use ops::{OpReport, VoxelDeltaBuilder, VoxelOp, VoxelOpKind, VoxelShape};
+pub use ops::{trench_basis, OpReport, VoxelDeltaBuilder, VoxelOp, VoxelOpKind, VoxelShape};
 pub use residency::{chunk_range, ChunkStore, MemoryChunkStore, ResidencyReport};
+pub use spoil::{
+    cbrt_det, default_spoil_site, pile_base_radius_m, SpoilPlan, SpoilReport, REPOSE_COS,
+    REPOSE_DEG, REPOSE_TAN, SPOIL_GAP_M,
+};
 pub use store::{VolumeSlot, VoxelStreamReport, VoxelVolumes};
 pub use wants::{
     advance_wants, chunk_wants, clamp_wants, ChunkCatalog, ChunkGrid, ChunkIndex,

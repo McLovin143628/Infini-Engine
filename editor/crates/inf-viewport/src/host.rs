@@ -47,7 +47,7 @@ use inf_terrain::{
 
 use crate::camera::{
     BiomeSettings, Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptFalloff, SculptOp,
-    SculptSettings, Snap2DSettings, SnapSettings, ToolMode, ViewportMode, VoxelOpMode,
+    SculptSettings, Snap2DSettings, SnapSettings, SpoilMode, ToolMode, ViewportMode, VoxelOpMode,
     VoxelSettings, VoxelToolKind, WaterSettings, WaterToolKind, TWO_D_FAR, TWO_D_NEAR,
 };
 use crate::SurfaceTarget;
@@ -317,8 +317,26 @@ pub struct EngineHost {
     /// or the sub-mode is left — an author who walked away must not find a
     /// half-drawn tunnel waiting to be committed.
     voxel_path: Vec<DVec3>,
+    /// The **box cut**'s drag anchor: the surface point the press landed on
+    /// (P21.3). `Some` for exactly as long as the button is down, and cleared by
+    /// a commit, a tool switch or a settings push — an abandoned pit rectangle
+    /// must not be waiting on return.
+    voxel_box_anchor: Option<DVec3>,
+    /// …and the surface point under the cursor while that drag runs, so the
+    /// preview and the readout describe the same rectangle the release will cut.
+    voxel_box_cursor: Option<DVec3>,
+    /// Where the author put the **spoil site** marker (P21.3), or `None` for the
+    /// deterministic default.
+    ///
+    /// Host state and not a setting, because the author picks it in the viewport
+    /// and the toolbar has no way to name a world point. It survives sub-mode
+    /// changes and tool switches on purpose: a heap site is a decision about the
+    /// *level*, not about the gesture, and re-picking it after every trip to the
+    /// Select tool would be busywork.
+    voxel_spoil_site: Option<DVec3>,
     /// The preview the voxel tool draws: the tunnel path plus the segment the next
-    /// click would add, or the brush's cut sphere. Debug lines, never persisted.
+    /// click would add, the pit rectangle being dragged, the brush's cut sphere,
+    /// and the spoil marker. Debug lines, never persisted.
     voxel_preview: Vec<[DVec3; 2]>,
     /// Terrains already reported as carrying holes they cannot save (P21.2's
     /// defensive advisory). One warning per terrain per document, because the
@@ -901,6 +919,9 @@ impl EngineHost {
             voxel_stroke_terrains: Vec::new(),
             voxel_stroke_last: None,
             voxel_path: Vec::new(),
+            voxel_box_anchor: None,
+            voxel_box_cursor: None,
+            voxel_spoil_site: None,
             voxel_preview: Vec::new(),
             voxel_hole_warned: BTreeSet::new(),
             foliage_stroke_seq: 0,
@@ -1019,6 +1040,11 @@ impl EngineHost {
             // shape the author stopped thinking about several tools ago.
             self.voxel_path.clear();
             self.voxel_preview.clear();
+            // A box-cut drag is the same case as a pending tunnel path: it has
+            // cut nothing (the pit is committed on release), so dropping it
+            // loses no work and leaves no un-undoable edit behind.
+            self.voxel_box_anchor = None;
+            self.voxel_box_cursor = None;
             // An in-flight BRUSH stroke is the opposite case — it has already cut
             // — and it is closed by [`settle_orphaned_carve`], which the pump calls
             // with the document in hand. It cannot be closed here: committing an
@@ -1036,6 +1062,12 @@ impl EngineHost {
         self.voxel_tool = voxel;
         self.voxel_path.clear();
         self.voxel_preview.clear();
+        // …and any half-dragged pit rectangle, for the same reason: a pit
+        // described at one depth and cut at another is not the pit the author
+        // dragged. The spoil SITE deliberately survives — it is a decision about
+        // the level, not about the gesture.
+        self.voxel_box_anchor = None;
+        self.voxel_box_cursor = None;
     }
 
     /// Replace the water-tool configuration (from the toolbar, P20.4).
@@ -4546,9 +4578,36 @@ impl EngineHost {
         "Carve: no terrain under the cursor. Aim at ground that has paged in — a cut placed at \
          sea level would dig somewhere the author never pointed at.";
 
-    /// `true` while a carve stroke is in progress.
+    /// …and why it refused a dig whose spoil had nowhere to go.
+    const VOXEL_NO_SPOIL_SITE_HINT: &'static str =
+        "Spoil: no site picked yet, so the soil goes to the default spot — east of the cut, \
+         clear of its rim. Turn on \"Set spoil site\" and click where you want the heap.";
+
+    /// `true` while a carve stroke **or a box-cut drag** is in progress.
+    ///
+    /// One predicate for both because the pump gates `update_voxel` and
+    /// `finish_voxel` on it: a box drag that answered `false` here would never
+    /// see a move or a release, which is a rectangle the author drags and the
+    /// editor never cuts.
     pub fn is_carving(&self) -> bool {
-        self.voxel_stroke.is_some()
+        self.voxel_stroke.is_some() || self.voxel_box_anchor.is_some()
+    }
+
+    /// Where this dig's material goes, resolved from the toolbar's mode and the
+    /// marker the author may have placed (P21.3).
+    fn spoil_choice(&self) -> inf_editor_core::scene::undo::SpoilChoice {
+        use inf_editor_core::scene::undo::SpoilChoice;
+        match self.voxel_tool.spoil {
+            SpoilMode::Off => SpoilChoice::Discard,
+            SpoilMode::Auto => SpoilChoice::Auto,
+            // Site with no marker falls back to the documented default rather
+            // than refusing: the author asked for a heap, and standing it in the
+            // default place is a better answer than not digging.
+            SpoilMode::Site => match self.voxel_spoil_site {
+                Some(p) => SpoilChoice::At(p),
+                None => SpoilChoice::Auto,
+            },
+        }
     }
 
     /// The volume the next cut goes into: the first **selected** entity carrying a
@@ -4587,26 +4646,48 @@ impl EngineHost {
     /// against voxel surfaces, so continuing a tunnel from *inside* an existing
     /// cave needs a voxel raycast this crate does not have yet. Aim from above and
     /// set a depth; the raycast is the follow-up.
-    fn voxel_pick(&self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) -> Option<DVec3> {
-        let probes = self.terrain_probes(doc, None);
-        let surface = if probes.is_empty() {
-            // No terrain in the level: the ground plane is the only ground there
-            // is, exactly as the water tool treats it.
-            self.pick_world_point(doc, view, px, py)
-        } else {
-            let (ro, rd) = view.pixel_ray(px as f32, py as f32);
-            let ro_w = self.origin.to_world(ro);
-            nearest_terrain_hit(&probes, ro_w, rd.as_dvec3()).map(|h| h.world)?
-        };
-        Some(surface - DVec3::new(0.0, self.voxel_tool.depth_m.max(0.0), 0.0))
+    fn voxel_sink(&self, surface: DVec3) -> DVec3 {
+        surface - DVec3::new(0.0, self.voxel_tool.depth_m.max(0.0), 0.0)
     }
 
-    /// The op one dab of the current settings makes at `center`.
-    fn voxel_op_at(&self, center: DVec3) -> VoxelOp {
-        self.voxel_shape_op(VoxelShape::Sphere {
-            center,
-            radius_m: self.voxel_tool.radius_m.max(0.0),
-        })
+    /// The **raw** ground point under the cursor, before the depth sink.
+    ///
+    /// Split out for P21.3: a box cut, a trench and a dig-to-depth brush dab all
+    /// need to know where *daylight* is (their tops clear the surface), while
+    /// the sphere brush and the tunnel want the sunk centre. Two callers, one
+    /// pick, so the two can never disagree about which ground the click found.
+    fn voxel_surface_pick(
+        &self,
+        doc: &SceneDoc,
+        view: &RenderView,
+        px: u32,
+        py: u32,
+    ) -> Option<DVec3> {
+        let probes = self.terrain_probes(doc, None);
+        if probes.is_empty() {
+            // No terrain in the level: the ground plane is the only ground there
+            // is, exactly as the water tool treats it.
+            return Some(self.pick_world_point(doc, view, px, py));
+        }
+        let (ro, rd) = view.pixel_ray(px as f32, py as f32);
+        let ro_w = self.origin.to_world(ro);
+        nearest_terrain_hit(&probes, ro_w, rd.as_dvec3()).map(|h| h.world)
+    }
+
+    /// The op one dab of the current settings makes at the **surface** point
+    /// `surface`.
+    ///
+    /// The shape itself is [`inf_editor_core::voxel_tool::brush_dab_shape`] —
+    /// Ring 1, pure, tested on every CI leg — because "what does one dab dig" is
+    /// a rule about committed geometry and this module is
+    /// `#[cfg(any(windows, macos))]` (the M11 argument).
+    fn voxel_op_at(&self, surface: DVec3) -> VoxelOp {
+        self.voxel_shape_op(inf_editor_core::voxel_tool::brush_dab_shape(
+            surface,
+            self.voxel_tool.radius_m,
+            self.voxel_tool.depth_m,
+            self.voxel_tool.dig_to_depth,
+        ))
     }
 
     /// Wrap `shape` in the carve-or-fill the toolbar selected. One place, so the
@@ -4682,17 +4763,46 @@ impl EngineHost {
         py: u32,
         ctrl: bool,
     ) -> bool {
+        // The spoil-site mode owns the click before anything else does: while it
+        // is on, the author is placing a marker, not digging. Checked ahead of
+        // the volume gate so a level with no volume can still be marked up.
+        if self.voxel_tool.pick_spoil_site {
+            match self.voxel_surface_pick(doc, view, px, py) {
+                Some(p) => {
+                    self.voxel_spoil_site = Some(p);
+                    self.report_tool(format!(
+                        "Spoil site set at ({:.1}, {:.1}, {:.1}). Turn off \"Set spoil site\" to \
+                         dig again.",
+                        p.x, p.y, p.z
+                    ));
+                    self.refresh_voxel_preview(p);
+                }
+                None => self.reject_tool(Self::VOXEL_NO_GROUND_REJECTION),
+            }
+            return false;
+        }
         let Some(volume) = self.voxel_target(doc) else {
             self.reject_tool(Self::VOXEL_NO_VOLUME_REJECTION);
             return false;
         };
-        let Some(p) = self.voxel_pick(doc, view, px, py) else {
+        let Some(surface) = self.voxel_surface_pick(doc, view, px, py) else {
             self.reject_tool(Self::VOXEL_NO_GROUND_REJECTION);
             return false;
         };
+        let p = self.voxel_sink(surface);
         match self.voxel_tool.kind {
+            VoxelToolKind::BoxCut => {
+                // A pit is committed on RELEASE, judged whole: the press only
+                // anchors the rectangle. Nothing is cut here, which is what
+                // makes an abandoned drag cost nothing.
+                self.voxel_box_anchor = Some(surface);
+                self.voxel_box_cursor = Some(surface);
+                self.refresh_voxel_preview(surface);
+                self.report_box_cut(doc, volume);
+                false
+            }
             VoxelToolKind::Brush => {
-                let op = self.voxel_op_at(p);
+                let op = self.voxel_op_at(surface);
                 let Some(terrains) = self.voxel_authorize(doc, &op.shape) else {
                     return false;
                 };
@@ -4714,7 +4824,10 @@ impl EngineHost {
                 };
                 self.voxel_stroke = Some(stroke);
                 self.voxel_stroke_terrains = terrains.clone();
-                self.voxel_stroke_last = Some(p);
+                // The stroke's path is resampled in SURFACE space, not in sunk
+                // space: the two differ by a constant only while the depth does,
+                // and a dig-to-depth column has no sunk centre at all.
+                self.voxel_stroke_last = Some(surface);
                 for g in terrains {
                     self.after_terrain_edit(doc, g);
                 }
@@ -4723,10 +4836,21 @@ impl EngineHost {
                 // The dabs mutate live; the undo entry lands at mouse-up.
                 !tally.is_noop()
             }
-            VoxelToolKind::Tunnel => {
-                self.voxel_path.push(p);
+            // The two path tools share the gesture and differ only in the shape
+            // the commit sweeps — a round bore for a tunnel, a square section
+            // for a trench (see `commit_path`).
+            VoxelToolKind::Tunnel | VoxelToolKind::Trench => {
+                // A tunnel's waypoints are its centreline (already sunk by the
+                // depth); a trench's are the SURFACE it is cut down from, and
+                // `trench_shapes` applies the depth itself.
+                self.voxel_path
+                    .push(if self.voxel_tool.kind == VoxelToolKind::Trench {
+                        surface
+                    } else {
+                        p
+                    });
                 if ctrl && self.voxel_path.len() >= 2 {
-                    return self.commit_tunnel(doc, volume);
+                    return self.commit_path(doc, volume);
                 }
                 self.refresh_voxel_preview(p);
                 false
@@ -4757,13 +4881,26 @@ impl EngineHost {
     /// spacing a *volume* wants) and cut at each, up to
     /// [`MAX_DABS_PER_UPDATE`](Self::MAX_DABS_PER_UPDATE) per frame.
     pub fn update_voxel(&mut self, doc: &mut SceneDoc, view: &RenderView, px: u32, py: u32) {
+        // The box cut's drag: rubber-band the rectangle and quote what releasing
+        // would excavate. Nothing is cut until the release, so this branch never
+        // mutates the document.
+        if self.voxel_box_anchor.is_some() {
+            if let Some(surface) = self.voxel_surface_pick(doc, view, px, py) {
+                self.voxel_box_cursor = Some(surface);
+                self.refresh_voxel_preview(surface);
+                if let Some(volume) = self.voxel_target(doc) {
+                    self.report_box_cut(doc, volume);
+                }
+            }
+            return;
+        }
         if self.voxel_stroke.is_none() {
             return;
         }
         let Some(last) = self.voxel_stroke_last else {
             return;
         };
-        let Some(cur) = self.voxel_pick(doc, view, px, py) else {
+        let Some(cur) = self.voxel_surface_pick(doc, view, px, py) else {
             return; // the cursor slid off the ground — hold the stroke, cut nothing
         };
         // Arc length in 3D, mirroring `inf_terrain::dab_positions`' pattern: a
@@ -4834,18 +4971,144 @@ impl EngineHost {
         self.refresh_voxel_preview(cur);
     }
 
-    /// Finish a brush stroke: commit both halves as ONE undo entry. Returns `true`
-    /// if anything was recorded.
+    /// Finish a brush stroke **or a box-cut drag**: displace the soil and commit
+    /// every half as ONE undo entry. Returns `true` if anything was recorded.
     pub fn finish_voxel(&mut self, doc: &mut SceneDoc) -> bool {
+        if self.voxel_box_anchor.is_some() {
+            return self.commit_box_cut(doc);
+        }
         let Some(stroke) = self.voxel_stroke.take() else {
             return false;
         };
         self.voxel_stroke_last = None;
-        let recorded = doc.edit_commit_carve(stroke);
+        let volume = stroke.volume();
+        // The spoil rides the SAME stroke, so the cut, its cave mouths and the
+        // heap it produced are one `EditCommand` and one Ctrl+Z.
+        let (tally, recorded, refusal) = doc.edit_commit_dig(stroke, self.spoil_choice());
         for g in std::mem::take(&mut self.voxel_stroke_terrains) {
             self.after_terrain_edit(doc, g);
         }
+        match refusal {
+            // The rock is committed either way (it is in the world and the author
+            // can see it); what failed is the heap, and the readout says which.
+            Some(r) => self.reject_tool(r.message()),
+            None => self.report_carve(volume, tally),
+        }
         recorded
+    }
+
+    /// Commit the pit the author dragged: judged whole, cut whole, spoiled whole
+    /// (P21.3).
+    ///
+    /// Returns `true` when the document changed. Clears the drag either way — a
+    /// refused pit that left its rectangle on screen would invite the author to
+    /// release again and be refused again.
+    fn commit_box_cut(&mut self, doc: &mut SceneDoc) -> bool {
+        let anchor = self.voxel_box_anchor.take();
+        let cursor = self.voxel_box_cursor.take();
+        self.voxel_preview.clear();
+        let (Some(anchor), Some(cursor)) = (anchor, cursor) else {
+            return false;
+        };
+        let Some(volume) = self.voxel_target(doc) else {
+            self.reject_tool(Self::VOXEL_NO_VOLUME_REJECTION);
+            return false;
+        };
+        let Some(plan) = self.box_cut_plan(doc, anchor, cursor) else {
+            // A click rather than a drag. Silent: missing a drag is not an error
+            // an author needs a sentence about.
+            return false;
+        };
+        let op = self.voxel_shape_op(plan.shape);
+        // Page before the verdict, exactly as the tunnel does: `cut_crosses_surface`
+        // reads authored tiles only, and an unpaged streamed footprint would wave
+        // a breakthrough through unchecked.
+        self.page_cut_footprint(doc, &op.shape);
+        let tally = match doc.edit_dig(volume, &self.voxel_volumes, &[op], self.spoil_choice()) {
+            Ok(tally) => tally,
+            Err(refusal) => {
+                self.reject_tool(refusal.message());
+                return false;
+            }
+        };
+        for i in 0..self.terrain_slots.len() {
+            let guid = self.terrain_slots[i].guid;
+            self.after_terrain_edit(doc, guid);
+        }
+        self.report_carve(volume, tally);
+        !tally.is_noop()
+    }
+
+    /// Resolve the dragged rectangle into a pit through the Ring-1 planner.
+    ///
+    /// The ground query is this document's own topmost surface
+    /// (`SceneDoc::ground_surface_y`), which is what makes a pit dragged across
+    /// a slope reach daylight along its whole rim — see
+    /// [`inf_editor_core::voxel_tool::box_cut_plan`] for the rule and its
+    /// documented limit.
+    fn box_cut_plan(
+        &self,
+        doc: &SceneDoc,
+        anchor: DVec3,
+        cursor: DVec3,
+    ) -> Option<inf_editor_core::voxel_tool::BoxCutPlan> {
+        inf_editor_core::voxel_tool::box_cut_plan(
+            anchor,
+            cursor,
+            self.voxel_tool.depth_m.max(0.0),
+            |x, z| doc.ground_surface_y(x, z),
+        )
+    }
+
+    /// The pit-drag readout: what releasing right now would excavate.
+    fn report_box_cut(&mut self, doc: &SceneDoc, volume: Uuid) {
+        let (Some(anchor), Some(cursor)) = (self.voxel_box_anchor, self.voxel_box_cursor) else {
+            return;
+        };
+        let Some(plan) = self.box_cut_plan(doc, anchor, cursor) else {
+            self.report_tool(
+                "Box cut: drag a rectangle on the ground — a click digs nothing.".to_string(),
+            );
+            return;
+        };
+        let size = self.voxel_size_of(volume);
+        // An UPPER bound on the excavation, not a promise: the pit's box may
+        // span air and already-hollow rock, and only the samples that actually
+        // held material become spoil. Quoted as "up to" for exactly that reason
+        // — the committed readout after the release quotes the real number.
+        let gross = plan.area_m2() * (plan.top_y - plan.floor_y);
+        self.report_tool(format!(
+            "Box cut {:.1} × {:.1} m, floor at {:.1} m ({:.1} m below grade) — up to {gross:.1} m³, \
+             {} m voxels{}",
+            plan.size_x_m,
+            plan.size_z_m,
+            plan.floor_y,
+            self.voxel_tool.depth_m.max(0.0),
+            size,
+            self.spoil_note(),
+        ));
+    }
+
+    /// The voxel scale a readout must quote: the **asset's**, never the
+    /// component's (the `project_voxel` rule).
+    fn voxel_size_of(&self, volume: Uuid) -> f64 {
+        self.voxel_volumes
+            .lock()
+            .ok()
+            .and_then(|v| v.slot(volume).map(|s| s.data.voxel_size_m()))
+            .unwrap_or(inf_ecs::components::VoxelVolume::default().voxel_size_m)
+    }
+
+    /// The clause every dig readout ends with: where the soil is going.
+    fn spoil_note(&self) -> String {
+        match self.voxel_tool.spoil {
+            SpoilMode::Off => String::new(),
+            SpoilMode::Auto => ", spoil piled east of the cut".to_string(),
+            SpoilMode::Site => match self.voxel_spoil_site {
+                Some(p) => format!(", spoil piled at ({:.0}, {:.0})", p.x, p.z),
+                None => ", spoil piled east of the cut (no site picked)".to_string(),
+            },
+        }
     }
 
     /// **Close a carve stroke the active tool can no longer finish** (P21.2
@@ -4870,7 +5133,7 @@ impl EngineHost {
     /// deferred flag would be a second piece of state saying what
     /// `tool_mode != Voxel && voxel_stroke.is_some()` already says.
     pub fn settle_orphaned_carve(&mut self, doc: &mut SceneDoc) -> bool {
-        if self.voxel_stroke.is_none() {
+        if self.voxel_stroke.is_none() && self.voxel_box_anchor.is_none() {
             return false;
         }
         // The condition is the pump's own `voxel` flag, derived here so the two
@@ -4880,6 +5143,16 @@ impl EngineHost {
         let carve_branch_runs =
             self.tool_mode == ToolMode::Voxel && self.mode != ViewportMode::TwoD;
         if carve_branch_runs {
+            return false;
+        }
+        // A box-cut drag has cut NOTHING (the pit is committed on release), so
+        // it is dropped rather than settled — there is no edit to make undoable
+        // and committing one would dig a pit the author abandoned. Only the
+        // brush stroke is settled, and only it earns the sentence below.
+        if self.voxel_stroke.is_none() {
+            self.voxel_box_anchor = None;
+            self.voxel_box_cursor = None;
+            self.voxel_preview.clear();
             return false;
         }
         let recorded = self.finish_voxel(doc);
@@ -4892,35 +5165,55 @@ impl EngineHost {
         "Carve: the tool changed while a stroke was still down, so the cut so far was committed \
          as one undo step. Ctrl+Z takes it back.";
 
-    /// Carve the pending tunnel: one capsule per path segment, all into a single
-    /// stroke, so the whole tube is one undo step.
+    /// Cut the pending path: one swept shape per segment, all into a single
+    /// stroke, so the whole run is one undo step.
     ///
-    /// Capsules and not spheres: a chain of spheres at waypoint spacing leaves
-    /// gaps between the beads, and the swept-sphere primitive exists in
-    /// `inf_voxel::VoxelShape` precisely for this.
+    /// **One function for both path tools**, because they differ only in the
+    /// section they sweep:
     ///
-    /// **Judged whole, then cut whole** — which is `SceneDoc::edit_carve_path`'s
-    /// job, not this file's. All this does is page every segment's footprint,
-    /// hand the chain over, and mirror the result into the render set. The
-    /// atomicity rule lives in Ring 1 so every CI leg tests it; this module is
-    /// `#[cfg(any(windows, macos))]`.
-    fn commit_tunnel(&mut self, doc: &mut SceneDoc, volume: Uuid) -> bool {
+    /// * a **tunnel** sweeps a capsule — a round bore at depth. Capsules and not
+    ///   spheres: a chain of spheres at waypoint spacing leaves gaps between the
+    ///   beads, and the swept-sphere primitive exists in `inf_voxel::VoxelShape`
+    ///   precisely for this.
+    /// * a **trench** sweeps a rectangle from the surface down (P21.3), through
+    ///   [`inf_editor_core::voxel_tool::trench_shapes`] — Ring 1, which owns the
+    ///   miter allowance that stops a bend leaving un-cut ground on its outside.
+    ///
+    /// **Judged whole, then cut whole, then spoiled whole** — which is
+    /// `SceneDoc::edit_dig`'s job, not this file's. All this does is page every
+    /// segment's footprint, hand the chain over, and mirror the result into the
+    /// render set. The atomicity rule lives in Ring 1 so every CI leg tests it;
+    /// this module is `#[cfg(any(windows, macos))]`.
+    fn commit_path(&mut self, doc: &mut SceneDoc, volume: Uuid) -> bool {
         let path = std::mem::take(&mut self.voxel_path);
         self.voxel_preview.clear();
         if path.len() < 2 {
             return false;
         }
         let radius_m = self.voxel_tool.radius_m.max(0.0);
-        let ops: Vec<VoxelOp> = path
-            .windows(2)
-            .map(|seg| {
-                self.voxel_shape_op(VoxelShape::Capsule {
-                    a: seg[0],
-                    b: seg[1],
-                    radius_m,
+        let ops: Vec<VoxelOp> = if self.voxel_tool.kind == VoxelToolKind::Trench {
+            inf_editor_core::voxel_tool::trench_shapes(
+                &path,
+                radius_m,
+                self.voxel_tool.depth_m.max(0.0),
+            )
+            .into_iter()
+            .map(|s| self.voxel_shape_op(s))
+            .collect()
+        } else {
+            path.windows(2)
+                .map(|seg| {
+                    self.voxel_shape_op(VoxelShape::Capsule {
+                        a: seg[0],
+                        b: seg[1],
+                        radius_m,
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        };
+        if ops.is_empty() {
+            return false;
+        }
         // Page every segment BEFORE the verdict runs: it reads authored tiles
         // only, and an unpaged streamed footprint would answer "this reaches no
         // surface" for a tunnel that plainly breaks out of the hillside.
@@ -4930,7 +5223,7 @@ impl EngineHost {
         // The refusal carries its OWN sentence. Quoting the inline-terrain one for
         // every empty answer is what this used to do, and it sent an author off to
         // convert a terrain when the real problem was a volume that never loaded.
-        let tally = match doc.edit_carve_path(volume, &self.voxel_volumes, &ops) {
+        let tally = match doc.edit_dig(volume, &self.voxel_volumes, &ops, self.spoil_choice()) {
             Ok(tally) => tally,
             Err(refusal) => {
                 self.reject_tool(refusal.message());
@@ -4938,7 +5231,7 @@ impl EngineHost {
             }
         };
         // Every projected terrain, not the segments' own lists: a tunnel can run
-        // across several, `edit_carve_path` keeps its per-segment plan private,
+        // across several, `edit_dig` keeps its per-segment plan private,
         // and `after_terrain_edit` is a no-op on a terrain that is not streamed
         // and a cheap re-projection on one that is (a level has a handful).
         for i in 0..self.terrain_slots.len() {
@@ -4952,22 +5245,63 @@ impl EngineHost {
     /// Idle hover in voxel mode: show where the next cut lands, and — for the
     /// tunnel — how much path is pending and how to commit it.
     pub fn update_voxel_hover(&mut self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) {
-        match self.voxel_pick(doc, view, px, py) {
-            Some(p) => self.refresh_voxel_preview(p),
+        // The spoil-site mode has its own hover: the marker follows the cursor,
+        // and the line says what the next click does. Reported unconditionally,
+        // because the *silent* version of this mode is a tool where clicking
+        // digs nothing and nothing explains why.
+        if self.voxel_tool.pick_spoil_site {
+            match self.voxel_surface_pick(doc, view, px, py) {
+                Some(p) => self.refresh_voxel_preview(p),
+                None => self.voxel_preview.clear(),
+            }
+            self.report_tool(match self.voxel_spoil_site {
+                Some(p) => format!(
+                    "Set spoil site: click to MOVE the heap from ({:.0}, {:.0}) — turn the button \
+                     off to dig again.",
+                    p.x, p.z
+                ),
+                None => Self::VOXEL_NO_SPOIL_SITE_HINT.to_string(),
+            });
+            return;
+        }
+        match self.voxel_surface_pick(doc, view, px, py) {
+            Some(surface) => {
+                let p = match self.voxel_tool.kind {
+                    // A trench's preview follows the SURFACE it is cut from; the
+                    // other three follow the sunk centre they cut at.
+                    VoxelToolKind::Trench | VoxelToolKind::BoxCut => surface,
+                    _ => self.voxel_sink(surface),
+                };
+                self.refresh_voxel_preview(p);
+            }
             None => self.voxel_preview.clear(),
         }
-        if self.voxel_tool.kind == VoxelToolKind::Tunnel && !self.voxel_path.is_empty() {
-            let length: f64 = self
-                .voxel_path
-                .windows(2)
-                .map(|w| (w[1] - w[0]).length())
-                .sum();
-            self.report_tool(format!(
-                "Tunnel: {} waypoint(s), {length:.1} m so far, {:.1} m across — Ctrl+click to \
-                 carve it",
-                self.voxel_path.len(),
-                self.voxel_tool.radius_m * 2.0,
-            ));
+        match self.voxel_tool.kind {
+            VoxelToolKind::Tunnel | VoxelToolKind::Trench if !self.voxel_path.is_empty() => {
+                let length: f64 = self
+                    .voxel_path
+                    .windows(2)
+                    .map(|w| (w[1] - w[0]).length())
+                    .sum();
+                let what = if self.voxel_tool.kind == VoxelToolKind::Trench {
+                    "Trench"
+                } else {
+                    "Tunnel"
+                };
+                self.report_tool(format!(
+                    "{what}: {} waypoint(s), {length:.1} m so far, {:.1} m across — Ctrl+click to \
+                     cut it{}",
+                    self.voxel_path.len(),
+                    self.voxel_tool.radius_m * 2.0,
+                    self.spoil_note(),
+                ));
+            }
+            VoxelToolKind::BoxCut => self.report_tool(format!(
+                "Box cut: drag a rectangle on the ground to excavate it {:.1} m below grade{}",
+                self.voxel_tool.depth_m.max(0.0),
+                self.spoil_note(),
+            )),
+            _ => {}
         }
     }
 
@@ -4990,12 +5324,49 @@ impl EngineHost {
                 }
             }
         }
-        if self.voxel_tool.kind == VoxelToolKind::Tunnel {
+        if matches!(
+            self.voxel_tool.kind,
+            VoxelToolKind::Tunnel | VoxelToolKind::Trench
+        ) {
             for seg in self.voxel_path.windows(2) {
                 self.voxel_preview.push([seg[0], seg[1]]);
             }
             if let Some(&tail) = self.voxel_path.last() {
                 self.voxel_preview.push([tail, center]);
+            }
+        }
+        // The pit being dragged, as a box: the rectangle at grade plus the four
+        // verticals down to the floor, so the author sees the DEPTH they set and
+        // not only the footprint they are dragging.
+        if let (Some(a), Some(b)) = (self.voxel_box_anchor, self.voxel_box_cursor) {
+            let floor = a.y.min(b.y) - self.voxel_tool.depth_m.max(0.0);
+            let top = a.y.max(b.y);
+            let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
+            let (z0, z1) = (a.z.min(b.z), a.z.max(b.z));
+            for &y in &[top, floor] {
+                let c = [
+                    DVec3::new(x0, y, z0),
+                    DVec3::new(x1, y, z0),
+                    DVec3::new(x1, y, z1),
+                    DVec3::new(x0, y, z1),
+                ];
+                for i in 0..4 {
+                    self.voxel_preview.push([c[i], c[(i + 1) % 4]]);
+                }
+            }
+            for (x, z) in [(x0, z0), (x1, z0), (x1, z1), (x0, z1)] {
+                self.voxel_preview
+                    .push([DVec3::new(x, top, z), DVec3::new(x, floor, z)]);
+            }
+        }
+        // The spoil marker: a small cross at the site, so an author can see where
+        // the heap will land without digging to find out.
+        if self.voxel_tool.spoil == SpoilMode::Site {
+            if let Some(p) = self.voxel_spoil_site {
+                const ARM: f64 = 1.0;
+                for d in [DVec3::X, DVec3::Y, DVec3::Z] {
+                    self.voxel_preview.push([p - d * ARM, p + d * ARM]);
+                }
             }
         }
     }
@@ -5004,8 +5375,13 @@ impl EngineHost {
     /// measurement readout, the twin of the lake drag's coverage line.
     ///
     /// Quotes cubic metres as well as sample counts because a volume is what an
-    /// author is actually digging, and it is the number P21.3's soil-displacement
-    /// conservation gate will have to balance.
+    /// author is actually digging, and — once spoil is on — it is the number the
+    /// conservation ledger balances.
+    ///
+    /// **The excavation line quotes both sides of that ledger** (P21.3): m³ out
+    /// of the hole, m³ into the heap, and the per-material breakdown, because
+    /// "did the soil actually go somewhere" is the question an author asks about
+    /// a dig and the one number that proves it is the pair.
     fn report_carve(&mut self, volume: Uuid, tally: inf_editor_core::scene::undo::CarveTally) {
         if tally.is_noop() {
             return;
@@ -5013,16 +5389,37 @@ impl EngineHost {
         // The ASSET's scale, never the component's — the same rule `project_voxel`
         // obeys, and reading the component here would quote a volume computed
         // against one cell size for geometry cut at another. The volume is passed
-        // in rather than read off the in-flight stroke, because the tunnel reports
-        // *after* committing (and therefore after the stroke is gone), which is
-        // exactly when a stroke-derived scale would silently fall back to a
-        // default that is right for most assets and wrong for the rest.
-        let size = self
-            .voxel_volumes
-            .lock()
-            .ok()
-            .and_then(|v| v.slot(volume).map(|s| s.data.voxel_size_m()))
-            .unwrap_or(inf_ecs::components::VoxelVolume::default().voxel_size_m);
+        // in rather than read off the in-flight stroke, because the path tools
+        // report *after* committing (and therefore after the stroke is gone),
+        // which is exactly when a stroke-derived scale would silently fall back
+        // to a default that is right for most assets and wrong for the rest.
+        let size = self.voxel_size_of(volume);
+        if tally.spoiled() > 0 || self.voxel_tool.spoil != SpoilMode::Off {
+            let breakdown = tally.material_breakdown();
+            let by_layer = if breakdown.is_empty() {
+                String::new()
+            } else {
+                format!(" [{breakdown}]")
+            };
+            // `conserved()` and not "the numbers look close": the identity is
+            // integer and per material, and a readout that said "balanced" for a
+            // near miss would be the one place the gate is not the gate.
+            let ledger = if tally.conserved() {
+                "balanced"
+            } else {
+                "DISCARDED"
+            };
+            self.report_tool(format!(
+                "Excavate: removed {:.2} m³ ({} voxels){by_layer}, spoiled {:.2} m³ ({} voxels) — \
+                 {ledger}; {} cave-mouth sample(s) opened",
+                tally.removed_m3(size),
+                tally.carved,
+                tally.spoiled_m3(size),
+                tally.spoiled(),
+                tally.holes,
+            ));
+            return;
+        }
         let m3 = tally.net_removed_m3(size);
         let verb = if m3 >= 0.0 { "removed" } else { "added" };
         self.report_tool(format!(

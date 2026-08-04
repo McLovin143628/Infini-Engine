@@ -991,6 +991,28 @@ pub enum VoxelToolKindDto {
     /// Click waypoints; Ctrl+click closes the path and tube-carves the whole
     /// thing as one undo step.
     Tunnel,
+    /// Press-drag a rectangle on the surface; release excavates it to
+    /// `depth_m` below grade (P21.3) — the foundation pit.
+    BoxCut,
+    /// Click waypoints; Ctrl+click cuts a swept **rectangular** trench along
+    /// them (P21.3) — the utility trench / road cut.
+    Trench,
+}
+
+/// Where a dig puts the material it removes (P21.3). Serializes as its tag
+/// string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum SpoilModeDto {
+    /// Removed and discarded — the P21.2 behaviour, and the right one for a
+    /// cave.
+    Off,
+    /// Piled at the deterministic default site: east of the cut, clear of its
+    /// rim, on the ground there.
+    Auto,
+    /// Piled where the author picked in the viewport (see
+    /// [`VoxelSettingsDto::pick_spoil_site`]); falls back to `Auto` until a site
+    /// has been picked.
+    Site,
 }
 
 /// Carve or fill — which way a voxel cut runs. Serializes as its tag string.
@@ -1027,6 +1049,16 @@ pub struct VoxelSettingsDto {
     /// carries no material). A voxel material index IS a terrain splat index,
     /// which is what makes a cave wall shade like the hillside it opens out of.
     pub material: u8,
+    /// **Dig to grade** (P21.3): a brush dab becomes a column from `depth_m`
+    /// below the surface up to daylight instead of a ball at depth, so a
+    /// freehand stroke leaves an open cut rather than buried bubbles. Ignored by
+    /// the other three sub-modes, which are open to the sky by construction.
+    pub dig_to_depth: bool,
+    /// Where the excavated material goes.
+    pub spoil: SpoilModeDto,
+    /// While `true`, a viewport click **moves the spoil site** instead of
+    /// digging — a sticky mode the toolbar turns off again, not a one-shot arm.
+    pub pick_spoil_site: bool,
 }
 
 /// What the Voxel tool can and cannot do in the **open level** — the toolbar's
@@ -1079,6 +1111,9 @@ impl Default for VoxelSettingsDto {
             depth_m: 0.0,
             mode: VoxelOpModeDto::Carve,
             material: 0,
+            dig_to_depth: false,
+            spoil: SpoilModeDto::Off,
+            pick_spoil_site: false,
         }
     }
 }

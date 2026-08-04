@@ -40,8 +40,8 @@ use std::sync::{Arc, Mutex};
 use glam::DVec3;
 use inf_ecs::components::VoxelVolume;
 use inf_voxel::{
-    ChunkKey, OpReport, VolumeSlot, VoxelDelta, VoxelDeltaBuilder, VoxelOp, VoxelStreamBudget,
-    VoxelStreamReport, VoxelVolumes, VoxelWantsParams,
+    ChunkKey, OpReport, SpoilPlan, SpoilReport, VolumeSlot, VoxelDelta, VoxelDeltaBuilder, VoxelOp,
+    VoxelStreamBudget, VoxelStreamReport, VoxelVolumes, VoxelWantsParams,
 };
 use uuid::Uuid;
 
@@ -432,6 +432,31 @@ impl EditorVoxelVolumes {
         if !report.is_noop() {
             // Re-mesh now rather than at commit: the whole point of a live brush
             // is that the cave appears under the cursor as it is dug.
+            self.volumes.resync(entity.as_u128());
+        }
+        Some(report)
+    }
+
+    /// Place a [`SpoilPlan`]'s displaced soil into `entity`'s volume,
+    /// accumulating into the **same** `builder` the cut used, and re-mesh what
+    /// moved (P21.3).
+    ///
+    /// `None` for the same reason [`carve_into`](Self::carve_into) answers
+    /// `None`: no loaded volume is a refusal, never an empty edit. The exactness
+    /// of the placement is the Ring-0 rule
+    /// ([`VoxelData::place_spoil_into`](inf_voxel::VoxelData::place_spoil_into));
+    /// this is the store's door onto it, and it exists so the caller never has
+    /// to reach past `VolumeSlot` to mutate a volume the store owns the meshes
+    /// for.
+    pub fn spoil_into(
+        &mut self,
+        entity: Uuid,
+        plan: &SpoilPlan,
+        builder: &mut VoxelDeltaBuilder,
+    ) -> Option<SpoilReport> {
+        let slot = self.volumes.get_mut(entity.as_u128())?;
+        let report = slot.data.place_spoil_into(plan, builder);
+        if report.total_placed() > 0 {
             self.volumes.resync(entity.as_u128());
         }
         Some(report)

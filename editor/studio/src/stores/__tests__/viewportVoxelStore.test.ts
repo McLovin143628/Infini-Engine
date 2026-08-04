@@ -88,6 +88,9 @@ beforeEach(() => {
     voxelDepth: 0,
     voxelMode: "Carve",
     voxelMaterial: 0,
+    voxelDigToDepth: false,
+    voxelSpoil: "Off",
+    voxelPickSpoilSite: false,
     voxelStatus: null,
     toolMode: "Select",
   });
@@ -103,6 +106,11 @@ describe("voxel tool store", () => {
     expect(s.voxelDepth).toBe(0);
     expect(s.voxelMode).toBe("Carve");
     expect(s.voxelMaterial).toBe(0);
+    // P21.3: the excavation half starts OFF, so the carve brush behaves exactly
+    // as it did in P21.2 until an author asks for a dig.
+    expect(s.voxelDigToDepth).toBe(false);
+    expect(s.voxelSpoil).toBe("Off");
+    expect(s.voxelPickSpoilSite).toBe(false);
     // Nothing is pushed until something is set.
     expect(viewport.setVoxel).not.toHaveBeenCalled();
   });
@@ -115,6 +123,9 @@ describe("voxel tool store", () => {
       depth_m: 0,
       mode: "Carve",
       material: 0,
+      dig_to_depth: false,
+      spoil: "Off",
+      pick_spoil_site: false,
     });
 
     useViewportStore.getState().setVoxelRadius(5.5);
@@ -127,8 +138,12 @@ describe("voxel tool store", () => {
     expect(lastPush().mode).toBe("Fill");
     useViewportStore.getState().setVoxelMaterial(2);
     expect(lastPush().material).toBe(2);
-    // Five setters, five pushes — none of them silent.
-    expect(vi.mocked(viewport.setVoxel).mock.calls.length).toBe(5);
+    useViewportStore.getState().setVoxelDigToDepth(true);
+    expect(lastPush().dig_to_depth).toBe(true);
+    useViewportStore.getState().setVoxelSpoil("Auto");
+    expect(lastPush().spoil).toBe("Auto");
+    // Seven setters, seven pushes — none of them silent.
+    expect(vi.mocked(viewport.setVoxel).mock.calls.length).toBe(7);
   });
 
   it("rejects NaN and negative lengths, and rounds the material into a u8", () => {
@@ -168,6 +183,61 @@ describe("voxel tool store", () => {
     expect(useViewportStore.getState().voxelRadius).toBe(0);
     useViewportStore.getState().setVoxelDepth(0);
     expect(useViewportStore.getState().voxelDepth).toBe(0);
+  });
+});
+
+describe("the excavation controls (P21.3)", () => {
+  /**
+   * THE ONE THAT MATTERS. A marker the author places and a dig that ignores it
+   * is the worst outcome available here — the heap lands somewhere else and
+   * nothing says why — so arming the picker also selects the mode that uses the
+   * site, in one atomic update that the single push then carries.
+   */
+  it("arming the spoil picker also selects the mode that USES the site", () => {
+    const s = () => useViewportStore.getState();
+    expect(s().voxelSpoil).toBe("Off");
+    s().toggleVoxelPickSpoilSite();
+    expect(s().voxelPickSpoilSite).toBe(true);
+    expect(s().voxelSpoil).toBe("Site");
+    expect(lastPush().pick_spoil_site).toBe(true);
+    expect(lastPush().spoil).toBe("Site");
+    // …and one push carried both halves, so the native side never sees a frame
+    // where the picker is armed and the mode is not.
+    expect(vi.mocked(viewport.setVoxel).mock.calls.length).toBe(1);
+  });
+
+  it("turning the picker off leaves the mode alone", () => {
+    const s = () => useViewportStore.getState();
+    s().toggleVoxelPickSpoilSite();
+    s().toggleVoxelPickSpoilSite();
+    expect(s().voxelPickSpoilSite).toBe(false);
+    expect(s().voxelSpoil).toBe("Site");
+    expect(lastPush().pick_spoil_site).toBe(false);
+    expect(lastPush().spoil).toBe("Site");
+  });
+
+  /**
+   * The converse: a lit "Set spoil site" button over a mode that no longer uses
+   * one is a control that does nothing and explains nothing.
+   */
+  it("leaving Site mode disarms the picker", () => {
+    const s = () => useViewportStore.getState();
+    s().toggleVoxelPickSpoilSite();
+    expect(s().voxelPickSpoilSite).toBe(true);
+    s().setVoxelSpoil("Auto");
+    expect(s().voxelPickSpoilSite).toBe(false);
+    expect(lastPush().pick_spoil_site).toBe(false);
+    expect(lastPush().spoil).toBe("Auto");
+    // Re-selecting Site does NOT re-arm: picking a mode is not picking a place.
+    s().setVoxelSpoil("Site");
+    expect(s().voxelPickSpoilSite).toBe(false);
+  });
+
+  it("the four cut sub-modes all reach the viewport", () => {
+    for (const kind of ["Brush", "Tunnel", "BoxCut", "Trench"] as const) {
+      useViewportStore.getState().setVoxelKind(kind);
+      expect(lastPush().kind).toBe(kind);
+    }
   });
 });
 

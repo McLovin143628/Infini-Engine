@@ -57,6 +57,71 @@ pub enum VoxelShape {
     /// dragging a carve across the world is a chain of these, and a chain of
     /// capsules has no gaps where a chain of spheres would.
     Capsule { a: DVec3, b: DVec3, radius_m: f64 },
+    /// A **swept rectangular trench** (P21.3): the box you get by dragging a
+    /// `2·half_width_m × 2·half_height_m` cross-section along the segment
+    /// `a → b`. The utility-trench / road-cut primitive, and the oriented box
+    /// [`Box`](VoxelShape::Box)'s doc comment promised would be "added beside
+    /// it" rather than composed from capsules.
+    ///
+    /// **Yaw is free, roll is not.** The frame is derived from the centreline:
+    /// local +X is `normalize(b − a)`, local +Z is the horizontal perpendicular
+    /// `normalize(u × Y)`, and local +Y closes the basis. So a trench can run in
+    /// any direction and dive, and its floor stays perpendicular to the run —
+    /// but it cannot be banked, which is the one degree of freedom an excavation
+    /// has no use for. A **vertical** centreline (a shaft) has no horizontal
+    /// perpendicular; the basis falls back to world +X, deterministically.
+    ///
+    /// The distance function is exact (a box SDF in the rotated frame), the
+    /// basis is built from square roots and dot/cross products only — **no `std`
+    /// trig anywhere**, which is what makes a committed trench bit-identical on
+    /// every platform (the P14 law).
+    Trench {
+        /// Centreline start, world metres.
+        a: DVec3,
+        /// Centreline end, world metres.
+        b: DVec3,
+        /// Half the cross-section's width, metres (local Z).
+        half_width_m: f64,
+        /// Half the cross-section's height, metres (local Y).
+        half_height_m: f64,
+    },
+}
+
+/// The orthonormal frame of a [`Trench`](VoxelShape::Trench): `(u, v, w,
+/// half_length_m)`, where `u` runs along the centreline, `w` is the horizontal
+/// perpendicular and `v = w × u` closes it.
+///
+/// `None` for a degenerate centreline (zero length, or non-finite input) — the
+/// same "write nothing rather than a plane of garbage" contract every other
+/// shape's validity check has.
+///
+/// Public because the tools draw the trench's preview box from exactly this
+/// frame, and a second copy of the basis rule is how a preview comes to show a
+/// different trench from the one that gets cut.
+pub fn trench_basis(a: DVec3, b: DVec3) -> Option<(DVec3, DVec3, DVec3, f64)> {
+    if !(a.is_finite() && b.is_finite()) {
+        return None;
+    }
+    let ab = b - a;
+    let len = ab.length();
+    // `<=` plus an explicit NaN guard rather than `!(len > 0.0)`: the two say the
+    // same thing and only one of them reads as a deliberate statement about a
+    // partially-ordered type.
+    if len.is_nan() || len <= 0.0 || len.is_infinite() {
+        return None;
+    }
+    let u = ab / len;
+    let cross = u.cross(DVec3::Y);
+    // A vertical run has no horizontal perpendicular. Falling back to world +X
+    // is arbitrary but *fixed*, which is the property that matters: a shaft cut
+    // twice is cut the same way twice.
+    let w = if cross.length_squared() > 1e-18 {
+        cross.normalize()
+    } else {
+        DVec3::X
+    };
+    let v = w.cross(u);
+    Some((u, v, w, len * 0.5))
 }
 
 impl VoxelShape {
@@ -85,6 +150,23 @@ impl VoxelShape {
                 };
                 p.distance(a + ab * t) - radius_m
             }
+            VoxelShape::Trench {
+                a,
+                b,
+                half_width_m,
+                half_height_m,
+            } => {
+                let Some((u, v, w, half_len)) = trench_basis(a, b) else {
+                    return f64::INFINITY;
+                };
+                // The box SDF, evaluated in the trench's own frame. `d` is the
+                // centreline midpoint offset expressed in `(u, v, w)`, so this
+                // is the axis-aligned formula one rotation later.
+                let d = p - (a + b) * 0.5;
+                let local = DVec3::new(d.dot(u), d.dot(v), d.dot(w));
+                let q = local.abs() - DVec3::new(half_len, half_height_m.abs(), half_width_m.abs());
+                q.max(DVec3::ZERO).length() + q.max_element().min(0.0)
+            }
         }
     }
 
@@ -106,9 +188,65 @@ impl VoxelShape {
                 let r = DVec3::splat(radius_m.abs());
                 (a.min(b) - r, a.max(b) + r)
             }
+            VoxelShape::Trench {
+                a,
+                b,
+                half_width_m,
+                half_height_m,
+            } => {
+                let Some((u, v, w, half_len)) = trench_basis(a, b) else {
+                    return (DVec3::ZERO, DVec3::ZERO);
+                };
+                // The world AABB of an oriented box: the support function of a
+                // box in each axis direction, which is the sum of |axis
+                // component| × half extent — exact, not a sphere bound.
+                let ext = u.abs() * half_len
+                    + v.abs() * half_height_m.abs()
+                    + w.abs() * half_width_m.abs();
+                let c = (a + b) * 0.5;
+                (c - ext, c + ext)
+            }
         };
         let m = DVec3::splat(margin_m.max(0.0));
         (lo - m, hi + m)
+    }
+
+    /// How many lattice samples [`VoxelData::apply_op`] would visit for this
+    /// shape at `voxel_size_m` — the **cost of a cut, computable before cutting
+    /// it**.
+    ///
+    /// The excavation gate (P21.3) needs an upper bound on a dig *before* it
+    /// starts, because a dig is judged whole: refusing a foundation pit halfway
+    /// through would leave exactly the half-excavated hole `a4e5844` ruled
+    /// against, and the spoil pile that must balance it is bounded by the same
+    /// number. This is that bound — the op's own affected region (the AABB grown
+    /// by [`SDF_BAND`]), so it is never an underestimate of the work.
+    ///
+    /// Saturating throughout: an absurd shape answers `u64::MAX` rather than
+    /// wrapping into a small number that would wave it through.
+    pub fn affected_sample_count(&self, voxel_size_m: f64) -> u64 {
+        if !self.is_valid() || voxel_size_m.is_nan() || voxel_size_m <= 0.0 {
+            return 0;
+        }
+        let (lo, hi) = self.aabb_m(SDF_BAND as f64 * voxel_size_m);
+        let mut total: u64 = 1;
+        for a in 0..3 {
+            let l = (lo.to_array()[a] / voxel_size_m).floor();
+            let h = (hi.to_array()[a] / voxel_size_m).ceil();
+            let span = h - l + 1.0;
+            if span.is_nan() || span <= 0.0 {
+                return 0;
+            }
+            // `u64::MAX` for anything past the integer range, so the gate above
+            // sees "too large" rather than a truncated small answer.
+            let n = if span >= u64::MAX as f64 {
+                u64::MAX
+            } else {
+                span as u64
+            };
+            total = total.saturating_mul(n);
+        }
+        total
     }
 
     /// `true` when the shape encloses a positive volume (a degenerate brush —
@@ -126,6 +264,29 @@ impl VoxelShape {
             VoxelShape::Capsule { a, b, radius_m } => {
                 a.is_finite() && b.is_finite() && radius_m.is_finite() && radius_m > 0.0
             }
+            VoxelShape::Trench {
+                a,
+                b,
+                half_width_m,
+                half_height_m,
+            } => {
+                trench_basis(a, b).is_some()
+                    && half_width_m.is_finite()
+                    && half_width_m > 0.0
+                    && half_height_m.is_finite()
+                    && half_height_m > 0.0
+            }
+        }
+    }
+
+    /// The shape's centre in world metres — what a readout quotes and what the
+    /// default spoil rule measures from.
+    pub fn center_m(&self) -> DVec3 {
+        match *self {
+            VoxelShape::Sphere { center, .. } => center,
+            VoxelShape::Box { center, .. } => center,
+            VoxelShape::Capsule { a, b, .. } => (a + b) * 0.5,
+            VoxelShape::Trench { a, b, .. } => (a + b) * 0.5,
         }
     }
 }
@@ -329,7 +490,7 @@ impl VoxelData {
 
 /// Clamp a fractional grid box to inclusive integer sample bounds, or `None` when
 /// it is empty or too far out to name real samples.
-fn integer_box(lo: DVec3, hi: DVec3) -> Option<([i32; 3], [i32; 3])> {
+pub(crate) fn integer_box(lo: DVec3, hi: DVec3) -> Option<([i32; 3], [i32; 3])> {
     if !(lo.is_finite() && hi.is_finite()) {
         return None;
     }
@@ -520,6 +681,208 @@ mod tests {
         assert_eq!(dot.distance_m(DVec3::new(3.0, 0.0, 0.0)), 2.0);
     }
 
+    /// The **trench** primitive (P21.3): a box in a frame the centreline
+    /// defines, checked against an independently rotated evaluation of the
+    /// axis-aligned box SDF.
+    #[test]
+    fn the_trench_is_an_exact_box_in_its_own_frame() {
+        // A trench running due +X: its frame is the world's, so it must agree
+        // with the axis-aligned box exactly.
+        let along_x = VoxelShape::Trench {
+            a: DVec3::new(-3.0, 0.0, 0.0),
+            b: DVec3::new(3.0, 0.0, 0.0),
+            half_width_m: 1.0,
+            half_height_m: 2.0,
+        };
+        let equiv = VoxelShape::Box {
+            center: DVec3::ZERO,
+            half_extents: DVec3::new(3.0, 2.0, 1.0),
+        };
+        for p in [
+            DVec3::ZERO,
+            DVec3::new(1.0, 1.0, 0.5),
+            DVec3::new(5.0, 0.0, 0.0),
+            DVec3::new(0.0, 0.0, 4.0),
+            DVec3::new(-7.0, 9.0, -3.0),
+        ] {
+            assert!(
+                (along_x.distance_m(p) - equiv.distance_m(p)).abs() < 1e-12,
+                "{p:?}: {} vs {}",
+                along_x.distance_m(p),
+                equiv.distance_m(p)
+            );
+        }
+
+        // Rotated 90° about Y (running due +Z): the same distances, with the
+        // query point rotated the same way.
+        let along_z = VoxelShape::Trench {
+            a: DVec3::new(0.0, 0.0, -3.0),
+            b: DVec3::new(0.0, 0.0, 3.0),
+            half_width_m: 1.0,
+            half_height_m: 2.0,
+        };
+        for p in [
+            DVec3::new(1.0, 1.0, 0.5),
+            DVec3::new(5.0, 0.0, 0.0),
+            DVec3::new(-7.0, 9.0, -3.0),
+        ] {
+            // (x, y, z) → (−z, y, x) is the same rotation the centreline took.
+            let rotated = DVec3::new(-p.z, p.y, p.x);
+            assert!(
+                (along_z.distance_m(rotated) - along_x.distance_m(p)).abs() < 1e-12,
+                "{p:?}"
+            );
+        }
+
+        // The AABB really contains the solid, on a diagonal run where a naive
+        // "endpoints ± half extents" bound would clip the corners off.
+        let diag = VoxelShape::Trench {
+            a: DVec3::new(-4.0, 1.0, -4.0),
+            b: DVec3::new(4.0, 1.0, 4.0),
+            half_width_m: 1.5,
+            half_height_m: 0.75,
+        };
+        let (lo, hi) = diag.aabb_m(0.0);
+        let mut inside = 0;
+        for gz in -80..=80 {
+            for gy in -20..=20 {
+                for gx in -80..=80 {
+                    let p = DVec3::new(gx as f64 * 0.1, gy as f64 * 0.1, gz as f64 * 0.1);
+                    if diag.distance_m(p) >= 0.0 {
+                        continue;
+                    }
+                    inside += 1;
+                    assert!(
+                        p.cmpge(lo).all() && p.cmple(hi).all(),
+                        "{p:?} is inside the trench but outside its AABB {lo:?}..{hi:?}"
+                    );
+                }
+            }
+        }
+        assert!(inside > 500, "the fixture trench is empty ({inside})");
+
+        // A **vertical** run (a shaft) has no horizontal perpendicular and falls
+        // back to a fixed basis rather than a NaN.
+        let shaft = VoxelShape::Trench {
+            a: DVec3::new(0.0, 0.0, 0.0),
+            b: DVec3::new(0.0, -6.0, 0.0),
+            half_width_m: 1.0,
+            half_height_m: 1.0,
+        };
+        assert!(shaft.is_valid());
+        assert!(shaft.distance_m(DVec3::new(0.0, -3.0, 0.0)) < 0.0);
+        assert!(shaft.distance_m(DVec3::new(0.0, -3.0, 5.0)) > 0.0);
+        assert!(shaft.distance_m(DVec3::new(0.0, -3.0, 0.0)).is_finite());
+    }
+
+    /// A degenerate trench writes nothing — a zero-length centreline, a zero
+    /// section, a NaN dragged in from a drag that has not moved yet.
+    #[test]
+    fn a_degenerate_trench_is_a_clean_no_op() {
+        let mut v = solid_block();
+        let before = image(&v);
+        for shape in [
+            VoxelShape::Trench {
+                a: DVec3::ZERO,
+                b: DVec3::ZERO,
+                half_width_m: 1.0,
+                half_height_m: 1.0,
+            },
+            VoxelShape::Trench {
+                a: DVec3::ZERO,
+                b: DVec3::new(4.0, 0.0, 0.0),
+                half_width_m: 0.0,
+                half_height_m: 1.0,
+            },
+            VoxelShape::Trench {
+                a: DVec3::splat(f64::NAN),
+                b: DVec3::new(4.0, 0.0, 0.0),
+                half_width_m: 1.0,
+                half_height_m: 1.0,
+            },
+        ] {
+            assert!(!shape.is_valid(), "{shape:?}");
+            let (r, d) = v.apply_op(&VoxelOp::carve(shape));
+            assert!(r.is_noop(), "{shape:?} → {r:?}");
+            assert!(d.is_empty());
+            assert_eq!(shape.affected_sample_count(0.5), 0);
+        }
+        assert_eq!(image(&v), before);
+    }
+
+    /// **The exact-accounting gate for the trench.** Carving a swept rectangle
+    /// out of rock empties precisely the samples the SDF contains, counted by an
+    /// independent walk.
+    #[test]
+    fn a_trench_carve_reports_exactly_the_samples_it_emptied() {
+        let mut v = solid_block();
+        let shape = VoxelShape::Trench {
+            a: v.grid_to_world(DVec3::new(1.0, 8.0, 3.0)),
+            b: v.grid_to_world(DVec3::new(26.0, 10.0, 22.0)),
+            half_width_m: 1.25,
+            half_height_m: 0.75,
+        };
+        let mut want = 0u64;
+        for gz in 0..(2 * CHUNK_DIM as i32) {
+            for gy in 0..(2 * CHUNK_DIM as i32) {
+                for gx in 0..(2 * CHUNK_DIM as i32) {
+                    let p = v.grid_to_world(DVec3::new(gx as f64, gy as f64, gz as f64));
+                    if shape.distance_m(p) <= 0.0 && v.sample_global(gx, gy, gz) < 0.0 {
+                        want += 1;
+                    }
+                }
+            }
+        }
+        assert!(want > 100, "the fixture trench carved {want} samples");
+        let (report, _) = v.apply_op(&VoxelOp::carve(shape));
+        assert_eq!(report.carved[1], want);
+        assert_eq!(report.total_carved(), want);
+        assert_eq!(report.total_filled(), 0);
+    }
+
+    /// [`VoxelShape::affected_sample_count`] really bounds the work: it is never
+    /// less than what the op actually touched, and it is a pure function of the
+    /// shape (so a dig can be judged before it cuts).
+    #[test]
+    fn the_affected_sample_bound_is_never_an_underestimate() {
+        for shape in [
+            VoxelShape::Sphere {
+                center: DVec3::new(4.0, 4.0, 4.0),
+                radius_m: 3.0,
+            },
+            VoxelShape::Box {
+                center: DVec3::new(4.0, 4.0, 4.0),
+                half_extents: DVec3::new(2.0, 1.0, 3.0),
+            },
+            VoxelShape::Capsule {
+                a: DVec3::new(1.0, 4.0, 4.0),
+                b: DVec3::new(9.0, 6.0, 5.0),
+                radius_m: 1.5,
+            },
+            VoxelShape::Trench {
+                a: DVec3::new(1.0, 4.0, 4.0),
+                b: DVec3::new(11.0, 4.0, 9.0),
+                half_width_m: 1.0,
+                half_height_m: 1.0,
+            },
+        ] {
+            let mut v = solid_block();
+            let bound = shape.affected_sample_count(v.voxel_size_m());
+            let (report, _) = v.apply_op(&VoxelOp::carve(shape));
+            assert!(report.touched > 0, "{shape:?}");
+            assert!(
+                report.touched <= bound,
+                "{shape:?}: touched {} > bound {bound}",
+                report.touched
+            );
+            assert_eq!(
+                bound,
+                shape.affected_sample_count(v.voxel_size_m()),
+                "the bound is not a pure function of the shape"
+            );
+        }
+    }
+
     /// **The exact-accounting gate**, sphere. Carving a ball out of solid rock
     /// must empty *precisely* the samples whose centres the ball contains, tallied
     /// against the material they had — counted here by an independent brute-force
@@ -613,11 +976,7 @@ mod tests {
             assert!(report.created_chunks > 0, "{label} must materialize chunks");
             assert_eq!(report.created_chunks as usize, v.chunk_count(), "{label}");
             // The material really landed.
-            let inside = match shape {
-                VoxelShape::Sphere { center, .. } => center,
-                VoxelShape::Box { center, .. } => center,
-                VoxelShape::Capsule { a, b, .. } => (a + b) * 0.5,
-            };
+            let inside = shape.center_m();
             let g = v.world_to_grid(inside);
             assert!(v.is_solid_at(inside), "{label}");
             assert_eq!(
