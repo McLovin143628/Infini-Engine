@@ -670,15 +670,74 @@ pub struct RenderTerrainTile {
 /// `band_m <= 0` disarms every volume, so a host with no terrain at all produces
 /// byte-identical frames to its pre-P21.2 self.
 ///
-/// Cost is one `seam_sample` per voxel vertex per projection, and projections
-/// happen on a change stamp, not per frame.
+/// Projections happen on a change stamp, not per frame.
 ///
-/// Terrains are consulted in projection order and the **first** one that answers
-/// wins. Overlapping heightfields are already outside what the clipmap can draw
-/// coherently, so there is no better rule available here — only a deterministic
-/// one, which this is. A terrain that answers and is then vetoed (below) has
-/// still answered: the search does not fall through to the next heightfield,
-/// because "the ground here is carved away" is an answer.
+/// # Which heightfield a vertex seams against, when several overlap (P16.6)
+///
+/// **The nearest surface wins — not the first one in the list.** Every terrain that
+/// answers at the vertex's `(x, z)` is sampled, and the one whose surface is
+/// vertically closest to that vertex takes it; an exact distance tie goes to the
+/// lower [`RenderTerrain::id`], which both hosts fold from the same entity `Guid`.
+///
+/// This was a `find_map` — first answer wins — and that is **list-order-dependent**,
+/// which is the one thing this function cannot afford to be: the editor projects
+/// its terrains in document order (`doc.order()`) and the shipped player in `Guid`
+/// order. With two overlapping heightfields the same voxel vertex therefore seamed
+/// against a *different* terrain in each host, and a cave mouth came out with a
+/// different albedo, roughness and shading normal in the preview than in the build
+/// — the PIE ≠ shipping failure `project_voxel`'s mirror gate exists to prevent,
+/// reached from underneath it, where no character-for-character comparison of the
+/// two projectors could ever have seen it.
+///
+/// Making the **rule** order-free was chosen over forcing one iteration order onto
+/// both hosts. Those orders are load-bearing where they are (the editor's is the
+/// document the author is looking at; the player has no document), pinning them
+/// would couple two crates that share no dependency, and a gate asserting "both
+/// walked the same way" would still say nothing about the next consumer. A rule
+/// that cannot read the list order cannot be broken by one.
+///
+/// Nearest-in-Y rather than, say, the largest footprint overlap, because it is the
+/// answer the content means: a mouth opens into the ground it was cut through, so
+/// where a valley terrain and a plateau terrain overlap in plan, a mouth at
+/// `y ≈ 0` belongs to the valley however wide the plateau is.
+///
+/// A terrain that answers and is then vetoed (below) has still answered: the search
+/// does not fall through to another heightfield, because "the ground here is carved
+/// away" is an answer.
+///
+/// Cost is one `seam_sample` per terrain per vertex instead of per vertex, so a
+/// single-terrain level — every golden, every unit test, every level that has been
+/// through one Terrain Import — pays exactly what it paid before. (Two terrains
+/// sharing one `id` would leave a distance tie unbroken and fall back to list
+/// position; that is already forbidden — see [`RenderTerrain::id`].)
+///
+/// # What paging cannot change here, and by which mechanism (P21.2 re-audit)
+///
+/// Two independent residency systems move under a seam, and only one of them is
+/// the answer for each axis:
+///
+/// * **The voxel-chunk axis** is closed by `inf_voxel::MeshSourceKey`'s 27-neighbour
+///   residency mask: a chunk re-meshes when a neighbour pages in *or* out, so the
+///   vertices walked below are the ones a fully-resident neighbourhood produces.
+///   That mask knows nothing about terrain.
+/// * **The terrain axis** is closed by [`RenderTerrain::max_lod`] and by nothing
+///   else. [`RenderTerrain::seam_sample`] reads the streamer's residency floor,
+///   which is pinned for the stream's whole life, so fine-page churn under a cave
+///   mouth cannot move a single seam value. An earlier round named the residency
+///   mask for this axis; it is the wrong mechanism, and the correction is recorded
+///   rather than quietly swapped, because "the right property, guaranteed by the
+///   wrong thing" is what survives a review and fails a refactor.
+///
+/// The **residual**, stated rather than discovered: a streamed terrain whose floor
+/// has not arrived yet projects *no tiles*, so its host pushes no `RenderTerrain`
+/// at all, this function returns at the `terrains.is_empty()` line, and the volume
+/// keeps [`RenderVoxelVertex::NO_SEAM`]. Both hosts gate re-projection on the
+/// document version, so nothing repairs it until the document next changes. That is
+/// accepted behaviour for now — the window is one stream's first projection, and
+/// the alternative (re-projecting on residency) is the camera-driven path the P18
+/// law keeps out of lighting — and it is pinned by
+/// `a_terrain_with_no_tiles_leaves_the_volume_unseamed` so it cannot become an
+/// unnoticed one.
 ///
 /// # The mask-free veto, and where it applies
 ///
@@ -711,11 +770,27 @@ pub fn apply_seam(volumes: &mut [RenderVoxelVolume], terrains: &[RenderTerrain],
             let base = chunk.origin;
             for v in &mut chunk.vertices {
                 let wx = base.x + v.pos[0] as f64;
+                let wy = base.y + v.pos[1] as f64;
                 let wz = base.z + v.pos[2] as f64;
-                let Some((terrain, sample)) = terrains
-                    .iter()
-                    .find_map(|t| t.seam_sample(wx, wz).map(|s| (t, s)))
-                else {
+                // The nearest answering surface, by a total order that does not
+                // mention the list: |Δy| first, then `id`. See the doc block —
+                // `find_map` here made a cave mouth's material a function of which
+                // host projected it.
+                let mut best: Option<(&RenderTerrain, SeamSample, f64)> = None;
+                for t in terrains {
+                    let Some(sample) = t.seam_sample(wx, wz) else {
+                        continue;
+                    };
+                    let dy = (sample.height - wy).abs();
+                    let wins = match &best {
+                        None => true,
+                        Some((bt, _, bdy)) => dy < *bdy || (dy == *bdy && t.id < bt.id),
+                    };
+                    if wins {
+                        best = Some((t, sample, dy));
+                    }
+                }
+                let Some((terrain, sample, _)) = best else {
                     continue;
                 };
                 if !terrain.seam_holes_are_known() && !continues_surface(v.normal, sample.normal) {
@@ -1800,6 +1875,148 @@ mod tests {
             RenderVoxelVertex::NO_SEAM,
             "a vertex off the terrain must not pick up a seam"
         );
+    }
+
+    /// **THE F3 GATE: two hosts, two list orders, one seam.**
+    ///
+    /// The editor projects terrains in document order and the shipped player in
+    /// `Guid` order, so with overlapping heightfields a first-answer-wins rule made
+    /// the same vertex seam against a different terrain per host: PIE ≠ shipping in
+    /// albedo, roughness and shading normal, and invisible to every gate that
+    /// compares the two *projectors* character for character.
+    ///
+    /// Asserted the only way that means anything — the identical input presented in
+    /// **both** orders, with the answer pinned to the near terrain rather than
+    /// merely to "the same one either way" (two orders agreeing on the wrong
+    /// terrain would pass a self-consistency check).
+    #[test]
+    fn the_seam_is_the_same_in_both_terrain_orderings() {
+        // The ground the cave is cut through, at y ≈ 10, and a plateau 50 m over it
+        // that covers the same plan. Distinct ids, as P16.6 requires.
+        let near = seam_terrain(false);
+        let far = {
+            let mut t = seam_terrain(false);
+            t.id = 2;
+            t.tiles[0].origin.y += 50.0;
+            t.layers[0].albedo = [0.9, 0.1, 0.8, 1.0];
+            t.layers[0].roughness = 0.15;
+            t
+        };
+        assert_ne!(
+            near.seam_sample(0.5, 0.5).unwrap().albedo,
+            far.seam_sample(0.5, 0.5).unwrap().albedo,
+            "the two fixtures shade the same, so neither ordering could tell them apart"
+        );
+
+        let volume = || RenderVoxelVolume {
+            id: 7,
+            chunks: vec![RenderVoxelChunk {
+                key: VoxelChunkKey::default(),
+                origin: DVec3::ZERO,
+                // A mouth vertex just under the near ground, and one just under the
+                // plateau — each must take the surface it belongs to.
+                vertices: vec![
+                    RenderVoxelVertex {
+                        pos: [0.5, 10.0, 0.5],
+                        normal: [0.0, 1.0, 0.0],
+                        material: 0,
+                        seam_nh: RenderVoxelVertex::NO_SEAM,
+                        seam_albedo: [0.0; 4],
+                    },
+                    RenderVoxelVertex {
+                        pos: [0.5, 60.0, 0.5],
+                        normal: [0.0, 1.0, 0.0],
+                        material: 0,
+                        seam_nh: RenderVoxelVertex::NO_SEAM,
+                        seam_albedo: [0.0; 4],
+                    },
+                ],
+                indices: vec![0, 1, 0],
+                bounds: ([0.0; 3], [1.0; 3]),
+                version: 1,
+            }],
+            layers: [RenderTerrainLayer::default(); 4],
+            seam_band_m: 0.0,
+        };
+
+        let seam_of = |terrains: &[RenderTerrain]| {
+            let mut v = vec![volume()];
+            apply_seam(&mut v, terrains, DEFAULT_SEAM_BAND_M);
+            v[0].chunks[0].vertices.clone()
+        };
+        let doc_order = seam_of(&[near.clone(), far.clone()]);
+        let guid_order = seam_of(&[far.clone(), near.clone()]);
+        assert_eq!(
+            doc_order, guid_order,
+            "the seam depends on the order the host happened to project its \
+             terrains in — the editor walks `doc.order()` and the player walks \
+             `Guid` order, so this IS a PIE-vs-shipping difference"
+        );
+        // …and it is the near surface that answers, in both.
+        assert_eq!(
+            doc_order[0].seam_albedo,
+            [0.2, 0.4, 0.1, 0.8],
+            "the mouth at y = 10 must seam against the ground it was cut through"
+        );
+        assert_eq!(
+            doc_order[1].seam_albedo,
+            [0.9, 0.1, 0.8, 0.15],
+            "the vertex under the plateau must seam against the plateau"
+        );
+    }
+
+    /// **The stated residual** behind [`apply_seam`]'s paging note: a streamed
+    /// terrain whose residency floor has not arrived projects no tiles, so its host
+    /// pushes no `RenderTerrain` at all and the volume stays unseamed until the next
+    /// document bump re-projects.
+    ///
+    /// Pinned rather than fixed — the repair would have to re-project on residency,
+    /// which is the camera-driven path the P18 law keeps out of lighting. A test is
+    /// what stops it from silently becoming something else.
+    #[test]
+    fn a_terrain_with_no_tiles_leaves_the_volume_unseamed() {
+        let mut volumes = vec![RenderVoxelVolume {
+            id: 1,
+            chunks: vec![RenderVoxelChunk {
+                key: VoxelChunkKey::default(),
+                origin: DVec3::ZERO,
+                vertices: vec![RenderVoxelVertex {
+                    pos: [0.5, 10.0, 0.5],
+                    normal: [0.0, 1.0, 0.0],
+                    material: 0,
+                    seam_nh: RenderVoxelVertex::NO_SEAM,
+                    seam_albedo: [0.0; 4],
+                }],
+                indices: vec![0, 0, 0],
+                bounds: ([0.0; 3], [1.0; 3]),
+                version: 1,
+            }],
+            layers: [RenderTerrainLayer::default(); 4],
+            seam_band_m: 0.0,
+        }];
+
+        // What a host projects for a stream with nothing resident: nothing. (The
+        // hosts filter on `tile_count() + coarse_tile_count() > 0`, so an empty
+        // `RenderTerrain` is not pushed either — this is the empty slice.)
+        apply_seam(&mut volumes, &[], DEFAULT_SEAM_BAND_M);
+        assert_eq!(
+            volumes[0].seam_band_m, 0.0,
+            "the band must stay disarmed, or the shader would blend toward a \
+             sentinel"
+        );
+        assert_eq!(
+            volumes[0].chunks[0].vertices[0].seam_nh,
+            RenderVoxelVertex::NO_SEAM
+        );
+
+        // The repair is a re-projection, and only a re-projection: the identical
+        // volume seams the moment the floor is there and the host projects again.
+        apply_seam(
+            &mut volumes,
+            std::slice::from_ref(&seam_terrain(false)),
+            DEFAULT_SEAM_BAND_M,
+        );
+        assert!(volumes[0].chunks[0].vertices[0].seam_nh[1] > 0.0);
     }
 
     /// The row-packed mask reads back the bit that was set, and an empty mask

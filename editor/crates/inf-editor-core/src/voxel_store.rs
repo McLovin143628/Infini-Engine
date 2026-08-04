@@ -459,9 +459,15 @@ impl EditorVoxelVolumes {
     /// **refusal** the caller must honour, not an empty edit (see
     /// [`SceneDoc::raw_write_carve`](crate::scene::SceneDoc), which skips the
     /// heightfield half when this says no).
+    ///
+    /// `#[must_use]` mirrors the Ring-0 contract on
+    /// [`inf_voxel::VoxelData::apply_delta`]: dropping the answer here silently
+    /// converts a refusal into "replayed fine", which is precisely how the
+    /// heightfield half came to run over rock nobody put back.
+    #[must_use = "`false` is a REFUSAL — the heightfield half must not run either"]
     pub fn apply_delta(&mut self, entity: Uuid, delta: &VoxelDelta) -> bool {
         let Some(slot) = self.volumes.get_mut(entity.as_u128()) else {
-            self.replay_faults += 1;
+            self.note_missing_volume(delta);
             return false;
         };
         let skipped = slot.data.apply_delta(delta);
@@ -473,16 +479,46 @@ impl EditorVoxelVolumes {
     /// Undo a carve: replay its `before` samples (dropping the chunks it
     /// materialized from nothing) and re-mesh, leaving the volume
     /// byte-identical to what it was before the op. `false` is a refusal, with
-    /// the same contract as [`apply_delta`](Self::apply_delta).
+    /// the same contract as [`apply_delta`](Self::apply_delta) — `#[must_use]`
+    /// included, and for the same reason.
+    #[must_use = "`false` is a REFUSAL — the heightfield half must not run either"]
     pub fn revert_delta(&mut self, entity: Uuid, delta: &VoxelDelta) -> bool {
         let Some(slot) = self.volumes.get_mut(entity.as_u128()) else {
-            self.replay_faults += 1;
+            self.note_missing_volume(delta);
             return false;
         };
         let skipped = slot.data.revert_delta(delta);
         self.report_skipped("undo", entity, skipped);
         self.volumes.resync(entity.as_u128());
         true
+    }
+
+    /// Count a replay that found no volume — **only when the delta had a rock half
+    /// to lose** (P21.2 re-audit).
+    ///
+    /// A holes-only carve — a brush swung through air over a hillside, which opens
+    /// cave mouths without moving one sample — finalizes to an empty
+    /// [`VoxelDelta`], and its whole record is those mouths.
+    /// [`SceneDoc::raw_write_carve`](crate::scene::SceneDoc) replays them without
+    /// needing the rock half at all (its `!delta.is_empty()` guard is the same
+    /// predicate as this one), so undoing that carve *after* the volume unbound puts
+    /// back exactly what it took. The un-gated bump still put "some Ctrl+Z put back
+    /// less than it took — prefer re-carving over saving this level" on the Voxel
+    /// tool's readout, about an undo that was correct.
+    ///
+    /// That is worse than a missing counter, because [`replay_faults`] is monotone
+    /// with no reset — a fault is a fact about the session, not a transient — so one
+    /// spurious bump misreports every carve for the rest of it, and the author is
+    /// steered away from saving work that is fine.
+    ///
+    /// [`replay_faults`]: Self::replay_faults
+    fn note_missing_volume(&mut self, delta: &VoxelDelta) {
+        // `is_empty`, not `patches.is_empty()`: a delta that materialized chunks
+        // but patched no samples still loses that half, and `raw_write_carve`
+        // treats it as a real refusal.
+        if !delta.is_empty() {
+            self.replay_faults += 1;
+        }
     }
 
     /// Surface a malformed-patch count from a replay.

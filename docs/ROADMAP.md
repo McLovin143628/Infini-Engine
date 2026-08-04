@@ -5977,6 +5977,19 @@ tech uses. We are not voxelizing the planet.
 >   *any* child is (a mouth grows by a whole coarse sample), if *all* are (it vanishes until it
 >   is 2ⁿ samples wide), or by majority like biome ids — and each answer draws a different
 >   distant silhouette.
+> * **N2 — the three terrain brushes can still strand a stroke, exactly as the carve brush
+>   could.** `EngineHost::sculpt_drag` holds a `DragStroke` — **sculpt (`Height`), splat paint
+>   (`Splat`) and biome paint (`Biome`)** — whose dabs mutate the terrain live and become an undo
+>   entry only in `finish_sculpt`, which is reached from the pump's tool-gated branch. A tool
+>   switch or a 2D-mode switch arriving between two frames of a drag therefore leaves the stroke
+>   open forever: its edits are in the document, they save like any other edit, and Ctrl+Z cannot
+>   reach them — the un-undoable committed edit `a4e5844` ruled worse than any partial one. The
+>   carve brush had the identical hole and it is closed; these three are the same shape and are
+>   **not** closed. The fix is a sibling of `EngineHost::settle_orphaned_carve`: one pump-called
+>   `settle_orphaned_sculpt(&mut SceneDoc)` that commits an in-flight `DragStroke` when the branch
+>   that would finish it no longer runs (`set_tool_mode` cannot do it — committing needs a
+>   `&mut SceneDoc` and that seam has none), plus its `viewport_pump_mirror` line. Deferred to
+>   P21.3, which reworks `host.rs` for the dig tools anyway.
 
 ### Phase 22 — Dynamic world: deformation & destruction
 

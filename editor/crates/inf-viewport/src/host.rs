@@ -2383,26 +2383,6 @@ fn push_foliage_scatter(scene: &mut RenderScene, fol: &Foliage, translation: DVe
     }
 }
 
-/// Project the level's **sky authority** into the renderer's sun + sky blocks
-/// (P17.1) — the seam that retired `inf_render::camera::SUN_DIR`.
-///
-/// **MIRROR**: byte-for-byte identical in `inf_viewport::host::project_sky` and
-/// `inf_player::render::project_sky`, and pinned by a parity test in each crate.
-/// The one thing that *could* silently diverge — *which* entity is the authority,
-/// since the editor walks document order and the player walks `Guid` order —
-/// deliberately does not live here: [`inf_ecs::sky::resolve_sky`] answers it once,
-/// in Ring 0, by lowest `Guid`.
-///
-/// With no authority the renderer's own defaults stand: the retired constant's
-/// direction and the historic three-colour gradient, so every level that has not
-/// opted into time of day renders exactly the pixels it always did.
-///
-/// When a clock is present the sun (or, once it has set, the moon) is also pushed
-/// as a **directional light**, so shadows, GI and the PBR loop all follow the
-/// clock without any of those passes knowing time of day exists. It goes in
-/// first, before the entity loop, so its index is stable on both sides. A level
-/// that would rather author its own suns sets `SkyAtmosphere::enabled = false`,
-/// which keeps the clock and the tint but projects no light.
 /// Project a [`WaterBody`] (+ the [`Spline`] on the **same entity**, for a river)
 /// into a [`RenderWater`] (P20.1).
 ///
@@ -2537,6 +2517,28 @@ fn project_water(
     out
 }
 
+/// Project the level's **sky authority** into the renderer's sun + sky blocks
+/// (P17.1) — the seam that retired `inf_render::camera::SUN_DIR`.
+///
+/// **MIRROR**: byte-for-byte identical in both hosts' `project_sky`, this doc
+/// block included, and pinned by `projector_mirror.rs`. (It sat above
+/// `project_water` in both files until the P21.2 re-audit — the mirror gate could
+/// not see it there, and neither could a reader looking for it here.)
+/// The one thing that *could* silently diverge — *which* entity is the authority,
+/// since the editor walks document order and the player walks `Guid` order —
+/// deliberately does not live here: [`inf_ecs::sky::resolve_sky`] answers it once,
+/// in Ring 0, by lowest `Guid`.
+///
+/// With no authority the renderer's own defaults stand: the retired constant's
+/// direction and the historic three-colour gradient, so every level that has not
+/// opted into time of day renders exactly the pixels it always did.
+///
+/// When a clock is present the sun (or, once it has set, the moon) is also pushed
+/// as a **directional light**, so shadows, GI and the PBR loop all follow the
+/// clock without any of those passes knowing time of day exists. It goes in
+/// first, before the entity loop, so its index is stable on both sides. A level
+/// that would rather author its own suns sets `SkyAtmosphere::enabled = false`,
+/// which keeps the clock and the tint but projects no light.
 fn project_sky(scene: &mut RenderScene, world: &inf_ecs::EcsWorld) {
     let Some(sky) = inf_ecs::sky::resolve_sky(world) else {
         scene.sun = SunParams::default();
@@ -2887,17 +2889,9 @@ fn project_terrain(
 ///   component's `voxel_size_m` here instead would scale vertices against origins
 ///   derived from the asset's and tear the volume apart wherever the two disagree.
 ///   The component's value is what a *new* asset is authored at, and the cook
-///   **does** report the disagreement now: `inf_packager::cook`'s
-///   `voxel_scale_mismatches` raises one advisory per level+volume, naming both
-///   numbers and which one wins (P21.2). The paragraph below still says there is
-///   no such advisory, and it is stale — but correcting it needs the player's
-///   twin edited in the same commit, because everything from the next mention of
-///   this function's signature onwards **is** compared byte for byte:
-///   `extract_fn` anchors on the FIRST match in the file, which is that mention
-///   itself. So the "NOT covered by the mirror gate" claim holds only for the
-///   lines above this one — a trap worth knowing about before editing here.
-///   (`extract_fn` starts at `fn project_voxel(`), so the two copies are
-///   hand-synced and drift here is silent.
+///   **does** report the disagreement: `inf_packager::cook`'s
+///   `voxel_scale_mismatches` raises one advisory per level + volume, naming both
+///   numbers and which one wins (P21.2).
 /// * **A voxel material index IS a terrain splat index**, so a volume shades with
 ///   the `Terrain` on **this same entity** when there is one — composition, not a
 ///   reference, so no cook edge and nothing to dangle — and with the default
@@ -2907,7 +2901,13 @@ fn project_terrain(
 ///   scene's `voxels` being empty is exactly what keeps the voxel pass off the
 ///   command encoder, and every existing golden depends on that.
 ///
-/// **MIRROR** of the other host's `project_voxel` — keep the two byte-identical.
+/// **MIRROR** of the other host's `project_voxel` — keep the two byte-identical,
+/// **this doc block included**. `projector_mirror`'s `extract_fn` anchors on the
+/// real function item and takes the comment above it with it; until the P21.2
+/// re-audit it anchored on the first `fn project_voxel(` token in the file, which
+/// was a backticked self-reference inside this very comment — so these lines were
+/// never compared, and the two copies drifted to 23 lines against 17 with the gate
+/// green throughout.
 fn project_voxel(
     slot: &inf_voxel::VolumeSlot,
     terrain: Option<&Terrain>,

@@ -413,6 +413,13 @@ impl EditorRenderAssets {
 /// they are on the rigid path. An **unskinned** submesh inside a skinned mesh is
 /// kept and pinned to joint 0 with weight 1, which is what a rigid part welded to
 /// a skeleton's root means; dropping it would silently lose geometry.
+///
+/// **MIRROR** of the other host's `skinned_mesh_data` — keep the two
+/// byte-identical, **this doc block included** (`projector_mirror.rs`). It has to
+/// be: the two hosts would otherwise upload *different vertex buffers* for the
+/// same asset, which no scene-level comparison can see. Side-neutral wording on
+/// purpose — a note that names the *other* file is a note only one copy can carry,
+/// and a comment that exists on one side only is the drift this gate is for.
 pub fn skinned_mesh_data(mesh: &MeshAsset) -> Option<SkinnedMeshData> {
     if !mesh.submeshes.iter().any(|s| s.is_skinned()) {
         return None;

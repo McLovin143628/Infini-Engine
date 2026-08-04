@@ -43,6 +43,12 @@ pub const SOLID_PROBE: (f64, f64) = (0.5, 0.5);
 /// The cave floor's world height under the hole (1 m voxels, so global sample
 /// `y = 3` is solid and `y = 4` is air ⇒ the crossing is exactly here).
 pub const CAVE_FLOOR_Y: f64 = 3.5;
+/// Where the cave floor sits in the **last saved** `.inf_voxel` — four metres of
+/// rock the author has already dug out but not written back yet.
+///
+/// Editor-only, deliberately: the shipped player has no working set to be unsaved
+/// *in*, which is exactly why the twin does not carry this constant.
+pub const SAVED_FLOOR_Y: f64 = 7.5;
 
 pub const TERRAIN_GUID: u128 = 0x2102_0001;
 pub const CAVE_GUID: u128 = 0x2102_0002;
@@ -298,6 +304,106 @@ fn the_resolver_keys_by_entity_and_folds_the_entity_translation() {
     // An asset the loader cannot serve is skipped, never a floorless volume.
     let none = inf_editor_core::simulate::resolve_voxel_volumes(&doc, |_| None);
     assert!(none.is_empty());
+}
+
+/// The same cave as [`cave_volume`], with its floor still at [`SAVED_FLOOR_Y`] —
+/// what the `.inf_voxel` on disk holds while the author is mid-dig.
+fn saved_volume() -> VoxelData {
+    let mut v = VoxelData::new(1.0);
+    v.insert_chunk(
+        ChunkKey::new(0, 0, 0),
+        VoxelChunk::from_fn(|_, j, _| j as f64 - SAVED_FLOOR_Y),
+    );
+    v.clear_dirty(); // it is what is on disk
+    v
+}
+
+/// **THE M2 GUARD.** Carve, do not save, press Play — and stand on the carve.
+///
+/// The fix for M2 (`overlay_unsaved_carves`) had unit tests around the function and
+/// **no test at its only production call site**: `commands/sim.rs`'s `sim_start`
+/// block could be deleted and the whole workspace stayed green, which is the same
+/// as not having fixed it. Ring 1 cannot call a `#[tauri::command]`, so this runs
+/// `sim_start`'s sequence in order — resolve the level's volumes off disk, fold in
+/// the store's unsaved carves, seed the session — and then asks the question
+/// gameplay asks, through the real interpreter and the real fixed step.
+///
+/// It is the test that would have caught the original bug: before the overlay, this
+/// Blueprint read [`SAVED_FLOOR_Y`] and the author fell four metres onto rock they
+/// had already dug away.
+#[test]
+fn a_blueprint_stands_on_a_carve_that_was_never_saved() {
+    let payload = inf_voxel::build_voxel_asset(&saved_volume())
+        .expect("the saved volume builds an asset")
+        .into_bytes();
+    let asset = Uuid::from_u128(0x2102_0B55);
+
+    let mut doc = cave_doc();
+    let cave = Uuid::from_u128(CAVE_GUID);
+    insert!(doc, cave, VoxelVolume::from_asset(asset));
+    doc.world_mut().propagate();
+
+    // 1. What `sim_start` resolves off disk …
+    let mut volumes = inf_editor_core::simulate::resolve_voxel_volumes(&doc, |guid| {
+        (guid == asset).then(|| payload.clone())
+    });
+    let disk = volumes[&cave]
+        .surface_y_at(PROBE.0, PROBE.1)
+        .expect("the saved cave has a floor");
+    assert!(
+        (disk - SAVED_FLOOR_Y).abs() < 1e-9,
+        "the disk copy is already the carved one ({disk}) — every assertion below \
+         would then be vacuous"
+    );
+
+    // 2. … and what the editor is actually holding: the same volume dug four
+    //    metres deeper, dirty, with nothing written back to the asset.
+    let store = cave_volume_dirty();
+    assert!(
+        !store.dirty_chunks().is_empty(),
+        "the fixture carve is not unsaved, so there is nothing for the overlay to do"
+    );
+    let applied = inf_editor_core::simulate::overlay_unsaved_carves(&mut volumes, |e| {
+        (e == cave).then_some(&store)
+    });
+    assert!(applied > 0, "no chunk was carried into the session");
+
+    // 3. Enter Simulate over exactly that map and stand on it.
+    let mut session = SimSession::enter(
+        &mut doc,
+        vec![(Uuid::from_u128(WALKER_GUID), ground_probe_class())],
+        DVec2::ZERO,
+        SIM_HZ,
+    );
+    session.set_voxel_volumes(volumes);
+    session.step_once(&mut doc, SimInput::default());
+
+    let hole = probe(&session, "hole");
+    assert!(
+        (hole - CAVE_FLOOR_Y).abs() < 1e-9,
+        "Simulate put the character on {hole}; the carve the author just made puts \
+         the floor at {CAVE_FLOOR_Y}"
+    );
+    assert_ne!(
+        hole, SAVED_FLOOR_Y,
+        "the session is standing on the LAST SAVED cave — pressing Play after \
+         digging drops the author onto rock that is no longer there (the P16.4b \
+         ScenePersist::Memory law, broken for voxels)"
+    );
+    // The unholed ground one cell away is untouched: the overlay moves the cave,
+    // never the heightfield.
+    assert!((probe(&session, "solid") - GROUND_Y).abs() < 1e-9);
+}
+
+/// [`cave_volume`] with its chunk left **dirty** — the editor's live working set
+/// after a carve, before any write-back.
+fn cave_volume_dirty() -> VoxelData {
+    let mut v = VoxelData::new(1.0);
+    v.insert_chunk(
+        ChunkKey::new(0, 0, 0),
+        VoxelChunk::from_fn(|_, j, _| j as f64 - CAVE_FLOOR_Y),
+    );
+    v
 }
 
 /// The hole is a **terrain** fact, not a voxel one: the same probe over the same

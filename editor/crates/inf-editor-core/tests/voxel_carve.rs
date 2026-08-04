@@ -313,6 +313,78 @@ fn an_asset_backed_carve_opens_the_ground_and_takes_the_rock() {
     assert_eq!(data.height_at(DVec2::new(28.0, 28.0)), Some(4.0));
 }
 
+/// **A CORRECT UNDO MUST NOT REPORT A FAULT** (P21.2 re-audit, D1).
+///
+/// A brush swung through air over the hillside — outside the rock block entirely —
+/// opens cave mouths and moves not one voxel sample, so its record's rock half is
+/// an empty `VoxelDelta` and its mouths are the whole of it. Undo that after the
+/// volume has unbound (a File ▸ Open, a cleared asset reference, a projection
+/// release) and the heightfield half replays perfectly: there was never a rock half
+/// to lose.
+///
+/// The missing-slot arms bumped `replay_faults` regardless, which put *"some Ctrl+Z
+/// put back less than it took — prefer re-carving over saving this level"* on the
+/// Voxel tool's readout about an undo that was right. The counter is monotone with
+/// no reset, so that one bump misreports every carve for the rest of the session
+/// and steers the author away from saving work that is fine.
+///
+/// The second half is the non-vacuity twin: a carve that *did* take rock, undone
+/// after the same unbind, still counts — the gate narrows the claim, it does not
+/// switch the counter off.
+#[test]
+fn a_holes_only_undo_after_an_unbind_is_not_a_replay_fault() {
+    let (mut doc, volumes, terrain, volume, _d) = fixture(true);
+    let before_tile = tile_image(&doc, terrain);
+
+    // Well outside the block (which spans [0, 16]³ at 2 chunks × 16 samples ×
+    // 0.5 m) and still over the terrain's 33 m tile, straddling the surface at
+    // y = 4 so the hole rule fires.
+    let air = VoxelOp::carve(VoxelShape::Sphere {
+        center: DVec3::new(24.0, 4.0, 24.0),
+        radius_m: 2.5,
+    });
+    let tally = doc
+        .edit_carve(volume, &volumes, &air)
+        .expect("a cut that reaches an asset-backed terrain is allowed");
+    assert_eq!(
+        tally.touched, 0,
+        "the fixture cut rock after all, so the delta is not holes-only and this \
+         test would be about a different path"
+    );
+    assert!(tally.holes > 0, "the fixture opened no cave mouth");
+    assert_eq!(volumes.lock().unwrap().replay_faults(), 0);
+
+    // The volume goes away — the document was replaced, or its reference cleared.
+    volumes.lock().unwrap().retain_only([]);
+    assert!(volumes.lock().unwrap().slot(volume).is_none());
+
+    assert!(doc.undo(), "the holes-only carve must be undoable");
+    assert_eq!(
+        tile_image(&doc, terrain),
+        before_tile,
+        "the mouths did not heal, so the undo really was incomplete"
+    );
+    assert_eq!(
+        volumes.lock().unwrap().replay_faults(),
+        0,
+        "a correct undo was reported as a replay fault — the Voxel tool now tells \
+         the author to prefer re-carving over saving a level that is intact"
+    );
+
+    // …and the counter still fires when there IS a rock half that could not land.
+    let (mut doc, volumes, _terrain, volume, _d) = fixture(true);
+    doc.edit_carve(volume, &volumes, &breakthrough())
+        .expect("the breakthrough must be allowed");
+    volumes.lock().unwrap().retain_only([]);
+    assert!(doc.undo());
+    assert_eq!(
+        volumes.lock().unwrap().replay_faults(),
+        1,
+        "an undo that could not put the rock back must still be counted, or the \
+         gate above has simply switched the readout off"
+    );
+}
+
 /// **THE TRANSACTION GATE: three carves, three undos, three redos.**
 ///
 /// Each Ctrl+Z must take back a whole cut — rock *and* mouth — and land the

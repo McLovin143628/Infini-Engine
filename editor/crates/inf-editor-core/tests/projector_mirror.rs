@@ -54,21 +54,111 @@ fn workspace_root() -> PathBuf {
         .join("..")
 }
 
-/// The text of `fn <name>(` through the closing brace at column 0, with line
-/// endings normalized (the two files can be checked out with different EOLs,
-/// which says nothing about whether the code drifted).
-fn extract_fn(source: &str, name: &str) -> String {
-    let source = source.replace("\r\n", "\n");
+/// Byte offset of the **real item** `fn <name>(` — never a mention of the
+/// signature inside a comment, a string or a backticked cross-reference.
+///
+/// The distinction is the whole of the P21.2 re-audit's F1. A plain
+/// `source.find("fn project_voxel(")` matched a backticked self-reference *inside
+/// that function's own doc comment*, several screens above the item, and every
+/// caller below silently inherited the wrong anchor.
+///
+/// The test is positional rather than lexical: everything between the start of the
+/// matched line and the `fn` keyword must be item qualifiers and nothing else. A
+/// `///`, a backtick or prose fails it, so a doc block can name the signature as
+/// often as it likes without moving the anchor.
+fn item_start(source: &str, name: &str) -> usize {
     let needle = format!("fn {name}(");
-    let start = source
-        .find(&needle)
-        .unwrap_or_else(|| panic!("`{needle}` not found — was the projector renamed?"));
-    let rest = &source[start..];
+    let mut from = 0usize;
+    while let Some(rel) = source[from..].find(&needle) {
+        let at = from + rel;
+        let line_start = source[..at].rfind('\n').map_or(0, |i| i + 1);
+        let is_item = source[line_start..at].split_whitespace().all(|w| {
+            matches!(w, "pub" | "async" | "const" | "unsafe" | "extern")
+                || w.starts_with("pub(")
+                || w.starts_with('"')
+        });
+        if is_item {
+            return at;
+        }
+        from = at + 1;
+    }
+    panic!("`{needle}` occurs nowhere as an item — was the projector renamed?");
+}
+
+/// The **item text** — the signature line (qualifiers included) through the
+/// closing brace at column 0 — with line endings normalized (the two files can be
+/// checked out with different EOLs, which says nothing about whether the code
+/// drifted).
+///
+/// Used by the "not a stub" guards, which must read *code* and not prose: a
+/// fragment assertion that can be satisfied by a sentence in a doc comment is a
+/// phantom guard.
+fn extract_item(source: &str, name: &str) -> String {
+    let source = source.replace("\r\n", "\n");
+    let start = item_start(&source, name);
+    let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+    let rest = &source[line_start..];
     let end = rest
         .find("\n}\n")
-        .unwrap_or_else(|| panic!("`{needle}` does not terminate at column 0"))
+        .unwrap_or_else(|| panic!("`fn {name}(` does not terminate at column 0"))
         + 3;
     rest[..end].to_string()
+}
+
+/// **What every mirror-equality gate below compares: the doc block AND the item.**
+///
+/// The doc block is not decoration on a mirrored pair. Every rule the two copies
+/// share — which of two values wins, what an empty projection means, why a field is
+/// host-local — is written in the `///` lines and nowhere else, so a rule corrected
+/// on one side only is the same defect as a line of code changed on one side only:
+/// the next person to read the stale copy implements the stale rule.
+///
+/// It went uncompared for two batches. The anchor used to be the first
+/// `fn <name>(` **substring** in the file, which for `project_voxel` was a
+/// backticked self-reference inside its own doc comment — so extraction began
+/// mid-comment, every line above it was invisible, and the two blocks drifted to 23
+/// lines against 17 with this assertion green the whole time. The sentence that
+/// drifted was the one *claiming* the doc block was uncovered, so the gate could
+/// not catch the defect that motivated it. [`item_start`] is what closes it.
+///
+/// Attribute lines between the doc block and the item are **stepped over, not
+/// compared**: `#[cfg(not(target_arch = "wasm32"))]` above the player's
+/// `skinned_mesh_data` is a fact about which host builds for wasm, not about
+/// whether the two hosts agree.
+fn extract_fn(source: &str, name: &str) -> String {
+    let source = source.replace("\r\n", "\n");
+    let start = item_start(&source, name);
+    let item_line = source[..start].rfind('\n').map_or(0, |i| i + 1);
+    // Walk back over the item's attributes and doc comment, keeping the doc lines.
+    let mut doc: Vec<&str> = Vec::new();
+    let mut cursor = item_line;
+    while cursor > 0 {
+        let prev_start = source[..cursor - 1].rfind('\n').map_or(0, |i| i + 1);
+        let line = &source[prev_start..cursor - 1];
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("///") {
+            doc.push(line);
+        } else if !trimmed.starts_with("#[") {
+            break;
+        }
+        cursor = prev_start;
+    }
+    // The guard on the guard: an undocumented item would quietly reduce this back
+    // to `extract_item`, which is precisely the hole that was just closed.
+    assert!(
+        !doc.is_empty(),
+        "`fn {name}` carries no doc comment, so this gate would compare only its \
+         body — the exact hole the anchor fix closed. Document it on both sides, or \
+         compare it with `extract_item`."
+    );
+    doc.reverse();
+    let mut out = String::new();
+    for line in doc {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&extract_item(&source, name));
+    out
 }
 
 /// The text of `fn <name>(` through its **brace-balanced** end — the indented
@@ -130,7 +220,7 @@ fn project_sky_is_identical_in_both_projectors() {
 /// blocks, and publish the key light.
 #[test]
 fn the_shared_projector_body_is_not_a_stub() {
-    let body = extract_fn(&read(VIEWPORT), "project_sky");
+    let body = extract_item(&read(VIEWPORT), "project_sky");
     for fragment in [
         "inf_ecs::sky::resolve_sky",
         "scene.sun = SunParams",
@@ -757,14 +847,16 @@ fn the_bind_space_rebuild_is_identical_in_both_stores() {
         "the editor's and the player's `skinned_mesh_data` have drifted — the two \
          hosts would build different bind-space geometry from the same `.inf_mesh`"
     );
-    // Not a stub: the concatenation, the rebase, and the joint-0 pin.
+    // Not a stub: the concatenation, the rebase, and the joint-0 pin. Read off the
+    // ITEM, never the doc block — a fragment a comment could satisfy proves nothing.
+    let body = extract_item(&read(PLAYER_ASSETS), "skinned_mesh_data");
     for fragment in [
         "let base = vertices.len() as u32;",
         "sm.skin.get(i).copied().unwrap_or_default().normalized()",
         "indices.extend(sm.indices.iter().map(|&i| i + base));",
     ] {
         assert!(
-            theirs.contains(fragment),
+            body.contains(fragment),
             "`skinned_mesh_data` lost `{fragment}`"
         );
     }
@@ -933,7 +1025,7 @@ fn project_water_is_identical_in_both_projectors() {
 /// ribbon from the spline on the same entity.
 #[test]
 fn the_shared_water_projector_is_not_a_stub() {
-    let body = extract_fn(&read(PLAYER), "project_water");
+    let body = extract_item(&read(PLAYER), "project_water");
     for fragment in [
         // The wind rule is the component's, not the host's — the one thing here
         // that could silently diverge.
@@ -1050,7 +1142,7 @@ fn project_voxel_is_identical_in_both_projectors() {
 /// empty volume.
 #[test]
 fn the_shared_voxel_projector_is_not_a_stub() {
-    let body = extract_fn(&read(PLAYER), "project_voxel");
+    let body = extract_item(&read(PLAYER), "project_voxel");
     for fragment in [
         // The scale comes from the ASSET, not from the component. A host that read
         // `volume.voxel_size_m` here would scale vertices against origins derived

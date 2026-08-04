@@ -808,6 +808,20 @@ impl SceneDoc {
                     v.apply_delta(volume, delta)
                 }
             }
+            // The line has to match what the code three statements down actually
+            // does, or the log is a second, contradictory specification: the
+            // `!delta.is_empty()` guard below only stops the mouths when there was
+            // a rock half to lose, so a holes-only record is replayed here despite
+            // the poison — correctly, since it never had one.
+            Err(_) if delta.is_empty() => {
+                tracing::warn!(
+                    "inf-editor-core: carve {what} could not read the voxel working set (a \
+                     thread panicked holding it), but this record moved no voxel samples — \
+                     its {} cave-mouth record(s) are replayed as usual",
+                    holes.len()
+                );
+                false
+            }
             Err(_) => {
                 tracing::error!(
                     "inf-editor-core: carve {what} could not read the voxel working set (a \

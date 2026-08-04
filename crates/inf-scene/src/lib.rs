@@ -7736,7 +7736,7 @@ mod tests {
     /// consequence in full under *THE EMPTY CELL*.
     ///
     /// `inf-terrain` carries the asset half of this assertion
-    /// (`frozen_tile_generation_is_pinned_to_both_ladders`); this is the scene
+    /// (`frozen_tile_generations_are_pinned_to_both_ladders`); this is the scene
     /// half, and the editor codec mirrors it.
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {

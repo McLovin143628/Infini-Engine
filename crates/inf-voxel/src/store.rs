@@ -260,15 +260,30 @@ impl VoxelVolumes {
     ///
     /// Returns whether the placement changed (a mover invalidates the want set;
     /// the next [`sync_camera`](Self::sync_camera) reconciles it).
+    ///
+    /// # A non-finite placement KEEPS THE LAST GOOD ONE
+    ///
+    /// A NaN must never reach the grid — every distance off a NaN anchor is NaN, so
+    /// every want is undecidable and the volume simply stops paging. What to put
+    /// there instead is a choice, and this one used to substitute the world origin:
+    /// a single NaN frame from a host (a degenerate parent transform, a
+    /// mid-teleport pose) then *teleported the cave to (0, 0, 0)* and paged the
+    /// chunks there until the next good `place`.
+    ///
+    /// Holding the last good translation is strictly better and no bigger: a
+    /// transform that went non-finite for a frame is a transform with no new
+    /// information in it, and the volume stays where it was last known to be. It
+    /// converges better across PIE and shipping too — the two hosts recover to the
+    /// same place instead of to whichever origin-teleport each of them saw. And it
+    /// is byte-identical for a *first* NaN: a fresh slot's translation is already
+    /// `DVec3::ZERO`, which is exactly what the old substitution wrote.
     pub fn place(&mut self, entity: u128, translation: DVec3) -> bool {
         let Some(slot) = self.slots.get_mut(&entity) else {
             return false;
         };
-        let translation = if translation.is_finite() {
-            translation
-        } else {
-            DVec3::ZERO
-        };
+        if !translation.is_finite() {
+            return false;
+        }
         if slot.translation == translation {
             return false;
         }
@@ -669,14 +684,34 @@ mod tests {
         assert!(!store.place(1, DVec3::new(1000.0, 0.0, 0.0)), "idempotent");
         let r = store.sync_camera(cam, &params, VoxelStreamBudget::default());
         assert!(r.loaded > 0, "{r:?}");
-        // A non-finite placement is **substituted with the origin**, not refused:
-        // the NaN never reaches the grid (which is the point — a NaN anchor makes
-        // every distance NaN and every want undecidable), but the volume does not
-        // keep the good placement it had either. Stated as it behaves rather than
-        // as it reads: a host that pushes one NaN frame teleports its cave to the
-        // world origin until the next good `place`.
-        store.place(1, DVec3::splat(f64::NAN));
-        assert_eq!(store.get(1).unwrap().translation, DVec3::ZERO);
+        // A non-finite placement KEEPS THE LAST GOOD ONE (P21.2 re-audit). The NaN
+        // never reaches the grid — that is the point, since a NaN anchor makes every
+        // distance NaN and every want undecidable — and the cave does not teleport
+        // to the world origin either, which is what the earlier origin-substitution
+        // did on a single bad frame from a host.
+        assert!(
+            !store.place(1, DVec3::splat(f64::NAN)),
+            "a non-finite placement changed nothing, so it reports no change"
+        );
+        assert_eq!(
+            store.get(1).unwrap().translation,
+            DVec3::new(1000.0, 0.0, 0.0),
+            "one NaN frame moved the volume — the last good placement must stand"
+        );
+        // …and the pages under it stay where they were: the refusal is a no-op all
+        // the way down, not just in the recorded translation.
+        let after = store.sync_camera(cam, &params, VoxelStreamBudget::default());
+        assert!(
+            after.is_noop(),
+            "the NaN frame re-paged the volume: {after:?}"
+        );
+        // A volume that has never been placed is unaffected too — the first NaN is
+        // byte-identical to the old behaviour, because a fresh slot is already at
+        // the origin.
+        let mut fresh = VoxelVolumes::new();
+        fresh.ensure(1, 100, &payload(10.0)).unwrap();
+        assert!(!fresh.place(1, DVec3::splat(f64::NAN)));
+        assert_eq!(fresh.get(1).unwrap().translation, DVec3::ZERO);
         assert!(
             !store.place(999, DVec3::ZERO),
             "an unbound entity is not an error"

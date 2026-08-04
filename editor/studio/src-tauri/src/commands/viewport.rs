@@ -104,8 +104,31 @@ impl ViewportState {
     /// The chunks cannot come through the command channel: they live behind a
     /// mutex the host and the undo history already share, and a `Cmd` has no
     /// reply path (see `inf_viewport::host::EngineHost::with_voxel_volumes`).
+    ///
+    /// **A poisoned OUTER handle answers `None` too — and says so** (P21.2
+    /// re-audit). Every caller reads `None` as "no viewport, so no carve edits,
+    /// so nothing to do", which is the correct reading for a headless session and
+    /// exactly the wrong one here: the volumes may be full of unsaved carves that
+    /// the save path then skips and Simulate then runs without. The inner store's
+    /// own poisoning is reported by each caller (`sim_start` warns, `voxel_status`
+    /// raises an advisory, `stage_voxels` fails the save); this handle is reached
+    /// first, and until now it swallowed the same failure with no witness at all.
+    /// It cannot widen the return type without giving every caller a second
+    /// "nothing here" case, so the log is the witness.
     pub fn voxel_volumes(&self) -> Option<inf_editor_core::voxel_store::SharedVoxelVolumes> {
-        let guard = self.0.lock().ok()?;
+        let guard = match self.0.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                tracing::error!(
+                    "inf-studio: the viewport handle is poisoned — a thread panicked while \
+                     holding it, so the shared voxel working set cannot be reached. Carve \
+                     edits will be treated as ABSENT (not as unsaved): a save will not write \
+                     them and Simulate will run on the saved volumes. Save the level and \
+                     restart the editor."
+                );
+                return None;
+            }
+        };
         guard.as_ref().map(|h| h.voxel_volumes())
     }
 
