@@ -265,12 +265,39 @@ fn read_buffer(gpu: &GpuContext, src: &wgpu::Buffer, label: &str) -> Vec<u8> {
 ///
 /// Camera *motion* is deliberately absent: the volume follows the camera every
 /// frame, so a reset on camera movement would mean never amortizing at all. What is
-/// here is everything that makes the previously-integrated probes describe a
-/// different *world* — content, GI configuration, probe geometry, and the sun
+/// here is everything that makes the previously-integrated probes **meaningless**
+/// — the probe geometry, the GI configuration, the volume generation, and the sun
 /// (which is how a time-of-day change propagates into the bounce).
+///
+/// # `scene.version` is NOT here, and that is the P18.4 amortization fix
+///
+/// It used to be, and it made amortized GI a **no-op in the shipped player**.
+/// `inf_player::render::project_scene` re-projects unconditionally every frame and
+/// ends with `RenderScene::mark_dirty()`, so `scene.version` increments every
+/// frame; the key therefore differed every frame, `ProbeSchedule::reset()` ran
+/// every frame, and the cursor never left its first slice. That is *precisely* the
+/// failure [`sun_bucket`](crate::gi::sun_bucket) exists to prevent, quoted from its
+/// own doc: "amortization paying full price for a fraction of the freshness,
+/// exactly where it is supposed to help". The editor viewport hid it, because
+/// `sync_from_doc` is version-gated there and a static document holds its version
+/// still — so this was a PIE-vs-shipping divergence in everything but name.
+///
+/// Quantizing it the way the sun is quantized is not available: a version counter
+/// has no metric to bucket on. The right reading is that a content change does not
+/// invalidate the *integration* — it makes some probes stale, and the sweep already
+/// bounds staleness by construction. The cursor wraps, so every probe is revisited
+/// every `ceil(total / budget)` frames (8 at the documented 256-probe budget), and
+/// a probe that has not been revisited lags by at most one sweep — the identical
+/// guarantee, in the identical words, that the sun bucket's doc already accepts.
+/// Resetting on top of that bought nothing an unreset sweep does not already give,
+/// and cost the whole feature wherever content moves every frame — which is every
+/// frame of any game that is actually running.
+///
+/// What a *reset* is still for is the case where the previous integration cannot
+/// be aged into the new one at all: a different probe count, a different volume, a
+/// different ray budget, a different sky source. Those are the fields below.
 #[derive(Clone, Copy, PartialEq)]
 struct GiSweepKey {
-    scene_version: u64,
     generation: u64,
     probe_total: u32,
     settings: [u32; 5],
@@ -831,8 +858,11 @@ impl RenderNode for GiNode {
         let sky_from_atmosphere = frame.scene.atmosphere.enabled;
 
         // ── amortization schedule ───────────────────────────────────────────
+        // NOTE: `frame.scene.version` is deliberately absent — see `GiSweepKey`.
+        // It churns every frame in the shipped player and pinned the cursor in its
+        // first slice forever; the sweep's own wrap-around is what bounds staleness
+        // after a content change.
         let key = GiSweepKey {
-            scene_version: frame.scene.version,
             generation: frame.gi.generation,
             probe_total,
             settings: [

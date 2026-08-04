@@ -310,7 +310,9 @@ pub fn probe_position(x: u32, y: u32, z: u32, vol_min: Vec3, extent: f32) -> Vec
 ///
 /// **Frame-index-free by construction.** The cursor is renderer state that advances
 /// by exactly the number of probes actually written, and it is reset (to `0`) when
-/// the scene or the GI configuration changes. So:
+/// the GI configuration or the probe geometry changes — **not** when the scene's
+/// content does (see `GiSweepKey` in `passes::gi` for why that reset had to go).
+/// So:
 ///
 /// * two *cold* renders of the same content produce the same slice sequence (both
 ///   start from a fresh cursor at `0`), and
@@ -338,9 +340,14 @@ impl ProbeSchedule {
         self.cursor
     }
 
-    /// Restart the sweep — called when the scene version, the GI settings or the
-    /// probe geometry changes, so a changed world never leaves half its probes
-    /// describing the old one for an unbounded time.
+    /// Restart the sweep — called when the GI settings, the probe geometry, the
+    /// volume generation or the (bucketed) sun changes, i.e. when the probes'
+    /// previous integration cannot be aged into the new one at all.
+    ///
+    /// **Not** called on a scene-content change: the cursor wraps, so every probe
+    /// is revisited within one sweep and staleness is already bounded without a
+    /// reset. Resetting there made amortization a no-op in the shipped player,
+    /// whose `scene.version` moves every frame — see `GiSweepKey`.
     pub fn reset(&mut self) {
         self.cursor = 0;
     }

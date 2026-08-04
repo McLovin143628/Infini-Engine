@@ -543,9 +543,9 @@ fn the_composed_frame_trace_is_deterministic_across_runs() {
     );
     // The probe update is **sliced** — 256 of the High tier's 2048 per frame. That
     // is all this asserts, and the wording matters: it does NOT claim the sweep
-    // *advances*, because it does not (see the cursor note below). Calling a
-    // pinned-at-zero cursor "really amortized" would be the gate blessing the very
-    // defect it found.
+    // *advances*, because in this arm it does not — the clock crosses the sun
+    // bucket every frame and legitimately restarts it (see the cursor note below).
+    // The advancing-cursor claim lives in the sun-still arm that follows.
     assert!(
         a.iter().all(|f| f.gi.probes_updated == 256),
         "the GI probe update is not sliced: a full High-tier update is 2048 probes, \
@@ -558,20 +558,151 @@ fn the_composed_frame_trace_is_deterministic_across_runs() {
         a.iter().map(|f| f.scatter.candidates).collect::<Vec<_>>()
     );
 
-    // NOTE (finding, not a blessed property): `gi.probe_cursor` does **not**
-    // advance across these frames, so the round-robin restarts from probe 0 every
-    // frame and the probes past the first 256-probe slice are never re-integrated
-    // in a shipped run. The cause is `GiSweepKey.scene_version`: the player's
-    // `project_scene` calls `RenderScene::mark_dirty()` unconditionally at the end
-    // of every projection, so the scene version changes every frame whether or not
-    // any content did, and `GiNode` resets the sweep. `gi::sun_bucket` exists to
-    // stop precisely this happening via the *sun*; the version has the same shape
-    // of problem and no equivalent guard. Deliberately NOT asserted either way
-    // here — a gate that pinned the current behaviour would make the fix a
-    // "regression", and this file may not touch `crates/`. It is recorded so the
-    // ROADMAP can carry it.
+    // **THE AMORTIZATION SWEEP, AND WHY THIS ARM ONLY PRINTS ITS CURSOR.**
+    //
+    // The P18.4 defect this gate found is FIXED (2026-08-02). It was: `GiSweepKey`
+    // held `scene.version`, and the player's `project_scene` calls
+    // `RenderScene::mark_dirty()` unconditionally at the end of every projection —
+    // so the version moved every frame whether or not any content did, `GiNode`
+    // restarted the sweep, and every probe past the first 256-probe slice was never
+    // re-integrated. The version has left the key; the sweep's own wrap-around
+    // bounds staleness after a content change instead.
+    //
+    // The cursor still sits at one slice *in this arm*, and legitimately so. The
+    // run advances `STEPS_PER_FRAME` steps of the sample's 600x clock between
+    // rendered frames — ten sim-minutes per frame — so the sun sweeps ≈2.5° per
+    // frame and crosses `gi::sun_bucket`'s ≈0.50° bucket every single frame. A
+    // genuinely moved sun invalidates the probes' integration, and restarting there
+    // is the documented doctrine, not a defect. No advancing-cursor assertion can
+    // hold here without weakening that doctrine, so the cursor is recorded as an
+    // observation.
+    //
+    // The player-side witness for the fix is the sun-still arm below,
+    // `the_amortized_sweep_advances_when_only_the_scene_version_churns`: it freezes
+    // the sim (and so the clock, the sun and the content) and leaves `scene.version`
+    // as the only moving input — the exact shape of the defect.
     let cursors: Vec<u32> = a.iter().map(|f| f.gi.probe_cursor).collect();
     eprintln!("gate (a): GI probe cursor across the run: {cursors:?}");
+}
+
+// ── the P18.4 amortization fix, witnessed from the shipped player ────────────
+
+/// **THE AMORTIZED SWEEP ADVANCES WHEN ONLY `scene.version` CHURNS** — the
+/// player-side witness for the P18.4 defect this gate found (fixed 2026-08-02).
+///
+/// `inf_player::render::project_scene` re-projects unconditionally and ends with
+/// `RenderScene::mark_dirty()`, so a shipped build's `scene.version` moves every
+/// frame whether or not one triangle did. While that version sat in `GiSweepKey`,
+/// `GiNode` restarted the probe sweep every frame and every probe past the first
+/// 256-probe slice was never re-integrated — amortization paying a full update's
+/// price for one slice of freshness, in the *shipped* build only. The editor hid
+/// it, because `sync_from_doc` is document-version-gated and a static document
+/// holds its version still: a PIE-vs-shipping divergence in everything but name.
+///
+/// `inf-render`'s `gi_amortization_survives_the_shipped_players_scene_version_churn`
+/// pins the claim on a synthetic scene. This pins it through the **real
+/// projector**, on the composed Phase 18 level, with the sun held still: the sim
+/// is advanced to the composed run's opening pose and then never stepped again, so
+/// the clock, the sun and the content are bit-frozen and the version is the only
+/// thing in the frame that moves. That isolation is what makes it a witness — with
+/// the sun frozen the documented `gi::sun_bucket` reset cannot be what drives the
+/// cursor, so an unfixed key would be caught by this churn *alone*. It is also not
+/// a contrived pose: a paused game, a pause menu, a cutscene hold and a
+/// static-time-of-day level are all exactly this.
+///
+/// Gate (a) cannot state it, for the reason its cursor note gives: it advances the
+/// clock ten sim-minutes per rendered frame, which crosses the ≈0.50° sun bucket
+/// every frame and restarts the sweep there for a legitimate reason.
+#[test]
+fn the_amortized_sweep_advances_when_only_the_scene_version_churns() {
+    let Some(gpu) = gpu_or_skip("phase18 amortization witness") else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let pack = cook_phase18(tmp.path());
+    let reg = pack_vmeshes(&pack);
+    // The same composed configuration gate (a) runs under, streaming budget and
+    // all — the claim is about the shipped renderer's real settings, not a
+    // GI-only one.
+    let settings = composed_settings(binding_budget(&gpu, &pack, &reg));
+
+    // One warmup block, so the level clock sits at the same mid-morning the
+    // composed run opens at — and then the sim is never stepped again.
+    let mut sim = pack_sim(&pack);
+    for _ in 0..STEPS_PER_FRAME {
+        sim.step_once(RuntimeInput::default());
+    }
+
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut r = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    r.set_settings(settings);
+    // One fixed pose. Camera motion is deliberately NOT a sweep reset (the volume
+    // follows the camera every frame, so resetting on it would mean never
+    // amortizing at all) — but freezing it leaves the version as the single
+    // moving input, which is the point of the arm.
+    let view = gate_camera(FRAMES / 2);
+
+    /// Frames of pure churn: two full 8-frame sweeps' worth of evidence, so the
+    /// wrap is inside the window rather than at its edge.
+    const CHURN_FRAMES: usize = 10;
+
+    let mut scene = RenderScene::default();
+    let mut cursors = Vec::with_capacity(CHURN_FRAMES);
+    let mut versions = Vec::with_capacity(CHURN_FRAMES);
+    let mut suns = Vec::with_capacity(CHURN_FRAMES);
+    for _ in 0..CHURN_FRAMES {
+        // THE PLAYER'S OWN LOOP: project every frame, step the sim never.
+        project_scene(&mut scene, &sim, 0.0, &reg);
+        r.render(&gpu, &scene, &view, &target.view, (W, H));
+        let _ = target.read_rgba(&gpu).expect("readback");
+        cursors.push(r.gi_audit().probe_cursor);
+        versions.push(scene.version);
+        let s = scene.sun.unit_direction();
+        suns.push([s.x.to_bits(), s.y.to_bits(), s.z.to_bits()]);
+    }
+    eprintln!(
+        "sun-still churn over {CHURN_FRAMES} frames:\n  cursors  {cursors:?}\n  \
+         versions {versions:?}\n  sun bits {:?} (held)",
+        suns[0]
+    );
+
+    // ── ANTI-VACUITY: the churn the defect needs really is present ──
+    assert!(
+        versions.windows(2).all(|w| w[1] > w[0]),
+        "`project_scene` did not bump `scene.version` on every projection — the \
+         churn this arm exists to survive is not happening, so it proves nothing \
+         ({versions:?})"
+    );
+    // ── ISOLATION: nothing else that legitimately resets the sweep moved ──
+    assert!(
+        suns.windows(2).all(|w| w[0] == w[1]),
+        "the projected sun moved with the sim held still — the sun bucket rather \
+         than the version could be what drives the cursor here ({suns:?})"
+    );
+
+    // ── the claim: 256 → 512 → … → 1792 → wrap, under pure version churn ──
+    assert_eq!(
+        cursors[0], 256,
+        "the first frame did not take one 256-probe slice ({cursors:?})"
+    );
+    assert!(
+        cursors.iter().any(|&c| c > 256),
+        "the cursor never advanced past its first slice — the shipped player's \
+         per-frame `scene.version` bump is restarting the sweep ({cursors:?})"
+    );
+    assert_eq!(
+        cursors[7], 0,
+        "the 2048-probe sweep did not wrap on the 8th 256-probe frame ({cursors:?})"
+    );
+    for (i, w) in cursors[..8].windows(2).enumerate() {
+        if w[1] != 0 {
+            assert_eq!(
+                w[1],
+                w[0] + 256,
+                "slice {i} did not advance by the 256-probe budget ({cursors:?})"
+            );
+        }
+    }
 }
 
 /// Instances the sample's painted `Foliage` entity contributes to the scatter

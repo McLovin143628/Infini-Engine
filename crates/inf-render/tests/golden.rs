@@ -3310,11 +3310,13 @@ fn gi_amortization_survives_a_running_time_of_day_clock() {
                 direction: Vec3::new(r.cos() as f32, r.sin() as f32, 0.3),
                 ..SunParams::default()
             };
+            // `scene.version` churns here exactly as the shipped player's does
+            // (`project_scene` re-projects and marks dirty every frame). It used to
+            // be part of the sweep key, so this test had to pin it to isolate the
+            // sun; since that reset was removed it does not, and leaving the churn
+            // in makes this a second witness for the fix — see
+            // `gi_amortization_survives_the_shipped_players_scene_version_churn`.
             scene.mark_dirty();
-            // `scene.version` is part of the sweep key on purpose — a changed
-            // world must restart the sweep — so hold it fixed across frames and
-            // let the SUN be the only thing moving, which is the question here.
-            scene.version = base.version;
             renderer.render(&gpu, &scene, &view, &target.view, (W, H));
             let _ = target.read_rgba(&gpu).expect("readback");
             out.push(renderer.gi_audit());
@@ -3350,6 +3352,97 @@ fn gi_amortization_survives_a_running_time_of_day_clock() {
     assert!(
         fast_cursors.iter().all(|&c| c == 256),
         "a bucket-crossing sun did not restart the sweep ({fast_cursors:?})"
+    );
+}
+
+/// **THE SHIPPED PLAYER'S `scene.version` CHURN MUST NOT STARVE THE SWEEP.**
+///
+/// `inf_player::render::project_scene` re-projects the whole scene every frame and
+/// ends with `RenderScene::mark_dirty()`, so `scene.version` increments every
+/// frame in a shipped build. While that version was part of `GiSweepKey`, the
+/// sweep reset every frame and the cursor never left its first slice —
+/// amortization paying a full update's CPU cost for one slice of freshness, in the
+/// *shipped* build only. The editor viewport hid it, because `sync_from_doc` is
+/// version-gated there and a static document holds its version still: a
+/// PIE-vs-shipping divergence in everything but name.
+///
+/// This drives the renderer the way the player drives it — nothing moving but the
+/// version — and asserts the cursor sweeps and wraps. The anti-vacuity arm below
+/// keeps the reset honest: the things that genuinely invalidate the integration
+/// still restart it.
+#[test]
+fn gi_amortization_survives_the_shipped_players_scene_version_churn() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut base = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    base.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.25, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(12.0, 0.5, 12.0),
+        [0.9, 0.9, 0.9, 1.0],
+        1,
+    ));
+    base.mark_dirty();
+    let view = look_view(DVec3::new(0.0, 4.0, 7.0), DVec3::ZERO);
+    let mut settings = gi_settings(40.0, 32, 1.0);
+    settings.gi.probe_budget = 256; // 2048 probes ⇒ an 8-frame sweep
+
+    // `extent` per frame: `None` keeps the GI volume (and so the probe geometry)
+    // fixed, which is the case under test; `Some(f)` perturbs it, which must reset.
+    let run = |extent: Option<&dyn Fn(u32) -> f32>, frames: u32| -> Vec<GiAudit> {
+        let target = HeadlessTarget::new(&gpu, W, H);
+        let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        renderer.set_settings(settings);
+        let mut out = Vec::new();
+        for f in 0..frames {
+            if let Some(ext) = extent {
+                let mut s = settings;
+                s.gi.extent = ext(f);
+                renderer.set_settings(s);
+            }
+            let mut scene = base.clone();
+            // THE PLAYER'S OWN BEHAVIOUR: a fresh projection, marked dirty, every
+            // frame — identical content, a different version.
+            scene.mark_dirty();
+            renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+            let _ = target.read_rgba(&gpu).expect("readback");
+            out.push(renderer.gi_audit());
+        }
+        out
+    };
+
+    let churn = run(None, 10);
+    let cursors: Vec<u32> = churn.iter().map(|a| a.probe_cursor).collect();
+    eprintln!("gi version-churn sweep: cursors {cursors:?}");
+    // The version really is moving — otherwise this proves nothing.
+    assert_eq!(cursors[0], 256, "the first frame should take one slice");
+    assert!(
+        cursors.iter().any(|&c| c > 256),
+        "the cursor never advanced past its first slice — the shipped player's \
+         per-frame `scene.version` bump is resetting the sweep ({cursors:?})"
+    );
+    assert_eq!(
+        cursors[7], 0,
+        "the sweep did not complete in 8 frames ({cursors:?})"
+    );
+    // Strictly monotone through the first sweep: 256, 512, … 1792, 0.
+    for (i, w) in cursors[..8].windows(2).enumerate() {
+        if w[1] != 0 {
+            assert_eq!(w[1], w[0] + 256, "slice {i} did not advance ({cursors:?})");
+        }
+    }
+
+    // ANTI-VACUITY: a change that really does invalidate the integration — the GI
+    // volume extent, which moves every probe — still restarts the sweep. Without
+    // this the assertions above would be satisfied by a key that never resets.
+    let moved = run(Some(&|f: u32| 40.0 + f as f32 * 4.0), 6);
+    let moved_cursors: Vec<u32> = moved.iter().map(|a| a.probe_cursor).collect();
+    eprintln!("gi extent-change sweep: cursors {moved_cursors:?}");
+    assert!(
+        moved_cursors.iter().all(|&c| c == 256),
+        "a moving GI volume did not restart the sweep ({moved_cursors:?})"
     );
 }
 

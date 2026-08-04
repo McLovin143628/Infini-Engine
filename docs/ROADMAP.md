@@ -2227,20 +2227,61 @@ GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and h
 > voxelizes as a box or a sphere, the 40 m volume is near-field only (a cascaded or
 > world-space clipmap is the next structural step), and emissive is quantized to RGBA8
 > against a shared 16.0 ceiling. **The phase gate found one live defect and this is
-> where it is recorded:** `GiAudit::probe_cursor` does not advance across a shipped
-> run, so an amortized sweep restarts at probe 0 every frame and the probes past the
-> first slice are never re-integrated. The cause is upstream of GI —
+> where it was recorded — ~~open~~ FIXED 2026-08-02, after Phase 20, see the note
+> below:** `GiAudit::probe_cursor` did not advance across a shipped run, so an
+> amortized sweep restarted at probe 0 every frame and the probes past the first
+> slice were never re-integrated. The cause was upstream of GI —
 > `inf_player::render::project_scene` calls `RenderScene::mark_dirty()`
 > *unconditionally* at the end of every projection, so `scene.version` moves whether
-> or not any content did, and `GiSweepKey` resets the cursor. `gi::sun_bucket` exists
-> to stop exactly this happening via the **sun**; the version has the same shape of
-> problem and no equivalent guard. The gate prints the cursor and deliberately
-> asserts nothing about it, so the fix will not read as a regression — but the fix is
-> a projection-level "did anything actually change?" question that ripples through
-> every version-gated upload in the renderer, which is why it is tracked rather than
-> patched here. At the shipping default (`probe_budget = 0`, a full update) it is
-> unreachable. Scatter does not enter the voxelizer at all, and the
-> P18.5 block says why that is a decision rather than a gap.
+> or not any content did, and `GiSweepKey` reset the cursor. `gi::sun_bucket` exists
+> to stop exactly this happening via the **sun**; the version had the same shape of
+> problem and no equivalent guard. At the shipping default (`probe_budget = 0`, a
+> full update) it was unreachable. Scatter does not enter the voxelizer at all, and
+> the P18.5 block says why that is a decision rather than a gap.
+>
+> > **THE FIX (2026-08-02).** Not the projection-level "did anything actually
+> > change?" question this block anticipated — that ripples through every
+> > version-gated upload in the renderer and is a far larger change than the defect
+> > warrants. Instead **`scene.version` left `GiSweepKey` entirely**, because on
+> > inspection it never belonged there. A content change does not invalidate the
+> > *integration*; it makes some probes stale, and the sweep already bounds staleness
+> > by construction — the cursor wraps, so every probe is revisited within
+> > `ceil(total / budget)` frames and an unvisited probe lags by at most one sweep.
+> > That is the identical guarantee, in the identical words, that the sun bucket's
+> > own doc already accepts. Resetting on top of it bought nothing and cost the whole
+> > feature wherever content moves every frame — which is every frame of a game that
+> > is running, not merely of the shipped player. A reset is still what the
+> > *irreconcilable* changes get: probe geometry, GI settings, the volume generation,
+> > the sky source and the (bucketed) sun. Gated in `inf-render` by
+> > `gi_amortization_survives_the_shipped_players_scene_version_churn` (the cursor
+> > sweeps `256 → … → 1792 → 0` under the player's own per-frame `mark_dirty`, with a
+> > moving-volume anti-vacuity arm that must still reset), and
+> > `gi_amortization_survives_a_running_time_of_day_clock` was strengthened at the
+> > same time: it used to pin `scene.version` to isolate the sun and no longer needs
+> > to, so it now churns the version too and is a second witness.
+> >
+> > **The player-side witness is a new arm of the Phase 18 gate**,
+> > `the_amortized_sweep_advances_when_only_the_scene_version_churns`: the composed
+> > level, the real `project_scene`, the sim advanced one block to the composed run's
+> > opening pose and then **never stepped again**, so the clock, the sun and the
+> > content are bit-frozen (both the frozen sun and the still-rising version are
+> > asserted) and `scene.version` is the only moving input — and the cursor then
+> > sweeps and wraps. **Gate (a)'s own cursor stays a printed observation rather than
+> > an assertion**, which is correct and not a leftover: that arm advances the clock
+> > ten sim-minutes per rendered frame (60 steps of the sample's 600× clock), so the
+> > sun moves ≈2.5° per frame and crosses `gi::sun_bucket`'s ≈0.50° bucket every
+> > frame — the documented, legitimate reset. Asserting an advancing cursor there
+> > would be asserting *against* the sun doctrine, not for the fix.
+> >
+> > **What is still open is the churn itself**, now stated as its own item rather
+> > than as GI's: `project_scene` marks the scene dirty every frame, so *every other*
+> > version-gated cache in the shipped player — the mesh instance buffer, the depth
+> > prepass packing, shadow casters, skinned uploads, sprite batching, the mask id
+> > map, vgeom and scatter — re-uploads or re-packs every frame regardless of whether
+> > anything moved. That is a pure throughput cost with no correctness face, and the
+> > honest fix is a projection fingerprint (or an ECS-side content version) that both
+> > hosts can compute; the editor is already correct here, because `sync_from_doc` is
+> > document-version-gated.
 > *Virtualized geometry* — streaming wants are per **asset**, driven by its closest
 > instance, so a hundred distant instances page in the near one's detail;
 > per-instance/per-region residency needs a second remap level. A pool that grows
@@ -2921,9 +2962,12 @@ GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and h
 > `probe_budget = 0` (full update), which is what every golden and every determinism gate
 > renders with — a full update makes a frame a pure function of the scene with no convergence
 > transient to reason about. A moving camera trades probe latency for the saving, which is why
-> it is opt-in rather than default. The sweep resets on scene version, GI settings, probe
-> geometry, GI generation and the sun; camera *motion* is deliberately absent, because the volume
-> follows the camera and resetting on that would mean never amortizing at all.
+> it is opt-in rather than default. The sweep resets on GI settings, probe geometry, GI
+> generation and the (bucketed) sun; camera *motion* is deliberately absent, because the volume
+> follows the camera and resetting on that would mean never amortizing at all. **Scene version
+> was in that list until 2026-08-02 and is not any more** — it churns every frame in the shipped
+> player, which made amortization a no-op there; the sweep's own wrap-around bounds staleness
+> after a content change without it. See the P18.4 defect note above for the whole argument.
 >
 > **The sun enters that key QUANTIZED, and the first cut got it wrong.** With raw `f32::to_bits()`
 > a running `TimeOfDay` clock moves the projected direction in the low bits every frame, so the
@@ -3465,12 +3509,17 @@ GI revoxelizes every frame, caps at 256 instances, sees only rigid meshes, and h
 > `Foliage::instances` *is* persisted and 100k of those would be a megabyte of
 > committed level.
 >
-> Ten tests. **(a)** the composed frame trace — pixels, meshlet residency and floor,
+> Eleven tests. **(a)** the composed frame trace — pixels, meshlet residency and floor,
 > the GI audit, the instance-cull audit, and the clock and sun as **bits** — reproduces
 > byte for byte across two fresh renderers over six frames under a *binding* VRAM
 > budget, with every layer asserted to have actually moved (the clock advanced, the sun
 > moved, the budget clamped, the meshlet path activated, GI saw the ground, the sweep
-> really amortized at 256 of 2048 probes, the cull saw all 102 416 instances). **(b)**
+> really amortized at 256 of 2048 probes, the cull saw all 102 416 instances); its GI
+> probe cursor is *printed*, because this arm's ten-minutes-per-frame clock crosses the
+> sun bucket every frame and legitimately restarts the sweep — the advancing-cursor
+> claim is the sun-still arm added with the P18.4 amortization fix
+> (`the_amortized_sweep_advances_when_only_the_scene_version_churns`: project every
+> frame, step the sim never, and the cursor sweeps `256 → … → 1792 → 0`). **(b)**
 > the cooked pack and the editor's PIE payload project the same scene, step for step,
 > with the clock running; a companion asserts the *scene-level* editor-parity claim
 > (vgeom assets and instances, scatter keys/anchors/draw-distance, terrain ids), since
