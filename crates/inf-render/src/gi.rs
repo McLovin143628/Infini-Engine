@@ -1211,6 +1211,7 @@ mod tests {
                 // Unpainted: GI reads heights + splat albedo, never biome ids.
                 biomes: Vec::new(),
                 height_bounds: (height, height),
+                holes: Vec::new(),
                 version: 1,
             }],
             layers: [
@@ -1273,6 +1274,7 @@ mod tests {
             weights: vec![[255, 0, 0, 0]; (res * res) as usize],
             biomes: Vec::new(),
             height_bounds: (9.0, 9.0),
+            holes: Vec::new(),
             version: 1,
         });
         // `tiles` is ascending by (lod, coord) → level 0 first → level 0 wins.
@@ -1302,6 +1304,7 @@ mod tests {
             weights: vec![[255, 0, 0, 0]; (res * res) as usize],
             biomes: Vec::new(),
             height_bounds: (9.0, 9.0),
+            holes: Vec::new(),
             version: 1,
         });
         let rect = ((0.0, 0.0), (span, span));

@@ -485,6 +485,17 @@ pub struct CachedTile {
     pub version: u64,
     /// The texture dimension the cached set was created at.
     pub resolution: u32,
+    /// Words per packed hole-mask row the cached hole texture was **sized** at:
+    /// `ceil(resolution / 32)` for a carved tile, **`0`** for the 1×1 sentinel an
+    /// un-carved one binds.
+    ///
+    /// Part of the cache identity rather than derived from `resolution`, because
+    /// it is the one property of the set that can change *without* the resolution
+    /// changing: the first carve on a tile turns a 1×1 texture into a real one,
+    /// and a heal turns it back. A stamp bump alone cannot fix that — the texture
+    /// would still be the wrong size to write into — so the transition has to
+    /// force a rebuild, exactly as a resolution change does.
+    pub hole_words: u32,
 }
 
 /// Identity of one cached tile **across the scene's terrains** (P16.6): the
@@ -507,6 +518,24 @@ pub struct TileCachePlan {
     /// Cached tiles that left the projection (or went malformed) and must be
     /// dropped, freeing their textures.
     pub evict: Vec<TileCacheKey>,
+}
+
+/// Words per packed hole-mask row this tile will be **uploaded** with: the real
+/// stride for a carved tile whose mask is the right length, and `0` — the 1×1
+/// sentinel — for one that is un-carved or whose mask does not match its
+/// resolution.
+///
+/// Shared by the planner and the uploader precisely so the number they agree on
+/// is one function. Two copies of this rule would be a texture created at one
+/// size and written at another, which no test that checks only the plan would
+/// ever catch.
+pub fn planned_hole_words(tile: &RenderTerrainTile, resolution: u32) -> u32 {
+    let words = RenderTerrainTile::hole_words_per_row(resolution);
+    if tile.holes.len() == (words * resolution) as usize && tile.has_holes() {
+        words
+    } else {
+        0
+    }
 }
 
 /// Plan the per-tile GPU texture cache against a projection — a pure function, so
@@ -544,11 +573,18 @@ pub fn plan_tile_cache<T>(
             }
             let key = (terrain.id, tile.key);
             live.insert(key);
+            // The hole mask joins the freshness identity (P21.2). A first carve
+            // on a tile changes the SIZE of its hole texture, and a plan that
+            // only compared stamps would call the entry fresh whenever the stamp
+            // happened to match — which it does not here, but the pairing must
+            // hold structurally rather than by luck, because the failure is a
+            // write into a 1×1 texture and a cave that never appears.
             let fresh = tile.version != 0
                 && cached.get(&key).map(&state)
                     == Some(CachedTile {
                         version: tile.version,
                         resolution: res,
+                        hole_words: planned_hole_words(tile, res),
                     });
             if !fresh {
                 upload.push(key);
@@ -633,6 +669,9 @@ struct TileTextures {
     _height: wgpu::Texture,
     _weights: wgpu::Texture,
     _biomes: wgpu::Texture,
+    /// The P21.2 packed hole mask — a full `ceil(res/32) × res` R32Uint texture
+    /// for a carved tile, or a 1×1 zero sentinel for one nothing has carved.
+    _holes: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     cached: CachedTile,
 }
@@ -815,7 +854,11 @@ impl TerrainNode {
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("terrain-tile"),
-                entries: &[tex_entry(0), tex_entry(1), uint_entry(2)],
+                // Binding 3 is the P21.2 hole mask: R32Uint, row-packed, and
+                // `uint_entry` again because a bitfield read through a filtering
+                // sample type would be a float somebody has to guess an integer
+                // back out of — the same reason the biome ids at binding 2 are Uint.
+                entries: &[tex_entry(0), tex_entry(1), uint_entry(2), uint_entry(3)],
             });
 
         // Splat material uniform bind group (@group(2)): the layer material at
@@ -1034,11 +1077,19 @@ impl TerrainNode {
                 }
                 wanted.next();
 
+                // `0` ⇒ the 1×1 sentinel; anything else is a real, row-packed
+                // mask. A projection whose `holes` vec is the wrong length for its
+                // resolution is treated as un-carved rather than uploaded
+                // partially — the same defensive rule the weights and biome ids
+                // below take, and for the same reason: a half-written mask is
+                // holes nobody authored.
+                let hole_words = planned_hole_words(tile, res);
                 let entry = self.textures.entry(key).or_insert_with(|| {
-                    create_tile_textures(gpu, &self.tile_bgl, res, tile.version)
+                    create_tile_textures(gpu, &self.tile_bgl, res, tile.version, hole_words)
                 });
-                if entry.cached.resolution != res {
-                    *entry = create_tile_textures(gpu, &self.tile_bgl, res, tile.version);
+                if entry.cached.resolution != res || entry.cached.hole_words != hole_words {
+                    *entry =
+                        create_tile_textures(gpu, &self.tile_bgl, res, tile.version, hole_words);
                 }
                 entry.cached.version = tile.version;
                 let tex = &*entry;
@@ -1131,6 +1182,32 @@ impl TerrainNode {
                         depth_or_array_layers: 1,
                     },
                 );
+
+                // The P21.2 hole mask, written only when there is one. The
+                // sentinel case writes nothing at all: its texture was created
+                // zeroed and stays zeroed, which is the "no holes" answer.
+                if hole_words > 0 {
+                    gpu.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &tex._holes,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        bytemuck::cast_slice(&tile.holes),
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            // Four bytes per texel — R32Uint, one word per 32 samples.
+                            bytes_per_row: Some(hole_words * 4),
+                            rows_per_image: Some(res),
+                        },
+                        wgpu::Extent3d {
+                            width: hole_words,
+                            height: res,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
             }
         }
         debug_assert!(
@@ -1185,13 +1262,22 @@ fn create_material_slot(
 }
 
 /// Create an empty `res × res` R32Float height texture + Rgba8Unorm weight
-/// texture + R8Uint biome-id texture, sharing one bind group. `version` records
-/// the stamp the caller is about to write into them.
+/// texture + R8Uint biome-id texture + the P21.2 R32Uint hole mask, sharing one
+/// bind group. `version` records the stamp the caller is about to write into them.
+///
+/// `hole_words` is the packed mask's words per row (`ceil(res / 32)`), or **`0`**
+/// for a tile with no holes — which creates a **1×1 zero texture** instead. That
+/// is the whole sparse-upload mechanism, and it needs no shader permutation: a
+/// `textureLoad` past a texture's bounds returns zero by WGSL's own rule, and
+/// zero means "not holed". An un-carved tile therefore costs four bytes of VRAM
+/// and one fetch that always answers no, so every pre-P21.2 terrain frame is
+/// byte-identical.
 fn create_tile_textures(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
     res: u32,
     version: u64,
+    hole_words: u32,
 ) -> TileTextures {
     let size = wgpu::Extent3d {
         width: res,
@@ -1216,9 +1302,24 @@ fn create_tile_textures(
     // painted as. A normalized format would hand the fragment `id / 255`, and every
     // palette lookup would become a float→index guess.
     let biomes = make("terrain-biomes", wgpu::TextureFormat::R8Uint);
+    let holes = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("terrain-holes"),
+        size: wgpu::Extent3d {
+            width: hole_words.max(1),
+            height: if hole_words == 0 { 1 } else { res },
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Uint,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
     let hview = height.create_view(&wgpu::TextureViewDescriptor::default());
     let wview = weights.create_view(&wgpu::TextureViewDescriptor::default());
     let bview = biomes.create_view(&wgpu::TextureViewDescriptor::default());
+    let holeview = holes.create_view(&wgpu::TextureViewDescriptor::default());
     let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("terrain-tile"),
         layout,
@@ -1235,16 +1336,22 @@ fn create_tile_textures(
                 binding: 2,
                 resource: wgpu::BindingResource::TextureView(&bview),
             },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&holeview),
+            },
         ],
     });
     TileTextures {
         _height: height,
         _weights: weights,
         _biomes: biomes,
+        _holes: holes,
         bind_group,
         cached: CachedTile {
             version,
             resolution: res,
+            hole_words,
         },
     }
 }
@@ -1393,6 +1500,7 @@ mod tests {
             weights: Vec::new(),
             biomes: Vec::new(),
             height_bounds: (0.0, 0.0),
+            holes: Vec::new(),
             version,
         }
     }
@@ -2129,6 +2237,9 @@ mod tests {
                     CachedTile {
                         version,
                         resolution: RES,
+                        // Every fixture tile here is un-carved, so the cache
+                        // records the 1x1 sentinel — see `planned_hole_words`.
+                        hole_words: 0,
                     },
                 )
             })
@@ -2260,6 +2371,7 @@ mod tests {
             CachedTile {
                 version: 1,
                 resolution: RES,
+                hole_words: 0,
             },
         )]
         .into_iter()

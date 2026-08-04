@@ -31,6 +31,8 @@ const LEVEL_ID: AssetId = AssetId(uuid::uuid!("00000000-0000-0000-0000-000021010
 const VOXEL_ID: AssetId = AssetId(uuid::uuid!("00000000-0000-0000-0000-000021010002"));
 /// A GUID no asset in the project has — the dangling case.
 const MISSING_ID: AssetId = AssetId(uuid::uuid!("00000000-0000-0000-0000-0000210100ff"));
+/// The `.inf_terrain` the P21.2 hole advisories read.
+const TERRAIN_ID: AssetId = AssetId(uuid::uuid!("00000000-0000-0000-0000-000021020001"));
 
 fn g(n: u128) -> uuid::Uuid {
     uuid::Uuid::from_u128(n)
@@ -119,6 +121,49 @@ fn voxel_payload() -> Vec<u8> {
         "the fixture must carve something"
     );
     inf_voxel::build_voxel_asset(&data).unwrap().into_bytes()
+}
+
+/// A terrain entity backed by `asset` — the P21.2 half. The inline `data` stays
+/// empty: a streamed terrain's tiles live in the `.inf_terrain`, and (since the
+/// scene wire is pinned at tile generation 3) its hole mask can live nowhere
+/// else at all.
+fn ground(guid: u128, name: &str, asset: AssetId) -> inf_scene::RuntimeEntity {
+    inf_scene::RuntimeEntity {
+        terrain: Some(inf_ecs::components::Terrain {
+            asset: Some(asset.uuid()),
+            ..inf_ecs::components::Terrain::default()
+        }),
+        ..rec(guid, name)
+    }
+}
+
+/// A real `.inf_terrain` payload: one flat tile, with `holes` carved into it at
+/// the given samples.
+fn terrain_payload(holes: &[(u32, u32)]) -> Vec<u8> {
+    let res = 8;
+    let mut t = inf_terrain::TerrainData::new(res, 1.0);
+    t.author_tile((0, 0), |_, _| 0.0);
+    {
+        let tile = t.get_tile_mut((0, 0)).unwrap();
+        for &(i, j) in holes {
+            tile.set_hole(res, i, j, true);
+        }
+        assert_eq!(tile.has_holes(), !holes.is_empty());
+    }
+    let opts = inf_terrain::PyramidOptions::default();
+    let pyramid = inf_terrain::build_pyramid(&t, opts);
+    inf_terrain::build_terrain_asset(&t, &pyramid, opts)
+        .unwrap()
+        .into_bytes()
+}
+
+/// Write `bytes` into the content root as `name`, with a sidecar of `kind`.
+fn put(root: &Path, name: &str, id: AssetId, kind: AssetKind, bytes: &[u8]) {
+    let path = root.join("Content").join(name);
+    std::fs::write(&path, bytes).unwrap();
+    AssetSidecar::new(id, kind, ContentHash::of(bytes))
+        .save(&path)
+        .unwrap();
 }
 
 /// Write a project whose level references `asset`, optionally writing that
@@ -326,6 +371,147 @@ fn a_corrupt_voxel_asset_fails_the_cook() {
         assert!(
             msg.contains("voxel volume") && msg.contains(&VOXEL_ID.to_string()),
             "{label}: the error must name the asset, got: {msg}"
+        );
+    }
+}
+
+// ── P21.2 advisories ─────────────────────────────────────────────────
+
+/// **(a) The scale mismatch is SAID, with both numbers.** The `.inf_voxel` header
+/// and the `VoxelVolume` component each carry a voxel scale, the asset's is the
+/// one that wins at runtime, and a component that disagrees is authored intent
+/// being silently discarded.
+///
+/// Both measured values must appear in the message, because "these disagree" is
+/// not actionable and "set it to 0.5" is.
+#[test]
+fn a_voxel_scale_mismatch_is_reported_with_both_numbers() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let out = dir.path().join("out");
+
+    // The payload is built at 0.5 m/voxel (see `voxel_payload`); the component
+    // claims 0.25.
+    let mut entity = cave(0x21_0201, "Cave", VOXEL_ID);
+    entity.voxel_volume.as_mut().unwrap().voxel_size_m = 0.25;
+    make_project(
+        &proj,
+        &level(vec![entity]),
+        Some((VOXEL_ID, voxel_payload())),
+    );
+
+    let report = cook(&proj, &out, &CookOptions::default()).unwrap();
+    let hit = report
+        .warnings
+        .iter()
+        .find(|w| w.contains("per voxel"))
+        .unwrap_or_else(|| panic!("no scale advisory in {:?}", report.warnings));
+    assert!(hit.contains("0.5"), "{hit}");
+    assert!(hit.contains("0.25"), "{hit}");
+    assert!(hit.contains(&VOXEL_ID.to_string()), "{hit}");
+    // The fix, named: which value to change, and to what.
+    assert!(hit.contains("VoxelVolume.voxel_size_m"), "{hit}");
+}
+
+/// **The matching silence.** A component that agrees with its asset says nothing.
+///
+/// Written as its own test rather than an assertion inside the one above,
+/// because "the advisory fires" and "the advisory does not over-fire" fail
+/// independently and an advisory that fires on correct content is the one that
+/// stops being read (cook.rs: *noise is how advisories stop being read*).
+#[test]
+fn a_matching_voxel_scale_is_silent() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let out = dir.path().join("out");
+
+    let mut entity = cave(0x21_0202, "Cave", VOXEL_ID);
+    entity.voxel_volume.as_mut().unwrap().voxel_size_m = 0.5;
+    make_project(
+        &proj,
+        &level(vec![entity]),
+        Some((VOXEL_ID, voxel_payload())),
+    );
+
+    let report = cook(&proj, &out, &CookOptions::default()).unwrap();
+    assert!(
+        !report.warnings.iter().any(|w| w.contains("per voxel")),
+        "a matching scale must be silent: {:?}",
+        report.warnings
+    );
+}
+
+/// **(b) A see-through pit is SAID, with the measured sample count.** Holed
+/// heightfield samples with no voxel volume over them are ground you fall
+/// through and sky you see from below — a hazard with no other alarm, because
+/// the level loads, the terrain streams and the cook succeeds.
+#[test]
+fn an_uncovered_hole_is_reported_as_a_see_through_pit() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let out = dir.path().join("out");
+
+    make_project(
+        &proj,
+        &level(vec![ground(0x21_0203, "Ground", TERRAIN_ID)]),
+        None,
+    );
+    put(
+        &proj,
+        "Ground.inf_terrain",
+        TERRAIN_ID,
+        AssetKind::Terrain,
+        &terrain_payload(&[(1, 1), (1, 2), (2, 1), (2, 2)]),
+    );
+
+    let report = cook(&proj, &out, &CookOptions::default()).unwrap();
+    let hit = report
+        .warnings
+        .iter()
+        .find(|w| w.contains("see-through"))
+        .unwrap_or_else(|| panic!("no pit advisory in {:?}", report.warnings));
+    // The measured number, not a vague "some".
+    assert!(hit.contains("4 holed sample"), "{hit}");
+    assert!(hit.contains("(0,0)"), "the tile is named: {hit}");
+    assert!(hit.contains(&TERRAIN_ID.to_string()), "{hit}");
+    // The fix, in both forms it takes.
+    assert!(hit.contains("extend a volume"), "{hit}");
+    assert!(hit.contains("fill the holes"), "{hit}");
+}
+
+/// **The matching silence, twice over.** A terrain with no holes says nothing,
+/// and — the load-bearing half — neither does a hole a voxel volume covers,
+/// which is the *correct* authoring of a cave mouth and by far the common case.
+#[test]
+fn a_covered_hole_and_an_uncarved_terrain_are_both_silent() {
+    for holes in [&[][..], &[(1u32, 1u32)][..]] {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("proj");
+        let out = dir.path().join("out");
+
+        // The voxel fixture spans chunks (0,0,0)..(1,1,1) at 0.5 m/voxel from the
+        // origin, i.e. world XZ [0, 16) — which contains sample (1, 1) of a 1 m
+        // tile at the origin.
+        let mut entity = cave(0x21_0204, "Cave", VOXEL_ID);
+        entity.voxel_volume.as_mut().unwrap().voxel_size_m = 0.5;
+        make_project(
+            &proj,
+            &level(vec![ground(0x21_0205, "Ground", TERRAIN_ID), entity]),
+            Some((VOXEL_ID, voxel_payload())),
+        );
+        put(
+            &proj,
+            "Ground.inf_terrain",
+            TERRAIN_ID,
+            AssetKind::Terrain,
+            &terrain_payload(holes),
+        );
+
+        let report = cook(&proj, &out, &CookOptions::default()).unwrap();
+        assert!(
+            !report.warnings.iter().any(|w| w.contains("see-through")),
+            "holes {holes:?} must be silent: {:?}",
+            report.warnings
         );
     }
 }

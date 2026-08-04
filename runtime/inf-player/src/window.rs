@@ -331,7 +331,11 @@ impl PlayerApp {
                 }
             }
         }
-        live.host.project(&self.sim, alpha);
+        // The eye the render host's own camera-driven residency (P21.2 voxel
+        // volumes) is measured from — the SAME point `sync_render_terrain` above
+        // took, so a frame with no view (occluded/minimized) pages neither.
+        let eye = view.as_ref().map(|v| v.eye_world).unwrap_or(DVec3::ZERO);
+        live.host.project(&self.sim, alpha, eye);
         if self.debug_cells {
             live.host.draw_cell_overlay(&self.sim);
         }

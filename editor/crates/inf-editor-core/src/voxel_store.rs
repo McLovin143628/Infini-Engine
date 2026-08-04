@@ -18,9 +18,12 @@
 //! everything after the bytes (parsing, residency, meshing, invalidation), so the
 //! editor and the shipped player cannot mesh the same field differently.
 //!
-//! Not here: **any camera policy**. The Ring-0 store pages a volume whole; the
-//! view-dependent selection that would page it in parts is P21.2, and the
-//! machinery for it is already built and tested in `inf_voxel::residency`.
+//! Not here: **any camera policy**. It lives in Ring 0 (`inf_voxel::wants`) and is
+//! executed in Ring 0 (`inf_voxel::VoxelVolumes::sync_camera`); this file only
+//! forwards the viewport's eye position to it (P21.2). Same reason as everything
+//! else above — a radius, a dead band and a budget written once in the editor and
+//! once in the player is two policies, and the shipped build would stream a cave
+//! differently from its preview.
 //!
 //! # Resolution is by sidecar GUID, and a miss rescans once
 //!
@@ -33,8 +36,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use glam::DVec3;
 use inf_ecs::components::VoxelVolume;
-use inf_voxel::{VolumeSlot, VoxelVolumes};
+use inf_voxel::{VolumeSlot, VoxelStreamBudget, VoxelStreamReport, VoxelVolumes, VoxelWantsParams};
 use uuid::Uuid;
 
 /// Depth cap on the content-root walk — deep enough for any content layout,
@@ -233,9 +237,58 @@ impl EditorVoxelVolumes {
         }
     }
 
+    /// Record where the document has placed `entity`'s volume in the world, so
+    /// residency is measured from the camera to the cave the player can see rather
+    /// than to the asset's authoring anchor. Idempotent; forwards to Ring 0.
+    pub fn place(&mut self, entity: Uuid, translation: DVec3) -> bool {
+        self.volumes.place(entity.as_u128(), translation)
+    }
+
+    /// **The camera-driven residency pass** (P21.2): page every bound volume
+    /// against the viewport eye, then re-mesh what moved.
+    ///
+    /// A pure forward to `inf_voxel::VoxelVolumes::sync_camera` — the radius, the
+    /// dead band, the budget and the eviction rule all live in Ring 0, so the
+    /// editor and the shipped player stream the same cave the same way. The only
+    /// editor-local part is *when* it is called (the viewport's per-frame sync
+    /// point) and *where the eye comes from* (the editor camera, which the
+    /// simulation cannot see — the determinism seam).
+    ///
+    /// Decode failures come back on the report rather than going to a log inside
+    /// Ring 0; they are warned about here, **once per asset**, on the same
+    /// suppression path an unresolvable reference uses — a projection runs at input
+    /// rate and a per-frame warning is an unusable log.
+    pub fn sync_camera(
+        &mut self,
+        eye_world: DVec3,
+        params: &VoxelWantsParams,
+        budget: VoxelStreamBudget,
+    ) -> VoxelStreamReport {
+        let report = self.volumes.sync_camera(eye_world, params, budget);
+        for (key, err) in &report.failed {
+            tracing::warn!(
+                "inf-editor-core: voxel chunk ({}, {}, {}) failed to decode: {err}",
+                key.x,
+                key.y,
+                key.z
+            );
+        }
+        report
+    }
+
     /// The loaded slot for `entity` — its resident chunks and meshed surface.
     pub fn slot(&self, entity: Uuid) -> Option<&VolumeSlot> {
         self.volumes.get(entity.as_u128())
+    }
+
+    /// Resident chunks across every loaded volume (a streaming readout).
+    pub fn chunk_count(&self) -> usize {
+        self.volumes.chunk_count()
+    }
+
+    /// Wanted-but-not-yet-resident chunks — the convergence backlog.
+    pub fn pending_loads(&self) -> usize {
+        self.volumes.pending_loads()
     }
 
     /// Release every volume whose entity is no longer in `live` (the document
@@ -267,8 +320,22 @@ impl EditorVoxelVolumes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::DVec3;
     use inf_voxel::{ChunkKey, VoxelChunk, VoxelData};
+
+    /// Page every bound volume in. The fixtures below are a couple of chunks
+    /// around the world origin, so one wide-radius pass is the whole volume — and
+    /// it has to be an explicit call, because P21.2 made binding and paging two
+    /// different acts (see `inf_voxel::store`).
+    fn page_everything(s: &mut EditorVoxelVolumes) -> inf_voxel::VoxelStreamReport {
+        s.sync_camera(
+            DVec3::splat(8.0),
+            &VoxelWantsParams {
+                radius_m: 1000.0,
+                hysteresis: 0.0,
+            },
+            VoxelStreamBudget::default(),
+        )
+    }
 
     /// A carved-out `.inf_voxel` written into `dir` with a sidecar, so the index
     /// can find it exactly as the editor's own writers would leave it.
@@ -325,6 +392,8 @@ mod tests {
         assert!(s.ensure(e, &VoxelVolume::from_asset(asset)));
         assert_eq!(s.len(), 1);
         assert!(s.slot(e).is_some());
+        assert_eq!(s.triangle_count(), 0, "binding pages nothing (P21.2)");
+        assert!(page_everything(&mut s).loaded > 0);
         assert!(s.triangle_count() > 0);
 
         // Clearing the reference must make the cave disappear, not keep the last
@@ -346,12 +415,16 @@ mod tests {
         let e = Uuid::from_u128(7);
         let volume = VoxelVolume::from_asset(asset);
         assert!(s.ensure(e, &volume));
+        page_everything(&mut s);
         let tris = s.slot(e).unwrap().meshes.triangle_count();
         assert!(tris > 0);
         // A second ensure is a no-op — no filesystem access, same slot.
         assert!(s.ensure(e, &volume));
         assert_eq!(s.slot(e).unwrap().meshes.triangle_count(), tris);
         assert_eq!(s.len(), 1);
+        // …and so is a second camera pass from the same eye: a settled volume
+        // pages nothing and moves no mesh stamp.
+        assert!(page_everything(&mut s).is_noop());
     }
 
     /// An asset written **after** the project opened still resolves: the miss
@@ -444,6 +517,7 @@ mod tests {
         let e = Uuid::from_u128(1);
         let volume = VoxelVolume::from_asset(asset);
         assert!(s.ensure(e, &volume), "an all-air asset still BINDS");
+        page_everything(&mut s);
         let slot = s.slot(e).expect("…and keeps its slot");
         assert_eq!(
             slot.meshes.triangle_count(),

@@ -14,11 +14,27 @@
 //   * no cloud shadow,
 //   * no shoreline wetness.
 //
-// P21.2 owns all of that, plus the three things that make a voxel surface part of
-// the world rather than merely in front of it: **seam blending against the
-// heightfield** (triplanar detail grain and splat continuity across a cave mouth),
-// **shadow/GI participation**, and the **depth prepass** (so SSAO and TAA see
-// these surfaces at all).
+// P21.2 closes the first of the three things that make a voxel surface part of
+// the world rather than merely in front of it — **seam blending against the
+// heightfield** (see below) — and leaves **shadow/GI participation** and the
+// **depth prepass** (so SSAO and TAA see these surfaces at all) open.
+//
+// ── SEAM BLENDING (P21.2), and what it does NOT do ──────────────────────
+//
+// Within a stated **blend band** (metres, per volume) of the heightfield surface,
+// a voxel fragment mixes toward the terrain's own splat-blended albedo,
+// roughness and surface normal at that point. The terrain values arrive
+// per-vertex, already resolved against the terrain's layer palette by the
+// projector — which is what "takes the terrain's layer palette weights" means
+// operationally, and why this pass needs no terrain bindings at all.
+//
+// **It is not welding.** No vertex moves, no index is shared, no crack is
+// closed: the cave mouth is still two surfaces that happen to agree about colour
+// and normal where they meet. Seen edge-on at a grazing angle, or with the two
+// surfaces a few centimetres apart, the seam is still a seam. What the band buys
+// is that the *material* does not change discontinuously across it — the thing
+// the eye actually reads as "one piece of ground" at a cave mouth — and that the
+// shading normal turns over smoothly instead of stepping.
 //
 // Keeping this pass off the `Lit` composition is what keeps this batch's surface
 // area honest rather than half-wired. A voxel surface bound into the env group
@@ -49,6 +65,23 @@ struct VsIn {
     // The four layers' perceptual roughness in x,y,z,w.
     @location(11) rough: vec4<f32>,
     @location(12) misc: vec4<u32>, // x = pick id (0 in P21.1 — see passes/voxel.rs)
+    // P21.2 seam, per vertex: the heightfield's unit surface normal at this
+    // vertex's world XZ in xyz, and its world surface height in w.
+    //
+    // `y <= 0` is the "no heightfield here" sentinel, and it is a sentinel that
+    // cannot be confused with data: a heightfield normal is the gradient of a
+    // single-valued function of (x, z), so its +Y component is strictly positive,
+    // always. No separate flag, and no reserved float value that some real
+    // terrain could legitimately reach.
+    @location(13) seam_nh: vec4<f32>,
+    // P21.2 seam, per vertex: the terrain's splat-blended albedo in rgb and its
+    // blended perceptual roughness in a, resolved on the CPU against the
+    // TERRAIN's layer palette — not this volume's.
+    @location(14) seam_albedo: vec4<f32>,
+    // P21.2 seam, per chunk: x = blend-band width in metres (0 disables the whole
+    // thing). Rides the instance stream because a band is a property of the
+    // volume, not of a vertex.
+    @location(15) seam_params: vec4<f32>,
 };
 
 struct VsOut {
@@ -63,6 +96,15 @@ struct VsOut {
     // and it keeps the fragment stage free of the array entirely.
     @location(2) @interpolate(flat) albedo: vec4<f32>,
     @location(3) @interpolate(flat) rough: f32,
+    // The seam terms cross the boundary **interpolated**, unlike the palette
+    // select above, and the difference is the whole point: a layer index is a
+    // label and must not be averaged, while a surface height, a normal and a
+    // blended colour are quantities whose average is the value halfway between.
+    // Interpolating them is what makes the band a smooth gradient across a
+    // triangle rather than a per-vertex staircase.
+    @location(4) seam_nh: vec4<f32>,
+    @location(5) seam_albedo: vec4<f32>,
+    @location(6) @interpolate(flat) seam_band: f32,
 };
 
 @vertex
@@ -87,7 +129,28 @@ fn vs(in: VsIn) -> VsOut {
     var rough = array<f32, 4>(in.rough.x, in.rough.y, in.rough.z, in.rough.w);
     out.albedo = albedo[mat];
     out.rough = rough[mat];
+
+    out.seam_nh = in.seam_nh;
+    out.seam_albedo = in.seam_albedo;
+    out.seam_band = in.seam_params.x;
     return out;
+}
+
+// How strongly this fragment belongs to the heightfield: 1 at the terrain
+// surface, 0 at `band` metres away from it, smoothstepped in between, and
+// exactly 0 where the sentinel says there is no heightfield over this point (or
+// where the volume disabled the band).
+//
+// Smoothstep rather than a linear ramp because a linear one has a derivative
+// break at both ends of the band — a pair of Mach bands running parallel to the
+// cave mouth, which is precisely the class of artefact this feature exists to
+// remove.
+fn seam_weight(world_y: f32, seam_nh: vec4<f32>, band: f32) -> f32 {
+    if (seam_nh.y <= 0.0 || band <= 0.0) {
+        return 0.0;
+    }
+    let t = 1.0 - clamp(abs(world_y - seam_nh.w) / band, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
 }
 
 // ── Lights (must match LightsUniform / MAX_LIGHTS in passes/mesh.rs) ──
@@ -168,7 +231,16 @@ fn point_attenuation(dist: f32, range: f32) -> f32 {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let albedo = in.albedo.rgb;
+    // ── P21.2 SEAM BLEND ────────────────────────────────────────────
+    // Applied BEFORE the unlit early-out, so the Unlit view mode shows the same
+    // continuity the Lit one does — a debug mode that disagreed with the shipped
+    // one about where the seam is would be worse than no debug mode.
+    //
+    // `s` is 0 for every fragment outside the band and for every volume with no
+    // heightfield over it, which is what keeps the pre-P21.2 voxel goldens
+    // byte-stable: the mixes below collapse to their first argument exactly.
+    let s = seam_weight(in.world_pos.y, in.seam_nh, in.seam_band);
+    let albedo = mix(in.albedo.rgb, in.seam_albedo.rgb, s);
     // Unlit view mode (R-P2): return albedo directly, skipping the light loop —
     // the same early-out every other lit pass takes, so volumetric terrain is not
     // the one surface that ignores the view mode. `flags.x` is 0 in the default
@@ -178,10 +250,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
     // The SDF gradient hands normalized normals in, but interpolation across a
     // triangle does not preserve unit length — that is a different fact, and it
-    // is why this normalize is not redundant with the projector's.
-    let n = normalize(in.normal);
+    // is why this normalize is not redundant with the projector's. The seam mix
+    // rides INSIDE the normalize for the same reason: the blend of two unit
+    // vectors is not a unit vector.
+    let n = normalize(mix(in.normal, in.seam_nh.xyz, s));
     let v = normalize(view.eye.xyz - in.world_pos);
-    let rough = clamp(in.rough, 0.04, 1.0);
+    let rough = clamp(mix(in.rough, in.seam_albedo.w, s), 0.04, 1.0);
     // Dielectric reflectance: a terrain splat layer has no metallic channel, so
     // f0 is the 4% every non-metal shares.
     let f0 = vec3<f32>(0.04);

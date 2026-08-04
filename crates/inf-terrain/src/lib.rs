@@ -111,9 +111,9 @@ pub use stream::{
     TerrainStreamer,
 };
 pub use tile::{
-    hole_mask_bytes, DataMapKind, TerrainTile, TerrainTileFrozenV1, TerrainTileFrozenV2,
-    TerrainTileFrozenV3, TileKey, DATA_MAP_CHANNELS, DEFAULT_BIOME, DEFAULT_DATA_MAP,
-    DEFAULT_WEIGHT, MAX_BIOMES, UNASSIGNED_BIOME,
+    hole_mask_bytes, pack_hole_rows, DataMapKind, TerrainTile, TerrainTileFrozenV1,
+    TerrainTileFrozenV2, TerrainTileFrozenV3, TileKey, DATA_MAP_CHANNELS, DEFAULT_BIOME,
+    DEFAULT_DATA_MAP, DEFAULT_WEIGHT, MAX_BIOMES, UNASSIGNED_BIOME,
 };
 pub use wants::{
     advance_cut, brush_wants, clamp_cut, render_wants, sim_wants, RenderWantsParams, TileCatalog,

@@ -354,6 +354,37 @@ pub struct TerrainTile {
     holes: Vec<u8>,
 }
 
+/// Re-pack a tile's hole mask into **row-aligned `u32` words** — the layout a GPU
+/// wants — returning an empty `Vec` for a tile with no holes.
+///
+/// The tile packs bit `j * resolution + i`, which is dense but does not align a
+/// row to a word boundary unless the resolution happens to be a multiple of 32.
+/// A fragment shader would then need a division by a non-constant to find its
+/// word. Row-aligned, the index is `(i >> 5, j)` — free — at a cost of at most
+/// 31 wasted bits per row on a carved tile, which is nothing against the
+/// `resolution²` bits it is carrying.
+///
+/// Lives here, beside the packing it inverts, so the two cannot drift; the
+/// renderer only ever sees the `Vec<u32>` and never learns the tile's own
+/// layout. Empty out means "nothing is holed", the same sparse default the layer
+/// itself carries.
+pub fn pack_hole_rows(tile: &TerrainTile, resolution: u32) -> Vec<u32> {
+    if !tile.has_holes() {
+        return Vec::new();
+    }
+    let res = resolution.max(1);
+    let words = res.div_ceil(32) as usize;
+    let mut out = vec![0u32; words * res as usize];
+    for j in 0..res {
+        for i in 0..res {
+            if tile.is_hole(res, i, j) {
+                out[j as usize * words + (i >> 5) as usize] |= 1u32 << (i & 31);
+            }
+        }
+    }
+    out
+}
+
 /// Bytes a packed hole mask occupies for a `resolution × resolution` tile:
 /// `ceil(resolution² / 8)`.
 ///
@@ -456,9 +487,9 @@ struct TerrainTileBin {
 /// Carving one is a live, undoable edit that survives until the level is written,
 /// and then the mask is gone. Holes persist on a terrain backed by a
 /// `.inf_terrain` asset — which is the streaming path every carve tool targets,
-/// and the one the P21.2 cook advisory names when it is missing. The next scene
-/// bump fills the empty cell in; `terrain_data_wire_is_pinned_at_generation_three`
-/// is the tripwire that fails when someone tries to fill it early.
+/// and the container the cook's P21.2 advisories read. The next scene bump fills
+/// the empty cell in; `terrain_data_wire_is_pinned_at_generation_three` is the
+/// tripwire that fails when someone tries to fill it early.
 ///
 /// bincode is positional, so these bytes cannot be fed to the grown
 /// [`TerrainTile`] — the decoder would read past the end of the tile and into

@@ -21,6 +21,19 @@
 // unassigned), bound per patch beside the two above (P19.2). Integer-typed on
 // purpose — see `load_biome`.
 @group(1) @binding(2) var biome_tex: texture_2d<u32>;
+// The per-tile HOLE MASK (P21.2): R32Uint, **row-packed** — texel `(w, j)` holds
+// the hole bits for samples `[w*32, w*32+32)` of row `j`, LSB-first. A tile with
+// no holes binds a **1×1 zero texture** instead of a `ceil(res/32) × res` one, so
+// the un-carved case costs four bytes and needs no shader permutation: every
+// `textureLoad` past a 1×1 texture's bounds returns zero by WGSL's own rule, and
+// zero means "not holed" everywhere. That is the entire sparse-upload mechanism.
+//
+// Bits rather than a byte-per-sample R8Uint texture, for the same reason the CPU
+// layer packs (see `inf_terrain::hole_mask_bytes`): this is a predicate, and 8×
+// the bandwidth to carry seven zero bits per sample buys nothing. Row-packed
+// rather than tile-packed so the fragment's index is `(i >> 5, j)` — no division
+// by a non-constant, and no dependence on the tile resolution at all.
+@group(1) @binding(3) var hole_tex: texture_2d<u32>;
 
 // Terrain splat material (@group(2)): four layers + macro variation. Mirrors
 // `MaterialRaw` in passes/terrain.rs. `params[k].x` = roughness, `.y` = tex_scale.
@@ -114,6 +127,32 @@ fn sample_weights(uv: vec2<f32>, res: f32) -> vec4<f32> {
         w = vec4<f32>(1.0, 0.0, 0.0, 0.0);
     }
     return w;
+}
+
+// ── hole mask (P21.2) ──────────────────────────────────────────────────────
+
+// Is sample `(i, j)` holed? Out-of-range reads return zero (WGSL's rule), which
+// is exactly what the 1×1 sentinel texture of an un-carved tile relies on.
+fn load_hole(ij: vec2<i32>) -> bool {
+    let word = textureLoad(hole_tex, vec2<i32>(ij.x >> 5u, ij.y), 0).r;
+    return ((word >> (u32(ij.x) & 31u)) & 1u) != 0u;
+}
+
+// **THE POISON RULE, raster half.** A holed sample removes the surface from every
+// cell that interpolates it, so one holed corner of the bilinear cell under `uv`
+// kills the whole cell — character for character the rule
+// `inf_terrain::TerrainData::height_at` applies on the CPU. The two MUST agree:
+// if the raster poisoned less than the query, a capsule would stand on ground
+// nobody draws; if it poisoned more, the cave's rim would be eaten away.
+fn is_holed(uv: vec2<f32>, res: f32) -> bool {
+    let p = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * (res - 1.0);
+    let m = i32(res) - 1;
+    let i0 = clamp(vec2<i32>(floor(p)), vec2<i32>(0), vec2<i32>(m));
+    let i1 = min(i0 + vec2<i32>(1, 1), vec2<i32>(m, m));
+    return load_hole(i0)
+        || load_hole(vec2<i32>(i1.x, i0.y))
+        || load_hole(vec2<i32>(i0.x, i1.y))
+        || load_hole(i1);
 }
 
 // ── biome ids (P19.2) ────────────────────────────────────────────────────────
@@ -230,6 +269,25 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     let res = max(in.span_res.y, 2.0);
     let world_step = span / (res - 1.0);   // world metres between texels
     let texel = 1.0 / (res - 1.0);
+
+    // ── P21.2 HOLE DISCARD ─────────────────────────────────────────
+    // The first statement in the fragment, before anything is computed and
+    // before depth is written: a carved cell has no surface, so the clipmap
+    // draws nothing there and whatever the voxel volume put behind it shows
+    // through. An un-carved tile's 1×1 sentinel makes this a texture fetch that
+    // always says "no", so every pre-P21.2 terrain golden stays byte-stable.
+    //
+    // **This also handles the skirt**, and structurally rather than by a second
+    // rule. A skirt vertex carries its boundary `uv`, so a skirt fragment tests
+    // the very sample it exists to seal the crack under — which means a skirt
+    // wall can never survive inside a hole. The honest consequence, stated
+    // because it is a real one: where a hole reaches a patch boundary the crack
+    // seal goes with it, so a fine↔coarse LOD gap can open at that edge. That is
+    // acceptable and preferable — a gap where there is no ground reads as the
+    // cave it is, while a skirt wall hanging in a cave mouth reads as a bug.
+    if (is_holed(in.uv, res)) {
+        discard;
+    }
 
     // Central-difference normal from the height texture (world-space gradient).
     let hl = sample_height(in.uv - vec2<f32>(texel, 0.0), res);

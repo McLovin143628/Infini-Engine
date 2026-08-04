@@ -285,6 +285,7 @@ pub fn run_headless(args: &Args) -> ExitCode {
     // freshly-activated cell brings some of them in.
     attach_cell_streaming(&mut sim, &partition);
     attach_terrain_streaming(&mut sim, &terrain_content);
+    attach_voxel_volumes(&mut sim, &load_voxel_assets(args));
     attach_mods(&mut sim, args);
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
         fold_trace_sim(sim, frames, panic_after)
@@ -333,6 +334,9 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     let mut sim = sim_from_built(built);
     attach_cell_streaming(&mut sim, &partition);
     attach_terrain_streaming(&mut sim, &terrain_content);
+    // The SAME registry the render host will page from — one source of bytes, two
+    // working sets, and the sim's is the one that decides where the floor is.
+    attach_voxel_volumes(&mut sim, &voxel_assets);
     attach_mods(&mut sim, args);
     match window::run(
         title,
@@ -350,6 +354,71 @@ pub fn run_windowed(args: &Args) -> ExitCode {
         Err(e) => {
             eprintln!("inf-player: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Seed the **simulation's** voxel volumes from `assets` (P21.2), so a Blueprint
+/// calling `terrain.height_at` over a carved hole reads the cave floor beneath it
+/// instead of the `None` a holed bilinear cell produces.
+///
+/// A no-op for a world with no `.inf_voxel` content, in which case the step is
+/// bit-identical to its pre-P21.2 self.
+///
+/// # Why this is not the render host's store
+///
+/// The render host pages its volumes against the camera
+/// (`inf_voxel::VoxelVolumes::sync_camera`); a fixed step must never be able to
+/// observe that, or the replay / PIE-==-shipping gates die. So the sim gets its
+/// own map, resolved once from level state, and the two are structurally apart —
+/// there is no reference from the world to the render store. Exactly the split
+/// `attach_terrain_streaming` above makes between `sync_sim` and `sync_render`.
+///
+/// Called from **every** boot path that has a voxel source (windowed and
+/// headless), because a level whose gameplay depends on a cave floor must answer
+/// the same in CI as on screen. The PIE `ScenePayload` path carries no
+/// `.inf_voxel` source at all, so both sides of that gate see an empty map and
+/// still agree.
+pub fn attach_voxel_volumes(sim: &mut RuntimeSim, assets: &voxel::VoxelRegistry) {
+    if assets.is_empty() {
+        return;
+    }
+    let volumes = runtime_sim::resolve_voxel_volumes(sim.world(), |guid| assets.load(guid));
+    sim.set_voxel_volumes(volumes);
+}
+
+/// The `.inf_voxel` source alone, for a boot path that needs the **gameplay** half
+/// of P21.1 without a GPU.
+///
+/// Split out of [`load_render_assets`] rather than folded into it because the
+/// headless CI path has no renderer and must not pay for opening the vmesh and
+/// skeletal stores to reach one registry — while still seeding the sim, since a
+/// determinism trace that skipped the cave floor would not be the same world the
+/// windowed build runs.
+fn load_voxel_assets(args: &Args) -> voxel::VoxelRegistry {
+    match &args.world {
+        WorldChoice::Demo => voxel::VoxelRegistry::new(),
+        WorldChoice::Level(path) => {
+            let content_dir = args
+                .content
+                .clone()
+                .or_else(|| path.parent().map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("."));
+            voxel::VoxelRegistry::from_dir(&content_dir)
+        }
+        WorldChoice::Pack(path) => {
+            let pack_path = if path.is_dir() {
+                path.join(level::PACK_FILE)
+            } else {
+                path.clone()
+            };
+            match inf_asset::PackReader::open(&pack_path) {
+                Ok(reader) => voxel::VoxelRegistry::from_pack(std::sync::Arc::new(reader)),
+                Err(e) => {
+                    tracing::warn!("inf-player: no voxel assets loaded from pack: {e}");
+                    voxel::VoxelRegistry::new()
+                }
+            }
         }
     }
 }

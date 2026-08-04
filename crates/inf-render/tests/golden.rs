@@ -805,6 +805,7 @@ fn hill_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
                 weights: Vec::new(),
                 biomes: Vec::new(),
                 height_bounds: (lo, hi),
+                holes: Vec::new(),
                 version: 1,
             });
         }
@@ -960,6 +961,7 @@ fn splat_terrain(res: u32, mps: f64, ntx: i32, ntz: i32) -> RenderTerrain {
                 // Unpainted — the biomes golden paints this fixture's ids itself.
                 biomes: Vec::new(),
                 height_bounds: (lo, hi),
+                holes: Vec::new(),
                 version: 1,
             });
         }
@@ -1199,6 +1201,7 @@ fn streamed_terrain(res: u32, mps: f64) -> RenderTerrain {
             weights: Vec::new(),
             biomes: Vec::new(),
             height_bounds: (lo, hi),
+            holes: Vec::new(),
             version: 1 + version,
         }
     };
@@ -3055,6 +3058,7 @@ fn golden_gi_terrain() {
                 weights: Vec::new(),
                 biomes: Vec::new(),
                 height_bounds: (0.0, 0.0),
+                holes: Vec::new(),
                 version: 1,
             });
         }
@@ -7153,6 +7157,8 @@ fn voxel_scene() -> RenderScene {
                     pos,
                     normal: mesh.normals[i],
                     material: mesh.materials[i] as u32,
+                    seam_nh: RenderVoxelVertex::NO_SEAM,
+                    seam_albedo: [0.0; 4],
                 })
                 .collect(),
             indices: mesh.indices.clone(),
@@ -7187,6 +7193,7 @@ fn voxel_scene() -> RenderScene {
                 },
                 RenderTerrainLayer::default(),
             ],
+            seam_band_m: 0.0,
         }],
         ..Default::default()
     };
@@ -7384,6 +7391,7 @@ fn voxel_off_path_never_engages() {
             id: 7,
             chunks: Vec::new(),
             layers: [RenderTerrainLayer::default(); 4],
+            seam_band_m: 0.0,
         }],
         ..bare.clone()
     };
@@ -7394,4 +7402,211 @@ fn voxel_off_path_never_engages() {
         before,
         "a volume with no chunks engaged the encoder"
     );
+}
+
+// ── P21.2: the cave mouth ───────────────────────────────────────────
+
+/// Row-pack a tile's holes into the [`RenderTerrainTile::holes`] layout: bit
+/// `i & 31` of word `(i >> 5) + j * ceil(res/32)`.
+///
+/// The same repack a host projector performs, written out here for the same
+/// reason `voxel_scene` writes out `project_voxel`: the golden harness has no
+/// `SceneDoc` and no ECS world.
+fn pack_holes(res: u32, holed: impl Fn(u32, u32) -> bool) -> Vec<u32> {
+    let words = RenderTerrainTile::hole_words_per_row(res) as usize;
+    let mut out = vec![0u32; words * res as usize];
+    for j in 0..res {
+        for i in 0..res {
+            if holed(i, j) {
+                out[j as usize * words + (i >> 5) as usize] |= 1u32 << (i & 31);
+            }
+        }
+    }
+    out
+}
+
+/// A flat heightfield at y = 15 with a **round hole** punched through the middle
+/// of it, and — through that hole — the P21.1 carved volume's tunnel underneath.
+///
+/// The two are deliberately built from the same numbers: the volume's slab top is
+/// y = 15 and its bore runs along x at (y, z) = (11, 16), so the hole opens
+/// directly onto four metres of cave and the camera can see into it. That is the
+/// whole claim of P21.2 in one frame — the clipmap stops where the mask says, and
+/// what is behind it is volumetric terrain, not sky.
+fn cave_mouth_scene() -> RenderScene {
+    const RES: u32 = 33;
+    const MPS: f64 = 1.0;
+    // The hole: every sample within 5 m of (16, 16), which is where the bore is.
+    let holed = |i: u32, j: u32| {
+        let dx = i as f64 - 16.0;
+        let dz = j as f64 - 16.0;
+        (dx * dx + dz * dz).sqrt() <= 5.0
+    };
+
+    let mut scene = voxel_scene();
+    scene.terrains.push(RenderTerrain {
+        id: 2,
+        tile_resolution: RES,
+        meters_per_sample: MPS,
+        tiles: vec![RenderTerrainTile {
+            key: TerrainTileKey::lod0((0, 0)),
+            origin: DVec3::new(0.0, 15.0, 0.0),
+            heights: vec![0.0; (RES * RES) as usize],
+            weights: vec![[255, 0, 0, 0]; (RES * RES) as usize],
+            biomes: vec![0; (RES * RES) as usize],
+            holes: pack_holes(RES, holed),
+            height_bounds: (0.0, 0.0),
+            version: 1,
+        }],
+        layers: [
+            // A grassy top layer, deliberately unlike the volume's rock ramp, so
+            // "which surface am I looking at" is answerable from the pixels.
+            RenderTerrainLayer {
+                albedo: [0.22, 0.34, 0.16, 1.0],
+                roughness: 0.9,
+                tex_scale: 6.0,
+            },
+            RenderTerrainLayer::default(),
+            RenderTerrainLayer::default(),
+            RenderTerrainLayer::default(),
+        ],
+        macro_variation: 0.0,
+        biome_palette: Vec::new(),
+    });
+
+    // Turn the seam blend on for the volume, and fill the per-vertex seam terms
+    // from the terrain that is now over it — exactly what a projector does.
+    let terrain = scene.terrains[0].clone();
+    let volume = &mut scene.voxels[0];
+    volume.seam_band_m = inf_render::DEFAULT_SEAM_BAND_M;
+    for chunk in &mut volume.chunks {
+        let base = chunk.origin;
+        for v in &mut chunk.vertices {
+            let wx = base.x + v.pos[0] as f64;
+            let wz = base.z + v.pos[2] as f64;
+            if let Some(sample) = terrain.seam_sample(wx, wz) {
+                let (nh, albedo) = sample.pack(0.0);
+                v.seam_nh = nh;
+                v.seam_albedo = albedo;
+            }
+        }
+    }
+    scene
+}
+
+/// **The P21.2 render gate.** A hole-punched heightfield with a voxel cave
+/// visible through it: the clipmap discards where the mask says, and what shows
+/// through the gap is the volume, not the sky.
+///
+/// The structural assertions are what make this a gate rather than a picture.
+/// The mask has to actually be sparse-and-nonzero (a golden of an un-carved tile
+/// would still be a golden), the seam has to actually have been sampled at some
+/// vertices and NOT at the ones inside the hole, and the pixels through the
+/// mouth have to be lit rock rather than sky — which is the one thing a discard
+/// that fired in the wrong place would break.
+#[test]
+fn golden_cave_mouth() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let scene = cave_mouth_scene();
+
+    // ── CPU-side, before a pixel is drawn ───────────────────────────────
+    let tile = &scene.terrains[0].tiles[0];
+    let res = scene.terrains[0].tile_resolution;
+    assert!(tile.has_holes(), "the fixture is not carved");
+    let holed = (0..res)
+        .flat_map(|j| (0..res).map(move |i| (i, j)))
+        .filter(|&(i, j)| tile.is_hole(res, i, j))
+        .count();
+    assert!(
+        (60..400).contains(&holed),
+        "{holed} holed samples — the mouth must be a real opening, and not the          whole tile"
+    );
+    // The packed mask is bits, not bytes: a 33-sample row costs two words.
+    assert_eq!(tile.holes.len(), 2 * res as usize);
+
+    // The seam was sampled outside the hole and refused inside it — the poison
+    // rule, on the projector's side of the boundary.
+    let volume = &scene.voxels[0];
+    let seamed = volume
+        .chunks
+        .iter()
+        .flat_map(|c| &c.vertices)
+        .filter(|v| v.seam_nh[1] > 0.0)
+        .count();
+    assert!(seamed > 0, "no vertex picked up a seam sample");
+    let under_hole = volume
+        .chunks
+        .iter()
+        .flat_map(|c| c.vertices.iter().map(move |v| (c.origin, v)))
+        .filter(|(o, v)| {
+            let dx = o.x + v.pos[0] as f64 - 16.0;
+            let dz = o.z + v.pos[2] as f64 - 16.0;
+            (dx * dx + dz * dz).sqrt() < 3.0
+        })
+        .collect::<Vec<_>>();
+    assert!(!under_hole.is_empty(), "no cave geometry under the mouth");
+    assert!(
+        under_hole.iter().all(|(_, v)| v.seam_nh[1] == 0.0),
+        "a vertex under the hole picked up a seam — the poison rule did not fire"
+    );
+
+    let img = check_golden(&gpu, "cave_mouth", &scene, &cave_mouth_view());
+
+    // ── pixels ────────────────────────────────────────────────
+    // The camera looks straight down at the ground, so the frame is grass with a
+    // hole in it. The claim is the CONTRAST between the two: the surround is the
+    // terrain's green layer, and the middle — seen through the mouth — is the
+    // volume's rock ramp. If the discard had not fired the middle would be green
+    // too; if it had over-fired there would be nothing green at all.
+    let surround = px(&img, W / 2, H / 8);
+    let mouth = px(&img, W / 2, H / 2);
+    let greener = |p: [u8; 4]| p[1] as i32 - p[0] as i32;
+    assert!(
+        greener(surround) > 8,
+        "the surround is not the terrain's green layer: {surround:?}"
+    );
+    assert!(
+        greener(mouth) + 8 < greener(surround),
+        "the mouth is as green as the ground around it — the hole did not          discard: mouth {mouth:?} vs surround {surround:?}"
+    );
+    // … and both surfaces are actually present in quantity, so neither claim is
+    // resting on a single lucky texel.
+    let mut green = 0usize;
+    let mut rock = 0usize;
+    for y in 0..H {
+        for x in 0..W {
+            let p = px(&img, x, y);
+            if greener(p) > 8 {
+                green += 1;
+            } else if p[0] > 24 {
+                rock += 1;
+            }
+        }
+    }
+    assert!(
+        green > 5_000,
+        "only {green} grass pixels — the clipmap is gone"
+    );
+    assert!(
+        rock > 500,
+        "only {rock} non-grass lit pixels — nothing shows through the mouth"
+    );
+}
+
+/// Looking down into the mouth from above and to the side, close enough that the
+/// opening fills the middle of the frame.
+fn cave_mouth_view() -> RenderView {
+    let eye = DVec3::new(16.0, 30.0, 30.0);
+    let target = DVec3::new(16.0, 11.0, 16.0);
+    RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: eye,
+        forward: (target - eye).as_vec3().normalize(),
+        up: Vec3::Y,
+        fov_y: 55f32.to_radians(),
+        near: 0.05,
+        width: W,
+        height: H,
+        ortho: None,
+    }
 }

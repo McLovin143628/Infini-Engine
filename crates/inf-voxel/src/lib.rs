@@ -55,10 +55,12 @@ pub mod asset;
 pub mod chunk;
 pub mod data;
 pub mod delta;
+pub mod ground;
 pub mod mesh;
 pub mod ops;
 pub mod residency;
 pub mod store;
+pub mod wants;
 pub mod writeback;
 
 pub use asset::{
@@ -72,10 +74,15 @@ pub use chunk::{
 };
 pub use data::VoxelData;
 pub use delta::{ChunkPatch, VoxelDelta};
+pub use ground::{ground_height_at, sim_volume, topmost_voxel_surface, voxel_surface_y_at};
 pub use mesh::{
     mesh_chunk, mesh_keys_for, source_key, MeshSourceKey, MeshSyncReport, VoxelMesh, VoxelMeshCache,
 };
 pub use ops::{OpReport, VoxelOp, VoxelOpKind, VoxelShape};
 pub use residency::{chunk_range, ChunkStore, MemoryChunkStore, ResidencyReport};
-pub use store::{VolumeSlot, VoxelVolumes};
+pub use store::{VolumeSlot, VoxelStreamReport, VoxelVolumes};
+pub use wants::{
+    advance_wants, chunk_wants, clamp_wants, ChunkCatalog, ChunkGrid, ChunkIndex,
+    VoxelStreamBudget, VoxelWantsParams,
+};
 pub use writeback::{rewrite_voxel_asset, VoxelEdits};

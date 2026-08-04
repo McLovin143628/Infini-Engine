@@ -208,6 +208,11 @@ struct ChunkInstanceRaw {
     rough: [f32; 4],
     /// x = pick id.
     misc: [u32; 4],
+    /// P21.2 seam: x = blend-band width in metres (`0` disables). Per chunk
+    /// rather than per vertex because a band is a property of the volume, and
+    /// paying four bytes per vertex for a number every vertex of a volume agrees
+    /// on would be a strange way to spend bandwidth.
+    seam_params: [f32; 4],
 }
 
 impl ChunkInstanceRaw {
@@ -234,11 +239,12 @@ impl ChunkInstanceRaw {
             // the pick pass (and the click→chunk→brush path that wants it) is a
             // P21.2 follow-up.
             misc: [0; 4],
+            seam_params: [volume.seam_band_m.max(0.0), 0.0, 0.0, 0.0],
         }
     }
 }
 
-const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 10] = [
+const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 11] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x4,
         offset: 0,
@@ -289,9 +295,15 @@ const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 10] = [
         offset: 144,
         shader_location: 12,
     },
+    // P21.2 seam band (metres) — location 15, past the per-vertex seam pair.
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 160,
+        shader_location: 15,
+    },
 ];
 
-const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x3,
         offset: 0,
@@ -306,6 +318,20 @@ const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
         format: wgpu::VertexFormat::Uint32,
         offset: 24,
         shader_location: 2,
+    },
+    // P21.2 seam, per vertex: the heightfield normal + surface height, then the
+    // terrain's splat-blended albedo + roughness. Locations 13 and 14 leave the
+    // 3..12 block whole for the instance stream, which is what keeps the two
+    // attribute tables independently extendable.
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 28,
+        shader_location: 13,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 44,
+        shader_location: 14,
     },
 ];
 
@@ -649,6 +675,8 @@ mod tests {
                     pos: [i as f32, 0.0, 0.0],
                     normal: [0.0, 1.0, 0.0],
                     material: 0,
+                    seam_nh: RenderVoxelVertex::NO_SEAM,
+                    seam_albedo: [0.0; 4],
                 })
                 .collect(),
             indices: (0..n).collect(),
@@ -662,6 +690,7 @@ mod tests {
             id,
             chunks,
             layers: [RenderTerrainLayer::default(); 4],
+            seam_band_m: 0.0,
         }
     }
 
@@ -835,17 +864,18 @@ mod tests {
             &chunk(VoxelChunkKey::default(), 1, 1),
         );
         let base = &v as *const ChunkInstanceRaw as usize;
-        assert_eq!(std::mem::size_of::<ChunkInstanceRaw>(), 160);
+        assert_eq!(std::mem::size_of::<ChunkInstanceRaw>(), 176);
         assert_eq!(&v.model as *const _ as usize - base, 0);
         assert_eq!(&v.albedo as *const _ as usize - base, 64);
         assert_eq!(&v.rough as *const _ as usize - base, 128);
         assert_eq!(&v.misc as *const _ as usize - base, 144);
+        assert_eq!(&v.seam_params as *const _ as usize - base, 160);
         // Every attribute offset the pipeline declares must land inside the struct
         // at the field it names.
         let offsets: Vec<u64> = INSTANCE_ATTRIBUTES.iter().map(|a| a.offset).collect();
         assert_eq!(
             offsets,
-            vec![0, 16, 32, 48, 64, 80, 96, 112, 128, 144],
+            vec![0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160],
             "instance attribute offsets drifted from ChunkInstanceRaw"
         );
     }
@@ -856,14 +886,18 @@ mod tests {
             pos: [0.0; 3],
             normal: [0.0; 3],
             material: 0,
+            seam_nh: RenderVoxelVertex::NO_SEAM,
+            seam_albedo: [0.0; 4],
         };
         let base = &v as *const RenderVoxelVertex as usize;
-        assert_eq!(std::mem::size_of::<RenderVoxelVertex>(), 28);
+        assert_eq!(std::mem::size_of::<RenderVoxelVertex>(), 60);
         assert_eq!(&v.pos as *const _ as usize - base, 0);
         assert_eq!(&v.normal as *const _ as usize - base, 12);
         assert_eq!(&v.material as *const _ as usize - base, 24);
+        assert_eq!(&v.seam_nh as *const _ as usize - base, 28);
+        assert_eq!(&v.seam_albedo as *const _ as usize - base, 44);
         let offsets: Vec<u64> = VERTEX_ATTRIBUTES.iter().map(|a| a.offset).collect();
-        assert_eq!(offsets, vec![0, 12, 24]);
+        assert_eq!(offsets, vec![0, 12, 24, 28, 44]);
     }
 
     #[test]

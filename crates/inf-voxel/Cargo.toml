@@ -20,6 +20,19 @@ thiserror = { workspace = true }
 # rather than through an `AssetPayload` impl, because the generic encode path
 # would frame the image and misalign every chunk. Ring 0 → Ring 0.
 inf-asset = { workspace = true }
+# The heightfield half of the **combined ground query** (P21.2, `crate::ground`):
+# a `terrain.height_at` seam now has to answer "terrain where it is solid, cave
+# floor where it is holed", and that rule has to live in exactly one place or the
+# editor Simulate and the shipped player will each grow their own version of it.
+#
+# The edge points THIS way on purpose. `inf-terrain` must never depend on
+# `inf-voxel`: the heightfield is the planet-scale base and knows nothing about
+# the volumes that locally extend it (a level with no caves must not pay for the
+# voxel crate), while a voxel volume is defined by what it carves *out of* a
+# heightfield — so the dependency runs from the specific to the general, and there
+# is no cycle. `inf-terrain`'s own manifest has no `inf-voxel` line and must not
+# grow one.  Ring-0 → Ring-0.
+inf-terrain = { workspace = true }
 # NB: no `inf-math`. A volume's world anchor is a plain `DVec3` and every
 # conversion here is grid↔world arithmetic, so there is nothing for the
 # floating-origin helpers to do — the f64→f32 render rebase happens in the two

@@ -1932,6 +1932,22 @@ impl EngineHost {
             self.terrain_guid = self.terrain_slots.first().map(|s| s.guid);
         }
 
+        // P21.2 SEAM. Fill every projected volume's per-vertex seam terms from
+        // the heightfields projected beside them, and arm the blend at
+        // [`DEFAULT_SEAM_BAND_M`]. `inf_render::apply_seam` is the ONE
+        // implementation both hosts call — a hand-synced per-vertex loop on each
+        // side is exactly the shape that eventually stops agreeing, and a cave
+        // mouth that shades one way in the editor and another in the shipped
+        // build is the failure the mirrored-pair discipline exists to prevent.
+        //
+        // Runs last, because it needs BOTH halves projected, and once per
+        // projection (a change stamp) rather than per frame.
+        inf_render::apply_seam(
+            &mut self.scene.voxels,
+            &self.scene.terrains,
+            inf_render::DEFAULT_SEAM_BAND_M,
+        );
+
         self.scene.hovered = None;
         self.scene.mark_dirty();
     }
@@ -2735,6 +2751,10 @@ fn project_terrain(
             weights,
             biomes,
             height_bounds: tile.height_bounds(),
+            // P21.2: the packed hole mask, row-aligned for the GPU by the one
+            // function that knows the tile's own bit layout. A tile nothing has
+            // carved projects an empty vec — the sparse default, intact.
+            holes: inf_terrain::pack_hole_rows(tile, res),
             version: data.tile_version(key),
         }
     };
@@ -2815,6 +2835,8 @@ fn project_voxel(
                     pos,
                     normal: mesh.normals[i],
                     material: mesh.materials[i] as u32,
+                    seam_nh: inf_render::RenderVoxelVertex::NO_SEAM,
+                    seam_albedo: [0.0; 4],
                 })
                 .collect(),
             indices: mesh.indices.clone(),
@@ -2833,7 +2855,12 @@ fn project_voxel(
         },
         None => RenderTerrainLayer::default(),
     });
-    Some(inf_render::RenderVoxelVolume { id, chunks, layers })
+    Some(inf_render::RenderVoxelVolume {
+        id,
+        chunks,
+        layers,
+        seam_band_m: 0.0,
+    })
 }
 
 /// Project an ECS [`Light2D`] (+ world position) into a renderer 2D light.
@@ -3374,9 +3401,9 @@ impl EngineHost {
         self.synced_version = None; // force a re-projection
     }
 
-    /// Bind (and release) voxel volumes to match the document — the `&mut` half
-    /// of the P21.1 path, run once before [`rebuild_scene`](Self::rebuild_scene)
-    /// projects anything.
+    /// Bind, place, page (and release) voxel volumes to match the document — the
+    /// `&mut` half of the P21.1/P21.2 path, run once before
+    /// [`rebuild_scene`](Self::rebuild_scene) projects anything.
     ///
     /// **MIRROR** of `inf_player::render::PlayerRenderHost::sync_voxels`, and the
     /// two agree on the load-bearing rule: the live set is whatever is **bound**,
@@ -3388,6 +3415,14 @@ impl EngineHost {
     ///
     /// Walks `doc.order()` so which volume binds first is a function of the
     /// document rather than of the ECS archetype layout.
+    ///
+    /// **P21.2 — three acts, not one.** `ensure` binds (parses the payload, indexes
+    /// its directory, pages nothing); `place` tells Ring 0 where the entity put the
+    /// volume, because residency is a world-space radius and a cave placed a
+    /// kilometre from its authoring anchor would otherwise page the chunks nobody
+    /// is standing in; `sync_camera` executes the policy. A bound volume with no
+    /// `sync_camera` draws nothing, which is why the three are one function on both
+    /// hosts and why the mirror gate requires all three calls on both sides.
     fn sync_voxels(&mut self, doc: &SceneDoc) {
         let world = doc.world();
         let w = world.world();
@@ -3400,6 +3435,11 @@ impl EngineHost {
                 continue;
             };
             if self.voxel_volumes.ensure(guid, &volume) {
+                let translation = w
+                    .get::<GlobalTransform>(entity)
+                    .map(|g| g.translation())
+                    .unwrap_or(DVec3::ZERO);
+                self.voxel_volumes.place(guid, translation);
                 live.push(guid);
             }
         }
@@ -3408,6 +3448,16 @@ impl EngineHost {
         // volume holds its whole decoded chunk set AND its meshed surface — real
         // megabytes — so this is not bookkeeping.
         self.voxel_volumes.retain_only(live);
+        // THE CAMERA-DRIVEN RESIDENCY PASS (P21.2). The eye is the *editor* camera,
+        // which the simulation has no reference to: `terrain.height_at` reads the
+        // sim's own volume map, seeded from sim state alone, so a fly-through can
+        // never change a gameplay answer. Same determinism seam as `sync_render`
+        // for terrain, and it is the absence of a path rather than a convention.
+        self.voxel_volumes.sync_camera(
+            self.last_eye_world,
+            &inf_voxel::VoxelWantsParams::default(),
+            inf_voxel::VoxelStreamBudget::default(),
+        );
     }
 
     /// Rebuild the loose-asset indexes after the content database changed.
@@ -3549,6 +3599,36 @@ impl EngineHost {
     /// second, and the split exists so the second can exist at all.
     fn report_tool(&mut self, message: String) {
         self.tool_status = Some(message);
+    }
+
+    /// Advance every voxel volume's camera-driven residency and, when it changed,
+    /// force a re-projection (P21.2).
+    ///
+    /// The editor-local half of what the shipped player gets for free: the player
+    /// projects its whole world every frame, so its one `sync_voxels` call is
+    /// enough. `sync_from_doc` is **version-gated** and the camera does not bump
+    /// the document version — nor should it — so without this a chunk that paged in
+    /// while flying would sit in the store, meshed, and never reach the scene.
+    /// Exactly the gap `sync_streamed_terrain` above exists to close, for exactly
+    /// the same reason.
+    ///
+    /// The re-projection is coarser than terrain's, deliberately: a terrain slot is
+    /// index-aligned with `scene.terrains` and can be refreshed in place, while a
+    /// voxel volume's projection also needs the `Terrain` palette and the transform
+    /// on its own entity — i.e. the document walk. Rebuilding the walk is one
+    /// projection, and only on a pass that actually moved a chunk (hysteresis makes
+    /// that intermittent even under a flying camera), which is cheaper than keeping
+    /// a second copy of the branch in step with the first.
+    fn sync_streamed_voxels(&mut self) {
+        let report = self.voxel_volumes.sync_camera(
+            self.last_eye_world,
+            &inf_voxel::VoxelWantsParams::default(),
+            inf_voxel::VoxelStreamBudget::default(),
+        );
+        if report.is_noop() {
+            return;
+        }
+        self.synced_version = None;
     }
 
     /// Advance the streamed terrain's camera-driven cut and, when it changed,
@@ -4669,6 +4749,7 @@ impl EngineHost {
         // the camera moves without the document changing. Nothing it does is
         // visible to the document, which is the whole point.
         self.sync_streamed_terrain();
+        self.sync_streamed_voxels();
         if self.gpu.is_lost() {
             tracing::warn!("inf-viewport: device lost — rebuilding GPU stack");
             let (w, h) = self.chain.requested_size();

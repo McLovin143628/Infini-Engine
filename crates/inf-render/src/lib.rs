@@ -82,13 +82,16 @@ pub use renderer::{
     SCENE_SAMPLES,
 };
 pub use scene::{
+    apply_seam, RenderTilemap, RenderVoxelChunk, RenderVoxelVertex, RenderVoxelVolume,
+    ScatterBatch, ScatterData, ScatterInstance, ScatterInstanceRaw, SkinnedInstance,
+    SkinnedMeshData, SkinnedVertex, SkyParams, SpriteInstance, SpriteTextureUpload, SunParams,
+    TerrainTileKey, TextureHandle, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh,
+    VoxelChunkKey, DEFAULT_SUN_DIR, ID_GIZMO_BASE, ID_NONE,
+};
+pub use scene::{
     terrain_id_from_guid, Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk,
     RenderLight, RenderLight2D, RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile,
-    RenderTilemap, RenderVoxelChunk, RenderVoxelVertex, RenderVoxelVolume, ScatterBatch,
-    ScatterData, ScatterInstance, ScatterInstanceRaw, SkinnedInstance, SkinnedMeshData,
-    SkinnedVertex, SkyParams, SpriteInstance, SpriteTextureUpload, SunParams, TerrainTileKey,
-    TextureHandle, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VoxelChunkKey,
-    DEFAULT_SUN_DIR, ID_GIZMO_BASE, ID_NONE,
+    SeamSample, DEFAULT_SEAM_BAND_M,
 };
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,

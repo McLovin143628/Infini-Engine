@@ -3481,6 +3481,7 @@ dependencies = [
  "bincode",
  "glam 0.33.2",
  "inf-asset",
+ "inf-terrain",
  "serde",
  "serde_json",
  "tempfile",

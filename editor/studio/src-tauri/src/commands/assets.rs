@@ -175,6 +175,21 @@ impl AssetState {
         std::fs::read(&entry.path).ok()
     }
 
+    /// Raw payload bytes of a `.inf_voxel` asset (P21.2), for seeding a Simulate
+    /// session's voxel volumes. `None` when the id is unknown or names another
+    /// kind — the kind check is what stops a mistyped reference feeding arbitrary
+    /// bytes to the voxel parser. Mirrors [`load_audio_bytes`](Self::load_audio_bytes).
+    pub fn load_voxel_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        let entry = proj.db().get(id)?;
+        if entry.kind() != inf_asset::AssetKind::VoxelVolume {
+            return None;
+        }
+        std::fs::read(&entry.path).ok()
+    }
+
     /// Create a new material instance of `parent` (P7.4). Returns the new id.
     pub fn create_material_instance(&self, parent: AssetId, name: &str) -> Result<AssetId, String> {
         self.with_project(|proj| {

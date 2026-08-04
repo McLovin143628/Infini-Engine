@@ -169,6 +169,28 @@ impl VoxelData {
         self.chunks.contains_key(&key)
     }
 
+    /// The chunk-Y coordinates of every resident chunk in the **vertical chunk
+    /// column** `(cx, cz)`, ascending.
+    ///
+    /// The bound a downward column scan needs (see [`crate::ground`]): a query
+    /// that marched from some fixed sky height to some fixed floor would either
+    /// miss a cave dug above it or burn thousands of samples on empty space, and a
+    /// query that marched `min_y ..= max_y` would burn them on the *gap* between
+    /// two chunks a sparse volume left a kilometre apart. Only the resident chunks
+    /// can hold a surface, so only they are walked.
+    ///
+    /// `Ord` on [`ChunkKey`] is lexicographic `(x, y, z)`, so the `x == cx` slab is
+    /// one contiguous range but the `z == cz` column inside it is not — hence the
+    /// filter. Cost is therefore the slab, not the volume, and never the whole
+    /// `i32` range.
+    pub fn column_chunk_ys(&self, cx: i32, cz: i32) -> Vec<i32> {
+        self.chunks
+            .range(ChunkKey::new(cx, i32::MIN, i32::MIN)..=ChunkKey::new(cx, i32::MAX, i32::MAX))
+            .filter(|(k, _)| k.z == cz)
+            .map(|(k, _)| k.y)
+            .collect()
+    }
+
     pub fn get_chunk(&self, key: ChunkKey) -> Option<&VoxelChunk> {
         self.chunks.get(&key)
     }

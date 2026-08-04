@@ -192,8 +192,14 @@ impl PlayerRenderHost {
     }
 
     /// Rebuild the render scene from the sim's world, interpolated by `alpha`.
-    pub fn project(&mut self, sim: &RuntimeSim, alpha: f64) {
-        self.sync_voxels(sim);
+    ///
+    /// `camera_world` is this frame's eye in world metres — the same point
+    /// [`RuntimeSim::sync_render_terrain`] is driven from, and used for the same
+    /// thing: camera-driven residency (P21.2). It reaches only the render host's
+    /// own stores, never the sim, which is what keeps a fixed step's answers
+    /// independent of where the camera happens to be.
+    pub fn project(&mut self, sim: &RuntimeSim, alpha: f64, camera_world: DVec3) {
+        self.sync_voxels(sim, camera_world);
         project_scene_with_skinned(
             &mut self.scene,
             sim,
@@ -204,40 +210,72 @@ impl PlayerRenderHost {
         );
     }
 
-    /// Load (and release) voxel volumes to match the world — the `&mut` half that
-    /// has to run *before* the projection's immutable walk.
+    /// Bind, place, page (and release) voxel volumes to match the world — the
+    /// `&mut` half that has to run *before* the projection's immutable walk.
     ///
     /// Walks the world in `Guid` order, so which volume loads first is a function
     /// of the level rather than of the ECS archetype layout. An entity whose asset
     /// the world cannot serve stays unloaded and draws nothing; the registry logs
     /// it once.
-    fn sync_voxels(&mut self, sim: &RuntimeSim) {
+    ///
+    /// **P21.2 — three acts, not one.** `ensure` binds (parses the payload, indexes
+    /// its directory, pages nothing); `place` tells Ring 0 where the entity put the
+    /// volume, because residency is a world-space radius and a cave placed a
+    /// kilometre from its authoring anchor would otherwise page the chunks nobody
+    /// is standing in; `sync_camera` executes the policy. A bound volume with no
+    /// `sync_camera` draws nothing, which is why the three are one function on both
+    /// hosts and why the mirror gate requires all three calls on both sides.
+    fn sync_voxels(&mut self, sim: &RuntimeSim, camera_world: DVec3) {
         let world = sim.world();
         let w = world.world();
-        let mut wants: Vec<(Uuid, Uuid)> = w
+        let mut wants: Vec<(Uuid, Uuid, DVec3)> = w
             .iter_entities()
             .filter_map(|e| {
                 let guid = e.get::<Guid>()?.0;
                 let asset = e.get::<VoxelVolume>()?.asset?;
-                Some((guid, asset))
+                let translation = e
+                    .get::<GlobalTransform>()
+                    .map(|g| g.translation())
+                    .unwrap_or(DVec3::ZERO);
+                Some((guid, asset, translation))
             })
             .collect();
-        wants.sort();
+        wants.sort_by_key(|(g, _, _)| *g);
         // Release volumes whose entity is gone (or whose component lost its
         // reference) BEFORE loading, so a level switch never holds both.
         let live: std::collections::BTreeSet<u128> =
-            wants.iter().map(|(g, _)| g.as_u128()).collect();
+            wants.iter().map(|(g, _, _)| g.as_u128()).collect();
         self.voxels.retain_only(&live);
-        for (guid, asset) in wants {
-            if self.voxels.is_bound(guid.as_u128(), asset.as_u128()) {
-                continue;
+        for (guid, asset, translation) in wants {
+            if !self.voxels.is_bound(guid.as_u128(), asset.as_u128()) {
+                let Some(bytes) = self.voxel_assets.load(asset) else {
+                    continue;
+                };
+                if let Err(e) = self.voxels.ensure(guid.as_u128(), asset.as_u128(), &bytes) {
+                    tracing::warn!("inf-player: bad .inf_voxel {asset}: {e}");
+                    continue;
+                }
             }
-            let Some(bytes) = self.voxel_assets.load(asset) else {
-                continue;
-            };
-            if let Err(e) = self.voxels.ensure(guid.as_u128(), asset.as_u128(), &bytes) {
-                tracing::warn!("inf-player: bad .inf_voxel {asset}: {e}");
-            }
+            self.voxels.place(guid.as_u128(), translation);
+        }
+        // THE CAMERA-DRIVEN RESIDENCY PASS (P21.2). The eye is the *render*
+        // camera, which the simulation has no reference to: `terrain.height_at`
+        // reads the sim's own volume map, seeded from sim state alone, so where the
+        // player is looking can never change a gameplay answer. Same determinism
+        // seam as `sync_render_terrain`, and it is the absence of a path rather
+        // than a convention.
+        let report = self.voxels.sync_camera(
+            camera_world,
+            &inf_voxel::VoxelWantsParams::default(),
+            inf_voxel::VoxelStreamBudget::default(),
+        );
+        for (key, err) in &report.failed {
+            tracing::warn!(
+                "inf-player: voxel chunk ({}, {}, {}) failed to decode: {err}",
+                key.x,
+                key.y,
+                key.z
+            );
         }
     }
 
@@ -767,6 +805,22 @@ pub fn project_scene_with_skinned(
         }
     }
 
+    // P21.2 SEAM. Fill every projected volume's per-vertex seam terms from
+    // the heightfields projected beside them, and arm the blend at
+    // [`DEFAULT_SEAM_BAND_M`]. `inf_render::apply_seam` is the ONE
+    // implementation both hosts call — a hand-synced per-vertex loop on each
+    // side is exactly the shape that eventually stops agreeing, and a cave
+    // mouth that shades one way in the editor and another in the shipped
+    // build is the failure the mirrored-pair discipline exists to prevent.
+    //
+    // Runs last, because it needs BOTH halves projected, and once per
+    // projection (a change stamp) rather than per frame.
+    inf_render::apply_seam(
+        &mut scene.voxels,
+        &scene.terrains,
+        inf_render::DEFAULT_SEAM_BAND_M,
+    );
+
     scene.mark_dirty();
 }
 
@@ -1052,6 +1106,10 @@ pub fn project_terrain(
             weights,
             biomes,
             height_bounds: tile.height_bounds(),
+            // P21.2: the packed hole mask, row-aligned for the GPU by the one
+            // function that knows the tile's own bit layout. A tile nothing has
+            // carved projects an empty vec — the sparse default, intact.
+            holes: inf_terrain::pack_hole_rows(tile, res),
             version: data.tile_version(key),
         }
     };
@@ -1141,6 +1199,8 @@ fn project_voxel(
                     pos,
                     normal: mesh.normals[i],
                     material: mesh.materials[i] as u32,
+                    seam_nh: inf_render::RenderVoxelVertex::NO_SEAM,
+                    seam_albedo: [0.0; 4],
                 })
                 .collect(),
             indices: mesh.indices.clone(),
@@ -1159,7 +1219,12 @@ fn project_voxel(
         },
         None => RenderTerrainLayer::default(),
     });
-    Some(inf_render::RenderVoxelVolume { id, chunks, layers })
+    Some(inf_render::RenderVoxelVolume {
+        id,
+        chunks,
+        layers,
+        seam_band_m: 0.0,
+    })
 }
 
 /// A distinct placeholder colour per PCG kind index (mirrors the viewport host's

@@ -1477,11 +1477,13 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// P20.3 also **re-blessed the three P20.1 water scenes**, deliberately: shoreline
 /// wetness is default-on and all three carry terrain, so their ground at and below
 /// the water level is now darker. Every other image is byte-identical.
-const GOLDENS: [&str; 48] = [
+const GOLDENS: [&str; 49] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
     "biomes.png",
+    // P21.2: a hole-punched heightfield with the voxel cave visible through it.
+    "cave_mouth.png",
     "clouds_dusk.png",
     "clouds_night.png",
     "clouds_overcast.png",

@@ -50,8 +50,11 @@
 //! `TerrainData`'s wire form — is pinned at tile generation 3 because the scene
 //! schema was frozen at v19; see the *THE EMPTY CELL* section of
 //! [`TerrainTileFrozenV1`]'s generation table. So a terrain that has been carved
-//! wants a `.inf_terrain` asset behind it, and P21.2's cook advisory says so when
-//! one is missing.
+//! wants a `.inf_terrain` asset behind it — and a carved terrain that has none
+//! reaches no cook at all to be warned about, because the mask was already gone
+//! when the level was written. The cook's P21.2 advisory (`see_through_pits`)
+//! therefore reads *this* container, and reports the hazard that does survive:
+//! holes with no voxel volume behind them.
 //!
 //! # Schema v2: the pyramid options are recorded (P16.6)
 //!

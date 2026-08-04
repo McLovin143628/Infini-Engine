@@ -1101,7 +1101,7 @@ fn the_shared_voxel_projector_is_not_a_stub() {
 /// and a gizmo drag bumps the document per input event.
 #[test]
 fn both_projectors_project_voxel_volumes_the_same_way() {
-    const SHARED: [&str; 8] = [
+    const SHARED: [&str; 10] = [
         // Rebuilt every projection, like `terrains`.
         "scene.voxels.clear()",
         // The branch itself.
@@ -1121,6 +1121,16 @@ fn both_projectors_project_voxel_volumes_the_same_way() {
         // …whose live set is bound-ness, never draw-ness: the release runs over
         // what `ensure` bound, not over what the projection pushed.
         "retain_only(",
+        // P21.2 — the pre-pass is THREE acts and a host that skipped either of the
+        // last two fails differently but silently. Without `place` residency is
+        // measured from the asset's authoring anchor instead of from where the
+        // entity actually is, so a cave placed away from the origin pages the
+        // chunks nobody is standing in — a hole in the world with no rendering
+        // explanation. Without `sync_camera` **nothing pages at all**: `ensure`
+        // binds and pages zero chunks by design, so the volume meshes to nothing
+        // and the host draws an empty cave while every other assertion here passes.
+        "place(",
+        "sync_camera(",
     ];
     for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
         let src = read(path).replace("\r\n", "\n");

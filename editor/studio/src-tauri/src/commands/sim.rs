@@ -90,6 +90,14 @@ pub async fn sim_start(
     let audio_clips = inf_editor_core::simulate::resolve_audio_assets(&doc, |guid| {
         assets.load_audio_bytes(inf_asset::AssetId(guid))
     });
+    // Resolve the scene's referenced `.inf_voxel` volumes (P21.2) so a Blueprint
+    // calling `terrain.height_at` over a carved hole reads the cave floor beneath
+    // it — the same map the shipped player seeds through `attach_voxel_volumes`.
+    // This is the SIM's set, camera-free: the viewport host pages its own against
+    // the editor camera, and a fixed step must never be able to see that.
+    let voxel_volumes = inf_editor_core::simulate::resolve_voxel_volumes(&doc, |guid| {
+        assets.load_voxel_bytes(inf_asset::AssetId(guid))
+    });
     // Character applies its own gravity in the blueprint → world gravity is zero.
     let mut session = SimSession::enter(&mut doc, actors, DVec2::ZERO, SIM_HZ);
     session.set_state_machines(machines);
@@ -97,6 +105,7 @@ pub async fn sim_start(
         session.register_root_motion_clip(clip_guid, skeleton, clip);
     }
     session.set_audio_clips(audio_clips);
+    session.set_voxel_volumes(voxel_volumes);
     // Load the project mixer (`<project>/.infinity/mixer.toml`) if present; else the
     // default. The mixer lives at the project root (the parent of Content).
     if let Some(content) = assets.content_root() {

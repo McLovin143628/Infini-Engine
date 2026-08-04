@@ -61,6 +61,7 @@ use inf_physics::{
     CharacterMover2D, CharacterMover3D, ColliderShape2D, ColliderShape3D, ContactPhase,
     FixedStepper, PhysicsBridge2D, PhysicsBridge3D,
 };
+use inf_voxel::VoxelData;
 
 use crate::scene::serialize::{apply_to_doc, to_scene_file_for, SceneFile, ScenePersist};
 use crate::scene::SceneDoc;
@@ -219,6 +220,21 @@ pub struct SimSession {
     /// by [`take_debug_events`](Self::take_debug_events) after a step. Non-empty
     /// only when a class in `debug` carries breakpoints or wire capture.
     debug_events: Vec<SimDebugHit>,
+    /// The **simulation's own** voxel volumes, keyed by entity `Guid` (P21.2).
+    ///
+    /// Read by the `terrain.height_at` host seam so a character can stand on a
+    /// cave floor where the heightfield has been carved through. Empty by default;
+    /// seed via [`set_voxel_volumes`](Self::set_voxel_volumes).
+    ///
+    /// **THE DETERMINISM SEAM.** This is emphatically *not* the render host's
+    /// store: that one is paged by a camera (`inf_voxel::VoxelVolumes::sync_camera`)
+    /// and a fixed step must never be able to observe where anyone is looking. The
+    /// separation is structural rather than conventional — the render store lives
+    /// in the render host, nothing here holds a reference to it, and this map is
+    /// filled once from level state. Verbatim the split `inf_terrain::wants`
+    /// documents between `sync_sim` and `sync_render`, and it is paid for the same
+    /// way: a volume wanted by both is held twice, on purpose.
+    voxels: BTreeMap<Uuid, VoxelData>,
 }
 
 /// One handler's debug observation under Simulate (B-P4 tier A′): the actor's
@@ -313,6 +329,7 @@ impl SimSession {
             steps: 0,
             debug: BTreeMap::new(),
             debug_events: Vec::new(),
+            voxels: BTreeMap::new(),
         };
 
         session.bridge.sync_from_world(doc.world());
@@ -386,6 +403,20 @@ impl SimSession {
     /// tick against the actor's Blueprint variables.
     pub fn set_state_machines(&mut self, machines: BTreeMap<Uuid, StateMachine>) {
         self.state_machines = machines;
+    }
+
+    /// Seed the simulation's voxel volumes (P21.2), keyed by entity `Guid`.
+    ///
+    /// Each [`VoxelData`]'s anchor must already be its **world** anchor — the
+    /// asset's own origin plus the volume entity's translation — because that is
+    /// what makes `terrain.height_at` answer in world metres. [`resolve_voxel_volumes`]
+    /// is the resolver that does it, and every caller should go through it rather
+    /// than assembling the map by hand.
+    ///
+    /// Camera-free by construction: nothing about this map depends on a viewport,
+    /// so a Simulate step answers the same whatever the editor camera is doing.
+    pub fn set_voxel_volumes(&mut self, volumes: BTreeMap<Uuid, VoxelData>) {
+        self.voxels = volumes;
     }
 
     /// Install (or replace) the debugger config for a class (B-P4 tier A′): the
@@ -731,6 +762,7 @@ impl SimSession {
                 bindings: &mut self.bindings,
                 dispatch_queue: &mut self.dispatch_queue,
                 dt: self.stepper.fixed_dt(),
+                voxels: &self.voxels,
             };
             match run_event(
                 &state.class,
@@ -1218,6 +1250,10 @@ struct SimHost<'a> {
     /// the number is the sim's own rather than whatever the solver was last
     /// stepped with.
     dt: f64,
+    /// The simulation's own voxel volumes (P21.2), read by `terrain.height_at`.
+    /// Borrowed from `SimSession::voxels` — never from a render store, which is
+    /// what keeps a camera out of a fixed step's answers.
+    voxels: &'a BTreeMap<Uuid, VoxelData>,
 }
 
 use inf_ecs::components::WeatherPreset;
@@ -1271,8 +1307,16 @@ impl Host for SimHost<'_> {
             // terrain.height_at(x, z) → the world height at that XZ (P11.4). The
             // seam a 3D character reads to stay on a heightfield terrain (which has
             // no physics collider); mirrored exactly in the shipped runtime host.
+            //
+            // P21.2: it is the **combined** ground query. The heightfield answers
+            // where it is still a heightfield; where a carve has holed it — or
+            // where there is no terrain at all — the topmost voxel surface does, so
+            // a character walking into a cave mouth gets the cave floor instead of
+            // the `None` a holed bilinear cell produces. One Ring-0 rule
+            // (`inf_voxel::ground_height_at`), read here and in the shipped host.
             (Some("terrain"), Some("height_at")) => Ok(Value::Float(terrain_height_at(
                 self.world,
+                self.voxels,
                 arg_f64(args, 0),
                 arg_f64(args, 1),
             ))),
@@ -1814,11 +1858,27 @@ fn arg_f64(args: &[Value], i: usize) -> f64 {
 /// heightfield carries no physics collider, so a 3D character reads its height
 /// here to stay grounded); returns `0.0` with no terrain. Shared shape with the
 /// shipped runtime host so preview == shipped. Deterministic (Guid-picked).
-fn terrain_height_at(world: &EcsWorld, x: f64, z: f64) -> f64 {
+/// The **ground** height at world `(x, z)` — the `terrain.height_at` host seam.
+///
+/// Picks the lowest-`Guid` non-empty terrain, remembering only its entity + origin —
+/// never a clone of the (multi-MB) heightfield. The component is re-fetched after
+/// the scan (all EntityRef borrows released) and sampled in place.
+///
+/// P21.2: the answer is the **combined** ground query, not the heightfield alone.
+/// A carved sample makes `TerrainData::height_at` return `None` through its whole
+/// bilinear cell, and a character walking into a cave mouth would otherwise read
+/// "no ground" at exactly the step that needs a floor — so the topmost voxel
+/// surface answers there instead. The rule itself is one Ring-0 function
+/// ([`inf_voxel::ground_height_at`]) precisely so the editor preview and the
+/// shipped player cannot disagree about where the floor is.
+///
+/// `0.0` when nothing answers at all, unchanged from P11.4: the IR has no optional
+/// Float, and this seam's documented default is a plain number rather than a
+/// sentinel. (The P20.4 "missed picks reject, never y = 0" law is about *picks*,
+/// which have a Result to reject into; this is a query, and a query that failed to
+/// answer is not an action that failed.)
+fn terrain_height_at(world: &EcsWorld, voxels: &BTreeMap<Uuid, VoxelData>, x: f64, z: f64) -> f64 {
     let w = world.world();
-    // Pick the lowest-Guid non-empty terrain, remembering only its entity + origin —
-    // never a clone of the (multi-MB) heightfield. The component is re-fetched after
-    // the scan (all EntityRef borrows released) and sampled in place.
     let mut picked: Option<(Uuid, DVec3, Entity)> = None;
     for e in w.iter_entities() {
         let Some(guid) = e.get::<Guid>().map(|g| g.0) else {
@@ -1839,14 +1899,14 @@ fn terrain_height_at(world: &EcsWorld, x: f64, z: f64) -> f64 {
             picked = Some((guid, origin, e.id()));
         }
     }
-    match picked.and_then(|(_, origin, e)| w.get::<Terrain>(e).map(|t| (origin, t))) {
-        Some((origin, t)) => t
-            .data
-            .height_at(DVec2::new(x - origin.x, z - origin.z))
-            .map(|h| h + origin.y)
-            .unwrap_or(0.0),
-        None => 0.0,
-    }
+    let picked = picked.and_then(|(_, origin, e)| w.get::<Terrain>(e).map(|t| (origin, t)));
+    let (origin, terrain) = match &picked {
+        Some((origin, t)) => (*origin, Some(&t.data)),
+        // No terrain at all is not "no ground": a level may be nothing but caves,
+        // and the voxel half still answers.
+        None => (DVec3::ZERO, None),
+    };
+    inf_voxel::ground_height_at(terrain, origin, voxels, x, z).unwrap_or(0.0)
 }
 
 // ── P11.2 state-machine glue: ECS POD ↔ inf-anim runtime + var snapshot ──────
@@ -1996,6 +2056,54 @@ where
         }
     }
     clips
+}
+
+/// Resolve every `.inf_voxel` volume a [`VoxelVolume`] entity in `doc` references,
+/// keyed by the **entity's** `Guid` (P21.2). `resolve_voxel` yields the asset's raw
+/// payload bytes by GUID (backed by the project DB / pack). A volume whose bytes
+/// don't parse is skipped with a warning. Deterministic (`BTreeMap` / document
+/// order). The caller seeds [`SimSession::set_voxel_volumes`] — the editor Simulate
+/// twin of the player's resolution, so preview == shipped.
+///
+/// Keyed by entity rather than by asset because two entities may reference one
+/// `.inf_voxel` at two different transforms, and the world anchor `sim_volume`
+/// folds in is per-entity. The transform is read **once, here**, which is the
+/// honest limitation: a volume whose entity is moved during play keeps the anchor
+/// it entered with, exactly as the physics bridge keeps the body it mirrored at
+/// `enter`. A moving cave is a P21.3 authoring concern and will re-seed.
+pub fn resolve_voxel_volumes<H>(doc: &SceneDoc, mut resolve_voxel: H) -> BTreeMap<Uuid, VoxelData>
+where
+    H: FnMut(Uuid) -> Option<Vec<u8>>,
+{
+    let mut out: BTreeMap<Uuid, VoxelData> = BTreeMap::new();
+    let world = doc.world();
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let w = world.world();
+        let Some(asset) = w
+            .get::<inf_ecs::components::VoxelVolume>(e)
+            .and_then(|v| v.asset)
+        else {
+            continue;
+        };
+        let translation = w
+            .get::<GlobalTransform>(e)
+            .map(|g| g.translation())
+            .or_else(|| w.get::<Transform>(e).map(|t| t.translation.to_dvec3()))
+            .unwrap_or(DVec3::ZERO);
+        let Some(bytes) = resolve_voxel(asset) else {
+            continue;
+        };
+        match inf_voxel::sim_volume(&bytes, translation) {
+            Ok(data) => {
+                out.insert(guid, data);
+            }
+            Err(e) => tracing::warn!("inf-editor-core: bad .inf_voxel {asset}: {e}"),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

@@ -535,6 +535,8 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     // simply cannot follow that edge, which would ship a level whose ground never
     // streams — silently. Say so.
     warnings.extend(dangling_terrain_refs(&db, &closure));
+    warnings.extend(voxel_scale_mismatches(&db, &closure));
+    warnings.extend(see_through_pits(&db, &closure));
     warnings.extend(dangling_biome_set_refs(&db, &closure));
     warnings.extend(unresolvable_image_masks(&db, &closure));
     warnings.extend(dangling_grammar_modules(&db, &closure));
@@ -1058,6 +1060,213 @@ fn dangling_terrain_refs(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
                 ("terrain", "tiles")
             };
             format!("level {level} references missing {kind} asset {asset}; its {pages} will not stream")
+        })
+        .collect()
+}
+
+/// **P21.2 (a): a `VoxelVolume.voxel_size_m` that disagrees with its asset.**
+///
+/// The component carries a voxel scale and so does the `.inf_voxel` header, and
+/// the asset's is the one that wins at runtime — the chunks were meshed at it.
+/// A component that says something else is not a build failure (nothing breaks,
+/// the volume loads and renders), it is a level whose *authored intent* about
+/// scale is quietly discarded: whoever typed 0.25 into the Details panel gets a
+/// cave built at 0.5 and no indication why.
+///
+/// So the advisory quotes **both measured numbers** and names the fix as an edit
+/// to the component, because the asset's value is the one that cannot be wrong.
+///
+/// Compared exactly, not with a tolerance. Both numbers travel as `f64` from the
+/// same authoring act, so any difference at all is a real disagreement — and a
+/// tolerance here would be a threshold nobody could justify the width of.
+fn voxel_scale_mismatches(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
+    // `(level, volume asset, component scale bits, asset scale)`. Bits rather
+    // than the `f64` so the key is `Ord` without a wrapper; the value is
+    // reconstructed for the message.
+    let mut hits: BTreeSet<(AssetId, AssetId, u64, u64)> = BTreeSet::new();
+    for &id in closure {
+        let Some(entry) = db.get(id) else { continue };
+        if entry.kind() != AssetKind::Level {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&entry.path) else {
+            continue;
+        };
+        let Ok(level) = inf_scene::decode(&raw) else {
+            continue;
+        };
+        for e in &level.entities {
+            let Some(v) = e.voxel_volume.as_ref() else {
+                continue;
+            };
+            let Some(asset) = v.asset else { continue };
+            let Some(vol) = db.get(AssetId(asset)) else {
+                // Missing entirely — `dangling_terrain_refs` already says so, and
+                // saying it twice is exactly the noise the advisory law forbids.
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(&vol.path) else {
+                continue;
+            };
+            let Ok(reader) = inf_voxel::VoxelAssetReader::new(bytes) else {
+                // A corrupt payload fails the cook outright in the structural
+                // validation pass; there is nothing for an advisory to add.
+                continue;
+            };
+            if reader.voxel_size_m() != v.voxel_size_m {
+                hits.insert((
+                    id,
+                    AssetId(asset),
+                    v.voxel_size_m.to_bits(),
+                    reader.voxel_size_m().to_bits(),
+                ));
+            }
+        }
+    }
+    hits.into_iter()
+        .map(|(level, asset, component, asset_scale)| {
+            format!(
+                "level {level}: voxel volume {asset} is built at {} m per voxel but its \
+                 component says {} m; the asset wins at runtime — set VoxelVolume.voxel_size_m \
+                 to {} m or rebuild the volume",
+                f64::from_bits(asset_scale),
+                f64::from_bits(component),
+                f64::from_bits(asset_scale),
+            )
+        })
+        .collect()
+}
+
+/// **P21.2 (b): a see-through pit — holed heightfield with nothing behind it.**
+///
+/// A P21.2 carve removes the heightfield surface at a set of samples so that the
+/// voxel volume underneath shows through. If no volume covers those samples, what
+/// shows through is the **sky** (or the inside of the level), from below and from
+/// above, and gameplay falls through the world at exactly that spot.
+///
+/// This is the hazard that has no other alarm: the level loads, the terrain
+/// streams, the cook succeeds, and the hole is invisible from any camera that
+/// never looks at it. So the advisory quotes the measured sample count and the
+/// tile it is in, and names the fix in the two forms it actually takes.
+///
+/// **It reads the `.inf_terrain` asset, not the level.** That is not an
+/// implementation detail — it is the only place holes exist. `TerrainData`'s wire
+/// form is pinned at tile generation 3 (the scene schema is frozen at v19), so a
+/// hole mask cannot ride an `.inf_lvl` at all; see
+/// `inf_terrain::TerrainTileFrozenV1`'s generation table. A terrain with no asset
+/// therefore has no holes to report, and this walks nothing.
+///
+/// Coverage is tested at **chunk-column** granularity: a holed sample is covered
+/// if some volume in the level has a resident chunk whose XZ footprint contains
+/// it. Deliberately coarse in the *permissive* direction — a chunk that exists
+/// over the hole might still be empty air inside — because the alternative is
+/// decoding every chunk's SDF during a cook to catch a case the author almost
+/// certainly did on purpose. An advisory that fires on correct caves stops being
+/// read, which is the failure this whole class of check is trying to avoid.
+fn see_through_pits(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
+    // `(level, terrain asset, tile x, tile z, holed samples)`.
+    let mut hits: BTreeSet<(AssetId, AssetId, i32, i32, usize)> = BTreeSet::new();
+    for &id in closure {
+        let Some(entry) = db.get(id) else { continue };
+        if entry.kind() != AssetKind::Level {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&entry.path) else {
+            continue;
+        };
+        let Ok(level) = inf_scene::decode(&raw) else {
+            continue;
+        };
+
+        // Every voxel volume in the level, as covered XZ world rectangles. One
+        // set for the whole level: a hole is covered if ANY volume covers it, and
+        // which entity owns that volume is not the author's question here.
+        let mut covered: Vec<(f64, f64, f64, f64)> = Vec::new();
+        for e in &level.entities {
+            let Some(asset) = e.voxel_volume.as_ref().and_then(|v| v.asset) else {
+                continue;
+            };
+            let Some(vol) = db.get(AssetId(asset)) else {
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(&vol.path) else {
+                continue;
+            };
+            let Ok(reader) = inf_voxel::VoxelAssetReader::new(bytes) else {
+                continue;
+            };
+            let vs = reader.voxel_size_m();
+            let dim = inf_voxel::CHUNK_DIM as f64;
+            let o = reader.origin();
+            for key in reader.keys() {
+                let b = key.base_sample();
+                let x0 = o.x + b[0] as f64 * vs;
+                let z0 = o.z + b[2] as f64 * vs;
+                covered.push((x0, z0, x0 + dim * vs, z0 + dim * vs));
+            }
+        }
+
+        for e in &level.entities {
+            let Some(t) = e.terrain.as_ref() else {
+                continue;
+            };
+            let Some(asset) = t.asset else { continue };
+            let Some(ta) = db.get(AssetId(asset)) else {
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(&ta.path) else {
+                continue;
+            };
+            let Ok(reader) = inf_terrain::TerrainAssetReader::new(bytes) else {
+                continue;
+            };
+            let res = reader.tile_resolution();
+            let mps = reader.meters_per_sample();
+            let span = (res as f64 - 1.0) * mps;
+            for key in reader.keys().collect::<Vec<_>>() {
+                // LOD \u2265 1 pages are downsampled heights only — the pyramid carries
+                // no hole mask, so walking them would double-count nothing and
+                // find nothing.
+                if key.lod != 0 {
+                    continue;
+                }
+                let Ok(Some(tile)) = reader.tile(key) else {
+                    continue;
+                };
+                if !tile.has_holes() {
+                    continue;
+                }
+                let ox = key.coord.0 as f64 * span;
+                let oz = key.coord.1 as f64 * span;
+                let mut naked = 0usize;
+                for j in 0..res {
+                    for i in 0..res {
+                        if !tile.is_hole(res, i, j) {
+                            continue;
+                        }
+                        let x = ox + i as f64 * mps;
+                        let z = oz + j as f64 * mps;
+                        if !covered
+                            .iter()
+                            .any(|&(x0, z0, x1, z1)| x >= x0 && x < x1 && z >= z0 && z < z1)
+                        {
+                            naked += 1;
+                        }
+                    }
+                }
+                if naked > 0 {
+                    hits.insert((id, AssetId(asset), key.coord.0, key.coord.1, naked));
+                }
+            }
+        }
+    }
+    hits.into_iter()
+        .map(|(level, asset, tx, tz, naked)| {
+            format!(
+                "level {level}: terrain {asset} tile ({tx},{tz}) has {naked} holed sample(s) \
+                 no voxel volume covers; the ground is see-through there — extend a volume \
+                 over them, or fill the holes back in with the carve tool"
+            )
         })
         .collect()
 }

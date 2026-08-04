@@ -345,3 +345,50 @@ fn the_two_deltas_do_not_interfere() {
     t.revert_delta(&height_delta);
     assert_eq!(blob(&t), blob(&sloped(res)));
 }
+
+// ── 6. the GPU row-pack ──────────────────────────────────────────
+
+/// [`pack_hole_rows`] is the *only* translation between the tile's dense bit
+/// layout and the row-aligned one a fragment shader indexes, so it is pinned by
+/// reading every bit back out through the row rule and comparing against the
+/// tile itself — at a resolution that is deliberately **not** a multiple of 32,
+/// which is where an off-by-a-row bug lives.
+#[test]
+fn the_gpu_row_pack_agrees_with_the_tile_bit_for_bit() {
+    let res = 33;
+    let mut t = TerrainData::new(res, 1.0);
+    t.author_tile((0, 0), |_, _| 0.0);
+    {
+        let tile = t.get_tile_mut((0, 0)).unwrap();
+        // A pattern that crosses word boundaries in both axes.
+        for j in 0..res {
+            for i in 0..res {
+                if (i * 7 + j * 13) % 11 == 0 {
+                    tile.set_hole(res, i, j, true);
+                }
+            }
+        }
+    }
+    let tile = t.get_tile((0, 0)).unwrap();
+    let packed = inf_terrain::pack_hole_rows(tile, res);
+    let words = res.div_ceil(32) as usize;
+    assert_eq!(packed.len(), words * res as usize);
+    assert_eq!(words, 2, "a 33-sample row must cost two words");
+
+    let mut holed = 0usize;
+    for j in 0..res {
+        for i in 0..res {
+            let bit = packed[j as usize * words + (i >> 5) as usize] & (1u32 << (i & 31)) != 0;
+            assert_eq!(bit, tile.is_hole(res, i, j), "({i},{j})");
+            holed += usize::from(bit);
+        }
+    }
+    assert!(
+        holed > 50,
+        "only {holed} holed samples — the pattern is too sparse"
+    );
+
+    // The sparse default packs to nothing at all — which is what lets the
+    // renderer bind a four-byte sentinel for an un-carved tile.
+    assert!(inf_terrain::pack_hole_rows(sloped(res).get_tile((0, 0)).unwrap(), res).is_empty());
+}

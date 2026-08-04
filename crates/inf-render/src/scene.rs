@@ -629,6 +629,20 @@ pub struct RenderTerrainTile {
     /// [`RenderTerrain::biome_palette`] and is never filtered or interpolated (the
     /// shader loads it nearest — the midpoint of ids 1 and 3 is not id 2).
     pub biomes: Vec<u8>,
+    /// `ceil(resolution / 32) * resolution` **row-packed hole bits** (P21.2), or
+    /// **empty** for a tile nothing has carved. Word `w + j * words_per_row` holds
+    /// the bits for samples `[w*32, w*32+32)` of row `j`, LSB-first.
+    ///
+    /// Row-packed, not tile-packed like `inf_terrain::TerrainTile`'s own mask: the
+    /// fragment's index becomes `(i >> 5, j)`, which needs no division by the
+    /// resolution and maps one-to-one onto an R32Uint texture's texel grid. The
+    /// projector does that repack, once per carved tile per edit, and only for
+    /// tiles that have holes at all — a hole-free tile projects an empty `Vec`
+    /// and the pass binds a 1x1 zero texture for it (four bytes, no permutation).
+    ///
+    /// Empty is therefore not "unknown", it is **"nothing is holed"** — the same
+    /// sparse-default rule the source layer carries, projected intact.
+    pub holes: Vec<u32>,
     /// Inclusive `(min, max)` of `heights` (for the tile's AABB cull bound).
     pub height_bounds: (f32, f32),
     /// The tile's **monotone change stamp** (P16.3b1), projected from
@@ -638,6 +652,146 @@ pub struct RenderTerrainTile {
     /// version) and is treated conservatively as *always re-upload*, never as a
     /// cache hit.
     pub version: u64,
+}
+
+/// **Fill every voxel volume's P21.2 seam terms from the heightfields beside
+/// them**, and arm the blend at `band_m` metres.
+///
+/// The one implementation both host projectors call, and that is the point
+/// rather than a convenience: the editor viewport and the shipped player must
+/// agree pixel for pixel about where a cave mouth stops being cave, and two
+/// hand-synced copies of a per-vertex loop is exactly the shape that eventually
+/// does not. (Same reasoning as [`RenderTerrain::seam_sample`] living on the
+/// DTO.) A host calls this once, after it has projected both halves.
+///
+/// A vertex over **no** terrain — or over a holed sample — keeps
+/// [`RenderVoxelVertex::NO_SEAM`] and blends nothing, which is what makes the
+/// mouth of a cave shade into the hillside while its interior does not. Passing
+/// `band_m <= 0` disarms every volume, so a host with no terrain at all produces
+/// byte-identical frames to its pre-P21.2 self.
+///
+/// Cost is one `seam_sample` per voxel vertex per projection, and projections
+/// happen on a change stamp, not per frame.
+///
+/// Terrains are consulted in projection order and the **first** one that answers
+/// wins. Overlapping heightfields are already outside what the clipmap can draw
+/// coherently, so there is no better rule available here — only a deterministic
+/// one, which this is.
+pub fn apply_seam(volumes: &mut [RenderVoxelVolume], terrains: &[RenderTerrain], band_m: f32) {
+    if band_m <= 0.0 || terrains.is_empty() {
+        return;
+    }
+    for volume in volumes {
+        volume.seam_band_m = band_m;
+        for chunk in &mut volume.chunks {
+            let base = chunk.origin;
+            for v in &mut chunk.vertices {
+                let wx = base.x + v.pos[0] as f64;
+                let wz = base.z + v.pos[2] as f64;
+                if let Some(sample) = terrains.iter().find_map(|t| t.seam_sample(wx, wz)) {
+                    // `origin.y` of the chunk is already the anchor the vertex
+                    // positions are relative to, so the packed height is measured
+                    // in the same space the shader compares it against.
+                    let (nh, albedo) = sample.pack(base.y);
+                    v.seam_nh = nh;
+                    v.seam_albedo = albedo;
+                }
+            }
+        }
+    }
+}
+
+/// What the heightfield looks like at one world `(x, z)`, for the P21.2 voxel
+/// seam blend — the output of [`RenderTerrain::seam_sample`].
+///
+/// Deliberately the *resolved* surface (a normal, a height, one blended colour)
+/// rather than the inputs it was resolved from. The consumer is a vertex
+/// attribute, and handing four weights plus a palette across that boundary would
+/// mean the voxel shader carrying the terrain's layers — a second place for the
+/// blend to be implemented, and a second place for it to be wrong.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SeamSample {
+    /// Unit heightfield normal (+Y strictly positive).
+    pub normal: [f32; 3],
+    /// World surface height (`f64`, the world-space precision doctrine).
+    pub height: f64,
+    /// Splat-blended linear albedo.
+    pub albedo: [f32; 3],
+    /// Splat-blended perceptual roughness.
+    pub roughness: f32,
+}
+
+impl SeamSample {
+    /// Pack into the two [`RenderVoxelVertex`] seam attributes, given the
+    /// vertex's own world position (only its Y matters — the shader measures the
+    /// band as `|world.y - height|`).
+    ///
+    /// The height rides as `f32` because it is only ever used as a *difference*
+    /// against an already render-local vertex Y; the `f64` above is the world
+    /// value, and the projector subtracts the floating origin before calling this.
+    pub fn pack(&self, origin_y: f64) -> ([f32; 4], [f32; 4]) {
+        (
+            [
+                self.normal[0],
+                self.normal[1],
+                self.normal[2],
+                (self.height - origin_y) as f32,
+            ],
+            [
+                self.albedo[0],
+                self.albedo[1],
+                self.albedo[2],
+                self.roughness,
+            ],
+        )
+    }
+}
+
+impl RenderTerrainTile {
+    /// Words per packed hole-mask row: `ceil(resolution / 32)`. Zero-width for a
+    /// degenerate resolution, which cannot happen through a projector but keeps
+    /// the arithmetic total.
+    #[inline]
+    pub fn hole_words_per_row(resolution: u32) -> u32 {
+        resolution.div_ceil(32)
+    }
+
+    /// `true` when **some** sample of this tile is holed — the cheap gate the GPU
+    /// cache takes before sizing a hole texture at all.
+    #[inline]
+    pub fn has_holes(&self) -> bool {
+        self.holes.iter().any(|&w| w != 0)
+    }
+
+    /// Is sample `(i, j)` holed? An empty mask reads `false` everywhere — the
+    /// sparse default, projected intact. Out-of-range words read `false` too,
+    /// matching the shader, whose `textureLoad` past the texture returns zero.
+    #[inline]
+    pub fn is_hole(&self, resolution: u32, i: u32, j: u32) -> bool {
+        if self.holes.is_empty() {
+            return false;
+        }
+        let stride = Self::hole_words_per_row(resolution) as usize;
+        match self.holes.get(j as usize * stride + (i >> 5) as usize) {
+            Some(word) => word & (1u32 << (i & 31)) != 0,
+            None => false,
+        }
+    }
+
+    /// The splat weight at sample `(i, j)`, clamping out-of-range indices to the
+    /// edge. The projected `weights` vec is always dense (the projector expands
+    /// the source's sparse default), so this never resolves a default itself —
+    /// but an empty vec still answers, uniformly layer 0, rather than panicking on
+    /// a projection that forgot.
+    #[inline]
+    pub fn weight_sample(&self, resolution: u32, i: u32, j: u32) -> [u8; 4] {
+        if self.weights.is_empty() {
+            return [255, 0, 0, 0];
+        }
+        let r = resolution.max(1);
+        let idx = (j.min(r - 1) * r + i.min(r - 1)) as usize;
+        self.weights.get(idx).copied().unwrap_or([255, 0, 0, 0])
+    }
 }
 
 /// One terrain splat material layer (P10.4), projected from the ECS
@@ -751,6 +905,112 @@ impl RenderTerrain {
         self.tile_span() * (1u64 << lod.min(62)) as f64
     }
 
+    /// **The P21.2 seam sample**: the heightfield's surface normal, world height
+    /// and splat-blended material at world `(x, z)`, or `None` where this
+    /// projection has no level-0 surface there — no resident tile, or a tile whose
+    /// sample is holed.
+    ///
+    /// This is what a projector calls per voxel vertex to fill
+    /// [`RenderVoxelVertex::seam_nh`] / [`seam_albedo`](RenderVoxelVertex::seam_albedo),
+    /// and it lives **here**, on the already-projected terrain, for a specific
+    /// reason: the alternative is for each of the two host projectors to sample
+    /// `inf_terrain` and re-implement the splat blend, which would make the seam
+    /// colour a function of *which host is drawing* — exactly the class of
+    /// divergence the mirrored-pair discipline exists to prevent. One
+    /// implementation, over the DTO both hosts already built, cannot diverge.
+    ///
+    /// **Level-0 only.** A coarse pyramid page carries downsampled heights and no
+    /// painted weights at all, so blending toward one would tint a cave mouth by
+    /// whatever LOD happened to be resident — a seam that changes colour as the
+    /// camera walks away. Where level 0 is not resident the answer is honestly
+    /// `None` and the blend is off.
+    ///
+    /// The hole test is the **same poison rule** the fragment shader and
+    /// `inf_terrain::TerrainData::height_at` apply: one holed corner of the
+    /// bilinear cell removes it. Which is what makes a cave mouth work — the
+    /// vertices *inside* the hole get no seam, the ones just outside it do, and
+    /// the band falls off across the rim.
+    pub fn seam_sample(&self, x: f64, z: f64) -> Option<SeamSample> {
+        let res = self.tile_resolution.max(2);
+        let mps = self.meters_per_sample;
+        let span = self.tile_span();
+        let coord = ((x / span).floor() as i32, (z / span).floor() as i32);
+        let tile = self
+            .tiles
+            .iter()
+            .find(|t| t.key.lod == 0 && t.key.coord == coord)?;
+
+        let u = ((x - coord.0 as f64 * span) / mps).clamp(0.0, (res - 1) as f64);
+        let v = ((z - coord.1 as f64 * span) / mps).clamp(0.0, (res - 1) as f64);
+        let (i0, j0) = (u.floor() as u32, v.floor() as u32);
+        let (i1, j1) = ((i0 + 1).min(res - 1), (j0 + 1).min(res - 1));
+        if tile.is_hole(res, i0, j0)
+            || tile.is_hole(res, i1, j0)
+            || tile.is_hole(res, i0, j1)
+            || tile.is_hole(res, i1, j1)
+        {
+            return None;
+        }
+        let (fx, fz) = (u - i0 as f64, v - j0 as f64);
+        let h = |i: u32, j: u32| tile.heights[(j * res + i) as usize] as f64;
+        let lerp2 = |a: f64, b: f64, c: f64, d: f64| {
+            let x0 = a + (b - a) * fx;
+            let x1 = c + (d - c) * fx;
+            x0 + (x1 - x0) * fz
+        };
+        let height = tile.origin.y + lerp2(h(i0, j0), h(i1, j0), h(i0, j1), h(i1, j1));
+
+        // Central differences on the sample lattice — the same gradient the
+        // terrain fragment shader takes, so the two normals agree at the seam.
+        let e = mps as f32;
+        let im = i0.saturating_sub(1);
+        let ip = (i0 + 1).min(res - 1);
+        let jm = j0.saturating_sub(1);
+        let jp = (j0 + 1).min(res - 1);
+        let dx = (h(ip, j0) - h(im, j0)) as f32 / ((ip - im).max(1) as f32 * e);
+        let dz = (h(i0, jp) - h(i0, jm)) as f32 / ((jp - jm).max(1) as f32 * e);
+        let n = {
+            let v = [-dx, 1.0, -dz];
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
+            [v[0] / l, v[1] / l, v[2] / l]
+        };
+
+        // Splat blend, against THIS terrain's layers.
+        let w = |i: u32, j: u32| tile.weight_sample(res, i, j);
+        let wq = [w(i0, j0), w(i1, j0), w(i0, j1), w(i1, j1)];
+        let mut weights = [0.0f32; 4];
+        for k in 0..4 {
+            let a = wq[0][k] as f32 / 255.0;
+            let b = wq[1][k] as f32 / 255.0;
+            let c = wq[2][k] as f32 / 255.0;
+            let d = wq[3][k] as f32 / 255.0;
+            weights[k] = lerp2(a as f64, b as f64, c as f64, d as f64) as f32;
+        }
+        let sum: f32 = weights.iter().sum();
+        if sum > 1e-4 {
+            for w in &mut weights {
+                *w /= sum;
+            }
+        } else {
+            weights = [1.0, 0.0, 0.0, 0.0];
+        }
+        let mut albedo = [0.0f32; 3];
+        let mut roughness = 0.0f32;
+        for (k, layer) in self.layers.iter().enumerate() {
+            for (c, out) in albedo.iter_mut().enumerate() {
+                *out += weights[k] * layer.albedo[c];
+            }
+            roughness += weights[k] * layer.roughness;
+        }
+
+        Some(SeamSample {
+            normal: n,
+            height,
+            albedo,
+            roughness: roughness.clamp(0.04, 1.0),
+        })
+    }
+
     /// The coarsest asset LOD present in the projection (`0` for a level-0-only
     /// terrain — every inline, non-streamed terrain).
     pub fn max_lod(&self) -> u32 {
@@ -853,6 +1113,28 @@ pub struct RenderVoxelVertex {
     /// projector that grows a fifth material before the renderer does degrades to
     /// the last layer instead of to undefined behaviour.
     pub material: u32,
+    /// **Seam (P21.2)**: the heightfield's unit surface normal at this vertex's
+    /// world XZ in `xyz`, and the heightfield's world surface height in `w`.
+    ///
+    /// [`NO_SEAM`](RenderVoxelVertex::NO_SEAM) — all zeros — means "no
+    /// heightfield over this point", and it is a sentinel that cannot be confused
+    /// with data: a heightfield normal is the gradient of a single-valued
+    /// function of `(x, z)`, so `y` is strictly positive for every real sample.
+    /// The shader tests `y <= 0` and skips the blend entirely, which is what keeps
+    /// a volume with no terrain over it byte-identical to its pre-P21.2 render.
+    pub seam_nh: [f32; 4],
+    /// **Seam (P21.2)**: the terrain's splat-blended albedo in `rgb` and its
+    /// blended perceptual roughness in `a` at this vertex's world XZ, resolved
+    /// against the **terrain's** layer palette (not this volume's) by
+    /// [`RenderTerrain::seam_sample`]. Ignored when
+    /// [`seam_nh`](Self::seam_nh) is the sentinel.
+    pub seam_albedo: [f32; 4],
+}
+
+impl RenderVoxelVertex {
+    /// The "no heightfield here" seam sentinel — see [`seam_nh`](Self::seam_nh).
+    /// A projector with no terrain to sample writes this and the blend is off.
+    pub const NO_SEAM: [f32; 4] = [0.0; 4];
 }
 
 /// One meshed chunk handed to the [`VoxelNode`](crate::passes::voxel) (P21.1).
@@ -940,10 +1222,32 @@ pub struct RenderVoxelVolume {
     /// deliberately indices `0..=3` **aligned with the terrain splat layers** — a
     /// cave mouth must shade continuously into the hillside it opens out of, which
     /// it cannot do if layer 2 means "rock" on one side of the seam and "moss" on
-    /// the other. (`tex_scale` is carried but unused in P21.1: the voxel shader has
-    /// no triplanar detail grain yet — that arrives with the seam blend in P21.2.)
+    /// the other. (`tex_scale` is carried but unused: the voxel shader has no
+    /// triplanar detail grain — P21.2 closed the seam through the per-vertex blend
+    /// below instead, which is a different mechanism.)
     pub layers: [RenderTerrainLayer; 4],
+    /// **Seam blend band (P21.2), in metres.** A voxel fragment within this
+    /// distance of the heightfield surface mixes toward the terrain's own albedo,
+    /// roughness and normal there; `0` disables the blend for this volume.
+    ///
+    /// A width, not a switch, because the right value is a property of the
+    /// content: a cave mouth cut into 1 m-per-sample ground wants a band about a
+    /// metre or two wide — wide enough that the transition is not a visible line,
+    /// narrow enough that the cave interior does not turn into hillside. The
+    /// projector defaults it to [`DEFAULT_SEAM_BAND_M`].
+    ///
+    /// What it buys and what it does not is stated in `voxel.wgsl`: material and
+    /// normal continuity, **not** geometric welding.
+    pub seam_band_m: f32,
 }
+
+/// Default width of the P21.2 voxel-to-heightfield seam blend band, in metres.
+///
+/// Two metres: about two samples of a default 1 m terrain, so the band spans a
+/// few pixels of hillside at any reasonable viewing distance and reads as a
+/// gradient rather than a boundary, while a player standing in a cave four metres
+/// under the surface is entirely outside it.
+pub const DEFAULT_SEAM_BAND_M: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkyParams {
@@ -1265,5 +1569,160 @@ mod tests {
         ));
         s.mark_dirty();
         assert_ne!(s.version, v0);
+    }
+    // ── P21.2 seam ──────────────────────────────────────────────
+
+    /// A 5×5 tile at y = 10, sloping +1 m per sample along +X, optionally with
+    /// sample `(2, 2)` holed.
+    fn seam_terrain(holed: bool) -> RenderTerrain {
+        const RES: u32 = 5;
+        let heights: Vec<f32> = (0..RES).flat_map(|_| (0..RES).map(|i| i as f32)).collect();
+        let mut holes = Vec::new();
+        if holed {
+            holes = vec![0u32; RES as usize];
+            holes[2] |= 1 << 2;
+        }
+        RenderTerrain {
+            id: 1,
+            tile_resolution: RES,
+            meters_per_sample: 1.0,
+            tiles: vec![RenderTerrainTile {
+                key: TerrainTileKey::lod0((0, 0)),
+                origin: DVec3::new(0.0, 10.0, 0.0),
+                heights,
+                weights: vec![[255, 0, 0, 0]; (RES * RES) as usize],
+                biomes: vec![0; (RES * RES) as usize],
+                holes,
+                height_bounds: (0.0, 4.0),
+                version: 1,
+            }],
+            layers: [
+                RenderTerrainLayer {
+                    albedo: [0.2, 0.4, 0.1, 1.0],
+                    roughness: 0.8,
+                    tex_scale: 1.0,
+                },
+                RenderTerrainLayer::default(),
+                RenderTerrainLayer::default(),
+                RenderTerrainLayer::default(),
+            ],
+            macro_variation: 0.0,
+            biome_palette: Vec::new(),
+        }
+    }
+
+    /// The sampler answers with the surface it was given — the interpolated
+    /// height, a normal that leans away from the slope, and the layer-0 albedo
+    /// the weights select.
+    #[test]
+    fn seam_sample_resolves_height_normal_and_layer() {
+        let t = seam_terrain(false);
+        let s = t.seam_sample(1.5, 1.0).expect("inside the tile");
+        assert!((s.height - 11.5).abs() < 1e-6, "height {}", s.height);
+        // Heights rise with +X, so the normal tilts toward -X, and +Y stays
+        // positive — which is what makes `y <= 0` a usable sentinel.
+        assert!(s.normal[0] < 0.0 && s.normal[1] > 0.0, "{:?}", s.normal);
+        assert!((s.normal[2]).abs() < 1e-6, "{:?}", s.normal);
+        assert_eq!(s.albedo, [0.2, 0.4, 0.1]);
+        assert!((s.roughness - 0.8).abs() < 1e-6);
+
+        // Outside the projected tile there is no answer at all — not a guess.
+        assert!(t.seam_sample(500.0, 500.0).is_none());
+    }
+
+    /// **The poison rule, projector half.** A holed sample removes the seam from
+    /// every cell that interpolates it, and from no other — the same rule
+    /// `terrain.wgsl` and `inf_terrain::TerrainData::height_at` apply.
+    #[test]
+    fn seam_sample_refuses_a_holed_cell_and_only_that_cell() {
+        let t = seam_terrain(true);
+        // The four cells around sample (2, 2).
+        for (x, z) in [(1.5, 1.5), (2.5, 1.5), (1.5, 2.5), (2.5, 2.5)] {
+            assert!(t.seam_sample(x, z).is_none(), "({x}, {z}) survived");
+        }
+        // One cell further out is untouched.
+        for (x, z) in [(0.5, 0.5), (3.5, 3.5)] {
+            assert!(t.seam_sample(x, z).is_some(), "({x}, {z}) was poisoned");
+        }
+        // The same query on the un-carved twin answers everywhere — so the test
+        // above is about the hole and not about the fixture.
+        let clean = seam_terrain(false);
+        assert!(clean.seam_sample(2.0, 2.0).is_some());
+    }
+
+    /// `apply_seam` arms the band and fills the vertices that have terrain over
+    /// them, leaves the rest at the sentinel, and is a **no-op** when disarmed —
+    /// which is what keeps a terrain-free scene byte-identical to its pre-P21.2
+    /// render.
+    #[test]
+    fn apply_seam_fills_only_where_there_is_ground() {
+        let terrain = seam_terrain(true);
+        let vertex = |x: f32, z: f32| RenderVoxelVertex {
+            pos: [x, 0.0, z],
+            normal: [0.0, 1.0, 0.0],
+            material: 0,
+            seam_nh: RenderVoxelVertex::NO_SEAM,
+            seam_albedo: [0.0; 4],
+        };
+        let mut volumes = vec![RenderVoxelVolume {
+            id: 1,
+            chunks: vec![RenderVoxelChunk {
+                key: VoxelChunkKey::default(),
+                origin: DVec3::ZERO,
+                // Under the hole, on clear ground, and off the terrain entirely.
+                vertices: vec![vertex(2.0, 2.0), vertex(0.5, 0.5), vertex(400.0, 400.0)],
+                indices: vec![0, 1, 2],
+                bounds: ([0.0; 3], [1.0; 3]),
+                version: 1,
+            }],
+            layers: [RenderTerrainLayer::default(); 4],
+            seam_band_m: 0.0,
+        }];
+
+        // Disarmed: nothing moves, and the band stays off.
+        let mut off = volumes.clone();
+        apply_seam(&mut off, std::slice::from_ref(&terrain), 0.0);
+        assert_eq!(off[0].seam_band_m, 0.0);
+        assert!(off[0].chunks[0]
+            .vertices
+            .iter()
+            .all(|v| v.seam_nh == RenderVoxelVertex::NO_SEAM));
+
+        apply_seam(&mut volumes, std::slice::from_ref(&terrain), 2.0);
+        assert_eq!(volumes[0].seam_band_m, 2.0);
+        let vs = &volumes[0].chunks[0].vertices;
+        assert_eq!(
+            vs[0].seam_nh,
+            RenderVoxelVertex::NO_SEAM,
+            "a vertex under the hole must not pick up a seam"
+        );
+        assert!(
+            vs[1].seam_nh[1] > 0.0,
+            "clear ground must seam: {:?}",
+            vs[1]
+        );
+        assert_eq!(vs[1].seam_albedo, [0.2, 0.4, 0.1, 0.8]);
+        assert_eq!(
+            vs[2].seam_nh,
+            RenderVoxelVertex::NO_SEAM,
+            "a vertex off the terrain must not pick up a seam"
+        );
+    }
+
+    /// The row-packed mask reads back the bit that was set, and an empty mask
+    /// reads `false` everywhere — the sparse default, which is what lets the
+    /// pass bind a 1×1 sentinel texture.
+    #[test]
+    fn the_projected_hole_mask_reads_back() {
+        let t = seam_terrain(true);
+        let tile = &t.tiles[0];
+        assert!(tile.has_holes());
+        assert!(tile.is_hole(5, 2, 2));
+        for (i, j) in [(1, 2), (3, 2), (2, 1), (2, 3)] {
+            assert!(!tile.is_hole(5, i, j), "({i},{j})");
+        }
+        let clean = seam_terrain(false);
+        assert!(!clean.tiles[0].has_holes());
+        assert!(!clean.tiles[0].is_hole(5, 2, 2));
     }
 }
