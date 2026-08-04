@@ -4180,6 +4180,56 @@ impl EngineHost {
         self.refresh_ring(doc, Some(guid), cur);
     }
 
+    /// **Close a terrain-brush stroke the active tool can no longer finish**
+    /// (P21.3, the P21.2 audit's N2 ledger item). Returns `true` when an orphaned
+    /// stroke was recorded.
+    ///
+    /// [`settle_orphaned_carve`](Self::settle_orphaned_carve)'s sibling, and the
+    /// identical bug one tool over. A [`DragStroke`] — **height sculpt, splat
+    /// paint or biome paint**, all three — mutates the terrain *live* per dab,
+    /// and only [`finish_sculpt`](Self::finish_sculpt) turns those dabs into the
+    /// undo entry that describes them. `finish_sculpt` is reached from the pump's
+    /// `sculpting` branch, which is gated on the **active tool** — so a tool
+    /// switch arriving between two frames of a drag (the toolbar and the `tool.*`
+    /// shortcuts both push one down a command channel, mid-gesture or not) left
+    /// the stroke open forever: its edits stayed in the document, saved like any
+    /// other edit, and Ctrl+Z could not reach them. That is the un-undoable
+    /// committed edit `a4e5844` ruled worse than any partial one.
+    ///
+    /// Committing rather than reverting, for the carve's reason: the author *did*
+    /// move that ground and can see it. One undo step, exactly as a mouse-up
+    /// would have produced.
+    ///
+    /// Called unconditionally by the platform pump with the document in hand —
+    /// `set_tool_mode` cannot do it itself (committing needs a `&mut SceneDoc`
+    /// and that seam has none), and a deferred flag would be a second piece of
+    /// state saying what `tool_mode` and `sculpt_drag` already say.
+    pub fn settle_orphaned_sculpt(&mut self, doc: &mut SceneDoc) -> bool {
+        if self.sculpt_drag.is_none() {
+            return false;
+        }
+        // The pump's own `sculpting` flag, derived here so the two cannot
+        // disagree: 2D mode keeps Select regardless of the tool, so switching
+        // projections mid-drag strands a stroke exactly as switching tools does.
+        // The Paint sub-mode rides `ToolMode::Sculpt`, so the two names below
+        // cover all three `DragStroke` kinds.
+        let sculpt_branch_runs = matches!(self.tool_mode, ToolMode::Sculpt | ToolMode::Biome)
+            && self.mode != ViewportMode::TwoD;
+        if sculpt_branch_runs {
+            return false;
+        }
+        let recorded = self.finish_sculpt(doc);
+        if recorded {
+            self.reject_tool(Self::SCULPT_STROKE_SETTLED_ON_TOOL_SWITCH);
+        }
+        recorded
+    }
+
+    /// What the author is told when a tool switch closed their brush stroke.
+    const SCULPT_STROKE_SETTLED_ON_TOOL_SWITCH: &'static str =
+        "Brush: the tool changed while a stroke was still down, so the edit so far was committed \
+         as one undo step. Ctrl+Z takes it back.";
+
     /// Finish the stroke: commit the merged height [`inf_terrain::HeightDelta`] or
     /// splat [`inf_terrain::SplatDelta`] as one undo step. Returns `true` if a
     /// non-empty stroke was recorded.
@@ -4555,18 +4605,28 @@ impl EngineHost {
         self.report_tool(msg);
     }
 
-    // ── the voxel carve tools (P21.2) ─────────────────────────────────────
+    // ── the voxel carve and dig tools (P21.2 + P21.3) ─────────────────────
     //
-    // Two sub-modes over one cut. The **brush** is the sculpt brush's gesture
-    // exactly — press, drag, release, dabs spaced by arc length so drag speed
-    // cannot change what is dug — and the **spline tunnel** is the river tool's:
-    // click waypoints, Ctrl+click to close and carve the tube as one step.
+    // FOUR sub-modes over three gestures, and this module owns none of the
+    // shapes they cut — those are `inf_editor_core::voxel_tool`, Ring 1, tested
+    // on every CI leg (the M11 move). What is here is the input plumbing:
     //
-    // Every cut goes through `SceneDoc::carve_verdict` FIRST. That is the gate
-    // the coordinator's inline-terrain ruling lives behind: schema v19 cannot
-    // persist a hole mask on an inline terrain, so a surface-crossing cut there
-    // is refused whole — voxels included — rather than half-applied into a cave
-    // with no mouth. A cut that never reaches a surface is legal anywhere.
+    // * **brush** — the sculpt brush's gesture exactly: press, drag, release,
+    //   dabs spaced by arc length so drag speed cannot change what is dug;
+    // * **tunnel** and **trench** — the river tool's: click waypoints,
+    //   Ctrl+click to close and cut the whole run as one step (a round bore for
+    //   the tunnel, a rectangular section open to the sky for the trench);
+    // * **box cut** — the lake tool's: press-drag a rectangle, release
+    //   excavates it.
+    //
+    // Every cut goes through `SceneDoc::edit_dig` (or, for the live brush,
+    // `carve_verdict` per dab) FIRST. That is the gate the coordinator's
+    // inline-terrain ruling lives behind: schema v19 cannot persist a hole mask
+    // on an inline terrain, so a surface-crossing cut there is refused whole —
+    // voxels included — rather than half-applied into a cave with no mouth. A
+    // cut that never reaches a surface is legal anywhere. P21.3 adds a size gate
+    // in the same pass, for the same reason: you find out a dig is too big by
+    // doing it, which is exactly what "judged whole" forbids.
 
     /// Why the voxel tool refused a click with no volume to cut.
     const VOXEL_NO_VOLUME_REJECTION: &'static str =
@@ -4578,7 +4638,9 @@ impl EngineHost {
         "Carve: no terrain under the cursor. Aim at ground that has paged in — a cut placed at \
          sea level would dig somewhere the author never pointed at.";
 
-    /// …and why it refused a dig whose spoil had nowhere to go.
+    /// …and what the spoil-site picker says while it is armed with nowhere
+    /// picked yet — a hint, not a refusal: the dig still happens, at the
+    /// documented default site.
     const VOXEL_NO_SPOIL_SITE_HINT: &'static str =
         "Spoil: no site picked yet, so the soil goes to the default spot — east of the cut, \
          clear of its rim. Turn on \"Set spoil site\" and click where you want the heap.";
@@ -4610,44 +4672,25 @@ impl EngineHost {
         }
     }
 
-    /// The volume the next cut goes into: the first **selected** entity carrying a
-    /// loaded volume, else the first in document order.
+    /// The volume the next cut goes into — the **lookup**; the rule is
+    /// [`inf_editor_core::voxel_tool::voxel_target`] (the M11 move).
     ///
-    /// Selection first, so an author with two cave systems open cuts the one they
-    /// are looking at. Deliberately **not** auto-created the way the foliage tool
-    /// creates its `Foliage` entity: a volume's chunks live in an `.inf_voxel` on
-    /// disk, and conjuring an entity that references an asset nobody has written
-    /// would produce a tool that silently does nothing.
+    /// All this contributes is the answer to "does the shared store hold chunks
+    /// for this entity?", which needs the mutex this thread owns and is
+    /// therefore the one half of the question that cannot live in Ring 1.
     fn voxel_target(&self, doc: &SceneDoc) -> Option<Uuid> {
-        let loaded = |g: &Uuid| {
+        inf_editor_core::voxel_tool::voxel_target(doc.order(), doc.selection(), |g| {
             self.voxel_volumes
                 .lock()
-                .map(|v| v.slot(*g).is_some())
+                .map(|v| v.slot(g).is_some())
                 .unwrap_or(false)
-        };
-        doc.selection()
-            .iter()
-            .copied()
-            .find(loaded)
-            .or_else(|| doc.order().iter().copied().find(loaded))
+        })
     }
 
-    /// Where a click puts the **centre** of the cut: the terrain surface under the
-    /// cursor, sunk by [`VoxelSettings::depth_m`].
-    ///
-    /// Camera-independent by construction, which is the same ruling the water tool
-    /// got and matters more here: a carve commits geometry, and two authors at
-    /// different camera distances must not dig different caves from the same
-    /// click. The depth is what turns a surface pick into a *tunnel* — at `0` the
-    /// cut breaks the ground where you point (a mouth), and past the radius it
-    /// hollows rock with no mouth at all, which the verdict then allows anywhere.
-    ///
-    /// **Documented limit:** the pick resolves against the heightfield, not
-    /// against voxel surfaces, so continuing a tunnel from *inside* an existing
-    /// cave needs a voxel raycast this crate does not have yet. Aim from above and
-    /// set a depth; the raycast is the follow-up.
+    /// The sunk cut centre for the current depth — the rule is
+    /// [`inf_editor_core::voxel_tool::cut_center`] (the M11 move).
     fn voxel_sink(&self, surface: DVec3) -> DVec3 {
-        surface - DVec3::new(0.0, self.voxel_tool.depth_m.max(0.0), 0.0)
+        inf_editor_core::voxel_tool::cut_center(surface, self.voxel_tool.depth_m)
     }
 
     /// The **raw** ground point under the cursor, before the depth sink.
@@ -4903,32 +4946,24 @@ impl EngineHost {
         let Some(cur) = self.voxel_surface_pick(doc, view, px, py) else {
             return; // the cursor slid off the ground — hold the stroke, cut nothing
         };
-        // Arc length in 3D, mirroring `inf_terrain::dab_positions`' pattern: a
-        // carve moves in y as well as xz (a tunnel dives), so resampling only the
-        // XZ path would space the dabs by their shadow and leave gaps on a slope.
-        let spacing = (0.65 * self.voxel_tool.radius_m).max(0.05);
-        let step = cur - last;
-        let len = step.length();
+        // The resampling is Ring 1's (`voxel_tool::dab_centers`, itself a wrapper
+        // over `inf_terrain::dab_positions`) — the M11 move. `skip(1)`: the
+        // first entry is `last`, which is already cut.
+        let spacing = inf_editor_core::voxel_tool::dab_spacing(self.voxel_tool.radius_m);
+        let centers = inf_editor_core::voxel_tool::dab_centers(&[last, cur], spacing);
         let mut tally = self
             .voxel_stroke
             .as_ref()
             .map(|s| s.tally())
             .unwrap_or_default();
         let mut refused = None;
-        if len > 0.0 {
-            let dir = step / len;
-            let mut t = spacing;
+        if centers.len() > 1 {
             let mut placed = last;
-            let mut dabs = 0usize;
-            while t <= len && dabs < Self::MAX_DABS_PER_UPDATE {
-                let center = last + dir * t;
+            for &center in centers.iter().skip(1).take(Self::MAX_DABS_PER_UPDATE) {
                 let op = self.voxel_op_at(center);
                 if let Some(terrains) = self.voxel_authorize(doc, &op.shape) {
                     if let Some(stroke) = self.voxel_stroke.as_mut() {
                         match stroke.dab(doc, &op, &terrains) {
-                            // Named `cut`, not `t` — `t` is the arc-length
-                            // parameter this loop advances, and shadowing it
-                            // inside the arm is one edit away from a hang.
                             Ok(cut) => tally = cut,
                             // The rock could not be cut, so nothing above it was
                             // opened either. Stop the stroke here — every later
@@ -4948,8 +4983,6 @@ impl EngineHost {
                     }
                 }
                 placed = center;
-                t += spacing;
-                dabs += 1;
             }
             // The remainder rides to the next frame from here, so the cut has no
             // gap where the budget ran out.

@@ -5940,7 +5940,54 @@ tech uses. We are not voxelizing the planet.
 - **P21.3 Excavation & soil displacement** — 1. dig tools (box/spline/brush cuts for
   foundations, parking garages, underground malls); 2. material accounting — excavated volume
   becomes displaced spoil (voxel additions or instanced debris), conservation-tested like the
-  erosion mass gates; 3. undo via chunk deltas on the `EditCommand` pattern.
+  erosion mass gates; 3. undo via chunk deltas on the `EditCommand` pattern. *(All three shipped,
+  plus the two carried ledger items M11 and N2. Spoil is **voxel additions**; instanced debris
+  stays a P22 concern. See the P21.3 status block below.)*
+
+> **P21.3 STATUS (complete).** Three cuts, one ledger, one undo step.
+>
+> *The cuts.* `VoxelToolKind` grew **BoxCut** (press-drag a rectangle, release excavates it) and
+> **Trench** (waypoints → a swept rectangular cut, Ctrl+click commits), beside the P21.2 Brush
+> and Tunnel; the brush gained a **dig-to-grade** mode whose dabs are columns to daylight rather
+> than balls at depth. Their shapes are Ring-1 pure functions
+> (`inf_editor_core::voxel_tool::{box_cut_plan, trench_shapes, brush_dab_shape}`), so every CI
+> leg tests what a click commits. The shared rule: **a cut is open to the sky** — its top clears
+> the *highest* ground it spans and its floor is `depth` below the *lowest*, so a pit dragged
+> across a slope has no lid of surviving hillside and "3 m deep" means below grade everywhere.
+> A new Ring-0 primitive, `VoxelShape::Trench`, is the swept rectangle the axis-aligned `Box`'s
+> own doc comment said would be added beside it — yaw free, roll not, exact SDF, no `std` trig.
+>
+> *The conservation centrepiece.* `spoiled[m] == removed[m]`, per material, as **integers**, with
+> **no bulking factor** (a documented non-goal: a 1:1 identity is a gate, a 1.25× fudge is a
+> number nobody can test). Since no analytic mound holds an arbitrary integer count, the pile is
+> an **order** rather than a solid: `rank = d·tan 35° + height`, the apex of the smallest repose
+> cone containing a cell, taken ascending with `(height, x, z)` ties. Three rules make it exact —
+> an already-solid cell is not a placement (so a heap on a hillside conserves as exactly as one
+> on a plain), the search region **grows until it holds the count**, and materials are laid down
+> in ascending index order so a two-strata dig builds a visibly layered mound. The default site
+> is stated so an author can predict it and a test can pin it: *centred on the cut's +X face,
+> offset by the pile's own footprint radius plus 1 m, dropped onto the ground there* — a function
+> of the cut and the count and of nothing the session happened to page in. `cbrt_det` replaces
+> `f64::cbrt` for the reason `psin64` exists.
+>
+> *The transaction.* `SceneDoc::edit_dig` judges **size, store, volume and the inline-terrain
+> verdict before a single sample moves** — the size gate in particular cannot be discovered any
+> other way, since you find out a dig is too big by doing it — then cuts the whole chain into one
+> `CarveStroke` and displaces the soil into the same stroke. Pit, cave mouths and heap are one
+> `EditCommand` labelled "Excavate", and one Ctrl+Z takes back all three, byte-identically, in
+> the chunks *and* in the terrain tiles. `edit_carve_path` is now this with spoil discarded.
+>
+> *Honest scope.* Spoil is **voxel additions only** — no instanced debris, which is P22's
+> fracture/destruction concern and is written into the bullet above rather than implied.
+> `SpoilMode::Site` **falls back to the default site** when no marker has been picked, and says
+> so on the readout. The pit's open-to-the-sky rule reads the ground at 33² probes, so terrain
+> that spikes between two probes by more than 25 cm can keep a sliver of surface on the rim —
+> documented at `BOX_CUT_PROBES`, fixed by re-dragging. A trench bend sharper than a right angle
+> keeps a small un-cut notch on its outside (the miter allowance covers `tan(θ/2) ≤ 1`). A
+> steeply-diving trench leg is shallower *vertically* than `depth_m` by the cosine of its pitch,
+> because its section stays perpendicular to the run — which is what a road cut looks like.
+> Viewport interaction is **human-verified**, as every native-viewport gesture in this repository
+> is. No schema bump (v19 stands), no `.inf_terrain` bump, no new dependency, no new golden.
 - **P21.4 Runtime carving** — 1. the same ops as Blueprint nodes, deterministic and
   replay-gated, so games can dig at runtime; 2. physics and nav updates on carve.
 
@@ -5959,12 +6006,13 @@ tech uses. We are not voxelizing the planet.
 >   trace compared. Until that exists, "preview == shipped" for voxel ground is a design
 >   intention and not a checked property, and this line says so rather than letting the mirrored
 >   `ground_height_at` call sites imply otherwise.
-> * **M11 — `voxel_target` / `voxel_pick` / dab resampling belong in Ring 1.** They live in
->   `inf-viewport`'s host today, which is `#[cfg(any(windows, macos))]` — so the Linux CI leg,
->   the one a contributor's PR usually runs first, cannot see them at all. That is the same
->   argument that put `terrain_stream`, `render_assets` and `voxel_store` in `inf-editor-core`,
->   and it has the same answer. **Folded into P21.3**, which reworks `host.rs` for the dig tools
->   anyway: moving them then costs one refactor instead of two.
+> * ~~**M11 — `voxel_target` / `voxel_pick` / dab resampling belong in Ring 1.**~~ **CLOSED in
+>   P21.3.** All three moved into `inf_editor_core::voxel_tool` — `voxel_target` (selection first,
+>   an unloaded volume is not a target), `cut_center` (the surface → depth rule) and `dab_centers`
+>   (which now **wraps `inf_terrain::dab_positions`** rather than carrying a hand copy of its
+>   spacing/carry semantics). The host keeps the pick and the store lookup, which are the two
+>   halves that genuinely need the platform and the mutex. Tested in Ring 1, so every CI leg runs
+>   them.
 > * **Coarse-LOD holes do not propagate into the pyramid** (the M7 remainder).
 >   `inf_terrain::pyramid::downsample_block` reduces heights, biome ids and erosion data maps
 >   and carries **no hole mask** upward, so a coarse page is hole-free however carved the
@@ -5977,19 +6025,16 @@ tech uses. We are not voxelizing the planet.
 >   *any* child is (a mouth grows by a whole coarse sample), if *all* are (it vanishes until it
 >   is 2ⁿ samples wide), or by majority like biome ids — and each answer draws a different
 >   distant silhouette.
-> * **N2 — the three terrain brushes can still strand a stroke, exactly as the carve brush
->   could.** `EngineHost::sculpt_drag` holds a `DragStroke` — **sculpt (`Height`), splat paint
->   (`Splat`) and biome paint (`Biome`)** — whose dabs mutate the terrain live and become an undo
->   entry only in `finish_sculpt`, which is reached from the pump's tool-gated branch. A tool
->   switch or a 2D-mode switch arriving between two frames of a drag therefore leaves the stroke
->   open forever: its edits are in the document, they save like any other edit, and Ctrl+Z cannot
->   reach them — the un-undoable committed edit `a4e5844` ruled worse than any partial one. The
->   carve brush had the identical hole and it is closed; these three are the same shape and are
->   **not** closed. The fix is a sibling of `EngineHost::settle_orphaned_carve`: one pump-called
->   `settle_orphaned_sculpt(&mut SceneDoc)` that commits an in-flight `DragStroke` when the branch
->   that would finish it no longer runs (`set_tool_mode` cannot do it — committing needs a
->   `&mut SceneDoc` and that seam has none), plus its `viewport_pump_mirror` line. Deferred to
->   P21.3, which reworks `host.rs` for the dig tools anyway.
+> * ~~**N2 — the three terrain brushes can still strand a stroke, exactly as the carve brush
+>   could.**~~ **CLOSED in P21.3.** `EngineHost::settle_orphaned_sculpt` is
+>   `settle_orphaned_carve`'s sibling: the pump calls it above the tool-gated branches with the
+>   document in hand, and it commits an in-flight `DragStroke` — height, splat *or* biome — when
+>   the branch that would have finished it no longer runs. Two gates, because a host cannot be
+>   constructed in CI: `tests/orphaned_strokes.rs` pins that a mid-drag commit of each of the
+>   three kinds is one undo entry that Ctrl+Z fully reverts and Ctrl+Y fully replays (plus a
+>   non-vacuity test that the three really move three different tile layers), and
+>   `viewport_pump_mirror.rs` pins both that the pump calls both settlers and — positionally —
+>   that they run **before** `if sculpting {`, which is the one way the fix regresses.
 
 ### Phase 22 — Dynamic world: deformation & destruction
 

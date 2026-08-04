@@ -37,9 +37,27 @@
 //! reads the clock, the camera or the document — every function is a pure
 //! function of its arguments, which is what lets the tests below be the gate
 //! rather than a hardware pass.
+//!
+//! # What arrived here from `host.rs` (the M11 move)
+//!
+//! [`voxel_target`] (which volume a click carves), [`cut_center`] (the
+//! surface → depth rule) and [`dab_centers`] (the stroke resampler) were written
+//! in `inf_viewport::host` in P21.2 and moved here in P21.3, when the dig tools
+//! reworked that file anyway — one refactor instead of two, as the ledger item
+//! said. The host now calls them and keeps nothing but the pick and the plumbing
+//! around them.
+//!
+//! [`dab_centers`] in particular is a **wrapper over
+//! [`inf_terrain::dab_positions`]**, not a second copy of it: the spacing, the
+//! carry across segments and the "the first point is re-emitted" convention are
+//! the sculpt brush's, resolved by the sculpt brush's code, with this function
+//! doing nothing but lifting the answer back onto a 3D polyline. Two resamplers
+//! that agree today and drift tomorrow is exactly the failure the M11 argument
+//! is about.
 
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 use inf_voxel::VoxelShape;
+use uuid::Uuid;
 
 /// How far above the highest ground a cut's top sits, metres.
 ///
@@ -67,6 +85,125 @@ pub const BOX_CUT_PROBES: u32 = 33;
 /// tool that digs a millimetre-wide slot every time an author misses a
 /// selection.
 pub const MIN_CUT_EXTENT_M: f64 = 0.05;
+
+/// **Which volume a click carves**: the first *selected* entity that has a
+/// loaded volume, else the first in document order.
+///
+/// Selection first, so an author with two cave systems open cuts the one they
+/// are looking at. Deliberately **not** auto-created the way the foliage tool
+/// creates its `Foliage` entity: a volume's chunks live in an `.inf_voxel` on
+/// disk, and conjuring an entity that references an asset nobody has written
+/// would produce a tool that silently does nothing.
+///
+/// `loaded` is the caller's answer to "does the shared store hold chunks for
+/// this entity?" — a parameter rather than a lookup because the store lives
+/// behind a mutex the viewport thread owns, and keeping the *rule* here and the
+/// *lookup* at the call site is what makes the rule testable at all.
+pub fn voxel_target(
+    order: &[Uuid],
+    selection: &[Uuid],
+    loaded: impl Fn(Uuid) -> bool,
+) -> Option<Uuid> {
+    selection
+        .iter()
+        .copied()
+        .find(|&g| loaded(g))
+        .or_else(|| order.iter().copied().find(|&g| loaded(g)))
+}
+
+/// Where a click puts the **centre** of a sunk cut: the picked surface, dropped
+/// by `depth_m`.
+///
+/// Camera-independent by construction, which is the ruling the water tool's pick
+/// got and matters more here: a carve commits geometry, and two authors at
+/// different camera distances must not dig different caves from the same click.
+/// The depth is what turns a surface pick into a *tunnel* — at `0` the cut
+/// breaks the ground where you point (a mouth), and past the cut's own radius it
+/// hollows rock with no mouth at all, which the surface-crossing verdict then
+/// allows on any terrain.
+///
+/// A negative depth is clamped to zero rather than honoured: depth is measured
+/// DOWN from the surface that was picked, so a negative one names a cut above
+/// the ground the author clicked on.
+///
+/// **Documented limit** (inherited, unchanged): the pick this takes resolves
+/// against the heightfield, not against voxel surfaces, so continuing a tunnel
+/// from *inside* an existing cave needs a voxel raycast the editor does not have
+/// yet. Aim from above and set a depth; the raycast is the follow-up.
+pub fn cut_center(surface: DVec3, depth_m: f64) -> DVec3 {
+    surface - DVec3::new(0.0, depth_m.max(0.0), 0.0)
+}
+
+/// Dab spacing for a cut of `radius_m`, metres — **⅔ of a radius**, floored so a
+/// zero-radius brush cannot ask for an infinite number of dabs.
+///
+/// Coarser than the sculpt brush's ⅓ because a *volume* brush's dabs overlap in
+/// three dimensions rather than two: at ⅔ of a radius consecutive spheres still
+/// intersect well inside each other, and the stroke costs a third of the cuts.
+pub fn dab_spacing(radius_m: f64) -> f64 {
+    (0.65 * radius_m).max(MIN_DAB_SPACING_M)
+}
+
+/// The floor under [`dab_spacing`], metres.
+pub const MIN_DAB_SPACING_M: f64 = 0.05;
+
+/// Resample a 3D drag path at even **arc length** — the stroke resampler, and a
+/// wrapper over [`inf_terrain::dab_positions`] rather than a second copy of it.
+///
+/// The path's own points are re-emitted as the first entry exactly as the
+/// Ring-0 function does (callers `skip(1)` when the first dab is already
+/// placed), and the leftover arc length carries across segments so a drag with
+/// several waypoints has no bunching at the joints.
+///
+/// # Why arc length in 3D, and why through the 2D function
+///
+/// A carve moves in `y` as well as `xz` — a tunnel dives — so resampling the XZ
+/// path alone would space the dabs by their *shadow* and leave gaps on a slope.
+/// But the spacing rule, the carry and the boundary conventions are the sculpt
+/// brush's, and re-deriving them here is how two resamplers come to disagree.
+/// So the path is flattened onto its own arc-length axis, handed to
+/// [`inf_terrain::dab_positions`], and the answers are lifted back onto the
+/// polyline. The 2D function is the one that decides *where* the dabs fall; this
+/// one only decides what a distance means.
+pub fn dab_centers(path: &[DVec3], spacing: f64) -> Vec<DVec3> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    if path.len() == 1 || spacing.is_nan() || spacing <= 0.0 || spacing.is_infinite() {
+        return path.to_vec();
+    }
+    // Cumulative arc length, as a degenerate 2D path along +X. `dab_positions`
+    // then does all the work.
+    let mut arc = Vec::with_capacity(path.len());
+    let mut total = 0.0;
+    arc.push(DVec2::ZERO);
+    for w in path.windows(2) {
+        let seg = (w[1] - w[0]).length();
+        total += if seg.is_finite() { seg } else { 0.0 };
+        arc.push(DVec2::new(total, 0.0));
+    }
+    inf_terrain::dab_positions(&arc, spacing)
+        .into_iter()
+        .map(|p| point_at_arc(path, p.x))
+        .collect()
+}
+
+/// The point `s` metres along the polyline `path`, clamped to its ends.
+fn point_at_arc(path: &[DVec3], s: f64) -> DVec3 {
+    let mut remaining = s.max(0.0);
+    for w in path.windows(2) {
+        let seg = w[1] - w[0];
+        let len = seg.length();
+        if !len.is_finite() || len <= 0.0 {
+            continue;
+        }
+        if remaining <= len {
+            return w[0] + seg * (remaining / len);
+        }
+        remaining -= len;
+    }
+    *path.last().unwrap_or(&DVec3::ZERO)
+}
 
 /// A **box cut** resolved against the ground it spans — a foundation pit.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -421,6 +558,115 @@ mod tests {
         // A path with one repeated point in the middle keeps its real legs.
         let legs = trench_shapes(&[p, p, p + DVec3::X * 5.0], 1.0, 1.0);
         assert_eq!(legs.len(), 1);
+    }
+
+    // ── the M11 move: rules that used to be invisible to the Linux CI leg ──
+
+    /// **Selection wins, document order is the fallback, and an unloaded volume
+    /// is not a target at all.**
+    ///
+    /// The last clause is the one that matters: a selected entity whose
+    /// `.inf_voxel` never resolved must not swallow the click, or the tool
+    /// reports success and cuts nothing.
+    #[test]
+    fn the_carve_target_prefers_the_selection_and_skips_unloaded_volumes() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
+        let order = [a, b, c];
+
+        // Nothing selected → the first LOADED volume in document order.
+        assert_eq!(voxel_target(&order, &[], |g| g == b || g == c), Some(b));
+        // A selection that is loaded wins over document order.
+        assert_eq!(voxel_target(&order, &[c], |_| true), Some(c));
+        // A selection that is NOT loaded falls through to document order rather
+        // than swallowing the click.
+        assert_eq!(voxel_target(&order, &[a], |g| g == c), Some(c));
+        // Several selected: the first loaded one.
+        assert_eq!(voxel_target(&order, &[a, b], |g| g != a), Some(b));
+        // Nothing loaded anywhere → no target, and the tool says so.
+        assert_eq!(voxel_target(&order, &[a, b, c], |_| false), None);
+        assert_eq!(voxel_target(&[], &[], |_| true), None);
+    }
+
+    /// The depth rule: straight down from the pick, clamped at zero.
+    #[test]
+    fn the_cut_centre_sinks_from_the_pick_and_never_rises_above_it() {
+        let surface = DVec3::new(3.0, 10.0, -4.0);
+        assert_eq!(
+            cut_center(surface, 0.0),
+            surface,
+            "0 depth IS the mouth cut"
+        );
+        assert_eq!(cut_center(surface, 2.5), DVec3::new(3.0, 7.5, -4.0));
+        assert_eq!(
+            cut_center(surface, -9.0),
+            surface,
+            "a negative depth must not lift the cut into the air"
+        );
+        // Camera-independence, stated as the property it is: the answer is a
+        // function of the pick and the depth and of nothing else.
+        assert_eq!(cut_center(surface, 2.5), cut_center(surface, 2.5));
+    }
+
+    /// **The resampler is the sculpt brush's**, lifted onto a 3D polyline: even
+    /// arc length, the first point re-emitted, and the leftover carried across a
+    /// bend.
+    #[test]
+    fn the_stroke_resampler_spaces_dabs_by_arc_length_in_three_dimensions() {
+        // A path that climbs as it runs: resampling its XZ shadow would place
+        // the dabs 1.0 m apart in world space instead of 1.0 m along the run,
+        // which is the bug this exists to prevent.
+        let a = DVec3::new(0.0, 0.0, 0.0);
+        let b = DVec3::new(3.0, 4.0, 0.0); // 5 m long, 3 m of shadow
+        let dabs = dab_centers(&[a, b], 1.0);
+        assert_eq!(dabs.len(), 6, "{dabs:?}");
+        assert_eq!(dabs[0], a);
+        for w in dabs.windows(2) {
+            assert!(
+                ((w[1] - w[0]).length() - 1.0).abs() < 1e-12,
+                "uneven spacing: {w:?}"
+            );
+        }
+        assert!((dabs[5] - b).length() < 1e-12);
+
+        // The carry crosses a bend: 1.5 m then 1.5 m at a right angle, spaced
+        // 1.0 m, must place dabs at 0, 1, 2 along the RUN — the second of which
+        // is 0.5 m past the corner and not 1.0 m past it.
+        let path = [
+            DVec3::ZERO,
+            DVec3::new(1.5, 0.0, 0.0),
+            DVec3::new(1.5, 0.0, 1.5),
+        ];
+        let bent = dab_centers(&path, 1.0);
+        assert_eq!(bent.len(), 4, "{bent:?}");
+        assert!((bent[1] - DVec3::new(1.0, 0.0, 0.0)).length() < 1e-12);
+        assert!((bent[2] - DVec3::new(1.5, 0.0, 0.5)).length() < 1e-12);
+        assert!((bent[3] - DVec3::new(1.5, 0.0, 1.5)).length() < 1e-12);
+
+        // Degenerate inputs answer with the path rather than with a hang or a
+        // NaN — a UI hands this a zero-length drag on the first frame of every
+        // stroke.
+        assert!(dab_centers(&[], 1.0).is_empty());
+        assert_eq!(dab_centers(&[a], 1.0), vec![a]);
+        assert_eq!(dab_centers(&[a, a], 1.0), vec![a]);
+        assert_eq!(dab_centers(&[a, b], 0.0), vec![a, b]);
+        assert_eq!(dab_centers(&[a, b], f64::NAN), vec![a, b]);
+    }
+
+    /// The spacing rule, including its floor — a zero-radius brush must not ask
+    /// for infinitely many dabs.
+    #[test]
+    fn the_dab_spacing_is_two_thirds_of_a_radius_with_a_floor() {
+        assert!((dab_spacing(3.0) - 1.95).abs() < 1e-12);
+        assert_eq!(dab_spacing(0.0), MIN_DAB_SPACING_M);
+        assert_eq!(dab_spacing(-5.0), MIN_DAB_SPACING_M);
+        // …and a long fast drag stays bounded because of it.
+        let far = dab_centers(
+            &[DVec3::ZERO, DVec3::new(100.0, 0.0, 0.0)],
+            dab_spacing(0.0),
+        );
+        assert_eq!(far.len(), 2001);
     }
 
     /// The brush's two modes: a ball at depth, or a column to grade.

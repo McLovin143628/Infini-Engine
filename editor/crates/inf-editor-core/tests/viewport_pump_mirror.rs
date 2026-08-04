@@ -329,11 +329,51 @@ fn the_win32_pump_still_drives_the_carve_tools() {
         // changed has to be closed OUTSIDE the tool-gated branch, or its cuts are
         // saved with no undo entry.
         "host.settle_orphaned_carve(",
+        // …and its P21.3 sibling for the three terrain brushes (height, splat,
+        // biome), which had the identical hole and now share the fix. Both calls
+        // must sit before the `sculpting` / `voxel` branches, which is what
+        // `the_orphan_settlers_run_outside_the_tool_gated_branches` checks.
+        "host.settle_orphaned_sculpt(",
     ] {
         assert!(
             src.contains(fragment),
             "the win32 pump no longer calls `{fragment}` — the Voxel tool is wired into the \
              host but nothing drives it, which is a tool that silently does nothing (P21.2)"
+        );
+    }
+}
+
+/// **The orphan settlers must run OUTSIDE the tool-gated branches** (P21.3).
+///
+/// The whole point of both `settle_orphaned_*` calls is that they run when the
+/// branch that would otherwise finish the stroke does not. A settler that had
+/// drifted inside `if sculpting { … }` or `else if voxel { … }` would compile,
+/// pass [`the_win32_pump_still_drives_the_carve_tools`] (which only asks whether
+/// the fragment appears anywhere), and restore exactly the bug it was written
+/// for — an edit in the document with no undo entry describing it.
+///
+/// Checked positionally, which is the strongest claim source text supports: both
+/// calls must appear **before** the first `if sculpting {`. It cannot see
+/// runtime order, and it does not pretend to; what it can see is a settler that
+/// moved into a branch, which is the way this regresses.
+#[test]
+fn the_orphan_settlers_run_outside_the_tool_gated_branches() {
+    let src = read(WIN32);
+    let branch = src
+        .find("if sculpting {")
+        .expect("the win32 pump no longer has a `sculpting` branch — was it renamed?");
+    for settler in [
+        "host.settle_orphaned_carve(",
+        "host.settle_orphaned_sculpt(",
+    ] {
+        let at = src
+            .find(settler)
+            .unwrap_or_else(|| panic!("the win32 pump never calls `{settler}`"));
+        assert!(
+            at < branch,
+            "`{settler}` is called AFTER the tool-gated `if sculpting` branch begins, so it \
+             cannot run for the case it exists for: a stroke stranded by a tool switch. It \
+             belongs above the branches, with the document in hand (P21.3 / the N2 ledger item)."
         );
     }
 }

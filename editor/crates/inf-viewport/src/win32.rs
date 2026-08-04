@@ -1196,6 +1196,13 @@ fn thread_main(
                 if host.settle_orphaned_carve(&mut doc) {
                     world_changed = true;
                 }
+                // P21.3 (the P21.2 audit's N2 item): the same hole, one tool
+                // over. A height / splat / biome stroke still down when the tool
+                // changed would never reach its `finish_sculpt` either — its dabs
+                // are already in the document and Ctrl+Z could not reach them.
+                if host.settle_orphaned_sculpt(&mut doc) {
+                    world_changed = true;
+                }
                 if sculpting {
                     if let Some((x, y, ctrl)) = input.left_press {
                         let (px, py) = (x.max(0) as u32, y.max(0) as u32);
