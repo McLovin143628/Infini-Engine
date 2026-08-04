@@ -145,6 +145,81 @@ fn solid_count(volumes: &SharedVoxelVolumes, volume: Uuid) -> usize {
         .sum()
 }
 
+/// Every resident chunk's **mesh stamp** — the key the viewport's GPU cache
+/// re-uploads off. `slot.meshes.version(key)`, ascending by key.
+fn mesh_stamps(volumes: &SharedVoxelVolumes, volume: Uuid) -> Vec<(ChunkKey, u64)> {
+    let v = volumes.lock().unwrap();
+    let slot = v.slot(volume).unwrap();
+    slot.data
+        .chunks()
+        .map(|(&k, _)| (k, slot.meshes.version(k)))
+        .collect()
+}
+
+/// **The re-upload gate.** A carve must move the mesh stamps of the chunks it
+/// reached, and bump the document version — those two are the *only* things that
+/// make the cave appear on screen.
+///
+/// The viewport's GPU cache is keyed on `VoxelMeshCache::version`, and its
+/// projection is document-version-gated. A carve that moved neither would mesh
+/// correctly in the store and be invisible in the editor — the failure mode that
+/// looks like "the brush does nothing" and has no rendering explanation.
+///
+/// Both halves are asserted for a **deep** cut as well, which touches no terrain
+/// tile at all: that is the case where a version bump driven only by the hole
+/// mask would silently stop happening.
+#[test]
+fn a_carve_moves_the_mesh_stamps_and_the_document_version() {
+    for (label, op, expect_holes) in [
+        ("breakthrough", breakthrough(), true),
+        (
+            "deep",
+            VoxelOp::carve(VoxelShape::Sphere {
+                center: DVec3::new(8.0, 1.0, 8.0),
+                radius_m: 1.5,
+            }),
+            false,
+        ),
+    ] {
+        let (mut doc, volumes, _t, volume, _d) = fixture(true);
+        let before = mesh_stamps(&volumes, volume);
+        let version = doc.version();
+        assert!(!before.is_empty(), "{label}: the fixture has no chunks");
+
+        let tally = doc
+            .edit_carve(volume, &volumes, &op)
+            .unwrap_or_else(|| panic!("{label} was refused"));
+        assert!(tally.carved > 0, "{label}");
+        assert_eq!(tally.holes > 0, expect_holes, "{label}");
+
+        let after = mesh_stamps(&volumes, volume);
+        let moved = before
+            .iter()
+            .zip(&after)
+            .filter(|((ka, a), (kb, b))| {
+                assert_eq!(ka, kb, "{label}: the chunk set changed");
+                b > a
+            })
+            .count();
+        assert!(
+            moved > 0,
+            "{label}: no mesh stamp moved, so the viewport's GPU cache would keep \
+             drawing the rock the carve removed"
+        );
+        assert!(
+            after.iter().zip(&before).all(|((_, a), (_, b))| a >= b),
+            "{label}: a mesh stamp went BACKWARDS — the cache would treat stale \
+             geometry as fresh"
+        );
+        assert!(
+            doc.version() > version,
+            "{label}: the document version did not move, so the version-gated \
+             projection would never re-read the store"
+        );
+        assert!(doc.is_dirty(), "{label}: a carve is an unsaved edit");
+    }
+}
+
 /// **The verdict gate.** A cut that breaks the surface of an *inline* terrain is
 /// refused; the same cut over an asset-backed one is allowed; a cut that never
 /// reaches a surface is allowed either way.

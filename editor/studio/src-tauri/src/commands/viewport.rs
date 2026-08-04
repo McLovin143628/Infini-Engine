@@ -11,12 +11,13 @@ use std::sync::Mutex;
 use inf_editor_core::ipc::{
     BiomeSettingsDto, FoliageSettingsDto, GizmoModeDto, GizmoSpaceDto, SculptFalloffDto,
     SculptOpDto, SculptSettingsDto, Snap2DDto, Snap3DDto, ToolModeDto, ViewModeDto, ViewportDrop,
-    ViewportKey, ViewportModeDto, ViewportRect, WaterSettingsDto, WaterToolKindDto,
+    ViewportKey, ViewportModeDto, ViewportRect, VoxelOpModeDto, VoxelSettingsDto, VoxelToolKindDto,
+    WaterSettingsDto, WaterToolKindDto,
 };
 use inf_viewport::camera::{BiomeSettings, WaterSettings, WaterToolKind};
 use inf_viewport::{
     FoliageSettings, GizmoSpace, SculptFalloff, SculptOp, SculptSettings, Snap2DSettings,
-    SnapSettings, ToolMode, ViewportEvent, ViewportMode,
+    SnapSettings, ToolMode, ViewportEvent, ViewportMode, VoxelOpMode, VoxelSettings, VoxelToolKind,
 };
 use tauri::{Emitter, Manager};
 
@@ -75,6 +76,30 @@ impl ViewportState {
         if let Ok(guard) = self.0.lock() {
             if let Some(handle) = guard.as_ref() {
                 handle.reload_terrain_stores();
+            }
+        }
+    }
+
+    /// Re-walk the viewport's loose `.inf_voxel` index in place — pushed by the
+    /// save path once it has folded carve edits back into the assets (P21.2).
+    /// The `reload_terrain_stores` twin, and the seam the P21.2 save flow needs:
+    /// a carve written into a *new* asset only resolves after a re-walk, and the
+    /// loaded volumes keep their chunks so saving never blinks a cave.
+    ///
+    /// **Unwired on purpose, for exactly one commit.** Its caller is
+    /// `commands/scene.rs`'s save path, beside the existing
+    /// `viewport.reload_terrain_stores()` call that follows the `.inf_terrain`
+    /// write-back — which the batch folding carve edits into `.inf_voxel` owns.
+    /// The whole chain below this point (`ViewportHandle::reload_voxel_stores`
+    /// → `Cmd::ReloadVoxelStores` on both platform pumps →
+    /// `EngineHost::reload_voxel_stores`) is live, so that batch adds one line
+    /// and nothing else. Deleting this instead would mean re-deriving the same
+    /// four-file chain from scratch.
+    #[allow(dead_code)]
+    pub fn reload_voxel_stores(&self) {
+        if let Ok(guard) = self.0.lock() {
+            if let Some(handle) = guard.as_ref() {
+                handle.reload_voxel_stores();
             }
         }
     }
@@ -326,6 +351,7 @@ pub async fn viewport_set_tool_mode(
             ToolModeDto::Foliage => ToolMode::Foliage,
             ToolModeDto::Biome => ToolMode::Biome,
             ToolModeDto::Water => ToolMode::Water,
+            ToolModeDto::Voxel => ToolMode::Voxel,
         });
     }
     Ok(())
@@ -420,6 +446,37 @@ pub async fn viewport_set_water(
             // its spline, which is a `WaterBody` feature, not a mistake.
             flow_m_s: water.flow_m_s,
             level_offset_m: water.level_offset_m,
+        });
+    }
+    Ok(())
+}
+
+/// Push the voxel carve-tool configuration (sub-mode / radius / depth /
+/// carve-or-fill / material) to the viewport (P21.2).
+///
+/// Both lengths are clamped non-negative — a negative radius or depth names no
+/// cut, and `VoxelShape::is_valid` would reject it one layer down anyway, which
+/// would read as a tool that silently does nothing. `material` needs no clamp:
+/// it is a `u8` splat index and the Ring-0 op clamps it to the material count.
+#[tauri::command]
+pub async fn viewport_set_voxel(
+    voxel: VoxelSettingsDto,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        handle.set_voxel(VoxelSettings {
+            kind: match voxel.kind {
+                VoxelToolKindDto::Brush => VoxelToolKind::Brush,
+                VoxelToolKindDto::Tunnel => VoxelToolKind::Tunnel,
+            },
+            radius_m: voxel.radius_m.max(0.0),
+            depth_m: voxel.depth_m.max(0.0),
+            mode: match voxel.mode {
+                VoxelOpModeDto::Carve => VoxelOpMode::Carve,
+                VoxelOpModeDto::Fill => VoxelOpMode::Fill,
+            },
+            material: voxel.material,
         });
     }
     Ok(())

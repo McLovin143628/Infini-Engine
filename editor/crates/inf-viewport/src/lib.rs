@@ -15,7 +15,8 @@ pub mod camera;
 
 pub use camera::{
     Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptFalloff, SculptOp, SculptSettings,
-    Snap2DSettings, SnapSettings, ToolMode, ViewportMode,
+    Snap2DSettings, SnapSettings, ToolMode, ViewportMode, VoxelOpMode, VoxelSettings,
+    VoxelToolKind,
 };
 
 use std::sync::{Arc, Mutex};
@@ -169,6 +170,7 @@ impl ViewportHandle {
     pub fn set_foliage(&self, _foliage: camera::FoliageSettings) {}
     pub fn set_biome(&self, _biome: camera::BiomeSettings) {}
     pub fn set_water(&self, _water: camera::WaterSettings) {}
+    pub fn set_voxel(&self, _voxel: camera::VoxelSettings) {}
     pub fn set_biome_palette(&self, _entity: uuid::Uuid, _palette: Vec<[f32; 4]>) {}
     pub fn set_water_hints(&self, _entity: uuid::Uuid, _hints: Vec<Option<f64>>) {}
     pub fn set_gizmo_mode(&self, _mode: inf_editor_core::ipc::GizmoModeDto) {}
@@ -178,6 +180,7 @@ impl ViewportHandle {
     pub fn set_content_root(&self, _root: Option<std::path::PathBuf>) {}
     pub fn refresh_asset_index(&self) {}
     pub fn reload_terrain_stores(&self) {}
+    pub fn reload_voxel_stores(&self) {}
     pub fn clear_streams(&self) {}
     pub fn embed_foreign(&self, _hwnd: isize) {}
     pub fn release_foreign(&self) {}

@@ -502,6 +502,100 @@ pub enum ToolMode {
     /// modes because they share the terrain pick, the "which body am I editing"
     /// state and the biome-hint defaults — the Sculpt/Paint precedent.
     Water,
+    /// Carve (and fill) a voxel volume — caves, tunnels and excavations (P21.2).
+    /// Perspective-only, like every other terrain tool.
+    ///
+    /// Its two sub-modes ([`VoxelToolKind`]) are a **brush** and a **spline
+    /// tunnel**, and they live in [`VoxelSettings::kind`] for exactly the reason
+    /// the water tool's do: they share the volume resolution, the surface-cut
+    /// verdict, the carve/fill switch and the material — everything except how
+    /// the author describes the path.
+    Voxel,
+}
+
+/// Which cut the [`ToolMode::Voxel`] tool makes (P21.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VoxelToolKind {
+    /// **Carve brush**: an LMB-drag lays sphere dabs along the stroke, spaced by
+    /// arc length exactly as the sculpt brush's are, so drag speed cannot change
+    /// what is dug.
+    #[default]
+    Brush,
+    /// **Spline tunnel**: each click appends a waypoint, and Ctrl+click closes the
+    /// path and tube-carves it as one capsule chain — one undo step for the whole
+    /// tunnel.
+    Tunnel,
+}
+
+/// Carve or fill — which way a [`ToolMode::Voxel`] cut runs (P21.2).
+///
+/// Not a `bool`: the ops it maps onto are named
+/// [`Carve`](inf_voxel::VoxelOpKind::Carve) and
+/// [`Fill`](inf_voxel::VoxelOpKind::Fill), and a `carve: bool` at three layers of
+/// IPC is three chances to invert it silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VoxelOpMode {
+    /// Remove material (CSG difference) — and open the heightfield above it.
+    #[default]
+    Carve,
+    /// Add material (CSG union) — and close the heightfield above it.
+    Fill,
+}
+
+/// Voxel-tool configuration pushed from the viewport toolbar (P21.2).
+///
+/// SI throughout (architecture rule 6): `radius_m` is world **metres**, and it is
+/// the *cut* radius — the sphere of a brush dab, the tube radius of a tunnel — so
+/// one slider means one thing in both sub-modes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VoxelSettings {
+    /// Brush or spline tunnel.
+    pub kind: VoxelToolKind,
+    /// Cut radius, world metres.
+    pub radius_m: f64,
+    /// How far **below the picked surface** the cut's centre sits, world metres
+    /// (clamped ≥ 0).
+    ///
+    /// This is what turns a surface pick into a *tunnel*, and it is why the tool
+    /// needs no second click to say "how deep". At `0` the cut breaks the ground
+    /// where the author points — a cave mouth. Past the radius it hollows rock
+    /// with no mouth at all, which the surface-crossing verdict then allows on
+    /// any terrain, inline included.
+    ///
+    /// A depth and not a free 3D point on purpose: the pick is the heightfield
+    /// under the cursor, so the cut stays a function of *where the author aimed*
+    /// rather than of how far away the camera happened to be. Same ruling the
+    /// water tool's pick got, and it matters more here because a carve commits
+    /// geometry.
+    pub depth_m: f64,
+    /// Carve or fill.
+    pub mode: VoxelOpMode,
+    /// The splat index a **fill** paints. Ignored by a carve, which normalizes
+    /// emptied samples back to the default material (an empty voxel carries no
+    /// material — see `inf_voxel::ops`).
+    ///
+    /// A voxel material index **is** a terrain splat index, which is what makes a
+    /// cave wall shade like the hillside it opens out of; `project_voxel` reads
+    /// the palette off the `Terrain` on the same entity.
+    pub material: u8,
+}
+
+impl Default for VoxelSettings {
+    fn default() -> Self {
+        Self {
+            kind: VoxelToolKind::Brush,
+            // 2 m: four voxels across at the `VoxelVolume::voxel_size_m` default
+            // of 0.5 m, so the first dab reads as a tunnel mouth rather than as a
+            // pinprick or as half the hillside.
+            radius_m: 2.0,
+            // Zero, so the very first click an author makes breaks the ground and
+            // they can SEE the tool worked. A cave that opens nowhere is the
+            // harder default to debug.
+            depth_m: 0.0,
+            mode: VoxelOpMode::Carve,
+            material: 0,
+        }
+    }
 }
 
 /// Which body the water tool places (P20.4).

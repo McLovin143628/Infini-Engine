@@ -818,6 +818,9 @@ pub enum ToolModeDto {
     /// the same "which body am I editing" state and the same biome-hint
     /// defaults. The Sculpt/Paint precedent, not the Sculpt/Biome one.
     Water,
+    /// Carve (and fill) a voxel volume — caves, tunnels, excavations (P21.2).
+    /// Perspective-only. Two sub-modes in [`VoxelSettingsDto::kind`].
+    Voxel,
 }
 
 // ── Water placement (P20.4) ──────────────────────────────────────────────
@@ -947,6 +950,78 @@ pub struct RiverReportDto {
     /// frames is not a clean bill of health.
     pub sampled_frames: usize,
     pub total_frames: usize,
+}
+
+// ── Voxel carve tools (P21.2) ────────────────────────────────────────────
+//
+// The [`ToolModeDto::Voxel`] tool cuts a `VoxelVolume`'s SDF chunks and — where
+// the cut breaks the heightfield surface — opens the terrain above it, as ONE
+// undo step. A surface-crossing cut over an INLINE terrain is refused outright,
+// because schema v19 pins a level's tiles at a layout with no hole mask; the
+// refusal arrives on `viewport://tool-status` like every other tool verdict.
+
+/// Which cut the [`ToolModeDto::Voxel`] tool makes. Serializes as its tag string.
+///
+/// Two sub-modes inside one tool mode rather than two modes — the water tool's
+/// precedent — because they share the volume resolution, the surface-crossing
+/// verdict, the carve/fill switch and the material. Only how the author
+/// describes the path differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum VoxelToolKindDto {
+    /// Drag to lay sphere dabs along the stroke, spaced by arc length so drag
+    /// speed cannot change what is dug.
+    Brush,
+    /// Click waypoints; Ctrl+click closes the path and tube-carves the whole
+    /// thing as one undo step.
+    Tunnel,
+}
+
+/// Carve or fill — which way a voxel cut runs. Serializes as its tag string.
+///
+/// Not a boolean: the Ring-0 ops it maps onto are named `Carve` and `Fill`, and
+/// a `carve: bool` crossing three layers of IPC is three chances to invert it
+/// silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum VoxelOpModeDto {
+    /// Remove material — and open the heightfield above it.
+    Carve,
+    /// Add material — and close the heightfield above it.
+    Fill,
+}
+
+/// Voxel-tool configuration pushed from the viewport toolbar
+/// (`viewport_set_voxel`).
+///
+/// SI throughout (architecture rule 6): both lengths are world **metres**.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct VoxelSettingsDto {
+    pub kind: VoxelToolKindDto,
+    /// Cut radius — the sphere of a brush dab, the tube radius of a tunnel —
+    /// metres. One slider, one meaning in both sub-modes.
+    pub radius_m: f64,
+    /// How far below the picked surface the cut's centre sits, metres.
+    ///
+    /// This is what makes a tunnel a tunnel. At `0` the cut breaks the ground
+    /// where the author points (a cave mouth); past the radius it hollows rock
+    /// with no mouth, which is legal on any terrain because no hole is needed.
+    pub depth_m: f64,
+    pub mode: VoxelOpModeDto,
+    /// The splat index a **fill** paints; ignored by a carve (an emptied voxel
+    /// carries no material). A voxel material index IS a terrain splat index,
+    /// which is what makes a cave wall shade like the hillside it opens out of.
+    pub material: u8,
+}
+
+impl Default for VoxelSettingsDto {
+    fn default() -> Self {
+        Self {
+            kind: VoxelToolKindDto::Brush,
+            radius_m: 2.0,
+            depth_m: 0.0,
+            mode: VoxelOpModeDto::Carve,
+            material: 0,
+        }
+    }
 }
 
 /// The sculpt brush operation. Serializes as its tag string. `Paint` is the

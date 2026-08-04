@@ -42,7 +42,7 @@ use glam::DVec2;
 use crate::camera::{
     BiomeSettings, Bookmarks, Camera2D, EditorCamera, FlyInput, FoliageSettings, GizmoSpace,
     NavInput, NavMode, SculptSettings, Snap2DSettings, SnapSettings, ToolMode, ViewportMode,
-    WaterSettings,
+    VoxelSettings, WaterSettings,
 };
 use crate::host::EngineHost;
 use crate::{KeyChord, SharedScene, SurfaceTarget, ViewportEvent, ViewportEventSink, ViewportRect};
@@ -118,6 +118,8 @@ enum Cmd {
     SetBiome(BiomeSettings),
     /// Replace the water-tool configuration (P20.4).
     SetWater(WaterSettings),
+    /// Replace the voxel carve-tool configuration (P21.2).
+    SetVoxel(VoxelSettings),
     /// Push a terrain entity's resolved biome overlay palette (P19.2) — Ring 2
     /// owns the asset lookup, the viewport only draws it.
     SetBiomePalette(uuid::Uuid, Vec<[f32; 4]>),
@@ -142,6 +144,9 @@ enum Cmd {
     /// Reopen every live terrain stream's `.inf_terrain` in place — a save just
     /// wrote sculpt/paint edits back into it (P16.4b).
     ReloadTerrainStores,
+    /// Re-walk the loose `.inf_voxel` index in place — a save just folded carve
+    /// edits back into the assets (P21.2). The twin of `ReloadTerrainStores`.
+    ReloadVoxelStores,
     /// Release every terrain stream — the document was replaced (P16.4b).
     ClearStreams,
     /// Adopt a foreign (PIE player) window into the viewport slot: reparent it
@@ -214,6 +219,12 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::SetBiome(biome));
     }
 
+    /// Replace the voxel carve-tool configuration (sub-mode / radius / depth /
+    /// carve-or-fill / material) — P21.2.
+    pub fn set_voxel(&self, voxel: VoxelSettings) {
+        let _ = self.tx.send(Cmd::SetVoxel(voxel));
+    }
+
     /// Replace the water-tool configuration (kind / river dimensions / level
     /// offset / resolved biome hint) — P20.4.
     pub fn set_water(&self, water: WaterSettings) {
@@ -273,6 +284,13 @@ impl ViewportHandle {
     /// keep their resident pages, so saving does not blink the terrain.
     pub fn reload_terrain_stores(&self) {
         let _ = self.tx.send(Cmd::ReloadTerrainStores);
+    }
+
+    /// Re-walk the loose `.inf_voxel` index in place — pushed when a save has
+    /// folded carve edits back into the assets (P21.2). Loaded volumes keep their
+    /// chunks and meshes, so saving does not blink the caves.
+    pub fn reload_voxel_stores(&self) {
+        let _ = self.tx.send(Cmd::ReloadVoxelStores);
     }
 
     /// Release every terrain stream (its pages, its edit pins and its
@@ -949,6 +967,7 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 Ok(Cmd::SetFoliage(f)) => host.set_foliage(f),
                 Ok(Cmd::SetBiome(b)) => host.set_biome(b),
                 Ok(Cmd::SetWater(w)) => host.set_water(w),
+                Ok(Cmd::SetVoxel(v)) => host.set_voxel(v),
                 Ok(Cmd::SetBiomePalette(e, p)) => host.set_biome_palette(e, p),
                 Ok(Cmd::SetWaterHints(e, h)) => host.set_water_hints(e, h),
                 Ok(Cmd::SetGizmo(m)) => {
@@ -962,6 +981,7 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 Ok(Cmd::SetContentRoot(root)) => host.set_content_root(root),
                 Ok(Cmd::RefreshAssetIndex) => host.refresh_asset_index(),
                 Ok(Cmd::ReloadTerrainStores) => host.reload_terrain_stores(),
+                Ok(Cmd::ReloadVoxelStores) => host.reload_voxel_stores(),
                 Ok(Cmd::ClearStreams) => host.clear_streams(),
                 Ok(Cmd::EmbedForeign(foreign)) => {
                     // Position the foreign window at the hole immediately. If no
@@ -1133,6 +1153,13 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                 // select/gizmo branch for the same reason the brushes do — plain
                 // LMB means something else here.
                 let water = host.tool_mode() == ToolMode::Water && !two_d;
+                // P21.2: the voxel carve tools. The brush is the sculpt gesture
+                // (press / drag / release, one undo step at mouse-up); the spline
+                // tunnel is the river tool's (a click appends a waypoint,
+                // Ctrl+click closes the path and carves the tube). Both ride in
+                // front of the select/gizmo branch for the same reason the other
+                // terrain tools do — plain LMB means something else here.
+                let voxel = host.tool_mode() == ToolMode::Voxel && !two_d;
                 if sculpting {
                     if let Some((x, y, ctrl)) = input.left_press {
                         let (px, py) = (x.max(0) as u32, y.max(0) as u32);
@@ -1155,6 +1182,39 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
                         let (x, y) = input.cursor;
                         if x >= 0 && y >= 0 {
                             host.update_sculpt_hover(&doc, &interact_view, x as u32, y as u32);
+                        }
+                    }
+                } else if voxel {
+                    if let Some((x, y, ctrl)) = input.left_press {
+                        let (px, py) = (x.max(0) as u32, y.max(0) as u32);
+                        // Ctrl is the tunnel's COMMIT modifier here, not the
+                        // sculpt brush's invert: a tunnel needs a "that was the
+                        // last waypoint" gesture, and the alternatives available
+                        // on this seam (a double-click, a second button) are
+                        // either not delivered or already spoken for by the
+                        // camera. The hover readout says so, every frame.
+                        if host.begin_voxel(&mut doc, &interact_view, px, py, ctrl) {
+                            world_changed = true;
+                        }
+                    }
+                    if input.left_down && host.is_carving() {
+                        let (x, y) = input.cursor;
+                        host.update_voxel(
+                            &mut doc,
+                            &interact_view,
+                            x.max(0) as u32,
+                            y.max(0) as u32,
+                        );
+                    }
+                    if input.left_release && host.is_carving() && host.finish_voxel(&mut doc) {
+                        world_changed = true;
+                    }
+                    // Idle hover: the cut silhouette follows the cursor, and a
+                    // pending tunnel shows the segment the next click would add.
+                    if !input.left_down && input.capture == Capture::None && input.cursor_moved {
+                        let (x, y) = input.cursor;
+                        if x >= 0 && y >= 0 {
+                            host.update_voxel_hover(&doc, &interact_view, x as u32, y as u32);
                         }
                     }
                 } else if water {

@@ -26,7 +26,7 @@ use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
 use crate::camera::{
     BiomeSettings, Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptSettings,
-    Snap2DSettings, SnapSettings, ToolMode, ViewportMode, WaterSettings,
+    Snap2DSettings, SnapSettings, ToolMode, ViewportMode, VoxelSettings, WaterSettings,
 };
 use crate::host::EngineHost;
 use crate::{SharedScene, SurfaceTarget, ViewportEventSink, ViewportRect};
@@ -69,6 +69,8 @@ enum Cmd {
     SetBiome(BiomeSettings),
     /// Replace the water-tool configuration (P20.4).
     SetWater(WaterSettings),
+    /// Replace the voxel carve-tool configuration (P21.2).
+    SetVoxel(VoxelSettings),
     SetBiomePalette(uuid::Uuid, Vec<[f32; 4]>),
     /// Per-terrain water-level hints by biome id (P20.4).
     SetWaterHints(uuid::Uuid, Vec<Option<f64>>),
@@ -83,6 +85,9 @@ enum Cmd {
     /// Reopen every live terrain stream's `.inf_terrain` in place after a save
     /// wrote edits back (P16.4b).
     ReloadTerrainStores,
+    /// Re-walk the loose `.inf_voxel` index in place — a save just folded carve
+    /// edits back into the assets (P21.2). The twin of `ReloadTerrainStores`.
+    ReloadVoxelStores,
     /// Release every terrain stream — the document was replaced (P16.4b).
     ClearStreams,
     Destroy,
@@ -155,6 +160,13 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::SetWater(water));
     }
 
+    /// Replace the voxel carve-tool configuration (sub-mode / radius / depth /
+    /// carve-or-fill / material) — P21.2. macOS input isn't wired yet, so this
+    /// only sets the host state (the tool authors once input lands).
+    pub fn set_voxel(&self, voxel: VoxelSettings) {
+        let _ = self.tx.send(Cmd::SetVoxel(voxel));
+    }
+
     /// Push a terrain's resolved biome overlay palette (P19.2).
     pub fn set_biome_palette(&self, entity: uuid::Uuid, palette: Vec<[f32; 4]>) {
         let _ = self.tx.send(Cmd::SetBiomePalette(entity, palette));
@@ -205,6 +217,13 @@ impl ViewportHandle {
     /// wrote sculpt/paint edits back into it (P16.4b).
     pub fn reload_terrain_stores(&self) {
         let _ = self.tx.send(Cmd::ReloadTerrainStores);
+    }
+
+    /// Re-walk the loose `.inf_voxel` index in place — pushed when a save has
+    /// folded carve edits back into the assets (P21.2). Loaded volumes keep their
+    /// chunks and meshes, so saving does not blink the caves.
+    pub fn reload_voxel_stores(&self) {
+        let _ = self.tx.send(Cmd::ReloadVoxelStores);
     }
 
     /// Release every terrain stream (its pages, its edit pins and its
@@ -347,6 +366,7 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedSce
                 Ok(Cmd::SetFoliage(f)) => host.set_foliage(f),
                 Ok(Cmd::SetBiome(b)) => host.set_biome(b),
                 Ok(Cmd::SetWater(w)) => host.set_water(w),
+                Ok(Cmd::SetVoxel(v)) => host.set_voxel(v),
                 Ok(Cmd::SetBiomePalette(e, p)) => host.set_biome_palette(e, p),
                 Ok(Cmd::SetWaterHints(e, h)) => host.set_water_hints(e, h),
                 Ok(Cmd::SetGizmo(m)) => host.set_gizmo_mode(m),
@@ -356,6 +376,7 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedSce
                 Ok(Cmd::SetContentRoot(root)) => host.set_content_root(root),
                 Ok(Cmd::RefreshAssetIndex) => host.refresh_asset_index(),
                 Ok(Cmd::ReloadTerrainStores) => host.reload_terrain_stores(),
+                Ok(Cmd::ReloadVoxelStores) => host.reload_voxel_stores(),
                 Ok(Cmd::ClearStreams) => host.clear_streams(),
                 Ok(Cmd::Destroy) | Err(TryRecvError::Disconnected) => break 'outer,
                 Err(TryRecvError::Empty) => break,

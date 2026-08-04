@@ -482,12 +482,14 @@ impl CarveStroke {
     /// only sees authored tiles, and a mouth cannot be punched in a page that is
     /// not in memory.
     pub fn dab(&mut self, doc: &mut SceneDoc, op: &VoxelOp, terrains: &[Uuid]) -> CarveTally {
+        let mut moved = false;
         if let Ok(mut volumes) = self.volumes.lock() {
             if let Some(report) = volumes.carve_into(self.volume, op, &mut self.voxels) {
                 self.tally.touched += report.touched;
                 self.tally.carved += report.total_carved();
                 self.tally.filled += report.total_filled();
                 self.tally.created_chunks += report.created_chunks;
+                moved |= !report.is_noop();
             }
         }
         // A carve opens the surface; a fill closes it again. The `open` flag is
@@ -504,15 +506,20 @@ impl CarveStroke {
                     inf_voxel::touch_surface_cut(data, origin, &op.shape, open, builder)
                 })
                 .unwrap_or(0);
-            if changed > 0 {
-                self.tally.holes += changed as u64;
-                // `with_terrain_data_mut` is the streamer's residency door and is
-                // deliberately non-touching, so the version bump and the dirty
-                // flag are this seam's job — without them the clipmap would keep
-                // drawing the ground the carve just took away.
-                doc.world_mut().mark_dirty();
-                doc.touch();
-            }
+            self.tally.holes += changed as u64;
+            moved |= changed > 0;
+        }
+        if moved {
+            // The document version is bumped for a **voxel-only** cut too, not
+            // just for one that moved the hole mask. The viewport's projection is
+            // version-gated, so a cave dug entirely below the surface — which
+            // touches no terrain tile at all — would otherwise be meshed in the
+            // store and never reach the screen until an unrelated edit happened
+            // to bump the document. `with_terrain_data_mut` is the streamer's
+            // residency door and is deliberately non-touching, so this seam owns
+            // both the bump and the dirty flag either way.
+            doc.world_mut().mark_dirty();
+            doc.touch();
         }
         self.tally
     }

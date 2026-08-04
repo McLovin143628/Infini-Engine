@@ -18,6 +18,10 @@ use inf_editor_core::ipc::SpawnKind;
 use inf_editor_core::scene::serialize::RenderSettingsRecord;
 use inf_editor_core::scene::SceneDoc;
 use inf_math::{FloatingOrigin, SplineInterp};
+// P21.2: the carve tools' brush primitive and the op it wraps it in. The rest of
+// this crate's voxel surface stays path-qualified (`inf_voxel::…`) — these two
+// are named because they appear in every line of the tool.
+use inf_voxel::{VoxelOp, VoxelShape};
 // R-P4: scene-persisted post/exposure/lighting settings applied to the live
 // renderer (see `apply_record` + `sync_from_doc`).
 use inf_render::{
@@ -43,8 +47,8 @@ use inf_terrain::{
 
 use crate::camera::{
     BiomeSettings, Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptFalloff, SculptOp,
-    SculptSettings, Snap2DSettings, SnapSettings, ToolMode, ViewportMode, WaterSettings,
-    WaterToolKind, TWO_D_FAR, TWO_D_NEAR,
+    SculptSettings, Snap2DSettings, SnapSettings, ToolMode, ViewportMode, VoxelOpMode,
+    VoxelSettings, VoxelToolKind, WaterSettings, WaterToolKind, TWO_D_FAR, TWO_D_NEAR,
 };
 use crate::SurfaceTarget;
 
@@ -232,7 +236,13 @@ pub struct EngineHost {
     /// residency and meshing — so the viewport and the shipped player cannot mesh
     /// the same field differently. Disabled until a content root is set, which
     /// makes a document with no volumes bit-identical to its pre-P21.1 self.
-    voxel_volumes: inf_editor_core::voxel_store::EditorVoxelVolumes,
+    /// **Shared** rather than owned (P21.2): the undo history has to be able to
+    /// put a carve back, and `SceneDoc::undo` runs on the Ring-2 command thread
+    /// with no viewport. The type is spelled out rather than written as its
+    /// `SharedVoxelVolumes` alias so the mirror gate can still see which store
+    /// this host loads through. Lock order everywhere: **document, then this**.
+    voxel_volumes:
+        std::sync::Arc<std::sync::Mutex<inf_editor_core::voxel_store::EditorVoxelVolumes>>,
     /// The loose-file render-asset store (P18.3) — the editor's answer to the
     /// player's `VmeshRegistry`. Resolves a `MeshRef.asset` to its derived
     /// `.inf_vmesh` and a `SkeletalMesh` to bind-space geometry + a posed skinning
@@ -291,6 +301,30 @@ pub struct EngineHost {
     /// rectangle plus its waterline contour. World space, rebuilt on hover and on
     /// drag; drawn as debug lines and never persisted.
     water_preview: Vec<[DVec3; 2]>,
+    /// Voxel-tool configuration pushed from the toolbar (P21.2).
+    voxel_tool: VoxelSettings,
+    /// In-flight carve stroke (`None` = idle), plus the terrains the verdict said
+    /// it may open. The terrain list is resolved ONCE at mouse-down: re-deriving
+    /// it per dab would let a drag wander onto ground the author was never warned
+    /// about, and if that ground were inline its mouths would be sealed by the
+    /// next save.
+    voxel_stroke: Option<inf_editor_core::scene::undo::CarveStroke>,
+    voxel_stroke_terrains: Vec<Uuid>,
+    /// World point of the stroke's last dab, so a fast drag is resampled at even
+    /// arc length rather than leaving gaps between dabs.
+    voxel_stroke_last: Option<DVec3>,
+    /// The spline tunnel's waypoints so far (world metres). Cleared when the tool
+    /// or the sub-mode is left — an author who walked away must not find a
+    /// half-drawn tunnel waiting to be committed.
+    voxel_path: Vec<DVec3>,
+    /// The preview the voxel tool draws: the tunnel path plus the segment the next
+    /// click would add, or the brush's cut sphere. Debug lines, never persisted.
+    voxel_preview: Vec<[DVec3; 2]>,
+    /// Terrains already reported as carrying holes they cannot save (P21.2's
+    /// defensive advisory). One warning per terrain per document, because the
+    /// check runs on every projection and a per-frame status event is an
+    /// unusable seam, not a louder one.
+    voxel_hole_warned: BTreeSet<Uuid>,
     /// Camera eye captured on the last rendered frame (P10.5b). PCG scatter
     /// instances are draw-distance-culled against it at projection time; because
     /// projection is doc-version-gated (not per-frame), the cull set refreshes
@@ -699,6 +733,26 @@ fn ground_ring(center_xz: DVec2, radius: f64) -> Vec<DVec3> {
         .collect()
 }
 
+/// Vertex `i` of an `n`-segment circle of radius `r` around `center`, in the
+/// plane perpendicular to `axis` (`0 = X`, `1 = Y`, `2 = Z`) — the voxel tool's
+/// three-circle cut silhouette (P21.2).
+///
+/// A *sphere* preview and not a ground ring, because the cut is a volume whose
+/// depth is the parameter an author most needs to see: a flat ring would draw a
+/// 4 m ball and a 4 m disc identically. Editor overlay geometry only — nothing
+/// here reaches committed content, which is why plain `std` trig is fine (the
+/// P14 portability law governs what is *authored*, not what is drawn).
+fn circle_point(center: DVec3, r: f64, axis: usize, i: usize, n: usize) -> DVec3 {
+    let a = std::f64::consts::TAU * (i % n) as f64 / n as f64;
+    let (s, c) = (r * a.sin(), r * a.cos());
+    center
+        + match axis {
+            0 => DVec3::new(0.0, c, s),
+            1 => DVec3::new(c, 0.0, s),
+            _ => DVec3::new(c, s, 0.0),
+        }
+}
+
 /// A selected 2D (non-mesh) entity's working transform for the gizmo. World
 /// space; mirrors what a mesh instance carries so the writeback path is uniform.
 /// Only `translation` is read off Windows (the selection center); the rest feed
@@ -828,7 +882,7 @@ impl EngineHost {
             terrain_guid: None,
             terrain_slots: Vec::new(),
             terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams::new(),
-            voxel_volumes: inf_editor_core::voxel_store::EditorVoxelVolumes::new(),
+            voxel_volumes: inf_editor_core::voxel_store::shared_volumes(),
             render_assets: inf_editor_core::render_assets::EditorRenderAssets::new(),
             tool_status: None,
             stream_log_countdown: STREAM_LOG_INTERVAL_FRAMES,
@@ -842,6 +896,13 @@ impl EngineHost {
             water_active_river: None,
             water_lake_drag: None,
             water_preview: Vec::new(),
+            voxel_tool: VoxelSettings::default(),
+            voxel_stroke: None,
+            voxel_stroke_terrains: Vec::new(),
+            voxel_stroke_last: None,
+            voxel_path: Vec::new(),
+            voxel_preview: Vec::new(),
+            voxel_hole_warned: BTreeSet::new(),
             foliage_stroke_seq: 0,
             last_eye_world: DVec3::ZERO,
             render_tier: None,
@@ -936,8 +997,8 @@ impl EngineHost {
         self.snap_2d = snap;
     }
 
-    /// Switch the active tool (Select / Sculpt / Foliage / Biome / Water) from
-    /// the toolbar. Leaving the brush tools drops any hovered brush ring, and
+    /// Switch the active tool (Select / Sculpt / Foliage / Biome / Water / Voxel)
+    /// from the toolbar. Leaving the brush tools drops any hovered brush ring, and
     /// leaving the water tool drops its pending state — an author who switched to
     /// Select and back should not find the next click extending a river they had
     /// finished.
@@ -951,6 +1012,26 @@ impl EngineHost {
             self.water_lake_drag = None;
             self.water_preview.clear();
         }
+        if mode != ToolMode::Voxel {
+            // The same rule the water tool follows, and it matters more here: an
+            // uncommitted tunnel path is geometry that has not been cut yet, and
+            // finding it half-drawn on return would make the next click carve a
+            // shape the author stopped thinking about several tools ago.
+            self.voxel_path.clear();
+            self.voxel_preview.clear();
+        }
+    }
+
+    /// Replace the voxel-tool configuration (from the toolbar, P21.2).
+    ///
+    /// Drops any pending tunnel path for the same reason
+    /// [`set_water`](Self::set_water) drops a lake drag: switching Brush ↔ Tunnel
+    /// (or changing the radius) mid-path would commit a tube the author described
+    /// with one setting and cut with another.
+    pub fn set_voxel(&mut self, voxel: VoxelSettings) {
+        self.voxel_tool = voxel;
+        self.voxel_path.clear();
+        self.voxel_preview.clear();
     }
 
     /// Replace the water-tool configuration (from the toolbar, P20.4).
@@ -1105,6 +1186,7 @@ impl EngineHost {
         self.synced_version = Some(version);
         self.rebuild_scene(doc);
         self.apply_render_settings(doc);
+        self.check_inline_holes(doc);
     }
 
     /// Apply the scene-persisted render block (post/exposure/lighting) to the live
@@ -1426,13 +1508,15 @@ impl EngineHost {
                     .unwrap_or(DVec3::ZERO);
                 // READ-ONLY: `sync_voxels` above did the binding, so nothing here
                 // loads, parses or meshes.
-                let projected = self.voxel_volumes.slot(guid).and_then(|slot| {
-                    project_voxel(
-                        slot,
-                        w.get::<Terrain>(entity),
-                        translation,
-                        inf_render::terrain_id_from_guid(guid.as_u128()),
-                    )
+                let projected = self.voxel_volumes.lock().ok().and_then(|v| {
+                    v.slot(guid).and_then(|slot| {
+                        project_voxel(
+                            slot,
+                            w.get::<Terrain>(entity),
+                            translation,
+                            inf_render::terrain_id_from_guid(guid.as_u128()),
+                        )
+                    })
                 });
                 if let Some(rv) = projected {
                     self.scene.voxels.push(rv);
@@ -3395,7 +3479,9 @@ impl EngineHost {
     /// site.
     pub fn set_content_root(&mut self, root: Option<std::path::PathBuf>) {
         self.terrain_streams.set_content_root(root.clone());
-        self.voxel_volumes.set_content_root(root.clone());
+        if let Ok(mut v) = self.voxel_volumes.lock() {
+            v.set_content_root(root.clone());
+        }
         self.render_assets.set_content_root(root);
         self.terrain_slots.clear();
         self.synced_version = None; // force a re-projection
@@ -3434,12 +3520,15 @@ impl EngineHost {
             let Some(volume) = w.get::<VoxelVolume>(entity).copied() else {
                 continue;
             };
-            if self.voxel_volumes.ensure(guid, &volume) {
+            let Ok(mut volumes) = self.voxel_volumes.lock() else {
+                continue;
+            };
+            if volumes.ensure(guid, &volume) {
                 let translation = w
                     .get::<GlobalTransform>(entity)
                     .map(|g| g.translation())
                     .unwrap_or(DVec3::ZERO);
-                self.voxel_volumes.place(guid, translation);
+                volumes.place(guid, translation);
                 live.push(guid);
             }
         }
@@ -3447,13 +3536,16 @@ impl EngineHost {
         // reference was cleared, or a File ▸ Open replaced the document). A loaded
         // volume holds its whole decoded chunk set AND its meshed surface — real
         // megabytes — so this is not bookkeeping.
-        self.voxel_volumes.retain_only(live);
+        let Ok(mut volumes) = self.voxel_volumes.lock() else {
+            return;
+        };
+        volumes.retain_only(live);
         // THE CAMERA-DRIVEN RESIDENCY PASS (P21.2). The eye is the *editor* camera,
         // which the simulation has no reference to: `terrain.height_at` reads the
         // sim's own volume map, seeded from sim state alone, so a fly-through can
         // never change a gameplay answer. Same determinism seam as `sync_render`
         // for terrain, and it is the absence of a path rather than a convention.
-        self.voxel_volumes.sync_camera(
+        volumes.sync_camera(
             self.last_eye_world,
             &inf_voxel::VoxelWantsParams::default(),
             inf_voxel::VoxelStreamBudget::default(),
@@ -3476,7 +3568,9 @@ impl EngineHost {
     /// parse each.
     pub fn refresh_asset_index(&mut self) {
         self.terrain_streams.refresh_index();
-        self.voxel_volumes.refresh_index();
+        if let Ok(mut v) = self.voxel_volumes.lock() {
+            v.refresh_index();
+        }
         self.render_assets.refresh_index();
         self.synced_version = None; // force a re-projection
     }
@@ -3627,11 +3721,15 @@ impl EngineHost {
     /// a mesh-cache walk that rebuilds nothing) — which is exactly the property
     /// `a_no_op_sync_moves_no_mesh_stamp` pins in Ring 0.
     fn sync_streamed_voxels(&mut self) {
-        let report = self.voxel_volumes.sync_camera(
+        let Ok(mut volumes) = self.voxel_volumes.lock() else {
+            return;
+        };
+        let report = volumes.sync_camera(
             self.last_eye_world,
             &inf_voxel::VoxelWantsParams::default(),
             inf_voxel::VoxelStreamBudget::default(),
         );
+        drop(volumes);
         if report.is_noop() {
             return;
         }
@@ -4411,6 +4509,440 @@ impl EngineHost {
         self.report_tool(msg);
     }
 
+    // ── the voxel carve tools (P21.2) ─────────────────────────────────────
+    //
+    // Two sub-modes over one cut. The **brush** is the sculpt brush's gesture
+    // exactly — press, drag, release, dabs spaced by arc length so drag speed
+    // cannot change what is dug — and the **spline tunnel** is the river tool's:
+    // click waypoints, Ctrl+click to close and carve the tube as one step.
+    //
+    // Every cut goes through `SceneDoc::carve_verdict` FIRST. That is the gate
+    // the coordinator's inline-terrain ruling lives behind: schema v19 cannot
+    // persist a hole mask on an inline terrain, so a surface-crossing cut there
+    // is refused whole — voxels included — rather than half-applied into a cave
+    // with no mouth. A cut that never reaches a surface is legal anywhere.
+
+    /// Why the voxel tool refused a click with no volume to cut.
+    const VOXEL_NO_VOLUME_REJECTION: &'static str =
+        "Carve: no voxel volume is loaded. Select an entity with a VoxelVolume whose .inf_voxel \
+         resolved under the project's Content root — a carve needs chunks to cut, and this level \
+         has none.";
+    /// …and why it refused a click that found no ground to aim at.
+    const VOXEL_NO_GROUND_REJECTION: &'static str =
+        "Carve: no terrain under the cursor. Aim at ground that has paged in — a cut placed at \
+         sea level would dig somewhere the author never pointed at.";
+
+    /// `true` while a carve stroke is in progress.
+    pub fn is_carving(&self) -> bool {
+        self.voxel_stroke.is_some()
+    }
+
+    /// The volume the next cut goes into: the first **selected** entity carrying a
+    /// loaded volume, else the first in document order.
+    ///
+    /// Selection first, so an author with two cave systems open cuts the one they
+    /// are looking at. Deliberately **not** auto-created the way the foliage tool
+    /// creates its `Foliage` entity: a volume's chunks live in an `.inf_voxel` on
+    /// disk, and conjuring an entity that references an asset nobody has written
+    /// would produce a tool that silently does nothing.
+    fn voxel_target(&self, doc: &SceneDoc) -> Option<Uuid> {
+        let loaded = |g: &Uuid| {
+            self.voxel_volumes
+                .lock()
+                .map(|v| v.slot(*g).is_some())
+                .unwrap_or(false)
+        };
+        doc.selection()
+            .iter()
+            .copied()
+            .find(loaded)
+            .or_else(|| doc.order().iter().copied().find(loaded))
+    }
+
+    /// Where a click puts the **centre** of the cut: the terrain surface under the
+    /// cursor, sunk by [`VoxelSettings::depth_m`].
+    ///
+    /// Camera-independent by construction, which is the same ruling the water tool
+    /// got and matters more here: a carve commits geometry, and two authors at
+    /// different camera distances must not dig different caves from the same
+    /// click. The depth is what turns a surface pick into a *tunnel* — at `0` the
+    /// cut breaks the ground where you point (a mouth), and past the radius it
+    /// hollows rock with no mouth at all, which the verdict then allows anywhere.
+    ///
+    /// **Documented limit:** the pick resolves against the heightfield, not
+    /// against voxel surfaces, so continuing a tunnel from *inside* an existing
+    /// cave needs a voxel raycast this crate does not have yet. Aim from above and
+    /// set a depth; the raycast is the follow-up.
+    fn voxel_pick(&self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) -> Option<DVec3> {
+        let probes = self.terrain_probes(doc, None);
+        let surface = if probes.is_empty() {
+            // No terrain in the level: the ground plane is the only ground there
+            // is, exactly as the water tool treats it.
+            self.pick_world_point(doc, view, px, py)
+        } else {
+            let (ro, rd) = view.pixel_ray(px as f32, py as f32);
+            let ro_w = self.origin.to_world(ro);
+            nearest_terrain_hit(&probes, ro_w, rd.as_dvec3()).map(|h| h.world)?
+        };
+        Some(surface - DVec3::new(0.0, self.voxel_tool.depth_m.max(0.0), 0.0))
+    }
+
+    /// The op one dab of the current settings makes at `center`.
+    fn voxel_op_at(&self, center: DVec3) -> VoxelOp {
+        self.voxel_shape_op(VoxelShape::Sphere {
+            center,
+            radius_m: self.voxel_tool.radius_m.max(0.0),
+        })
+    }
+
+    /// Wrap `shape` in the carve-or-fill the toolbar selected. One place, so the
+    /// brush and the tunnel cannot disagree about which way the cut runs.
+    fn voxel_shape_op(&self, shape: VoxelShape) -> VoxelOp {
+        match self.voxel_tool.mode {
+            VoxelOpMode::Carve => VoxelOp::carve(shape),
+            VoxelOpMode::Fill => VoxelOp::fill(shape, self.voxel_tool.material),
+        }
+    }
+
+    /// Judge one cut and, when it is allowed, page the heightfield footprint it
+    /// will write so the hole rule sees real tiles.
+    ///
+    /// Returns the terrains this cut may open, or `None` when it is refused (the
+    /// refusal is reported on the status seam here, so no caller can drop it).
+    ///
+    /// Judged **per dab** rather than once per gesture: a drag walks, and the
+    /// terrain a dab actually reaches is the one whose container has to be able to
+    /// save the mouth it opens. Judging only the first dab would let a stroke
+    /// wander onto an inline terrain and seal its mouths at the next save — the
+    /// exact failure the ruling exists to prevent, arrived at sideways.
+    fn voxel_authorize(&mut self, doc: &mut SceneDoc, shape: &VoxelShape) -> Option<Vec<Uuid>> {
+        // Page first, judge second: `cut_crosses_surface` only sees authored
+        // tiles, so on a streamed terrain an unpaged footprint would answer "this
+        // cut reaches no surface" and wave through a breakthrough nobody checked.
+        let (lo, hi) = shape.aabb_m(0.0);
+        let center = DVec2::new((lo.x + hi.x) * 0.5, (lo.z + hi.z) * 0.5);
+        let radius = ((hi.x - lo.x).max(hi.z - lo.z) * 0.5).max(0.0);
+        for i in 0..self.terrain_slots.len() {
+            let guid = self.terrain_slots[i].guid;
+            if !self.terrain_slots[i].streamed {
+                continue;
+            }
+            let translation = self
+                .terrain_streams
+                .projection_inputs(guid)
+                .map(|(_, _, t)| t)
+                .unwrap_or(DVec3::ZERO);
+            let local = DVec2::new(center.x - translation.x, center.y - translation.z);
+            self.terrain_streams
+                .page_brush_footprint(guid, doc, local, radius);
+        }
+        match doc.carve_verdict(shape) {
+            inf_editor_core::scene::undo::CarveVerdict::RefusedInline { .. } => {
+                self.reject_tool(inf_editor_core::scene::undo::INLINE_TERRAIN_CARVE_REFUSAL);
+                None
+            }
+            v => Some(v.terrains().to_vec()),
+        }
+    }
+
+    /// Begin a carve gesture. For the **brush** this opens a stroke and lays the
+    /// first dab; for the **tunnel** it appends a waypoint (and, with `ctrl`,
+    /// closes the path and carves the whole tube).
+    ///
+    /// Returns `true` when the document changed, so the caller emits a delta.
+    pub fn begin_voxel(
+        &mut self,
+        doc: &mut SceneDoc,
+        view: &RenderView,
+        px: u32,
+        py: u32,
+        ctrl: bool,
+    ) -> bool {
+        let Some(volume) = self.voxel_target(doc) else {
+            self.reject_tool(Self::VOXEL_NO_VOLUME_REJECTION);
+            return false;
+        };
+        let Some(p) = self.voxel_pick(doc, view, px, py) else {
+            self.reject_tool(Self::VOXEL_NO_GROUND_REJECTION);
+            return false;
+        };
+        match self.voxel_tool.kind {
+            VoxelToolKind::Brush => {
+                let op = self.voxel_op_at(p);
+                let Some(terrains) = self.voxel_authorize(doc, &op.shape) else {
+                    return false;
+                };
+                let mut stroke = inf_editor_core::scene::undo::CarveStroke::begin(
+                    volume,
+                    self.voxel_volumes.clone(),
+                );
+                let tally = stroke.dab(doc, &op, &terrains);
+                self.voxel_stroke = Some(stroke);
+                self.voxel_stroke_terrains = terrains.clone();
+                self.voxel_stroke_last = Some(p);
+                for g in terrains {
+                    self.after_terrain_edit(doc, g);
+                }
+                self.report_carve(tally);
+                self.refresh_voxel_preview(p);
+                // The dabs mutate live; the undo entry lands at mouse-up.
+                !tally.is_noop()
+            }
+            VoxelToolKind::Tunnel => {
+                self.voxel_path.push(p);
+                if ctrl && self.voxel_path.len() >= 2 {
+                    return self.commit_tunnel(doc, volume);
+                }
+                self.refresh_voxel_preview(p);
+                false
+            }
+        }
+    }
+
+    /// Continue a brush stroke: resample the path from the last dab to the cursor
+    /// at even arc length (~⅔ radius, the sculpt brush's rule at the coarser
+    /// spacing a *volume* wants) and cut at each.
+    pub fn update_voxel(&mut self, doc: &mut SceneDoc, view: &RenderView, px: u32, py: u32) {
+        if self.voxel_stroke.is_none() {
+            return;
+        }
+        let Some(last) = self.voxel_stroke_last else {
+            return;
+        };
+        let Some(cur) = self.voxel_pick(doc, view, px, py) else {
+            return; // the cursor slid off the ground — hold the stroke, cut nothing
+        };
+        // Arc length in 3D, mirroring `inf_terrain::dab_positions`' pattern: a
+        // carve moves in y as well as xz (a tunnel dives), so resampling only the
+        // XZ path would space the dabs by their shadow and leave gaps on a slope.
+        let spacing = (0.65 * self.voxel_tool.radius_m).max(0.05);
+        let step = cur - last;
+        let len = step.length();
+        let mut tally = self
+            .voxel_stroke
+            .as_ref()
+            .map(|s| s.tally())
+            .unwrap_or_default();
+        if len > 0.0 {
+            let dir = step / len;
+            let mut t = spacing;
+            let mut placed = last;
+            while t <= len {
+                let center = last + dir * t;
+                let op = self.voxel_op_at(center);
+                if let Some(terrains) = self.voxel_authorize(doc, &op.shape) {
+                    if let Some(stroke) = self.voxel_stroke.as_mut() {
+                        tally = stroke.dab(doc, &op, &terrains);
+                    }
+                    for g in terrains {
+                        if !self.voxel_stroke_terrains.contains(&g) {
+                            self.voxel_stroke_terrains.push(g);
+                        }
+                    }
+                }
+                placed = center;
+                t += spacing;
+            }
+            self.voxel_stroke_last = Some(placed);
+        }
+        for g in self.voxel_stroke_terrains.clone() {
+            self.after_terrain_edit(doc, g);
+        }
+        self.report_carve(tally);
+        self.refresh_voxel_preview(cur);
+    }
+
+    /// Finish a brush stroke: commit both halves as ONE undo entry. Returns `true`
+    /// if anything was recorded.
+    pub fn finish_voxel(&mut self, doc: &mut SceneDoc) -> bool {
+        let Some(stroke) = self.voxel_stroke.take() else {
+            return false;
+        };
+        self.voxel_stroke_last = None;
+        let recorded = doc.edit_commit_carve(stroke);
+        for g in std::mem::take(&mut self.voxel_stroke_terrains) {
+            self.after_terrain_edit(doc, g);
+        }
+        recorded
+    }
+
+    /// Carve the pending tunnel: one capsule per path segment, all into a single
+    /// stroke, so the whole tube is one undo step.
+    ///
+    /// Capsules and not spheres: a chain of spheres at waypoint spacing leaves
+    /// gaps between the beads, and the swept-sphere primitive exists in
+    /// `inf_voxel::VoxelShape` precisely for this.
+    fn commit_tunnel(&mut self, doc: &mut SceneDoc, volume: Uuid) -> bool {
+        let path = std::mem::take(&mut self.voxel_path);
+        self.voxel_preview.clear();
+        if path.len() < 2 {
+            return false;
+        }
+        let radius_m = self.voxel_tool.radius_m.max(0.0);
+        let mut stroke =
+            inf_editor_core::scene::undo::CarveStroke::begin(volume, self.voxel_volumes.clone());
+        let mut touched: Vec<Uuid> = Vec::new();
+        let mut tally = inf_editor_core::scene::undo::CarveTally::default();
+        for seg in path.windows(2) {
+            let op = self.voxel_shape_op(VoxelShape::Capsule {
+                a: seg[0],
+                b: seg[1],
+                radius_m,
+            });
+            let Some(terrains) = self.voxel_authorize(doc, &op.shape) else {
+                // One refused segment refuses the tunnel: committing the rest
+                // would leave a tube that stops in the middle of a hillside, which
+                // is the partial success the ruling exists to prevent.
+                return false;
+            };
+            tally = stroke.dab(doc, &op, &terrains);
+            for g in terrains {
+                if !touched.contains(&g) {
+                    touched.push(g);
+                }
+            }
+        }
+        let recorded = doc.edit_commit_carve(stroke);
+        for g in touched {
+            self.after_terrain_edit(doc, g);
+        }
+        self.report_carve(tally);
+        recorded
+    }
+
+    /// Idle hover in voxel mode: show where the next cut lands, and — for the
+    /// tunnel — how much path is pending and how to commit it.
+    pub fn update_voxel_hover(&mut self, doc: &SceneDoc, view: &RenderView, px: u32, py: u32) {
+        match self.voxel_pick(doc, view, px, py) {
+            Some(p) => self.refresh_voxel_preview(p),
+            None => self.voxel_preview.clear(),
+        }
+        if self.voxel_tool.kind == VoxelToolKind::Tunnel && !self.voxel_path.is_empty() {
+            let length: f64 = self
+                .voxel_path
+                .windows(2)
+                .map(|w| (w[1] - w[0]).length())
+                .sum();
+            self.report_tool(format!(
+                "Tunnel: {} waypoint(s), {length:.1} m so far, {:.1} m across — Ctrl+click to \
+                 carve it",
+                self.voxel_path.len(),
+                self.voxel_tool.radius_m * 2.0,
+            ));
+        }
+    }
+
+    /// Rebuild the voxel tool's preview: the cut's silhouette at `center`, plus
+    /// the tunnel path and the segment the next click would add.
+    ///
+    /// Three orthogonal circles rather than a ring on the ground: the cut is a
+    /// **volume** and its depth is the parameter an author most needs to see, and
+    /// a flat ring would draw a 4 m sphere and a 4 m disc identically.
+    fn refresh_voxel_preview(&mut self, center: DVec3) {
+        const SEGMENTS: usize = 24;
+        self.voxel_preview.clear();
+        let r = self.voxel_tool.radius_m.max(0.0);
+        if r > 0.0 {
+            for axis in 0..3 {
+                for i in 0..SEGMENTS {
+                    let a = circle_point(center, r, axis, i, SEGMENTS);
+                    let b = circle_point(center, r, axis, i + 1, SEGMENTS);
+                    self.voxel_preview.push([a, b]);
+                }
+            }
+        }
+        if self.voxel_tool.kind == VoxelToolKind::Tunnel {
+            for seg in self.voxel_path.windows(2) {
+                self.voxel_preview.push([seg[0], seg[1]]);
+            }
+            if let Some(&tail) = self.voxel_path.last() {
+                self.voxel_preview.push([tail, center]);
+            }
+        }
+    }
+
+    /// Publish a carve's running totals on the status seam — the tool's live
+    /// measurement readout, the twin of the lake drag's coverage line.
+    ///
+    /// Quotes cubic metres as well as sample counts because a volume is what an
+    /// author is actually digging, and it is the number P21.3's soil-displacement
+    /// conservation gate will have to balance.
+    fn report_carve(&mut self, tally: inf_editor_core::scene::undo::CarveTally) {
+        if tally.is_noop() {
+            return;
+        }
+        // The ASSET's scale, never the component's — the same rule `project_voxel`
+        // obeys, and reading the component here would quote a volume computed
+        // against one cell size for geometry cut at another.
+        let size = self
+            .voxel_stroke
+            .as_ref()
+            .map(|s| s.volume())
+            .and_then(|g| {
+                self.voxel_volumes
+                    .lock()
+                    .ok()
+                    .and_then(|v| v.slot(g).map(|s| s.data.voxel_size_m()))
+            })
+            .unwrap_or(inf_ecs::components::VoxelVolume::default().voxel_size_m);
+        let m3 = tally.net_removed_m3(size);
+        let verb = if m3 >= 0.0 { "removed" } else { "added" };
+        self.report_tool(format!(
+            "Carve: {verb} {:.2} m³ ({} voxels), {} cave-mouth sample(s) opened/closed",
+            m3.abs(),
+            tally.touched,
+            tally.holes,
+        ));
+    }
+
+    /// Reopen every loaded volume's `.inf_voxel` index in place — the twin of
+    /// [`reload_terrain_stores`](Self::reload_terrain_stores), pushed by the save
+    /// path once it has folded carve edits back into the assets.
+    ///
+    /// `refresh_index` and **not** `clear`: the loaded chunks are the working set
+    /// the author is looking at, a save does not change their contents, and
+    /// dropping them would blink every cave in the level at Ctrl+S. What it does
+    /// change is which GUIDs resolve — a carve saved into a *new* `.inf_voxel` is
+    /// only findable after a re-walk — and it forgets past resolution failures,
+    /// which is exactly the state a just-written asset was in a moment ago.
+    pub fn reload_voxel_stores(&mut self) {
+        if let Ok(mut v) = self.voxel_volumes.lock() {
+            v.refresh_index();
+        }
+        self.synced_version = None; // re-project against the refreshed index
+    }
+
+    /// **The defensive advisory** (P21.2): a terrain carrying holes it cannot
+    /// save.
+    ///
+    /// The carve tools refuse to create that state, so reaching it means the
+    /// document arrived in it — an older session, a hand-edited level, a terrain
+    /// converted back to inline after a carve. Saving would seal every cave mouth
+    /// in it, so the author is told **before** that happens rather than after a
+    /// reload. One report per terrain per host, because this runs on every
+    /// projection and a per-frame status event is an unusable seam rather than a
+    /// louder one.
+    ///
+    /// The *rule* is `inf_voxel::inline_hole_advisory` (Ring 0, unit-tested on all
+    /// three OSes); this is only the call site. The save path is the other place
+    /// it belongs, and that half is `voxel_edit`'s to wire.
+    fn check_inline_holes(&mut self, doc: &SceneDoc) {
+        for &guid in doc.order() {
+            if self.voxel_hole_warned.contains(&guid) {
+                continue;
+            }
+            let Some((data, _)) = doc.terrain_data_and_origin(guid) else {
+                continue;
+            };
+            let backed = doc.terrain_asset_of(guid).is_some();
+            let Some(note) = inf_voxel::inline_hole_advisory(data, backed) else {
+                continue;
+            };
+            self.voxel_hole_warned.insert(guid);
+            self.reject_tool(&note.message());
+        }
+    }
+
     /// The world height foliage lands on at world XZ `p`: the topmost terrain
     /// surface covering it, else `0.0` (the ground plane) — the pre-P16.6 answer
     /// for a world with no terrain, unchanged.
@@ -4857,6 +5389,19 @@ impl EngineHost {
                 let a = self.origin.to_render(*a);
                 let b = self.origin.to_render(*b);
                 self.scene.debug.line(a, b, WATER_PREVIEW);
+            }
+        }
+
+        // Voxel tool preview (P21.2): the cut's three orthogonal silhouette
+        // circles at the point under the cursor, plus the pending tunnel path and
+        // the segment the next click would add. Editor-only debug lines; a cut is
+        // never previewed by mutating the field.
+        if self.tool_mode == ToolMode::Voxel {
+            const VOXEL_PREVIEW: [f32; 4] = [1.0, 0.62, 0.28, 1.0];
+            for [a, b] in &self.voxel_preview {
+                let a = self.origin.to_render(*a);
+                let b = self.origin.to_render(*b);
+                self.scene.debug.line(a, b, VOXEL_PREVIEW);
             }
         }
 

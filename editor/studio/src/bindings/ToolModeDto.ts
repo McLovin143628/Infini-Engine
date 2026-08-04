@@ -4,4 +4,4 @@
  * Active viewport tool (`viewport_set_tool_mode`). Serializes as the tag string
  * `"Select"` / `"Sculpt"`.
  */
-export type ToolModeDto = "Select" | "Sculpt" | "Foliage" | "Biome" | "Water";
+export type ToolModeDto = "Select" | "Sculpt" | "Foliage" | "Biome" | "Water" | "Voxel";
