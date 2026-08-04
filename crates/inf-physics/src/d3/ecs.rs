@@ -151,13 +151,18 @@ pub struct PhysicsBridge3D {
     /// [`pcg_structure_snaps`].
     structure_stamps: BTreeMap<Uuid, (u64, usize)>,
     /// Per-voxel-chunk change stamp (P21.4): `(volume entity, chunk key) →
-    /// VoxelData::chunk_version`. The `structure_stamps` twin, keyed one level
+    /// `inf_voxel::source_key`. The `structure_stamps` twin, keyed one level
     /// finer because a runtime carve moves *one chunk of one volume* and
     /// re-meshing a whole cave system for it inside a fixed step is exactly the
     /// bill the pattern exists to refuse. While a stamp matches, that chunk's
     /// collider is **retained without being re-described** — see
     /// [`gather_voxels`](Self::gather_voxels).
-    voxel_stamps: BTreeMap<(Uuid, inf_voxel::ChunkKey), u64>,
+    ///
+    /// The value is the **mesher's** key, not the chunk's own version: a mesh is a
+    /// function of its 3×3×3 neighbourhood, so the chunk's own stamp cannot see a
+    /// neighbour being carved or evicted (`inf_voxel::MeshSourceKey`'s docs carry
+    /// the argument and the bug it hid).
+    voxel_stamps: BTreeMap<(Uuid, inf_voxel::ChunkKey), inf_voxel::MeshSourceKey>,
     /// Reverse map `collider handle → owning entity Guid`, rebuilt at the end of
     /// every [`sync`](Self::sync) (Wave 3). The collision-event drain resolves
     /// rapier's `ContactEvent3D` collider handles back to entity `Guid`s through
@@ -481,9 +486,33 @@ impl PhysicsBridge3D {
         let mut live: BTreeSet<(Uuid, inf_voxel::ChunkKey)> = BTreeSet::new();
         for (&entity, data) in volumes {
             let voxel_size_m = data.voxel_size_m();
-            for key in data.resident_keys() {
+            // **The mesher's own key set, and the mesher's own stamp.** Both were
+            // wrong here in the first cut of P21.4, and both were wrong in ways
+            // that produce a *silent phantom wall* rather than a crash:
+            //
+            // * `resident_keys()` is not the surface. A cell owned by chunk `K`
+            //   has corners in `K + 1`, so the surface of a volume lives on
+            //   `mesh_keys_for` — the resident set **closed downward by one chunk
+            //   on each axis** — which `inf_voxel::mesh` calls "a correctness
+            //   requirement, not defensive padding". Iterating residency instead
+            //   left 37 % of this phase's own flagship sample drawn and not
+            //   collidable (10 936 rendered triangles against 6 874 collidable
+            //   ones; the whole −X/−Y/−Z faces were walk-through).
+            //
+            // * `chunk_version` is not the mesh's identity. A mesh is a function
+            //   of its 3×3×3 neighbourhood, so a doorway carved wholly inside
+            //   chunk `K + 1` never moves `K`'s own stamp and `K` keeps a wall
+            //   across the opening — the exact M3 defect P21.1 paid for in the
+            //   renderer, re-introduced here. `source_key` is the answer that
+            //   already exists: the max stamp over the neighbourhood **plus a
+            //   residency mask**, so an eviction invalidates too.
+            //
+            // Using the mesher's own two functions is also what makes
+            // `inf-physics`' "the SAME mesher the renderer draws with" true rather
+            // than aspirational: same key set, same invalidation, same triangles.
+            for key in inf_voxel::mesh_keys_for(data) {
                 live.insert((entity, key));
-                let version = data.chunk_version(key);
+                let version = inf_voxel::source_key(data, key);
                 if self.voxel_stamps.get(&(entity, key)) == Some(&version) {
                     retained.insert(voxel_chunk_guid(entity, key));
                     continue;

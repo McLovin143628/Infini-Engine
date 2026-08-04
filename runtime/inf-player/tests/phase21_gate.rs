@@ -11,6 +11,18 @@
 //!
 //! * **(a) determinism** — two fresh loads of one cooked pack produce
 //!   bit-identical traces, **including the voxel field and the hole mask**.
+//! * **(a2) the carve is REAL** — the field the borer left differs from the
+//!   seeded asset *where it dug* and is byte-identical *everywhere else*, and the
+//!   **collider world** answers differently through the bore. Without these two,
+//!   a `runtime_carve` applied to a throwaway clone — correct cubic metres
+//!   reported, real world untouched — passes every other arm in this file.
+//! * **(a3) the shipped player SEES it** — the render-side voxel store and the
+//!   render-side terrain streamer both reflect the carve, so a game that digs is
+//!   not looking at the rock it removed.
+//! * **(a4) the REAL `--pie` subprocess** — one arm spawns the actual player
+//!   binary in `--pie` mode and compares its per-step trace against the
+//!   in-process reference, so a boot path that reverts to a divergent seam fails
+//!   the battery instead of agreeing with itself.
 //! * **(b) cooked == uncooked** — the same level off loose files and off a pack.
 //! * **(c) PIE == shipping on the runtime-carve trace** — the M9 debt. The first
 //!   voxel PIE-vs-shipping coverage this repository has ever had; before P21.4
@@ -47,7 +59,8 @@ use uuid::Uuid;
 use inf_blueprint::Value;
 use inf_editor_core::samples::{
     phase21_build, phase21_cavern_dir, phase21_height, phase21_pit_floor_y, phase21_room_probe_xz,
-    PHASE21_BORER_ACTOR_GUID, PHASE21_CAVERN_GUID, PHASE21_LAMP_GUID, PHASE21_PIT_CENTER_XZ,
+    PHASE21_BORER_ACTOR_GUID, PHASE21_BORE_RADIUS_M, PHASE21_BORE_START, PHASE21_BORE_STEPS,
+    PHASE21_BORE_STEP_M, PHASE21_CAVERN_GUID, PHASE21_LAMP_GUID, PHASE21_PIT_CENTER_XZ,
     PHASE21_ROOM_FLOOR_Y, PHASE21_TERRAIN_GUID, PHASE21_VOXEL_M,
 };
 use inf_packager::{cook, CookOptions};
@@ -66,7 +79,7 @@ use inf_player::budget::LOAD_BUDGET_MS;
 /// Steps traced. Long enough for the borer to drive its drift 24 m through solid
 /// rock (0.15 m per tick) without leaving the authored rock body — the bound is
 /// the content's, not the gate's.
-const STEPS: usize = 160;
+const STEPS: usize = PHASE21_BORE_STEPS;
 
 /// Every committed file of the sample, so the fixture copy cannot silently miss
 /// one as the sample grows.
@@ -155,6 +168,15 @@ fn dir_sim(content: &Path) -> RuntimeSim {
 /// The **editor preview** side: the payload the editor really builds, through the
 /// one PIE boot seam the `--pie` subprocess takes.
 fn pie_sim() -> RuntimeSim {
+    inf_player::sim_from_payload(&cavern_payload())
+        .expect("PIE world builds")
+        .sim
+}
+
+/// The payload the editor really builds for the committed sample — the input to
+/// both the in-process PIE arm and the real-subprocess one, so the two cannot
+/// disagree about what was sent.
+fn cavern_payload() -> inf_runtime::pie::ScenePayload {
     let dir = phase21_cavern_dir();
     let doc = inf_editor_core::scene::serialize::load(&dir.join("Phase21Cavern.inf_lvl"))
         .expect("the committed phase21 document loads");
@@ -185,9 +207,7 @@ fn pie_sim() -> RuntimeSim {
         1,
         "the .inf_terrain must ride the wire"
     );
-    inf_player::sim_from_payload(&payload)
-        .expect("PIE world builds")
-        .sim
+    payload
 }
 
 // ── the trace ───────────────────────────────────────────────────────────────
@@ -196,13 +216,26 @@ fn pie_sim() -> RuntimeSim {
 /// and the two ground queries over the underground room — plus the *collider*
 /// count under the volume, which is what makes this a trace of a world a body
 /// could stand in rather than of four floats.
-type Frame = [u64; 5];
+type Frame = [u64; 6];
 
 fn var_bits(sim: &RuntimeSim, name: &str) -> u64 {
     match sim.actor_var(PHASE21_CAVERN_GUID, name) {
         Some(Value::Float(f)) => f.to_bits(),
         other => panic!("{name} is {other:?}"),
     }
+}
+
+/// The boulder's world `y`.
+fn boulder_y(sim: &RuntimeSim) -> f64 {
+    sim.world()
+        .entity_of(inf_editor_core::samples::PHASE21_BOULDER_GUID)
+        .and_then(|e| {
+            sim.world()
+                .world()
+                .get::<inf_ecs::components::Transform>(e)
+                .map(|t| t.translation.y)
+        })
+        .unwrap_or(f64::NAN)
 }
 
 fn frame(sim: &RuntimeSim) -> Frame {
@@ -214,6 +247,12 @@ fn frame(sim: &RuntimeSim) -> Frame {
         // A carve that never reached the physics bridge would leave this constant
         // while the three floats above moved.
         sim.bridge3d().body_count() as u64,
+        // The boulder's height. The level's only dynamic body, resting on the
+        // voxel rock over the drift (terrain has no collider in this engine), so
+        // it falls when the borer takes that rock away — the one witness of the
+        // carve that survives out to the PIE pipe, which streams poses and knows
+        // nothing about chunks.
+        boulder_y(sim).to_bits(),
     ]
 }
 
@@ -238,18 +277,177 @@ fn assert_not_vacuous(trace: &[Frame]) {
         "the borer removed only {total} m³ over {STEPS} ticks — the trace is of a \
          script reporting zero, not of carving"
     );
-    // The room's floor is where the level says it is, on every tick.
+    // The room's floor is where the level says it is, on every tick — and the
+    // VOXEL-only query agrees with the combined one there, which the borer's own
+    // docs call "the property the pair exists to show" and which nothing
+    // asserted: `room_voxel` could have returned −12345.0 for ever.
     for (i, f) in trace.iter().enumerate() {
         assert_eq!(
             f64::from_bits(f[2]),
             PHASE21_ROOM_FLOOR_Y,
             "tick {i}: the combined ground query left the room floor"
         );
+        assert_eq!(
+            f64::from_bits(f[3]),
+            PHASE21_ROOM_FLOOR_Y,
+            "tick {i}: `voxel.ground_height` disagrees with `terrain.height_at`              over a holed sample, where the combined query IS the voxel one"
+        );
     }
     // The per-tick cut really varies (sub-voxel steps overlap), so "equal traces"
     // is not "equal copies of one number".
     let cuts: std::collections::BTreeSet<u64> = trace.iter().map(|f| f[0]).collect();
     assert!(cuts.len() > 2, "every tick cut the same amount: {cuts:?}");
+
+    // **THE BOULDER: three heights, and each one rules out a different failure.**
+    //
+    // It starts in the air, lands on the voxel rock, rests there while the borer
+    // is still upstream of it, and then drops again when the drift takes that rock
+    // away. Terrain has no rapier collider in this engine, so the only thing that
+    // can ever hold it up is a voxel chunk trimesh.
+    let (blx, blz) = inf_editor_core::samples::PHASE21_BOULDER_XZ;
+    let half = inf_editor_core::samples::PHASE21_BOULDER_HALF_M;
+    let first = f64::from_bits(trace[0][5]);
+    let last = f64::from_bits(trace.last().unwrap()[5]);
+    assert!(
+        last < first,
+        "the boulder never fell at all ({first} -> {last})"
+    );
+
+    // 1. It RESTED ON THE ROCK before the borer arrived. Deleting the voxel
+    //    collider path entirely leaves it in free fall here, tens of metres down.
+    let arrival = ((blx - PHASE21_BORE_START.0) / PHASE21_BORE_STEP_M) as usize;
+    assert!(
+        arrival > 20 && arrival < STEPS,
+        "the fixture's timing broke"
+    );
+    // Ten ticks before the borer gets there: after the 2.1 m drop has settled
+    // (~40 ticks) and before the rock under it goes.
+    let resting = f64::from_bits(trace[arrival - 10][5]);
+    let rock_top = phase21_height(blx, blz);
+    assert!(
+        (resting - (rock_top + half)).abs() < 0.6,
+        "half-way through the run the boulder is at {resting}, not resting on the          rock at {} - nothing is holding it up, so the voxel colliders are absent          rather than merely stale",
+        rock_top + half
+    );
+
+    // 2. It then FELL THROUGH the floor the borer opened...
+    let crown = PHASE21_BORE_START.1 + PHASE21_BORE_RADIUS_M;
+    assert!(
+        last < crown,
+        "the boulder rests at {last}, above the trench crown at {crown} - the borer          removed the rock under it in the SIM and the solver never heard"
+    );
+
+    // 3. ...and LANDED ON THE TRENCH FLOOR rather than falling out of the world,
+    //    which is what a collider-free run looks like.
+    let floor = PHASE21_BORE_START.1 - PHASE21_BORE_RADIUS_M;
+    assert!(
+        last > floor - 2.0,
+        "the boulder ended at {last}, well below the trench floor at {floor} - it          fell through everything, so nothing caught it"
+    );
+}
+
+// ── the field, and the collider world ───────────────────────────────────────
+
+/// The sim's voxel field, as raw bytes: every chunk's signed distances and
+/// materials, in `BTreeMap` order.
+///
+/// **This is what a carve is.** Everything else the gate reads — the cubic metres
+/// a Blueprint recorded, the ground query, the collider count — is downstream of
+/// it, and every one of them can be produced by a carve applied to a *clone*
+/// while the world stays solid rock (mutation-proved: 10/10 green, and the run
+/// got ten times faster because nothing was being dug).
+fn field_bytes(sim: &RuntimeSim) -> Vec<(Uuid, inf_voxel::ChunkKey, Vec<u8>)> {
+    let mut out = Vec::new();
+    for (&guid, data) in sim.voxel_volumes() {
+        for (&key, chunk) in data.chunks() {
+            let mut bytes = Vec::with_capacity(inf_voxel::CHUNK_VOXELS * 5);
+            for v in chunk.sdf() {
+                bytes.extend_from_slice(&v.to_bits().to_le_bytes());
+            }
+            bytes.extend_from_slice(chunk.materials());
+            out.push((guid, key, bytes));
+        }
+    }
+    out
+}
+
+/// Chunk keys the borer's drift passes through — the region that MUST change —
+/// and, by exclusion, the region that must not.
+fn bore_chunks() -> std::collections::BTreeSet<inf_voxel::ChunkKey> {
+    let (bx, by, bz) = PHASE21_BORE_START;
+    let r = PHASE21_BORE_RADIUS_M;
+    let mut out = std::collections::BTreeSet::new();
+    for i in 0..=STEPS {
+        let x = bx + i as f64 * PHASE21_BORE_STEP_M;
+        for (dx, dy, dz) in [(-r, -r, -r), (r, r, r)] {
+            out.insert(inf_voxel::ChunkKey::of_sample(
+                ((x + dx) / PHASE21_VOXEL_M).floor() as i32,
+                ((by + dy) / PHASE21_VOXEL_M).floor() as i32,
+                ((bz + dz) / PHASE21_VOXEL_M).floor() as i32,
+            ));
+        }
+    }
+    out
+}
+
+/// **THE FIELD ASSERTION.** Compare the world the borer left against the world it
+/// started from: every chunk the drift touches must differ, and every chunk it
+/// does not touch must be byte-identical.
+///
+/// The second half is what makes the first half a claim about *this* carve rather
+/// than about any mutation at all.
+fn assert_the_carve_landed(
+    before: &[(Uuid, inf_voxel::ChunkKey, Vec<u8>)],
+    after: &[(Uuid, inf_voxel::ChunkKey, Vec<u8>)],
+) {
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "the carve added or dropped chunks; the sample's volume is fixed"
+    );
+    let bored = bore_chunks();
+    let mut changed = 0usize;
+    let mut untouched_changed: Vec<inf_voxel::ChunkKey> = Vec::new();
+    for ((gb, kb, b), (ga, ka, a)) in before.iter().zip(after) {
+        assert_eq!((gb, kb), (ga, ka), "the chunk set moved");
+        if b == a {
+            continue;
+        }
+        if bored.contains(kb) {
+            changed += 1;
+        } else {
+            untouched_changed.push(*kb);
+        }
+    }
+    assert!(
+        changed > 0,
+        "NOTHING IN THE FIELD MOVED over {STEPS} ticks of carving. The Blueprint \
+         reported cubic metres and the ground query answered — so the carve ran \
+         against something that is not the world."
+    );
+    assert!(
+        untouched_changed.is_empty(),
+        "the borer changed chunks its drift never reaches: {untouched_changed:?}"
+    );
+}
+
+/// Where a ray cast straight down the bore column stops, in the **collider**
+/// world. `None` when it hits nothing.
+///
+/// The only probe in this file that asks the *solver* what it contains. A carve
+/// that never reached `PhysicsBridge3D` moves every other number here and leaves
+/// this one exactly where it was — which is how deleting `gather_voxels` outright
+/// kept the gate green.
+fn bore_ray_toi(sim: &mut RuntimeSim, x: f64) -> Option<f64> {
+    let (_, by, bz) = PHASE21_BORE_START;
+    sim.bridge3d_mut()
+        .world_mut()
+        .cast_ray(
+            glam::DVec3::new(x, by + 12.0, bz),
+            glam::DVec3::new(0.0, -1.0, 0.0),
+            24.0,
+        )
+        .map(|h| h.toi)
 }
 
 // ── (a) determinism, INCLUDING the field and the mask ───────────────────────
@@ -263,6 +461,7 @@ fn the_cavern_traces_bit_identically_across_two_loads() {
 
     let mut a = pack_sim(&pack);
     let mut b = pack_sim(&pack);
+    let seeded = field_bytes(&a);
     let ta = run_trace(&mut a);
     let tb = run_trace(&mut b);
     assert_not_vacuous(&ta);
@@ -270,6 +469,10 @@ fn the_cavern_traces_bit_identically_across_two_loads() {
         ta, tb,
         "the cavern moved between two loads of the same pack"
     );
+    // …and the carve was REAL: the field moved where the drift runs, and nowhere
+    // else. Without this line every arm in the file passes with `runtime_carve`
+    // applied to a throwaway clone.
+    assert_the_carve_landed(&seeded, &field_bytes(&a));
 
     // The FIELD, not only the trace: the two sims' voxel volumes are equal chunk
     // for chunk (`VoxelData`'s `PartialEq` compares scale, anchor and chunks —
@@ -313,6 +516,227 @@ fn hole_signature(sim: &RuntimeSim) -> Vec<bool> {
     out
 }
 
+// ── (a2) the carve is REAL, in the collider world ───────────────────────────
+
+/// **THE COLLIDER ARM.** A ray down the bore column stops on rock before the
+/// carve and falls through afterwards — asked of the *solver*, not of the sim.
+///
+/// This is the arm that fails when `gather_voxels` is deleted outright. Every
+/// other number in this file — the cubic metres, the ground query, the entity
+/// count — is unchanged by removing the voxel colliders entirely (mutation-proved:
+/// an early `return` at the top of `gather_voxels` left the gate 10/10 green in
+/// half a second), because none of them asks what a body would collide with.
+///
+/// The probe is a ray rather than a dropped body because a ray is a pure query:
+/// no integration, no substeps, no tolerance, and the number it returns is the
+/// distance to the first triangle — which is exactly the quantity a carve moves.
+#[test]
+fn the_carve_opens_the_collider_world_not_only_the_sim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_content, pack) = cook_cavern(tmp.path());
+    let mut sim = pack_sim(&pack);
+
+    // One step to build the colliders (the bridge syncs inside the step).
+    sim.step_once(RuntimeInput::default());
+    let (bx, _, _) = PHASE21_BORE_START;
+    // A metre into the drift, which the first tick has not yet reached.
+    let probe_x = bx + 8.0;
+    let before = bore_ray_toi(&mut sim, probe_x).expect(
+        "the ray hit nothing before the carve — there are no voxel colliders at all, \
+         so this arm cannot see the carve either",
+    );
+
+    // …drive the borer through it.
+    for _ in 0..STEPS {
+        sim.step_once(RuntimeInput::default());
+    }
+    let after =
+        bore_ray_toi(&mut sim, probe_x).expect("the ray fell out of the world after the carve");
+
+    // The ray travels FURTHER before it stops: the crown the trench removed is
+    // gone, so it falls through where the ground used to be and lands on the
+    // trench floor. The bore is 2.5 m in radius, so a real opening moves the stop
+    // by metres — a metre of tolerance would accept a rounding artefact.
+    assert!(
+        after > before + 2.0,
+        "the ray stops at {after} after the bore and stopped at {before} before it — \
+         the carve did not reach the colliders, so a body still stands on rock that \
+         gameplay says is gone"
+    );
+
+    // ANTI-VACUITY: a column the drift never reaches is unmoved, so "the ray
+    // changed" is a statement about the bore and not about the whole world.
+    let untouched_x = bx - 6.0;
+    let u_before = {
+        let mut fresh = pack_sim(&pack);
+        fresh.step_once(RuntimeInput::default());
+        bore_ray_toi(&mut fresh, untouched_x)
+    };
+    assert!(
+        u_before.is_some(),
+        "the control column has no collider at all, so it cannot witness anything"
+    );
+    let u_after = bore_ray_toi(&mut sim, untouched_x);
+    assert_eq!(
+        u_before, u_after,
+        "a column the bore never reaches moved — the comparison above is not about \
+         the drift"
+    );
+}
+
+// ── (a3) the shipped player SEES what it carves ─────────────────────────────
+
+/// **THE RENDER ARM.** After the borer runs, the *render* stores reflect the
+/// carve: the voxel store has mirrored the carved chunks, and the terrain
+/// streamer has pinned the tiles whose hole mask moved.
+///
+/// Both were missing from the first cut of P21.4, and both fail the same way: the
+/// player digs, the collider opens, gameplay walks in — and the screen keeps
+/// drawing the rock and the unbroken ground. The render store never read
+/// `sim.voxel_volumes()`, and `pin_tile`'s only production caller was the editor,
+/// so on an **asset-backed** terrain (the only kind that can carry a hole mask,
+/// and therefore this sample's necessary configuration) the mouth was never drawn.
+///
+/// Structural, not pixels: engagement counters on the two seams that carry the
+/// state, which is what the house rule asks for when the claim is "the command
+/// stream reached the renderer".
+#[test]
+fn the_render_side_reflects_the_runtime_carve() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (content, pack) = cook_cavern(tmp.path());
+    let mut sim = pack_sim(&pack);
+
+    // `sync_voxel_store` is the CPU half of `PlayerRenderHost::sync_voxels` — the
+    // same function the windowed player calls every frame, lifted out of the impl
+    // precisely so this claim is checkable where there is no GPU.
+    let assets = inf_player::voxel::VoxelRegistry::from_dir(&content);
+    let camera = glam::DVec3::new(48.0, 40.0, 48.0);
+    let mut store = inf_voxel::VoxelVolumes::new();
+    inf_player::render::sync_voxel_store(&mut store, &assets, &sim, camera);
+    assert!(
+        store.chunk_count() > 0,
+        "the render store bound no chunks at all — the rest of this arm is vacuous"
+    );
+    let drawn_before = store.triangle_count();
+    assert!(
+        drawn_before > 0,
+        "the render store drew nothing to begin with"
+    );
+
+    for _ in 0..STEPS {
+        sim.step_once(RuntimeInput::default());
+    }
+    // The two render-side passes the windowed player runs every frame.
+    sim.sync_render_terrain(camera);
+    inf_player::render::sync_voxel_store(&mut store, &assets, &sim, camera);
+
+    // The voxel half: the store mirrored the carved chunks and re-meshed them.
+    assert!(
+        store.overlaid_len(PHASE21_CAVERN_GUID.as_u128()) > 0,
+        "the render store never looked at the sim's volumes"
+    );
+    assert_ne!(
+        store.triangle_count(),
+        drawn_before,
+        "the render store draws the same surface before and after {STEPS} ticks of          boring — it is still showing the rock the player removed"
+    );
+
+    // …and a store fed a sim that never bored is the control: same asset, same
+    // camera, no carve.
+    let mut untouched = pack_sim(&pack);
+    untouched.step_once(RuntimeInput::default());
+    let mut control = inf_voxel::VoxelVolumes::new();
+    inf_player::render::sync_voxel_store(&mut control, &assets, &untouched, camera);
+    assert_eq!(
+        control.triangle_count(),
+        drawn_before,
+        "the control store moved on its own, so the comparison above is not about          the carve"
+    );
+
+    // The terrain half: the runtime hole reached the render streamer.
+    assert!(
+        sim.terrain_streaming().overlaid_len(PHASE21_TERRAIN_GUID) > 0,
+        "no terrain tile was pinned into the render streamer, so an asset-backed \
+         terrain keeps drawing solid ground over the mouth the carve opened"
+    );
+}
+
+// ── (a4) the REAL `--pie` subprocess boundary ───────────────────────────────
+
+/// **THE GUARD THE LAW DEMANDS.** Spawn the actual `inf-player` binary in `--pie`
+/// mode over the cavern payload and compare its per-step state hashes against the
+/// in-process reference.
+///
+/// Every other PIE arm in this file builds its "preview" side **in process**, by
+/// calling `sim_from_payload` directly. That is a comparison of one function
+/// against itself: revert `main.rs`'s `LoadScene` handler to the bare
+/// `RuntimeSim::new` it used before P21.4 — dropping the voxel volumes, the
+/// terrain, the state machines, the clips and the audio — and every one of them
+/// stays green, because the thing that changed is the boot path neither side
+/// runs. That is precisely this batch's own law:
+///
+/// > a boot path that forgets an attachment does not crash — it agrees with
+/// > itself.
+///
+/// It is also the shape the P11 history had: the in-process reference always
+/// carried the rich fixture, and the real subprocess had nothing to drop, so
+/// nothing ever reported the divergence. This arm is the one that would have.
+///
+/// Compared as **state hashes**, which is what the PIE protocol streams — the
+/// xxh3 of the `Guid`-sorted sim snapshot, so a voxel volume the subprocess
+/// failed to attach shows up as a different ground query in a different pose in a
+/// different hash.
+#[test]
+fn the_real_pie_subprocess_matches_the_in_process_reference() {
+    use inf_editor_core::pie::PieSession;
+    use inf_runtime::pie::PlayerToEditor;
+    use std::time::Duration;
+
+    let payload = cavern_payload();
+    // The **whole** run, not a prefix. Every frame is a pipe round trip, so the
+    // temptation is to trace forty and stop — and forty is inside the boulder's
+    // free fall, where a subprocess with no voxel volumes and no colliders traces
+    // *identically* because gravity is the only thing acting on anything. The
+    // divergence starts when the boulder lands (about tick 40) and again when the
+    // borer takes the rock out from under it (about tick 67), so the window has to
+    // contain both. Measured before it was written down: at `N = 40` this arm
+    // passed with the `--pie` boot seam reverted.
+    const N: u32 = STEPS as u32;
+
+    let mut session =
+        PieSession::spawn_scene(&PathBuf::from(env!("CARGO_BIN_EXE_inf-player")), &payload)
+            .expect("the player spawns in --pie mode");
+    session.step(N).expect("step N");
+
+    let mut got = Vec::with_capacity(N as usize);
+    for _ in 0..N {
+        let ev = session
+            .wait_for(Duration::from_secs(20), |e| {
+                matches!(e, PlayerToEditor::Frame { .. })
+            })
+            .expect("a frame per step");
+        if let PlayerToEditor::Frame { state_hash, .. } = ev {
+            got.push(state_hash);
+        }
+    }
+    session
+        .stop(Duration::from_secs(10))
+        .expect("graceful stop");
+
+    let want = inf_player::scene_trace(&payload, N as u64).expect("in-process reference");
+    assert_eq!(
+        got, want,
+        "the REAL --pie subprocess ran a different world from the in-process \
+         reference — one of the two boot paths is missing an attachment"
+    );
+    // ANTI-VACUITY: the trace evolves, so equal hashes are equal *worlds* and not
+    // two copies of a scene that never moved.
+    assert!(
+        got.windows(2).any(|w| w[0] != w[1]),
+        "the state hash never changed across {N} steps"
+    );
+}
+
 // ── (b) cooked == uncooked ──────────────────────────────────────────────────
 
 /// The same level, off loose files and off a cooked pack, traces identically.
@@ -320,12 +744,23 @@ fn hole_signature(sim: &RuntimeSim) -> Vec<bool> {
 fn cooked_equals_uncooked_on_the_cavern() {
     let tmp = tempfile::tempdir().unwrap();
     let (content, pack) = cook_cavern(tmp.path());
-    let cooked = run_trace(&mut pack_sim(&pack));
-    let loose = run_trace(&mut dir_sim(&content));
+    let mut cooked_sim = pack_sim(&pack);
+    let mut loose_sim = dir_sim(&content);
+    let seeded = field_bytes(&cooked_sim);
+    let cooked = run_trace(&mut cooked_sim);
+    let loose = run_trace(&mut loose_sim);
     assert_not_vacuous(&cooked);
     assert_eq!(
         cooked, loose,
         "the cook changed what the borer digs or what the ground answers"
+    );
+    // The trace is what a Blueprint *recorded*; the field is what the world
+    // *became*, and the two are different claims.
+    assert_the_carve_landed(&seeded, &field_bytes(&cooked_sim));
+    assert_eq!(
+        field_bytes(&cooked_sim),
+        field_bytes(&loose_sim),
+        "cooked and loose reported the same trace over different rock"
     );
 }
 
@@ -342,12 +777,21 @@ fn cooked_equals_uncooked_on_the_cavern() {
 fn pie_equals_shipping_on_the_runtime_carve() {
     let tmp = tempfile::tempdir().unwrap();
     let (_content, pack) = cook_cavern(tmp.path());
-    let ship = run_trace(&mut pack_sim(&pack));
-    let pie = run_trace(&mut pie_sim());
+    let mut ship_sim = pack_sim(&pack);
+    let mut pie_side = pie_sim();
+    let seeded = field_bytes(&ship_sim);
+    let ship = run_trace(&mut ship_sim);
+    let pie = run_trace(&mut pie_side);
     assert_not_vacuous(&ship);
     assert_eq!(
         ship, pie,
         "a cooked build digs the cavern differently from the editor preview"
+    );
+    assert_the_carve_landed(&seeded, &field_bytes(&ship_sim));
+    assert_eq!(
+        field_bytes(&ship_sim),
+        field_bytes(&pie_side),
+        "preview and shipping report the same numbers over different rock"
     );
 }
 

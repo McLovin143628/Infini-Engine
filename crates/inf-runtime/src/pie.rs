@@ -129,6 +129,25 @@ pub struct ScenePayload {
     /// PIE session grows the same world a cooked pack does.
     #[serde(default)]
     pub biome_sets: Vec<(Uuid, Vec<u8>)>,
+    /// Fixed update rate (Hz) the player ticks at.
+    pub tick_hz: u32,
+    /// Open a real window (`true`, the embedded / new-window PIE path) vs run
+    /// headless + step-driven (`false`, the CI / determinism path).
+    pub windowed: bool,
+
+    // ── APPEND-ONLY TAIL ────────────────────────────────────────────────────
+    //
+    // **New fields go HERE, after `windowed`, and nowhere else.** bincode is
+    // positional: `#[serde(default)]` buys nothing, and a field inserted in the
+    // middle re-interprets every byte after it. v5 was first written with
+    // `voxels` and `terrains` between `biome_sets` and `tick_hz`, where two empty
+    // `Vec`s decode in a stale player as a perfectly valid `u32` + `bool` — so
+    // Play started, reported success, and silently ran at a `tick_hz` of zero. A
+    // crash would have been the kind outcome.
+    //
+    // At the tail a stale reader gets every field it knows about correct and
+    // stops; `check_version` below is what turns "stops" into a refusal rather
+    // than a silent half-load. See `SCENE_PAYLOAD_VERSION`.
     /// Referenced voxel volumes: `(asset guid, .inf_voxel bincode bytes)` — keyed
     /// by a v19 level's `VoxelVolume.asset` refs (schema v5, P21.4).
     ///
@@ -148,11 +167,6 @@ pub struct ScenePayload {
     /// the hole mask that makes a cave mouth a cave mouth.
     #[serde(default)]
     pub terrains: Vec<(Uuid, Vec<u8>)>,
-    /// Fixed update rate (Hz) the player ticks at.
-    pub tick_hz: u32,
-    /// Open a real window (`true`, the embedded / new-window PIE path) vs run
-    /// headless + step-driven (`false`, the CI / determinism path).
-    pub windowed: bool,
 }
 
 impl ScenePayload {
@@ -174,11 +188,36 @@ impl ScenePayload {
             clips: Vec::new(),
             machines: Vec::new(),
             biome_sets: Vec::new(),
-            voxels: Vec::new(),
-            terrains: Vec::new(),
             tick_hz,
             windowed,
+            voxels: Vec::new(),
+            terrains: Vec::new(),
         }
+    }
+
+    /// Refuse a payload this build cannot read (P21.4).
+    ///
+    /// Nothing read `schema_version` before v5, which is half of why the
+    /// mid-struct insertion the tail comment describes was survivable long enough
+    /// to ship: a stale player decoded nonsense and reported `Loaded`. Checked at
+    /// the one place every consumer goes through
+    /// (`inf_player::build_world_from_payload`), so a version the reader does not
+    /// understand is a **loud refusal** rather than a world quietly missing its
+    /// caves.
+    ///
+    /// Exact equality, not a floor: the envelope is positional, so an older
+    /// payload is as unreadable as a newer one, and the editor and the player it
+    /// spawns are built together.
+    pub fn check_version(&self) -> Result<(), String> {
+        if self.schema_version == SCENE_PAYLOAD_VERSION {
+            return Ok(());
+        }
+        Err(format!(
+            "PIE scene payload schema v{} but this build speaks v{SCENE_PAYLOAD_VERSION} — \
+             the editor and the player must be built together (the envelope is \
+             positional bincode, so a mismatch decodes as garbage rather than failing)",
+            self.schema_version
+        ))
     }
 
     /// Attach the referenced `.inf_pcg` graph payloads (`(asset guid, bytes)`).
@@ -310,9 +349,30 @@ pub enum PlayerToEditor {
 pub fn write_msg<T: Serialize>(writer: &mut impl Write, msg: &T) -> io::Result<()> {
     let bytes = bincode::serde::encode_to_vec(msg, bincode::config::standard())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    // **Refuse an oversized frame; never truncate its length** (P21.4).
+    //
+    // `bytes.len() as u32` wrapped silently past 4 GiB, and past `MAX_FRAME_LEN`
+    // it produced a header the reader rejects *after* the writer has committed to
+    // sending the body — a desynced stream either way. Since P21.4 a scene payload
+    // carries whole `.inf_voxel` and `.inf_terrain` assets **uncompressed**, so
+    // frame size is now a function of the author's content rather than of the
+    // protocol, and this is a bound a real level can reach. Compressing them (or
+    // streaming them out of band) is the open question the ROADMAP carries.
+    let len = u32::try_from(bytes.len())
+        .ok()
+        .filter(|_| bytes.len() <= MAX_FRAME_LEN);
+    let Some(len) = len else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "PIE frame of {} bytes exceeds the {MAX_FRAME_LEN}-byte cap",
+                bytes.len()
+            ),
+        ));
+    };
     writer.write_all(&PIE_FRAME_MAGIC.to_le_bytes())?;
     writer.write_all(&PIE_FRAME_VERSION.to_le_bytes())?;
-    writer.write_all(&(bytes.len() as u32).to_le_bytes())?;
+    writer.write_all(&len.to_le_bytes())?;
     writer.write_all(&bytes)?;
     writer.flush()
 }
@@ -357,6 +417,7 @@ pub fn read_msg<T: DeserializeOwned>(reader: &mut impl Read) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
 
     #[test]
     fn framing_round_trip() {
@@ -445,5 +506,113 @@ mod tests {
         wire.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
         let err = read_msg::<EditorToPlayer>(&mut std::io::Cursor::new(wire)).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    // ── the v5 tail, and the law it was written for (P21.4) ─────────────────
+
+    fn payload_with_assets() -> ScenePayload {
+        ScenePayload::new(
+            "Cavern",
+            vec![9, 8, 7],
+            vec![(Uuid::from_u128(1), vec![1, 2, 3])],
+            60,
+            true,
+        )
+        .with_pcgs(vec![(Uuid::from_u128(2), vec![4, 5])])
+        .with_biome_sets(vec![(Uuid::from_u128(3), vec![6])])
+        .with_anim_assets(
+            vec![(Uuid::from_u128(4), vec![7])],
+            vec![(Uuid::from_u128(5), vec![8])],
+            vec![(Uuid::from_u128(6), vec![9])],
+        )
+        .with_voxels(vec![
+            (Uuid::from_u128(0x21_04_01), vec![0xAA; 64]),
+            (Uuid::from_u128(0x21_04_02), vec![0xBB; 32]),
+        ])
+        .with_terrains(vec![(Uuid::from_u128(0x21_04_03), vec![0xCC; 128])])
+    }
+
+    /// **The round trip the v5 fields never had.** Every earlier envelope test
+    /// used a payload whose new `Vec`s were EMPTY, which is exactly the shape that
+    /// cannot tell a mid-struct insertion from a tail one: two empty vectors are
+    /// two zero bytes, and two zero bytes are a perfectly good `u32` + `bool`.
+    #[test]
+    fn a_payload_with_non_empty_voxels_and_terrains_round_trips() {
+        let want = payload_with_assets();
+        assert!(!want.voxels.is_empty() && !want.terrains.is_empty());
+
+        let mut wire = Vec::new();
+        write_msg(&mut wire, &EditorToPlayer::LoadScene(want.clone())).unwrap();
+        let got: EditorToPlayer = read_msg(&mut std::io::Cursor::new(wire)).unwrap();
+        let EditorToPlayer::LoadScene(got) = got else {
+            panic!("not a LoadScene");
+        };
+        assert_eq!(got, want);
+        // The fields a stale reader would have mis-decoded are the load-bearing
+        // ones, so they are named rather than left to the struct equality.
+        assert_eq!(got.tick_hz, 60);
+        assert!(got.windowed);
+        assert_eq!(got.voxels.len(), 2);
+        assert_eq!(got.terrains[0].1.len(), 128);
+    }
+
+    /// **The tail is positional, and it is at the tail.** A reader that knows only
+    /// the pre-v5 field order decodes `tick_hz` and `windowed` **correctly** from a
+    /// v5 payload and simply stops early — which is what makes the version check a
+    /// refusal instead of a corruption. (Modelled by decoding into a struct with
+    /// the tail truncated, which is exactly what an older build's `ScenePayload`
+    /// is.)
+    #[test]
+    fn a_stale_reader_still_decodes_every_field_it_knows() {
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct PreV5 {
+            schema_version: u32,
+            label: String,
+            level_bytes: Vec<u8>,
+            classes: Vec<(Uuid, Vec<u8>)>,
+            pcgs: Vec<(Uuid, Vec<u8>)>,
+            skeletons: Vec<(Uuid, Vec<u8>)>,
+            clips: Vec<(Uuid, Vec<u8>)>,
+            machines: Vec<(Uuid, Vec<u8>)>,
+            biome_sets: Vec<(Uuid, Vec<u8>)>,
+            tick_hz: u32,
+            windowed: bool,
+        }
+
+        let want = payload_with_assets();
+        let bytes = bincode::serde::encode_to_vec(&want, bincode::config::standard()).unwrap();
+        let (old, _): (PreV5, usize) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+        assert_eq!(old.schema_version, SCENE_PAYLOAD_VERSION);
+        assert_eq!(old.tick_hz, want.tick_hz, "the tail moved a known field");
+        assert_eq!(old.windowed, want.windowed, "the tail moved a known field");
+        assert_eq!(old.label, want.label);
+    }
+
+    /// …and the version check is what stops it running with the caves missing.
+    #[test]
+    fn a_version_mismatch_is_refused_loudly() {
+        let mut p = payload_with_assets();
+        assert!(p.check_version().is_ok());
+        p.schema_version = SCENE_PAYLOAD_VERSION - 1;
+        let err = p
+            .check_version()
+            .expect_err("a stale payload must be refused");
+        assert!(err.contains("schema"), "{err}");
+    }
+
+    /// A frame past the cap is a **real error**, not a truncated length header
+    /// that desyncs the stream after the body is already committed.
+    #[test]
+    fn an_oversized_frame_is_refused_rather_than_truncated() {
+        // One asset just past the cap. (`Vec<u8>` of that length is the cheapest
+        // way to build an over-large payload without a real level.)
+        let huge = ScenePayload::new("Huge", vec![0u8; MAX_FRAME_LEN + 16], vec![], 60, false);
+        let mut wire = Vec::new();
+        let err = write_msg(&mut wire, &EditorToPlayer::LoadScene(huge))
+            .expect_err("an oversized frame must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(wire.is_empty(), "the header was written before the refusal");
     }
 }

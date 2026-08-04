@@ -497,6 +497,11 @@ pub fn run(
 /// but wired to a PIE control channel (Pause/Resume/Step/Stop/Eject/SetViewport)
 /// and a report sink (`Window` handle for reparenting, `Paused`/`Resumed`/…).
 /// Blocks until Stop or the window closes.
+// Eight parameters trips clippy's arity lint. Bundling them would hide the one
+// that matters — `voxel_assets` was ADDED here in P21.4 because a windowed PIE
+// session was binding no volumes and drawing no caves, and a struct is exactly
+// where a field like that goes back to being easy to forget to fill.
+#[allow(clippy::too_many_arguments)]
 pub fn run_pie(
     title: String,
     width: u32,
@@ -505,6 +510,7 @@ pub fn run_pie(
     map: InputMap,
     control: Receiver<EditorToPlayer>,
     out: Box<dyn Write>,
+    voxel_assets: Arc<VoxelRegistry>,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -521,6 +527,12 @@ pub fn run_pie(
         Arc::new(VmeshRegistry::new()),
         inf_scene::RenderSettingsRecord::default(),
     );
+    // P21.4: the payload's `.inf_voxel` bytes. Without them the windowed PIE
+    // player binds no volumes, so `overlay_sim` has nothing to mirror the
+    // Blueprint's carves *into* and an embedded session draws no caves at all —
+    // while the headless one, which the gate drives, draws them correctly. Passed
+    // in rather than defaulted so the gap cannot reopen silently.
+    app.voxel_assets = voxel_assets;
     app.pie = Some(PieLink {
         control,
         out,

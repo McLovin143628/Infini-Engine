@@ -371,6 +371,9 @@ fn run_pie_window(
         inf_player::input::default_map(),
         rx,
         Box::new(stdout),
+        std::sync::Arc::new(inf_player::voxel::VoxelRegistry::from_payload(
+            &payload.voxels,
+        )),
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

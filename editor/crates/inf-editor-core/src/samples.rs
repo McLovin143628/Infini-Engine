@@ -5505,6 +5505,29 @@ pub const PHASE21_CAMERA_GUID: Uuid = uuid::uuid!("21040000-0000-4000-8000-00000
 /// room a *room* rather than a void, and the gate's anti-vacuity handle on "the
 /// room is where the generator says it is".
 pub const PHASE21_LAMP_GUID: Uuid = uuid::uuid!("21040000-0000-4000-8000-000000000015");
+/// A boulder resting on the rock **over the borer's drift**.
+///
+/// The only dynamic body in the level, and it is content rather than decoration:
+/// this engine gives terrain **no rapier collider at all** (gameplay stands on it
+/// through `terrain.height_at`), so the only thing holding this boulder up is the
+/// voxel chunk trimesh the P21.4 bridge builds. When the borer removes the rock
+/// beneath it, it falls into the trench — which is the one witness that survives
+/// the whole way out to the real `--pie` pipe, because a falling body is in the
+/// sim snapshot and a carved chunk is not.
+pub const PHASE21_BOULDER_GUID: Uuid = uuid::uuid!("21040000-0000-4000-8000-000000000016");
+
+/// Where the boulder starts, and how big it is. Directly over the drift at
+/// `x = 50`, which the borer reaches around tick 67 of 120 — long after the drop
+/// onto the rock has settled, so the two falls are distinct events in the trace.
+pub const PHASE21_BOULDER_XZ: (f64, f64) = (50.0, 60.0);
+pub const PHASE21_BOULDER_HALF_M: f64 = 0.5;
+/// Its start height: clear of the ground so the first tick is a free fall, and
+/// clear of the **trench crown** so the first landing is on solid rock rather
+/// than inside the void the borer is about to open. Low enough that the 2.1 m
+/// drop settles (about 40 ticks) well before the borer reaches `x = 50` (tick
+/// 67), so "resting on rock" is a real, observable phase of the trace and not a
+/// moment caught mid-fall.
+pub const PHASE21_BOULDER_START_Y: f64 = 33.5;
 
 // ── the ground ───────────────────────────────────────────────────────────────
 
@@ -5745,25 +5768,32 @@ pub fn phase21_build() -> Phase21Workings {
 
 // ── the runtime borer ────────────────────────────────────────────────────────
 
-/// Where the borer starts cutting, and how far it advances per tick.
+/// Where the borer starts cutting, how far it advances per tick, and for how
+/// many ticks.
 ///
-/// A **drift along `+X` at `y = 22`, north of every committed working** (the cave
-/// chamber reaches `z ≈ 56.5`, the pit and the room stop at `z = 41`), so the
-/// bore is cutting rock that was solid when the level was saved for its whole
-/// run — which is what makes the runtime-carve trace a trace of *carving* rather
-/// than of a script re-reporting zero.
+/// A **cut-and-cover drift along `+X` at `y = 29.7`**, north of every committed
+/// working (the cave chamber reaches `z ≈ 56.5`; the pit and the room stop at
+/// `z = 41`), running from `x = 40` to `x = 58` — inside the rock body's
+/// `[32, 64)` span at both ends.
 ///
-/// The step is **sub-voxel on purpose**: at 0.15 m per tick a 2 m ball advances
-/// less than one sample per tick, so consecutive cuts overlap and the per-tick
-/// volume varies between zero and a few cubic metres. A trace whose every entry
-/// is the same number would compare equal for the wrong reason.
+/// **It breaks the surface for its whole run, and that is the point.** The ground
+/// over the drift falls from 31.5 m to 30.375 m; a 2.5 m ball centred at 29.7 m
+/// has its crown at 32.2 m and its floor at 27.2 m, so every tick removes rock
+/// that was solid when the level was saved *and* opens height samples that were
+/// closed. A borer that stayed underground would exercise the carve and never the
+/// **coupling** — and "a game digging through the surface opens a mouth" is the
+/// phase's own sentence, so the sample has to actually do it.
 ///
-/// 160 ticks of it covers 24 m and ends at `x = 60`, four metres inside the rock
-/// body's east edge — bounded by design rather than by where the gate happens to
-/// stop.
-pub const PHASE21_BORE_START: (f64, f64, f64) = (36.0, 22.0, 58.0);
+/// The step is **sub-voxel on purpose**: at 0.15 m per tick a 2.5 m ball advances
+/// less than one sample, so consecutive cuts overlap and the per-tick volume
+/// varies between zero and a few cubic metres. A trace whose every entry was the
+/// same number would compare equal for the wrong reason.
+pub const PHASE21_BORE_START: (f64, f64, f64) = (40.0, 29.7, 60.0);
 pub const PHASE21_BORE_STEP_M: f64 = 0.15;
-pub const PHASE21_BORE_RADIUS_M: f64 = 2.0;
+pub const PHASE21_BORE_RADIUS_M: f64 = 2.5;
+/// Ticks the gate drives the borer for — 18 m of drift. Stated here rather than
+/// in the gate so the content and the test cannot disagree about how far it goes.
+pub const PHASE21_BORE_STEPS: usize = 120;
 
 /// The XZ the borer probes each tick with the **combined** ground query
 /// (`terrain.height_at`) — the underground room's centre, which the committed
@@ -5900,7 +5930,8 @@ pub fn phase21_borer_class() -> BlueprintClass {
 pub fn phase21_cavern_scene() -> SceneDoc {
     use crate::scene::serialize::LevelSettings;
     use inf_ecs::components::{
-        ActorClass, Camera, Light, LightKind, SkyAtmosphere, Terrain, TimeOfDay, VoxelVolume,
+        ActorClass, BodyKind3D, Camera, Collider3D, ColliderShape3DKind, Light, LightKind,
+        RigidBody3D, SkyAtmosphere, Terrain, TimeOfDay, VoxelVolume,
     };
     use inf_ecs::math::{Vec2d, Vec3d};
 
@@ -5983,6 +6014,40 @@ pub fn phase21_cavern_scene() -> SceneDoc {
             range: 14.0,
             color: inf_ecs::math::Color::new(1.0, 0.86, 0.62, 1.0),
             ..Light::default()
+        }
+    );
+
+    // ── The boulder over the drift. ──
+    //
+    // The level's only dynamic body. Terrain has no collider in this engine, so it
+    // is resting on the **voxel rock** and nothing else; when the borer takes that
+    // rock away it falls into the trench. That is what makes "the carve reached
+    // the colliders" observable through the PIE pipe, which streams poses and
+    // knows nothing about chunks.
+    doc.create_with_guid(PHASE21_BOULDER_GUID, SpawnKind::Empty, "Boulder", None);
+    {
+        let (bx, bz) = PHASE21_BOULDER_XZ;
+        insert!(
+            doc,
+            PHASE21_BOULDER_GUID,
+            Transform::from_translation(DVec3::new(bx, PHASE21_BOULDER_START_Y, bz))
+        );
+    }
+    insert!(
+        doc,
+        PHASE21_BOULDER_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            ..RigidBody3D::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE21_BOULDER_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::splat(PHASE21_BOULDER_HALF_M),
+            ..Collider3D::default()
         }
     );
 
@@ -6200,17 +6265,62 @@ mod tests {
             "the heap and the pit disagree about how much soil there is"
         );
 
-        // The borer's drift is in SOLID ROCK for its whole run: 160 ticks of it
-        // is a trace of carving, not of a script reporting zero.
+        // The borer's drift is in SOLID ROCK for its whole run — a trace of
+        // carving, not of a script reporting zero — and its crown is ABOVE the
+        // ground for its whole run, so every tick opens the heightfield too.
         let (bx, by, bz) = PHASE21_BORE_START;
+        let end_x = bx + PHASE21_BORE_STEPS as f64 * PHASE21_BORE_STEP_M;
+        let mut steps = 0;
+        let mut x = bx;
+        while x <= end_x {
+            assert!(
+                vol.is_solid_at(DVec3::new(x, by, bz)),
+                "the bore centre is in air at x = {x}"
+            );
+            let ground = phase21_height(x, bz);
+            assert!(
+                by + PHASE21_BORE_RADIUS_M > ground,
+                "at x = {x} the bore's crown ({}) is under the ground ({ground}) — it \
+                 cuts a sealed tube and never opens a mouth",
+                by + PHASE21_BORE_RADIUS_M
+            );
+            assert!(
+                by < ground,
+                "at x = {x} the bore's centre is above grade, so it is cutting air"
+            );
+            steps += 1;
+            x += 1.0;
+        }
+        assert!(steps > 10, "the drift is too short to prove anything");
+
+        // The boulder starts ABOVE the rock (so it falls onto it) and sits over
+        // the drift (so the borer eventually takes that rock away). Both halves,
+        // because a boulder resting beside the drift never witnesses anything.
+        let (blx, blz) = PHASE21_BOULDER_XZ;
         assert!(
-            vol.is_solid_at(DVec3::new(bx, by, bz)),
-            "the bore starts in air"
+            PHASE21_BOULDER_START_Y - PHASE21_BOULDER_HALF_M > phase21_height(blx, blz),
+            "the boulder starts inside the ground"
         );
-        let end_x = bx + 160.0 * PHASE21_BORE_STEP_M;
         assert!(
-            vol.is_solid_at(DVec3::new(end_x, by, bz)),
-            "the bore leaves the rock body before tick 160"
+            blx > bx && blx < end_x,
+            "the boulder at x = {blx} is not over the drift [{bx}, {end_x}]"
+        );
+        assert!(
+            (blz - bz).abs() < PHASE21_BORE_RADIUS_M,
+            "the boulder is {} m off the drift's centreline",
+            (blz - bz).abs()
+        );
+        assert!(
+            vol.is_solid_at(DVec3::new(blx, phase21_height(blx, blz) - 0.5, blz)),
+            "there is no rock under the boulder to hold it up"
+        );
+        // …and it starts ABOVE the trench crown, so its first landing is on rock
+        // the borer has not reached yet. Starting inside the trench's future void
+        // would make "it fell when the rock went" unobservable: it would already
+        // be on the floor.
+        assert!(
+            PHASE21_BOULDER_START_Y - PHASE21_BOULDER_HALF_M > by + PHASE21_BORE_RADIUS_M,
+            "the boulder starts inside the trench the borer will open"
         );
         // …and it stays inside the authored chunks.
         let east = (PHASE21_ROCK_CHUNKS_XZ.1 + 1) as f64 * inf_voxel::CHUNK_DIM as f64;

@@ -210,73 +210,8 @@ impl PlayerRenderHost {
         );
     }
 
-    /// Bind, place, page (and release) voxel volumes to match the world — the
-    /// `&mut` half that has to run *before* the projection's immutable walk.
-    ///
-    /// Walks the world in `Guid` order, so which volume loads first is a function
-    /// of the level rather than of the ECS archetype layout. An entity whose asset
-    /// the world cannot serve stays unloaded and draws nothing; the registry logs
-    /// it once.
-    ///
-    /// **P21.2 — three acts, not one.** `ensure` binds (parses the payload, indexes
-    /// its directory, pages nothing); `place` tells Ring 0 where the entity put the
-    /// volume, because residency is a world-space radius and a cave placed a
-    /// kilometre from its authoring anchor would otherwise page the chunks nobody
-    /// is standing in; `sync_camera` executes the policy. A bound volume with no
-    /// `sync_camera` draws nothing, which is why the three are one function on both
-    /// hosts and why the mirror gate requires all three calls on both sides.
     fn sync_voxels(&mut self, sim: &RuntimeSim, camera_world: DVec3) {
-        let world = sim.world();
-        let w = world.world();
-        let mut wants: Vec<(Uuid, Uuid, DVec3)> = w
-            .iter_entities()
-            .filter_map(|e| {
-                let guid = e.get::<Guid>()?.0;
-                let asset = e.get::<VoxelVolume>()?.asset?;
-                let translation = e
-                    .get::<GlobalTransform>()
-                    .map(|g| g.translation())
-                    .unwrap_or(DVec3::ZERO);
-                Some((guid, asset, translation))
-            })
-            .collect();
-        wants.sort_by_key(|(g, _, _)| *g);
-        // Release volumes whose entity is gone (or whose component lost its
-        // reference) BEFORE loading, so a level switch never holds both.
-        let live: std::collections::BTreeSet<u128> =
-            wants.iter().map(|(g, _, _)| g.as_u128()).collect();
-        self.voxels.retain_only(&live);
-        for (guid, asset, translation) in wants {
-            if !self.voxels.is_bound(guid.as_u128(), asset.as_u128()) {
-                let Some(bytes) = self.voxel_assets.load(asset) else {
-                    continue;
-                };
-                if let Err(e) = self.voxels.ensure(guid.as_u128(), asset.as_u128(), &bytes) {
-                    tracing::warn!("inf-player: bad .inf_voxel {asset}: {e}");
-                    continue;
-                }
-            }
-            self.voxels.place(guid.as_u128(), translation);
-        }
-        // THE CAMERA-DRIVEN RESIDENCY PASS (P21.2). The eye is the *render*
-        // camera, which the simulation has no reference to: `terrain.height_at`
-        // reads the sim's own volume map, seeded from sim state alone, so where the
-        // player is looking can never change a gameplay answer. Same determinism
-        // seam as `sync_render_terrain`, and it is the absence of a path rather
-        // than a convention.
-        let report = self.voxels.sync_camera(
-            camera_world,
-            &inf_voxel::VoxelWantsParams::default(),
-            inf_voxel::VoxelStreamBudget::default(),
-        );
-        for (key, err) in &report.failed {
-            tracing::warn!(
-                "inf-player: voxel chunk ({}, {}, {}) failed to decode: {err}",
-                key.x,
-                key.y,
-                key.z
-            );
-        }
+        sync_voxel_store(&mut self.voxels, &self.voxel_assets, sim, camera_world);
     }
 
     /// Stroke the **world-partition cell overlay** into the debug-line layer
@@ -1910,5 +1845,100 @@ mod foliage_projection {
             );
         }
         assert_ne!(a.scatter[0].anchor, b.scatter[0].anchor);
+    }
+}
+
+/// **The CPU half of the render host's voxel sync** — bind, place, mirror the
+/// simulation's runtime carves, then page against the camera.
+///
+/// A free function rather than a method because it needs **no GPU**, and the
+/// claim it carries — that the shipped player's render side sees what its
+/// Blueprints carve — has to be checkable in CI, where no adapter exists.
+/// `PlayerRenderHost::sync_voxels` is a one-line call to it, so the gate and the
+/// player run the same code rather than two arrangements of it.
+///
+/// **P21.2 — three acts, not one.** `ensure` binds (parses the payload, indexes
+/// its directory, pages nothing); `place` tells Ring 0 where the entity put the
+/// volume, because residency is a world-space radius and a cave placed a
+/// kilometre from its authoring anchor would otherwise page the chunks nobody is
+/// standing in; `sync_camera` executes the policy. A bound volume with no
+/// `sync_camera` draws nothing, which is why the three are one function on both
+/// hosts and why the mirror gate requires all three calls on both sides.
+///
+/// **P21.4 — a fourth act, before the camera one.** `overlay_sim` mirrors the
+/// chunks a runtime carve changed out of the *simulation's* map. Without it the
+/// player gives a dug floor a collider, lets gameplay stand on it, and keeps
+/// drawing the rock.
+pub fn sync_voxel_store(
+    voxels: &mut inf_voxel::VoxelVolumes,
+    assets: &VoxelRegistry,
+    sim: &RuntimeSim,
+    camera_world: DVec3,
+) {
+    let world = sim.world();
+    let w = world.world();
+    let mut wants: Vec<(Uuid, Uuid, DVec3)> = w
+        .iter_entities()
+        .filter_map(|e| {
+            let guid = e.get::<Guid>()?.0;
+            let asset = e.get::<VoxelVolume>()?.asset?;
+            let translation = e
+                .get::<GlobalTransform>()
+                .map(|g| g.translation())
+                .unwrap_or(DVec3::ZERO);
+            Some((guid, asset, translation))
+        })
+        .collect();
+    wants.sort_by_key(|(g, _, _)| *g);
+    // Release volumes whose entity is gone (or whose component lost its
+    // reference) BEFORE loading, so a level switch never holds both.
+    let live: std::collections::BTreeSet<u128> =
+        wants.iter().map(|(g, _, _)| g.as_u128()).collect();
+    voxels.retain_only(&live);
+    for (guid, asset, translation) in wants {
+        if !voxels.is_bound(guid.as_u128(), asset.as_u128()) {
+            let Some(bytes) = assets.load(asset) else {
+                continue;
+            };
+            if let Err(e) = voxels.ensure(guid.as_u128(), asset.as_u128(), &bytes) {
+                tracing::warn!("inf-player: bad .inf_voxel {asset}: {e}");
+                continue;
+            }
+        }
+        voxels.place(guid.as_u128(), translation);
+    }
+    // THE CAMERA-DRIVEN RESIDENCY PASS (P21.2). The eye is the *render*
+    // camera, which the simulation has no reference to: `terrain.height_at`
+    // reads the sim's own volume map, seeded from sim state alone, so where the
+    // player is looking can never change a gameplay answer. Same determinism
+    // seam as `sync_render_terrain`, and it is the absence of a path rather
+    // than a convention.
+    // **THE SIM'S CARVES, BEFORE THE CAMERA PASS** (P21.4). A Blueprint that
+    // dug this frame changed the *simulation's* volume map; without this the
+    // shipped player gives the new floor a collider, lets gameplay stand on
+    // it, and keeps drawing the rock that is no longer there. `sim → render`
+    // is the legal direction (the simulation is authoritative and the renderer
+    // projects from it); the camera below never reaches back.
+    //
+    // Before `sync_camera`, so the copied chunks are dirty when residency runs
+    // — `sync_residency` refuses to evict a dirty chunk, which is the pin that
+    // stops a carved chunk being paged out and re-read as solid rock from the
+    // `.inf_voxel`. `sync_camera`'s own re-mesh then rebuilds exactly what
+    // moved.
+    for (guid, sim_data) in sim.voxel_volumes() {
+        voxels.overlay_sim(guid.as_u128(), sim_data);
+    }
+    let report = voxels.sync_camera(
+        camera_world,
+        &inf_voxel::VoxelWantsParams::default(),
+        inf_voxel::VoxelStreamBudget::default(),
+    );
+    for (key, err) in &report.failed {
+        tracing::warn!(
+            "inf-player: voxel chunk ({}, {}, {}) failed to decode: {err}",
+            key.x,
+            key.y,
+            key.z
+        );
     }
 }

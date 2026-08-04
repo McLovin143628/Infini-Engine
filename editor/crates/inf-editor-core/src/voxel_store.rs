@@ -409,6 +409,15 @@ impl EditorVoxelVolumes {
     // pass happened to rebuild it, which reads as a brush that works
     // intermittently.
 
+    /// Mirror a **Simulate session's** runtime carves into this (camera-paged)
+    /// editor store — the Ring-1 door onto
+    /// [`inf_voxel::VoxelVolumes::overlay_sim`], which carries the whole rule and
+    /// the reason `sim → render` is the legal direction (P21.4). Returns how many
+    /// chunks were copied.
+    pub fn overlay_sim(&mut self, entity: Uuid, sim: &inf_voxel::VoxelData) -> usize {
+        self.volumes.overlay_sim(entity.as_u128(), sim)
+    }
+
     /// Re-mesh whatever `entity`'s volume has moved since its meshes were last
     /// built. `false` when the entity has no loaded volume.
     ///

@@ -190,8 +190,46 @@ pub async fn sim_tick(
     session.tick(&mut doc, dt, SimInput::with_down(keys));
     doc.bump_version_for_runtime();
     drop(doc);
+    overlay_sim_carves(&app, session);
     emit_debug(&app, session);
     Ok(true)
+}
+
+/// **Mirror the Simulate session's runtime carves into the viewport's voxel
+/// store** (P21.4) — the editor twin of `PlayerRenderHost::sync_voxels`' overlay.
+///
+/// A `voxel.*` node writes the *session's* volume map, which is deliberately not
+/// the store the viewport draws from (the store is camera-paged; the sim's map
+/// must never be). Without this the editor shows exactly what the shipped player
+/// showed before the fold existed: a Blueprint digs, `terrain.height_at` moves,
+/// the colliders rebuild — and the screen keeps drawing the rock.
+///
+/// `sim → render` only, and stamp-gated inside Ring 0
+/// ([`inf_voxel::VoxelVolumes::overlay_sim`]): a frame in which nothing was dug
+/// copies nothing. A poisoned store is skipped rather than fatal — Simulate keeps
+/// running and the picture goes stale, which is strictly better than killing a
+/// session over a render detail.
+///
+/// The terrain half needs no twin here: `SimSession` steps the **document's** own
+/// world, so a runtime hole lands in the document and the viewport's existing
+/// `overlay_document_edits` already mirrors it.
+fn overlay_sim_carves(app: &AppHandle, session: &inf_editor_core::simulate::SimSession) {
+    let volumes = session.voxel_volumes();
+    if volumes.is_empty() {
+        return;
+    }
+    let Some(store) = app
+        .try_state::<crate::commands::ViewportState>()
+        .and_then(|v| v.voxel_volumes())
+    else {
+        return;
+    };
+    let Ok(mut store) = store.lock() else {
+        return;
+    };
+    for (entity, data) in volumes {
+        store.overlay_sim(*entity, data);
+    }
 }
 
 /// Advance Simulate by **exactly one fixed step** with the held keys (B-P4 tier
@@ -216,6 +254,7 @@ pub async fn sim_step_fixed(
     session.step_once(&mut doc, SimInput::with_down(keys));
     doc.bump_version_for_runtime();
     drop(doc);
+    overlay_sim_carves(&app, session);
     emit_debug(&app, session);
     Ok(true)
 }

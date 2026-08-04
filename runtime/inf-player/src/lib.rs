@@ -619,6 +619,12 @@ pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, St
     use crate::level::WorldBuilder;
     use std::collections::HashMap;
 
+    // The one place every PIE consumer passes through, so the one place the
+    // envelope's version is checked (P21.4). Nothing read `schema_version` before
+    // v5 — which is how a mid-struct field insertion could ship as a *silent*
+    // half-load rather than a refusal.
+    payload.check_version()?;
+
     let mut fallback: Vec<BlueprintClass> = Vec::new();
     let mut by_guid: HashMap<uuid::Uuid, BlueprintClass> = HashMap::new();
     for (guid, bytes) in &payload.classes {

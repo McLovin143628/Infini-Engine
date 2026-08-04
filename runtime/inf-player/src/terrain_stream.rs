@@ -127,6 +127,10 @@ struct StreamedTerrain {
     /// Whether the last sync was already over [`SIM_WANT_SOFT_CEILING`], so a
     /// stable oversized set warns once instead of every fixed step.
     warned_sim_ceiling: bool,
+    /// Which **simulation** tile versions have been mirrored into the render
+    /// streamer (P21.4) — see [`TerrainStreaming::overlay_sim_edits`]. Empty for
+    /// every level nothing carves at runtime.
+    overlaid: std::collections::BTreeMap<inf_terrain::TileKey, u64>,
 }
 
 /// Whether `entity` can **observe** the terrain, i.e. whether the fixed step can
@@ -278,6 +282,7 @@ impl TerrainStreaming {
                 grid,
                 sim_margin_m: SIM_MARGIN_TILES * grid.level0_span(),
                 warned_sim_ceiling: false,
+                overlaid: std::collections::BTreeMap::new(),
             });
         }
         Self {
@@ -411,6 +416,80 @@ impl TerrainStreaming {
     /// Call at exactly one point per frame — the render-sync point — in both the
     /// windowed and the headless loops, so a scripted camera path produces the
     /// same resident-set trace either way.
+    /// **Mirror the SIMULATION's runtime terrain edits into the render streamer**
+    /// (P21.4). Returns how many tiles were (re)pinned.
+    ///
+    /// A runtime carve opens a **hole** in the sim world's `Terrain.data`
+    /// (`inf_voxel::apply_surface_cut`, from `runtime_voxel_op`), so gameplay
+    /// stops standing on ground that is no longer there. On an **asset-backed**
+    /// terrain — the only kind that can persist a hole mask at all, and therefore
+    /// the configuration every carved level ships in — the render side streams its
+    /// own tiles out of the `.inf_terrain` and never sees that edit: the clipmap
+    /// keeps drawing solid ground over a mouth the player just blew open, and can
+    /// walk through it.
+    ///
+    /// This is the player's twin of the editor's
+    /// `inf_editor_core::terrain_stream::TerrainStreaming::overlay_document_edits`,
+    /// with the sim world in place of the document, and it works the same way: a
+    /// **dirty** level-0 tile is pinned into the streamer, which then neither
+    /// evicts it nor re-reads it from the asset. Dirty is a function of what was
+    /// written, never of what any camera paged, so the direction of dependency is
+    /// still `sim → render` alone.
+    ///
+    /// Cheap every frame: a tile is copied only when its sim stamp moved, and
+    /// stamps move only when something wrote to the tile.
+    pub fn overlay_sim_edits(&mut self, world: &EcsWorld) -> usize {
+        if self.entries.is_empty() {
+            return 0;
+        }
+        let mut mirrored = 0usize;
+        for entry in &mut self.entries {
+            let Some(e) = world.entity_of(entry.entity) else {
+                continue;
+            };
+            let Some(terrain) = world.world().get::<Terrain>(e) else {
+                continue;
+            };
+            for key in terrain.data.dirty_tiles() {
+                if !key.is_lod0() {
+                    continue;
+                }
+                // A dirty key with no tile is a deletion; the streamer must drop
+                // and unpin it, or a phantom page survives that the store has
+                // nothing to page over. (The editor's twin carries the same arm,
+                // for the same reason.)
+                let Some(tile) = terrain.data.get_tile(key.coord) else {
+                    if entry.overlaid.remove(&key).is_some() || entry.streamer.is_pinned(key) {
+                        entry.streamer.unpin_and_evict(key);
+                        mirrored += 1;
+                    }
+                    continue;
+                };
+                let stamp = terrain.data.tile_version(key);
+                if entry.overlaid.get(&key) == Some(&stamp) && entry.streamer.is_pinned(key) {
+                    continue;
+                }
+                entry.streamer.pin_tile(key, tile.clone());
+                entry.overlaid.insert(key, stamp);
+                mirrored += 1;
+            }
+        }
+        if mirrored > 0 {
+            self.refresh_stats();
+        }
+        mirrored
+    }
+
+    /// How many tiles of `entity` have been mirrored from the sim — the engagement
+    /// counter a gate reads instead of pixels.
+    pub fn overlaid_len(&self, entity: Uuid) -> usize {
+        self.entries
+            .iter()
+            .find(|e| e.entity == entity)
+            .map(|e| e.overlaid.len())
+            .unwrap_or(0)
+    }
+
     pub fn sync_render(&mut self, camera_world: DVec3) {
         if self.entries.is_empty() {
             return;

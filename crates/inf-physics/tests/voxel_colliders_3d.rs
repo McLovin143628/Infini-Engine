@@ -271,3 +271,140 @@ fn chunk_identities_are_distinct_and_deterministic() {
         assert!(seen.insert(voxel_chunk_guid(a, k)), "{k:?} aliased");
     }
 }
+
+// ── B3 / B4: the mesher's key set, and the mesher's stamp ────────────────────
+
+/// Total collidable triangles across every chunk collider the bridge described.
+fn collider_triangles(volumes: &BTreeMap<Uuid, VoxelData>) -> usize {
+    let mut n = 0;
+    for data in volumes.values() {
+        for key in inf_voxel::mesh_keys_for(data) {
+            n += inf_voxel::mesh_chunk(data, key).triangle_count();
+        }
+    }
+    n
+}
+
+/// Triangles the bridge would have described under the **residency** key set —
+/// the first cut of P21.4, kept here as the measurement the fix is against.
+fn resident_only_triangles(volumes: &BTreeMap<Uuid, VoxelData>) -> usize {
+    let mut n = 0;
+    for data in volumes.values() {
+        for key in data.resident_keys() {
+            n += inf_voxel::mesh_chunk(data, key).triangle_count();
+        }
+    }
+    n
+}
+
+/// **B4 — the collider set is the MESHER's key set, not the resident set.**
+///
+/// A cell owned by chunk `K` has corners in `K + 1`, so the surface of a volume
+/// lives on `mesh_keys_for` — the resident set closed downward by one chunk on
+/// each axis, which `inf_voxel::mesh` calls "a correctness requirement, not
+/// defensive padding". Iterating `resident_keys()` instead leaves every −X/−Y/−Z
+/// face drawn and walk-through.
+///
+/// Asserted as an inequality *and* an equality: the two key sets really do differ
+/// on this fixture (so the test is not vacuous), and the bridge's set is the
+/// renderer's.
+#[test]
+fn the_collider_set_covers_every_triangle_the_renderer_draws() {
+    let world = empty_world();
+    let mut volumes = rock();
+    volumes
+        .get_mut(&CAVE)
+        .unwrap()
+        .apply_op(&VoxelOp::carve(VoxelShape::Sphere {
+            center: DVec3::new(8.0, 8.0, 8.0),
+            radius_m: 4.0,
+        }));
+
+    let drawn = collider_triangles(&volumes);
+    let resident_only = resident_only_triangles(&volumes);
+    assert!(
+        drawn > resident_only,
+        "the fixture cannot tell the two key sets apart ({drawn} vs {resident_only}) — \
+         this test would pass with the bug in place"
+    );
+
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world_with_voxels(&world, &volumes);
+
+    // Every mesh key with geometry got a collider; the closure keys are exactly
+    // the ones the resident walk would have missed.
+    let mut described = 0usize;
+    let mut missed_by_residency = 0usize;
+    let data = &volumes[&CAVE];
+    let resident: std::collections::BTreeSet<ChunkKey> = data.resident_keys().into_iter().collect();
+    for key in inf_voxel::mesh_keys_for(data) {
+        if inf_voxel::mesh_chunk(data, key).triangle_count() == 0 {
+            continue;
+        }
+        assert!(
+            bridge.collider_of(voxel_chunk_guid(CAVE, key)).is_some(),
+            "chunk {key:?} is drawn and has no collider"
+        );
+        described += 1;
+        if !resident.contains(&key) {
+            missed_by_residency += 1;
+        }
+    }
+    assert!(described > 0);
+    assert!(
+        missed_by_residency > 0,
+        "no closure key carried geometry here, so this fixture proves nothing"
+    );
+}
+
+/// **B3 — the stamp is the MESHER's key, not the chunk's own version.**
+///
+/// A mesh is a function of its 3×3×3 neighbourhood, so a chunk's own
+/// `chunk_version` cannot see a neighbour change. The sharpest case is an
+/// **eviction**, which `MeshSourceKey`'s own docs name: a non-resident neighbour
+/// reads as empty space, so chunk `K`'s surface really does move — and no stamp
+/// on `K` will ever record it.
+///
+/// Keyed on `chunk_version` this test fails with a *retained* collider: the wall
+/// against the evicted neighbour survives for ever.
+#[test]
+fn evicting_a_neighbour_re_describes_the_chunk_that_meshed_against_it() {
+    let world = empty_world();
+    // Two chunks of rock side by side, with a surface inside each.
+    let mut v = VoxelData::new(MPS);
+    for key in [ChunkKey::new(0, 0, 0), ChunkKey::new(1, 0, 0)] {
+        v.insert_chunk(key, VoxelChunk::solid(1));
+    }
+    v.clear_dirty();
+    let mut volumes = BTreeMap::from([(CAVE, v)]);
+
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world_with_voxels(&world, &volumes);
+    let before = bridge
+        .collider_of(key0())
+        .expect("chunk 0 has a surface against the outside air");
+    let version_before = volumes[&CAVE].chunk_version(ChunkKey::new(0, 0, 0));
+
+    // Evict the NEIGHBOUR. Chunk 0's own field does not move at all…
+    volumes
+        .get_mut(&CAVE)
+        .unwrap()
+        .evict_chunk(ChunkKey::new(1, 0, 0));
+    assert_eq!(
+        volumes[&CAVE].chunk_version(ChunkKey::new(0, 0, 0)),
+        version_before,
+        "the fixture moved chunk 0's own version, so this proves nothing"
+    );
+
+    // …but its SURFACE does: the seam it meshed against is now open air.
+    bridge.sync_from_world_with_voxels(&world, &volumes);
+    let after = bridge
+        .collider_of(key0())
+        .expect("chunk 0 still has a surface");
+    assert_ne!(
+        before, after,
+        "chunk 0 kept its collider after its neighbour was evicted — the stamp is \
+         the chunk's own version rather than the mesher's source key, which is the \
+         M3 defect P21.1 paid for, re-introduced in the physics bridge"
+    );
+}

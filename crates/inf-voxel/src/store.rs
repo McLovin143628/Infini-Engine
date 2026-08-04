@@ -90,6 +90,11 @@ pub struct VolumeSlot {
     /// not reached yet is *wanted* and not *resident*, and feeding residency back
     /// into the dead-band test would let the budget change the policy.
     wants: BTreeSet<ChunkKey>,
+    /// Which **simulation** chunk versions have been mirrored into this render
+    /// store (P21.4) — see [`VoxelVolumes::overlay_sim`]. Empty for every volume
+    /// nothing has carved at runtime, which is every volume in an unmodified
+    /// level.
+    overlaid: BTreeMap<ChunkKey, u64>,
 }
 
 impl VolumeSlot {
@@ -254,6 +259,7 @@ impl VoxelVolumes {
                 catalog,
                 grid,
                 wants: BTreeSet::new(),
+                overlaid: BTreeMap::new(),
             },
         );
         Ok(true)
@@ -366,6 +372,81 @@ impl VoxelVolumes {
             report.resident += slot.data.chunk_count();
         }
         report
+    }
+
+    /// **Mirror a SIMULATION volume's runtime carves into this render store**
+    /// (P21.4). Returns how many chunks were copied (`0` = nothing has been dug
+    /// since the last call, which is every frame of an unmodified level).
+    ///
+    /// # The direction, and why it is the legal one
+    ///
+    /// This store is **camera-paged**; the sim's map is not. The standing law is
+    /// that camera residency must never reach the simulation or the lighting —
+    /// `render → sim` is the forbidden direction, and nothing here goes that way.
+    /// `sim → render` is the opposite: the simulation is authoritative and the
+    /// renderer projects from it, exactly as it does for every `Transform` in the
+    /// world. Without it the shipped player **cannot see what it carves**: a
+    /// Blueprint digs, the physics bridge gives the new floor a collider, gameplay
+    /// stands on it — and the screen keeps drawing the rock that is no longer
+    /// there.
+    ///
+    /// # Baseline-on-first-sight, so residency is not defeated
+    ///
+    /// A sim volume is **fully resident** by construction ([`crate::sim_volume`]
+    /// decodes the whole `.inf_voxel` precisely so a fixed step cannot observe
+    /// paging). Copying every one of its chunks in would therefore make the render
+    /// store fully resident too, which is the camera budget deleted.
+    ///
+    /// So a key seen for the **first** time records the sim's stamp and copies
+    /// nothing: both sides were built from the same asset, so at `t = 0` they
+    /// already agree. Only a *later* divergence — a runtime carve moving the sim's
+    /// `chunk_version` — copies. A carve therefore costs its own chunks and
+    /// nothing else, and a level nobody digs costs one version compare per
+    /// resident chunk per frame.
+    ///
+    /// The copy goes in through [`VoxelData::insert_chunk`], which marks the chunk
+    /// **dirty** — and `sync_residency` refuses to evict a dirty chunk. That is
+    /// the pin, for free and by an existing rule: a carved chunk cannot be paged
+    /// out and re-read from the `.inf_voxel`, which would restore the rock the
+    /// player just removed.
+    ///
+    /// A volume whose grids disagree is skipped rather than mixed: two different
+    /// `voxel_size_m` are two different lattices, and a chunk copied between them
+    /// would land somewhere nobody dug.
+    pub fn overlay_sim(&mut self, entity: u128, sim: &VoxelData) -> usize {
+        let Some(slot) = self.slots.get_mut(&entity) else {
+            return 0;
+        };
+        if slot.data.voxel_size_m() != sim.voxel_size_m() {
+            return 0;
+        }
+        let mut copied = 0usize;
+        for (&key, chunk) in sim.chunks() {
+            let stamp = sim.chunk_version(key);
+            match slot.overlaid.get(&key) {
+                // Already mirrored at this version: nothing moved.
+                Some(&seen) if seen == stamp => continue,
+                // First sight: record the baseline, copy nothing.
+                None => {
+                    slot.overlaid.insert(key, stamp);
+                    continue;
+                }
+                Some(_) => {}
+            }
+            slot.data.insert_chunk(key, chunk.clone());
+            slot.overlaid.insert(key, stamp);
+            copied += 1;
+        }
+        copied
+    }
+
+    /// How many chunks of `entity` have been mirrored from the sim — the
+    /// engagement counter a gate reads instead of pixels.
+    pub fn overlaid_len(&self, entity: u128) -> usize {
+        self.slots
+            .get(&entity)
+            .map(|s| s.overlaid.len())
+            .unwrap_or(0)
     }
 
     /// Re-mesh whatever moved in an already-loaded slot — the seam a carve tool

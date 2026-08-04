@@ -6192,15 +6192,46 @@ tech uses. We are not voxelizing the planet.
 > save system is P22-and-later and is not half-built here.
 >
 > *Physics on carve, and nav honestly.* `PhysicsBridge3D::sync_from_world_with_voxels`
-> gives every resident chunk a static trimesh collider built by the **same**
-> `mesh_chunk` the renderer draws with, stamped per `(entity, chunk key)` on
-> `VoxelData::chunk_version` — the P19.5 `structure_stamps` pattern one level
+> gives every chunk of `mesh_keys_for` a static trimesh collider built by the
+> **same** `mesh_chunk` the renderer draws with, stamped per `(entity, chunk key)`
+> on `inf_voxel::source_key` — the P19.5 `structure_stamps` pattern one level
 > finer, because a cave is hundreds of chunks and a gameplay carve moves two. A
 > buried chunk meshes to nothing and costs no collider; a chunk carved hollow
 > *loses* its collider on the next sync, which is how a runtime carve becomes a
-> hole a body falls through. **There is no navigation system in this engine** —
-> not a nav mesh, not a nav volume, not a path query — so the plan bullet's "nav
-> updates on carve" has nothing to update. Said here rather than quietly dropped.
+> hole a body falls through.
+>
+> **Both of those nouns were wrong in the first cut, and both failed silently.**
+> The walk was `resident_keys()` while the renderer meshes `mesh_keys_for` — the
+> resident set *closed downward by one chunk on each axis*, which `inf_voxel::mesh`
+> calls "a correctness requirement, not defensive padding" — so 37 % of the
+> flagship sample's drawn surface had no collider at all (10 936 triangles drawn
+> against 6 874 collidable; the whole −X/−Y/−Z faces were walk-through). And the
+> stamp was the chunk's own `chunk_version`, which cannot see a neighbour being
+> carved or evicted: **the exact M3 defect P21.1 paid for in the renderer,
+> re-introduced in the physics bridge**, and reproduced as a phantom wall at
+> x = 15.50 over a doorway carved wholly inside the next chunk. Using the mesher's
+> own key set and the mesher's own stamp is also what makes the `inf-physics`
+> manifest's "the SAME mesher the renderer draws with" true rather than
+> aspirational.
+>
+> **There is no navigation system in this engine** — not a nav mesh, not a nav
+> volume, not a path query — so the plan bullet's "nav updates on carve" has
+> nothing to update. Said here rather than quietly dropped.
+>
+> *The v5 fields live at the TAIL, and the envelope is version-checked.* They were
+> first written **between `biome_sets` and `tick_hz`**, which is the bincode
+> positional law broken in the one way that does not announce itself: two empty
+> `Vec`s are two zero bytes, and two zero bytes are a perfectly valid `u32` + `bool`
+> — so a stale player decoded `tick_hz = 0`, reported `Loaded`, and Play silently
+> did nothing. Every envelope test in the tree used a payload whose new vectors were
+> **empty**, which is exactly the shape that cannot tell a mid-struct insertion from
+> a tail one. The fields are now after `windowed` with an append-only comment on
+> the seam, `ScenePayload::check_version` refuses a mismatch at the one place every
+> consumer passes through (nothing read `schema_version` at all before this), and
+> the round-trip test carries **non-empty** voxels and terrains. `write_msg` also
+> stops truncating its `u32` length: a payload now carries whole assets
+> uncompressed, so frame size is a function of the author's content and
+> `MAX_FRAME_LEN` is a bound a real level can reach.
 >
 > *The PIE voxel source, and the P16.3b2 deferral closed with it.* `ScenePayload`
 > v4 → v5 appends **`voxels`** and **`terrains`**. The first was the M9
@@ -6215,6 +6246,28 @@ tech uses. We are not voxelizing the planet.
 > too. `terrain_source_from_bytes` + `TerrainContent::Memory` is the whole
 > mechanism; the store is the one the dev-dir path already used, with the read
 > already done.
+>
+> *The shipped player must SEE what it carves (the sim→render fold).* Two seams
+> were missing, and they fail together: the render voxel store never read
+> `sim.voxel_volumes()`, and `TerrainStreamer::pin_tile`'s only production caller
+> was the **editor**. So a game dug, the collider opened, gameplay walked in — and
+> the screen kept drawing the rock, with the mouth sealed over on any asset-backed
+> terrain, which is the only kind that can carry a hole mask and therefore the
+> configuration every carved level ships in.
+>
+> `VoxelVolumes::overlay_sim` and `TerrainStreaming::overlay_sim_edits` close it,
+> both **`sim → render` only**. That direction is the legal one and it is worth
+> saying why, because the phase is full of the opposite rule: camera residency must
+> never reach the simulation or the lighting, and nothing here goes that way — the
+> simulation is authoritative and the renderer projects from it, exactly as it does
+> for every `Transform` in the world. The voxel half is **baseline-on-first-sight**
+> so it does not defeat the camera budget: a sim volume is fully resident by
+> construction, so a key seen for the first time records its stamp and copies
+> nothing (both sides came from the same asset and already agree), and only a later
+> divergence copies. The copy goes in through `insert_chunk`, which marks the chunk
+> dirty — and `sync_residency` refuses to evict a dirty chunk, so the pin is free
+> and by an existing rule. The terrain half is the editor's `overlay_document_edits`
+> with the sim world in place of the document.
 >
 > **PIE ships the SAVED cave, and the reason is stronger than symmetry.** Editor
 > *Simulate* does carry unsaved carves (`overlay_unsaved_carves` folds the editor
@@ -6233,26 +6286,54 @@ tech uses. We are not voxelizing the planet.
 > and does not warn, it runs a world whose caves are not there. Building it found
 > that the real `--pie` subprocess had been constructing its sim with a bare
 > `RuntimeSim::new` rather than `sim_from_built`, so it was **also** dropping the
-> state machines, the root-motion clips and the audio clips the in-process
-> reference kept: every gate since P11 compared a reference against a subprocess
-> that was not running the same world.
+> state machines, the root-motion clips and the audio clips.
+>
+> **What that did and did not mean, stated precisely** (the first draft of this
+> block overclaimed it, and the audit was right to say so). It did *not* mean every
+> gate since P11 was comparing two different worlds: those gates build **both**
+> sides in process, and the levels they run carry no state machine or audio that
+> the subprocess would have had to drop — the subprocess had nothing to lose, so
+> nothing diverged and nothing was hidden. What it meant is that the *capability*
+> was missing from the shipped `--pie` path and **no gate could have told us**,
+> because none of them ran it. That is the same shape as this batch's own law, one
+> level up: a boot path nobody exercises does not fail, it simply is not there. The
+> fix is `the_real_pie_subprocess_matches_the_in_process_reference`, which spawns
+> the actual binary — and which is mutation-proved: reverting the seam fails it.
 >
 > *The gate is `samples/phase21-cavern` + `runtime/inf-player/tests/phase21_gate.rs`.*
 > The plan's done-when sentence as committed content — a 128 m ridge on an
 > asset-backed terrain, a carved cave system with a real mouth, an excavated
 > foundation pit with its exactly-conserved spoil heap, an underground room under
-> the pit joined by a shaft, and a borer that keeps digging — with ten arms:
-> two loads bit-identical **including the field and the hole mask**; cooked ==
-> uncooked; **PIE == shipping on the runtime-carve trace, as `f64::to_bits`** (the
-> M9 debt, and the first voxel PIE-vs-shipping coverage this repository has ever
-> had); the workings surviving a round trip byte-identical with the room reachable
-> through the combined query; `runtime_carve` gated **both ways** on one world with
-> one flag flipped; a **silent** cook; both budget classes; a subprocess pool gate
-> at 1/2/4/8 comparing the trace **and the resulting field**; and the cold-region
-> count below. It is not a vacuous gate: it caught its own first defect — the
-> borer's IR used `math::add`, which is a **binary op** and not a `dispatch_math`
-> builtin, so the handler errored and the trace was 160 ticks of zero. The
-> anti-vacuity arm said so in one line.
+> the pit joined by a shaft, a borer that keeps digging, and a **boulder** resting
+> on the rock the borer is about to remove — with **thirteen** arms: two loads
+> bit-identical including the field and the hole mask; **the carve is real** (the
+> post-run field differs from the seeded asset where the drift runs and is
+> byte-identical everywhere else); **the collider world opens** (a ray down the
+> bore stops metres lower after it, and the boulder rests on rock, then falls into
+> the trench and lands on its floor); **the shipped player sees it** (the render
+> voxel store mirrors the carved chunks and the render terrain streamer pins the
+> holed tiles); **the real `--pie` subprocess** matches the in-process reference;
+> cooked == uncooked *on the field as well as the trace*; **PIE == shipping on the
+> runtime-carve trace, as `f64::to_bits`** (the M9 debt); the workings surviving a
+> round trip byte-identical with the room reachable through the combined query
+> *and* through `voxel.ground_height`; `runtime_carve` gated **both ways** on one
+> world with one flag flipped; a **silent** cook; both budget classes; a subprocess
+> pool gate at 1/2/4/8 comparing the trace **and the resulting field**; and the
+> cold-region count below.
+>
+> **Six of those arms exist because the first version of this gate certified a
+> no-op.** The audit mutated `runtime_carve` to apply the op to a *clone* — correct
+> cubic metres reported, real field never touched — and the gate stayed 10/10
+> green (and ran ten times faster, because nothing was being dug). A second
+> mutation deleted `gather_voxels` outright and it stayed green again. Nothing
+> compared the **field**, and nothing asked the **solver** what it contained; every
+> number the gate read was downstream of a report rather than of the world. Both
+> mutations now fail — the first on five arms, the second on four — and so does
+> reverting the `--pie` boot seam. The lesson is recorded in the laws below.
+>
+> It caught its own first defect too: the borer's IR used `math::add`, which is a
+> **binary op** and not a `dispatch_math` builtin, so the handler errored and the
+> trace was 160 ticks of zero. The anti-vacuity arm said so in one line.
 >
 > *The cold-region count, paid.* P21.3 fixed the paging and gated it in Ring 1;
 > the end-to-end claim — that a dig over a region **no camera has ever paged**
@@ -6285,10 +6366,30 @@ tech uses. We are not voxelizing the planet.
 > zero-and-a-log. **A camera-paged store may be read but never shipped**: the
 > difference between the Simulate overlay (dirty-gated, edit-history-driven) and
 > the PIE payload (the whole volume, residency-driven) is the whole reason one is
-> legal and the other is not. **`math.add` is a binary op, not a math builtin** —
+> legal and the other is not — while `sim → render` is the *permitted* direction
+> and had to be built, because a player that cannot see what it carves is not
+> shipping the feature. **`math.add` is a binary op, not a math builtin** —
 > hand-written IR that says `math::add` fails its handler silently, and a
-> zero-forever trace is what that looks like from outside. And, from the gate: **a
-> boot path that forgets an attachment does not crash — it agrees with itself.**
+> zero-forever trace is what that looks like from outside.
+>
+> And the four this batch's audit paid for, which are one law seen from four sides:
+>
+> * **A boot path that forgets an attachment does not crash — it agrees with
+>   itself.** A gate whose two sides are both built in process compares one function
+>   against itself; at least one arm has to cross the real process boundary.
+> * **Assert the WORLD, not the report.** Every number the first gate read — cubic
+>   metres, ground height, entity count — was downstream of a report, so a carve
+>   applied to a clone satisfied all of them. The field is what a carve *is*, and a
+>   gate that never compares it certifies a no-op.
+> * **A mesh is a function of its neighbourhood, so its identity is `source_key`
+>   and its key set is `mesh_keys_for`.** Written down in `inf_voxel::mesh` after
+>   P21.1 paid for it, and re-learned in the physics bridge five months later —
+>   which is the argument for using the mesher's own two functions rather than
+>   re-deriving "which chunks, and when did they change" per consumer.
+> * **An `#[serde(default)]` on a bincode struct buys nothing.** Positional means
+>   positional: new fields go at the tail, the version is checked at decode, and the
+>   round-trip test carries a **non-empty** value of the new field — an empty `Vec`
+>   is two zero bytes and will decode as whatever follows it.
 
 > **PHASE 21 SHIPPED LEDGER.**
 >
@@ -6328,9 +6429,22 @@ tech uses. We are not voxelizing the planet.
 > holed if *any* child is, if *all* are, or by majority, and each answer draws a
 > different distant silhouette.
 >
-> *New, carried out of P21.4.* **PIE previews the last SAVED cave** — the
-> dirty-chunk overlay described above is the fix and is not built. **`BeginPlay`
-> cannot see a voxel volume**: both hosts seed their map after constructing the sim
+> *New, carried out of P21.4.* **The render fold is stamp-gated, not free**: a
+> carve copies its own chunks into the render store every frame it changes them,
+> and a volume nobody digs costs one version compare per resident chunk per frame.
+> **The editor's Simulate fold runs from Ring 2** (`commands/sim.rs` overlays the
+> session's map into the viewport store after each tick) rather than from the
+> viewport pump, because the pump has no reference to a `SimSession`; it is
+> correct and it is not the same call site as the player's. **Windowed PIE now
+> carries its voxel assets** (it bound none before, so an embedded session drew no
+> caves at all while the headless one the gate drives drew them correctly) — and
+> the windowed path remains **human-verified**, as every windowed path here is.
+> **A PIE payload carries whole `.inf_voxel` / `.inf_terrain` assets
+> uncompressed**, against a 256 MiB frame cap that is now a real refusal rather
+> than a truncated length; compressing them, or streaming them out of band, is the
+> open question a level near the roadmap's ~1 GB target will force. **PIE previews
+> the last SAVED cave** — the dirty-chunk overlay described above is the fix and is
+> not built. **`BeginPlay` cannot see a voxel volume**: both hosts seed their map after constructing the sim
 > (which is where `BeginPlay` runs), so a carve or a hole-query there refuses; the
 > workaround is deferring `BeginPlay`, which changes when *every* handler in the
 > engine runs, and the node kit says "put the first dig on Tick" instead. **A

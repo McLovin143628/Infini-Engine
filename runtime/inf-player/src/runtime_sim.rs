@@ -515,6 +515,11 @@ impl RuntimeSim {
     /// call it at the same place in their frame so a scripted camera path yields
     /// the same resident-set trace either way.
     pub fn sync_render_terrain(&mut self, camera_world: DVec3) {
+        // The runtime hole mask first (P21.4): a carve that opened a mouth in the
+        // sim's heightfield has to reach the render streamer, or an asset-backed
+        // terrain keeps drawing solid ground over it. `sim → render` only — the
+        // camera below never reaches back.
+        self.terrain.overlay_sim_edits(&self.world);
         self.terrain.sync_render(camera_world);
     }
 
@@ -530,6 +535,16 @@ impl RuntimeSim {
     /// to perturb the step that produced them.
     pub fn bridge3d(&self) -> &PhysicsBridge3D {
         &self.bridge3d
+    }
+
+    /// Mutable access to the 3D bridge, for a **scene query** (P21.4).
+    ///
+    /// `cast_ray` needs `&mut` because rapier's query pipeline updates itself
+    /// lazily. Exposed so a gate can ask the *collider* world what it contains —
+    /// which is the only way to tell a carve that reached the solver from one that
+    /// only moved four floats a Blueprint recorded.
+    pub fn bridge3d_mut(&mut self) -> &mut PhysicsBridge3D {
+        &mut self.bridge3d
     }
 
     pub fn logs(&self) -> &[String] {
@@ -2041,6 +2056,16 @@ fn terrain_height_at(world: &EcsWorld, voxels: &BTreeMap<Uuid, VoxelData>, x: f6
 /// [`inf_voxel::apply_surface_cut`] — the *same* exactly-invertible rule the
 /// editor's carve brush runs — over **every** terrain in the world, in `Guid`
 /// order.
+///
+/// That opens the mouth for **gameplay** (`terrain.height_at` stops answering, the
+/// combined query falls to the cave floor, the physics bridge rebuilds the chunk
+/// colliders). Making it *visible* is a second seam and was missing from the first
+/// cut of P21.4: on an asset-backed terrain — the only kind that can carry a hole
+/// mask, and therefore the configuration every carved level ships in — the render
+/// side streams its own tiles out of the `.inf_terrain` and never saw this edit.
+/// `TerrainStreaming::overlay_sim_edits` (player) pins the dirty tiles into the
+/// render streamer, and `VoxelVolumes::overlay_sim` does the same for the chunks;
+/// both run `sim → render` only.
 ///
 /// The difference from the editor is that **nothing here is persisted, and that
 /// changes which refusals apply.** The editor refuses to carve an *inline* terrain

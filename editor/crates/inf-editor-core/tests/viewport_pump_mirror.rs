@@ -507,21 +507,46 @@ fn the_projection_re_meshes_every_volume_it_projects() {
                  (SceneDoc::edit_dig) would never be re-meshed and the cave would be \
                  invisible, not late",
     );
-    // Inside the projection, and BEFORE the read-only entity walk that consumes
-    // the meshes it produces.
-    let walk = src[sync..]
+    // It runs BEFORE the entity walk that consumes the meshes it produces, and the
+    // walk is really downstream (`clear` then refill), so "before" is a claim about
+    // order rather than a coincidence of two offsets.
+    let clear = src
         .find("self.scene.instances.clear();")
         .expect("the projection no longer clears its instance list — was it renamed?");
-    assert!(walk > 0);
-    // …and `sync_voxels` itself ends in the Ring-0 pass that re-meshes.
-    let body = src
+    assert!(
+        sync < clear,
+        "`sync_voxels` runs AFTER the projection has begun rebuilding its lists, so \
+         a frame draws the meshes of the previous one"
+    );
+
+    // …and `sync_voxels` itself reaches the Ring-0 pass that re-meshes —
+    // **unconditionally**. A body that early-returns before `sync_camera` passes a
+    // bare `contains` check and produces exactly the failure this gate is named
+    // for: a dug cave that is permanently invisible rather than one frame late.
+    // (Verified: with the `contains` check alone, inserting `return;` at the top of
+    // `sync_voxels` left this test green.)
+    let body_at = src
         .find("fn sync_voxels(&mut self, doc: &SceneDoc) {")
         .expect("`sync_voxels` was renamed");
-    let after = &src[body..];
+    let after = &src[body_at..];
     let end = after.find("\n    fn ").unwrap_or(after.len());
-    assert!(
-        after[..end].contains("sync_camera("),
-        "`sync_voxels` no longer calls `sync_camera`, which is the pass that \
-         re-meshes what a deferred dig changed"
-    );
+    let body = &after[..end];
+    let camera = body
+        .find("sync_camera(")
+        .expect("`sync_voxels` no longer calls `sync_camera`, the pass that re-meshes");
+    // Every `return` upstream of the re-mesh must be a **guard** — a
+    // `let … else { return; }` on a poisoned lock, which is the house tolerance for
+    // a thread that already panicked mid-carve. An *unconditional* one is the
+    // failure this gate is named for, and a bare `contains("sync_camera")` cannot
+    // tell the two apart.
+    let prefix = &body[..camera];
+    for (i, _) in prefix.match_indices("return") {
+        let lead = &prefix[i.saturating_sub(60)..i];
+        assert!(
+            lead.contains("else {"),
+            "`sync_voxels` returns unconditionally before it reaches `sync_camera`, \
+             so a deferred dig may never be re-meshed at all — a dug cave would be \
+             permanently invisible rather than one frame late"
+        );
+    }
 }

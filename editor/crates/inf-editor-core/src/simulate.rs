@@ -2026,6 +2026,16 @@ fn terrain_height_at(world: &EcsWorld, voxels: &BTreeMap<Uuid, VoxelData>, x: f6
 /// editor's carve brush runs — over **every** terrain in the world, in `Guid`
 /// order.
 ///
+/// That opens the mouth for **gameplay** (`terrain.height_at` stops answering, the
+/// combined query falls to the cave floor, the physics bridge rebuilds the chunk
+/// colliders). Making it *visible* is a second seam and was missing from the first
+/// cut of P21.4: on an asset-backed terrain — the only kind that can carry a hole
+/// mask, and therefore the configuration every carved level ships in — the render
+/// side streams its own tiles out of the `.inf_terrain` and never saw this edit.
+/// `TerrainStreaming::overlay_sim_edits` (player) pins the dirty tiles into the
+/// render streamer, and `VoxelVolumes::overlay_sim` does the same for the chunks;
+/// both run `sim → render` only.
+///
 /// The difference from the editor is that **nothing here is persisted, and that
 /// changes which refusals apply.** The editor refuses to carve an *inline* terrain
 /// (`CarveRefusal::InlineTerrain`) because scene schema v19 cannot carry a hole
