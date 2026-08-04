@@ -288,19 +288,19 @@ fn a_hole_delta_round_trips_byte_identically() {
     let carved = blob(&t);
     assert_ne!(carved, clean);
 
-    t.revert_hole_delta(&delta);
+    assert_eq!(t.revert_hole_delta(&delta), 0);
     assert!(
         t.get_tile((0, 0)).unwrap().holes_are_default(),
         "undo left the materialized mask behind"
     );
     assert_eq!(blob(&t), clean, "undo was not byte-identical");
 
-    t.apply_hole_delta(&delta);
+    assert_eq!(t.apply_hole_delta(&delta), 0);
     assert_eq!(blob(&t), carved, "redo was not byte-identical");
 
     // A second revert is idempotent, and a wash produces no delta at all.
-    t.revert_hole_delta(&delta);
-    t.revert_hole_delta(&delta);
+    assert_eq!(t.revert_hole_delta(&delta), 0);
+    assert_eq!(t.revert_hole_delta(&delta), 0);
     assert_eq!(blob(&t), clean);
 
     let mut wash = HoleDeltaBuilder::new();
@@ -335,7 +335,7 @@ fn the_two_deltas_do_not_interfere() {
     }
     let hole_delta = b.finalize(&t);
 
-    t.revert_hole_delta(&hole_delta);
+    assert_eq!(t.revert_hole_delta(&hole_delta), 0);
     assert_eq!(
         blob(&t),
         after_sculpt,

@@ -5977,17 +5977,56 @@ tech uses. We are not voxelizing the planet.
 > `EditCommand` labelled "Excavate", and one Ctrl+Z takes back all three, byte-identically, in
 > the chunks *and* in the terrain tiles. `edit_carve_path` is now this with spoil discarded.
 >
+> *The audit round (four blockers, all measured).* **B1** — the spoil growth loop multiplied three
+> `i32`-clamped spans unchecked, so a count past ~4.08 M panicked *while holding the
+> shared-volumes guard, mid-transaction, with the cut already in the world and no `EditCommand`
+> describing it*: the exact `a4e5844` worst case. Now `checked_mul`, the loop **stops** the moment
+> a step outgrows the cap, and `edit_commit_dig` carries the size gate the brush path never had
+> (a stroke's dabs accumulate across frames with no ceiling, so the only thing left to refuse is
+> the heap — `SPOIL_TOO_LARGE_REFUSAL` says so instead of claiming nothing was cut). **B2** — the
+> trench had three doc blocks and a tooltip promising the sky rule and no `surface` closure at
+> all; a 1.5 m ridge mid-run left 11 of 51 ground samples outside the cut. Legs now read the
+> ground over their own rotated footprint and are **horizontal**, which also deletes the
+> diving-leg frame bug (a vertical shift on a pitched leg leaked into the along-run axis and put
+> the first waypoint outside its own leg). **B3** — *the dig path pages its footprint first*, now
+> a rule in three places: the box drag pages before it probes (it was probing `height_at`, whose
+> `None` on a non-resident tile reads as "no ground", so two cameras dug two pits), the Auto spoil
+> site's ground is paged before the rule reads it, and `carve_into`/`spoil_into` page the voxel
+> chunks — rock in an unpaged chunk was not removed, not counted and not spoiled, **and
+> conservation balanced anyway**, which is what hid it. **B4** — the sky-rule gate was vacuous:
+> its fixture was monotone over its own rectangle, so the entire probe loop could be deleted and
+> the test still passed. The fixture now has an interior ridge and an interior hollow, and both
+> mutations (probe loop no-op; pitch coarsened) fail it.
+>
+> *Also this round.* The heap could be placed **back into its own hole** — the default clearance
+> is the pile's *analytic* radius and the real footprint is 81 % wider, which refilled 59 of 729
+> excavated samples with conservation balancing perfectly throughout. `SpoilPlan::exclude` makes
+> it structural: the cut's cells are not candidates, exactly as solid cells are not. The dab cap
+> became a real bound (it was `.take(32)` on a fully-materialized list — 2 M points, 80 MB, 27 ms
+> per frame at the spacing floor). `cbrt_det(∞)` no longer spins. Probe semantics are now a
+> **pitch** (0.5 m, ceiling 129/axis) rather than a fixed count documented as a pitch.
+>
 > *Honest scope.* Spoil is **voxel additions only** — no instanced debris, which is P22's
 > fracture/destruction concern and is written into the bullet above rather than implied.
 > `SpoilMode::Site` **falls back to the default site** when no marker has been picked, and says
-> so on the readout. The pit's open-to-the-sky rule reads the ground at 33² probes, so terrain
-> that spikes between two probes by more than 25 cm can keep a sliver of surface on the rim —
-> documented at `BOX_CUT_PROBES`, fixed by re-dragging. A trench bend sharper than a right angle
-> keeps a small un-cut notch on its outside (the miter allowance covers `tan(θ/2) ≤ 1`). A
-> steeply-diving trench leg is shallower *vertically* than `depth_m` by the cosine of its pitch,
-> because its section stays perpendicular to the run — which is what a road cut looks like.
-> Viewport interaction is **human-verified**, as every native-viewport gesture in this repository
-> is. No schema bump (v19 stands), no `.inf_terrain` bump, no new dependency, no new golden.
+> so on the readout. The sky rule's probe pitch is 0.5 m up to 64 m on an axis, past which it
+> coarsens in proportion — a feature narrower than the coarsened pitch can still be missed, which
+> is where the guarantee stops and `MAX_GROUND_PROBES` says so. A long trench leg over a big
+> elevation change becomes a tall box and over-digs its low end, exactly as a box cut does; the
+> fix is another waypoint. **A dig at the `MAX_DIG_SAMPLES` ceiling is not interactive**: mouse-up
+> on 2 M samples spends ≈1.3 s under the volumes lock (4 M ≈3.1 s) because the cut, the spoil
+> search and the re-mesh all run there. Decided rather than hidden — the ceiling stays, the
+> number is on the constant, and *make a big dig incremental (re-mesh off-lock)* is ledgered for
+> P21.4. Viewport interaction is **human-verified**, as every native-viewport gesture in this
+> repository is. No schema bump (v19 stands), no `.inf_terrain` bump, no new dependency, no new
+> golden.
+>
+> *Laws this batch paid for.* **Conservation can hide a bug rather than catch one** — a heap in
+> its own pit and a cut over unpaged rock both balance perfectly, so an identity gate needs a
+> *placement* gate beside it. **A `.take(n)` is a filter, not a bound.** **The dig path pages its
+> footprint before it reads it** — camera residency never decides what a committed edit contains,
+> now in its third phase. And **a fixture whose extremes are its corners cannot test a probe**:
+> the seeded picks already found them.
 - **P21.4 Runtime carving** — 1. the same ops as Blueprint nodes, deterministic and
   replay-gated, so games can dig at runtime; 2. physics and nav updates on carve.
 

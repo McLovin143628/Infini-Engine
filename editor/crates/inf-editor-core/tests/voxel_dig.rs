@@ -66,8 +66,24 @@ fn write_rock(dir: &Path, name: &str, guid: Uuid) {
 }
 
 /// A document with one terrain (flat at [`GRADE_M`]) and one voxel volume bound
-/// to the two-strata block, plus the shared store holding it.
+/// to the two-strata block, plus the shared store holding it — **fully paged**.
 fn fixture(asset_backed: bool) -> (SceneDoc, SharedVoxelVolumes, Uuid, Uuid, tempfile::TempDir) {
+    build_fixture(asset_backed, true)
+}
+
+/// …and the same level with the volume **bound but not paged**: every chunk is
+/// in the `.inf_voxel` and none of them is in memory, which is the state a
+/// camera that has never been near the dig leaves behind.
+fn unpaged_fixture(
+    asset_backed: bool,
+) -> (SceneDoc, SharedVoxelVolumes, Uuid, Uuid, tempfile::TempDir) {
+    build_fixture(asset_backed, false)
+}
+
+fn build_fixture(
+    asset_backed: bool,
+    page: bool,
+) -> (SceneDoc, SharedVoxelVolumes, Uuid, Uuid, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let asset = Uuid::from_u128(0x2133_0001);
     write_rock(dir.path(), "Rock.inf_voxel", asset);
@@ -98,15 +114,24 @@ fn fixture(asset_backed: bool) -> (SceneDoc, SharedVoxelVolumes, Uuid, Uuid, tem
         let mut v = volumes.lock().unwrap();
         v.set_content_root(Some(dir.path().to_path_buf()));
         assert!(v.ensure(volume, &VoxelVolume::from_asset(asset)));
-        let report = v.sync_camera(
-            DVec3::splat(4.0),
-            &VoxelWantsParams {
-                radius_m: 1000.0,
-                hysteresis: 0.0,
-            },
-            VoxelStreamBudget::default(),
-        );
-        assert!(report.loaded > 0, "the fixture volume must page in");
+        if page {
+            let report = v.sync_camera(
+                DVec3::splat(4.0),
+                &VoxelWantsParams {
+                    radius_m: 1000.0,
+                    hysteresis: 0.0,
+                },
+                VoxelStreamBudget::default(),
+            );
+            assert!(report.loaded > 0, "the fixture volume must page in");
+        } else {
+            // Binding pages nothing (P21.2), so this really is the empty state.
+            assert_eq!(
+                v.slot(volume).map(|s| s.data.chunk_count()),
+                Some(0),
+                "the unpaged fixture is not unpaged"
+            );
+        }
     }
     (doc, volumes, terrain, volume, dir)
 }
@@ -211,6 +236,7 @@ fn every_dig_spoils_exactly_what_it_removed_per_material() {
                     ],
                     1.0,
                     2.0,
+                    surface_of(doc),
                 )
                 .into_iter()
                 .map(VoxelOp::carve)
@@ -578,7 +604,7 @@ fn an_oversized_dig_is_refused_before_it_cuts() {
     let long: Vec<DVec3> = (0..40)
         .map(|i| DVec3::new(i as f64 * 30.0, y, 0.0))
         .collect();
-    let legs: Vec<VoxelOp> = trench_shapes(&long, 6.0, 8.0)
+    let legs: Vec<VoxelOp> = trench_shapes(&long, 6.0, 8.0, surface_of(&doc))
         .into_iter()
         .map(VoxelOp::carve)
         .collect();
@@ -600,4 +626,166 @@ fn a_dig_into_an_unloaded_volume_is_refused_and_places_no_spoil() {
         .edit_dig(Uuid::from_u128(0xDEAD), &volumes, &ops, SpoilChoice::Auto)
         .expect_err("no such volume");
     assert_eq!(err, CarveRefusal::VolumeNotLoaded);
+}
+
+// ── the dig pages its own footprint (P21.3 audit, B3) ───────────────────────
+
+/// **THE PAGING GATE.** A dig over rock the camera never visited must page it,
+/// cut it, count it and spoil it — identically to the same dig on a fully-paged
+/// volume.
+///
+/// Before this, `removed[m]` counted only *resident* samples and nothing on the
+/// dig path called `request_chunks`. Rock in an unpaged chunk was not removed,
+/// not counted and not displaced — and **conservation still balanced**, because
+/// zero equals zero. That is what made it invisible: every number the tools
+/// quote agreed with every other one while the pit was a different shape
+/// depending on where the author had flown.
+#[test]
+fn a_dig_pages_the_rock_it_cuts_and_counts_all_of_it() {
+    let dig = |mut doc: SceneDoc, volumes: SharedVoxelVolumes, volume: Uuid| {
+        let ops = vec![pit(&doc, (2.0, 2.0), (7.0, 7.0), 3.0)];
+        let tally = doc
+            .edit_dig(volume, &volumes, &ops, SpoilChoice::Auto)
+            .expect("allowed");
+        (tally, volume_image(&volumes, volume))
+    };
+
+    let (doc, volumes, _t, volume, _d) = fixture(true);
+    let (paged, paged_image) = dig(doc, volumes, volume);
+
+    let (doc, volumes, _t, volume, _d) = unpaged_fixture(true);
+    let (cold, cold_image) = dig(doc, volumes, volume);
+
+    assert!(paged.carved > 0, "the fixture pit removed nothing");
+    assert_eq!(
+        cold.carved_by_material, paged.carved_by_material,
+        "a dig over unpaged rock removed a different amount than the same dig over paged rock \
+         — camera residency decided what the level contains"
+    );
+    assert!(cold.conserved(), "{cold:?}");
+    assert_eq!(
+        cold.spoiled_by_material, paged.spoiled_by_material,
+        "the heaps differ"
+    );
+    // …and the chunks the two produced are the same bytes, so it is not only the
+    // counts that agree.
+    assert_eq!(
+        cold_image, paged_image,
+        "two identical digs produced different geometry"
+    );
+}
+
+/// **The heap does not move with the camera.** The `Auto` site drops the pile
+/// onto `ground_surface_y`, which reads resident tiles — so without paging, a
+/// session that had flown over the spoil site piled at a different height than
+/// one that had not.
+#[test]
+fn the_auto_heap_is_identical_whatever_the_camera_visited() {
+    let mut images = Vec::new();
+    for far_first in [false, true] {
+        let (mut doc, volumes, _t, volume, _d) = unpaged_fixture(true);
+        if far_first {
+            // A camera pass that pages a *different* neighbourhood first.
+            volumes.lock().unwrap().sync_camera(
+                DVec3::new(60.0, 20.0, 60.0),
+                &VoxelWantsParams {
+                    radius_m: 24.0,
+                    hysteresis: 0.0,
+                },
+                VoxelStreamBudget::default(),
+            );
+        }
+        let ops = vec![pit(&doc, (3.0, 3.0), (8.0, 8.0), 2.5)];
+        let tally = doc
+            .edit_dig(volume, &volumes, &ops, SpoilChoice::Auto)
+            .expect("allowed");
+        assert!(tally.conserved(), "{tally:?}");
+        images.push(volume_image(&volumes, volume));
+    }
+    assert_eq!(
+        images[0], images[1],
+        "the committed dig depends on where the camera had been"
+    );
+}
+
+/// **The heap never lands back in the hole** (P21.3 audit).
+///
+/// `default_spoil_site` clears the cut by the pile's *analytic* radius, and the
+/// real footprint is wider — 81 % wider on the dig the audit measured, which put
+/// 59 of 729 excavated samples straight back into the pit. Conservation balanced
+/// throughout, because a refilled pit is a perfectly conserved place to put
+/// soil, so nothing in the ledger could ever have caught it.
+///
+/// The site here is the pit's own eastern **rim**, which is the author-picked
+/// case where the intrusion is largest and the one `SpoilChoice::At` makes
+/// reachable in one click. The non-vacuity half is at the bottom: the same dig
+/// with no exclusion really does refill.
+#[test]
+fn no_spoil_lands_back_inside_the_pit() {
+    fn refilled_samples(volumes: &SharedVoxelVolumes, volume: Uuid, lo: DVec3, hi: DVec3) -> usize {
+        let v = volumes.lock().unwrap();
+        let data = &v.slot(volume).unwrap().data;
+        let mut n = 0;
+        for (&key, c) in data.chunks() {
+            for k in 0..inf_voxel::CHUNK_DIM {
+                for j in 0..inf_voxel::CHUNK_DIM {
+                    for i in 0..inf_voxel::CHUNK_DIM {
+                        if c.sample(i, j, k) >= 0.0 {
+                            continue;
+                        }
+                        let b = key.base_sample();
+                        let w = data.grid_to_world(DVec3::new(
+                            (b[0] + i as i32) as f64,
+                            (b[1] + j as i32) as f64,
+                            (b[2] + k as i32) as f64,
+                        ));
+                        if w.cmpge(lo).all() && w.cmple(hi).all() {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    let (mut doc, volumes, _t, volume, _d) = fixture(true);
+    let op = pit(&doc, (1.0, 1.0), (9.0, 9.0), 3.5);
+    let (lo, hi) = op.shape.aabb_m(0.0);
+    // The site is ON the pit's eastern rim, at grade: a heap standing here leans
+    // straight back over the hole.
+    let site = DVec3::new(hi.x, GRADE_M, (lo.z + hi.z) * 0.5);
+    let tally = doc
+        .edit_dig(volume, &volumes, &[op], SpoilChoice::At(site))
+        .expect("allowed");
+    assert!(tally.conserved() && tally.spoiled() > 200, "{tally:?}");
+    assert_eq!(
+        refilled_samples(&volumes, volume, lo, hi),
+        0,
+        "spoil was placed back inside the pit it came out of"
+    );
+
+    // **Non-vacuity**: the identical dig with the exclusion removed really does
+    // refill the pit, so the assertion above is a property of the fix and not of
+    // the fixture. Ring 0's `place_spoil_into` is called directly here because
+    // the transaction always excludes.
+    let (mut doc2, volumes2, _t2, volume2, _d2) = fixture(true);
+    let op2 = pit(&doc2, (1.0, 1.0), (9.0, 9.0), 3.5);
+    let removed = doc2
+        .edit_dig(volume2, &volumes2, &[op2], SpoilChoice::Discard)
+        .expect("allowed")
+        .carved_by_material;
+    {
+        let mut v = volumes2.lock().unwrap();
+        let mut b = inf_voxel::VoxelDeltaBuilder::new();
+        let r = v
+            .spoil_into(volume2, &inf_voxel::SpoilPlan::new(removed, site), &mut b)
+            .expect("the volume is loaded");
+        assert!(r.is_exact(), "{r:?}");
+    }
+    assert!(
+        refilled_samples(&volumes2, volume2, lo, hi) > 0,
+        "an UNEXCLUDED heap on the rim did not refill the pit — the gate above is vacuous, \
+         and the fixture needs a bigger dig or a closer site"
+    );
 }

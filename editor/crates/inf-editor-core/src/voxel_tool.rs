@@ -27,9 +27,15 @@
 //! buried box: **the cut is open to the sky**. Its top is
 //! [`BOX_CUT_TOP_MARGIN_M`] above the *highest* ground it spans, not above the
 //! point the author happened to click, so a pit dragged across a slope has no
-//! lid of surviving hillside over its uphill half. Its floor is the same margin
-//! below the *lowest* ground it spans, so "3 m deep" means three metres below
-//! grade everywhere rather than three metres below one corner.
+//! lid of surviving hillside over its uphill half. Its floor is `depth` below
+//! the *lowest* ground it spans, so "3 m deep" means three metres below grade
+//! everywhere rather than three metres below one corner.
+//!
+//! The box and the trench each read that ground themselves, through a `surface`
+//! closure the caller supplies ([`box_cut_plan`], [`trench_shapes`]); the brush
+//! gets it from the pick under each dab. The trench's half of that arrived in
+//! the P21.3 audit round — it had the docs and not the rule, and cut a run
+//! roofed by any ridge between two waypoints.
 //!
 //! # Units
 //!
@@ -68,16 +74,63 @@ use uuid::Uuid;
 /// past any float slop and small enough that the cut does not visibly overshoot.
 pub const BOX_CUT_TOP_MARGIN_M: f64 = 0.25;
 
-/// Probe lattice resolution per axis for [`box_cut_plan`]'s surface scan.
+/// The ground-probe **pitch**, metres — how finely a cut reads the surface it
+/// has to clear.
 ///
-/// **The documented limit of the pit's "open to the sky" rule.** The plan reads
-/// the ground at `BOX_CUT_PROBES²` points across the rectangle; terrain that
-/// rises between two probes by more than [`BOX_CUT_TOP_MARGIN_M`] can keep a
-/// sliver of surface over the pit there. At 33 probes a 30 m pit samples every
-/// 94 cm — finer than the metre-per-sample heightfields this engine authors — so
-/// the case needs a deliberately spiky terrain to reach, and the fix is to
-/// re-drag rather than to fail.
-pub const BOX_CUT_PROBES: u32 = 33;
+/// # Pitch, not count (P21.3 audit)
+///
+/// This was a fixed *count* (33 per axis) documented as though it were a pitch,
+/// which is only the same thing at one size: a 200 m pit probed every 6.25 m
+/// misses a 0.6 m ridge and puts its roof 2.75 m too low, while the doc promised
+/// "94 cm". A pitch keeps the **promise** — *the cut clears any ground feature
+/// wider than [`GROUND_PROBE_PITCH_M`]* — at every size an author can drag, and
+/// the count follows from the drag rather than the other way round.
+///
+/// Half a metre is finer than the metre-per-sample heightfields this engine
+/// authors, so on a level whose terrain the editor produced the scan is exact:
+/// every heightfield sample under the cut is probed at least once.
+pub const GROUND_PROBE_PITCH_M: f64 = 0.5;
+
+/// Ceiling on probes per axis, so a kilometre-wide drag cannot ask for a
+/// million-point scan.
+///
+/// **This is where the guarantee above stops, and it is the honest statement of
+/// the limit**: past `MAX_GROUND_PROBES · GROUND_PROBE_PITCH_M` = 64 m on an
+/// axis the pitch coarsens in proportion, and a feature narrower than the
+/// coarsened pitch can be missed. A 200 m pit therefore probes every 1.56 m, not
+/// every 6.25 m as the fixed count gave — four times finer, and still a stated
+/// limit rather than a promise.
+pub const MAX_GROUND_PROBES: u32 = 129;
+
+/// Ground extremes over an axis-aligned rectangle, seeded with the caller's own
+/// picks so a cut always contains the points the author actually aimed at.
+///
+/// Returns `(lowest, highest)`. Probes at [`GROUND_PROBE_PITCH_M`] up to
+/// [`MAX_GROUND_PROBES`] per axis; `None` answers (no terrain, a hole, past the
+/// world's edge) are skipped rather than folded in, which is what lets a pit be
+/// dragged over a cave mouth or off the edge of the world.
+pub fn ground_extremes(
+    lo: DVec2,
+    hi: DVec2,
+    seed: (f64, f64),
+    surface: &impl Fn(f64, f64) -> Option<f64>,
+) -> (f64, f64) {
+    let (mut min_h, mut max_h) = seed;
+    let (nx, nz) = (probe_steps(hi.x - lo.x), probe_steps(hi.y - lo.y));
+    for j in 0..=nz {
+        let z = lo.y + (hi.y - lo.y) * j as f64 / nz as f64;
+        for i in 0..=nx {
+            let x = lo.x + (hi.x - lo.x) * i as f64 / nx as f64;
+            let Some(h) = surface(x, z) else { continue };
+            if !h.is_finite() {
+                continue;
+            }
+            min_h = min_h.min(h);
+            max_h = max_h.max(h);
+        }
+    }
+    (min_h, max_h)
+}
 
 /// The smallest extent a cut may have on any axis, metres.
 ///
@@ -166,12 +219,75 @@ pub const MIN_DAB_SPACING_M: f64 = 0.05;
 /// polyline. The 2D function is the one that decides *where* the dabs fall; this
 /// one only decides what a distance means.
 pub fn dab_centers(path: &[DVec3], spacing: f64) -> Vec<DVec3> {
+    dab_centers_capped(path, spacing, usize::MAX)
+}
+
+/// [`dab_centers`], **bounded before it allocates** — the door an interactive
+/// brush uses (P21.3 audit).
+///
+/// A per-frame `.take(n)` on the full list is a *filter*, not a bound: the whole
+/// list is built first. At the [`MIN_DAB_SPACING_M`] floor a drag whose pick
+/// landed far away — and `pick_world_point` admits a ray parameter out to 1e6 —
+/// asks for two million points, eighty megabytes and twenty-seven milliseconds,
+/// every frame, to keep thirty-two of them. So the *path* is trimmed to
+/// `max_dabs · spacing` of arc length first, and the resampler never sees the
+/// rest. The remainder rides to the next frame from the last dab actually
+/// placed, exactly as it did before, so a long drag is still continuous.
+///
+/// Returns at most `max_dabs + 1` points (the first is the path's own start,
+/// which callers `skip`).
+pub fn dab_centers_capped(path: &[DVec3], spacing: f64, max_dabs: usize) -> Vec<DVec3> {
     if path.is_empty() {
         return Vec::new();
     }
     if path.len() == 1 || spacing.is_nan() || spacing <= 0.0 || spacing.is_infinite() {
         return path.to_vec();
     }
+    // Trim the path to the arc length the cap allows, BEFORE resampling it.
+    let total: f64 = path
+        .windows(2)
+        .map(|w| (w[1] - w[0]).length())
+        .filter(|d| d.is_finite())
+        .sum();
+    let allowed = (max_dabs as f64).saturating_mul_f64(spacing);
+    if allowed < total {
+        let end = point_at_arc(path, allowed);
+        let mut trimmed: Vec<DVec3> = Vec::new();
+        let mut walked = 0.0;
+        trimmed.push(path[0]);
+        for w in path.windows(2) {
+            let seg = (w[1] - w[0]).length();
+            if !seg.is_finite() || seg <= 0.0 {
+                continue;
+            }
+            if walked + seg >= allowed {
+                break;
+            }
+            walked += seg;
+            trimmed.push(w[1]);
+        }
+        trimmed.push(end);
+        return dab_centers_unbounded(&trimmed, spacing);
+    }
+    dab_centers_unbounded(path, spacing)
+}
+
+/// A helper so `usize::MAX * spacing` cannot become `inf` and then `NaN`.
+trait SaturatingMulF64 {
+    fn saturating_mul_f64(self, rhs: f64) -> f64;
+}
+impl SaturatingMulF64 for f64 {
+    fn saturating_mul_f64(self, rhs: f64) -> f64 {
+        let v = self * rhs;
+        if v.is_finite() {
+            v
+        } else {
+            f64::MAX
+        }
+    }
+}
+
+fn dab_centers_unbounded(path: &[DVec3], spacing: f64) -> Vec<DVec3> {
     // Cumulative arc length, as a degenerate 2D path along +X. `dab_positions`
     // then does all the work.
     let mut arc = Vec::with_capacity(path.len());
@@ -263,23 +379,12 @@ pub fn box_cut_plan(
     }
     // Seeded with the two picks so the pit always contains the ground the author
     // actually aimed at, whatever the probe lattice finds.
-    let mut min_h = a.y.min(b.y);
-    let mut max_h = a.y.max(b.y);
-    let steps = BOX_CUT_PROBES.max(2) - 1;
-    for j in 0..=steps {
-        let z = lo_z + size_z_m * j as f64 / steps as f64;
-        for i in 0..=steps {
-            let x = lo_x + size_x_m * i as f64 / steps as f64;
-            let Some(h) = surface(x, z) else {
-                continue;
-            };
-            if !h.is_finite() {
-                continue;
-            }
-            min_h = min_h.min(h);
-            max_h = max_h.max(h);
-        }
-    }
+    let (min_h, max_h) = ground_extremes(
+        DVec2::new(lo_x, lo_z),
+        DVec2::new(hi_x, hi_z),
+        (a.y.min(b.y), a.y.max(b.y)),
+        &surface,
+    );
     let floor_y = min_h - depth_m.max(0.0);
     let top_y = max_h + BOX_CUT_TOP_MARGIN_M;
     let shape = VoxelShape::Box {
@@ -303,18 +408,42 @@ pub fn box_cut_plan(
 }
 
 /// Resolve a **spline trench** from a path of surface waypoints: one swept
-/// rectangle per leg.
+/// rectangle per leg, **each one open to the sky over the ground it spans**.
 ///
-/// Each leg's cross-section is `2·half_width_m` across and spans from `depth_m`
-/// below the waypoints to [`BOX_CUT_TOP_MARGIN_M`] above them, so the trench is
-/// open along its whole length.
+/// # The sky rule, which this had to earn (P21.3 audit)
 ///
-/// **The section is perpendicular to the run, not to gravity.** A leg that dives
-/// tilts its floor with it, which is what a road cut or a sewer fall actually
-/// looks like — and it means a steeply-diving leg is slightly shallower measured
-/// vertically than `depth_m`, by the cosine of its pitch. Documented rather than
-/// corrected: correcting it would make the trench's walls non-planar at every
-/// waypoint, and an author dragging a gradient wants a constant section.
+/// The first version took no `surface` closure at all: each leg's roof sat
+/// `BOX_CUT_TOP_MARGIN_M` above the straight chord between its two waypoints,
+/// which is fine on a plane and wrong on anything else. A 1.5 m ridge mid-run
+/// left 11 of 51 ground samples outside the cut, so the coupling never punched
+/// their holes and the trench came out roofed by the hillside it was supposed
+/// to open. Three doc blocks and a toolbar tooltip promised a rule the code did
+/// not implement.
+///
+/// So each leg now reads the ground **over its own footprint** — a rotated
+/// rectangle, probed along the run and across the width at
+/// [`GROUND_PROBE_PITCH_M`] — and spans from `depth_m` below the lowest of it to
+/// [`BOX_CUT_TOP_MARGIN_M`] above the highest. Exactly the box cut's rule, in
+/// the leg's own frame.
+///
+/// # Legs are HORIZONTAL, and that is the design
+///
+/// The vertical span above is an absolute world range, so each leg's centreline
+/// is level and only its *yaw* follows the path. Three things fall out, all of
+/// them wanted:
+///
+/// * a trench is an **open cut from the surface**, so it follows the ground by
+///   spanning it, not by tilting into it — the diving primitive is the tunnel;
+/// * the "a diving leg is shallower vertically by the cosine of its pitch"
+///   caveat this function used to carry simply stops existing;
+/// * and so does a real bug behind it — a *vertical* centreline shift applied to
+///   a pitched leg leaks into the along-run axis, which put the first waypoint
+///   **outside its own leg** (`sdf(A) = +0.33` on a 45°, 4 m leg).
+///
+/// A long run across a big elevation change therefore becomes a tall box and
+/// over-digs its low end, exactly as the box cut does over the same ground; the
+/// gesture that fixes it is another waypoint, which is the gesture an author
+/// already has.
 ///
 /// Degenerate legs (a repeated waypoint) are dropped rather than emitted as
 /// invalid shapes, so a double-click in the middle of a path costs nothing.
@@ -323,42 +452,104 @@ pub fn box_cut_plan(
 ///
 /// Two swept rectangles meeting at a bend leave a wedge of un-cut ground on the
 /// **outside** of the corner, because each leg's end cap is square to its own
-/// run. Every leg is therefore extended by `half_width_m` past both waypoints,
-/// which closes the wedge for any deviation up to a right angle (the uncovered
-/// overhang is `half_width · tan(θ/2)`, and `tan(45°) = 1`). Bends sharper than
-/// that keep a small notch on the outside — a documented limit, not a silent
-/// one, and the fix is a waypoint rather than a different primitive. The same
-/// allowance is what stops the run looking clipped at the first and last click.
-pub fn trench_shapes(path: &[DVec3], half_width_m: f64, depth_m: f64) -> Vec<VoxelShape> {
+/// run. Every leg is therefore extended by `half_width_m` past both waypoints.
+/// Measured over deviations from 10 to 170 degrees, the uncut wedge is
+/// **0.0000 m**: the allowance closes the corner completely, not merely up to a
+/// right angle as an earlier note here guessed. It is also what stops the run
+/// looking clipped at the first and last click.
+pub fn trench_shapes(
+    path: &[DVec3],
+    half_width_m: f64,
+    depth_m: f64,
+    surface: impl Fn(f64, f64) -> Option<f64>,
+) -> Vec<VoxelShape> {
     let mut out = Vec::new();
     if path.len() < 2 || half_width_m.is_nan() || half_width_m <= 0.0 || half_width_m.is_infinite()
     {
         return out;
     }
     let depth = depth_m.max(0.0);
-    let half_height_m = (depth + BOX_CUT_TOP_MARGIN_M) * 0.5;
-    // The centreline sits half-way between the floor and the top, which is
-    // `(margin − depth)/2` from the surface the author clicked.
-    let shift = DVec3::new(0.0, (BOX_CUT_TOP_MARGIN_M - depth) * 0.5, 0.0);
     for seg in path.windows(2) {
-        let (a, b) = (seg[0] + shift, seg[1] + shift);
-        let run = b - a;
-        let len = run.length();
-        if len.is_nan() || len <= 0.0 || !run.is_finite() {
+        let (p, q) = (seg[0], seg[1]);
+        if !(p.is_finite() && q.is_finite()) {
             continue;
         }
-        let over = run / len * half_width_m;
+        // Yaw only: the leg's direction is its HORIZONTAL run.
+        let run = DVec2::new(q.x - p.x, q.z - p.z);
+        let len = run.length();
+        if len.is_nan() || len <= 0.0 || !len.is_finite() {
+            continue;
+        }
+        let dir = run / len;
+        let over = dir * half_width_m;
+        let a2 = DVec2::new(p.x, p.z) - over;
+        let b2 = DVec2::new(q.x, q.z) + over;
+        let (min_h, max_h) =
+            leg_ground_extremes(a2, b2, half_width_m, (p.y.min(q.y), p.y.max(q.y)), &surface);
+        let floor_y = min_h - depth;
+        let top_y = max_h + BOX_CUT_TOP_MARGIN_M;
+        let mid_y = (floor_y + top_y) * 0.5;
         let shape = VoxelShape::Trench {
-            a: a - over,
-            b: b + over,
+            a: DVec3::new(a2.x, mid_y, a2.y),
+            b: DVec3::new(b2.x, mid_y, b2.y),
             half_width_m,
-            half_height_m,
+            half_height_m: (top_y - floor_y) * 0.5,
         };
         if shape.is_valid() {
             out.push(shape);
         }
     }
     out
+}
+
+/// Ground extremes over one trench leg's **rotated** footprint: the rectangle
+/// `a2 -> b2` widened by `half_width_m` on both sides.
+///
+/// Probed in the leg's own frame rather than over its world AABB. The AABB of a
+/// diagonal leg is up to twice its area, and folding a hill *beside* the trench
+/// into `max_h` would raise the roof (harmless) while folding a valley beside it
+/// into `min_h` would deepen the floor along the whole run (not harmless).
+fn leg_ground_extremes(
+    a2: DVec2,
+    b2: DVec2,
+    half_width_m: f64,
+    seed: (f64, f64),
+    surface: &impl Fn(f64, f64) -> Option<f64>,
+) -> (f64, f64) {
+    let (mut min_h, mut max_h) = seed;
+    let run = b2 - a2;
+    let len = run.length();
+    if len.is_nan() || len <= 0.0 || len.is_infinite() {
+        return (min_h, max_h);
+    }
+    let dir = run / len;
+    let perp = DVec2::new(-dir.y, dir.x);
+    let (na, nw) = (probe_steps(len), probe_steps(half_width_m * 2.0));
+    for i in 0..=na {
+        let along = a2 + dir * (len * i as f64 / na as f64);
+        for j in 0..=nw {
+            let s = -half_width_m + 2.0 * half_width_m * j as f64 / nw as f64;
+            let p = along + perp * s;
+            let Some(h) = surface(p.x, p.y) else { continue };
+            if !h.is_finite() {
+                continue;
+            }
+            min_h = min_h.min(h);
+            max_h = max_h.max(h);
+        }
+    }
+    (min_h, max_h)
+}
+
+/// Probe intervals across `span` metres: one per [`GROUND_PROBE_PITCH_M`], never
+/// more than [`MAX_GROUND_PROBES`] - 1 and never fewer than one.
+fn probe_steps(span: f64) -> u32 {
+    let n = (span / GROUND_PROBE_PITCH_M).ceil();
+    if !n.is_finite() || n < 1.0 {
+        1
+    } else {
+        (n as u32).min(MAX_GROUND_PROBES - 1)
+    }
 }
 
 /// The shape one **brush** dab makes at a surface pick.
@@ -401,12 +592,47 @@ pub fn brush_dab_shape(
 mod tests {
     use super::*;
 
-    /// A non-flat deterministic ground: polynomial, never trigonometric (this
-    /// workspace's `std`-trig ban reaches into its fixtures — a fixture that
-    /// drifts by a bit between platforms is a gate that fails on one of them).
+    /// A deterministic ground with a **RIDGE and a HOLLOW inside** the fixtures'
+    /// rectangles — polynomial, never trigonometric (this workspace's `std`-trig
+    /// ban reaches into its fixtures; a fixture that drifts by a bit between
+    /// platforms is a gate that fails on one of them).
+    ///
+    /// # Why the old fixture made the gate vacuous (P21.3 audit, B4)
+    ///
+    /// It was `4 + 0.25x − 0.01x² + 0.1z`, whose turning point is `x = 12.5` —
+    /// **outside** the `[0, 10] × [0, 6]` rectangle the test dragged. Monotone
+    /// over its own domain, so its extremes were the two corners, which
+    /// `box_cut_plan` already seeds before it probes anything. The whole probe
+    /// loop could be deleted, or `BOX_CUT_PROBES` dropped from 33 to 2, and the
+    /// test still passed — while its own comment claimed it was checking that
+    /// the middle of the drag is higher than either corner.
+    ///
+    /// This one has a genuine interior maximum at `(5, 3)` and a genuine
+    /// interior minimum at `(2, 4.5)`, both strictly inside the rectangle and
+    /// both invisible from the corners. `RIDGE_XZ` / `HOLLOW_XZ` name them so a
+    /// reader can check the claim without solving the polynomial.
     fn ground(x: f64, z: f64) -> Option<f64> {
-        Some(4.0 + x * 0.25 - x * x * 0.01 + z * 0.1)
+        // A bump at (5, 3) and a dip at (2, 4.5), on a gentle background slope.
+        let bump = 3.0 * bell(x - 5.0, 2.5) * bell(z - 3.0, 2.0);
+        let dip = -2.0 * bell(x - 2.0, 1.5) * bell(z - 4.5, 1.5);
+        Some(4.0 + x * 0.05 + z * 0.03 + bump + dip)
     }
+
+    /// A smooth, compactly-supported bump: `(1 − (t/r)²)²` inside `|t| < r`, else
+    /// `0`. Polynomial, so it is bit-identical everywhere.
+    fn bell(t: f64, r: f64) -> f64 {
+        let u = t / r;
+        if u.abs() >= 1.0 {
+            0.0
+        } else {
+            let v = 1.0 - u * u;
+            v * v
+        }
+    }
+
+    /// The fixture's interior maximum, and its interior minimum.
+    const RIDGE_XZ: (f64, f64) = (5.0, 3.0);
+    const HOLLOW_XZ: (f64, f64) = (2.0, 4.5);
 
     /// **The open-to-the-sky rule.** A pit dragged across rising ground is
     /// deeper than the drag's own span: its top clears the HIGHEST ground it
@@ -417,25 +643,40 @@ mod tests {
         let b = DVec3::new(10.0, ground(10.0, 6.0).unwrap(), 6.0);
         let plan = box_cut_plan(a, b, 3.0, ground).expect("a real drag");
 
-        // Independently: the extremes of the ground over the rectangle.
+        // The fixture must actually have interior extrema, or everything below
+        // is a test of two corners (the P21.3 audit's B4).
+        let ridge_h = ground(RIDGE_XZ.0, RIDGE_XZ.1).unwrap();
+        let hollow_h = ground(HOLLOW_XZ.0, HOLLOW_XZ.1).unwrap();
+        assert!(
+            ridge_h > a.y.max(b.y) + 1.0,
+            "the fixture ridge ({ridge_h:.2}) is not above both corner picks — \
+             seeding alone would find it"
+        );
+        assert!(
+            hollow_h < a.y.min(b.y) - 0.5,
+            "the fixture hollow ({hollow_h:.2}) is not below both corner picks"
+        );
+
+        // Independently: the extremes of the ground over the rectangle, on a
+        // lattice far finer than the one under test.
         let mut lo = f64::INFINITY;
         let mut hi = f64::NEG_INFINITY;
-        for j in 0..=200 {
-            for i in 0..=200 {
-                let h = ground(i as f64 * 0.05, j as f64 * 0.03).unwrap();
+        for j in 0..=600 {
+            for i in 0..=1000 {
+                let h = ground(i as f64 * 0.01, j as f64 * 0.01).unwrap();
                 lo = lo.min(h);
                 hi = hi.max(h);
             }
         }
         assert!(
             (plan.floor_y - (lo - 3.0)).abs() < 0.05,
-            "floor {} vs {}",
+            "floor {} vs {} — the probe did not find the HOLLOW",
             plan.floor_y,
             lo - 3.0
         );
         assert!(
-            plan.top_y >= hi + BOX_CUT_TOP_MARGIN_M - 1e-9,
-            "top {} does not clear the highest ground {hi}",
+            plan.top_y >= hi + BOX_CUT_TOP_MARGIN_M - 0.05,
+            "top {} does not clear the highest ground {hi} — the probe did not find the RIDGE",
             plan.top_y
         );
         assert_eq!(plan.size_x_m, 10.0);
@@ -453,12 +694,53 @@ mod tests {
                 "the pit does not reach its own corner pick {p:?}"
             );
         }
-        // …and the ground in the MIDDLE of the drag is strictly inside, even
-        // though it is higher than either corner pick's own height.
-        let mid = DVec3::new(5.0, ground(5.0, 3.0).unwrap(), 3.0);
+        // …and the ground ON THE RIDGE is strictly inside, though it is a metre
+        // above either corner pick and nothing but a probe could have found it.
+        let crest = DVec3::new(RIDGE_XZ.0, ridge_h, RIDGE_XZ.1);
         assert!(
-            plan.shape.distance_m(mid) < 0.0,
-            "the pit has a lid of surviving hillside over its middle"
+            plan.shape.distance_m(crest) < 0.0,
+            "the pit has a lid of surviving hillside over its ridge"
+        );
+        // …and the floor really is `depth` below the HOLLOW, not below a corner.
+        assert!(
+            plan.floor_y < hollow_h - 3.0 + 0.05,
+            "the floor stops short of 3 m below the hollow ({hollow_h:.2})"
+        );
+    }
+
+    /// **B4's mutation guard, stated as a test.** The probe lattice has to be
+    /// fine enough to *find* the fixture's ridge, and the fixture's ridge has to
+    /// be narrow enough that a coarse lattice misses it — so a coarsened pitch
+    /// really does produce a shallower roof.
+    ///
+    /// Without this the "pitch, not count" change would be untested: a rule that
+    /// probes at 0.5 m and one that probes at 6 m both pass every other
+    /// assertion in this file on a wide enough bump.
+    #[test]
+    fn a_coarse_probe_lattice_would_miss_the_ridge() {
+        let a = DVec3::new(0.0, ground(0.0, 0.0).unwrap(), 0.0);
+        let b = DVec3::new(10.0, ground(10.0, 6.0).unwrap(), 6.0);
+        let fine = box_cut_plan(a, b, 3.0, ground).unwrap();
+
+        // The same rectangle read at the pitch the old fixed COUNT gave a 200 m
+        // pit (6.25 m): three probes across this drag, none of them on the
+        // ridge.
+        let coarse = {
+            let (mut lo, mut hi) = (a.y.min(b.y), a.y.max(b.y));
+            for j in 0..=1 {
+                for i in 0..=1 {
+                    let h = ground(i as f64 * 10.0, j as f64 * 6.0).unwrap();
+                    lo = lo.min(h);
+                    hi = hi.max(h);
+                }
+            }
+            hi
+        };
+        assert!(
+            fine.top_y > coarse + BOX_CUT_TOP_MARGIN_M + 0.5,
+            "a corners-only read ({coarse:.2}) reaches the same roof as the probed one \
+             ({:.2}) — the fixture's ridge is invisible to the probe and B4 is back",
+            fine.top_y
         );
     }
 
@@ -505,12 +787,13 @@ mod tests {
     /// waypoints, open at the top and `depth_m` deep below them.
     #[test]
     fn a_trench_is_one_open_section_per_leg() {
+        let flat = |_: f64, _: f64| Some(5.0);
         let path = [
             DVec3::new(0.0, 5.0, 0.0),
             DVec3::new(10.0, 5.0, 0.0),
             DVec3::new(10.0, 5.0, 10.0),
         ];
-        let shapes = trench_shapes(&path, 1.5, 2.0);
+        let shapes = trench_shapes(&path, 1.5, 2.0, flat);
         assert_eq!(shapes.len(), 2);
         for (n, s) in shapes.iter().enumerate() {
             assert!(s.is_valid(), "leg {n}");
@@ -541,23 +824,185 @@ mod tests {
         assert!(shapes[0].distance_m(outside) > 0.0);
     }
 
+    /// **THE TRENCH SKY RULE** (P21.3 audit, B2). A ridge between two waypoints
+    /// must be inside the cut, or the coupling never punches its holes and the
+    /// trench comes out roofed by the hillside it was supposed to open.
+    ///
+    /// The measurement the audit made: with the roof pinned to the straight
+    /// chord, 11 of 51 ground samples along a run over a 1.5 m ridge fell
+    /// outside the leg. This asserts **zero**, and then asserts that the
+    /// chord-roofed version really would have failed — so the gate cannot pass
+    /// by the ridge being too small to matter.
+    #[test]
+    fn a_trench_clears_a_ridge_between_its_waypoints() {
+        // Flat at y = 5 except for a 1.5 m ridge across the middle of the run.
+        let ridge = |x: f64, _z: f64| Some(5.0 + 1.5 * bell(x - 5.0, 2.0));
+        let a = DVec3::new(0.0, 5.0, 0.0);
+        let b = DVec3::new(10.0, 5.0, 0.0);
+        let legs = trench_shapes(&[a, b], 1.0, 2.0, ridge);
+        assert_eq!(legs.len(), 1);
+        let leg = legs[0];
+
+        let mut outside = 0;
+        let mut samples = 0;
+        for i in 0..=50 {
+            let x = i as f64 * 0.2;
+            let p = DVec3::new(x, ridge(x, 0.0).unwrap(), 0.0);
+            samples += 1;
+            if leg.distance_m(p) >= 0.0 {
+                outside += 1;
+            }
+        }
+        assert_eq!(
+            outside, 0,
+            "{outside}/{samples} ground samples are outside the trench — a roofed run"
+        );
+
+        // Non-vacuity: the OLD rule (roof `margin` above the chord between the
+        // waypoints, both at y = 5) really does leave the crest outside.
+        let crest = DVec3::new(5.0, ridge(5.0, 0.0).unwrap(), 0.0);
+        assert!(
+            crest.y > 5.0 + BOX_CUT_TOP_MARGIN_M,
+            "the fixture ridge ({:.2}) does not even clear the old roof — this proves nothing",
+            crest.y
+        );
+        // …and the floor is still `depth` below the LOWEST ground, not below the
+        // ridge: a trench does not get shallower because it crossed a hill.
+        assert!(
+            leg.distance_m(DVec3::new(0.0, 5.0 - 1.9, 0.0)) < 0.0,
+            "the floor rose with the ridge"
+        );
+    }
+
+    /// **Legs are horizontal, and the first waypoint is inside its own leg**
+    /// (P21.3 audit). A vertical centreline shift on a pitched leg leaked into
+    /// the along-run axis and pushed the start cap past the waypoint —
+    /// `sdf(A) = +0.33` on a 45°, 4 m leg. Yaw-only legs cannot express that.
+    #[test]
+    fn a_steep_run_still_contains_its_own_waypoints() {
+        // A 45° run: 4 m across, 4 m down.
+        let a = DVec3::new(0.0, 10.0, 0.0);
+        let b = DVec3::new(4.0, 6.0, 0.0);
+        let ramp = |x: f64, _z: f64| Some(10.0 - x.clamp(0.0, 4.0));
+        let legs = trench_shapes(&[a, b], 1.0, 2.0, ramp);
+        assert_eq!(legs.len(), 1);
+        for (label, p) in [("start", a), ("end", b)] {
+            assert!(
+                legs[0].distance_m(p) < 0.0,
+                "the {label} waypoint is OUTSIDE its own leg (sdf = {:.3})",
+                legs[0].distance_m(p)
+            );
+        }
+        // …and the whole ramp between them is covered, not just its ends.
+        for i in 0..=40 {
+            let x = i as f64 * 0.1;
+            let p = DVec3::new(x, ramp(x, 0.0).unwrap(), 0.0);
+            assert!(legs[0].distance_m(p) < 0.0, "the ramp at x={x} is roofed");
+        }
+    }
+
+    /// **The miter allowance closes the corner completely** — measured, not
+    /// assumed (P21.3 audit).
+    ///
+    /// An earlier note here guessed the allowance only covered bends up to a
+    /// right angle and documented a "small notch" past that. The audit measured
+    /// 0.0000 m of uncut wedge from 10 degrees to 170; this pins it, so the
+    /// guess cannot come back and neither can a regression that makes it true.
+    ///
+    /// The sweep is over the bend's OUTSIDE, which is where a wedge would be:
+    /// for each deviation, a dense fan of points on the corner's outer side is
+    /// tested against the union of the two legs.
+    #[test]
+    fn the_miter_allowance_leaves_no_uncut_wedge_at_any_bend() {
+        let flat = |_: f64, _: f64| Some(0.0);
+        let half_width = 1.0;
+        // Deviations from a gentle 10 degrees to a hairpin 170, as directions
+        // built without `std` trig (a unit vector from a rational slope).
+        let dirs: [(f64, f64); 9] = [
+            (0.985, 0.174),
+            (0.940, 0.342),
+            (0.866, 0.500),
+            (0.707, 0.707),
+            (0.500, 0.866),
+            (0.174, 0.985),
+            (-0.342, 0.940),
+            (-0.766, 0.643),
+            (-0.985, 0.174),
+        ];
+        for (n, (dx, dz)) in dirs.into_iter().enumerate() {
+            let corner = DVec3::new(0.0, 0.0, 0.0);
+            let a = DVec3::new(-8.0, 0.0, 0.0);
+            let len = (dx * dx + dz * dz).sqrt();
+            let b = DVec3::new(dx / len * 8.0, 0.0, dz / len * 8.0);
+            let legs = trench_shapes(&[a, corner, b], half_width, 2.0, flat);
+            assert_eq!(legs.len(), 2, "case {n}");
+
+            // Every point of the corner's *inner cut* — the region a single
+            // continuous trench of this width would occupy near the bend — must
+            // be inside at least one leg. Sampled densely on the surface plane.
+            let mut uncovered = 0;
+            let mut sampled = 0;
+            for i in -40..=40 {
+                for j in -40..=40 {
+                    let p = DVec3::new(i as f64 * 0.05, 0.0, j as f64 * 0.05);
+                    // Inside the swept region iff within half_width of either
+                    // centreline segment (that is what "a trench of this width
+                    // along this path" means).
+                    let near = |s: DVec3, e: DVec3| {
+                        let d = e - s;
+                        let t = ((p - s).dot(d) / d.length_squared()).clamp(0.0, 1.0);
+                        (p - (s + d * t)).length() <= half_width
+                    };
+                    if !(near(a, corner) || near(corner, b)) {
+                        continue;
+                    }
+                    sampled += 1;
+                    if legs.iter().all(|l| l.distance_m(p) > 0.0) {
+                        uncovered += 1;
+                    }
+                }
+            }
+            assert!(
+                sampled > 100,
+                "case {n}: only {sampled} points in the corner"
+            );
+            assert_eq!(
+                uncovered, 0,
+                "case {n}: {uncovered}/{sampled} points of the bend are uncut — the miter \
+                 allowance does not close this corner"
+            );
+        }
+    }
+
     /// Degenerate input produces no legs rather than invalid ones.
     #[test]
     fn a_degenerate_trench_path_produces_no_legs() {
+        let flat = |_: f64, _: f64| Some(2.0);
         let p = DVec3::new(1.0, 2.0, 3.0);
-        assert!(trench_shapes(&[], 1.0, 1.0).is_empty());
-        assert!(trench_shapes(&[p], 1.0, 1.0).is_empty());
+        assert!(trench_shapes(&[], 1.0, 1.0, flat).is_empty());
+        assert!(trench_shapes(&[p], 1.0, 1.0, flat).is_empty());
         assert!(
-            trench_shapes(&[p, p], 1.0, 1.0).is_empty(),
+            trench_shapes(&[p, p], 1.0, 1.0, flat).is_empty(),
             "a repeated point"
         );
         assert!(
-            trench_shapes(&[p, p + DVec3::X], 0.0, 1.0).is_empty(),
+            trench_shapes(&[p, p + DVec3::X], 0.0, 1.0, flat).is_empty(),
             "no width"
         );
+        // A purely VERTICAL leg has no horizontal run and is dropped — a trench
+        // is an open cut, and a shaft is the tunnel tool's job.
+        assert!(
+            trench_shapes(&[p, p + DVec3::Y * 5.0], 1.0, 1.0, flat).is_empty(),
+            "a vertical leg"
+        );
         // A path with one repeated point in the middle keeps its real legs.
-        let legs = trench_shapes(&[p, p, p + DVec3::X * 5.0], 1.0, 1.0);
+        let legs = trench_shapes(&[p, p, p + DVec3::X * 5.0], 1.0, 1.0, flat);
         assert_eq!(legs.len(), 1);
+        // A level with no terrain at all still cuts: the waypoints are the
+        // ground, exactly as the box cut falls back.
+        let none = trench_shapes(&[p, p + DVec3::X * 5.0], 1.0, 1.0, |_, _| None);
+        assert_eq!(none.len(), 1);
+        assert!(none[0].distance_m(p) < 0.0);
     }
 
     // ── the M11 move: rules that used to be invisible to the Linux CI leg ──
@@ -604,9 +1049,20 @@ mod tests {
             surface,
             "a negative depth must not lift the cut into the air"
         );
-        // Camera-independence, stated as the property it is: the answer is a
-        // function of the pick and the depth and of nothing else.
-        assert_eq!(cut_center(surface, 2.5), cut_center(surface, 2.5));
+        // Camera-independence, stated as the property it actually is: the
+        // horizontal position is the PICK's, untouched — a depth rule that
+        // leaked into x or z would move the cave sideways with the aim.
+        // (`cut_center(x) == cut_center(x)` was the previous line here, which
+        // asserts that a pure function is pure — P21.3 audit.)
+        for d in [0.0, 0.5, 3.0, 40.0] {
+            let c = cut_center(surface, d);
+            assert_eq!(
+                (c.x, c.z),
+                (surface.x, surface.z),
+                "depth {d} moved the cut sideways"
+            );
+            assert!((surface.y - c.y - d).abs() < 1e-12, "depth {d}");
+        }
     }
 
     /// **The resampler is the sculpt brush's**, lifted onto a 3D polyline: even
@@ -667,6 +1123,45 @@ mod tests {
             dab_spacing(0.0),
         );
         assert_eq!(far.len(), 2001);
+    }
+
+    /// **The cap is a BOUND, not a filter** (P21.3 audit). A pick a hundred
+    /// kilometres away must not materialize two million points to keep
+    /// thirty-two, and the ones it keeps must be the FIRST thirty-two — the drag
+    /// continues from the last one placed on the next frame, so a sample of the
+    /// whole run would leave a gap in the middle of the cut.
+    #[test]
+    fn the_dab_cap_trims_the_path_before_it_resamples() {
+        let a = DVec3::ZERO;
+        let far = DVec3::new(100_000.0, 0.0, 0.0);
+        let capped = dab_centers_capped(&[a, far], 0.05, 32);
+        assert!(
+            capped.len() <= 33,
+            "{} points materialized for a 32-dab budget",
+            capped.len()
+        );
+        assert_eq!(capped[0], a);
+        for (i, p) in capped.iter().enumerate() {
+            assert!(
+                (p.x - i as f64 * 0.05).abs() < 1e-9,
+                "dab {i} is at {} — the cap resampled the whole run instead of trimming it",
+                p.x
+            );
+        }
+        // A path that fits under the cap is untouched by it.
+        let short = [a, DVec3::new(1.0, 0.0, 0.0)];
+        assert_eq!(
+            dab_centers_capped(&short, 0.25, 32),
+            dab_centers(&short, 0.25)
+        );
+        // A multi-leg path is trimmed mid-leg, not dropped at a waypoint.
+        let bent = [a, DVec3::new(1.0, 0.0, 0.0), DVec3::new(1.0, 0.0, 100.0)];
+        let cut = dab_centers_capped(&bent, 0.25, 8);
+        assert!(cut.len() <= 9, "{}", cut.len());
+        assert!(cut.last().unwrap().z > 0.0, "the trim stopped at the bend");
+        // Degenerate caps answer sanely rather than panicking or spinning.
+        assert!(dab_centers_capped(&short, 0.25, 0).len() <= 2);
+        assert!(!dab_centers_capped(&[a, far], 0.05, usize::MAX).is_empty());
     }
 
     /// The brush's two modes: a ball at depth, or a column to grade.

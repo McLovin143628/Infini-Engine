@@ -233,7 +233,13 @@ impl VoxelShape {
         for a in 0..3 {
             let l = (lo.to_array()[a] / voxel_size_m).floor();
             let h = (hi.to_array()[a] / voxel_size_m).ceil();
-            let span = h - l + 1.0;
+            // `+ 1` for the inclusive range, and `+ 1` again for the volume's
+            // **anchor phase**: this is a shape-only bound, but the lattice it
+            // will be walked on is offset by `VoxelData::origin`, which can
+            // shift each axis' floor/ceil by one sample. Without it the answer
+            // was up to ~2.4 % under on a real volume, while the doc above
+            // promised it is never an underestimate (P21.3 audit).
+            let span = h - l + 2.0;
             if span.is_nan() || span <= 0.0 {
                 return 0;
             }
@@ -762,17 +768,41 @@ mod tests {
         assert!(inside > 500, "the fixture trench is empty ({inside})");
 
         // A **vertical** run (a shaft) has no horizontal perpendicular and falls
-        // back to a fixed basis rather than a NaN.
+        // back to a FIXED basis rather than a NaN — and the fallback is pinned,
+        // because "arbitrary but fixed" is only a determinism guarantee if
+        // something checks that it stays fixed (P21.3 audit).
         let shaft = VoxelShape::Trench {
             a: DVec3::new(0.0, 0.0, 0.0),
             b: DVec3::new(0.0, -6.0, 0.0),
             half_width_m: 1.0,
-            half_height_m: 1.0,
+            half_height_m: 2.0,
         };
         assert!(shaft.is_valid());
         assert!(shaft.distance_m(DVec3::new(0.0, -3.0, 0.0)) < 0.0);
         assert!(shaft.distance_m(DVec3::new(0.0, -3.0, 5.0)) > 0.0);
         assert!(shaft.distance_m(DVec3::new(0.0, -3.0, 0.0)).is_finite());
+        // The documented fallback is `w = +X`. For a DOWNWARD shaft that makes
+        // `u = −Y`, `v = w × u = −Z` — so `half_width` (local Z, i.e. `w`)
+        // measures along **X**, and `half_height` (local Y, i.e. `v`) measures
+        // along **Z**. Asymmetric extents make the two distinguishable: with
+        // 1.0 and 2.0 a swapped or rotated fallback fails here.
+        let (u, v, w, _) = trench_basis(DVec3::new(0.0, 0.0, 0.0), DVec3::new(0.0, -6.0, 0.0))
+            .expect("a shaft is a valid centreline");
+        assert_eq!(w, DVec3::X, "the vertical fallback moved");
+        assert_eq!(u, DVec3::NEG_Y);
+        assert_eq!(v, DVec3::NEG_Z, "v = w x u for a downward shaft");
+        assert!(
+            shaft.distance_m(DVec3::new(1.5, -3.0, 0.0)) > 0.0,
+            "half_width (1.0 m) measures along X"
+        );
+        assert!(
+            shaft.distance_m(DVec3::new(0.0, -3.0, 1.5)) < 0.0,
+            "half_height (2.0 m) measures along Z"
+        );
+        // …and a shaft pointing UP falls back the same way, so the two cannot
+        // disagree about which face is which.
+        let up = trench_basis(DVec3::ZERO, DVec3::new(0.0, 6.0, 0.0)).unwrap();
+        assert_eq!(up.2, DVec3::X);
     }
 
     /// A degenerate trench writes nothing — a zero-length centreline, a zero
@@ -875,10 +905,20 @@ mod tests {
                 "{shape:?}: touched {} > bound {bound}",
                 report.touched
             );
-            assert_eq!(
-                bound,
-                shape.affected_sample_count(v.voxel_size_m()),
-                "the bound is not a pure function of the shape"
+            // The bound holds against a volume whose lattice is OFFSET too —
+            // the anchor phase is what made it a ~2.4 % underestimate before
+            // (P21.3 audit). Calling it twice and comparing was the previous
+            // assertion here, which only says a pure function is pure.
+            let mut shifted =
+                VoxelData::new(v.voxel_size_m()).with_origin(DVec3::new(0.237, -0.611, 0.049));
+            for key in chunk_range(ChunkKey::new(0, 0, 0), ChunkKey::new(1, 1, 1)) {
+                shifted.insert_chunk(key, VoxelChunk::solid(1));
+            }
+            let (off_report, _) = shifted.apply_op(&VoxelOp::carve(shape));
+            assert!(
+                off_report.touched <= bound,
+                "{shape:?}: an offset volume touched {} > bound {bound}",
+                off_report.touched
             );
         }
     }

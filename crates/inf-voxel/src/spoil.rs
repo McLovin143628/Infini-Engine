@@ -64,9 +64,10 @@
 
 use glam::DVec3;
 
-use crate::chunk::{clamp_sdf, ChunkKey, MATERIAL_COUNT, SDF_BAND};
+use crate::chunk::{clamp_sdf, ChunkKey, CHUNK_DIM, MATERIAL_COUNT, SDF_BAND};
 use crate::data::{local_of, VoxelData};
 use crate::ops::{integer_box, VoxelDeltaBuilder};
+use crate::residency::ChunkStore;
 
 /// The angle of repose used for spoil, **degrees** — loose excavated earth.
 ///
@@ -117,12 +118,41 @@ pub struct SpoilPlan {
     /// Where the pile's apex axis meets its base plane, world metres. The pile
     /// grows **upward** from `base.y`; nothing is written below it.
     pub base: DVec3,
+    /// A world AABB the pile may **never** place into — the cut that produced
+    /// it (P21.3 audit).
+    ///
+    /// # Why this is a hard exclusion and not a clearance
+    ///
+    /// [`default_spoil_site`] stands the heap clear of the cut by the pile's
+    /// *analytic* radius, and the analytic radius is an estimate: the real
+    /// footprint is `apex_actual / tan θ`, which the lattice, the truncated
+    /// outermost shell and every already-solid cell the search grew around make
+    /// **wider** — measured at 81 % wider on a real dig, which put 59 of 729
+    /// excavated samples straight back into the hole they came out of. The
+    /// conservation identity did not notice, because refilling the pit is a
+    /// perfectly balanced place to put the soil.
+    ///
+    /// So the guarantee is structural rather than arithmetic: cells inside this
+    /// box are not candidates, exactly as already-solid cells are not
+    /// candidates, and the pile grows around it. `None` for a caller with no
+    /// hole to protect (a scripted heap, a test).
+    pub exclude: Option<(DVec3, DVec3)>,
 }
 
 impl SpoilPlan {
-    /// A plan that displaces `counts` to `base`.
+    /// A plan that displaces `counts` to `base`, with nothing excluded.
     pub fn new(counts: [u64; MATERIAL_COUNT], base: DVec3) -> Self {
-        Self { counts, base }
+        Self {
+            counts,
+            base,
+            exclude: None,
+        }
+    }
+
+    /// …and one that must not place inside `lo..hi` — the cut's own bounds.
+    pub fn excluding(mut self, lo: DVec3, hi: DVec3) -> Self {
+        self.exclude = (lo.is_finite() && hi.is_finite()).then_some((lo, hi));
+        self
     }
 
     /// Total voxels to place.
@@ -176,11 +206,24 @@ impl SpoilReport {
 /// both tolerant of the analytic-vs-lattice discrepancy, and both required to be
 /// **deterministic**, which is why the cube root is [`cbrt_det`].
 pub fn pile_base_radius_m(voxels: u64, voxel_size_m: f64) -> f64 {
-    if voxels == 0 || voxel_size_m.is_nan() || voxel_size_m <= 0.0 {
+    if voxels == 0 || !voxel_size_m.is_finite() || voxel_size_m <= 0.0 {
         return 0.0;
     }
     let v = voxels as f64 * voxel_size_m * voxel_size_m * voxel_size_m;
     cbrt_det(3.0 * v / (std::f64::consts::PI * REPOSE_TAN))
+}
+
+/// The world AABB a spoil search of `apex` covers, from `base` upward.
+///
+/// One definition, used by the candidate gather, the band pass and the paging —
+/// three walks that must cover the same region or the pile is placed against a
+/// field one of them has not read.
+pub fn spoil_search_region(base: DVec3, apex: f64) -> (DVec3, DVec3) {
+    let radius = (apex / REPOSE_TAN).max(0.0);
+    (
+        DVec3::new(base.x - radius, base.y, base.z - radius),
+        DVec3::new(base.x + radius, base.y + apex.max(0.0), base.z + radius),
+    )
 }
 
 /// **The deterministic default spoil site**: due **east** of the cut, clear of
@@ -201,6 +244,16 @@ pub fn pile_base_radius_m(voxels: u64, voxel_size_m: f64) -> f64 {
 /// The caller may lower `y` onto ground it knows about (`inf-voxel` has no
 /// terrain); the height returned is the cut's top, which is grade for a pit dug
 /// from the surface.
+///
+/// # The clearance is a HINT, not the guarantee
+///
+/// [`pile_base_radius_m`] is the *analytic* cone radius for the count, and the
+/// real footprint is wider — by the lattice, by the truncated outermost shell,
+/// and by every already-solid cell the search had to grow around (81 % wider on
+/// the dig the P21.3 audit measured). So this offset only keeps the heap from
+/// being jammed against the rim; what actually stops soil landing back in the
+/// hole is [`SpoilPlan::exclude`], which removes the cut's cells from the
+/// candidate set entirely.
 pub fn default_spoil_site(cut_lo: DVec3, cut_hi: DVec3, voxels: u64, voxel_size_m: f64) -> DVec3 {
     let radius = pile_base_radius_m(voxels, voxel_size_m);
     DVec3::new(
@@ -223,7 +276,11 @@ pub fn default_spoil_site(cut_lo: DVec3, cut_hi: DVec3, voxels: u64, voxel_size_
 /// iterations from a seed within a factor of two is roughly twice what full
 /// `f64` precision needs.
 pub fn cbrt_det(x: f64) -> f64 {
-    if x.is_nan() || x <= 0.0 {
+    // `is_finite` and not merely `is_nan`: an infinite argument would spin the
+    // scaling loop below forever (`m /= 8.0` never falls under 8.0), and both
+    // this function and `pile_base_radius_m` are public re-exports (P21.3
+    // audit).
+    if !x.is_finite() || x <= 0.0 {
         return 0.0;
     }
     let mut m = x;
@@ -283,6 +340,38 @@ impl VoxelData {
         plan: &SpoilPlan,
         builder: &mut VoxelDeltaBuilder,
     ) -> SpoilReport {
+        self.place_spoil_inner(plan, builder, None)
+    }
+
+    /// [`place_spoil_into`](Self::place_spoil_into), **paging the search region
+    /// out of `store` first** (P21.3 audit).
+    ///
+    /// The door every editor path must use. A non-resident chunk reads as
+    /// [`EMPTY_SDF`](crate::EMPTY_SDF) — which is *correct* for a key the asset
+    /// does not have (that really is air) and a **silent lie** for one it does
+    /// (that is rock nobody paged in). Without this, a pile placed near unpaged
+    /// rock would count cells it cannot see as placeable, materialize empty
+    /// chunks over keys the `.inf_voxel` already holds, and the write-back would
+    /// then overwrite real geometry with a heap.
+    ///
+    /// Paged **inside the growth loop**, one region per step, because the search
+    /// region is what grows: paging the first estimate and then growing past it
+    /// would restore the same hazard at the moment the pile needed more room.
+    pub fn place_spoil_into_paged(
+        &mut self,
+        plan: &SpoilPlan,
+        builder: &mut VoxelDeltaBuilder,
+        store: &dyn ChunkStore,
+    ) -> SpoilReport {
+        self.place_spoil_inner(plan, builder, Some(store))
+    }
+
+    fn place_spoil_inner(
+        &mut self,
+        plan: &SpoilPlan,
+        builder: &mut VoxelDeltaBuilder,
+        store: Option<&dyn ChunkStore>,
+    ) -> SpoilReport {
         let mut report = SpoilReport::default();
         let total = plan.total();
         if total == 0 {
@@ -298,7 +387,19 @@ impl VoxelData {
         let mut apex = (pile_base_radius_m(total, h) * REPOSE_TAN).max(h) + 2.0 * h;
         let mut chosen: Vec<Candidate> = Vec::new();
         for _ in 0..MAX_GROWTH_STEPS {
-            let cands = self.spoil_candidates(plan.base, apex, total);
+            if let Some(s) = store {
+                self.page_spoil_region(plan.base, apex, s);
+            }
+            // `None` = the region outgrew [`MAX_SPOIL_SEARCH_CELLS`]. **Stop**
+            // rather than keep multiplying (P21.3 audit, B1): every further step
+            // is a bigger region that will be rejected the same way, and the
+            // 32nd one is a `(i32 span)³` product that overflows `i64` and
+            // panics — while holding the shared-volumes guard, mid-transaction,
+            // with the cut already in the world and no `EditCommand` describing
+            // it. Exactly the un-undoable committed edit `a4e5844` ruled worst.
+            let Some(cands) = self.spoil_candidates(plan, apex, total) else {
+                break;
+            };
             if cands.len() as u64 >= total {
                 chosen = cands;
                 break;
@@ -306,7 +407,8 @@ impl VoxelData {
             apex *= GROWTH;
         }
         if (chosen.len() as u64) < total {
-            // Every growth step ran out: the volume is solid for kilometres. Say
+            // The search ran out of room (or out of steps): the volume is solid
+            // for kilometres, or the count is larger than one pile may hold. Say
             // so rather than committing a pile that does not balance.
             report.shortfall = plan.counts;
             return report;
@@ -355,22 +457,9 @@ impl VoxelData {
     /// "Placeable" is **not currently solid**: piling onto rock makes nothing
     /// newly solid, so those cells cannot count towards the balance and are left
     /// for the mound to grow around.
-    fn spoil_candidates(&self, base: DVec3, apex: f64, want: u64) -> Vec<Candidate> {
-        let radius = apex / REPOSE_TAN;
-        let lo = self.world_to_grid(DVec3::new(base.x - radius, base.y, base.z - radius));
-        let hi = self.world_to_grid(DVec3::new(base.x + radius, base.y + apex, base.z + radius));
-        let Some((lo_g, hi_g)) = integer_box(lo, hi) else {
-            return Vec::new();
-        };
-        // A cap so a pathological base cannot ask for an unbounded walk: the
-        // caller's own dig budget already bounds `want`, and the cone that holds
-        // it has a bounded box.
-        let cells = (hi_g[0] as i64 - lo_g[0] as i64 + 1).max(0)
-            * (hi_g[1] as i64 - lo_g[1] as i64 + 1).max(0)
-            * (hi_g[2] as i64 - lo_g[2] as i64 + 1).max(0);
-        if cells <= 0 || cells > MAX_SPOIL_SEARCH_CELLS {
-            return Vec::new();
-        }
+    fn spoil_candidates(&self, plan: &SpoilPlan, apex: f64, want: u64) -> Option<Vec<Candidate>> {
+        let base = plan.base;
+        let (lo_g, hi_g) = self.spoil_search_box(base, apex)?;
         let mut out: Vec<Candidate> = Vec::with_capacity((want as usize).min(1 << 20));
         for gx in lo_g[0]..=hi_g[0] {
             for gz in lo_g[2]..=hi_g[2] {
@@ -384,8 +473,14 @@ impl VoxelData {
                 if slant > apex {
                     continue;
                 }
+                // The excluded box is tested in world space, once per column for
+                // XZ and once per cell for Y.
+                let in_xz = plan
+                    .exclude
+                    .is_some_and(|(l, h)| w.x >= l.x && w.x <= h.x && w.z >= l.z && w.z <= h.z);
                 for gy in lo_g[1]..=hi_g[1] {
-                    let y = self.grid_to_world(DVec3::new(0.0, gy as f64, 0.0)).y - base.y;
+                    let wy = self.grid_to_world(DVec3::new(0.0, gy as f64, 0.0)).y;
+                    let y = wy - base.y;
                     if y < 0.0 {
                         continue;
                     }
@@ -395,6 +490,10 @@ impl VoxelData {
                     }
                     if self.sample_global(gx, gy, gz) < 0.0 {
                         continue; // already rock — piling on it places nothing
+                    }
+                    // …and never back into the hole this soil came out of.
+                    if in_xz && plan.exclude.is_some_and(|(l, h)| wy >= l.y && wy <= h.y) {
+                        continue;
                     }
                     out.push(Candidate {
                         rank,
@@ -413,7 +512,52 @@ impl VoxelData {
                 .then(a.g[0].cmp(&b.g[0]))
                 .then(a.g[2].cmp(&b.g[2]))
         });
-        out
+        Some(out)
+    }
+
+    /// Inclusive integer sample box a spoil search of `apex` covers, or `None`
+    /// when it is empty or larger than [`MAX_SPOIL_SEARCH_CELLS`].
+    ///
+    /// **The cell count is computed with `checked_mul`** (P21.3 audit, B1).
+    /// [`integer_box`] clamps each axis to `±(i32::MAX − 4)`, so three spans
+    /// multiplied straight reach ~7.9 × 10²⁸ and wrap an `i64` long before they
+    /// exceed the cap — the compare then passes and the walk runs forever, or
+    /// the multiply itself panics in a debug build. A `None` here is what stops
+    /// the growth loop instead.
+    fn spoil_search_box(&self, base: DVec3, apex: f64) -> Option<([i32; 3], [i32; 3])> {
+        let (lo_w, hi_w) = spoil_search_region(base, apex);
+        let (lo_g, hi_g) = integer_box(self.world_to_grid(lo_w), self.world_to_grid(hi_w))?;
+        let mut cells: u64 = 1;
+        for a in 0..3 {
+            let span = (hi_g[a] as i64 - lo_g[a] as i64 + 1).max(0) as u64;
+            cells = cells.checked_mul(span)?;
+            if cells > MAX_SPOIL_SEARCH_CELLS {
+                return None;
+            }
+        }
+        (cells > 0).then_some((lo_g, hi_g))
+    }
+
+    /// Make every chunk the search region touches resident, so a cell that is
+    /// absent really is air rather than rock nobody paged in.
+    fn page_spoil_region(&mut self, base: DVec3, apex: f64, store: &dyn ChunkStore) {
+        let Some((lo_g, hi_g)) = self.spoil_search_box(base, apex) else {
+            return;
+        };
+        let lo = ChunkKey::of_sample(lo_g[0], lo_g[1], lo_g[2]);
+        let hi = ChunkKey::of_sample(hi_g[0], hi_g[1], hi_g[2]);
+        // The cell cap above already bounds the sample box; a chunk box is that
+        // divided by `CHUNK_DIM³`, so this set is small by construction.
+        let span = |a: i32, b: i32| (b as i64 - a as i64 + 1).max(0) as u64;
+        let chunks = span(lo.x, hi.x)
+            .saturating_mul(span(lo.y, hi.y))
+            .saturating_mul(span(lo.z, hi.z));
+        if chunks == 0 || chunks > MAX_SPOIL_SEARCH_CELLS / (CHUNK_DIM as u64).pow(3) + 8 {
+            return;
+        }
+        let wants: std::collections::BTreeSet<ChunkKey> =
+            crate::residency::chunk_range(lo, hi).into_iter().collect();
+        self.request_chunks(&wants, store);
     }
 
     /// Write the pile's **outside** distance band, so the mesher has a gradient
@@ -433,18 +577,11 @@ impl VoxelData {
         let h = self.voxel_size_m();
         let margin = SDF_BAND as f64 * h / REPOSE_COS;
         let reach = apex + margin;
-        let radius = reach / REPOSE_TAN;
-        let lo = self.world_to_grid(DVec3::new(base.x - radius, base.y, base.z - radius));
-        let hi = self.world_to_grid(DVec3::new(base.x + radius, base.y + reach, base.z + radius));
-        let Some((lo_g, hi_g)) = integer_box(lo, hi) else {
+        // The same checked box the candidate gather uses — one place where three
+        // `i32` spans become a cell count, so one place that can overflow.
+        let Some((lo_g, hi_g)) = self.spoil_search_box(base, reach) else {
             return;
         };
-        let cells = (hi_g[0] as i64 - lo_g[0] as i64 + 1).max(0)
-            * (hi_g[1] as i64 - lo_g[1] as i64 + 1).max(0)
-            * (hi_g[2] as i64 - lo_g[2] as i64 + 1).max(0);
-        if cells <= 0 || cells > MAX_SPOIL_SEARCH_CELLS {
-            return;
-        }
         for gx in lo_g[0]..=hi_g[0] {
             for gz in lo_g[2]..=hi_g[2] {
                 let w = self.grid_to_world(DVec3::new(gx as f64, 0.0, gz as f64));
@@ -494,7 +631,7 @@ impl VoxelData {
 /// so a base point dropped a kilometre from the volume cannot turn into an
 /// unbounded scan. Sixteen million cells is a 250-metre cone at half-metre
 /// voxels — far past anything an editor gesture produces.
-const MAX_SPOIL_SEARCH_CELLS: i64 = 16_777_216;
+const MAX_SPOIL_SEARCH_CELLS: u64 = 16_777_216;
 
 #[cfg(test)]
 mod tests {
@@ -745,6 +882,179 @@ mod tests {
         );
     }
 
+    /// **B1 (P21.3 audit): the growth loop is bounded and never overflows.**
+    ///
+    /// A count too large for any pile used to make step 0 exceed the cell cap,
+    /// after which the `apex *= 1.4` loop ran all 32 times and multiplied three
+    /// `i32`-clamped spans into a panic — while holding the shared-volumes
+    /// guard, mid-transaction, with the cut already committed to the world and
+    /// no `EditCommand` describing it.
+    ///
+    /// The measured threshold was 4_075_984 OK / 4_075_985 panic, so both sides
+    /// of it are exercised here, plus a count far past any conceivable dig.
+    #[test]
+    fn an_impossible_count_is_a_shortfall_and_never_a_panic() {
+        for total in [4_075_984u64, 4_075_985, 40_000_000, u64::MAX / 4] {
+            let mut v = empty(0.5);
+            let mut b = VoxelDeltaBuilder::new();
+            let report = v.place_spoil_into(&SpoilPlan::new([total, 0, 0, 0], DVec3::ZERO), &mut b);
+            // Either it fits (small ones may) or it is an honest shortfall — but
+            // it always RETURNS.
+            assert!(
+                report.is_exact() || report.shortfall == [total, 0, 0, 0],
+                "{total}: {report:?}"
+            );
+            if !report.is_exact() {
+                assert_eq!(report.total_placed(), 0, "{total}: a partial pile");
+                assert!(b.is_empty(), "{total}: a refused pile recorded writes");
+            }
+        }
+    }
+
+    /// **The pile never places back into the hole it came out of** (P21.3 audit).
+    ///
+    /// The default site's clearance is the *analytic* radius and the real
+    /// footprint is wider, so a big dig used to refill part of its own pit — and
+    /// conservation balanced perfectly while it did, because a refilled pit is
+    /// an impeccably conserved place to put the soil. The guarantee is now
+    /// structural: excluded cells are not candidates.
+    #[test]
+    fn an_excluded_box_is_never_placed_into() {
+        let mut v = empty(0.5);
+        // A "cut" box, and a base sitting right on its eastern rim so the pile
+        // must lean back over it.
+        let lo = DVec3::new(0.0, 0.0, 0.0);
+        let hi = DVec3::new(6.0, 4.0, 6.0);
+        let plan = SpoilPlan::new([3000, 0, 0, 0], DVec3::new(6.5, 0.0, 3.0)).excluding(lo, hi);
+        let mut b = VoxelDeltaBuilder::new();
+        let report = v.place_spoil_into(&plan, &mut b);
+        assert!(report.is_exact(), "{report:?}");
+        assert!(
+            report.base_radius_m > 6.5 - hi.x,
+            "the fixture pile ({:.1} m) does not even reach the exclusion — it proves nothing",
+            report.base_radius_m
+        );
+
+        let mut inside = 0;
+        for (&key, c) in v.chunks() {
+            for k in 0..CHUNK_DIM {
+                for j in 0..CHUNK_DIM {
+                    for i in 0..CHUNK_DIM {
+                        if c.sample(i, j, k) >= 0.0 {
+                            continue;
+                        }
+                        let bs = key.base_sample();
+                        let w = v.grid_to_world(DVec3::new(
+                            (bs[0] + i as i32) as f64,
+                            (bs[1] + j as i32) as f64,
+                            (bs[2] + k as i32) as f64,
+                        ));
+                        if w.cmpge(lo).all() && w.cmple(hi).all() {
+                            inside += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(inside, 0, "{inside} spoil samples landed back in the cut");
+
+        // …and without the exclusion the same pile really does intrude, so the
+        // assertion above is not vacuous.
+        let mut u = empty(0.5);
+        let mut b2 = VoxelDeltaBuilder::new();
+        let open = SpoilPlan::new([3000, 0, 0, 0], DVec3::new(6.5, 0.0, 3.0));
+        assert!(u.place_spoil_into(&open, &mut b2).is_exact());
+        let mut intruded = 0;
+        for (&key, c) in u.chunks() {
+            for k in 0..CHUNK_DIM {
+                for j in 0..CHUNK_DIM {
+                    for i in 0..CHUNK_DIM {
+                        if c.sample(i, j, k) >= 0.0 {
+                            continue;
+                        }
+                        let bs = key.base_sample();
+                        let w = u.grid_to_world(DVec3::new(
+                            (bs[0] + i as i32) as f64,
+                            (bs[1] + j as i32) as f64,
+                            (bs[2] + k as i32) as f64,
+                        ));
+                        if w.cmpge(lo).all() && w.cmple(hi).all() {
+                            intruded += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            intruded > 0,
+            "the fixture cannot intrude even unguarded — the gate above is vacuous"
+        );
+    }
+
+    /// **Paging is part of the placement** (P21.3 audit): a pile that would
+    /// stand where the asset holds un-paged rock pages it in first, so those
+    /// cells are correctly rejected as solid instead of being counted as air and
+    /// overwritten.
+    #[test]
+    fn a_paged_placement_sees_rock_an_unpaged_one_would_overwrite() {
+        use crate::residency::MemoryChunkStore;
+
+        // A cold store holding a solid slab right where the pile wants to stand.
+        let mut source = empty(0.5);
+        let mut store = MemoryChunkStore::new();
+        for key in chunk_range(ChunkKey::new(0, 0, 0), ChunkKey::new(1, 0, 1)) {
+            let chunk = VoxelChunk::solid(3);
+            store.insert(key, &chunk).unwrap();
+            source.insert_chunk(key, chunk);
+        }
+
+        let plan = SpoilPlan::new([600, 0, 0, 0], DVec3::new(4.0, 0.0, 4.0));
+
+        // UNPAGED: the slab is invisible, so its cells are "air" and the pile
+        // writes straight over the asset's own rock.
+        let mut blind = empty(0.5);
+        let mut b1 = VoxelDeltaBuilder::new();
+        assert!(blind.place_spoil_into(&plan, &mut b1).is_exact());
+
+        // PAGED: the same call through the paging door sees the rock, rejects
+        // those cells and grows the pile around them.
+        let mut seeing = empty(0.5);
+        let mut b2 = VoxelDeltaBuilder::new();
+        let paged = seeing.place_spoil_into_paged(&plan, &mut b2, &store);
+        assert!(paged.is_exact(), "{paged:?}");
+        assert!(
+            paged.apex_height_m > 0.0 && seeing.chunk_count() > 0,
+            "the paged pile placed nothing"
+        );
+        assert!(
+            paged.base_radius_m > 0.0,
+            "the paged pile has no footprint: {paged:?}"
+        );
+        // The rock is intact: every sample the store served is still solid.
+        for key in source.resident_keys() {
+            let got = seeing.get_chunk(key).expect("paged in");
+            let want = source.get_chunk(key).unwrap();
+            for k in 0..CHUNK_DIM {
+                for j in 0..CHUNK_DIM {
+                    for i in 0..CHUNK_DIM {
+                        if want.sample(i, j, k) < 0.0 {
+                            assert!(
+                                got.sample(i, j, k) < 0.0,
+                                "{key:?} ({i},{j},{k}): the pile hollowed the asset's own rock"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // …and the two runs really differ, so this is not two identical piles.
+        assert_ne!(
+            image(&blind),
+            image(&seeing),
+            "paging changed nothing — the fixture does not overlap the slab"
+        );
+    }
+
     /// The frozen trig constants really are the stated angle — checked against
     /// `std` here (a **test**, where libm's last bit does not decide committed
     /// content) so a typo in a literal cannot ship.
@@ -786,20 +1096,116 @@ mod tests {
         let rb = place(&mut big, [4000, 0, 0, 0], DVec3::ZERO);
         assert!(rb.apex_height_m > rs.apex_height_m, "{rs:?} {rb:?}");
         assert!(rb.base_radius_m > rs.base_radius_m);
-        for r in [rs, rb] {
+        // `base_radius_m == apex / tan θ` is how the field is COMPUTED, so
+        // asserting it is a tautology (P21.3 audit). The claim worth making is
+        // about the geometry the pile actually has: measure the placed samples
+        // and check that the mound's silhouette really lies on the repose cone.
+        let solid_extent = |v: &VoxelData, base: DVec3| -> (f64, f64) {
+            let (mut top, mut reach) = (0.0f64, 0.0f64);
+            for (&key, c) in v.chunks() {
+                for k in 0..CHUNK_DIM {
+                    for j in 0..CHUNK_DIM {
+                        for i in 0..CHUNK_DIM {
+                            if c.sample(i, j, k) >= 0.0 {
+                                continue;
+                            }
+                            let b = key.base_sample();
+                            let w = v.grid_to_world(DVec3::new(
+                                (b[0] + i as i32) as f64,
+                                (b[1] + j as i32) as f64,
+                                (b[2] + k as i32) as f64,
+                            ));
+                            top = top.max(w.y - base.y);
+                            let dx = w.x - base.x;
+                            let dz = w.z - base.z;
+                            reach = reach.max((dx * dx + dz * dz).sqrt());
+                        }
+                    }
+                }
+            }
+            (top, reach)
+        };
+        for (label, v, r, n) in [("small", &small, rs, 200u64), ("big", &big, rb, 4000)] {
+            let (top, reach) = solid_extent(v, DVec3::ZERO);
+            // Every placed sample is under the cone the report describes, within
+            // one voxel of lattice slack.
             assert!(
-                (r.base_radius_m * REPOSE_TAN - r.apex_height_m).abs() < 1e-9,
-                "{r:?}"
+                top <= r.apex_height_m + 0.5,
+                "{label}: the pile is {top:.2} m tall but reports {:.2} m",
+                r.apex_height_m
+            );
+            assert!(
+                reach <= r.base_radius_m + 0.5,
+                "{label}: the pile reaches {reach:.2} m but reports {:.2} m",
+                r.base_radius_m
+            );
+            // …and it really is a CONE and not a column or a slab: the measured
+            // height over the measured footprint is the repose slope.
+            if reach > 1.0 {
+                let slope = top / reach;
+                assert!(
+                    (slope - REPOSE_TAN).abs() < 0.35,
+                    "{label}: slope {slope:.3} is not the {REPOSE_TAN:.3} angle of repose \
+                     ({top:.2} m over {reach:.2} m)"
+                );
+            }
+            // The analytic cone that tall over that footprint holds roughly the
+            // count — a sanity bound, not an identity (a pile is a lattice).
+            let vol = std::f64::consts::PI / 3.0 * r.base_radius_m.powi(2) * r.apex_height_m;
+            let cells = vol / 0.125;
+            assert!(
+                (0.4..2.2).contains(&(cells / n as f64)),
+                "{label}: {cells:.0} lattice cells for {n} voxels"
             );
         }
-        // A cone that tall over that footprint is roughly the volume it holds —
-        // a sanity bound, not an identity (the pile is a lattice, not a solid).
-        let v = std::f64::consts::PI / 3.0 * rb.base_radius_m.powi(2) * rb.apex_height_m;
-        let cells = v / 0.125;
-        assert!(
-            (0.5..2.0).contains(&(cells / 4000.0)),
-            "{cells} lattice cells for 4000 voxels"
-        );
+    }
+
+    /// **The tie-break order is a total order, and it is the one documented.**
+    ///
+    /// The pile is "a pure function of `(base, count)`" only because
+    /// `(rank, height, x, z)` never ties on all four for distinct cells. Nothing
+    /// asserted it, so a sort that dropped a key — or reordered them — would
+    /// still pass every determinism test that compares two identical runs.
+    #[test]
+    fn the_candidate_order_is_total_and_as_documented() {
+        let mut v = empty(1.0);
+        let mut b = VoxelDeltaBuilder::new();
+        // A base on the lattice, so the four cells at (±1, 0, 0) / (0, 0, ±1)
+        // tie on rank AND height and can only be separated by x then z.
+        let r = v.place_spoil_into(&SpoilPlan::new([5, 0, 0, 0], DVec3::ZERO), &mut b);
+        assert!(r.is_exact());
+
+        // Gather the placed cells in the order the rule says they were taken.
+        let mut placed: Vec<[i32; 3]> = Vec::new();
+        for (&key, c) in v.chunks() {
+            for k in 0..CHUNK_DIM {
+                for j in 0..CHUNK_DIM {
+                    for i in 0..CHUNK_DIM {
+                        if c.sample(i, j, k) < 0.0 {
+                            let bs = key.base_sample();
+                            placed.push([bs[0] + i as i32, bs[1] + j as i32, bs[2] + k as i32]);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(placed.len(), 5);
+        // The centre cell (rank 0) must be there, and the four unit-distance
+        // neighbours — not, say, two of them and one two cells out.
+        assert!(placed.contains(&[0, 0, 0]), "{placed:?}");
+        let ring: Vec<[i32; 3]> = vec![[-1, 0, 0], [0, 0, -1], [0, 0, 1], [1, 0, 0]];
+        for cell in &ring {
+            assert!(
+                placed.contains(cell),
+                "{cell:?} is missing — the order skipped a tied cell: {placed:?}"
+            );
+        }
+        // Two independent runs agree, cell for cell (the order is a function of
+        // the set, not of the walk).
+        let mut w = empty(1.0);
+        let mut b2 = VoxelDeltaBuilder::new();
+        w.place_spoil_into(&SpoilPlan::new([5, 0, 0, 0], DVec3::ZERO), &mut b2);
+        assert_eq!(image(&v), image(&w));
     }
 
     /// **Nothing is written below the base plane.** A pile grows up; a spoil

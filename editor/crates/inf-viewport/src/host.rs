@@ -4777,20 +4777,38 @@ impl EngineHost {
         let (lo, hi) = shape.aabb_m(0.0);
         let center = DVec2::new((lo.x + hi.x) * 0.5, (lo.z + hi.z) * 0.5);
         let radius = ((hi.x - lo.x).max(hi.z - lo.z) * 0.5).max(0.0);
-        for i in 0..self.terrain_slots.len() {
-            let guid = self.terrain_slots[i].guid;
-            if !self.terrain_slots[i].streamed {
-                continue;
-            }
-            let translation = self
-                .terrain_streams
-                .projection_inputs(guid)
-                .map(|(_, _, t)| t)
-                .unwrap_or(DVec3::ZERO);
-            let local = DVec2::new(center.x - translation.x, center.y - translation.z);
-            self.terrain_streams
-                .page_brush_footprint(guid, doc, local, radius);
+        self.page_terrain_disc(doc, center, radius);
+    }
+
+    /// Page the ground under the **spoil site** before the dig resolves it
+    /// (P21.3 audit, B3).
+    ///
+    /// `SceneDoc::spoil_site`'s `Auto` rule drops the heap onto
+    /// `ground_surface_y`, which reads resident tiles only — so on a streamed
+    /// terrain the heap's height, and therefore the committed geometry, would
+    /// depend on which tiles the camera had visited. `Ring 1` cannot fix this
+    /// itself: it has the rule and no streamer.
+    ///
+    /// The exact site is not known until the cut has run (it is offset by the
+    /// pile's own radius), so this pages a **conservative band**: from the cut's
+    /// eastern face out by the radius the dig's own sample bound allows, plus
+    /// the gap. Deterministic, and a superset of wherever the rule lands.
+    fn page_spoil_ground(&mut self, doc: &mut SceneDoc, bounds: (DVec3, DVec3), voxels: u64) {
+        if self.voxel_tool.spoil != SpoilMode::Auto {
+            return; // a picked site is paged by the click that placed it
         }
+        let (lo, hi) = bounds;
+        if !(lo.is_finite() && hi.is_finite()) {
+            return;
+        }
+        let size = self
+            .voxel_target(doc)
+            .map(|v| self.voxel_size_of(v))
+            .unwrap_or(0.5);
+        let reach = inf_voxel::pile_base_radius_m(voxels, size) + inf_voxel::SPOIL_GAP_M;
+        let center = DVec2::new(hi.x + reach * 0.5, (lo.z + hi.z) * 0.5);
+        let radius = (reach + (hi.z - lo.z) * 0.5).max(1.0);
+        self.page_terrain_disc(doc, center, radius);
     }
 
     /// Begin a carve gesture. For the **brush** this opens a stroke and lays the
@@ -4950,7 +4968,16 @@ impl EngineHost {
         // over `inf_terrain::dab_positions`) — the M11 move. `skip(1)`: the
         // first entry is `last`, which is already cut.
         let spacing = inf_editor_core::voxel_tool::dab_spacing(self.voxel_tool.radius_m);
-        let centers = inf_editor_core::voxel_tool::dab_centers(&[last, cur], spacing);
+        // **Capped before it is materialized**, not filtered afterwards (P21.3
+        // audit). `.take(32)` on a full list is not a bound: at the 0.05 m
+        // spacing floor a drag whose pick landed a hundred kilometres away —
+        // `pick_world_point` admits `t` out to 1e6 — builds two million points,
+        // 80 MB and 27 ms, every frame, before discarding all but 32 of them.
+        let centers = inf_editor_core::voxel_tool::dab_centers_capped(
+            &[last, cur],
+            spacing,
+            Self::MAX_DABS_PER_UPDATE,
+        );
         let mut tally = self
             .voxel_stroke
             .as_ref()
@@ -4959,7 +4986,7 @@ impl EngineHost {
         let mut refused = None;
         if centers.len() > 1 {
             let mut placed = last;
-            for &center in centers.iter().skip(1).take(Self::MAX_DABS_PER_UPDATE) {
+            for &center in centers.iter().skip(1) {
                 let op = self.voxel_op_at(center);
                 if let Some(terrains) = self.voxel_authorize(doc, &op.shape) {
                     if let Some(stroke) = self.voxel_stroke.as_mut() {
@@ -5015,6 +5042,13 @@ impl EngineHost {
         };
         self.voxel_stroke_last = None;
         let volume = stroke.volume();
+        // The Auto spoil rule reads the ground east of the stroke's own
+        // footprint, so that ground has to be paged before it does (P21.3
+        // audit, B3).
+        if let Some(bounds) = stroke.bounds() {
+            let removed: u64 = stroke.tally().carved_by_material.iter().sum();
+            self.page_spoil_ground(doc, bounds, removed);
+        }
         // The spoil rides the SAME stroke, so the cut, its cave mouths and the
         // heap it produced are one `EditCommand` and one Ctrl+Z.
         let (tally, recorded, refusal) = doc.edit_commit_dig(stroke, self.spoil_choice());
@@ -5037,6 +5071,7 @@ impl EngineHost {
     /// refused pit that left its rectangle on screen would invite the author to
     /// release again and be refused again.
     fn commit_box_cut(&mut self, doc: &mut SceneDoc) -> bool {
+        let version_before = doc.version();
         let anchor = self.voxel_box_anchor.take();
         let cursor = self.voxel_box_cursor.take();
         self.voxel_preview.clear();
@@ -5047,21 +5082,37 @@ impl EngineHost {
             self.reject_tool(Self::VOXEL_NO_VOLUME_REJECTION);
             return false;
         };
+        // **Page the rectangle BEFORE the plan probes it** (P21.3 audit, B3) —
+        // otherwise the pit's roof and floor are a function of camera residency.
+        self.page_box_footprint(doc, anchor, cursor);
         let Some(plan) = self.box_cut_plan(doc, anchor, cursor) else {
             // A click rather than a drag. Silent: missing a drag is not an error
             // an author needs a sentence about.
             return false;
         };
         let op = self.voxel_shape_op(plan.shape);
-        // Page before the verdict, exactly as the tunnel does: `cut_crosses_surface`
-        // reads authored tiles only, and an unpaged streamed footprint would wave
-        // a breakthrough through unchecked.
+        // …and page again around the resolved shape before the verdict, exactly
+        // as the path tools do: `cut_crosses_surface` reads authored tiles only,
+        // and the plan's box is taller than the rectangle that produced it.
         self.page_cut_footprint(doc, &op.shape);
+        // The Auto spoil rule drops the heap onto the ground east of the cut, so
+        // that ground has to be in the document before the rule reads it.
+        let (blo, bhi) = op.shape.aabb_m(0.0);
+        self.page_spoil_ground(
+            doc,
+            (blo, bhi),
+            op.shape.affected_sample_count(self.voxel_size_of(volume)),
+        );
         let tally = match doc.edit_dig(volume, &self.voxel_volumes, &[op], self.spoil_choice()) {
             Ok(tally) => tally,
             Err(refusal) => {
                 self.reject_tool(refusal.message());
-                return false;
+                // A refused dig cuts nothing, but paging its footprint DID move
+                // the document (tiles arrived in the working set), and the
+                // caller's `world_changed` is what re-emits the delta. Returning
+                // a flat `false` here left the viewport's own projection a
+                // version behind (P21.3 audit).
+                return doc.version() != version_before;
             }
         };
         for i in 0..self.terrain_slots.len() {
@@ -5069,7 +5120,7 @@ impl EngineHost {
             self.after_terrain_edit(doc, guid);
         }
         self.report_carve(volume, tally);
-        !tally.is_noop()
+        !tally.is_noop() || doc.version() != version_before
     }
 
     /// Resolve the dragged rectangle into a pit through the Ring-1 planner.
@@ -5093,11 +5144,56 @@ impl EngineHost {
         )
     }
 
+    /// **Page the drag rectangle into the document before anything probes it**
+    /// (P21.3 audit, B3).
+    ///
+    /// `box_cut_plan` reads the ground through `SceneDoc::ground_surface_y`,
+    /// which answers `None` on a tile that is not resident and whose `None` the
+    /// planner treats as "no ground here, skip". On a streamed terrain that
+    /// makes the pit's floor and roof a function of **camera residency**: two
+    /// authors at different distances dig different pits from the same drag, and
+    /// the committed geometry depends on where the session had been. The
+    /// standing law says it must not.
+    ///
+    /// Called before *both* the commit and the readout, so the number the author
+    /// reads while dragging is the number the release cuts.
+    fn page_box_footprint(&mut self, doc: &mut SceneDoc, anchor: DVec3, cursor: DVec3) {
+        let center = DVec2::new((anchor.x + cursor.x) * 0.5, (anchor.z + cursor.z) * 0.5);
+        let radius = ((anchor.x - cursor.x).abs().max((anchor.z - cursor.z).abs())) * 0.5;
+        self.page_terrain_disc(doc, center, radius);
+    }
+
+    /// Page every streamed terrain's tiles under an XZ disc into the document's
+    /// working set — the shared half of [`page_cut_footprint`](Self::page_cut_footprint)
+    /// and [`page_box_footprint`](Self::page_box_footprint).
+    fn page_terrain_disc(&mut self, doc: &mut SceneDoc, center: DVec2, radius: f64) {
+        if !center.is_finite() || !radius.is_finite() {
+            return;
+        }
+        for i in 0..self.terrain_slots.len() {
+            let guid = self.terrain_slots[i].guid;
+            if !self.terrain_slots[i].streamed {
+                continue;
+            }
+            let translation = self
+                .terrain_streams
+                .projection_inputs(guid)
+                .map(|(_, _, t)| t)
+                .unwrap_or(DVec3::ZERO);
+            let local = DVec2::new(center.x - translation.x, center.y - translation.z);
+            self.terrain_streams
+                .page_brush_footprint(guid, doc, local, radius.max(0.0));
+        }
+    }
+
     /// The pit-drag readout: what releasing right now would excavate.
-    fn report_box_cut(&mut self, doc: &SceneDoc, volume: Uuid) {
+    fn report_box_cut(&mut self, doc: &mut SceneDoc, volume: Uuid) {
         let (Some(anchor), Some(cursor)) = (self.voxel_box_anchor, self.voxel_box_cursor) else {
             return;
         };
+        // Page first, then probe — the same order the commit uses, so the
+        // readout cannot quote a pit the release would not cut.
+        self.page_box_footprint(doc, anchor, cursor);
         let Some(plan) = self.box_cut_plan(doc, anchor, cursor) else {
             self.report_tool(
                 "Box cut: drag a rectangle on the ground — a click digs nothing.".to_string(),
@@ -5223,12 +5319,24 @@ impl EngineHost {
         if path.len() < 2 {
             return false;
         }
+        let version_before = doc.version();
         let radius_m = self.voxel_tool.radius_m.max(0.0);
         let ops: Vec<VoxelOp> = if self.voxel_tool.kind == VoxelToolKind::Trench {
+            // **Page every leg's footprint BEFORE `trench_shapes` probes it**
+            // (P21.3 audit, B3): the sky rule reads the ground through
+            // `ground_surface_y`, whose `None` on a non-resident tile the
+            // planner treats as "no ground here" — which would make a committed
+            // trench's roof a function of camera residency.
+            for seg in path.windows(2) {
+                let mid = DVec2::new((seg[0].x + seg[1].x) * 0.5, (seg[0].z + seg[1].z) * 0.5);
+                let half = (seg[1] - seg[0]).length() * 0.5 + radius_m;
+                self.page_terrain_disc(doc, mid, half);
+            }
             inf_editor_core::voxel_tool::trench_shapes(
                 &path,
                 radius_m,
                 self.voxel_tool.depth_m.max(0.0),
+                |x, z| doc.ground_surface_y(x, z),
             )
             .into_iter()
             .map(|s| self.voxel_shape_op(s))
@@ -5256,11 +5364,23 @@ impl EngineHost {
         // The refusal carries its OWN sentence. Quoting the inline-terrain one for
         // every empty answer is what this used to do, and it sent an author off to
         // convert a terrain when the real problem was a volume that never loaded.
+        // The Auto spoil rule needs the ground east of the whole run paged.
+        let size = self.voxel_size_of(volume);
+        let mut lo = DVec3::splat(f64::INFINITY);
+        let mut hi = DVec3::splat(f64::NEG_INFINITY);
+        let mut budget = 0u64;
+        for op in &ops {
+            let (l, h) = op.shape.aabb_m(0.0);
+            lo = lo.min(l);
+            hi = hi.max(h);
+            budget = budget.saturating_add(op.shape.affected_sample_count(size));
+        }
+        self.page_spoil_ground(doc, (lo, hi), budget);
         let tally = match doc.edit_dig(volume, &self.voxel_volumes, &ops, self.spoil_choice()) {
             Ok(tally) => tally,
             Err(refusal) => {
                 self.reject_tool(refusal.message());
-                return false;
+                return doc.version() != version_before;
             }
         };
         // Every projected terrain, not the segments' own lists: a tunnel can run

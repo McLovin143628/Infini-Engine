@@ -592,9 +592,9 @@ mod tests {
                 carve2, carve,
                 "case {case}: the record is not deterministic"
             );
-            u.revert_hole_delta(&carve2);
+            assert_eq!(u.revert_hole_delta(&carve2), 0);
             assert_eq!(image(&u), before, "case {case}: undo left a scar");
-            u.apply_hole_delta(&carve2);
+            assert_eq!(u.apply_hole_delta(&carve2), 0);
             assert!(u.has_holes(), "case {case}: redo opened nothing");
         }
         assert!(

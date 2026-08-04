@@ -402,23 +402,38 @@ impl HoleDeltaBuilder {
 
 impl TerrainData {
     /// Apply (redo) a [`HoleDelta`]: write each patch's `after` flags, then heal.
-    /// A patch that targets a tile the terrain no longer holds is skipped — a
-    /// hole cannot exist without a heightfield to cut it from.
-    pub fn apply_hole_delta(&mut self, delta: &HoleDelta) {
-        self.write_hole_patches(delta, false);
+    ///
+    /// Returns how many patches were **skipped** because the terrain no longer
+    /// holds their tile — a hole cannot exist without a heightfield to cut it
+    /// from, so skipping is right, but a caller that ignores the number is
+    /// silently replaying less than the record describes.
+    ///
+    /// `#[must_use]` for parity with the voxel half
+    /// ([`VoxelData::apply_delta`](inf_voxel::VoxelData::apply_delta), whose
+    /// dropped answer is exactly how a hole mask came to be replayed over rock
+    /// nobody put back). The two halves of one carve must not have two different
+    /// standards about a partial replay (P21.3 audit).
+    #[must_use = "a non-zero skip count means the mask was only partly replayed"]
+    pub fn apply_hole_delta(&mut self, delta: &HoleDelta) -> usize {
+        self.write_hole_patches(delta, false)
     }
 
     /// Revert (undo) a [`HoleDelta`]: write each patch's `before` flags, then
     /// heal — so a carve that materialized a mask undoes back to a tile that
     /// serializes byte-identically to one nothing ever carved.
-    pub fn revert_hole_delta(&mut self, delta: &HoleDelta) {
-        self.write_hole_patches(delta, true);
+    ///
+    /// Returns the skip count, like [`apply_hole_delta`](Self::apply_hole_delta).
+    #[must_use = "a non-zero skip count means the mask was only partly reverted"]
+    pub fn revert_hole_delta(&mut self, delta: &HoleDelta) -> usize {
+        self.write_hole_patches(delta, true)
     }
 
-    fn write_hole_patches(&mut self, delta: &HoleDelta, revert: bool) {
+    fn write_hole_patches(&mut self, delta: &HoleDelta, revert: bool) -> usize {
         let res = self.tile_resolution();
+        let mut skipped = 0;
         for patch in &delta.patches {
             if self.get_tile(patch.coord).is_none() {
+                skipped += 1;
                 continue;
             }
             let buf = if revert { &patch.before } else { &patch.after };
@@ -431,5 +446,6 @@ impl TerrainData {
             }
             tile.heal_holes();
         }
+        skipped
     }
 }

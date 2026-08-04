@@ -446,20 +446,45 @@ pub const DIG_TOO_LARGE_REFUSAL: &str =
 /// the count. It exists because "the spoil did not fit" must be a refusal the
 /// author reads rather than a transaction that silently fails conservation.
 pub const SPOIL_SHORTFALL_REFUSAL: &str =
-    "Dig refused: the excavated soil could not be placed — the spoil site is buried in solid \
-     rock for as far as the pile could search. Nothing was cut. Move the spoil site to open \
-     ground, or turn spoil off to discard the material instead.";
+    "Spoil refused: the excavated soil could not be placed — the spoil site is buried in solid \
+     rock for as far as the pile could search, or the stroke removed more than one heap can \
+     hold. The cut itself is committed (Ctrl+Z takes it back); the material was discarded. Move \
+     the spoil site to open ground, or dig in smaller passes.";
+
+/// …and why a **brush stroke**'s spoil was refused: the stroke removed more than
+/// one pile may hold.
+///
+/// A distinct sentence from [`DIG_TOO_LARGE_REFUSAL`] because the situation is
+/// the opposite one. A box or trench cut is judged *before* it cuts, so its
+/// refusal can honestly say "nothing was cut". A brush stroke's dabs are already
+/// in the world by the time anyone can count them — `CarveStroke::dab`
+/// accumulates across frames with no ceiling — so the only thing left to refuse
+/// is the heap, and telling the author "nothing was cut" would be a lie about a
+/// hole they are looking at.
+pub const SPOIL_TOO_LARGE_REFUSAL: &str =
+    "Spoil skipped: this stroke removed more material than one heap can hold, so the soil was \
+     discarded rather than piled. The cut is committed and Ctrl+Z takes it back. Dig in several \
+     passes if you want the spoil.";
 
 /// The most lattice samples one dig transaction may move, cut and spoil
 /// together.
 ///
-/// Two million samples is a 63 m cube at half-metre voxels — comfortably past
-/// any foundation pit an author drags, and the point where the undo record, the
-/// spoil search and the re-mesh stop being interactive. The bound is checked
-/// against
+/// Two million samples is a **58.5 m** cube at half-metre voxels (`∛2e6 = 126`
+/// samples on a side) — comfortably past any foundation pit an author drags, and
+/// the point where the undo record, the spoil search and the re-mesh stop being
+/// interactive. The bound is checked against
 /// [`affected_sample_count`](inf_voxel::VoxelShape::affected_sample_count),
-/// which is the op's whole affected region and therefore never an
-/// underestimate.
+/// which is the op's whole affected region.
+///
+/// **A dig at the ceiling is not interactive**, and that is a decided trade
+/// rather than an oversight: mouse-up on a 2 M-sample box cut spends ≈1.3 s
+/// under the shared-volumes lock (4 M would be ≈3.1 s), because the cut, the
+/// spoil search and the re-mesh all run there. The alternative — moving the
+/// re-mesh off the lock — is a bigger change than this batch should make to the
+/// store's threading, and lowering the ceiling would refuse pits an author can
+/// legitimately want. So the ceiling stays, the number is written down, and
+/// "make a big dig incremental" is the ledgered follow-up. See the P21.3 status
+/// block.
 pub const MAX_DIG_SAMPLES: u64 = 2_000_000;
 
 /// **Why a carve did not happen** — every refusal the coupled transaction can
@@ -484,6 +509,12 @@ pub enum CarveRefusal {
         /// The bound the ops actually asked for.
         samples: u64,
     },
+    /// A **brush stroke** removed more than one pile may hold, so the soil was
+    /// discarded (P21.3 audit). The cut itself is committed.
+    SpoilTooLarge {
+        /// Voxels the stroke removed.
+        voxels: u64,
+    },
     /// The spoil pile could not hold what the cut removed (P21.3).
     SpoilShortfall,
 }
@@ -496,6 +527,7 @@ impl CarveRefusal {
             CarveRefusal::VolumeNotLoaded => VOLUME_NOT_LOADED_CARVE_REFUSAL,
             CarveRefusal::PoisonedStore => POISONED_STORE_CARVE_REFUSAL,
             CarveRefusal::TooLarge { .. } => DIG_TOO_LARGE_REFUSAL,
+            CarveRefusal::SpoilTooLarge { .. } => SPOIL_TOO_LARGE_REFUSAL,
             CarveRefusal::SpoilShortfall => SPOIL_SHORTFALL_REFUSAL,
         }
     }
@@ -680,12 +712,23 @@ impl CarveStroke {
         if counts.iter().all(|&n| n == 0) {
             return Ok(()); // a dig that removed nothing spoils nothing
         }
+        // **The heap may never place back into the hole it came out of** (P21.3
+        // audit): the default site's clearance is the pile's *analytic* radius
+        // and the real footprint is wider, so a big dig used to refill part of
+        // its own pit — with conservation balancing perfectly while it did,
+        // because a refilled pit is an impeccably conserved place to put soil.
+        // The stroke's own bounds are the exclusion, so the guarantee is
+        // structural rather than arithmetic.
+        let mut plan = SpoilPlan::new(counts, site);
+        if let Some((lo, hi)) = self.bounds {
+            plan = plan.excluding(lo, hi);
+        }
         let mut volumes = self
             .volumes
             .lock()
             .map_err(|_| CarveRefusal::PoisonedStore)?;
         let report = volumes
-            .spoil_into(self.volume, &SpoilPlan::new(counts, site), &mut self.voxels)
+            .spoil_into(self.volume, &plan, &mut self.voxels)
             .ok_or(CarveRefusal::VolumeNotLoaded)?;
         if !report.is_exact() {
             return Err(CarveRefusal::SpoilShortfall);
@@ -753,8 +796,14 @@ impl CarveStroke {
         // The gesture's own footprint, for the default spoil rule. Taken from
         // the shape and not from the report, so it is the region the author
         // described rather than the subset that happened to contain rock.
+        //
+        // **Only for a VALID shape** (P21.3 audit): `aabb_m` answers
+        // `(ZERO, ZERO)` for a degenerate one — a zero-length trench, a NaN from
+        // the first frame of a drag — and unioning that box would drag the
+        // stroke's bounds (and therefore the spoil exclusion and the default
+        // site) all the way to the world origin.
         let (lo, hi) = op.shape.aabb_m(0.0);
-        if lo.is_finite() && hi.is_finite() {
+        if op.shape.is_valid() && lo.is_finite() && hi.is_finite() {
             self.bounds = Some(match self.bounds {
                 Some((l, h)) => (l.min(lo), h.max(hi)),
                 None => (lo, hi),
@@ -1073,6 +1122,17 @@ impl SceneDoc {
         spoil: SpoilChoice,
         voxel_size_m: f64,
     ) -> Result<(), CarveRefusal> {
+        // **The size gate the brush path had no other place to get** (P21.3
+        // audit, B1). `edit_dig` bounds its ops before it cuts, but a brush
+        // stroke's dabs are already in the world and `CarveStroke::dab`
+        // accumulates across frames with no ceiling — so an hour of dragging
+        // arrives here as one unbounded count, and the spoil search reacts to it
+        // by growing 32 times and multiplying three `i32`-clamped spans into a
+        // panic. Under the volumes guard. Mid-transaction. This is the bound.
+        let removed: u64 = stroke.tally().carved_by_material.iter().sum();
+        if removed > MAX_DIG_SAMPLES {
+            return Err(CarveRefusal::SpoilTooLarge { voxels: removed });
+        }
         let Some(site) = self.spoil_site(stroke, spoil, voxel_size_m) else {
             return Ok(());
         };
@@ -1212,13 +1272,35 @@ impl SceneDoc {
             return;
         }
         for (guid, hole) in holes {
-            self.with_terrain_data_mut(*guid, |data| {
+            // **Both answers are checked** (P21.3 audit). `with_terrain_data_mut`
+            // returns `None` when the entity has no terrain at all — a deleted
+            // terrain, a cleared component — and the inner call returns how many
+            // patches it had to skip because their tile is no longer resident.
+            // Dropping either one turns "the cave mouths were not put back" into
+            // silence, on the exact path whose whole job is keeping the rock and
+            // the ground consistent.
+            let skipped = self.with_terrain_data_mut(*guid, |data| {
                 if revert {
-                    data.revert_hole_delta(hole);
+                    data.revert_hole_delta(hole)
                 } else {
-                    data.apply_hole_delta(hole);
+                    data.apply_hole_delta(hole)
                 }
             });
+            match skipped {
+                None => tracing::error!(
+                    "inf-editor-core: carve {what} found no terrain {guid} — its {} cave-mouth \
+                     patch(es) were not replayed, so the ground and the rock have come apart. \
+                     Prefer re-carving over saving this level.",
+                    hole.patches.len()
+                ),
+                Some(n) if n > 0 => tracing::warn!(
+                    "inf-editor-core: carve {what} skipped {n} of {} cave-mouth patch(es) on \
+                     terrain {guid} — their tiles are not paged in, so those mouths keep their \
+                     current state until the tiles return.",
+                    hole.patches.len()
+                ),
+                Some(_) => {}
+            }
         }
         self.world_mut().mark_dirty();
         self.touch();

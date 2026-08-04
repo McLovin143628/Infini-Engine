@@ -427,6 +427,12 @@ impl EditorVoxelVolumes {
         op: &VoxelOp,
         builder: &mut VoxelDeltaBuilder,
     ) -> Option<OpReport> {
+        // **Page before cutting** (P21.3 audit, B3). A non-resident chunk reads
+        // as empty, so rock the camera never visited is not removed, not
+        // counted, and not spoiled — and conservation balances anyway, which is
+        // exactly what hides it. Camera residency must never decide what a
+        // committed edit contains.
+        self.page_op(entity, op);
         let slot = self.volumes.get_mut(entity.as_u128())?;
         let report = slot.data.apply_op_into(op, builder);
         if !report.is_noop() {
@@ -454,12 +460,35 @@ impl EditorVoxelVolumes {
         plan: &SpoilPlan,
         builder: &mut VoxelDeltaBuilder,
     ) -> Option<SpoilReport> {
-        let slot = self.volumes.get_mut(entity.as_u128())?;
-        let report = slot.data.place_spoil_into(plan, builder);
+        // The **paged** placement (P21.3 audit, B3): the pile pages each search
+        // region as it grows, so a cell it treats as air really is air and not
+        // rock the asset holds but nobody read. Placing over the latter would
+        // materialize an empty chunk on top of it and the write-back would then
+        // commit the erasure.
+        let report = self.volumes.spoil_into(entity.as_u128(), plan, builder)?;
         if report.total_placed() > 0 {
             self.volumes.resync(entity.as_u128());
         }
         Some(report)
+    }
+
+    /// Page every chunk `op`'s affected region touches into `entity`'s working
+    /// set. Returns how many were newly made resident.
+    pub fn page_op(&mut self, entity: Uuid, op: &VoxelOp) -> usize {
+        let Some(slot) = self.volumes.get(entity.as_u128()) else {
+            return 0;
+        };
+        // The op's own affected region — the AABB grown by the SDF band, which
+        // is exactly the set `apply_op_into` walks.
+        let margin = inf_voxel::SDF_BAND as f64 * slot.data.voxel_size_m();
+        let (lo, hi) = op.shape.aabb_m(margin);
+        self.volumes.page_region(entity.as_u128(), lo, hi)
+    }
+
+    /// Page every chunk a world AABB touches — the door a caller with a region
+    /// rather than an op uses.
+    pub fn page_region(&mut self, entity: Uuid, lo: DVec3, hi: DVec3) -> usize {
+        self.volumes.page_region(entity.as_u128(), lo, hi)
     }
 
     /// Close a stroke: compress `builder` into the reversible [`VoxelDelta`],

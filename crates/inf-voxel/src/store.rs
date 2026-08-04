@@ -41,10 +41,20 @@ use crate::asset::VoxelAssetReader;
 use crate::chunk::ChunkKey;
 use crate::data::VoxelData;
 use crate::mesh::VoxelMeshCache;
+use crate::residency::chunk_range;
+
 use crate::wants::{
     advance_wants, chunk_wants, clamp_wants, ChunkCatalog, ChunkGrid, VoxelStreamBudget,
     VoxelWantsParams,
 };
+
+/// The most chunks one **edit** may page in a single [`VoxelVolumes::page_region`]
+/// call.
+///
+/// 32 768 chunks is a 32³ box of them — 512 m on a side at half-metre voxels,
+/// far past any dig the size gate permits. A caller that asks for more has an
+/// AABB it did not mean, and pages nothing rather than walking the world.
+pub const MAX_EDIT_PAGE_CHUNKS: u64 = 32_768;
 
 /// One volume's loaded state: its cold store, its resident chunks and its meshed
 /// surface.
@@ -366,6 +376,76 @@ impl VoxelVolumes {
             return false;
         };
         !slot.meshes.sync(&slot.data).is_noop()
+    }
+
+    /// **Page every chunk a world AABB touches** into `entity`'s working set —
+    /// the door an *edit* pages through (P21.3 audit, B3).
+    ///
+    /// Returns the number of chunks newly made resident (`0` for an unbound
+    /// entity, or for a region already fully paged).
+    ///
+    /// # Why an edit must page, and what goes wrong when it does not
+    ///
+    /// A non-resident chunk reads [`EMPTY_SDF`](crate::EMPTY_SDF), which is
+    /// **correct** for a key the asset does not have (that is genuinely air) and
+    /// a **silent lie** for one it does (that is rock nobody paged in). A carve
+    /// over unpaged rock therefore removes nothing, counts nothing, and
+    /// conservation still balances perfectly — the discrepancy is invisible in
+    /// every number the tools quote. Worse, a *spoil* placement into such a key
+    /// materializes a fresh empty chunk over it, and the write-back then commits
+    /// that empty chunk into the `.inf_voxel`, erasing the geometry the asset
+    /// held.
+    ///
+    /// Camera residency must never decide what a committed edit contains (the
+    /// standing law); this is how the dig path obeys it.
+    ///
+    /// The region is clamped to [`MAX_EDIT_PAGE_CHUNKS`]: a caller with an
+    /// absurd AABB pages nothing rather than walking the world, and the dig's
+    /// own size gate is what keeps real cuts far below the limit.
+    pub fn page_region(&mut self, entity: u128, lo: DVec3, hi: DVec3) -> usize {
+        let Some(slot) = self.slots.get_mut(&entity) else {
+            return 0;
+        };
+        if !(lo.is_finite() && hi.is_finite()) {
+            return 0;
+        }
+        let g_lo = slot.data.world_to_grid(lo.min(hi));
+        let g_hi = slot.data.world_to_grid(lo.max(hi));
+        if !(g_lo.is_finite() && g_hi.is_finite()) {
+            return 0;
+        }
+        let limit = i32::MAX as f64 - 4.0;
+        let key_of = |g: DVec3, round: fn(f64) -> f64| {
+            ChunkKey::of_sample(
+                round(g.x).clamp(-limit, limit) as i32,
+                round(g.y).clamp(-limit, limit) as i32,
+                round(g.z).clamp(-limit, limit) as i32,
+            )
+        };
+        let k_lo = key_of(g_lo, f64::floor);
+        let k_hi = key_of(g_hi, f64::ceil);
+        let span = |a: i32, b: i32| (b as i64 - a as i64 + 1).max(0) as u64;
+        let chunks = span(k_lo.x, k_hi.x)
+            .saturating_mul(span(k_lo.y, k_hi.y))
+            .saturating_mul(span(k_lo.z, k_hi.z));
+        if chunks == 0 || chunks > MAX_EDIT_PAGE_CHUNKS {
+            return 0;
+        }
+        let wants: BTreeSet<ChunkKey> = chunk_range(k_lo, k_hi).into_iter().collect();
+        slot.data.request_chunks(&wants, &slot.store).loaded.len()
+    }
+
+    /// Place a spoil pile into `entity`'s volume, **paging the search region as
+    /// it grows** (P21.3 audit) — the door [`page_region`](Self::page_region)'s
+    /// note describes, for the one write that materializes chunks of its own.
+    pub fn spoil_into(
+        &mut self,
+        entity: u128,
+        plan: &crate::spoil::SpoilPlan,
+        builder: &mut crate::ops::VoxelDeltaBuilder,
+    ) -> Option<crate::spoil::SpoilReport> {
+        let slot = self.slots.get_mut(&entity)?;
+        Some(slot.data.place_spoil_into_paged(plan, builder, &slot.store))
     }
 
     /// A loaded volume's slot.
