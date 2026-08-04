@@ -190,6 +190,22 @@ impl AssetState {
         std::fs::read(&entry.path).ok()
     }
 
+    /// Raw payload bytes of a `.inf_terrain` asset (P21.4), for the PIE payload's
+    /// streamed-terrain source. Kind-checked exactly like
+    /// [`load_voxel_bytes`](Self::load_voxel_bytes), for the same reason: a
+    /// mistyped reference must miss rather than feed arbitrary bytes to the tile
+    /// reader.
+    pub fn load_terrain_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        let entry = proj.db().get(id)?;
+        if entry.kind() != inf_asset::AssetKind::Terrain {
+            return None;
+        }
+        std::fs::read(&entry.path).ok()
+    }
+
     /// Create a new material instance of `parent` (P7.4). Returns the new id.
     pub fn create_material_instance(&self, parent: AssetId, name: &str) -> Result<AssetId, String> {
         self.with_project(|proj| {

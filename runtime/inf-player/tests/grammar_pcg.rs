@@ -794,6 +794,7 @@ fn pie_matches_shipping_for_the_grammar_population() {
         |_guid| None,
         |_guid| None,
         |_guid| None,
+        |_guid| None,
         60,
         false,
     )

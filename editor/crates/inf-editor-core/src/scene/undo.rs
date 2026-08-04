@@ -663,10 +663,22 @@ pub struct CarveStroke {
     /// of the *last* dab of a hundred-metre trench would sit in the middle of
     /// the trench.
     bounds: Option<(DVec3, DVec3)>,
+    /// Whether each dab re-meshes immediately (P21.4).
+    ///
+    /// `true` for the live **brush**, whose whole point is that the cave appears
+    /// under the cursor as it is dug and whose dabs are small. `false` for a
+    /// one-shot **dig** — a box cut or a trench committed on mouse-up — where the
+    /// re-mesh is the one part of the transaction that does not have to happen
+    /// under the shared-volumes guard: `VoxelMeshCache` is keyed on the chunk
+    /// versions the cut just bumped, so the viewport's next per-frame
+    /// `sync_camera` rebuilds exactly the same chunks. See
+    /// `EditorVoxelVolumes::carve_into_deferred` for the measurement.
+    remesh: bool,
 }
 
 impl CarveStroke {
-    /// Open a stroke against `volume`'s chunks in `volumes`.
+    /// Open a stroke against `volume`'s chunks in `volumes`, re-meshing each dab
+    /// as it lands — the live-brush shape.
     pub fn begin(volume: Uuid, volumes: SharedVoxelVolumes) -> Self {
         Self {
             volume,
@@ -675,6 +687,16 @@ impl CarveStroke {
             holes: BTreeMap::new(),
             tally: CarveTally::default(),
             bounds: None,
+            remesh: true,
+        }
+    }
+
+    /// [`begin`](Self::begin) with the per-dab re-mesh **deferred** to the
+    /// viewport's next frame — the one-shot-dig shape (P21.4).
+    pub fn begin_deferred(volume: Uuid, volumes: SharedVoxelVolumes) -> Self {
+        Self {
+            remesh: false,
+            ..Self::begin(volume, volumes)
         }
     }
 
@@ -727,9 +749,12 @@ impl CarveStroke {
             .volumes
             .lock()
             .map_err(|_| CarveRefusal::PoisonedStore)?;
-        let report = volumes
-            .spoil_into(self.volume, &plan, &mut self.voxels)
-            .ok_or(CarveRefusal::VolumeNotLoaded)?;
+        let report = if self.remesh {
+            volumes.spoil_into(self.volume, &plan, &mut self.voxels)
+        } else {
+            volumes.spoil_into_deferred(self.volume, &plan, &mut self.voxels)
+        }
+        .ok_or(CarveRefusal::VolumeNotLoaded)?;
         if !report.is_exact() {
             return Err(CarveRefusal::SpoilShortfall);
         }
@@ -781,9 +806,12 @@ impl CarveStroke {
             .volumes
             .lock()
             .map_err(|_| CarveRefusal::PoisonedStore)?;
-        let report = volumes
-            .carve_into(self.volume, op, &mut self.voxels)
-            .ok_or(CarveRefusal::VolumeNotLoaded)?;
+        let report = if self.remesh {
+            volumes.carve_into(self.volume, op, &mut self.voxels)
+        } else {
+            volumes.carve_into_deferred(self.volume, op, &mut self.voxels)
+        }
+        .ok_or(CarveRefusal::VolumeNotLoaded)?;
         self.tally.touched += report.touched;
         self.tally.carved += report.total_carved();
         self.tally.filled += report.total_filled();
@@ -1081,7 +1109,14 @@ impl SceneDoc {
             }
         }
         // Pass 2 — cut, into one stroke, so the chain is one undo entry.
-        let mut stroke = CarveStroke::begin(volume, volumes.clone());
+        //
+        // **Deferred** (P21.4): a dig is committed on mouse-up as one shape (or a
+        // handful), so nobody is watching the surface appear under a cursor — and
+        // the re-mesh is the part of the transaction with no reason to hold the
+        // shared-volumes guard. The mesh cache is stamp-keyed on the chunk
+        // versions this cut bumps, so the viewport's next `sync_camera` rebuilds
+        // exactly the same chunks, on the render thread, outside this lock.
+        let mut stroke = CarveStroke::begin_deferred(volume, volumes.clone());
         for (op, terrains) in ops.iter().zip(&plan) {
             match stroke.dab(self, op, terrains) {
                 Ok(_) => {}

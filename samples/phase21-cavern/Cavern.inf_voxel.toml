@@ -1,0 +1,6 @@
+schema_version = 1
+guid = "21040000-0000-4000-8000-000000000003"
+kind = "voxel_volume"
+content_hash = "413d721fca798910e0245b5f21139403"
+dependencies = []
+tags = []

@@ -222,6 +222,8 @@ fn pie_payload_matches_shipping_for_terrain_and_pcg() {
         |_guid| None,
         // No voxel volumes in this scene.
         |_guid| None,
+        // The terrain is INLINE in this scene, so there is no `.inf_terrain`.
+        |_guid| None,
         60,
         false,
     )

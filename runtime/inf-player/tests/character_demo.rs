@@ -288,6 +288,7 @@ fn pie_payload_matches_shipping_for_character_demo() {
         anim_bytes,
         |_guid| None, // no biome sets
         |_guid| None, // no voxel volumes
+        |_guid| None, // no streamed terrains
         60,
         false,
     )

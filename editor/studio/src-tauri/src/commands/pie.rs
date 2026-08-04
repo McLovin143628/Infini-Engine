@@ -122,6 +122,10 @@ pub async fn pie_start(
             // the camera-paged editor store instead would make a preview depend on
             // where the author was looking.
             |guid| assets.load_voxel_bytes(inf_asset::AssetId(guid)),
+            // P21.4 (the P16.3b2 deferral): the `.inf_terrain` a streamed
+            // terrain's working set was stripped in favour of. Without it a PIE
+            // session over an asset-backed terrain previews no ground at all.
+            |guid| assets.load_terrain_bytes(inf_asset::AssetId(guid)),
             PIE_TICK_HZ,
             true,
         )

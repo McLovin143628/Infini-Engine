@@ -5452,9 +5452,770 @@ the engine's own flagship sample is one nobody reads. The surface descends from\
    frame budget.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// ── Phase 21 gate scene: `samples/phase21-cavern` (P21.4) ────────────────────
+//
+// The plan's own done-when sentence, built: *on a streamed terrain, a carved cave
+// system and an excavated foundation pit with displaced spoil piles, an
+// underground room in the pit, saved and reloaded byte-identical, and it works in
+// PIE.*
+//
+// Everything below is a **pure function of these constants**, evaluated with the
+// same Ring-0 primitives the editor's carve and dig tools commit through
+// (`VoxelOp` / `apply_surface_cut` / `SpoilPlan`). The generator is not a second
+// implementation of excavation; it is the tools' arithmetic without the
+// transaction, undo record and toolbar a document editor needs and a file writer
+// does not.
+
+/// The world is 128 m square: two 64 m tiles per axis at 2 m per sample.
+pub const PHASE21_WORLD_M: f64 = 128.0;
+pub const PHASE21_TILE_RES: u32 = 33;
+pub const PHASE21_TILES: u32 = 2;
+pub const PHASE21_MPS: f64 = 2.0;
+
+/// One metre per voxel — the volume's grid and the world's therefore agree, which
+/// is what lets every constant below be read as the metre it is.
+pub const PHASE21_VOXEL_M: f64 = 1.0;
+
+/// The rock body: chunk coords `[2, 3]` in X and Z, `[1, 2]` in Y — eight 16 m
+/// chunks covering `x, z ∈ [32, 64)`, `y ∈ [16, 48)`, which is where every working
+/// below lives. Stated as chunk indices rather than metres because that is the
+/// unit the asset's size is actually charged in.
+pub const PHASE21_ROCK_CHUNKS_XZ: (i32, i32) = (2, 3);
+pub const PHASE21_ROCK_CHUNKS_Y: (i32, i32) = (1, 2);
+
+const PHASE21_LEVEL_GUID: Uuid = uuid::uuid!("21040000-0000-4000-8000-000000000001");
+pub const PHASE21_TERRAIN_ASSET_GUID: Uuid = uuid::uuid!("21040000-0000-4000-8000-000000000002");
+pub const PHASE21_VOXEL_ASSET_GUID: Uuid = uuid::uuid!("21040000-0000-4000-8000-000000000003");
+pub const PHASE21_BORER_ACTOR_GUID: Uuid = uuid::uuid!("21040000-0000-4000-8000-000000000004");
+
+pub const PHASE21_TERRAIN_GUID: Uuid = uuid::uuid!("21040000-0000-4000-8000-000000000010");
+/// The entity that carries the `VoxelVolume` **and** the borer Blueprint.
+///
+/// One entity, deliberately: `vars::get("entity")` is the only entity reference
+/// the blueprint IR has, so a `voxel.*` node can only name the volume on its own
+/// actor. Naming another entity's volume needs an entity-reference value type the
+/// IR does not have — the same limit the audio and physics kits live under, and
+/// the reason this is a cavern that bores itself rather than a digger standing
+/// next to one.
+pub const PHASE21_CAVERN_GUID: Uuid = uuid::uuid!("21040000-0000-4000-8000-000000000011");
+pub const PHASE21_SKY_GUID: Uuid = uuid::uuid!("21040000-0000-4000-8000-000000000012");
+pub const PHASE21_SUN_GUID: Uuid = uuid::uuid!("21040000-0000-4000-8000-000000000013");
+pub const PHASE21_CAMERA_GUID: Uuid = uuid::uuid!("21040000-0000-4000-8000-000000000014");
+/// A lamp standing on the underground room's floor — the thing that makes the
+/// room a *room* rather than a void, and the gate's anti-vacuity handle on "the
+/// room is where the generator says it is".
+pub const PHASE21_LAMP_GUID: Uuid = uuid::uuid!("21040000-0000-4000-8000-000000000015");
+
+// ── the ground ───────────────────────────────────────────────────────────────
+
+/// The heightfield: a shallow ridge falling toward `+X`, plus a knoll well clear
+/// of the workings so "the terrain is not flat" is true of content the dig never
+/// touches.
+///
+/// Polynomial, deliberately: this is committed content, and `std` trigonometry is
+/// not bit-portable (the P14 LAW).
+pub fn phase21_height(x: f64, z: f64) -> f64 {
+    let t = (x / PHASE21_WORLD_M).clamp(0.0, 1.0);
+    let base = 34.0 - 8.0 * t;
+    let dx = (x - 104.0) / 20.0;
+    let dz = (z - 32.0) / 20.0;
+    let r2 = dx * dx + dz * dz;
+    if r2 < 1.0 {
+        base + 6.0 * (1.0 - r2)
+    } else {
+        base
+    }
+}
+
+// ── the workings ─────────────────────────────────────────────────────────────
+
+/// The cave system: two swept legs from a mouth on the west slope, ending in a
+/// chamber. The first leg's top clears the ground it starts under, which is what
+/// opens the **mouth** — a cave with no mouth is a bubble.
+pub fn phase21_cave_ops() -> Vec<inf_voxel::VoxelOp> {
+    use inf_voxel::{VoxelOp, VoxelShape};
+    vec![
+        VoxelOp::carve(VoxelShape::Capsule {
+            a: DVec3::new(34.0, 32.5, 44.0),
+            b: DVec3::new(40.0, 28.0, 44.0),
+            radius_m: 2.5,
+        }),
+        VoxelOp::carve(VoxelShape::Capsule {
+            a: DVec3::new(40.0, 28.0, 44.0),
+            b: DVec3::new(48.0, 25.0, 50.0),
+            radius_m: 2.5,
+        }),
+        VoxelOp::carve(VoxelShape::Sphere {
+            center: DVec3::new(52.0, 24.0, 52.0),
+            radius_m: 4.5,
+        }),
+    ]
+}
+
+/// The **foundation pit**, resolved by the P21.3 sky rule: the top clears the
+/// *highest* ground the footprint spans and the floor is [`PHASE21_PIT_DEPTH_M`]
+/// below the *lowest*, so a pit dragged across a slope has no lid of surviving
+/// hillside and "6 m deep" means below grade everywhere.
+pub const PHASE21_PIT_CENTER_XZ: (f64, f64) = (50.0, 38.0);
+pub const PHASE21_PIT_HALF_XZ: (f64, f64) = (4.0, 3.0);
+pub const PHASE21_PIT_DEPTH_M: f64 = 6.0;
+/// How far the cut's top clears the highest ground it spans.
+pub const PHASE21_PIT_SKY_CLEARANCE_M: f64 = 2.0;
+
+/// `(lowest, highest)` ground over the pit's footprint, sampled at one-metre
+/// pitch — the same probe the tool's sky rule takes.
+fn phase21_pit_ground() -> (f64, f64) {
+    let (cx, cz) = PHASE21_PIT_CENTER_XZ;
+    let (hx, hz) = PHASE21_PIT_HALF_XZ;
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    let steps_x = (2.0 * hx) as i32;
+    let steps_z = (2.0 * hz) as i32;
+    for i in 0..=steps_x {
+        for j in 0..=steps_z {
+            let h = phase21_height(cx - hx + i as f64, cz - hz + j as f64);
+            lo = lo.min(h);
+            hi = hi.max(h);
+        }
+    }
+    (lo, hi)
+}
+
+/// The pit floor's world `y`.
+pub fn phase21_pit_floor_y() -> f64 {
+    phase21_pit_ground().0 - PHASE21_PIT_DEPTH_M
+}
+
+/// The pit as one axis-aligned box cut.
+pub fn phase21_pit_op() -> inf_voxel::VoxelOp {
+    use inf_voxel::{VoxelOp, VoxelShape};
+    let (lo, hi) = phase21_pit_ground();
+    let floor = lo - PHASE21_PIT_DEPTH_M;
+    let top = hi + PHASE21_PIT_SKY_CLEARANCE_M;
+    let (cx, cz) = PHASE21_PIT_CENTER_XZ;
+    let (hx, hz) = PHASE21_PIT_HALF_XZ;
+    VoxelOp::carve(VoxelShape::Box {
+        center: DVec3::new(cx, 0.5 * (floor + top), cz),
+        half_extents: DVec3::new(hx, 0.5 * (top - floor), hz),
+    })
+}
+
+/// The underground room's floor and ceiling, world `y`.
+pub const PHASE21_ROOM_FLOOR_Y: f64 = 20.0;
+pub const PHASE21_ROOM_CEILING_Y: f64 = 23.0;
+
+/// The **underground room in the pit**: a chamber directly beneath the pit's
+/// footprint, plus the shaft that joins the two. The shaft's top reaches into the
+/// pit and its bottom into the room, so the column over the room's centre is one
+/// continuous void from the room floor to open sky — which is what "reachable"
+/// means for the combined ground query.
+pub fn phase21_room_ops() -> Vec<inf_voxel::VoxelOp> {
+    use inf_voxel::{VoxelOp, VoxelShape};
+    let (cx, cz) = PHASE21_PIT_CENTER_XZ;
+    let floor = phase21_pit_floor_y();
+    vec![
+        VoxelOp::carve(VoxelShape::Box {
+            center: DVec3::new(
+                cx,
+                0.5 * (PHASE21_ROOM_FLOOR_Y + PHASE21_ROOM_CEILING_Y),
+                cz,
+            ),
+            half_extents: DVec3::new(
+                PHASE21_PIT_HALF_XZ.0,
+                0.5 * (PHASE21_ROOM_CEILING_Y - PHASE21_ROOM_FLOOR_Y),
+                PHASE21_PIT_HALF_XZ.1,
+            ),
+        }),
+        VoxelOp::carve(VoxelShape::Capsule {
+            a: DVec3::new(cx, floor + 0.5, cz),
+            b: DVec3::new(cx, PHASE21_ROOM_CEILING_Y - 1.0, cz),
+            radius_m: 1.5,
+        }),
+    ]
+}
+
+/// Where the pit's spoil goes. Chosen explicitly rather than through
+/// [`inf_voxel::default_spoil_site`] so the heap lands inside the volume's own
+/// chunks: the default site stands clear of the cut's `+X` face, which for this
+/// pit is past the rock body's east edge, and a pile that materialized chunks
+/// outside the authored body would make the committed asset a function of the
+/// pile's arithmetic rather than of the design.
+pub const PHASE21_SPOIL_SITE_XZ: (f64, f64) = (42.0, 56.0);
+
+// ── the built content ────────────────────────────────────────────────────────
+
+/// `(the carved volume, the terrain with its hole mask, the pit's spoil report)`
+/// — every working applied, in one deterministic order.
+///
+/// The order is the order an author would dig in and the order the numbers depend
+/// on: the cave first (its mouth is on virgin ground), then the pit (whose spoil
+/// counts are what the heap is made of), then the room under it, then the heap.
+/// A carve is idempotent and the ops are disjoint, so the *geometry* does not
+/// depend on the order — the **spoil counts** do, which is why the pit's report is
+/// taken alone rather than from a running total.
+pub struct Phase21Workings {
+    /// The rock, with every working cut into it and the heap placed on it.
+    pub volume: inf_voxel::VoxelData,
+    /// The heightfield, with the hole mask every cut opened.
+    pub terrain: inf_terrain::TerrainData,
+    /// What the **pit** removed, per material — one side of the conservation
+    /// identity, produced by the cut itself.
+    pub pit_removed: [u64; inf_voxel::MATERIAL_COUNT],
+    /// What the heap placed — the other side.
+    pub spoil: inf_voxel::SpoilReport,
+}
+
+pub fn phase21_build() -> Phase21Workings {
+    use inf_voxel::{ChunkKey, VoxelChunk, VoxelData};
+
+    // The heightfield, authored tile by tile.
+    let mut terrain = inf_terrain::TerrainData::new(PHASE21_TILE_RES, PHASE21_MPS);
+    for tz in 0..PHASE21_TILES {
+        for tx in 0..PHASE21_TILES {
+            terrain.author_tile((tx as i32, tz as i32), phase21_height);
+        }
+    }
+
+    // The rock: solid below the heightfield, air above, meeting the terrain on
+    // its own plane. Signed distance in voxels; the chunk clamps it to the band.
+    let mut rock = VoxelData::new(PHASE21_VOXEL_M);
+    for cy in PHASE21_ROCK_CHUNKS_Y.0..=PHASE21_ROCK_CHUNKS_Y.1 {
+        for cz in PHASE21_ROCK_CHUNKS_XZ.0..=PHASE21_ROCK_CHUNKS_XZ.1 {
+            for cx in PHASE21_ROCK_CHUNKS_XZ.0..=PHASE21_ROCK_CHUNKS_XZ.1 {
+                let key = ChunkKey::new(cx, cy, cz);
+                let base = key.base_sample();
+                rock.insert_chunk(
+                    key,
+                    VoxelChunk::from_fn(|i, j, k| {
+                        let x = (base[0] + i as i32) as f64;
+                        let y = (base[1] + j as i32) as f64;
+                        let z = (base[2] + k as i32) as f64;
+                        y - phase21_height(x, z)
+                    }),
+                );
+            }
+        }
+    }
+
+    // Every cut, through the same two Ring-0 rules a tool commits: the voxel op,
+    // then the exactly-invertible surface coupling that decides which height
+    // samples it opens.
+    fn cut(
+        data: &mut inf_voxel::VoxelData,
+        t: &mut inf_terrain::TerrainData,
+        op: &inf_voxel::VoxelOp,
+    ) -> inf_voxel::OpReport {
+        let (report, _delta) = data.apply_op(op);
+        inf_voxel::apply_surface_cut(t, DVec3::ZERO, &op.shape, true);
+        report
+    }
+
+    for op in phase21_cave_ops() {
+        cut(&mut rock, &mut terrain, &op);
+    }
+    let pit = phase21_pit_op();
+    let pit_report = cut(&mut rock, &mut terrain, &pit);
+    for op in phase21_room_ops() {
+        cut(&mut rock, &mut terrain, &op);
+    }
+
+    // The spoil: exactly what the pit removed, per material, placed as a repose
+    // heap on the ground beside it. `place_spoil_into` is the same call the
+    // editor's excavation transaction makes; no store is needed because this
+    // volume is fully resident by construction (there is no cold half to page).
+    let (sx, sz) = PHASE21_SPOIL_SITE_XZ;
+    let (pit_lo, pit_hi) = pit.shape.aabb_m(0.0);
+    let plan = inf_voxel::SpoilPlan::new(
+        pit_report.carved,
+        DVec3::new(sx, phase21_height(sx, sz), sz),
+    )
+    .excluding(pit_lo, pit_hi);
+    let mut builder = inf_voxel::VoxelDeltaBuilder::new();
+    let spoil = rock.place_spoil_into(&plan, &mut builder);
+
+    rock.clear_dirty();
+    terrain.clear_dirty();
+    Phase21Workings {
+        volume: rock,
+        terrain,
+        pit_removed: pit_report.carved,
+        spoil,
+    }
+}
+
+// ── the runtime borer ────────────────────────────────────────────────────────
+
+/// Where the borer starts cutting, and how far it advances per tick.
+///
+/// A **drift along `+X` at `y = 22`, north of every committed working** (the cave
+/// chamber reaches `z ≈ 56.5`, the pit and the room stop at `z = 41`), so the
+/// bore is cutting rock that was solid when the level was saved for its whole
+/// run — which is what makes the runtime-carve trace a trace of *carving* rather
+/// than of a script re-reporting zero.
+///
+/// The step is **sub-voxel on purpose**: at 0.15 m per tick a 2 m ball advances
+/// less than one sample per tick, so consecutive cuts overlap and the per-tick
+/// volume varies between zero and a few cubic metres. A trace whose every entry
+/// is the same number would compare equal for the wrong reason.
+///
+/// 160 ticks of it covers 24 m and ends at `x = 60`, four metres inside the rock
+/// body's east edge — bounded by design rather than by where the gate happens to
+/// stop.
+pub const PHASE21_BORE_START: (f64, f64, f64) = (36.0, 22.0, 58.0);
+pub const PHASE21_BORE_STEP_M: f64 = 0.15;
+pub const PHASE21_BORE_RADIUS_M: f64 = 2.0;
+
+/// The XZ the borer probes each tick with the **combined** ground query
+/// (`terrain.height_at`) — the underground room's centre, which the committed
+/// workings have already opened all the way to the sky.
+pub fn phase21_room_probe_xz() -> (f64, f64) {
+    PHASE21_PIT_CENTER_XZ
+}
+
+/// The borer Blueprint: on every Tick it advances one step along `+Z`, carves a
+/// ball, accumulates the volume, and records both ground queries.
+///
+/// **Tick, not BeginPlay.** Both hosts seed their voxel map *after* constructing
+/// the sim (`SimSession::enter` … `set_voxel_volumes`; `sim_from_built` …
+/// `attach_voxel_volumes`), and `BeginPlay` runs inside that construction — so a
+/// carve there would see an empty map and refuse. Stated on the node kit too; the
+/// sample obeys it rather than working around it.
+pub fn phase21_borer_class() -> BlueprintClass {
+    use inf_blueprint::{
+        BinOp, BlueprintFn, EventBinding, EventKind, Expr, Lit, Param, Stmt, Ty, Variable,
+    };
+
+    let get = |name: &str| Expr::Call {
+        path: vec!["vars".into(), "get".into()],
+        args: vec![Expr::Lit(Lit::Str(name.into()))],
+    };
+    let set = |name: &str, value: Expr| {
+        Stmt::ExprStmt(Expr::Call {
+            path: vec!["vars".into(), "set".into()],
+            args: vec![Expr::Lit(Lit::Str(name.into())), value],
+        })
+    };
+    // `Expr::Binary`, not a `math::*` call: `math.add` / `math.mul` lower as
+    // BINARY OPS (`lower::role_of` → `NodeRole::BinaryOp`), and only the unary /
+    // ternary `math.*` names ever reach `dispatch_math`. Writing `math::add(a, b)`
+    // into the IR by hand produces "unknown math node", which fails the whole
+    // handler — and a failed handler looks, from the trace, exactly like a borer
+    // that reports zero for ever.
+    let math = |op: BinOp, a: Expr, b: Expr| Expr::Binary(op, Box::new(a), Box::new(b));
+    let fslot = |name: &str, default: f64| Variable {
+        name: name.into(),
+        ty: Ty::Float,
+        default: Lit::Float(default),
+        exposed: false,
+    };
+
+    let (bx, by, bz) = PHASE21_BORE_START;
+    let (px, pz) = phase21_room_probe_xz();
+
+    let mut class = BlueprintClass::new("act:phase21-borer", "Tunnel Borer");
+    class.variables = vec![
+        // How many ticks have run — the bore's own clock, so its position is a
+        // function of the trace and not of a wall clock.
+        fslot("step", 0.0),
+        // This tick's cut, in cubic metres.
+        fslot("removed", 0.0),
+        // Every tick's cut, summed — the number a game would show on a HUD.
+        fslot("total", 0.0),
+        // The combined ground query over the underground room.
+        fslot("room_ground", 0.0),
+        // The voxel-only surface at the same XZ. Equal to `room_ground` wherever
+        // the terrain is holed, which is the property the pair exists to show.
+        fslot("room_voxel", 0.0),
+    ];
+    class.events = vec![EventBinding {
+        event: EventKind::Tick,
+        body: BlueprintFn {
+            id: "tick".into(),
+            name: "tick".into(),
+            params: vec![Param {
+                name: "dt".into(),
+                ty: Ty::Float,
+            }],
+            ret: Ty::Unit,
+            body: vec![
+                set(
+                    "removed",
+                    Expr::Call {
+                        path: vec!["voxel".into(), "carve_sphere".into()],
+                        args: vec![
+                            get("entity"),
+                            // x = start.x + step * PHASE21_BORE_STEP_M
+                            math(
+                                BinOp::Add,
+                                Expr::Lit(Lit::Float(bx)),
+                                math(
+                                    BinOp::Mul,
+                                    get("step"),
+                                    Expr::Lit(Lit::Float(PHASE21_BORE_STEP_M)),
+                                ),
+                            ),
+                            Expr::Lit(Lit::Float(by)),
+                            Expr::Lit(Lit::Float(bz)),
+                            Expr::Lit(Lit::Float(PHASE21_BORE_RADIUS_M)),
+                        ],
+                    },
+                ),
+                set("total", math(BinOp::Add, get("total"), get("removed"))),
+                set(
+                    "step",
+                    math(BinOp::Add, get("step"), Expr::Lit(Lit::Float(1.0))),
+                ),
+                set(
+                    "room_ground",
+                    Expr::Call {
+                        path: vec!["terrain".into(), "height_at".into()],
+                        args: vec![Expr::Lit(Lit::Float(px)), Expr::Lit(Lit::Float(pz))],
+                    },
+                ),
+                set(
+                    "room_voxel",
+                    Expr::Call {
+                        path: vec!["voxel".into(), "ground_height".into()],
+                        args: vec![Expr::Lit(Lit::Float(px)), Expr::Lit(Lit::Float(pz))],
+                    },
+                ),
+            ],
+        },
+    }];
+    class
+}
+
+// ── the scene ────────────────────────────────────────────────────────────────
+
+/// Build the committed Phase 21 [`SceneDoc`].
+///
+/// The terrain is **asset-backed** (`Terrain.asset`), not inline, and that is
+/// forced rather than chosen: scene schema v19 pins `TerrainTileFrozenV3`, which
+/// has no hole rows, so an inline terrain cannot persist a hole mask and saving
+/// this level would seal every cave mouth in it (`inf_voxel::inline_hole_advisory`
+/// is the detector; the carve tools refuse to create the state at all). The
+/// working set is written into the document anyway and stripped on save by
+/// `serialize::strip_streamed_terrain`, exactly as a wizard-imported terrain is —
+/// which is why the PIE wire had to learn to carry `.inf_terrain` bytes this batch.
+pub fn phase21_cavern_scene() -> SceneDoc {
+    use crate::scene::serialize::LevelSettings;
+    use inf_ecs::components::{
+        ActorClass, Camera, Light, LightKind, SkyAtmosphere, Terrain, TimeOfDay, VoxelVolume,
+    };
+    use inf_ecs::math::{Vec2d, Vec3d};
+
+    let terrain_data = phase21_build().terrain;
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Phase 21 Cavern");
+    doc.set_settings(LevelSettings {
+        gravity_2d: Vec2d::new(0.0, -9.81),
+        gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+        sim_hz: 60.0,
+        ..LevelSettings::default()
+    });
+
+    // ── The ground, carved. ──
+    doc.create_with_guid(PHASE21_TERRAIN_GUID, SpawnKind::Empty, "Ridge", None);
+    insert!(
+        doc,
+        PHASE21_TERRAIN_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+    insert!(
+        doc,
+        PHASE21_TERRAIN_GUID,
+        Terrain {
+            meters_per_sample: PHASE21_MPS,
+            tile_resolution: PHASE21_TILE_RES,
+            data: terrain_data,
+            asset: Some(PHASE21_TERRAIN_ASSET_GUID),
+            ..Terrain::default()
+        }
+    );
+
+    // ── The rock, and the script that keeps boring into it. ──
+    doc.create_with_guid(PHASE21_CAVERN_GUID, SpawnKind::Empty, "Cavern", None);
+    insert!(
+        doc,
+        PHASE21_CAVERN_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+    insert!(
+        doc,
+        PHASE21_CAVERN_GUID,
+        VoxelVolume {
+            asset: Some(PHASE21_VOXEL_ASSET_GUID),
+            // Must equal the asset's own scale or the cook advises about it —
+            // `voxel_scale_mismatches` exists because the two are separately
+            // authored and a mismatch draws a cave at the wrong size.
+            voxel_size_m: PHASE21_VOXEL_M,
+            runtime_carve: true,
+        }
+    );
+    insert!(
+        doc,
+        PHASE21_CAVERN_GUID,
+        ActorClass(PHASE21_BORER_ACTOR_GUID)
+    );
+
+    // ── A lamp on the underground room's floor. ──
+    //
+    // Content, not decoration: it is the one entity whose authored `y` is the
+    // room's floor, so a gate can compare "where the ground query says the floor
+    // is" against "where the level says the floor is" without either number being
+    // derived from the other.
+    doc.create_with_guid(PHASE21_LAMP_GUID, SpawnKind::Empty, "Room Lamp", None);
+    {
+        let (px, pz) = phase21_room_probe_xz();
+        insert!(
+            doc,
+            PHASE21_LAMP_GUID,
+            Transform::from_translation(DVec3::new(px, PHASE21_ROOM_FLOOR_Y, pz))
+        );
+    }
+    insert!(
+        doc,
+        PHASE21_LAMP_GUID,
+        Light {
+            kind: LightKind::Point,
+            intensity: 12.0,
+            range: 14.0,
+            color: inf_ecs::math::Color::new(1.0, 0.86, 0.62, 1.0),
+            ..Light::default()
+        }
+    );
+
+    // ── Sky + sun + camera, so the scene opens somewhere sensible. ──
+    doc.create_with_guid(PHASE21_SKY_GUID, SpawnKind::Empty, "Sky", None);
+    insert!(
+        doc,
+        PHASE21_SKY_GUID,
+        TimeOfDay {
+            seconds: 10.0 * 3600.0,
+            rate: 0.0,
+            ..TimeOfDay::default()
+        }
+    );
+    insert!(doc, PHASE21_SKY_GUID, SkyAtmosphere::default());
+
+    doc.create_with_guid(PHASE21_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        PHASE21_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            intensity: 3.0,
+            ..Light::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE21_SUN_GUID,
+        Transform::from_translation(DVec3::new(0.0, 80.0, 0.0))
+    );
+
+    doc.create_with_guid(PHASE21_CAMERA_GUID, SpawnKind::Empty, "Camera", None);
+    insert!(doc, PHASE21_CAMERA_GUID, Camera::default());
+    insert!(
+        doc,
+        PHASE21_CAMERA_GUID,
+        Transform::from_translation(DVec3::new(20.0, 44.0, 44.0))
+    );
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+// ── the committed files ──────────────────────────────────────────────────────
+
+/// `samples/phase21-cavern`, resolved from this crate's manifest dir.
+pub fn phase21_cavern_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/phase21-cavern")
+}
+
+/// The `.inf_terrain` the level's `Terrain.asset` names — the **only** place the
+/// hole mask can live (schema v19's frozen tile record has no hole rows).
+pub fn phase21_terrain_asset() -> Result<inf_terrain::TerrainAsset, String> {
+    let data = phase21_build().terrain;
+    let opts = inf_terrain::PyramidOptions::default();
+    let pyramid = inf_terrain::build_pyramid(&data, opts);
+    inf_terrain::build_terrain_asset(&data, &pyramid, opts)
+        .map_err(|e| format!("build terrain asset: {e}"))
+}
+
+/// The `.inf_voxel` the level's `VoxelVolume.asset` names.
+pub fn phase21_voxel_asset() -> Result<inf_voxel::VoxelAsset, String> {
+    let volume = phase21_build().volume;
+    inf_voxel::build_voxel_asset(&volume).map_err(|e| format!("build voxel asset: {e}"))
+}
+
+/// Write every committed Phase 21 gate file: the `.inf_lvl` (+ sidecar), the
+/// `.inf_terrain` and `.inf_voxel` (+ their `inf_asset` sidecars, so the level's
+/// refs resolve through the AssetDb *and* the cooked pack), the borer's
+/// `.inf_act`, and the README.
+pub fn write_phase21_cavern() -> Result<(), String> {
+    let dir = phase21_cavern_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    crate::scene::serialize::save(
+        &phase21_cavern_scene(),
+        &dir.join("Phase21Cavern.inf_lvl"),
+        Some(PHASE21_LEVEL_GUID),
+    )?;
+
+    let terrain = phase21_terrain_asset()?;
+    let tpath = dir.join("Phase21Cavern.inf_terrain");
+    let tbytes = inf_terrain::write_terrain_asset(&tpath, &terrain)
+        .map_err(|e| format!("write terrain asset: {e}"))?;
+    inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(PHASE21_TERRAIN_ASSET_GUID),
+        inf_asset::AssetKind::Terrain,
+        inf_asset::ContentHash::of(tbytes),
+    )
+    .save(&tpath)
+    .map_err(|e| format!("write terrain sidecar: {e}"))?;
+
+    let voxel = phase21_voxel_asset()?;
+    write_phase19_asset(
+        &dir.join("Cavern.inf_voxel"),
+        voxel.as_bytes(),
+        PHASE21_VOXEL_ASSET_GUID,
+        inf_asset::AssetKind::VoxelVolume,
+    )?;
+
+    let act_bytes = encode_actor(&phase21_borer_class())?;
+    write_phase19_asset(
+        &dir.join("Borer.inf_act"),
+        &act_bytes,
+        PHASE21_BORER_ACTOR_GUID,
+        inf_asset::AssetKind::Blueprint,
+    )?;
+
+    std::fs::write(dir.join("README.md"), PHASE21_CAVERN_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const PHASE21_CAVERN_README: &str = "# Phase 21 Cavern (the phase gate scene)\n\n\
+Generated by `inf_editor_core::samples::phase21_cavern_scene` -- the **composed**\n\
+gate scene for Phase 21 (volumetric terrain), and the plan's own done-when\n\
+sentence built: *on a streamed terrain, carve a cave system and excavate a\n\
+foundation pit with displaced soil piles, build an underground room in the pit,\n\
+save and reload byte-identical, and it works in PIE.*\n\n\
+- `Phase21Cavern.inf_lvl` -- a 128 m ridge (2 x 2 tiles at 2 m/sample) with an\n\
+  **asset-backed** terrain, one `VoxelVolume` entity carrying the rock body and\n\
+  the borer Blueprint, a lamp standing on the underground room's floor, and a\n\
+  sky/sun/camera.\n\
+- `Phase21Cavern.inf_terrain` -- the heightfield **and its hole mask**. The mask\n\
+  is why the terrain is asset-backed rather than inline: scene schema v19's\n\
+  frozen tile record has no hole rows, so an inline terrain cannot persist one\n\
+  and saving would seal every cave mouth.\n\
+- `Cavern.inf_voxel` -- eight 16 m SDF chunks of rock, with the cave system, the\n\
+  foundation pit, the underground room + its shaft, and the pit's **spoil heap**\n\
+  cut into them. The heap holds exactly the pit's per-material voxel count, with\n\
+  no bulking factor: a 1:1 identity is a gate, a 1.25x fudge is a number nobody\n\
+  can test.\n\
+- `Borer.inf_act` -- the runtime-carving Blueprint. Every Tick it advances 0.5 m\n\
+  along +Z and carves a 2 m ball with `voxel.carve_sphere`, accumulating the\n\
+  cubic metres removed and recording both ground queries. It runs on **Tick**\n\
+  rather than BeginPlay because both hosts seed their voxel map after building\n\
+  the sim, so a BeginPlay carve would find no volume.\n\n\
+Exercised by `runtime/inf-player/tests/phase21_gate.rs`.\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Phase 21 cavern shape (P21.4) ──────────────────────────────────────
+
+    /// **The sample really is the done-when sentence.** Asserted on the
+    /// *generators* rather than on the committed bytes, so a change to the design
+    /// fails here with a readable number instead of as a byte diff.
+    #[test]
+    fn the_cavern_sample_is_actually_a_cavern() {
+        use glam::DVec2;
+        let w = phase21_build();
+        let (vol, terrain, spoil) = (&w.volume, &w.terrain, w.spoil);
+
+        // Eight chunks — the authored rock body, and no more: a heap that
+        // materialized chunks outside it would show up here first.
+        assert_eq!(vol.chunk_count(), 8, "the rock body grew or shrank");
+
+        // The cave has a MOUTH: the heightfield is holed where the first leg
+        // crosses it, and un-holed on ground the dig never reached.
+        assert!(terrain.has_holes());
+        assert!(terrain.is_hole_at(DVec2::new(34.0, 44.0)), "no cave mouth");
+        assert!(terrain.is_hole_at(DVec2::new(50.0, 38.0)), "no open pit");
+        assert!(
+            !terrain.is_hole_at(DVec2::new(100.0, 30.0)),
+            "the knoll on the far side of the map was holed"
+        );
+        // …and the knoll is really there, so "the terrain is not flat" is content
+        // rather than an assumption.
+        let knoll = phase21_height(104.0, 32.0);
+        assert!(
+            knoll - phase21_height(104.0, 96.0) > 5.0,
+            "the knoll is flat: {knoll}"
+        );
+
+        // The pit is open to the sky over its whole footprint (the P21.3 rule):
+        // its top clears the highest ground it spans, its floor is the full depth
+        // below the lowest.
+        let (lo, hi) = phase21_pit_ground();
+        assert!(hi > lo, "a pit on perfectly flat ground proves nothing");
+        let (plo, phi) = phase21_pit_op().shape.aabb_m(0.0);
+        assert!(phi.y > hi, "the pit has a lid of surviving hillside");
+        assert_eq!(plo.y, lo - PHASE21_PIT_DEPTH_M);
+        assert_eq!(plo.y, phase21_pit_floor_y());
+
+        // The underground room is UNDER the pit and REACHABLE: the topmost voxel
+        // surface over its centre is its own floor, which means the column above
+        // it is continuous void all the way to the sky.
+        let (px, pz) = phase21_room_probe_xz();
+        assert_eq!(vol.surface_y_at(px, pz), Some(PHASE21_ROOM_FLOOR_Y));
+        assert!(PHASE21_ROOM_CEILING_Y < phase21_pit_floor_y());
+        // The combined query agrees, because the pit holed the ground above it.
+        assert_eq!(
+            inf_voxel::ground_height_at(
+                Some(terrain),
+                DVec3::ZERO,
+                &std::collections::BTreeMap::from([(0u8, vol.clone())]),
+                px,
+                pz,
+            ),
+            Some(PHASE21_ROOM_FLOOR_Y)
+        );
+
+        // CONSERVATION: the heap holds exactly what the pit removed, **per
+        // material**, with no shortfall and no bulking factor. Both sides come
+        // from the cuts that produced them, not from each other.
+        assert_eq!(spoil.shortfall, [0; inf_voxel::MATERIAL_COUNT]);
+        assert!(spoil.total_placed() > 0, "nothing was displaced");
+        assert!(spoil.is_exact(), "the heap did not hold the whole pit");
+        assert_eq!(
+            spoil.placed, w.pit_removed,
+            "the heap and the pit disagree about how much soil there is"
+        );
+
+        // The borer's drift is in SOLID ROCK for its whole run: 160 ticks of it
+        // is a trace of carving, not of a script reporting zero.
+        let (bx, by, bz) = PHASE21_BORE_START;
+        assert!(
+            vol.is_solid_at(DVec3::new(bx, by, bz)),
+            "the bore starts in air"
+        );
+        let end_x = bx + 160.0 * PHASE21_BORE_STEP_M;
+        assert!(
+            vol.is_solid_at(DVec3::new(end_x, by, bz)),
+            "the bore leaves the rock body before tick 160"
+        );
+        // …and it stays inside the authored chunks.
+        let east = (PHASE21_ROCK_CHUNKS_XZ.1 + 1) as f64 * inf_voxel::CHUNK_DIM as f64;
+        assert!(end_x + PHASE21_BORE_RADIUS_M < east, "{end_x} vs {east}");
+    }
 
     #[test]
     fn coyote_class_round_trips() {
@@ -5631,6 +6392,7 @@ mod tests {
             write_phase18_scatter().expect("regenerate phase18 scatter");
             write_phase19_town().expect("regenerate phase19 town");
             write_phase20_coastal().expect("regenerate phase20 coastal");
+            write_phase21_cavern().expect("regenerate phase21 cavern");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -5899,6 +6661,40 @@ mod tests {
                 std::fs::read(p20dir.join("Swimmer.inf_act")).unwrap(),
                 encode_actor(&phase20_swimmer_class()).unwrap(),
                 "committed phase20-coastal .inf_act drifted from the generator"
+            );
+        }
+
+        // Phase 21 cavern lock (P21.4): the level, the borer's blueprint, AND
+        // both derived assets. The `.inf_voxel` and `.inf_terrain` are locked
+        // here and not merely regenerated because the workings ARE the sample —
+        // a drifted carve is a different cave, a different hole mask and a
+        // different spoil heap, all of which the level itself is silent about.
+        let p21dir = phase21_cavern_dir();
+        let p21lvl = p21dir.join("Phase21Cavern.inf_lvl");
+        if p21lvl.exists() {
+            let want_lvl = crate::scene::serialize::encode(
+                &crate::scene::serialize::to_scene_file(&phase21_cavern_scene()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&p21lvl).unwrap(),
+                want_lvl,
+                "committed phase21-cavern .inf_lvl drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(p21dir.join("Borer.inf_act")).unwrap(),
+                encode_actor(&phase21_borer_class()).unwrap(),
+                "committed phase21-cavern .inf_act drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(p21dir.join("Cavern.inf_voxel")).unwrap(),
+                phase21_voxel_asset().unwrap().into_bytes(),
+                "committed phase21-cavern .inf_voxel drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(p21dir.join("Phase21Cavern.inf_terrain")).unwrap(),
+                phase21_terrain_asset().unwrap().into_bytes(),
+                "committed phase21-cavern .inf_terrain drifted from the generator"
             );
         }
     }

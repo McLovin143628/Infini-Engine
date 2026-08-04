@@ -201,6 +201,7 @@ fn platformer_payload() -> ScenePayload {
         |_guid| None, // no animation assets in the platformer scene
         |_guid| None, // no biome sets in the platformer scene
         |_guid| None, // no voxel volumes in the platformer scene
+        |_guid| None, // no streamed terrains in the platformer scene
         0,            // tick-hz 0: no per-frame sleep (step-driven determinism)
         false,
     )

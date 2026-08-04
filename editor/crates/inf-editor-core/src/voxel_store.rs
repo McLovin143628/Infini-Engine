@@ -409,6 +409,19 @@ impl EditorVoxelVolumes {
     // pass happened to rebuild it, which reads as a brush that works
     // intermittently.
 
+    /// Re-mesh whatever `entity`'s volume has moved since its meshes were last
+    /// built. `false` when the entity has no loaded volume.
+    ///
+    /// The Ring-0 mesh cache is **stamp-keyed** ([`inf_voxel::MeshSourceKey`]),
+    /// so this is idempotent and order-free: calling it twice costs one walk and
+    /// no re-meshing, and *not* calling it costs nothing either — the viewport's
+    /// per-frame [`inf_voxel::VoxelVolumes::sync_camera`] runs the same pass.
+    /// That is what makes deferral a legal choice rather than a leak, and it is
+    /// why [`carve_into_deferred`](Self::carve_into_deferred) exists.
+    pub fn resync(&mut self, entity: Uuid) -> bool {
+        self.volumes.resync(entity.as_u128())
+    }
+
     /// Apply one carve/fill dab to `entity`'s volume, accumulating its undo
     /// record into `builder`, and re-mesh what moved.
     ///
@@ -441,6 +454,50 @@ impl EditorVoxelVolumes {
             self.volumes.resync(entity.as_u128());
         }
         Some(report)
+    }
+
+    /// [`carve_into`](Self::carve_into) **without the re-mesh** (P21.4) — the door
+    /// a big, one-shot cut uses.
+    ///
+    /// # Why this exists, with numbers
+    ///
+    /// A dig at the `MAX_DIG_SAMPLES` ceiling spent ≈1.3 s under the shared-volumes
+    /// guard (4 M samples ≈3.1 s), and the *whole* of it was spent with the lock
+    /// held because the cut, the spoil search and the re-mesh all ran there. The
+    /// re-mesh is the part that did not have to: the Ring-0 mesh cache is keyed on
+    /// [`inf_voxel::MeshSourceKey`], which folds the chunk versions the cut just
+    /// bumped, so the *next* pass over the volume rebuilds exactly the same chunks
+    /// whenever it happens to run — and the viewport runs one every frame
+    /// (`EngineHost::sync_voxels` → [`inf_voxel::VoxelVolumes::sync_camera`],
+    /// which re-meshes unconditionally for precisely this reason).
+    ///
+    /// So a deferred cut is not an un-meshed cut; it is a cut whose meshing
+    /// happens on the render thread's own pass instead of inside the document
+    /// transaction. The live **brush** keeps [`carve_into`](Self::carve_into): its
+    /// whole point is that the cave appears under the cursor as it is dug, and its
+    /// dabs are small.
+    pub fn carve_into_deferred(
+        &mut self,
+        entity: Uuid,
+        op: &VoxelOp,
+        builder: &mut VoxelDeltaBuilder,
+    ) -> Option<OpReport> {
+        // Paging is NOT deferrable — see `carve_into`. A non-resident chunk reads
+        // as air, and conservation balances anyway, which is what hides it.
+        self.page_op(entity, op);
+        let slot = self.volumes.get_mut(entity.as_u128())?;
+        Some(slot.data.apply_op_into(op, builder))
+    }
+
+    /// [`spoil_into`](Self::spoil_into) without the re-mesh — the deferred
+    /// twin, for the same reason and used by the same caller.
+    pub fn spoil_into_deferred(
+        &mut self,
+        entity: Uuid,
+        plan: &SpoilPlan,
+        builder: &mut VoxelDeltaBuilder,
+    ) -> Option<SpoilReport> {
+        self.volumes.spoil_into(entity.as_u128(), plan, builder)
     }
 
     /// Place a [`SpoilPlan`]'s displaced soil into `entity`'s volume,

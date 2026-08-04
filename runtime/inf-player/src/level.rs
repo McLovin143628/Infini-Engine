@@ -1587,6 +1587,26 @@ pub fn terrain_paths_by_guid_from_dir(dir: &Path) -> HashMap<Uuid, PathBuf> {
     out
 }
 
+/// Open an **in-memory** `.inf_terrain` payload as a streaming source (P21.4) —
+/// the PIE twin of [`terrain_source_from_file`], for bytes that arrived over the
+/// wire rather than off a disk the player cannot see.
+///
+/// The dev-dir path already reads the whole payload once and slices tiles out of
+/// it (`TerrainAssetReader<Vec<u8>>`), so a source over bytes is the same store
+/// with the read already done. Nothing about residency, tiling or the hole mask
+/// differs — which is the point: PIE must stream the terrain the shipped build
+/// streams, not a second decoding of it.
+pub fn terrain_source_from_bytes(bytes: Vec<u8>) -> Result<TerrainSource, String> {
+    let store = inf_terrain::TerrainAssetReader::new(bytes)
+        .map_err(|e| format!("decode .inf_terrain payload: {e}"))?;
+    let header = *store.header();
+    Ok(TerrainSource {
+        store: Arc::new(store),
+        tile_resolution: header.tile_resolution,
+        meters_per_sample: header.meters_per_sample,
+    })
+}
+
 /// Open a loose `.inf_terrain` as a streaming source (the `--level` dev-dir
 /// path). The whole payload is read once; tiles are then sliced out of it.
 pub fn terrain_source_from_file(path: &Path) -> Result<TerrainSource, String> {

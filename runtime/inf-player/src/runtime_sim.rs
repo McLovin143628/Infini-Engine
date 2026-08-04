@@ -387,6 +387,16 @@ impl RuntimeSim {
     ///
     /// Camera-free by construction: nothing about this map depends on a viewport,
     /// so a Simulate step answers the same whatever the editor camera is doing.
+    /// Read-only view of the simulation's voxel volumes (P21.4).
+    ///
+    /// The map a `voxel.*` node writes and `terrain.height_at` reads. Exposed so a
+    /// gate can compare the *field* two runs produced rather than only the floats
+    /// a Blueprint happened to record — the two can disagree, and the field is the
+    /// authority.
+    pub fn voxel_volumes(&self) -> &BTreeMap<Uuid, VoxelData> {
+        &self.voxels
+    }
+
     pub fn set_voxel_volumes(&mut self, volumes: BTreeMap<Uuid, VoxelData>) {
         self.voxels = volumes;
     }

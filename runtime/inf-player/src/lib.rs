@@ -122,6 +122,11 @@ pub enum TerrainContent {
     Dir(std::collections::HashMap<uuid::Uuid, PathBuf>),
     /// The opened cooked pack (`--pack` / the exported game).
     Pack(PackLevelSource),
+    /// `.inf_terrain` payloads that arrived over the **PIE wire** (P21.4), keyed
+    /// by asset GUID. The PIE player has no filesystem handle to the project and
+    /// no pack, so the payload *is* the source — see
+    /// [`ScenePayload::terrains`](inf_runtime::pie::ScenePayload::terrains).
+    Memory(std::collections::HashMap<uuid::Uuid, Vec<u8>>),
 }
 
 impl TerrainContent {
@@ -146,6 +151,15 @@ impl TerrainContent {
                     None
                 }
             },
+            TerrainContent::Memory(map) => {
+                match level::terrain_source_from_bytes(map.get(&guid)?.clone()) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        tracing::error!("inf-player: terrain asset {guid}: {e}");
+                        None
+                    }
+                }
+            }
         }
     }
 }
@@ -697,9 +711,10 @@ pub struct PayloadSim {
 /// machines, root-motion clips and audio clips the in-process reference kept;
 /// routing every path through here closes that drift too.)
 ///
-/// **Streamed terrain is still not attached**, because `ScenePayload` still does
-/// not carry `.inf_terrain` bytes — see [`build_world_from_payload`]'s note on
-/// P16.3b2.
+/// * **streamed terrain** (P21.4, the P16.3b2 deferral) — the payload's
+///   `.inf_terrain` bytes, attached through the same `TerrainStreaming` the pack
+///   path uses, because a level whose caves have mouths keeps that mask in the
+///   asset and nowhere else.
 pub fn sim_from_payload(payload: &ScenePayload) -> Result<PayloadSim, String> {
     let mut built = build_world_from_payload(payload)?;
     let label = built.label.clone();
@@ -717,6 +732,20 @@ pub fn sim_from_payload(payload: &ScenePayload) -> Result<PayloadSim, String> {
         &mut sim,
         &voxel::VoxelRegistry::from_payload(&payload.voxels),
     );
+    // P21.4 (the P16.3b2 deferral): the payload's `.inf_terrain` bytes, streamed
+    // through the same `TerrainStreaming` the pack path attaches. The level bytes
+    // carry a blanked working set for these terrains, so without this the PIE
+    // world has no ground — and, since P21.2, none of the hole mask either.
+    if !payload.terrains.is_empty() {
+        let content = crate::TerrainContent::Memory(
+            payload
+                .terrains
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashMap<_, _>>(),
+        );
+        attach_terrain_streaming(&mut sim, &content);
+    }
     Ok(PayloadSim {
         sim,
         label,

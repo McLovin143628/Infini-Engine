@@ -69,12 +69,22 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 /// * v4 — appended `biome_sets`: the `.inf_biomes` payloads a v16 level's
 ///   `Terrain.biome_set` refs, so the PIE player runs the biome→PCG binding
 ///   exactly like the shipping pack path.
-/// * v5 — appended `voxels`: the `.inf_voxel` payloads a v19 level's
-///   `VoxelVolume.asset` refs (P21.4). Before this rung the PIE player carried no
-///   voxel source at all, so a carved cave answered `terrain.height_at` with the
-///   seam's `0.0` in preview and with the cave floor in the shipped build — and
-///   the PIE == shipping gate compared **two empty maps agreeing**, which is not
-///   a comparison. This is the byte source that makes it one.
+/// * v5 — appended `voxels` **and** `terrains` (P21.4), the two byte sources the
+///   PIE player had no route to at all.
+///
+///   `voxels` are the `.inf_voxel` payloads a v19 level's `VoxelVolume.asset`
+///   refs name. Before this rung a carved cave answered `terrain.height_at` with
+///   the seam's `0.0` in preview and with the cave floor in the shipped build,
+///   and the PIE == shipping gate compared **two empty maps agreeing**, which is
+///   not a comparison.
+///
+///   `terrains` are the `.inf_terrain` payloads a v10 level's `Terrain.asset`
+///   refs name — the **P16.3b2 deferral**, closed here because P21.2's hole mask
+///   only persists on an asset-backed terrain (scene schema v19 pins
+///   `TerrainTileFrozenV3`, which has no hole rows), so "a level with carved cave
+///   mouths" and "a level PIE can preview" were mutually exclusive until now.
+///   `serialize::strip_streamed_terrain` still blanks the inline working set, so
+///   PIE streams from the asset exactly as the shipped build does.
 pub const SCENE_PAYLOAD_VERSION: u32 = 5;
 
 /// Upper bound on a single frame; anything larger means a desynced or
@@ -128,6 +138,16 @@ pub struct ScenePayload {
     /// is empty and every combined ground query over a hole falls back to `0.0`.
     #[serde(default)]
     pub voxels: Vec<(Uuid, Vec<u8>)>,
+    /// Referenced streamed terrains: `(asset guid, .inf_terrain bytes)` — keyed by
+    /// a v10 level's `Terrain.asset` refs (schema v5, P21.4 / the P16.3b2
+    /// deferral).
+    ///
+    /// The level bytes above carry a **blanked** working set for any asset-backed
+    /// terrain (`strip_streamed_terrain`), so without these a PIE session over a
+    /// streamed terrain runs on no ground at all — and, since P21.2, with none of
+    /// the hole mask that makes a cave mouth a cave mouth.
+    #[serde(default)]
+    pub terrains: Vec<(Uuid, Vec<u8>)>,
     /// Fixed update rate (Hz) the player ticks at.
     pub tick_hz: u32,
     /// Open a real window (`true`, the embedded / new-window PIE path) vs run
@@ -155,6 +175,7 @@ impl ScenePayload {
             machines: Vec::new(),
             biome_sets: Vec::new(),
             voxels: Vec::new(),
+            terrains: Vec::new(),
             tick_hz,
             windowed,
         }
@@ -180,6 +201,14 @@ impl ScenePayload {
     /// [`with_pcgs`](Self::with_pcgs).
     pub fn with_voxels(mut self, voxels: Vec<(Uuid, Vec<u8>)>) -> Self {
         self.voxels = voxels;
+        self
+    }
+
+    /// Attach the referenced `.inf_terrain` payloads (`(asset guid, bytes)`) a
+    /// level's `Terrain.asset` refs name (P21.4). Builder-style, exactly like
+    /// [`with_pcgs`](Self::with_pcgs).
+    pub fn with_terrains(mut self, terrains: Vec<(Uuid, Vec<u8>)>) -> Self {
+        self.terrains = terrains;
         self
     }
 

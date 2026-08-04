@@ -168,6 +168,7 @@ fn pie_sim(doc: &SceneDoc) -> RuntimeSim {
         |_guid| None, // no animation assets
         |_guid| None, // no biome sets
         |_guid| None, // no voxel volumes
+        |_guid| None, // no streamed terrains
         60,
         false,
     )

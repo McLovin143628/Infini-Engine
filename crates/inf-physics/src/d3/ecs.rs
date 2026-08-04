@@ -225,6 +225,14 @@ impl PhysicsBridge3D {
     }
 
     /// The body handle mirroring `guid`, if it is tracked.
+    /// How many entities the bridge is mirroring — real ones, `PcgVolume`
+    /// solids and voxel chunks alike. A cheap, order-free handle on "the world
+    /// the solver sees changed", which is what a gate needs when the change it is
+    /// watching for is a collider that appeared or vanished under a carve.
+    pub fn body_count(&self) -> usize {
+        self.entities.len()
+    }
+
     pub fn body_of(&self, guid: Uuid) -> Option<BodyId3D> {
         self.entities.get(&guid).map(|r| r.body)
     }

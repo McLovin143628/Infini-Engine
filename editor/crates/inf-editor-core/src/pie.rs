@@ -391,13 +391,14 @@ impl Drop for PieSession {
 /// pinned by `a_payload_carries_every_referenced_asset_kind_in_its_own_field`
 /// below.)
 #[allow(clippy::too_many_arguments)]
-pub fn build_scene_payload<F, G, H, B, V>(
+pub fn build_scene_payload<F, G, H, B, V, T>(
     doc: &SceneDoc,
     mut resolve: F,
     mut resolve_pcg: G,
     mut resolve_anim: H,
     mut resolve_biome_set: B,
     mut resolve_voxel: V,
+    mut resolve_terrain: T,
     tick_hz: u32,
     windowed: bool,
 ) -> Result<ScenePayload, PieError>
@@ -407,6 +408,7 @@ where
     H: FnMut(Uuid) -> Option<Vec<u8>>,
     B: FnMut(Uuid) -> Option<Vec<u8>>,
     V: FnMut(Uuid) -> Option<Vec<u8>>,
+    T: FnMut(Uuid) -> Option<Vec<u8>>,
 {
     let level_bytes = serialize::encode(&serialize::to_scene_file(doc))
         .map_err(|e| PieError::Protocol(format!("encode scene: {e}")))?;
@@ -572,12 +574,43 @@ where
         }
     }
 
+    // Referenced streamed terrains (P21.4, the P16.3b2 deferral): every
+    // `Terrain.asset` ref resolved to its `.inf_terrain` bytes.
+    //
+    // `strip_streamed_terrain` above blanked the inline working set of exactly
+    // these terrains, on the rule that PIE previews what was SAVED. Until this
+    // resolver existed that left the PIE player with no ground under an
+    // asset-backed terrain at all — tolerable while the only casualty was
+    // detail, and not tolerable since P21.2 put the **hole mask** in the asset:
+    // a level whose caves have mouths could not be previewed without it.
+    let mut terrains: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut seen_terrain: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let Some(asset) = world
+            .world()
+            .get::<inf_ecs::components::Terrain>(e)
+            .and_then(|t| t.asset)
+        else {
+            continue;
+        };
+        if !seen_terrain.insert(asset) {
+            continue;
+        }
+        if let Some(bytes) = resolve_terrain(asset) {
+            terrains.push((asset, bytes));
+        }
+    }
+
     Ok(
         ScenePayload::new(doc.title(), level_bytes, classes, tick_hz, windowed)
             .with_pcgs(pcgs)
             .with_biome_sets(biome_sets)
             .with_anim_assets(skeletons, clips, machines)
-            .with_voxels(voxels),
+            .with_voxels(voxels)
+            .with_terrains(terrains),
     )
 }
 
@@ -625,6 +658,7 @@ mod tests {
         const SKEL: Uuid = Uuid::from_u128(0x2104_0E03);
         const BIOMES: Uuid = Uuid::from_u128(0x2104_0E04);
         const VOXELS: Uuid = Uuid::from_u128(0x2104_0E05);
+        const TERRAIN: Uuid = Uuid::from_u128(0x2104_0E06);
 
         let mut doc = SceneDoc::new();
         let e = doc.create(SpawnKind::Empty, "Everything", None);
@@ -639,6 +673,7 @@ mod tests {
                 },
                 Terrain {
                     biome_set: Some(BIOMES),
+                    asset: Some(TERRAIN),
                     ..Terrain::default()
                 },
                 SkeletalMesh {
@@ -657,6 +692,7 @@ mod tests {
             |g| (g == SKEL).then(|| b"SKEL".to_vec()),
             |g| (g == BIOMES).then(|| b"BIOMES".to_vec()),
             |g| (g == VOXELS).then(|| b"VOXELS".to_vec()),
+            |g| (g == TERRAIN).then(|| b"TERRAIN".to_vec()),
             60,
             false,
         )
@@ -668,6 +704,7 @@ mod tests {
         assert_eq!(payload.skeletons, vec![(SKEL, b"SKEL".to_vec())]);
         assert_eq!(payload.biome_sets, vec![(BIOMES, b"BIOMES".to_vec())]);
         assert_eq!(payload.voxels, vec![(VOXELS, b"VOXELS".to_vec())]);
+        assert_eq!(payload.terrains, vec![(TERRAIN, b"TERRAIN".to_vec())]);
         assert_eq!(
             payload.schema_version,
             inf_runtime::pie::SCENE_PAYLOAD_VERSION
@@ -697,10 +734,12 @@ mod tests {
             |_| None,
             |_| None,
             |_| None,
+            |_| None,
             60,
             false,
         )
         .expect("payload builds");
         assert!(payload.voxels.is_empty());
+        assert!(payload.terrains.is_empty());
     }
 }

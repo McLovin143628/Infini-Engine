@@ -39,6 +39,8 @@ inf export --project samples/<name> --out /tmp/<name>-dist
 | [`phase16-world`](phase16-world/) | **P16 (the phase gate)** | The composed world: a **wizard-imported** streamed terrain over 8.2 km, a partition on top of it, a **second inline terrain**, and the residency/step budgets. |
 | [`phase18-scatter`](phase18-scatter/) | **P18 (the phase gate)** | The composed frame: standing **meshlet slabs** (sharing vgeom-demo's mesh by GUID) under two-pass HZB occlusion + a bound streaming budget, **GI v2** on a running clock, and **102 400 GPU-scattered instances** with LOD fade. |
 | [`phase19-town`](phase19-town/) | **P19 (the phase gate)** | The composed town: a **biome-painted** terrain, a **spline road** with a solid grammar fence, twelve streamed street lamps on a 128 m partition, and **seven fully enterable, furnished, three-storey buildings — one per archetype** (office, apartment, industrial, house, estate, hotel, shop). |
+| [`phase20-coastal`](phase20-coastal/) | **P20 (the phase gate)** | The composed coast: an **ocean** with swell, a **head lake** in a dug basin 33.6 m up, a **spline river** running the valley between them, eight buoyant crates at ascending densities, and a swimmer that surfaces. |
+| [`phase21-cavern`](phase21-cavern/) | **P21 (the phase gate)** | The composed workings: a **carved cave system** whose mouth is a real hole in an **asset-backed** heightfield, an **excavated foundation pit** with its exactly-conserved **spoil heap**, an **underground room** under the pit, and a Blueprint **borer** that keeps digging at runtime. |
 
 ## Project templates
 

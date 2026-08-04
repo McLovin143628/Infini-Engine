@@ -483,3 +483,45 @@ fn the_orphan_settlers_run_outside_the_tool_gated_branches() {
         );
     }
 }
+
+/// **The deferred dig's safety net** (P21.4).
+///
+/// `SceneDoc::edit_dig` commits with the re-mesh deferred — the box cut, the
+/// spline trench, the tunnel and the brush's committed stroke all land in the
+/// store with their chunk versions bumped and their *meshes* left for later. That
+/// is only legal because the viewport re-meshes every time it projects, and it
+/// projects whenever the document version moves — which a carve does.
+///
+/// So two calls are now load-bearing in a way they were not before: without them
+/// a dug cave is not one frame late, it is **permanently invisible**. Both are
+/// pinned here, positionally where that is meaningful.
+///
+/// Source text is the strongest claim available (a host cannot be constructed in
+/// CI — there is no window). What it can see is the call disappearing, which is
+/// the way this regresses.
+#[test]
+fn the_projection_re_meshes_every_volume_it_projects() {
+    let src = read("editor/crates/inf-viewport/src/host.rs");
+    let sync = src.find("self.sync_voxels(doc);").expect(
+        "the viewport projection no longer calls `sync_voxels` — a deferred dig \
+                 (SceneDoc::edit_dig) would never be re-meshed and the cave would be \
+                 invisible, not late",
+    );
+    // Inside the projection, and BEFORE the read-only entity walk that consumes
+    // the meshes it produces.
+    let walk = src[sync..]
+        .find("self.scene.instances.clear();")
+        .expect("the projection no longer clears its instance list — was it renamed?");
+    assert!(walk > 0);
+    // …and `sync_voxels` itself ends in the Ring-0 pass that re-meshes.
+    let body = src
+        .find("fn sync_voxels(&mut self, doc: &SceneDoc) {")
+        .expect("`sync_voxels` was renamed");
+    let after = &src[body..];
+    let end = after.find("\n    fn ").unwrap_or(after.len());
+    assert!(
+        after[..end].contains("sync_camera("),
+        "`sync_voxels` no longer calls `sync_camera`, which is the pass that \
+         re-meshes what a deferred dig changed"
+    );
+}

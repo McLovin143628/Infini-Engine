@@ -156,14 +156,39 @@ fn mesh_stamps(volumes: &SharedVoxelVolumes, volume: Uuid) -> Vec<(ChunkKey, u64
         .collect()
 }
 
-/// **The re-upload gate.** A carve must move the mesh stamps of the chunks it
-/// reached, and bump the document version — those two are the *only* things that
-/// make the cave appear on screen.
+/// Every resident chunk's **field stamp** — `VoxelData::chunk_version`, the
+/// thing a cut bumps and the thing the mesh cache is keyed on.
+fn chunk_stamps(volumes: &SharedVoxelVolumes, volume: Uuid) -> Vec<(ChunkKey, u64)> {
+    let v = volumes.lock().unwrap();
+    let slot = v.slot(volume).unwrap();
+    slot.data
+        .chunks()
+        .map(|(&k, _)| (k, slot.data.chunk_version(k)))
+        .collect()
+}
+
+/// **The re-upload gate.** A carve must move the **field** stamps of the chunks
+/// it reached and bump the document version, and the re-mesh those stamps drive
+/// must produce moved **mesh** stamps — those are the only things that make the
+/// cave appear on screen.
 ///
-/// The viewport's GPU cache is keyed on `VoxelMeshCache::version`, and its
+/// The viewport's GPU cache is keyed on the Ring-0 mesh version, and its
 /// projection is document-version-gated. A carve that moved neither would mesh
 /// correctly in the store and be invisible in the editor — the failure mode that
 /// looks like "the brush does nothing" and has no rendering explanation.
+///
+/// # The mesh stamp moves on the NEXT sync, not inside the transaction (P21.4)
+///
+/// `edit_dig` — which `edit_carve` and `edit_carve_path` are — commits with the
+/// re-mesh **deferred**, so it does not hold the shared-volumes guard for work
+/// the render thread is going to do anyway. The chunk versions move immediately
+/// (they are the edit); the mesh versions move on the next `resync`, which the
+/// viewport runs every frame inside `sync_voxels` → `sync_camera`. That call is
+/// pinned by `viewport_pump_mirror.rs`, because it is now load-bearing: without
+/// it a dug cave would be permanently invisible rather than one frame late.
+///
+/// The live **brush** is not deferred and is not this path — `CarveStroke::begin`
+/// re-meshes each dab, which is what makes a drag look like digging.
 ///
 /// Both halves are asserted for a **deep** cut as well, which touches no terrain
 /// tile at all: that is the case where a version bump driven only by the hole
@@ -183,6 +208,7 @@ fn a_carve_moves_the_mesh_stamps_and_the_document_version() {
     ] {
         let (mut doc, volumes, _t, volume, _d) = fixture(true);
         let before = mesh_stamps(&volumes, volume);
+        let field_before = chunk_stamps(&volumes, volume);
         let version = doc.version();
         assert!(!before.is_empty(), "{label}: the fixture has no chunks");
 
@@ -192,6 +218,23 @@ fn a_carve_moves_the_mesh_stamps_and_the_document_version() {
         assert!(tally.carved > 0, "{label}");
         assert_eq!(tally.holes > 0, expect_holes, "{label}");
 
+        // The FIELD moved inside the transaction — that half is never deferred,
+        // because it *is* the edit.
+        let field_after = chunk_stamps(&volumes, volume);
+        assert!(
+            field_before
+                .iter()
+                .zip(&field_after)
+                .any(|((_, a), (_, b))| b > a),
+            "{label}: no chunk version moved, so nothing was cut at all"
+        );
+
+        // …and the mesh follows on the next sync, which the viewport runs every
+        // frame. Called explicitly here because a test has no render thread.
+        {
+            let mut v = volumes.lock().unwrap();
+            assert!(v.resync(volume), "{label}: the volume vanished");
+        }
         let after = mesh_stamps(&volumes, volume);
         let moved = before
             .iter()

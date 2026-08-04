@@ -6064,15 +6064,28 @@ tech uses. We are not voxelizing the planet.
 > owes a settler, and every settler owes a pump call above the branch that would have run it.
 - **P21.4 Runtime carving** — 1. the same ops as Blueprint nodes, deterministic and
   replay-gated, so games can dig at runtime; 2. physics and nav updates on carve.
+  *(1 shipped in full — the `voxel.*` kit over one Ring-0 rule, gated by
+  `VoxelVolume::runtime_carve`, with the heightfield coupling sim-local. For 2, the
+  **physics** half shipped as per-chunk trimesh colliders on the P19.5 change-stamp
+  pattern; the **nav** half has nothing to update, because this engine has no
+  navigation system — see the P21.4 status block, which says so rather than
+  quietly dropping the word.)*
 
 > **P21.4 owes (carried from the P21.3 audit rounds).**
 >
-> * **The `phase21_gate` must assert a dig over a COLD region counts everything.** P21.3 fixed the
+> * ~~**The `phase21_gate` must assert a dig over a COLD region counts everything.**~~
+>   **CLOSED in P21.4** — `phase21_gate::a_dig_over_a_never_paged_region_counts_and_conserves_everything`,
+>   against a genuinely cold `MemoryChunkStore` over the shipped `.inf_voxel`.
+>   Original text: P21.3 fixed the
 >   paging (`carve_into`/`spoil_into` page before they write) and gated it at call-site level, but
 >   the *end-to-end* claim — that `removed[m]` over an unpaged chunk equals `removed[m]` over a
 >   paged one, through a real cook and a real player — is verified in Ring 1 only. The gate P21.4
 >   owes anyway (M9: voxel ground has zero PIE == shipping coverage) is where that belongs.
-> * **Make a big dig incremental.** A dig at the `MAX_DIG_SAMPLES` ceiling spends ≈1.3 s under the
+> * ~~**Make a big dig incremental.**~~ **PARTLY CLOSED in P21.4** — the re-mesh is
+>   off the lock (12–16 % of a big dig's lock time, measured; see the P21.4 status
+>   block for the numbers and the bench). The cut and the spoil search stay under
+>   the guard because they *are* the edit, so a dig at the ceiling is still not
+>   interactive. Original text: A dig at the `MAX_DIG_SAMPLES` ceiling spends ≈1.3 s under the
 >   shared-volumes lock (4 M samples ≈3.1 s) because the cut, the spoil search and the re-mesh all
 >   run there. Moving the re-mesh off the lock is the fix; it is a change to the store's threading
 >   and did not belong in P21.3.
@@ -6087,7 +6100,12 @@ tech uses. We are not voxelizing the planet.
 > is a named obligation on a later batch of this phase, recorded here at the moment it was
 > found rather than at the moment someone trips over it.
 >
-> * **M9 — voxel ground has ZERO PIE == shipping coverage, and P21.4's gate must cover it
+> * ~~**M9 — voxel ground has ZERO PIE == shipping coverage.**~~ **CLOSED in P21.4**
+>   — `ScenePayload` v5 carries the `.inf_voxel` **and** the `.inf_terrain` (the
+>   P16.3b2 deferral, closed with it because a hole mask only persists on an
+>   asset-backed terrain), and `phase21_gate::pie_equals_shipping_on_the_runtime_carve`
+>   compares the traces as `f64::to_bits` over `samples/phase21-cavern`. Original
+>   text: **voxel ground has ZERO PIE == shipping coverage, and P21.4's gate must cover it
 >   explicitly.** Every phase since P9 has closed on a gate that runs the same scene in PIE and
 >   in the shipped player and compares the traces; P21 does not have one yet. The combined
 >   ground query (`inf_voxel::ground_height_at`, the "terrain where solid, topmost voxel surface
@@ -6127,6 +6145,245 @@ tech uses. We are not voxelizing the planet.
 >   non-vacuity test that the three really move three different tile layers), and
 >   `viewport_pump_mirror.rs` pins both that the pump calls both settlers and — positionally —
 >   that they run **before** `if sculpting {`, which is the one way the fix regresses.
+
+
+> **P21.4 STATUS (complete).** Gameplay digs, and the ground opens.
+>
+> *The kit.* `voxel.*` joins the palette: three exec actions — `carve_sphere`,
+> `carve_box`, `fill_sphere` — and two pure queries, `is_solid` and
+> `ground_height`. A carve reports the volume it moved in **cubic metres**, an
+> exact integer sample count times `voxel_size_m³`, because the units doctrine
+> says SI everywhere and a raw voxel count means something different the moment an
+> author re-authors the same cave on a finer grid; divide by `voxel_size_m³` to get
+> the count back. `voxel.ground_height` is the **voxel half alone** and says so on
+> the node — `terrain.height_at` remains the combined query a character controller
+> wants, and two names for one number would have been the worse choice.
+>
+> *One rule, in Ring 0.* `inf_voxel::runtime_carve` is the whole gameplay carve:
+> permission, shape validity, the per-step ceiling, then `apply_op_into`. Both
+> hosts call it, for the reason `ground_height_at` is one function. The editor's
+> dig transaction does not survive into a fixed step — there is no undo entry, no
+> author to refuse to, no toolbar to report a verdict on — so the smaller rule is:
+> a **pure function of the op and the volume**, no camera and no session history;
+> every refusal decided **before the first sample moves**; and **idempotent**,
+> because `VoxelOp` is, which is what makes a replayed step after a rollback land
+> on the same bytes.
+>
+> *Four refusals, all answering `0.0` and all logged.* No volume on the entity;
+> `runtime_carve` off; a degenerate shape; more than `MAX_RUNTIME_CARVE_SAMPLES =
+> 65_536` samples in one call (the editor's ceiling is 2 M and costs ≈78 fixed
+> steps, so a gameplay carve gets one two orders of magnitude smaller — a grenade
+> crater rather than a quarry, stated as a **sample count** because the same radius
+> is a different bill on a different grid). A blueprint node is not a transaction:
+> failing the handler would take down the rest of the Tick body — the movement, the
+> animation, the sound — for an op the author fixes by typing a smaller radius. The
+> flag frozen into scene schema v19 finally has its reader, and it behaves the way
+> its doc comment promised: **refused and reported, never silently applied**, so a
+> replay cannot diverge on whether some node happened to run.
+>
+> *The heightfield half is sim-local, and that changes which refusals apply.* A
+> carve that crosses the surface opens a mouth through the same
+> `apply_surface_cut` the editor brush runs, over every terrain in `Guid` order.
+> But **nothing is persisted**: the editor's Simulate world is a
+> `ScenePersist::Memory` snapshot and the player's is a loaded pack, and both die
+> with the session. So the inline-terrain refusal — which exists to stop an author
+> *saving* a document whose mask cannot survive — does not apply at runtime, and a
+> game may carve any terrain. Craters last exactly as long as the play session; a
+> save system is P22-and-later and is not half-built here.
+>
+> *Physics on carve, and nav honestly.* `PhysicsBridge3D::sync_from_world_with_voxels`
+> gives every resident chunk a static trimesh collider built by the **same**
+> `mesh_chunk` the renderer draws with, stamped per `(entity, chunk key)` on
+> `VoxelData::chunk_version` — the P19.5 `structure_stamps` pattern one level
+> finer, because a cave is hundreds of chunks and a gameplay carve moves two. A
+> buried chunk meshes to nothing and costs no collider; a chunk carved hollow
+> *loses* its collider on the next sync, which is how a runtime carve becomes a
+> hole a body falls through. **There is no navigation system in this engine** —
+> not a nav mesh, not a nav volume, not a path query — so the plan bullet's "nav
+> updates on carve" has nothing to update. Said here rather than quietly dropped.
+>
+> *The PIE voxel source, and the P16.3b2 deferral closed with it.* `ScenePayload`
+> v4 → v5 appends **`voxels`** and **`terrains`**. The first was the M9
+> prerequisite: before it the PIE player had no `.inf_voxel` at all, so a carved
+> cave answered `terrain.height_at` with the seam's `0.0` in preview and with the
+> cave floor in the shipped build — and any gate comparing them would have compared
+> **two empty maps agreeing**. The second was forced by P21.2's own design: a hole
+> mask only persists on an asset-backed terrain (v19 pins `TerrainTileFrozenV3`,
+> which has no hole rows), and `strip_streamed_terrain` blanks a streamed terrain's
+> working set on the way to the wire — so "a level with cave mouths" and "a level
+> PIE can preview" were mutually exclusive until the `.inf_terrain` bytes crossed
+> too. `terrain_source_from_bytes` + `TerrainContent::Memory` is the whole
+> mechanism; the store is the one the dev-dir path already used, with the read
+> already done.
+>
+> **PIE ships the SAVED cave, and the reason is stronger than symmetry.** Editor
+> *Simulate* does carry unsaved carves (`overlay_unsaved_carves` folds the editor
+> store's **dirty** chunks over the resolved map, safe because dirty is a function
+> of edit history and `sync_residency` refuses to evict a dirty chunk). Shipping
+> that store *as a volume* over the wire is a different act: the store is
+> **camera-paged**, so a PIE session built from it would preview a cave truncated
+> by where the author happened to be looking — precisely the dependency every seam
+> in this phase is shaped to forbid. The fix that would work is the dirty-chunk
+> **overlay** (ship the saved bytes plus `(entity, chunk key, chunk bytes)` and let
+> the player apply the same rule), and it is ledgered below rather than half-built.
+>
+> *`sim_from_payload`, and a drift it closed on the way past.* Every PIE boot path
+> now goes through one function that makes every attachment a session needs. It had
+> to, because the failure is silent — a path that forgets an attach does not crash
+> and does not warn, it runs a world whose caves are not there. Building it found
+> that the real `--pie` subprocess had been constructing its sim with a bare
+> `RuntimeSim::new` rather than `sim_from_built`, so it was **also** dropping the
+> state machines, the root-motion clips and the audio clips the in-process
+> reference kept: every gate since P11 compared a reference against a subprocess
+> that was not running the same world.
+>
+> *The gate is `samples/phase21-cavern` + `runtime/inf-player/tests/phase21_gate.rs`.*
+> The plan's done-when sentence as committed content — a 128 m ridge on an
+> asset-backed terrain, a carved cave system with a real mouth, an excavated
+> foundation pit with its exactly-conserved spoil heap, an underground room under
+> the pit joined by a shaft, and a borer that keeps digging — with ten arms:
+> two loads bit-identical **including the field and the hole mask**; cooked ==
+> uncooked; **PIE == shipping on the runtime-carve trace, as `f64::to_bits`** (the
+> M9 debt, and the first voxel PIE-vs-shipping coverage this repository has ever
+> had); the workings surviving a round trip byte-identical with the room reachable
+> through the combined query; `runtime_carve` gated **both ways** on one world with
+> one flag flipped; a **silent** cook; both budget classes; a subprocess pool gate
+> at 1/2/4/8 comparing the trace **and the resulting field**; and the cold-region
+> count below. It is not a vacuous gate: it caught its own first defect — the
+> borer's IR used `math::add`, which is a **binary op** and not a `dispatch_math`
+> builtin, so the handler errored and the trace was 160 ticks of zero. The
+> anti-vacuity arm said so in one line.
+>
+> *The cold-region count, paid.* P21.3 fixed the paging and gated it in Ring 1;
+> the end-to-end claim — that a dig over a region **no camera has ever paged**
+> removes and conserves exactly what the same dig over a warm region does — is now
+> asserted on the shipped `.inf_voxel`, against a genuinely cold `MemoryChunkStore`
+> whose volume starts at zero resident chunks. The failure it exists to catch is
+> invisible from inside: a non-resident chunk reads as air, so the cut removes
+> nothing there, counts nothing, spoils nothing — **and conservation balances
+> perfectly**.
+>
+> *Off-lock re-mesh, with honest numbers.* `SceneDoc::edit_dig` — the one door the
+> box cut, the trench, the tunnel and the brush's committed stroke all arrive at —
+> now commits with the re-mesh **deferred**: the chunk versions move inside the
+> transaction (they *are* the edit), and the meshes are rebuilt by the viewport's
+> next projection, which runs whenever the document version moves and which a carve
+> always bumps. Measured (release, one machine, 108 chunks at 0.5 m, a 405 000-sample
+> box cut, `editor/crates/inf-editor-core/tests/dig_stall_bench.rs`): **86.1 ms →
+> 72.1 ms** under the shared-volumes guard with spoil discarded, and **≈224 ms →
+> 197.8 ms** with `SpoilChoice::Auto`; the 11.3 ms / 26.8 ms of meshing moves to
+> the render thread. So the re-mesh is **12–16 %** of a big dig's lock time and is
+> the only part with no reason to be there — the remaining 84–88 % is the cut and
+> the spoil search, which *are* the edit and cannot leave. **A dig at the ceiling
+> is still not interactive.** That is the honest conclusion, recorded rather than
+> rounded up, and the `#[ignore]`d bench that produced the numbers is committed
+> beside it. The live **brush** is untouched: `CarveStroke::begin` still re-meshes
+> every dab, which is what makes a drag look like digging.
+>
+> *Laws this batch paid for.* **A refusal must be a value, not a failure** — a
+> node that errors takes its whole handler down, so a gameplay op's refusals are
+> zero-and-a-log. **A camera-paged store may be read but never shipped**: the
+> difference between the Simulate overlay (dirty-gated, edit-history-driven) and
+> the PIE payload (the whole volume, residency-driven) is the whole reason one is
+> legal and the other is not. **`math.add` is a binary op, not a math builtin** —
+> hand-written IR that says `math::add` fails its handler silently, and a
+> zero-forever trace is what that looks like from outside. And, from the gate: **a
+> boot path that forgets an attachment does not crash — it agrees with itself.**
+
+> **PHASE 21 SHIPPED LEDGER.**
+>
+> * **P21.1** — `ccbc348` (SDF chunk store, deterministic Surface-Nets mesher,
+>   `.inf_voxel`, scene schema **v19** + `VoxelVolume`, the renderer's voxel path),
+>   `a027513` (audit: engagement-counted off-path, editor bind parity,
+>   eviction-aware mesh keys).
+> * **P21.2** — `bab8596` (per-sample hole mask; `.inf_terrain` **v5**),
+>   `65d2876` (clipmap discard, seam blending, the combined ground query, camera
+>   residency), `f6a60fb`, `f7548b0` (hole-coupled carve as one undo step + the
+>   inline-terrain refusal), `b7260a4` (carve brush + spline tunnel),
+>   `a4e5844`, `a4fc002` (write-back + reload), `2ee5b0b` (toolbar + verdict),
+>   `8504e75`, `b3fe2a8`, `c33bde8` (three audit rounds).
+> * **P21.3** — `bd1e3fa` (excavation: box/trench cuts, exact-conservation spoil),
+>   `1ec70b5` (tool policy to Ring 1; orphaned strokes settle), `cf2ed56` (audit:
+>   paged digs, sky-rule trenches, bounded spoil growth), `8ab04e0` (stranded
+>   transactions settle), `cdd356d` (a document swap abandons rather than settles).
+> * **P21.4** — `31144dc` (runtime carving: the `voxel.*` kit, the Ring-0 rule,
+>   chunk colliders on carve, the PIE voxel source), plus this batch's gate +
+>   sample + completion block.
+>
+> **Schema: one bump, v18 → v19**, spent in P21.1 on `VoxelVolume`'s three fields
+> and never touched again — `.inf_voxel` and `.inf_terrain` version themselves, and
+> `ScenePayload` v5 is a **wire envelope** bump that changes nothing on disk and
+> re-blesses no golden. Goldens stand at **49** (P21.1's `voxel` and P21.2's
+> `cave_mouth`); this batch added none, because every claim it makes is structural
+> and a screenshot could not have carried one of them.
+>
+> **THE PHASE'S REMAINDER LEDGER, swept across all four batches.**
+>
+> *Carried from P21.2, still open.* **Coarse-LOD holes do not propagate into the
+> pyramid** (`pyramid::downsample_block` carries no hole mask upward), so a clipmap
+> ring far enough out draws ground over a cave and `RenderTerrain::seam_sample`
+> cannot apply the poison rule on a streamed terrain. Pinned by
+> `a_coarse_page_carries_no_hole_mask` so flipping it is deliberate. It is a
+> **decision, not an oversight**: a coarse sample covering four fine ones could be
+> holed if *any* child is, if *all* are, or by majority, and each answer draws a
+> different distant silhouette.
+>
+> *New, carried out of P21.4.* **PIE previews the last SAVED cave** — the
+> dirty-chunk overlay described above is the fix and is not built. **`BeginPlay`
+> cannot see a voxel volume**: both hosts seed their map after constructing the sim
+> (which is where `BeginPlay` runs), so a carve or a hole-query there refuses; the
+> workaround is deferring `BeginPlay`, which changes when *every* handler in the
+> engine runs, and the node kit says "put the first dig on Tick" instead. **A
+> `voxel.*` node can only name the volume on its own actor**, because
+> `vars::get("entity")` is the only entity reference the blueprint IR has — the
+> same limit the audio and physics kits live under, and the reason the sample is a
+> cavern that bores itself. **A runtime carve has no spoil**: gameplay deletes
+> rock, and conservation stays an authoring guarantee about a document.
+> **Nothing a game digs is persisted** (see above). **Chunk colliders are built for
+> every resident chunk at load**, which is a real one-off cost on a large cave and
+> is not amortized or budgeted — the change stamp makes the *steady state* cheap
+> and says nothing about the first frame.
+>
+> *Standing, from earlier batches.* Instanced debris for spoil is **P22**'s
+> (fracture/destruction), not this phase's. There is **no voxel raycast picking
+> from inside a cave** — the viewport picks against the heightfield and the ID
+> buffer. **macOS viewport input is unwired**, so every voxel gesture there is
+> compile-checked and not driven. The sculpt-side items P21.2 named
+> (per-material brush falloff, a hole-aware sculpt undo preview) are unbuilt.
+> Viewport interaction is **human-verified**, as every native-viewport gesture in
+> this repository is: CI creates no window. The *logic* is not — every edit, every
+> verdict and every preview is a Ring-0/Ring-1 function with its own tests.
+>
+> *Dependency hygiene.* P21.4 added `inf-voxel` to `inf-physics` (the chunk
+> colliders) — Ring 0 → Ring 0, with its reason in the manifest — and nothing else.
+> **No new third-party crate entered the tree for the whole phase**, and
+> `cargo deny` is unmoved across all four batches.
+>
+> *The `LNK1102` note, since this phase is where it grew.* "crate X required to be
+> available in rlib format" now has **three** causes and `df` explains only one:
+> disk-full (P4, P20), a corrupted incremental cache after hand-editing
+> `target/debug/build/*` (P21.3 — `rm -rf target/debug/incremental` plus a targeted
+> `cargo clean -p`), and **linker/rustc OOM under parallel jobs** (P21.3 at `-j2`,
+> its re-audit at `-j4`, both with >100 GB free — fixed by lowering `-j`). Check
+> free space *first*, but do not stop there.
+
+> **STATUS: Phase 21 COMPLETE** (2026-08-04) — **local gates green; CI pending
+> push.** (Written with the commit rather than after the CI run, like Phases
+> 16–20's, and saying so rather than implying a green run that has not happened.)
+>
+> **The four batches, in one line each.** **P21.1** gave the engine geometry a
+> heightfield cannot express — sparse SDF chunks, `f64`-anchored like terrain
+> tiles, meshed by a Surface-Nets pass whose seams are watertight by construction
+> and whose output is byte-identical however the chunks arrived. **P21.2** made
+> them part of the *world*: a per-sample hole mask on the tiles so a cave has a
+> mouth, one combined ground query wired into both hosts so gameplay stands on a
+> cave floor, and the carve brush and spline tunnel that author it. **P21.3** made
+> them **excavatable** — box and trench cuts under a sky rule, and material
+> accounting whose spoil heap holds the excavated count exactly, per material, as
+> integers, with no bulking factor. **P21.4** handed the whole thing to gameplay:
+> Blueprint carve nodes gated by `runtime_carve`, chunk colliders that rebuild on
+> a carve, the two byte sources PIE never had, and the phase gate that compares
+> preview against shipping on a trace of digging.
 
 ### Phase 22 — Dynamic world: deformation & destruction
 

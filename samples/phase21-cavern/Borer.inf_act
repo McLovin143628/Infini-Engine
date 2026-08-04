@@ -1,0 +1,327 @@
+{
+  "schema_version": 1,
+  "id": "act:phase21-borer",
+  "name": "Tunnel Borer",
+  "components": [],
+  "variables": [
+    {
+      "name": "step",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": false
+    },
+    {
+      "name": "removed",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": false
+    },
+    {
+      "name": "total",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": false
+    },
+    {
+      "name": "room_ground",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": false
+    },
+    {
+      "name": "room_voxel",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": false
+    }
+  ],
+  "events": [
+    {
+      "event": "Tick",
+      "body": {
+        "id": "tick",
+        "name": "tick",
+        "params": [
+          {
+            "name": "dt",
+            "ty": "Float"
+          }
+        ],
+        "ret": "Unit",
+        "body": [
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "removed"
+                    }
+                  },
+                  {
+                    "Call": {
+                      "path": [
+                        "voxel",
+                        "carve_sphere"
+                      ],
+                      "args": [
+                        {
+                          "Call": {
+                            "path": [
+                              "vars",
+                              "get"
+                            ],
+                            "args": [
+                              {
+                                "Lit": {
+                                  "Str": "entity"
+                                }
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "Binary": [
+                            "Add",
+                            {
+                              "Lit": {
+                                "Float": 36.0
+                              }
+                            },
+                            {
+                              "Binary": [
+                                "Mul",
+                                {
+                                  "Call": {
+                                    "path": [
+                                      "vars",
+                                      "get"
+                                    ],
+                                    "args": [
+                                      {
+                                        "Lit": {
+                                          "Str": "step"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                },
+                                {
+                                  "Lit": {
+                                    "Float": 0.15
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "Lit": {
+                            "Float": 22.0
+                          }
+                        },
+                        {
+                          "Lit": {
+                            "Float": 58.0
+                          }
+                        },
+                        {
+                          "Lit": {
+                            "Float": 2.0
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "total"
+                    }
+                  },
+                  {
+                    "Binary": [
+                      "Add",
+                      {
+                        "Call": {
+                          "path": [
+                            "vars",
+                            "get"
+                          ],
+                          "args": [
+                            {
+                              "Lit": {
+                                "Str": "total"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "Call": {
+                          "path": [
+                            "vars",
+                            "get"
+                          ],
+                          "args": [
+                            {
+                              "Lit": {
+                                "Str": "removed"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "step"
+                    }
+                  },
+                  {
+                    "Binary": [
+                      "Add",
+                      {
+                        "Call": {
+                          "path": [
+                            "vars",
+                            "get"
+                          ],
+                          "args": [
+                            {
+                              "Lit": {
+                                "Str": "step"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "Lit": {
+                          "Float": 1.0
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "room_ground"
+                    }
+                  },
+                  {
+                    "Call": {
+                      "path": [
+                        "terrain",
+                        "height_at"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Float": 50.0
+                          }
+                        },
+                        {
+                          "Lit": {
+                            "Float": 38.0
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "room_voxel"
+                    }
+                  },
+                  {
+                    "Call": {
+                      "path": [
+                        "voxel",
+                        "ground_height"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Float": 50.0
+                          }
+                        },
+                        {
+                          "Lit": {
+                            "Float": 38.0
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "functions": []
+}

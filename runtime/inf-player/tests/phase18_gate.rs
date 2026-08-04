@@ -187,6 +187,7 @@ fn pie_sim() -> RuntimeSim {
         |_| None,
         |_| None,
         |_| None,
+        |_| None,
         60,
         false,
     )
@@ -1916,6 +1917,7 @@ fn skinned_pack_sim(pack_dir: &Path) -> RuntimeSim {
 fn skinned_pie_sim(doc: &inf_editor_core::scene::SceneDoc) -> RuntimeSim {
     let payload = inf_editor_core::pie::build_scene_payload(
         doc,
+        |_| None,
         |_| None,
         |_| None,
         |_| None,
