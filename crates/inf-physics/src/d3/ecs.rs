@@ -152,11 +152,20 @@ pub struct PhysicsBridge3D {
     structure_stamps: BTreeMap<Uuid, (u64, usize)>,
     /// Per-voxel-chunk change stamp (P21.4): `(volume entity, chunk key) →
     /// `inf_voxel::source_key`. The `structure_stamps` twin, keyed one level
-    /// finer because a runtime carve moves *one chunk of one volume* and
-    /// re-meshing a whole cave system for it inside a fixed step is exactly the
-    /// bill the pattern exists to refuse. While a stamp matches, that chunk's
-    /// collider is **retained without being re-described** — see
+    /// finer because a runtime carve moves a *handful* of chunks and re-meshing a
+    /// whole cave system for it inside a fixed step is exactly the bill the pattern
+    /// exists to refuse. While a stamp matches, that chunk's collider is
+    /// **retained without being re-described** — see
     /// [`gather_voxels`](Self::gather_voxels).
+    ///
+    /// **"A handful" is up to 27, not two.** `source_key` is a max over the 3×3×3
+    /// neighbourhood, so carving one chunk moves the key of every chunk that can
+    /// see it — the carved one and its 26 neighbours — and each of them is
+    /// re-meshed and re-described. That is the price of correctness (a mesh really
+    /// is a function of its neighbourhood; the alternative is the stale seam the
+    /// M3 defect produced), and it is a real per-carve-step cost on a volume being
+    /// dug continuously. It is bounded and local: 27 chunks against a cave system
+    /// of hundreds, and zero on every step that digs nothing.
     ///
     /// The value is the **mesher's** key, not the chunk's own version: a mesh is a
     /// function of its 3×3×3 neighbourhood, so the chunk's own stamp cannot see a

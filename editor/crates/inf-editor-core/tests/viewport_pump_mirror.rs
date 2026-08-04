@@ -550,3 +550,65 @@ fn the_projection_re_meshes_every_volume_it_projects() {
         );
     }
 }
+
+/// **ACT FOUR OF THE PROJECTION: the sim → render voxel fold** (P21.4).
+///
+/// A `voxel.*` node writes the *simulation's* volume map, which is deliberately
+/// not the camera-paged store either host draws from. Both hosts therefore owe a
+/// fold, and neither is covered by the pump-mirror family's `Cmd`-based checks:
+/// the player's lives in `render::sync_voxel_store` and the **editor's lives in
+/// Ring 2** (`commands/sim.rs`), because the viewport pump has no reference to a
+/// `SimSession` to fold from. Two different call sites, one rule, and nothing
+/// structural connecting them — which is how one of them gets deleted.
+///
+/// The failure is silent in the way this whole batch has been: a host without the
+/// fold gives the dug floor a collider, lets gameplay stand on it, and keeps
+/// drawing the rock. Source text is the strongest claim available (neither host
+/// can be constructed in CI); what it can see is a call site disappearing.
+#[test]
+fn both_hosts_fold_the_sims_carves_into_their_render_store() {
+    // The player: inside the CPU half of its voxel sync, and **after** the camera
+    // pass, which is what keeps the pin-free re-copy correct.
+    let player = read("runtime/inf-player/src/render.rs");
+    let sync = player
+        .find("pub fn sync_voxel_store(")
+        .expect("the player's voxel sync was renamed");
+    let body = &player[sync..];
+    let camera = body
+        .find("sync_camera(")
+        .expect("the player's voxel sync no longer pages against the camera");
+    let overlay = body.find("overlay_sim(").expect(
+        "the SHIPPED PLAYER no longer folds the sim's carves into its render store — \
+         a game that digs would draw the rock it removed",
+    );
+    assert!(
+        overlay > camera,
+        "the player's overlay runs BEFORE the camera pass, so residency can page \
+         the asset's pre-carve bytes back over a carve with nothing to undo it"
+    );
+    assert!(
+        body[overlay..].contains("resync("),
+        "the player's overlay never re-meshes what it copied, so the carve is in \
+         the field and not on the screen"
+    );
+
+    // The editor: from Ring 2, after the session ticks. Both tick paths, because
+    // `sim_tick` (free-running) and `sim_step_fixed` (Step) are separate commands
+    // and a fold on only one of them is a debugger that shows a different world.
+    let ring2 = read("editor/studio/src-tauri/src/commands/sim.rs");
+    assert!(
+        ring2.contains("fn overlay_sim_carves("),
+        "the EDITOR no longer folds the sim's carves into the viewport store"
+    );
+    assert_eq!(
+        ring2.matches("overlay_sim_carves(&app").count(),
+        2,
+        "the editor's fold is called from {} of its two tick commands (`sim_tick` \
+         and `sim_step_fixed`) — Step and Play would show different worlds",
+        ring2.matches("overlay_sim_carves(&app").count()
+    );
+    assert!(
+        ring2.contains("store.overlay_sim("),
+        "the editor's fold no longer reaches the Ring-0 rule"
+    );
+}

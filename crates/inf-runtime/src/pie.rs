@@ -606,13 +606,35 @@ mod tests {
     /// that desyncs the stream after the body is already committed.
     #[test]
     fn an_oversized_frame_is_refused_rather_than_truncated() {
-        // One asset just past the cap. (`Vec<u8>` of that length is the cheapest
-        // way to build an over-large payload without a real level.)
-        let huge = ScenePayload::new("Huge", vec![0u8; MAX_FRAME_LEN + 16], vec![], 60, false);
+        // A type whose *encoding* is enormous but whose value is not: serde is
+        // told there are `MAX_FRAME_LEN + 16` bytes and yields them lazily, so the
+        // check is exercised without a 256 MiB allocation in a unit test.
+        struct HugeBlob;
+        impl Serialize for HugeBlob {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeSeq;
+                let n = MAX_FRAME_LEN + 16;
+                let mut seq = s.serialize_seq(Some(n))?;
+                for _ in 0..n {
+                    seq.serialize_element(&0u8)?;
+                }
+                seq.end()
+            }
+        }
+
         let mut wire = Vec::new();
-        let err = write_msg(&mut wire, &EditorToPlayer::LoadScene(huge))
-            .expect_err("an oversized frame must be refused");
+        let err = write_msg(&mut wire, &HugeBlob).expect_err("an oversized frame must be refused");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(wire.is_empty(), "the header was written before the refusal");
+        assert!(
+            wire.is_empty(),
+            "the header was written before the refusal, which desyncs the stream"
+        );
+
+        // …and a frame just under the cap is accepted, so the bound is a bound and
+        // not a blanket refusal.
+        let ok = ScenePayload::new("Small", vec![0u8; 1024], vec![], 60, false);
+        let mut wire = Vec::new();
+        write_msg(&mut wire, &EditorToPlayer::LoadScene(ok)).expect("a normal frame writes");
+        assert!(!wire.is_empty());
     }
 }

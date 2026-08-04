@@ -190,7 +190,7 @@ pub async fn sim_tick(
     session.tick(&mut doc, dt, SimInput::with_down(keys));
     doc.bump_version_for_runtime();
     drop(doc);
-    overlay_sim_carves(&app, session);
+    overlay_sim_carves(&app, &scene, session);
     emit_debug(&app, session);
     Ok(true)
 }
@@ -213,7 +213,11 @@ pub async fn sim_tick(
 /// The terrain half needs no twin here: `SimSession` steps the **document's** own
 /// world, so a runtime hole lands in the document and the viewport's existing
 /// `overlay_document_edits` already mirrors it.
-fn overlay_sim_carves(app: &AppHandle, session: &inf_editor_core::simulate::SimSession) {
+fn overlay_sim_carves(
+    app: &AppHandle,
+    scene: &SceneState,
+    session: &inf_editor_core::simulate::SimSession,
+) {
     let volumes = session.voxel_volumes();
     if volumes.is_empty() {
         return;
@@ -227,8 +231,27 @@ fn overlay_sim_carves(app: &AppHandle, session: &inf_editor_core::simulate::SimS
     let Ok(mut store) = store.lock() else {
         return;
     };
+    // The entity→asset binding, so a re-pointed `VoxelVolume.asset` cannot make
+    // asset A's chunks land in a slot bound to asset B.
+    let doc = match scene.doc.lock() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
     for (entity, data) in volumes {
-        store.overlay_sim(*entity, data);
+        let Some(asset) = doc
+            .entity_of(*entity)
+            .and_then(|e| {
+                doc.world()
+                    .world()
+                    .get::<inf_ecs::components::VoxelVolume>(e)
+            })
+            .and_then(|v| v.asset)
+        else {
+            continue;
+        };
+        if store.overlay_sim(*entity, asset, data) > 0 {
+            store.resync(*entity);
+        }
     }
 }
 
@@ -254,7 +277,7 @@ pub async fn sim_step_fixed(
     session.step_once(&mut doc, SimInput::with_down(keys));
     doc.bump_version_for_runtime();
     drop(doc);
-    overlay_sim_carves(&app, session);
+    overlay_sim_carves(&app, &scene, session);
     emit_debug(&app, session);
     Ok(true)
 }

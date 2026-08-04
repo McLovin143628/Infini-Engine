@@ -90,11 +90,19 @@ pub struct VolumeSlot {
     /// not reached yet is *wanted* and not *resident*, and feeding residency back
     /// into the dead-band test would let the budget change the policy.
     wants: BTreeSet<ChunkKey>,
-    /// Which **simulation** chunk versions have been mirrored into this render
-    /// store (P21.4) — see [`VoxelVolumes::overlay_sim`]. Empty for every volume
-    /// nothing has carved at runtime, which is every volume in an unmodified
-    /// level.
-    overlaid: BTreeMap<ChunkKey, u64>,
+    /// What [`VoxelVolumes::overlay_sim`] has mirrored: `key → (the simulation
+    /// stamp copied, the stamp this slot held afterwards)` (P21.4).
+    ///
+    /// **Both halves are load-bearing.** The first says "this carve is already
+    /// here". The second says "and nothing has replaced it since" — because camera
+    /// residency may evict the chunk and page the *asset's* pre-carve bytes back
+    /// over it, which stamps a new version. Recording only the sim's side would
+    /// leave the overlay convinced it had already done its work while the store
+    /// drew solid rock.
+    ///
+    /// Empty for every volume nothing has carved at runtime, which is every volume
+    /// in an unmodified level.
+    overlaid: BTreeMap<ChunkKey, (u64, u64)>,
 }
 
 impl VolumeSlot {
@@ -390,51 +398,94 @@ impl VoxelVolumes {
     /// stands on it — and the screen keeps drawing the rock that is no longer
     /// there.
     ///
-    /// # Baseline-on-first-sight, so residency is not defeated
+    /// # DIRTY is the signal, and it is the *only* signal
     ///
-    /// A sim volume is **fully resident** by construction ([`crate::sim_volume`]
-    /// decodes the whole `.inf_voxel` precisely so a fixed step cannot observe
-    /// paging). Copying every one of its chunks in would therefore make the render
-    /// store fully resident too, which is the camera budget deleted.
+    /// A sim volume arrives from [`crate::sim_volume`] with its dirty set
+    /// **cleared** (`VoxelAssetReader::to_voxel_data` ends in `clear_dirty`), and
+    /// the simulation never writes back, so nothing ever clears it again. A dirty
+    /// sim chunk therefore means exactly one thing: *gameplay carved this*.
     ///
-    /// So a key seen for the **first** time records the sim's stamp and copies
-    /// nothing: both sides were built from the same asset, so at `t = 0` they
-    /// already agree. Only a *later* divergence — a runtime carve moving the sim's
-    /// `chunk_version` — copies. A carve therefore costs its own chunks and
-    /// nothing else, and a level nobody digs costs one version compare per
-    /// resident chunk per frame.
+    /// That replaces the baseline-on-first-sight rule this function shipped with,
+    /// which was **wrong in the one case the roadmap prescribes**. `overlaid` is
+    /// empty when a volume binds, so the first call recorded the sim's current
+    /// stamps and copied nothing — including stamps a carve had *already* moved.
+    /// Both hosts bind after the first step (the editor overlays after
+    /// `session.tick`; the player binds inside its render sync, which runs after
+    /// the first frame), so a **one-shot dig on the first Tick** — carve once,
+    /// never again — was baselined away in its entirety: the sim had the hole, the
+    /// colliders had the hole, gameplay walked through it, and the render store
+    /// drew solid rock for the rest of the session. A *continuous* borer hid it,
+    /// because tick 2 repaired tick 1.
     ///
-    /// The copy goes in through [`VoxelData::insert_chunk`], which marks the chunk
-    /// **dirty** — and `sync_residency` refuses to evict a dirty chunk. That is
-    /// the pin, for free and by an existing rule: a carved chunk cannot be paged
-    /// out and re-read from the `.inf_voxel`, which would restore the rock the
-    /// player just removed.
+    /// Keying on dirty keeps the property the baseline was there for — an undug
+    /// level copies nothing, so camera residency is untouched — without inventing
+    /// a moment before which carves do not count.
     ///
-    /// A volume whose grids disagree is skipped rather than mixed: two different
-    /// `voxel_size_m` are two different lattices, and a chunk copied between them
-    /// would land somewhere nobody dug.
-    pub fn overlay_sim(&mut self, entity: u128, sim: &VoxelData) -> usize {
+    /// # It does not pin, and it does not dirty
+    ///
+    /// The copy goes in through [`VoxelData::insert_resident_chunk`], which stamps
+    /// the chunk (so the mesh cache rebuilds it) and leaves the **dirty set
+    /// alone**. That matters far more than it looks: in the editor this store *is*
+    /// the one the save path stages from (`SceneDoc::save` → `VoxelEdits::from_dirty`
+    /// → `write_voxel_edits`), so an overlay that dirtied would have written a
+    /// player's runtime craters into the author's `.inf_voxel` on the next Ctrl+S —
+    /// contradicting the rule this phase recorded, that runtime carves are not
+    /// persisted — and would have left "you have unsaved carves" true for ever
+    /// after a clean save.
+    ///
+    /// Nor does it pin. An earlier draft leaned on the dirty flag as an eviction
+    /// pin, which grew the resident set without bound: a camera a thousand
+    /// kilometres away still kept every carved chunk resident, meshed and
+    /// uploaded, for the life of the session. Instead the overlay simply **runs
+    /// again**: it is called *after* the camera pass, so a chunk the camera
+    /// evicted and later paged back in arrives as the asset's pre-carve bytes,
+    /// with a fresh stamp that no longer matches the one recorded here — and is
+    /// re-copied. Residency stays exactly the camera's business, and the carve is
+    /// re-applied on top of it as often as it takes.
+    ///
+    /// # The lattice must match, and so must the asset
+    ///
+    /// A volume whose grid disagrees is skipped rather than mixed: two different
+    /// `voxel_size_m` are two different lattices, and two different anchors are the
+    /// same lattice at different places — a chunk copied across either lands
+    /// somewhere nobody dug. The **asset id** is checked too, because an author can
+    /// re-point `VoxelVolume.asset` in the Details panel mid-Simulate: without it,
+    /// asset A's chunks are copied into a slot bound to asset B. `sim` is anchored
+    /// at the asset's origin plus the entity's world translation (see
+    /// [`crate::sim_volume`]), which is what this slot's `translation` holds
+    /// separately, so the comparison folds it back in.
+    pub fn overlay_sim(&mut self, entity: u128, asset: u128, sim: &VoxelData) -> usize {
         let Some(slot) = self.slots.get_mut(&entity) else {
             return 0;
         };
-        if slot.data.voxel_size_m() != sim.voxel_size_m() {
+        if slot.asset != asset {
+            return 0;
+        }
+        if slot.data.voxel_size_m() != sim.voxel_size_m()
+            || slot.data.origin() + slot.translation != sim.origin()
+        {
             return 0;
         }
         let mut copied = 0usize;
-        for (&key, chunk) in sim.chunks() {
+        for key in sim.dirty_chunks() {
+            // A dirty key with no resident chunk is a DELETION in this vocabulary
+            // (`VoxelData::evict_chunk`'s note). Gameplay has no path that removes
+            // a chunk — `runtime_carve` only ever writes samples — so this cannot
+            // arise today; it is skipped rather than guessed at, because deleting
+            // a chunk out of the render store on the strength of an absence is how
+            // a cave becomes a hole in the world.
+            let Some(chunk) = sim.get_chunk(key) else {
+                continue;
+            };
             let stamp = sim.chunk_version(key);
-            match slot.overlaid.get(&key) {
-                // Already mirrored at this version: nothing moved.
-                Some(&seen) if seen == stamp => continue,
-                // First sight: record the baseline, copy nothing.
-                None => {
-                    slot.overlaid.insert(key, stamp);
+            if let Some(&(seen, mirrored)) = slot.overlaid.get(&key) {
+                if seen == stamp && mirrored == slot.data.chunk_version(key) {
                     continue;
                 }
-                Some(_) => {}
             }
-            slot.data.insert_chunk(key, chunk.clone());
-            slot.overlaid.insert(key, stamp);
+            slot.data.insert_resident_chunk(key, chunk.clone());
+            slot.overlaid
+                .insert(key, (stamp, slot.data.chunk_version(key)));
             copied += 1;
         }
         copied

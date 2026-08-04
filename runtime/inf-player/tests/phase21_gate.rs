@@ -83,7 +83,7 @@ const STEPS: usize = PHASE21_BORE_STEPS;
 
 /// Every committed file of the sample, so the fixture copy cannot silently miss
 /// one as the sample grows.
-fn sample_files() -> [&'static str; 8] {
+fn sample_files() -> [&'static str; 9] {
     [
         "Phase21Cavern.inf_lvl",
         "Phase21Cavern.inf_lvl.toml",
@@ -93,7 +93,29 @@ fn sample_files() -> [&'static str; 8] {
         "Cavern.inf_voxel.toml",
         "Borer.inf_act",
         "Borer.inf_act.toml",
+        "README.md",
     ]
+}
+
+/// …and the list really is **every** committed file. This function exists so a
+/// sample that grows a file cannot be cooked without it, which only works if
+/// something checks the list against the directory — it was eight of nine
+/// (`README.md` was missing) from the day it was written.
+#[test]
+fn the_fixture_copies_every_committed_sample_file() {
+    let listed: std::collections::BTreeSet<String> =
+        sample_files().iter().map(|s| s.to_string()).collect();
+    let on_disk: std::collections::BTreeSet<String> = std::fs::read_dir(phase21_cavern_dir())
+        .expect("the sample directory exists")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        listed, on_disk,
+        "`sample_files()` and samples/phase21-cavern disagree — a cooked fixture \
+         would be missing content the committed sample has"
+    );
 }
 
 /// Scaffold a project holding the sample; returns its `Content` dir.
@@ -609,55 +631,66 @@ fn the_render_side_reflects_the_runtime_carve() {
     // `sync_voxel_store` is the CPU half of `PlayerRenderHost::sync_voxels` — the
     // same function the windowed player calls every frame, lifted out of the impl
     // precisely so this claim is checkable where there is no GPU.
+    //
+    // **In the PRODUCT's ordering**, which is the whole point of this arm. The
+    // render host binds its volumes *inside* the sync, and the sync runs after the
+    // frame has stepped — so the very first `sync_voxel_store` a session ever runs
+    // already has a carve behind it. An earlier `overlay_sim` recorded that first
+    // sight as a *baseline* and copied nothing, so a one-shot dig on the first Tick
+    // was invisible for the rest of the session. Syncing before the loop (the
+    // ordering this arm used to take) is the one ordering the product never runs,
+    // and it is the ordering that hides it.
     let assets = inf_player::voxel::VoxelRegistry::from_dir(&content);
     let camera = glam::DVec3::new(48.0, 40.0, 48.0);
+
+    // The control: a store synced against a sim that has never stepped, so it
+    // holds exactly the authored surface.
+    let mut control = inf_voxel::VoxelVolumes::new();
+    let untouched = pack_sim(&pack);
+    inf_player::render::sync_voxel_store(&mut control, &assets, &untouched, camera);
+    let authored = control.triangle_count();
+    assert!(authored > 0, "the render store drew nothing to begin with");
+
+    // ONE step — one carve — and only then the first sync of the session.
+    sim.step_once(RuntimeInput::default());
     let mut store = inf_voxel::VoxelVolumes::new();
     inf_player::render::sync_voxel_store(&mut store, &assets, &sim, camera);
     assert!(
         store.chunk_count() > 0,
         "the render store bound no chunks at all — the rest of this arm is vacuous"
     );
-    let drawn_before = store.triangle_count();
-    assert!(
-        drawn_before > 0,
-        "the render store drew nothing to begin with"
-    );
-
-    for _ in 0..STEPS {
-        sim.step_once(RuntimeInput::default());
-    }
-    // The two render-side passes the windowed player runs every frame.
-    sim.sync_render_terrain(camera);
-    inf_player::render::sync_voxel_store(&mut store, &assets, &sim, camera);
-
-    // The voxel half: the store mirrored the carved chunks and re-meshed them.
     assert!(
         store.overlaid_len(PHASE21_CAVERN_GUID.as_u128()) > 0,
-        "the render store never looked at the sim's volumes"
+        "the FIRST sync of the session copied nothing, so a one-shot dig on the          first Tick would never be drawn"
     );
+    let after_one = store.triangle_count();
+    assert_ne!(
+        after_one, authored,
+        "after one tick of carving the render store still draws the authored          surface — the first carve was baselined away"
+    );
+
+    // …and the rest of the run keeps reaching it.
+    for _ in 1..STEPS {
+        sim.step_once(RuntimeInput::default());
+    }
+    sim.sync_render_terrain(camera);
+    inf_player::render::sync_voxel_store(&mut store, &assets, &sim, camera);
     assert_ne!(
         store.triangle_count(),
-        drawn_before,
-        "the render store draws the same surface before and after {STEPS} ticks of          boring — it is still showing the rock the player removed"
+        after_one,
+        "the render store stopped following the borer after its first tick"
     );
 
-    // …and a store fed a sim that never bored is the control: same asset, same
-    // camera, no carve.
-    let mut untouched = pack_sim(&pack);
-    untouched.step_once(RuntimeInput::default());
-    let mut control = inf_voxel::VoxelVolumes::new();
-    inf_player::render::sync_voxel_store(&mut control, &assets, &untouched, camera);
-    assert_eq!(
-        control.triangle_count(),
-        drawn_before,
-        "the control store moved on its own, so the comparison above is not about          the carve"
-    );
-
-    // The terrain half: the runtime hole reached the render streamer.
+    // The terrain half: the runtime hole reached the render streamer, and its pin
+    // set is bounded by the cut rather than growing for the life of the session.
+    let pinned = sim.terrain_streaming().overlaid_len(PHASE21_TERRAIN_GUID);
     assert!(
-        sim.terrain_streaming().overlaid_len(PHASE21_TERRAIN_GUID) > 0,
-        "no terrain tile was pinned into the render streamer, so an asset-backed \
-         terrain keeps drawing solid ground over the mouth the carve opened"
+        pinned > 0,
+        "no terrain tile was pinned into the render streamer, so an asset-backed          terrain keeps drawing solid ground over the mouth the carve opened"
+    );
+    assert!(
+        pinned <= inf_terrain::StreamBudget::default().max_resident_tiles,
+        "the pin set ({pinned}) is not bounded by the residency budget — past it          `pin_ceiling` clamps the camera cut to 1 and the terrain silently stops          streaming"
     );
 }
 
@@ -769,8 +802,8 @@ fn cooked_equals_uncooked_on_the_cavern() {
 /// **THE HOUSE GATE, on voxel ground for the first time.**
 ///
 /// The editor's preview and the shipped build bore the same drift, remove the same
-/// cubic metres, and stand on the same underground floor — bit for bit, over 160
-/// steps. Until P21.4 the PIE payload carried no `.inf_voxel` and no
+/// cubic metres, and stand on the same underground floor — bit for bit, over
+/// every step of the run. Until P21.4 the PIE payload carried no `.inf_voxel` and no
 /// `.inf_terrain`, so both sides ran an empty voxel map over a blanked heightfield
 /// and agreed about nothing.
 #[test]

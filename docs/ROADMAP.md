@@ -6214,6 +6214,13 @@ tech uses. We are not voxelizing the planet.
 > manifest's "the SAME mesher the renderer draws with" true rather than
 > aspirational.
 >
+> The cost of doing it correctly is worth a number: `source_key` is a max over the
+> 3×3×3 neighbourhood, so carving **one** chunk moves the key of that chunk and its
+> 26 neighbours, and each of the 27 is re-meshed and re-described. That is the price
+> of a mesh being a function of its neighbourhood — the alternative is the stale
+> seam — and it is bounded and local: 27 against a cave system of hundreds, and
+> zero on every step that digs nothing.
+>
 > **There is no navigation system in this engine** — not a nav mesh, not a nav
 > volume, not a path query — so the plan bullet's "nav updates on carve" has
 > nothing to update. Said here rather than quietly dropped.
@@ -6260,14 +6267,66 @@ tech uses. We are not voxelizing the planet.
 > saying why, because the phase is full of the opposite rule: camera residency must
 > never reach the simulation or the lighting, and nothing here goes that way — the
 > simulation is authoritative and the renderer projects from it, exactly as it does
-> for every `Transform` in the world. The voxel half is **baseline-on-first-sight**
-> so it does not defeat the camera budget: a sim volume is fully resident by
-> construction, so a key seen for the first time records its stamp and copies
-> nothing (both sides came from the same asset and already agree), and only a later
-> divergence copies. The copy goes in through `insert_chunk`, which marks the chunk
-> dirty — and `sync_residency` refuses to evict a dirty chunk, so the pin is free
-> and by an existing rule. The terrain half is the editor's `overlay_document_edits`
-> with the sim world in place of the document.
+> for every `Transform` in the world.
+>
+> **The first version of the fold was wrong three times, and the third audit caught
+> all three.** Each is worth the space, because each is a shape rather than a typo.
+>
+> *It baselined away the first carve.* The rule was "a key seen for the first time
+> records the sim's stamp and copies nothing — both sides came from the same asset
+> and already agree". They do not, because *first sight happens after the first
+> step*: both hosts bind their store after a frame has run (the editor folds after
+> `session.tick`, the player binds inside a render sync that runs after the first
+> frame), so the stamps being recorded were stamps a carve had **already moved**. A
+> **one-shot dig on the first Tick** — the pattern the node kit itself prescribes,
+> since `BeginPlay` cannot see a volume — was therefore invisible for the rest of
+> the session: the sim had the hole, the colliders had the hole, gameplay walked
+> through it, and the screen drew solid rock. A *continuous* borer masked it (tick 2
+> repaired tick 1), which is exactly why the flagship sample did not catch it. The
+> rule is now **dirty-driven**: `sim_volume` clears the dirty set on load and the
+> simulation never writes back, so a dirty sim chunk means precisely "gameplay
+> carved this". An undug level still copies nothing — the property the baseline
+> existed for — without inventing a moment before which carves do not count.
+>
+> *It dirtied what it copied.* The copy went in through `insert_chunk`, leaning on
+> the dirty flag as a free eviction pin. In the editor **this store is the one a
+> save stages from** (`SceneDoc::save` → `stage_voxel_edits` → `write_voxel_edits`),
+> so Simulate → dig → Stop → Ctrl+S would have written a player's runtime craters
+> into the author's `.inf_voxel` — flatly contradicting the rule three paragraphs
+> down, that nothing a game digs is persisted — and `has_unsaved_edits` would have
+> stayed true after a clean save, telling the author they had unsaved caves they
+> had never carved and never releasing the crash-recovery file. It now copies
+> through `insert_resident_chunk`, which stamps and does **not** dirty.
+>
+> *And the pin never released.* Holding carved chunks resident for ever grew the
+> resident set without bound: a camera a thousand kilometres away still kept every
+> carved chunk meshed and uploaded for the life of the session. There is now **no
+> pin at all.** The overlay runs *after* the camera pass and simply runs again: a
+> chunk residency evicted and later paged back in arrives as the asset's pre-carve
+> bytes with a fresh stamp, which is exactly what the overlay re-copies on. So
+> residency stays entirely the camera's business and the carve is re-applied on top
+> of whatever it decided, as often as it takes. `overlaid` records **both** stamps —
+> the sim's and the one this slot held afterwards — because recording only the sim's
+> would leave the overlay convinced it had already done its work while the store
+> drew rock.
+>
+> It also checks the **whole lattice and the asset id**, not just `voxel_size_m`: an
+> author can re-point `VoxelVolume.asset` in the Details panel mid-Simulate, and
+> without the check asset A's chunks were copied into a slot bound to asset B (and,
+> before the dirty fix, written into B's file).
+>
+> The terrain half is the editor's `overlay_document_edits` with the sim world in
+> place of the document, and it needed the same lesson. The editor pins every dirty
+> tile and releases them all on save; a **player never saves**, and a runtime hole
+> mask is never cleared, so the pin set only grew. Past
+> `StreamBudget::max_resident_tiles` that is not a memory cost but a **stall**:
+> `pin_ceiling` clamps the camera's cut to `.max(1)` once pins fill the budget, and
+> the terrain silently stops streaming around the player. The player's pin set now
+> follows its **cut** — pin a dirty tile inside it, release one that leaves — so it
+> is bounded by the cut, which is bounded by the budget. `inf_terrain::stream`'s
+> claim that "pins only ever exist in the editor; the shipped player never pins" was
+> falsified by this batch and is corrected in place, since it is the sentence that
+> made the unbounded case unthinkable.
 >
 > **PIE ships the SAVED cave, and the reason is stronger than symmetry.** Editor
 > *Simulate* does carry unsaved carves (`overlay_unsaved_carves` folds the editor
@@ -6390,6 +6449,23 @@ tech uses. We are not voxelizing the planet.
 >   positional: new fields go at the tail, the version is checked at decode, and the
 >   round-trip test carries a **non-empty** value of the new field — an empty `Vec`
 >   is two zero bytes and will decode as whatever follows it.
+>
+> And three more from the round after that, all about the same fold:
+>
+> * **"First sight" is not "the beginning" in any system that binds lazily.** A
+>   baseline recorded when a cache first sees a key is a baseline recorded after
+>   however many events already happened — and it silently swallows every one of
+>   them. Key on a fact that *means* what you need ("this was carved") rather than
+>   on the observer's own history.
+> * **In the editor, the render store IS the save's staging source.** Anything
+>   written into it for display is a candidate for the author's asset file on the
+>   next Ctrl+S. `insert_resident_chunk` stamps; `insert_chunk` stamps *and*
+>   schedules a write-back, and the difference is a player's craters in an author's
+>   cave.
+> * **A pin with no release is a leak with a deadline.** The voxel one grew the
+>   resident set for the life of a session; the terrain one grew until it hit
+>   `pin_ceiling` and silently stopped the world streaming. Re-applying from the
+>   authoritative side is cheaper and bounded — and needs no policy at all.
 
 > **PHASE 21 SHIPPED LEDGER.**
 >
@@ -6430,8 +6506,12 @@ tech uses. We are not voxelizing the planet.
 > different distant silhouette.
 >
 > *New, carried out of P21.4.* **The render fold is stamp-gated, not free**: a
-> carve copies its own chunks into the render store every frame it changes them,
-> and a volume nobody digs costs one version compare per resident chunk per frame.
+> carve copies its own chunks into the render store the frame it changes them and
+> whenever residency has paged the asset back over them, and a volume nobody digs
+> costs one lookup per **dirty** sim chunk per frame — which is zero until something
+> digs. **A carved chunk is re-copied after every eviction round trip**, so a camera
+> oscillating across a carved region pays the copy repeatedly; that is the price of
+> not pinning, and it is bounded by the camera's own residency churn.
 > **The editor's Simulate fold runs from Ring 2** (`commands/sim.rs` overlays the
 > session's map into the viewport store after each tick) rather than from the
 > viewport pump, because the pump has no reference to a `SimSession`; it is

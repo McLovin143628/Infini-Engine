@@ -515,12 +515,17 @@ impl RuntimeSim {
     /// call it at the same place in their frame so a scripted camera path yields
     /// the same resident-set trace either way.
     pub fn sync_render_terrain(&mut self, camera_world: DVec3) {
-        // The runtime hole mask first (P21.4): a carve that opened a mouth in the
+        self.terrain.sync_render(camera_world);
+        // Then the runtime hole mask (P21.4): a carve that opened a mouth in the
         // sim's heightfield has to reach the render streamer, or an asset-backed
         // terrain keeps drawing solid ground over it. `sim → render` only — the
-        // camera below never reaches back.
+        // camera pass above never reaches back.
+        //
+        // **After** `sync_render`, so the pin set follows *this* frame's cut and
+        // stays bounded by it; pinning ahead of the cut let the set grow until it
+        // hit the residency ceiling and silently stopped the terrain streaming.
+        // Same ordering, same reason, as the voxel overlay's fourth act.
         self.terrain.overlay_sim_edits(&self.world);
-        self.terrain.sync_render(camera_world);
     }
 
     /// Render interpolation factor in `[0, 1)` (how far into the next step the

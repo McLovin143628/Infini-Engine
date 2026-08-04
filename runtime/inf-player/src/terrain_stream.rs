@@ -417,27 +417,44 @@ impl TerrainStreaming {
     /// windowed and the headless loops, so a scripted camera path produces the
     /// same resident-set trace either way.
     /// **Mirror the SIMULATION's runtime terrain edits into the render streamer**
-    /// (P21.4). Returns how many tiles were (re)pinned.
+    /// (P21.4). Returns how many tiles were pinned or released.
     ///
     /// A runtime carve opens a **hole** in the sim world's `Terrain.data`
-    /// (`inf_voxel::apply_surface_cut`, from `runtime_voxel_op`), so gameplay
-    /// stops standing on ground that is no longer there. On an **asset-backed**
-    /// terrain — the only kind that can persist a hole mask at all, and therefore
-    /// the configuration every carved level ships in — the render side streams its
-    /// own tiles out of the `.inf_terrain` and never sees that edit: the clipmap
-    /// keeps drawing solid ground over a mouth the player just blew open, and can
-    /// walk through it.
+    /// (`inf_voxel::apply_surface_cut`, from `runtime_voxel_op`), so gameplay stops
+    /// standing on ground that is no longer there. On an **asset-backed** terrain —
+    /// the only kind that can persist a hole mask at all, and therefore the
+    /// configuration every carved level ships in — the render side streams its own
+    /// tiles out of the `.inf_terrain` and never sees that edit: the clipmap keeps
+    /// drawing solid ground over a mouth the player just blew open, and can walk
+    /// through it.
     ///
     /// This is the player's twin of the editor's
     /// `inf_editor_core::terrain_stream::TerrainStreaming::overlay_document_edits`,
-    /// with the sim world in place of the document, and it works the same way: a
-    /// **dirty** level-0 tile is pinned into the streamer, which then neither
-    /// evicts it nor re-reads it from the asset. Dirty is a function of what was
-    /// written, never of what any camera paged, so the direction of dependency is
-    /// still `sim → render` alone.
+    /// with the sim world in place of the document. A **dirty** level-0 tile is
+    /// pinned into the streamer, which then neither evicts it nor re-reads it from
+    /// the asset. Dirty is a function of what was written, never of what any camera
+    /// paged, so the direction of dependency is `sim → render` alone.
     ///
-    /// Cheap every frame: a tile is copied only when its sim stamp moved, and
-    /// stamps move only when something wrote to the tile.
+    /// # The pin set is bounded by the CUT, and that is not a detail
+    ///
+    /// The editor pins every dirty tile and releases them all on save. A *player*
+    /// never saves, and a runtime hole mask is never cleared — so pinning every
+    /// dirty tile meant a pin set that only ever grew. Past
+    /// `StreamBudget::max_resident_tiles` (1024) that is not a memory cost, it is
+    /// a **stall**: `TerrainStreamer::pin_ceiling` clamps the camera's cut to
+    /// `.max(1)` once the pins fill the budget, so the terrain silently stops
+    /// streaming around the player and nothing says why.
+    ///
+    /// So the pin follows the **cut** — the tiles the streamer is actually drawing.
+    /// A dirty tile inside the cut is pinned; a pinned tile that leaves the cut is
+    /// released (and dropped, so the next visit pages it fresh and re-pins it from
+    /// the sim, which still holds the hole). The pin set is therefore bounded by
+    /// the cut, the cut is bounded by the budget, and a carve fifty kilometres
+    /// behind the player costs nothing.
+    ///
+    /// Called **after** `sync_render`, so "the cut" is this frame's rather than
+    /// last frame's — the same ordering, and the same reason, as the voxel
+    /// overlay's fourth act in `crate::render::sync_voxel_store`.
     pub fn overlay_sim_edits(&mut self, world: &EcsWorld) -> usize {
         if self.entries.is_empty() {
             return 0;
@@ -450,8 +467,26 @@ impl TerrainStreaming {
             let Some(terrain) = world.world().get::<Terrain>(e) else {
                 continue;
             };
+
+            // Release pins the cut has moved off. `unpin_and_evict` rather than a
+            // bare unpin: leaving the tile resident-but-unpinned would let the
+            // camera page the asset's un-holed bytes over it later with nothing
+            // watching, and the tile is outside the cut so dropping it draws
+            // nothing away.
+            let stale: Vec<inf_terrain::TileKey> = entry
+                .overlaid
+                .keys()
+                .copied()
+                .filter(|k| !entry.streamer.cut().contains(k))
+                .collect();
+            for key in stale {
+                entry.streamer.unpin_and_evict(key);
+                entry.overlaid.remove(&key);
+                mirrored += 1;
+            }
+
             for key in terrain.data.dirty_tiles() {
-                if !key.is_lod0() {
+                if !key.is_lod0() || !entry.streamer.cut().contains(&key) {
                     continue;
                 }
                 // A dirty key with no tile is a deletion; the streamer must drop
@@ -490,6 +525,12 @@ impl TerrainStreaming {
             .unwrap_or(0)
     }
 
+    /// **RENDER (camera-driven).** Advance every streamed terrain's cut toward the
+    /// camera's target and apply the (bounded, deterministic) load batch.
+    ///
+    /// Call at exactly one point per frame — the render-sync point — in both the
+    /// windowed and the headless loops, so a scripted camera path produces the
+    /// same resident-set trace either way.
     pub fn sync_render(&mut self, camera_world: DVec3) {
         if self.entries.is_empty() {
             return;

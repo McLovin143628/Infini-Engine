@@ -1890,6 +1890,11 @@ pub fn sync_voxel_store(
         })
         .collect();
     wants.sort_by_key(|(g, _, _)| *g);
+    // Kept for the overlay pass below: it needs the entity→asset binding to refuse
+    // a cross-asset copy (an author can re-point `VoxelVolume.asset` in the
+    // Details panel mid-session, and asset A's chunks must never land in a slot
+    // bound to asset B).
+    let bindings = wants.clone();
     // Release volumes whose entity is gone (or whose component lost its
     // reference) BEFORE loading, so a level switch never holds both.
     let live: std::collections::BTreeSet<u128> =
@@ -1913,21 +1918,6 @@ pub fn sync_voxel_store(
     // player is looking can never change a gameplay answer. Same determinism
     // seam as `sync_render_terrain`, and it is the absence of a path rather
     // than a convention.
-    // **THE SIM'S CARVES, BEFORE THE CAMERA PASS** (P21.4). A Blueprint that
-    // dug this frame changed the *simulation's* volume map; without this the
-    // shipped player gives the new floor a collider, lets gameplay stand on
-    // it, and keeps drawing the rock that is no longer there. `sim → render`
-    // is the legal direction (the simulation is authoritative and the renderer
-    // projects from it); the camera below never reaches back.
-    //
-    // Before `sync_camera`, so the copied chunks are dirty when residency runs
-    // — `sync_residency` refuses to evict a dirty chunk, which is the pin that
-    // stops a carved chunk being paged out and re-read as solid rock from the
-    // `.inf_voxel`. `sync_camera`'s own re-mesh then rebuilds exactly what
-    // moved.
-    for (guid, sim_data) in sim.voxel_volumes() {
-        voxels.overlay_sim(guid.as_u128(), sim_data);
-    }
     let report = voxels.sync_camera(
         camera_world,
         &inf_voxel::VoxelWantsParams::default(),
@@ -1940,5 +1930,28 @@ pub fn sync_voxel_store(
             key.y,
             key.z
         );
+    }
+    // **ACT FOUR — THE SIM'S CARVES, AFTER THE CAMERA PASS** (P21.4).
+    //
+    // A Blueprint that dug changed the *simulation's* volume map; without this the
+    // shipped player gives the new floor a collider, lets gameplay stand on it,
+    // and keeps drawing the rock that is no longer there. `sim -> render` is the
+    // legal direction (the simulation is authoritative and the renderer projects
+    // from it); the camera above never reaches back.
+    //
+    // **After**, so residency stays the camera's business alone and the carve is
+    // re-applied on top of whatever it decided. A chunk the camera evicted and
+    // later paged back in arrives as the asset's pre-carve bytes with a fresh
+    // stamp, which is exactly what `overlay_sim` re-copies on — so nothing has to
+    // be pinned and a session's resident set cannot grow without bound. `resync`
+    // follows because `sync_camera`'s own re-mesh has already run by then.
+    let volumes = sim.voxel_volumes();
+    for (guid, asset, _) in &bindings {
+        let Some(data) = volumes.get(guid) else {
+            continue;
+        };
+        if voxels.overlay_sim(guid.as_u128(), asset.as_u128(), data) > 0 {
+            voxels.resync(guid.as_u128());
+        }
     }
 }

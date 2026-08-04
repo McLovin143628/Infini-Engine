@@ -414,8 +414,9 @@ impl EditorVoxelVolumes {
     /// [`inf_voxel::VoxelVolumes::overlay_sim`], which carries the whole rule and
     /// the reason `sim → render` is the legal direction (P21.4). Returns how many
     /// chunks were copied.
-    pub fn overlay_sim(&mut self, entity: Uuid, sim: &inf_voxel::VoxelData) -> usize {
-        self.volumes.overlay_sim(entity.as_u128(), sim)
+    pub fn overlay_sim(&mut self, entity: Uuid, asset: Uuid, sim: &inf_voxel::VoxelData) -> usize {
+        self.volumes
+            .overlay_sim(entity.as_u128(), asset.as_u128(), sim)
     }
 
     /// Re-mesh whatever `entity`'s volume has moved since its meshes were last

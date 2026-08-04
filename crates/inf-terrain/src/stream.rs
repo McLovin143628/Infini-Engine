@@ -676,8 +676,16 @@ impl TerrainStreamer {
     ///   one place the bound is exceeded, and it is exceeded by unsaved authoring
     ///   the editor must not drop plus the coverage layer P18.4 pins on purpose. A
     ///   budget below the floor's own size is therefore unsatisfiable by
-    ///   construction. Pins only ever exist in the editor; the shipped player never
-    ///   pins, but every streamer has a floor.
+    ///   construction.
+    ///
+    /// **The shipped player pins too, since P21.4** — a runtime carve's hole mask
+    /// reaches the clipmap through `pin_tile`, exactly as an author's brush does.
+    /// The earlier claim that "pins only ever exist in the editor" is why the
+    /// unbounded case was never considered: the editor releases every pin on save,
+    /// and a player never saves. The player therefore bounds its pin set by its own
+    /// **cut** (`inf_player::terrain_stream::TerrainStreaming::overlay_sim_edits`),
+    /// which is what keeps the clamp below from being reachable by simply playing
+    /// for long enough. Every streamer has a floor either way.
     fn pin_ceiling(&self, cut: &BTreeSet<TileKey>) -> usize {
         let max = self.budget.max_resident_tiles;
         if max == 0 || (self.pinned.is_empty() && self.floor.is_empty()) {
