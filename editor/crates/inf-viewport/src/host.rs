@@ -3641,6 +3641,10 @@ impl EngineHost {
         self.render_assets.clear();
         self.terrain_slots.clear();
         self.terrain_guid = None;
+        // P21.2: the "already warned about unsaveable holes" ledger is keyed on
+        // the PREVIOUS document's entity GUIDs, so a level opened after one that
+        // carried them would inherit the suppression and never say a word.
+        self.voxel_hole_warned.clear();
         self.synced_version = None; // force a re-projection against the new doc
     }
 
@@ -4616,9 +4620,26 @@ impl EngineHost {
     /// wander onto an inline terrain and seal its mouths at the next save — the
     /// exact failure the ruling exists to prevent, arrived at sideways.
     fn voxel_authorize(&mut self, doc: &mut SceneDoc, shape: &VoxelShape) -> Option<Vec<Uuid>> {
-        // Page first, judge second: `cut_crosses_surface` only sees authored
-        // tiles, so on a streamed terrain an unpaged footprint would answer "this
-        // cut reaches no surface" and wave through a breakthrough nobody checked.
+        self.page_cut_footprint(doc, shape);
+        match doc.carve_verdict(shape) {
+            inf_editor_core::scene::undo::CarveVerdict::RefusedInline { .. } => {
+                self.reject_tool(inf_editor_core::scene::undo::INLINE_TERRAIN_CARVE_REFUSAL);
+                None
+            }
+            v => Some(v.terrains().to_vec()),
+        }
+    }
+
+    /// Page every streamed terrain's tiles under `shape` into the **document's**
+    /// working set.
+    ///
+    /// Run before the verdict, not after: `cut_crosses_surface` only sees
+    /// authored tiles, so on a streamed terrain an unpaged footprint would answer
+    /// "this cut reaches no surface" and wave through a breakthrough nobody
+    /// checked — and then the carve would open a mouth on whichever tiles
+    /// happened to be in memory. The sculpt brush's `page_brush_footprint` rule,
+    /// with the cut's XZ silhouette in place of the brush radius.
+    fn page_cut_footprint(&mut self, doc: &mut SceneDoc, shape: &VoxelShape) {
         let (lo, hi) = shape.aabb_m(0.0);
         let center = DVec2::new((lo.x + hi.x) * 0.5, (lo.z + hi.z) * 0.5);
         let radius = ((hi.x - lo.x).max(hi.z - lo.z) * 0.5).max(0.0);
@@ -4635,13 +4656,6 @@ impl EngineHost {
             let local = DVec2::new(center.x - translation.x, center.y - translation.z);
             self.terrain_streams
                 .page_brush_footprint(guid, doc, local, radius);
-        }
-        match doc.carve_verdict(shape) {
-            inf_editor_core::scene::undo::CarveVerdict::RefusedInline { .. } => {
-                self.reject_tool(inf_editor_core::scene::undo::INLINE_TERRAIN_CARVE_REFUSAL);
-                None
-            }
-            v => Some(v.terrains().to_vec()),
         }
     }
 
@@ -4683,7 +4697,7 @@ impl EngineHost {
                 for g in terrains {
                     self.after_terrain_edit(doc, g);
                 }
-                self.report_carve(tally);
+                self.report_carve(volume, tally);
                 self.refresh_voxel_preview(p);
                 // The dabs mutate live; the undo entry lands at mouse-up.
                 !tally.is_noop()
@@ -4748,7 +4762,9 @@ impl EngineHost {
         for g in self.voxel_stroke_terrains.clone() {
             self.after_terrain_edit(doc, g);
         }
-        self.report_carve(tally);
+        if let Some(volume) = self.voxel_stroke.as_ref().map(|s| s.volume()) {
+            self.report_carve(volume, tally);
+        }
         self.refresh_voxel_preview(cur);
     }
 
@@ -4772,6 +4788,12 @@ impl EngineHost {
     /// Capsules and not spheres: a chain of spheres at waypoint spacing leaves
     /// gaps between the beads, and the swept-sphere primitive exists in
     /// `inf_voxel::VoxelShape` precisely for this.
+    ///
+    /// **Judged whole, then cut whole** — which is `SceneDoc::edit_carve_path`'s
+    /// job, not this file's. All this does is page every segment's footprint,
+    /// hand the chain over, and mirror the result into the render set. The
+    /// atomicity rule lives in Ring 1 so every CI leg tests it; this module is
+    /// `#[cfg(any(windows, macos))]`.
     fn commit_tunnel(&mut self, doc: &mut SceneDoc, volume: Uuid) -> bool {
         let path = std::mem::take(&mut self.voxel_path);
         self.voxel_preview.clear();
@@ -4779,35 +4801,36 @@ impl EngineHost {
             return false;
         }
         let radius_m = self.voxel_tool.radius_m.max(0.0);
-        let mut stroke =
-            inf_editor_core::scene::undo::CarveStroke::begin(volume, self.voxel_volumes.clone());
-        let mut touched: Vec<Uuid> = Vec::new();
-        let mut tally = inf_editor_core::scene::undo::CarveTally::default();
-        for seg in path.windows(2) {
-            let op = self.voxel_shape_op(VoxelShape::Capsule {
-                a: seg[0],
-                b: seg[1],
-                radius_m,
-            });
-            let Some(terrains) = self.voxel_authorize(doc, &op.shape) else {
-                // One refused segment refuses the tunnel: committing the rest
-                // would leave a tube that stops in the middle of a hillside, which
-                // is the partial success the ruling exists to prevent.
-                return false;
-            };
-            tally = stroke.dab(doc, &op, &terrains);
-            for g in terrains {
-                if !touched.contains(&g) {
-                    touched.push(g);
-                }
-            }
+        let ops: Vec<VoxelOp> = path
+            .windows(2)
+            .map(|seg| {
+                self.voxel_shape_op(VoxelShape::Capsule {
+                    a: seg[0],
+                    b: seg[1],
+                    radius_m,
+                })
+            })
+            .collect();
+        // Page every segment BEFORE the verdict runs: it reads authored tiles
+        // only, and an unpaged streamed footprint would answer "this reaches no
+        // surface" for a tunnel that plainly breaks out of the hillside.
+        for op in &ops {
+            self.page_cut_footprint(doc, &op.shape);
         }
-        let recorded = doc.edit_commit_carve(stroke);
-        for g in touched {
-            self.after_terrain_edit(doc, g);
+        let Some(tally) = doc.edit_carve_path(volume, &self.voxel_volumes, &ops) else {
+            self.reject_tool(inf_editor_core::scene::undo::INLINE_TERRAIN_CARVE_REFUSAL);
+            return false;
+        };
+        // Every projected terrain, not the segments' own lists: a tunnel can run
+        // across several, `edit_carve_path` keeps its per-segment plan private,
+        // and `after_terrain_edit` is a no-op on a terrain that is not streamed
+        // and a cheap re-projection on one that is (a level has a handful).
+        for i in 0..self.terrain_slots.len() {
+            let guid = self.terrain_slots[i].guid;
+            self.after_terrain_edit(doc, guid);
         }
-        self.report_carve(tally);
-        recorded
+        self.report_carve(volume, tally);
+        !tally.is_noop()
     }
 
     /// Idle hover in voxel mode: show where the next cut lands, and — for the
@@ -4867,23 +4890,22 @@ impl EngineHost {
     /// Quotes cubic metres as well as sample counts because a volume is what an
     /// author is actually digging, and it is the number P21.3's soil-displacement
     /// conservation gate will have to balance.
-    fn report_carve(&mut self, tally: inf_editor_core::scene::undo::CarveTally) {
+    fn report_carve(&mut self, volume: Uuid, tally: inf_editor_core::scene::undo::CarveTally) {
         if tally.is_noop() {
             return;
         }
         // The ASSET's scale, never the component's — the same rule `project_voxel`
         // obeys, and reading the component here would quote a volume computed
-        // against one cell size for geometry cut at another.
+        // against one cell size for geometry cut at another. The volume is passed
+        // in rather than read off the in-flight stroke, because the tunnel reports
+        // *after* committing (and therefore after the stroke is gone), which is
+        // exactly when a stroke-derived scale would silently fall back to a
+        // default that is right for most assets and wrong for the rest.
         let size = self
-            .voxel_stroke
-            .as_ref()
-            .map(|s| s.volume())
-            .and_then(|g| {
-                self.voxel_volumes
-                    .lock()
-                    .ok()
-                    .and_then(|v| v.slot(g).map(|s| s.data.voxel_size_m()))
-            })
+            .voxel_volumes
+            .lock()
+            .ok()
+            .and_then(|v| v.slot(volume).map(|s| s.data.voxel_size_m()))
             .unwrap_or(inf_ecs::components::VoxelVolume::default().voxel_size_m);
         let m3 = tally.net_removed_m3(size);
         let verb = if m3 >= 0.0 { "removed" } else { "added" };

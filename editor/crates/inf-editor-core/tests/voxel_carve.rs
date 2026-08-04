@@ -447,6 +447,69 @@ fn shell_count(volumes: &SharedVoxelVolumes, volume: Uuid, shape: &VoxelShape) -
     n
 }
 
+/// **The spline tunnel's atomicity gate.** A chain of capsules is ONE
+/// transaction: one undo entry for the whole tube, and — if any segment is
+/// refused — nothing written at all, not even the segments before it.
+///
+/// The partial case is the load-bearing one. A chain that judged as it went would
+/// leave the first half of a tunnel in the volume with **no undo entry describing
+/// it**: a partial success that is not even reversible, which is strictly worse
+/// than the sealed-cave one `RefusedInline` exists to prevent. The fixture makes
+/// the *last* segment the offending one, so a "judge as you go" implementation
+/// gets two clean segments in before it notices.
+#[test]
+fn a_carve_chain_is_all_or_nothing_and_one_undo_step() {
+    let leg = |x: f64, y: f64| VoxelShape::Capsule {
+        a: DVec3::new(x, y, 8.0),
+        b: DVec3::new(x + 3.0, y, 8.0),
+        radius_m: 1.5,
+    };
+    // Three legs: two buried, then one that surfaces.
+    let ops: Vec<VoxelOp> = [leg(2.0, 1.5), leg(5.0, 1.5), leg(8.0, 4.0)]
+        .into_iter()
+        .map(VoxelOp::carve)
+        .collect();
+
+    // ── over an INLINE terrain: refused whole ──
+    let (mut doc, volumes, terrain, volume, _d) = fixture(false);
+    let before_tile = tile_image(&doc, terrain);
+    let before_solid = solid_count(&volumes, volume);
+    let undos = doc.undo_len();
+    assert_eq!(doc.edit_carve_path(volume, &volumes, &ops), None);
+    assert_eq!(
+        solid_count(&volumes, volume),
+        before_solid,
+        "the two buried segments were cut before the third was judged — a partial \
+         tunnel with no undo entry"
+    );
+    assert_eq!(tile_image(&doc, terrain), before_tile);
+    assert_eq!(doc.undo_len(), undos);
+
+    // ── over an ASSET-BACKED terrain: cut whole, in one step ──
+    let (mut doc, volumes, terrain, volume, _d) = fixture(true);
+    let before_tile = tile_image(&doc, terrain);
+    let before_solid = solid_count(&volumes, volume);
+    let undos = doc.undo_len();
+    let tally = doc
+        .edit_carve_path(volume, &volumes, &ops)
+        .expect("allowed over an asset-backed terrain");
+    assert!(tally.carved > 0 && tally.holes > 0, "{tally:?}");
+    assert_eq!(doc.undo_len(), undos + 1, "three legs, ONE undo entry");
+    assert!(solid_count(&volumes, volume) < before_solid);
+
+    assert!(doc.undo());
+    assert_eq!(
+        tile_image(&doc, terrain),
+        before_tile,
+        "one Ctrl+Z must take the whole tunnel's mouths back"
+    );
+    assert_eq!(
+        solid_count(&volumes, volume),
+        before_solid,
+        "one Ctrl+Z must take the whole tunnel's rock back"
+    );
+}
+
 /// A **fill** over the same region closes exactly the mouths the carve opened,
 /// leaving the tile byte-identical — the deliverable's symmetric-healing gate,
 /// asserted through the editor's own doors and not just through the Ring-0 rule.

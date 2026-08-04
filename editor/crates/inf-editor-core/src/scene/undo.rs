@@ -609,23 +609,55 @@ impl SceneDoc {
     }
 
     /// The one-shot carve: apply `op` and record it, holes included. Returns the
-    /// tally, or `None` when the verdict refused it or the volume is not loaded.
+    /// tally, or `None` when the verdict refused it.
     ///
-    /// The spline tunnel's per-segment door and the seam a scripted carve uses;
-    /// the brush goes through [`CarveStroke`] so its dabs merge.
+    /// The seam a scripted or single-click cut uses; a brush goes through
+    /// [`CarveStroke`] so its dabs merge.
     pub fn edit_carve(
         &mut self,
         volume: Uuid,
         volumes: &SharedVoxelVolumes,
         op: &VoxelOp,
     ) -> Option<CarveTally> {
-        let verdict = self.carve_verdict(&op.shape);
-        if !verdict.allowed() {
-            return None;
+        self.edit_carve_path(volume, volumes, std::slice::from_ref(op))
+    }
+
+    /// Cut a **chain** of ops as ONE transaction: judge every one first, then cut
+    /// every one. `None` — and nothing written at all — if any is refused.
+    ///
+    /// The spline tunnel's door, and the reason it is here rather than in the
+    /// viewport host is the atomicity: judging as it went would leave the *first
+    /// half* of a tunnel in the volume with no undo entry describing it, which is
+    /// a partial success that is not even reversible — strictly worse than the
+    /// one [`CarveVerdict::RefusedInline`] exists to prevent. Ring 1 also means
+    /// all three CI legs run it, while `inf_viewport::host` is
+    /// `#[cfg(any(windows, macos))]`.
+    ///
+    /// **The caller pages first.** The verdict reads authored tiles only, so on a
+    /// streamed terrain an unpaged footprint answers "this reaches no surface"
+    /// and waves a breakthrough through unchecked.
+    pub fn edit_carve_path(
+        &mut self,
+        volume: Uuid,
+        volumes: &SharedVoxelVolumes,
+        ops: &[VoxelOp],
+    ) -> Option<CarveTally> {
+        // Pass 1 — judge. Nothing is cut yet, so a refusal here really is a
+        // refusal of the whole op and not of its tail.
+        let mut plan: Vec<Vec<Uuid>> = Vec::with_capacity(ops.len());
+        for op in ops {
+            let verdict = self.carve_verdict(&op.shape);
+            if !verdict.allowed() {
+                return None;
+            }
+            plan.push(verdict.terrains().to_vec());
         }
-        let terrains = verdict.terrains().to_vec();
+        // Pass 2 — cut, into one stroke, so the chain is one undo entry.
         let mut stroke = CarveStroke::begin(volume, volumes.clone());
-        let tally = stroke.dab(self, op, &terrains);
+        let mut tally = CarveTally::default();
+        for (op, terrains) in ops.iter().zip(&plan) {
+            tally = stroke.dab(self, op, terrains);
+        }
         self.edit_commit_carve(stroke);
         Some(tally)
     }
