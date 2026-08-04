@@ -374,11 +374,13 @@ pub fn run_windowed(args: &Args) -> ExitCode {
 /// there is no reference from the world to the render store. Exactly the split
 /// `attach_terrain_streaming` above makes between `sync_sim` and `sync_render`.
 ///
-/// Called from **every** boot path that has a voxel source (windowed and
-/// headless), because a level whose gameplay depends on a cave floor must answer
-/// the same in CI as on screen. The PIE `ScenePayload` path carries no
-/// `.inf_voxel` source at all, so both sides of that gate see an empty map and
-/// still agree.
+/// Called from **every** boot path that has a voxel source: `--pack` and
+/// `--level` through [`load_voxel_assets`] / [`load_render_assets`], and `--pie`
+/// through [`sim_from_payload`] over the payload's own bytes (P21.4 —
+/// `ScenePayload` v5). Before that rung the PIE path had no source at all and both
+/// sides of the phase gate saw an empty map and agreed, which is why the gate is
+/// built on [`sim_from_payload`] and not on
+/// [`build_world_from_payload`] + [`sim_from_built`].
 pub fn attach_voxel_volumes(sim: &mut RuntimeSim, assets: &voxel::VoxelRegistry) {
     if assets.is_empty() {
         return;
@@ -592,6 +594,13 @@ use inf_runtime::pie::ScenePayload;
 /// prove is covered meanwhile by the streamed-terrain gate's cooked-vs-loose arm
 /// (`runtime/inf-player/tests/streamed_terrain.rs`), which runs the identical
 /// world off a pack and off loose files and compares the traces.
+///
+/// **Voxel volumes DO cross the wire (P21.4, `ScenePayload` v5)** — but the map
+/// they seed lives on the [`RuntimeSim`], not on the [`BuiltWorld`], so this
+/// function alone is not enough. Use [`sim_from_payload`], which is this plus the
+/// voxel attach; a caller that hand-rolls
+/// `build_world_from_payload` + [`sim_from_built`] gets a world with an **empty**
+/// voxel map and a `terrain.height_at` that answers `0.0` over every carved hole.
 pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, String> {
     use crate::level::WorldBuilder;
     use std::collections::HashMap;
@@ -655,6 +664,66 @@ pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, St
     builder.build(&payload.level_bytes)
 }
 
+/// The result of [`sim_from_payload`]: a ready-to-step sim plus the two facts a
+/// PIE handshake reports back to the editor.
+pub struct PayloadSim {
+    /// The sim, with every attachment a PIE session gets already made.
+    pub sim: RuntimeSim,
+    /// The level label (from the payload's own `.inf_lvl` bytes) for the
+    /// `Loaded` reply and the window title.
+    pub label: String,
+    /// How many blueprint actors were bound, for the `Loaded` reply.
+    pub actor_count: usize,
+}
+
+/// Build the **runnable sim** for a streamed [`ScenePayload`] — the one entry
+/// point every PIE boot path goes through (P21.4).
+///
+/// [`build_world_from_payload`] + [`sim_from_built`] builds the world; this adds
+/// the attachments that live on the sim rather than on the world:
+///
+/// * **cell streaming** (P16.5) — a partitioned payload bins its entities in
+///   memory with the same Ring-0 function the cook used;
+/// * **voxel volumes** (P21.4) — the payload's `.inf_voxel` bytes resolved through
+///   [`runtime_sim::resolve_voxel_volumes`], the *same* function the pack path
+///   calls, so a carved cave answers `terrain.height_at` identically in preview
+///   and in the shipped build.
+///
+/// It exists as one function because the failure it prevents is silent: a boot
+/// path that forgets an attach does not crash and does not warn — it runs a world
+/// whose caves are not there, and a PIE == shipping comparison between two such
+/// worlds passes. (The `--pie` subprocess used to build its sim with a bare
+/// `RuntimeSim::new` rather than [`sim_from_built`], so it also dropped the state
+/// machines, root-motion clips and audio clips the in-process reference kept;
+/// routing every path through here closes that drift too.)
+///
+/// **Streamed terrain is still not attached**, because `ScenePayload` still does
+/// not carry `.inf_terrain` bytes — see [`build_world_from_payload`]'s note on
+/// P16.3b2.
+pub fn sim_from_payload(payload: &ScenePayload) -> Result<PayloadSim, String> {
+    let mut built = build_world_from_payload(payload)?;
+    let label = built.label.clone();
+    let actor_count = built.actors.len();
+    // P16.5: a partitioned scene streams in PIE too — the payload carries the
+    // entities inline, so the in-memory binning path produces the same cells the
+    // cook would. Skipping it would run an empty world and quietly break
+    // PIE == shipping.
+    let partition = built.take_partition();
+    let mut sim = sim_from_built(built);
+    // Cells first: a freshly-activated cell can bring in a `VoxelVolume` entity,
+    // and the voxel resolution below walks the world as it stands.
+    attach_cell_streaming(&mut sim, &partition);
+    attach_voxel_volumes(
+        &mut sim,
+        &voxel::VoxelRegistry::from_payload(&payload.voxels),
+    );
+    Ok(PayloadSim {
+        sim,
+        label,
+        actor_count,
+    })
+}
+
 /// One fixed step's determinism fingerprint: xxh3-64 of the `Guid`-sorted sim
 /// snapshot — the per-frame `state_hash` a PIE `Frame` reports. Shared by the
 /// PIE loop and the in-process reference so a mismatch is a real divergence.
@@ -667,14 +736,10 @@ pub fn step_state_hash(sim: &mut RuntimeSim) -> u64 {
 /// each step's [`step_state_hash`]. A PIE subprocess fed the same payload must
 /// stream byte-identical per-step hashes.
 pub fn scene_trace(payload: &ScenePayload, frames: u64) -> Result<Vec<u64>, String> {
-    let mut built = build_world_from_payload(payload)?;
-    // P16.5: a partitioned scene streams here too — the payload carries the
-    // level's entities inline, so the in-memory binning path produces the very
-    // same cells the cook would have. Without this the reference trace would run
-    // an empty world and "PIE == shipping" would compare nothing to nothing.
-    let partition = built.take_partition();
-    let mut sim = sim_from_built(built);
-    attach_cell_streaming(&mut sim, &partition);
+    // Through the same one seam the `--pie` subprocess takes, so the reference and
+    // the thing it is a reference *for* cannot make different worlds out of one
+    // payload. (Both would previously have run an empty voxel map and agreed.)
+    let mut sim = sim_from_payload(payload)?.sim;
     let mut hashes = Vec::with_capacity(frames as usize);
     for _ in 0..frames {
         sim.step_once(RuntimeInput::default());

@@ -287,6 +287,7 @@ fn pie_payload_matches_shipping_for_character_demo() {
         |_guid| None, // no PCG graphs
         anim_bytes,
         |_guid| None, // no biome sets
+        |_guid| None, // no voxel volumes
         60,
         false,
     )

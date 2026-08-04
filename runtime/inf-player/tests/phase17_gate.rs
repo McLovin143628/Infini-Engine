@@ -277,6 +277,7 @@ fn pie_sim(doc: &SceneDoc) -> RuntimeSim {
         |_| None,
         |_| None,
         |_| None,
+        |_| None,
         60,
         false,
     )

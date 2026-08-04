@@ -296,6 +296,7 @@ fn pie_payload_matches_shipping_for_playground() {
         |_guid| None, // no PCG graphs
         |_guid| None, // no animation assets
         |_guid| None, // no biome sets
+        |_guid| None, // no voxel volumes
         60,
         false,
     )

@@ -110,6 +110,7 @@ fn pie_sim() -> RuntimeSim {
         |_| None,
         |_| None,
         |_| None,
+        |_| None,
         60,
         false,
     )

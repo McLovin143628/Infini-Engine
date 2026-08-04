@@ -354,12 +354,50 @@ impl Drop for PieSession {
 /// via `resolve`), falling back to the `CharacterController2D` coyote class for
 /// scenes authored before per-entity bindings. This is the point of PIE:
 /// unsaved edits are previewed exactly.
-pub fn build_scene_payload<F, G, H, B>(
+///
+/// # `resolve_voxel`, and the honest limit of "unsaved edits are previewed exactly"
+///
+/// P21.4 added the fifth resolver: every `VoxelVolume.asset` a level names is
+/// resolved to its `.inf_voxel` bytes and shipped, because before it the PIE
+/// player had **no voxel source at all** — a Blueprint over a carved hole read the
+/// seam's `0.0` in preview and the cave floor in the shipped build, and the phase
+/// gate compared two empty maps agreeing.
+///
+/// **PIE sees the last SAVED cave**, which is the `strip_streamed_terrain`
+/// precedent one file over (PIE sees the last saved `.inf_terrain` too) — but here
+/// the reason is stronger than symmetry, and it is worth stating because the
+/// obvious "fix" is a law violation. Editor *Simulate* does carry unsaved carves
+/// ([`crate::simulate::overlay_unsaved_carves`]), by folding the editor store's
+/// **dirty** chunks over the resolved map — safe because dirty is a function of
+/// the edit history and `sync_residency` refuses to evict a dirty chunk. Shipping
+/// that store *as a volume* over the wire is not the same act: the store is
+/// **camera-paged**, so its resident set is whatever the author happened to be
+/// looking at, and a PIE session built from it would preview a cave truncated by
+/// the editor viewport's position. That is precisely the dependency every seam in
+/// this phase exists to forbid.
+///
+/// The parity fix that would work is the dirty-chunk **overlay**, not the volume:
+/// ship the saved bytes here plus `(entity, chunk key, chunk bytes)` for the
+/// store's dirty set, and let the player apply it with the same rule
+/// `overlay_unsaved_carves` uses. That is a second wire field and a second
+/// application site, it is not needed by any committed content (a sample is saved
+/// by definition), and it is ledgered rather than half-built.
+///
+/// (Eight parameters trips clippy's arity lint. The alternative — bundling the
+/// four byte-resolvers into a struct — would move thirteen call sites to hide one
+/// number, and each resolver is a *different* asset kind reaching a *different*
+/// store, which a struct of four identically-typed closures makes easier to
+/// mis-order rather than harder. The positions are named in the `where` clause and
+/// pinned by `a_payload_carries_every_referenced_asset_kind_in_its_own_field`
+/// below.)
+#[allow(clippy::too_many_arguments)]
+pub fn build_scene_payload<F, G, H, B, V>(
     doc: &SceneDoc,
     mut resolve: F,
     mut resolve_pcg: G,
     mut resolve_anim: H,
     mut resolve_biome_set: B,
+    mut resolve_voxel: V,
     tick_hz: u32,
     windowed: bool,
 ) -> Result<ScenePayload, PieError>
@@ -368,6 +406,7 @@ where
     G: FnMut(Uuid) -> Option<Vec<u8>>,
     H: FnMut(Uuid) -> Option<Vec<u8>>,
     B: FnMut(Uuid) -> Option<Vec<u8>>,
+    V: FnMut(Uuid) -> Option<Vec<u8>>,
 {
     let level_bytes = serialize::encode(&serialize::to_scene_file(doc))
         .map_err(|e| PieError::Protocol(format!("encode scene: {e}")))?;
@@ -502,11 +541,43 @@ where
         }
     }
 
+    // Referenced voxel volumes (P21.4): every `VoxelVolume.asset` ref resolved to
+    // its `.inf_voxel` bytes, so the PIE player seeds the SAME sim-side volume map
+    // the cooked pack path seeds — the M9 debt.
+    //
+    // Keyed by ASSET (two entities may reference one cave at two transforms); the
+    // per-entity world anchor is folded in on the player side by
+    // `resolve_voxel_volumes`, exactly as it is on the editor Simulate side. A
+    // volume the caller cannot serve is skipped rather than faked: an unresolvable
+    // ref previews as no cave, which is what the shipped build does with the same
+    // dangling reference.
+    let mut voxels: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut seen_voxel: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let Some(asset) = world
+            .world()
+            .get::<inf_ecs::components::VoxelVolume>(e)
+            .and_then(|v| v.asset)
+        else {
+            continue;
+        };
+        if !seen_voxel.insert(asset) {
+            continue;
+        }
+        if let Some(bytes) = resolve_voxel(asset) {
+            voxels.push((asset, bytes));
+        }
+    }
+
     Ok(
         ScenePayload::new(doc.title(), level_bytes, classes, tick_hz, windowed)
             .with_pcgs(pcgs)
             .with_biome_sets(biome_sets)
-            .with_anim_assets(skeletons, clips, machines),
+            .with_anim_assets(skeletons, clips, machines)
+            .with_voxels(voxels),
     )
 }
 
@@ -530,5 +601,106 @@ pub fn find_player_bin() -> std::path::PathBuf {
     match sibling {
         Some(p) => p,
         None => PathBuf::from(exe_name),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::SpawnKind;
+    use inf_ecs::components::{PcgVolume, Terrain, VoxelVolume};
+
+    /// **The positional pin for [`build_scene_payload`]'s five resolvers.**
+    ///
+    /// Each resolver reaches a different store and fills a different payload
+    /// field, and every one of them has the same type — `FnMut(Uuid) ->
+    /// Option<Vec<u8>>` — so a swapped pair compiles silently and ships a level's
+    /// PCG graphs as its biome sets. This hands each resolver a *distinguishable*
+    /// payload and asserts where it landed, which is the check a struct of four
+    /// identically-typed closures would not have given us either.
+    #[test]
+    fn a_payload_carries_every_referenced_asset_kind_in_its_own_field() {
+        const CLASS: Uuid = Uuid::from_u128(0x2104_0E01);
+        const GRAPH: Uuid = Uuid::from_u128(0x2104_0E02);
+        const SKEL: Uuid = Uuid::from_u128(0x2104_0E03);
+        const BIOMES: Uuid = Uuid::from_u128(0x2104_0E04);
+        const VOXELS: Uuid = Uuid::from_u128(0x2104_0E05);
+
+        let mut doc = SceneDoc::new();
+        let e = doc.create(SpawnKind::Empty, "Everything", None);
+        {
+            let world = doc.world_mut();
+            let id = world.entity_of(e).expect("the entity exists");
+            world.world_mut().entity_mut(id).insert((
+                ActorClass(CLASS),
+                PcgVolume {
+                    graph: Some(GRAPH),
+                    ..PcgVolume::default()
+                },
+                Terrain {
+                    biome_set: Some(BIOMES),
+                    ..Terrain::default()
+                },
+                SkeletalMesh {
+                    skeleton: Some(SKEL),
+                    ..SkeletalMesh::default()
+                },
+                VoxelVolume::from_asset(VOXELS),
+            ));
+            world.mark_dirty();
+        }
+
+        let payload = build_scene_payload(
+            &doc,
+            |g| (g == CLASS).then(|| BlueprintClass::new("act:probe", "Probe")),
+            |g| (g == GRAPH).then(|| b"PCG".to_vec()),
+            |g| (g == SKEL).then(|| b"SKEL".to_vec()),
+            |g| (g == BIOMES).then(|| b"BIOMES".to_vec()),
+            |g| (g == VOXELS).then(|| b"VOXELS".to_vec()),
+            60,
+            false,
+        )
+        .expect("payload builds");
+
+        assert_eq!(payload.classes.len(), 1);
+        assert_eq!(payload.classes[0].0, CLASS);
+        assert_eq!(payload.pcgs, vec![(GRAPH, b"PCG".to_vec())]);
+        assert_eq!(payload.skeletons, vec![(SKEL, b"SKEL".to_vec())]);
+        assert_eq!(payload.biome_sets, vec![(BIOMES, b"BIOMES".to_vec())]);
+        assert_eq!(payload.voxels, vec![(VOXELS, b"VOXELS".to_vec())]);
+        assert_eq!(
+            payload.schema_version,
+            inf_runtime::pie::SCENE_PAYLOAD_VERSION
+        );
+    }
+
+    /// A resolver that cannot serve an asset leaves the field **empty** rather than
+    /// inventing one: an unresolvable reference previews as absent content, which
+    /// is exactly what the shipped build does with the same dangling ref.
+    #[test]
+    fn an_unresolvable_voxel_reference_ships_nothing() {
+        let mut doc = SceneDoc::new();
+        let e = doc.create(SpawnKind::Empty, "Cave", None);
+        {
+            let world = doc.world_mut();
+            let id = world.entity_of(e).expect("the entity exists");
+            world
+                .world_mut()
+                .entity_mut(id)
+                .insert(VoxelVolume::from_asset(Uuid::from_u128(0xDEAD)));
+            world.mark_dirty();
+        }
+        let payload = build_scene_payload(
+            &doc,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            60,
+            false,
+        )
+        .expect("payload builds");
+        assert!(payload.voxels.is_empty());
     }
 }

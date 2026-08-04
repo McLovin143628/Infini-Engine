@@ -62,6 +62,7 @@ pub mod ground;
 pub mod mesh;
 pub mod ops;
 pub mod residency;
+pub mod runtime;
 pub mod spoil;
 pub mod store;
 pub mod wants;
@@ -88,6 +89,9 @@ pub use mesh::{
 };
 pub use ops::{trench_basis, OpReport, VoxelDeltaBuilder, VoxelOp, VoxelOpKind, VoxelShape};
 pub use residency::{chunk_range, ChunkStore, MemoryChunkStore, ResidencyReport};
+pub use runtime::{
+    runtime_carve, RuntimeCarveOutcome, RuntimeCarveReport, MAX_RUNTIME_CARVE_SAMPLES,
+};
 pub use spoil::{
     cbrt_det, default_spoil_site, pile_base_radius_m, SpoilPlan, SpoilReport, REPOSE_COS,
     REPOSE_DEG, REPOSE_TAN, SPOIL_GAP_M,

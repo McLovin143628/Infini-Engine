@@ -220,6 +220,8 @@ fn pie_payload_matches_shipping_for_terrain_and_pcg() {
         |_guid| None,
         // No biome sets in this scene.
         |_guid| None,
+        // No voxel volumes in this scene.
+        |_guid| None,
         60,
         false,
     )

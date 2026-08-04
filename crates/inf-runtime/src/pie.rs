@@ -69,7 +69,13 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 /// * v4 — appended `biome_sets`: the `.inf_biomes` payloads a v16 level's
 ///   `Terrain.biome_set` refs, so the PIE player runs the biome→PCG binding
 ///   exactly like the shipping pack path.
-pub const SCENE_PAYLOAD_VERSION: u32 = 4;
+/// * v5 — appended `voxels`: the `.inf_voxel` payloads a v19 level's
+///   `VoxelVolume.asset` refs (P21.4). Before this rung the PIE player carried no
+///   voxel source at all, so a carved cave answered `terrain.height_at` with the
+///   seam's `0.0` in preview and with the cave floor in the shipped build — and
+///   the PIE == shipping gate compared **two empty maps agreeing**, which is not
+///   a comparison. This is the byte source that makes it one.
+pub const SCENE_PAYLOAD_VERSION: u32 = 5;
 
 /// Upper bound on a single frame; anything larger means a desynced or
 /// corrupt stream and is treated as an error rather than an allocation. A
@@ -113,6 +119,15 @@ pub struct ScenePayload {
     /// PIE session grows the same world a cooked pack does.
     #[serde(default)]
     pub biome_sets: Vec<(Uuid, Vec<u8>)>,
+    /// Referenced voxel volumes: `(asset guid, .inf_voxel bincode bytes)` — keyed
+    /// by a v19 level's `VoxelVolume.asset` refs (schema v5, P21.4).
+    ///
+    /// The player resolves these through the **same** `resolve_voxel_volumes` the
+    /// pack path uses, so a Blueprint standing on a cave floor reads the same
+    /// metre in preview and in the shipped build. Without them the sim's voxel map
+    /// is empty and every combined ground query over a hole falls back to `0.0`.
+    #[serde(default)]
+    pub voxels: Vec<(Uuid, Vec<u8>)>,
     /// Fixed update rate (Hz) the player ticks at.
     pub tick_hz: u32,
     /// Open a real window (`true`, the embedded / new-window PIE path) vs run
@@ -139,6 +154,7 @@ impl ScenePayload {
             clips: Vec::new(),
             machines: Vec::new(),
             biome_sets: Vec::new(),
+            voxels: Vec::new(),
             tick_hz,
             windowed,
         }
@@ -156,6 +172,14 @@ impl ScenePayload {
     /// [`with_pcgs`](Self::with_pcgs) — the binding needs both.
     pub fn with_biome_sets(mut self, biome_sets: Vec<(Uuid, Vec<u8>)>) -> Self {
         self.biome_sets = biome_sets;
+        self
+    }
+
+    /// Attach the referenced `.inf_voxel` payloads (`(asset guid, bytes)`) a
+    /// level's `VoxelVolume.asset` refs name (P21.4). Builder-style, exactly like
+    /// [`with_pcgs`](Self::with_pcgs).
+    pub fn with_voxels(mut self, voxels: Vec<(Uuid, Vec<u8>)>) -> Self {
+        self.voxels = voxels;
         self
     }
 

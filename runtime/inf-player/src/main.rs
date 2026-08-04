@@ -246,22 +246,16 @@ fn handle_msg(
             if payload.windowed {
                 return Control::RunWindow(Box::new(payload));
             }
-            match inf_player::build_world_from_payload(&payload) {
-                Ok(mut built) => {
-                    let level = built.label.clone();
-                    let actor_count = built.actors.len();
-                    // P16.5: a partitioned scene streams in PIE too — the payload
-                    // carries the entities inline, so the in-memory binning path
-                    // produces the same cells the cook would. Skipping this would
-                    // run an empty world and quietly break PIE == shipping.
-                    let partition = built.take_partition();
-                    let mut sim = inf_player::runtime_sim::RuntimeSim::new(
-                        built.world,
-                        built.actors,
-                        built.gravity,
-                        built.hz,
-                    );
-                    inf_player::attach_cell_streaming(&mut sim, &partition);
+            // `sim_from_payload` is the ONE PIE boot seam (P21.4): it makes every
+            // attachment a PIE session needs — cells, voxel volumes, state
+            // machines, root-motion clips, audio — so this path cannot drift from
+            // the in-process `scene_trace` reference the gates compare against.
+            match inf_player::sim_from_payload(&payload) {
+                Ok(inf_player::PayloadSim {
+                    sim,
+                    label: level,
+                    actor_count,
+                }) => {
                     *active = Active::Real {
                         sim: Box::new(sim),
                         frame: 0,
@@ -344,28 +338,31 @@ fn run_pie_window(
     rx: std::sync::mpsc::Receiver<EditorToPlayer>,
     mut stdout: impl std::io::Write + 'static,
 ) -> ExitCode {
-    let mut built = match inf_player::build_world_from_payload(&payload) {
-        Ok(b) => b,
+    // The same one seam the headless PIE path takes (P21.4) — see `run_pie`.
+    let inf_player::PayloadSim {
+        sim,
+        label,
+        actor_count,
+    } = match inf_player::sim_from_payload(&payload) {
+        Ok(p) => p,
         Err(e) => {
             eprintln!("inf-player: build scene failed: {e}");
             let _ = write_msg(&mut stdout, &PlayerToEditor::Error { message: e });
             return ExitCode::FAILURE;
         }
     };
-    let level = built.label.clone();
-    let actor_count = built.actors.len();
-    if write_msg(&mut stdout, &PlayerToEditor::Loaded { level, actor_count }).is_err() {
+    let title = format!("Infinity Engine (PIE) — {label}");
+    if write_msg(
+        &mut stdout,
+        &PlayerToEditor::Loaded {
+            level: label,
+            actor_count,
+        },
+    )
+    .is_err()
+    {
         return ExitCode::SUCCESS;
     }
-    let title = format!("Infinity Engine (PIE) — {}", built.label);
-    let partition = built.take_partition();
-    let mut sim = inf_player::runtime_sim::RuntimeSim::new(
-        built.world,
-        built.actors,
-        built.gravity,
-        built.hz,
-    );
-    inf_player::attach_cell_streaming(&mut sim, &partition);
     match inf_player::window::run_pie(
         title,
         1280,

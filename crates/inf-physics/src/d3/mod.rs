@@ -22,7 +22,8 @@ mod world;
 
 pub use character::{CharacterMove3D, CharacterMover3D};
 pub use ecs::{
-    pcg_structure_guid, BodyDesc3D, EntitySync3D, JointSync3D, PhysicsBridge3D, PoseWriteback3D,
+    pcg_structure_guid, voxel_chunk_guid, BodyDesc3D, EntitySync3D, JointSync3D, PhysicsBridge3D,
+    PoseWriteback3D,
 };
 pub use events::ContactEvent3D;
 pub use joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};

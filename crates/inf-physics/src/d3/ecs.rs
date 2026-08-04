@@ -150,6 +150,14 @@ pub struct PhysicsBridge3D {
     /// colliders are **retained without being re-described** — see
     /// [`pcg_structure_snaps`].
     structure_stamps: BTreeMap<Uuid, (u64, usize)>,
+    /// Per-voxel-chunk change stamp (P21.4): `(volume entity, chunk key) →
+    /// VoxelData::chunk_version`. The `structure_stamps` twin, keyed one level
+    /// finer because a runtime carve moves *one chunk of one volume* and
+    /// re-meshing a whole cave system for it inside a fixed step is exactly the
+    /// bill the pattern exists to refuse. While a stamp matches, that chunk's
+    /// collider is **retained without being re-described** — see
+    /// [`gather_voxels`](Self::gather_voxels).
+    voxel_stamps: BTreeMap<(Uuid, inf_voxel::ChunkKey), u64>,
     /// Reverse map `collider handle → owning entity Guid`, rebuilt at the end of
     /// every [`sync`](Self::sync) (Wave 3). The collision-event drain resolves
     /// rapier's `ContactEvent3D` collider handles back to entity `Guid`s through
@@ -193,6 +201,7 @@ impl PhysicsBridge3D {
             world: PhysicsWorld3D::new(gravity),
             entities: BTreeMap::new(),
             structure_stamps: BTreeMap::new(),
+            voxel_stamps: BTreeMap::new(),
             collider_to_guid: BTreeMap::new(),
             water: WaterIndex::default(),
             water_stamps: Vec::new(),
@@ -251,6 +260,34 @@ impl PhysicsBridge3D {
     /// which reconciles in deterministic `Guid` order. The `d3` mirror of
     /// [`crate::d2::PhysicsBridge2D::sync_from_world`].
     pub fn sync_from_world(&mut self, world: &EcsWorld) {
+        self.sync_from_world_with_voxels(world, &BTreeMap::new());
+    }
+
+    /// [`sync_from_world`](Self::sync_from_world) **plus the sim's voxel volumes**
+    /// (P21.4), which become static trimesh colliders so a cave has a floor and a
+    /// runtime carve is something a body can fall into.
+    ///
+    /// `volumes` is the *simulation's* map — `RuntimeSim::voxels` /
+    /// `SimSession::voxels`, keyed by the volume's entity `Guid` — and emphatically
+    /// **not** the render host's camera-paged store. A collider set that depended
+    /// on where anyone was looking would put the floor under a player only while
+    /// the camera happened to have paged it, which is the failure every seam in
+    /// this phase is shaped to forbid.
+    ///
+    /// # Cost, and why the stamp is per chunk
+    ///
+    /// The first sync meshes every resident chunk once — a load-time cost, paid in
+    /// the same place a level's colliders are always paid for. After that,
+    /// [`gather_voxels`](Self::gather_voxels) re-describes **only chunks whose
+    /// `VoxelData::chunk_version` moved**, which for a gameplay carve is the two or
+    /// three the brush touched. `mesh_chunk` is the same deterministic Surface-Nets
+    /// pass the renderer draws with, so the surface a body collides with and the
+    /// surface a player sees are one extraction.
+    pub fn sync_from_world_with_voxels(
+        &mut self,
+        world: &EcsWorld,
+        volumes: &BTreeMap<Uuid, inf_voxel::VoxelData>,
+    ) {
         let mut snaps: Vec<EntitySync3D> = Vec::new();
         // P20.2: the water gather rides in THIS walk rather than in a second one.
         // A furnished town is 13 000 entities, and walking them twice per fixed
@@ -309,7 +346,9 @@ impl PhysicsBridge3D {
         self.reconcile_water(buoyancy);
         // P19.5: a volume's derived solids. Unchanged volumes are **retained**
         // rather than re-described — see the doc on `structure_stamps`.
-        let retained = self.gather_structures(world, &mut snaps);
+        let mut retained = self.gather_structures(world, &mut snaps);
+        // P21.4: the sim's voxel chunks, on the same rule one level finer.
+        self.gather_voxels(volumes, &mut snaps, &mut retained);
         // `sync` sorts by Guid internally, so the gather order here is irrelevant.
         self.sync_retaining(&snaps, &retained);
     }
@@ -398,6 +437,88 @@ impl PhysicsBridge3D {
         self.structure_stamps
             .retain(|g, _| live_volumes.contains(g));
         retained
+    }
+
+    /// Append a static trimesh collider for every voxel chunk whose field
+    /// **changed**, and add the unchanged ones to `retained` so the despawn sweep
+    /// leaves them alone (P21.4).
+    ///
+    /// The [`gather_structures`](Self::gather_structures) rule, one level finer.
+    /// A cave system is hundreds of chunks and a gameplay carve moves two of them;
+    /// re-meshing the rest at 60 Hz to learn that the far wall has not moved is the
+    /// cost the stamp exists to refuse. `VoxelData::chunk_version` is the stamp —
+    /// minted by the store on every mutating touch, and *not* by paging, which is
+    /// what makes "changed" mean *dug* rather than *loaded*.
+    ///
+    /// **A chunk that meshes to nothing gets no collider**, and its stamp is still
+    /// recorded — so the empty result is reached once, not once per step. Carving a
+    /// chunk hollow therefore *removes* its collider on the next sync (the key is
+    /// no longer in `snaps` and not in `retained`, so the sweep takes it), which is
+    /// how a runtime carve becomes a hole a body can fall through.
+    ///
+    /// Order is `BTreeMap` over `(entity, chunk key)`, and `sync_retaining` sorts
+    /// by `Guid` again on top of that, so the handles rapier allocates are a
+    /// function of the content and of nothing else.
+    fn gather_voxels(
+        &mut self,
+        volumes: &BTreeMap<Uuid, inf_voxel::VoxelData>,
+        snaps: &mut Vec<EntitySync3D>,
+        retained: &mut BTreeSet<Uuid>,
+    ) {
+        // The fast path a level with no voxels takes: no walk, no allocation, and
+        // the stale-stamp prune below is a no-op on an empty map.
+        if volumes.is_empty() && self.voxel_stamps.is_empty() {
+            return;
+        }
+        let mut live: BTreeSet<(Uuid, inf_voxel::ChunkKey)> = BTreeSet::new();
+        for (&entity, data) in volumes {
+            let voxel_size_m = data.voxel_size_m();
+            for key in data.resident_keys() {
+                live.insert((entity, key));
+                let version = data.chunk_version(key);
+                if self.voxel_stamps.get(&(entity, key)) == Some(&version) {
+                    retained.insert(voxel_chunk_guid(entity, key));
+                    continue;
+                }
+                self.voxel_stamps.insert((entity, key), version);
+                let mesh = inf_voxel::mesh_chunk(data, key);
+                if mesh.is_empty() {
+                    continue;
+                }
+                // Chunk-local metres against the chunk's own `f64` world origin —
+                // the floating-origin split `VoxelMesh::local_positions_m` exists
+                // to make one function, so the collider surface and the drawn
+                // surface cannot be a fraction of a voxel apart.
+                let vertices: Vec<DVec3> = mesh
+                    .local_positions_m(voxel_size_m)
+                    .into_iter()
+                    .map(|p| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64))
+                    .collect();
+                let indices: Vec<[u32; 3]> = mesh
+                    .indices
+                    .chunks_exact(3)
+                    .map(|t| [t[0], t[1], t[2]])
+                    .collect();
+                snaps.push(EntitySync3D {
+                    guid: voxel_chunk_guid(entity, key),
+                    // No body: the bridge's implicit-static-body rule gives it a
+                    // static parent. Rock does not fall, and rapier cannot give a
+                    // trimesh a well-defined mass anyway.
+                    body: None,
+                    collider: Some(ColliderDesc3D::new(ColliderShape3D::Trimesh {
+                        vertices,
+                        indices,
+                    })),
+                    translation: data.chunk_origin_world(key),
+                    rotation: DQuat::IDENTITY,
+                    joint: None,
+                });
+            }
+        }
+        // A chunk (or a whole volume) that went away drops its stamp, so a key that
+        // comes back is re-described rather than inheriting a stale version — the
+        // `structure_stamps` prune's reasoning, and the `swimming` prune's.
+        self.voxel_stamps.retain(|k, _| live.contains(k));
     }
 
     /// Reconcile the physics world with a scene snapshot: spawn new
@@ -917,6 +1038,31 @@ pub fn pcg_structure_guid(volume: Uuid, index: usize) -> Uuid {
     let mut x = volume.as_u128() ^ PCG_STRUCTURE_SALT;
     x ^= (index as u128).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5cec_c5c3);
     x = x.rotate_left(37) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
+    Uuid::from_u128(x)
+}
+
+/// Salt for [`voxel_chunk_guid`]. A different constant from
+/// [`PCG_STRUCTURE_SALT`] so a scattered solid and a voxel chunk can never
+/// collide in the bridge's one entity map.
+const VOXEL_CHUNK_SALT: u128 = 0x2104_0400_564f_5845_4c43_484e_4b21_0021;
+
+/// The synthetic identity of chunk `key` inside the volume on entity `volume`.
+///
+/// The [`pcg_structure_guid`] rule, with the chunk's three signed coordinates
+/// folded in instead of an index — and for the same reason it is a 128-bit mix
+/// rather than a XOR: two volumes whose ids differ in the low bits must not alias
+/// each other's chunks. Stated as one function so a debug view or a save hook that
+/// ever needs to name one of these names it the same way.
+pub fn voxel_chunk_guid(volume: Uuid, key: inf_voxel::ChunkKey) -> Uuid {
+    let mut x = volume.as_u128() ^ VOXEL_CHUNK_SALT;
+    for (i, c) in [key.x, key.y, key.z].into_iter().enumerate() {
+        // `as u32 as u128` keeps a negative coordinate's bits (two's complement)
+        // rather than sign-extending them across the whole word, so −1 and a large
+        // positive coordinate stay distinct inputs.
+        let lane = (c as u32 as u128) | ((i as u128 + 1) << 96);
+        x ^= lane.wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5cec_c5c3);
+        x = x.rotate_left(37) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
+    }
     Uuid::from_u128(x)
 }
 

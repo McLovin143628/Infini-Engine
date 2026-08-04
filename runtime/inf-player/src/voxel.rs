@@ -35,6 +35,11 @@ enum Source {
     /// the mapping is opened once however many kinds of asset the renderer reaches
     /// into it for (the P18.2 rule).
     Pack(Arc<PackReader>),
+    /// Bytes that arrived over the PIE wire (P21.4). The editor has the project's
+    /// asset DB and the player subprocess has no filesystem handle to it at all,
+    /// so a PIE session's voxel source *is* the payload — see
+    /// [`ScenePayload::voxels`](inf_runtime::pie::ScenePayload::voxels).
+    Memory(HashMap<Uuid, Vec<u8>>),
 }
 
 /// Resolves a `VoxelVolume.asset` GUID to its `.inf_voxel` payload bytes.
@@ -99,6 +104,24 @@ impl VoxelRegistry {
         }
     }
 
+    /// Serve `.inf_voxel` payloads carried by a PIE [`ScenePayload`] (P21.4).
+    ///
+    /// The editor resolved these out of the project's asset DB (or out of its own
+    /// live carve store, for a volume with unsaved digs) and put them on the wire;
+    /// the player has no other route to them, because `--pie` discards every
+    /// content path argument. This is what makes the PIE half of the phase-21 gate
+    /// a real comparison rather than two empty maps agreeing.
+    ///
+    /// [`ScenePayload`]: inf_runtime::pie::ScenePayload
+    pub fn from_payload(voxels: &[(Uuid, Vec<u8>)]) -> Self {
+        let map: HashMap<Uuid, Vec<u8>> = voxels.iter().cloned().collect();
+        let count = map.len();
+        Self {
+            source: Source::Memory(map),
+            count,
+        }
+    }
+
     /// Read `asset`'s payload bytes, or `None` when this world has no such asset.
     ///
     /// Called once per `(entity, asset)` binding — see the module docs on why
@@ -106,6 +129,7 @@ impl VoxelRegistry {
     pub fn load(&self, asset: Uuid) -> Option<Vec<u8>> {
         match &self.source {
             Source::None => None,
+            Source::Memory(map) => map.get(&asset).cloned(),
             Source::Dir(map) => {
                 let path = map.get(&asset)?;
                 match std::fs::read(path) {
@@ -205,6 +229,22 @@ mod tests {
         assert_eq!(r.len(), 1, "the walk reaches subfolders and skips orphans");
         assert_eq!(r.load(guid).as_deref(), Some(bytes.as_slice()));
         assert!(r.load(Uuid::from_u128(0xBEEF)).is_none());
+    }
+
+    /// The PIE source (P21.4): the payload's bytes come back verbatim, and a GUID
+    /// the payload did not carry misses rather than resolving to a neighbour.
+    #[test]
+    fn a_payload_serves_the_bytes_it_carried() {
+        let guid = Uuid::from_u128(0x2104_0001);
+        let bytes = asset_bytes();
+        let r = VoxelRegistry::from_payload(&[(guid, bytes.clone())]);
+        assert_eq!(r.len(), 1);
+        assert!(!r.is_empty());
+        assert_eq!(r.load(guid).as_deref(), Some(bytes.as_slice()));
+        assert!(r.load(Uuid::from_u128(0x2104_0002)).is_none());
+        // An empty payload is an INERT registry, so `attach_voxel_volumes`'
+        // early-out keeps a voxel-free PIE session on exactly the path it had.
+        assert!(VoxelRegistry::from_payload(&[]).is_empty());
     }
 
     #[test]

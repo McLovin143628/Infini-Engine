@@ -27,6 +27,13 @@ inf-ecs = { workspace = true }
 # surface a boat floats on and the surface the shader draws are one evaluator —
 # the terrain-parity class of drift, avoided by not creating a second copy.
 inf-water = { workspace = true }
+# P21.4: the sim's voxel volumes, meshed into static trimesh colliders so a
+# runtime carve is something a body can fall into. Ring 0 → Ring 0, and
+# deliberately the SAME mesher the renderer draws with (`inf_voxel::mesh_chunk`) —
+# a second surface-extraction here would be the class of drift the water crate's
+# comment above names, with the added charm of being invisible until a player
+# clips through a cave wall.
+inf-voxel = { workspace = true }
 # The spline interpolation kind a river centreline is built with. Named directly
 # rather than reached through `inf-ecs` because the ECS `SplineInterp` is the
 # *authoring* enum and `inf_math`'s is the *math* one — the mapping between them

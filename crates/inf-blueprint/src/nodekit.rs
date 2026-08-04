@@ -50,6 +50,7 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(audio_nodes());
     reg.register_all(sky_nodes());
     reg.register_all(water_nodes());
+    reg.register_all(voxel_nodes());
     reg
 }
 
@@ -710,6 +711,166 @@ fn water_nodes() -> Vec<NodeDef> {
     ]
 }
 
+/// The voxel kit (P21.4) — **runtime carving**: three exec actions that dig, and
+/// two pure queries that ask about the rock. The `water_nodes` shape, with one
+/// deliberate difference: these are the first nodes in this kit family that
+/// **change the world** rather than reporting on it.
+///
+/// ## The namespace, and why it is not `terrain.*`
+///
+/// `terrain.height_at` already answers the *combined* ground — the heightfield
+/// where it is still solid, the topmost voxel surface where a carve has holed it
+/// (`inf_voxel::ground_height_at`). That is the query a character controller
+/// wants, and it deliberately hides which half answered. `voxel.*` is the other
+/// audience: a game that dug the hole and wants to know about **the rock it dug**,
+/// separately from the ground a body stands on. Folding carving into `terrain.*`
+/// would have made "terrain" mean two grids, and `voxel.ground_height` below is
+/// the honest name for the half that is not the heightfield.
+///
+/// ## Units: `removed_m3` is CUBIC METRES, not a voxel count
+///
+/// A carve reports `removed_m3` — the exact integer sample count times the
+/// volume's own `voxel_size_m³`. The units doctrine is the whole argument
+/// (`docs/memos/units-doctrine.md`): a raw count is a number whose meaning changes
+/// when an author re-authors the same cave at a finer grid, so a gameplay counter
+/// built on it ("mine 20 units of ore") silently means something different after a
+/// re-import. m³ does not move. The number is still **exact** — an integer times a
+/// constant, identical bits on every host, which is what the phase gate compares —
+/// and dividing by `voxel_size_m³` recovers the count for anyone who wants it.
+///
+/// ## The `runtime_carve` gate
+///
+/// Every carve/fill node checks the target volume's
+/// `VoxelVolume::runtime_carve` **first**. When it is `false` the node is a
+/// deterministic **no-op returning `0.0`** — not an error, not a partial cut, and
+/// not something that depends on which node happened to run first. That flag was
+/// frozen into scene schema v19 for exactly this, and the refusal is reported on
+/// the log rather than swallowed, in both hosts, with one shared message
+/// (`inf_voxel::RuntimeCarveOutcome::refusal`).
+///
+/// A carve is also refused when the entity has no seeded volume, when the shape is
+/// degenerate, and when it would touch more than
+/// `inf_voxel::MAX_RUNTIME_CARVE_SAMPLES` — a fixed step cannot afford a quarry,
+/// and a bound stated in samples is the only one that does not change meaning with
+/// the grid. All four refusals answer `0.0`, so a Blueprint that only wants "did I
+/// get anything" needs no error handling; one that wants to know *why* reads the
+/// log.
+///
+/// ## `BeginPlay` cannot see a volume — carve on `Tick`
+///
+/// Both hosts seed their voxel map **after** constructing the sim, because
+/// resolving a `VoxelVolume.asset` needs the built world to walk
+/// (`SimSession::enter` … `set_voxel_volumes`; `sim_from_built` …
+/// `attach_voxel_volumes`), and `BeginPlay` runs inside that construction. So a
+/// `voxel.*` node on a `BeginPlay` handler sees an empty map and refuses with
+/// "no voxel volume on that entity" — as does `terrain.height_at` over a hole,
+/// which has answered the seam's `0.0` there since P21.2. It is stated here
+/// rather than worked around, because the workaround (deferring `BeginPlay`)
+/// changes when *every* handler in the engine runs. Put the first dig on `Tick`.
+///
+/// ## What a runtime carve does NOT do
+///
+/// * **No spoil.** The editor's excavation conserves material into a displaced
+///   pile (P21.3); a gameplay carve deletes rock. Conservation is an authoring
+///   guarantee about a document, and a game blowing a hole in a wall is not
+///   excavating a foundation. `voxel.fill_sphere` is the door for a game that
+///   wants to put material somewhere.
+/// * **No undo entry.** A fixed step has no `EditCommand`; the rollback story is
+///   replay, which works because [`VoxelOp`](inf_voxel::VoxelOp) is idempotent.
+/// * **Nothing is persisted.** A runtime carve lives in the sim's volume map and
+///   in the sim's copy of the heightfield's hole mask, and dies with the session.
+///   The `.inf_voxel` and the `.inf_terrain` on disk are untouched — a save game
+///   is a P22-and-later concern, and writing a player's craters into the author's
+///   asset would be the worst possible default.
+///
+/// ## Why the two queries have one output each
+///
+/// The `sky.*`/`water.*` rule, for the same reason: a `PureCall` with more than
+/// one data output fans each pin into its own `voxel::<op>::<field>` call, which
+/// would force three-segment match arms in both hosts. The carve *actions* may
+/// have a data output because an `Action` binds its single output to a `Stmt::Let`
+/// (`physics2d.move_and_slide`'s `grounded` is the precedent).
+fn voxel_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("voxel.carve_sphere", "Carve Sphere", "voxel")
+            .described(
+                "Dig a ball out of the entity's voxel volume; reports the cubic metres \
+                 removed (0 if the volume's Runtime Carve is off).",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+                PortDef::new("radius", PortType::Float),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("removed_m3", PortType::Float),
+            ]),
+        NodeDef::new("voxel.carve_box", "Carve Box", "voxel")
+            .described(
+                "Dig an axis-aligned box out of the entity's voxel volume; reports the \
+                 cubic metres removed. Extents are HALF-extents, in metres.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+                PortDef::new("half_x", PortType::Float),
+                PortDef::new("half_y", PortType::Float),
+                PortDef::new("half_z", PortType::Float),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("removed_m3", PortType::Float),
+            ]),
+        NodeDef::new("voxel.fill_sphere", "Fill Sphere", "voxel")
+            .described(
+                "Add a ball of solid material to the entity's voxel volume; reports the \
+                 cubic metres added. Material is a splat-layer index (0..3).",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+                PortDef::new("radius", PortType::Float),
+                PortDef::new("material", PortType::Int),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("added_m3", PortType::Float),
+            ]),
+        NodeDef::new("voxel.is_solid", "Is Solid", "voxel")
+            .described(
+                "True when any of the level's voxel volumes has rock at that world point. \
+                 Says nothing about the heightfield — solid ground reads false.",
+            )
+            .with_inputs(vec![
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+            ])
+            .with_outputs(vec![PortDef::new("solid", PortType::Bool)]),
+        NodeDef::new("voxel.ground_height", "Voxel Surface Height", "voxel")
+            .described(
+                "World Y of the topmost VOXEL surface over (x, z) — 0 where no volume \
+                 answers. For the ground a character stands on, use Terrain Height At, \
+                 which combines the heightfield with this.",
+            )
+            .with_inputs(vec![
+                PortDef::new("x", PortType::Float),
+                PortDef::new("z", PortType::Float),
+            ])
+            .with_outputs(vec![PortDef::new("height", PortType::Float)]),
+    ]
+}
+
 /// The input-state kit (P8.4): pure Bool queries the Simulate loop answers from
 /// the focused viewport's keyboard state. Both take the action/key **as a `Str`
 /// data input** (wire a `lit.str`) rather than a node param, so they lower with
@@ -1007,6 +1168,98 @@ mod tests {
                 .unwrap()
                 .ty,
             PortType::Float
+        );
+    }
+
+    /// The P21.4 voxel kit: three exec actions that each carry **one** data
+    /// output, two pure single-output queries, and — the thing a reader cannot
+    /// see from the node list — **declaration order is argument order**, so a
+    /// swap here silently passes a radius as a Y coordinate.
+    #[test]
+    fn voxel_kit_is_registered() {
+        let reg = blueprint_registry();
+        for id in [
+            "voxel.carve_sphere",
+            "voxel.carve_box",
+            "voxel.fill_sphere",
+            "voxel.is_solid",
+            "voxel.ground_height",
+        ] {
+            assert!(reg.get(id).is_some(), "missing voxel node {id}");
+        }
+
+        // The three carves are exec ACTIONS with exactly one data output, which
+        // is what lets the lowerer bind them to a `Stmt::Let` (the
+        // `physics2d.move_and_slide` shape) instead of fanning into
+        // `voxel::<op>::<field>` — which the hosts' two-segment match cannot see.
+        for (id, out) in [
+            ("voxel.carve_sphere", "removed_m3"),
+            ("voxel.carve_box", "removed_m3"),
+            ("voxel.fill_sphere", "added_m3"),
+        ] {
+            let d = reg.get(id).unwrap();
+            assert!(d.input(EXEC_IN).is_some(), "{id} must be an exec action");
+            assert!(d.output(EXEC_THEN).is_some(), "{id} must chain");
+            let data_outs: Vec<&str> = d
+                .outputs
+                .iter()
+                .filter(|p| !p.ty.is_exec())
+                .map(|p| p.name.as_str())
+                .collect();
+            assert_eq!(data_outs, [out], "{id} must have exactly one data output");
+            assert_eq!(d.output(out).unwrap().ty, PortType::Float);
+            assert!(
+                d.input("entity").unwrap().required,
+                "{id} must name its volume"
+            );
+        }
+
+        // The two queries are pure, single-output, and take NO entity: they ask
+        // about the level's rock, not about one volume — the `water.surface_height`
+        // shape.
+        for (id, out, ty) in [
+            ("voxel.is_solid", "solid", PortType::Bool),
+            ("voxel.ground_height", "height", PortType::Float),
+        ] {
+            let d = reg.get(id).unwrap();
+            assert!(d.input(EXEC_IN).is_none(), "{id} must be pure");
+            assert_eq!(d.outputs.len(), 1, "{id} must have one data output");
+            assert_eq!(d.output(out).unwrap().ty, ty);
+            assert!(d.input("entity").is_none(), "{id} is level-wide");
+        }
+
+        // Declaration order IS argument order (`lower::data_input_ports`).
+        let args = |id: &str| -> Vec<String> {
+            reg.get(id)
+                .unwrap()
+                .inputs
+                .iter()
+                .filter(|p| !p.ty.is_exec())
+                .map(|p| p.name.clone())
+                .collect()
+        };
+        assert_eq!(
+            args("voxel.carve_sphere"),
+            ["entity", "x", "y", "z", "radius"]
+        );
+        assert_eq!(
+            args("voxel.carve_box"),
+            ["entity", "x", "y", "z", "half_x", "half_y", "half_z"]
+        );
+        assert_eq!(
+            args("voxel.fill_sphere"),
+            ["entity", "x", "y", "z", "radius", "material"]
+        );
+        assert_eq!(args("voxel.is_solid"), ["x", "y", "z"]);
+        assert_eq!(args("voxel.ground_height"), ["x", "z"]);
+        // The material is an Int splat-layer index, not a Float.
+        assert_eq!(
+            reg.get("voxel.fill_sphere")
+                .unwrap()
+                .input("material")
+                .unwrap()
+                .ty,
+            PortType::Int
         );
     }
 

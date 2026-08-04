@@ -132,6 +132,7 @@ fn pie_built() -> BuiltWorld {
         |guid| pcgs.get(&guid).cloned(),
         |_| None,
         |_| None,
+        |_| None,
         60,
         false,
     )

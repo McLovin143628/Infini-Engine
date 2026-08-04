@@ -3225,6 +3225,7 @@ dependencies = [
  "inf-ecs",
  "inf-math",
  "inf-pcg",
+ "inf-voxel",
  "inf-water",
  "rapier2d-f64",
  "rapier3d-f64",

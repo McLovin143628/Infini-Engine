@@ -116,6 +116,12 @@ pub async fn pie_start(
             |guid| assets.load_pcg_bytes(inf_asset::AssetId(guid)),
             |guid| assets.load_anim_bytes(inf_asset::AssetId(guid)),
             |guid| assets.load_biome_set_bytes(inf_asset::AssetId(guid)),
+            // P21.4: the `.inf_voxel` sources a level's `VoxelVolume`s name, so a
+            // PIE session stands on the same cave floors the shipped build does.
+            // The SAVED bytes — see `build_scene_payload`'s note on why shipping
+            // the camera-paged editor store instead would make a preview depend on
+            // where the author was looking.
+            |guid| assets.load_voxel_bytes(inf_asset::AssetId(guid)),
             PIE_TICK_HZ,
             true,
         )

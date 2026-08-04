@@ -54,6 +54,7 @@ use inf_ecs::components::{
     AnimPlayer, AnimStateMachine, AudioListener, AudioSource, CharacterController2D,
     CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
     DistanceModel, GlobalTransform, RootMotion, RootMotionMode, SmRuntimeState, Terrain, Transform,
+    VoxelVolume,
 };
 use inf_ecs::{sim_snapshot, update_attachments, EcsWorld, Entity, Guid};
 use inf_physics::d3::WaterEventKind3D;
@@ -330,7 +331,13 @@ impl RuntimeSim {
         };
 
         sim.bridge.sync_from_world(&sim.world);
-        sim.bridge3d.sync_from_world(&sim.world); // P11.3 3D bridge
+        // P11.3 3D bridge. The voxel map is still empty here — the caller seeds
+        // it after `new` returns (`attach_voxel_volumes`) — so a volume's chunk
+        // colliders arrive on the first step's sync instead. That is also why a
+        // `BeginPlay` handler cannot see a cave (see the P21.4 kit docs): the map
+        // it would read does not exist yet.
+        sim.bridge3d
+            .sync_from_world_with_voxels(&sim.world, &sim.voxels);
         sim.run_all(&EventKind::BeginPlay);
         sim.drain_dispatch(); // Wave 3: BeginPlay may dispatch custom events.
         sim.capture_positions();
@@ -625,13 +632,16 @@ impl RuntimeSim {
         inf_ecs::sky::advance_weather(&mut self.world, dt);
         // 1. ECS → physics.
         self.bridge.sync_from_world(&self.world);
-        self.bridge3d.sync_from_world(&self.world); // ── P11.3 3D bridge: sync ──
-                                                    // ── P20.2 water forces ── buoyancy + hydrodynamic drag, between the sync
-                                                    //    and the solver: after the sync because a body must be sampled where it
-                                                    //    IS, and before the step because that is the step the forces belong to.
-                                                    //    Also arms this step's enter/exit/splash, drained in the collision slot
-                                                    //    below so the fixed step has ONE event point. One branch on a level with
-                                                    //    no `Buoyancy` component. (MIRROR of `SimSession::fixed_step`.)
+        // ── P11.3 3D bridge: sync ── carrying the P21.4 voxel chunk colliders,
+        //    so a runtime carve is something a body can fall into.
+        self.bridge3d
+            .sync_from_world_with_voxels(&self.world, &self.voxels);
+        // ── P20.2 water forces ── buoyancy + hydrodynamic drag, between the sync
+        //    and the solver: after the sync because a body must be sampled where it
+        //    IS, and before the step because that is the step the forces belong to.
+        //    Also arms this step's enter/exit/splash, drained in the collision slot
+        //    below so the fixed step has ONE event point. One branch on a level with
+        //    no `Buoyancy` component. (MIRROR of `SimSession::fixed_step`.)
         self.bridge3d.apply_water_forces(dt);
         // ── Wave 3 input events ── (MIRROR of SimSession) fire Input(action) edges
         //    BEFORE the Tick pass, then drain any dispatches they queued.
@@ -992,7 +1002,7 @@ impl RuntimeSim {
                 bindings: &mut self.bindings,
                 dispatch_queue: &mut self.dispatch_queue,
                 dt: self.stepper.fixed_dt(),
-                voxels: &self.voxels,
+                voxels: &mut self.voxels,
             };
             if let Err(e) = run_event(
                 &state.class,
@@ -1215,10 +1225,12 @@ struct RuntimeHost<'a> {
     /// the number is the sim's own rather than whatever the solver was last
     /// stepped with.
     dt: f64,
-    /// The simulation's own voxel volumes (P21.2), read by `terrain.height_at`.
+    /// The simulation's own voxel volumes (P21.2), read by `terrain.height_at`
+    /// and **written** by the P21.4 `voxel.carve_*`/`voxel.fill_*` nodes.
     /// Borrowed from `RuntimeSim::voxels` — never from a render store, which is
-    /// what keeps a camera out of a fixed step's answers.
-    voxels: &'a BTreeMap<Uuid, VoxelData>,
+    /// what keeps a camera out of a fixed step's answers, in both directions: the
+    /// carve a game commits must not depend on where anyone is looking either.
+    voxels: &'a mut BTreeMap<Uuid, VoxelData>,
 }
 
 use inf_ecs::components::WeatherPreset;
@@ -1350,6 +1362,84 @@ impl Host for RuntimeHost<'_> {
             (Some("water"), Some("surface_height")) => Ok(Value::Float(
                 self.bridge3d
                     .water_surface_height(arg_f64(args, 0), arg_f64(args, 1))
+                    .unwrap_or(0.0),
+            )),
+            // voxel.* (P21.4) — RUNTIME CARVING, shared verbatim with the editor
+            // SimHost so preview == shipped by construction. The three actions run
+            // one Ring-0 rule (`inf_voxel::runtime_carve`) against the sim's own
+            // volume map plus the shared coupling rule against the sim's own
+            // heightfield; the two queries read that same map.
+            //
+            // Every refusal — no volume, `runtime_carve` off, degenerate shape,
+            // past the per-step sample ceiling — answers **0.0** and logs one
+            // shared message, because a Blueprint node is not a transaction:
+            // failing the handler would take down the rest of the Tick body for an
+            // op the author fixes by typing a smaller radius. `0.0` also means "I
+            // carved air", which is deliberate — the two are the same fact from
+            // gameplay's side (no rock moved) and the log is where they differ.
+            (Some("voxel"), Some("carve_sphere")) => {
+                let op = inf_voxel::VoxelOp::carve(inf_voxel::VoxelShape::Sphere {
+                    center: DVec3::new(arg_f64(args, 1), arg_f64(args, 2), arg_f64(args, 3)),
+                    radius_m: arg_f64(args, 4),
+                });
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Float(match entity {
+                    Ok(guid) => runtime_voxel_op(
+                        self.world,
+                        self.voxels,
+                        self.logs,
+                        guid,
+                        &op,
+                        "voxel::carve_sphere",
+                    ),
+                    Err(_) => 0.0,
+                }))
+            }
+            (Some("voxel"), Some("carve_box")) => {
+                let op = inf_voxel::VoxelOp::carve(inf_voxel::VoxelShape::Box {
+                    center: DVec3::new(arg_f64(args, 1), arg_f64(args, 2), arg_f64(args, 3)),
+                    half_extents: DVec3::new(arg_f64(args, 4), arg_f64(args, 5), arg_f64(args, 6)),
+                });
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Float(match entity {
+                    Ok(guid) => runtime_voxel_op(
+                        self.world,
+                        self.voxels,
+                        self.logs,
+                        guid,
+                        &op,
+                        "voxel::carve_box",
+                    ),
+                    Err(_) => 0.0,
+                }))
+            }
+            (Some("voxel"), Some("fill_sphere")) => {
+                let op = inf_voxel::VoxelOp::fill(
+                    inf_voxel::VoxelShape::Sphere {
+                        center: DVec3::new(arg_f64(args, 1), arg_f64(args, 2), arg_f64(args, 3)),
+                        radius_m: arg_f64(args, 4),
+                    },
+                    clamp_material(arg_i64(args, 5)),
+                );
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Float(match entity {
+                    Ok(guid) => runtime_voxel_op(
+                        self.world,
+                        self.voxels,
+                        self.logs,
+                        guid,
+                        &op,
+                        "voxel::fill_sphere",
+                    ),
+                    Err(_) => 0.0,
+                }))
+            }
+            (Some("voxel"), Some("is_solid")) => Ok(Value::Bool(voxel_is_solid(
+                self.voxels,
+                DVec3::new(arg_f64(args, 0), arg_f64(args, 1), arg_f64(args, 2)),
+            ))),
+            (Some("voxel"), Some("ground_height")) => Ok(Value::Float(
+                inf_voxel::topmost_voxel_surface(self.voxels, arg_f64(args, 0), arg_f64(args, 1))
                     .unwrap_or(0.0),
             )),
             // Unknown engine call: log it (matching the editor host) so a
@@ -1924,6 +2014,122 @@ fn terrain_height_at(world: &EcsWorld, voxels: &BTreeMap<Uuid, VoxelData>, x: f6
         None => (DVec3::ZERO, None),
     };
     inf_voxel::ground_height_at(terrain, origin, voxels, x, z).unwrap_or(0.0)
+}
+
+/// **One gameplay carve or fill** (P21.4) — the voxel half through the shared
+/// Ring-0 rule, then the heightfield half through the shared coupling rule.
+/// Returns the volume moved in **cubic metres**, `0.0` for every refusal.
+///
+/// Mirrored character-for-character in `inf_editor_core::simulate`, for the reason
+/// `terrain_height_at` above is: a preview that dug a different hole from the
+/// shipped build is a bug no compiler and no screenshot finds.
+///
+/// # The heightfield half, and what "sim-local" means
+///
+/// A game digging through the surface must open a mouth, or a player walks into a
+/// cave that is not there. So a carve that reaches a terrain's height samples runs
+/// [`inf_voxel::apply_surface_cut`] — the *same* exactly-invertible rule the
+/// editor's carve brush runs — over **every** terrain in the world, in `Guid`
+/// order.
+///
+/// The difference from the editor is that **nothing here is persisted, and that
+/// changes which refusals apply.** The editor refuses to carve an *inline* terrain
+/// (`CarveRefusal::InlineTerrain`) because scene schema v19 cannot carry a hole
+/// mask, so saving would seal every mouth the author dug — the refusal protects a
+/// document. A fixed step writes no document: the editor's Simulate world is a
+/// `ScenePersist::Memory` snapshot and the player's is a loaded pack, and both die
+/// with the session. So a runtime carve is allowed on any terrain, inline or
+/// streamed, and the hole lives exactly as long as the play session does. A game
+/// that wants craters to survive a reload needs a save system, which is not this
+/// phase and is not silently half-built here.
+fn runtime_voxel_op(
+    world: &mut EcsWorld,
+    voxels: &mut BTreeMap<Uuid, VoxelData>,
+    logs: &mut Vec<String>,
+    entity: Uuid,
+    op: &inf_voxel::VoxelOp,
+    op_name: &str,
+) -> f64 {
+    // The component decides permission; a missing one is "no volume" rather than
+    // "not permitted", because the two read very differently in a log.
+    let flag = world
+        .entity_of(entity)
+        .and_then(|e| world.world().get::<VoxelVolume>(e))
+        .map(|v| v.runtime_carve);
+    let Some(permitted) = flag else {
+        logs.push(
+            inf_voxel::RuntimeCarveOutcome::NoVolume
+                .refusal(op_name)
+                .expect("NoVolume is a refusal"),
+        );
+        return 0.0;
+    };
+    let report = inf_voxel::runtime_carve(voxels, &entity, permitted, op);
+    if let Some(msg) = report.outcome.refusal(op_name) {
+        logs.push(msg);
+        return 0.0;
+    }
+    let voxel_size_m = voxels
+        .get(&entity)
+        .map(|d| d.voxel_size_m())
+        .unwrap_or(1.0_f64);
+
+    // The heightfield half. Only when the field actually moved: an op that hit
+    // nothing but air has nothing to open, and re-running the coupling would be a
+    // no-op anyway (it is a pure function of the shape and the tile grid) — this
+    // just declines to walk the sample grid for it.
+    if report.touched > 0 {
+        let open = matches!(op.kind, inf_voxel::VoxelOpKind::Carve);
+        // Collect first: the walk borrows the world immutably and the cut needs it
+        // mutably. `Guid` order, so two runs touch the tiles in one sequence.
+        let mut terrains: Vec<(Uuid, DVec3)> = world
+            .world()
+            .iter_entities()
+            .filter_map(|e| {
+                let guid = e.get::<Guid>().map(|g| g.0)?;
+                let t = e.get::<Terrain>()?;
+                if t.data.is_empty() {
+                    return None;
+                }
+                let origin = e
+                    .get::<GlobalTransform>()
+                    .map(|g| g.translation())
+                    .or_else(|| e.get::<Transform>().map(|t| t.translation.to_dvec3()))
+                    .unwrap_or(DVec3::ZERO);
+                Some((guid, origin))
+            })
+            .collect();
+        terrains.sort_by_key(|(g, _)| *g);
+        for (guid, origin) in terrains {
+            let Some(e) = world.entity_of(guid) else {
+                continue;
+            };
+            if let Some(mut t) = world.world_mut().get_mut::<Terrain>(e) {
+                inf_voxel::apply_surface_cut(&mut t.data, origin, &op.shape, open);
+            }
+        }
+    }
+
+    match op.kind {
+        inf_voxel::VoxelOpKind::Carve => report.removed_m3(voxel_size_m),
+        inf_voxel::VoxelOpKind::Fill { .. } => report.added_m3(voxel_size_m),
+    }
+}
+
+/// Whether any of the sim's volumes has rock at a world point (`voxel.is_solid`).
+/// Shared with the editor twin; deterministic (`BTreeMap` order, and the answer
+/// is an `any`, so order cannot change it).
+fn voxel_is_solid(voxels: &BTreeMap<Uuid, VoxelData>, p: DVec3) -> bool {
+    voxels.values().any(|d| d.is_solid_at(p))
+}
+
+/// Clamp a Blueprint's `material` pin into the four splat layers a voxel sample
+/// can carry. Out of range **saturates** rather than erroring or wrapping: a `7`
+/// typed into a node is an author mistake, and filling with the last layer is a
+/// visible wrong answer while wrapping to layer 3 would be an invisible one.
+/// Shared with the editor twin.
+fn clamp_material(m: i64) -> u8 {
+    m.clamp(0, inf_voxel::MATERIAL_COUNT as i64 - 1) as u8
 }
 
 /// Resolve every `.inf_voxel` volume a `VoxelVolume` entity in `world` references,
