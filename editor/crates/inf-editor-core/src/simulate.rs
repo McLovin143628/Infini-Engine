@@ -2106,6 +2106,172 @@ where
     out
 }
 
+/// Fold the editor's **unsaved carves** into a resolved sim volume map — the
+/// `ScenePersist::Memory` law (P16.4b), for voxels.
+///
+/// [`resolve_voxel_volumes`] reads `.inf_voxel` payloads off disk, so on its own
+/// it hands Simulate the *last saved* cave. A streamed terrain does not behave
+/// that way and must not: `SimSession::enter` snapshots the document with
+/// [`ScenePersist::Memory`] precisely so a session sees the sculpts an author has
+/// not saved yet. A carve is the same act on the other surface — and it is worse
+/// unsaved, because a tunnel the author just dug is a tunnel they immediately
+/// press Play to walk through, and the disk copy is still solid rock. The
+/// difference is only that a terrain's working set lives in the `SceneDoc` (so
+/// the snapshot carries it) while chunks cannot: scene schema v19 is frozen, so
+/// the live store is a separate object and this is what reaches into it.
+///
+/// `live` yields the editor store's current [`VoxelData`] for an entity — in the
+/// editor that is `EditorVoxelVolumes::slot(entity).data`.
+///
+/// # Why the DIRTY set, and why that is still camera-free
+///
+/// Only chunks the store marks dirty are copied, and dirty means "carved since
+/// the last write-back" — a function of the **edit history**, never of residency:
+/// `VoxelData::sync_residency` refuses to evict a dirty chunk and reports it as
+/// `retained_dirty` (`sync_residency_never_evicts_a_dirty_chunk`), so a carve
+/// cannot be paged out from under this. That is what keeps the determinism seam
+/// on [`SimSession::set_voxel_volumes`] intact: the sim's map still does not
+/// depend on where the editor camera is, it depends on what was dug.
+///
+/// A dirty key with **no resident chunk** is a deletion (see
+/// `VoxelData::evict_chunk`'s note), and is replayed as one — a chunk the author
+/// removed must not survive into Simulate just because the disk copy still has it.
+///
+/// Volumes the resolver could not produce are skipped rather than invented: a
+/// carve has no world anchor without the asset it was cut into. So is a live
+/// volume whose voxel size disagrees with the resolved one — those are two
+/// different grids, and copying a chunk between them would place its samples
+/// somewhere nobody carved.
+///
+/// Returns how many chunks were overlaid (0 = "the disk copy was already
+/// current"), which is what a caller logs and a test asserts against.
+pub fn overlay_unsaved_carves<'a, F>(volumes: &mut BTreeMap<Uuid, VoxelData>, mut live: F) -> usize
+where
+    F: FnMut(Uuid) -> Option<&'a VoxelData>,
+{
+    let mut applied = 0usize;
+    for (&entity, sim) in volumes.iter_mut() {
+        let Some(store) = live(entity) else { continue };
+        if store.voxel_size_m() != sim.voxel_size_m() {
+            tracing::warn!(
+                "inf-editor-core: live voxel volume {entity} is {} m/voxel but the \
+                 resolved one is {} m — unsaved carves NOT carried into Simulate",
+                store.voxel_size_m(),
+                sim.voxel_size_m()
+            );
+            continue;
+        }
+        for key in store.dirty_chunks() {
+            match store.get_chunk(key) {
+                Some(chunk) => sim.insert_resident_chunk(key, chunk.clone()),
+                None => {
+                    sim.evict_chunk(key);
+                }
+            }
+            applied += 1;
+        }
+    }
+    applied
+}
+
+#[cfg(test)]
+mod voxel_sim_tests {
+    //! P21.2 audit: an unsaved carve is standable in Simulate.
+
+    use super::*;
+    use inf_voxel::{ChunkKey, VoxelChunk, VoxelOp, VoxelShape};
+
+    /// A 2 × 2 × 2-chunk block of solid rock at 0.5 m voxels, anchored at the
+    /// world origin — the "saved" state both maps start from.
+    fn solid_block() -> VoxelData {
+        let mut v = VoxelData::new(0.5);
+        for key in inf_voxel::chunk_range(ChunkKey::new(0, 0, 0), ChunkKey::new(1, 1, 1)) {
+            v.insert_chunk(key, VoxelChunk::solid(1));
+        }
+        v.clear_dirty(); // it is what is on disk
+        v
+    }
+
+    /// **THE M2 REGRESSION: Simulate must see the carve that has not been saved.**
+    ///
+    /// The ground query is the observable, because it is the one gameplay uses:
+    /// standing over the carved column, the floor must drop to the cave floor. On
+    /// the disk copy it is still the top of the rock.
+    #[test]
+    fn an_unsaved_carve_is_standable_in_simulate() {
+        let entity = Uuid::from_u128(1);
+        // What Simulate resolves off disk …
+        let mut sim: BTreeMap<Uuid, VoxelData> = BTreeMap::new();
+        sim.insert(entity, solid_block());
+        // … and what the editor is actually holding: the same volume with a shaft
+        // carved down through the middle of it, unsaved.
+        let mut store = solid_block();
+        let (report, _) = store.apply_op(&VoxelOp::carve(VoxelShape::Sphere {
+            center: glam::DVec3::new(8.0, 12.0, 8.0),
+            radius_m: 5.0,
+        }));
+        assert!(report.total_carved() > 0, "the fixture carved nothing");
+        assert!(!store.dirty_chunks().is_empty());
+
+        // Directly under the shaft: the carve breaches the rock's top face there,
+        // so the topmost surface drops from the roof to the cave floor.
+        let (x, z) = (8.0, 8.0);
+        let saved = inf_voxel::voxel_surface_y_at(&sim[&entity], x, z).expect("rock has a top");
+        let carved = inf_voxel::voxel_surface_y_at(&store, x, z).expect("the cave has a floor");
+        assert!(
+            carved < saved - 0.5,
+            "the fixture must actually lower the ground ({carved} vs {saved})"
+        );
+
+        let applied = overlay_unsaved_carves(&mut sim, |e| (e == entity).then_some(&store));
+        assert!(applied > 0, "no chunk was overlaid at all");
+        assert_eq!(
+            inf_voxel::voxel_surface_y_at(&sim[&entity], x, z),
+            Some(carved),
+            "Simulate is standing on the disk copy — the unsaved carve is invisible \
+             to it, which is the P16.4b ScenePersist::Memory law broken for voxels"
+        );
+    }
+
+    /// The overlay is a function of the **edit history**, not of residency: a
+    /// carve that has been paged around still lands, and a clean volume changes
+    /// nothing at all.
+    #[test]
+    fn the_overlay_is_camera_free_and_a_clean_store_is_a_no_op() {
+        let entity = Uuid::from_u128(1);
+        let clean = solid_block();
+        let mut sim: BTreeMap<Uuid, VoxelData> = BTreeMap::new();
+        sim.insert(entity, solid_block());
+        let before = sim[&entity].clone();
+        assert_eq!(overlay_unsaved_carves(&mut sim, |_| Some(&clean)), 0);
+        assert_eq!(
+            sim[&entity].chunk_count(),
+            before.chunk_count(),
+            "a store with nothing unsaved must not move the sim's volumes"
+        );
+
+        // A volume the resolver never produced is skipped rather than invented —
+        // a carve with no asset behind it has no world anchor to hang off.
+        let mut carved = solid_block();
+        carved.apply_op(&VoxelOp::carve(VoxelShape::Sphere {
+            center: glam::DVec3::new(8.0, 12.0, 8.0),
+            radius_m: 5.0,
+        }));
+        let mut empty: BTreeMap<Uuid, VoxelData> = BTreeMap::new();
+        assert_eq!(overlay_unsaved_carves(&mut empty, |_| Some(&carved)), 0);
+        assert!(empty.is_empty());
+
+        // A live volume on a different grid is refused: copying a chunk between
+        // two voxel sizes would place its samples where nobody carved.
+        let mut other = VoxelData::new(0.25);
+        other.insert_chunk(ChunkKey::new(0, 0, 0), VoxelChunk::solid(1));
+        assert!(!other.dirty_chunks().is_empty());
+        let mut sim2: BTreeMap<Uuid, VoxelData> = BTreeMap::new();
+        sim2.insert(entity, solid_block());
+        assert_eq!(overlay_unsaved_carves(&mut sim2, |_| Some(&other)), 0);
+    }
+}
+
 #[cfg(test)]
 mod debug_tests {
     //! B-P4 tier A′: the Simulate debug seam (per-class `InterpDebug` +

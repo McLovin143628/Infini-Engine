@@ -1196,6 +1196,77 @@ mod tests {
         assert!(cache.get(touched).is_none());
     }
 
+    /// **THE OTHER DIRECTION: paging a neighbour IN dissolves the wall the seam
+    /// had against it** (P21.2 audit).
+    ///
+    /// `evicting_a_non_maximal_neighbour_remeshes_the_chunks_that_could_see_it`
+    /// pins the *evict* direction, which is the one a max alone gets wrong. The
+    /// *load* direction is the one that happens on every camera move, and it was
+    /// asserted nowhere: a chunk meshed while its neighbour was absent carries a
+    /// **wall** (absent ≡ empty, so the shared boundary is a sign change), and if
+    /// nothing re-meshed it when the neighbour arrived, the player would walk up to
+    /// a pane of rock hanging inside solid ground.
+    ///
+    /// Asserted as the *surface*, not only as the bookkeeping: the re-meshed chunk
+    /// must be bit-equal to what it would have been had both chunks been resident
+    /// all along, which is the only statement that rules out "re-meshed, still
+    /// wrong". `VoxelVolumes::sync_camera` closes the loop end to end by calling
+    /// this sync unconditionally after every residency pass.
+    #[test]
+    fn paging_a_neighbour_in_dissolves_the_wall_meshed_against_it() {
+        // A slab: solid below global y = 8, air above. Both chunks carry it, so a
+        // fully-resident pair has NO surface on their shared x = 16 boundary.
+        let slab = |key: ChunkKey| {
+            let base = key.base_sample();
+            VoxelChunk::from_fn(move |_, j, _| ((base[1] + j as i32) as f64) - 8.0)
+        };
+        let (a, b) = (ChunkKey::new(0, 0, 0), ChunkKey::new(1, 0, 0));
+
+        let mut alone = VoxelData::new(0.5);
+        alone.insert_chunk(a, slab(a));
+        let mut cache = VoxelMeshCache::new();
+        cache.sync(&alone);
+        let walled = cache.get(a).expect("a is cached").clone();
+        assert!(
+            !walled.is_empty(),
+            "the fixture produced no surface at all — nothing below is a claim"
+        );
+
+        // Both resident: what the chunk SHOULD look like.
+        let mut both = alone.clone();
+        both.insert_chunk(b, slab(b));
+        let want = mesh_chunk(&both, a);
+        assert_ne!(
+            walled, want,
+            "the lone chunk meshed the same as the paired one — the fixture has no \
+             boundary wall, so the re-mesh below would prove nothing"
+        );
+        assert!(
+            walled.triangle_count() > want.triangle_count(),
+            "the wall is the extra triangles: {} alone vs {} paired",
+            walled.triangle_count(),
+            want.triangle_count()
+        );
+
+        let before = cache.version(a);
+        let report = cache.sync(&both);
+        assert!(
+            report.remeshed.contains(&a),
+            "chunk {a:?} kept its wall after the neighbour paged in: {report:?}"
+        );
+        assert!(
+            cache.version(a) > before,
+            "the mesh stamp did not move, so a GPU cache would keep the walled buffers"
+        );
+        assert_eq!(
+            cache.get(a),
+            Some(&want),
+            "re-meshed, but not to the surface a fully-resident pair produces"
+        );
+        // …and a settled volume then re-meshes nothing.
+        assert!(cache.sync(&both).is_noop());
+    }
+
     /// **THE EVICTION REGRESSION.** A max over the neighbourhood cannot see a
     /// non-maximal neighbour leaving, and the first cut of this cache used exactly
     /// that as its whole key.

@@ -941,6 +941,78 @@ mod tests {
         assert_eq!(a.biome_sample(res, 3, 3), 9, "the id-9 patch survives");
     }
 
+    /// **THE COARSE-LOD HOLE REMAINDER, PINNED** (P21.2 audit).
+    ///
+    /// [`downsample_block`] reduces heights, biome ids and erosion data maps —
+    /// and **not** the per-sample hole mask. A coarse pyramid page is therefore
+    /// hole-free however thoroughly carved the level-0 block under it is, and the
+    /// two consequences are shipped behaviour rather than theory:
+    ///
+    /// * a clipmap ring far enough out to draw a coarse page draws **ground over
+    ///   a cave** — `terrain.wgsl` discards on the page's own mask and the page
+    ///   has none, so a cave mouth closes up as the camera walks away from it;
+    /// * `inf_render::RenderTerrain::seam_sample` reads the residency floor (the
+    ///   coarsest level, so that lighting cannot depend on camera history), so on
+    ///   a streamed terrain the seam blend cannot apply the poison rule either —
+    ///   which is why `RenderTerrain::seam_holes_are_known` exists and why
+    ///   `apply_seam` carries a mask-free veto for the case it answers `false`.
+    ///
+    /// This asserts the **current** behaviour, not the wanted one, and that is the
+    /// whole point of writing it: a previous audit round claimed this was "pinned
+    /// as a remainder" when nothing anywhere asserted it, and a cited gate that
+    /// does not exist is worse than no claim. Propagating holes upward is a
+    /// **decision**, not an oversight — a coarse sample covering four fine ones
+    /// could be holed if any child is (a cave mouth grows by a whole coarse
+    /// sample), if all are (it vanishes until it is 2ⁿ samples wide), or by
+    /// majority like biome ids — and each answer draws a different distant
+    /// silhouette. Whoever makes it deletes this test on the way past.
+    #[test]
+    fn a_coarse_page_carries_no_hole_mask() {
+        let res = 5;
+        let mut t = poly_terrain(res, 1.0, 2);
+        // Carve the ENTIRE 2×2 block through: if anything were going to survive
+        // the reduction, an all-holed input is where it would.
+        for coord in t.tiles().map(|(&c, _)| c).collect::<Vec<_>>() {
+            let tile = t.get_tile_mut(coord).unwrap();
+            for j in 0..res {
+                for i in 0..res {
+                    tile.set_hole(res, i, j, true);
+                }
+            }
+            assert!(tile.has_holes(), "the fixture must really be carved");
+        }
+
+        let fine: BTreeMap<(i32, i32), &TerrainTile> = t.tiles().map(|(&c, x)| (c, x)).collect();
+        let coarse = downsample_block(res, 1.0, (0, 0), &fine);
+        assert!(
+            coarse.holes_are_default() && !coarse.has_holes(),
+            "the reduction grew a hole mask — that is a deliberate change, and \
+             this test is where it gets argued for"
+        );
+        for j in 0..res {
+            for i in 0..res {
+                assert!(!coarse.is_hole(res, i, j), "({i},{j})");
+            }
+        }
+        // …and the heights DID reduce, so this is a statement about the mask and
+        // not about a fixture that produced nothing.
+        assert_eq!(
+            coarse.sample(res, 0, 0),
+            fine[&(0, 0)].sample(res, 0, 0),
+            "the near corner must decimate — otherwise nothing was reduced at all"
+        );
+        // The whole pyramid, not just the kernel: every coarse level is hole-free.
+        for level in build_pyramid(&t, PyramidOptions::default()) {
+            for (coord, tile) in &level.tiles {
+                assert!(
+                    !tile.has_holes(),
+                    "lod {} tile {coord:?} carries holes",
+                    level.lod
+                );
+            }
+        }
+    }
+
     /// **The dimension is the rule: flow sums, the metre channels average.**
     ///
     /// The property that separates them is what a **uniform field** does across a

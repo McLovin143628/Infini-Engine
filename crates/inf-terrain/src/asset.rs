@@ -162,7 +162,8 @@ pub const HEADER_LEN_V4: u64 = HEADER_LEN_V2;
 /// Bytes of the **v5** fixed header. P21.2's hole mask is, once again, a *tile
 /// blob* change only — and v2 left 56 reserved bytes precisely so a version that
 /// needs no new header field costs no re-length. Same reasoning as
-/// [`HEADER_LEN_V3`]; `v5_needed_no_header_re_length` is the check.
+/// [`HEADER_LEN_V3`]; `v5_needed_no_header_re_length` is the check (it was cited
+/// here before it was written — the P21.2 audit wrote it).
 pub const HEADER_LEN_V5: u64 = HEADER_LEN_V2;
 
 /// Bytes of the fixed header **this build writes** (the current schema's).
@@ -987,6 +988,47 @@ mod tests {
         assert_eq!(
             r.header().blob_base,
             (HEADER_LEN_V2 + DIR_ENTRY_LEN * r.tile_count() as u64).next_multiple_of(TILE_ALIGN)
+        );
+    }
+
+    /// **The v5 header claim, actually checked** (P21.2 audit). [`HEADER_LEN_V5`]
+    /// says P21.2's hole mask cost no header re-length and cited this test by
+    /// name; the test did not exist, and a cited gate that does not exist is worse
+    /// than no claim.
+    ///
+    /// What it pins is what the claim actually rests on: `header_len(5)` resolves
+    /// to the v2 length, this build writes v5 and writes that length, and the
+    /// reserved tail is **still all zeros** — the 56 bytes v2 set aside are
+    /// unclaimed, so the next version that genuinely needs a header field can take
+    /// them and be told apart from every version that did not.
+    #[test]
+    fn v5_needed_no_header_re_length() {
+        assert_eq!(TERRAIN_ASSET_SCHEMA_VERSION, 5, "this test is about v5");
+        assert_eq!(header_len(5), HEADER_LEN_V2);
+        assert_eq!(HEADER_LEN_V5, HEADER_LEN_V2);
+        assert_eq!(HEADER_LEN, HEADER_LEN_V5);
+        // The catch-all arm answers with the current length. Not a forward-compat
+        // promise — an unknown version is rejected before `header_len` is asked —
+        // just the statement that v5 is the arm every future number lands in until
+        // one of them claims the reserved tail and adds its own.
+        assert_eq!(header_len(6), HEADER_LEN_V5);
+
+        let t = sample_terrain();
+        let opts = PyramidOptions::default();
+        let asset = build_terrain_asset(&t, &build_pyramid(&t, opts), opts).unwrap();
+        assert_eq!(asset.reader().header().schema_version, 5);
+        assert!(
+            asset.as_bytes()[72..HEADER_LEN_V5 as usize]
+                .iter()
+                .all(|&b| b == 0),
+            "v5 spent part of the reserved tail — then it is not a tile-blob-only \
+             change, and HEADER_LEN_V5's doc is wrong"
+        );
+        assert_eq!(
+            asset.reader().header().blob_base,
+            (HEADER_LEN_V5 + DIR_ENTRY_LEN * asset.reader().tile_count() as u64)
+                .next_multiple_of(TILE_ALIGN),
+            "the directory does not start where a 128-byte header would put it"
         );
     }
 

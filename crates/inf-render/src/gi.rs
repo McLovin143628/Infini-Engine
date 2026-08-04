@@ -212,8 +212,8 @@ pub fn sh_l1_basis(d: Vec3) -> [f32; 4] {
 /// an *identity* for a constant field: a probe that saw uniform radiance `L`
 /// reconstructs exactly `L` in every direction, at every `lobe`. That property is
 /// what lets the specular term reduce to the old constant ambient specular
-/// (`pre_p18_4_ambient_specular_is_the_uniform_field_limit`) instead of being a
-/// free-floating new light source.
+/// instead of being a free-floating new light source, and it is asserted
+/// directly — `sh_radiance_is_identity_on_a_uniform_field`, below.
 pub fn sh_radiance(coeffs: &[[f32; 3]; 4], d: Vec3, lobe: f32) -> [f32; 3] {
     let b = sh_l1_basis(d);
     let mut out = [0.0; 3];

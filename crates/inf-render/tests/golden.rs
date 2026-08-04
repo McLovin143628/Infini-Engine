@@ -7140,7 +7140,8 @@ fn carved_volume() -> (inf_voxel::VoxelData, inf_voxel::VoxelMeshCache) {
 /// Project the carved volume into the renderer DTO — the same mapping the two
 /// hosts' `project_voxel` performs, written out here because the golden harness
 /// has neither a `SceneDoc` nor an ECS world (the same reason
-/// `golden_streamed_terrain` builds its `RenderTerrain` by hand).
+/// `streamed_terrain_renders_partial_residency` builds its `RenderTerrain` by
+/// hand, through the `streamed_terrain` helper above).
 fn voxel_scene() -> RenderScene {
     let (data, meshes) = carved_volume();
     let voxel_size_m = data.voxel_size_m();
@@ -7590,6 +7591,166 @@ fn golden_cave_mouth() {
     assert!(
         rock > 500,
         "only {rock} non-grass lit pixels — nothing shows through the mouth"
+    );
+}
+
+/// The cave-mouth heightfield as a **streamed** terrain, in the two residency
+/// states a camera produces: `(near, far)`.
+///
+/// `near` is the authored level-0 page (holed, painted) *plus* the coarse pyramid
+/// page `TerrainStreamer` pins as its residency floor. `far` is what the streamer
+/// publishes once the camera has walked away — the floor alone. Both are valid
+/// projections of one asset, they differ only in what the camera dragged in, and
+/// `max_lod()` is `1` in both, which is the property the floor exists to give.
+///
+/// The coarse page is flat at the same surface height as the fine one but carries
+/// **no weights and no hole mask** — what `inf_terrain::pyramid::downsample_block`
+/// actually produces.
+fn streamed_cave_terrain() -> (RenderTerrain, RenderTerrain) {
+    let mut near = cave_mouth_scene().terrains.remove(0);
+    let fine = near.tiles[0].clone();
+    let res = near.tile_resolution;
+    near.tiles.push(RenderTerrainTile {
+        key: TerrainTileKey::new(1, (0, 0)),
+        origin: fine.origin,
+        heights: vec![0.0; (res * res) as usize],
+        weights: Vec::new(),
+        biomes: Vec::new(),
+        holes: Vec::new(),
+        height_bounds: (0.0, 0.0),
+        version: 2,
+    });
+    let far = RenderTerrain {
+        tiles: near
+            .tiles
+            .iter()
+            .filter(|t| t.key.lod == 1)
+            .cloned()
+            .collect(),
+        ..near.clone()
+    };
+    (near, far)
+}
+
+/// **THE B1 GATE: camera-driven residency must never feed voxel lighting.**
+///
+/// The P18 law (`gi::voxelization_tiles`) with a second consumer. P21.2's seam
+/// blend hands a voxel fragment the heightfield's albedo, roughness and shading
+/// normal, and the first cut resolved them against the *level-0* pages —
+/// precisely the part of the published cut that pages in and out. A cave mouth
+/// therefore lit one way with the fine page resident and another without it, and
+/// no golden would have noticed: every golden renders a fully-resident terrain.
+///
+/// This drives one asset through two genuinely different residency histories and
+/// **byte-compares the rendered voxel surface**. The terrain itself is removed
+/// from the frame before rendering — deliberately, and it is the whole design of
+/// the instrument: the two states legitimately *draw* different heightfield
+/// detail (asserted below), so an image that contained the terrain could not
+/// separate "the clipmap drew a coarser hill" from "the cave was lit differently".
+/// The seam terms are baked into the vertices before the terrain leaves, so what
+/// is compared is exactly the voxel pass's own output.
+///
+/// Structural + bitwise, so no golden PNG is added (the count stays at 49): the
+/// claim is an equality between two renders, not the appearance of either.
+#[test]
+fn voxel_lighting_is_independent_of_terrain_residency() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (near, far) = streamed_cave_terrain();
+    assert_eq!(near.max_lod(), 1);
+    assert_eq!(far.max_lod(), 1);
+    assert!(
+        far.tiles.len() < near.tiles.len(),
+        "the paged-out state must actually be a smaller residency set"
+    );
+
+    // Bake the seam from `terrain`, then drop the terrain and draw the volume.
+    let lit = |terrain: &RenderTerrain, band: f32| -> (Vec<u8>, usize) {
+        let mut scene = voxel_scene();
+        inf_render::apply_seam(&mut scene.voxels, std::slice::from_ref(terrain), band);
+        let seamed = scene.voxels[0]
+            .chunks
+            .iter()
+            .flat_map(|c| &c.vertices)
+            .filter(|v| v.seam_nh[1] > 0.0)
+            .count();
+        scene.terrains.clear();
+        scene.mark_dirty();
+        (
+            render_with(&gpu, &scene, &cave_mouth_view(), RenderSettings::default()),
+            seamed,
+        )
+    };
+
+    let (with_fine, seamed_near) = lit(&near, inf_render::DEFAULT_SEAM_BAND_M);
+    let (without_fine, seamed_far) = lit(&far, inf_render::DEFAULT_SEAM_BAND_M);
+
+    // Not vacuous: the seam fired, on the same vertices, in both states.
+    assert!(
+        seamed_near > 0,
+        "no vertex picked up a seam — the gate would pass on two unseamed renders"
+    );
+    assert_eq!(
+        seamed_near, seamed_far,
+        "a different number of vertices seamed depending on residency"
+    );
+
+    // Summarize rather than assert_eq! on the buffers: a failure would otherwise
+    // print two 320×180 RGBA images.
+    let mismatch = |a: &[u8], b: &[u8]| -> Option<(usize, usize)> {
+        if a.len() != b.len() {
+            return Some((0, a.len().max(b.len())));
+        }
+        let differing = a.iter().zip(b).filter(|(x, y)| x != y).count();
+        a.iter()
+            .zip(b)
+            .position(|(x, y)| x != y)
+            .map(|i| (i, differing))
+    };
+    assert!(
+        mismatch(&with_fine, &without_fine).is_none(),
+        "the voxel surface was lit differently across two residency histories \
+         ({:?} = (first differing byte, count of {})) — camera history is feeding \
+         lighting",
+        mismatch(&with_fine, &without_fine),
+        with_fine.len()
+    );
+
+    // The comparison above is only worth making if the seam reaches the pixels at
+    // all: the same volume with the band disarmed must render differently.
+    let (unseamed, none) = lit(&near, 0.0);
+    assert_eq!(
+        none, 0,
+        "a disarmed band must leave every vertex at NO_SEAM"
+    );
+    // Counted, not averaged: the band is a two-metre ring around one surface
+    // height by construction, so it covers a small fraction of a frame that is
+    // mostly dome. A whole-image mean would be a threshold tuned to this
+    // fixture's framing rather than a statement about the seam.
+    let moved = with_fine
+        .chunks_exact(4)
+        .zip(unseamed.chunks_exact(4))
+        .filter(|(a, b)| (0..3).any(|c| (a[c] as i32 - b[c] as i32).abs() >= 8))
+        .count();
+    assert!(
+        moved > 200,
+        "only {moved} pixel(s) moved when the band was armed, so byte-equality \
+         across residency proves nothing about lighting"
+    );
+
+    // …and the two residency states really are different inputs: with the terrain
+    // left in the frame they draw differently, which is exactly why the gate
+    // takes it out.
+    let drawn = |terrain: &RenderTerrain| {
+        let mut scene = voxel_scene();
+        scene.terrains.push(terrain.clone());
+        scene.mark_dirty();
+        render_with(&gpu, &scene, &cave_mouth_view(), RenderSettings::default())
+    };
+    assert_ne!(
+        drawn(&near),
+        drawn(&far),
+        "the two residency states rendered identically — the fixture is not \
+         exercising a residency difference at all"
     );
 }
 

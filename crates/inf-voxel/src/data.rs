@@ -440,12 +440,22 @@ impl VoxelData {
     /// Make every key in `wants` resident, **evicting nothing** — the additive
     /// half of [`sync_residency`](Self::sync_residency).
     ///
-    /// An edit working set pages this way rather than through `sync_residency`: a
-    /// carve footprint is a *different* set on every dab, so reconciling against
-    /// it would evict the chunks the previous dab just edited and, worse, would
-    /// leave the chunks an undo step has to write `before` into non-resident —
-    /// where [`VoxelDelta`](crate::VoxelDelta) would recreate them **empty** and
-    /// lose every sample outside the recorded box.
+    /// An edit working set pages this way rather than through `sync_residency`
+    /// because a carve footprint is a *different* set on every dab: reconciling
+    /// against it would page the surrounding neighbourhood out and straight back
+    /// in as the brush moved, one full round trip through the store per dab.
+    ///
+    /// **The reason it does NOT give is data loss**, and the correction is worth
+    /// keeping because the wrong version is the plausible one. An earlier draft of
+    /// this comment claimed reconciling "would evict the chunks the previous dab
+    /// just edited" and leave an undo step writing `before` into chunks
+    /// [`VoxelDelta`](crate::VoxelDelta) would have to recreate **empty**. It would
+    /// not: every op path marks what it touches dirty
+    /// ([`chunk_version`](Self::chunk_version)), and `sync_residency` refuses to
+    /// evict a dirty chunk — it reports it as `retained_dirty` and leaves it
+    /// resident, which `sync_residency_never_evicts_a_dirty_chunk` asserts against
+    /// the most hostile want set there is (the empty one). Unsaved carving is
+    /// never dropped on the floor; this door exists for churn, not for safety.
     pub fn request_chunks<S: ChunkStore + ?Sized>(
         &mut self,
         wants: &BTreeSet<ChunkKey>,

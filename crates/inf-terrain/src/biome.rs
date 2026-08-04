@@ -31,10 +31,12 @@
 //!
 //! # The hint fields are plain data, deliberately
 //!
-//! `water_hint` and `structure_hint` are inert here: nothing in P19.2 reads them.
-//! They are declared now because they are what P20 (water) and P19.5 (building
-//! grammar) will ask a biome for, and adding a field to a bincode payload later
-//! costs a schema migration on every `.inf_biomes` in every project. Storing them
+//! `water_hint` and `structure_hint` were inert when P19.2 declared them: nothing
+//! read them. **Both have readers now** — `water_hint` through [`water_hints`]
+//! right here and through the editor's hydrology tools, `structure_hint` through
+//! the P19.5 grammar samples — and the paragraph is kept, corrected, because the
+//! *reason* is what matters and it was vindicated: they were declared ahead of
+//! their consumers because adding a field to a bincode payload later
 //! as *hints* — advisory scalars a consumer may ignore — rather than as bound
 //! references keeps them honest: an empty hint is not a dangling edge.
 //!
@@ -87,10 +89,12 @@ pub struct BiomeDef {
     pub pcg_graph: Option<Uuid>,
     /// Still-water level for this biome, in **metres** of absolute world height
     /// (SI doctrine: 1 world unit = 1 metre). `None` = no standing water. Plain
-    /// data in P19.2; P20's water system is its first reader.
+    /// data when P19.2 declared it; P20.4's hydrology tools are its first reader
+    /// (through [`water_hints`], and `inf_editor_core::hydro`'s suggested level).
     pub water_hint: Option<f32>,
     /// Building/structure palette name for this biome (P19.5's `office`,
-    /// `house`, … module sets). Plain data in P19.2.
+    /// `house`, … module sets). Plain data when P19.2 declared it; read by the
+    /// P19.5 grammar binding since.
     pub structure_hint: Option<String>,
 }
 

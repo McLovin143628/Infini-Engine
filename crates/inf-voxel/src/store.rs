@@ -669,7 +669,12 @@ mod tests {
         assert!(!store.place(1, DVec3::new(1000.0, 0.0, 0.0)), "idempotent");
         let r = store.sync_camera(cam, &params, VoxelStreamBudget::default());
         assert!(r.loaded > 0, "{r:?}");
-        // A non-finite placement is refused rather than propagated into the grid.
+        // A non-finite placement is **substituted with the origin**, not refused:
+        // the NaN never reaches the grid (which is the point — a NaN anchor makes
+        // every distance NaN and every want undecidable), but the volume does not
+        // keep the good placement it had either. Stated as it behaves rather than
+        // as it reads: a host that pushes one NaN frame teleports its cave to the
+        // world origin until the next good `place`.
         store.place(1, DVec3::splat(f64::NAN));
         assert_eq!(store.get(1).unwrap().translation, DVec3::ZERO);
         assert!(

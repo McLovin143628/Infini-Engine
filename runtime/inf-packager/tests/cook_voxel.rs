@@ -23,6 +23,7 @@ use std::path::Path;
 
 use inf_asset::{AssetId, AssetKind, AssetSidecar, ContentHash};
 use inf_ecs::components::{Transform, VoxelVolume};
+use inf_ecs::math::Vec3d;
 use inf_packager::{cook, CookOptions};
 use inf_project::ProjectManifest;
 use inf_voxel::{ChunkKey, VoxelChunk, VoxelData};
@@ -479,39 +480,184 @@ fn an_uncovered_hole_is_reported_as_a_see_through_pit() {
     assert!(hit.contains("fill the holes"), "{hit}");
 }
 
+/// Move `e` to `translation` and yaw it `yaw_deg` about +Y (`Transform.rotation`
+/// is euler **degrees**, per the units doctrine).
+fn placed(
+    mut e: inf_scene::RuntimeEntity,
+    translation: (f64, f64, f64),
+    yaw_deg: f64,
+) -> inf_scene::RuntimeEntity {
+    e.transform.translation = Vec3d::new(translation.0, translation.1, translation.2);
+    e.transform.rotation = Vec3d::new(0.0, yaw_deg, 0.0);
+    e
+}
+
+/// A carved voxel volume entity at 0.5 m/voxel — the scale its payload is built
+/// at, so `voxel_scale_mismatches` stays quiet and the only advisory in play is
+/// the pit one.
+fn sized_cave(guid: u128, name: &str) -> inf_scene::RuntimeEntity {
+    let mut e = cave(guid, name, VOXEL_ID);
+    e.voxel_volume.as_mut().unwrap().voxel_size_m = 0.5;
+    e
+}
+
+/// Cook a level of `entities` over a terrain holed at `holes`, and return only
+/// its **see-through** advisories.
+fn pit_warnings(
+    entities: Vec<inf_scene::RuntimeEntity>,
+    holes: &[(u32, u32)],
+    with_voxel: bool,
+) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let out = dir.path().join("out");
+    make_project(
+        &proj,
+        &level(entities),
+        with_voxel.then(|| (VOXEL_ID, voxel_payload())),
+    );
+    put(
+        &proj,
+        "Ground.inf_terrain",
+        TERRAIN_ID,
+        AssetKind::Terrain,
+        &terrain_payload(holes),
+    );
+    cook(&proj, &out, &CookOptions::default())
+        .unwrap()
+        .warnings
+        .into_iter()
+        .filter(|w| w.contains("see-through"))
+        .collect()
+}
+
 /// **The matching silence, twice over.** A terrain with no holes says nothing,
 /// and — the load-bearing half — neither does a hole a voxel volume covers,
 /// which is the *correct* authoring of a cave mouth and by far the common case.
+///
+/// Both entities are deliberately **not at the origin** (P21.2 audit): the
+/// terrain is 100 m out, the cave meets it there, and the cave is yawed 40° for
+/// good measure. A fixture where everything sits at the origin cannot tell an
+/// advisory that places its operands from one that forgot to.
 #[test]
 fn a_covered_hole_and_an_uncarved_terrain_are_both_silent() {
     for holes in [&[][..], &[(1u32, 1u32)][..]] {
-        let dir = tempfile::tempdir().unwrap();
-        let proj = dir.path().join("proj");
-        let out = dir.path().join("out");
-
-        // The voxel fixture spans chunks (0,0,0)..(1,1,1) at 0.5 m/voxel from the
-        // origin, i.e. world XZ [0, 16) — which contains sample (1, 1) of a 1 m
-        // tile at the origin.
-        let mut entity = cave(0x21_0204, "Cave", VOXEL_ID);
-        entity.voxel_volume.as_mut().unwrap().voxel_size_m = 0.5;
-        make_project(
-            &proj,
-            &level(vec![ground(0x21_0205, "Ground", TERRAIN_ID), entity]),
-            Some((VOXEL_ID, voxel_payload())),
+        // The voxel fixture spans chunks (0,0,0)..(1,1,1) at 0.5 m/voxel from its
+        // asset origin, i.e. 16 m of XZ — so placed at (100, 100) it covers
+        // [100, 116), which contains sample (1, 1) of a 1 m tile placed there too.
+        let warnings = pit_warnings(
+            vec![
+                placed(
+                    ground(0x21_0205, "Ground", TERRAIN_ID),
+                    (100.0, 0.0, 100.0),
+                    0.0,
+                ),
+                placed(sized_cave(0x21_0204, "Cave"), (100.0, 0.0, 100.0), 40.0),
+            ],
+            holes,
+            true,
         );
-        put(
-            &proj,
-            "Ground.inf_terrain",
-            TERRAIN_ID,
-            AssetKind::Terrain,
-            &terrain_payload(holes),
-        );
-
-        let report = cook(&proj, &out, &CookOptions::default()).unwrap();
         assert!(
-            !report.warnings.iter().any(|w| w.contains("see-through")),
-            "holes {holes:?} must be silent: {:?}",
-            report.warnings
+            warnings.is_empty(),
+            "holes {holes:?} must be silent: {warnings:?}"
         );
+    }
+}
+
+/// **THE TRANSFORM REGRESSION (P21.2 audit).** Coverage is computed where the
+/// *level* puts the two assets — not where their payloads happen to be authored.
+///
+/// The first cut compared both footprints in raw asset space, so a cave authored
+/// around its own origin and placed a hundred metres from the hole it is supposed
+/// to be under read as covering it. That is the advisory reporting on a world
+/// nobody ships, and it is silent in exactly the case it exists for.
+///
+/// The second half closes it through a **parent**, which is the reason the fold
+/// is a full affine composed up the chain rather than a single translation read
+/// off the entity: a level that groups its caves under a moved (and here rotated)
+/// pivot is the normal authoring shape, and the child moves by the composition.
+#[test]
+fn a_pit_is_judged_where_the_level_puts_the_terrain_and_the_volume() {
+    let hole = &[(1u32, 1u32)][..];
+
+    // Terrain 100 m out, cave left behind at the authored origin.
+    let warnings = pit_warnings(
+        vec![
+            placed(
+                ground(0x21_0205, "Ground", TERRAIN_ID),
+                (100.0, 0.0, 100.0),
+                0.0,
+            ),
+            sized_cave(0x21_0204, "Cave"),
+        ],
+        hole,
+        true,
+    );
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("1 holed sample"), "{}", warnings[0]);
+
+    // …and the cave brought back under it through a moved, rotated PARENT.
+    let pivot = placed(rec(0x21_0206, "Caves"), (100.0, 0.0, 100.0), 25.0);
+    let mut child = sized_cave(0x21_0204, "Cave");
+    child.parent = Some(pivot.guid);
+    let warnings = pit_warnings(
+        vec![
+            placed(
+                ground(0x21_0205, "Ground", TERRAIN_ID),
+                (100.0, 0.0, 100.0),
+                0.0,
+            ),
+            pivot,
+            child,
+        ],
+        hole,
+        true,
+    );
+    assert!(
+        warnings.is_empty(),
+        "the cave is under the hole through its parent: {warnings:?}"
+    );
+}
+
+/// **Rotation does not move the ground a volume covers — here or at runtime.**
+///
+/// `inf_voxel::VoxelVolumes::place` takes a *translation* and offsets the asset
+/// anchor by it; the shipped player feeds it `GlobalTransform::translation()` and
+/// discards the rest. So a yawed cave occupies exactly the chunks an unyawed one
+/// does, and an advisory that rotated the footprint would report a hazard the
+/// build does not have. Pinned rather than assumed, because "fold the transform"
+/// reads like "fold the whole transform" until someone checks what the runtime
+/// honours.
+///
+/// The day placement grows a rotation, this test is the one that fails.
+#[test]
+fn yawing_a_volume_does_not_move_the_ground_it_covers() {
+    let hole = &[(1u32, 1u32)][..];
+    let ground_at = |t| placed(ground(0x21_0205, "Ground", TERRAIN_ID), t, 0.0);
+
+    // Covered either way …
+    for yaw in [0.0, 90.0, 217.5] {
+        let warnings = pit_warnings(
+            vec![
+                ground_at((100.0, 0.0, 100.0)),
+                placed(sized_cave(0x21_0204, "Cave"), (100.0, 0.0, 100.0), yaw),
+            ],
+            hole,
+            true,
+        );
+        assert!(warnings.is_empty(), "yaw {yaw}: {warnings:?}");
+    }
+    // … and uncovered either way: a rotation cannot rescue a cave that is not
+    // there, which is the half that keeps the claim from being vacuous.
+    for yaw in [0.0, 90.0] {
+        let warnings = pit_warnings(
+            vec![
+                ground_at((100.0, 0.0, 100.0)),
+                placed(sized_cave(0x21_0204, "Cave"), (0.0, 0.0, 0.0), yaw),
+            ],
+            hole,
+            true,
+        );
+        assert_eq!(warnings.len(), 1, "yaw {yaw}: {warnings:?}");
     }
 }

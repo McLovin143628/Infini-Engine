@@ -676,7 +676,31 @@ pub struct RenderTerrainTile {
 /// Terrains are consulted in projection order and the **first** one that answers
 /// wins. Overlapping heightfields are already outside what the clipmap can draw
 /// coherently, so there is no better rule available here — only a deterministic
-/// one, which this is.
+/// one, which this is. A terrain that answers and is then vetoed (below) has
+/// still answered: the search does not fall through to the next heightfield,
+/// because "the ground here is carved away" is an answer.
+///
+/// # The mask-free veto, and where it applies
+///
+/// [`RenderTerrain::seam_sample`] reads the residency floor, so on a **streamed**
+/// terrain it reads a coarse pyramid page — which carries no hole mask, so its
+/// poison rule cannot fire (see
+/// [`seam_holes_are_known`](RenderTerrain::seam_holes_are_known)). Blending
+/// anyway would put grass on a cave ceiling: at a mouth the roof is *at* the
+/// heightfield's surface, which is exactly where the band is widest.
+///
+/// So where the mask is missing, one rule that needs no mask stands in for it: a
+/// voxel surface only *continues* a heightfield if it faces the same way it does,
+/// `dot(vertex normal, heightfield normal) > 0`. A cave roof faces down and a
+/// heightfield normal always faces up, so a roof is refused; a cave wall is
+/// perpendicular and is refused too; the mouth's outward-turning lip — the one
+/// surface the blend exists for — faces up and keeps its seam.
+///
+/// It is deliberately applied **only** where the mask is absent, and that is not
+/// timidity: it is strictly weaker than the mask (it cannot see a hole in flat
+/// ground at all), so using it in place of a mask that *is* present would trade a
+/// correct answer for an approximate one — and would silently move every existing
+/// golden, which has an inline terrain and therefore a mask.
 pub fn apply_seam(volumes: &mut [RenderVoxelVolume], terrains: &[RenderTerrain], band_m: f32) {
     if band_m <= 0.0 || terrains.is_empty() {
         return;
@@ -688,17 +712,37 @@ pub fn apply_seam(volumes: &mut [RenderVoxelVolume], terrains: &[RenderTerrain],
             for v in &mut chunk.vertices {
                 let wx = base.x + v.pos[0] as f64;
                 let wz = base.z + v.pos[2] as f64;
-                if let Some(sample) = terrains.iter().find_map(|t| t.seam_sample(wx, wz)) {
-                    // `origin.y` of the chunk is already the anchor the vertex
-                    // positions are relative to, so the packed height is measured
-                    // in the same space the shader compares it against.
-                    let (nh, albedo) = sample.pack(base.y);
-                    v.seam_nh = nh;
-                    v.seam_albedo = albedo;
+                let Some((terrain, sample)) = terrains
+                    .iter()
+                    .find_map(|t| t.seam_sample(wx, wz).map(|s| (t, s)))
+                else {
+                    continue;
+                };
+                if !terrain.seam_holes_are_known() && !continues_surface(v.normal, sample.normal) {
+                    continue;
                 }
+                // `origin.y` of the chunk is already the anchor the vertex
+                // positions are relative to, so the packed height is measured
+                // in the same space the shader compares it against.
+                let (nh, albedo) = sample.pack(base.y);
+                v.seam_nh = nh;
+                v.seam_albedo = albedo;
             }
         }
     }
+}
+
+/// Does a voxel surface with normal `voxel_n` *continue* a heightfield whose
+/// surface normal there is `terrain_n`? — the mask-free half of the poison rule
+/// (see [`apply_seam`]).
+///
+/// Strictly positive, not `>= 0`: a perpendicular surface (a cave wall against
+/// flat ground) is refused. Blending it would smear hillside down a vertical face
+/// for the band's whole width, which is the loudest form of the artefact this
+/// guards, and a wall is not a continuation of the ground it is cut into.
+#[inline]
+fn continues_surface(voxel_n: [f32; 3], terrain_n: [f32; 3]) -> bool {
+    voxel_n[0] * terrain_n[0] + voxel_n[1] * terrain_n[1] + voxel_n[2] * terrain_n[2] > 0.0
 }
 
 /// What the heightfield looks like at one world `(x, z)`, for the P21.2 voxel
@@ -919,26 +963,57 @@ impl RenderTerrain {
     /// divergence the mirrored-pair discipline exists to prevent. One
     /// implementation, over the DTO both hosts already built, cannot diverge.
     ///
-    /// **Level-0 only.** A coarse pyramid page carries downsampled heights and no
-    /// painted weights at all, so blending toward one would tint a cave mouth by
-    /// whatever LOD happened to be resident — a seam that changes colour as the
-    /// camera walks away. Where level 0 is not resident the answer is honestly
-    /// `None` and the blend is off.
+    /// ## THE RESIDENCY FLOOR, and not the finest resident page (P21.2 audit)
     ///
-    /// The hole test is the **same poison rule** the fragment shader and
+    /// This reads **only** the projection's coarsest asset level
+    /// ([`max_lod`](Self::max_lod)) — the same restriction, for the same reason,
+    /// that [`gi::voxelization_tiles`](crate::gi::voxelization_tiles) puts on the
+    /// GI voxelizer. [`tiles`](Self::tiles) is the streamer's **camera-driven**
+    /// working set, so a seam resolved against "whichever level-0 page happens to
+    /// be paged in" makes a voxel surface's albedo, roughness and shading normal —
+    /// and therefore its **lighting** — a function of where the camera has *been*.
+    /// That is the P18 law (`camera-driven residency never feeds lighting`), and
+    /// the first cut of this function broke it: level 0 is exactly the part of the
+    /// cut that pages, so walking away from a cave mouth silently turned its blend
+    /// off.
+    ///
+    /// The coarsest level is the terrain's always-resident root:
+    /// `inf_terrain::TerrainStreamer` pins it as its **residency floor** and
+    /// reseeds the published cut from it, which is what makes `max_lod` a property
+    /// of the *asset* rather than of the camera (see `TerrainStreamer::
+    /// residency_floor`). An inline, non-streamed terrain has `max_lod() == 0`, so
+    /// for every such terrain — every unit test, every golden, every level that has
+    /// not been through the Terrain Import wizard — this is byte-identical to
+    /// sampling level 0, because level 0 *is* the coarsest level.
+    ///
+    /// **Two consequences on a streamed terrain, stated rather than discovered.**
+    /// A coarse pyramid page carries downsampled heights and **no painted
+    /// weights**, so the seam colour there is the uniform layer-0 blend rather than
+    /// the painted one — the identical fidelity trade the GI voxelizer already
+    /// took, and the right way round: a slightly flat seam everywhere beats a
+    /// differently-coloured one depending on where the player walked. And a coarse
+    /// page carries **no hole mask** (`inf_terrain::pyramid::downsample_block`
+    /// reduces heights, biome ids and data maps and nothing else — pinned by
+    /// `a_coarse_page_carries_no_hole_mask`), which is why
+    /// [`seam_holes_are_known`](Self::seam_holes_are_known) exists and why
+    /// [`apply_seam`] carries a mask-free veto for the case where it answers
+    /// `false`.
+    ///
+    /// The hole test below is the **same poison rule** the fragment shader and
     /// `inf_terrain::TerrainData::height_at` apply: one holed corner of the
     /// bilinear cell removes it. Which is what makes a cave mouth work — the
     /// vertices *inside* the hole get no seam, the ones just outside it do, and
     /// the band falls off across the rim.
     pub fn seam_sample(&self, x: f64, z: f64) -> Option<SeamSample> {
         let res = self.tile_resolution.max(2);
-        let mps = self.meters_per_sample;
-        let span = self.tile_span();
+        let lod = self.max_lod();
+        let mps = self.meters_per_sample * (1u64 << lod.min(62)) as f64;
+        let span = self.tile_span_at(lod);
         let coord = ((x / span).floor() as i32, (z / span).floor() as i32);
         let tile = self
             .tiles
             .iter()
-            .find(|t| t.key.lod == 0 && t.key.coord == coord)?;
+            .find(|t| t.key.lod == lod && t.key.coord == coord)?;
 
         let u = ((x - coord.0 as f64 * span) / mps).clamp(0.0, (res - 1) as f64);
         let v = ((z - coord.1 as f64 * span) / mps).clamp(0.0, (res - 1) as f64);
@@ -1015,6 +1090,24 @@ impl RenderTerrain {
     /// terrain — every inline, non-streamed terrain).
     pub fn max_lod(&self) -> u32 {
         self.tiles.iter().map(|t| t.key.lod).max().unwrap_or(0)
+    }
+
+    /// Whether the level [`seam_sample`](Self::seam_sample) reads — the residency
+    /// floor, [`max_lod`](Self::max_lod) — carries the per-sample hole mask.
+    ///
+    /// `true` exactly when that level is 0, because holes live **only** on
+    /// authored level-0 tiles: `inf_terrain::pyramid::downsample_block` reduces
+    /// heights, biome ids and erosion data maps into a coarse page and carries no
+    /// hole mask upward at all (the P21.2 remainder, pinned by
+    /// `a_coarse_page_carries_no_hole_mask`).
+    ///
+    /// The consequence is the one [`apply_seam`] acts on: where this is `false`
+    /// the poison rule inside `seam_sample` **cannot fire**, so a cave ceiling
+    /// under a mouth would answer "there is hillside here" and wear the hillside's
+    /// material. Not knowing about a hole is not the same as there being none, and
+    /// this is the predicate that says which of the two the caller is holding.
+    pub fn seam_holes_are_known(&self) -> bool {
+        self.max_lod() == 0
     }
 
     /// The projected `(key → change stamp)` ledger, in tile order — the input the
@@ -1724,5 +1817,226 @@ mod tests {
         let clean = seam_terrain(false);
         assert!(!clean.tiles[0].has_holes());
         assert!(!clean.tiles[0].is_hole(5, 2, 2));
+    }
+
+    // ── P21.2 audit: the seam may not read camera-driven residency ──────
+
+    /// A **streamed** seam terrain: the level-0 page of [`seam_terrain`] (holed)
+    /// beside the coarse pyramid page the streamer pins as its residency floor.
+    ///
+    /// `level_0` is what the camera controls — near the terrain it is paged in,
+    /// far away it is not — so the two states this builds are two genuinely
+    /// different *residency histories* over one asset.
+    ///
+    /// The coarse page is deliberately **not** a decimation of the fine one (flat
+    /// at +5 m, where level 0 slopes from +0 to +4): a fixture whose two levels
+    /// agreed could not say which one answered, and that is the whole question
+    /// here. It carries no weights and no hole mask, which is exactly what a real
+    /// `downsample_block` page carries.
+    fn streamed_seam_terrain(level_0: bool) -> RenderTerrain {
+        const RES: u32 = 5;
+        let coarse = RenderTerrainTile {
+            key: TerrainTileKey::new(1, (0, 0)),
+            origin: DVec3::new(0.0, 10.0, 0.0),
+            heights: vec![5.0; (RES * RES) as usize],
+            weights: Vec::new(),
+            biomes: Vec::new(),
+            holes: Vec::new(),
+            height_bounds: (5.0, 5.0),
+            version: 2,
+        };
+        let mut t = seam_terrain(true);
+        if !level_0 {
+            t.tiles.clear();
+        }
+        t.tiles.push(coarse);
+        t
+    }
+
+    /// **THE B1 REGRESSION, projector half.** The seam is resolved against the
+    /// terrain's *residency floor* — never against whichever fine page the camera
+    /// dragged in — so two residency histories over one asset produce the identical
+    /// sample.
+    ///
+    /// Before the fix `seam_sample` took `key.lod == 0`, which is precisely the
+    /// part of the published cut that pages: the same point answered with a full
+    /// blend near the camera and `None` far from it, and a voxel surface's albedo,
+    /// roughness and shading normal — its **lighting** — moved with it.
+    #[test]
+    fn seam_sample_reads_the_residency_floor_not_the_finest_page() {
+        let near = streamed_seam_terrain(true);
+        let far = streamed_seam_terrain(false);
+        assert_eq!(near.max_lod(), 1);
+        assert_eq!(far.max_lod(), 1);
+        assert!(
+            far.tiles.len() < near.tiles.len(),
+            "the far state must actually be a smaller residency set"
+        );
+
+        for (x, z) in [(0.5, 0.5), (2.0, 2.0), (3.75, 1.25)] {
+            let a = near.seam_sample(x, z);
+            let b = far.seam_sample(x, z);
+            assert_eq!(a, b, "({x}, {z}) answered differently across residency");
+            let s = a.expect("the floor covers the whole terrain");
+            // …and it is the FLOOR's surface, not the fine page's: level 0 is at
+            // 10 + x here, the coarse page is flat at 15.
+            assert!((s.height - 15.0).abs() < 1e-6, "height {}", s.height);
+            assert_eq!(s.normal, [0.0, 1.0, 0.0]);
+        }
+
+        // The level-0 page is genuinely a different surface, so the equality above
+        // is a claim about which level was read and not about a flat fixture.
+        let inline = seam_terrain(false);
+        assert_eq!(inline.max_lod(), 0);
+        let s = inline.seam_sample(0.5, 0.5).expect("inside");
+        assert!((s.height - 10.5).abs() < 1e-6, "height {}", s.height);
+    }
+
+    /// Holes do **not** propagate into the pyramid, so a coarse-floor projection
+    /// cannot answer the hole question — and says so rather than implying "no
+    /// hole". The stated remainder is `downsample_block` carrying a hole mask; the
+    /// day it does, this flips and the veto below becomes dead weight.
+    #[test]
+    fn a_streamed_projection_does_not_know_where_the_holes_are() {
+        assert!(seam_terrain(true).seam_holes_are_known());
+        let streamed = streamed_seam_terrain(true);
+        assert!(!streamed.seam_holes_are_known());
+        // The level-0 poison rule refuses (2, 2); the coarse floor has never heard
+        // of it. That is the divergence, pinned rather than left to be found.
+        assert!(seam_terrain(true).seam_sample(2.0, 2.0).is_none());
+        assert!(streamed.seam_sample(2.0, 2.0).is_some());
+    }
+
+    /// **THE B1 GATE, CPU half.** Every seam attribute of every vertex is
+    /// bit-identical across two residency histories — asserted on the raw `f32`
+    /// arrays, because a lighting input that is "close" across camera history is
+    /// still a lighting input that depends on camera history.
+    #[test]
+    fn the_seam_is_bit_identical_across_two_residency_histories() {
+        let vertex = |x: f32, z: f32, n: [f32; 3]| RenderVoxelVertex {
+            pos: [x, 0.0, z],
+            normal: n,
+            material: 0,
+            seam_nh: RenderVoxelVertex::NO_SEAM,
+            seam_albedo: [0.0; 4],
+        };
+        let volume = RenderVoxelVolume {
+            id: 1,
+            chunks: vec![RenderVoxelChunk {
+                key: VoxelChunkKey::default(),
+                origin: DVec3::ZERO,
+                vertices: vec![
+                    vertex(0.5, 0.5, [0.0, 1.0, 0.0]),
+                    vertex(2.0, 2.0, [0.0, 1.0, 0.0]),
+                    vertex(3.5, 1.5, [0.3, 0.9, 0.3]),
+                    vertex(1.0, 3.0, [0.0, -1.0, 0.0]),
+                    vertex(400.0, 400.0, [0.0, 1.0, 0.0]),
+                ],
+                indices: vec![0, 1, 2],
+                bounds: ([0.0; 3], [1.0; 3]),
+                version: 1,
+            }],
+            layers: [RenderTerrainLayer::default(); 4],
+            seam_band_m: 0.0,
+        };
+
+        let seamed = |terrain: RenderTerrain| {
+            let mut v = vec![volume.clone()];
+            apply_seam(&mut v, std::slice::from_ref(&terrain), DEFAULT_SEAM_BAND_M);
+            v
+        };
+        let near = seamed(streamed_seam_terrain(true));
+        let far = seamed(streamed_seam_terrain(false));
+        for (i, (a, b)) in near[0].chunks[0]
+            .vertices
+            .iter()
+            .zip(&far[0].chunks[0].vertices)
+            .enumerate()
+        {
+            assert_eq!(
+                (a.seam_nh, a.seam_albedo),
+                (b.seam_nh, b.seam_albedo),
+                "vertex {i} was lit differently depending on where the camera had \
+                 been — camera-driven residency is feeding lighting"
+            );
+        }
+        // Not vacuous: the seam really did fire on the ground-facing vertices.
+        assert!(
+            near[0].chunks[0].vertices[..3]
+                .iter()
+                .all(|v| v.seam_nh[1] > 0.0),
+            "no vertex picked up a seam at all"
+        );
+    }
+
+    /// The mask-free veto, where the mask is missing: a surface that does not
+    /// **continue** the heightfield gets no seam, so a coarse floor that cannot see
+    /// a hole still does not paint hillside onto a cave ceiling.
+    ///
+    /// The second half is the part that keeps every existing golden byte-stable:
+    /// over an *inline* terrain, whose mask IS present, the veto does not apply and
+    /// a down-facing vertex seams exactly as it always did.
+    #[test]
+    fn a_coarse_seam_refuses_the_surfaces_that_do_not_continue_the_ground() {
+        let vertex = |n: [f32; 3]| RenderVoxelVertex {
+            pos: [0.5, 0.0, 0.5],
+            normal: n,
+            material: 0,
+            seam_nh: RenderVoxelVertex::NO_SEAM,
+            seam_albedo: [0.0; 4],
+        };
+        let volume = RenderVoxelVolume {
+            id: 1,
+            chunks: vec![RenderVoxelChunk {
+                key: VoxelChunkKey::default(),
+                origin: DVec3::ZERO,
+                // A cave floor (up), a cave wall (perpendicular), a cave roof (down).
+                vertices: vec![
+                    vertex([0.0, 1.0, 0.0]),
+                    vertex([1.0, 0.0, 0.0]),
+                    vertex([0.0, -1.0, 0.0]),
+                ],
+                indices: vec![0, 1, 2],
+                bounds: ([0.0; 3], [1.0; 3]),
+                version: 1,
+            }],
+            layers: [RenderTerrainLayer::default(); 4],
+            seam_band_m: 0.0,
+        };
+
+        let mut streamed = vec![volume.clone()];
+        apply_seam(
+            &mut streamed,
+            std::slice::from_ref(&streamed_seam_terrain(true)),
+            DEFAULT_SEAM_BAND_M,
+        );
+        let vs = &streamed[0].chunks[0].vertices;
+        assert!(vs[0].seam_nh[1] > 0.0, "the floor must still seam");
+        assert_eq!(
+            vs[1].seam_nh,
+            RenderVoxelVertex::NO_SEAM,
+            "a wall is perpendicular to the ground, not a continuation of it"
+        );
+        assert_eq!(
+            vs[2].seam_nh,
+            RenderVoxelVertex::NO_SEAM,
+            "hillside was blended onto a cave ceiling"
+        );
+
+        // Inline terrain: the mask answers, so the veto stays out of it.
+        let mut inline = vec![volume];
+        apply_seam(
+            &mut inline,
+            std::slice::from_ref(&seam_terrain(false)),
+            DEFAULT_SEAM_BAND_M,
+        );
+        assert!(
+            inline[0].chunks[0]
+                .vertices
+                .iter()
+                .all(|v| v.seam_nh[1] > 0.0),
+            "the veto fired over a terrain whose hole mask is present — every \
+             pre-P21.2-audit golden depends on it not doing that"
+        );
     }
 }

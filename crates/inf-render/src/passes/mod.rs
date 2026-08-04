@@ -299,8 +299,8 @@ pub(crate) fn cloud_shadow_bake_shader(source: &str) -> String {
 
 /// Every composed scene-shader module the renderer builds — label, WGSL
 /// source, composition. Pass constructors fetch their source from this table
-/// via [`shader_source`], and the `shader_compose` unit test naga-validates
-/// each entry, so a composition that references undeclared identifiers (the
+/// via [`shader_source`], and `shader_compose_tests::composed_scene_shaders_validate`
+/// naga-validates every entry, so a composition that references undeclared identifiers (the
 /// pick-shader `shadow` bug class) fails in CI instead of panicking the live
 /// viewport thread. Add new composed call sites HERE, not inline.
 pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[

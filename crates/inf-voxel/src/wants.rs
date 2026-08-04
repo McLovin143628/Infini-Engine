@@ -503,9 +503,10 @@ mod tests {
             a,
             chunk_wants(DVec3::splat(56.0), g, &params, &cat, &BTreeSet::new())
         );
-        // A zero radius still wants the chunks the camera is standing inside
-        // (distance 0 is not < 0) — nothing, deliberately: a caller that wants
-        // "just my own chunk" asks for a radius, not for zero.
+        // A zero radius wants NOTHING — not even the chunk the camera is standing
+        // in, because the test is `d < take` and distance 0 is not < 0. Stated the
+        // way round the assertion actually falls: a caller that wants "just my own
+        // chunk" asks for a radius, not for zero.
         let none = chunk_wants(
             cam,
             g,

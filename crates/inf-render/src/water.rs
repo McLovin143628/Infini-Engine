@@ -36,7 +36,11 @@ pub use inf_water::{
 ///
 /// The discriminants are the values written into the water uniform and switched
 /// on in `water.wgsl`; the shader's constants mirror them, and
-/// `water_kind_codes_match_the_shader` pins the pair.
+/// `water_kind_codes_are_frozen` pins THIS side of the pair — the discriminants
+/// are asserted by value, so a reordering of the enum fails there rather than
+/// silently shading a river as an ocean. (The WGSL constants are not read back
+/// by that test; keeping them in step is a review obligation, stated so nobody
+/// reads more into the citation than it says.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum WaterKindGpu {
     /// An unbounded plane: tessellated as a camera-following graded grid.

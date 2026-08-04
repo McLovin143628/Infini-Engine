@@ -5944,6 +5944,40 @@ tech uses. We are not voxelizing the planet.
 - **P21.4 Runtime carving** — 1. the same ops as Blueprint nodes, deterministic and
   replay-gated, so games can dig at runtime; 2. physics and nav updates on carve.
 
+> **P21.2 CARRIED LEDGER (from the P21.2 audit round — deferred, not lost).** Each item below
+> is a named obligation on a later batch of this phase, recorded here at the moment it was
+> found rather than at the moment someone trips over it.
+>
+> * **M9 — voxel ground has ZERO PIE == shipping coverage, and P21.4's gate must cover it
+>   explicitly.** Every phase since P9 has closed on a gate that runs the same scene in PIE and
+>   in the shipped player and compares the traces; P21 does not have one yet. The combined
+>   ground query (`inf_voxel::ground_height_at`, the "terrain where solid, topmost voxel surface
+>   where holed" rule) is wired into **both** `terrain.height_at` host arms precisely so preview
+>   and shipped agree — and nothing anywhere asserts that they do. So P21.4 owes a
+>   `phase21_gate` plus a committed **cave sample**: a level with a carved mouth a character
+>   walks into, driven through Simulate and through the cooked pack, with the ground-height
+>   trace compared. Until that exists, "preview == shipped" for voxel ground is a design
+>   intention and not a checked property, and this line says so rather than letting the mirrored
+>   `ground_height_at` call sites imply otherwise.
+> * **M11 — `voxel_target` / `voxel_pick` / dab resampling belong in Ring 1.** They live in
+>   `inf-viewport`'s host today, which is `#[cfg(any(windows, macos))]` — so the Linux CI leg,
+>   the one a contributor's PR usually runs first, cannot see them at all. That is the same
+>   argument that put `terrain_stream`, `render_assets` and `voxel_store` in `inf-editor-core`,
+>   and it has the same answer. **Folded into P21.3**, which reworks `host.rs` for the dig tools
+>   anyway: moving them then costs one refactor instead of two.
+> * **Coarse-LOD holes do not propagate into the pyramid** (the M7 remainder).
+>   `inf_terrain::pyramid::downsample_block` reduces heights, biome ids and erosion data maps
+>   and carries **no hole mask** upward, so a coarse page is hole-free however carved the
+>   level-0 block under it is. Two shipped consequences: a clipmap ring far enough out to draw a
+>   coarse page **draws ground over a cave**, and `RenderTerrain::seam_sample` — which reads the
+>   residency floor so that lighting cannot depend on camera history — cannot apply the poison
+>   rule on a streamed terrain either (hence `seam_holes_are_known` and `apply_seam`'s mask-free
+>   veto). Pinned by `a_coarse_page_carries_no_hole_mask`, so flipping it is deliberate. It is a
+>   **decision**, not an oversight: a coarse sample covering four fine ones could be holed if
+>   *any* child is (a mouth grows by a whole coarse sample), if *all* are (it vanishes until it
+>   is 2ⁿ samples wide), or by majority like biome ids — and each answer draws a different
+>   distant silhouette.
+
 ### Phase 22 — Dynamic world: deformation & destruction
 
 **Goal:** the world reacts — surfaces deform, assets and buildings break. **Done when:** a

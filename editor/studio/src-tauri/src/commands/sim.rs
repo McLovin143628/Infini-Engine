@@ -22,7 +22,7 @@ use inf_blueprint::{InterpDebug, LocalId};
 use inf_editor_core::samples::bound_actors;
 use inf_editor_core::simulate::{SimDebugHit, SimInput, SimSession, SIM_HZ};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::assets::AssetState;
 use super::scene::SceneState;
@@ -95,9 +95,48 @@ pub async fn sim_start(
     // it — the same map the shipped player seeds through `attach_voxel_volumes`.
     // This is the SIM's set, camera-free: the viewport host pages its own against
     // the editor camera, and a fixed step must never be able to see that.
-    let voxel_volumes = inf_editor_core::simulate::resolve_voxel_volumes(&doc, |guid| {
+    let mut voxel_volumes = inf_editor_core::simulate::resolve_voxel_volumes(&doc, |guid| {
         assets.load_voxel_bytes(inf_asset::AssetId(guid))
     });
+    // …and then the carves that are NOT on disk yet (P21.2 audit). Resolving from
+    // the asset alone hands Simulate the last *saved* cave, so pressing Play after
+    // digging a tunnel dropped the player onto solid rock. A streamed terrain does
+    // not behave that way — `SimSession::enter` snapshots with
+    // `ScenePersist::Memory` precisely so unsaved sculpts survive into a session
+    // (P16.4b) — and a carve is the same act on the other surface. It cannot ride
+    // the snapshot the way a sculpt does (scene schema v19 is frozen, so chunks
+    // are not in the document), so it is read out of the shared store the viewport
+    // carves into, on the same lock order every other reader uses: **document
+    // first, volumes second** (the doc guard is still held here, taken above).
+    //
+    // Only the store's DIRTY chunks are folded in, which is what keeps the
+    // determinism seam on `set_voxel_volumes` intact: dirty is a function of what
+    // was dug, never of where the editor camera has paged. Headless/CI has no
+    // viewport and therefore no store, and no carve edits either — nothing to
+    // fold, and the resolved map stands as it always did.
+    if let Some(volumes) = app
+        .try_state::<crate::commands::ViewportState>()
+        .and_then(|v| v.voxel_volumes())
+    {
+        match volumes.lock() {
+            Ok(store) => {
+                let n = inf_editor_core::simulate::overlay_unsaved_carves(
+                    &mut voxel_volumes,
+                    |entity| store.slot(entity).map(|s| &s.data),
+                );
+                if n > 0 {
+                    tracing::info!("simulate: {n} unsaved voxel chunk(s) carried into Simulate");
+                }
+            }
+            // A poisoned store is a thread that already panicked mid-carve; its
+            // chunks are not trustworthy input for a session. Play still starts,
+            // on the saved volumes, rather than refusing outright.
+            Err(_) => tracing::warn!(
+                "simulate: voxel store lock poisoned — Simulate runs on the SAVED \
+                 volumes, so unsaved carves will not be there"
+            ),
+        }
+    }
     // Character applies its own gravity in the blueprint → world gravity is zero.
     let mut session = SimSession::enter(&mut doc, actors, DVec2::ZERO, SIM_HZ);
     session.set_state_machines(machines);

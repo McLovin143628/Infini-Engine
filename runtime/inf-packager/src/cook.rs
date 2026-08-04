@@ -953,9 +953,10 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
                 .collect()
         }
         // P19.2: a `.inf_biomes` references the `.inf_pcg` graph each of its
-        // biomes scatters with. Empty today — nothing populates `pcg_graph` until
-        // P19.3 binds them — and that is exactly why the edge is derived here and
-        // now rather than when the first graph appears: every other referencing
+        // biomes scatters with. It was empty when this arm was written — nothing
+        // populated `pcg_graph` until P19.3 bound them, and it does now — which is
+        // exactly why the edge was derived here and then rather than waiting for
+        // the first graph to appear: every other referencing
         // kind re-derives its edges from the payload, and a `biome_set` whose
         // graphs the cook could not reach would ship a level whose biomes
         // evaluate to nothing, silently, the same failure `Terrain.biome_set`
@@ -1137,6 +1138,39 @@ fn voxel_scale_mismatches(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
         .collect()
 }
 
+/// The world transform of a persisted entity: its own local affine composed with
+/// every parent's, root-last.
+///
+/// A `.inf_lvl` stores only the **local** `Transform` — `GlobalTransform` is
+/// computed by `inf_ecs::transform::propagate` over a live world and is never
+/// serialized — so an advisory that wants to know where something actually is has
+/// to walk the chain itself. Depth-guarded at 64, because a merge-mangled level
+/// can contain a parent cycle and an advisory must never hang a build.
+///
+/// Shared by [`uphill_rivers`] and [`see_through_pits`]: two advisories reading a
+/// level in two different frames is precisely how one of them ends up quoting
+/// coordinates from a world that does not exist.
+fn world_affine(
+    level: &inf_scene::RuntimeLevel,
+    start: &inf_scene::RuntimeEntity,
+) -> glam::DAffine3 {
+    let mut e = start;
+    let mut affine = e.transform.affine();
+    let mut depth = 0u32;
+    while let Some(pg) = e.parent {
+        depth += 1;
+        if depth > 64 {
+            break;
+        }
+        let Some(parent) = level.entity(pg) else {
+            break;
+        };
+        affine = parent.transform.affine() * affine;
+        e = parent;
+    }
+    affine
+}
+
 /// **P21.2 (b): a see-through pit — holed heightfield with nothing behind it.**
 ///
 /// A P21.2 carve removes the heightfield surface at a set of samples so that the
@@ -1163,6 +1197,42 @@ fn voxel_scale_mismatches(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
 /// decoding every chunk's SDF during a cook to catch a case the author almost
 /// certainly did on purpose. An advisory that fires on correct caves stops being
 /// read, which is the failure this whole class of check is trying to avoid.
+///
+/// # BOTH SIDES ARE PLACED IN THE WORLD (P21.2 audit)
+///
+/// The first cut compared the two footprints in **raw asset space**, so a level
+/// whose cave sat at the origin in its `.inf_voxel` and a hundred metres away in
+/// its level answered a question nobody asked. Both sides now go through
+/// [`world_affine`], so a moved terrain, a moved volume, or either of them under a
+/// moved or rotated *parent* is judged where the level actually puts it.
+///
+/// **Translation, and deliberately only translation** — because that is the whole
+/// of what the runtime honours, and this advisory must describe the world that
+/// ships rather than a more principled one that does not:
+///
+/// * a volume is placed by `inf_voxel::VoxelVolumes::place`, which offsets the
+///   asset's own anchor by the entity translation (`ChunkGrid::new(voxel_size,
+///   origin + translation)`), and the shipped player feeds it exactly
+///   `GlobalTransform::translation()`;
+/// * a terrain's world frame is `GlobalTransform::translation()` too — every
+///   consumer (`ground_height_at`'s heightfield arm, the scatter and biome passes
+///   in `inf_player::level`) takes the translation and nothing else.
+///
+/// So a *rotated* volume covers the same ground a same-place unrotated one does,
+/// here and at runtime alike, and the fixtures below pin that rather than leave it
+/// to be rediscovered. Composing the parent chain as a full affine and taking its
+/// translation is still the right way to get there: a child of a rotated parent
+/// really does move, and it moves by exactly this.
+///
+/// The frames, spelled out, because the two sides are genuinely different:
+///
+/// * a hole sample is at `terrain_translation.xz + coord · span + (i, j) · mps`.
+///   The `.inf_terrain` header's own origin is **not** in it —
+///   `TerrainData::tile_origin_xz` is `coord · span` and nothing else, so the
+///   header value round-trips through a write-back and never places a tile.
+/// * a chunk column is at `voxel_asset_origin.xz + volume_translation.xz +
+///   base_sample · voxel_size`, which is the frame `VoxelData::world_to_grid`
+///   answers in.
 fn see_through_pits(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
     // `(level, terrain asset, tile x, tile z, holed samples)`.
     let mut hits: BTreeSet<(AssetId, AssetId, i32, i32, usize)> = BTreeSet::new();
@@ -1197,7 +1267,10 @@ fn see_through_pits(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
             };
             let vs = reader.voxel_size_m();
             let dim = inf_voxel::CHUNK_DIM as f64;
-            let o = reader.origin();
+            // Where the level puts this cave: the asset's own anchor offset by
+            // the entity's WORLD translation, which is what `VoxelVolumes::place`
+            // does to build the grid the runtime queries against.
+            let o = reader.origin() + world_affine(&level, e).translation;
             for key in reader.keys() {
                 let b = key.base_sample();
                 let x0 = o.x + b[0] as f64 * vs;
@@ -1223,6 +1296,9 @@ fn see_through_pits(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
             let res = reader.tile_resolution();
             let mps = reader.meters_per_sample();
             let span = (res as f64 - 1.0) * mps;
+            // The heightfield's world frame is its entity's translation — see the
+            // doc above for why the `.inf_terrain` header origin is not in it.
+            let base = world_affine(&level, e).translation;
             for key in reader.keys().collect::<Vec<_>>() {
                 // LOD \u2265 1 pages are downsampled heights only — the pyramid carries
                 // no hole mask, so walking them would double-count nothing and
@@ -1236,8 +1312,8 @@ fn see_through_pits(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
                 if !tile.has_holes() {
                     continue;
                 }
-                let ox = key.coord.0 as f64 * span;
-                let oz = key.coord.1 as f64 * span;
+                let ox = base.x + key.coord.0 as f64 * span;
+                let oz = base.z + key.coord.1 as f64 * span;
                 let mut naked = 0usize;
                 for j in 0..res {
                     for i in 0..res {
@@ -1321,30 +1397,6 @@ use inf_water::UPHILL_TOLERANCE_M as RIVER_UPHILL_TOLERANCE_M;
 /// Deduplicated + sorted (by entity) so the report stays deterministic.
 fn uphill_rivers(guid: AssetId, level: &inf_scene::RuntimeLevel) -> Vec<String> {
     use inf_ecs::components::{SplineInterp, WaterKind};
-
-    // World transform of an entity: its local affine composed with its parents'.
-    // Depth-guarded, because a merge-mangled level can contain a parent cycle and
-    // an advisory must never hang a build.
-    fn world_affine(
-        level: &inf_scene::RuntimeLevel,
-        start: &inf_scene::RuntimeEntity,
-    ) -> glam::DAffine3 {
-        let mut e = start;
-        let mut affine = e.transform.affine();
-        let mut depth = 0u32;
-        while let Some(pg) = e.parent {
-            depth += 1;
-            if depth > 64 {
-                break;
-            }
-            let Some(parent) = level.entity(pg) else {
-                break;
-            };
-            affine = parent.transform.affine() * affine;
-            e = parent;
-        }
-        affine
-    }
 
     let mut out: Vec<(uuid::Uuid, String)> = Vec::new();
     for e in &level.entities {

@@ -259,8 +259,14 @@ impl InlineHoleAdvisory {
 /// `asset_backed` is the caller's answer to "does this terrain page from a
 /// `.inf_terrain`?" (`Terrain.asset.is_some()` in the editor). It is a parameter
 /// rather than a read because Ring 0 has no ECS: keeping the *rule* here and the
-/// *lookup* at the call site is what lets the editor, a cook advisory and a test
-/// all reach the same verdict.
+/// *lookup* at the call site is what lets every caller reach the same verdict.
+/// Today that is the editor's carve path (`inf_editor_core::voxel_edit`), the
+/// viewport tool readout and this module's own test — and **not** a cook
+/// advisory, which an earlier draft of this sentence claimed. There is no cook
+/// advisory for the inline case and there cannot usefully be one: an inline
+/// terrain's holes never reach a `.inf_lvl` at all (the scene wire is pinned at
+/// tile generation 3), so by cook time the evidence is already gone. That is why
+/// the refusal is raised in the editor, at the moment of the carve.
 ///
 /// `None` means "nothing to say" — an asset-backed terrain, or an inline one with
 /// no holes, which is every level written before P21.2.
