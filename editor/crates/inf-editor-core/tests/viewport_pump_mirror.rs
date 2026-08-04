@@ -343,6 +343,73 @@ fn the_win32_pump_still_drives_the_carve_tools() {
     }
 }
 
+/// **Every gesture that survives across frames has a settler, and the pump calls
+/// it** (P21.3 audit).
+///
+/// The other half of the settlement discipline, and the half
+/// `tests/orphaned_strokes.rs` structurally cannot check: an `EngineHost` needs
+/// a GPU and is `#[cfg]`-gated, so no CI machine can construct one. That file
+/// gates what a settler *does* (the recorders, and the transaction door);
+/// **this** gates that the settler exists at all and is wired — which is what
+/// deleting `settle_orphaned_sculpt` breaks, and what nothing caught before.
+///
+/// Four gestures hold state across frames today: a carve stroke, a terrain
+/// brush stroke, a foliage stroke, and a gizmo drag (whose state is an *undo
+/// transaction* rather than a stroke object, so its settler is the generic one).
+#[test]
+fn every_cross_frame_gesture_has_a_settler_and_the_pump_calls_it() {
+    let host = read("editor/crates/inf-viewport/src/host.rs");
+    let pump = read(WIN32);
+    for settler in [
+        "settle_orphaned_carve",
+        "settle_orphaned_sculpt",
+        "settle_orphaned_foliage",
+        "settle_orphaned_transaction",
+        // Not a settler but the same discipline's other half: a document swap
+        // ABANDONS in-flight gestures rather than committing them, because the
+        // level they belonged to is gone (P21.3 audit).
+        "abandon_gestures_on_document_swap",
+    ] {
+        assert!(
+            host.contains(&format!("pub fn {settler}(")),
+            "`EngineHost::{settler}` is gone — the gesture it closed can strand an edit in the \
+             world with no undo entry describing it (P21.3 / the N2 ledger item)"
+        );
+        assert!(
+            pump.contains(&format!("host.{settler}(")),
+            "the win32 pump never calls `{settler}` — it exists and nothing drives it"
+        );
+    }
+}
+
+/// **The document-swap abandon must run BEFORE every settler** (P21.3 audit).
+///
+/// Order is the whole content of this one: a settler that ran first would
+/// faithfully commit the *old* level's stroke into the *new* document, which is
+/// precisely the outcome the abandon exists to prevent. Source text can see the
+/// order of the calls, which is the way this regresses.
+#[test]
+fn the_document_swap_abandon_precedes_every_settler() {
+    let src = read(WIN32);
+    let abandon = src
+        .find("host.abandon_gestures_on_document_swap(")
+        .expect("the win32 pump never abandons gestures on a document swap");
+    for settler in [
+        "host.settle_orphaned_carve(",
+        "host.settle_orphaned_sculpt(",
+        "host.settle_orphaned_foliage(",
+        "host.settle_orphaned_transaction(",
+    ] {
+        let at = src
+            .find(settler)
+            .unwrap_or_else(|| panic!("no `{settler}`"));
+        assert!(
+            abandon < at,
+            "`{settler}` is called BEFORE the document-swap abandon, so a File > Open during a              drag commits the old level's edit into the new document"
+        );
+    }
+}
+
 /// **The orphan settlers must run OUTSIDE the tool-gated branches** (P21.3).
 ///
 /// The whole point of both `settle_orphaned_*` calls is that they run when the
@@ -365,6 +432,8 @@ fn the_orphan_settlers_run_outside_the_tool_gated_branches() {
     for settler in [
         "host.settle_orphaned_carve(",
         "host.settle_orphaned_sculpt(",
+        "host.settle_orphaned_foliage(",
+        "host.settle_orphaned_transaction(",
     ] {
         let at = src
             .find(settler)

@@ -568,6 +568,36 @@ pub enum SpoilMode {
     Site,
 }
 
+impl SpoilMode {
+    /// Resolve the toolbar's mode plus the marker the author may have placed
+    /// into the transaction's own [`SpoilChoice`].
+    ///
+    /// # Why this lives here rather than in `host.rs` (the M11 argument, again)
+    ///
+    /// This module is **not** `#[cfg]`-gated — only `host` is — so a rule
+    /// written here is compiled and tested on every CI leg, including the Linux
+    /// one. "Where does the soil go" decides committed geometry, which is
+    /// exactly the class of rule the M11 ledger item says must not be invisible
+    /// to a whole platform. The host keeps the *state* (the picked marker lives
+    /// on the viewport thread, because the author places it with a click) and
+    /// calls this for the *decision*.
+    ///
+    /// A `Site` mode with no marker resolves to `Auto` rather than refusing: the
+    /// author asked for a heap, and standing it in the documented default place
+    /// is a better answer than not digging. The readout says so.
+    pub fn choice(self, site: Option<DVec3>) -> inf_editor_core::scene::undo::SpoilChoice {
+        use inf_editor_core::scene::undo::SpoilChoice;
+        match self {
+            SpoilMode::Off => SpoilChoice::Discard,
+            SpoilMode::Auto => SpoilChoice::Auto,
+            SpoilMode::Site => match site {
+                Some(p) if p.is_finite() => SpoilChoice::At(p),
+                _ => SpoilChoice::Auto,
+            },
+        }
+    }
+}
+
 /// Carve or fill — which way a [`ToolMode::Voxel`] cut runs (P21.2).
 ///
 /// Not a `bool`: the ops it maps onto are named
@@ -863,6 +893,34 @@ fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    /// **The spoil rule, tested where every CI leg can see it** (the M11 move,
+    /// completed in the P21.3 audit round). It used to be `EngineHost::spoil_choice`,
+    /// inside the `#[cfg(any(windows, macos))]` module.
+    #[test]
+    fn the_spoil_mode_resolves_the_marker_the_way_the_toolbar_shows() {
+        use inf_editor_core::scene::undo::SpoilChoice;
+        let here = DVec3::new(10.0, 2.0, -4.0);
+
+        // Off discards, whatever marker is lying around.
+        assert_eq!(SpoilMode::Off.choice(None), SpoilChoice::Discard);
+        assert_eq!(SpoilMode::Off.choice(Some(here)), SpoilChoice::Discard);
+        // Auto ignores the marker too — the toolbar says "east of the cut".
+        assert_eq!(SpoilMode::Auto.choice(Some(here)), SpoilChoice::Auto);
+        // Site uses it …
+        assert_eq!(SpoilMode::Site.choice(Some(here)), SpoilChoice::At(here));
+        // … falls back to the documented default when none has been picked …
+        assert_eq!(SpoilMode::Site.choice(None), SpoilChoice::Auto);
+        // … and never places a heap at infinity from a broken pick.
+        assert_eq!(
+            SpoilMode::Site.choice(Some(DVec3::splat(f64::NAN))),
+            SpoilChoice::Auto
+        );
+        assert_eq!(
+            SpoilMode::Site.choice(Some(DVec3::splat(f64::INFINITY))),
+            SpoilChoice::Auto
+        );
+    }
+
     use super::*;
 
     #[test]

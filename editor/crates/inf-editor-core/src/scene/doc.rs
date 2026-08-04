@@ -65,7 +65,25 @@ pub struct SceneDoc {
     /// back to these so the file carries the AUTHORED values, then re-applies
     /// the preview (see [`Self::with_authored_scene`]).
     preview: Option<Vec<(Uuid, String, f64)>>,
+    /// **Process-unique identity of this document instance** (P21.3 audit).
+    ///
+    /// Not persisted and not part of the level: it exists so a *different
+    /// thread* can tell that the document under it was replaced wholesale.
+    /// `scene_open` and `scene_new` do `*doc = …` under the lock; the viewport
+    /// thread wakes up holding gestures whose state — a stroke's terrain entity,
+    /// a gizmo drag's selection, an open transaction — refers to a document that
+    /// no longer exists. Committing one then writes the *old* level's edit into
+    /// the new one, and a single Ctrl+Z applies it.
+    ///
+    /// A monotone counter rather than a hash of the contents, because two
+    /// identical levels opened in sequence are still two different documents to
+    /// anything holding a mid-gesture reference into one of them.
+    doc_id: u64,
 }
+
+/// Source of [`SceneDoc::doc_id`]. Never wraps in any plausible session (one
+/// document per open/new; `u64` at one per nanosecond is 584 years).
+static NEXT_DOC_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Default for SceneDoc {
     fn default() -> Self {
@@ -85,7 +103,14 @@ impl SceneDoc {
             settings: LevelSettings::default(),
             history: EditHistory::default(),
             preview: None,
+            doc_id: NEXT_DOC_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
+    }
+
+    /// This document instance's process-unique id — see [`SceneDoc::doc_id`]'s
+    /// field docs for why another thread needs it.
+    pub fn doc_id(&self) -> u64 {
+        self.doc_id
     }
 
     // ── accessors ────────────────────────────────────────────────────────
@@ -2785,6 +2810,33 @@ impl SceneDoc {
 
     pub fn commit_transaction(&mut self) {
         self.history.commit();
+    }
+
+    /// `true` while an undo transaction is open — i.e. while some gesture owns
+    /// the history and every recorded edit is being folded into its entry.
+    pub fn has_open_transaction(&self) -> bool {
+        self.history.has_open()
+    }
+
+    /// **Close a transaction whose owner will never close it**, whatever its
+    /// nesting depth. Returns `true` when one was closed and had edits in it.
+    ///
+    /// See [`EditHistory::settle_open`](crate::scene::undo::EditHistory) for the
+    /// failure: one unmatched `begin_transaction` makes `undo_len()` stop
+    /// growing and **kills Ctrl+Z for the rest of the session**, silently. The
+    /// viewport pump calls this when no gesture that owns a transaction is in
+    /// flight, which is the same settlement discipline the stroke settlers use.
+    ///
+    /// **Only safe from a caller that holds the document lock and knows no
+    /// gesture of its own is mid-transaction.** Ring-2 commands open and close
+    /// theirs synchronously inside one function under that same lock, so the
+    /// viewport thread can never observe one of those half-open.
+    pub fn settle_open_transaction(&mut self) -> bool {
+        let settled = self.history.settle_open();
+        if settled {
+            self.touch();
+        }
+        settled
     }
 
     pub fn can_undo(&self) -> bool {

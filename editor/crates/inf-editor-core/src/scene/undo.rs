@@ -1406,6 +1406,45 @@ impl EditHistory {
         }
     }
 
+    /// `true` while a transaction is open (nesting depth ≥ 1).
+    pub(crate) fn has_open(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// **Force-close a stranded transaction, whatever its nesting depth.**
+    ///
+    /// Returns `true` when one was closed *and* had commands to record.
+    ///
+    /// # The failure this exists for — session-wide undo death
+    ///
+    /// [`begin`](Self::begin) increments `depth` and [`commit`](Self::commit)
+    /// decrements it, and only the *outermost* commit closes the transaction. So
+    /// one `begin` with no matching `commit` leaves `open = Some(..)` and
+    /// `depth = 1` **forever**: every later begin/commit pair bounces 1 → 2 → 1,
+    /// every subsequent edit is appended to the stranded transaction instead of
+    /// pushed as its own entry, `undo_len()` stops growing, and **Ctrl+Z is
+    /// silently dead for the rest of the session**. Nothing surfaces it — the
+    /// edits all land in the world, the document is dirty, the save works.
+    ///
+    /// It is reachable today: the win32 pump opens `"Move"` when a gizmo drag
+    /// begins and commits it on release, both inside the tool-gated select
+    /// branch, so *hold a translate handle → Ctrl+Shift+P → `tool.sculpt` →
+    /// release* strands one. The foliage stroke has the same shape.
+    ///
+    /// Committing rather than discarding, for the settlement pattern's reason:
+    /// the edits are in the world and the author can see them, so the only
+    /// question is whether Ctrl+Z can reach them.
+    pub(crate) fn settle_open(&mut self) -> bool {
+        self.depth = 0;
+        match self.open.take() {
+            Some(txn) if !txn.commands.is_empty() => {
+                self.push(txn);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn push(&mut self, txn: Transaction) {
         self.redo.clear();
         self.undo.push(txn);

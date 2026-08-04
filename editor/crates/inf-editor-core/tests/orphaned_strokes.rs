@@ -30,14 +30,22 @@
 //!   what has to hold is that *a mid-drag commit of each kind records one undo
 //!   entry that Ctrl+Z fully reverts and Ctrl+Y fully replays* — for all three,
 //!   including the two that had no such test before.
-//! * **`viewport_pump_mirror.rs`** — the wiring. `the_win32_pump_still_drives_…`
-//!   pins that the pump calls both settlers, and
+//! * **`viewport_pump_mirror.rs`** — the settler's own existence and its wiring.
+//!   `every_cross_frame_gesture_has_a_settler_and_the_pump_calls_it` fails if any
+//!   of the four `settle_orphaned_*` functions is deleted (the P21.3 audit's
+//!   point: this file alone passed with `settle_orphaned_sculpt` removed, because
+//!   it gates the *recorders* the settler calls and not the settler itself), and
 //!   `the_orphan_settlers_run_outside_the_tool_gated_branches` pins that they are
 //!   called *before* the branch that would otherwise have finished the stroke —
-//!   which is the entire content of the fix and the exact way it would regress.
+//!   which is the exact way the fix regresses.
 //!
-//! Neither half alone is the gate. Together they say: the pump calls it, it is
-//! called where it can help, and what it calls does not lose the edit.
+//! Neither half alone is the gate. Together they say: the settler exists, the
+//! pump calls it, it is called where it can help, and what it calls does not
+//! lose the edit.
+//!
+//! The **transaction** half below needs no such split: `settle_open_transaction`
+//! is a `SceneDoc` door, so its failure — one unmatched `begin_transaction`
+//! killing Ctrl+Z for the whole session — is reproduced and fixed here directly.
 
 use glam::DVec2;
 use inf_ecs::components::Terrain;
@@ -261,4 +269,136 @@ fn the_three_kinds_move_three_different_layers() {
             .collect();
         assert_ne!(heights, heights_before, "a raise stroke moved no height");
     }
+}
+
+// ── the stranded transaction (P21.3 audit ruling) ───────────────────────────
+
+/// **ONE UNMATCHED `begin_transaction` KILLS Ctrl+Z FOR THE SESSION.**
+///
+/// This is the failure, reproduced: open a transaction, never close it, and from
+/// then on every later begin/commit pair bounces the nesting depth `1 → 2 → 1`
+/// without ever closing the stranded one. Every edit is folded into it,
+/// `undo_len()` stops growing, and undo silently does nothing — while the edits
+/// land in the world, the document goes dirty and the save works.
+///
+/// Reachable from the viewport today: the pump opens `"Move"` when a gizmo drag
+/// starts and commits it on release, **both inside the tool-gated select
+/// branch**, so *hold a translate handle → Ctrl+Shift+P → `tool.sculpt` →
+/// release* strands one.
+#[test]
+fn a_stranded_transaction_swallows_every_later_edit_until_it_is_settled() {
+    let mut doc = SceneDoc::new();
+    let a = doc.edit_create(SpawnKind::Empty, "A", None);
+    let baseline = doc.undo_len();
+
+    // The leak: a gesture opens a transaction and is interrupted before it can
+    // close it.
+    doc.begin_transaction("Move");
+    doc.edit_rename(a, "moved");
+    assert!(doc.has_open_transaction());
+
+    // Every later edit — each of which opens and closes its OWN transaction —
+    // now disappears into the stranded one.
+    for i in 0..4 {
+        doc.begin_transaction("later");
+        doc.edit_rename(a, &format!("later-{i}"));
+        doc.commit_transaction();
+    }
+    assert_eq!(
+        doc.undo_len(),
+        baseline,
+        "the history grew — the fixture is not reproducing the leak"
+    );
+    assert!(
+        doc.has_open_transaction(),
+        "four matched commits closed the stranded transaction on their own"
+    );
+
+    // THE FIX: settling closes it, and everything it swallowed becomes one
+    // reachable undo step.
+    assert!(doc.settle_open_transaction(), "nothing to settle?");
+    assert!(!doc.has_open_transaction());
+    assert_eq!(doc.undo_len(), baseline + 1, "the settled entry is missing");
+    assert!(doc.undo(), "Ctrl+Z could not reach the settled edit");
+    assert_eq!(
+        doc.world().name_of(doc.entity_of(a).unwrap()),
+        Some("A"),
+        "undo did not put the name back"
+    );
+
+    // …and the history works normally again afterwards.
+    doc.edit_rename(a, "after");
+    assert_eq!(doc.undo_len(), baseline + 1);
+    assert!(doc.undo());
+}
+
+/// Settling when nothing is open is a no-op, and settling an **empty**
+/// transaction records nothing — an undo entry that reverts nothing would make
+/// Ctrl+Z appear broken in exactly the way this fix exists to prevent.
+#[test]
+fn settling_records_nothing_when_there_is_nothing_to_settle() {
+    let mut doc = SceneDoc::new();
+    let undos = doc.undo_len();
+    assert!(!doc.settle_open_transaction(), "nothing was open");
+
+    doc.begin_transaction("empty");
+    assert!(doc.has_open_transaction());
+    assert!(
+        !doc.settle_open_transaction(),
+        "an empty transaction recorded"
+    );
+    assert!(!doc.has_open_transaction(), "…but it was still closed");
+    assert_eq!(doc.undo_len(), undos);
+}
+
+/// A **nested** stranded transaction settles too. `commit` only closes at depth
+/// 1, so a gesture that opened two and closed one leaves `depth = 1` with the
+/// transaction still open — the same dead end, one level down.
+#[test]
+fn settling_closes_a_transaction_at_any_nesting_depth() {
+    let mut doc = SceneDoc::new();
+    let a = doc.edit_create(SpawnKind::Empty, "A", None);
+    let undos = doc.undo_len();
+
+    doc.begin_transaction("outer");
+    doc.begin_transaction("inner");
+    doc.edit_rename(a, "x");
+    doc.commit_transaction(); // inner — unwinds to depth 1, closes nothing
+    assert!(doc.has_open_transaction());
+    assert_eq!(doc.undo_len(), undos);
+
+    assert!(doc.settle_open_transaction());
+    assert_eq!(doc.undo_len(), undos + 1);
+    assert!(doc.undo());
+    assert_eq!(doc.world().name_of(doc.entity_of(a).unwrap()), Some("A"));
+}
+
+/// **A replaced document is a different document**, and another thread can tell.
+///
+/// `scene_open` / `scene_new` do `*doc = …` under the scene lock; the viewport
+/// thread holds gestures pointing into the document that was there a moment ago.
+/// Settling one of those would commit the **old** level's edit into the new
+/// document, where a single Ctrl+Z then applies it — so the host abandons them
+/// instead, and this id is how it notices.
+///
+/// A monotone counter and not a content hash: two identical levels opened in
+/// sequence are still two different documents to anything holding a mid-gesture
+/// reference into one of them.
+#[test]
+fn every_document_instance_has_its_own_id() {
+    let a = SceneDoc::new();
+    let b = SceneDoc::new();
+    assert_ne!(a.doc_id(), b.doc_id(), "two documents share an identity");
+    assert_eq!(a.doc_id(), a.doc_id(), "an id must be stable");
+
+    // Editing does not change it — only replacement does.
+    let mut c = SceneDoc::new();
+    let before = c.doc_id();
+    let g = c.edit_create(SpawnKind::Empty, "x", None);
+    c.edit_rename(g, "y");
+    assert_eq!(c.doc_id(), before);
+
+    // …and the swap `scene_open` performs really produces a new one.
+    c = SceneDoc::new();
+    assert_ne!(c.doc_id(), before, "a replaced document kept its identity");
 }

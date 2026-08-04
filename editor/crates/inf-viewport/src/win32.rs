@@ -849,6 +849,31 @@ fn drain_input() -> FrameInput {
     })
 }
 
+/// **Settle every in-flight gesture before the render loop stops** (P21.3
+/// audit).
+///
+/// A caught panic ends the loop but not the process: the editor, the webview and
+/// the document all survive. What does not survive is the *undoability* of any
+/// gesture that was mid-drag — its dabs are already in the document with no
+/// `EditCommand` describing them, and the gizmo drag's open transaction would
+/// additionally swallow every later edit (see
+/// `EngineHost::settle_orphaned_transaction`). One lock, one call, on the way
+/// out.
+///
+/// Failing to take the lock is not worth a second failure path here: this runs
+/// while unwinding from a panic that may itself have poisoned it, and the loop
+/// is stopping either way.
+fn settle_before_exit(host: &mut EngineHost, scene: &SharedScene) {
+    if let Ok(mut doc) = scene.lock() {
+        if host.settle_all_gestures(&mut doc) {
+            tracing::warn!(
+                "inf-viewport: the render loop stopped mid-gesture — the edit so far was \
+                 committed as one undo step so Ctrl+Z can still reach it"
+            );
+        }
+    }
+}
+
 /// Write a viewport crash report for a caught panic and log where it landed.
 /// Shared by the init and per-frame guards; the editor process survives either.
 fn report_viewport_panic(location: &str, payload: &(dyn std::any::Any + Send)) {
@@ -1193,6 +1218,13 @@ fn thread_main(
                 // never reach its `finish_voxel` — its dabs stay in the world,
                 // save like any other edit, and Ctrl+Z cannot reach them. Close it
                 // here, before the branches, where the document is in hand.
+                // BEFORE any settler: if the document was replaced under us
+                // (File ▸ Open / New), every in-flight gesture refers to a level
+                // that no longer exists — settling one would commit the OLD
+                // level's edit into the new document (P21.3 audit).
+                if host.abandon_gestures_on_document_swap(&doc) {
+                    world_changed = true;
+                }
                 if host.settle_orphaned_carve(&mut doc) {
                     world_changed = true;
                 }
@@ -1201,6 +1233,18 @@ fn thread_main(
                 // changed would never reach its `finish_sculpt` either — its dabs
                 // are already in the document and Ctrl+Z could not reach them.
                 if host.settle_orphaned_sculpt(&mut doc) {
+                    world_changed = true;
+                }
+                // …and the foliage stroke, which strands an undo entry AND the
+                // transaction it opened.
+                if host.settle_orphaned_foliage(&mut doc) {
+                    world_changed = true;
+                }
+                // The backstop for the one gesture with no stroke object of its
+                // own: a gizmo drag opens "Move" here and commits it on release,
+                // both inside the tool-gated select branch below. One unmatched
+                // begin kills Ctrl+Z for the whole session (P21.3 audit ruling).
+                if host.settle_orphaned_transaction(&mut doc) {
                     world_changed = true;
                 }
                 if sculpting {
@@ -1414,6 +1458,7 @@ fn thread_main(
             Ok(wc) => wc,
             Err(payload) => {
                 report_viewport_panic("<viewport interaction>", &*payload);
+                settle_before_exit(&mut host, &scene);
                 break 'outer;
             }
         };
@@ -1545,10 +1590,12 @@ fn thread_main(
                 Ok(Ok(p)) => presented = p,
                 Ok(Err(e)) => {
                     tracing::error!("inf-viewport: unrecoverable render failure: {e}");
+                    settle_before_exit(&mut host, &scene);
                     break 'outer;
                 }
                 Err(payload) => {
                     report_viewport_panic("<viewport render thread>", &*payload);
+                    settle_before_exit(&mut host, &scene);
                     break 'outer;
                 }
             }

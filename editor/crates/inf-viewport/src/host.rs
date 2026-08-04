@@ -41,8 +41,8 @@ use inf_render::{
 use uuid::Uuid;
 
 use inf_terrain::{
-    dab_positions, raycast_terrain, BiomeStroke, BrushOp, BrushParams, Falloff, FlattenTarget,
-    SplatStroke, Stroke, TerrainData,
+    raycast_terrain, BiomeStroke, BrushOp, BrushParams, Falloff, FlattenTarget, SplatStroke,
+    Stroke, TerrainData,
 };
 
 use crate::camera::{
@@ -334,6 +334,13 @@ pub struct EngineHost {
     /// *level*, not about the gesture, and re-picking it after every trip to the
     /// Select tool would be busywork.
     voxel_spoil_site: Option<DVec3>,
+    /// The `SceneDoc::doc_id` this host last saw, so it can notice the document
+    /// being replaced under it (P21.3 audit). `None` before the first frame.
+    last_doc_id: Option<u64>,
+    /// The box cut's **resolved** plan, refreshed while the drag runs so the
+    /// preview draws the pit the release would actually cut rather than a
+    /// rubber-band between the two corner picks (P21.3 audit).
+    voxel_box_plan: Option<inf_editor_core::voxel_tool::BoxCutPlan>,
     /// The preview the voxel tool draws: the tunnel path plus the segment the next
     /// click would add, the pit rectangle being dragged, the brush's cut sphere,
     /// and the spoil marker. Debug lines, never persisted.
@@ -759,6 +766,27 @@ fn ground_ring(center_xz: DVec2, radius: f64) -> Vec<DVec3> {
 /// depth is the parameter an author most needs to see: a flat ring would draw a
 /// 4 m ball and a 4 m disc identically. Editor overlay geometry only — nothing
 /// here reaches committed content, which is why plain `std` trig is fine (the
+/// Push the twelve edges of an axis-aligned wire box onto a debug-line list.
+///
+/// One writer, so the pit preview and the dig-to-grade column preview cannot
+/// draw the same shape two different ways.
+fn push_box_wire(out: &mut Vec<[DVec3; 2]>, lo: DVec3, hi: DVec3) {
+    for &y in &[hi.y, lo.y] {
+        let c = [
+            DVec3::new(lo.x, y, lo.z),
+            DVec3::new(hi.x, y, lo.z),
+            DVec3::new(hi.x, y, hi.z),
+            DVec3::new(lo.x, y, hi.z),
+        ];
+        for i in 0..4 {
+            out.push([c[i], c[(i + 1) % 4]]);
+        }
+    }
+    for (x, z) in [(lo.x, lo.z), (hi.x, lo.z), (hi.x, hi.z), (lo.x, hi.z)] {
+        out.push([DVec3::new(x, hi.y, z), DVec3::new(x, lo.y, z)]);
+    }
+}
+
 /// P14 portability law governs what is *authored*, not what is drawn).
 fn circle_point(center: DVec3, r: f64, axis: usize, i: usize, n: usize) -> DVec3 {
     let a = std::f64::consts::TAU * (i % n) as f64 / n as f64;
@@ -922,6 +950,8 @@ impl EngineHost {
             voxel_box_anchor: None,
             voxel_box_cursor: None,
             voxel_spoil_site: None,
+            last_doc_id: None,
+            voxel_box_plan: None,
             voxel_preview: Vec::new(),
             voxel_hole_warned: BTreeSet::new(),
             foliage_stroke_seq: 0,
@@ -1068,6 +1098,7 @@ impl EngineHost {
         // the level, not about the gesture.
         self.voxel_box_anchor = None;
         self.voxel_box_cursor = None;
+        self.voxel_box_plan = None;
     }
 
     /// Replace the water-tool configuration (from the toolbar, P20.4).
@@ -4151,7 +4182,17 @@ impl EngineHost {
         let biome = self.biome;
         let spacing = (0.35 * self.brush_radius()).max(0.05);
         // `dab_positions` re-emits the start (`last`); skip it — already placed.
-        let dabs = dab_positions(&[last, cur], spacing);
+        //
+        // Through the Ring-1 wrapper, and **capped** (P21.3 audit): the terrain
+        // brushes had no per-frame bound at all — only the carve brush did — so
+        // a drag whose pick landed far away built the whole list every frame and
+        // laid every dab in it. The remainder rides to the next frame from the
+        // last dab actually placed, exactly as the carve brush's does.
+        let dabs = inf_editor_core::voxel_tool::dab_centers_2d_capped(
+            &[last, cur],
+            spacing,
+            Self::MAX_DABS_PER_UPDATE,
+        );
         let mut new_last = last;
         for &c in dabs.iter().skip(1) {
             // Every dab pages its own footprint: a drag walks across tiles, and a
@@ -4229,6 +4270,146 @@ impl EngineHost {
     const SCULPT_STROKE_SETTLED_ON_TOOL_SWITCH: &'static str =
         "Brush: the tool changed while a stroke was still down, so the edit so far was committed \
          as one undo step. Ctrl+Z takes it back.";
+
+    /// **Settle every in-flight gesture, unconditionally** — the door the
+    /// branch-gated settlers share, and the one the render loop's panic exits
+    /// call on their way out (P21.3 audit).
+    ///
+    /// Returns `true` when anything was recorded.
+    ///
+    /// The three strokes each already mutated the world per dab; the gizmo drag
+    /// and the foliage stroke additionally hold an open undo transaction. When
+    /// the render thread is about to stop — a caught panic in the interaction
+    /// block or in `render_frame` — the editor process survives, the document
+    /// survives, and every one of those edits is in it with **no `EditCommand`
+    /// describing it**. The author is then looking at a level they cannot undo
+    /// back to, in a session that otherwise still works.
+    ///
+    /// Deliberately not a `Drop` guard: settling needs `&mut SceneDoc`, which a
+    /// destructor on the host cannot have.
+    pub fn settle_all_gestures(&mut self, doc: &mut SceneDoc) -> bool {
+        let mut settled = false;
+        if self.voxel_stroke.is_some() {
+            settled |= self.finish_voxel(doc);
+        }
+        // A box-cut drag has cut nothing (the pit commits on release), so it is
+        // dropped rather than settled — committing would dig a pit the author
+        // abandoned.
+        self.voxel_box_anchor = None;
+        self.voxel_box_cursor = None;
+        self.voxel_box_plan = None;
+        if self.sculpt_drag.is_some() {
+            settled |= self.finish_sculpt(doc);
+        }
+        if self.foliage_drag.is_some() {
+            settled |= self.finish_foliage(doc);
+        }
+        // Last, because the two above close transactions of their own: whatever
+        // is still open belongs to a gizmo drag with no owner left.
+        self.gizmo_drag = None;
+        if doc.has_open_transaction() {
+            settled |= doc.settle_open_transaction();
+        }
+        settled
+    }
+
+    /// **Abandon every in-flight gesture when the document is replaced under
+    /// us** (P21.3 audit). Returns `true` when something was dropped.
+    ///
+    /// `scene_open` / `scene_new` do `*doc = …` under the scene lock, on the
+    /// Ring-2 thread. The viewport thread then wakes up holding gestures whose
+    /// state points into a document that no longer exists: a sculpt stroke's
+    /// terrain entity, a carve stroke's hole builders, a gizmo drag's selection,
+    /// an open transaction. `clear_streams` — the one thing the swap does notify
+    /// us about — travels down a command channel and only releases *streams*.
+    ///
+    /// The consequence is not a stale gesture, it is a **wrong edit**: the
+    /// settlers above would faithfully commit the old level's terrain deltas
+    /// into the new document, where one Ctrl+Z then applies them.
+    ///
+    /// So these are **abandoned, not settled** — the opposite ruling to every
+    /// other settler here, and for a reason that inverts the usual argument. A
+    /// settler commits because *the author can see the edit*; after a document
+    /// swap they cannot, because the world it belonged to is gone. There is
+    /// nothing to make undoable and everything to keep out of the new level.
+    pub fn abandon_gestures_on_document_swap(&mut self, doc: &SceneDoc) -> bool {
+        let id = doc.doc_id();
+        if self.last_doc_id == Some(id) {
+            return false;
+        }
+        let first_sight = self.last_doc_id.is_none();
+        self.last_doc_id = Some(id);
+        if first_sight {
+            return false; // binding to the first document is not a swap
+        }
+        let had = self.sculpt_drag.is_some()
+            || self.foliage_drag.is_some()
+            || self.voxel_stroke.is_some()
+            || self.voxel_box_anchor.is_some()
+            || self.gizmo_drag.is_some()
+            || !self.voxel_path.is_empty();
+        self.sculpt_drag = None;
+        self.foliage_drag = None;
+        self.voxel_stroke = None;
+        self.voxel_stroke_terrains.clear();
+        self.voxel_stroke_last = None;
+        self.voxel_box_anchor = None;
+        self.voxel_box_cursor = None;
+        self.voxel_box_plan = None;
+        self.voxel_path.clear();
+        self.voxel_preview.clear();
+        self.gizmo_drag = None;
+        self.water_active_river = None;
+        self.water_lake_drag = None;
+        self.water_preview.clear();
+        if had {
+            self.reject_tool(Self::GESTURE_ABANDONED_ON_DOCUMENT_SWAP);
+        }
+        had
+    }
+
+    /// What the author is told when a File ▸ Open dropped their gesture.
+    const GESTURE_ABANDONED_ON_DOCUMENT_SWAP: &'static str =
+        "Edit: the level changed while a drag was in progress, so the drag was dropped. It \
+         belonged to the level that just closed.";
+
+    /// **Close an undo transaction no gesture is going to close** (P21.3 audit —
+    /// the coordinator's ruling). Returns `true` when one was settled.
+    ///
+    /// The stroke settlers above close *strokes*; this closes the other half of
+    /// the same failure — a bare `begin_transaction` with no owner object. The
+    /// win32 pump opens `"Move"` when a gizmo drag starts and commits it on
+    /// release, **both inside the tool-gated select branch**, so *hold a
+    /// translate handle → Ctrl+Shift+P → `tool.sculpt` → release* leaves it open
+    /// forever. From then on every begin/commit pair bounces the nesting depth
+    /// 1 → 2 → 1 without closing, every edit is folded into the stranded entry,
+    /// `undo_len()` stops growing, and **Ctrl+Z is silently dead for the rest of
+    /// the session**. Nothing else surfaces it: the edits land, the document is
+    /// dirty, the save works.
+    ///
+    /// The guard is "no gesture of MINE owns one": a gizmo drag and a foliage
+    /// stroke are the two that hold a transaction across frames. Ring-2 commands
+    /// open and close theirs synchronously inside one function under the
+    /// document lock this thread also takes, so none of those can be observed
+    /// half-open from here.
+    pub fn settle_orphaned_transaction(&mut self, doc: &mut SceneDoc) -> bool {
+        if !doc.has_open_transaction() {
+            return false;
+        }
+        if self.is_dragging_gizmo() || self.is_painting_foliage() {
+            return false; // its owner is still alive and will close it
+        }
+        let settled = doc.settle_open_transaction();
+        if settled {
+            self.reject_tool(Self::TRANSACTION_SETTLED_ON_TOOL_SWITCH);
+        }
+        settled
+    }
+
+    /// What the author is told when a stranded transaction was closed for them.
+    const TRANSACTION_SETTLED_ON_TOOL_SWITCH: &'static str =
+        "Edit: a drag was interrupted before it finished, so the change so far was committed as \
+         one undo step. Ctrl+Z takes it back.";
 
     /// Finish the stroke: commit the merged height [`inf_terrain::HeightDelta`] or
     /// splat [`inf_terrain::SplatDelta`] as one undo step. Returns `true` if a
@@ -4655,21 +4836,12 @@ impl EngineHost {
         self.voxel_stroke.is_some() || self.voxel_box_anchor.is_some()
     }
 
-    /// Where this dig's material goes, resolved from the toolbar's mode and the
-    /// marker the author may have placed (P21.3).
+    /// Where this dig's material goes — the **state**; the rule is
+    /// [`SpoilMode::choice`] in `camera.rs`, which is not `#[cfg]`-gated and is
+    /// therefore tested on every CI leg (the M11 argument, completed in the
+    /// P21.3 audit round).
     fn spoil_choice(&self) -> inf_editor_core::scene::undo::SpoilChoice {
-        use inf_editor_core::scene::undo::SpoilChoice;
-        match self.voxel_tool.spoil {
-            SpoilMode::Off => SpoilChoice::Discard,
-            SpoilMode::Auto => SpoilChoice::Auto,
-            // Site with no marker falls back to the documented default rather
-            // than refusing: the author asked for a heap, and standing it in the
-            // default place is a better answer than not digging.
-            SpoilMode::Site => match self.voxel_spoil_site {
-                Some(p) => SpoilChoice::At(p),
-                None => SpoilChoice::Auto,
-            },
-        }
+        self.voxel_tool.spoil.choice(self.voxel_spoil_site)
     }
 
     /// The volume the next cut goes into — the **lookup**; the rule is
@@ -5074,6 +5246,7 @@ impl EngineHost {
         let version_before = doc.version();
         let anchor = self.voxel_box_anchor.take();
         let cursor = self.voxel_box_cursor.take();
+        self.voxel_box_plan = None;
         self.voxel_preview.clear();
         let (Some(anchor), Some(cursor)) = (anchor, cursor) else {
             return false;
@@ -5195,11 +5368,15 @@ impl EngineHost {
         // readout cannot quote a pit the release would not cut.
         self.page_box_footprint(doc, anchor, cursor);
         let Some(plan) = self.box_cut_plan(doc, anchor, cursor) else {
+            self.voxel_box_plan = None;
             self.report_tool(
                 "Box cut: drag a rectangle on the ground — a click digs nothing.".to_string(),
             );
             return;
         };
+        // The preview reads this, so it is refreshed here — where the document
+        // is in hand and the ground has just been paged and probed.
+        self.voxel_box_plan = Some(plan);
         let size = self.voxel_size_of(volume);
         // An UPPER bound on the excavation, not a promise: the pit's box may
         // span air and already-hollow rock, and only the samples that actually
@@ -5342,14 +5519,9 @@ impl EngineHost {
             .map(|s| self.voxel_shape_op(s))
             .collect()
         } else {
-            path.windows(2)
-                .map(|seg| {
-                    self.voxel_shape_op(VoxelShape::Capsule {
-                        a: seg[0],
-                        b: seg[1],
-                        radius_m,
-                    })
-                })
+            inf_editor_core::voxel_tool::tunnel_shapes(&path, radius_m)
+                .into_iter()
+                .map(|s| self.voxel_shape_op(s))
                 .collect()
         };
         if ops.is_empty() {
@@ -5468,7 +5640,27 @@ impl EngineHost {
         const SEGMENTS: usize = 24;
         self.voxel_preview.clear();
         let r = self.voxel_tool.radius_m.max(0.0);
-        if r > 0.0 {
+        // **The preview draws the shape the commit CUTS** (P21.3 audit). The
+        // brush's dig-to-grade mode cuts a column, not a ball, and drawing three
+        // circles for it showed the author a sphere at depth while the release
+        // dug a shaft to daylight. The shape comes from the same Ring-1 function
+        // the dab uses, so the two cannot drift.
+        if r > 0.0 && self.voxel_tool.kind == VoxelToolKind::Brush && self.voxel_tool.dig_to_depth {
+            // `center` is the sunk point for the brush; the column is measured
+            // from the surface above it.
+            let surface = center + DVec3::new(0.0, self.voxel_tool.depth_m.max(0.0), 0.0);
+            if let VoxelShape::Box {
+                center: c,
+                half_extents: h,
+            } = inf_editor_core::voxel_tool::brush_dab_shape(
+                surface,
+                r,
+                self.voxel_tool.depth_m,
+                true,
+            ) {
+                push_box_wire(&mut self.voxel_preview, c - h, c + h);
+            }
+        } else if r > 0.0 {
             for axis in 0..3 {
                 for i in 0..SEGMENTS {
                     let a = circle_point(center, r, axis, i, SEGMENTS);
@@ -5488,28 +5680,22 @@ impl EngineHost {
                 self.voxel_preview.push([tail, center]);
             }
         }
-        // The pit being dragged, as a box: the rectangle at grade plus the four
-        // verticals down to the floor, so the author sees the DEPTH they set and
-        // not only the footprint they are dragging.
-        if let (Some(a), Some(b)) = (self.voxel_box_anchor, self.voxel_box_cursor) {
-            let floor = a.y.min(b.y) - self.voxel_tool.depth_m.max(0.0);
-            let top = a.y.max(b.y);
-            let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
-            let (z0, z1) = (a.z.min(b.z), a.z.max(b.z));
-            for &y in &[top, floor] {
-                let c = [
-                    DVec3::new(x0, y, z0),
-                    DVec3::new(x1, y, z0),
-                    DVec3::new(x1, y, z1),
-                    DVec3::new(x0, y, z1),
-                ];
-                for i in 0..4 {
-                    self.voxel_preview.push([c[i], c[(i + 1) % 4]]);
-                }
-            }
-            for (x, z) in [(x0, z0), (x1, z0), (x1, z1), (x0, z1)] {
-                self.voxel_preview
-                    .push([DVec3::new(x, top, z), DVec3::new(x, floor, z)]);
+        // The pit being dragged, as the box the release would cut.
+        //
+        // **Drawn from the resolved plan, not from the two picks** (P21.3
+        // audit): the plan's floor is `depth` below the LOWEST ground it spans
+        // and its top clears the HIGHEST, so a rubber-band drawn between the two
+        // corner heights showed a different pit from the one being committed on
+        // any ground that was not flat. `voxel_box_plan` is refreshed by
+        // `report_box_cut`, which runs on the same frame as the drag update and
+        // has the document (this seam does not).
+        if let Some(plan) = self.voxel_box_plan {
+            if let VoxelShape::Box {
+                center: c,
+                half_extents: h,
+            } = plan.shape
+            {
+                push_box_wire(&mut self.voxel_preview, c - h, c + h);
             }
         }
         // The spoil marker: a small cross at the site, so an author can see where
@@ -5844,6 +6030,32 @@ impl EngineHost {
     /// Finish the stroke: commit ONE `PaintFoliage` undo step (added or removed)
     /// and close the transaction opened in [`Self::begin_foliage`]. Returns `true`
     /// if the stroke changed anything (so the caller emits `WorldChanged`).
+    /// **Close a foliage stroke the active tool can no longer finish** (P21.3
+    /// audit) — the third settler, and the one that also carries a transaction.
+    ///
+    /// `begin_foliage` opens `"Paint Foliage"` and `finish_foliage` closes it,
+    /// both inside the pump's tool-gated `foliage` branch. A tool switch between
+    /// two frames of a drag therefore stranded *two* things at once: the
+    /// scattered instances (in the world, with no undo entry) and the
+    /// transaction itself (which then killed Ctrl+Z for the session — see
+    /// [`settle_orphaned_transaction`](Self::settle_orphaned_transaction)).
+    /// Settling here fixes both, because `finish_foliage` commits the entry and
+    /// closes the transaction on its way out.
+    pub fn settle_orphaned_foliage(&mut self, doc: &mut SceneDoc) -> bool {
+        if self.foliage_drag.is_none() {
+            return false;
+        }
+        // The pump's own `foliage` flag, derived here so the two cannot disagree.
+        let foliage_branch_runs =
+            self.tool_mode == ToolMode::Foliage && self.mode != ViewportMode::TwoD;
+        if foliage_branch_runs {
+            return false;
+        }
+        let recorded = self.finish_foliage(doc);
+        self.reject_tool(Self::SCULPT_STROKE_SETTLED_ON_TOOL_SWITCH);
+        recorded
+    }
+
     pub fn finish_foliage(&mut self, doc: &mut SceneDoc) -> bool {
         let Some(drag) = self.foliage_drag.take() else {
             return false;

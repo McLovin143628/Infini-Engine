@@ -6021,12 +6021,47 @@ tech uses. We are not voxelizing the planet.
 > repository is. No schema bump (v19 stands), no `.inf_terrain` bump, no new dependency, no new
 > golden.
 >
+> *The settlement discipline, finished (P21.3 audit ruling).* The P21.2 carve-brush fix and
+> P21.3's sculpt sibling were two thirds of a rule; the audit found the rest. **A gizmo drag opens
+> `"Move"` and commits it on release, both inside the tool-gated select branch** — so *hold a
+> translate handle → Ctrl+Shift+P → `tool.sculpt` → release* left one unmatched
+> `begin_transaction`, after which every later begin/commit pair bounces the nesting depth
+> 1 → 2 → 1 without closing, every edit folds into the stranded entry, `undo_len()` stops growing
+> and **Ctrl+Z is silently dead for the rest of the session** while edits land, the document goes
+> dirty and saves work. Four settlers now exist and the pump calls all four
+> (`settle_orphaned_{carve,sculpt,foliage,transaction}`), plus two rules that are not settlement:
+>
+> * **a document swap ABANDONS rather than settles.** `scene_open`/`scene_new` replace `*doc`
+>   under the lock and only `clear_streams` is notified; a settler waking up afterwards would
+>   faithfully commit the *old* level's terrain stroke into the *new* document, where one Ctrl+Z
+>   applies it. `SceneDoc::doc_id` (a monotone per-instance counter) is how the viewport thread
+>   notices, and the abandon is gated to run **before** every settler.
+> * **the render loop's panic exits settle on the way out.** A caught panic ends the loop but not
+>   the process — the document survives with the mid-drag edits in it and no `EditCommand`
+>   describing them.
+>
+> *M11, actually finished.* `spoil_choice` moved to `SpoilMode::choice` in `camera.rs` (not
+> `#[cfg]`-gated, so every CI leg runs it), the tunnel's inline capsule chain became
+> `voxel_tool::tunnel_shapes`, and the terrain brushes' resampler became
+> `voxel_tool::dab_centers_2d_capped` — **which also gave them the per-frame cap they never had**;
+> only the carve brush was bounded. And `orphaned_strokes.rs` is honest now: it passed with
+> `settle_orphaned_sculpt` deleted, because it gates the recorders rather than the settler, so
+> `viewport_pump_mirror.rs` gained `every_cross_frame_gesture_has_a_settler_and_the_pump_calls_it`
+> (verified: deleting the settler fails it) and the file says which half it is.
+>
+> *Preview == commit.* Two divergences closed rather than ledgered: the box drag's rubber band is
+> now drawn from the **resolved plan** (its floor is below the lowest ground it spans, not between
+> the two corner picks), and the dig-to-grade brush draws its column instead of a sphere at depth.
+> Both read the same Ring-1 function the commit does.
+>
 > *Laws this batch paid for.* **Conservation can hide a bug rather than catch one** — a heap in
 > its own pit and a cut over unpaged rock both balance perfectly, so an identity gate needs a
 > *placement* gate beside it. **A `.take(n)` is a filter, not a bound.** **The dig path pages its
 > footprint before it reads it** — camera residency never decides what a committed edit contains,
 > now in its third phase. And **a fixture whose extremes are its corners cannot test a probe**:
-> the seeded picks already found them.
+> the seeded picks already found them. And, from the ruling: **an unmatched `begin_transaction`
+> is not a leak, it is session-wide undo death** — every gesture that holds state across frames
+> owes a settler, and every settler owes a pump call above the branch that would have run it.
 - **P21.4 Runtime carving** — 1. the same ops as Blueprint nodes, deterministic and
   replay-gated, so games can dig at runtime; 2. physics and nav updates on carve.
 

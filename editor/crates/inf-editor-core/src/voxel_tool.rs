@@ -502,6 +502,95 @@ pub fn trench_shapes(
     out
 }
 
+/// Resolve a **spline tunnel** from a path of waypoints: one swept sphere
+/// (capsule) per leg — a round bore at depth.
+///
+/// Capsules and not spheres: a chain of spheres at waypoint spacing leaves gaps
+/// between the beads, and `VoxelShape::Capsule` exists precisely for this.
+///
+/// The trench's twin, and its opposite in every way that matters: a tunnel's
+/// waypoints are its **centreline** (the caller has already sunk them by the
+/// tool's depth), it dives freely, and it reads no ground at all — a bore below
+/// the surface needs no sky rule, and one that breaks out of a hillside is
+/// handled by the surface-cut verdict rather than by its shape.
+///
+/// Moved out of `inf_viewport::host` in the P21.3 audit round (the M11 item's
+/// last inline shape): what geometry a Ctrl+click commits is a rule, and rules
+/// do not live in a `#[cfg]`-gated module.
+pub fn tunnel_shapes(path: &[DVec3], radius_m: f64) -> Vec<VoxelShape> {
+    let mut out = Vec::new();
+    if path.len() < 2 || radius_m.is_nan() || radius_m <= 0.0 || radius_m.is_infinite() {
+        return out;
+    }
+    for seg in path.windows(2) {
+        let shape = VoxelShape::Capsule {
+            a: seg[0],
+            b: seg[1],
+            radius_m,
+        };
+        if shape.is_valid() {
+            out.push(shape);
+        }
+    }
+    out
+}
+
+/// Resample a **2D** drag path at even arc length, bounded before it allocates —
+/// the terrain brushes' resampler.
+///
+/// [`dab_centers_capped`]'s twin for the sculpt / splat / biome strokes, which
+/// work in terrain-local XZ. It lives beside its 3D sibling so there is **one**
+/// stroke-resampling policy in the workspace rather than one per tool: both wrap
+/// [`inf_terrain::dab_positions`], both carry the leftover across segments, and
+/// both bound the path rather than filtering the result.
+///
+/// The terrain brushes had **no per-frame cap at all** before the P21.3 audit —
+/// only the carve brush did — so a sculpt drag whose pick landed far away built
+/// the whole list every frame and laid every dab in it.
+pub fn dab_centers_2d_capped(path: &[DVec2], spacing: f64, max_dabs: usize) -> Vec<DVec2> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    if path.len() == 1 || spacing.is_nan() || spacing <= 0.0 || spacing.is_infinite() {
+        return path.to_vec();
+    }
+    let total: f64 = path
+        .windows(2)
+        .map(|w| (w[1] - w[0]).length())
+        .filter(|d| d.is_finite())
+        .sum();
+    let allowed = {
+        let v = max_dabs as f64 * spacing;
+        if v.is_finite() {
+            v
+        } else {
+            f64::MAX
+        }
+    };
+    if allowed < total {
+        // Trim to the allowed arc length, then resample the short path.
+        let mut walked = 0.0;
+        let mut trimmed: Vec<DVec2> = vec![path[0]];
+        let mut end = path[0];
+        for w in path.windows(2) {
+            let seg = (w[1] - w[0]).length();
+            if !seg.is_finite() || seg <= 0.0 {
+                continue;
+            }
+            if walked + seg >= allowed {
+                end = w[0] + (w[1] - w[0]) / seg * (allowed - walked);
+                break;
+            }
+            walked += seg;
+            trimmed.push(w[1]);
+            end = w[1];
+        }
+        trimmed.push(end);
+        return inf_terrain::dab_positions(&trimmed, spacing);
+    }
+    inf_terrain::dab_positions(path, spacing)
+}
+
 /// Ground extremes over one trench leg's **rotated** footprint: the rectangle
 /// `a2 -> b2` widened by `half_width_m` on both sides.
 ///
