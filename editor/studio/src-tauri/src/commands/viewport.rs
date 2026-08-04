@@ -506,17 +506,45 @@ pub async fn viewport_voxel_status(
 ) -> Result<VoxelStatusDto, String> {
     // Lock order — document, then volumes — so this can never deadlock against
     // the viewport loop or the undo path, which both take them that way round.
-    let level = {
+    let mut level = {
         let doc = scene.doc.lock().map_err(|e| e.to_string())?;
         inf_editor_core::voxel_edit::level_status(&doc)
     };
     // With no viewport attached nothing is bound and nothing can be carved, which
     // is the honest answer rather than an error: the level still has its volumes
     // and its terrains, they are simply not loaded.
+    //
+    // A **poisoned** store is not that answer, and it does not get to borrow it
+    // (P21.2 audit): "0 bound, 0 unsaved" is a claim, and the one state in which
+    // it is a lie is the one where the author most needs the truth. It rides the
+    // advisory list, which the toolbar already sorts first.
     let volumes = state.voxel_volumes();
     let (bound_volumes, unsaved_chunks) = match volumes.as_ref().map(|v| v.lock()) {
-        Some(Ok(store)) => (store.bound_volumes().len(), store.unsaved_chunk_count()),
-        _ => (0, 0),
+        Some(Ok(store)) => {
+            // **The replay-fault readout.** A Ctrl+Z that put back less than it
+            // took leaves a world that looks entirely plausible, so the counter is
+            // the only witness an author will ever see (the Ring-0 skip counts and
+            // the missing-volume refusals both land on it).
+            let faults = store.replay_faults();
+            if faults > 0 {
+                level.advisories.push(format!(
+                    "{faults} carve undo/redo replay(s) could not fully land — some Ctrl+Z put \
+                     back less than it took, so a cave may be part-open. Check the Output Log, \
+                     and prefer re-carving over saving this level."
+                ));
+            }
+            (store.bound_volumes().len(), store.unsaved_chunk_count())
+        }
+        Some(Err(_)) => {
+            level.advisories.push(
+                "The voxel working set is unreadable — a thread panicked while holding it. \
+                 Carve counts below are unknown, carving is refused, and a save cannot write \
+                 the .inf_voxel assets. Save the level and restart the editor."
+                    .to_string(),
+            );
+            (0, 0)
+        }
+        None => (0, 0),
     };
     Ok(VoxelStatusDto {
         volumes: level.volumes as u32,

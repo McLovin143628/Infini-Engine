@@ -16,7 +16,7 @@ use std::path::Path;
 use glam::{DVec2, DVec3};
 use inf_ecs::components::{Terrain, VoxelVolume};
 use inf_editor_core::ipc::SpawnKind;
-use inf_editor_core::scene::undo::{CarveStroke, CarveVerdict};
+use inf_editor_core::scene::undo::{CarveRefusal, CarveStroke, CarveVerdict};
 use inf_editor_core::scene::SceneDoc;
 use inf_editor_core::voxel_store::{shared_volumes, SharedVoxelVolumes};
 use inf_voxel::{
@@ -188,7 +188,7 @@ fn a_carve_moves_the_mesh_stamps_and_the_document_version() {
 
         let tally = doc
             .edit_carve(volume, &volumes, &op)
-            .unwrap_or_else(|| panic!("{label} was refused"));
+            .unwrap_or_else(|r| panic!("{label} was refused: {r:?}"));
         assert!(tally.carved > 0, "{label}");
         assert_eq!(tally.holes > 0, expect_holes, "{label}");
 
@@ -271,7 +271,7 @@ fn a_refused_carve_changes_nothing_at_all() {
 
     assert_eq!(
         doc.edit_carve(volume, &volumes, &breakthrough()),
-        None,
+        Err(CarveRefusal::InlineTerrain { terrain }),
         "the refused carve reported success"
     );
 
@@ -335,7 +335,7 @@ fn three_carves_undo_and_redo_as_three_whole_steps() {
         });
         let tally = doc
             .edit_carve(volume, &volumes, &op)
-            .unwrap_or_else(|| panic!("carve {step} was refused"));
+            .unwrap_or_else(|r| panic!("carve {step} was refused: {r:?}"));
         assert!(tally.carved > 0 && tally.holes > 0, "carve {step}");
         assert_eq!(
             doc.undo_len(),
@@ -402,7 +402,9 @@ fn a_carve_stroke_is_one_undo_step() {
             center: DVec3::new(5.0 + i as f64, 4.0, 8.0),
             radius_m: 1.5,
         });
-        stroke.dab(&mut doc, &op, &terrains);
+        stroke
+            .dab(&mut doc, &op, &terrains)
+            .expect("the dab must cut");
     }
     let tally = stroke.tally();
     assert!(tally.carved > 0 && tally.holes > 0);
@@ -475,7 +477,10 @@ fn a_carve_chain_is_all_or_nothing_and_one_undo_step() {
     let before_tile = tile_image(&doc, terrain);
     let before_solid = solid_count(&volumes, volume);
     let undos = doc.undo_len();
-    assert_eq!(doc.edit_carve_path(volume, &volumes, &ops), None);
+    assert_eq!(
+        doc.edit_carve_path(volume, &volumes, &ops),
+        Err(CarveRefusal::InlineTerrain { terrain })
+    );
     assert_eq!(
         solid_count(&volumes, volume),
         before_solid,
@@ -529,14 +534,14 @@ fn a_fill_over_the_carve_restores_byte_identical_ground() {
     let shell = shell_count(&volumes, volume, &shape);
     assert!(doc
         .edit_carve(volume, &volumes, &VoxelOp::carve(shape))
-        .is_some());
+        .is_ok());
     assert_ne!(tile_image(&doc, terrain), before_tile);
 
     // Material 1 — the fixture's rock — so the refilled samples carry the block's
     // own material and nothing but the surface shell is left hollow.
     assert!(doc
         .edit_carve(volume, &volumes, &VoxelOp::fill(shape, 1))
-        .is_some());
+        .is_ok());
     assert_eq!(
         tile_image(&doc, terrain),
         before_tile,
@@ -552,6 +557,155 @@ fn a_fill_over_the_carve_restores_byte_identical_ground() {
     assert!(data.get_tile((0, 0)).unwrap().holes_are_default());
 }
 
+/// **THE OTHER HALF OF THE WHOLE-OP RULE (P21.2 audit, M5): a refused VOXEL half
+/// must punch no holes.**
+///
+/// `a_refused_carve_changes_nothing_at_all` above pins the refusal that comes
+/// from the *terrain* side. This is the one that comes from the rock side, and it
+/// is the direction that shipped broken: `dab` wrapped its voxel write in
+/// `if let Ok(…) { if let Some(…) { … } }` and then ran the heightfield loop
+/// **unconditionally**, so a volume that was not loaded — or a working set a
+/// panicked thread had poisoned — produced cave mouths in the ground over solid,
+/// untouched rock.
+///
+/// That is worse than the sealed cave `RefusedInline` prevents, because it is
+/// *saveable*: the hole mask rides the `.inf_terrain`, so the next Ctrl+S commits
+/// a hole into ground nothing ever hollowed, and only a reload reveals it.
+///
+/// Three doors, because the fix has to hold at each: the raw stroke (where the
+/// bug was), the one-shot carve, and the chain.
+#[test]
+fn a_refused_voxel_half_punches_no_holes() {
+    let terrains_of = |doc: &SceneDoc| doc.carve_verdict(&breakthrough().shape).terrains().to_vec();
+
+    // ── the door the bug was behind: a dab whose volume is not loaded ──
+    let (mut doc, volumes, terrain, _volume, _d) = fixture(true);
+    let before_tile = tile_image(&doc, terrain);
+    let terrains = terrains_of(&doc);
+    assert_eq!(
+        terrains,
+        vec![terrain],
+        "the cut must really reach the ground"
+    );
+
+    // A volume entity the store has never bound — the mid-gesture state where the
+    // asset reference was cleared, the entity deleted, or the projection released
+    // it while the button was still down.
+    let unbound = Uuid::from_u128(0x212C_DEAD);
+    let mut stroke = CarveStroke::begin(unbound, volumes.clone());
+    assert_eq!(
+        stroke.dab(&mut doc, &breakthrough(), &terrains),
+        Err(CarveRefusal::VolumeNotLoaded),
+        "a dab into a volume with no chunks must refuse, not report an empty edit"
+    );
+    assert_eq!(
+        tile_image(&doc, terrain),
+        before_tile,
+        "the dab opened cave mouths over rock it never cut — a hole the save WILL commit"
+    );
+    let (data, _) = doc.terrain_data_and_origin(terrain).unwrap();
+    assert!(!data.has_holes());
+    assert_eq!(data.height_at(DVec2::new(8.0, 8.0)), Some(4.0));
+    assert!(stroke.tally().is_noop(), "a refused dab tallied work");
+    assert!(
+        !doc.edit_commit_carve(stroke),
+        "a stroke that cut nothing must record nothing"
+    );
+
+    // ── the one-shot and the chain refuse the same way, before anything moves ──
+    let (mut doc, volumes, terrain, _volume, _d) = fixture(true);
+    let before_tile = tile_image(&doc, terrain);
+    let undos = doc.undo_len();
+    assert_eq!(
+        doc.edit_carve(unbound, &volumes, &breakthrough()),
+        Err(CarveRefusal::VolumeNotLoaded)
+    );
+    assert_eq!(
+        doc.edit_carve_path(unbound, &volumes, &[breakthrough(), breakthrough()]),
+        Err(CarveRefusal::VolumeNotLoaded)
+    );
+    assert_eq!(tile_image(&doc, terrain), before_tile);
+    assert_eq!(doc.undo_len(), undos, "a refused carve recorded a step");
+
+    // ── and a POISONED working set is a refusal, never an empty edit ──
+    let (mut doc, _v, terrain, volume, _d) = fixture(true);
+    let before_tile = tile_image(&doc, terrain);
+    let poisoned = shared_volumes();
+    {
+        let inner = poisoned.clone();
+        // The expected panic prints; that is cheaper than a process-global hook
+        // the other tests in this binary would race against.
+        let _ = std::thread::spawn(move || {
+            let _guard = inner.lock().expect("a fresh mutex is not poisoned");
+            panic!("deliberate: poisoning the voxel working set");
+        })
+        .join();
+        assert!(
+            poisoned.lock().is_err(),
+            "the fixture must really poison it"
+        );
+    }
+    assert_eq!(
+        doc.edit_carve(volume, &poisoned, &breakthrough()),
+        Err(CarveRefusal::PoisonedStore)
+    );
+    assert_eq!(
+        tile_image(&doc, terrain),
+        before_tile,
+        "an unreadable working set opened the ground anyway"
+    );
+    let (data, _) = doc.terrain_data_and_origin(terrain).unwrap();
+    assert!(!data.has_holes());
+}
+
+/// **The refusals name themselves** (P21.2 audit, M6): the three ways a carve can
+/// be refused carry three different sentences, and each names its own fix.
+///
+/// The doors used to return `Option`, so the viewport quoted
+/// `INLINE_TERRAIN_CARVE_REFUSAL` for every empty answer — sending an author off
+/// to convert a terrain that was never at fault when the real problem was a
+/// volume that had not loaded. A verdict readout that explains the wrong problem
+/// is worse than a silent one.
+#[test]
+fn every_carve_refusal_says_which_one_it_is() {
+    use inf_editor_core::scene::undo::{
+        INLINE_TERRAIN_CARVE_REFUSAL, POISONED_STORE_CARVE_REFUSAL, VOLUME_NOT_LOADED_CARVE_REFUSAL,
+    };
+
+    let inline = CarveRefusal::InlineTerrain {
+        terrain: Uuid::from_u128(1),
+    };
+    assert_eq!(inline.message(), INLINE_TERRAIN_CARVE_REFUSAL);
+    assert_eq!(
+        CarveRefusal::VolumeNotLoaded.message(),
+        VOLUME_NOT_LOADED_CARVE_REFUSAL
+    );
+    assert_eq!(
+        CarveRefusal::PoisonedStore.message(),
+        POISONED_STORE_CARVE_REFUSAL
+    );
+
+    // Three distinct sentences, each naming what to do about it. Equal messages
+    // would make the enum a decoration.
+    let all = [
+        inline.message(),
+        CarveRefusal::VolumeNotLoaded.message(),
+        CarveRefusal::PoisonedStore.message(),
+    ];
+    for (i, a) in all.iter().enumerate() {
+        assert!(a.starts_with("Carve refused:"), "{a}");
+        assert!(
+            a.contains("Convert the terrain")
+                || a.contains("asset reference")
+                || a.contains("restart the editor"),
+            "a refusal that names no fix is a broken tool with better manners: {a}"
+        );
+        for b in &all[i + 1..] {
+            assert_ne!(a, b, "two refusals share one sentence");
+        }
+    }
+}
+
 /// The defensive advisory: a document that arrived carrying holes on an inline
 /// terrain — an older session, a hand-edited file, a terrain converted back to
 /// inline after a carve — is detectable, with the fix named.
@@ -562,7 +716,7 @@ fn a_fill_over_the_carve_restores_byte_identical_ground() {
 fn holes_on_an_inline_terrain_are_detected_as_a_lossy_document() {
     // Carve legally against an asset-backed terrain …
     let (mut doc, volumes, terrain, volume, _d) = fixture(true);
-    assert!(doc.edit_carve(volume, &volumes, &breakthrough()).is_some());
+    assert!(doc.edit_carve(volume, &volumes, &breakthrough()).is_ok());
 
     let (data, _) = doc.terrain_data_and_origin(terrain).unwrap();
     assert!(inf_voxel::inline_hole_advisory(data, true).is_none());

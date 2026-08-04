@@ -62,7 +62,7 @@ use crate::scene::SceneDoc;
 ///   linking two bodies; the `#[reflect(ignore)]` `other` entity ref is
 ///   serde-persisted), `audio_source` ([`AudioSource`], a spatialized emitter) and
 ///   `audio_listener` ([`AudioListener`], the active listener flag). All four were
-///   live-session-only through v5 (the `joint_3d_serde_round_trip_including_entity_ref`
+///   live-session-only through v5 (the `joint_3d_serde_round_trips_including_entity_ref`
 ///   and `audio_components_serde_round_trip` guards pinned the gap); v6 is where
 ///   they first persist. The collision-layer / combine-rule / CCD fields added in
 ///   the same P12.1 batch are `#[serde(default)]` extensions of the **existing**
@@ -6817,7 +6817,7 @@ mod tests {
     /// `#[reflect(ignore)]` `other` entity ref) + `AudioSource` (with its `clip`
     /// ref) + `AudioListener` now **persist** across save/load and are
     /// byte-identical on re-encode — the guards the P12.1..P12.3 batches left as
-    /// `joint_3d_serde_round_trip_including_entity_ref` + `audio_components_serde_round_trip`
+    /// `joint_3d_serde_round_trips_including_entity_ref` + `audio_components_serde_round_trip`
     /// (component-only, no `.inf_lvl` slot). The v6 slots close the gap.
     #[test]
     fn joints_and_audio_persist_across_save_load_v6() {
@@ -10271,7 +10271,7 @@ mod tests {
     /// consequence in full under *THE EMPTY CELL*.
     ///
     /// `inf-terrain` carries the asset half of this assertion
-    /// (`frozen_tile_generation_is_pinned_to_both_ladders`); this is the scene
+    /// (`frozen_tile_generations_are_pinned_to_both_ladders`); this is the scene
     /// half, and the runtime codec mirrors it.
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {

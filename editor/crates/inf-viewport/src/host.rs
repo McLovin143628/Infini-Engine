@@ -1019,6 +1019,10 @@ impl EngineHost {
             // shape the author stopped thinking about several tools ago.
             self.voxel_path.clear();
             self.voxel_preview.clear();
+            // An in-flight BRUSH stroke is the opposite case — it has already cut
+            // — and it is closed by [`settle_orphaned_carve`], which the pump calls
+            // with the document in hand. It cannot be closed here: committing an
+            // undo entry needs a `&mut SceneDoc` and this seam has none.
         }
     }
 
@@ -2882,10 +2886,16 @@ fn project_terrain(
 ///   `.inf_voxel` header — so the geometry is self-consistent. Reading the
 ///   component's `voxel_size_m` here instead would scale vertices against origins
 ///   derived from the asset's and tear the volume apart wherever the two disagree.
-///   The component's value is what a *new* asset is authored at; **a P21.2 cook
-///   advisory will report** a disagreement. There is no such advisory today — it
-///   is named in the future tense because a gate that does not exist is worse than
-///   no claim, and because this doc block is NOT covered by the mirror gate
+///   The component's value is what a *new* asset is authored at, and the cook
+///   **does** report the disagreement now: `inf_packager::cook`'s
+///   `voxel_scale_mismatches` raises one advisory per level+volume, naming both
+///   numbers and which one wins (P21.2). The paragraph below still says there is
+///   no such advisory, and it is stale — but correcting it needs the player's
+///   twin edited in the same commit, because everything from the next mention of
+///   this function's signature onwards **is** compared byte for byte:
+///   `extract_fn` anchors on the FIRST match in the file, which is that mention
+///   itself. So the "NOT covered by the mirror gate" claim holds only for the
+///   lines above this one — a trap worth knowing about before editing here.
 ///   (`extract_fn` starts at `fn project_voxel(`), so the two copies are
 ///   hand-synced and drift here is silent.
 /// * **A voxel material index IS a terrain splat index**, so a volume shades with
@@ -4690,7 +4700,18 @@ impl EngineHost {
                     volume,
                     self.voxel_volumes.clone(),
                 );
-                let tally = stroke.dab(doc, &op, &terrains);
+                // A refusal from the first dab ends the gesture before it starts:
+                // the volume was released or its working set is poisoned, so
+                // nothing was cut and nothing above it was opened. Report the
+                // reason the stroke gave rather than a paraphrase — it is the
+                // only thing that tells the author which of the three it was.
+                let tally = match stroke.dab(doc, &op, &terrains) {
+                    Ok(t) => t,
+                    Err(refusal) => {
+                        self.reject_tool(refusal.message());
+                        return false;
+                    }
+                };
                 self.voxel_stroke = Some(stroke);
                 self.voxel_stroke_terrains = terrains.clone();
                 self.voxel_stroke_last = Some(p);
@@ -4713,9 +4734,28 @@ impl EngineHost {
         }
     }
 
+    /// The most dabs one [`update_voxel`](Self::update_voxel) will lay before it
+    /// stops and **carries the rest of the stroke to the next frame**.
+    ///
+    /// The spacing floor is 0.05 m and a drag has no length limit, so one fast
+    /// swing across a hundred metres asks for two thousand dabs — and every dab
+    /// pages a streamed terrain's footprint off disk, walks every terrain for a
+    /// verdict, cuts, and re-meshes what it moved, **all inside the one scene
+    /// mutex** that autosave and every Ring-2 command also need. Uncapped, that is
+    /// a multi-second freeze in which the crash-recovery write cannot run.
+    ///
+    /// Capping without carrying would be worse than the freeze: the stroke would
+    /// skip to the cursor and leave a gap in the middle of the cut. Resuming from
+    /// the last dab actually placed keeps the gesture continuous, and the pump
+    /// calls this **every frame while the button is down** (not only when the
+    /// cursor moves), so a stroke that outran its budget still drains itself while
+    /// the author holds still.
+    const MAX_DABS_PER_UPDATE: usize = 32;
+
     /// Continue a brush stroke: resample the path from the last dab to the cursor
     /// at even arc length (~⅔ radius, the sculpt brush's rule at the coarser
-    /// spacing a *volume* wants) and cut at each.
+    /// spacing a *volume* wants) and cut at each, up to
+    /// [`MAX_DABS_PER_UPDATE`](Self::MAX_DABS_PER_UPDATE) per frame.
     pub fn update_voxel(&mut self, doc: &mut SceneDoc, view: &RenderView, px: u32, py: u32) {
         if self.voxel_stroke.is_none() {
             return;
@@ -4737,16 +4777,32 @@ impl EngineHost {
             .as_ref()
             .map(|s| s.tally())
             .unwrap_or_default();
+        let mut refused = None;
         if len > 0.0 {
             let dir = step / len;
             let mut t = spacing;
             let mut placed = last;
-            while t <= len {
+            let mut dabs = 0usize;
+            while t <= len && dabs < Self::MAX_DABS_PER_UPDATE {
                 let center = last + dir * t;
                 let op = self.voxel_op_at(center);
                 if let Some(terrains) = self.voxel_authorize(doc, &op.shape) {
                     if let Some(stroke) = self.voxel_stroke.as_mut() {
-                        tally = stroke.dab(doc, &op, &terrains);
+                        match stroke.dab(doc, &op, &terrains) {
+                            // Named `cut`, not `t` — `t` is the arc-length
+                            // parameter this loop advances, and shadowing it
+                            // inside the arm is one edit away from a hang.
+                            Ok(cut) => tally = cut,
+                            // The rock could not be cut, so nothing above it was
+                            // opened either. Stop the stroke here — every later
+                            // dab would refuse the same way — and let mouse-up
+                            // commit whatever the earlier dabs did cut, which is
+                            // the only way it stays undoable.
+                            Err(r) => {
+                                refused = Some(r);
+                                break;
+                            }
+                        }
                     }
                     for g in terrains {
                         if !self.voxel_stroke_terrains.contains(&g) {
@@ -4756,14 +4812,24 @@ impl EngineHost {
                 }
                 placed = center;
                 t += spacing;
+                dabs += 1;
             }
+            // The remainder rides to the next frame from here, so the cut has no
+            // gap where the budget ran out.
             self.voxel_stroke_last = Some(placed);
         }
         for g in self.voxel_stroke_terrains.clone() {
             self.after_terrain_edit(doc, g);
         }
-        if let Some(volume) = self.voxel_stroke.as_ref().map(|s| s.volume()) {
-            self.report_carve(volume, tally);
+        // A refusal wins the readout: a measurement line over it would tell the
+        // author how much they dug while the brush had silently stopped digging.
+        match refused {
+            Some(r) => self.reject_tool(r.message()),
+            None => {
+                if let Some(volume) = self.voxel_stroke.as_ref().map(|s| s.volume()) {
+                    self.report_carve(volume, tally);
+                }
+            }
         }
         self.refresh_voxel_preview(cur);
     }
@@ -4781,6 +4847,50 @@ impl EngineHost {
         }
         recorded
     }
+
+    /// **Close a carve stroke the active tool can no longer finish** (P21.2
+    /// audit). Returns `true` when an orphaned stroke was recorded.
+    ///
+    /// A stroke's dabs mutate the volume and the heightfield *live*, and only
+    /// `finish_voxel` turns them into the undo entry that describes them. But
+    /// `finish_voxel` is reached from the pump's `else if voxel` branch, which is
+    /// gated on the **active tool** — so a tool switch arriving between two frames
+    /// of a drag (the toolbar and the `tool.*` shortcuts both push one down a
+    /// command channel, mid-gesture or not) left the stroke open forever: its cuts
+    /// stayed in the world, saved like any other edit, and Ctrl+Z could not reach
+    /// them. That is the un-undoable committed edit `a4e5844` ruled worse than any
+    /// partial one.
+    ///
+    /// Committing rather than reverting, deliberately: the author *did* dig that
+    /// rock and can see it, and reverting would need the document the tool switch
+    /// does not have. One undo step, exactly as a mouse-up would have produced.
+    ///
+    /// Called unconditionally by the platform pump with the document in hand —
+    /// `set_tool_mode` cannot do it itself (no `SceneDoc` on that seam), and a
+    /// deferred flag would be a second piece of state saying what
+    /// `tool_mode != Voxel && voxel_stroke.is_some()` already says.
+    pub fn settle_orphaned_carve(&mut self, doc: &mut SceneDoc) -> bool {
+        if self.voxel_stroke.is_none() {
+            return false;
+        }
+        // The condition is the pump's own `voxel` flag, derived here so the two
+        // cannot disagree: 2D mode keeps Select regardless of the tool, so
+        // switching projections mid-drag strands a stroke exactly as switching
+        // tools does.
+        let carve_branch_runs =
+            self.tool_mode == ToolMode::Voxel && self.mode != ViewportMode::TwoD;
+        if carve_branch_runs {
+            return false;
+        }
+        let recorded = self.finish_voxel(doc);
+        self.reject_tool(Self::VOXEL_STROKE_SETTLED_ON_TOOL_SWITCH);
+        recorded
+    }
+
+    /// What the author is told when a tool switch closed their carve for them.
+    const VOXEL_STROKE_SETTLED_ON_TOOL_SWITCH: &'static str =
+        "Carve: the tool changed while a stroke was still down, so the cut so far was committed \
+         as one undo step. Ctrl+Z takes it back.";
 
     /// Carve the pending tunnel: one capsule per path segment, all into a single
     /// stroke, so the whole tube is one undo step.
@@ -4817,9 +4927,15 @@ impl EngineHost {
         for op in &ops {
             self.page_cut_footprint(doc, &op.shape);
         }
-        let Some(tally) = doc.edit_carve_path(volume, &self.voxel_volumes, &ops) else {
-            self.reject_tool(inf_editor_core::scene::undo::INLINE_TERRAIN_CARVE_REFUSAL);
-            return false;
+        // The refusal carries its OWN sentence. Quoting the inline-terrain one for
+        // every empty answer is what this used to do, and it sent an author off to
+        // convert a terrain when the real problem was a volume that never loaded.
+        let tally = match doc.edit_carve_path(volume, &self.voxel_volumes, &ops) {
+            Ok(tally) => tally,
+            Err(refusal) => {
+                self.reject_tool(refusal.message());
+                return false;
+            }
         };
         // Every projected terrain, not the segments' own lists: a tunnel can run
         // across several, `edit_carve_path` keeps its per-segment plan private,

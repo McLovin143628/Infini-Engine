@@ -777,6 +777,48 @@ fn resolve_save_target(
     }
 }
 
+/// What a poisoned voxel working set means to a save, said once so the save path,
+/// autosave and the tests quote the same sentence.
+const POISONED_VOXEL_STORE_SAVE_FAILURE: &str =
+    "Carve edits could NOT be staged: the voxel working set is poisoned — a thread panicked \
+     while holding it. The level itself was written, but no .inf_voxel was updated, so every \
+     cave carved this session is still only in memory. The crash-recovery file has been kept.";
+
+/// Stage the voxel half of a save out of the shared working set (P21.2 audit).
+///
+/// **Three outcomes, and the middle one is why this is a function.** No viewport
+/// (headless, or a build with no embedding backend) means no carve tool and
+/// nothing to stage — the honest empty answer. A readable store stages its dirty
+/// chunks. A **poisoned** store is neither: it is a save that cannot see the
+/// edits it is supposed to write, and folding it into the headless arm — which is
+/// what `match … { Some(Ok(s)) => …, _ => Vec::new() }` did — made a save that
+/// silently dropped every carve report complete success and then delete the
+/// crash-recovery file that was their last copy.
+fn stage_voxels(
+    volumes: Option<&inf_editor_core::voxel_store::SharedVoxelVolumes>,
+) -> Result<Vec<voxel_edit::StagedVoxelEdit>, String> {
+    match volumes {
+        None => Ok(Vec::new()),
+        Some(v) => match v.lock() {
+            Ok(store) => Ok(voxel_edit::stage_voxel_edits(&store)),
+            Err(_) => Err(POISONED_VOXEL_STORE_SAVE_FAILURE.to_string()),
+        },
+    }
+}
+
+/// Whether carve edits survived the save and the crash-recovery file must
+/// therefore be kept (P21.2 audit).
+///
+/// **A poisoned store answers "still dirty".** It is the terrain twin's rule —
+/// `has_unsaved_terrain_edits` is read through `lock(&state.doc)?`, which aborts
+/// the save outright on a poisoned document — expressed the only way this seam
+/// can: the question is "may the recovery file be deleted?", and an unreadable
+/// store cannot answer *yes* to it. `unwrap_or(false)` said yes, so a poisoned
+/// mutex deleted the only surviving copy of the session's carves.
+fn voxels_still_dirty(volumes: Option<&inf_editor_core::voxel_store::SharedVoxelVolumes>) -> bool {
+    volumes.is_some_and(|v| v.lock().map_or(true, |s| s.has_unsaved_edits()))
+}
+
 #[tauri::command]
 pub async fn scene_save(
     app: AppHandle,
@@ -813,15 +855,10 @@ pub async fn scene_save(
     // shared store the viewport carves into (schema v19 is frozen, so the chunks
     // are NOT in the document). The doc lock is already released above, which
     // keeps the fixed order — **document first, volumes second** — trivially.
-    // No viewport ⇒ no carve tool ⇒ nothing staged, which is the headless case
-    // and not a failure to report.
     let voxel_volumes = app
         .try_state::<crate::commands::ViewportState>()
         .and_then(|v| v.voxel_volumes());
-    let staged_voxels = match voxel_volumes.as_ref().map(|v| v.lock()) {
-        Some(Ok(store)) => voxel_edit::stage_voxel_edits(&store),
-        _ => Vec::new(),
-    };
+    let staged_voxels = stage_voxels(voxel_volumes.as_ref());
     serialize::write_encoded(&enc, &target)?;
 
     // Fold this session's sculpt/paint into the `.inf_terrain` assets, then clear
@@ -875,6 +912,18 @@ pub async fn scene_save(
             }
         }
     }
+    // A working set nobody can read is a save failure, not an empty stage. It is
+    // reported rather than returned because the level bytes are already on disk
+    // and the document is already marked saved: bailing here with `?` would leave
+    // a document that believes it was written by a save that never wrote it.
+    let staged_voxels = match staged_voxels {
+        Ok(staged) => staged,
+        Err(msg) => {
+            tracing::error!("scene_save: {msg}");
+            result.voxel_warnings.push(msg);
+            Vec::new()
+        }
+    };
     // Fold this session's carves into the `.inf_voxel` assets, then clear the
     // marks for the ones that really landed and re-walk the viewport's index.
     //
@@ -890,8 +939,26 @@ pub async fn scene_save(
             Some(root) => {
                 let report = voxel_edit::write_voxel_edits(&staged_voxels, &root);
                 if !report.is_empty() {
-                    if let Some(Ok(mut store)) = voxel_volumes.as_ref().map(|v| v.lock()) {
-                        voxel_edit::mark_voxel_edits_saved(&mut store, &report);
+                    match voxel_volumes.as_ref().map(|v| v.lock()) {
+                        Some(Ok(mut store)) => {
+                            voxel_edit::mark_voxel_edits_saved(&mut store, &report);
+                        }
+                        // Poisoned in the window between staging and marking (the
+                        // rewrite runs with both locks released, so the viewport
+                        // thread can panic inside it). The marks stay set, which
+                        // is the safe direction — the next save rewrites the same
+                        // chunks — but it must be said, not swallowed.
+                        Some(Err(_)) => {
+                            let msg = format!(
+                                "{} volume(s) were written but their write-back marks could \
+                                 not be cleared: the voxel working set was poisoned during \
+                                 the save. The next save will rewrite them.",
+                                report.written.len()
+                            );
+                            tracing::error!("scene_save: {msg}");
+                            result.voxel_warnings.push(msg);
+                        }
+                        None => {}
                     }
                     tracing::info!("{}", report.summary());
                 }
@@ -949,10 +1016,7 @@ pub async fn scene_save(
         // The voxel twin, and the same starvation condition: carve edits that
         // could not be written live only in the shared store, so the recovery
         // file and its note are their only backstop (P21.2).
-        let voxels_still_dirty = voxel_volumes
-            .as_ref()
-            .and_then(|v| v.lock().ok().map(|s| s.has_unsaved_edits()))
-            .unwrap_or(false);
+        let voxels_still_dirty = voxels_still_dirty(voxel_volumes.as_ref());
         if terrain_still_dirty || voxels_still_dirty {
             tracing::warn!(
                 "scene_save: unsaved terrain/carve edits survived the save — keeping the \
@@ -1025,7 +1089,11 @@ pub async fn scene_autosave(app: AppHandle, state: State<'_, SceneState>) -> Res
         .and_then(|v| v.voxel_volumes())
         .and_then(|v| match v.lock() {
             Ok(store) => voxel_edit::unsaved_voxel_note(&store),
-            Err(_) => None,
+            // Not `None` (P21.2 audit). `None` here means "no unsaved carves",
+            // which on a clean document short-circuits autosave entirely — so a
+            // poisoned store would suppress the one mechanism that records the
+            // carves existed. An unreadable store must assume the worst.
+            Err(_) => Some(POISONED_VOXEL_STORE_SAVE_FAILURE.to_string()),
         });
     // Encode under the lock (authored values if a scrub is live), write outside it.
     let (payload, terrain_note) = {
@@ -1089,6 +1157,8 @@ pub async fn scene_new(
 #[cfg(test)]
 mod tests {
     use super::resolve_save_target;
+    use super::{stage_voxels, voxels_still_dirty, POISONED_VOXEL_STORE_SAVE_FAILURE};
+    use inf_editor_core::voxel_store::{shared_volumes, SharedVoxelVolumes};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1111,5 +1181,67 @@ mod tests {
         let (target, new_current): (PathBuf, _) = resolve_save_target(None, None, quicksave);
         assert_eq!(target, quicksave.to_path_buf());
         assert_eq!(new_current, None);
+    }
+
+    /// A [`SharedVoxelVolumes`] whose mutex is **poisoned** — a thread panicked
+    /// holding the guard, which is exactly what a viewport-thread panic mid-carve
+    /// leaves behind (the render loop's `catch_unwind` nets are around the render
+    /// and the pointer-interaction block; a panic anywhere else on that thread
+    /// poisons every lock it held).
+    fn poisoned_store() -> SharedVoxelVolumes {
+        let volumes = shared_volumes();
+        let inner = volumes.clone();
+        // The panic message is expected output — the test harness prints it, and
+        // that is cheaper than installing a process-global panic hook that other
+        // tests in this binary would race against.
+        let _ = std::thread::spawn(move || {
+            let _guard = inner.lock().expect("a fresh mutex is not poisoned");
+            panic!("deliberate: poisoning the voxel working set");
+        })
+        .join();
+        assert!(volumes.lock().is_err(), "the fixture must really poison it");
+        volumes
+    }
+
+    /// **THE B2 GATE.** A poisoned voxel working set must make the save *report a
+    /// failure*, and must never be read as "nothing was carved".
+    ///
+    /// Both halves matter and they used to fail together: staging folded
+    /// `Some(Err(poison))` into the no-viewport arm (so every carve was silently
+    /// dropped) and the recovery check answered `unwrap_or(false)` (so the save
+    /// reported success and deleted the crash-recovery file — the only remaining
+    /// copy of the chunks it had just failed to read).
+    #[test]
+    fn a_poisoned_voxel_store_fails_the_save_and_keeps_the_recovery_file() {
+        let volumes = poisoned_store();
+
+        let err = stage_voxels(Some(&volumes)).expect_err("a poisoned store staged silently");
+        assert_eq!(err, POISONED_VOXEL_STORE_SAVE_FAILURE);
+        assert!(
+            err.contains("crash-recovery"),
+            "the failure line must say the backstop was kept: {err}"
+        );
+
+        assert!(
+            voxels_still_dirty(Some(&volumes)),
+            "a poisoned store answered `not dirty`, which is what deletes the recovery file"
+        );
+    }
+
+    /// The two honest answers, so the gate above cannot pass by reporting failure
+    /// unconditionally: no viewport stages nothing and is not dirty, and a
+    /// readable empty store is the same.
+    #[test]
+    fn a_readable_or_absent_store_stages_cleanly() {
+        assert!(stage_voxels(None)
+            .expect("no viewport is not a save failure")
+            .is_empty());
+        assert!(!voxels_still_dirty(None));
+
+        let volumes = shared_volumes();
+        assert!(stage_voxels(Some(&volumes))
+            .expect("an empty store stages nothing")
+            .is_empty());
+        assert!(!voxels_still_dirty(Some(&volumes)));
     }
 }

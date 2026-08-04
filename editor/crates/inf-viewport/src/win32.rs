@@ -1188,6 +1188,14 @@ fn thread_main(
                 // front of the select/gizmo branch for the same reason the other
                 // terrain tools do — plain LMB means something else here.
                 let voxel = host.tool_mode() == ToolMode::Voxel && !two_d;
+                // P21.2 audit: the branches below are gated on the ACTIVE tool, so
+                // a carve stroke that was still down when the tool changed would
+                // never reach its `finish_voxel` — its dabs stay in the world,
+                // save like any other edit, and Ctrl+Z cannot reach them. Close it
+                // here, before the branches, where the document is in hand.
+                if host.settle_orphaned_carve(&mut doc) {
+                    world_changed = true;
+                }
                 if sculpting {
                     if let Some((x, y, ctrl)) = input.left_press {
                         let (px, py) = (x.max(0) as u32, y.max(0) as u32);

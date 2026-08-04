@@ -41,8 +41,10 @@
 //! the mouths reach the `.inf_terrain` through the write-back that was already
 //! there, with nothing in this file mentioning them. That is a claim about a
 //! seam rather than an obvious truth — `terrain_edit`'s
-//! `a_carve_writes_its_cave_mouths_into_the_asset` is what pins it, exactly as
-//! the biome twin pins the P19.2 layer.
+//! `a_carve_writes_its_cave_mouths_into_the_asset_and_leaves_every_other_tile_verbatim`
+//! is what pins it, exactly as the biome twin pins the P19.2 layer. (The name is
+//! spelled out in full because a truncated citation greps to nothing, which is
+//! indistinguishable from a gate that was never written.)
 //!
 //! Which is also why the two flushes are **ordered** in the Ring-2 save path:
 //! terrain first, then voxels. Nothing in either write reads the other, but a

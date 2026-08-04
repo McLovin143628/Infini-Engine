@@ -151,6 +151,16 @@ pub struct EditorVoxelVolumes {
     /// unbounded number and nowhere else, because the *behaviour* (a volume that
     /// does not draw) is identical either way.
     scans: usize,
+    /// **Undo/redo replays that could not fully land** (P21.2 audit): a malformed
+    /// patch the Ring-0 `#[must_use]` skip count reported, or a delta whose volume
+    /// was gone.
+    ///
+    /// A counter and not just a log line, because this is the one failure whose
+    /// *symptom* is indistinguishable from correct behaviour — a Ctrl+Z that
+    /// silently put back less than it took leaves a world that looks plausible.
+    /// [`replay_faults`](Self::replay_faults) is what puts it on the Voxel tool's
+    /// verdict readout, where the author is already looking.
+    replay_faults: usize,
 }
 
 impl EditorVoxelVolumes {
@@ -445,24 +455,32 @@ impl EditorVoxelVolumes {
     }
 
     /// Redo a carve: replay its `after` samples into `entity`'s volume and
-    /// re-mesh. Returns whether the volume was there to write to.
+    /// re-mesh. Returns whether the volume was there to write to — `false` is a
+    /// **refusal** the caller must honour, not an empty edit (see
+    /// [`SceneDoc::raw_write_carve`](crate::scene::SceneDoc), which skips the
+    /// heightfield half when this says no).
     pub fn apply_delta(&mut self, entity: Uuid, delta: &VoxelDelta) -> bool {
         let Some(slot) = self.volumes.get_mut(entity.as_u128()) else {
+            self.replay_faults += 1;
             return false;
         };
-        Self::report_skipped("redo", entity, slot.data.apply_delta(delta));
+        let skipped = slot.data.apply_delta(delta);
+        self.report_skipped("redo", entity, skipped);
         self.volumes.resync(entity.as_u128());
         true
     }
 
     /// Undo a carve: replay its `before` samples (dropping the chunks it
     /// materialized from nothing) and re-mesh, leaving the volume
-    /// byte-identical to what it was before the op.
+    /// byte-identical to what it was before the op. `false` is a refusal, with
+    /// the same contract as [`apply_delta`](Self::apply_delta).
     pub fn revert_delta(&mut self, entity: Uuid, delta: &VoxelDelta) -> bool {
         let Some(slot) = self.volumes.get_mut(entity.as_u128()) else {
+            self.replay_faults += 1;
             return false;
         };
-        Self::report_skipped("undo", entity, slot.data.revert_delta(delta));
+        let skipped = slot.data.revert_delta(delta);
+        self.report_skipped("undo", entity, skipped);
         self.volumes.resync(entity.as_u128());
         true
     }
@@ -473,14 +491,27 @@ impl EditorVoxelVolumes {
     /// the volume in a *partial* state — half a carve put back — and the one
     /// thing worse than a broken undo is a silent one. It cannot happen with a
     /// delta this editor produced; it can with one that survived a corrupt
-    /// history, and then the log is the only witness.
-    fn report_skipped(what: &str, entity: Uuid, skipped: usize) {
+    /// history.
+    ///
+    /// The log is **not** the only witness any more: it also lands on
+    /// [`replay_faults`](Self::replay_faults), because a partial undo is exactly
+    /// the failure whose symptom looks like a correct one, and an author does not
+    /// read the Output Log to find out whether Ctrl+Z worked.
+    fn report_skipped(&mut self, what: &str, entity: Uuid, skipped: usize) {
         if skipped > 0 {
+            self.replay_faults += skipped;
             tracing::warn!(
                 "inf-editor-core: voxel {what} on {entity} skipped {skipped} malformed patch(es) \
                  — the volume is in a partial state"
             );
         }
+    }
+
+    /// Undo/redo replays that could not fully land since this store was created
+    /// (see [`replay_faults`](Self::replay_faults) on the field). Non-zero means
+    /// some Ctrl+Z put back less than it took; the Voxel tool's readout says so.
+    pub fn replay_faults(&self) -> usize {
+        self.replay_faults
     }
 
     /// Resident chunks across every loaded volume (a streaming readout).

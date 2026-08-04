@@ -158,8 +158,10 @@ export const WEATHER_PRESETS = [
  * leave the sliders showing the old sky for a debounce interval. The Rust side
  * remains authoritative — `WeatherDto::snapped_to` recomputes the same state
  * server-side from `WeatherPreset::params()`, so a drift here is corrected on
- * the next snapshot rather than persisted. `weather_preset_table_matches_rust`
- * pins the two together.
+ * the next snapshot rather than persisted. `todModel.test.ts`'s "mirrors the
+ * Rust preset table field for field" pins the two together — cited by the title
+ * it actually has, because a made-up test name greps to nothing and reads as a
+ * gate that was never written.
  */
 export function weatherPreset(preset: WeatherPresetDto): {
   coverage: number;

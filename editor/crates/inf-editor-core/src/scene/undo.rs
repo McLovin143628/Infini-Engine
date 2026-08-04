@@ -401,6 +401,58 @@ pub const INLINE_TERRAIN_CARVE_REFUSAL: &str =
      mask). Nothing was carved. Convert the terrain to asset-backed — import or export it as \
      a .inf_terrain — and the same cut will work.";
 
+/// …and why a cut was refused because its target volume has no chunks to cut.
+///
+/// Distinct from the tool's own "no volume is loaded" line (which is about
+/// *choosing* a target before the gesture starts): this one fires **mid-gesture**,
+/// when the volume that was there at mouse-down has since been released — its
+/// asset reference was cleared, its entity was deleted, or the projection dropped
+/// it. Nothing was cut, so nothing above it may be opened either.
+pub const VOLUME_NOT_LOADED_CARVE_REFUSAL: &str =
+    "Carve refused: the target voxel volume has no loaded chunks, so there is nothing to cut. \
+     Its .inf_voxel may have been released or its asset reference cleared since the gesture \
+     started. Nothing was carved, and no cave mouth was opened.";
+
+/// …and why a cut was refused because the shared working set cannot be read.
+///
+/// A poisoned mutex means a thread panicked while holding the volumes — the
+/// chunks are in an unknown state, so a carve must not write to them and, above
+/// all, must not open a mouth in the ground over rock it could not touch.
+pub const POISONED_STORE_CARVE_REFUSAL: &str =
+    "Carve refused: the voxel working set is unreadable — a thread panicked while holding it, \
+     so the loaded chunks are in an unknown state. Nothing was carved, and no cave mouth was \
+     opened. Save your work and restart the editor.";
+
+/// **Why a carve did not happen** — every refusal the coupled transaction can
+/// hand back, as a value rather than a `None` the caller has to guess about.
+///
+/// Before this existed the carve doors returned `Option`, so the viewport
+/// reported [`INLINE_TERRAIN_CARVE_REFUSAL`] for *any* empty answer — including
+/// the two below, which have nothing to do with inline terrain and name a
+/// completely different fix. A verdict readout that explains the wrong problem is
+/// worse than a silent one: the author converts a terrain that was never at
+/// fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarveRefusal {
+    /// The cut breaks through an inline terrain — [`CarveVerdict::RefusedInline`].
+    InlineTerrain { terrain: Uuid },
+    /// The target volume has no loaded chunks (released, unresolved, or deleted).
+    VolumeNotLoaded,
+    /// The shared voxel working set is poisoned.
+    PoisonedStore,
+}
+
+impl CarveRefusal {
+    /// The sentence the tool status seam quotes, verbatim.
+    pub fn message(&self) -> &'static str {
+        match self {
+            CarveRefusal::InlineTerrain { .. } => INLINE_TERRAIN_CARVE_REFUSAL,
+            CarveRefusal::VolumeNotLoaded => VOLUME_NOT_LOADED_CARVE_REFUSAL,
+            CarveRefusal::PoisonedStore => POISONED_STORE_CARVE_REFUSAL,
+        }
+    }
+}
+
 /// Running totals of a carve stroke, for the tool's live readout.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CarveTally {
@@ -481,17 +533,47 @@ impl CarveStroke {
     /// for a streamed terrain, exactly as the sculpt brush does: the hole rule
     /// only sees authored tiles, and a mouth cannot be punched in a page that is
     /// not in memory.
-    pub fn dab(&mut self, doc: &mut SceneDoc, op: &VoxelOp, terrains: &[Uuid]) -> CarveTally {
+    ///
+    /// # The hole half is strictly conditional on the voxel half (P21.2 audit)
+    ///
+    /// `Err` — and **not one hole bit written** — when the rock could not be cut
+    /// at all. This used to run the two halves independently: the voxel write was
+    /// wrapped in `if let Ok(…)` / `if let Some(…)` and the heightfield loop below
+    /// ran regardless, so a released volume or a poisoned working set produced a
+    /// mouth in the ground over solid rock — the exact "cave with no mouth"
+    /// failure `RefusedInline` exists to prevent, arrived at from the other side,
+    /// and this one is *saveable*: the hole mask rides the `.inf_terrain`, so a
+    /// Ctrl+S commits a hole into ground nothing ever hollowed.
+    ///
+    /// The refusal is a value rather than a log line because the tools put it on
+    /// `viewport://tool-status`, where the author is looking.
+    pub fn dab(
+        &mut self,
+        doc: &mut SceneDoc,
+        op: &VoxelOp,
+        terrains: &[Uuid],
+    ) -> Result<CarveTally, CarveRefusal> {
         let mut moved = false;
-        if let Ok(mut volumes) = self.volumes.lock() {
-            if let Some(report) = volumes.carve_into(self.volume, op, &mut self.voxels) {
-                self.tally.touched += report.touched;
-                self.tally.carved += report.total_carved();
-                self.tally.filled += report.total_filled();
-                self.tally.created_chunks += report.created_chunks;
-                moved |= !report.is_noop();
-            }
-        }
+        // The voxel half FIRST, and its answer decides whether the ground is
+        // allowed to open. Both failure returns are refusals, not empty edits:
+        // `lock` fails when a thread panicked holding the chunks, and
+        // `carve_into` answers `None` when this volume has no loaded chunks.
+        let mut volumes = self
+            .volumes
+            .lock()
+            .map_err(|_| CarveRefusal::PoisonedStore)?;
+        let report = volumes
+            .carve_into(self.volume, op, &mut self.voxels)
+            .ok_or(CarveRefusal::VolumeNotLoaded)?;
+        self.tally.touched += report.touched;
+        self.tally.carved += report.total_carved();
+        self.tally.filled += report.total_filled();
+        self.tally.created_chunks += report.created_chunks;
+        moved |= !report.is_noop();
+        // Released before the heightfield half so the two locks are never held at
+        // once — the fixed order is document first, volumes second, and this
+        // function already holds the document.
+        drop(volumes);
         // A carve opens the surface; a fill closes it again. The `open` flag is
         // the op's kind and nothing else, which is what makes the fill of a
         // region clear exactly the bits its carve set.
@@ -521,7 +603,7 @@ impl CarveStroke {
             doc.world_mut().mark_dirty();
             doc.touch();
         }
-        self.tally
+        Ok(self.tally)
     }
 
     /// Close the stroke into the reversible pair, or `None` when it changed
@@ -609,7 +691,7 @@ impl SceneDoc {
     }
 
     /// The one-shot carve: apply `op` and record it, holes included. Returns the
-    /// tally, or `None` when the verdict refused it.
+    /// tally, or the [`CarveRefusal`] that stopped it.
     ///
     /// The seam a scripted or single-click cut uses; a brush goes through
     /// [`CarveStroke`] so its dabs merge.
@@ -618,12 +700,12 @@ impl SceneDoc {
         volume: Uuid,
         volumes: &SharedVoxelVolumes,
         op: &VoxelOp,
-    ) -> Option<CarveTally> {
+    ) -> Result<CarveTally, CarveRefusal> {
         self.edit_carve_path(volume, volumes, std::slice::from_ref(op))
     }
 
     /// Cut a **chain** of ops as ONE transaction: judge every one first, then cut
-    /// every one. `None` — and nothing written at all — if any is refused.
+    /// every one. `Err` — and nothing written at all — if any is refused.
     ///
     /// The spline tunnel's door, and the reason it is here rather than in the
     /// viewport host is the atomicity: judging as it went would leave the *first
@@ -641,25 +723,52 @@ impl SceneDoc {
         volume: Uuid,
         volumes: &SharedVoxelVolumes,
         ops: &[VoxelOp],
-    ) -> Option<CarveTally> {
+    ) -> Result<CarveTally, CarveRefusal> {
         // Pass 1 — judge. Nothing is cut yet, so a refusal here really is a
         // refusal of the whole op and not of its tail.
+        //
+        // **The voxel half is judged in the same pass** (P21.2 audit): a chain
+        // that only discovered a released volume on its third leg would already
+        // have cut two, and `dab`'s per-leg refusal is a backstop rather than the
+        // gate. Asking here — once, before anything moves — is what makes the
+        // refusal that actually happens (a volume whose asset never resolved, or
+        // one the projection released) atomic like the inline one.
+        match volumes.lock() {
+            Err(_) => return Err(CarveRefusal::PoisonedStore),
+            Ok(v) if v.slot(volume).is_none() => return Err(CarveRefusal::VolumeNotLoaded),
+            Ok(_) => {}
+        }
         let mut plan: Vec<Vec<Uuid>> = Vec::with_capacity(ops.len());
         for op in ops {
-            let verdict = self.carve_verdict(&op.shape);
-            if !verdict.allowed() {
-                return None;
+            match self.carve_verdict(&op.shape) {
+                CarveVerdict::RefusedInline { terrain } => {
+                    return Err(CarveRefusal::InlineTerrain { terrain })
+                }
+                v => plan.push(v.terrains().to_vec()),
             }
-            plan.push(verdict.terrains().to_vec());
         }
         // Pass 2 — cut, into one stroke, so the chain is one undo entry.
         let mut stroke = CarveStroke::begin(volume, volumes.clone());
         let mut tally = CarveTally::default();
         for (op, terrains) in ops.iter().zip(&plan) {
-            tally = stroke.dab(self, op, terrains);
+            match stroke.dab(self, op, terrains) {
+                Ok(t) => tally = t,
+                Err(refusal) => {
+                    // A leg refused after earlier legs cut — the volume was
+                    // released or its store poisoned *between* two legs, which
+                    // pass 1 cannot rule out because another thread owns the
+                    // working set. Commit what is already in the world anyway:
+                    // `a4e5844` established that an un-undoable partial tunnel is
+                    // strictly worse than a partial one, and this leg opened no
+                    // ground (`dab` refuses before the heightfield half), so the
+                    // entry describes exactly what happened.
+                    self.edit_commit_carve(stroke);
+                    return Err(refusal);
+                }
+            }
         }
         self.edit_commit_carve(stroke);
-        Some(tally)
+        Ok(tally)
     }
 
     /// Redo (`revert = false`) or undo (`revert = true`) a carve: both halves,
@@ -669,6 +778,19 @@ impl SceneDoc {
     /// the heightfield half through the document's own tiles, healing every
     /// touched mask so an undone carve leaves tiles byte-identical to ones
     /// nothing ever carved.
+    ///
+    /// # The coupling rule runs backwards too (P21.2 audit)
+    ///
+    /// If the rock half cannot be replayed — the volume was released, or its
+    /// working set is poisoned — the heightfield half **does not run either**, and
+    /// the failure is logged rather than swallowed. Healing the mouths over rock
+    /// that is still carved is the same "the two halves came apart" state this
+    /// command exists to make impossible, and it is the half that a save would
+    /// then commit into the `.inf_terrain`.
+    ///
+    /// An **empty** `delta` is not a refusal: a cut that opened a mouth without
+    /// moving a sample (a brush swung through air over a hillside) has no rock
+    /// half to replay, and its mouths are the whole record.
     pub(crate) fn raw_write_carve(
         &mut self,
         volume: Uuid,
@@ -677,12 +799,36 @@ impl SceneDoc {
         holes: &[(Uuid, HoleDelta)],
         revert: bool,
     ) {
-        if let Ok(mut v) = volumes.lock() {
-            if revert {
-                v.revert_delta(volume, delta);
-            } else {
-                v.apply_delta(volume, delta);
+        let what = if revert { "undo" } else { "redo" };
+        let voxels_replayed = match volumes.lock() {
+            Ok(mut v) => {
+                if revert {
+                    v.revert_delta(volume, delta)
+                } else {
+                    v.apply_delta(volume, delta)
+                }
             }
+            Err(_) => {
+                tracing::error!(
+                    "inf-editor-core: carve {what} could not read the voxel working set (a \
+                     thread panicked holding it) — neither the rock nor the {} cave mouth \
+                     record(s) were replayed, so the two halves stay consistent",
+                    holes.len()
+                );
+                false
+            }
+        };
+        if !delta.is_empty() && !voxels_replayed {
+            tracing::error!(
+                "inf-editor-core: carve {what} found no loaded volume {volume} — its {} \
+                 sample patch(es) were not replayed, so the {} cave-mouth record(s) above \
+                 them were skipped too rather than leaving holes over solid rock",
+                delta.patches.len(),
+                holes.len()
+            );
+            self.world_mut().mark_dirty();
+            self.touch();
+            return;
         }
         for (guid, hole) in holes {
             self.with_terrain_data_mut(*guid, |data| {
