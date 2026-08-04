@@ -7,13 +7,17 @@
 //! commits a single undo entry (P3.4.2). Structural inverses (create/delete)
 //! reuse the P3.5 [`EntityRecord`] so a deleted subtree round-trips exactly.
 
+use std::collections::BTreeMap;
+
 use inf_ecs::components::{FoliageInstance, Sprite, Transform};
 use inf_ecs::PropValue;
-use inf_terrain::{BiomeDelta, DataMapDelta, HeightDelta, SplatDelta};
+use inf_terrain::{BiomeDelta, DataMapDelta, HeightDelta, HoleDelta, HoleDeltaBuilder, SplatDelta};
+use inf_voxel::{VoxelDelta, VoxelDeltaBuilder, VoxelOp, VoxelOpKind, VoxelShape};
 use uuid::Uuid;
 
 use crate::scene::serialize::{EntityRecord, LevelSettings};
 use crate::scene::SceneDoc;
+use crate::voxel_store::SharedVoxelVolumes;
 
 /// The default history depth (well past the phase gate's 50 steps).
 pub const HISTORY_LIMIT: usize = 256;
@@ -149,6 +153,36 @@ pub(crate) enum EditCommand {
         added: Vec<FoliageInstance>,
         removed: Vec<(usize, FoliageInstance)>,
     },
+    /// **One voxel carve/fill and the heightfield holes it opened** (P21.2) —
+    /// deliberately ONE command rather than a pair, so a single Ctrl+Z takes back
+    /// the rock *and* the ground above it.
+    ///
+    /// Splitting them into two commands inside a transaction was the obvious
+    /// alternative and is wrong here: the two halves are not independent edits
+    /// that happen to be grouped, they are two representations of one cut, and a
+    /// history that could ever replay one without the other would leave a cave
+    /// sealed behind ground or a hole in the sky over solid rock.
+    ///
+    /// * `volume` — the `VoxelVolume` entity whose chunks moved.
+    /// * `volumes` — the shared working set the chunks live in. The document
+    ///   holds no voxel data (schema v19 keeps it out in the `.inf_voxel`), and
+    ///   `SceneDoc::undo` runs on the Ring-2 command thread with no viewport, so
+    ///   the store reaches the history through this handle. See
+    ///   [`SharedVoxelVolumes`] for why that, and not a journal or a move into
+    ///   the document.
+    /// * `holes` — the heightfield half, **per terrain**: a tunnel may cross more
+    ///   than one (P16.6 multi-terrain), and an arbitrary tie-break would silently
+    ///   drop the mouths on all but one of them. Empty for a cut that never
+    ///   reached a surface, which is every cave dug below the ground.
+    ///
+    /// Both payloads are boxed/owned rather than inline — a stroke's delta is
+    /// dense sub-boxes and would bloat every other variant.
+    CarveVoxels {
+        volume: Uuid,
+        volumes: SharedVoxelVolumes,
+        delta: Box<VoxelDelta>,
+        holes: Vec<(Uuid, HoleDelta)>,
+    },
 }
 
 impl EditCommand {
@@ -207,6 +241,14 @@ impl EditCommand {
                 removed,
             } => {
                 doc.raw_apply_foliage(*guid, added, removed);
+            }
+            EditCommand::CarveVoxels {
+                volume,
+                volumes,
+                delta,
+                holes,
+            } => {
+                doc.raw_write_carve(*volume, volumes, delta, holes, false);
             }
         }
     }
@@ -283,7 +325,337 @@ impl EditCommand {
             } => {
                 doc.raw_revert_foliage(*guid, added, removed);
             }
+            EditCommand::CarveVoxels {
+                volume,
+                volumes,
+                delta,
+                holes,
+            } => {
+                doc.raw_write_carve(*volume, volumes, delta, holes, true);
+            }
         }
+    }
+}
+
+// ── the coupled voxel carve (P21.2) ─────────────────────────────────────────
+//
+// A carve is two edits to two containers that must behave as one: SDF samples in
+// a `.inf_voxel` and hole bits in a `.inf_terrain`. Everything below exists to
+// keep them one — one verdict before the gesture starts, one stroke that
+// accumulates both records, one `EditCommand` on the history.
+//
+// It lives here rather than in `doc.rs` because it *is* the undo record under
+// construction, and because the document owns only half of it: the heightfield.
+
+/// What the tools are allowed to do with a proposed cut, decided **before**
+/// anything is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CarveVerdict {
+    /// The cut stays clear of every heightfield surface — a cave under a hill, a
+    /// brush swung in mid-air, a level with no terrain at all. Legal everywhere:
+    /// no hole is needed, so no container has to be able to persist one.
+    NoSurface,
+    /// It breaks through, and every terrain it breaks through is asset-backed and
+    /// can persist the mouths. `terrains` is in document order.
+    Opens { terrains: Vec<Uuid> },
+    /// **Refused.** It breaks through an *inline* terrain — one whose heightfield
+    /// is stored in the `.inf_lvl` itself.
+    ///
+    /// Schema v19 is frozen, so `TerrainData`'s wire form is pinned at tile
+    /// generation 3 and an inline terrain **cannot persist a hole mask** (see
+    /// `TerrainTileFrozenV3`). An author who punched a cave mouth here would lose
+    /// it on the next save+reload, which breaks the house law that *a committed
+    /// level must not depend on which tools the session visited*.
+    ///
+    /// The **whole op** is refused, voxels included — not "carve the rock and
+    /// skip the holes". A partial success leaves a cave with no mouth: geometry
+    /// the author cannot see, cannot reach, and has no reason to suspect. A clean
+    /// refusal that names the fix is a better surprise than a silent one.
+    RefusedInline { terrain: Uuid },
+}
+
+impl CarveVerdict {
+    /// `true` when the tools may proceed.
+    pub fn allowed(&self) -> bool {
+        !matches!(self, CarveVerdict::RefusedInline { .. })
+    }
+
+    /// The terrains whose hole masks this cut will move (empty unless
+    /// [`Opens`](CarveVerdict::Opens)).
+    pub fn terrains(&self) -> &[Uuid] {
+        match self {
+            CarveVerdict::Opens { terrains } => terrains,
+            _ => &[],
+        }
+    }
+}
+
+/// Why a surface-crossing carve was refused, verbatim, for the tool status seam.
+///
+/// One string so the viewport, a future command and any test quote the same
+/// sentence — and it names the fix, because a refusal the author cannot act on is
+/// just a broken tool with better manners.
+pub const INLINE_TERRAIN_CARVE_REFUSAL: &str =
+    "Carve refused: this cut breaks through an INLINE terrain, and a terrain stored in the \
+     level cannot save cave mouths (the level schema pins its tiles at a layout with no hole \
+     mask). Nothing was carved. Convert the terrain to asset-backed — import or export it as \
+     a .inf_terrain — and the same cut will work.";
+
+/// Running totals of a carve stroke, for the tool's live readout.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CarveTally {
+    /// Voxel samples whose SDF or material changed.
+    pub touched: u64,
+    /// Voxel samples that went solid → empty.
+    pub carved: u64,
+    /// Voxel samples that went empty → solid.
+    pub filled: u64,
+    /// Chunks materialized from nothing.
+    pub created_chunks: u64,
+    /// Heightfield samples whose hole bit changed.
+    pub holes: u64,
+}
+
+impl CarveTally {
+    /// `true` when the stroke has changed nothing at all.
+    pub fn is_noop(&self) -> bool {
+        self.touched == 0 && self.holes == 0
+    }
+
+    /// Cubic metres of material removed minus added, at `voxel_size_m`. The
+    /// number the readout quotes, and the one P21.3's soil-displacement
+    /// conservation gate will subtract against.
+    pub fn net_removed_m3(&self, voxel_size_m: f64) -> f64 {
+        let cell = voxel_size_m * voxel_size_m * voxel_size_m;
+        (self.carved as f64 - self.filled as f64) * cell
+    }
+}
+
+/// One carve/fill gesture in progress — a brush stroke or a spline tunnel —
+/// accumulating both halves of the reversible record.
+///
+/// Held by the viewport thread between mouse-down and mouse-up exactly as an
+/// `inf_terrain::Stroke` is, and for the same reason: the dabs mutate live (so
+/// the cave appears under the cursor) and the *record* is what reaches the
+/// history at commit.
+pub struct CarveStroke {
+    volume: Uuid,
+    volumes: SharedVoxelVolumes,
+    voxels: VoxelDeltaBuilder,
+    /// One builder per terrain the stroke has broken through, in entity order.
+    holes: BTreeMap<Uuid, HoleDeltaBuilder>,
+    tally: CarveTally,
+}
+
+impl CarveStroke {
+    /// Open a stroke against `volume`'s chunks in `volumes`.
+    pub fn begin(volume: Uuid, volumes: SharedVoxelVolumes) -> Self {
+        Self {
+            volume,
+            volumes,
+            voxels: VoxelDeltaBuilder::new(),
+            holes: BTreeMap::new(),
+            tally: CarveTally::default(),
+        }
+    }
+
+    /// The volume entity this stroke is cutting.
+    pub fn volume(&self) -> Uuid {
+        self.volume
+    }
+
+    /// Totals so far.
+    pub fn tally(&self) -> CarveTally {
+        self.tally
+    }
+
+    /// Lay one dab: cut the voxels, then open (or close) the heightfield samples
+    /// the cut crosses on every `terrain` it reaches.
+    ///
+    /// `terrains` is the verdict's list, resolved once when the gesture started —
+    /// re-deriving it per dab would let a stroke wander onto a terrain the author
+    /// was never told about (and, if that one were inline, onto ground whose
+    /// mouths the save would silently seal).
+    ///
+    /// **The caller must have paged the cut's footprint into the document first**
+    /// for a streamed terrain, exactly as the sculpt brush does: the hole rule
+    /// only sees authored tiles, and a mouth cannot be punched in a page that is
+    /// not in memory.
+    pub fn dab(&mut self, doc: &mut SceneDoc, op: &VoxelOp, terrains: &[Uuid]) -> CarveTally {
+        if let Ok(mut volumes) = self.volumes.lock() {
+            if let Some(report) = volumes.carve_into(self.volume, op, &mut self.voxels) {
+                self.tally.touched += report.touched;
+                self.tally.carved += report.total_carved();
+                self.tally.filled += report.total_filled();
+                self.tally.created_chunks += report.created_chunks;
+            }
+        }
+        // A carve opens the surface; a fill closes it again. The `open` flag is
+        // the op's kind and nothing else, which is what makes the fill of a
+        // region clear exactly the bits its carve set.
+        let open = matches!(op.kind, VoxelOpKind::Carve);
+        for &terrain in terrains {
+            let Some(origin) = doc.terrain_data_and_origin(terrain).map(|(_, o)| o) else {
+                continue;
+            };
+            let builder = self.holes.entry(terrain).or_default();
+            let changed = doc
+                .with_terrain_data_mut(terrain, |data| {
+                    inf_voxel::touch_surface_cut(data, origin, &op.shape, open, builder)
+                })
+                .unwrap_or(0);
+            if changed > 0 {
+                self.tally.holes += changed as u64;
+                // `with_terrain_data_mut` is the streamer's residency door and is
+                // deliberately non-touching, so the version bump and the dirty
+                // flag are this seam's job — without them the clipmap would keep
+                // drawing the ground the carve just took away.
+                doc.world_mut().mark_dirty();
+                doc.touch();
+            }
+        }
+        self.tally
+    }
+
+    /// Close the stroke into the reversible pair, or `None` when it changed
+    /// nothing (a click that missed, a re-carve of ground already hollow).
+    fn finish(self, doc: &SceneDoc) -> Option<(VoxelDelta, Vec<(Uuid, HoleDelta)>)> {
+        let delta = self
+            .volumes
+            .lock()
+            .ok()
+            .and_then(|v| v.finish_carve(self.volume, &self.voxels))
+            .unwrap_or_default();
+        let holes: Vec<(Uuid, HoleDelta)> = self
+            .holes
+            .iter()
+            .filter_map(|(&guid, builder)| {
+                let data = doc.terrain_data_and_origin(guid)?.0;
+                let d = builder.finalize(data);
+                (!d.is_empty()).then_some((guid, d))
+            })
+            .collect();
+        if delta.is_empty() && holes.is_empty() {
+            return None;
+        }
+        Some((delta, holes))
+    }
+}
+
+impl SceneDoc {
+    /// Decide what a cut of `shape` (world metres) is allowed to do to this
+    /// document's terrains — **the gate every carve tool takes first**.
+    ///
+    /// Walks the document's terrains in creation order and asks
+    /// [`inf_voxel::cut_crosses_surface`] about each. Reading the *document's*
+    /// working set and not the viewport's render cut is deliberate: the document
+    /// is what gets saved, so the terrain that has to be able to persist a mouth
+    /// is the one whose tiles are about to be written.
+    ///
+    /// A cut over a streamed terrain whose footprint has not been paged in yet
+    /// reads as [`NoSurface`](CarveVerdict::NoSurface). That is not a hole in the
+    /// gate — the same paging the sculpt brush already does before its first dab
+    /// is what makes the answer true, and it is why the tools page before they
+    /// ask.
+    pub fn carve_verdict(&self, shape: &VoxelShape) -> CarveVerdict {
+        let mut terrains = Vec::new();
+        for &guid in self.order() {
+            let Some((data, origin)) = self.terrain_data_and_origin(guid) else {
+                continue;
+            };
+            if !inf_voxel::cut_crosses_surface(data, origin, shape) {
+                continue;
+            }
+            if self.terrain_asset_of(guid).is_none() {
+                return CarveVerdict::RefusedInline { terrain: guid };
+            }
+            terrains.push(guid);
+        }
+        if terrains.is_empty() {
+            CarveVerdict::NoSurface
+        } else {
+            CarveVerdict::Opens { terrains }
+        }
+    }
+
+    /// Commit a [`CarveStroke`] as **one** undo entry. Returns whether anything
+    /// was recorded (an empty stroke records nothing, like every other brush).
+    ///
+    /// The stroke's dabs already mutated both containers, so this only finalizes
+    /// and records — the shape `edit_commit_sculpt` established one layer down.
+    pub fn edit_commit_carve(&mut self, stroke: CarveStroke) -> bool {
+        let volume = stroke.volume;
+        let volumes = stroke.volumes.clone();
+        let Some((delta, holes)) = stroke.finish(self) else {
+            return false;
+        };
+        self.record_edit(
+            "Carve Voxels",
+            EditCommand::CarveVoxels {
+                volume,
+                volumes,
+                delta: Box::new(delta),
+                holes,
+            },
+        );
+        true
+    }
+
+    /// The one-shot carve: apply `op` and record it, holes included. Returns the
+    /// tally, or `None` when the verdict refused it or the volume is not loaded.
+    ///
+    /// The spline tunnel's per-segment door and the seam a scripted carve uses;
+    /// the brush goes through [`CarveStroke`] so its dabs merge.
+    pub fn edit_carve(
+        &mut self,
+        volume: Uuid,
+        volumes: &SharedVoxelVolumes,
+        op: &VoxelOp,
+    ) -> Option<CarveTally> {
+        let verdict = self.carve_verdict(&op.shape);
+        if !verdict.allowed() {
+            return None;
+        }
+        let terrains = verdict.terrains().to_vec();
+        let mut stroke = CarveStroke::begin(volume, volumes.clone());
+        let tally = stroke.dab(self, op, &terrains);
+        self.edit_commit_carve(stroke);
+        Some(tally)
+    }
+
+    /// Redo (`revert = false`) or undo (`revert = true`) a carve: both halves,
+    /// in one call, so neither can be replayed without the other.
+    ///
+    /// The voxel half goes through the shared store (which re-meshes what moved);
+    /// the heightfield half through the document's own tiles, healing every
+    /// touched mask so an undone carve leaves tiles byte-identical to ones
+    /// nothing ever carved.
+    pub(crate) fn raw_write_carve(
+        &mut self,
+        volume: Uuid,
+        volumes: &SharedVoxelVolumes,
+        delta: &VoxelDelta,
+        holes: &[(Uuid, HoleDelta)],
+        revert: bool,
+    ) {
+        if let Ok(mut v) = volumes.lock() {
+            if revert {
+                v.revert_delta(volume, delta);
+            } else {
+                v.apply_delta(volume, delta);
+            }
+        }
+        for (guid, hole) in holes {
+            self.with_terrain_data_mut(*guid, |data| {
+                if revert {
+                    data.revert_hole_delta(hole);
+                } else {
+                    data.apply_hole_delta(hole);
+                }
+            });
+        }
+        self.world_mut().mark_dirty();
+        self.touch();
     }
 }
 

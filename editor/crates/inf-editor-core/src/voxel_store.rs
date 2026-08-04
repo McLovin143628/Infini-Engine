@@ -35,10 +35,14 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use glam::DVec3;
 use inf_ecs::components::VoxelVolume;
-use inf_voxel::{VolumeSlot, VoxelStreamBudget, VoxelStreamReport, VoxelVolumes, VoxelWantsParams};
+use inf_voxel::{
+    OpReport, VolumeSlot, VoxelDelta, VoxelDeltaBuilder, VoxelOp, VoxelStreamBudget,
+    VoxelStreamReport, VoxelVolumes, VoxelWantsParams,
+};
 use uuid::Uuid;
 
 /// Depth cap on the content-root walk — deep enough for any content layout,
@@ -93,6 +97,32 @@ fn collect_voxel_files(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// The **one** editable voxel working set, shared by the two things that both
+/// have to be able to move it (P21.2).
+///
+/// The viewport thread pages, meshes and carves it; the document's undo history
+/// has to be able to put a carve back — and `SceneDoc::undo` runs on the Ring-2
+/// command thread, which has no viewport. The two alternatives were both worse:
+///
+/// * **Move the store into `SceneDoc`.** Every projection would then need
+///   `&mut SceneDoc` (binding and meshing are `&mut` acts), which is exactly the
+///   signature the shipped player's projector does not have — and the two
+///   projectors are held byte-identical by `projector_mirror`.
+/// * **Journal the voxel half of an undo for the viewport to replay next frame.**
+///   A single Ctrl+Z would then revert the ground now and the rock one frame
+///   later, which is a visible tear across the cave mouth the two layers share.
+///
+/// So the handle is shared, and the lock order is fixed everywhere: **document
+/// first, volumes second.** Both the viewport loop and the Ring-2 undo command
+/// already take the document lock before they reach this one.
+pub type SharedVoxelVolumes = Arc<Mutex<EditorVoxelVolumes>>;
+
+/// A fresh [`SharedVoxelVolumes`] — the one constructor, so nobody has to spell
+/// the `Arc<Mutex<…>>` out and no second wrapper shape can appear.
+pub fn shared_volumes() -> SharedVoxelVolumes {
+    Arc::new(Mutex::new(EditorVoxelVolumes::new()))
 }
 
 /// The editor's loaded voxel volumes, indexed over a project's content root.
@@ -279,6 +309,98 @@ impl EditorVoxelVolumes {
     /// The loaded slot for `entity` — its resident chunks and meshed surface.
     pub fn slot(&self, entity: Uuid) -> Option<&VolumeSlot> {
         self.volumes.get(entity.as_u128())
+    }
+
+    // ── carving (P21.2) ──────────────────────────────────────────────────
+    //
+    // Three calls, and every one of them ends in `resync` — the Ring-0 re-mesh
+    // of whatever the edit moved. A carve that skipped it would change the field
+    // and leave the *previous* surface on screen until an unrelated streaming
+    // pass happened to rebuild it, which reads as a brush that works
+    // intermittently.
+
+    /// Apply one carve/fill dab to `entity`'s volume, accumulating its undo
+    /// record into `builder`, and re-mesh what moved.
+    ///
+    /// `None` when the entity has no loaded volume — an unbound reference, an
+    /// asset that did not resolve, or a volume the store has released. That is a
+    /// refusal, not an empty edit: a carve into a volume nobody loaded would
+    /// report success and change nothing.
+    ///
+    /// One `builder` per **stroke**, not per dab (see
+    /// [`inf_voxel::VoxelDeltaBuilder`]): overlapping dabs then merge into a
+    /// single reversible record whose `before` is the state at the start of the
+    /// drag.
+    pub fn carve_into(
+        &mut self,
+        entity: Uuid,
+        op: &VoxelOp,
+        builder: &mut VoxelDeltaBuilder,
+    ) -> Option<OpReport> {
+        let slot = self.volumes.get_mut(entity.as_u128())?;
+        let report = slot.data.apply_op_into(op, builder);
+        if !report.is_noop() {
+            // Re-mesh now rather than at commit: the whole point of a live brush
+            // is that the cave appears under the cursor as it is dug.
+            self.volumes.resync(entity.as_u128());
+        }
+        Some(report)
+    }
+
+    /// Close a stroke: compress `builder` into the reversible [`VoxelDelta`],
+    /// read against the volume's **current** chunks. `None` when the volume is
+    /// gone (the stroke has nothing left to describe).
+    pub fn finish_carve(&self, entity: Uuid, builder: &VoxelDeltaBuilder) -> Option<VoxelDelta> {
+        let slot = self.volumes.get(entity.as_u128())?;
+        Some(builder.finalize(&slot.data))
+    }
+
+    /// The one-shot form of [`carve_into`](Self::carve_into) +
+    /// [`finish_carve`](Self::finish_carve) — a scripted or single-click cut.
+    pub fn carve(&mut self, entity: Uuid, op: &VoxelOp) -> Option<(OpReport, VoxelDelta)> {
+        let mut builder = VoxelDeltaBuilder::new();
+        let report = self.carve_into(entity, op, &mut builder)?;
+        let delta = self.finish_carve(entity, &builder)?;
+        Some((report, delta))
+    }
+
+    /// Redo a carve: replay its `after` samples into `entity`'s volume and
+    /// re-mesh. Returns whether the volume was there to write to.
+    pub fn apply_delta(&mut self, entity: Uuid, delta: &VoxelDelta) -> bool {
+        let Some(slot) = self.volumes.get_mut(entity.as_u128()) else {
+            return false;
+        };
+        Self::report_skipped("redo", entity, slot.data.apply_delta(delta));
+        self.volumes.resync(entity.as_u128());
+        true
+    }
+
+    /// Undo a carve: replay its `before` samples (dropping the chunks it
+    /// materialized from nothing) and re-mesh, leaving the volume
+    /// byte-identical to what it was before the op.
+    pub fn revert_delta(&mut self, entity: Uuid, delta: &VoxelDelta) -> bool {
+        let Some(slot) = self.volumes.get_mut(entity.as_u128()) else {
+            return false;
+        };
+        Self::report_skipped("undo", entity, slot.data.revert_delta(delta));
+        self.volumes.resync(entity.as_u128());
+        true
+    }
+
+    /// Surface a malformed-patch count from a replay.
+    ///
+    /// Ring 0 returns it rather than swallowing it because a skipped patch leaves
+    /// the volume in a *partial* state — half a carve put back — and the one
+    /// thing worse than a broken undo is a silent one. It cannot happen with a
+    /// delta this editor produced; it can with one that survived a corrupt
+    /// history, and then the log is the only witness.
+    fn report_skipped(what: &str, entity: Uuid, skipped: usize) {
+        if skipped > 0 {
+            tracing::warn!(
+                "inf-editor-core: voxel {what} on {entity} skipped {skipped} malformed patch(es) \
+                 — the volume is in a partial state"
+            );
+        }
     }
 
     /// Resident chunks across every loaded volume (a streaming readout).

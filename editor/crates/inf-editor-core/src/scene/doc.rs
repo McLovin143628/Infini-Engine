@@ -164,6 +164,19 @@ impl SceneDoc {
         self.dirty = true;
     }
 
+    /// Push a prepared [`EditCommand`] onto the history — the door for edits
+    /// whose `edit_*` entry point lives in [`crate::scene::undo`] rather than
+    /// here.
+    ///
+    /// The `history` field is private to this module, so a command assembled
+    /// elsewhere in the crate has no other way in. Deliberately narrow: it does
+    /// **not** touch or dirty the document, because the callers that use it have
+    /// already applied their edit live (a brush stroke) and record only at
+    /// commit — exactly like `edit_commit_sculpt` beside them.
+    pub(crate) fn record_edit(&mut self, label: &str, cmd: EditCommand) {
+        self.history.record(label, cmd);
+    }
+
     /// Bump the version **without** dirtying — the Simulate loop (P8.4) calls
     /// this after mutating the ECS world so the viewport re-syncs, but a live
     /// preview must not mark the document unsaved (exit restores it anyway).

@@ -208,10 +208,30 @@ impl VoxelData {
     /// volume **byte-identically**, chunk set included. A degenerate shape is a
     /// no-op with an empty delta rather than an error — a UI can hand this a
     /// zero-radius brush mid-drag and must not have to guard every call.
+    ///
+    /// The one-dab form of [`apply_op_into`](Self::apply_op_into); a brush stroke
+    /// wants that one.
     pub fn apply_op(&mut self, op: &VoxelOp) -> (OpReport, VoxelDelta) {
+        let mut builder = VoxelDeltaBuilder::new();
+        let report = self.apply_op_into(op, &mut builder);
+        let delta = builder.finalize(self);
+        (report, delta)
+    }
+
+    /// Apply `op`, accumulating its undo record into `builder` — **the stroke
+    /// form**.
+    ///
+    /// One builder held across every dab of a mouse-down is what makes a stroke
+    /// undo in a single step *to where it started*: `before` is the value at the
+    /// **first** touch of each sample and `after` is read at
+    /// [`finalize`](VoxelDeltaBuilder::finalize) time, so overlapping dabs merge
+    /// instead of stacking N deltas whose intermediate states nobody wants back.
+    /// (It is also what keeps a long drag from costing one dense sub-box per dab
+    /// on the undo stack.)
+    pub fn apply_op_into(&mut self, op: &VoxelOp, builder: &mut VoxelDeltaBuilder) -> OpReport {
         let mut report = OpReport::default();
         if !op.shape.is_valid() {
-            return (report, VoxelDelta::default());
+            return report;
         }
 
         // The affected region: the shape's AABB grown by the distance band, so the
@@ -222,11 +242,15 @@ impl VoxelData {
         let lo_g = self.world_to_grid(lo_m);
         let hi_g = self.world_to_grid(hi_m);
         let Some((lo, hi)) = integer_box(lo_g, hi_g) else {
-            return (report, VoxelDelta::default());
+            return report;
         };
 
         let inv = 1.0 / self.voxel_size_m();
-        let mut builder = DeltaBuilder::default();
+        // THIS op's touched chunks, kept apart from the builder's running set: a
+        // stroke's builder accumulates every dab, and compacting all of them on
+        // every dab would make a long drag quadratic in the chunks it has
+        // already passed over.
+        let mut touched: std::collections::BTreeSet<ChunkKey> = std::collections::BTreeSet::new();
 
         for gz in lo[2]..=hi[2] {
             for gy in lo[1]..=hi[1] {
@@ -269,6 +293,7 @@ impl VoxelData {
                     }
                     let (i, j, k) = local_of(gx, gy, gz);
                     builder.touch(key, i, j, k, old_sdf, old_mat);
+                    touched.insert(key);
 
                     let chunk = self.get_or_create_chunk(key);
                     chunk.set_sample(i, j, k, new_sdf);
@@ -293,14 +318,12 @@ impl VoxelData {
         // every chunk it touched, and compaction cannot change what any reader
         // sees (the sparse and dense forms hold the same values), so a second
         // stamp would only buy a redundant re-mesh.
-        let touched: Vec<ChunkKey> = builder.keys().copied().collect();
         for key in touched {
             if let Some(c) = self.raw_chunk_mut(key) {
                 c.compact_materials();
             }
         }
-        let delta = builder.finalize(self);
-        (report, delta)
+        report
     }
 }
 
@@ -330,11 +353,16 @@ fn integer_box(lo: DVec3, hi: DVec3) -> Option<([i32; 3], [i32; 3])> {
 ///
 /// A brush stroke keeps one builder alive across every dab so that, where dabs
 /// overlap, `before` is the value at the **first** touch and `after` (read at
-/// [`finalize`](DeltaBuilder::finalize) time) is the **final** value — the merge
-/// contract an undo stack relies on. P21.3 is what will hold one across a drag;
-/// a single [`VoxelData::apply_op`] uses one for exactly one op.
+/// [`finalize`](VoxelDeltaBuilder::finalize) time) is the **final** value — the
+/// merge contract an undo stack relies on. The P21.2 carve brush holds one
+/// across a drag through [`VoxelData::apply_op_into`]; a single
+/// [`VoxelData::apply_op`] uses one for exactly one op.
+///
+/// The exact shape — and the exact contract — of
+/// [`HoleDeltaBuilder`](inf_terrain::HoleDeltaBuilder), one layer over, which is
+/// what lets a carve's two halves merge the same way and undo as one step.
 #[derive(Default)]
-pub(crate) struct DeltaBuilder {
+pub struct VoxelDeltaBuilder {
     /// `key → (i, j, k) → first-touch (sdf, material)`.
     touched: TouchedSamples,
     /// Chunks materialized from nothing during the stroke.
@@ -346,7 +374,19 @@ pub(crate) struct DeltaBuilder {
 type TouchedSamples =
     std::collections::BTreeMap<ChunkKey, std::collections::BTreeMap<(u32, u32, u32), (f32, u8)>>;
 
-impl DeltaBuilder {
+impl VoxelDeltaBuilder {
+    /// A builder with nothing touched.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `true` when no sample has been touched yet — an empty stroke, which
+    /// records no undo entry.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.touched.is_empty() && self.created.is_empty()
+    }
+
     #[inline]
     pub(crate) fn touch(&mut self, key: ChunkKey, i: u32, j: u32, k: u32, sdf: f32, mat: u8) {
         self.touched
@@ -361,14 +401,9 @@ impl DeltaBuilder {
         self.created.insert(key);
     }
 
-    #[inline]
-    pub(crate) fn keys(&self) -> impl Iterator<Item = &ChunkKey> {
-        self.touched.keys()
-    }
-
     /// Compress the accumulated touches into per-chunk dense sub-boxes, reading
     /// final (`after`) and filler values from `data`'s current chunks.
-    pub(crate) fn finalize(&self, data: &VoxelData) -> VoxelDelta {
+    pub fn finalize(&self, data: &VoxelData) -> VoxelDelta {
         let mut patches = Vec::with_capacity(self.touched.len());
         for (&key, samples) in &self.touched {
             let Some(chunk) = data.get_chunk(key) else {
@@ -697,6 +732,50 @@ mod tests {
             assert!(delta.is_empty(), "{label}");
             assert_eq!(image(&v), settled, "{label}");
         }
+    }
+
+    /// **The stroke merge contract.** One builder held across a chain of
+    /// overlapping dabs undoes to where the *stroke* started, not to where the
+    /// last dab started — and it does so in one step, whatever the dabs did to
+    /// each other on the way.
+    ///
+    /// The overlap is the point: with disjoint dabs any per-dab record would
+    /// pass. Here every dab re-carves ground the previous one already emptied,
+    /// so a builder that kept the *latest* `before` would restore a volume with
+    /// the first dab's hole still in it.
+    #[test]
+    fn a_stroke_of_overlapping_dabs_undoes_to_where_it_started() {
+        let mut v = solid_block();
+        let before = image(&v);
+        let mut builder = VoxelDeltaBuilder::new();
+        assert!(builder.is_empty());
+
+        // Six dabs walking half a radius at a time along +X — each overlaps its
+        // predecessor by more than half its volume.
+        for step in 0..6 {
+            let center = v.grid_to_world(DVec3::new(4.0 + step as f64 * 1.5, 8.0, 8.0));
+            let report = v.apply_op_into(
+                &VoxelOp::carve(VoxelShape::Sphere {
+                    center,
+                    radius_m: 1.5,
+                }),
+                &mut builder,
+            );
+            assert!(!report.is_noop(), "dab {step} carved nothing");
+        }
+        assert!(!builder.is_empty());
+        let after = image(&v);
+        assert_ne!(after, before);
+
+        let delta = builder.finalize(&v);
+        assert_eq!(v.revert_delta(&delta), 0);
+        assert_eq!(
+            image(&v),
+            before,
+            "the stroke undid to the last dab's state rather than to the stroke's"
+        );
+        assert_eq!(v.apply_delta(&delta), 0);
+        assert_eq!(image(&v), after, "redo must restore the whole stroke");
     }
 
     /// Two runs of the same op on the same volume produce identical bytes AND

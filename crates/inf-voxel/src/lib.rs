@@ -27,7 +27,9 @@
 //! Around them: a **deterministic Surface-Nets mesher** ([`mesh_chunk`]) whose
 //! chunk seams are watertight by construction, and **carve/fill ops**
 //! ([`VoxelOp`]) that return exact per-material voxel counts and a reversible
-//! [`VoxelDelta`].
+//! [`VoxelDelta`]. [`coupling`] is where a cut meets the heightfield: the
+//! exactly-invertible rule that decides which terrain samples a carve opens and a
+//! fill closes again, so a cave has a mouth and undoing it seals one.
 //!
 //! # Determinism is structural, not aspirational
 //!
@@ -53,6 +55,7 @@
 
 pub mod asset;
 pub mod chunk;
+pub mod coupling;
 pub mod data;
 pub mod delta;
 pub mod ground;
@@ -72,13 +75,17 @@ pub use chunk::{
     ChunkKey, VoxelChunk, CHUNK_DIM, CHUNK_VOXELS, DEFAULT_MATERIAL, EMPTY_SDF, MATERIAL_COUNT,
     SDF_BAND,
 };
+pub use coupling::{
+    apply_surface_cut, cut_crosses_surface, inline_hole_advisory, surface_cut_samples,
+    touch_surface_cut, InlineHoleAdvisory, SurfaceSample,
+};
 pub use data::VoxelData;
 pub use delta::{ChunkPatch, VoxelDelta};
 pub use ground::{ground_height_at, sim_volume, topmost_voxel_surface, voxel_surface_y_at};
 pub use mesh::{
     mesh_chunk, mesh_keys_for, source_key, MeshSourceKey, MeshSyncReport, VoxelMesh, VoxelMeshCache,
 };
-pub use ops::{OpReport, VoxelOp, VoxelOpKind, VoxelShape};
+pub use ops::{OpReport, VoxelDeltaBuilder, VoxelOp, VoxelOpKind, VoxelShape};
 pub use residency::{chunk_range, ChunkStore, MemoryChunkStore, ResidencyReport};
 pub use store::{VolumeSlot, VoxelStreamReport, VoxelVolumes};
 pub use wants::{
