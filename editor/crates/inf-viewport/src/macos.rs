@@ -26,7 +26,7 @@ use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
 use crate::camera::{
     BiomeSettings, Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptSettings,
-    Snap2DSettings, SnapSettings, ToolMode, ViewportMode,
+    Snap2DSettings, SnapSettings, ToolMode, ViewportMode, WaterSettings,
 };
 use crate::host::EngineHost;
 use crate::{SharedScene, SurfaceTarget, ViewportEventSink, ViewportRect};
@@ -67,7 +67,11 @@ enum Cmd {
     SetSculpt(SculptSettings),
     SetFoliage(FoliageSettings),
     SetBiome(BiomeSettings),
+    /// Replace the water-tool configuration (P20.4).
+    SetWater(WaterSettings),
     SetBiomePalette(uuid::Uuid, Vec<[f32; 4]>),
+    /// Per-terrain water-level hints by biome id (P20.4).
+    SetWaterHints(uuid::Uuid, Vec<Option<f64>>),
     SetGizmo(GizmoMode),
     SetGizmoSpace(GizmoSpace),
     SetSnap3D(SnapSettings),
@@ -144,9 +148,22 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::SetBiome(biome));
     }
 
+    /// Replace the water-tool configuration (kind / river dimensions / level
+    /// offset / resolved biome hint) — P20.4. macOS input isn't wired yet, so
+    /// this only sets the host state (the tool authors once input lands).
+    pub fn set_water(&self, water: WaterSettings) {
+        let _ = self.tx.send(Cmd::SetWater(water));
+    }
+
     /// Push a terrain's resolved biome overlay palette (P19.2).
     pub fn set_biome_palette(&self, entity: uuid::Uuid, palette: Vec<[f32; 4]>) {
         let _ = self.tx.send(Cmd::SetBiomePalette(entity, palette));
+    }
+
+    /// Push a terrain's per-biome water-level hints (P20.4). An all-`None` table
+    /// clears them.
+    pub fn set_water_hints(&self, entity: uuid::Uuid, hints: Vec<Option<f64>>) {
+        let _ = self.tx.send(Cmd::SetWaterHints(entity, hints));
     }
 
     /// Set the transform-gizmo mode (Wave 2). macOS input isn't wired yet, so
@@ -329,7 +346,9 @@ fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedSce
                 Ok(Cmd::SetSculpt(s)) => host.set_sculpt(s),
                 Ok(Cmd::SetFoliage(f)) => host.set_foliage(f),
                 Ok(Cmd::SetBiome(b)) => host.set_biome(b),
+                Ok(Cmd::SetWater(w)) => host.set_water(w),
                 Ok(Cmd::SetBiomePalette(e, p)) => host.set_biome_palette(e, p),
+                Ok(Cmd::SetWaterHints(e, h)) => host.set_water_hints(e, h),
                 Ok(Cmd::SetGizmo(m)) => host.set_gizmo_mode(m),
                 Ok(Cmd::SetGizmoSpace(s)) => host.set_gizmo_space(s),
                 Ok(Cmd::SetSnap3D(s)) => host.set_snap_3d(s),
