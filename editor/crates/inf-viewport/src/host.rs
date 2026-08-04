@@ -4917,6 +4917,34 @@ impl EngineHost {
         ));
     }
 
+    /// Adopt an externally-created voxel working set, replacing the private one
+    /// [`new`](Self::new) made — called by each platform's `spawn` immediately
+    /// after construction and never again.
+    ///
+    /// **Why the store is created outside the host** (P21.2 deliverable 7): the
+    /// carved chunks are the thing Ctrl+S writes into the `.inf_voxel`, and the
+    /// save path is Ring 2's `commands/scene.rs`, which has a `ViewportHandle`
+    /// and no host — the host lives on the render thread behind a command
+    /// channel. A terrain's working set is reachable because it is *in the
+    /// document*; a volume's cannot be (scene schema v19 is frozen and carries no
+    /// chunks), so the handle has to be able to hand the store out. `spawn`
+    /// therefore makes it, keeps a clone on the handle, and gives this one to the
+    /// host. The `Arc<Mutex<…>>` is the same object either way, and the lock
+    /// order is unchanged: **document first, volumes second.**
+    ///
+    /// The alternative — a `Cmd` that flushed edits on the render thread — would
+    /// put a whole-payload asset rewrite between two frames and hand the report
+    /// back across a channel that has no reply path. The other one — moving the
+    /// store into `SceneDoc` — is refused where the type is defined.
+    #[must_use]
+    pub fn with_voxel_volumes(
+        mut self,
+        volumes: inf_editor_core::voxel_store::SharedVoxelVolumes,
+    ) -> Self {
+        self.voxel_volumes = volumes;
+        self
+    }
+
     /// Reopen every loaded volume's `.inf_voxel` index in place — the twin of
     /// [`reload_terrain_stores`](Self::reload_terrain_stores), pushed by the save
     /// path once it has folded carve edits back into the assets.

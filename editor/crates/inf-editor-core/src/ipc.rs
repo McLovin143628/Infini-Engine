@@ -426,6 +426,23 @@ pub struct SaveResultDto {
     /// and are retried by the next save — nothing was lost, but nothing was
     /// persisted either, and the user has to be told.
     pub terrain_failures: Vec<String>,
+    /// How many `.inf_voxel` assets were rewritten with carve edits (P21.2).
+    pub voxel_assets_written: u32,
+    /// How many chunks were folded into those assets.
+    pub voxel_chunks_written: u32,
+    /// Everything about this save that did **not** persist a cave, in two
+    /// flavours that read the same way to an author (P21.2):
+    ///
+    /// * a volume whose `.inf_voxel` could not be written — the terrain-failure
+    ///   twin, still in memory, still retried;
+    /// * an **inline-terrain hole advisory**: this document is carrying cave
+    ///   mouths on a terrain whose container cannot store them, so the save just
+    ///   sealed them. The carve tools refuse to create that state, so it means
+    ///   the document arrived in it; the line names the terrain and the fix.
+    ///
+    /// Separate from `terrain_failures` because they are separate assets with
+    /// separate outcomes — a save may write every tile and no chunk.
+    pub voxel_warnings: Vec<String>,
 }
 
 // ── Terrain import wizard (P16.4) ────────────────────────────────────────
@@ -1010,6 +1027,48 @@ pub struct VoxelSettingsDto {
     /// carries no material). A voxel material index IS a terrain splat index,
     /// which is what makes a cave wall shade like the hillside it opens out of.
     pub material: u8,
+}
+
+/// What the Voxel tool can and cannot do in the **open level** — the toolbar's
+/// live verdict readout (`viewport_voxel_status`, P21.2).
+///
+/// The river verdict's shape, and for the same reason: a carve is a commit of
+/// geometry, and an author who has just had one refused needs to know *why* and
+/// *what to change* without reproducing the gesture. Everything here is
+/// camera-independent, so it can be answered without a pick — which is what lets
+/// the toolbar show it before the first click rather than after the first
+/// refusal.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct VoxelStatusDto {
+    /// `VoxelVolume` entities in the document. Zero means there is nothing to
+    /// carve at all — a different problem from a carve that would be refused,
+    /// and the readout must not conflate them.
+    pub volumes: u32,
+    /// …of those, how many resolve to a loaded `.inf_voxel`. A volume whose
+    /// asset reference is empty or unresolvable binds nothing, and a carve into
+    /// it changes nothing while reporting success.
+    pub bound_volumes: u32,
+    /// Terrains that **can** persist a cave mouth (asset-backed).
+    pub asset_backed_terrains: u32,
+    /// Terrains that cannot — inline in the `.inf_lvl`, whose tiles schema v19
+    /// pins at a layout with no hole mask. Names rather than GUIDs, and a list
+    /// rather than a count, because in a multi-terrain world the author has to
+    /// know *which* one to convert.
+    pub inline_terrains: Vec<String>,
+    /// Chunks carved since the last save. Carve edits live in the `.inf_voxel`
+    /// and are written by an explicit save only — autosave does not touch assets
+    /// — so this is the reminder that Ctrl+S is owed.
+    pub unsaved_chunks: u32,
+    /// The refusal a surface-crossing carve would hit, **verbatim** the sentence
+    /// the viewport puts on `viewport://tool-status`
+    /// (`INLINE_TERRAIN_CARVE_REFUSAL`). `None` when every terrain is
+    /// asset-backed. One string, quoted in both places, so the toolbar cannot
+    /// explain the refusal differently from the tool that raised it.
+    pub refusal: Option<String>,
+    /// The defensive advisories: this document is **already** carrying mouths it
+    /// cannot save. Empty for every level the carve tools produced, and for every
+    /// level written before P21.2.
+    pub advisories: Vec<String>,
 }
 
 impl Default for VoxelSettingsDto {

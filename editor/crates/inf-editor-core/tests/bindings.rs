@@ -23,8 +23,8 @@ use inf_editor_core::ipc::{
     SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto, TerrainImportPlanDto,
     TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto, TilemapDto, TimeOfDayDto,
     ToolModeDto, ViewModeDto, ViewportDrop, ViewportKey, ViewportModeDto, ViewportRect,
-    ViewportToolStatusDto, VoxelOpModeDto, VoxelSettingsDto, VoxelToolKindDto, WaterDefaultsDto,
-    WaterSettingsDto, WaterToolKindDto, WeatherDto, WeatherPresetDto,
+    ViewportToolStatusDto, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto,
+    WaterDefaultsDto, WaterSettingsDto, WaterToolKindDto, WeatherDto, WeatherPresetDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -104,6 +104,7 @@ fn export_bindings() {
     VoxelToolKindDto::export_all(&cfg).expect("export VoxelToolKindDto");
     VoxelOpModeDto::export_all(&cfg).expect("export VoxelOpModeDto");
     VoxelSettingsDto::export_all(&cfg).expect("export VoxelSettingsDto");
+    VoxelStatusDto::export_all(&cfg).expect("export VoxelStatusDto");
     WaterDefaultsDto::export_all(&cfg).expect("export WaterDefaultsDto");
     LakePreviewDto::export_all(&cfg).expect("export LakePreviewDto");
     RiverClimbDto::export_all(&cfg).expect("export RiverClimbDto");

@@ -25,4 +25,6 @@ pub mod terrain_edit;
 /// Editor-side camera-driven terrain streaming (P16.3b2).
 pub mod terrain_stream;
 pub mod thumbnail;
+/// Carving a voxel volume + the save write-back (P21.2), `terrain_edit`'s twin.
+pub mod voxel_edit;
 pub mod voxel_store;

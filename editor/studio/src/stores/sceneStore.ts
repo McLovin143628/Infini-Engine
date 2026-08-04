@@ -425,19 +425,32 @@ export function isEffectivelyVisible(nodes: Record<string, SceneNode>, guid: str
  */
 export function reportSaveResult(res: SaveResultDto, what = "Level"): void {
   const status = useShellStore.getState().pushStatus;
-  if (res.terrain_failures.length > 0) {
+  // Failures first, and the voxel ones beside the terrain ones (P21.2): both mean
+  // "the level landed, this asset did not", and an author who carved a cave and a
+  // hillside in one session has to hear about both in one message rather than
+  // about whichever the code checked first.
+  const failures = [...res.terrain_failures, ...res.voxel_warnings];
+  if (failures.length > 0) {
     status(
-      `${what} saved, but terrain edits were NOT written: ${res.terrain_failures.join("; ")}. ` +
-        "They are still unsaved — fix the cause and save again.",
+      `${what} saved, but terrain/carve edits were NOT fully written: ${failures.join("; ")}. ` +
+        "Fix the cause and save again.",
       10000,
     );
     return;
   }
-  if (res.terrain_assets_written > 0) {
-    status(
-      `${what} saved (${res.terrain_tiles_written} terrain tile(s) written to ` +
-        `${res.terrain_assets_written} asset(s)).`,
-    );
+  if (res.terrain_assets_written > 0 || res.voxel_assets_written > 0) {
+    const parts: string[] = [];
+    if (res.terrain_assets_written > 0) {
+      parts.push(
+        `${res.terrain_tiles_written} terrain tile(s) to ${res.terrain_assets_written} asset(s)`,
+      );
+    }
+    if (res.voxel_assets_written > 0) {
+      parts.push(
+        `${res.voxel_chunks_written} voxel chunk(s) to ${res.voxel_assets_written} asset(s)`,
+      );
+    }
+    status(`${what} saved (${parts.join(", ")}).`);
     return;
   }
   status(`${what} saved.`);

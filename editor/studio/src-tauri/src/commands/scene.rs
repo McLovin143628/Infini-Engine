@@ -17,6 +17,7 @@ use inf_editor_core::ipc::{
 use inf_editor_core::scene::serialize::EntityRecord;
 use inf_editor_core::scene::{details, diff, serialize, tilemap, SceneDoc};
 use inf_editor_core::terrain_edit;
+use inf_editor_core::voxel_edit;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
@@ -808,6 +809,19 @@ pub async fn scene_save(
         doc.mark_saved();
         (enc, staged)
     };
+    // The voxel half is staged at the same "save begins" moment, out of the
+    // shared store the viewport carves into (schema v19 is frozen, so the chunks
+    // are NOT in the document). The doc lock is already released above, which
+    // keeps the fixed order — **document first, volumes second** — trivially.
+    // No viewport ⇒ no carve tool ⇒ nothing staged, which is the headless case
+    // and not a failure to report.
+    let voxel_volumes = app
+        .try_state::<crate::commands::ViewportState>()
+        .and_then(|v| v.voxel_volumes());
+    let staged_voxels = match voxel_volumes.as_ref().map(|v| v.lock()) {
+        Some(Ok(store)) => voxel_edit::stage_voxel_edits(&store),
+        _ => Vec::new(),
+    };
     serialize::write_encoded(&enc, &target)?;
 
     // Fold this session's sculpt/paint into the `.inf_terrain` assets, then clear
@@ -820,6 +834,9 @@ pub async fn scene_save(
         terrain_assets_written: 0,
         terrain_tiles_written: 0,
         terrain_failures: Vec::new(),
+        voxel_assets_written: 0,
+        voxel_chunks_written: 0,
+        voxel_warnings: Vec::new(),
     };
     if !staged.is_empty() {
         let content_root = app
@@ -858,6 +875,70 @@ pub async fn scene_save(
             }
         }
     }
+    // Fold this session's carves into the `.inf_voxel` assets, then clear the
+    // marks for the ones that really landed and re-walk the viewport's index.
+    //
+    // **After** the terrain flush, deliberately. Neither write reads the other,
+    // so this is not a data dependency — it is a reporting one: a cave and the
+    // mouth above it are ONE edit to the author, and a save that announced the
+    // rock written while the ground failed would be describing half a cut.
+    if !staged_voxels.is_empty() {
+        let content_root = app
+            .try_state::<crate::commands::ProjectState>()
+            .and_then(|p| p.current_content_root());
+        match content_root {
+            Some(root) => {
+                let report = voxel_edit::write_voxel_edits(&staged_voxels, &root);
+                if !report.is_empty() {
+                    if let Some(Ok(mut store)) = voxel_volumes.as_ref().map(|v| v.lock()) {
+                        voxel_edit::mark_voxel_edits_saved(&mut store, &report);
+                    }
+                    tracing::info!("{}", report.summary());
+                }
+                result.voxel_assets_written = report.written.len() as u32;
+                result.voxel_chunks_written = report.chunks() as u32;
+                result.voxel_warnings.extend(
+                    report
+                        .unwritten
+                        .iter()
+                        .map(|u| format!("volume {}: {}", u.entity, u.reason)),
+                );
+                if !report.written.is_empty() {
+                    if let Some(viewport) = app.try_state::<crate::commands::ViewportState>() {
+                        // The terrain twin: a re-walk, not a clear. Loaded volumes
+                        // keep their chunks and meshes, so Ctrl+S never blinks a
+                        // cave — what changes is which GUIDs resolve.
+                        viewport.reload_voxel_stores();
+                    }
+                }
+            }
+            None => {
+                let msg = format!(
+                    "{} voxel volume(s) have unsaved carve edits but no project is open, so \
+                     there is no content root to write the .inf_voxel into — the edits stay \
+                     in memory",
+                    staged_voxels.len()
+                );
+                tracing::warn!("scene_save: {msg}");
+                result.voxel_warnings.push(msg);
+            }
+        }
+    }
+    // **The inline-terrain hole advisory, on EVERY save** (P21.2) — not only when
+    // something was carved this session. The state it detects is one a document
+    // *arrives* in (an older session, a hand-edited level, a terrain converted
+    // back to inline after a carve), and the save is the moment the mouths are
+    // actually lost: an inline terrain's tiles ride the `.inf_lvl`, whose frozen
+    // v19 wire form drops the hole mask by construction. Gating it on a carve
+    // having happened would mean the one save that silently seals a level is the
+    // one that says nothing.
+    {
+        let doc = lock(&state.doc)?;
+        for line in voxel_edit::inline_hole_warnings(&doc) {
+            tracing::warn!("scene_save: {line}");
+            result.voxel_warnings.push(line);
+        }
+    }
     // A clean save invalidates the crash-recovery file — but ONLY when the save
     // really was clean (P16.4b audit). Terrain edits that could not be written are
     // still in memory and nowhere else, so dropping the recovery file would leave
@@ -865,9 +946,16 @@ pub async fn scene_save(
     // whole point of the note.
     if let Ok(dir) = data_dir(&app) {
         let terrain_still_dirty = lock(&state.doc)?.has_unsaved_terrain_edits();
-        if terrain_still_dirty {
+        // The voxel twin, and the same starvation condition: carve edits that
+        // could not be written live only in the shared store, so the recovery
+        // file and its note are their only backstop (P21.2).
+        let voxels_still_dirty = voxel_volumes
+            .as_ref()
+            .and_then(|v| v.lock().ok().map(|s| s.has_unsaved_edits()))
+            .unwrap_or(false);
+        if terrain_still_dirty || voxels_still_dirty {
             tracing::warn!(
-                "scene_save: unsaved terrain edits survived the save — keeping the \
+                "scene_save: unsaved terrain/carve edits survived the save — keeping the \
                  crash-recovery file and its note"
             );
         } else {
@@ -929,6 +1017,16 @@ pub async fn scene_open(
 #[tauri::command]
 pub async fn scene_autosave(app: AppHandle, state: State<'_, SceneState>) -> Result<(), String> {
     let dir = data_dir(&app)?;
+    // The carve half of the same "clean document, unsaved assets" state (P21.2).
+    // Read BEFORE the doc lock, in the fixed order — document first, volumes
+    // second — so this function can never take them the other way round.
+    let voxel_note = app
+        .try_state::<crate::commands::ViewportState>()
+        .and_then(|v| v.voxel_volumes())
+        .and_then(|v| match v.lock() {
+            Ok(store) => voxel_edit::unsaved_voxel_note(&store),
+            Err(_) => None,
+        });
     // Encode under the lock (authored values if a scrub is live), write outside it.
     let (payload, terrain_note) = {
         let mut doc = lock(&state.doc)?;
@@ -936,7 +1034,8 @@ pub async fn scene_autosave(app: AppHandle, state: State<'_, SceneState>) -> Res
         // whose `.inf_terrain` write failed marks the level saved but leaves the
         // tiles dirty. Gating autosave on `is_dirty()` alone would then starve the
         // one mechanism that records those edits ever existed (P16.4b audit).
-        if !doc.is_dirty() && !doc.has_unsaved_terrain_edits() {
+        // `voxel_note` is exactly that condition for a `.inf_voxel`.
+        if !doc.is_dirty() && !doc.has_unsaved_terrain_edits() && voxel_note.is_none() {
             return Ok(());
         }
         let payload =
@@ -944,11 +1043,19 @@ pub async fn scene_autosave(app: AppHandle, state: State<'_, SceneState>) -> Res
         (payload, terrain_edit::unsaved_terrain_note(&doc))
     };
     serialize::write_recovery_bytes(&payload, &dir)?;
-    // Autosave deliberately does NOT rewrite `.inf_terrain` assets — asset writes
-    // are explicit (P16.4b). Record that unsaved terrain edits existed instead, so
-    // a recovery can say honestly that the terrain it restores is the last SAVED
-    // one rather than pretending the level is whole.
-    serialize::write_recovery_terrain_note(&dir, terrain_note.as_deref())?;
+    // Autosave deliberately does NOT rewrite `.inf_terrain` or `.inf_voxel`
+    // assets — asset writes are explicit (P16.4b, P21.2). Record that unsaved
+    // terrain and carve edits existed instead, so a recovery can say honestly
+    // that the ground and the caves it restores are the last SAVED assets rather
+    // than pretending the level is whole.
+    //
+    // ONE note file carrying both halves, not two: a recovery consumes and warns
+    // exactly once, and a second file is a second thing to forget to read.
+    let note = match (terrain_note, voxel_note) {
+        (Some(t), Some(v)) => Some(format!("{t}\n{v}")),
+        (t, v) => t.or(v),
+    };
+    serialize::write_recovery_terrain_note(&dir, note.as_deref())?;
     Ok(())
 }
 

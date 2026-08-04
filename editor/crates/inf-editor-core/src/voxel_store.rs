@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex};
 use glam::DVec3;
 use inf_ecs::components::VoxelVolume;
 use inf_voxel::{
-    OpReport, VolumeSlot, VoxelDelta, VoxelDeltaBuilder, VoxelOp, VoxelStreamBudget,
+    ChunkKey, OpReport, VolumeSlot, VoxelDelta, VoxelDeltaBuilder, VoxelOp, VoxelStreamBudget,
     VoxelStreamReport, VoxelVolumes, VoxelWantsParams,
 };
 use uuid::Uuid;
@@ -309,6 +309,86 @@ impl EditorVoxelVolumes {
     /// The loaded slot for `entity` — its resident chunks and meshed surface.
     pub fn slot(&self, entity: Uuid) -> Option<&VolumeSlot> {
         self.volumes.get(entity.as_u128())
+    }
+
+    // ── the write-back seam (P21.2 deliverable 7) ────────────────────────
+    //
+    // Four accessors, and they are deliberately the same four `SceneDoc` gives a
+    // streamed terrain — `streamed_terrain_entities` / `terrain_dirty_tiles` /
+    // `has_unsaved_terrain_edits` / `terrain_mark_written_back`. The *policy*
+    // (what a save stages, when it writes, what a failure means) lives in
+    // [`crate::voxel_edit`], mirroring [`crate::terrain_edit`], so the two halves
+    // of one Ctrl+S cannot drift into two different sets of rules.
+    //
+    // Nothing here re-meshes, because nothing here changes the field: staging
+    // reads chunks and marking clears bits. That is why these are the only
+    // `&mut` doors that skip the `resync` every carve door ends in.
+
+    /// Every loaded volume as `(entity, asset GUID)`, **ascending by entity**.
+    ///
+    /// Ascending rather than in document order because this store has no
+    /// document — it is reachable from the Ring-2 save path with no `SceneDoc`
+    /// in hand. A stable order still matters: a save that staged its volumes in
+    /// `HashMap` order would rewrite the same assets in a different sequence on
+    /// every run, which turns one flaky IO failure into a different set of
+    /// half-written assets each time.
+    pub fn bound_volumes(&self) -> Vec<(Uuid, Uuid)> {
+        let mut out: Vec<(Uuid, Uuid)> = self
+            .volumes
+            .iter()
+            .map(|(&e, slot)| (Uuid::from_u128(e), Uuid::from_u128(slot.asset)))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// The chunks of `entity`'s volume awaiting write-back into its
+    /// `.inf_voxel`, ascending. Empty for an unloaded volume — which is the
+    /// truth, not a failure: nothing that was never bound can have been carved.
+    pub fn dirty_chunks(&self, entity: Uuid) -> Vec<ChunkKey> {
+        self.slot(entity)
+            .map(|s| s.data.dirty_chunks())
+            .unwrap_or_default()
+    }
+
+    /// Whether **any** loaded volume carries carve edits that only an explicit
+    /// save will persist — the voxel twin of
+    /// [`SceneDoc::has_unsaved_terrain_edits`](crate::scene::SceneDoc::has_unsaved_terrain_edits),
+    /// and what keeps autosave from dropping the crash-recovery note.
+    pub fn has_unsaved_edits(&self) -> bool {
+        self.volumes.iter().any(|(_, s)| s.data.has_dirty_chunks())
+    }
+
+    /// Chunks awaiting write-back across every loaded volume — the number the
+    /// unsaved-edits note and the tool readout quote.
+    pub fn unsaved_chunk_count(&self) -> usize {
+        self.volumes
+            .iter()
+            .map(|(_, s)| s.data.dirty_chunks().len())
+            .sum()
+    }
+
+    /// Clear the write-back marks of the chunks a save actually wrote — **and
+    /// only where the chunk has not been re-carved since it was staged**.
+    ///
+    /// `written` is `(key, stamp-at-staging)`. The rewrite runs with both locks
+    /// released and can take seconds on a large volume, so the author can keep
+    /// carving while it runs; a chunk touched inside that window has a newer
+    /// stamp, keeps its mark, and is written by the next save. Clearing the whole
+    /// dirty set instead would silently discard exactly the cuts made while the
+    /// author was waiting for the save. Verbatim
+    /// [`SceneDoc::terrain_mark_written_back`](crate::scene::SceneDoc::terrain_mark_written_back)'s
+    /// rule, over [`inf_voxel::VoxelData::clear_dirty_if_unchanged`].
+    ///
+    /// Returns how many marks were cleared.
+    pub fn mark_written_back(&mut self, entity: Uuid, written: &[(ChunkKey, u64)]) -> usize {
+        let Some(slot) = self.volumes.get_mut(entity.as_u128()) else {
+            return 0;
+        };
+        written
+            .iter()
+            .filter(|&&(key, stamp)| slot.data.clear_dirty_if_unchanged(key, stamp))
+            .count()
     }
 
     // ── carving (P21.2) ──────────────────────────────────────────────────

@@ -161,6 +161,11 @@ enum Cmd {
 /// Cheap-to-clone handle for controlling the viewport thread.
 pub struct ViewportHandle {
     tx: Sender<Cmd>,
+    /// The shared voxel working set the host on the other end of `tx` carves
+    /// into (P21.2). Held here — not merely inside the host — because Ring 2's
+    /// save path has to stage carve edits out of it with no host in hand; see
+    /// [`EngineHost::with_voxel_volumes`] for the whole argument.
+    volumes: inf_editor_core::voxel_store::SharedVoxelVolumes,
 }
 
 impl ViewportHandle {
@@ -293,6 +298,16 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::ReloadVoxelStores);
     }
 
+    /// The shared voxel working set this viewport carves into (P21.2).
+    ///
+    /// Not a `Cmd`: the save path needs the chunks *now*, under a lock it takes
+    /// and releases itself, and a command channel with no reply path cannot give
+    /// them back. Handing out a clone of the `Arc` is the same seam
+    /// `SceneState::doc` already is on the document side.
+    pub fn voxel_volumes(&self) -> inf_editor_core::voxel_store::SharedVoxelVolumes {
+        self.volumes.clone()
+    }
+
     /// Release every terrain stream (its pages, its edit pins and its
     /// `.inf_terrain` payload) — pushed when the open document is replaced by
     /// File ▸ Open / File ▸ New (P16.4b).
@@ -323,11 +338,18 @@ impl ViewportHandle {
 /// `sink` receives events the viewport surfaces back (forwarded key chords).
 pub fn spawn(parent_hwnd: isize, sink: ViewportEventSink, scene: SharedScene) -> ViewportHandle {
     let (tx, rx) = channel();
+    // The voxel working set is created HERE rather than inside the host, so the
+    // handle can hand it to Ring 2's save path (see `EngineHost::with_voxel_
+    // volumes`). Both ends hold clones of one `Arc`; an engine init that fails
+    // leaves the handle holding an empty store, which stages nothing — the right
+    // answer for a viewport that never came up.
+    let volumes = inf_editor_core::voxel_store::shared_volumes();
+    let host_volumes = volumes.clone();
     std::thread::Builder::new()
         .name("inf-viewport".into())
-        .spawn(move || thread_main(parent_hwnd, rx, sink, scene))
+        .spawn(move || thread_main(parent_hwnd, rx, sink, scene, host_volumes))
         .expect("failed to spawn inf-viewport thread");
-    ViewportHandle { tx }
+    ViewportHandle { tx, volumes }
 }
 
 /// Which mouse gesture currently owns capture.
@@ -854,7 +876,13 @@ fn report_viewport_panic(location: &str, payload: &(dyn std::any::Any + Send)) {
     }
 }
 
-fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, scene: SharedScene) {
+fn thread_main(
+    parent_hwnd: isize,
+    rx: Receiver<Cmd>,
+    sink: ViewportEventSink,
+    scene: SharedScene,
+    volumes: inf_editor_core::voxel_store::SharedVoxelVolumes,
+) {
     let hwnd = match create_child_window(parent_hwnd) {
         Ok(h) => h,
         Err(e) => {
@@ -881,7 +909,7 @@ fn thread_main(parent_hwnd: isize, rx: Receiver<Cmd>, sink: ViewportEventSink, s
     // unavailable" instead of silently killing this thread (the pick-shader
     // composition bug did exactly that).
     let init = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        EngineHost::new(target, 64, 64)
+        EngineHost::new(target, 64, 64).map(|h| h.with_voxel_volumes(volumes))
     }));
     let mut host = match init {
         Ok(Ok(h)) => h,

@@ -96,6 +96,9 @@ enum Cmd {
 /// Cheap-to-clone handle for controlling the viewport thread.
 pub struct ViewportHandle {
     tx: Sender<Cmd>,
+    /// The shared voxel working set the host on the other end of `tx` carves
+    /// into (P21.2) — the win32 twin; see [`EngineHost::with_voxel_volumes`].
+    volumes: inf_editor_core::voxel_store::SharedVoxelVolumes,
 }
 
 impl ViewportHandle {
@@ -226,6 +229,13 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::ReloadVoxelStores);
     }
 
+    /// The shared voxel working set this viewport carves into (P21.2) — the
+    /// win32 twin, and NOT a `Cmd`: the save path needs the chunks now, and a
+    /// command channel has no reply path.
+    pub fn voxel_volumes(&self) -> inf_editor_core::voxel_store::SharedVoxelVolumes {
+        self.volumes.clone()
+    }
+
     /// Release every terrain stream (its pages, its edit pins and its
     /// `.inf_terrain` payload) — pushed when the open document is replaced by
     /// File ▸ Open / File ▸ New (P16.4b).
@@ -252,10 +262,16 @@ impl ViewportHandle {
 /// caller dispatches via `run_on_main_thread`.
 pub fn spawn(ns_view: isize, sink: ViewportEventSink, scene: SharedScene) -> ViewportHandle {
     let (tx, rx) = channel();
+    // The voxel working set is created HERE rather than inside the host, so the
+    // handle can hand it to Ring 2's save path (see `EngineHost::with_voxel_
+    // volumes`) - the win32 twin. Every early return below still yields a handle
+    // holding an empty store, which stages nothing: the right answer for a
+    // viewport that never came up.
+    let volumes = inf_editor_core::voxel_store::shared_volumes();
 
     if MainThreadMarker::new().is_none() {
         tracing::error!("inf-viewport: macOS spawn must run on the main thread");
-        return ViewportHandle { tx };
+        return ViewportHandle { tx, volumes };
     }
 
     // SAFETY: the caller passes the live contentView of the editor window
@@ -278,7 +294,7 @@ pub fn spawn(ns_view: isize, sink: ViewportEventSink, scene: SharedScene) -> Vie
             Some(root) => root.addSublayer(&metal),
             None => {
                 tracing::error!("inf-viewport: contentView has no backing layer");
-                return ViewportHandle { tx };
+                return ViewportHandle { tx, volumes };
             }
         }
         // Intentional +1 retain: the layer lives until Destroy releases it.
@@ -292,11 +308,12 @@ pub fn spawn(ns_view: isize, sink: ViewportEventSink, scene: SharedScene) -> Vie
     // either; the hardware pass wires the sink and both together.
     let _ = sink;
 
+    let host_volumes = volumes.clone();
     std::thread::Builder::new()
         .name("inf-viewport".into())
-        .spawn(move || thread_main(layer_ptr, scale, rx, scene))
+        .spawn(move || thread_main(layer_ptr, scale, rx, scene, host_volumes))
         .expect("failed to spawn inf-viewport thread");
-    ViewportHandle { tx }
+    ViewportHandle { tx, volumes }
 }
 
 fn apply_rect(layer_ptr: isize, scale: f64, r: ViewportRect) {
@@ -325,9 +342,15 @@ fn apply_rect(layer_ptr: isize, scale: f64, r: ViewportRect) {
     }
 }
 
-fn thread_main(layer_ptr: isize, scale: f64, rx: Receiver<Cmd>, scene: SharedScene) {
+fn thread_main(
+    layer_ptr: isize,
+    scale: f64,
+    rx: Receiver<Cmd>,
+    scene: SharedScene,
+    volumes: inf_editor_core::voxel_store::SharedVoxelVolumes,
+) {
     let target = SurfaceTarget::MetalLayer { layer: layer_ptr };
-    let mut host = match EngineHost::new(target, 64, 64) {
+    let mut host = match EngineHost::new(target, 64, 64).map(|h| h.with_voxel_volumes(volumes)) {
         Ok(h) => h,
         Err(e) => {
             tracing::error!("inf-viewport: engine init failed: {e}");

@@ -28,4 +28,27 @@ terrain_tiles_written: number,
  * and are retried by the next save — nothing was lost, but nothing was
  * persisted either, and the user has to be told.
  */
-terrain_failures: Array<string>, };
+terrain_failures: Array<string>, 
+/**
+ * How many `.inf_voxel` assets were rewritten with carve edits (P21.2).
+ */
+voxel_assets_written: number, 
+/**
+ * How many chunks were folded into those assets.
+ */
+voxel_chunks_written: number, 
+/**
+ * Everything about this save that did **not** persist a cave, in two
+ * flavours that read the same way to an author (P21.2):
+ *
+ * * a volume whose `.inf_voxel` could not be written — the terrain-failure
+ *   twin, still in memory, still retried;
+ * * an **inline-terrain hole advisory**: this document is carrying cave
+ *   mouths on a terrain whose container cannot store them, so the save just
+ *   sealed them. The carve tools refuse to create that state, so it means
+ *   the document arrived in it; the line names the terrain and the fix.
+ *
+ * Separate from `terrain_failures` because they are separate assets with
+ * separate outcomes — a save may write every tile and no chunk.
+ */
+voxel_warnings: Array<string>, };

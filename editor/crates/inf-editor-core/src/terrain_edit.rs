@@ -782,6 +782,199 @@ mod tests {
         );
     }
 
+    /// **THE HOLE WRITE-BACK GATE (P21.2 deliverable 7).**
+    ///
+    /// Cave mouths are a *tile layer*, so nothing in this module mentions them:
+    /// `TerrainEdits::from_dirty` clones whole tiles and carries the mask for
+    /// free, exactly as it does the biome ids. "For free" is a claim about a seam
+    /// and not an obvious truth — `touch_surface_cut` writes through
+    /// `get_tile_mut` (which stamps and dirties), the container encodes the mask
+    /// at tile generation 4, and `passthrough` only copies blobs verbatim while
+    /// the source header is already at the current schema. Any one of those
+    /// moving would drop every mouth in the level on save, and only a reload
+    /// would reveal it.
+    ///
+    /// Four claims in one script:
+    ///
+    /// 1. a hole-only cut **schedules** a write-back (no height moved);
+    /// 2. the rewritten asset serves the mask back, bit for bit, and the carved
+    ///    tiles' blobs equal the working set's;
+    /// 3. **every other tile is byte-identical verbatim** — the property the
+    ///    partial rewrite exists for;
+    /// 4. …including the **coarse pages**, which come out identical *because a
+    ///    decimated tile carries no hole mask at all* (`downsample_block` reduces
+    ///    heights, data maps and biome ids, and stops there). That is a P21
+    ///    remainder rather than a decision this batch made — a mouth is only
+    ///    discarded on the LOD-0 ring, so a distant clipmap page still draws
+    ///    ground over the cave. Pinned here so flipping it (the P19.3 move, one
+    ///    layer over) is deliberate rather than accidental.
+    #[test]
+    fn a_carve_writes_its_cave_mouths_into_the_asset_and_leaves_every_other_tile_verbatim() {
+        use crate::samples::streamed_terrain_height;
+
+        let (dir, mut doc, mut streams) = fixture();
+        ensure_stream(&doc, &mut streams);
+        let path = dir.path().join("World.inf_terrain");
+
+        let center = DVec2::new(100.0, 100.0);
+        assert!(
+            streams
+                .page_brush_footprint(STREAMED_TERRAIN_TERRAIN_GUID, &mut doc, center, 8.0)
+                .is_some(),
+            "the terrain must be streamed"
+        );
+
+        // Every blob in the pristine asset, so "verbatim" is checked and not
+        // assumed.
+        let before: BTreeMap<TileKey, Vec<u8>> = {
+            let store = inf_terrain::open_file_tile_store(&path).unwrap();
+            store
+                .keys()
+                .map(|k| (k, store.tile_bytes(k).unwrap().to_vec()))
+                .collect()
+        };
+        assert!(before.keys().any(|k| !k.is_lod0()), "no pyramid to check");
+
+        let heights_before: Vec<f32> = {
+            let (data, _) = doc
+                .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+                .unwrap();
+            data.tiles()
+                .flat_map(|(_, t)| t.heights().to_vec())
+                .collect()
+        };
+
+        // A ball straddling the surface at `center` — the breakthrough that opens
+        // a mouth. The sample terrain is anchored at the world origin, so the
+        // world height IS the bare generator.
+        let origin = doc
+            .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+            .unwrap()
+            .1;
+        assert_eq!(origin, DVec3::ZERO);
+        let shape = inf_voxel::VoxelShape::Sphere {
+            center: DVec3::new(
+                center.x,
+                streamed_terrain_height(center.x, center.y),
+                center.y,
+            ),
+            radius_m: 5.0,
+        };
+        let delta = doc
+            .with_terrain_data_mut(STREAMED_TERRAIN_TERRAIN_GUID, |data| {
+                inf_voxel::apply_surface_cut(data, origin, &shape, true)
+            })
+            .unwrap();
+        assert!(
+            !delta.is_empty(),
+            "the cut opened no mouth — the fixture proves nothing"
+        );
+
+        let (data, _) = doc
+            .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+            .unwrap();
+        assert!(data.has_holes());
+        assert!(data.is_hole_at(center), "the cut centre must be open");
+        // Not one height moved — a hole really is a layer of its own.
+        let heights_after: Vec<f32> = data
+            .tiles()
+            .flat_map(|(_, t)| t.heights().to_vec())
+            .collect();
+        assert_eq!(heights_before, heights_after, "a carve moved a height");
+        assert!(
+            doc.has_unsaved_terrain_edits(),
+            "a hole-only edit must schedule a write-back"
+        );
+
+        // The tiles the cut opened, with the blob each should land as.
+        let res = data.tile_resolution();
+        let carved: BTreeMap<(i32, i32), Vec<u8>> = data
+            .tiles()
+            .filter(|(_, t)| t.has_holes())
+            .map(|(&c, t)| (c, blob_of(t)))
+            .collect();
+        assert!(!carved.is_empty());
+        let carved_masks: BTreeMap<(i32, i32), Vec<bool>> = data
+            .tiles()
+            .filter(|(_, t)| t.has_holes())
+            .map(|(&c, t)| {
+                let mask = (0..res)
+                    .flat_map(|j| (0..res).map(move |i| (i, j)))
+                    .map(|(i, j)| t.is_hole(res, i, j))
+                    .collect();
+                (c, mask)
+            })
+            .collect();
+
+        let report = flush_terrain_edits(&mut doc, dir.path());
+        assert_eq!(report.written.len(), 1);
+        assert!(report.tiles() > 0);
+        assert!(!doc.has_unsaved_terrain_edits(), "the marks must clear");
+
+        // ── the asset, re-read ──
+        let store = inf_terrain::open_file_tile_store(&path).unwrap();
+        for (&coord, mask) in &carved_masks {
+            let key = TileKey::lod0(coord);
+            let tile = store.tile(key).unwrap().expect("the carved tile survived");
+            assert!(
+                tile.has_holes(),
+                "tile {coord:?} lost its hole mask on the way to disk"
+            );
+            let saved: Vec<bool> = (0..res)
+                .flat_map(|j| (0..res).map(move |i| (i, j)))
+                .map(|(i, j)| tile.is_hole(res, i, j))
+                .collect();
+            assert_eq!(saved, *mask, "tile {coord:?} saved a DIFFERENT mask");
+            assert_eq!(
+                store.tile_bytes(key).unwrap(),
+                carved[&coord].as_slice(),
+                "tile {coord:?} does not encode as the working set does"
+            );
+            assert_ne!(
+                store.tile_bytes(key).unwrap(),
+                before[&key].as_slice(),
+                "tile {coord:?} reached disk unchanged, so the mask never left memory"
+            );
+        }
+
+        // …and every tile the cut did not open is byte-identical — level 0 AND
+        // the recomputed pyramid ancestors (claim 4).
+        let mut coarse_checked = 0usize;
+        for (key, bytes) in &before {
+            if key.is_lod0() && carved_masks.contains_key(&key.coord) {
+                continue;
+            }
+            coarse_checked += usize::from(!key.is_lod0());
+            assert_eq!(
+                store.tile_bytes(*key).unwrap(),
+                bytes.as_slice(),
+                "{key:?} was rewritten by a save that only opened cave mouths"
+            );
+        }
+        assert!(coarse_checked > 0);
+        drop(store);
+
+        // A FRESH streamer over the rewritten asset serves the mouth back — the
+        // reload half, and the thing an author actually notices.
+        let mut fresh = EditorTerrainStreams::new();
+        fresh.set_content_root(Some(dir.path().to_path_buf()));
+        let mut fresh_doc = streamed_terrain_scene();
+        ensure_stream(&fresh_doc, &mut fresh);
+        fresh.page_brush_footprint(STREAMED_TERRAIN_TERRAIN_GUID, &mut fresh_doc, center, 8.0);
+        let (reloaded, _) = fresh_doc
+            .terrain_data_and_origin(STREAMED_TERRAIN_TERRAIN_GUID)
+            .unwrap();
+        assert!(
+            reloaded.is_hole_at(center),
+            "the reloaded asset sealed the cave mouth"
+        );
+        assert_eq!(
+            reloaded.height_at(center),
+            None,
+            "…and the poisoned cell must still refuse a surface there"
+        );
+    }
+
     /// **Undo of a biome stroke restores the saved bytes exactly (P19.2).** The
     /// blob-level twin of the splat/data-map undo gates: a stroke that
     /// materialized a tile's sparse id buffer must undo back to a tile that

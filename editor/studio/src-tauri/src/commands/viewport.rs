@@ -11,8 +11,8 @@ use std::sync::Mutex;
 use inf_editor_core::ipc::{
     BiomeSettingsDto, FoliageSettingsDto, GizmoModeDto, GizmoSpaceDto, SculptFalloffDto,
     SculptOpDto, SculptSettingsDto, Snap2DDto, Snap3DDto, ToolModeDto, ViewModeDto, ViewportDrop,
-    ViewportKey, ViewportModeDto, ViewportRect, VoxelOpModeDto, VoxelSettingsDto, VoxelToolKindDto,
-    WaterSettingsDto, WaterToolKindDto,
+    ViewportKey, ViewportModeDto, ViewportRect, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto,
+    VoxelToolKindDto, WaterSettingsDto, WaterToolKindDto,
 };
 use inf_viewport::camera::{BiomeSettings, WaterSettings, WaterToolKind};
 use inf_viewport::{
@@ -85,23 +85,28 @@ impl ViewportState {
     /// The `reload_terrain_stores` twin, and the seam the P21.2 save flow needs:
     /// a carve written into a *new* asset only resolves after a re-walk, and the
     /// loaded volumes keep their chunks so saving never blinks a cave.
-    ///
-    /// **Unwired on purpose, for exactly one commit.** Its caller is
-    /// `commands/scene.rs`'s save path, beside the existing
-    /// `viewport.reload_terrain_stores()` call that follows the `.inf_terrain`
-    /// write-back — which the batch folding carve edits into `.inf_voxel` owns.
-    /// The whole chain below this point (`ViewportHandle::reload_voxel_stores`
-    /// → `Cmd::ReloadVoxelStores` on both platform pumps →
-    /// `EngineHost::reload_voxel_stores`) is live, so that batch adds one line
-    /// and nothing else. Deleting this instead would mean re-deriving the same
-    /// four-file chain from scratch.
-    #[allow(dead_code)]
     pub fn reload_voxel_stores(&self) {
         if let Ok(guard) = self.0.lock() {
             if let Some(handle) = guard.as_ref() {
                 handle.reload_voxel_stores();
             }
         }
+    }
+
+    /// The shared voxel working set the viewport carves into (P21.2), or `None`
+    /// when no viewport is attached.
+    ///
+    /// `None` is not a failure and must not be reported as one: with no viewport
+    /// there is no carve tool, so there are no carve edits, so a save has nothing
+    /// to write. It is also the CI/headless case, which is exactly why the save
+    /// path treats it as "nothing to do" rather than as a missing capability.
+    ///
+    /// The chunks cannot come through the command channel: they live behind a
+    /// mutex the host and the undo history already share, and a `Cmd` has no
+    /// reply path (see `inf_viewport::host::EngineHost::with_voxel_volumes`).
+    pub fn voxel_volumes(&self) -> Option<inf_editor_core::voxel_store::SharedVoxelVolumes> {
+        let guard = self.0.lock().ok()?;
+        guard.as_ref().map(|h| h.voxel_volumes())
     }
 
     /// Release every terrain stream — pushed when the open document is replaced
@@ -480,6 +485,51 @@ pub async fn viewport_set_voxel(
         });
     }
     Ok(())
+}
+
+/// The Voxel tool's live verdict (P21.2): what this level can be carved into,
+/// what a surface-crossing cut would be refused for, and how much is unsaved.
+///
+/// Answered from the **document** and the shared voxel store, never from the
+/// viewport's render cut — the document is what gets saved, so the terrain that
+/// has to be able to persist a mouth is the one whose tiles are about to be
+/// written. That is `SceneDoc::carve_verdict`'s rule, and this reads the same
+/// doors so the toolbar and the tool cannot disagree.
+///
+/// Camera-independent on purpose: everything here is a fact about the level, not
+/// about where the cursor is, so the readout is available before the first click
+/// rather than only after the first refusal.
+#[tauri::command]
+pub async fn viewport_voxel_status(
+    state: tauri::State<'_, ViewportState>,
+    scene: tauri::State<'_, SceneState>,
+) -> Result<VoxelStatusDto, String> {
+    // Lock order — document, then volumes — so this can never deadlock against
+    // the viewport loop or the undo path, which both take them that way round.
+    let level = {
+        let doc = scene.doc.lock().map_err(|e| e.to_string())?;
+        inf_editor_core::voxel_edit::level_status(&doc)
+    };
+    // With no viewport attached nothing is bound and nothing can be carved, which
+    // is the honest answer rather than an error: the level still has its volumes
+    // and its terrains, they are simply not loaded.
+    let volumes = state.voxel_volumes();
+    let (bound_volumes, unsaved_chunks) = match volumes.as_ref().map(|v| v.lock()) {
+        Some(Ok(store)) => (store.bound_volumes().len(), store.unsaved_chunk_count()),
+        _ => (0, 0),
+    };
+    Ok(VoxelStatusDto {
+        volumes: level.volumes as u32,
+        bound_volumes: bound_volumes as u32,
+        asset_backed_terrains: level.asset_backed_terrains as u32,
+        // One string quoted in both places, so a refusal cannot be explained one
+        // way by the toolbar and another by the tool that raised it.
+        refusal: (!level.inline_terrains.is_empty())
+            .then(|| inf_editor_core::scene::undo::INLINE_TERRAIN_CARVE_REFUSAL.to_string()),
+        inline_terrains: level.inline_terrains,
+        unsaved_chunks: unsaved_chunks as u32,
+        advisories: level.advisories,
+    })
 }
 
 /// Push the foliage brush configuration (radius / density / kind / …) to the

@@ -123,6 +123,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         viewport::viewport_set_biome,
         viewport::viewport_set_water,
         viewport::viewport_set_voxel,
+        viewport::viewport_voxel_status,
         viewport::viewport_set_gizmo_mode,
         viewport::viewport_set_gizmo_space,
         viewport::viewport_set_snap3d,
