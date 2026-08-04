@@ -6065,6 +6065,24 @@ tech uses. We are not voxelizing the planet.
 - **P21.4 Runtime carving** — 1. the same ops as Blueprint nodes, deterministic and
   replay-gated, so games can dig at runtime; 2. physics and nav updates on carve.
 
+> **P21.4 owes (carried from the P21.3 audit rounds).**
+>
+> * **The `phase21_gate` must assert a dig over a COLD region counts everything.** P21.3 fixed the
+>   paging (`carve_into`/`spoil_into` page before they write) and gated it at call-site level, but
+>   the *end-to-end* claim — that `removed[m]` over an unpaged chunk equals `removed[m]` over a
+>   paged one, through a real cook and a real player — is verified in Ring 1 only. The gate P21.4
+>   owes anyway (M9: voxel ground has zero PIE == shipping coverage) is where that belongs.
+> * **Make a big dig incremental.** A dig at the `MAX_DIG_SAMPLES` ceiling spends ≈1.3 s under the
+>   shared-volumes lock (4 M samples ≈3.1 s) because the cut, the spoil search and the re-mesh all
+>   run there. Moving the re-mesh off the lock is the fix; it is a change to the store's threading
+>   and did not belong in P21.3.
+> * **`LNK1102` / "crate X required to be available in rlib format" now has THREE causes**, and
+>   `df` only explains one of them: disk-full (P4, P20, cited three times), a corrupted incremental
+>   cache after hand-editing `target/debug/build/*` (P21.3 — fixed by
+>   `rm -rf target/debug/incremental` plus a targeted `cargo clean -p`), and **linker/rustc OOM
+>   under parallel jobs** (P21.3 re-audit at `-j2`, this batch at `-j4`, both with >100 GB free —
+>   fixed by lowering `-j`). Check free space *first*, but do not stop there.
+
 > **P21.2 CARRIED LEDGER (from the P21.2 audit round — deferred, not lost).** Each item below
 > is a named obligation on a later batch of this phase, recorded here at the moment it was
 > found rather than at the moment someone trips over it.

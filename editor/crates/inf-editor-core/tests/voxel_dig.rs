@@ -789,3 +789,105 @@ fn no_spoil_lands_back_inside_the_pit() {
          and the fixture needs a bigger dig or a closer site"
     );
 }
+
+// ── a document swap discards the carve store (P21.3 re-audit) ───────────────
+
+/// **A discarded carve must not survive the document that owned it.**
+///
+/// The shared voxel store is a *host* field: it outlives `scene_open`/`scene_new`
+/// entirely. Abandoning the stroke handle leaves its cut chunks in the slot, and
+/// they are **dirty** — so when the new document binds the same `(entity,
+/// asset)` pair (File ▸ Open on the same level, the gesture an author uses to
+/// *throw changes away*), `retain_only` keeps the slot, `ensure` short-circuits
+/// on `is_bound`, and the next Ctrl+S writes the half-carve into the
+/// `.inf_voxel` with no `EditCommand` anywhere.
+///
+/// This is the store-side contract the host's
+/// `EngineHost::abandon_gestures_on_document_swap` relies on: after the clear,
+/// nothing is dirty, a save stages nothing, and re-binding serves the
+/// **last-saved** geometry rather than the abandoned cut.
+///
+/// (The host call itself needs a GPU and a `#[cfg]`-gated module, so that it
+/// really calls `clear` is pinned by `viewport_pump_mirror.rs`'s
+/// `the_document_swap_clears_the_shared_carve_store`. Same split as the
+/// settlers, same reason.)
+#[test]
+fn clearing_the_store_discards_an_abandoned_carve_and_saves_nothing() {
+    let (mut doc, volumes, _t, volume, dir) = fixture(true);
+    let pristine = volume_image(&volumes, volume);
+    let asset_before = std::fs::read(dir.path().join("Rock.inf_voxel")).unwrap();
+
+    // A stroke's worth of cutting lands in the store, exactly as `dab` leaves
+    // it: applied, dirty, and not yet described by any undo entry.
+    {
+        let mut v = volumes.lock().unwrap();
+        let op = pit(&doc, (2.0, 2.0), (6.0, 6.0), 2.0);
+        let mut builder = inf_voxel::VoxelDeltaBuilder::new();
+        let report = v
+            .carve_into(volume, &op, &mut builder)
+            .expect("the volume is loaded");
+        assert!(report.total_carved() > 0, "the fixture stroke cut nothing");
+    }
+    assert!(
+        volumes.lock().unwrap().has_unsaved_edits(),
+        "a carve owes a save"
+    );
+    assert_ne!(volume_image(&volumes, volume), pristine);
+    assert!(
+        !inf_editor_core::voxel_edit::stage_voxel_edits(&volumes.lock().unwrap()).is_empty(),
+        "the fixture carve stages nothing — this proves nothing"
+    );
+
+    // THE SWAP. `*doc = …` on the Ring-2 thread; the host clears the store.
+    doc = SceneDoc::new();
+    volumes.lock().unwrap().clear();
+
+    // Nothing dirty, nothing staged, nothing written.
+    {
+        let v = volumes.lock().unwrap();
+        assert!(
+            !v.has_unsaved_edits(),
+            "the abandoned carve is still marked unsaved and the next Ctrl+S would write it"
+        );
+        assert_eq!(v.unsaved_chunk_count(), 0);
+        assert!(inf_editor_core::voxel_edit::stage_voxel_edits(&v).is_empty());
+    }
+    let report =
+        inf_editor_core::voxel_edit::flush_voxel_edits(&mut volumes.lock().unwrap(), dir.path());
+    assert!(
+        report.is_empty(),
+        "a save after the swap wrote something: {report:?}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("Rock.inf_voxel")).unwrap(),
+        asset_before,
+        "the .inf_voxel changed — the discarded carve reached disk"
+    );
+
+    // …and re-binding (what the new document's projection does) serves the
+    // LAST SAVED geometry, not the abandoned cut.
+    {
+        let mut v = volumes.lock().unwrap();
+        assert!(
+            v.ensure(
+                volume,
+                &VoxelVolume::from_asset(Uuid::from_u128(0x2133_0001))
+            ),
+            "a cleared store must re-bind rather than short-circuit on is_bound"
+        );
+        v.sync_camera(
+            DVec3::splat(4.0),
+            &VoxelWantsParams {
+                radius_m: 1000.0,
+                hysteresis: 0.0,
+            },
+            VoxelStreamBudget::default(),
+        );
+    }
+    assert_eq!(
+        volume_image(&volumes, volume),
+        pristine,
+        "the re-bound volume still carries the carve the swap was supposed to discard"
+    );
+    let _ = doc.undo_len();
+}

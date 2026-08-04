@@ -59,7 +59,9 @@ const VOXEL_KINDS: [VoxelToolKindDto, string, string][] = [
   [
     "Trench",
     "Trench",
-    "Click waypoints; Ctrl+click cuts a rectangular trench along them, open to the sky",
+    "Click waypoints; Ctrl+click cuts a rectangular trench along them, open to the sky. " +
+      "Each leg is LEVEL, so a run across a slope stair-steps — add waypoints to tighten the " +
+      "steps. To dive, use Tunnel.",
   ],
 ];
 

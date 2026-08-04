@@ -382,6 +382,43 @@ fn every_cross_frame_gesture_has_a_settler_and_the_pump_calls_it() {
     }
 }
 
+/// **A document swap must clear the shared carve store, not just the gesture
+/// handles** (P21.3 re-audit).
+///
+/// The store is a **host** field, so it survives `scene_open` / `scene_new`
+/// entirely. Dropping the stroke handle leaves its cut chunks in the slot and
+/// they are *dirty*; when the new document binds the same `(entity, asset)` —
+/// File ▸ Open on the same level, which is the gesture for *discarding* changes
+/// — `retain_only` keeps the slot, `ensure` short-circuits on `is_bound`, and
+/// the next Ctrl+S writes the half-carve into the `.inf_voxel` with no
+/// `EditCommand` anywhere.
+///
+/// `voxel_dig.rs`'s `clearing_the_store_discards_an_abandoned_carve_and_saves_nothing`
+/// gates what the clear *does* (nothing dirty, nothing staged, re-binding serves
+/// the last-saved geometry). This gates that the abandon actually calls it —
+/// which needs a GPU and a `#[cfg]`-gated module, so source text is the seam,
+/// the same split the settlers use.
+#[test]
+fn the_document_swap_clears_the_shared_carve_store() {
+    let host = read("editor/crates/inf-viewport/src/host.rs");
+    let at = host
+        .find("pub fn abandon_gestures_on_document_swap(")
+        .expect("`abandon_gestures_on_document_swap` is gone");
+    let end = host[at..]
+        .find("\n    /// ")
+        .map(|e| at + e)
+        .unwrap_or(host.len());
+    let body = &host[at..end];
+    assert!(
+        body.contains("volumes.clear()"),
+        "`abandon_gestures_on_document_swap` drops the gesture handles but never clears the \
+         shared voxel store. The chunks an abandoned stroke cut are still there and still \
+         dirty, so File > Open on the same level — the gesture for THROWING CHANGES AWAY — \
+         reuses them and the next save writes them into the .inf_voxel with no undo entry \
+         describing them (P21.3 re-audit)."
+    );
+}
+
 /// **The document-swap abandon must run BEFORE every settler** (P21.3 audit).
 ///
 /// Order is the whole content of this one: a settler that ran first would

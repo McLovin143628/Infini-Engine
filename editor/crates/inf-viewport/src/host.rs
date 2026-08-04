@@ -4362,6 +4362,27 @@ impl EngineHost {
         self.water_active_river = None;
         self.water_lake_drag = None;
         self.water_preview.clear();
+        // **And the carved chunks themselves** (P21.3 re-audit).
+        //
+        // Dropping the stroke handle above is not enough, because the shared
+        // voxel store is a **host** field: it outlives the document swap
+        // entirely. Its slots still hold whatever the abandoned stroke cut, and
+        // those chunks are *dirty*. When the new document binds the same
+        // `(entity, asset)` pair — which is exactly what File ▸ Open on the same
+        // level does — `sync_voxels`' `retain_only` keeps the slot and `ensure`
+        // short-circuits on `is_bound`, so the half-carve is silently **reused**
+        // and the next Ctrl+S writes it into the `.inf_voxel`. With no
+        // `EditCommand` anywhere: opening a level to *discard* changes would
+        // commit them.
+        //
+        // Clearing is the whole fix. The new document re-`ensure`s from disk, so
+        // every volume comes back as its **last saved** state, which is what
+        // "the level that just closed is gone" means. A swap to a *different*
+        // level would have dropped these slots on the next projection anyway;
+        // this makes the same-level case behave like it.
+        if let Ok(mut volumes) = self.voxel_volumes.lock() {
+            volumes.clear();
+        }
         if had {
             self.reject_tool(Self::GESTURE_ABANDONED_ON_DOCUMENT_SWAP);
         }
