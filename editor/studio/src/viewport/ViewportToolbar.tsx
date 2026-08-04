@@ -14,6 +14,9 @@ import type { SculptOpDto } from "../bindings/SculptOpDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
 import type { RiverReportDto } from "../bindings/RiverReportDto";
 import type { WaterToolKindDto } from "../bindings/WaterToolKindDto";
+import type { VoxelOpModeDto } from "../bindings/VoxelOpModeDto";
+import type { VoxelStatusDto } from "../bindings/VoxelStatusDto";
+import type { VoxelToolKindDto } from "../bindings/VoxelToolKindDto";
 import type { ViewModeDto } from "../bindings/ViewModeDto";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
 
@@ -38,12 +41,26 @@ const TOOLS: [ToolModeDto, string, string][] = [
   ["Foliage", "Foliage", "Scatter foliage onto the terrain (perspective only)"],
   ["Biome", "Biome", "Paint named biomes onto the terrain (perspective only)"],
   ["Water", "Water", "Place rivers and lakes against the terrain (perspective only)"],
+  ["Voxel", "Voxel", "Carve caves and tunnels out of a voxel volume (perspective only)"],
 ];
 
 /** River vs Lake, and what each gesture is. */
 const WATER_KINDS: [WaterToolKindDto, string, string][] = [
   ["River", "River", "Click the ground to add a control point; the first click starts a river"],
   ["Lake", "Lake", "Drag a rectangle; the waterline preview shows where it lands"],
+];
+
+/** Brush vs Tunnel, and what each gesture is (P21.2). */
+const VOXEL_KINDS: [VoxelToolKindDto, string, string][] = [
+  ["Brush", "Brush", "Drag to lay sphere dabs along the stroke; one undo step at mouse-up"],
+  ["Tunnel", "Tunnel", "Click waypoints; Ctrl+click closes the path and tube-carves it whole"],
+];
+
+/** Carve vs Fill. Not a checkbox: the Ring-0 ops are named Carve and Fill, and a
+ *  boolean crossing three layers of IPC is three chances to invert it silently. */
+const VOXEL_MODES: [VoxelOpModeDto, string, string][] = [
+  ["Carve", "Carve", "Remove material — and open the heightfield above it"],
+  ["Fill", "Fill", "Add material — and close the heightfield above it"],
 ];
 
 const SCULPT_OPS: [SculptOpDto, string][] = [
@@ -250,6 +267,7 @@ export default function ViewportToolbar() {
           {toolMode === "Foliage" && <FoliageControls />}
           {toolMode === "Biome" && <BiomeControls />}
           {toolMode === "Water" && <WaterControls />}
+          {toolMode === "Voxel" && <VoxelControls />}
         </>
       )}
     </div>
@@ -645,6 +663,232 @@ export function riverIssues(r: RiverReportDto): string[] {
   if (r.bed_climbs.length) {
     const rise = r.bed_climbs.reduce((a, c) => a + c.rise_m, 0);
     out.push(`its BED climbs ${rise.toFixed(1)} m — a basin (the cook will say so)`);
+  }
+  return out;
+}
+
+/**
+ * Brush / Tunnel, carve or fill, and the two lengths a cut takes (P21.2).
+ *
+ * The water tool's shape, and for the water tool's reason: the two sub-modes
+ * share the volume, the surface-crossing verdict, the carve/fill switch and the
+ * material — only how the author describes the path differs, so they are two
+ * sub-modes of one tool and not two tools.
+ */
+function VoxelControls() {
+  const kind = useViewportStore((s) => s.voxelKind);
+  const radius = useViewportStore((s) => s.voxelRadius);
+  const depth = useViewportStore((s) => s.voxelDepth);
+  const mode = useViewportStore((s) => s.voxelMode);
+  const material = useViewportStore((s) => s.voxelMaterial);
+  const setKind = useViewportStore((s) => s.setVoxelKind);
+  const setRadius = useViewportStore((s) => s.setVoxelRadius);
+  const setDepth = useViewportStore((s) => s.setVoxelDepth);
+  const setMode = useViewportStore((s) => s.setVoxelMode);
+  const setMaterial = useViewportStore((s) => s.setVoxelMaterial);
+
+  return (
+    <>
+      <div
+        className="flex items-center rounded bg-(--ink-bg-0) p-0.5"
+        role="group"
+        aria-label="Voxel cut"
+      >
+        {VOXEL_KINDS.map(([id, label, title]) => (
+          <button
+            key={id}
+            type="button"
+            aria-pressed={kind === id}
+            title={title}
+            className={`flex h-6 items-center rounded px-2 ${
+              kind === id
+                ? "bg-(--ink-accent) text-(--ink-bg-0)"
+                : "text-(--ink-text-dim) hover:text-(--ink-text)"
+            }`}
+            onClick={() => setKind(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div
+        className="flex items-center rounded bg-(--ink-bg-0) p-0.5"
+        role="group"
+        aria-label="Voxel operation"
+      >
+        {VOXEL_MODES.map(([id, label, title]) => (
+          <button
+            key={id}
+            type="button"
+            aria-pressed={mode === id}
+            title={title}
+            className={`flex h-6 items-center rounded px-2 ${
+              mode === id
+                ? "bg-(--ink-accent) text-(--ink-bg-0)"
+                : "text-(--ink-text-dim) hover:text-(--ink-text)"
+            }`}
+            onClick={() => setMode(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Radius
+        <NumberField
+          value={Math.round(radius * 100) / 100}
+          min={0}
+          step={0.5}
+          onChange={setRadius}
+          title="Cut radius — the sphere of a brush dab, the tube radius of a tunnel (world metres)"
+          suffix="m"
+        />
+      </label>
+      <label className="flex items-center gap-1 text-(--ink-text-dim)">
+        Depth
+        <NumberField
+          value={Math.round(depth * 100) / 100}
+          min={0}
+          step={0.5}
+          onChange={setDepth}
+          title={VOXEL_DEPTH_HINT}
+          suffix="m"
+        />
+      </label>
+      {/* Fill only: an emptied voxel carries no material, so the picker would be
+          a control with no effect during a carve. */}
+      {mode === "Fill" && (
+        <div
+          className="flex items-center gap-1 rounded bg-(--ink-bg-0) p-0.5"
+          role="group"
+          aria-label="Fill material"
+        >
+          {LAYER_SWATCHES.map(([color, name], i) => (
+            <button
+              key={name}
+              type="button"
+              aria-pressed={material === i}
+              title={`Fill with layer ${i + 1} (${name}) — a voxel material index IS a terrain splat index`}
+              onClick={() => setMaterial(i)}
+              className={`flex h-6 w-6 items-center justify-center rounded text-[10px] font-medium ${
+                material === i
+                  ? "ring-2 ring-(--ink-accent)"
+                  : "ring-1 ring-(--ink-border) hover:ring-(--ink-text-dim)"
+              }`}
+              style={{ backgroundColor: color, color: "#111" }}
+            >
+              {i + 1}
+            </button>
+          ))}
+        </div>
+      )}
+      <VoxelVerdict />
+    </>
+  );
+}
+
+/** What `Depth` means, in the one place an author will look for it. */
+const VOXEL_DEPTH_HINT =
+  "How far BELOW the picked surface the cut's centre sits (world metres). At 0 the cut breaks " +
+  "the ground where you point (a cave mouth); past the radius it hollows rock with no mouth, " +
+  "which is legal on any terrain because no hole has to be saved.";
+
+/**
+ * The Voxel tool's verdict on the open level (P21.2) — the river verdict's twin,
+ * and the answer to "why was my carve refused, and what do I do about it".
+ *
+ * Three states, deliberately distinguishable: nothing to carve, a cut that would
+ * be refused, and a level that is ALREADY carrying mouths it cannot save. The
+ * refusal text is the backend's own sentence (`INLINE_TERRAIN_CARVE_REFUSAL`), so
+ * the toolbar cannot explain a refusal differently from the tool that raised it.
+ */
+function VoxelVerdict() {
+  const status = useViewportStore((s) => s.voxelStatus);
+  const refresh = useViewportStore((s) => s.refreshVoxelStatus);
+
+  if (!status) {
+    return (
+      <span className="text-(--ink-text-faint)" title="The level's carve verdict has not been read">
+        Verdict unavailable
+      </span>
+    );
+  }
+  const issues = voxelIssues(status);
+  return (
+    <button
+      type="button"
+      onClick={() => void refresh()}
+      title={voxelVerdictTitle(status).join("\n")}
+      className={`flex h-6 items-center rounded px-2 ${
+        issues.length
+          ? "bg-(--ink-bg-0) text-(--ink-warning)"
+          : "bg-(--ink-bg-0) text-(--ink-text-faint)"
+      }`}
+    >
+      {issues.length
+        ? `⚠ ${issues.length} issue${issues.length > 1 ? "s" : ""}: ${issues[0]}`
+        : `✓ ${status.bound_volumes} volume(s)${
+            status.unsaved_chunks > 0 ? `, ${status.unsaved_chunks} chunk(s) unsaved` : ""
+          }`}
+    </button>
+  );
+}
+
+/**
+ * The verdict tooltip, one fact per line.
+ *
+ * The chip can only carry the shortest issue, so this is where an author who has
+ * just been refused actually finds out what to do — and the line that tells them
+ * is `status.refusal`, quoted **verbatim** from the backend
+ * (`INLINE_TERRAIN_CARVE_REFUSAL`). Paraphrasing it here would put two different
+ * explanations of one rule in front of the same person: this one, and the one the
+ * viewport pushes onto `viewport://tool-status` when the cut is actually refused.
+ * It is also the only place the *fix* ("convert the terrain to asset-backed —
+ * import or export it as a .inf_terrain") is written down.
+ *
+ * Exported for the store tests, which pin exactly that.
+ */
+export function voxelVerdictTitle(s: VoxelStatusDto): string[] {
+  const issues = voxelIssues(s);
+  return [
+    `${s.bound_volumes}/${s.volumes} volume(s) loaded, ` +
+      `${s.asset_backed_terrains} asset-backed terrain(s)`,
+    ...(s.unsaved_chunks > 0
+      ? [`${s.unsaved_chunks} carved chunk(s) awaiting Ctrl+S (autosave does not save them)`]
+      : []),
+    ...(issues.length ? issues : ["Nothing in the way of a carve."]),
+    // The backend's sentence, last, because it is the longest and the one that
+    // names the remedy.
+    ...(s.refusal ? [s.refusal] : []),
+    "Click to re-check.",
+  ];
+}
+
+/**
+ * One human line per thing standing between the author and a carve, worst first.
+ *
+ * Order is the order they have to be fixed in: damage already done, then the
+ * refusal the next cut would hit, then "there is nothing here to carve". A level
+ * with no volume and an inline terrain has both problems and must say so.
+ *
+ * Exported for the store tests, which pin that the refusal quoted here is the
+ * backend's own sentence rather than a paraphrase the toolbar invented.
+ */
+export function voxelIssues(s: VoxelStatusDto): string[] {
+  const out: string[] = [];
+  // The advisory first: it reports a loss that has ALREADY happened, while the
+  // refusal is a warning about the next gesture.
+  for (const line of s.advisories) out.push(line);
+  if (s.refusal) {
+    out.push(
+      `${s.inline_terrains.join(", ")} cannot hold a cave mouth — a cut that breaks the ` +
+        "surface there is refused whole",
+    );
+  }
+  if (s.volumes === 0) {
+    out.push("no voxel volume in this level — add one to carve into");
+  } else if (s.bound_volumes === 0) {
+    out.push("no volume resolved to a .inf_voxel — check the asset reference");
   }
   return out;
 }

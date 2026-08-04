@@ -24,6 +24,10 @@ import type { RiverReportDto } from "../bindings/RiverReportDto";
 import type { ToolModeDto } from "../bindings/ToolModeDto";
 import type { WaterSettingsDto } from "../bindings/WaterSettingsDto";
 import type { WaterToolKindDto } from "../bindings/WaterToolKindDto";
+import type { VoxelOpModeDto } from "../bindings/VoxelOpModeDto";
+import type { VoxelSettingsDto } from "../bindings/VoxelSettingsDto";
+import type { VoxelStatusDto } from "../bindings/VoxelStatusDto";
+import type { VoxelToolKindDto } from "../bindings/VoxelToolKindDto";
 import type { ViewModeDto } from "../bindings/ViewModeDto";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
 import { useSceneStore } from "./sceneStore";
@@ -137,6 +141,34 @@ interface ViewportUiState {
    */
   waterRiverReport: RiverReportDto | null;
 
+  /**
+   * Voxel carve tool (P21.2). `voxelKind` picks the brush or the spline tunnel;
+   * `voxelMode` picks carve or fill; both lengths are world metres.
+   *
+   * `voxelDepth` is the one that needs explaining: it is how far BELOW the picked
+   * surface the cut's centre sits. At 0 the cut breaks the ground where you point
+   * (a cave mouth); past the radius it hollows rock with no mouth at all, which is
+   * legal on any terrain because no hole has to be persisted. It exists because
+   * the pick is the heightfield under the cursor — camera-independent, like the
+   * water tool's — so saying "how deep" is the only way to reach under the surface
+   * without making the result depend on where the camera happened to be.
+   */
+  voxelKind: VoxelToolKindDto;
+  voxelRadius: number;
+  voxelDepth: number;
+  voxelMode: VoxelOpModeDto;
+  /** Splat index a FILL paints. Ignored by a carve — an emptied voxel has no
+   * material. A voxel material index IS a terrain splat index, which is what
+   * makes a cave wall shade like the hillside it opens out of. */
+  voxelMaterial: number;
+  /**
+   * The Voxel tool's verdict on the open level (P21.2): what can be carved, what
+   * a surface-crossing cut would be refused for, and how much is unsaved. `null`
+   * until the first `refreshVoxelStatus` — "not asked yet", which the toolbar
+   * deliberately does not render the same as "a level with nothing to carve".
+   */
+  voxelStatus: VoxelStatusDto | null;
+
   /** Transform-gizmo mode (translate/rotate/scale), two-way synced (Wave 2). */
   gizmoMode: GizmoModeDto;
   /** Gizmo orientation frame (World ↔ Local). */
@@ -199,6 +231,21 @@ interface ViewportUiState {
    * centreline yet" both arrive as "nothing to say".
    */
   refreshRiverReport: () => Promise<void>;
+
+  setVoxelKind: (kind: VoxelToolKindDto) => void;
+  setVoxelRadius: (r: number) => void;
+  setVoxelDepth: (d: number) => void;
+  setVoxelMode: (mode: VoxelOpModeDto) => void;
+  setVoxelMaterial: (m: number) => void;
+  /**
+   * Re-read the level's carve verdict (P21.2).
+   *
+   * Called on entering the tool and after every `world://delta`, because both
+   * change the answer: a delta is emitted by every carve (so `unsaved_chunks`
+   * moves), by every save, and by anything that adds or removes a terrain or a
+   * volume — which is exactly what decides whether the next cut is refused.
+   */
+  refreshVoxelStatus: () => Promise<void>;
 
   /** Set the gizmo mode + push to the viewport (Wave 2). */
   setGizmoMode: (mode: GizmoModeDto) => void;
@@ -285,6 +332,24 @@ function pushWater(s: ViewportUiState): void {
   void viewport.setWater(dto).catch(() => {});
 }
 
+/**
+ * Send the current voxel carve-tool settings to the native viewport (P21.2).
+ *
+ * NOT persisted, for the water tool's reason: a radius is a statement about the
+ * level being authored, and a remembered 20 m brush from another project would
+ * make the first click of a new session excavate a room.
+ */
+function pushVoxel(s: ViewportUiState): void {
+  const dto: VoxelSettingsDto = {
+    kind: s.voxelKind,
+    radius_m: s.voxelRadius,
+    depth_m: s.voxelDepth,
+    mode: s.voxelMode,
+    material: s.voxelMaterial,
+  };
+  void viewport.setVoxel(dto).catch(() => {});
+}
+
 /** A finite, non-negative metre value, or the fallback. Shared by the water
  *  tool's width/depth setters — a NaN from a half-typed number input must not
  *  reach the viewport. */
@@ -362,6 +427,14 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
   waterFlow: 1.5,
   waterLevelOffset: 0,
   waterRiverReport: null,
+  // Mirrors `inf_viewport::camera::VoxelSettings::default()` and the DTO's own
+  // `Default`, so the toolbar and the tool start out describing the same cut.
+  voxelKind: "Brush",
+  voxelRadius: 2,
+  voxelDepth: 0,
+  voxelMode: "Carve",
+  voxelMaterial: 0,
+  voxelStatus: null,
   gizmoMode: "Translate",
   gizmoSpace: "World",
   snap3dEnabled: false,
@@ -425,6 +498,13 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
       void get().refreshBiomes();
       // The river report follows the selection, so arm it on entry too.
       void get().refreshRiverReport();
+    }
+    if (toolMode === "Voxel") {
+      pushVoxel(get());
+      // …and read the verdict on entry, for the reason the water tool reads its
+      // hint table: an author has to be able to see that a cut here WILL be
+      // refused before making it, not after. A carve commits geometry.
+      void get().refreshVoxelStatus();
     }
   },
   setSculptOp: (sculptOp) => {
@@ -521,6 +601,41 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
     set({ waterLevelOffset: Number.isFinite(o) ? o : get().waterLevelOffset });
     pushWater(get());
   },
+  setVoxelKind: (voxelKind) => {
+    set({ voxelKind });
+    pushVoxel(get());
+  },
+  setVoxelRadius: (r) => {
+    set({ voxelRadius: positiveMetres(r, get().voxelRadius) });
+    pushVoxel(get());
+  },
+  setVoxelDepth: (d) => {
+    // Non-negative: depth is measured DOWN from the picked surface, so a negative
+    // one names a cut above the ground that was clicked. The backend clamps it to
+    // 0 anyway, and a field that silently disagrees with the tool is worse than
+    // one that cannot express the value at all.
+    set({ voxelDepth: positiveMetres(d, get().voxelDepth) });
+    pushVoxel(get());
+  },
+  setVoxelMode: (voxelMode) => {
+    set({ voxelMode });
+    pushVoxel(get());
+  },
+  setVoxelMaterial: (m) => {
+    const voxelMaterial = Number.isFinite(m) ? Math.min(Math.max(Math.round(m), 0), 255) : 0;
+    set({ voxelMaterial });
+    pushVoxel(get());
+  },
+  refreshVoxelStatus: async () => {
+    try {
+      set({ voxelStatus: await viewport.voxelStatus() });
+    } catch {
+      // Swallowed like the other polled reads: no viewport attached is a normal
+      // state, not an error to surface. `null` reads as "nothing known", which is
+      // what the toolbar then says.
+      set({ voxelStatus: null });
+    }
+  },
   refreshRiverReport: async () => {
     const selection = useSceneStore.getState().selection;
     const entity = selection[0];
@@ -598,6 +713,7 @@ export function registerViewportCommands(): void {
     { id: "tool.sculpt", title: "Tool: Sculpt Terrain", category: "Tools" },
     { id: "tool.foliage", title: "Tool: Paint Foliage", category: "Tools" },
     { id: "tool.biome", title: "Tool: Paint Biomes", category: "Tools" },
+    { id: "tool.voxel", title: "Tool: Carve Voxels", category: "Tools" },
   ]);
   if (getCommand("view.toggle2D")) {
     setCommandHandler("view.toggle2D", () => useViewportStore.getState().toggleMode());
@@ -633,6 +749,9 @@ export function registerViewportCommands(): void {
   }
   if (getCommand("tool.biome")) {
     setCommandHandler("tool.biome", () => useViewportStore.getState().setToolMode("Biome"));
+  }
+  if (getCommand("tool.voxel")) {
+    setCommandHandler("tool.voxel", () => useViewportStore.getState().setToolMode("Voxel"));
   }
 }
 
@@ -733,6 +852,11 @@ export function initViewportSync(): () => void {
     listenTo("world://delta", () => {
       if (useViewportStore.getState().toolMode === "Water") {
         void useViewportStore.getState().refreshRiverReport();
+      }
+      // P21.2, the same shape: a carve, a save and any terrain/volume change all
+      // emit a delta, and all three change what the next cut is allowed to do.
+      if (useViewportStore.getState().toolMode === "Voxel") {
+        void useViewportStore.getState().refreshVoxelStatus();
       }
     }),
   );

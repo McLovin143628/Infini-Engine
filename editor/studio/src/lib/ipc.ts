@@ -57,6 +57,8 @@ import type { FoliageSettingsDto } from "../bindings/FoliageSettingsDto";
 import type { SculptSettingsDto } from "../bindings/SculptSettingsDto";
 import type { WaterDefaultsDto } from "../bindings/WaterDefaultsDto";
 import type { WaterSettingsDto } from "../bindings/WaterSettingsDto";
+import type { VoxelSettingsDto } from "../bindings/VoxelSettingsDto";
+import type { VoxelStatusDto } from "../bindings/VoxelStatusDto";
 import type { SearchOptsDto } from "../bindings/SearchOptsDto";
 import type { SaveResultDto } from "../bindings/SaveResultDto";
 import type { SceneSnapshot } from "../bindings/SceneSnapshot";
@@ -198,6 +200,23 @@ export const viewport = {
    */
   setWater: (water: WaterSettingsDto): Promise<void> =>
     invoke("viewport_set_water", { water }),
+  /**
+   * Push the voxel carve-tool configuration (brush/tunnel + radius, depth,
+   * carve-or-fill, fill material) (P21.2). Both lengths are world metres and are
+   * clamped non-negative backend-side.
+   */
+  setVoxel: (voxel: VoxelSettingsDto): Promise<void> =>
+    invoke("viewport_set_voxel", { voxel }),
+  /**
+   * The Voxel tool's live verdict (P21.2): how many volumes there are to carve,
+   * which terrains could not keep a cave mouth (and the refusal text a
+   * surface-crossing cut would hit, verbatim the viewport's), how many chunks are
+   * unsaved, and whether this document is ALREADY carrying mouths it cannot save.
+   *
+   * Camera-independent, so the toolbar can answer "why would this be refused"
+   * before the author makes the gesture rather than after.
+   */
+  voxelStatus: (): Promise<VoxelStatusDto> => invoke<VoxelStatusDto>("viewport_voxel_status"),
   /**
    * Set the transform-gizmo mode (translate/rotate/scale) (Wave 2). The viewport
    * echoes mode changes (incl. W/E/R keypresses over it) on `viewport://gizmo`.
