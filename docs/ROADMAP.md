@@ -6949,11 +6949,37 @@ and the headless preview render is the proven offscreen-PNG path.
 - **P23.1 Design memo** — 1. the DCC spec's open questions answered against our infrastructure
   — reuse `bevy_reflect` + the asset DB + undo; **no Blender DNA/RNA clone**; 2. the
   edit-session model; 3. the viewport decision below, with measured latency.
+  **DONE 2026-08-05** — `docs/memos/p23-dcc-design.md`. Rulings: the edit session is
+  **strictly asset-scoped** (a `DccDoc` keyed by asset id; the scene document is never
+  touched, so no schema move and no third rung on the lock order); saves go through
+  `AssetProject::rewrite_payload` **plus a synchronous `ensure_vmesh`** (a `.inf_mesh`
+  rewrite regenerates nothing today, and the viewport would redraw stale `.inf_vmesh`
+  geometry with full confidence); live edit works under **Simulate** because
+  `SimSession::exit` reverts only the *document* and an asset edit is not in it, and is
+  **impossible under embedded PIE** (the player draws placeholder cubes for asset meshes,
+  and `embed_foreign` hides the editor viewport) — ledgered rather than promised;
+  **`meshopt` NEVER enters the op journal** (the P18 non-portability law makes replay
+  machine-dependent) — optimize at EXPORT only.
 - **P23.2 Multi-viewport enabler** — 1. promote `ViewportState` to a keyed map with
   id-parameterized `viewport_*` commands and events; 2. a second `EngineHost` on its own thread
   with its own scene projector; 3. per-viewport airspace refcounts. Fallback if hostile:
   offscreen-PNG interactive preview first, native second viewport as fast-follow. Also unlocks
   the standing editor multi-viewport deferral.
+  **P23.2a DONE 2026-08-05** — the pure-refactor half: keyed `ViewportState` with
+  `Target::{Primary,Named,All}` named explicitly at all 31 resolution points (17 commands +
+  14 cross-module pushes); **the store hoist** (the shared carve store and Simulate fracture
+  map move out of `ViewportHandle` into a process-wide `commands::SharedStores`, fixing a
+  latent defect where a second viewport's carves would have been saved by nobody, and
+  retiring the P21.2 poisoned-outer-handle hazard); id-namespaced `viewport://` events;
+  `ViewportPanel` a registered panel type; per-viewport airspace refcounts; **panel-focus
+  undo routing** (Ctrl+Z inside the Material panel undid the SCENE — a shipping bug); and
+  `PreviewSession`, the cached-pipeline offscreen renderer, **measured**: warm 512²
+  re-render **0.34 ms** (thirty times under the ~10 ms bar, so the offscreen-interactive
+  ruling holds) while the *default PNG encode* is 22.9 ms — 98% of an offscreen frame is
+  deflate, and `encode_png_fast` takes it to 1.98 ms. **P23.2b (the native second
+  `EngineHost`) is deliberately a fast-follow**; its projector must never enter
+  `projector_mirror.rs`'s set (it projects an edit mesh, not a world, so it has no player
+  twin and an exemption there is how a mirror stops mirroring).
 - **P23.3 Mesh kernel** — 1. `inf-dcc` (Ring 0): a half-edge structure importing from and
   exporting to `inf-mesh`'s `MeshAsset` (the missing writer); 2. validity invariants
   property-tested; 3. an op journal — deterministic replay is both the undo/redo story and the
