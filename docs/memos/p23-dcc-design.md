@@ -388,10 +388,48 @@ asset-scoped ruling rather than by new machinery:
   no in-engine format an author could get trapped in. `inf-mesh` gaining a
   writer is P23.3's first deliverable for exactly this reason.
 
+## 7a. Addendum, P23.3 — the kernel's answers
+
+The kernel landed in `crates/inf-dcc` (2026-08-05). Two things this memo left
+open are now decided, and one of its rulings got sharper:
+
+* **Seams live on the half-edge** (§8's first ledger item, answered). Positions
+  are on vertices; UV and an *optional authored* normal are on **corners**, i.e.
+  on face-side half-edges; edge sharpness is on the twin pair. No side table.
+  That is what lets `from_mesh_asset` weld a `MeshAsset`'s split vertices back
+  into topology — with a tolerance of **exactly zero**, because an epsilon weld
+  is a modelling operation wearing a reader's clothes — without averaging away
+  the attributes the split existed to carry. P23.5's UV work inherits corners
+  that already exist rather than inventing a parallel store.
+* **The op journal is `base + Vec<Op> + cursor`** (§4, built). Checkpoint every
+  32 ops, at most 8 retained *nearest the cursor*, and an undo that lands on a
+  boundary stores the mesh it just computed so walking backwards stays cheap.
+  `SessionSave` persists in bincode and JSON; `restore` replays the redo tail as
+  well as the applied prefix, which is what makes `undo`/`redo` infallible
+  afterwards rather than optimistic.
+* **§4's meshopt LAW held, and is now enforced by reading the source.**
+  `tests/determinism_law.rs` greps the crate for `meshopt::`, `std`
+  transcendentals, hash containers and stray `f32`, because the claim is about
+  *two machines* and nothing in a test process compares two machines. The one
+  sanctioned call is `inf_mesh::optimize` in `export.rs`, behind
+  `ExportOptions::optimize`, off by default.
+
+One consequence the memo did not anticipate, recorded here because P23.6's save
+path is the thing that meets it: **a kernel mesh can be legal and still not
+survive a write/read round trip.** Two distinct vertices at the same position
+(the kernel distinguishes them; the exact weld fuses them) and an n-gon
+triangulation diagonal that duplicates an edge elsewhere in the mesh both
+produce an asset the reader refuses as non-manifold. The writer avoids the
+second where it can and *counts* both as advisories
+(`ExportReport::coincident_vertices` / `reused_diagonals`) — the P16 doctrine,
+because the alternatives are nudging the author's geometry or refusing to save a
+legal intermediate state.
+
 ## 8. Ledger — what this memo does NOT decide
 
-* **UV/sculpt data model** (P23.5). Whether seams live on the half-edge or in a
-  side table is a kernel question and belongs with the kernel.
+* **UV/sculpt data model** (P23.5). ~~Whether seams live on the half-edge or in a
+  side table is a kernel question and belongs with the kernel.~~ **Answered by
+  P23.3, see §7a: on the half-edge.** The brush/unwrap half is still P23.5's.
 * **Multi-object edit.** v1 edits one mesh. Whether a session can hold several
   is a UI question that the `docs: BTreeMap<Id, Doc>` shape already permits.
 * **The vmesh-in-PIE-payload follow-up** (blocker 1 in §3) is not P23 work; it

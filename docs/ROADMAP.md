@@ -7015,6 +7015,66 @@ and the headless preview render is the proven offscreen-PNG path.
   exporting to `inf-mesh`'s `MeshAsset` (the missing writer); 2. validity invariants
   property-tested; 3. an op journal — deterministic replay is both the undo/redo story and the
   test story, mirroring `GraphJournal`.
+  **DONE 2026-08-05** — `crates/inf-dcc` (Ring 0; `inf-mesh` + `inf-math` + glam + serde +
+  bincode + thiserror, **no new external crate**). 82 tests, no schema move (`MeshAsset` stays
+  v2 — this batch adds a *writer*, not a version). The six decisions:
+  **(1) boundaries are real half-edges** — `twin` is TOTAL and `face` is the `Option`, so an
+  open mesh is not a special case and no traversal branches; **(2) attributes live where seams
+  live** — positions on vertices, UV + *optional authored* normal on **corners**, so importing
+  a `MeshAsset` position-welds the topology back together (tolerance **exactly 0**, because an
+  epsilon weld is a modelling op wearing a reader's clothes: not transitive, order-dependent,
+  and irreversible) while every split attribute survives; a bowtie created by welding is
+  **split back into fans**, not refused — refusing to open a file because two boxes touch at a
+  corner is not a DCC; **(3) edge- AND vertex-manifold**, because a vertex's boundary loop must
+  be unique for the boundary relink to be defined at all; **(4) refusals are values and they
+  are INERT** — structural ops run on a clone inside `Mesh::transact` and commit only on
+  success, so a refused op leaves the mesh **byte-identical** (property-tested; the honest cost
+  is `O(|mesh|)` per structural op and `transact` is the single seam a slot-level undo log
+  would land in); **(5) `f64` throughout** — `f32` exists only inside `build.rs`/`export.rs`,
+  pinned by a source-grep gate; **(6) `meshopt` NEVER in the journal** (P18 law) — one call
+  site, in `export.rs`, behind `ExportOptions::optimize`, off by default.
+  **The writer**: one submesh per material slot, ear clipping (deterministic — the *first*
+  valid ear, never the "best"), MikkTSpace-**class** tangents written here in pure `f64` with
+  no dependency (`sqrt` is IEEE-exact and therefore bit-portable, unlike `sin`/`cbrt`), and
+  derived normals from the corner's **smooth fan** summed in ascending face id so every corner
+  of a fan lands on identical bits and collapses to one written vertex. `MeshSession` is the
+  op journal: `base + Vec<Op> + cursor`, checkpoint every 32 ops, at most 8 retained nearest
+  the cursor, `SessionSave` in bincode **and** JSON, and `restore` replays the redo tail as
+  well as the applied prefix — which is what makes `undo`/`redo` infallible afterwards.
+  LAWS: **a gate must be built to falsify, and a winding gate has to be a VOLUME** — every
+  count, every invariant and every round trip in this crate is winding-agnostic, so the cube
+  primitive shipped uniformly **inside-out** through 63 green tests until a
+  divergence-theorem signed-volume assertion existed; **an exported asset must be readable by
+  its own reader** — two independent ways it was not (an ear diagonal that duplicates an edge
+  the mesh already has elsewhere → four faces on one edge in the flattened soup, now avoided by
+  preferring an unused diagonal and *counted* when unavoidable; and two distinct kernel
+  vertices at one position, which the exact weld fuses, now counted as an advisory since both
+  "fixes" — nudging geometry or refusing the save — are worse); **first-use order is part of
+  the format** — interning corners in face-loop order instead of *index-buffer* order cost a
+  byte-identical `export∘import∘export`, because the reader welds in index order; **"keep the
+  first of the run" is direction-dependent** — collapsing a merged vertex kept the survivor's
+  UV on one incident face and the vanishing vertex's on the other, so a collapse that should
+  undo a split left one UV at the midpoint (the rule is "drop the corner that came from
+  `merge`"); **relink every vertex the patch TOUCHED, not every vertex it rebuilt** — a face
+  that loses its surface in a merge is not rebuilt, but its edges were still freed and other
+  boundary half-edges still pointed at them (`DeadLink`, found by the validity property);
+  **validity is audited, never enforced** — `validate()` is deliberately *not* called by
+  `apply`, because "every op leaves the mesh valid" would then be asserting a call the op just
+  made, and vacuous checks hide real intrusions (P19); the same reasoning put a
+  `the_generator_reaches_both_applied_and_refused_ops` coverage guard on the property
+  generator. **Mutation-verified** (each gate fails under the defect it names, and only that
+  gate): dropping the `prev` fix-up in `add_face_raw` fails 60 of 67 unit tests and
+  `validity_holds_after_every_op`; making `SetCornerUv` mutate without journalling fails
+  `replay_is_a_pure_function_of_the_ops` and `replay_reproduces_the_session_byte_for_byte` and
+  nothing else; interning export corners in face-loop order instead of index-buffer order
+  fails `export_is_a_fixed_point` and `one_round_trip_reaches_a_fixed_point` while the other
+  six properties stay green. The source-grep determinism gate was falsified too (a planted
+  `HashMap<u8, f32>` + `.sin()` trips three of its six arms). **Carried remainders**: no
+  panel, no commands, no modelling ops beyond the core
+  set (P23.4); collapsing a tetrahedron edge is *permitted* and leaves a legal two-face
+  degenerate surface (topology kernel, geometric rules excluded on purpose); import **refuses**
+  a skinned submesh rather than dropping weights (P24 gives the kernel somewhere to put them)
+  and refuses a genuinely non-manifold *edge* rather than inventing geometry.
 - **P23.4 Modeling ops & tools** — 1. extrude / inset / bevel / loop-cut / knife / merge /
   subdivide / mirror; 2. a vertex/edge/face selection model with soft-select; 3. gizmo reuse
   extended to component selections; 4. a Model Editor panel on the material-editor template.

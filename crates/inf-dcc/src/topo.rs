@@ -53,7 +53,7 @@
 //! It *is* a hazard for anything holding an id **across** a journal move. After
 //! an undo, id `v7` may name a different vertex than the one a selection
 //! remembered — and it will not be dead, so nothing would catch it. Hence
-//! `MeshSession::generation` (the op journal): it bumps on every history move,
+//! [`crate::journal::MeshSession::generation`]: it bumps on every history move,
 //! and a consumer that caches ids (P23.4's selection) must discard its cache
 //! when the generation changes. The rule stated once: **an id is meaningful only
 //! within one journal generation.**

@@ -1,0 +1,28 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+#
+# HAND-EDITED (P23.3). proptest appends a `# shrinks to ...` comment carrying the
+# whole shrunk input, and for this file that is a full `Mesh` Debug dump — 31 kB
+# of arena across six seeds, for no reading benefit. The seeds are the
+# load-bearing part; the dumps are replaced here by what each one actually found.
+# Both defects also have named deterministic tests
+# (`weld_relinks_every_vertex_the_patch_touched` in `ops`,
+# `the_ear_chooser_avoids_a_diagonal_that_already_exists` in `export`): a seed
+# says "this input broke it once", a named test says what the bug was.
+#
+# 1–5: a `WeldVerts`/`CollapseEdge` whose incident face lost its surface was not
+#      rebuilt, so its vertices never reached `finish_patch` and boundary
+#      half-edges elsewhere kept pointing at freed slots (`DeadLink`).
+# 6:   the writer emitted an n-gon ear diagonal duplicating an edge the mesh
+#      already had, so `from_mesh_asset` refused the writer's own output as
+#      non-manifold.
+cc 09cf2086b10d8fae3dc57dd5ee992da19e33062fe93f545318b249f52b07d2ba
+cc 908c0ed72d85c74e5048078ef7d68897f6abf5c85a39b68376d580d94333c22d
+cc d6b37192a568f7028a156de4b197506c9cda4ed98eb26854501049ffc1534984
+cc ef646b6881681e3070771322b78432baaf599b0988b808cc2e97f26f457bc10b
+cc 4a0967ccccf7479d5700a290c0ed9739fa6f2c800c75aef1cd71de272a9ff06c
+cc a36c7bc77006a9db8d988c97ad90129d79fda14fa20137d0636d8b18588dc4c9

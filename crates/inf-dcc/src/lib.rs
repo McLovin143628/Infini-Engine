@@ -1,7 +1,7 @@
 //! **The embedded DCC's mesh kernel** (P23.3): a half-edge structure, the
-//! invariants it promises, the `MeshAsset` reader, and a small set of core
-//! topology operations. The writer and the deterministic op journal land in the
-//! next commit of this batch.
+//! invariants it promises, the `MeshAsset` reader/writer pair, a small set of
+//! core topology operations, and the deterministic op journal that is both the
+//! undo/redo story and the test story.
 //!
 //! This crate is a *kernel*, not an editor. It has no panel, no commands, no
 //! selection model and no modelling ops beyond the primitives P23.4's extrude /
@@ -26,7 +26,8 @@
 //! half-edges. A `MeshAsset` stores a *split* vertex per UV/normal seam, so
 //! importing it position-welds the topology back together while keeping every
 //! attribute on the corner it was authored for. Nothing is averaged, nothing is
-//! lost, and export re-splits from exactly the same information. See [`build`].
+//! lost, and export re-splits from exactly the same information. See [`build`]
+//! and [`export`].
 //!
 //! **3. The mesh is edge- AND vertex-manifold, and ops refuse rather than
 //! corrupt.** At most one half-edge runs from `a` to `b` (so at most two faces
@@ -50,8 +51,8 @@
 //! cross-platform: identical input, different bytes on `x86_64-msvc` vs
 //! `aarch64-apple-darwin`) makes it poison for a structure whose entire contract
 //! is "replaying these ops on any machine produces the same mesh". It is
-//! available exactly once, behind the writer's opt-in `optimize` flag, on the
-//! way OUT — and that door is documented as the non-deterministic one.
+//! available exactly once, behind [`ExportOptions::optimize`], on the way OUT —
+//! and that door is documented as the non-deterministic one.
 //!
 //! # What "deterministic" means here, precisely
 //!
@@ -74,6 +75,8 @@
 //! carries.
 
 pub mod build;
+pub mod export;
+pub mod journal;
 pub mod ops;
 pub mod topo;
 pub mod validate;
@@ -82,6 +85,8 @@ pub use build::{
     cube, cylinder, from_mesh_asset, plane, torus, ImportError, ImportReport, MeshImport,
     WELD_TOLERANCE,
 };
+pub use export::{to_mesh_asset, ExportOptions, ExportReport, NormalPolicy, TANGENT_FALLBACK};
+pub use journal::{MeshSession, SessionSave, CHECKPOINT_INTERVAL, MAX_CHECKPOINTS};
 pub use ops::{Op, OpError, OpOutcome};
 pub use topo::{CanonicalMesh, CornerData, FaceId, HalfId, Mesh, VertId};
 pub use validate::{validate, Violation};

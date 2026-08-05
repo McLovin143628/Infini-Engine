@@ -14,7 +14,7 @@
 //!    enforce local preconditions and a local manifold test, and the property
 //!    test audits them independently.
 //! 3. **Every op is a journal entry.** [`Op`] is the serialized form; applying it
-//!    through `MeshSession` (the op journal) records it, and replaying the
+//!    through [`crate::journal::MeshSession`] records it, and replaying the
 //!    record reproduces the mesh byte for byte. Nothing mutates a mesh outside an
 //!    `Op` — that is what makes the journal a complete description of a session.
 //!
@@ -39,7 +39,7 @@
 //! replay structure: one op routed through it and "replaying this journal gives
 //! the same mesh" becomes true only on the machine that recorded it. Optimization
 //! happens at export, once, behind a flag that says so
-//! (`ExportOptions::optimize`, on the writer).
+//! ([`crate::export::ExportOptions::optimize`]).
 
 use std::collections::BTreeSet;
 
@@ -830,6 +830,46 @@ mod tests {
                 to: verts[1],
             },
         );
+    }
+
+    #[test]
+    fn weld_relinks_every_vertex_the_patch_touched() {
+        // Found by `validity_holds_after_every_op`, and the reason the touched
+        // set is built from every REMOVED face rather than every REBUILT one.
+        //
+        // A quad with one triangle hanging off an outer edge. Welding the
+        // triangle's free corner into one of the shared ones makes that triangle
+        // lose its surface entirely, so it is removed and never rebuilt — and
+        // its OTHER shared vertex therefore never reached `finish_patch`, while
+        // the edge it lost had already been freed. The boundary half-edge
+        // arriving at that vertex kept pointing at a dead slot: `DeadLink`, with
+        // no other symptom.
+        let mut m = plane(2.0);
+        let quad = m.face_verts(m.face_ids().next().unwrap()).unwrap();
+        let (v0, v1) = (quad[0], quad[1]);
+        let e = apply(
+            &mut m,
+            &Op::AddVertex {
+                position: [0.0, 2.0, 0.0],
+            },
+        )
+        .unwrap()
+        .verts[0];
+        // The free side of the quad's v0→v1 edge is v1→v0.
+        expect_ok(
+            &mut m,
+            Op::AddFace {
+                verts: vec![v1, v0, e],
+                corners: vec![CornerData::default(); 3],
+                slot: None,
+            },
+        );
+        assert_eq!(m.face_count(), 2);
+
+        expect_ok(&mut m, Op::WeldVerts { keep: v1, merge: e });
+        assert_eq!(m.face_count(), 1, "the fin folded onto an edge and went");
+        assert_eq!(m.vert_count(), 4, "and took its own vertex with it");
+        assert_eq!(m.edge_count(), 4, "back to the bare quad");
     }
 
     #[test]
