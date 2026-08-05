@@ -7,6 +7,8 @@
  */
 import { create } from "zustand";
 
+import { registerUndoScope } from "../lib/undoScopes";
+
 import { material as materialIpc } from "../lib/ipc";
 import type { BpDoc, BpEdit, BpIssue, NodeDef } from "../lib/blueprintTypes";
 import type { MaterialCompileResult } from "../lib/materialTypes";
@@ -159,3 +161,14 @@ export const useMaterialStore = create<MaterialState>((set, get) => ({
 
   toggleWgsl: () => set((s) => ({ showWgsl: !s.showWgsl })),
 }));
+
+// **Ctrl+Z inside the Material panel undoes the MATERIAL** (P23.2a).
+//
+// Before this it undid the scene: `edit.undo` was wired straight to the scene
+// store, so an author editing a graph moved an actor they could not see while
+// the graph in front of them did nothing. The journal these call has existed
+// since P7.2 — it simply had no way to be reached from the keyboard.
+registerUndoScope("material", {
+  undo: () => useMaterialStore.getState().undo(),
+  redo: () => useMaterialStore.getState().redo(),
+});

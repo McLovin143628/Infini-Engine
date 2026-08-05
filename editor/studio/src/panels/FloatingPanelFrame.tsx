@@ -59,6 +59,7 @@ export function FloatingPanelFrame({
   const setMinimized = useDockLayout((s) => s.setMinimized);
   const hidePanel = useDockLayout((s) => s.hidePanel);
   const bringToFront = useDockLayout((s) => s.bringToFront);
+  const setFocusedPanel = useDockLayout((s) => s.setFocusedPanel);
   // Dim the source panel while its drag ghost is over a dock target.
   const ghosting = useDockDrag((s) => s.dragging?.panelId === id && !s.dragging.liveMove);
   const { startHeaderDrag, startResize } = useFloatingPanelDrag(id);
@@ -82,8 +83,13 @@ export function FloatingPanelFrame({
         boxShadow: `0 10px 32px var(--ink-shadow)`,
         ...(ghosting ? { opacity: 0.4 } : {}),
       }}
-      // Clicking anywhere in a panel raises it (no-op when already front).
-      onPointerDown={() => bringToFront(id)}
+      // Clicking anywhere in a panel raises it (no-op when already front) and
+      // makes it the focused panel (P23.2a) — raising and focusing are the same
+      // gesture for a float, so they share a handler.
+      onPointerDown={() => {
+        bringToFront(id);
+        setFocusedPanel(id);
+      }}
     >
       <PanelContextMenu panelId={id}>
         <header

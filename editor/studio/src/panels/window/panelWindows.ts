@@ -246,6 +246,14 @@ export function usePanelWindowManager(): void {
     };
     let dragZones: DropZones | null = null;
 
+    // A detached window reports its own pointer-downs so undo routing can aim
+    // at it (P23.2a) — the dock layout store lives here and is not bridged.
+    track(
+      listen<{ panelId: string }>("panel://focus", (e) => {
+        useDockLayout.getState().setFocusedPanel(e.payload.panelId);
+      }),
+    );
+
     track(
       listen<{ panelId: string }>("panel://closed", (e) => {
         const st = useDockLayout.getState();

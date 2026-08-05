@@ -41,8 +41,22 @@ interface DockLayoutStore {
   hydrated: boolean;
   /** Live size of the workspace area hosting docks + floats. */
   container: ContainerSize | null;
+  /**
+   * The last panel the user pointed at — last pointer-down wins (P23.2a).
+   *
+   * NOT part of `layout`, and never persisted: it is where the user is looking
+   * right now, not how the workspace is arranged. Restoring it across a restart
+   * would mean Ctrl+Z's first press went somewhere the author never clicked.
+   *
+   * `null` means "no panel" — the viewport, the toolbar, the title bar, or a
+   * fresh session — which routes undo to the scene, the pre-P23.2a behaviour.
+   */
+  focusedPanel: string | null;
 
   setContainer: (size: ContainerSize) => void;
+  /** Record a panel as focused (pointer-down, tab activation, detached-window
+   *  focus report). Idempotent — re-focusing the same panel does not notify. */
+  setFocusedPanel: (id: string | null) => void;
   /** Hydrate from a saved doc (or seed the default when null/stale). */
   hydrate: (doc: DockLayoutDoc | null, container: ContainerSize) => void;
 
@@ -524,8 +538,14 @@ export const useDockLayout = create<DockLayoutStore>((set, get) => {
     layout: defaultDockLayout(),
     hydrated: false,
     container: null,
+    focusedPanel: null,
 
     setContainer: (container) => set({ container }),
+
+    setFocusedPanel: (id) => {
+      if (get().focusedPanel === id) return;
+      set({ focusedPanel: id });
+    },
 
     hydrate: (doc, container) => {
       let layout: DockLayout;
@@ -613,6 +633,10 @@ export const useDockLayout = create<DockLayoutStore>((set, get) => {
       delete panels[id];
       next = { ...next, panels };
       commitTx(next);
+      // A closed panel cannot be where the user is looking (P23.2a) — leaving
+      // it focused would route Ctrl+Z into a document that is no longer on
+      // screen, which is the bug the routing exists to fix, inverted.
+      get().setFocusedPanel(null);
       // Explicit close (instance destroyed) → let resource owners free up
       // (e.g. the terminal's PTY). A location move goes through `applyDrop`,
       // which never notifies, so a drag keeps the resource alive.
@@ -647,6 +671,7 @@ export const useDockLayout = create<DockLayoutStore>((set, get) => {
         },
       };
       commitTx(next);
+      if (get().focusedPanel === id) get().setFocusedPanel(null);
       // Hiding (the singleton "close" path) is an explicit close from the
       // user's view — free panel-owned resources. Moves use `applyDrop`.
       notifyPanelClosed(id);
@@ -675,6 +700,11 @@ export const useDockLayout = create<DockLayoutStore>((set, get) => {
       const { layout } = get();
       const p = layout.panels[id];
       if (!p) return;
+      // Group activation IS focus (P23.2a): bringing a tab forward is the
+      // gesture for "work here now", and it is also what a pointer-down on a
+      // tab does before the drag controller takes over. Set it before the
+      // early-outs below, which skip only the LAYOUT work.
+      get().setFocusedPanel(id);
       if (p.location.kind === "floating") {
         const next = raiseFloat(layout, id);
         if (next !== layout) {

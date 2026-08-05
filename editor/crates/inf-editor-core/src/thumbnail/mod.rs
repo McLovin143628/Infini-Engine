@@ -25,10 +25,20 @@ use crate::assets::AssetProject;
 /// Default thumbnail edge length (square).
 pub const THUMB_SIZE: u32 = 128;
 
+pub use scene_render::{PreviewSession, PreviewView};
+
 /// Renders asset thumbnails. Holds a lazily-created, possibly-absent GPU context.
+///
+/// It also owns the live [`PreviewSession`] (P23.2a) that
+/// [`render_material_preview`](Thumbnailer::render_material_preview) draws
+/// through, so the material editor's preview keeps its target, buffers and
+/// compiled pipelines between compiles instead of rebuilding them per keystroke.
 pub struct Thumbnailer {
     size: u32,
     gpu: GpuState,
+    /// Rebuilt only when the requested preview size changes (the session's
+    /// target and depth are fixed for its life).
+    preview: Option<PreviewSession>,
 }
 
 enum GpuState {
@@ -48,11 +58,14 @@ impl Thumbnailer {
         Self {
             size,
             gpu: GpuState::Uninit,
+            preview: None,
         }
     }
 
-    /// Lazily obtain the GPU context; `None` if this machine has no adapter.
-    fn gpu(&mut self) -> Option<&GpuContext> {
+    /// Bring the GPU context up if it has not been tried yet. Split out of
+    /// [`gpu`](Self::gpu) so a caller can initialize and then borrow `self.gpu`
+    /// and another field disjointly (the preview session needs both).
+    fn ensure_gpu(&mut self) {
         if matches!(self.gpu, GpuState::Uninit) {
             self.gpu = match GpuContext::headless() {
                 Ok(ctx) => GpuState::Ready(Box::new(ctx)),
@@ -62,6 +75,11 @@ impl Thumbnailer {
                 }
             };
         }
+    }
+
+    /// Lazily obtain the GPU context; `None` if this machine has no adapter.
+    fn gpu(&mut self) -> Option<&GpuContext> {
+        self.ensure_gpu();
         match &self.gpu {
             GpuState::Ready(ctx) => Some(ctx),
             _ => None,
@@ -129,14 +147,53 @@ impl Thumbnailer {
     /// Render a material graph's generated `surface_wgsl` on a lit preview
     /// sphere (P7.2.3). `None` if no GPU adapter is available. `tex_count`
     /// texture slots are bound to white; the surface must be naga-valid.
+    ///
+    /// Goes through the persistent [`PreviewSession`] (P23.2a): the material
+    /// editor recompiles on every graph edit, so the target, depth buffer,
+    /// sphere buffers and — when the same surface comes back, as it does on an
+    /// undo or a parameter revert — the compiled pipeline are all reused. The
+    /// image is identical to the pre-session one-shot; only the cost changed.
     pub fn render_material_preview(
         &mut self,
         surface_wgsl: &str,
         tex_count: u32,
         size: u32,
     ) -> Option<Vec<u8>> {
-        let gpu = self.gpu()?;
-        scene_render::render_material_preview(gpu, size, surface_wgsl, tex_count).ok()
+        self.ensure_gpu();
+        let GpuState::Ready(gpu) = &self.gpu else {
+            return None;
+        };
+        if self.preview.as_ref().is_none_or(|s| s.size() != size) {
+            self.preview = Some(PreviewSession::new(gpu, size));
+        }
+        let session = self.preview.as_mut()?;
+        session
+            .render(gpu, surface_wgsl, tex_count, PreviewView::default())
+            .ok()
+    }
+
+    /// Render an interactive preview frame at an explicit camera (P23.2a) — the
+    /// seam a Model Editor panel drives with a mouse-orbit.
+    ///
+    /// The same session as [`render_material_preview`](Self::render_material_preview),
+    /// so a panel that orbits and a compile that re-renders share one set of
+    /// compiled pipelines.
+    pub fn render_preview_view(
+        &mut self,
+        surface_wgsl: &str,
+        tex_count: u32,
+        size: u32,
+        view: PreviewView,
+    ) -> Option<Vec<u8>> {
+        self.ensure_gpu();
+        let GpuState::Ready(gpu) = &self.gpu else {
+            return None;
+        };
+        if self.preview.as_ref().is_none_or(|s| s.size() != size) {
+            self.preview = Some(PreviewSession::new(gpu, size));
+        }
+        let session = self.preview.as_mut()?;
+        session.render(gpu, surface_wgsl, tex_count, view).ok()
     }
 
     /// Bake a texture graph's generated `compute_wgsl` (entry `cs_bake`) to a
@@ -334,12 +391,48 @@ fn resize_letterbox(src: &[u8], sw: u32, sh: u32, size: u32) -> Vec<u8> {
 }
 
 /// PNG-encode a square RGBA8 image.
+///
+/// Default deflate: a thumbnail is encoded ONCE and lives on disk under its
+/// content hash for ever, so the bytes are worth compressing hard.
 pub fn encode_png(size: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    encode_png_with(
+        size,
+        rgba,
+        png::Compression::default(),
+        png::Filter::default(),
+    )
+}
+
+/// PNG-encode for an **interactive** preview (P23.2a) — same pixels, cheaper.
+///
+/// The P23.2a measurement found the offscreen preview's cost is not the render:
+/// at 512² a warm re-render is ~0.34 ms and the default-compression PNG encode
+/// is ~22.7 ms, i.e. **98% of the frame is deflate**. Nothing downstream keeps
+/// this image — it is base64'd into a data URL, shown, and replaced by the next
+/// orbit frame — so paying for the last few percent of size is paying for
+/// nothing at a cost that decides whether the panel is interactive.
+///
+/// PNG is lossless at every level, so this is byte-identical *as an image*; only
+/// the file is larger. Never use it for the disk cache.
+pub fn encode_png_fast(size: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    // `NoFilter` as well as `Fast`: adaptive filtering walks every row five
+    // times to pick a predictor, which is most of what is being paid for here.
+    encode_png_with(size, rgba, png::Compression::Fast, png::Filter::NoFilter)
+}
+
+fn encode_png_with(
+    size: u32,
+    rgba: &[u8],
+    compression: png::Compression,
+    filter: png::Filter,
+) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut buf, size, size);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(compression);
+        encoder.set_filter(filter);
         let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
         writer.write_image_data(rgba).map_err(|e| e.to_string())?;
     }

@@ -26,6 +26,7 @@ import type { DockGroupState, DockSide } from "./dockTypes";
 export function DockGroup({ side, group }: { side: DockSide; group: DockGroupState }) {
   const activateTab = useDockLayout((s) => s.activateTab);
   const closePanel = useDockLayout((s) => s.closePanel);
+  const setFocusedPanel = useDockLayout((s) => s.setFocusedPanel);
   const panels = useDockLayout((s) => s.layout.panels);
   const draggingId = useDockDrag((s) => s.dragging?.panelId ?? null);
   const stripRef = useRef<HTMLDivElement | null>(null);
@@ -192,6 +193,11 @@ export function DockGroup({ side, group }: { side: DockSide; group: DockGroupSta
               key={panelId}
               role="tabpanel"
               hidden={!active}
+              // Focus follows the pointer INTO the body, not just onto the tab
+              // (P23.2a): clicking inside the material canvas is the gesture
+              // that has to make Ctrl+Z mean "the material". Capture phase, so
+              // a child that stops propagation cannot swallow it.
+              onPointerDownCapture={() => setFocusedPanel(panelId)}
               className={cn(
                 "min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-(--ink-bg-1)",
                 active ? "flex" : "hidden",

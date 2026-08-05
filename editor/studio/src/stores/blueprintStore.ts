@@ -5,6 +5,8 @@
  */
 import { create } from "zustand";
 
+import { registerUndoScope } from "../lib/undoScopes";
+
 import { graph as graphIpc } from "../lib/ipc";
 import type {
   BpDoc,
@@ -252,3 +254,9 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
 
   clearDebugValues: () => set({ debugHits: new Set(), debugWireValues: {} }),
 }));
+
+// Ctrl+Z inside the Blueprint panel undoes the GRAPH, not the scene (P23.2a).
+registerUndoScope("blueprint", {
+  undo: () => useBlueprintStore.getState().undo(),
+  redo: () => useBlueprintStore.getState().redo(),
+});

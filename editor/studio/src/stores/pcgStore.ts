@@ -8,6 +8,8 @@
  */
 import { create } from "zustand";
 
+import { registerUndoScope } from "../lib/undoScopes";
+
 import { pcg as pcgIpc } from "../lib/ipc";
 import type { BpDoc, BpEdit, BpIssue, NodeDef } from "../lib/blueprintTypes";
 import type { PcgBiomeResult, PcgCompileResult, PcgEvaluateResult } from "../lib/pcgTypes";
@@ -199,3 +201,9 @@ export const usePcgStore = create<PcgState>((set, get) => ({
     }
   },
 }));
+
+// Ctrl+Z inside the PCG panel undoes the PCG graph, not the scene (P23.2a).
+registerUndoScope("pcg", {
+  undo: () => usePcgStore.getState().undo(),
+  redo: () => usePcgStore.getState().redo(),
+});

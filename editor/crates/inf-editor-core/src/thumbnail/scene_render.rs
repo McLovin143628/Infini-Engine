@@ -6,6 +6,8 @@
 //! for materials) into an offscreen target, so a minimal forward pipeline with a
 //! plain perspective camera is simpler and fully isolated.
 
+use std::sync::Arc;
+
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Mat4, Vec3, Vec4};
 use inf_mesh::{Aabb, MeshVertex};
@@ -359,116 +361,408 @@ fn fs(i: PvOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Render a material graph's generated `surface_wgsl` on a lit preview sphere,
-/// returning tightly-packed RGBA8 rows. `tex_count` texture slots are bound to a
-/// shared white 1×1 (binding real referenced textures is a follow-up). The
-/// caller must have naga-validated the surface (see `inf_material::emit_wgsl`).
-pub fn render_material_preview(
-    gpu: &GpuContext,
+/// Where the preview camera is looking from — **the only thing a mouse-orbit
+/// changes between frames** (P23.2a).
+///
+/// Split out because that is the whole economics of [`PreviewSession`]: a
+/// camera move must not rebuild a target, a depth buffer, a shader module or a
+/// pipeline. Angles are degrees and `distance` is in sphere radii (the preview
+/// mesh is a unit sphere), so a caller drags in units it can reason about.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PreviewView {
+    /// Rotation about +Y, degrees. 0 looks down −Z.
+    pub yaw_deg: f32,
+    /// Elevation, degrees. Clamped to ±89 so the up-vector never degenerates.
+    pub pitch_deg: f32,
+    /// Eye distance from the origin, in world units.
+    pub distance: f32,
+}
+
+impl Default for PreviewView {
+    /// The fixed 3/4 framing every material preview used before it could orbit —
+    /// `dir = normalize(0.5, 0.35, 1.0)` at 2.8 units, expressed as angles.
+    fn default() -> Self {
+        let dir = Vec3::new(0.5, 0.35, 1.0).normalize();
+        Self {
+            yaw_deg: dir.x.atan2(dir.z).to_degrees(),
+            pitch_deg: dir.y.asin().to_degrees(),
+            distance: 2.8,
+        }
+    }
+}
+
+impl PreviewView {
+    /// The eye position this view looks from (target is always the origin).
+    fn eye(&self) -> Vec3 {
+        let yaw = self.yaw_deg.to_radians();
+        let pitch = self.pitch_deg.clamp(-89.0, 89.0).to_radians();
+        let (sy, cy) = yaw.sin_cos();
+        let (sp, cp) = pitch.sin_cos();
+        Vec3::new(cp * sy, sp, cp * cy) * self.distance.max(1e-3)
+    }
+}
+
+/// One compiled preview program: the pipeline plus, when the surface samples
+/// textures, the white-bound `group(2)` resources it was laid out for.
+///
+/// Held behind an `Arc` so the cache can hand the same one out repeatedly and a
+/// test can prove it did (`Arc::ptr_eq` — the `GenCache` precedent in
+/// `inf_render::passes`).
+pub(crate) struct PreviewProgram {
+    pipeline: wgpu::RenderPipeline,
+    /// `(texture, sampler, bind group)` — kept alive because the bind group
+    /// references the first two. `None` when the surface samples nothing.
+    textures: Option<(wgpu::Texture, wgpu::Sampler, wgpu::BindGroup)>,
+}
+
+/// How many distinct surfaces a session keeps compiled.
+///
+/// Bounded on purpose: a material graph recompiles on every edit, so an
+/// unbounded cache would hold one pipeline per keystroke for the life of the
+/// session. Eight covers "the graph I am editing, and the last few I looked at"
+/// — which is what the cache is for — and evicts least-recently-used beyond it.
+const PIPELINE_CACHE_CAP: usize = 8;
+
+/// **A reusable, cached-pipeline offscreen preview** (P23.2a).
+///
+/// The seam an interactive Model-Editor panel drives with a mouse-orbit, and the
+/// reason the P23.1 memo can rule that the first DCC preview is an offscreen
+/// PNG rather than a second native viewport.
+///
+/// The free [`render_material_preview`] rebuilt **everything** per call — render
+/// target, depth texture, vertex/index/uniform buffers, shader module, bind
+/// group layouts, pipeline — which is right for a thumbnail rendered once and
+/// cached to disk by content hash, and hopeless at interactive rates. A session
+/// owns all of it and rebuilds only what actually changed:
+///
+/// * a **camera** move writes 144 bytes into an existing uniform buffer;
+/// * a **surface** change compiles one shader and one pipeline, and finds it
+///   already compiled if that surface has been seen (bounded by
+///   [`PIPELINE_CACHE_CAP`]);
+/// * a **size** change is a new session (the caller's business — `size` is
+///   fixed for the session's life so the target and depth never reallocate).
+///
+/// It is deliberately NOT `Send`: wgpu resources are tied to their device and
+/// the editor drives this from the command thread that owns the `Thumbnailer`.
+pub struct PreviewSession {
     size: u32,
-    surface_wgsl: &str,
-    tex_count: u32,
-) -> Result<Vec<u8>, String> {
-    let device = &gpu.device;
-    let (verts, indices) = unit_sphere(64, 48);
+    target: HeadlessTarget,
+    depth: wgpu::TextureView,
+    vbo: wgpu::Buffer,
+    ibo: wgpu::Buffer,
+    index_count: u32,
+    ubo: wgpu::Buffer,
+    cam_bgl: wgpu::BindGroupLayout,
+    cam_bg: wgpu::BindGroup,
+    empty_bgl: wgpu::BindGroupLayout,
+    empty_bg: wgpu::BindGroup,
+    /// MRU-first: `(shader hash, tex_count, source, program)`.
+    ///
+    /// The source is stored beside its hash and compared on a hit. A 64-bit
+    /// collision is vanishingly unlikely and its consequence is not — it would
+    /// draw a *different material* with total confidence, which is exactly the
+    /// class of failure this codebase keeps paying for. The compare only runs on
+    /// a hash hit, so it costs nothing on a miss.
+    programs: Vec<(u64, u32, String, Arc<PreviewProgram>)>,
+}
 
-    let target = HeadlessTarget::new(gpu, size, size);
-    let depth = device
-        .create_texture(&wgpu::TextureDescriptor {
-            label: Some("matprev-depth"),
-            size: wgpu::Extent3d {
-                width: size,
-                height: size,
-                depth_or_array_layers: 1,
+/// Hash a surface for the pipeline cache key.
+fn surface_hash(surface_wgsl: &str, tex_count: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    surface_wgsl.hash(&mut h);
+    tex_count.hash(&mut h);
+    h.finish()
+}
+
+impl PreviewSession {
+    /// Build a session rendering `size × size` frames on `gpu`.
+    ///
+    /// Everything size- and mesh-dependent is allocated here, once. The sphere
+    /// is the same 64×48 UV sphere the one-shot preview used, so a session
+    /// render and a one-shot render of the same surface are the same image.
+    pub fn new(gpu: &GpuContext, size: u32) -> Self {
+        let device = &gpu.device;
+        let (verts, indices) = unit_sphere(64, 48);
+
+        let target = HeadlessTarget::new(gpu, size, size);
+        let depth = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("preview-depth"),
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        // COPY_DST, unlike the one-shot's init-only buffer: the camera is
+        // rewritten per frame and that is the warm path's entire cost.
+        let ubo = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("preview-cam"),
+            size: std::mem::size_of::<PreviewCam>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("preview-vtx"),
+            contents: bytemuck::cast_slice(&verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let ibo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("preview-idx"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let cam_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("preview-cam-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let cam_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("preview-cam-bg"),
+            layout: &cam_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: ubo.as_entire_binding(),
+            }],
+        });
+        // group(1) is unused by the shader but must exist (and be bound) to
+        // reach group(2) — an empty layout + empty bind group.
+        let empty_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("preview-empty-bgl"),
+            entries: &[],
+        });
+        let empty_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("preview-empty-bg"),
+            layout: &empty_bgl,
+            entries: &[],
+        });
+
+        Self {
+            size,
+            target,
+            depth,
+            vbo,
+            ibo,
+            index_count: indices.len() as u32,
+            ubo,
+            cam_bgl,
+            cam_bg,
+            empty_bgl,
+            empty_bg,
+            programs: Vec::new(),
+        }
+    }
+
+    /// The edge length this session renders at. A caller wanting another size
+    /// builds another session (the target and depth are fixed for its life).
+    pub fn size(&self) -> u32 {
+        self.size
+    }
+
+    /// How many distinct surfaces are currently compiled — the cache's
+    /// observable state, and what its bound is asserted against.
+    pub fn cached_programs(&self) -> usize {
+        self.programs.len()
+    }
+
+    /// The compiled program for `surface_wgsl`, building it on a miss and moving
+    /// it to the front of the MRU list on a hit.
+    pub(crate) fn program(
+        &mut self,
+        gpu: &GpuContext,
+        surface_wgsl: &str,
+        tex_count: u32,
+    ) -> Arc<PreviewProgram> {
+        let key = surface_hash(surface_wgsl, tex_count);
+        if let Some(i) = self
+            .programs
+            .iter()
+            .position(|(k, t, src, _)| *k == key && *t == tex_count && src == surface_wgsl)
+        {
+            let entry = self.programs.remove(i);
+            let program = entry.3.clone();
+            self.programs.insert(0, entry);
+            return program;
+        }
+        let program = Arc::new(self.build_program(gpu, surface_wgsl, tex_count));
+        self.programs.insert(
+            0,
+            (key, tex_count, surface_wgsl.to_string(), program.clone()),
+        );
+        self.programs.truncate(PIPELINE_CACHE_CAP);
+        program
+    }
+
+    fn build_program(
+        &self,
+        gpu: &GpuContext,
+        surface_wgsl: &str,
+        tex_count: u32,
+    ) -> PreviewProgram {
+        let device = &gpu.device;
+        let source = format!("{surface_wgsl}\n{PREVIEW_WRAPPER}");
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("preview-shader"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+
+        // Texture group(2): a shared white 1×1 + sampler bound to every slot.
+        let textures = (tex_count > 0).then(|| build_white_textures(gpu, tex_count));
+        let tex_bgl = textures.as_ref().map(|(_, _, _, bgl)| bgl);
+        let layout_bgls: Vec<Option<&wgpu::BindGroupLayout>> = match tex_bgl {
+            Some(bgl) => vec![Some(&self.cam_bgl), Some(&self.empty_bgl), Some(bgl)],
+            None => vec![Some(&self.cam_bgl)],
+        };
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("preview-layout"),
+            bind_group_layouts: &layout_bgls,
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("preview-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                buffers: &[Some(preview_vertex_layout())],
+                compilation_options: Default::default(),
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        })
-        .create_view(&wgpu::TextureViewDescriptor::default());
-
-    let center = Vec3::ZERO;
-    let dir = Vec3::new(0.5, 0.35, 1.0).normalize();
-    let eye = center + dir * 2.8;
-    let view = look_at_rh(eye, center, Vec3::Y);
-    let proj = perspective_rh(40f32.to_radians(), 1.0, 0.05, 20.0);
-    let cam = PreviewCam {
-        view_proj: (proj * view).to_cols_array_2d(),
-        normal_matrix: Mat4::IDENTITY.to_cols_array_2d(),
-        cam_pos: [eye.x, eye.y, eye.z, 1.0],
-    };
-
-    let ubo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("matprev-cam"),
-        contents: bytemuck::bytes_of(&cam),
-        usage: wgpu::BufferUsages::UNIFORM,
-    });
-    let vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("matprev-vtx"),
-        contents: bytemuck::cast_slice(&verts),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-    let ibo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("matprev-idx"),
-        contents: bytemuck::cast_slice(&indices),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-
-    let source = format!("{surface_wgsl}\n{PREVIEW_WRAPPER}");
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("matprev-shader"),
-        source: wgpu::ShaderSource::Wgsl(source.into()),
-    });
-
-    let cam_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("matprev-cam-bgl"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
             },
-            count: None,
-        }],
-    });
-    let cam_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("matprev-cam-bg"),
-        layout: &cam_bgl,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: ubo.as_entire_binding(),
-        }],
-    });
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HEADLESS_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        PreviewProgram {
+            pipeline,
+            textures: textures.map(|(t, s, bg, _)| (t, s, bg)),
+        }
+    }
 
-    // Texture group(2): a shared white 1×1 + sampler bound to every slot.
-    let tex_resources = (tex_count > 0).then(|| build_white_textures(gpu, tex_count));
-    // group(1) is unused by the shader but must exist (and be bound) to reach
-    // group(2) — an empty layout + empty bind group.
-    let empty_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("matprev-empty-bgl"),
-        entries: &[],
-    });
-    let empty_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("matprev-empty-bg"),
-        layout: &empty_bgl,
-        entries: &[],
-    });
-    let layout_bgls: Vec<Option<&wgpu::BindGroupLayout>> = match &tex_resources {
-        Some((_, _, _, tex_bgl)) => vec![Some(&cam_bgl), Some(&empty_bgl), Some(tex_bgl)],
-        None => vec![Some(&cam_bgl)],
-    };
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("matprev-layout"),
-        bind_group_layouts: &layout_bgls,
-        immediate_size: 0,
-    });
+    /// Render one frame of `surface_wgsl` from `view`, returning tightly-packed
+    /// RGBA8 rows.
+    ///
+    /// `tex_count` texture slots are bound to a shared white 1×1 (binding real
+    /// referenced textures is the standing P7 follow-up). The caller must have
+    /// naga-validated the surface (see `inf_material::emit_wgsl`).
+    ///
+    /// **Deterministic within a process**: the same `(surface, tex_count, view)`
+    /// produces byte-identical output, which is what makes an orbit's frames
+    /// comparable and a cache hit provable. It is NOT a cross-machine claim —
+    /// this is a preview image, never committed content, so the P14 trig law
+    /// does not reach it (nothing here is serialized, hashed into an asset, or
+    /// compared between two machines).
+    pub fn render(
+        &mut self,
+        gpu: &GpuContext,
+        surface_wgsl: &str,
+        tex_count: u32,
+        view: PreviewView,
+    ) -> Result<Vec<u8>, String> {
+        let program = self.program(gpu, surface_wgsl, tex_count);
 
-    let vertex_layout = wgpu::VertexBufferLayout {
+        let eye = view.eye();
+        let look = look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+        let proj = perspective_rh(40f32.to_radians(), 1.0, 0.05, 20.0);
+        let cam = PreviewCam {
+            view_proj: (proj * look).to_cols_array_2d(),
+            normal_matrix: Mat4::IDENTITY.to_cols_array_2d(),
+            cam_pos: [eye.x, eye.y, eye.z, 1.0],
+        };
+        gpu.queue
+            .write_buffer(&self.ubo, 0, bytemuck::bytes_of(&cam));
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("preview"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("preview-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.target.view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.10,
+                            g: 0.10,
+                            b: 0.12,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&program.pipeline);
+            pass.set_bind_group(0, &self.cam_bg, &[]);
+            if let Some((_, _, tex_bg)) = &program.textures {
+                pass.set_bind_group(1, &self.empty_bg, &[]);
+                pass.set_bind_group(2, tex_bg, &[]);
+            }
+            pass.set_vertex_buffer(0, self.vbo.slice(..));
+            pass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.index_count, 0, 0..1);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        self.target.read_rgba(gpu)
+    }
+}
+
+/// The preview sphere's interleaved vertex layout (position / normal / uv).
+fn preview_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<MeshVertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
@@ -488,89 +782,17 @@ pub fn render_material_preview(
                 shader_location: 2,
             },
         ],
-    };
-
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("matprev-pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs"),
-            buffers: &[Some(vertex_layout)],
-            compilation_options: Default::default(),
-        },
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            cull_mode: Some(wgpu::Face::Back),
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Less),
-            stencil: Default::default(),
-            bias: Default::default(),
-        }),
-        multisample: Default::default(),
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: HEADLESS_FORMAT,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        multiview_mask: None,
-        cache: None,
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("matprev"),
-    });
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("matprev-pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &target.view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.10,
-                        g: 0.10,
-                        b: 0.12,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Discard,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &cam_bg, &[]);
-        if let Some((_, _, tex_bg, _)) = &tex_resources {
-            pass.set_bind_group(1, &empty_bg, &[]);
-            pass.set_bind_group(2, tex_bg, &[]);
-        }
-        pass.set_vertex_buffer(0, vbo.slice(..));
-        pass.set_index_buffer(ibo.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
     }
-    gpu.queue.submit([encoder.finish()]);
-    target.read_rgba(gpu)
 }
+
+// The free `render_material_preview` that used to live here is GONE (P23.2a).
+// It rebuilt the target, the depth texture, the sphere buffers, the shader
+// module, three bind-group layouts and the pipeline on **every call** — right
+// for a one-shot thumbnail, hopeless for a panel that orbits. Its one caller
+// (`Thumbnailer::render_material_preview`) now drives a persistent
+// [`PreviewSession`]; the image is unchanged, and
+// `the_default_view_reproduces_the_historical_framing` pins that claim without
+// needing a GPU.
 
 /// Build the shared white 1×1 texture + sampler and a bind group binding them to
 /// every `tex.sample` slot (`2k` = texture, `2k+1` = sampler).
@@ -943,10 +1165,18 @@ fn material_surface(mi: MatIn) -> Surface {
         GpuContext::headless().ok()
     }
 
+    /// Render one preview frame at the default framing — the shape the three
+    /// legacy assertions below were written against, now through the session.
+    fn preview(gpu: &GpuContext, size: u32, surface: &str, tex_count: u32) -> Vec<u8> {
+        PreviewSession::new(gpu, size)
+            .render(gpu, surface, tex_count, PreviewView::default())
+            .expect("preview render")
+    }
+
     #[test]
     fn material_preview_renders_without_textures() {
         let Some(gpu) = gpu_or_skip() else { return };
-        let img = render_material_preview(&gpu, 32, MIN_SURFACE, 0).expect("preview render");
+        let img = preview(&gpu, 32, MIN_SURFACE, 0);
         assert_eq!(img.len(), 32 * 32 * 4);
         // Not entirely the background clear color (the sphere is drawn).
         assert!(img.chunks(4).any(|p| p[0] > 20 && p[1] > 20));
@@ -956,7 +1186,7 @@ fn material_surface(mi: MatIn) -> Surface {
     fn material_preview_renders_with_texture_binding() {
         let Some(gpu) = gpu_or_skip() else { return };
         // Exercises the empty-group(1) + white-texture-group(2) path.
-        let img = render_material_preview(&gpu, 32, TEX_SURFACE, 1).expect("textured preview");
+        let img = preview(&gpu, 32, TEX_SURFACE, 1);
         assert_eq!(img.len(), 32 * 32 * 4);
     }
 
@@ -964,7 +1194,7 @@ fn material_surface(mi: MatIn) -> Surface {
     fn material_preview_renders_layered_slab_surface() {
         let Some(gpu) = gpu_or_skip() else { return };
         // P13.2: a slab-based surface embeds cleanly in the preview wrapper.
-        let img = render_material_preview(&gpu, 32, SLAB_SURFACE, 0).expect("slab preview");
+        let img = preview(&gpu, 32, SLAB_SURFACE, 0);
         assert_eq!(img.len(), 32 * 32 * 4);
         assert!(img.chunks(4).any(|p| p[0] > 20 || p[2] > 20));
     }
@@ -995,6 +1225,214 @@ fn cs_bake(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(bake_out, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(s.base_color, 1.0));
 }
 ";
+
+    // ── PreviewSession (P23.2a) ─────────────────────────────────────────────
+
+    /// **Determinism**: the same `(surface, tex_count, view)` renders the same
+    /// bytes, and a *different* view renders different ones.
+    ///
+    /// Both halves matter together. The first is what makes an orbit's frames
+    /// comparable at all and what proves the cached pipeline is the same
+    /// program; the second is the non-vacuity guard — a session that returned a
+    /// stale readback, or ignored the camera entirely, would pass the first
+    /// claim perfectly and be a preview that does not move.
+    #[test]
+    fn the_preview_session_is_deterministic_and_the_camera_moves_it() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let mut session = PreviewSession::new(&gpu, 64);
+        let a = PreviewView::default();
+
+        let first = session.render(&gpu, MIN_SURFACE, 0, a).expect("first");
+        let again = session.render(&gpu, MIN_SURFACE, 0, a).expect("second");
+        assert_eq!(first, again, "the same parameters rendered different bytes");
+        assert_eq!(first.len(), 64 * 64 * 4);
+
+        let orbited = session
+            .render(
+                &gpu,
+                MIN_SURFACE,
+                0,
+                PreviewView {
+                    yaw_deg: a.yaw_deg + 90.0,
+                    ..a
+                },
+            )
+            .expect("orbited");
+        assert_ne!(
+            first, orbited,
+            "a 90° yaw produced an identical image — the camera is not reaching \
+             the shader, so every determinism claim above is vacuous"
+        );
+    }
+
+    /// **The extraction changed the cost, not the picture.**
+    ///
+    /// The pre-P23.2a preview looked from a hard-coded
+    /// `normalize(0.5, 0.35, 1.0) * 2.8`; the session takes yaw/pitch/distance
+    /// so a panel can orbit. `PreviewView::default` is that same eye, and this
+    /// pins it — on the CPU, so it runs on every CI leg (there is no adapter
+    /// there, which is exactly where a silently re-framed preview would ship).
+    ///
+    /// Tolerance is f32 round-trip through `atan2`/`asin` and back, not
+    /// "roughly the same view": 1e-5 is about six significant figures.
+    #[test]
+    fn the_default_view_reproduces_the_historical_framing() {
+        let historical = Vec3::new(0.5, 0.35, 1.0).normalize() * 2.8;
+        let eye = PreviewView::default().eye();
+        assert!(
+            (eye - historical).length() < 1e-5,
+            "the default preview camera moved: {eye:?} vs the historical \
+             {historical:?} — every material thumbnail in every project would \
+             re-render from a different angle"
+        );
+    }
+
+    /// **The pipeline cache is a cache** — pointer identity, on the `GenCache`
+    /// precedent (`inf_render::passes::the_cloud_bake_key_rebuilds_on_a_generation_bump`).
+    ///
+    /// A `render` that quietly recompiled every frame would produce identical
+    /// pixels and pass every other test in this file while being exactly the
+    /// thing `PreviewSession` exists to avoid. `Arc::ptr_eq` is the only claim
+    /// that can tell the two apart.
+    #[test]
+    fn the_pipeline_cache_hands_back_the_same_program() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let mut session = PreviewSession::new(&gpu, 32);
+
+        let first = session.program(&gpu, MIN_SURFACE, 0);
+        let again = session.program(&gpu, MIN_SURFACE, 0);
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "an unchanged surface recompiled its pipeline"
+        );
+        assert_eq!(session.cached_programs(), 1);
+
+        // A changed surface must NOT reuse it — the other direction, and the
+        // failure that would draw the previous material with total confidence.
+        let other = session.program(&gpu, SLAB_SURFACE, 0);
+        assert!(!Arc::ptr_eq(&other, &first));
+        assert_eq!(session.cached_programs(), 2);
+
+        // …and the same surface at a different `tex_count` is a different
+        // pipeline LAYOUT, so it may not share either.
+        let textured = session.program(&gpu, TEX_SURFACE, 1);
+        assert!(!Arc::ptr_eq(&textured, &first));
+
+        // The original is still cached (MRU, not overwritten).
+        assert!(Arc::ptr_eq(&session.program(&gpu, MIN_SURFACE, 0), &first));
+    }
+
+    /// The cache is BOUNDED: a material graph recompiles on every keystroke, so
+    /// an unbounded one would hold a pipeline per edit for the whole session.
+    #[test]
+    fn the_pipeline_cache_evicts_beyond_its_cap() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let mut session = PreviewSession::new(&gpu, 32);
+        // Distinct surfaces: a trailing comment changes the source (and so the
+        // hash) without changing what is drawn.
+        for i in 0..(PIPELINE_CACHE_CAP + 3) {
+            let src = format!("{MIN_SURFACE}\n// variant {i}\n");
+            let _ = session.program(&gpu, &src, 0);
+        }
+        assert_eq!(session.cached_programs(), PIPELINE_CACHE_CAP);
+    }
+
+    /// **THE MEASUREMENT** (P23.1's "measured latency"; P23.2a deliverable 4).
+    ///
+    /// Cold = a fresh session's first frame (target + depth + buffers + shader +
+    /// pipeline). Warm = a re-render with only the camera moved, which is what a
+    /// mouse-orbit does. Both include the readback, because the offscreen path's
+    /// whole cost is "GPU work + map + copy to a PNG the webview can show".
+    ///
+    /// Asserts only what is *structurally* true (warm is not slower than cold by
+    /// construction — it does strictly less work) and prints the numbers, which
+    /// is what the memo quotes. A hard millisecond bound here would be a budget
+    /// test on unknown hardware, and this file has no adapter on CI at all.
+    ///
+    /// **The first render in a PROCESS is not a cold session render**, and
+    /// conflating them is how a measurement lies: the very first draw pays for
+    /// driver warm-up, the shader toolchain and the first allocation of every
+    /// pool, none of which recur. So the GPU is primed first and discarded, and
+    /// the process-cold figure is reported separately rather than folded in.
+    #[test]
+    fn preview_session_cold_versus_warm_latency() {
+        let Some(gpu) = gpu_or_skip() else { return };
+
+        // Process-cold: the first render this process has ever done. Reported
+        // once, and never counted as a session cost.
+        let t0 = std::time::Instant::now();
+        let _ = PreviewSession::new(&gpu, 256)
+            .render(&gpu, MIN_SURFACE, 0, PreviewView::default())
+            .expect("process-cold render");
+        eprintln!(
+            "PREVIEW LATENCY process-cold 256x256: {:.2} ms (driver + shader \
+             toolchain warm-up; paid once per editor session)",
+            t0.elapsed().as_secs_f64() * 1e3
+        );
+
+        for size in [256u32, 512] {
+            // Session-cold: a NEW session on a warm process — a fresh target,
+            // depth, buffers, shader and pipeline. What opening a Model Editor
+            // on a new asset costs.
+            let t0 = std::time::Instant::now();
+            let mut session = PreviewSession::new(&gpu, size);
+            let _ = session
+                .render(&gpu, MIN_SURFACE, 0, PreviewView::default())
+                .expect("cold render");
+            let cold = t0.elapsed();
+
+            // Warm: camera only, five frames, best-of (an orbit is judged by the
+            // frame it usually delivers, not by the one that hit a scheduler).
+            let mut warm = std::time::Duration::MAX;
+            for i in 1..=5 {
+                let view = PreviewView {
+                    yaw_deg: 30.0 + i as f32 * 7.0,
+                    ..PreviewView::default()
+                };
+                let t = std::time::Instant::now();
+                let _ = session.render(&gpu, MIN_SURFACE, 0, view).expect("warm");
+                warm = warm.min(t.elapsed());
+            }
+            // …and the rest of the round trip the panel actually pays, because
+            // an offscreen preview reaches the webview as a PNG data URL. A
+            // number that stopped at `read_rgba` would be measuring the half of
+            // the loop that is already fast and calling it the loop.
+            let frame = session
+                .render(&gpu, MIN_SURFACE, 0, PreviewView::default())
+                .expect("frame to encode");
+            let mut encode = std::time::Duration::MAX;
+            let mut encode_fast = std::time::Duration::MAX;
+            let mut bytes = 0usize;
+            let mut bytes_fast = 0usize;
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                let png = crate::thumbnail::encode_png(size, &frame).expect("png");
+                encode = encode.min(t.elapsed());
+                bytes = png.len();
+
+                let t = std::time::Instant::now();
+                let png = crate::thumbnail::encode_png_fast(size, &frame).expect("png fast");
+                encode_fast = encode_fast.min(t.elapsed());
+                bytes_fast = png.len();
+            }
+            eprintln!(
+                "PREVIEW LATENCY {size}x{size}: session-cold {:.2} ms, warm {:.2} ms, \
+                 png {:.2} ms ({bytes} B) / png-fast {:.2} ms ({bytes_fast} B) \
+                 => orbit frame {:.2} ms",
+                cold.as_secs_f64() * 1e3,
+                warm.as_secs_f64() * 1e3,
+                encode.as_secs_f64() * 1e3,
+                encode_fast.as_secs_f64() * 1e3,
+                (warm + encode_fast).as_secs_f64() * 1e3
+            );
+            assert!(
+                warm <= cold,
+                "warm re-render ({warm:?}) was slower than the cold first frame \
+                 ({cold:?}) at {size}x{size} — the session is rebuilding something \
+                 it was supposed to keep"
+            );
+        }
+    }
 
     #[test]
     fn bake_texture_writes_a_gradient() {

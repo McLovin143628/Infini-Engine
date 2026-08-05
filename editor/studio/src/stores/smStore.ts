@@ -10,6 +10,8 @@
 import { create } from "zustand";
 
 import { sm as smIpc } from "../lib/ipc";
+import { registerUndoScope } from "../lib/undoScopes";
+import { useShellStore } from "./shellStore";
 import type {
   SmClipDto,
   SmConditionDto,
@@ -279,3 +281,22 @@ export const useSmStore = create<SmStore>((set, get) => ({
     }
   },
 }));
+
+// **The State Machine editor claims Ctrl+Z and says it has no undo** (P23.2a).
+//
+// It genuinely has none: the frontend owns the `.inf_sm` document outright, so
+// there is no journal on either side (see the module doc). Claiming the scope
+// anyway is the honest choice — the alternative is falling through to the scene
+// default, which would undo an ACTOR MOVE while the author is looking at a state
+// machine. That is precisely the bug this routing exists to fix, and "nothing
+// happened, and here is why" beats "something happened somewhere else".
+registerUndoScope("stateMachine", {
+  undo: () =>
+    useShellStore
+      .getState()
+      .pushStatus("The State Machine editor has no undo yet (P23 ledger)."),
+  redo: () =>
+    useShellStore
+      .getState()
+      .pushStatus("The State Machine editor has no redo yet (P23 ledger)."),
+});

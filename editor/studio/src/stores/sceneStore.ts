@@ -21,6 +21,7 @@ import type { SpawnKind } from "../bindings/SpawnKind";
 import { getCommand, setCommandHandler } from "../lib/commands";
 import { listenTo, type UnlistenFn } from "../lib/events";
 import { scene as sceneIpc } from "../lib/ipc";
+import { dispatchRedo, dispatchUndo } from "../lib/undoScopes";
 import { registerBridgedStore } from "../panels/window/storeBridge";
 import { useProjectStore } from "./projectStore";
 import { useShellStore } from "./shellStore";
@@ -462,8 +463,19 @@ export function registerSceneCommands(): void {
   const wire = (id: string, run: () => void | Promise<void>) => {
     if (getCommand(id)) setCommandHandler(id, run);
   };
-  wire("edit.undo", () => s().undo());
-  wire("edit.redo", () => s().redo());
+  // **Undo routes to the focused panel first, the scene otherwise** (P23.2a).
+  //
+  // The scene is the DEFAULT, not the only answer: with no panel focused, or a
+  // focused panel that claimed no scope (viewport, outliner, details — the
+  // level-editing surface), `dispatchUndo` returns false and this runs, which
+  // is exactly what Ctrl+Z did before. What changed is that a graph editor with
+  // its own journal now gets its own Ctrl+Z instead of quietly moving an actor.
+  wire("edit.undo", () => {
+    if (!dispatchUndo()) s().undo();
+  });
+  wire("edit.redo", () => {
+    if (!dispatchRedo()) s().redo();
+  });
   wire("edit.delete", () => s().deleteSelected());
   wire("edit.duplicate", () => s().duplicateSelected());
   wire("actor.duplicate", () => s().duplicateSelected());

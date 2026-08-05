@@ -120,7 +120,22 @@ export default function PanelWindowApp() {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-(--ink-bg-1) text-(--ink-text)">
       <PanelWindowChrome panelId={panelId ?? ""} title={title} />
-      <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+      <main
+        className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+        // **Detached windows count** (P23.2a). The dock layout store lives in
+        // the main window and is not bridged, so a pointer-down here reports
+        // itself across; `usePanelWindowManager` applies it. Without this a
+        // torn-off Material editor would leave `focusedPanel` on whatever was
+        // last touched in the main window, and Ctrl+Z there would undo that.
+        //
+        // Honest limit: this window installs no keybinding listener of its own
+        // (see the lean-bootstrap note above), so Ctrl+Z pressed *inside* a
+        // detached panel does nothing at all today. What this fixes is the main
+        // window's aim, not the detached window's own shortcuts.
+        onPointerDownCapture={() => {
+          if (panelId) void emitTo("main", "panel://focus", { panelId });
+        }}
+      >
         {def && panelId && ready ? (
           <PanelChromeContext.Provider value="window">
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
