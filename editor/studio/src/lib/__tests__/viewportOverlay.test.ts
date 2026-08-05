@@ -23,16 +23,23 @@ import {
   registerViewport,
 } from "../viewportOverlay";
 import { PRIMARY_VIEWPORT } from "../viewportIds";
+import { viewport } from "../ipc";
 
 let calls: Array<{ visible: boolean; viewport: string | undefined }>;
+/** `viewport_attach` ids, in order — so a test can assert attach-then-register. */
+let attachCalls: string[];
 
 beforeEach(() => {
   __resetViewportOverlayForTest();
   calls = [];
+  attachCalls = [];
   mockIPC((cmd, args) => {
     if (cmd === "viewport_set_visible") {
       const a = args as { visible: boolean; viewport?: string };
       calls.push({ visible: a.visible, viewport: a.viewport });
+    }
+    if (cmd === "viewport_attach") {
+      attachCalls.push((args as { viewport?: string }).viewport ?? PRIMARY_VIEWPORT);
     }
   });
 });
@@ -124,13 +131,24 @@ test("a window-wide overlay hides EVERY attached viewport", async () => {
 });
 
 test("a viewport that attaches while an overlay is open comes up hidden", async () => {
+  // **The real sequence** (P23.2a audit). `ViewportPanel` registers only once
+  // `viewport.attach` has RESOLVED — an earlier version registered from its own
+  // effect, which ran first, so the hide reached a backend whose viewport map
+  // was still empty, was dropped, and the native child then attached and drew
+  // straight over the open overlay. The test has to run the order the panel
+  // does or it certifies a fix that is not there.
   const release = acquireViewportOverlay();
   await settle();
   calls.length = 0;
 
-  // Opening a second viewport with the palette up must not punch through it.
+  // 1. The panel mounts and asks the backend to attach…
+  await viewport.attach("model");
+  // 2. …and only then announces itself. This is the hide that must happen.
   const dispose = registerViewport("model");
   await settle();
+
+  const attachIndex = attachCalls.indexOf("model");
+  expect(attachIndex, "attach must precede registration").toBeGreaterThanOrEqual(0);
   expect(calls).toEqual([{ visible: false, viewport: "model" }]);
 
   release();

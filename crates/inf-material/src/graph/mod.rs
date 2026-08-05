@@ -13,7 +13,7 @@ pub mod nodekit;
 
 pub use budget::{analyze_complexity, analyze_with_budget, ComplexityReport, MaterialBudget};
 pub use emit::{
-    emit_texture_compute, emit_wgsl, MatIssue, MatSeverity, MaterialCompile, TextureBinding,
-    TextureCompile,
+    emit_texture_compute, emit_wgsl, validate_module, MatIssue, MatSeverity, MaterialCompile,
+    TextureBinding, TextureCompile,
 };
 pub use nodekit::{material_registry, MatType};

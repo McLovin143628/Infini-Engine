@@ -340,11 +340,31 @@ pub async fn material_compile(
         ))
     })?;
 
+    // A preview failure is a VALUE, not a crash and not silence (P23.2a audit —
+    // M3). The composed module (this graph's surface + the preview wrapper) is
+    // what wgpu compiles, and a symbol collision with the wrapper's `pv_*`
+    // names would abort the editor on the default handler; `PreviewSession`
+    // naga-validates it first and hands the error back. It rides the existing
+    // diagnostics list as a warning — the GRAPH compiled (`ok` is true), only
+    // its picture did not — with `node: None`, because nothing in the graph is
+    // to blame in a way the canvas could highlight.
+    let mut issues = issues;
     let image = if ok {
         let mut prev = state.preview.lock().map_err(|e| e.to_string())?;
-        prev.render_material_preview(&surface, tex_count, 256)
-            .and_then(|rgba| encode_png(256, &rgba).ok())
-            .map(|png| format!("data:image/png;base64,{}", super::assets::base64(&png)))
+        match prev.render_material_preview(&surface, tex_count, 256) {
+            Ok(rgba) => rgba
+                .and_then(|rgba| encode_png(256, &rgba).ok())
+                .map(|png| format!("data:image/png;base64,{}", super::assets::base64(&png))),
+            Err(msg) => {
+                tracing::warn!("material_compile: {msg}");
+                issues.push(MatIssueDto {
+                    node: None,
+                    severity: "warning".into(),
+                    message: format!("preview failed: {msg}"),
+                });
+                None
+            }
+        }
     } else {
         None
     };

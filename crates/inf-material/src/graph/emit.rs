@@ -888,6 +888,32 @@ fn fmt_f(v: f64) -> String {
     }
 }
 
+/// **Parse + validate an arbitrary WGSL module with naga** — the public door
+/// (P23.2a audit — M3).
+///
+/// `emit_wgsl` validates what it generates, but a *consumer* may compose that
+/// output with a wrapper of its own before handing it to wgpu — the offscreen
+/// preview concatenates `surface_wgsl` with its vertex/PBR wrapper, and the
+/// result is a module naga has never seen as a whole. A symbol collision
+/// between a graph and the wrapper's `pv_*`/`PvCam` names, or a binding
+/// disagreement, is a validation error at `create_shader_module`, and wgpu's
+/// default uncaptured-error handler **aborts the process**. Validating the
+/// composed source first turns that into a value the caller can show.
+///
+/// Errors are joined into one message; callers wanting per-node mapping use
+/// [`emit_wgsl`], which owns the graph and can attribute them.
+pub fn validate_module(src: &str) -> Result<(), String> {
+    validate_wgsl(src).map_err(|list| {
+        list.into_iter()
+            .map(|(line, msg)| match line {
+                Some(l) => format!("line {l}: {msg}"),
+                None => msg,
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+}
+
 /// Parse + validate the module with naga. Returns per-error (optional
 /// module-line, message).
 fn validate_wgsl(src: &str) -> Result<(), Vec<(Option<u32>, String)>> {

@@ -361,44 +361,80 @@ fn fs(i: PvOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Where the preview camera is looking from — **the only thing a mouse-orbit
-/// changes between frames** (P23.2a).
+/// **The whole preview camera** — and the only thing a mouse-orbit changes
+/// between frames (P23.2a).
 ///
-/// Split out because that is the whole economics of [`PreviewSession`]: a
-/// camera move must not rebuild a target, a depth buffer, a shader module or a
-/// pipeline. Angles are degrees and `distance` is in sphere radii (the preview
-/// mesh is a unit sphere), so a caller drags in units it can reason about.
+/// Split out because that is the economics of [`PreviewSession`]: a camera move
+/// must not rebuild a target, a depth buffer, a shader module or a pipeline.
+/// Angles are degrees and `distance` is world units (the preview mesh is a unit
+/// sphere), so a caller drags in units it can reason about.
+///
+/// **Every parameter the projection depends on lives here** (P23.2a audit —
+/// M2). Five of them — target, up, fov, near, far — used to be literals inside
+/// `render`, which meant [`the_default_view_reproduces_the_historical_framing`]
+/// pinned one sixth of the camera: changing the field of view from 40° to 55°,
+/// moving the look-at target, or pulling the far plane from 20 to 8 all passed.
+/// That test is the *replacement* for the deleted "a session render matches the
+/// one-shot" guarantee, and it has to be able to fail on an adapter-less CI leg
+/// or a re-framed preview ships unnoticed. It cannot pin what it cannot see.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PreviewView {
     /// Rotation about +Y, degrees. 0 looks down −Z.
     pub yaw_deg: f32,
     /// Elevation, degrees. Clamped to ±89 so the up-vector never degenerates.
     pub pitch_deg: f32,
-    /// Eye distance from the origin, in world units.
+    /// Eye distance from [`target`](Self::target), in world units.
     pub distance: f32,
+    /// What the camera orbits and looks at.
+    pub target: Vec3,
+    /// The camera's up vector.
+    pub up: Vec3,
+    /// Vertical field of view, degrees.
+    pub fov_deg: f32,
+    /// Near clip plane, world units.
+    pub near: f32,
+    /// Far clip plane, world units.
+    pub far: f32,
 }
 
 impl Default for PreviewView {
-    /// The fixed 3/4 framing every material preview used before it could orbit —
-    /// `dir = normalize(0.5, 0.35, 1.0)` at 2.8 units, expressed as angles.
+    /// The fixed framing every material preview used before it could orbit:
+    /// `dir = normalize(0.5, 0.35, 1.0)` at 2.8 units, looking at the origin
+    /// with +Y up through a 40° lens clipped at 0.05 / 20. Expressed as angles
+    /// where it used to be a direction vector; identical to within f32
+    /// round-trip, which is what the framing test checks.
     fn default() -> Self {
         let dir = Vec3::new(0.5, 0.35, 1.0).normalize();
         Self {
             yaw_deg: dir.x.atan2(dir.z).to_degrees(),
             pitch_deg: dir.y.asin().to_degrees(),
             distance: 2.8,
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            fov_deg: 40.0,
+            near: 0.05,
+            far: 20.0,
         }
     }
 }
 
 impl PreviewView {
-    /// The eye position this view looks from (target is always the origin).
+    /// The eye position this view looks from.
     fn eye(&self) -> Vec3 {
         let yaw = self.yaw_deg.to_radians();
         let pitch = self.pitch_deg.clamp(-89.0, 89.0).to_radians();
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();
-        Vec3::new(cp * sy, sp, cp * cy) * self.distance.max(1e-3)
+        self.target + Vec3::new(cp * sy, sp, cp * cy) * self.distance.max(1e-3)
+    }
+
+    /// `(eye, view_projection)` for this camera — the one place the projection
+    /// is built, so nothing about the framing can live outside this struct.
+    fn eye_and_view_proj(&self) -> (Vec3, Mat4) {
+        let eye = self.eye();
+        let look = look_at_rh(eye, self.target, self.up);
+        let proj = perspective_rh(self.fov_deg.to_radians(), 1.0, self.near, self.far);
+        (eye, proj * look)
     }
 }
 
@@ -442,8 +478,11 @@ const PIPELINE_CACHE_CAP: usize = 8;
 /// * a **size** change is a new session (the caller's business — `size` is
 ///   fixed for the session's life so the target and depth never reallocate).
 ///
-/// It is deliberately NOT `Send`: wgpu resources are tied to their device and
-/// the editor drives this from the command thread that owns the `Thumbnailer`.
+/// Every resource it holds belongs to the `GpuContext` passed to
+/// [`new`](Self::new), and every method takes that same context back — so a
+/// session must only ever be driven with the device that built it. Nothing in
+/// the type system enforces that (wgpu handles are `Send + Sync`), which is why
+/// the editor keeps exactly one, inside the `Thumbnailer` that owns the device.
 pub struct PreviewSession {
     size: u32,
     target: HeadlessTarget,
@@ -486,22 +525,7 @@ impl PreviewSession {
         let (verts, indices) = unit_sphere(64, 48);
 
         let target = HeadlessTarget::new(gpu, size, size);
-        let depth = device
-            .create_texture(&wgpu::TextureDescriptor {
-                label: Some("preview-depth"),
-                size: wgpu::Extent3d {
-                    width: size,
-                    height: size,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: DEPTH_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            })
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = new_depth(gpu, size);
 
         // COPY_DST, unlike the one-shot's init-only buffer: the camera is
         // rewritten per frame and that is the warm path's entire cost.
@@ -571,10 +595,35 @@ impl PreviewSession {
         }
     }
 
-    /// The edge length this session renders at. A caller wanting another size
-    /// builds another session (the target and depth are fixed for its life).
+    /// The edge length this session renders at.
     pub fn size(&self) -> u32 {
         self.size
+    }
+
+    /// Re-target the session at `size`, **keeping the compiled pipelines**
+    /// (P23.2a audit — M5).
+    ///
+    /// The `GenCache` precedent applies here and was cited without being used:
+    /// a resizable GPU resource lives behind a key, and only what the key
+    /// invalidates gets rebuilt. Size invalidates the colour target, the depth
+    /// texture and the readback — and **nothing else**. A pipeline depends on
+    /// the shader, the vertex layout, the bind-group layouts and the two
+    /// formats (`HEADLESS_FORMAT`, `DEPTH_FORMAT`), all of which are constants;
+    /// it does not depend on the extent it draws into.
+    ///
+    /// Rebuilding the whole session on a size change therefore threw away every
+    /// compiled program to reallocate two textures. That is not hypothetical
+    /// once P23.4 ships: `material_compile` hardcodes 256 and a Model Editor
+    /// panel will ask for 512, so the two consumers sharing one `Thumbnailer`
+    /// would have evicted each other's pipelines on every alternation — turning
+    /// a warm 0.34 ms re-render back into a 1.7 ms cold one, for ever.
+    pub fn resize(&mut self, gpu: &GpuContext, size: u32) {
+        if self.size == size {
+            return;
+        }
+        self.size = size;
+        self.target = HeadlessTarget::new(gpu, size, size);
+        self.depth = new_depth(gpu, size);
     }
 
     /// How many distinct surfaces are currently compiled — the cache's
@@ -585,12 +634,15 @@ impl PreviewSession {
 
     /// The compiled program for `surface_wgsl`, building it on a miss and moving
     /// it to the front of the MRU list on a hit.
+    ///
+    /// `Err` is a **refusal, not a crash** (P23.2a audit — M3): the composed
+    /// module failed naga validation, and the caller shows the message.
     pub(crate) fn program(
         &mut self,
         gpu: &GpuContext,
         surface_wgsl: &str,
         tex_count: u32,
-    ) -> Arc<PreviewProgram> {
+    ) -> Result<Arc<PreviewProgram>, String> {
         let key = surface_hash(surface_wgsl, tex_count);
         if let Some(i) = self
             .programs
@@ -600,15 +652,15 @@ impl PreviewSession {
             let entry = self.programs.remove(i);
             let program = entry.3.clone();
             self.programs.insert(0, entry);
-            return program;
+            return Ok(program);
         }
-        let program = Arc::new(self.build_program(gpu, surface_wgsl, tex_count));
+        let program = Arc::new(self.build_program(gpu, surface_wgsl, tex_count)?);
         self.programs.insert(
             0,
             (key, tex_count, surface_wgsl.to_string(), program.clone()),
         );
         self.programs.truncate(PIPELINE_CACHE_CAP);
-        program
+        Ok(program)
     }
 
     fn build_program(
@@ -616,9 +668,26 @@ impl PreviewSession {
         gpu: &GpuContext,
         surface_wgsl: &str,
         tex_count: u32,
-    ) -> PreviewProgram {
+    ) -> Result<PreviewProgram, String> {
         let device = &gpu.device;
         let source = format!("{surface_wgsl}\n{PREVIEW_WRAPPER}");
+
+        // **Validate what is actually compiled** (P23.2a audit — M3).
+        //
+        // `emit_wgsl` naga-validates the surface it generates, and the wrapper
+        // is valid on its own — but the module handed to wgpu is their
+        // CONCATENATION, which naga has never seen. A graph that emits a symbol
+        // colliding with the wrapper's `pv_*` / `PvCam` names, or disagrees
+        // about a binding, is a validation error at `create_shader_module`, and
+        // wgpu's default uncaptured-error handler ABORTS THE PROCESS. Losing the
+        // editor because a material graph named a function `pv_light` is not a
+        // failure mode a shipping tool may have.
+        //
+        // Refusal-as-value, on the P21 law: the panel shows "preview failed: …"
+        // in the diagnostics slot it already has, and keeps running.
+        inf_material::validate_module(&source)
+            .map_err(|e| format!("preview shader did not validate: {e}"))?;
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("preview-shader"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -672,10 +741,10 @@ impl PreviewSession {
             multiview_mask: None,
             cache: None,
         });
-        PreviewProgram {
+        Ok(PreviewProgram {
             pipeline,
             textures: textures.map(|(t, s, bg, _)| (t, s, bg)),
-        }
+        })
     }
 
     /// Render one frame of `surface_wgsl` from `view`, returning tightly-packed
@@ -698,13 +767,13 @@ impl PreviewSession {
         tex_count: u32,
         view: PreviewView,
     ) -> Result<Vec<u8>, String> {
-        let program = self.program(gpu, surface_wgsl, tex_count);
+        let program = self.program(gpu, surface_wgsl, tex_count)?;
 
-        let eye = view.eye();
-        let look = look_at_rh(eye, Vec3::ZERO, Vec3::Y);
-        let proj = perspective_rh(40f32.to_radians(), 1.0, 0.05, 20.0);
+        // Every camera literal that used to live here is a `PreviewView` field
+        // now (P23.2a audit — M2), so the CPU framing test can see all six.
+        let (eye, view_proj) = view.eye_and_view_proj();
         let cam = PreviewCam {
-            view_proj: (proj * look).to_cols_array_2d(),
+            view_proj: view_proj.to_cols_array_2d(),
             normal_matrix: Mat4::IDENTITY.to_cols_array_2d(),
             cam_pos: [eye.x, eye.y, eye.z, 1.0],
         };
@@ -758,6 +827,27 @@ impl PreviewSession {
         gpu.queue.submit([encoder.finish()]);
         self.target.read_rgba(gpu)
     }
+}
+
+/// The preview session's depth view at `size`. One of exactly two things a
+/// resize rebuilds (the other is the colour target).
+fn new_depth(gpu: &GpuContext, size: u32) -> wgpu::TextureView {
+    gpu.device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("preview-depth"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 /// The preview sphere's interleaved vertex layout (position / normal / uv).
@@ -1265,25 +1355,118 @@ fn cs_bake(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
     }
 
-    /// **The extraction changed the cost, not the picture.**
+    /// **The extraction changed the cost, not the picture** — all six camera
+    /// parameters, not one (P23.2a audit — M2).
     ///
-    /// The pre-P23.2a preview looked from a hard-coded
-    /// `normalize(0.5, 0.35, 1.0) * 2.8`; the session takes yaw/pitch/distance
-    /// so a panel can orbit. `PreviewView::default` is that same eye, and this
-    /// pins it — on the CPU, so it runs on every CI leg (there is no adapter
-    /// there, which is exactly where a silently re-framed preview would ship).
+    /// This test is the *replacement* for the deleted "a session render matches
+    /// the one-shot" guarantee, so it has to be able to fail wherever that
+    /// guarantee could have: on an adapter-less CI leg, where no GPU test runs
+    /// at all and a silently re-framed preview would otherwise ship.
+    ///
+    /// It used to check the eye alone. Target, up, field of view, near and far
+    /// were literals inside `render`, so moving the look-at point, widening the
+    /// lens from 40° to 55°, or pulling the far plane from 20 to 8 all passed —
+    /// it pinned one sixth of the camera and read as if it pinned the framing.
+    /// Comparing the **view-projection matrix** against one built from the
+    /// historical literals covers every one of them at once, and covers them
+    /// the way the shader sees them.
     ///
     /// Tolerance is f32 round-trip through `atan2`/`asin` and back, not
     /// "roughly the same view": 1e-5 is about six significant figures.
     #[test]
     fn the_default_view_reproduces_the_historical_framing() {
-        let historical = Vec3::new(0.5, 0.35, 1.0).normalize() * 2.8;
-        let eye = PreviewView::default().eye();
+        // Verbatim the pre-P23.2a body of `render_material_preview`.
+        let historical_eye = Vec3::new(0.5, 0.35, 1.0).normalize() * 2.8;
+        let historical_vp = perspective_rh(40f32.to_radians(), 1.0, 0.05, 20.0)
+            * look_at_rh(historical_eye, Vec3::ZERO, Vec3::Y);
+
+        let (eye, view_proj) = PreviewView::default().eye_and_view_proj();
         assert!(
-            (eye - historical).length() < 1e-5,
-            "the default preview camera moved: {eye:?} vs the historical \
-             {historical:?} — every material thumbnail in every project would \
-             re-render from a different angle"
+            (eye - historical_eye).length() < 1e-5,
+            "the default preview EYE moved: {eye:?} vs the historical \
+             {historical_eye:?}"
+        );
+        let drift = (0..4)
+            .flat_map(|c| (0..4).map(move |r| (c, r)))
+            .map(|(c, r)| (view_proj.col(c)[r] - historical_vp.col(c)[r]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            drift < 1e-5,
+            "the default preview PROJECTION moved (max element drift {drift:e}): \
+             target/up/fov/near/far are `PreviewView` fields precisely so this \
+             assertion can see them. Every material thumbnail in every project \
+             would re-render from a different camera.\n  now:        {view_proj:?}\n  \
+             historical: {historical_vp:?}"
+        );
+    }
+
+    /// The guard on the guard: each of the five parameters that used to be a
+    /// literal must MOVE the projection, or the matrix comparison above is
+    /// pinning fields that reach nothing.
+    ///
+    /// Without this, wiring `PreviewView::fov_deg` to a struct field that
+    /// `eye_and_view_proj` ignores would leave the framing test green while the
+    /// preview quietly kept its hard-coded lens — the same "tests the thing
+    /// next to the thing it names" shape the audit found.
+    #[test]
+    fn every_camera_field_actually_reaches_the_projection() {
+        let base = PreviewView::default();
+        let baseline = base.eye_and_view_proj().1;
+        let differs = |v: PreviewView, what: &str| {
+            let vp = v.eye_and_view_proj().1;
+            let drift = (0..4)
+                .flat_map(|c| (0..4).map(move |r| (c, r)))
+                .map(|(c, r)| (vp.col(c)[r] - baseline.col(c)[r]).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                drift > 1e-4,
+                "changing `{what}` did not move the view-projection — the field \
+                 is decorative and the framing test cannot see it"
+            );
+        };
+        differs(
+            PreviewView {
+                target: Vec3::new(0.0, 0.5, 0.0),
+                ..base
+            },
+            "target",
+        );
+        differs(
+            PreviewView {
+                up: Vec3::new(0.2, 1.0, 0.0).normalize(),
+                ..base
+            },
+            "up",
+        );
+        differs(
+            PreviewView {
+                fov_deg: 55.0,
+                ..base
+            },
+            "fov_deg",
+        );
+        differs(PreviewView { near: 0.5, ..base }, "near");
+        differs(PreviewView { far: 8.0, ..base }, "far");
+        differs(
+            PreviewView {
+                yaw_deg: base.yaw_deg + 20.0,
+                ..base
+            },
+            "yaw_deg",
+        );
+        differs(
+            PreviewView {
+                pitch_deg: base.pitch_deg + 20.0,
+                ..base
+            },
+            "pitch_deg",
+        );
+        differs(
+            PreviewView {
+                distance: 4.0,
+                ..base
+            },
+            "distance",
         );
     }
 
@@ -1294,32 +1477,137 @@ fn cs_bake(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// pixels and pass every other test in this file while being exactly the
     /// thing `PreviewSession` exists to avoid. `Arc::ptr_eq` is the only claim
     /// that can tell the two apart.
+    ///
+    /// **It goes through `render`, not `program`** (P23.2a audit — M1). The
+    /// first version of this test called `program` directly, which tested the
+    /// cache next to the thing that is supposed to use it: replacing `render`'s
+    /// lookup with an unconditional rebuild left all nine tests in this file
+    /// green while warm latency degraded tenfold. Every assertion below is now
+    /// downstream of an actual frame.
     #[test]
     fn the_pipeline_cache_hands_back_the_same_program() {
         let Some(gpu) = gpu_or_skip() else { return };
         let mut session = PreviewSession::new(&gpu, 32);
+        let v = PreviewView::default();
 
-        let first = session.program(&gpu, MIN_SURFACE, 0);
-        let again = session.program(&gpu, MIN_SURFACE, 0);
+        // THE CLAIM: rendering twice compiles once.
+        session
+            .render(&gpu, MIN_SURFACE, 0, v)
+            .expect("first frame");
+        assert_eq!(session.cached_programs(), 1);
+        session
+            .render(&gpu, MIN_SURFACE, 0, v)
+            .expect("second frame");
+        assert_eq!(
+            session.cached_programs(),
+            1,
+            "a warm re-render added a cache entry — `render` is not going \
+             through the cache at all"
+        );
+
+        // …and the entry it holds is the same allocation, which is what
+        // "did not recompile" means where a count cannot tell.
+        let first = session.program(&gpu, MIN_SURFACE, 0).expect("cached");
+        let again = session.program(&gpu, MIN_SURFACE, 0).expect("cached");
         assert!(
             Arc::ptr_eq(&first, &again),
             "an unchanged surface recompiled its pipeline"
         );
-        assert_eq!(session.cached_programs(), 1);
 
         // A changed surface must NOT reuse it — the other direction, and the
         // failure that would draw the previous material with total confidence.
-        let other = session.program(&gpu, SLAB_SURFACE, 0);
-        assert!(!Arc::ptr_eq(&other, &first));
+        session
+            .render(&gpu, SLAB_SURFACE, 0, v)
+            .expect("slab frame");
         assert_eq!(session.cached_programs(), 2);
+        let other = session.program(&gpu, SLAB_SURFACE, 0).expect("cached");
+        assert!(!Arc::ptr_eq(&other, &first));
 
         // …and the same surface at a different `tex_count` is a different
         // pipeline LAYOUT, so it may not share either.
-        let textured = session.program(&gpu, TEX_SURFACE, 1);
+        session
+            .render(&gpu, TEX_SURFACE, 1, v)
+            .expect("textured frame");
+        let textured = session.program(&gpu, TEX_SURFACE, 1).expect("cached");
         assert!(!Arc::ptr_eq(&textured, &first));
 
         // The original is still cached (MRU, not overwritten).
-        assert!(Arc::ptr_eq(&session.program(&gpu, MIN_SURFACE, 0), &first));
+        assert!(Arc::ptr_eq(
+            &session.program(&gpu, MIN_SURFACE, 0).expect("cached"),
+            &first
+        ));
+    }
+
+    /// **A resize keeps the compiled pipelines** (P23.2a audit — M5).
+    ///
+    /// A pipeline depends on the shader, the layouts and the two constant
+    /// formats — never on the extent it draws into. Rebuilding the session on a
+    /// size change threw every program away to reallocate two textures, which
+    /// matters the moment `material_compile` (256) and a Model Editor panel
+    /// (512) share one `Thumbnailer`: they would have evicted each other on
+    /// every alternation, permanently.
+    #[test]
+    fn a_resize_keeps_the_compiled_pipelines() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let mut session = PreviewSession::new(&gpu, 64);
+        let v = PreviewView::default();
+        session.render(&gpu, MIN_SURFACE, 0, v).expect("at 64");
+        let before = session.program(&gpu, MIN_SURFACE, 0).expect("cached");
+
+        session.resize(&gpu, 128);
+        assert_eq!(session.size(), 128);
+        let img = session.render(&gpu, MIN_SURFACE, 0, v).expect("at 128");
+        assert_eq!(img.len(), 128 * 128 * 4, "the target really resized");
+        assert_eq!(
+            session.cached_programs(),
+            1,
+            "a resize recompiled — the program cache is being thrown away with \
+             the target it does not depend on"
+        );
+        assert!(Arc::ptr_eq(
+            &session.program(&gpu, MIN_SURFACE, 0).expect("cached"),
+            &before
+        ));
+
+        // …and back down, because the real pattern alternates.
+        session.resize(&gpu, 64);
+        let img = session.render(&gpu, MIN_SURFACE, 0, v).expect("back at 64");
+        assert_eq!(img.len(), 64 * 64 * 4);
+        assert_eq!(session.cached_programs(), 1);
+    }
+
+    /// **A surface that collides with the wrapper is a REFUSAL, not an abort**
+    /// (P23.2a audit — M3).
+    ///
+    /// The module wgpu compiles is `surface_wgsl` concatenated with
+    /// `PREVIEW_WRAPPER`, which naga has never validated as a whole. A graph
+    /// emitting a `pv_*` symbol would hit `create_shader_module` and, on wgpu's
+    /// default uncaptured-error handler, take the editor down with the author's
+    /// unsaved level in it. Validating the composition first turns that into a
+    /// string the panel shows.
+    ///
+    /// Needs no GPU: the validation happens before any device call, which is
+    /// exactly why it can be trusted to run everywhere.
+    #[test]
+    fn a_surface_colliding_with_the_preview_wrapper_refuses_instead_of_aborting() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let mut session = PreviewSession::new(&gpu, 32);
+        // `pv_aces` is the wrapper's tonemapper; redefining it is a duplicate
+        // symbol in the composed module and valid on its own.
+        let colliding =
+            format!("{MIN_SURFACE}\nfn pv_aces(x: vec3<f32>) -> vec3<f32> {{ return x; }}\n");
+        let err = session
+            .render(&gpu, &colliding, 0, PreviewView::default())
+            .expect_err("a colliding surface compiled");
+        assert!(
+            err.contains("preview shader did not validate"),
+            "the refusal must name what failed, not leak a raw naga string: {err}"
+        );
+        // The session survives and still renders a good surface afterwards.
+        assert_eq!(session.cached_programs(), 0, "a refusal cached nothing");
+        session
+            .render(&gpu, MIN_SURFACE, 0, PreviewView::default())
+            .expect("the session is still usable after a refusal");
     }
 
     /// The cache is BOUNDED: a material graph recompiles on every keystroke, so

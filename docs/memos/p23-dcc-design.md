@@ -282,7 +282,14 @@ Consequences recorded as decisions:
 There is also the honest caveat the numbers cannot cover: base64 + IPC +
 `<img>` decode in WebView2 are not measured here, because they are not
 measurable from a Rust test. They are bounded by the payload size, which is why
-the byte counts are in the table.
+the byte counts are in the table — and at 512² the bound is **not comfortable**:
+`encode_png_fast` produces 1 049 236 B, which base64 inflates to ~1.4 MB per
+frame, so a 30 fps orbit pushes **~42 MB/s of string through the webview
+bridge**. The GPU cost says the panel is free; the transport says a 512² orbit
+is the thing to measure first when P23.4 has something to measure. 256²
+(262 488 B → ~350 kB, ~10 MB/s at 30 fps) is the default for that reason, and
+if 512² is wanted the fix is the one already named: raw RGBA over a Tauri
+channel into an `ImageData`, skipping both the encode and the base64.
 
 `PreviewSession` is deliberately not a Model-Editor-only object: `Thumbnailer`
 holds one, so `material_compile`'s preview got the caching for free and the seam
@@ -398,3 +405,23 @@ asset-scoped ruling rather than by new machinery:
 * **Ctrl+Z inside a detached panel window does nothing** (§3, last part). Needs
   a scoped keybinding listener in `PanelWindowApp` and a decision about which
   global chords a panel window owns.
+* **A lost preview device stays lost** (P23.2a audit — M4). `Thumbnailer`
+  resolves its `GpuContext` once and caches the result in `GpuState`; there is
+  no `is_lost()` check and no rebuild, so after a driver TDR — a real event on a
+  machine that also runs the interactive viewport — every material preview
+  reads "No preview" for the rest of the session, and only a restart fixes it.
+  The lenient error handler installed in P23.2a keeps the editor *alive* through
+  that, which is the difference between a degraded panel and a lost level, but
+  it does not recover. The fix shape is the one the viewport host already uses:
+  check `GpuContext::is_lost()` before a render, drop the context and the
+  `PreviewSession` together on a loss, and let `ensure_gpu` rebuild both on the
+  next call (the session holds nothing that outlives its device, so a drop-and-
+  recreate is the whole of it).
+* **There is no `viewport_detach`.** `viewport_attach` inserts into the keyed
+  map and nothing ever removes an entry: a `ViewportHandle` lives until the
+  process exits, holding its thread, its native child window and its wgpu
+  surface. Harmless while the only viewport is the shell's permanent one — it is
+  attached once and wanted for ever — and an unbounded native-window factory the
+  moment P23.4 opens and closes Model Editor tabs. The command is the missing
+  half of the keyed map, and `ViewportHandle::destroy` (which already exists on
+  all three platforms) is what it calls.

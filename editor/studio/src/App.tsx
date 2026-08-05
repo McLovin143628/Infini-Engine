@@ -20,13 +20,10 @@ import FirstRunTour from "./shell/FirstRunTour";
 import { DockWorkspace } from "./panels/dock/DockWorkspace";
 import ViewportPanel from "./viewport/ViewportPanel";
 import { bootstrapShellCommands } from "./shell/shellCommands";
-import {
-  dispatchChord,
-  installKeybindingListener,
-  registerDefaultKeybindings,
-} from "./lib/keybindings";
+import { installKeybindingListener, registerDefaultKeybindings } from "./lib/keybindings";
 import { listenTo } from "./lib/events";
 import { PRIMARY_VIEWPORT } from "./lib/viewportIds";
+import { focusViewport, handleViewportChord, VIEWPORT_PANEL_ID } from "./lib/viewportFocus";
 import { startLogListener } from "./stores/logStore";
 import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
 import { initAssetSync, registerAssetCommands } from "./stores/assetStore";
@@ -217,7 +214,14 @@ export default function App() {
     // NOT filtered by `payload.viewport`, deliberately: what is forwarded here
     // is a GLOBAL shortcut the viewport declined to consume (Ctrl+S, the
     // palette), and those belong to the shell whichever viewport had focus.
-    listenTo("viewport://key", (payload) => dispatchChord(payload.chord)).then((fn) => {
+    //
+    // `handleViewportChord` takes panel focus BEFORE replaying (P23.2a audit —
+    // B1): the arrival of a forwarded chord is proof the native viewport holds
+    // OS focus, and it is the only signal available, because the native child
+    // swallows DOM pointer events so a click on the 3D view is not a DOM event.
+    // Without it, Ctrl+Z over the viewport undid whichever panel was clicked
+    // last.
+    listenTo("viewport://key", (payload) => handleViewportChord(payload.chord)).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;
     });
@@ -238,8 +242,16 @@ export default function App() {
             React tree is invariant, so the native child resizes and never
             remounts (the Spike A invariant). `PRIMARY_VIEWPORT` is the id it
             attaches under; the props are the registry's component signature. */}
-        <div className="absolute inset-0 flex p-1">
-          <ViewportPanel panelId="viewport" params={PRIMARY_VIEWPORT} />
+        <div
+          className="absolute inset-0 flex p-1"
+          // The DOM half of B1: the hole is a native child window and swallows
+          // pointer events, but this wrapper covers the viewport toolbar and the
+          // padding around it — real DOM surface where a click means "I am
+          // working in the viewport now". The chord path above covers clicks on
+          // the 3D view itself.
+          onPointerDownCapture={focusViewport}
+        >
+          <ViewportPanel panelId={VIEWPORT_PANEL_ID} params={PRIMARY_VIEWPORT} />
         </div>
       </DockWorkspace>
       <ContentDrawer />

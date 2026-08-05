@@ -33,16 +33,21 @@ export default function ViewportPanel({ params }: { panelId?: string; params?: s
   // Simulate (P8.4): a live session tints the viewport frame.
   const running = useSimStore((s) => s.running);
 
-  // Tell the airspace refcount this viewport exists (P23.2a): window-wide
-  // overlays hide every attached viewport, and one that mounts while the
-  // palette is already open must come up hidden rather than punch through it.
-  useEffect(() => registerViewport(id), [id]);
-
   useEffect(() => {
     const el = holeRef.current;
     if (!el) return;
 
     let raf = 0;
+    // Airspace registration (P23.2a): window-wide overlays hide every attached
+    // viewport, and one that comes up while the palette is open must come up
+    // HIDDEN rather than punch through it.
+    //
+    // Registered inside the attach effect and only once `attach` RESOLVES
+    // (P23.2a audit): a separate effect ran before this one, so the hide it
+    // triggered reached a backend whose viewport map was still empty and was
+    // dropped — the native child then attached and drew straight over the open
+    // overlay, which is the exact case registration exists for.
+    let unregister: (() => void) | undefined;
     const report = () => {
       const rect = toPhysicalRect(el.getBoundingClientRect(), window.devicePixelRatio);
       viewport.setRect(rect, id).catch(() => {});
@@ -54,7 +59,10 @@ export default function ViewportPanel({ params }: { panelId?: string; params?: s
 
     viewport
       .attach(id)
-      .then(report)
+      .then(() => {
+        report();
+        unregister = registerViewport(id);
+      })
       .catch((e) => console.error("viewport attach failed:", e));
 
     const ro = new ResizeObserver(schedule);
@@ -82,6 +90,9 @@ export default function ViewportPanel({ params }: { panelId?: string; params?: s
       window.removeEventListener("resize", schedule);
       mql?.removeEventListener("change", onDprChange);
       cancelAnimationFrame(raf);
+      // May be undefined if `attach` has not resolved yet — the disposer is
+      // assigned inside the same `.then`, so there is nothing to release.
+      unregister?.();
     };
   }, [id]);
 

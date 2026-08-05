@@ -36,8 +36,11 @@ pub use scene_render::{PreviewSession, PreviewView};
 pub struct Thumbnailer {
     size: u32,
     gpu: GpuState,
-    /// Rebuilt only when the requested preview size changes (the session's
-    /// target and depth are fixed for its life).
+    /// Created on first use and then kept for the process's life. A size change
+    /// **resizes** it rather than replacing it, so the compiled pipelines
+    /// survive (P23.2a audit — M5): `material_compile` asks for 256 and a Model
+    /// Editor panel will ask for 512, and rebuilding would have had the two
+    /// consumers evict each other's programs on every alternation.
     preview: Option<PreviewSession>,
 }
 
@@ -68,7 +71,24 @@ impl Thumbnailer {
     fn ensure_gpu(&mut self) {
         if matches!(self.gpu, GpuState::Uninit) {
             self.gpu = match GpuContext::headless() {
-                Ok(ctx) => GpuState::Ready(Box::new(ctx)),
+                Ok(ctx) => {
+                    // **This device is LIVE in the editor** (P23.2a audit — M3).
+                    //
+                    // `GpuContext::headless` deliberately keeps wgpu's fatal
+                    // default handler, because its other callers are CI: a
+                    // golden or a validation regression must abort loudly
+                    // rather than degrade. But the editor's `MaterialState`
+                    // holds a `Thumbnailer` for the whole session and drives it
+                    // from the material panel on every graph edit — so on this
+                    // one instance the fatal default means a bad draw takes the
+                    // EDITOR down, with the author's unsaved level in it.
+                    //
+                    // The composed-module validation in `PreviewSession` catches
+                    // the failure we know about; this is the net under the ones
+                    // we do not. Errors are counted and rate-limited-logged.
+                    ctx.install_lenient_error_handler();
+                    GpuState::Ready(Box::new(ctx))
+                }
                 Err(e) => {
                     tracing::info!("thumbnailer: no GPU adapter ({e}); mesh/material previews off");
                     GpuState::Unavailable
@@ -153,23 +173,19 @@ impl Thumbnailer {
     /// sphere buffers and — when the same surface comes back, as it does on an
     /// undo or a parameter revert — the compiled pipeline are all reused. The
     /// image is identical to the pre-session one-shot; only the cost changed.
+    ///
+    /// Three outcomes, all of them honest (P23.2a audit — M3):
+    /// `Ok(Some(rgba))` rendered; `Ok(None)` this machine has no GPU adapter
+    /// (the standing degrade-to-icons case); `Err(msg)` the composed preview
+    /// shader did not validate, which the panel shows in its diagnostics slot
+    /// rather than dying on.
     pub fn render_material_preview(
         &mut self,
         surface_wgsl: &str,
         tex_count: u32,
         size: u32,
-    ) -> Option<Vec<u8>> {
-        self.ensure_gpu();
-        let GpuState::Ready(gpu) = &self.gpu else {
-            return None;
-        };
-        if self.preview.as_ref().is_none_or(|s| s.size() != size) {
-            self.preview = Some(PreviewSession::new(gpu, size));
-        }
-        let session = self.preview.as_mut()?;
-        session
-            .render(gpu, surface_wgsl, tex_count, PreviewView::default())
-            .ok()
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.render_preview_view(surface_wgsl, tex_count, size, PreviewView::default())
     }
 
     /// Render an interactive preview frame at an explicit camera (P23.2a) — the
@@ -177,23 +193,27 @@ impl Thumbnailer {
     ///
     /// The same session as [`render_material_preview`](Self::render_material_preview),
     /// so a panel that orbits and a compile that re-renders share one set of
-    /// compiled pipelines.
+    /// compiled pipelines — including **across a size change**, which
+    /// `PreviewSession::resize` keeps (the two consumers ask for 512 and 256).
     pub fn render_preview_view(
         &mut self,
         surface_wgsl: &str,
         tex_count: u32,
         size: u32,
         view: PreviewView,
-    ) -> Option<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>, String> {
         self.ensure_gpu();
         let GpuState::Ready(gpu) = &self.gpu else {
-            return None;
+            return Ok(None);
         };
-        if self.preview.as_ref().is_none_or(|s| s.size() != size) {
-            self.preview = Some(PreviewSession::new(gpu, size));
+        match &mut self.preview {
+            Some(session) => session.resize(gpu, size),
+            slot @ None => *slot = Some(PreviewSession::new(gpu, size)),
         }
-        let session = self.preview.as_mut()?;
-        session.render(gpu, surface_wgsl, tex_count, view).ok()
+        let Some(session) = self.preview.as_mut() else {
+            return Ok(None);
+        };
+        session.render(gpu, surface_wgsl, tex_count, view).map(Some)
     }
 
     /// Bake a texture graph's generated `compute_wgsl` (entry `cs_bake`) to a

@@ -466,10 +466,17 @@ export function registerSceneCommands(): void {
   // **Undo routes to the focused panel first, the scene otherwise** (P23.2a).
   //
   // The scene is the DEFAULT, not the only answer: with no panel focused, or a
-  // focused panel that claimed no scope (viewport, outliner, details — the
-  // level-editing surface), `dispatchUndo` returns false and this runs, which
-  // is exactly what Ctrl+Z did before. What changed is that a graph editor with
-  // its own journal now gets its own Ctrl+Z instead of quietly moving an actor.
+  // focused panel that claimed no scope, `dispatchUndo` returns false and this
+  // runs, which is exactly what Ctrl+Z did before. What changed is that a graph
+  // editor with its own journal now gets its own Ctrl+Z instead of quietly
+  // moving an actor.
+  //
+  // The level-editing surface — outliner, details, and **the viewport** — is on
+  // the default path because none of them registers a scope. For the viewport
+  // that is only half the story and the other half was a bug (P23.2a audit —
+  // B1): claiming no scope is useless if focus can never REACH the viewport,
+  // and it could not, because the native child swallows DOM pointer events.
+  // `lib/viewportFocus.ts` is what puts it back on this path.
   wire("edit.undo", () => {
     if (!dispatchUndo()) s().undo();
   });

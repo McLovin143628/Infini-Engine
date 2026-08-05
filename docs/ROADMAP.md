@@ -6997,7 +6997,20 @@ and the headless preview render is the proven offscreen-PNG path.
   attached viewport), because `Target::All` existed in Rust while the frontend primitive
   could only name one viewport — the moment viewport #2 existed, every menu, dialog and
   drag ghost would have been painted over by it; a viewport attaching *while* an overlay is
-  open now comes up hidden.
+  open now comes up hidden. LAW: **a gate must aim at the thing it names** — the
+  pipeline-cache test called `program()` and never `render()`, so replacing `render`'s
+  cache lookup with an unconditional rebuild left all nine preview tests green while warm
+  latency degraded tenfold; and the framing test pinned the eye while target/up/fov/near/far
+  were literals inside `render`, so 40°→55° passed. Both now go through the real entry
+  point, and every camera parameter is a `PreviewView` field with a guard test proving each
+  one moves the projection. **Carried remainders**: a lost preview device stays lost (no
+  `is_lost()` check on the `Thumbnailer`'s cached context — after a TDR every material
+  preview reads "No preview" until restart; the lenient handler keeps the editor alive but
+  does not recover); there is **no `viewport_detach`**, so the keyed map only ever grows —
+  harmless for the shell's one permanent viewport, an unbounded native-window factory the
+  moment P23.4 opens and closes Model Editor tabs; and a 512² offscreen orbit pushes
+  ~1.4 MB of base64 per frame (**~42 MB/s at 30 fps**) through the webview bridge, which is
+  why 256² is the default and raw RGBA over a channel is the named next lever.
 - **P23.3 Mesh kernel** — 1. `inf-dcc` (Ring 0): a half-edge structure importing from and
   exporting to `inf-mesh`'s `MeshAsset` (the missing writer); 2. validity invariants
   property-tested; 3. an op journal — deterministic replay is both the undo/redo story and the

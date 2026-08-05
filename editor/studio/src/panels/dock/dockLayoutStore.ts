@@ -636,7 +636,13 @@ export const useDockLayout = create<DockLayoutStore>((set, get) => {
       // A closed panel cannot be where the user is looking (P23.2a) — leaving
       // it focused would route Ctrl+Z into a document that is no longer on
       // screen, which is the bug the routing exists to fix, inverted.
-      get().setFocusedPanel(null);
+      //
+      // GUARDED, like `hidePanel` (P23.2a audit): clearing unconditionally
+      // would move focus off an unrelated panel every time a dynamic instance
+      // closed. Dead today — every registered type is a singleton, so this path
+      // is unreachable — and live the moment a non-singleton one exists, which
+      // is the per-asset Model Editor tab P23.4 opens.
+      if (get().focusedPanel === id) get().setFocusedPanel(null);
       // Explicit close (instance destroyed) → let resource owners free up
       // (e.g. the terminal's PTY). A location move goes through `applyDrop`,
       // which never notifies, so a drag keeps the resource alive.

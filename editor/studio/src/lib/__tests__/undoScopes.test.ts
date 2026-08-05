@@ -16,6 +16,8 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { useDockLayout } from "../../panels/dock/dockLayoutStore";
 import { registerPanelType } from "../../panels/panelRegistry";
+import { __resetCommandsForTest, registerCommands, setCommandHandler } from "../commands";
+import { __resetKeybindingsForTest, bindKey } from "../keybindings";
 import {
   __resetUndoScopesForTest,
   dispatchRedo,
@@ -23,6 +25,7 @@ import {
   registerUndoScope,
   undoScopeFor,
 } from "../undoScopes";
+import { focusViewport, handleViewportChord, VIEWPORT_PANEL_ID } from "../viewportFocus";
 
 /** A minimal registered type so `panelTypeOf`/`panelDefFor` resolve. */
 function stubPanel(type: string) {
@@ -39,6 +42,8 @@ function stubPanel(type: string) {
 
 beforeEach(() => {
   __resetUndoScopesForTest();
+  __resetCommandsForTest();
+  __resetKeybindingsForTest();
   useDockLayout.getState().setFocusedPanel(null);
   stubPanel("material");
   stubPanel("outliner");
@@ -107,4 +112,65 @@ test("closing the focused panel clears the focus, so undo goes back to the scene
 test("an unregistered type has no scope", () => {
   expect(undoScopeFor("nobody")).toBeUndefined();
   expect(undoScopeFor(null)).toBeUndefined();
+});
+
+// ── B1: the viewport takes focus back (P23.2a audit) ───────────────────────
+//
+// **The exact repro.** Click the Material editor, click into the viewport,
+// press Ctrl+Z. Before the fix the graph rewound and the actor did not move,
+// repeatably — `focusedPanel` still said "material", because a click on the 3D
+// view is not a DOM event (the native child window swallows it) and no
+// `setFocusedPanel` call site could ever name the viewport.
+//
+// "Click into the viewport" is exercised through the path that actually carries
+// it: win32 forwards every Ctrl chord it declines on `viewport://key`, and the
+// arrival of one is proof the native viewport holds OS focus.
+
+test("B1: focus material, then Ctrl+Z over the viewport → the SCENE undoes", () => {
+  stubPanel("viewport");
+  const materialUndo = vi.fn();
+  const sceneUndo = vi.fn();
+  registerUndoScope("material", { undo: materialUndo, redo: vi.fn() });
+
+  // Mirror `registerSceneCommands`' wiring exactly: undo routes to the focused
+  // panel's scope, and falls through to the scene when nothing claims it.
+  registerCommands([{ id: "edit.undo", title: "Undo", category: "Edit" }]);
+  setCommandHandler("edit.undo", () => {
+    if (!dispatchUndo()) sceneUndo();
+  });
+  bindKey({ chord: "Ctrl+Z", command: "edit.undo" });
+
+  // 1. The author clicks the Material panel.
+  useDockLayout.getState().setFocusedPanel("material");
+  expect(dispatchUndo()).toBe(true);
+  expect(materialUndo).toHaveBeenCalledTimes(1);
+
+  // 2. …clicks into the viewport and presses Ctrl+Z. The chord arrives over
+  //    `viewport://key`, which is the whole of "the viewport has focus".
+  expect(handleViewportChord("Ctrl+Z")).toBe(true);
+
+  // 3. The SCENE undid. The material graph did not move.
+  expect(sceneUndo).toHaveBeenCalledTimes(1);
+  expect(materialUndo).toHaveBeenCalledTimes(1);
+  expect(useDockLayout.getState().focusedPanel).toBe(VIEWPORT_PANEL_ID);
+});
+
+test("B1: a pointer-down on the viewport's DOM margin focuses it too", () => {
+  // The toolbar strip and the padding around the hole ARE real DOM surface, so
+  // `App` hangs `focusViewport` on them. The hole itself cannot report.
+  stubPanel("viewport");
+  registerUndoScope("material", { undo: vi.fn(), redo: vi.fn() });
+  useDockLayout.getState().setFocusedPanel("material");
+
+  focusViewport();
+
+  expect(useDockLayout.getState().focusedPanel).toBe(VIEWPORT_PANEL_ID);
+  expect(dispatchUndo()).toBe(false); // ⇒ the caller runs the scene's undo
+});
+
+test("B1: the viewport registers no undo scope, so it rides the scene default", () => {
+  // If a future edit gave "viewport" a scope, the two tests above would still
+  // pass while Ctrl+Z over the 3D view stopped undoing the level.
+  stubPanel("viewport");
+  expect(undoScopeFor(VIEWPORT_PANEL_ID)).toBeUndefined();
 });
