@@ -81,12 +81,46 @@ pub enum ColliderShape3D {
         vertices: Vec<DVec3>,
         indices: Vec<[u32; 3]>,
     },
+    /// The **convex hull** of a point cloud (P22.2): the solid body of the
+    /// smallest convex shape containing every point. The points need not already
+    /// be a hull — rapier computes it — and interior points are simply ignored.
+    ///
+    /// # Why this variant exists at all, given [`Trimesh`](Self::Trimesh)
+    ///
+    /// Because **a convex hull has a well-defined mass and a trimesh does not.**
+    /// A triangle soup is a *surface*: rapier can raycast and collide against it,
+    /// but it cannot integrate a volume over it, so its mass properties come back
+    /// zero and a dynamic body built from one has no inertia to simulate. That is
+    /// why the `Trimesh` doc above says "static/kinematic use only in practice",
+    /// and it is exactly the wall the fracture pipeline would hit: a chunk of a
+    /// shattered wall is the archetypal *dynamic* body, and it needs to weigh
+    /// something.
+    ///
+    /// A hull is a *solid*. rapier knows its volume, centre of mass and inertia
+    /// tensor exactly (see [`volume_m3`](Self::volume_m3)), so
+    /// `density × volume` is a real mass and a chunk falls, tumbles and rests
+    /// like an object rather than like a ghost.
+    ///
+    /// The trade is stated: a hull cannot be concave, so a chunk with a hollow or
+    /// a re-entrant notch collides as if it were filled in. For pre-fractured
+    /// Voronoi chunks that is not an approximation at all — a Voronoi cell
+    /// intersected with a convex hull **is** convex — which is why the P22.2 cook
+    /// emits hull point sets in the first place.
+    ///
+    /// A degenerate point set (fewer than four points, or points that are
+    /// collinear/coplanar and so bound no volume) is **refused**, not panicked
+    /// on: [`to_shared`](Self::to_shared) returns `None` and
+    /// [`PhysicsWorld3D::add_collider`] skips the collider, leaving the body
+    /// intact. Producers should ask [`convex_hull_is_buildable`] first — it is
+    /// the same door — rather than discover the refusal at spawn time.
+    ConvexHull { points: Vec<DVec3> },
 }
 
 impl ColliderShape3D {
-    /// Build the rapier shape. Returns `None` if a `Trimesh` buffer is degenerate
-    /// (empty / non-manifold) so [`PhysicsWorld3D::add_collider`] can refuse it
-    /// rather than panic.
+    /// Build the rapier shape. Returns `None` when the shape's buffers cannot
+    /// make a collider — a degenerate `Trimesh` (empty / non-manifold) or a
+    /// degenerate `ConvexHull` (see [`convex_hull_is_buildable`]) — so
+    /// [`PhysicsWorld3D::add_collider`] can refuse it rather than panic.
     pub(crate) fn to_shared(&self) -> Option<SharedShape> {
         Some(match self {
             ColliderShape3D::Sphere { radius } => SharedShape::ball(*radius),
@@ -104,8 +138,81 @@ impl ColliderShape3D {
                 let verts: Vec<DVec3> = vertices.clone();
                 SharedShape::trimesh(verts, indices.clone()).ok()?
             }
+            ColliderShape3D::ConvexHull { points } => hull_shape(points)?,
         })
     }
+
+    /// The shape's **volume in m³**, or `None` for a shape that has no
+    /// well-defined one.
+    ///
+    /// Read off the *same* mass properties the solver integrates (at unit
+    /// density, where mass and volume are numerically equal) rather than from a
+    /// second hand-written per-shape volume formula that could drift from it —
+    /// the P20.2 buoyancy precedent, where the displaced volume is likewise taken
+    /// from rapier's own numbers.
+    ///
+    /// [`Trimesh`](Self::Trimesh) returns `None`, and that is the whole reason
+    /// [`ConvexHull`](Self::ConvexHull) exists: a surface has no volume, so a
+    /// trimesh body's mass would be zero. Callers giving a chunk its mass
+    /// (`density_kg_m3 × volume`) must treat `None` as "this cannot be a dynamic
+    /// body".
+    pub fn volume_m3(&self) -> Option<f64> {
+        if matches!(self, ColliderShape3D::Trimesh { .. }) {
+            return None;
+        }
+        let shape = self.to_shared()?;
+        // Unit density ⇒ the reported mass IS the volume, in m³.
+        let props: parry3d_f64::mass_properties::MassProperties = shape.mass_properties(1.0);
+        let v = props.mass();
+        (v.is_finite() && v > 0.0).then_some(v)
+    }
+}
+
+/// The smallest volume, m³, a convex hull must bound to be accepted as a
+/// collider — a cubic micrometre.
+///
+/// Not zero, and the gap matters. `parry`'s hull builder happily accepts a
+/// **coplanar** cloud and returns a polyhedron of zero thickness (measured, not
+/// assumed — `degenerate_point_sets_refuse_cleanly` is what found this), and a
+/// *near*-coplanar cloud returns one whose volume is f64 noise. Either would
+/// insert a collider that a dynamic body then has to be given a mass from, and
+/// `density × 0` is the failure this constant exists to make impossible.
+///
+/// The floor is absolute rather than relative because the shapes are in metres
+/// (architecture rule 6): 1e-12 m³ is a thousandth of a cubic millimetre —
+/// below anything that can be a game object, and many orders above the rounding
+/// noise of a hull built from metre-scale coordinates.
+pub const MIN_HULL_VOLUME_M3: f64 = 1e-12;
+
+/// Build a convex-hull shape from `points`, refusing anything that does not
+/// bound a real volume. The single door both [`ColliderShape3D::to_shared`] and
+/// [`convex_hull_is_buildable`] go through, so the pre-check and the build can
+/// never disagree.
+fn hull_shape(points: &[DVec3]) -> Option<SharedShape> {
+    // `parry3d_f64::shape::ConvexPolyhedron::from_convex_hull` is what this
+    // calls; naming it here is why the crate is a direct dependency.
+    let shape = SharedShape::convex_hull(points)?;
+    let props: parry3d_f64::mass_properties::MassProperties = shape.mass_properties(1.0);
+    let volume = props.mass(); // unit density ⇒ mass == volume
+    (volume.is_finite() && volume > MIN_HULL_VOLUME_M3).then_some(shape)
+}
+
+/// Whether `points` can become a [`ColliderShape3D::ConvexHull`] — i.e. whether
+/// they bound a volume of at least [`MIN_HULL_VOLUME_M3`].
+///
+/// Refuses fewer than four points, collinear points, and **coplanar** points: a
+/// flat slab of vertices has no interior and is not a solid. Note that the last
+/// of those is *our* refusal, not parry's — parry's builder returns a zero-
+/// thickness polyhedron for a coplanar cloud rather than `None`, so a producer
+/// that only checked "did the builder succeed" would ship massless chunks.
+///
+/// Exposed so a *producer* of hull point sets (the P22.2 fracture cook, which
+/// must not ship a chunk nothing can collide with) can check before it writes
+/// bytes, instead of discovering it in a player. It runs the same
+/// [`hull_shape`] the collider build runs, so a "yes" here is a guarantee rather
+/// than an estimate.
+pub fn convex_hull_is_buildable(points: &[DVec3]) -> bool {
+    hull_shape(points).is_some()
 }
 
 /// Description of a collider to attach to a body. Build with [`ColliderDesc3D::new`]

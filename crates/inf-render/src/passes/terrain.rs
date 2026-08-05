@@ -69,8 +69,16 @@
 //! height relief `hmax − hmin` of the tiles involved.
 //!
 //! Each patch's skirt drops its boundary ring by
-//! `skirt = max(|hmax − hmin|, 0.05 · span, 1 m)` — at least the tile's own full
-//! relief. So the skirt wall of *either* side already spans the worst-case gap,
+//! `skirt = max(|hmax − hmin|, 0.05 · span, 1 m) + deform_depth` — at least the
+//! tile's own full relief, **plus** the deepest deformation the surface can
+//! carry. That additive term is `crate::deform::DEFORM_MAX_DEPTH_M` (P22.1) and
+//! it is added, not folded into the `max`, because a tyre rut stacks *on top of*
+//! the relief rather than competing with it: a patch whose relief already
+//! exceeds the 1 m floor would otherwise have its boundary vertices displaced
+//! below the very wall that seals the seam. It is added **only when the scene
+//! carries a drawable deformation field**, so a pre-P22.1 (or off-path) frame is
+//! byte-identical — see the call site in `encode`, which owns the full argument.
+//! So the skirt wall of *either* side already spans the worst-case gap,
 //! and both sides skirt, so the seam is sealed twice over. The `0.05 · span`
 //! floor matters for the coarse side specifically: a coarse tile's own relief is
 //! measured over its decimated samples and can under-report the fine relief

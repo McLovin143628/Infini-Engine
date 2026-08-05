@@ -298,6 +298,205 @@ fn trimesh_collider_from_buffers_is_hit_by_raycast() {
         .is_none());
 }
 
+// ── convex hulls (P22.2) ────────────────────────────────────────────────────
+
+/// The eight corners of an axis-aligned box of the given half-extents, plus a
+/// few interior points a hull must simply absorb.
+fn box_point_cloud(h: f64) -> Vec<DVec3> {
+    let mut pts = Vec::new();
+    for sx in [-1.0, 1.0] {
+        for sy in [-1.0, 1.0] {
+            for sz in [-1.0, 1.0] {
+                pts.push(DVec3::new(sx * h, sy * h, sz * h));
+            }
+        }
+    }
+    // Interior points: a hull ignores them, so their presence must change nothing.
+    pts.push(DVec3::ZERO);
+    pts.push(DVec3::splat(h * 0.25));
+    pts
+}
+
+/// A hull built from a box's corner cloud collides exactly like the equivalent
+/// `Box` — same raycast hit, same volume — which is what "the hull of a box is
+/// the box" has to mean if the variant is to be trusted with chunk geometry.
+#[test]
+fn convex_hull_of_a_box_cloud_collides_like_the_box() {
+    let h = 0.5;
+    let hull = ColliderShape3D::ConvexHull {
+        points: box_point_cloud(h),
+    };
+    let cube = ColliderShape3D::Box {
+        half_extents: DVec3::splat(h),
+    };
+
+    // Same solid: the volume rapier will integrate is the cube's, to f64 slop.
+    let vh = hull
+        .volume_m3()
+        .expect("a hull is a solid and has a volume");
+    let vc = cube.volume_m3().expect("a cuboid has a volume");
+    assert!(
+        (vh - vc).abs() < 1e-9 && (vc - (2.0 * h).powi(3)).abs() < 1e-9,
+        "hull {vh} vs box {vc}"
+    );
+
+    // Same surface: a downward ray from above hits both at the same distance.
+    let hit_at = |shape: ColliderShape3D| {
+        let mut world = PhysicsWorld3D::new(DVec3::ZERO);
+        let b = world.add_body(BodyKind3D::Static, DVec3::ZERO, DQuat::IDENTITY);
+        world
+            .add_collider(b, ColliderDesc3D::new(shape))
+            .expect("shape builds");
+        world
+            .cast_ray(DVec3::new(0.0, 5.0, 0.0), DVec3::new(0.0, -1.0, 0.0), 100.0)
+            .expect("ray hits")
+            .toi
+    };
+    let (th, tc) = (hit_at(hull), hit_at(cube));
+    assert!((th - tc).abs() < 1e-9, "hull toi {th} vs box toi {tc}");
+    assert!((tc - (5.0 - h)).abs() < 1e-9, "toi {tc}");
+}
+
+/// A point set that bounds no volume is **refused**, cleanly, at every door:
+/// the pre-check says so, the shape build says so, and `add_collider` returns
+/// `None` instead of panicking or inserting a collider with no shape.
+///
+/// The `coplanar` arm is the one that earned its keep: `parry`'s own hull builder
+/// *accepts* a flat cloud and hands back a zero-thickness polyhedron, so a
+/// refusal delegated entirely to it would have shipped fracture chunks with zero
+/// mass. `MIN_HULL_VOLUME_M3` is the answer, and this is what found the need.
+#[test]
+fn degenerate_point_sets_refuse_cleanly() {
+    let cases: [(&str, Vec<DVec3>); 5] = [
+        ("empty", vec![]),
+        ("single point", vec![DVec3::ZERO]),
+        (
+            "collinear",
+            (0..8).map(|i| DVec3::new(i as f64, 0.0, 0.0)).collect(),
+        ),
+        (
+            // A filled square in the y = 0 plane: plenty of points, zero thickness.
+            "coplanar",
+            (0..4)
+                .flat_map(|i| (0..4).map(move |j| DVec3::new(i as f64, 0.0, j as f64)))
+                .collect(),
+        ),
+        (
+            "three points (a triangle is a surface, not a solid)",
+            vec![
+                DVec3::ZERO,
+                DVec3::new(1.0, 0.0, 0.0),
+                DVec3::new(0.0, 1.0, 0.0),
+            ],
+        ),
+    ];
+
+    let mut world = PhysicsWorld3D::new(DVec3::ZERO);
+    for (what, points) in cases {
+        assert!(
+            !inf_physics::d3::convex_hull_is_buildable(&points),
+            "{what}: the pre-check must refuse a point set that bounds no volume"
+        );
+        let shape = ColliderShape3D::ConvexHull { points };
+        assert_eq!(shape.volume_m3(), None, "{what}: no volume to report");
+        let body = world.add_body(BodyKind3D::Static, DVec3::ZERO, DQuat::IDENTITY);
+        assert!(
+            world
+                .add_collider(body, ColliderDesc3D::new(shape))
+                .is_none(),
+            "{what}: add_collider must refuse, not panic"
+        );
+        // The refusal leaves the world usable: the body is still there, with no
+        // collider attached to it.
+        assert!(world.contains_body(body));
+    }
+
+    // …and the pre-check agrees with the build on a *valid* set, which is the
+    // half that stops it being a rubber stamp.
+    let good = box_point_cloud(0.5);
+    assert!(inf_physics::d3::convex_hull_is_buildable(&good));
+    let body = world.add_body(BodyKind3D::Static, DVec3::ZERO, DQuat::IDENTITY);
+    assert!(world
+        .add_collider(
+            body,
+            ColliderDesc3D::new(ColliderShape3D::ConvexHull { points: good })
+        )
+        .is_some());
+}
+
+/// **The reason the variant exists**: a hull body has real mass, so it falls,
+/// lands and rests. The same body built as a `Trimesh` of the same solid has no
+/// mass at all — asserted here so the claim in `ColliderShape3D::ConvexHull`'s
+/// docs is a measurement rather than a belief.
+#[test]
+fn a_dynamic_convex_hull_body_has_real_mass_and_comes_to_rest() {
+    let h = 0.5;
+    let mut world = PhysicsWorld3D::new(DVec3::new(0.0, -9.81, 0.0));
+
+    // Floor.
+    let floor = world.add_body(
+        BodyKind3D::Static,
+        DVec3::new(0.0, -1.0, 0.0),
+        DQuat::IDENTITY,
+    );
+    world
+        .add_collider(
+            floor,
+            ColliderDesc3D::new(ColliderShape3D::Box {
+                half_extents: DVec3::new(20.0, 1.0, 20.0),
+            }),
+        )
+        .unwrap();
+
+    // A hull chunk dropped from 4 m, at a real material density (concrete).
+    let start_y = 4.0;
+    let chunk = world.add_body(
+        BodyKind3D::Dynamic,
+        DVec3::new(0.0, start_y, 0.0),
+        DQuat::IDENTITY,
+    );
+    world
+        .add_collider(
+            chunk,
+            ColliderDesc3D::new(ColliderShape3D::ConvexHull {
+                points: box_point_cloud(h),
+            })
+            .density(2400.0),
+        )
+        .unwrap();
+
+    for _ in 0..(3.0 / DT) as usize {
+        world.step(DT);
+    }
+
+    let y = world.body_translation(chunk).unwrap().y;
+    // It fell (gravity acted on a real mass) and it rests ON the floor — the
+    // hull's half-extent above the floor's top face at y = 0.
+    assert!(y < start_y - 1.0, "the hull body never fell: y = {y}");
+    assert!(
+        (y - h).abs() < 0.05,
+        "the hull body did not come to rest on the floor: y = {y}"
+    );
+
+    // The mass really is density × volume — and the trimesh of the same solid
+    // has no volume to multiply, which is the whole point of the variant.
+    let vol = ColliderShape3D::ConvexHull {
+        points: box_point_cloud(h),
+    }
+    .volume_m3()
+    .unwrap();
+    assert!((vol - (2.0 * h).powi(3)).abs() < 1e-9);
+    assert_eq!(
+        ColliderShape3D::Trimesh {
+            vertices: box_point_cloud(h),
+            indices: vec![[0, 1, 2]],
+        }
+        .volume_m3(),
+        None,
+        "a triangle soup is a surface: it has no volume, hence no mass"
+    );
+}
+
 #[test]
 fn point_and_aabb_queries_are_deterministically_ordered() {
     let mut world = PhysicsWorld3D::new(DVec3::ZERO);

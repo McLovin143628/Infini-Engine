@@ -3227,6 +3227,7 @@ dependencies = [
  "inf-pcg",
  "inf-voxel",
  "inf-water",
+ "parry3d-f64",
  "rapier2d-f64",
  "rapier3d-f64",
  "uuid",

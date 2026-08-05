@@ -17,6 +17,16 @@ rapier2d-f64 = { workspace = true }
 # f64 + enhanced-determinism + no-`parallel` rationale; math types are glam 0.33
 # so the facade speaks `glam::DVec3` / `glam::DQuat` natively.
 rapier3d-f64 = { workspace = true }
+# parry3d-f64 (P22.2): rapier's own geometry library, already in the tree beneath
+# rapier3d-f64 and pinned once in `[workspace.dependencies]` (see the rationale
+# there). Named here — and ONLY here in the whole workspace — so the
+# `ColliderShape3D::ConvexHull` variant can state its refusal in parry's own
+# terms (`ConvexPolyhedron::from_convex_hull` returning `None`) and report the
+# hull's volume from the SAME mass properties the solver will integrate, rather
+# than from a second hand-written volume formula that could drift from it. The
+# P20.2 precedent: buoyancy reads its displaced volume off rapier's own mass
+# properties for exactly this reason.
+parry3d-f64 = { workspace = true }
 glam = { workspace = true }
 # The ECS↔physics bridge (`d2::ecs`) reads scene components to build bodies.
 # Dependency direction is inf-physics → inf-ecs (both Ring 0); inf-ecs never

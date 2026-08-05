@@ -236,7 +236,31 @@ pub struct SampleGeometry {
 /// which is honest rather than lazy, because rapier cannot give a trimesh
 /// well-defined mass properties either, so a trimesh body is static in practice
 /// and never reaches this path with anything to float.
+///
+/// A **convex hull** (P22.2) takes the same AABB reduction, but here the
+/// approximation is real and worth naming: a hull body *can* be dynamic and *can*
+/// float, and its AABB over-states the waterplane of anything that is not a box.
+/// The sampled draught is therefore a little optimistic for a wedge-shaped
+/// fracture chunk. That is the same class of v1 simplification the linear-drag
+/// model already carries, and the exact fix (sample the hull's own waterplane
+/// section) belongs with whatever first needs floating debris, not here.
 pub fn sample_geometry(shape: &ColliderShape3D, local_translation: DVec3) -> SampleGeometry {
+    /// The AABB half-extents + centre of a point cloud in the body frame, or the
+    /// half-metre default for an empty/non-finite one.
+    fn cloud_extents(points: &[DVec3]) -> (f64, f64, f64, DVec3) {
+        let mut min = DVec3::splat(f64::INFINITY);
+        let mut max = DVec3::splat(f64::NEG_INFINITY);
+        for v in points {
+            min = min.min(*v);
+            max = max.max(*v);
+        }
+        if !min.is_finite() || !max.is_finite() {
+            (0.5, 0.5, 0.5, DVec3::ZERO)
+        } else {
+            let half = (max - min) * 0.5;
+            (half.y, half.x, half.z, (max + min) * 0.5)
+        }
+    }
     let (half_y, hx, hz, centre) = match shape {
         ColliderShape3D::Box { half_extents } => (
             half_extents.y.abs(),
@@ -255,20 +279,8 @@ pub fn sample_geometry(shape: &ColliderShape3D, local_translation: DVec3) -> Sam
             let r = radius.abs();
             (half_height.abs() + r, r, r, DVec3::ZERO)
         }
-        ColliderShape3D::Trimesh { vertices, .. } => {
-            let mut min = DVec3::splat(f64::INFINITY);
-            let mut max = DVec3::splat(f64::NEG_INFINITY);
-            for v in vertices {
-                min = min.min(*v);
-                max = max.max(*v);
-            }
-            if !min.is_finite() || !max.is_finite() {
-                (0.5, 0.5, 0.5, DVec3::ZERO)
-            } else {
-                let half = (max - min) * 0.5;
-                (half.y, half.x, half.z, (max + min) * 0.5)
-            }
-        }
+        ColliderShape3D::Trimesh { vertices, .. } => cloud_extents(vertices),
+        ColliderShape3D::ConvexHull { points } => cloud_extents(points),
     };
     // A fixed quadrant order, so two runs place the same force at the same point.
     let base = local_translation + centre;

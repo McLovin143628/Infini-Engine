@@ -31,7 +31,9 @@ pub use query::RayHit3D;
 pub use water::{
     BuoyancyDesc3D, SampleGeometry, WaterEvent3D, WaterEventKind3D, WaterIndex, WaterProbe,
 };
-pub use world::{BodyKind3D, ColliderDesc3D, ColliderShape3D, PhysicsWorld3D};
+pub use world::{
+    convex_hull_is_buildable, BodyKind3D, ColliderDesc3D, ColliderShape3D, PhysicsWorld3D,
+};
 
 // `ContactPhase` (Started/Stopped) is dimension-agnostic, so `d3` reuses the one
 // `d2` defines rather than duplicating an identical enum — this is the single

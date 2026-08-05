@@ -258,6 +258,26 @@ rapier2d-f64 = { version = "0.34", features = ["enhanced-determinism"] }
 # step is order-independent of thread scheduling and rapier never spawns a pool beside
 # inf-core's job system. Apache-2.0. (P9.1 3D baseline; deepened at P12.)
 rapier3d-f64 = { version = "0.34", features = ["enhanced-determinism"] }
+# parry3d-f64: rapier's own collision-detection/geometry library, named DIRECTLY
+# for the first time at P22.2 (the `ColliderShape3D::ConvexHull` variant a
+# fracture chunk needs).
+#
+# **This pin adds nothing to the supply chain.** `parry3d-f64 0.29.0` is already
+# in `Cargo.lock`, pulled by `rapier3d-f64 0.34`, and the version here is that
+# exact resolved version — the pin is a *record*, not a new edge. Its whole value
+# is that a future rapier bump which moves parry becomes a one-line, reviewable
+# change in this file instead of a silent shift under a member crate. Same
+# licence as rapier (Apache-2.0, on the `deny.toml` allow-list), same
+# f64/glamx/glam-0.33 math types, so a `parry` `Vector` IS a `glam::DVec3`.
+#
+# **`inf-physics` is the ONLY crate allowed to name it** — the three-ring facade
+# discipline that already keeps `bevy_ecs`/`bevy_reflect` inside `inf-ecs` and
+# `wasmtime` inside `inf-wasm-host`. In particular the Ring-0 fracture pipeline
+# (`inf_mesh::fracture`) computes its convex hulls with its own deterministic
+# code and does NOT reach for parry: a cook-time geometry kernel and a runtime
+# collision library have different determinism obligations, and giving the cook a
+# second hull implementation to disagree with is the whole hazard.
+parry3d-f64 = "0.29"
 # kira: the audio engine (roadmap §7 — game-oriented: clocks, tweens, spatial; rodio is
 # playback-only). default-features OFF: kira's defaults pull the `cpal` device backend
 # (which links ALSA on Linux + libdbus via `cpal-realtime-dbus`) — a system-dep CI has

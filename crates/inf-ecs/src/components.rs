@@ -1164,6 +1164,23 @@ impl Default for RigidBody3D {
 /// numeric parameters live in sibling fields ([`Collider3D::half_extents`] /
 /// [`Collider3D::radius`]). Trimesh (static-mesh) colliders are intentionally
 /// omitted — they are not authored as a primitive shape and land with P12.
+///
+/// # Why P22.2's convex hull is not here either
+///
+/// `inf_physics::d3::ColliderShape3D` gained a `ConvexHull { points }` variant so
+/// a fracture chunk can be a *dynamic* body with a real mass. It deliberately has
+/// **no** counterpart in this enum, for exactly the reason `Trimesh` has none: a
+/// hull is a point cloud, not three numbers in sibling fields. Adding it would
+/// mean either a unit variant whose points come from nowhere (a dropdown an
+/// author can pick that silently produces no collider) or a `Vec<Vec3d>` in a
+/// `Copy` component — which would grow the wire record and cost a scene-schema
+/// bump to hold data nobody types in by hand.
+///
+/// A chunk's hull points are *cook output* (`inf_mesh::fracture`), read straight
+/// from the `.inf_fracture` by the runtime bridge that builds the chunk bodies —
+/// the same route `voxel_chunk_guid`'s trimesh colliders take, and they are not
+/// in this enum either. So this remains the **authored primitive** vocabulary,
+/// and nothing about P22.2 moves its bytes.
 #[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ColliderShape3DKind {
     /// Axis-aligned box; uses [`Collider3D::half_extents`] (radius ignored).
