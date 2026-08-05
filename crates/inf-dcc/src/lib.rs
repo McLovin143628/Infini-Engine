@@ -86,7 +86,7 @@ pub use build::{
     WELD_TOLERANCE,
 };
 pub use export::{to_mesh_asset, ExportOptions, ExportReport, NormalPolicy, TANGENT_FALLBACK};
-pub use journal::{MeshSession, SessionSave, CHECKPOINT_INTERVAL, MAX_CHECKPOINTS};
+pub use journal::{MeshSession, SessionError, SessionSave, CHECKPOINT_INTERVAL, MAX_CHECKPOINTS};
 pub use ops::{Op, OpError, OpOutcome};
 pub use topo::{CanonicalMesh, CornerData, FaceId, HalfId, Mesh, VertId};
 pub use validate::{validate, Violation};

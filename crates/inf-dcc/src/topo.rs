@@ -296,11 +296,36 @@ impl Mesh {
         self.faces.get(f.0).is_some()
     }
 
-    // ── public reads: `None` for a dead id ─────────────────────────────────
+    // ── THE ARENA-INDEXING CONTRACT ────────────────────────────────────────
     //
-    // A stale id arriving from a UI selection after an undo must become a
-    // refusal, never a panic. Internal code uses the `*_ref` helpers below,
-    // which panic, and reaches them only after the ops layer has checked.
+    // Three things can be wrong with an id, and they get three different
+    // answers. Stating them together because the `expect`s further down are only
+    // honest if the third case cannot reach them:
+    //
+    // 1. **Dead** — never allocated, or freed. Every public accessor returns
+    //    `None`; every op returns a typed refusal (`NoSuchVert`/`NoSuchHalf`/
+    //    `NoSuchFace`). Never a panic. This is the case a UI selection hits
+    //    after a delete, and it is a value.
+    //
+    // 2. **Stale but live** — freed and reallocated, or renumbered by a
+    //    structural op that rebuilt its patch. The id now names a *different*
+    //    element and nothing about the id says so. Not detectable here by
+    //    construction; that is the entire reason
+    //    `MeshSession::generation` (the op journal) exists, and a consumer
+    //    caching ids must compare it.
+    //
+    // 3. **Internally inconsistent** — a live half-edge whose `twin`, `next`,
+    //    `prev`, `origin` or `face` names a dead slot. The `*_ref` helpers below
+    //    PANIC on this, deliberately: it is an assertion about an invariant this
+    //    crate maintains, not a condition a caller can cause, and turning it
+    //    into a refusal would mean inventing an error variant for "the kernel is
+    //    broken" and threading it through every traversal. What makes that safe
+    //    is that a mesh can only reach the ops layer from three places — a
+    //    primitive, `from_mesh_asset`, or another session — and the one door
+    //    that accepts a mesh from *outside the process*,
+    //    `MeshSession::restore`, runs `validate` in full before any op sees it.
+    //    That check is not a nicety: without it a save with one mangled `twin`
+    //    panics inside `split_edge`.
 
     pub fn position(&self, v: VertId) -> Option<DVec3> {
         self.verts.get(v.0).map(|x| DVec3::from_array(x.position))

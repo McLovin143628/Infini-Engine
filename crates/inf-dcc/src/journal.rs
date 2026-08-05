@@ -43,26 +43,88 @@
 //! optimize pass lives behind a flag on [`crate::export`] instead.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 use crate::ops::{self, Op, OpError, OpOutcome};
 use crate::topo::Mesh;
+use crate::validate::{validate, Violation};
 
 /// A full mesh snapshot is stored every this many ops.
 pub const CHECKPOINT_INTERVAL: usize = 32;
 /// At most this many snapshots are retained, nearest the cursor first.
 pub const MAX_CHECKPOINTS: usize = 8;
 
-/// A whole edit session as data: the mesh it started from, every op applied, and
-/// where the cursor sits. Checkpoints are **not** persisted — they are derived,
-/// and re-deriving them is exactly what `restore` does.
+/// A whole edit session as data: the version it was written under, the mesh it
+/// started from, every op applied, and where the cursor sits. Checkpoints are
+/// **not** persisted — they are derived, and re-deriving them is exactly what
+/// [`MeshSession::restore`] does.
+///
+/// # Why `schema_version` is the FIRST field
+///
+/// bincode is **positional**: it writes fields in declaration order with no
+/// names and no framing. A reader that expects a leading `u32` and gets a `Mesh`
+/// does not fail, it *mis-parses*. So the version has to be the first thing on
+/// the wire, or it cannot guard the thing after it — and it has to exist from
+/// the very first release, because adding it later would make every already-
+/// written save decode its old leading field (here, the `Mesh`'s vertex arena
+/// slot count) as a version number.
+///
+/// This crate has written zero sessions to disk, which is precisely the moment
+/// the ladder is free. `inf_mesh::MeshAsset` has had one since v1 and
+/// [`crate::build::from_mesh_asset`] honours it; a reader that enforces a
+/// version ladder on its *input* while writing its own *output* without one is
+/// the asymmetry this field closes.
+///
+/// # And the enum discriminants underneath it
+///
+/// The version guards the *shape* of this struct. It does **not** guard
+/// [`Op`]'s discriminants, because a mis-numbered variant produces a
+/// structurally valid save of the wrong edit. That is pinned separately by the
+/// frozen-discriminant test (the P19 wire-enum law): `Op` is **append-only**,
+/// and any insertion or reorder must bump [`SessionSave::CURRENT_VERSION`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSave {
+    /// Must be the first field — see the type docs.
+    pub schema_version: u32,
     pub base: Mesh,
     pub ops: Vec<Op>,
     /// How many of `ops` are applied. `ops[cursor..]` is the redo tail.
     pub cursor: usize,
+}
+
+impl SessionSave {
+    /// v1: `{schema_version, base, ops, cursor}` with the [`Op`] discriminants
+    /// frozen by `op_discriminants_are_frozen`. Bump on any change to either.
+    pub const CURRENT_VERSION: u32 = 1;
+}
+
+/// Why a [`SessionSave`] could not become a session.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SessionError {
+    #[error("session schema v{found} is not v{current}; this build cannot read it")]
+    UnsupportedSchema { found: u32, current: u32 },
+    /// The base mesh is not a valid mesh. Replaying ops onto it would produce
+    /// nonsense at best and, because the internal accessors assert the kernel's
+    /// own invariants rather than validating input, a panic at worst.
+    #[error("the save's base mesh is invalid: {} violation(s), first {:?}", .0.len(), .0.first())]
+    InvalidBase(Vec<Violation>),
+    #[error("replaying the save's ops failed: {0}")]
+    Op(OpError),
+}
+
+/// A process-wide source of [`MeshSession::generation`] stamps.
+///
+/// Monotone across *every* session in the process, including ones built by
+/// [`MeshSession::restore`]. Starting a restored session back at 0 would let a
+/// consumer's cached ids from an earlier session compare equal to a completely
+/// different document's — which is the exact stale-id hazard the stamp exists
+/// to catch, reintroduced by the door meant to be safest.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn fresh_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 
 /// A mesh plus its op journal.
@@ -78,6 +140,11 @@ pub struct MeshSession {
 
 impl MeshSession {
     /// Start a session from a base mesh.
+    ///
+    /// The base is **not** validated here: it comes from this process — a
+    /// primitive, [`crate::build::from_mesh_asset`], or another session — and
+    /// every one of those doors either constructs a valid mesh or refuses.
+    /// [`MeshSession::restore`] is the trust boundary, and it does validate.
     pub fn new(base: Mesh) -> Self {
         Self {
             current: base.clone(),
@@ -85,7 +152,7 @@ impl MeshSession {
             ops: Vec::new(),
             cursor: 0,
             checkpoints: BTreeMap::new(),
-            generation: 0,
+            generation: fresh_generation(),
         }
     }
 
@@ -107,13 +174,18 @@ impl MeshSession {
     }
 
     /// A monotone stamp bumped by every successful mutation and every history
-    /// move.
+    /// move — and **never repeated anywhere in the process**, including across
+    /// [`MeshSession::restore`] and across different sessions.
     ///
     /// It exists because of the id-reuse rule ([`crate::topo`]): a structural op
     /// rebuilds a local patch, so half-edge and face ids that were valid a moment
     /// ago may now name something else — and they will not be *dead*, so nothing
     /// would catch a stale one. **A consumer caching ids (P23.4's selection) must
-    /// discard the cache when this changes.**
+    /// discard the cache when this changes**, and must compare stamps rather than
+    /// assume any particular starting value: a fresh session does not start at 0,
+    /// precisely so a cache held across a restore cannot match by accident.
+    ///
+    /// A **refused** op does not bump it: nothing moved, so no cache is stale.
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -224,34 +296,49 @@ impl MeshSession {
         Ok(mesh)
     }
 
-    /// The session as persistable data.
+    /// The session as persistable data, stamped with the current schema version.
     pub fn save(&self) -> SessionSave {
         SessionSave {
+            schema_version: SessionSave::CURRENT_VERSION,
             base: self.base.clone(),
             ops: self.ops.clone(),
             cursor: self.cursor,
         }
     }
 
-    /// Rebuild a session from a save.
+    /// Rebuild a session from a save. **This is the crate's trust boundary for
+    /// journals**, and it checks three things in this order:
     ///
-    /// Every op is replayed — the applied prefix to produce the live mesh, and
-    /// the redo tail to prove it *can* be redone. That is what makes
-    /// [`MeshSession::redo`] and [`MeshSession::undo`] infallible afterwards: a
-    /// save is the only way an op sequence this type did not itself produce can
-    /// enter, so it is the only place the check is needed.
-    pub fn restore(save: SessionSave) -> Result<Self, OpError> {
+    /// 1. **The version.** A mismatch is a loud refusal, not a best-effort read.
+    /// 2. **The base mesh.** `validate` in full, because everything downstream
+    ///    assumes a valid mesh: the internal accessors are *assertions of the
+    ///    kernel's own invariants*, not input validation, so a base whose `twin`
+    ///    names a dead slot does not refuse — it panics inside the first
+    ///    structural op, in code whose own contract says a refusal is a value.
+    ///    Validating here is what makes that contract true, and it is cheap
+    ///    against the replay that follows.
+    /// 3. **Every op** — the applied prefix to produce the live mesh, and the
+    ///    redo tail on a throwaway to prove it *can* be redone. That is what
+    ///    makes [`MeshSession::redo`] and [`MeshSession::undo`] infallible
+    ///    afterwards.
+    pub fn restore(save: SessionSave) -> Result<Self, SessionError> {
+        if save.schema_version != SessionSave::CURRENT_VERSION {
+            return Err(SessionError::UnsupportedSchema {
+                found: save.schema_version,
+                current: SessionSave::CURRENT_VERSION,
+            });
+        }
+        validate(&save.base).map_err(SessionError::InvalidBase)?;
         let cursor = save.cursor.min(save.ops.len());
-        let current = Self::replay(&save.base, &save.ops[..cursor])?;
-        // Prove the tail too, on a throwaway, before promising redo cannot fail.
-        Self::replay(&current, &save.ops[cursor..])?;
+        let current = Self::replay(&save.base, &save.ops[..cursor]).map_err(SessionError::Op)?;
+        Self::replay(&current, &save.ops[cursor..]).map_err(SessionError::Op)?;
         let mut session = Self {
             base: save.base,
             ops: save.ops,
             cursor,
             current,
             checkpoints: BTreeMap::new(),
-            generation: 0,
+            generation: fresh_generation(),
         };
         session.rebuild_checkpoints();
         Ok(session)
@@ -284,7 +371,7 @@ impl PartialEq for MeshSession {
 mod tests {
     use super::*;
     use crate::build::{cube, plane};
-    use crate::topo::{CornerData, HalfId, VertId};
+    use crate::topo::{CornerData, FaceId, HalfId, VertId};
     use crate::validate::validate;
 
     /// A deterministic, mildly adversarial edit script over a cube.
@@ -364,6 +451,7 @@ mod tests {
     fn a_refused_op_is_not_journalled_and_does_not_move_the_mesh() {
         let mut s = MeshSession::new(plane(2.0));
         let before = s.mesh().encoded();
+        let gen_before = s.generation();
         let err = s
             .apply(Op::SplitEdge {
                 half: HalfId(9_999),
@@ -373,7 +461,11 @@ mod tests {
         assert_eq!(err, OpError::NoSuchHalf(HalfId(9_999)));
         assert_eq!(s.ops().len(), 0, "a refusal leaves no record");
         assert_eq!(s.cursor(), 0);
-        assert_eq!(s.generation(), 0);
+        assert_eq!(
+            s.generation(),
+            gen_before,
+            "nothing moved, so no consumer's id cache went stale"
+        );
         assert_eq!(s.mesh().encoded(), before);
     }
 
@@ -451,6 +543,7 @@ mod tests {
     #[test]
     fn restore_refuses_a_save_whose_ops_do_not_apply() {
         let save = SessionSave {
+            schema_version: SessionSave::CURRENT_VERSION,
             base: plane(2.0),
             ops: vec![Op::AddFace {
                 verts: vec![VertId(0), VertId(1), VertId(400)],
@@ -461,7 +554,7 @@ mod tests {
         };
         assert_eq!(
             MeshSession::restore(save),
-            Err(OpError::NoSuchVert(VertId(400)))
+            Err(SessionError::Op(OpError::NoSuchVert(VertId(400))))
         );
     }
 
@@ -480,7 +573,193 @@ mod tests {
         });
         assert_eq!(
             MeshSession::restore(save),
-            Err(OpError::NoSuchVert(VertId(4_000)))
+            Err(SessionError::Op(OpError::NoSuchVert(VertId(4_000))))
+        );
+    }
+
+    // ── B2: the version ladder and the discriminant freeze ──────────────────
+
+    /// The frozen wire position of every [`Op`] variant.
+    ///
+    /// This is a `match`, not a table, on purpose: **adding a variant stops this
+    /// file compiling** until an author has consciously given it the next index.
+    /// A table would silently accept an insertion, which is the whole defect —
+    /// bincode writes an externally-tagged enum as a varint discriminant, so
+    /// inserting a variant at index 5 turns every recorded `CollapseEdge` into
+    /// whatever now sits at 5, structurally valid and semantically a different
+    /// edit. Append only; anything else bumps `SessionSave::CURRENT_VERSION`.
+    fn frozen_discriminant(op: &Op) -> u8 {
+        match op {
+            Op::AddVertex { .. } => 0,
+            Op::RemoveVertex { .. } => 1,
+            Op::AddFace { .. } => 2,
+            Op::RemoveFace { .. } => 3,
+            Op::SplitEdge { .. } => 4,
+            Op::CollapseEdge { .. } => 5,
+            Op::SplitFace { .. } => 6,
+            Op::WeldVerts { .. } => 7,
+            Op::TranslateVerts { .. } => 8,
+            Op::SetCornerUv { .. } => 9,
+            Op::SetCornerNormal { .. } => 10,
+            Op::SetEdgeSharp { .. } => 11,
+            Op::SetFaceSlot { .. } => 12,
+        }
+    }
+
+    #[test]
+    fn op_discriminants_are_frozen() {
+        let every: Vec<Op> = vec![
+            Op::AddVertex { position: [0.0; 3] },
+            Op::RemoveVertex { vert: VertId(0) },
+            Op::AddFace {
+                verts: vec![],
+                corners: vec![],
+                slot: None,
+            },
+            Op::RemoveFace { face: FaceId(0) },
+            Op::SplitEdge {
+                half: HalfId(0),
+                t: 0.5,
+            },
+            Op::CollapseEdge { half: HalfId(7) },
+            Op::SplitFace {
+                from: HalfId(0),
+                to: HalfId(1),
+            },
+            Op::WeldVerts {
+                keep: VertId(0),
+                merge: VertId(1),
+            },
+            Op::TranslateVerts {
+                verts: vec![],
+                delta: [0.0; 3],
+            },
+            Op::SetCornerUv {
+                half: HalfId(0),
+                uv: [0.0; 2],
+            },
+            Op::SetCornerNormal {
+                half: HalfId(0),
+                normal: None,
+            },
+            Op::SetEdgeSharp {
+                half: HalfId(0),
+                sharp: true,
+            },
+            Op::SetFaceSlot {
+                face: FaceId(0),
+                slot: None,
+            },
+        ];
+        assert_eq!(every.len(), 13, "one sample per variant");
+        let cfg = bincode::config::standard();
+        for op in &every {
+            let bytes = bincode::serde::encode_to_vec(op, cfg).unwrap();
+            assert_eq!(
+                bytes[0],
+                frozen_discriminant(op),
+                "{op:?} moved on the wire"
+            );
+        }
+        // The concrete byte string the audit measured, pinned outright.
+        assert_eq!(
+            bincode::serde::encode_to_vec(Op::CollapseEdge { half: HalfId(7) }, cfg).unwrap(),
+            vec![5, 7],
+        );
+    }
+
+    #[test]
+    fn a_save_carries_its_version_first_on_the_wire() {
+        let s = MeshSession::new(plane(2.0));
+        let cfg = bincode::config::standard();
+        let bytes = bincode::serde::encode_to_vec(s.save(), cfg).unwrap();
+        assert_eq!(
+            bytes[0],
+            SessionSave::CURRENT_VERSION as u8,
+            "the version must be the first byte, or it cannot guard what follows"
+        );
+    }
+
+    #[test]
+    fn restore_refuses_a_save_from_another_schema() {
+        let s = MeshSession::new(plane(2.0));
+        let mut save = s.save();
+        save.schema_version = SessionSave::CURRENT_VERSION + 1;
+        assert_eq!(
+            MeshSession::restore(save.clone()),
+            Err(SessionError::UnsupportedSchema {
+                found: SessionSave::CURRENT_VERSION + 1,
+                current: SessionSave::CURRENT_VERSION,
+            })
+        );
+        save.schema_version = 0;
+        assert!(matches!(
+            MeshSession::restore(save),
+            Err(SessionError::UnsupportedSchema { .. })
+        ));
+    }
+
+    // ── B3: the base mesh is validated at the trust boundary ────────────────
+
+    #[test]
+    fn restore_refuses_a_corrupt_base_instead_of_panicking() {
+        // The audit's two corruptions. Before this check, the first restored
+        // `Ok` and then failed `validate` on demand; the second PANICKED inside
+        // `split_edge`'s `expect("live half-edge id")` chain — in an op whose own
+        // contract says a refusal is a value.
+        for mangle in [
+            |m: &mut Mesh| m.halfs.get_mut(0).unwrap().next = HalfId(99),
+            |m: &mut Mesh| m.halfs.get_mut(0).unwrap().twin = HalfId(99),
+        ] {
+            let mut base = plane(2.0);
+            mangle(&mut base);
+            let save = SessionSave {
+                schema_version: SessionSave::CURRENT_VERSION,
+                base,
+                ops: vec![Op::SplitEdge {
+                    half: HalfId(0),
+                    t: 0.5,
+                }],
+                cursor: 1,
+            };
+            match MeshSession::restore(save) {
+                Err(SessionError::InvalidBase(v)) => assert!(!v.is_empty()),
+                other => panic!("expected InvalidBase, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn restore_accepts_a_sound_base() {
+        // The other half of the gate: validation must not reject real saves.
+        let mut s = MeshSession::new(cube(1.0));
+        script(&mut s);
+        let restored = MeshSession::restore(s.save()).expect("a real save restores");
+        assert_eq!(restored.mesh().encoded(), s.mesh().encoded());
+    }
+
+    // ── M4: the generation stamp is monotone across every door ──────────────
+
+    #[test]
+    fn generation_never_repeats_across_sessions_or_a_restore() {
+        let mut a = MeshSession::new(plane(2.0));
+        let start = a.generation();
+        a.apply(Op::AddVertex {
+            position: [1.0, 0.0, 0.0],
+        })
+        .unwrap();
+        assert!(a.generation() > start, "a mutation bumps it");
+
+        let b = MeshSession::new(plane(2.0));
+        assert!(
+            b.generation() > start,
+            "a second session cannot reuse a stamp a live cache may hold"
+        );
+
+        let restored = MeshSession::restore(a.save()).unwrap();
+        assert!(
+            restored.generation() > a.generation(),
+            "a restore is a NEW document as far as any cached id is concerned"
         );
     }
 

@@ -88,6 +88,13 @@ pub enum Violation {
     },
     /// `origin(h)` names a dead vertex.
     DeadOrigin { half: HalfId, vert: VertId },
+    /// `face(h)` names a dead face record.
+    ///
+    /// The gap this closes: removing a face record while leaving its half-edges
+    /// naming it produced a mesh `validate` called `Ok(())`. Every property in
+    /// this crate leans on `validate` as the independent auditor, so a blind spot
+    /// here is a blind spot in all of them at once.
+    DeadFace { half: HalfId, face: FaceId },
     /// A live half-edge originating at `v` that `out(v)` does not list.
     VertOutMissing { vert: VertId, half: HalfId },
     /// `out(v)` lists a half-edge that is dead or does not originate at `v`.
@@ -210,6 +217,23 @@ fn check_twins(mesh: &Mesh, out: &mut Vec<Violation>) {
 
 fn check_links(mesh: &Mesh, out: &mut Vec<Violation>) {
     for h in mesh.half_ids() {
+        // Liveness of EVERY id a half-edge holds, before anything that might
+        // `continue`: `twin` is checked in `check_twins`, `origin` and the two
+        // links here, and `face` — the one that was missing, and the reason a
+        // mesh whose face record had been removed while its loop still named it
+        // read as `Ok(())`.
+        if let Some(Some(f)) = mesh.face_of(h) {
+            if !mesh.has_face(f) {
+                out.push(Violation::DeadFace { half: h, face: f });
+            }
+        }
+        let origin = mesh.origin(h).expect("live half-edge id");
+        if !mesh.has_vert(origin) {
+            out.push(Violation::DeadOrigin {
+                half: h,
+                vert: origin,
+            });
+        }
         let n = mesh.next(h).expect("live half-edge id");
         let p = mesh.prev(h).expect("live half-edge id");
         for link in [n, p] {
@@ -226,13 +250,6 @@ fn check_links(mesh: &Mesh, out: &mut Vec<Violation>) {
                 half: h,
                 next: n,
                 next_prev: np,
-            });
-        }
-        let origin = mesh.origin(h).expect("live half-edge id");
-        if !mesh.has_vert(origin) {
-            out.push(Violation::DeadOrigin {
-                half: h,
-                vert: origin,
             });
         }
         if let (Some(d), Some(no)) = (mesh.dest(h), mesh.origin(n)) {
@@ -604,5 +621,52 @@ mod tests {
         m.faces.remove(f.0);
         let errs = validate(&m).expect_err("an impossible count must be caught");
         assert!(!errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn a_half_edge_naming_a_dead_face_is_reported() {
+        // The audit's M3. `validate` is the independent auditor every property in
+        // this crate leans on, so a blind spot here was a blind spot in all of
+        // them at once.
+        //
+        // Two fixtures, because they fail differently and only one of them shows
+        // the whole hole:
+        //
+        // * On the CUBE, removing a face record also disturbs the Euler count, so
+        //   something was reported even before this check existed — but only
+        //   `EulerInconsistent`, which names the component and not the dangling
+        //   reference, and which does not run at all unless every structural
+        //   check is already clean.
+        // * On the PLANE the component has no faces left, and the Euler check
+        //   exempts face-less components (an isolated vertex is a legal staging
+        //   state). So `validate` returned a flat `Ok(())` on a mesh whose every
+        //   half-edge pointed at a face that did not exist.
+        let mut cube_mesh = cube(1.0);
+        let f = cube_mesh.face_ids().next().unwrap();
+        cube_mesh.faces.remove(f.0);
+        let errs = validate(&cube_mesh).expect_err("a dangling face reference must be caught");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, Violation::DeadFace { face, .. } if *face == f)),
+            "{errs:?}"
+        );
+        assert_eq!(
+            errs.iter()
+                .filter(|e| matches!(e, Violation::DeadFace { .. }))
+                .count(),
+            4,
+            "one per corner of the removed quad"
+        );
+
+        let mut plane_mesh = plane(2.0);
+        let pf = plane_mesh.face_ids().next().unwrap();
+        plane_mesh.faces.remove(pf.0);
+        let errs = validate(&plane_mesh).expect_err("this one used to read Ok(())");
+        assert!(
+            errs.iter().all(|e| matches!(e, Violation::DeadFace { .. })),
+            "the ONLY thing wrong with this mesh is the dangling reference, \
+             which is why nothing else caught it: {errs:?}"
+        );
+        assert_eq!(errs.len(), 4);
     }
 }

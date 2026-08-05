@@ -88,6 +88,36 @@ pub enum OpError {
     NotCollapsible { half: HalfId, shared: Vec<VertId> },
     #[error("material slot {slot} is out of range ({slots} named slots)")]
     UnknownSlot { slot: u32, slots: usize },
+    /// A NaN or infinity was handed to an op.
+    ///
+    /// Refused rather than stored, because a non-finite coordinate is not a
+    /// value the author can see or find later: it prints as `NaN` in a Details
+    /// panel, it makes the mesh's bounds exclude its own geometry, and every
+    /// comparison it takes part in is false — including the ones a later
+    /// refusal would rely on. The read path already treats it as a
+    /// [`crate::validate::Violation`]; this is the same rule at the edit door.
+    #[error("{what} is not finite: {value:?}")]
+    NonFinite { what: &'static str, value: Vec<f64> },
+    /// An authored corner normal that is not a unit vector.
+    ///
+    /// "Authored" means the writer copies it out verbatim, so it has to be a
+    /// real normal. A caller that wants to *store a direction* should normalize
+    /// it; a caller that wants shading derived from the surface should pass
+    /// `None` and let the smooth fan do it.
+    #[error("an authored corner normal must be unit length, got |n| = {length}")]
+    NormalNotUnit { length: f64 },
+}
+
+/// Every value crossing an op boundary is checked here, once.
+fn finite(what: &'static str, values: &[f64]) -> Result<(), OpError> {
+    if values.iter().all(|v| v.is_finite()) {
+        Ok(())
+    } else {
+        Err(OpError::NonFinite {
+            what,
+            value: values.to_vec(),
+        })
+    }
 }
 
 /// What an op created. Ids of rebuilt elements change (see the module docs), so
@@ -156,6 +186,7 @@ pub enum Op {
 pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
     match op {
         Op::AddVertex { position } => {
+            finite("a vertex position", position)?;
             let v = mesh.alloc_vert(*position);
             Ok(OpOutcome {
                 verts: vec![v],
@@ -183,6 +214,9 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
             slot,
         } => {
             check_slot(mesh, *slot)?;
+            for c in corners {
+                check_corner(c)?;
+            }
             let touched: BTreeSet<VertId> = verts.iter().copied().collect();
             let f = mesh.transact(|m| {
                 let f = m.add_face_raw(verts, corners, *slot)?;
@@ -230,6 +264,7 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
         Op::TranslateVerts { verts, delta } => {
             // Every id is checked before the first write, so a refusal is inert
             // without needing a transaction.
+            finite("a translation delta", delta)?;
             for v in verts {
                 if !mesh.has_vert(*v) {
                     return Err(OpError::NoSuchVert(*v));
@@ -244,12 +279,17 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
 
         Op::SetCornerUv { half, uv } => {
             corner_of(mesh, *half)?;
+            finite("a corner uv", uv)?;
             mesh.half_mut(*half).uv = *uv;
             Ok(OpOutcome::default())
         }
 
         Op::SetCornerNormal { half, normal } => {
             corner_of(mesh, *half)?;
+            check_corner(&CornerData {
+                uv: [0.0, 0.0],
+                normal: *normal,
+            })?;
             mesh.half_mut(*half).normal = *normal;
             Ok(OpOutcome::default())
         }
@@ -271,6 +311,20 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
             Ok(OpOutcome::default())
         }
     }
+}
+
+/// A corner's UV must be finite and its AUTHORED normal must be a finite unit
+/// vector — see [`OpError::NormalNotUnit`].
+fn check_corner(c: &CornerData) -> Result<(), OpError> {
+    finite("a corner uv", &c.uv)?;
+    if let Some(n) = c.normal {
+        finite("a corner normal", &n)?;
+        let length = DVec3::from_array(n).length();
+        if (length - 1.0).abs() > 1e-6 {
+            return Err(OpError::NormalNotUnit { length });
+        }
+    }
+    Ok(())
 }
 
 fn check_slot(mesh: &Mesh, slot: Option<u32>) -> Result<(), OpError> {
@@ -1004,6 +1058,132 @@ mod tests {
         assert_eq!(m.vert_count(), 3);
         assert_eq!(m.face_count(), 1);
         assert_eq!(m.face_verts(m.face_ids().next().unwrap()).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn non_finite_values_are_refused_at_every_op_that_takes_one() {
+        // M6, the door side. The writer counts non-finite values because it
+        // cannot refuse an author's imported file without losing their work; an
+        // *edit* has no such excuse, so the kernel simply cannot be made to hold
+        // a NaN by anything in this module.
+        let mut m = plane(2.0);
+        let v = m.vert_ids().next().unwrap();
+        let c = m
+            .half_ids()
+            .find(|&h| m.is_boundary(h) == Some(false))
+            .unwrap();
+        for (op, what) in [
+            (
+                Op::AddVertex {
+                    position: [f64::NAN, 0.0, 0.0],
+                },
+                "a vertex position",
+            ),
+            (
+                Op::TranslateVerts {
+                    verts: vec![v],
+                    delta: [0.0, f64::INFINITY, 0.0],
+                },
+                "a translation delta",
+            ),
+            (
+                Op::SetCornerUv {
+                    half: c,
+                    uv: [f64::NAN, 0.0],
+                },
+                "a corner uv",
+            ),
+            (
+                Op::SetCornerNormal {
+                    half: c,
+                    normal: Some([f64::NAN, 1.0, 0.0]),
+                },
+                "a corner normal",
+            ),
+        ] {
+            let before = m.encoded();
+            match apply(&mut m, &op) {
+                Err(OpError::NonFinite { what: got, .. }) => assert_eq!(got, what),
+                other => panic!("{op:?} was not refused: {other:?}"),
+            }
+            assert_eq!(m.encoded(), before, "and the refusal is inert");
+        }
+    }
+
+    #[test]
+    fn an_authored_normal_must_be_a_real_normal() {
+        // The writer copies an authored normal out VERBATIM, so it has to be
+        // unit. A caller who wants shading from the surface passes `None`.
+        let mut m = plane(2.0);
+        let c = m
+            .half_ids()
+            .find(|&h| m.is_boundary(h) == Some(false))
+            .unwrap();
+        match apply(
+            &mut m,
+            &Op::SetCornerNormal {
+                half: c,
+                normal: Some([0.0, 5.0, 0.0]),
+            },
+        ) {
+            Err(OpError::NormalNotUnit { length }) => assert!((length - 5.0).abs() < 1e-12),
+            other => panic!("{other:?}"),
+        }
+        // Unit is accepted, and so is "derive it".
+        expect_ok(
+            &mut m,
+            Op::SetCornerNormal {
+                half: c,
+                normal: Some([0.0, 1.0, 0.0]),
+            },
+        );
+        expect_ok(
+            &mut m,
+            Op::SetCornerNormal {
+                half: c,
+                normal: None,
+            },
+        );
+        // AddFace checks its corner records by the same door.
+        let a = apply(
+            &mut m,
+            &Op::AddVertex {
+                position: [4.0, 0.0, 0.0],
+            },
+        )
+        .unwrap()
+        .verts[0];
+        let b = apply(
+            &mut m,
+            &Op::AddVertex {
+                position: [4.0, 0.0, 4.0],
+            },
+        )
+        .unwrap()
+        .verts[0];
+        let d = apply(
+            &mut m,
+            &Op::AddVertex {
+                position: [8.0, 0.0, 0.0],
+            },
+        )
+        .unwrap()
+        .verts[0];
+        let bad = CornerData {
+            uv: [0.0, 0.0],
+            normal: Some([0.0, 3.0, 0.0]),
+        };
+        assert!(matches!(
+            apply(
+                &mut m,
+                &Op::AddFace {
+                    verts: vec![a, b, d],
+                    corners: vec![bad, bad, bad],
+                    slot: None,
+                },
+            ),
+            Err(OpError::NormalNotUnit { .. })
+        ));
     }
 
     #[test]

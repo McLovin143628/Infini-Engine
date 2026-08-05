@@ -7016,8 +7016,10 @@ and the headless preview render is the proven offscreen-PNG path.
   property-tested; 3. an op journal — deterministic replay is both the undo/redo story and the
   test story, mirroring `GraphJournal`.
   **DONE 2026-08-05** — `crates/inf-dcc` (Ring 0; `inf-mesh` + `inf-math` + glam + serde +
-  bincode + thiserror, **no new external crate**). 82 tests, no schema move (`MeshAsset` stays
-  v2 — this batch adds a *writer*, not a version). The six decisions:
+  bincode + thiserror, **no new external crate**). 99 tests after the audit round below, no
+  schema move (`MeshAsset` stays v2 — this batch adds a *writer*, not a version; the session
+  journal gets its OWN v1 ladder, which is a new format, not a bump of an existing one). The
+  six decisions:
   **(1) boundaries are real half-edges** — `twin` is TOTAL and `face` is the `Option`, so an
   open mesh is not a special case and no traversal branches; **(2) attributes live where seams
   live** — positions on vertices, UV + *optional authored* normal on **corners**, so importing
@@ -7070,6 +7072,58 @@ and the headless preview render is the proven offscreen-PNG path.
   fails `export_is_a_fixed_point` and `one_round_trip_reaches_a_fixed_point` while the other
   six properties stay green. The source-grep determinism gate was falsified too (a planted
   `HashMap<u8, f32>` + `.sin()` trips three of its six arms). **Carried remainders**: no
+  **AUDIT ROUND (fix-first, one commit).** Three blockers, four majors, all landed.
+  **B1 — ear clipping emitted geometry OUTSIDE the polygon on ordinary rectilinear
+  n-gons**: `strictly_inside` required `> 0` on all three edges, so a reflex vertex lying
+  exactly *on* a candidate diagonal — the normal case wherever an L, a T or a staircase puts
+  three corners on a line — did not block the ear. Measured on a 3.0 m² L-hexagon: **4.0 m² of
+  triangles emitted**, one outside the L and one wound backwards, with `fan_fallbacks` reading
+  zero. The textbook rule is now enforced (only **reflex** vertices block, and they block by
+  lying inside **or on**), and the reason nothing caught it is itself a LAW: **the winding gate
+  is blind to this by construction** — an escaped triangle and an inverted one cancel exactly,
+  so signed volume reads correct. Hence `every_ngon_triangulation_tiles_its_polygon`, which
+  measures **unsigned** area (`Σ|tri| == |polygon|`) over six rectilinear shapes, plus the same
+  shapes through the real writer. **B2 — the session had no version ladder and `Op` had no
+  discriminant freeze**: `Op::CollapseEdge{half:7}` encodes `[5, 7]`, and against an enum with
+  one plausible P23.4 op inserted at index 5 that decodes as a *different edit* with no error.
+  `SessionSave` now carries `schema_version` as its **first field** (positional bincode: a
+  version that is not first cannot guard what follows, and adding it later would have made
+  today's bytes read their leading `Mesh` arena count as a version — free only while zero
+  sessions exist), `restore` refuses a mismatch, and `frozen_discriminant` is a **`match`, not a
+  table**, so adding a variant stops the crate compiling until an author appends it
+  consciously. **B3 — `restore` never validated `save.base`**: a mangled `next` restored `Ok`
+  and failed later; a mangled `twin` **panicked** inside `split_edge`'s `expect` chain, in an op
+  whose own contract says a refusal is a value. `restore` now validates in full and returns a
+  typed `SessionError::{UnsupportedSchema, InvalidBase, Op}`. The **arena-indexing contract** is
+  stated with it: the internal accessors assert *the kernel's own invariants*, not input, and a
+  stale id is always either dead (→ typed refusal) or live (→ the documented generation hazard)
+  — it never dangles, so the only door that needed closing was the one that accepts a mesh from
+  outside. **M3** `validate` was blind to a half-edge naming a **dead face** — on a plane it
+  returned a flat `Ok(())` while every half-edge pointed at a face that did not exist, and
+  since `validate` is the independent auditor every property leans on, that was a blind spot in
+  all of them at once. **M1** `ImportReport::boundary_edges` (the exact-0 weld ruling **upheld**
+  — an epsilon weld smuggles non-transitivity back in — with the consequence *measured* instead
+  of argued: a solid the author believes is closed arriving with boundary edges is
+  self-evidently fragmented, no tolerance required). **M2** `coincident_vertices` moved into the
+  **f32 domain the reader actually welds in** and restricted to what was written (an f64
+  comparison read zero at exactly the moment the reader was about to fuse two vertices, and
+  counted isolated vertices export never emits). **M4** the generation stamp is now
+  process-monotone across `new` *and* `restore`. **M5** UV handedness joined the corner-split
+  key — and had to be taken **per triangle and from the f32 UVs**, because per-face broke the
+  export fixed point the moment an n-gon's UV loop summed to zero while its triangles did not,
+  and f64-computed signs disagree with the f32 ones the reread recomputes. **M6** the write path
+  counts non-finite and non-unit values while **`ops` refuse them outright** — the door is
+  closed where closing it is free, and an author who opened a bad glTF is not locked out of
+  saving their own work. **M7** the `Recompute` exception named the wrong fixture: measured, it
+  **is** a fixed point on plane/cube and is **not** on cylinder/torus, and the mechanism (the
+  fan sums n-gons on the first pass and triangles on the second) is now stated and pinned.
+  99 tests. LAWS added: **a winding gate must be a VOLUME and a tiling gate must be UNSIGNED** —
+  they catch disjoint classes and signed area cancels the one that matters; **a version that is
+  not the first field cannot guard the fields after it**, and the only free moment to add one is
+  before the first byte is written; **a computed value that goes into a split key must be
+  computed in the domain the reader will recompute it in** (twice: coincidence in f32,
+  handedness in f32).
+  **Carried remainders**: no
   panel, no commands, no modelling ops beyond the core
   set (P23.4); collapsing a tetrahedron edge is *permitted* and leaves a legal two-face
   degenerate surface (topology kernel, geometric rules excluded on purpose); import **refuses**

@@ -17,12 +17,20 @@
 //! summed in **ascending face id** order so that every corner in one fan gets a
 //! bit-identical result and they therefore collapse to one output vertex.
 //!
-//! [`NormalPolicy::Recompute`] ignores authored normals entirely. It is **not**
-//! the default, and the reason is a gate rather than a preference: recomputing
-//! always would make `SetCornerNormal` an op whose effect can never be observed
-//! in the thing the kernel writes, and it would break the bit-identical round
-//! trip on the one fixture this batch names (a flat-shaded, UV-mapped cube). It
-//! exists for the "bake the shading I can see" case P23.5 will want.
+//! [`NormalPolicy::Recompute`] ignores authored normals entirely. Two reasons it
+//! is **not** the default, and the second one is measured rather than assumed:
+//!
+//! * It would make [`crate::ops::Op::SetCornerNormal`] an op whose effect can
+//!   never be observed in the thing the kernel writes.
+//! * It is **not a round-trip fixed point on curved geometry**. A derived normal
+//!   sums the corner's smooth fan; on the first export that fan is made of
+//!   n-gons and after the round trip the same surface is triangles, so the sums
+//!   differ. Flat, all-sharp geometry is unaffected (the fan is one face either
+//!   way), which is why `plane` and `cube` are stable under `Recompute` and
+//!   `cylinder` and `torus` are not — pinned by
+//!   `the_recompute_policy_is_a_fixed_point_only_on_flat_geometry`.
+//!
+//! It exists for the "bake the shading I can see" case P23.5 will want.
 //!
 //! # Tangents: MikkTSpace-class, written here, deterministic
 //!
@@ -138,6 +146,34 @@ pub struct ExportReport {
     /// polygon has no such ear it is counted here rather than left to be
     /// discovered on the next open.
     pub reused_diagonals: usize,
+    /// Written vertices carrying a non-finite position, normal or UV.
+    ///
+    /// # Why this is a counter here and a REFUSAL in [`crate::ops`]
+    ///
+    /// The read path refuses non-finite data (it is a
+    /// [`crate::validate::Violation`]), and symmetry does argue for the writer
+    /// refusing too. The kernel therefore closes the door where closing it is
+    /// free: `AddVertex`, `TranslateVerts`, `SetCornerUv` and `SetCornerNormal`
+    /// **refuse** a non-finite value outright, so no *edit* can produce this.
+    ///
+    /// What remains is data the kernel did not author — a `MeshAsset` whose
+    /// positions were already NaN when the author's glTF was written.
+    /// [`crate::build::from_mesh_asset`] deliberately does not police attribute
+    /// *values* (it preserves them bit-for-bit so the round trip is exact), so
+    /// such a value can reach the writer. Refusing there would mean an author
+    /// who opened a bad file cannot save their work at all, over a value they
+    /// did not create and may not be able to find. So it is counted, loudly, for
+    /// P23.6's save path to surface — the P16 advisory doctrine, and the same
+    /// call as `coincident_vertices` above.
+    ///
+    /// A non-zero count on a mesh this crate built is a bug in this crate.
+    pub non_finite_written: usize,
+    /// Written vertices whose normal is not unit length (tolerance 1e-3).
+    ///
+    /// Same door, same reasoning: `SetCornerNormal` refuses a non-unit authored
+    /// normal, derived normals are normalized by construction, so this can only
+    /// be an imported value passing through — a `[0, 5, 0]` in someone's asset.
+    pub non_unit_normals_written: usize,
 }
 
 /// Write a kernel mesh as a `.inf_mesh` payload.
@@ -147,9 +183,11 @@ pub struct ExportReport {
 pub fn to_mesh_asset(mesh: &Mesh, opts: &ExportOptions) -> (MeshAsset, ExportReport) {
     let mut report = ExportReport {
         optimized: opts.optimize,
-        coincident_vertices: count_coincident(mesh),
         ..Default::default()
     };
+    // Filled as vertices are interned, so the coincidence advisory measures what
+    // was WRITTEN, in f32 — see `count_coincident`.
+    let mut written: BTreeSet<([u32; 3], VertId)> = BTreeSet::new();
 
     // One submesh per material slot, ascending (`None` first — `Option`'s own
     // ordering, so the grouping needs no special case for "unassigned").
@@ -168,7 +206,7 @@ pub fn to_mesh_asset(mesh: &Mesh, opts: &ExportOptions) -> (MeshAsset, ExportRep
     let mut submeshes = Vec::with_capacity(by_slot.len());
     for (slot, faces) in by_slot {
         let (vertices, indices, fallbacks) =
-            build_submesh(mesh, &faces, opts, &mut report, &mut emitted);
+            build_submesh(mesh, &faces, opts, &mut report, &mut emitted, &mut written);
         report.fan_fallbacks += fallbacks;
         if indices.is_empty() {
             continue;
@@ -205,6 +243,7 @@ pub fn to_mesh_asset(mesh: &Mesh, opts: &ExportOptions) -> (MeshAsset, ExportRep
         });
     }
     report.submeshes = submeshes.len();
+    report.coincident_vertices = count_coincident(&written);
 
     // `MeshAsset::new` recomputes the bounds from the written positions.
     (
@@ -213,31 +252,95 @@ pub fn to_mesh_asset(mesh: &Mesh, opts: &ExportOptions) -> (MeshAsset, ExportRep
     )
 }
 
-/// Vertices that share a position with another vertex — see
-/// [`ExportReport::coincident_vertices`]. Bit-exact, and `-0.0` folded onto
-/// `+0.0`, because that is exactly the comparison the reader's weld makes.
-fn count_coincident(mesh: &Mesh) -> usize {
-    let mut buckets: BTreeMap<[u64; 3], usize> = BTreeMap::new();
-    for v in mesh.vert_ids() {
-        let p = mesh.position(v).expect("live vertex id").to_array();
-        let key = [bits(p[0]), bits(p[1]), bits(p[2])];
-        *buckets.entry(key).or_default() += 1;
+/// Vertices that collide **in the domain the reader actually welds in** — see
+/// [`ExportReport::coincident_vertices`].
+///
+/// Two things this gets right that the obvious version does not:
+///
+/// * **`f32`, not `f64`.** The weld compares the positions in the *asset*, and
+///   an asset position is `f32`. Two vertices 1e-9 m apart are distinct in the
+///   kernel and bit-equal once written, so an `f64` comparison reports zero
+///   while the reader fuses them and refuses the result as non-manifold — the
+///   advisory reading clean at exactly the moment it is needed.
+/// * **Only what was written.** Isolated vertices, and vertices whose every
+///   incident face was skipped, never reach the payload, so counting them
+///   inflates a hazard that cannot occur.
+///
+/// Input is the `(written f32 position, kernel vertex)` pairs the interning pass
+/// produced; the count is the number of distinct kernel vertices sharing a
+/// written position with another.
+fn count_coincident(written: &BTreeSet<([u32; 3], VertId)>) -> usize {
+    let mut by_position: BTreeMap<[u32; 3], BTreeSet<VertId>> = BTreeMap::new();
+    for (pos, v) in written {
+        by_position.entry(*pos).or_default().insert(*v);
     }
-    buckets.values().filter(|&&n| n > 1).sum()
+    by_position
+        .values()
+        .filter(|verts| verts.len() > 1)
+        .map(BTreeSet::len)
+        .sum()
 }
 
-fn bits(x: f64) -> u64 {
-    if x == 0.0 {
-        0
-    } else {
-        x.to_bits()
+fn bits32(p: [f32; 3]) -> [u32; 3] {
+    // `-0.0` folded onto `+0.0`: the reader's weld compares the f64 promotion of
+    // these bits, where the two compare EQUAL, so treating them as distinct here
+    // would under-report.
+    let one = |x: f32| if x == 0.0 { 0 } else { x.to_bits() };
+    [one(p[0]), one(p[1]), one(p[2])]
+}
+
+/// The corner key an output vertex is deduplicated by: the vertex it sits on,
+/// the **f32** bits of the attributes that will actually be written (so the
+/// split is exactly the split the payload needs and not one bit finer), and the
+/// corner's **UV handedness**.
+///
+/// Handedness is in the key because a tangent frame has one, and it is exactly
+/// what MikkTSpace splits on. Two faces meeting at a vertex with mirrored UV
+/// islands can carry the *same* uv and the *same* normal while winding opposite
+/// ways in UV space; without handedness in the key they intern to one output
+/// vertex whose accumulated bitangent is the sum of two opposing contributions,
+/// so the written `w` depends on which triangles happened to be emitted first.
+/// That is a seam that flips its normal map, and it is triangulation-dependent —
+/// the worst kind of bug to chase.
+type CornerKey = (VertId, [u32; 2], [u32; 3], i8);
+
+/// The sign of a **triangle's** signed area in UV space: `+1`, `-1`, or `0` when
+/// it carries no UV area at all (an unwrapped or degenerate triangle, where
+/// there is no handedness to disagree about and no split is wanted).
+///
+/// Per *triangle*, not per face, and computed from the **f32** UVs, and both of
+/// those are load-bearing.
+///
+/// * *Per triangle* is what MikkTSpace splits on, and it is the only version
+///   that survives the round trip, because the round trip replaces every n-gon
+///   with its triangles. Keying on the parent face's orientation made
+///   `export_is_a_fixed_point` fail the moment an n-gon's UV loop summed to zero
+///   while its triangles did not: 16 written vertices became 18 on the reread.
+/// * *From f32* because this sign goes into the corner key, so it decides how
+///   many vertices are written — and on the reread it will be recomputed from
+///   the f32 values in the payload. A sign taken from the f64 kernel UVs and a
+///   sign taken from their f32 images disagree whenever a triangle's UV area is
+///   smaller than the rounding, and the two passes then split differently. Same
+///   lesson as `count_coincident`: measure in the domain the reader will use.
+fn uv_orientation(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> i8 {
+    let (a, b, c) = (
+        [a[0] as f64, a[1] as f64],
+        [b[0] as f64, b[1] as f64],
+        [c[0] as f64, c[1] as f64],
+    );
+    let twice_area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+    match twice_area.partial_cmp(&0.0) {
+        Some(std::cmp::Ordering::Greater) => 1,
+        Some(std::cmp::Ordering::Less) => -1,
+        _ => 0,
     }
 }
 
-/// The corner key an output vertex is deduplicated by: the vertex it sits on
-/// plus the **f32** bits of the attributes that will actually be written, so the
-/// split is exactly the split the payload needs and not one bit finer.
-type CornerKey = (VertId, [u32; 2], [u32; 3]);
+/// A corner's UV as it will be WRITTEN.
+fn corner_uv32(mesh: &Mesh, h: HalfId) -> [f32; 2] {
+    let uv = mesh.corner_uv(h).expect("live half-edge id");
+    [uv[0] as f32, uv[1] as f32]
+}
 
 fn build_submesh(
     mesh: &Mesh,
@@ -245,6 +348,7 @@ fn build_submesh(
     opts: &ExportOptions,
     report: &mut ExportReport,
     emitted: &mut BTreeSet<(VertId, VertId)>,
+    written: &mut BTreeSet<([u32; 3], VertId)>,
 ) -> (Vec<MeshVertex>, Vec<u32>, usize) {
     let mut key_to_index: BTreeMap<CornerKey, u32> = BTreeMap::new();
     let mut positions: Vec<[f32; 3]> = Vec::new();
@@ -264,12 +368,12 @@ fn build_submesh(
             .map(|&v| mesh.position(v).expect("live vertex id"))
             .collect();
         let n = halfs.len();
-        let written = &*emitted;
+        let seen_edges = &*emitted;
         let taken = |a: VertId, b: VertId| {
             mesh.find_half(a, b).is_some()
                 || mesh.find_half(b, a).is_some()
-                || written.contains(&(a, b))
-                || written.contains(&(b, a))
+                || seen_edges.contains(&(a, b))
+                || seen_edges.contains(&(b, a))
         };
         let forbidden = |i: usize, j: usize| taken(loop_verts[i], loop_verts[j]);
         let t = triangulate_with(&loop_positions, &forbidden);
@@ -305,6 +409,11 @@ fn build_submesh(
         // order instead put the ear-clipper's first triangle out of step with the
         // vertex order and cost a byte-identical `export∘import∘export`.
         for tri in tris {
+            let hand = uv_orientation(
+                corner_uv32(mesh, halfs[tri[0]]),
+                corner_uv32(mesh, halfs[tri[1]]),
+                corner_uv32(mesh, halfs[tri[2]]),
+            );
             for local in tri {
                 let h = halfs[local];
                 let v = mesh.origin(h).expect("live half-edge id");
@@ -316,12 +425,29 @@ fn build_submesh(
                     v,
                     [uv32[0].to_bits(), uv32[1].to_bits()],
                     [n32[0].to_bits(), n32[1].to_bits(), n32[2].to_bits()],
+                    hand,
                 );
                 let next = positions.len() as u32;
                 let idx = *key_to_index.entry(key).or_insert(next);
                 if idx == next {
                     let p = mesh.position(v).expect("live vertex id");
-                    positions.push([p.x as f32, p.y as f32, p.z as f32]);
+                    let p32 = [p.x as f32, p.y as f32, p.z as f32];
+                    // M6: the write path counts what it cannot refuse. See the
+                    // `ExportReport` field docs for why this is a counter here
+                    // and a REFUSAL in `ops`.
+                    if !p32.iter().all(|c| c.is_finite())
+                        || !n32.iter().all(|c| c.is_finite())
+                        || !uv32.iter().all(|c| c.is_finite())
+                    {
+                        report.non_finite_written += 1;
+                    }
+                    let len2: f32 = n32.iter().map(|c| c * c).sum();
+                    // NaN-safe on purpose: a non-finite normal is also non-unit.
+                    if len2.is_nan() || (len2 - 1.0).abs() > 1e-3 {
+                        report.non_unit_normals_written += 1;
+                    }
+                    written.insert((bits32(p32), v));
+                    positions.push(p32);
                     normals.push(n32);
                     uvs.push(uv32);
                 }
@@ -518,6 +644,33 @@ fn triangulate_with(pts: &[DVec3], forbidden: &dyn Fn(usize, usize) -> bool) -> 
     let mut fell_back = false;
     while remaining.len() > 3 {
         let m = remaining.len();
+        // Only a REFLEX vertex of the remaining polygon can invalidate an ear,
+        // and it invalidates it by lying inside OR ON the candidate triangle.
+        //
+        // Both halves of that sentence are load-bearing, and the first version
+        // of this clipper got both wrong. It tested every vertex for STRICT
+        // containment, so a reflex vertex sitting exactly on a candidate
+        // diagonal — the ordinary case for rectilinear geometry, where an L, a
+        // T or a staircase puts three corners on one line — failed the `> 0.0`
+        // test on one edge and did not block. The clipper then cut an "ear"
+        // straight across the notch: on a 3 m² L-hexagon it emitted 4 m² of
+        // triangles, one of them outside the polygon and one wound backwards,
+        // with `fan_fallbacks` reporting zero. Nothing else noticed, because the
+        // signed areas cancel to exactly the right answer — which is why the
+        // winding gate (signed volume) is blind to this by construction and
+        // `every_ngon_triangulation_tiles_its_polygon` measures UNSIGNED area.
+        //
+        // Testing convex vertices with `>=` instead would be the opposite
+        // mistake: a convex vertex adjacent to the ear legitimately touches it.
+        let reflex: Vec<bool> = (0..m)
+            .map(|i| {
+                cross2(
+                    p2[remaining[(i + m - 1) % m]],
+                    p2[remaining[i]],
+                    p2[remaining[(i + 1) % m]],
+                ) <= 0.0
+            })
+            .collect();
         let is_ear = |i: usize| -> Option<(usize, usize, usize)> {
             let (a, b, c) = (
                 remaining[(i + m - 1) % m],
@@ -527,8 +680,8 @@ fn triangulate_with(pts: &[DVec3], forbidden: &dyn Fn(usize, usize) -> bool) -> 
             if cross2(p2[a], p2[b], p2[c]) <= 0.0 {
                 return None; // reflex or collinear — not an ear
             }
-            let blocked = remaining.iter().any(|&k| {
-                k != a && k != b && k != c && strictly_inside(p2[a], p2[b], p2[c], p2[k])
+            let blocked = remaining.iter().enumerate().any(|(ki, &k)| {
+                reflex[ki] && k != a && k != b && k != c && inside_or_on(p2[a], p2[b], p2[c], p2[k])
             });
             if blocked {
                 None
@@ -586,8 +739,11 @@ fn cross2(a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> f64 {
     (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
 }
 
-fn strictly_inside(a: (f64, f64), b: (f64, f64), c: (f64, f64), p: (f64, f64)) -> bool {
-    cross2(a, b, p) > 0.0 && cross2(b, c, p) > 0.0 && cross2(c, a, p) > 0.0
+/// Inside the triangle **or on its boundary**. `>=`, not `>`: a reflex vertex
+/// lying exactly on a candidate diagonal is the case that matters (see
+/// [`triangulate_with`]), and strict containment waves it through.
+fn inside_or_on(a: (f64, f64), b: (f64, f64), c: (f64, f64), p: (f64, f64)) -> bool {
+    cross2(a, b, p) >= 0.0 && cross2(b, c, p) >= 0.0 && cross2(c, a, p) >= 0.0
 }
 
 /// MikkTSpace-class tangent generation. See the module docs for the determinism
@@ -784,6 +940,234 @@ mod tests {
     }
 
     #[test]
+    fn a_mirrored_uv_island_splits_its_shared_seam_vertices() {
+        // M5. Two quads sharing an edge, with MIRRORED uv islands: the shared
+        // corners carry the same uv and the same normal, and the two faces wind
+        // opposite ways in UV space. Without handedness in the corner key they
+        // intern to one vertex whose bitangent is the sum of two opposing
+        // contributions, so the written `w` depends on which triangle the ear
+        // clipper emitted first — a seam that flips its normal map for reasons
+        // no one can reproduce.
+        let mut m = Mesh::new();
+        let p = [
+            [0.0, 0.0, 0.0],  // 0 ─┐ shared edge 0–1
+            [1.0, 0.0, 0.0],  // 1 ─┘
+            [1.0, 0.0, 1.0],  // 2  right quad
+            [0.0, 0.0, 1.0],  // 3
+            [1.0, 0.0, -1.0], // 4  left quad
+            [0.0, 0.0, -1.0], // 5
+        ];
+        let ids: Vec<VertId> = p
+            .iter()
+            .map(|q| {
+                apply(&mut m, &Op::AddVertex { position: *q })
+                    .unwrap()
+                    .verts[0]
+            })
+            .collect();
+        let corner = |uv: [f64; 2]| crate::topo::CornerData { uv, normal: None };
+        // Right quad: uv winds one way.
+        apply(
+            &mut m,
+            &Op::AddFace {
+                verts: vec![ids[0], ids[1], ids[2], ids[3]],
+                corners: vec![
+                    corner([0.0, 0.0]),
+                    corner([1.0, 0.0]),
+                    corner([1.0, 1.0]),
+                    corner([0.0, 1.0]),
+                ],
+                slot: None,
+            },
+        )
+        .unwrap();
+        // Left quad: MIRRORED in u, so its uv loop winds the other way while the
+        // shared corners keep the very same uv values.
+        apply(
+            &mut m,
+            &Op::AddFace {
+                verts: vec![ids[1], ids[0], ids[5], ids[4]],
+                corners: vec![
+                    corner([1.0, 0.0]),
+                    corner([0.0, 0.0]),
+                    corner([0.0, 1.0]),
+                    corner([1.0, 1.0]),
+                ],
+                slot: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(validate(&m), Ok(()));
+
+        // The two faces really do disagree about handedness — otherwise this
+        // fixture would be testing nothing.
+        let hands: Vec<i8> = m
+            .face_ids()
+            .map(|f| {
+                let hs = m.face_loop(f).unwrap();
+                uv_orientation(
+                    corner_uv32(&m, hs[0]),
+                    corner_uv32(&m, hs[1]),
+                    corner_uv32(&m, hs[2]),
+                )
+            })
+            .collect();
+        assert_eq!(hands.len(), 2);
+        assert_eq!(
+            hands[0], -hands[1],
+            "the islands must be mirrored: {hands:?}"
+        );
+
+        let asset = export(&m);
+        // Six kernel vertices; the two on the shared edge split in two, so eight.
+        assert_eq!(
+            asset.vertex_count(),
+            8,
+            "the two seam vertices must not be shared across a handedness flip"
+        );
+        // And each side's tangents are internally consistent: every written
+        // vertex has a definite handedness, not a cancelled one.
+        for sm in &asset.submeshes {
+            for v in &sm.vertices {
+                assert!(v.tangent[3] == 1.0 || v.tangent[3] == -1.0);
+                let t = DVec3::new(
+                    v.tangent[0] as f64,
+                    v.tangent[1] as f64,
+                    v.tangent[2] as f64,
+                );
+                assert!(
+                    (t.length() - 1.0).abs() < 1e-5,
+                    "a cancelled accumulation would leave this degenerate: {t:?}"
+                );
+            }
+        }
+        let ws: BTreeSet<u32> = asset.submeshes[0]
+            .vertices
+            .iter()
+            .map(|v| v.tangent[3].to_bits())
+            .collect();
+        assert_eq!(ws.len(), 2, "both handednesses are present and distinct");
+    }
+
+    #[test]
+    fn the_write_path_counts_what_it_cannot_refuse() {
+        // M6. The kernel's own ops refuse non-finite and non-unit values, so
+        // this state can only arrive from an imported asset — which the reader
+        // deliberately does not police, because preserving attribute bits is
+        // what makes the round trip exact. So the writer counts it.
+        let mut asset = crate::build::tests::textured_cube_asset();
+        asset.submeshes[0].vertices[0].position[0] = f32::NAN;
+        asset.submeshes[0].vertices[1].normal = [0.0, 5.0, 0.0];
+        let m = from_mesh_asset(&asset).unwrap().mesh;
+        let (_, report) = to_mesh_asset(&m, &ExportOptions::default());
+        assert!(
+            report.non_finite_written >= 1,
+            "a NaN reached the payload uncounted"
+        );
+        assert!(
+            report.non_unit_normals_written >= 1,
+            "a [0,5,0] normal reached the payload uncounted"
+        );
+
+        // And the clean fixture reports zero, so the counters are not just
+        // always-on noise.
+        let clean = from_mesh_asset(&crate::build::tests::textured_cube_asset())
+            .unwrap()
+            .mesh;
+        let (_, ok) = to_mesh_asset(&clean, &ExportOptions::default());
+        assert_eq!(ok.non_finite_written, 0);
+        assert_eq!(ok.non_unit_normals_written, 0);
+    }
+
+    #[test]
+    fn coincidence_is_measured_in_the_f32_domain_the_reader_welds_in() {
+        // M6's sibling defect, M2: two vertices 1e-9 m apart are distinct in the
+        // f64 kernel and BIT-EQUAL once written as f32. Measuring the advisory in
+        // f64 reported zero at exactly the moment the reader was about to fuse
+        // them and refuse the result.
+        // The offset has to sit BELOW the f32 ULP at that coordinate. Near 0 an
+        // f32 is fine down to 1e-38, so a nudge there stays distinct; near 1.0
+        // the ULP is ~1.2e-7 and 1e-9 vanishes. Getting this wrong is how the
+        // f64 version of the check looked like it worked.
+        let mut m = Mesh::new();
+        let p = [
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 1.0],
+            [1.0 + 1e-9, 0.0, 0.0], // distinct in f64, identical in f32
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+        ];
+        let ids: Vec<VertId> = p
+            .iter()
+            .map(|q| {
+                apply(&mut m, &Op::AddVertex { position: *q })
+                    .unwrap()
+                    .verts[0]
+            })
+            .collect();
+        for tri in [[0, 1, 2], [3, 4, 5]] {
+            apply(
+                &mut m,
+                &Op::AddFace {
+                    verts: tri.iter().map(|&i| ids[i]).collect(),
+                    corners: vec![Default::default(); 3],
+                    slot: None,
+                },
+            )
+            .unwrap();
+        }
+        assert_ne!(
+            m.position(ids[0]).unwrap(),
+            m.position(ids[3]).unwrap(),
+            "distinct in the kernel"
+        );
+        let (asset, report) = to_mesh_asset(&m, &ExportOptions::default());
+        assert_ne!(
+            m.position(ids[0]).unwrap().x as f32 as f64,
+            1.0 + 1e-9,
+            "the fixture only works because f32 cannot hold the difference"
+        );
+        assert_eq!(
+            report.coincident_vertices, 2,
+            "both halves of the pair, measured where the weld happens"
+        );
+        // And the advisory is telling the truth: writing and reading back is not
+        // the identity — the reader really does fuse the pair.
+        let back = from_mesh_asset(&asset).unwrap();
+        assert_eq!(
+            back.report.welded_positions, 5,
+            "6 kernel vertices came back as 5"
+        );
+        assert_eq!(
+            back.mesh.vert_count(),
+            6,
+            "and the fused vertex split into fans"
+        );
+    }
+
+    #[test]
+    fn isolated_vertices_are_not_counted_as_a_write_hazard() {
+        // The other half of M2: the old f64 count included vertices export never
+        // writes, inflating a hazard that cannot occur.
+        let mut m = cube(1.0);
+        for _ in 0..3 {
+            apply(
+                &mut m,
+                &Op::AddVertex {
+                    position: [7.0, 7.0, 7.0], // three coincident, all isolated
+                },
+            )
+            .unwrap();
+        }
+        let (_, report) = to_mesh_asset(&m, &ExportOptions::default());
+        assert_eq!(
+            report.coincident_vertices, 0,
+            "nothing that never reaches the payload can collide in it"
+        );
+    }
+
+    #[test]
     fn tangent_generation_is_identical_across_two_runs() {
         let m = cylinder(0.5, 2.0, 17);
         let a = export(&m);
@@ -815,6 +1199,183 @@ mod tests {
             .vertices
             .iter()
             .all(|v| v.tangent == TANGENT_FALLBACK));
+    }
+
+    /// Six rectilinear polygons, every one of which puts three corners on a line
+    /// — the shape real inset/bevel/loop-cut output has, and the shape the first
+    /// clipper mis-triangulated.
+    fn rectilinear_shapes() -> Vec<(&'static str, Vec<DVec3>, f64)> {
+        let poly = |pts: &[(f64, f64)]| -> Vec<DVec3> {
+            pts.iter().map(|&(x, z)| DVec3::new(x, 0.0, z)).collect()
+        };
+        vec![
+            (
+                "L-hexagon",
+                poly(&[
+                    (0.0, 0.0),
+                    (2.0, 0.0),
+                    (2.0, 1.0),
+                    (1.0, 1.0),
+                    (1.0, 2.0),
+                    (0.0, 2.0),
+                ]),
+                3.0,
+            ),
+            (
+                "L-hexagon mirrored",
+                poly(&[
+                    (0.0, 0.0),
+                    (2.0, 0.0),
+                    (2.0, 2.0),
+                    (1.0, 2.0),
+                    (1.0, 1.0),
+                    (0.0, 1.0),
+                ]),
+                3.0,
+            ),
+            (
+                "T-octagon",
+                poly(&[
+                    (0.0, 0.0),
+                    (3.0, 0.0),
+                    (3.0, 1.0),
+                    (2.0, 1.0),
+                    (2.0, 2.0),
+                    (1.0, 2.0),
+                    (1.0, 1.0),
+                    (0.0, 1.0),
+                ]),
+                4.0,
+            ),
+            (
+                "U-octagon",
+                poly(&[
+                    (0.0, 0.0),
+                    (3.0, 0.0),
+                    (3.0, 2.0),
+                    (2.0, 2.0),
+                    (2.0, 1.0),
+                    (1.0, 1.0),
+                    (1.0, 2.0),
+                    (0.0, 2.0),
+                ]),
+                5.0,
+            ),
+            (
+                "staircase",
+                poly(&[
+                    (0.0, 0.0),
+                    (3.0, 0.0),
+                    (3.0, 1.0),
+                    (2.0, 1.0),
+                    (2.0, 2.0),
+                    (1.0, 2.0),
+                    (1.0, 3.0),
+                    (0.0, 3.0),
+                ]),
+                6.0,
+            ),
+            (
+                "plus-dodecagon",
+                poly(&[
+                    (1.0, 0.0),
+                    (2.0, 0.0),
+                    (2.0, 1.0),
+                    (3.0, 1.0),
+                    (3.0, 2.0),
+                    (2.0, 2.0),
+                    (2.0, 3.0),
+                    (1.0, 3.0),
+                    (1.0, 2.0),
+                    (0.0, 2.0),
+                    (0.0, 1.0),
+                    (1.0, 1.0),
+                ]),
+                5.0,
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_ngon_triangulation_tiles_its_polygon() {
+        // THE gate for the class the winding gate cannot see. Signed areas of an
+        // escaped triangle and an inverted one cancel exactly, so signed volume
+        // reads correct while the mesh has geometry outside itself. UNSIGNED
+        // area does not cancel: Σ|tri| == |polygon| iff the triangles tile it.
+        for (name, pts, want_area) in rectilinear_shapes() {
+            let normal = newell_of(&pts);
+            let poly_area = normal.length() * 0.5;
+            assert!(
+                (poly_area - want_area).abs() < 1e-12,
+                "{name}: fixture area {poly_area}, expected {want_area}"
+            );
+            let (tris, fell_back) = triangulate(&pts);
+            assert!(!fell_back, "{name}: fell back to a fan");
+            assert_eq!(tris.len(), pts.len() - 2, "{name}: wrong triangle count");
+            let mut unsigned = 0.0;
+            for [a, b, c] in &tris {
+                let cr = (pts[*b] - pts[*a]).cross(pts[*c] - pts[*a]);
+                assert!(
+                    cr.dot(normal) > 0.0,
+                    "{name}: triangle {a},{b},{c} is wound against the polygon"
+                );
+                unsigned += cr.length() * 0.5;
+            }
+            assert!(
+                (unsigned - poly_area).abs() < 1e-12,
+                "{name}: triangles cover {unsigned} of a {poly_area} polygon — \
+                 geometry escaped the outline"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rectilinear_ngon_survives_the_asset_round_trip() {
+        // The same shapes through the real writer, not just the clipper.
+        for (name, pts, want_area) in rectilinear_shapes() {
+            let mut m = Mesh::new();
+            let ids: Vec<VertId> = pts
+                .iter()
+                .map(|p| {
+                    apply(
+                        &mut m,
+                        &Op::AddVertex {
+                            position: p.to_array(),
+                        },
+                    )
+                    .unwrap()
+                    .verts[0]
+                })
+                .collect();
+            let n = ids.len();
+            apply(
+                &mut m,
+                &Op::AddFace {
+                    verts: ids,
+                    corners: vec![Default::default(); n],
+                    slot: None,
+                },
+            )
+            .unwrap();
+            let (asset, report) = to_mesh_asset(&m, &ExportOptions::default());
+            assert_eq!(report.fan_fallbacks, 0, "{name}");
+            assert_eq!(report.triangles, n - 2, "{name}");
+            let sm = &asset.submeshes[0];
+            let mut area = 0.0;
+            for tri in sm.indices.chunks_exact(3) {
+                let p = |k: usize| {
+                    let v = sm.vertices[tri[k] as usize].position;
+                    DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64)
+                };
+                area += (p(1) - p(0)).cross(p(2) - p(0)).length() * 0.5;
+            }
+            assert!(
+                (area - want_area).abs() < 1e-6,
+                "{name}: written triangles cover {area}, polygon is {want_area}"
+            );
+            let back = from_mesh_asset(&asset).expect("{name} must read back");
+            assert_eq!(validate(&back.mesh), Ok(()), "{name}");
+        }
     }
 
     #[test]
@@ -1008,6 +1569,44 @@ mod tests {
             4,
             "quad → 2 triangles, plus the two"
         );
+    }
+
+    #[test]
+    fn the_recompute_policy_is_a_fixed_point_only_on_flat_geometry() {
+        // The claim the module docs USED to make was that `Recompute` breaks the
+        // round trip on the flat-shaded cube. Measured, that is false twice
+        // over: it holds on the cube, and what it actually breaks is the CURVED
+        // case, which nothing tested.
+        //
+        // The mechanism: a derived normal is the area-weighted sum over the
+        // corner's smooth fan. On the first export that fan is made of n-gons;
+        // after the round trip the same surface is triangles, so the fan sums
+        // different polygons and lands on different normals. Where every edge is
+        // sharp the fan is a single face either way and nothing moves.
+        let recompute = ExportOptions {
+            normals: NormalPolicy::Recompute,
+            optimize: false,
+        };
+        let fixed_point = |m: &Mesh| {
+            let a1 = to_mesh_asset(m, &recompute).0;
+            let a2 = to_mesh_asset(&from_mesh_asset(&a1).unwrap().mesh, &recompute).0;
+            inf_asset::encode(&a1).unwrap() == inf_asset::encode(&a2).unwrap()
+        };
+        for (name, m) in [("plane", plane(2.0)), ("cube", cube(1.0))] {
+            assert!(fixed_point(&m), "{name}: flat geometry must be stable");
+        }
+        for (name, m) in [
+            ("cylinder", cylinder(0.5, 2.0, 9)),
+            ("torus", torus(1.0, 0.25, 9, 5)),
+        ] {
+            assert!(
+                !fixed_point(&m),
+                "{name}: if this now holds, the smooth-fan derivation became                  triangulation-independent and the docs above are stale"
+            );
+        }
+        // The DEFAULT policy is a fixed point on all four — that is what
+        // `one_round_trip_reaches_a_fixed_point` pins, and it is the reason
+        // authored normals win by default.
     }
 
     #[test]

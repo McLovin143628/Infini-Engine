@@ -101,6 +101,36 @@ pub struct ImportReport {
     pub degenerate_triangles_skipped: usize,
     /// Edges marked sharp because the corner normals disagree across them.
     pub sharp_edges: usize,
+    /// **The exact-weld advisory.** Undirected edges with a face on only one
+    /// side after import.
+    ///
+    /// [`WELD_TOLERANCE`] is zero, and it stays zero — an epsilon weld is not
+    /// transitive, so its result would depend on iteration order, and it would
+    /// silently re-topologize an asset the author has already shipped. But that
+    /// decision has a consequence worth *measuring* rather than arguing about: a
+    /// source whose seam positions differ by one ULP does not weld, and the mesh
+    /// arrives fragmented.
+    ///
+    /// This counter is what makes that visible without a tolerance. A closed
+    /// solid has **zero** boundary edges; the same solid whose seam failed to
+    /// weld arrives with one boundary edge per seam edge — 24 for a cube split
+    /// down every face. An author who believes their mesh is closed and sees a
+    /// non-zero count has been told exactly what happened, and no epsilon had to
+    /// be chosen on their behalf. (A genuinely open mesh — a plane, a cloth
+    /// panel — reports its real boundary here and that is not a fault.)
+    pub boundary_edges: usize,
+    /// Source vertices carrying a non-finite position, normal or UV.
+    ///
+    /// The reader deliberately does **not** refuse these, and does not repair
+    /// them: preserving attribute bits verbatim is what makes the export round
+    /// trip exact, and an author who opened a file with one bad vertex should
+    /// not be locked out of their own mesh. But `validate` treats a non-finite
+    /// position as a violation, so a mesh carrying one is *legal to hold and
+    /// illegal to journal* — [`crate::journal::MeshSession::restore`] will
+    /// refuse it as an invalid base. This counter is what makes that
+    /// predictable instead of surprising, and it is the read-side twin of
+    /// [`crate::export::ExportReport::non_finite_written`].
+    pub non_finite_values: usize,
 }
 
 /// A mesh plus what the reader had to do to produce it.
@@ -153,6 +183,12 @@ pub fn from_mesh_asset(asset: &MeshAsset) -> Result<MeshImport, ImportError> {
                     v.position[1] as f64,
                     v.position[2] as f64,
                 ];
+                if !p.iter().all(|c| c.is_finite())
+                    || !v.normal.iter().all(|c| c.is_finite())
+                    || !v.uv.iter().all(|c| c.is_finite())
+                {
+                    report.non_finite_values += 1;
+                }
                 let key = bits3(p);
                 let idx = *weld.entry(key).or_insert_with(|| {
                     positions.push(p);
@@ -219,6 +255,10 @@ pub fn from_mesh_asset(asset: &MeshAsset) -> Result<MeshImport, ImportError> {
         .expect("bowties were split before building");
 
     report.sharp_edges = mark_sharp_from_normals(&mut mesh);
+    report.boundary_edges = mesh
+        .half_ids()
+        .filter(|&h| mesh.is_boundary(h) == Some(true))
+        .count();
     Ok(MeshImport { mesh, report })
 }
 
@@ -615,6 +655,46 @@ pub(crate) mod tests {
             24,
             "24 distinct corner attribute combinations"
         );
+    }
+
+    #[test]
+    fn a_one_ulp_seam_does_not_weld_and_the_counter_says_so() {
+        // The exact-weld ruling stands (an epsilon weld is not transitive and
+        // would re-topologize shipped assets), so this test does NOT assert that
+        // the mesh comes back closed. It asserts that when a seam misses by one
+        // ULP the author is TOLD — which is the whole point of preferring a
+        // counter to a tolerance.
+        let closed = from_mesh_asset(&textured_cube_asset()).unwrap();
+        assert_eq!(
+            closed.report.boundary_edges, 0,
+            "the friendly fixture is a closed solid"
+        );
+
+        // Nudge the +X FACE's own four corners by one ULP. The same four
+        // positions are still written exactly by the ±Y/±Z faces that share
+        // them, so the seam misses by one ULP — the realistic shape of the
+        // hazard, and the one an epsilon weld is usually proposed for.
+        let mut asset = textured_cube_asset();
+        let plus_x = 20..24; // the sixth face's corners, in fixture order
+        for i in plus_x {
+            let p = &mut asset.submeshes[0].vertices[i].position;
+            p[0] = f32::from_bits(p[0].to_bits() + 1);
+        }
+        let split = from_mesh_asset(&asset).unwrap();
+        assert_eq!(
+            split.report.welded_positions, 12,
+            "the four +X corners no longer weld with their twins"
+        );
+        assert!(
+            split.report.boundary_edges > 0,
+            "a mesh the author believes is closed must not arrive silently fragmented"
+        );
+        assert_eq!(
+            split.report.boundary_edges, 8,
+            "the detached quad's four border edges, plus the four around the hole \
+             it left — the author is told the solid is open, and where"
+        );
+        assert_eq!(validate(&split.mesh), Ok(()), "fragmented, but still valid");
     }
 
     #[test]

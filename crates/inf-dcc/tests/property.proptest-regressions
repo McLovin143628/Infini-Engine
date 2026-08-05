@@ -20,9 +20,15 @@
 # 6:   the writer emitted an n-gon ear diagonal duplicating an edge the mesh
 #      already had, so `from_mesh_asset` refused the writer's own output as
 #      non-manifold.
+# 7:   (audit round) UV handedness entered the corner-split key computed PER FACE
+#      and from f64 UVs. Both were wrong: an n-gon whose UV loop sums to zero has
+#      triangles that do not, and a sign taken in f64 disagrees with the f32 one
+#      the reread recomputes — so `export_is_a_fixed_point` wrote 16 vertices and
+#      re-wrote 18. Per triangle, from f32. See `uv_orientation`.
 cc 09cf2086b10d8fae3dc57dd5ee992da19e33062fe93f545318b249f52b07d2ba
 cc 908c0ed72d85c74e5048078ef7d68897f6abf5c85a39b68376d580d94333c22d
 cc d6b37192a568f7028a156de4b197506c9cda4ed98eb26854501049ffc1534984
 cc ef646b6881681e3070771322b78432baaf599b0988b808cc2e97f26f457bc10b
 cc 4a0967ccccf7479d5700a290c0ed9739fa6f2c800c75aef1cd71de272a9ff06c
 cc a36c7bc77006a9db8d988c97ad90129d79fda14fa20137d0636d8b18588dc4c9
+cc 454676124cd94671eea2f3ea047a917fbbf1dade7306b6a86e63fb05e95d9155
