@@ -31,9 +31,10 @@ use glam::{DAffine3, DQuat, DVec2, DVec3};
 use inf_ecs::components::{
     BodyKind3D as SceneBodyKind3D, Buoyancy, Collider3D, ColliderShape3DKind,
     CombineRule as SceneCombineRule, GlobalTransform, Joint3D, JointKind3D as SceneJointKind3D,
-    PcgVolume, RigidBody3D, Spline, Transform, WaterBody,
+    PcgVolume, RigidBody3D, Spline, Terrain, Transform, WaterBody,
 };
 use inf_ecs::{EcsWorld, Vec3d};
+use inf_terrain::TileKey;
 use uuid::Uuid;
 
 use super::joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
@@ -172,6 +173,38 @@ pub struct PhysicsBridge3D {
     /// neighbour being carved or evicted (`inf_voxel::MeshSourceKey`'s docs carry
     /// the argument and the bug it hid).
     voxel_stamps: BTreeMap<(Uuid, inf_voxel::ChunkKey), inf_voxel::MeshSourceKey>,
+    /// Per-terrain-tile change stamp (P22.3): `(terrain entity, level-0 tile
+    /// coord) → (`[`TerrainData::tile_version`], terrain origin)`. The
+    /// [`structure_stamps`](Self::structure_stamps) pattern one more time, at the
+    /// granularity streaming already has.
+    ///
+    /// A tile's version is a **process-global monotone counter** minted on every
+    /// mutating touch (and on paging a tile in), so it is runtime cache identity
+    /// and never content — which is exactly what a retention stamp needs and
+    /// exactly what a *serialized* one must not be. Determinism does not rest on
+    /// it either way: a re-described tile produces a byte-identical
+    /// [`ColliderDesc3D`], and [`sync_retaining`](Self::sync_retaining) rebuilds a
+    /// collider only when the descriptor actually differs. The stamp buys the
+    /// *work*, not the answer.
+    ///
+    /// The origin rides in the stamp because a terrain that moved has to
+    /// re-place every one of its tiles even though not one sample changed.
+    terrain_stamps: BTreeMap<TerrainTileKey, TerrainTileStamp>,
+    /// How many terrain tile colliders were (re-)described on the most recent
+    /// sync — the audit counter the budget test reads. Zero on a steady-state
+    /// step is the whole point of [`terrain_stamps`](Self::terrain_stamps).
+    terrain_audit: TerrainColliderAudit,
+    /// Per-destructible-actor change stamp (P22.3): `entity →
+    /// `[`FractureState::generation`](super::fracture::FractureState::generation).
+    /// The same pattern a fourth time, keyed by ACTOR rather than by chunk —
+    /// because a fracture event moves every chunk of one actor at once and
+    /// nothing at all on any other, which is the opposite shape from a voxel
+    /// carve.
+    ///
+    /// **Only broken actors appear here.** An intact destructible emits no chunk
+    /// bodies at all, so a town full of destructible walls nobody has shot at
+    /// costs an empty map and one `is_intact` call each.
+    fracture_stamps: BTreeMap<Uuid, u64>,
     /// Reverse map `collider handle → owning entity Guid`, rebuilt at the end of
     /// every [`sync`](Self::sync) (Wave 3). The collision-event drain resolves
     /// rapier's `ContactEvent3D` collider handles back to entity `Guid`s through
@@ -216,6 +249,9 @@ impl PhysicsBridge3D {
             entities: BTreeMap::new(),
             structure_stamps: BTreeMap::new(),
             voxel_stamps: BTreeMap::new(),
+            terrain_stamps: BTreeMap::new(),
+            terrain_audit: TerrainColliderAudit::default(),
+            fracture_stamps: BTreeMap::new(),
             collider_to_guid: BTreeMap::new(),
             water: WaterIndex::default(),
             water_stamps: Vec::new(),
@@ -259,6 +295,19 @@ impl PhysicsBridge3D {
     /// The collider handle mirroring `guid`, if it has one.
     pub fn collider_of(&self, guid: Uuid) -> Option<ColliderId3D> {
         self.entities.get(&guid).and_then(|r| r.collider)
+    }
+
+    /// Every tracked `(guid, body, kind)`, in `Guid` order (P22.3).
+    ///
+    /// The seam a level-wide sweep — a radial impulse, a debug view — walks
+    /// instead of reaching into rapier's own body set, because the rapier set is
+    /// in handle-allocation order and the `Guid` order is the one every other
+    /// pass in this bridge uses.
+    pub fn tracked_bodies(&self) -> Vec<(Uuid, BodyId3D, BodyKind3D)> {
+        self.entities
+            .iter()
+            .map(|(g, r)| (*g, r.body, r.kind))
+            .collect()
     }
 
     /// The entity `Guid` owning `collider`, if tracked — the inverse of
@@ -310,6 +359,36 @@ impl PhysicsBridge3D {
         world: &EcsWorld,
         volumes: &BTreeMap<Uuid, inf_voxel::VoxelData>,
     ) {
+        self.sync_from_world_sim(world, volumes, &BTreeMap::new());
+    }
+
+    /// [`sync_from_world_with_voxels`](Self::sync_from_world_with_voxels) **plus
+    /// the sim's fracture states** (P22.3) — the full sim-side sync both hosts
+    /// call.
+    ///
+    /// `fractures` is the *simulation's* map (`RuntimeSim::fractures` /
+    /// `SimSession::fractures`), keyed by the destructible actor's entity `Guid`.
+    /// An actor whose state is still [`FractureState::is_intact`] contributes
+    /// nothing here and keeps its authored collider; the first chunk to come off
+    /// swaps that one collider for per-chunk bodies, atomically, in this pass.
+    pub fn sync_from_world_sim(
+        &mut self,
+        world: &EcsWorld,
+        volumes: &BTreeMap<Uuid, inf_voxel::VoxelData>,
+        fractures: &BTreeMap<Uuid, super::fracture::FractureState>,
+    ) {
+        // **THE SWAP, and why it is decided before the walk.** An actor that has
+        // started breaking must render and collide as chunks and NOT as itself —
+        // never both, never neither. Both halves of that are one fact, so both
+        // read one set: this one gates the collider below, and the render
+        // projector's `is_intact` gates the mesh. Computing it up front is what
+        // makes the swap atomic within the frame rather than an ordering
+        // accident between two passes.
+        let broken: BTreeSet<Uuid> = fractures
+            .iter()
+            .filter(|(_, s)| !s.is_intact())
+            .map(|(g, _)| *g)
+            .collect();
         let mut snaps: Vec<EntitySync3D> = Vec::new();
         // P20.2: the water gather rides in THIS walk rather than in a second one.
         // A furnished town is 13 000 entities, and walking them twice per fixed
@@ -346,8 +425,24 @@ impl PhysicsBridge3D {
                     buoyancy.push((guid, desc));
                 }
             }
-            let rb = entity.get::<RigidBody3D>().copied();
-            let col = entity.get::<Collider3D>().copied();
+            // A broken destructible's own body and collider are **gone**: the
+            // chunk bodies below are what the world collides with now. Dropping
+            // both makes `sync_retaining` skip the entity entirely, so the
+            // despawn sweep removes the intact body — which is the swap. The
+            // entity itself survives untouched in the scene document (it still
+            // has a name, a transform and its components); it is only its
+            // physical and visible representation that moved into the chunks.
+            let broken_here = broken.contains(&guid);
+            let rb = if broken_here {
+                None
+            } else {
+                entity.get::<RigidBody3D>().copied()
+            };
+            let col = if broken_here {
+                None
+            } else {
+                entity.get::<Collider3D>().copied()
+            };
             let joint = entity.get::<Joint3D>().copied();
             if rb.is_none() && col.is_none() {
                 continue;
@@ -371,6 +466,13 @@ impl PhysicsBridge3D {
         let mut retained = self.gather_structures(world, &mut snaps);
         // P21.4: the sim's voxel chunks, on the same rule one level finer.
         self.gather_voxels(volumes, &mut snaps, &mut retained);
+        // P22.3: the sim's terrain tiles, on the same rule again. Before this the
+        // ground had NO collider at all — the heightfield answered
+        // `terrain.height_at` and a character controller read it, but a dynamic
+        // body (a crate, a chunk of a shattered wall) fell through the world.
+        self.gather_terrain(world, &mut snaps, &mut retained);
+        // P22.3: the sim's fracture chunks, on the same rule a fourth time.
+        self.gather_fracture(fractures, &mut snaps, &mut retained);
         // `sync` sorts by Guid internally, so the gather order here is irrelevant.
         self.sync_retaining(&snaps, &retained);
     }
@@ -565,6 +667,270 @@ impl PhysicsBridge3D {
         // comes back is re-described rather than inheriting a stale version — the
         // `structure_stamps` prune's reasoning, and the `swimming` prune's.
         self.voxel_stamps.retain(|k, _| live.contains(k));
+    }
+
+    /// Append a static height-field collider for every **sim-resident** terrain
+    /// tile whose contents (or whose terrain's origin) changed, and add the
+    /// unchanged ones to `retained` (P22.3).
+    ///
+    /// # Sim-resident, and why that phrase is the whole design
+    ///
+    /// The tiles walked here are the ones in the ECS [`Terrain`] component's own
+    /// [`TerrainData`](inf_terrain::TerrainData). That set is **camera-free by
+    /// construction**, and structurally so rather than by convention: the
+    /// determinism doctrine in `inf_terrain::wants` keeps two residency drivers
+    /// apart and gives them two *different* `TerrainData` instances — the sim's
+    /// lives in this component and pages against `sim_wants` (entity positions +
+    /// a fixed margin, loaded synchronously at the fixed-step boundary), while the
+    /// camera-driven render cut lives in the streamer, outside the world entirely,
+    /// with no reference from here to there. So there is no way for this gather to
+    /// reach a camera-paged tile even by mistake, which is the property that keeps
+    /// the collider set — and therefore every replay and every PIE-vs-shipping
+    /// trace — independent of where anyone was looking. It is the same rule
+    /// `sync_from_world_with_voxels` states for the voxel map, one crate over.
+    ///
+    /// Only **level-0** tiles get colliders. The coarse pyramid levels are a
+    /// rendering LOD; two overlapping surfaces at different resolutions would
+    /// double-contact a body standing on the seam, and the sim never asks a coarse
+    /// tile for a height either ([`TerrainData::height_at`] reads level 0).
+    ///
+    /// # Holes: the cell rule, and its consistency with `height_at`
+    ///
+    /// **A height-field cell is removed when ANY of its four corner samples is
+    /// holed** — the identical rule
+    /// [`TerrainData::height_at`](inf_terrain::TerrainData::height_at) applies to
+    /// decide that a bilinear cell has no surface ("THE POISON RULE", P21.2), and
+    /// the identical rule `terrain.wgsl` discards a fragment on. All three are one
+    /// statement: *the visible gap, the queryable gap and the walkable gap are the
+    /// same gap.* A body dropped over a cave mouth falls into it, and the voxel
+    /// chunk colliders from [`gather_voxels`](Self::gather_voxels) are what catch
+    /// it — the P21.2 combined ground query, now with real physics under it.
+    ///
+    /// If this rule and `height_at`'s ever diverge the symptom is a character
+    /// controller (which reads `height_at`) standing on air a metre from a
+    /// dynamic body (which reads this) resting on rock, so the statement is
+    /// repeated at both sites deliberately.
+    ///
+    /// # Cost
+    ///
+    /// Bounded by the sim-resident tile count, which is already budgeted by
+    /// `sim_wants`' margin. Within that, a tile is re-described only when its
+    /// version stamp or its terrain's origin moved — see
+    /// [`terrain_stamps`](Self::terrain_stamps) — so a level whose ground nobody
+    /// is sculpting pays one build at load and nothing per step.
+    /// [`terrain_collider_audit`](Self::terrain_collider_audit) counts what it
+    /// actually did.
+    fn gather_terrain(
+        &mut self,
+        world: &EcsWorld,
+        snaps: &mut Vec<EntitySync3D>,
+        retained: &mut BTreeSet<Uuid>,
+    ) {
+        let mut live: BTreeSet<(Uuid, (i32, i32))> = BTreeSet::new();
+        let mut described = 0_u32;
+        let mut resident = 0_u32;
+        // Walk in `Guid` order rather than archetype order: the synthetic guids
+        // below are sorted by `sync_retaining` anyway, but the *stamp* map's
+        // insertion order is observable through `terrain_stamps` and a gate reads
+        // it. Collected first because the descriptor build needs no borrow.
+        let mut terrains: Vec<(Uuid, DVec3)> = Vec::new();
+        for entity in world.world().iter_entities() {
+            let Some(guid) = entity.get::<inf_ecs::Guid>().map(|g| g.0) else {
+                continue;
+            };
+            let Some(t) = entity.get::<Terrain>() else {
+                continue;
+            };
+            if t.data.is_empty() {
+                continue;
+            }
+            // The same origin resolution `terrain.height_at` uses in both hosts:
+            // the computed global transform, falling back to the local one and
+            // then to the world origin. An unpropagated frame is a timing
+            // artefact, not an authoring error.
+            let origin = entity
+                .get::<GlobalTransform>()
+                .map(|g| g.translation())
+                .or_else(|| entity.get::<Transform>().map(|t| t.translation.to_dvec3()))
+                .unwrap_or(DVec3::ZERO);
+            terrains.push((guid, origin));
+        }
+        terrains.sort_by_key(|(g, _)| *g);
+        if terrains.is_empty() && self.terrain_stamps.is_empty() {
+            self.terrain_audit = TerrainColliderAudit::default();
+            return;
+        }
+        for (guid, origin) in terrains {
+            let Some(entity) = world.entity_of(guid) else {
+                continue;
+            };
+            let Some(terrain) = world.world().get::<Terrain>(entity) else {
+                continue;
+            };
+            let data = &terrain.data;
+            let res = data.tile_resolution();
+            let span = data.tile_span();
+            // The origin rides in the stamp as raw bits: a terrain that MOVED has
+            // to re-place every tile, and `f64 == f64` on a translation that was
+            // copied rather than recomputed is exact — but bit equality is the
+            // honest comparison for a cache key, and it makes `-0.0` and `NaN`
+            // behave (they compare unequal to their own re-derivation, so the
+            // conservative answer is "re-describe").
+            let origin_bits = [origin.x.to_bits(), origin.y.to_bits(), origin.z.to_bits()];
+            for (&coord, tile) in data.tiles() {
+                resident += 1;
+                live.insert((guid, coord));
+                let stamp = (data.tile_version(TileKey::lod0(coord)), origin_bits);
+                if self.terrain_stamps.get(&(guid, coord)) == Some(&stamp) {
+                    retained.insert(terrain_tile_guid(guid, coord));
+                    continue;
+                }
+                self.terrain_stamps.insert((guid, coord), stamp);
+                described += 1;
+                let Some(collider) = terrain_tile_collider(tile, res, span) else {
+                    // A degenerate tile (resolution < 2, a short height buffer)
+                    // gets no collider and still records its stamp, so the
+                    // refusal is reached once rather than once per step — the
+                    // `gather_voxels` empty-mesh rule.
+                    continue;
+                };
+                snaps.push(EntitySync3D {
+                    guid: terrain_tile_guid(guid, coord),
+                    // No body: the implicit-static-body rule gives it a static
+                    // parent. Ground does not fall, and a height field has no
+                    // well-defined mass anyway (`ColliderShape3D::volume_m3`).
+                    body: None,
+                    collider: Some(collider),
+                    // The field is CENTRED in its own local frame, so the body
+                    // goes at the tile's centre and not at its corner sample.
+                    translation: origin
+                        + DVec3::new(
+                            tile.origin.x + span * 0.5,
+                            tile.origin.y,
+                            tile.origin.z + span * 0.5,
+                        ),
+                    rotation: DQuat::IDENTITY,
+                    joint: None,
+                });
+            }
+        }
+        // A tile (or a whole terrain) that paged out drops its stamp, so a key
+        // that comes back is re-described rather than inheriting a stale version
+        // — the `voxel_stamps` prune's reasoning, and the `structure_stamps`
+        // prune's. This is also what makes paging in and out leak nothing: the
+        // guid leaves `live`, so `sync_retaining`'s despawn sweep removes the body
+        // and this line removes the stamp.
+        self.terrain_stamps.retain(|k, _| live.contains(k));
+        self.terrain_audit = TerrainColliderAudit {
+            resident_tiles: resident,
+            described,
+            retained: resident.saturating_sub(described),
+        };
+    }
+
+    /// Append a collider for every live fracture chunk of every **broken**
+    /// destructible, and add the unchanged actors' chunks to `retained` (P22.3).
+    ///
+    /// The [`gather_voxels`](Self::gather_voxels) rule again, keyed by actor
+    /// rather than by chunk:
+    ///
+    /// * An **intact** actor emits nothing. Its authored collider is still in the
+    ///   world (the walk left it there), and describing twelve chunk bodies for
+    ///   every destructible wall in a town that nobody has shot at is precisely
+    ///   the bill the stamp pattern exists to refuse.
+    /// * A **broken** actor's chunks are described together, keyed on the state's
+    ///   [`generation`](super::fracture::FractureState::generation) — which moves
+    ///   when a chunk detaches or is reclaimed and **not** when one merely
+    ///   tumbles, because a dynamic body's pose is solver-owned and re-describing
+    ///   it every step would teleport it back to where it broke.
+    /// * An **attached** chunk is a *static* body at its rest pose: the standing
+    ///   half of a half-collapsed wall still stops bullets and holds up the
+    ///   chunks above it.
+    /// * A **detached** chunk is a *dynamic* [`ColliderShape3D::ConvexHull`] with
+    ///   a real mass — `density_kg_m3 × volume_m3 × scale³` — which is the whole
+    ///   reason the hull variant exists (a trimesh has no volume, so a trimesh
+    ///   chunk would have no inertia to simulate).
+    /// * A **reclaimed** chunk is emitted by nobody and retained by nobody, so
+    ///   the despawn sweep takes it. Despawn-by-omission, the third time.
+    ///
+    /// Debris goes on its own collision layer ([`DEBRIS_LAYER`]) so a game can
+    /// stop rubble from blocking a doorway or from tripping a trigger volume
+    /// without touching anything else. CCD is **off** by default: a fracture
+    /// event makes tens of bodies at once and continuous detection is the most
+    /// expensive thing in the solver, so it is opt-in-by-editing rather than
+    /// on-by-default (documented in `DEBRIS_LAYER`).
+    fn gather_fracture(
+        &mut self,
+        fractures: &BTreeMap<Uuid, super::fracture::FractureState>,
+        snaps: &mut Vec<EntitySync3D>,
+        retained: &mut BTreeSet<Uuid>,
+    ) {
+        if fractures.is_empty() && self.fracture_stamps.is_empty() {
+            return;
+        }
+        let mut live: BTreeSet<Uuid> = BTreeSet::new();
+        for (&entity, state) in fractures {
+            if state.is_intact() {
+                continue;
+            }
+            live.insert(entity);
+            let retain = self.fracture_stamps.get(&entity) == Some(&state.generation());
+            if !retain {
+                self.fracture_stamps.insert(entity, state.generation());
+            }
+            for (i, chunk) in state.chunks().iter().enumerate() {
+                if chunk.gone {
+                    continue;
+                }
+                let guid = super::fracture::fracture_chunk_guid(entity, i as u32);
+                if retain {
+                    retained.insert(guid);
+                    continue;
+                }
+                let Some(collider) = state.chunk_collider(i, debris_layers()) else {
+                    // A hull the cook's own producer gate should already have
+                    // refused. Skipping it leaves a chunk that renders and does
+                    // not collide, which is strictly better than a massless
+                    // dynamic body — and the stamp is still recorded above, so
+                    // the refusal is reached once.
+                    continue;
+                };
+                let (translation, rotation) = state.chunk_pose(i);
+                snaps.push(EntitySync3D {
+                    guid,
+                    body: Some(BodyDesc3D {
+                        kind: if chunk.detached {
+                            BodyKind3D::Dynamic
+                        } else {
+                            BodyKind3D::Static
+                        },
+                        ..BodyDesc3D::default()
+                    }),
+                    collider: Some(collider),
+                    translation,
+                    rotation,
+                    joint: None,
+                });
+            }
+        }
+        // An actor that became whole again (impossible today) or vanished drops
+        // its stamp, so a guid that comes back is re-described rather than
+        // inheriting a stale generation — the `voxel_stamps` prune's reasoning.
+        self.fracture_stamps.retain(|g, _| live.contains(g));
+    }
+
+    /// What the last [`gather_terrain`](Self::gather_terrain) actually did
+    /// (P22.3) — the budget instrument. `described == 0` with
+    /// `resident_tiles > 0` is the steady state the change stamp exists to
+    /// produce.
+    pub fn terrain_collider_audit(&self) -> TerrainColliderAudit {
+        self.terrain_audit
+    }
+
+    /// How many terrain tiles currently hold a collider stamp — the bounded-ledger
+    /// invariant made observable, so a paging soak can assert it does not grow.
+    pub fn terrain_stamp_count(&self) -> usize {
+        self.terrain_stamps.len()
     }
 
     /// Reconcile the physics world with a scene snapshot: spawn new
@@ -1110,6 +1476,134 @@ pub fn voxel_chunk_guid(volume: Uuid, key: inf_voxel::ChunkKey) -> Uuid {
         x = x.rotate_left(37) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
     }
     Uuid::from_u128(x)
+}
+
+/// What identifies one terrain tile to the collider gather: the terrain entity's
+/// `Guid` and the level-0 tile's grid coordinate.
+type TerrainTileKey = (Uuid, (i32, i32));
+
+/// What that tile's collider was last built from: the tile's own change stamp
+/// plus its terrain's world origin **as raw bits**.
+///
+/// Bits rather than `f64` because this is a cache key, not a measurement: bit
+/// equality makes `-0.0` and `NaN` behave (both compare unequal to a
+/// re-derivation, so the conservative answer is "re-describe"), and it lets the
+/// whole stamp derive `Eq` and `Ord` for the `BTreeMap`.
+type TerrainTileStamp = (u64, [u64; 3]);
+
+/// The collision layer bit fracture debris belongs to (P22.3).
+///
+/// **Layer 30**, near the top of the 32 available, so it does not collide with a
+/// project's own low-numbered layers. Debris is a **member** of this layer and
+/// interacts with **everything**, which is the default a designer expects (rubble
+/// piles up on the floor and bounces off walls). What the layer buys is the
+/// *other* direction: a trigger volume, a bullet trace or a doorway blocker can
+/// clear bit 30 from its own filter and stop seeing rubble at all, without any
+/// per-chunk authoring — which is impossible for geometry that has no entity to
+/// author on.
+///
+/// See [`inf_physics::filtering::CollisionLayers`](crate::filtering::CollisionLayers)
+/// for the membership/filter convention.
+pub const DEBRIS_LAYER: u32 = 30;
+
+/// The layers a debris chunk's collider is built with: a member of
+/// [`DEBRIS_LAYER`] alone, interacting with everything.
+fn debris_layers() -> CollisionLayers {
+    CollisionLayers::new(1 << DEBRIS_LAYER, u32::MAX)
+}
+
+/// Salt for [`terrain_tile_guid`]. A third distinct constant, so a scattered
+/// solid, a voxel chunk and a terrain tile can never collide in the bridge's one
+/// entity map.
+const TERRAIN_TILE_SALT: u128 = 0x2203_0100_5445_5252_4149_4e54_494c_4521;
+
+/// The synthetic identity of level-0 tile `coord` inside the terrain on entity
+/// `terrain`.
+///
+/// The [`voxel_chunk_guid`] rule with two coordinates instead of three, and a
+/// 128-bit mix rather than a XOR for the same reason: two terrains whose ids
+/// differ in the low bits must not alias each other's tiles. Stated as one
+/// function so a debug view or a save hook that ever needs to name one of these
+/// names it the same way.
+pub fn terrain_tile_guid(terrain: Uuid, coord: (i32, i32)) -> Uuid {
+    let mut x = terrain.as_u128() ^ TERRAIN_TILE_SALT;
+    for (i, c) in [coord.0, coord.1].into_iter().enumerate() {
+        // `as u32 as u128` keeps a negative coordinate's two's-complement bits
+        // rather than sign-extending them across the word, so −1 and a large
+        // positive coordinate stay distinct inputs.
+        let lane = (c as u32 as u128) | ((i as u128 + 1) << 96);
+        x ^= lane.wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5cec_c5c3);
+        x = x.rotate_left(37) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
+    }
+    Uuid::from_u128(x)
+}
+
+/// What one [`PhysicsBridge3D::gather_terrain`] pass did (P22.3).
+///
+/// A plain counter struct on the `ScatterAudit` precedent rather than a new
+/// budget ratchet: the question a gate asks here is "did the change stamp
+/// actually retain, or is this rebuilding a quarter-million triangles a step",
+/// and that is answered by a number, not by a threshold.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerrainColliderAudit {
+    /// Level-0 tiles resident in the sim's terrains this sync.
+    pub resident_tiles: u32,
+    /// Tiles whose collider was (re-)described — a new tile, a sculpted or
+    /// carved one, or a terrain that moved.
+    pub described: u32,
+    /// Tiles kept without being re-described. `resident_tiles − described`.
+    pub retained: u32,
+}
+
+/// One static [`ColliderShape3D::Heightfield`] for a level-0 terrain tile.
+///
+/// `None` for a tile the shape cannot be built from (a resolution below 2 or a
+/// short height buffer) — a refusal, never a panic, on the
+/// `convex_hull_is_buildable` precedent.
+///
+/// # The hole mask, stated here and at the call site
+///
+/// A cell is removed when **any** of its four corner samples is holed. That is
+/// [`TerrainData::height_at`](inf_terrain::TerrainData::height_at)'s poison rule
+/// verbatim: one holed corner removes the surface from the whole bilinear cell,
+/// so the query, the raster and the collider agree about where the ground stops.
+/// A tile with no holes emits an **empty** removal buffer (the sparse default),
+/// which is also what keeps an un-carved level's descriptors small.
+fn terrain_tile_collider(
+    tile: &inf_terrain::TerrainTile,
+    resolution: u32,
+    span: f64,
+) -> Option<ColliderDesc3D> {
+    if resolution < 2 {
+        return None;
+    }
+    let n = resolution as usize;
+    if tile.heights().len() != n * n {
+        return None;
+    }
+    let removed_cells = if tile.has_holes() {
+        let mut cells = vec![false; (n - 1) * (n - 1)];
+        for jz in 0..(n - 1) {
+            for ix in 0..(n - 1) {
+                let (i0, j0) = (ix as u32, jz as u32);
+                let (i1, j1) = (i0 + 1, j0 + 1);
+                cells[jz * (n - 1) + ix] = tile.is_hole(resolution, i0, j0)
+                    || tile.is_hole(resolution, i1, j0)
+                    || tile.is_hole(resolution, i0, j1)
+                    || tile.is_hole(resolution, i1, j1);
+            }
+        }
+        cells
+    } else {
+        Vec::new()
+    };
+    Some(ColliderDesc3D::new(ColliderShape3D::Heightfield {
+        samples_x: resolution,
+        samples_z: resolution,
+        heights: tile.heights().to_vec(),
+        removed_cells,
+        span: DVec2::splat(span),
+    }))
 }
 
 /// One static box collider per [`PcgVolume::structures`] entry (P19.5).

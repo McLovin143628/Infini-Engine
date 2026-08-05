@@ -15,6 +15,7 @@ use rapier3d_f64::prelude::{ColliderHandle, RigidBodyHandle};
 mod character;
 mod ecs;
 mod events;
+pub mod fracture;
 mod joint;
 mod query;
 pub mod water;
@@ -22,10 +23,15 @@ mod world;
 
 pub use character::{CharacterMove3D, CharacterMover3D};
 pub use ecs::{
-    pcg_structure_guid, voxel_chunk_guid, BodyDesc3D, EntitySync3D, JointSync3D, PhysicsBridge3D,
-    PoseWriteback3D,
+    pcg_structure_guid, terrain_tile_guid, voxel_chunk_guid, BodyDesc3D, EntitySync3D, JointSync3D,
+    PhysicsBridge3D, PoseWriteback3D, TerrainColliderAudit, DEBRIS_LAYER,
 };
 pub use events::ContactEvent3D;
+pub use fracture::{
+    fracture_chunk_guid, resolve_fracture_states, ChunkState, DamageReport, DebrisBudget,
+    DestroyedEvent, DestructOutcome, FractureAudit, FractureState, CRACK_OPENING_M,
+    DEFAULT_DEBRIS_LIFETIME_S, DEFAULT_DEBRIS_MAX_LIVE,
+};
 pub use joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
 pub use query::RayHit3D;
 pub use water::{

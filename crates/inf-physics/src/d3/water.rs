@@ -281,6 +281,14 @@ pub fn sample_geometry(shape: &ColliderShape3D, local_translation: DVec3) -> Sam
         }
         ColliderShape3D::Trimesh { vertices, .. } => cloud_extents(vertices),
         ColliderShape3D::ConvexHull { points } => cloud_extents(points),
+        // A height field (P22.3) is ground. It is static by construction — it has
+        // no mass (`ColliderShape3D::volume_m3` is `None` for it, exactly as for a
+        // trimesh), so it can never carry a `Buoyancy` that reaches this function,
+        // and the water pass skips non-dynamic bodies before it gets here anyway.
+        // The half-metre default is the same "nothing sensible to report" answer
+        // an empty point cloud gets, and it is unreachable rather than
+        // approximate: a terrain that floated would be a bug two layers up.
+        ColliderShape3D::Heightfield { .. } => (0.5, 0.5, 0.5, DVec3::ZERO),
     };
     // A fixed quadrant order, so two runs place the same force at the same point.
     let base = local_translation + centre;

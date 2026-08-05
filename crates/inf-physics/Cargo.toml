@@ -44,6 +44,27 @@ inf-water = { workspace = true }
 # comment above names, with the added charm of being invisible until a player
 # clips through a cave wall.
 inf-voxel = { workspace = true }
+# P22.3: the terrain tile grid + its per-sample hole mask, so a sim-resident tile
+# becomes a static height-field collider and a body can stand on the ground at
+# all. Named directly rather than reached through `inf-ecs`'s re-export because
+# the gather needs `TileKey` and `TerrainData`'s residency/version ledger, not
+# just the component — and because the crate this reads the HOLE RULE from must
+# be the crate that defines it (`TerrainData::height_at`'s poison rule), so the
+# collider's gap and the query's gap cannot drift apart. Ring 0 → Ring 0; the
+# same crate `inf-render` and both hosts already consume.
+inf-terrain = { workspace = true }
+# P22.3: the `.inf_fracture` chunk set — hull point sets, volumes, centres of
+# mass and the chunk-indexed adjacency graph — that a `FractureState` is built
+# from. Named directly, on the same rule the four dependencies above are: the
+# structural solve reads the SAME `FractureAsset` the cook wrote and the render
+# projector draws, so there is no second copy of a chunk's adjacency to drift
+# from it (the `GpuLight` triplication law). A facade-local mirror of
+# `FractureChunk` would be exactly that second copy, and would have to be kept in
+# step with a container that has its own version ladder. Ring 0 → Ring 0; the
+# direction is inf-physics → inf-mesh and inf-mesh never names physics, so there
+# is no cycle. (inf-mesh's own `convex_hull_is_buildable` producer gate already
+# points the other way at *dev*-dependency strength, in the packager.)
+inf-mesh = { workspace = true }
 # The spline interpolation kind a river centreline is built with. Named directly
 # rather than reached through `inf-ecs` because the ECS `SplineInterp` is the
 # *authoring* enum and `inf_math`'s is the *math* one — the mapping between them
@@ -58,3 +79,7 @@ uuid = { workspace = true }
 # converts both ways. Dev-only — the bridge reads the ECS side and never names
 # the PCG one, so the dependency direction stays inf-physics → inf-ecs.
 inf-pcg = { workspace = true }
+# P22.3: `AssetId`, so the fracture suite can run the REAL cook derivation
+# (`fracture_mesh`) against its hand-built fixtures. Dev-only — the bridge never
+# names an asset id, because a `FractureState` arrives already resolved.
+inf-asset = { workspace = true }

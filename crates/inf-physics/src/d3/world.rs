@@ -1,7 +1,9 @@
 //! [`PhysicsWorld3D`]: the fixed-step 3D rigid-body world. The `d3` mirror of
 //! [`crate::d2::PhysicsWorld2D`].
 
-use glam::{DQuat, DVec3};
+use glam::{DQuat, DVec2, DVec3};
+use parry3d_f64::shape::{HeightField, HeightFieldCellStatus};
+use parry3d_f64::utils::Array2;
 use rapier3d_f64::dynamics::CoefficientCombineRule;
 use rapier3d_f64::geometry::{Group, InteractionGroups, InteractionTestMode};
 use rapier3d_f64::prelude::{
@@ -114,6 +116,57 @@ pub enum ColliderShape3D {
     /// intact. Producers should ask [`convex_hull_is_buildable`] first — it is
     /// the same door — rather than discover the refusal at spawn time.
     ConvexHull { points: Vec<DVec3> },
+    /// A **regular-grid height field** on the local XZ plane, with per-cell
+    /// removal for holes (P22.3). The shape a terrain tile becomes.
+    ///
+    /// # Why this variant and not a [`Trimesh`](Self::Trimesh) per tile
+    ///
+    /// A terrain tile is 256 × 256 samples. As a trimesh that is **130 050
+    /// triangles** plus a BVH over them, per tile, rebuilt whenever a sculpt or a
+    /// runtime carve moves a sample — and a broad-phase query then walks a tree to
+    /// find the one quad under a body's foot. As a height field it is the same
+    /// 65 536 numbers with the topology *implied*: parry indexes the cell under a
+    /// point arithmetically, so a contact query is O(1) in the sample count and
+    /// the memory is the heights and nothing else. It is also the only one of the
+    /// two that can express a hole without re-triangulating: a removed cell is two
+    /// status bits.
+    ///
+    /// A height field is a **surface**, so — exactly like `Trimesh` —
+    /// [`volume_m3`](Self::volume_m3) is `None` and it is static/kinematic-only in
+    /// practice. That costs nothing here: ground does not fall.
+    ///
+    /// # The local frame is CENTRED, and the heights are metres
+    ///
+    /// parry's height field spans `[-span.x/2, +span.x/2] × [-span.y/2, +span.y/2]`
+    /// (x and z) about its **own origin**, so the collider must be placed at the
+    /// tile's **centre**, not at its corner sample. The Y scale is fixed at `1`, so
+    /// [`heights`](Self::Heightfield::heights) are used as local metres directly and a
+    /// body placed at the tile's `origin.y` puts sample `h` at world `origin.y + h`
+    /// — which is exactly `TerrainTile::world_height`. Nothing is rescaled, so the
+    /// surface a body stands on and the surface `height_at` reports are the same
+    /// arithmetic.
+    Heightfield {
+        /// Height samples along local **X** (columns). Must be ≥ 2.
+        samples_x: u32,
+        /// Height samples along local **Z** (rows). Must be ≥ 2.
+        samples_z: u32,
+        /// `samples_x · samples_z` heights in **metres**, row-major in Z:
+        /// index `j · samples_x + i` is the sample `i` steps along X and `j` steps
+        /// along Z. This is `TerrainTile`'s own layout, kept verbatim so the
+        /// descriptor is a clone rather than a transform (parry wants the
+        /// transpose; [`to_shared`](Self::to_shared) does that conversion in one
+        /// place).
+        heights: Vec<f32>,
+        /// `(samples_x − 1) · (samples_z − 1)` bits, row-major in Z: `true` means
+        /// the **cell** has no surface and both of its triangles are removed.
+        ///
+        /// **Empty means "no cell is removed"** — the sparse default, so an
+        /// un-holed tile costs nothing here (the `TerrainTile::holes` convention,
+        /// one container down).
+        removed_cells: Vec<bool>,
+        /// World size of the field along local X and Z, in metres.
+        span: DVec2,
+    },
 }
 
 impl ColliderShape3D {
@@ -139,6 +192,13 @@ impl ColliderShape3D {
                 SharedShape::trimesh(verts, indices.clone()).ok()?
             }
             ColliderShape3D::ConvexHull { points } => hull_shape(points)?,
+            ColliderShape3D::Heightfield {
+                samples_x,
+                samples_z,
+                heights,
+                removed_cells,
+                span,
+            } => heightfield_shape(*samples_x, *samples_z, heights, removed_cells, *span)?,
         })
     }
 
@@ -157,7 +217,10 @@ impl ColliderShape3D {
     /// (`density_kg_m3 × volume`) must treat `None` as "this cannot be a dynamic
     /// body".
     pub fn volume_m3(&self) -> Option<f64> {
-        if matches!(self, ColliderShape3D::Trimesh { .. }) {
+        if matches!(
+            self,
+            ColliderShape3D::Trimesh { .. } | ColliderShape3D::Heightfield { .. }
+        ) {
             return None;
         }
         let shape = self.to_shared()?;
@@ -195,6 +258,75 @@ fn hull_shape(points: &[DVec3]) -> Option<SharedShape> {
     let props: parry3d_f64::mass_properties::MassProperties = shape.mass_properties(1.0);
     let volume = props.mass(); // unit density ⇒ mass == volume
     (volume.is_finite() && volume > MIN_HULL_VOLUME_M3).then_some(shape)
+}
+
+/// Build a parry height field from a [`ColliderShape3D::Heightfield`]'s buffers,
+/// refusing anything that cannot make a surface.
+///
+/// # The two index conversions, stated once
+///
+/// 1. **Transpose.** Our buffer is row-major in Z (`j · samples_x + i`, the
+///    `TerrainTile` layout). parry's [`Array2`] is column-major with the *row*
+///    index advancing Z and the *column* index advancing X, i.e. `i + j · nrows`
+///    where `i` is the Z index and `j` the X index. So `nrows = samples_z`,
+///    `ncols = samples_x`, and the two layouts are transposes of each other.
+///    Doing that here, once, is why the descriptor can stay a clone of the tile's
+///    own `heights`.
+/// 2. **Cell status.** parry's cell `(i, j)` is the quad between samples
+///    `(i, j) .. (i+1, j+1)` — `i` in Z, `j` in X — so our row-major-in-Z cell
+///    index `jz · (samples_x − 1) + ix` maps to `set_cell_status(jz, ix, …)`.
+///
+/// Refusals (returning `None`, so [`PhysicsWorld3D::add_collider`] skips the
+/// collider and leaves the body intact) are: fewer than two samples on either
+/// axis, a `heights` buffer that is not exactly `samples_x · samples_z`, a
+/// `removed_cells` buffer that is neither empty nor exactly the cell count, a
+/// non-finite or non-positive span, and a non-finite height. Every one of them is
+/// a producer bug that would otherwise be an assert inside parry.
+fn heightfield_shape(
+    samples_x: u32,
+    samples_z: u32,
+    heights: &[f32],
+    removed_cells: &[bool],
+    span: DVec2,
+) -> Option<SharedShape> {
+    if samples_x < 2 || samples_z < 2 {
+        return None;
+    }
+    let nx = samples_x as usize;
+    let nz = samples_z as usize;
+    if heights.len() != nx * nz {
+        return None;
+    }
+    let cells = (nx - 1) * (nz - 1);
+    if !removed_cells.is_empty() && removed_cells.len() != cells {
+        return None;
+    }
+    if !span.x.is_finite() || !span.y.is_finite() || span.x <= 0.0 || span.y <= 0.0 {
+        return None;
+    }
+    if heights.iter().any(|h| !h.is_finite()) {
+        return None;
+    }
+    // Transpose into parry's (rows = Z, cols = X) column-major array.
+    let mut data = vec![0.0_f64; nx * nz];
+    for jz in 0..nz {
+        for ix in 0..nx {
+            data[jz + ix * nz] = heights[jz * nx + ix] as f64;
+        }
+    }
+    let array = Array2::new(nz, nx, data);
+    // Y scale 1: the heights ARE metres (see the variant docs).
+    let mut field = HeightField::new(array, DVec3::new(span.x, 1.0, span.y));
+    if !removed_cells.is_empty() {
+        for jz in 0..(nz - 1) {
+            for ix in 0..(nx - 1) {
+                if removed_cells[jz * (nx - 1) + ix] {
+                    field.set_cell_status(jz, ix, HeightFieldCellStatus::CELL_REMOVED);
+                }
+            }
+        }
+    }
+    Some(SharedShape::new(field))
 }
 
 /// Whether `points` can become a [`ColliderShape3D::ConvexHull`] — i.e. whether
@@ -783,6 +915,65 @@ impl PhysicsWorld3D {
             point: ray.point_at(hit.time_of_impact),
             normal: hit.normal,
             toi: hit.time_of_impact,
+        })
+    }
+
+    /// [`cast_ray`](Self::cast_ray), ignoring every collider in `exclude`
+    /// (P22.3).
+    ///
+    /// # Why a filtered ray and not an AABB overlap
+    ///
+    /// The structural solve asks "is this chunk resting on static geometry", and
+    /// the two obvious cheaper answers are both wrong here.
+    /// [`intersect_aabb`](Self::intersect_aabb) is broad-phase only, so a chunk
+    /// three metres above a terrain tile overlaps that tile's 255 m box and
+    /// reports supported. [`intersect_point`](Self::intersect_point) needs an
+    /// *interior*, and a height field has none — the ground would answer "no" for
+    /// every point on it.
+    ///
+    /// A ray is exact against every shape in the facade, and the exclusion is
+    /// what makes it usable: without it the probe from a chunk's underside hits
+    /// the chunk itself (or the intact collider it is replacing) and certifies a
+    /// building that is standing on nothing.
+    ///
+    /// The filter is rapier's own `QueryFilter::predicate`, so the broad phase
+    /// still prunes and the excluded colliders are rejected before any narrow
+    /// phase runs.
+    pub fn cast_ray_excluding(
+        &mut self,
+        origin: DVec3,
+        dir: DVec3,
+        max_toi: f64,
+        exclude: &std::collections::BTreeSet<ColliderId3D>,
+    ) -> Option<RayHit3D> {
+        let dir = dir.normalize_or_zero();
+        if dir == DVec3::ZERO {
+            return None;
+        }
+        self.ensure_query_pipeline();
+        let ray = Ray::new(origin, dir);
+        let predicate = |h: rapier3d_f64::geometry::ColliderHandle,
+                         _: &rapier3d_f64::geometry::Collider| {
+            !exclude.contains(&ColliderId3D(h))
+        };
+        let filter = QueryFilter::default().predicate(&predicate);
+        let pipe = self.query_pipeline(filter);
+        let (handle, hit) = pipe.cast_ray_and_get_normal(&ray, max_toi, true)?;
+        Some(RayHit3D {
+            collider: ColliderId3D(handle),
+            point: ray.point_at(hit.time_of_impact),
+            normal: hit.normal,
+            toi: hit.time_of_impact,
+        })
+    }
+
+    /// A body's kind (static / kinematic / dynamic), or `None` for a stale
+    /// handle.
+    pub fn body_kind(&self, body: BodyId3D) -> Option<BodyKind3D> {
+        self.bodies.get(body.0).map(|rb| match rb.body_type() {
+            RigidBodyType::Fixed => BodyKind3D::Static,
+            RigidBodyType::Dynamic => BodyKind3D::Dynamic,
+            _ => BodyKind3D::Kinematic,
         })
     }
 

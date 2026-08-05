@@ -3224,9 +3224,12 @@ name = "inf-physics"
 version = "0.1.0"
 dependencies = [
  "glam 0.33.2",
+ "inf-asset",
  "inf-ecs",
  "inf-math",
+ "inf-mesh",
  "inf-pcg",
+ "inf-terrain",
  "inf-voxel",
  "inf-water",
  "parry3d-f64",
