@@ -6793,6 +6793,28 @@ deterministic on the replay trace, PIE == shipping.
 >   within 1%. A sweep of 24 cook configurations (2 959 bonds) found **zero**.
 >   `FractureState::estimated_bonds` is now a **record**, asserted EMPTY, and the
 >   phase-22 gate asserts it on the shipped block and its control.
+> * **A pool matrix over a serial program measures nothing.** `phase22_gate`'s
+>   `destruct_probe` arm shipped claiming the `destruct.*` calls "run from a
+>   Blueprint tick, which runs inside the ECS schedule". They do not:
+>   `RuntimeSim::run_all_with_args` is a serial `for` loop over a `Vec` of
+>   `BTreeMap` keys, no `SimSchedule` runs on the player's fixed-step path, and
+>   rapier's `parallel` feature is off by rule — so 1/2/4/8 workers execute the
+>   same program and the arm cannot *discover* a race. It is kept with the claim
+>   corrected (a regression tripwire for the day the tick pass parallelizes, plus
+>   a pin that nothing on that path reached for the process-global pool), and the
+>   same false premise was inherited from `voxel_probe.rs` (P21.4) and corrected
+>   there too. This is the "inference dressed as measurement" law again, one level
+>   up: four green runs proving something that was never at risk.
+> * **A preview must run what it previews.** The per-tier debris budget was applied
+>   by the windowed player — and **embedded PIE is windowed**, so it built a real
+>   host, detected a real tier and clamped. On any Medium or Low machine the
+>   editor's Simulate (which never clamps) and the PIE session it had just spawned
+>   therefore stepped **different simulations**: the budget is read by
+>   `step_fractures`, and a reclaim removes a solver body. Nothing failed; PIE just
+>   silently stopped being the preview half of PIE == shipping, on exactly the
+>   machines least likely to be the author's. The door is now
+>   `debris_budget_for_session(tier, pie)` and the exemption is pinned at the
+>   source.
 > * **A gate must be built to falsify, not to confirm.** Every world arm in
 >   `phase22_gate` carries its own control: a debris cap of 2 that really reclaims,
 >   a cooked-vs-uncooked comparison with a stated horizon *and* an asserted
@@ -6821,16 +6843,50 @@ deterministic on the replay trace, PIE == shipping.
 >   never reaches the audit. Reading the audit as "did the solve run" shows zero and
 >   looks like a dead subsystem. The gate measures it in **joules** instead: the car
 >   absorbs one chunk's worth of bonds (25 136 J) and twelve chunks come off.
+> * **"Once per break" was wrong; it is once per GENERATION.** The rubble's site set
+>   is `detached && !gone`, which moves on every detach *and* every reclaim — so a
+>   collapsing actor re-keys and re-uploads once per chunk that comes off, bounded
+>   by `2 × chunk_count` per actor per session. The CPU pack was worse: it ran
+>   every *frame*, for an answer that changes when the live set does.
+>   `DebrisCache` memoizes it on `(entity, generation)`.
+> * **A ban enumerates what you thought of; an allowlist enumerates what is
+>   allowed.** The mirror gate banned `c.translation`/`c.rotation` from the debris
+>   projection — and `age_s`, a per-step field added one batch earlier, sailed
+>   through: the auditor compiled `entity: id ^ age_s.to_bits()` into both hosts
+>   and all three debris gates stayed green. The whole `DebrisSite` literal is now
+>   pinned field-by-field against five exact expressions.
 > * **A charge with slack in it cascades.** Breaking a chunk makes its neighbours
 >   cheaper — their bond to it is gone — so 40 kJ took a whole car that 30 kJ opens
 >   one chunk of. Tuning a demolition charge is tuning against the *cheapest* chunk,
 >   and both neighbours of the right value are instructive: 25 000 J spent nothing
 >   at all (damage is not banked, and a Blueprint reports 0 J as a legal value).
-> * **Size a blast against the LIGHTEST body in its radius.** 60 kN·s is reasonable
->   for 5-tonne chunks and puts a 295 kg wheel 13 km up. The gate found it.
+> * **Size a blast against the LIGHTEST body in its radius — and count how often
+>   it fires.** 60 kN·s is reasonable for 5-tonne chunks and is 64 m/s on a 295 kg
+>   wheel; fired on every tick of a six-tick charge window it put a wheel past
+>   **60 m and still climbing**, which is what the gate measured. (The first
+>   write-up of this said "13 km up", which was neither the measurement nor
+>   consistent with its own 60 m/s — corrected here, because the lesson was paid
+>   for and is worth keeping accurate.) The fix was both halves: the car bomb
+>   became one instant, and the constant became the right size for one.
 > * **`Collider3D::density` defaults to 1.0, which is rapier's mass placeholder and
 >   not a material density** — the P20.2 buoyancy finding, met again: a 0.4 m wheel
 >   at the default weighs 268 grams.
+> * **`.rs` files are READ BY TESTS, so they need `text eol=lf` too.** The trig-law
+>   gate indexed `include_str!("debris.rs")`, searching for a newline-brace-newline
+>   to find the end of an item, and never
+>   normalized; with `core.autocrlf = true` and no attribute for `*.rs`, that
+>   substring occurs nowhere on a Windows checkout, and the *sole* enforcement of
+>   the law on that path aborted with a message about braces. The mirror gates
+>   defend themselves in twenty places; `.gitattributes` now pins `*.rs text
+>   eol=lf` so the class dies at the source. Its first paragraph records the
+>   identical incident for `.inf_act`.
+> * **The libm law is not only about trigonometry.** `f64::cbrt` was on the rubble
+>   placement path in two crates — and on `wasm32` the standard library routes it
+>   through the `libm` crate, so a browser client and a native one derive different
+>   fragments from the same detach set. `inf_math::pcbrt` (a deliberate duplicate
+>   of P21.3's `inf_voxel::cbrt_det`, held to it by a bit-equality sweep in the
+>   crate that sees both) replaces it, and the grep gates now ban `.cbrt()` in
+>   `inf-render` **and** in `inf-physics`, which the first one could not see.
 > * **The P14 trig LAW reaches further than serialization.** The rubble is never
 >   written to a file, so `sin`/`cos` in its placement could never fail a gate —
 >   and would quietly make the net memo's "every client re-derives the rubble byte

@@ -257,11 +257,19 @@ pub fn debris_instances(
             let dir = unit_dir(site.entity, site.chunk, site.order, f, 1_000);
             // Radius: uniform BY VOLUME inside the chunk's own sphere — the
             // cube-root rule, which is what stops every fragment piling against
-            // the surface. `cbrt` is a libm call like `sin`, but unlike `sin` it
-            // is monotone in one argument over a bounded domain and any drift is
-            // a fragment a micrometre nearer the centre; the *direction* is where
-            // a last-bit difference would be visible, and that is exact.
-            let r = site.radius_m * unit(draw(site.entity, site.chunk, site.order, f, 3)).cbrt();
+            // the surface.
+            //
+            // **`inf_math::pcbrt`, not `f64::cbrt`.** The first cut argued that a
+            // libm cube root was tolerable here because any drift is "a fragment a
+            // micrometre nearer the centre" while the *direction* is exact. That
+            // argument is wrong about which claim is being made: the net memo says
+            // a client re-derives this rubble **byte for byte** from the detach set
+            // alone, and on `wasm32` the standard library's `cbrt` goes through the
+            // `libm` crate and differs from the native one by an ulp — so a browser
+            // client and a desktop one provably do not. A micrometre is not the
+            // unit the promise is in.
+            let r = site.radius_m
+                * inf_math::pcbrt(unit(draw(site.entity, site.chunk, site.order, f, 3)));
             let position = site.center + dir * r;
             let t = unit(draw(site.entity, site.chunk, site.order, f, 4)) as f32;
             let scale = site.radius_m as f32
@@ -284,6 +292,111 @@ pub fn debris_instances(
         }
     }
     out
+}
+
+/// One broken actor's packed rubble, memoized against its fracture
+/// **generation** (P22.4 audit).
+///
+/// # What was wrong without it
+///
+/// The first cut called [`debris_batch`] from the projection loop every frame,
+/// and claimed in three places that the payload "re-uploads exactly once per
+/// break". Both halves were overstated:
+///
+/// * The **GPU upload** is once per *generation bump*, not once per break — and a
+///   generation bumps on every detach **and** every reclaim, because the site set
+///   is `detached && !gone`. A 24-chunk block shedding one chunk a step uploads
+///   once a step while it is collapsing. The real bound is `≤ 2 × chunk_count`
+///   uploads per actor per session (each chunk can bump twice: detach, reclaim),
+///   each of `live × DEBRIS_RUBBLE_PER_CHUNK × 48` bytes. That is intrinsic —
+///   the batch's membership genuinely changed — and no cache can remove it.
+/// * The **CPU pack** was once per *frame*, which nothing said and nothing
+///   needed. That is what this removes: at the debris cap it was 1 536 instances
+///   packed and xxh3'd sixty times a second for an answer that changes when a
+///   chunk detaches.
+///
+/// # Bounded by construction
+///
+/// One entry per destructible actor, replaced (never appended) when its
+/// generation moves — so the map is bounded by the number of destructibles in
+/// the level and needs no eviction policy. An actor that becomes whole again
+/// cannot happen (a chunk never re-attaches), and an actor that leaves the level
+/// leaves a single stale `Arc` behind until the host is rebuilt, which is a
+/// pointer and a few kilobytes.
+#[derive(Debug, Default)]
+pub struct DebrisCache {
+    /// `entity → (generation, anchor, packed payload)`.
+    entries: std::collections::BTreeMap<u64, (u64, DVec3, std::sync::Arc<ScatterData>)>,
+    /// How many times a projection has had to re-pack — the engagement counter a
+    /// gate reads to tell "the memo is working" from "the memo is a map nobody
+    /// hits".
+    packs: u64,
+}
+
+impl DebrisCache {
+    /// Packed payloads currently held (one per broken actor).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether nothing is cached.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// How many times this cache has packed a payload since it was created.
+    ///
+    /// Flat across a frame in which nothing detached is the property the memo
+    /// exists for, and it is what
+    /// `phase22_gate::the_debris_batch_holds_its_key_while_the_chunks_tumble`
+    /// asserts.
+    pub fn packs(&self) -> u64 {
+        self.packs
+    }
+
+    /// The batch for `entity` at `generation`, packing only if the generation
+    /// moved (or nothing is cached yet).
+    ///
+    /// `None` when the actor sheds nothing — and the entry is dropped, so a fully
+    /// reclaimed actor stops costing memory.
+    pub fn batch(
+        &mut self,
+        entity: u64,
+        generation: u64,
+        sites: &[DebrisSite],
+        per_chunk: u32,
+        color: [f32; 4],
+        roughness: f32,
+    ) -> Option<ScatterBatch> {
+        if sites.is_empty() || per_chunk == 0 {
+            self.entries.remove(&entity);
+            return None;
+        }
+        // `generation == 0` never hits: a source that cannot version its chunks
+        // must degrade to re-packing, not to a stale frame (the
+        // `plan_fracture_cache` rule, applied to the CPU half).
+        let hit = generation != 0
+            && self
+                .entries
+                .get(&entity)
+                .is_some_and(|(g, _, _)| *g == generation);
+        if !hit {
+            let built = debris_batch(sites, per_chunk, color, roughness)?;
+            self.packs += 1;
+            self.entries
+                .insert(entity, (generation, built.anchor, built.data.clone()));
+        }
+        let (_, anchor, data) = self.entries.get(&entity)?;
+        Some(ScatterBatch {
+            data: data.clone(),
+            anchor: *anchor,
+            metallic: 0.0,
+            roughness,
+            emissive: [0.0; 3],
+            id: ID_NONE,
+            draw_distance: 0.0,
+        })
+    }
 }
 
 /// Build one broken actor's rubble batch, or `None` when it sheds nothing.
@@ -406,6 +519,30 @@ pub const DEBRIS_BUDGET_HIGH: DebrisBudgetSpec = DebrisBudgetSpec {
 ///
 /// The windowed player is the one caller, because it is the one place that has
 /// both a tier and a session and no comparison to lose.
+/// The budget a **session** should run, or `None` when it must run the engine
+/// default — the door a host actually calls (P22.4 audit, M6).
+///
+/// # The bug this exists to make impossible
+///
+/// [`debris_budget_for`]'s docs claimed the `--pie` path never sees a tier
+/// "because no headless boot path builds a render host". True of the headless
+/// protocol loop, **false of embedded PIE**: a `LoadScene` with `windowed = true`
+/// leaves the headless loop for `run_pie_window`, which builds a real
+/// `PlayerRenderHost` and detects a real tier. So on a Medium or Low machine the
+/// editor's Simulate ran the engine default (256 / 20 s) and the PIE session it
+/// had just spawned ran 128 / 12 s — and the budget is read by `step_fractures`,
+/// so a reclaim removes a solver body. **Two different simulations, presented to
+/// the author as a preview of one.** Nothing failed; PIE simply stopped being
+/// the preview half of PIE == shipping, on exactly the machines least likely to
+/// be the author's.
+///
+/// So the rule is not "headless is exempt", it is **"a PREVIEW is exempt"**: a
+/// session that exists to show what Simulate shows must run what Simulate runs.
+/// A shipped windowed player is the only caller that clamps.
+pub fn debris_budget_for_session(tier: RenderTier, pie: bool) -> Option<DebrisBudgetSpec> {
+    (!pie).then(|| debris_budget_for(tier))
+}
+
 pub fn debris_budget_for(tier: RenderTier) -> DebrisBudgetSpec {
     match tier {
         RenderTier::High => DEBRIS_BUDGET_HIGH,
@@ -476,17 +613,29 @@ mod tests {
     /// nothing else in this repository compares two machines.
     #[test]
     fn the_placement_uses_no_platform_dependent_trigonometry() {
-        let src = include_str!("debris.rs");
+        // **NORMALIZE FIRST.** `include_str!` hands back the file as it sits in the
+        // working tree, and `core.autocrlf = true` checks `.rs` out CRLF on Windows
+        // — where `"\n}\n"` occurs nowhere, the search below returns `None`, and the
+        // only enforcement of the trig law on this path aborts with a message about
+        // braces. The mirror gates learned this in twenty places; `.gitattributes`
+        // now pins `*.rs text eol=lf` so the class dies at the source, and this line
+        // is the belt to that braces.
+        let src = include_str!("debris.rs").replace("\r\n", "\n");
         // The item bodies only — the doc comments above them say `sin`/`cos`
         // repeatedly, and must go on being allowed to.
         for name in ["fn unit_dir(", "fn unit_quat(", "pub fn debris_instances("] {
             let start = src.find(name).expect("the item exists");
-            let body = &src[start..start + src[start..].find("\n}\n").expect("terminates")];
-            for banned in [".sin()", ".cos()", ".tan()", ".atan2("] {
+            let end = src[start..]
+                .find("\n}\n")
+                .unwrap_or_else(|| panic!("`{name}` does not terminate at column 0"));
+            let body = &src[start..start + end];
+            for banned in [".sin()", ".cos()", ".tan()", ".atan2(", ".cbrt()"] {
                 assert!(
                     !body.contains(banned),
-                    "`{name}` calls `{banned}` — `std` trigonometry is not \
-                     bit-portable, and this path claims to be"
+                    "`{name}` calls `{banned}` — `std` transcendentals are not \
+                     bit-portable (and on wasm32 `cbrt` routes through the `libm` \
+                     crate, which differs from the native one by an ulp), and this \
+                     path claims to be identical on every machine"
                 );
             }
         }
@@ -507,15 +656,39 @@ mod tests {
         }
     }
 
-    /// **THE KEYING CLAIM.** A batch's content key is a function of the live chunk
-    /// set alone, so a collapse re-uploads once per break rather than once per
-    /// step. Sites are rest centres; nothing here changes as the chunks tumble.
+    /// **The key is a function of the SITE SET and of nothing else this function
+    /// is given.**
+    ///
+    /// The honest scope of a unit test here, and the auditor's finding that
+    /// forced the name change: [`DebrisSite`] carries no live pose, so "the key
+    /// holds while the chunks tumble" is *unstateable* at this level — calling
+    /// `debris_batch` twice with one array asserts that a pure function is pure.
+    /// The claim that matters is about the projector, which decides what goes
+    /// into a site; it is asserted twice, on real physics, in
+    /// `phase22_gate::the_debris_batch_holds_its_key_while_the_chunks_tumble` and
+    /// structurally by `projector_mirror`'s field allowlist.
+    ///
+    /// What IS provable here: the key moves when the live set moves and stays put
+    /// when it does not.
     #[test]
-    fn the_batch_key_is_stable_while_chunks_tumble() {
+    fn the_batch_key_follows_the_live_site_set_and_nothing_else() {
         let sites = [site(0, 1, 0.5), site(1, 2, 1.5)];
         let a = debris_batch(&sites, DEBRIS_RUBBLE_PER_CHUNK, [1.0; 4], 0.8).unwrap();
         let b = debris_batch(&sites, DEBRIS_RUBBLE_PER_CHUNK, [1.0; 4], 0.8).unwrap();
         assert_eq!(a.data.key(), b.data.key());
+        // The ANCHOR is not part of the identity — a batch whose anchor moves keeps
+        // its buffer (P18.5's own rule), which is what lets a site set be re-keyed
+        // only when its membership changes.
+        assert_eq!(a.anchor, sites[0].center);
+        // …and a reclaim (one site leaving) IS a different batch.
+        let shrunk = [site(0, 1, 0.5)];
+        assert_ne!(
+            a.data.key(),
+            debris_batch(&shrunk, DEBRIS_RUBBLE_PER_CHUNK, [1.0; 4], 0.8)
+                .unwrap()
+                .data
+                .key()
+        );
         // …and a break that takes another chunk off IS a different batch.
         let grown = [site(0, 1, 0.5), site(1, 2, 1.5), site(2, 3, 2.5)];
         let c = debris_batch(&grown, DEBRIS_RUBBLE_PER_CHUNK, [1.0; 4], 0.8).unwrap();
@@ -560,5 +733,33 @@ mod tests {
         // …and a weak machine still gets enough for a collapse to read as one.
         assert!(low.max_live >= 32, "Low drops debris to a vanishing wall");
         assert!(low.lifetime_s > 0.0);
+    }
+
+    /// **A PIE session never clamps** — the P22.4 audit's M6.
+    ///
+    /// Embedded PIE is windowed, so it builds a real render host and detects a
+    /// real tier; if it applied the mapping, the editor's Simulate (which never
+    /// does) and the PIE it spawns would run two different simulations on any
+    /// Medium or Low machine, because the debris budget is read by the fixed
+    /// step.
+    #[test]
+    fn a_pie_session_runs_the_engine_default_whatever_its_tier_is() {
+        for tier in [RenderTier::High, RenderTier::Medium, RenderTier::Low] {
+            assert_eq!(
+                debris_budget_for_session(tier, true),
+                None,
+                "a {tier:?} PIE session clamped its debris budget — its preview no \
+                 longer matches the Simulate that spawned it"
+            );
+            // …and the control: a shipped session on the same tier DOES clamp, so
+            // the exemption is about PIE rather than about a dead function.
+            assert_eq!(
+                debris_budget_for_session(tier, false),
+                Some(debris_budget_for(tier))
+            );
+        }
+        // The High row is the identity either way, which is why this was invisible
+        // on the machine it was written on.
+        assert_eq!(debris_budget_for(RenderTier::High), DEBRIS_BUDGET_HIGH);
     }
 }

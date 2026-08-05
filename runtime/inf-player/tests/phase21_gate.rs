@@ -1030,11 +1030,20 @@ fn probe(threads: usize, steps: usize) -> HashMap<String, String> {
 /// **A runtime carve is invariant to the ECS worker-pool size** — in what the
 /// Blueprints saw *and* in what the world became.
 ///
-/// Four borers on four volumes, so the handlers really can interleave: one actor
-/// could not observe an ordering dependency even if there were one. The `field=`
-/// hash is the load-bearing half — a trace of what each script recorded could
-/// agree while the chunks underneath diverged, and the chunks are what a save, a
-/// replay and the next frame's colliders all read.
+/// **The premise this arm shipped with was wrong** and P22.4's audit corrected
+/// it: the Blueprint tick does **not** run inside the ECS schedule
+/// (`RuntimeSim::run_all_with_args` is a serial `for` loop and no `SimSchedule`
+/// runs on the player's fixed-step path), so four pool sizes execute the same
+/// serial program and this cannot *discover* an ordering race. What it is worth —
+/// a regression tripwire for the day the tick pass parallelizes, plus a pin that
+/// nothing on that path reached for the process-global pool — is stated in full
+/// on `destruct_probe.rs` and applies here verbatim.
+///
+/// Four borers on four volumes, so that the day there IS interleaving there is
+/// something to interleave. The `field=` hash is the load-bearing half — a trace
+/// of what each script recorded could agree while the chunks underneath diverged,
+/// and the chunks are what a save, a replay and the next frame's colliders all
+/// read.
 #[test]
 fn the_runtime_carve_is_identical_across_pool_sizes() {
     const PROBE_STEPS: usize = 120;

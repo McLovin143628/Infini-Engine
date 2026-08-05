@@ -28,3 +28,18 @@
 # TOML (asset sidecars included) participates in byte-determinism tests and is
 # always emitted with LF; check it out that way everywhere.
 *.toml text eol=lf
+
+# Rust sources are READ BY TESTS, not only compiled (P22.4).
+#
+# The mirror gates (`projector_mirror`, `viewport_pump_mirror`, `grammar_span_mirror`)
+# and the P22.4 trig-law gate all `include_str!`/`read_to_string` a `.rs` file and
+# index into it — `find("\n}\n")`, `rfind('\n')`, line walks. With `core.autocrlf =
+# true` and no attribute, every one of those files is checked out CRLF on Windows,
+# where `"\n}\n"` does not occur and the search returns `None`. The mirrors defend
+# themselves with `.replace("\r\n", "\n")` in twenty places; relying on every future
+# gate to remember is the same bet this file's first paragraph already lost once.
+#
+# `text eol=lf` does not change what is stored (git normalizes to LF on check-IN
+# regardless) — it fixes what is written to the working tree, so a Windows checkout
+# and a Linux one hand a test the same bytes.
+*.rs text eol=lf

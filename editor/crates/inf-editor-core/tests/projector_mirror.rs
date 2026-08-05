@@ -1554,6 +1554,67 @@ fn project_debris_is_identical_in_both_projectors() {
     );
 }
 
+/// **THE DEBRIS SITE IS AN ALLOWLIST, NOT A BAN.**
+///
+/// The first cut of this gate banned the substrings `c.translation` and
+/// `c.rotation` from `project_debris` — which is a list of the two ways the
+/// auditor happened to think of. It compiled
+/// `entity: id ^ translation.x.to_bits() ^ age_s.to_bits()` into **both** hosts
+/// and all three debris gates stayed green: `age_s` is a per-step field, so the
+/// batch would have re-keyed and re-uploaded its whole instance buffer sixty
+/// times a second, and nothing in the repository would have said so.
+///
+/// A ban enumerates what is forbidden; the set of per-step fields on
+/// `ChunkState` is open (it grew `age_s` in P22.3 and will grow again). So this
+/// pins the **whole `DebrisSite` literal, field by field, expression by
+/// expression** — every value is one of five exact strings, and anything else at
+/// all fails, whether or not anybody thought of it.
+///
+/// Each expression is here because it is *frozen at the break*: the placement
+/// (and therefore `chunk_rest_center`), the volume-derived radius, the chunk
+/// index, and the detach order, which is minted once. None of them can move while
+/// a chunk tumbles, so the batch's content key cannot either.
+#[test]
+fn the_debris_site_projection_reads_only_frozen_state() {
+    /// `field: expression` — the ONLY values `DebrisSite` may be built from.
+    const ALLOWED: [(&str, &str); 5] = [
+        // The actor's render id, which the entity fold already produced.
+        ("entity", "id"),
+        // The chunk's index in its `.inf_fracture`.
+        ("chunk", "i as u32"),
+        // Minted once, at detach, and never touched again.
+        ("order", "c.detach_order"),
+        // The REST centre — `placement · center_of_mass`, and `placement` is
+        // frozen the instant the first chunk comes off.
+        ("center", "state.chunk_rest_center(i)"),
+        // A pure function of the chunk's authored volume and the placement's
+        // determinant.
+        ("radius_m", "state.chunk_radius_m(i)"),
+    ];
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let fields = struct_literal_fields(&read(path), "inf_render::DebrisSite");
+        assert_eq!(
+            fields.len(),
+            ALLOWED.len(),
+            "the {label}'s `DebrisSite` literal has {} field(s), not {} — a field \
+             was added or dropped on one side: {fields:?}",
+            fields.len(),
+            ALLOWED.len()
+        );
+        for ((name, value), (want_name, want_value)) in fields.iter().zip(ALLOWED) {
+            assert_eq!(
+                (name.as_str(), value.as_str()),
+                (want_name, want_value),
+                "the {label} builds `DebrisSite::{name}` from `{value}`. Every \
+                 field of a debris site must be state that is FROZEN AT THE BREAK, \
+                 or the batch re-keys and re-uploads its whole instance buffer \
+                 every step. If this change is deliberate, prove the new \
+                 expression cannot move between two detaches and add it here."
+            );
+        }
+    }
+}
+
 /// A guard on the guard: two stubs are identical too, and a debris projection
 /// that quietly stopped being *content-keyed* would look identical to one that
 /// still was.
@@ -1568,18 +1629,11 @@ fn the_shared_debris_projector_is_not_a_stub() {
         // A reclaimed chunk sheds nothing: the budget's despawn takes the body,
         // the collider and the rubble out together.
         "c.detached && !c.gone",
-        // **THE KEYING RULE.** The site is the chunk's REST centre, which is frozen
-        // at the break — so the batch's bytes change once per break rather than
-        // once per step. A host that read `c.translation` here would re-upload the
-        // whole instance buffer every frame of a collapse, and nothing else in the
-        // repo would notice.
-        "center: state.chunk_rest_center(i),",
-        "radius_m: state.chunk_radius_m(i),",
-        // The seed is the content tuple, so two hosts (and two machines) lay the
-        // same rubble.
-        "order: c.detach_order,",
-        // The placement rule itself is Ring 0, called and never re-implemented.
-        "inf_render::debris_batch(",
+        // The placement rule itself is Ring 0, reached through the host's memo
+        // (which calls `inf_render::debris_batch` on a miss) and never
+        // re-implemented.
+        "cache.batch(",
+        "state.generation(),",
         "inf_render::DEBRIS_RUBBLE_PER_CHUNK,",
     ] {
         assert!(
@@ -1588,14 +1642,6 @@ fn the_shared_debris_projector_is_not_a_stub() {
              gutted, or this gate needs updating deliberately:\n{body}"
         );
     }
-    // The live pose must not appear at all: it is the one input that would make
-    // the batch re-upload every step.
-    assert!(
-        !body.contains("c.translation") && !body.contains("c.rotation"),
-        "`project_debris` reads a chunk's LIVE pose — the rubble would be \
-         re-uploaded wholesale every step, which is the documented cost the rest \
-         pose exists to avoid:\n{body}"
-    );
     // …and, like the chunk projection, it must never see a camera.
     for probe in ["eye", "camera", "frustum"] {
         assert!(
@@ -1610,10 +1656,15 @@ fn the_shared_debris_projector_is_not_a_stub() {
 /// their rubble cannot disagree about which actors have come apart.
 #[test]
 fn both_projectors_shed_debris_the_same_way() {
-    const SHARED: [&str; 3] = [
+    const SHARED: [&str; 4] = [
         "project_debris(",
-        "scatter.extend(debris)",
+        "scatter.extend(rubble)",
         "fracture_chunks.extend(chunks)",
+        // The payload is memoized against the fracture GENERATION, not rebuilt per
+        // frame — the P22.4 audit's M2. A host that dropped the cache would pack
+        // 1 536 instances and hash them sixty times a second and no other test
+        // would notice, because the *output* is identical either way.
+        "cache.batch(",
     ];
     for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
         let src = read(path).replace("\r\n", "\n");

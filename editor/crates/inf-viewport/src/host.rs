@@ -251,6 +251,10 @@ pub struct EngineHost {
     /// spelled out rather than written as its `SharedFractures` alias for the same
     /// reason `voxel_volumes` above is: the mirror gate can then see which state
     /// this host draws from.
+    /// The P22.4 sub-chunk rubble memo, keyed by each broken actor's fracture
+    /// generation, so a collapse packs its instance payload when the live chunk
+    /// set changes rather than on every projection.
+    debris_cache: inf_render::DebrisCache,
     fractures: std::sync::Arc<
         std::sync::Mutex<std::collections::BTreeMap<uuid::Uuid, inf_physics::d3::FractureState>>,
     >,
@@ -940,6 +944,7 @@ impl EngineHost {
             terrain_slots: Vec::new(),
             terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams::new(),
             voxel_volumes: inf_editor_core::voxel_store::shared_volumes(),
+            debris_cache: inf_render::DebrisCache::default(),
             fractures: inf_editor_core::simulate::shared_fractures(),
             render_assets: inf_editor_core::render_assets::EditorRenderAssets::new(),
             tool_status: None,
@@ -1999,11 +2004,9 @@ impl EngineHost {
             // so the two projections cannot disagree about which actors are
             // broken; it is dressing only, keyed by content, and it never touches
             // the sim.
-            let fractured = self
-                .fractures
-                .lock()
-                .ok()
-                .and_then(|f| {
+            let broken = {
+                let debris = &mut self.debris_cache;
+                self.fractures.lock().ok().and_then(|f| {
                     f.get(&guid).and_then(|state| {
                         project_fracture(
                             state,
@@ -2017,16 +2020,18 @@ impl EngineHost {
                                     state,
                                     w.get::<Material>(entity),
                                     inf_render::terrain_id_from_guid(guid.as_u128()),
+                                    debris,
                                 ),
                             )
                         })
                     })
                 })
-                .map(|(chunks, debris)| {
-                    self.scene.fracture_chunks.extend(chunks);
-                    self.scene.scatter.extend(debris);
-                })
-                .is_some();
+            };
+            let fractured = broken.is_some();
+            if let Some((chunks, rubble)) = broken {
+                self.scene.fracture_chunks.extend(chunks);
+                self.scene.scatter.extend(rubble);
+            }
             let vgeom = (!fractured)
                 .then(|| {
                     mesh_ref
@@ -3189,10 +3194,21 @@ fn project_fracture(
 ///
 /// A **reclaimed** chunk sheds nothing, so the budget's despawn takes the chunk,
 /// its collider and its rubble out together — one event, not three.
+///
+/// # The bound, stated exactly
+///
+/// The payload is memoized against the actor's fracture **generation**
+/// ([`inf_render::DebrisCache`]), so the CPU pack happens when the live set
+/// changes rather than every frame. The GPU upload follows the same cadence, and
+/// that is once per *generation bump* — not, as an earlier version of this
+/// comment claimed, once per break: a generation moves on every detach AND every
+/// reclaim, so a collapsing actor uploads once per chunk that comes off. The
+/// bound is `<= 2 x chunk_count` uploads per actor per session.
 fn project_debris(
     state: &inf_physics::d3::FractureState,
     material: Option<&Material>,
     id: u64,
+    cache: &mut inf_render::DebrisCache,
 ) -> Option<inf_render::ScatterBatch> {
     if state.is_intact() {
         return None;
@@ -3214,7 +3230,9 @@ fn project_debris(
             radius_m: state.chunk_radius_m(i),
         })
         .collect();
-    inf_render::debris_batch(
+    cache.batch(
+        id,
+        state.generation(),
         &sites,
         inf_render::DEBRIS_RUBBLE_PER_CHUNK,
         color,

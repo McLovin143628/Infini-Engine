@@ -387,20 +387,24 @@ impl ApplicationHandler for PlayerApp {
                 // engine where a `RenderTier` becomes a `DebrisBudget`.
                 //
                 // It happens *here*, in the window, because this is the one place
-                // that holds both a detected tier and a live session — and because
-                // it must not happen anywhere else. `step_fractures` is fixed-step
-                // simulation, so a host that sets its budget from the adapter has
-                // made its simulation a function of the machine; the editor's
-                // Simulate deliberately does not (it is the preview half of
-                // `PIE == shipping`), and no headless boot path builds a host at
-                // all. High maps to the physics default, so a capable machine runs
-                // the engine's own numbers and the clamp is something a weak one
-                // opts into. `inf_render::debris_budget_for` argues the rows.
-                let spec = inf_render::debris_budget_for(host.tier());
-                self.sim.set_debris_budget(inf_physics::d3::DebrisBudget {
-                    max_live: spec.max_live,
-                    lifetime_s: spec.lifetime_s,
-                });
+                // that holds both a detected tier and a live session. And it is
+                // asked through `debris_budget_for_session` rather than
+                // `debris_budget_for`, with `self.pie.is_some()`, because **an
+                // embedded PIE session is windowed** — it comes through this exact
+                // path with a real host and a real tier. The first cut clamped it,
+                // which meant that on any Medium or Low machine the editor's
+                // Simulate ran the engine default and the PIE it had just spawned
+                // ran a smaller one; the budget is read by `step_fractures`, so a
+                // reclaim removes a solver body and the two were different
+                // simulations. A preview must run what it previews.
+                if let Some(spec) =
+                    inf_render::debris_budget_for_session(host.tier(), self.pie.is_some())
+                {
+                    self.sim.set_debris_budget(inf_physics::d3::DebrisBudget {
+                        max_live: spec.max_live,
+                        lifetime_s: spec.lifetime_s,
+                    });
+                }
                 // Report our native window handle so the editor can reparent us
                 // into the viewport slot (embedded PIE).
                 if let Some(pie) = self.pie.as_mut() {

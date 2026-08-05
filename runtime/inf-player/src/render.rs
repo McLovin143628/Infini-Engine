@@ -78,6 +78,10 @@ pub struct PlayerRenderHost {
     /// GPU meshlet path (High). Off → the classic discrete-LOD fallback renders the
     /// same vgeom content (the renderer's `ClassicVgeomNode`).
     vgeom_enabled: bool,
+    /// The P22.4 sub-chunk rubble memo, keyed by each broken actor's fracture
+    /// generation, so a collapse packs its instance payload when the live chunk
+    /// set changes rather than on every frame.
+    debris_cache: inf_render::DebrisCache,
     /// The auto-picked capability tier itself (P22.4).
     ///
     /// Kept because the tier now decides one thing that is **not** a renderer
@@ -150,6 +154,7 @@ impl PlayerRenderHost {
             voxel_assets: Arc::new(VoxelRegistry::new()),
             voxels: inf_voxel::VoxelVolumes::new(),
             vgeom_enabled,
+            debris_cache: inf_render::DebrisCache::default(),
             tier,
         })
     }
@@ -220,13 +225,14 @@ impl PlayerRenderHost {
     /// independent of where the camera happens to be.
     pub fn project(&mut self, sim: &RuntimeSim, alpha: f64, camera_world: DVec3) {
         self.sync_voxels(sim, camera_world);
-        project_scene_with_skinned(
+        project_scene_full(
             &mut self.scene,
             sim,
             alpha,
             &self.vmeshes,
             &self.skinned,
             &self.voxels,
+            &mut self.debris_cache,
         );
     }
 
@@ -354,6 +360,38 @@ pub fn project_scene_with_skinned(
     vmeshes: &VmeshRegistry,
     skinned: &SkinnedRegistry,
     voxels: &inf_voxel::VoxelVolumes,
+) {
+    // The narrow doors pack their rubble fresh — which is what they always did,
+    // and none of the dozen gates that drive them carries a broken destructible.
+    // The shipped host holds a real cache and calls `project_scene_full`.
+    project_scene_full(
+        scene,
+        sim,
+        alpha,
+        vmeshes,
+        skinned,
+        voxels,
+        &mut inf_render::DebrisCache::default(),
+    );
+}
+
+/// [`project_scene_with_skinned`] plus the host's **debris memo** (P22.4) — the
+/// widest door, and the one the shipped render host calls.
+///
+/// The memo is a parameter rather than a global because a projection must stay a
+/// pure function of `(sim, stores)`: two hosts projecting the same sim must
+/// produce the same scene, and a cache that outlived a level would make the
+/// second projection depend on the first. It is keyed by fracture generation, so
+/// a hit and a miss produce byte-identical payloads — the memo can only change
+/// how often the packing runs, never what it packs.
+pub fn project_scene_full(
+    scene: &mut RenderScene,
+    sim: &RuntimeSim,
+    alpha: f64,
+    vmeshes: &VmeshRegistry,
+    skinned: &SkinnedRegistry,
+    voxels: &inf_voxel::VoxelVolumes,
+    debris: &mut inf_render::DebrisCache,
 ) {
     scene.instances.clear();
     scene.lights.clear();
@@ -737,31 +775,29 @@ pub fn project_scene_with_skinned(
             // so the two projections cannot disagree about which actors are
             // broken; it is dressing only, keyed by content, and it never touches
             // the sim.
-            let fractured = sim
-                .fractures()
-                .get(&guid)
-                .and_then(|state| {
-                    project_fracture(
-                        state,
-                        w.get::<Material>(entity),
-                        inf_render::terrain_id_from_guid(guid.as_u128()),
+            let broken = sim.fractures().get(&guid).and_then(|state| {
+                project_fracture(
+                    state,
+                    w.get::<Material>(entity),
+                    inf_render::terrain_id_from_guid(guid.as_u128()),
+                )
+                .map(|chunks| {
+                    (
+                        chunks,
+                        project_debris(
+                            state,
+                            w.get::<Material>(entity),
+                            inf_render::terrain_id_from_guid(guid.as_u128()),
+                            debris,
+                        ),
                     )
-                    .map(|chunks| {
-                        (
-                            chunks,
-                            project_debris(
-                                state,
-                                w.get::<Material>(entity),
-                                inf_render::terrain_id_from_guid(guid.as_u128()),
-                            ),
-                        )
-                    })
                 })
-                .map(|(chunks, debris)| {
-                    scene.fracture_chunks.extend(chunks);
-                    scene.scatter.extend(debris);
-                })
-                .is_some();
+            });
+            let fractured = broken.is_some();
+            if let Some((chunks, rubble)) = broken {
+                scene.fracture_chunks.extend(chunks);
+                scene.scatter.extend(rubble);
+            }
             let vgeom = (!fractured)
                 .then(|| mesh_ref.asset.and_then(|mesh_id| vmeshes.resolve(mesh_id)))
                 .flatten();
@@ -1294,10 +1330,21 @@ fn project_fracture(
 ///
 /// A **reclaimed** chunk sheds nothing, so the budget's despawn takes the chunk,
 /// its collider and its rubble out together — one event, not three.
+///
+/// # The bound, stated exactly
+///
+/// The payload is memoized against the actor's fracture **generation**
+/// ([`inf_render::DebrisCache`]), so the CPU pack happens when the live set
+/// changes rather than every frame. The GPU upload follows the same cadence, and
+/// that is once per *generation bump* — not, as an earlier version of this
+/// comment claimed, once per break: a generation moves on every detach AND every
+/// reclaim, so a collapsing actor uploads once per chunk that comes off. The
+/// bound is `<= 2 x chunk_count` uploads per actor per session.
 fn project_debris(
     state: &inf_physics::d3::FractureState,
     material: Option<&Material>,
     id: u64,
+    cache: &mut inf_render::DebrisCache,
 ) -> Option<inf_render::ScatterBatch> {
     if state.is_intact() {
         return None;
@@ -1319,7 +1366,9 @@ fn project_debris(
             radius_m: state.chunk_radius_m(i),
         })
         .collect();
-    inf_render::debris_batch(
+    cache.batch(
+        id,
+        state.generation(),
         &sites,
         inf_render::DEBRIS_RUBBLE_PER_CHUNK,
         color,

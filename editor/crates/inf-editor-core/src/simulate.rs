@@ -2443,6 +2443,18 @@ fn runtime_destruct_damage(
         logs.push(msg);
         return 0.0;
     }
+    // **A NEAR MISS IS REPORTED** (P22.4 audit). `Applied` with zero joules
+    // absorbed is a blow that could not break the cheapest bond set — damage is
+    // not banked, so the energy is simply not spent. From outside it is
+    // indistinguishable from a script that never ran: the level looks untouched
+    // and the node returns a legal `0.0`. The phase-22 sample lost half a day to
+    // exactly that (25 000 J against a 25 136 J chunk), so it says so, on the same
+    // refusal-visibility principle the outcomes above are built on.
+    if report.detached == 0 && report.energy_absorbed_j == 0.0 {
+        logs.push(format!(
+            "destruct::apply_damage: {energy_j} J was not enough to break the              cheapest bond set on that actor, so NOTHING was spent (damage is not              banked — a bigger single blow, not more small ones)"
+        ));
+    }
     report.energy_absorbed_j
 }
 

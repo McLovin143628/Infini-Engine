@@ -10,13 +10,20 @@
 //! trap `crates/inf-runtime/src/bin/replay_probe.rs` exists to avoid, and
 //! `water_probe.rs` is the water twin; this is the voxel one.
 //!
-//! **Why voxels need their own probe.** A runtime carve is the first thing in
-//! this engine that *writes* world state from inside a Blueprint handler, and the
-//! blueprint tick runs inside the ECS schedule. Two questions follow that the
-//! water probe cannot answer: whether the order handlers run in can reach the
-//! carve's result, and whether the collider rebuild the carve triggers can. Both
-//! are asserted rather than reasoned about, because both would be introduced by a
-//! change nobody was watching for.
+//! **The premise this file shipped with was wrong, and P22.4's audit corrected
+//! it.** It said "the blueprint tick runs inside the ECS schedule". It does not:
+//! `RuntimeSim::run_all_with_args` is a serial `for` loop over a `Vec` of
+//! `BTreeMap` keys and no `SimSchedule` runs on the player's fixed-step path at
+//! all, so four pool sizes execute the same serial program and this probe cannot
+//! *discover* an ordering race — there is no concurrency here for one to live in.
+//!
+//! What the runs are actually worth is stated in full on `destruct_probe.rs`,
+//! P22.4's twin of this file, and applies verbatim: a **regression tripwire**
+//! against the day the tick pass moves onto `inf-ecs`'s parallel `SimSchedule`
+//! (which `runtime_sim`'s own docs name as a follow-up), plus a **pin** that
+//! nothing on the fixed-step path has reached for the process-global
+//! `ComputeTaskPool` — checked rather than assumed, which is the half that can
+//! change without anybody noticing.
 //!
 //! The probe builds its scene from a **bare `EcsWorld`** — no editor crate,
 //! because a `[[bin]]` cannot reach dev-dependencies — pins the pool to a

@@ -110,8 +110,9 @@ pub use water::{
 // sub-chunk rubble both hosts lay through the P18.5 scatter path, and the one
 // place `RenderTier` is mapped onto a budget (physics stays tier-blind).
 pub use debris::{
-    debris_batch, debris_budget_for, debris_instances, DebrisBudgetSpec, DebrisSite,
-    DEBRIS_BUDGET_HIGH, DEBRIS_MAX_SCALE, DEBRIS_MIN_SCALE, DEBRIS_RUBBLE_PER_CHUNK,
+    debris_batch, debris_budget_for, debris_budget_for_session, debris_instances, DebrisBudgetSpec,
+    DebrisCache, DebrisSite, DEBRIS_BUDGET_HIGH, DEBRIS_MAX_SCALE, DEBRIS_MIN_SCALE,
+    DEBRIS_RUBBLE_PER_CHUNK,
 };
 // P22.1 surface deformation: the projected field, the camera-following window's
 // packing, and the engine constants argued in `deform.rs` rather than authored.

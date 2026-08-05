@@ -1001,6 +1001,29 @@ pub struct Collider2D {
     #[serde(default)]
     pub restitution: f64,
     /// Mass density (drives a dynamic body's mass/inertia).
+    ///
+    /// # THE DEFAULT IS A PLACEHOLDER, NOT A MATERIAL
+    ///
+    /// [`default_density`] is rapier's `1.0` — **one kilogram per cubic metre**,
+    /// which is lighter than air and is not any substance a level contains. It is
+    /// the solver's "no opinion" value, not a sensible starting point, and an
+    /// authored collider that leaves it alone gets a body whose mass is a
+    /// thousandth of what the geometry looks like.
+    ///
+    /// This has now been paid for twice. P20.2's buoyancy work found it first and
+    /// put the honest number on `Buoyancy::density_kg_m3` rather than reading this
+    /// one. P22.4 found it again from the other end: a 0.4 m wheel at the default
+    /// weighs **268 grams**, so a car-bomb impulse sized against 5-tonne fracture
+    /// chunks threw it out of the level — and `Destructible::density_kg_m3` exists
+    /// precisely so a chunk's mass never comes from here.
+    ///
+    /// So: **author it.** Classes, kg/m³ — pine 500, oak 750, brick 1900, concrete
+    /// 2400, granite 2700, steel 7850, rubber ~1100, and a hollow shell (a car
+    /// body, a crate) is far lower than its material — 150 is right for a 4 × 1 × 2 m
+    /// car at ~1200 kg. The default is left at `1.0` deliberately rather than
+    /// "fixed" to something plausible: changing it would silently re-mass every
+    /// committed level in the repository, and a wrong number that *looks* right is
+    /// worse than one that is obviously a placeholder.
     #[serde(default = "default_density")]
     pub density: f64,
     /// A trigger volume: detects overlaps but generates no contact force.
@@ -1221,6 +1244,29 @@ pub struct Collider3D {
     #[serde(default)]
     pub restitution: f64,
     /// Mass density (drives a dynamic body's mass/inertia).
+    ///
+    /// # THE DEFAULT IS A PLACEHOLDER, NOT A MATERIAL
+    ///
+    /// [`default_density`] is rapier's `1.0` — **one kilogram per cubic metre**,
+    /// which is lighter than air and is not any substance a level contains. It is
+    /// the solver's "no opinion" value, not a sensible starting point, and an
+    /// authored collider that leaves it alone gets a body whose mass is a
+    /// thousandth of what the geometry looks like.
+    ///
+    /// This has now been paid for twice. P20.2's buoyancy work found it first and
+    /// put the honest number on `Buoyancy::density_kg_m3` rather than reading this
+    /// one. P22.4 found it again from the other end: a 0.4 m wheel at the default
+    /// weighs **268 grams**, so a car-bomb impulse sized against 5-tonne fracture
+    /// chunks threw it out of the level — and `Destructible::density_kg_m3` exists
+    /// precisely so a chunk's mass never comes from here.
+    ///
+    /// So: **author it.** Classes, kg/m³ — pine 500, oak 750, brick 1900, concrete
+    /// 2400, granite 2700, steel 7850, rubber ~1100, and a hollow shell (a car
+    /// body, a crate) is far lower than its material — 150 is right for a 4 × 1 × 2 m
+    /// car at ~1200 kg. The default is left at `1.0` deliberately rather than
+    /// "fixed" to something plausible: changing it would silently re-mass every
+    /// committed level in the repository, and a wrong number that *looks* right is
+    /// worse than one that is obviously a placeholder.
     #[serde(default = "default_density")]
     pub density: f64,
     /// A trigger volume: detects overlaps but generates no contact force.

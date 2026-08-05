@@ -839,3 +839,48 @@ fn a_tightened_debris_budget_reclaims_the_oldest_chunks() {
          cap of 1 proved nothing"
     );
 }
+
+/// **THE WINDOWED-PIE EXEMPTION IS PINNED** (P22.4 audit, M6).
+///
+/// Embedded PIE is *windowed*: a `LoadScene` with `windowed = true` leaves the
+/// headless protocol loop for `run_pie_window`, which builds a real
+/// `PlayerRenderHost` and therefore detects a real `RenderTier`. If the window
+/// applied the per-tier mapping there, then on any Medium or Low machine the
+/// editor's Simulate (which never clamps) and the PIE session it had just spawned
+/// would run **two different simulations** — the budget is read by
+/// `step_fractures`, and a reclaim removes a solver body.
+///
+/// The behaviour is `debris_budget_for_session`'s and is unit-tested there. What
+/// cannot be unit-tested is that the *window actually asks it that way*, because
+/// reaching `resumed` needs a winit event loop and a GPU. So this reads the
+/// source — the mirror gates' pattern — and pins the three things that make the
+/// exemption real: the session door is the one called, the PIE flag is what is
+/// passed, and the unconditional door is not called at all.
+#[test]
+fn the_windowed_player_exempts_pie_from_the_tier_budget() {
+    // Normalized: `core.autocrlf = true` checks `.rs` out CRLF on Windows.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/window.rs"),
+    )
+    .expect("window.rs is readable")
+    .replace("\r\n", "\n");
+
+    assert!(
+        src.contains("inf_render::debris_budget_for_session(host.tier(), self.pie.is_some())"),
+        "the windowed player no longer asks for its debris budget through the \
+         SESSION door with its PIE flag — an embedded PIE session would clamp, and \
+         the editor's Simulate does not, so the preview and the thing it previews \
+         would step different worlds"
+    );
+    assert!(
+        !src.contains("debris_budget_for(host.tier())"),
+        "the windowed player calls the unconditional `debris_budget_for` — that is \
+         the exact call the PIE exemption replaced"
+    );
+    // …and it is still a real caller: `set_debris_budget` is reached from here,
+    // so the exemption did not turn the whole mapping off.
+    assert!(
+        src.contains("set_debris_budget("),
+        "nothing in the windowed player sets a debris budget any more"
+    );
+}

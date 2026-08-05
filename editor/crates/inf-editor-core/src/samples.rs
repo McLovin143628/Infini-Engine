@@ -6581,16 +6581,16 @@ pub const PHASE22_TRIGGER_END: f64 = 65.0;
 pub const PHASE22_TOWER_CHARGE_J: f64 = 8.0e4;
 /// Joules the wreck script delivers to the car per tick, over the same window.
 ///
+/// **One blow, at [`PHASE22_TRIGGER_STEP`] — not a per-tick charge.** (An earlier
+/// draft of this comment described "25 kJ a tick over the window", which was the
+/// design before the wreck script became a single instant; it never shipped, and
+/// leaving it here would have told the next reader to look for a loop that is not
+/// there.) The block's demolition string is the multi-tick one; a car bomb is one
+/// bang, for the reason [`phase22_at_trigger`] gives.
+///
 /// The chassis is far stronger per unit area (2e7 Pa against the block's 2.5e6)
 /// and far smaller (0.67 m³ a chunk, faces of order 0.7 m²), so a bond is ~14 kJ
-/// and a chunk 30–45 kJ. 25 kJ a tick takes three or four pieces off over the
-/// window and leaves the rest attached — which matters, because a car body is
-/// **not supported by static geometry**: the moment its first chunk comes off,
-/// its own collider goes with the atomic swap and the remainder is hanging in
-/// mid-air on four dynamic wheels, which the support rule correctly refuses to
-/// count. The structural solve then drops the lot. That is the level's
-/// progressive-collapse witness, and it is honest physics rather than a tuned
-/// coincidence.
+/// and a chunk 30–45 kJ.
 ///
 /// **30 kJ, measured against the shipped asset, and both neighbouring values are
 /// wrong for instructive reasons.** The chassis' cheapest chunk costs 25 136 J to
@@ -6620,14 +6620,26 @@ pub const PHASE22_CAR_CHARGE_J: f64 = 3.0e4;
 /// "the block's chunks moved" a statement about the blast rather than about the
 /// collapse.
 ///
-/// **8 kN·s, and the first cut had 60.** The number has to be read against the
-/// masses it acts on, and the smallest of those is a wheel: a 0.4 m sphere at
-/// [`PHASE22_WHEEL_DENSITY`] is ~295 kg, and it sits ~1.8 m from the charge where
-/// the inverse-square falloff leaves about a third of the one-metre value. 8 kN·s
-/// is therefore ~2.5 kN·s on a wheel, i.e. about 8 m/s — a wheel that is thrown
-/// and lands. At 60 kN·s it was 60 m/s and the gate found one of them 13 km up,
-/// which is what a blast tuned against the *chunk* masses (tonnes) does to the
-/// lightest body in its radius.
+/// **8 kN·s, and the first cut had 60 — fired every tick.** The number has to be
+/// read against the masses it acts on, and the smallest of those is a wheel: a
+/// 0.4 m sphere at [`PHASE22_WHEEL_DENSITY`] is ~295 kg, and it sits ~1.8 m from
+/// the charge where the inverse-square falloff leaves about a third of the
+/// one-metre value. 8 kN·s is therefore ~2.5 kN·s on a wheel, i.e. about 8 m/s —
+/// a wheel that is thrown and lands.
+///
+/// **The two numbers the first cut got wrong were the size AND the count**, and
+/// separating them matters because only one is about the constant. At 60 kN·s a
+/// single impulse is ~19 kN·s on a wheel, i.e. **64 m/s** — already absurd, and
+/// it ballistically reaches ~210 m, not kilometres. What the gate actually
+/// measured was a wheel at **y = 60.8 m still climbing**, because the impulse was
+/// fired on *every one of the six charge ticks*: six times 64 m/s, minus what
+/// gravity took back. So the honest account is "60 kN·s six times over put a
+/// wheel past 60 m and rising", and the fix was both halves —
+/// [`phase22_at_trigger`] made it one bang, and this constant made that bang the
+/// right size. (An earlier version of this paragraph said "13 km up", which is
+/// neither the measurement nor consistent with its own 60 m/s; it is corrected
+/// rather than deleted because the *lesson* — size a blast against the lightest
+/// body in its radius — was paid for and is worth keeping accurate.)
 pub const PHASE22_BLAST_NS: f64 = 8.0e3;
 pub const PHASE22_BLAST_RADIUS_M: f64 = 12.0;
 
@@ -7479,8 +7491,8 @@ deterministic on the replay trace, PIE == shipping.*\n\n\
   pipeline -- so using it would have meant building a grammar-to-mesh bake first,\n\
   which is a modelling feature and belongs to Phase 23.\n\
 - `Chassis.inf_mesh` -- the car's 4 x 1 x 2 m body, likewise tessellated (both\n\
-  meshes clear the cook's 2 048-triangle vgeom threshold, because arm (e) of the\n\
-  gate asserts the cook is SILENT and a sub-threshold mesh draws an advisory).\n\
+  meshes clear the cook's 2 048-triangle vgeom threshold, because the gate's\n\
+  cook-silence arm would otherwise fail on a sub-threshold advisory).\n\
 - `Demolition.inf_act` -- the charge. On Tick, over steps 60-65, it spends\n\
   80 kJ a tick on its own actor's bonds and then reports `is_intact` and\n\
   `chunk_count`; its `Destroyed` handler counts its firings and plays the actor's\n\
@@ -7510,6 +7522,13 @@ deterministic on the replay trace, PIE == shipping.*\n\n\
 - A **car**: a destructible chassis with four wheels on revolute joints. It is a\n\
   **prop, not a vehicle** -- this engine has no vehicle controller -- so it\n\
   settles onto its wheels and is then blown up, which is all the phase claims.\n\
+  Its colliders carry **authored densities** (rubber 1100 for the wheels, 150 for\n\
+  the hollow chassis shell). If you copy one thing out of this sample, copy that:\n\
+  `Collider3D::density` defaults to **1.0 kg/m3**, which is rapier's mass\n\
+  placeholder and lighter than air. A 0.4 m wheel at the default weighs 268\n\
+  grams, and an impulse sized against 5-tonne fracture chunks throws it out of\n\
+  the level. (A chunk's mass never comes from there -- it comes from\n\
+  `Destructible::density_kg_m3`, which exists for exactly this reason.)\n\
 - A **grass strip** straddling the roller's lane, so instances stand both inside\n\
   the trail and clear of it: the P22.1 bend shader reads the same deformation\n\
   window the terrain displacement does, and a strip entirely inside the rut would\n\

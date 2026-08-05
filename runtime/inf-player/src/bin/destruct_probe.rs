@@ -8,22 +8,41 @@
 //! `water_probe.rs` is the P20.2 twin and `voxel_probe.rs` the P21.4 one; this is
 //! destruction's.
 //!
-//! # Why destruction needs its own probe, when P22.3 argued it did not
+//! # What this probe ACTUALLY guards — the premise, corrected
 //!
-//! `inf_physics::d3::fracture`'s module docs say — correctly — that *nothing in
-//! that module is scheduled*: it names no job pool, rapier's `parallel` feature is
-//! off by rule, and every order that could matter is a `BTreeMap`/`BTreeSet` or an
-//! explicit sort. That is a claim about the **unit**, and it is the reason P22.3
-//! shipped without a probe.
+//! An earlier version of this comment said the `destruct.*` calls "run from a
+//! Blueprint tick, **which runs in the ECS schedule**". **That is false**, and the
+//! P22.4 audit caught it. `RuntimeSim` runs no `SimSchedule` at all: its
+//! `run_all_with_args` is a serial `for` loop over a `Vec` of `BTreeMap` keys,
+//! `inf_physics::d3::fracture` names no job pool, and rapier's `parallel` feature
+//! is off by rule. Four pool sizes therefore execute **the same serial program**,
+//! and this probe cannot *discover* an ordering race because there is no
+//! concurrency on the step path for one to live in.
 //!
-//! It is not the claim P22.4 needs. The thing a gate has to answer is whether the
-//! *whole fixed step* is pool-invariant, and destruction sits inside one: the
-//! `destruct.*` calls that decide what breaks run from a **Blueprint tick, which
-//! runs in the ECS schedule**, and what they break is then read by the structural
-//! solve, the budget sweep and the next sync's colliders. If handler order can
-//! vary, "which actor spent its joules first" can vary, and the whole collapse
-//! follows it. That is exactly the shape the voxel probe was written for, one
-//! phase on, and the honest way to answer it is to measure rather than to reason.
+//! Saying otherwise would be the "inference dressed as measurement" mistake this
+//! phase's own ledger records one law up: four green runs proving a property that
+//! was never at risk, presented as evidence that it was.
+//!
+//! So the honest statement of what these runs are worth:
+//!
+//! * **A regression tripwire, with a real cost of zero.** `inf-ecs` *does* have a
+//!   parallel schedule (`SimSchedule` in `ScheduleMode::Parallel`), and
+//!   `runtime_sim`'s own module docs name moving the tick pass onto it as a
+//!   documented follow-up. The day that lands, this arm becomes load-bearing —
+//!   and it will already exist, already be wired into the phase gate, and already
+//!   have a reference hash, instead of being something somebody has to remember
+//!   to write.
+//! * **A pin on the process-global pool being irrelevant here.** `bevy_ecs`'s
+//!   `ComputeTaskPool` is a `OnceLock`: the first init wins and later ones are
+//!   no-ops that report the count already chosen. So the pool a process gets IS
+//!   decided by the `threads=` line this prints, and the trace being invariant to
+//!   it is the statement "nothing on the fixed-step path has reached for that
+//!   pool" — checked rather than assumed, which is the part that can change
+//!   without anyone noticing.
+//!
+//! Subprocesses rather than `init_ecs_task_pool` calls, for the `OnceLock` reason
+//! above: an in-process "matrix" runs every leg on one pool and is the two-run
+//! determinism arm wearing a stronger name.
 //!
 //! The probe builds its scene from a **bare `EcsWorld`** — no editor crate,
 //! because a `[[bin]]` cannot reach dev-dependencies — pins the pool to a

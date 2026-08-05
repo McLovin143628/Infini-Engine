@@ -28,8 +28,16 @@
 //! * **(g) pool-size determinism** — a subprocess matrix at 1/2/4/8 workers.
 //! * **(h) persistence** — a save after the damage is byte-identical to a save
 //!   before it, which is this phase's ruling stated where a gate can fail on it.
-//! * **the cook is silent** — no advisory fires on the flagship sample, including
-//!   the three this phase added.
+//! * **(i) the cook is silent** — no advisory fires on the flagship sample,
+//!   including the three this phase added.
+//! * **(j) the keying claim, on real physics** — the rubble's content key holds
+//!   while chunks demonstrably tumble, and moves when the live set does. The only
+//!   arm that touches `inf_render::debris`.
+//!
+//! The letters are load-bearing: `samples/phase22-playground/README.md` and
+//! ROADMAP §12 cite them, so an arm that is added or re-ordered has to be
+//! re-cited with it. (The P22.4 audit found the README pointing at "arm (e)" for
+//! the cook-silence arm, which is (i).)
 //!
 //! # Why the trace is bits and not floats
 //!
@@ -88,10 +96,18 @@ use inf_player::budget::LOAD_BUDGET_MS;
 ///
 /// So the trace is the WHOLE run, and the run is sized from the other end: 240
 /// steps is 4 s, of which 1 s is the pre-trigger settle, 0.1 s the charge and
-/// **2.9 s the collapse and its debris settling** — comfortably past the point
-/// where the block's rubble has stopped moving. The number lives in the sample,
-/// not here, so the content and the test cannot disagree about how long the run
-/// is.
+/// **2.9 s the collapse and its debris settling**.
+///
+/// "Settled" is a measurement rather than a feeling, and the honest number is
+/// **0.365 m**: that is how far the block's rubble still moves over the last
+/// second of the run. It is not zero — a hull resting on a heightfield keeps
+/// micro-settling — and it is two orders below the metres the collapse itself
+/// covers, which is what the window has to contain. Defended: a run truncated to
+/// 120 steps fails 7 of the 15 arms, and a perturbation injected at step 200 is
+/// caught at step 200.
+///
+/// The number lives in the sample, not here, so the content and the test cannot
+/// disagree about how long the run is.
 const STEPS: usize = PHASE22_STEPS;
 
 /// Every committed file of the sample, so the fixture copy cannot silently miss
@@ -303,6 +319,13 @@ struct Frame {
     fractures: Vec<u64>,
     audit: [u64; 5],
     probes: [u64; 6],
+    /// The sim's **whole** trace surface — every `Guid`'d entity's pose plus the
+    /// deformation field, i.e. exactly what the replay harness and the PIE
+    /// `Frame::state_hash` consume. Carried per step (P22.4 audit, M5) because
+    /// four hand-picked scalars are not "the terrain, the physics, the joints,
+    /// the dispatch and the ground query", however carefully the doc block says
+    /// they are.
+    state: Vec<u8>,
 }
 
 fn var_bits(sim: &RuntimeSim, actor: Uuid, name: &str) -> u64 {
@@ -337,7 +360,7 @@ fn fracture_bits(sim: &RuntimeSim) -> Vec<u64> {
     out
 }
 
-fn frame(sim: &RuntimeSim) -> Frame {
+fn frame(sim: &mut RuntimeSim) -> Frame {
     let audit = sim.fracture_audit();
     let roller = translation(sim, PHASE22_ROLLER_GUID);
     Frame {
@@ -360,6 +383,7 @@ fn frame(sim: &RuntimeSim) -> Frame {
             // controller reads.
             sim.terrain_height_at(roller.x, roller.z).to_bits(),
         ],
+        state: sim.state_bytes(),
     }
 }
 
@@ -370,6 +394,14 @@ fn run_trace(sim: &mut RuntimeSim) -> Vec<Frame> {
             frame(sim)
         })
         .collect()
+}
+
+/// The trace, plus the sim it left behind — so a world arm can interrogate the
+/// world rather than a report about it.
+fn run_and_keep(pack: &Path) -> (RuntimeSim, Vec<Frame>) {
+    let mut sim = pack_sim(pack);
+    let trace = run_trace(&mut sim);
+    (sim, trace)
 }
 
 /// **ANTI-VACUITY, applied to every arm that compares two traces.**
@@ -506,6 +538,20 @@ fn cooked_equals_uncooked_up_to_the_charge_and_differs_after_it() {
             c.probes[5], l.probes[5],
             "step {i}: the cook changed the ground the roller runs on"
         );
+        // **AND THE WHOLE WORLD** (P22.4 audit, M5). The four scalars above were
+        // this arm's entire evidence for a doc block promising "the terrain and its
+        // splat bands, the physics, the joints, the Blueprint dispatch, the ground
+        // query and the whole deformation field". `state_bytes` is the trace
+        // surface the replay harness and the PIE `Frame::state_hash` already
+        // consume: every `Guid`'d entity's pose plus the deformation field. It is
+        // provably equal over this prefix — nothing has broken yet, and everything
+        // that HAS happened (the car settling on its joints, the roller crossing
+        // two splat bands) is in it.
+        assert_eq!(
+            c.state, l.state,
+            "step {i}: the cooked world and the uncooked one diverged BEFORE \
+             anything was destroyed — the cook changed the level itself"
+        );
     }
     // Not a vacuous prefix: the roller has already crossed into the snow and
     // pressed real depth into it by the horizon.
@@ -574,6 +620,11 @@ fn pie_equals_shipping_on_the_damage_trace() {
         );
         assert_eq!(s.audit, p.audit, "step {i}: the fracture audits differ");
         assert_eq!(s.probes, p.probes, "step {i}: the probes differ");
+        assert_eq!(
+            s.state, p.state,
+            "step {i}: the two worlds' whole trace surfaces differ — some entity \
+             the four probes above do not name is in a different place"
+        );
     }
     assert_eq!(ship.len(), pie.len());
     assert_eq!(
@@ -638,9 +689,11 @@ fn the_real_pie_subprocess_matches_the_in_process_reference() {
         "the REAL --pie subprocess ran a different world from the in-process \
          reference — one of the two boot paths is missing an attachment"
     );
-    // ANTI-VACUITY: the trace evolves, so equal hashes are equal *worlds* and not
-    // two copies of a scene that never moved. And it evolves ACROSS THE CHARGE,
-    // which is the part a fracture-less boot path would have left flat.
+    // ANTI-VACUITY, and the audit's M4: the two guards below are **satisfied by
+    // the rolling ball**. Proven, not supposed — a subprocess with no fractures at
+    // all still moves its state hash every step and still moves it after the
+    // trigger, because the roller never stops. So they stay (a frozen world is
+    // still worth catching) but they are not the anti-vacuity this arm needs.
     assert!(
         got.windows(2).any(|w| w[0] != w[1]),
         "the state hash never changed across {N} steps"
@@ -648,20 +701,29 @@ fn the_real_pie_subprocess_matches_the_in_process_reference() {
     let t = PHASE22_TRIGGER_STEP as usize;
     assert!(
         got[t..].windows(2).any(|w| w[0] != w[1]),
-        "the state hash stopped changing at the trigger step — the subprocess ran \
-         a level in which nothing broke"
+        "the state hash stopped changing at the trigger step"
+    );
+    // THE ONE THAT BITES: the reference world really destroyed something inside
+    // the compared window. If it did not, the hashes above are a comparison of two
+    // levels in which the whole subject of this phase never happened.
+    let mut reference = pie_sim();
+    for _ in 0..=(PHASE22_TRIGGER_END as usize + 1) {
+        reference.step_once(RuntimeInput::default());
+    }
+    assert!(
+        !reference.fractures()[&PHASE22_TOWER_GUID].is_intact(),
+        "the world these hashes were taken over still had an intact block at step \
+         {} — the subprocess and the reference agreed about a level in which \
+         nothing broke",
+        PHASE22_TRIGGER_END as usize + 1
+    );
+    assert!(
+        !reference.fractures()[&PHASE22_CHASSIS_GUID].is_intact(),
+        "…and an intact car"
     );
 }
 
 // ── (e) the WORLD ───────────────────────────────────────────────────────────
-
-/// Run the trace and hand back the sim, so the world arms can interrogate the
-/// world the run left rather than a report about it.
-fn run_and_keep(pack: &Path) -> (RuntimeSim, Vec<Frame>) {
-    let mut sim = pack_sim(pack);
-    let trace = run_trace(&mut sim);
-    (sim, trace)
-}
 
 /// **THE HEADLINE.** The multi-storey block came down, its **control twin under
 /// the identical charge did not**, and the structural solve did real work getting
@@ -693,7 +755,18 @@ fn the_block_collapses_and_its_control_twin_survives() {
     }
 
     // THE WORLD, not the report: the block's chunk POSES moved.
+    //
+    // **And how many, exactly, and why not all of them** (P22.4 audit). Ten chunks
+    // detach; three leave their rest pose by more than 25 cm and seven do not, and
+    // that is correct rather than a weak threshold: damage is cheapest-to-liberate,
+    // the cheapest chunks in a block standing on flat ground are the ones with
+    // fewest neighbours, and several of those are **base** chunks (chunk 0, three
+    // neighbours, is the cheapest in the whole structure). A base chunk that
+    // detaches is already resting on the terrain — it has nowhere to fall. So the
+    // bound is stated as the pair it is: some rubble fell, and the rest is sitting
+    // where it was because it was on the floor to begin with.
     assert!(!block.is_intact(), "the block never broke");
+    let detached = block.chunks().iter().filter(|c| c.detached).count();
     let moved = block
         .chunks()
         .iter()
@@ -704,8 +777,27 @@ fn the_block_collapses_and_its_control_twin_survives() {
         .count();
     assert!(
         moved >= 3,
-        "only {moved} of the block's chunks left their rest pose — a detach that \
-         leaves everything where it was is a bookkeeping change, not a collapse"
+        "only {moved} of the block's {detached} detached chunks left their rest \
+         pose — a detach that leaves everything where it was is a bookkeeping \
+         change, not a collapse"
+    );
+    // …and the ones that did move came from ABOVE the ground floor, which is what
+    // makes "it fell" true rather than "it was nudged". A chunk whose rest centre
+    // is below 3 m had nothing to fall.
+    let fell_from_height = block
+        .chunks()
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| {
+            c.detached
+                && block.asset().chunks[*i].center_of_mass[1] > 3.0
+                && c.translation.y < block.chunk_rest_center(*i).y - 0.5
+        })
+        .count();
+    assert!(
+        fell_from_height >= 1,
+        "no chunk from above the ground floor ended lower than it started — the \
+         charge peeled the base and nothing actually came down"
     );
 
     // …and the charge OPENED it rather than erasing it: chunks are left standing
@@ -786,7 +878,7 @@ fn the_block_collapses_and_its_control_twin_survives() {
     // assertion is what will fail, and whoever changes it will have to update the
     // ledger with it. The solve's *own* demonstration lives on the car, which is
     // not standing on anything — see
-    // `the_car_fractures_and_its_blast_reaches_the_debris_it_made`.
+    // `the_car_fractures_and_its_blast_reaches_everything_in_its_radius`.
     let out_of_damage: u64 = trace.iter().map(|f| f.audit[1]).sum();
     assert_eq!(
         out_of_damage, 0,
@@ -829,13 +921,20 @@ fn the_block_collapses_and_its_control_twin_survives() {
     );
 }
 
-/// **The car fractured, and its own blast reached its own debris.**
+/// **The car fractured, and its own blast reached everything inside its radius.**
 ///
-/// The blast is the one node in the kit that is deliberately *not* gated by
+/// Named for what it checks (P22.4 audit): on the step the blast fires, the
+/// bodies in range are the four wheels and the still-unswapped chassis, and
+/// **no debris at all** — a chunk body reaches the solver one step later. The
+/// arm used to be called "…reaches the debris it made", which was a claim it did
+/// not make and could not have made.
+///
+/// The blast is the one node in the kit deliberately *not* gated by
 /// `runtime_destruct` — it pushes bodies, and a body is a body — so "it hit
-/// something" and "the chassis broke" are two claims and both are made here.
+/// exactly what was there" and "the chassis broke" are two claims and both are
+/// made here.
 #[test]
-fn the_car_fractures_and_its_blast_reaches_the_debris_it_made() {
+fn the_car_fractures_and_its_blast_reaches_everything_in_its_radius() {
     let tmp = tempfile::tempdir().unwrap();
     let (_content, pack) = cook_playground(tmp.path());
     let (sim, _trace) = run_and_keep(&pack);
@@ -847,15 +946,26 @@ fn the_car_fractures_and_its_blast_reaches_the_debris_it_made() {
         "one chunk off a car is a dent, not a wreck"
     );
 
+    // **WHAT `hit` ACTUALLY COUNTS, stated because this arm's name over-claimed
+    // it** (P22.4 audit). The blast fires on the SAME step the charge lands, and a
+    // chunk body reaches the solver on the step *after* the swap (the one-beat
+    // latency `inf_physics::d3::fracture` documents). So the bodies it pushes are
+    // the four wheels and the still-unswapped chassis — **zero debris**. That the
+    // blast reaches debris is real and is asserted in `runtime_destruct`'s
+    // `a_blueprint_breaks_its_own_wall`, where a second tick can be isolated; the
+    // honest claim here is narrower and exact.
     let hit = match sim.actor_var(PHASE22_CHASSIS_GUID, "hit") {
         Some(Value::Float(f)) => *f,
         Some(Value::Int(i)) => *i as f64,
         other => panic!("the car's `hit` is {other:?}"),
     };
-    assert!(
-        hit > 0.0,
-        "the radial impulse pushed nothing at all — the car's four wheels alone \
-         are inside its radius, so zero means the blast never reached the solver"
+    assert_eq!(
+        hit,
+        (PHASE22_WHEEL_GUIDS.len() + 1) as f64,
+        "the blast pushed {hit} bodies. On the step it fires, the four wheels and \
+         the not-yet-swapped chassis are what is inside its radius: more means it \
+         reached the block 25 m away (and 'the block's chunks moved' stops being a \
+         statement about the collapse), fewer means it never reached the solver."
     );
 
     // **THE STRUCTURAL SOLVE, ON THE ACTOR IT IS HONEST ABOUT — and measured in
@@ -899,11 +1009,41 @@ fn the_car_fractures_and_its_blast_reaches_the_debris_it_made() {
         other => panic!("the car's total is {other:?}"),
     };
     assert!(cheapest.is_finite() && cheapest > 0.0);
+    // `spent <= the charge` by construction, so a bound of `2 × cheapest`
+    // (50 272 J against a 30 000 J charge) could never fail — it read like a
+    // measurement and was an identity (P22.4 audit). Two assertions that CAN fail
+    // replace it.
+    //
+    // (1) EXACTLY ONE CHUNK WAS PAID FOR. `apply_damage` spends on the cheapest
+    //     bond set and stops when what is left cannot buy another; if the charge
+    //     had cascaded — breaking a chunk makes its neighbours cheaper — `spent`
+    //     would be several bond sets rather than one. This is the number that
+    //     tells "the solve dropped eleven" from "the charge bought twelve", and
+    //     raising `PHASE22_CAR_CHARGE_J` breaks it.
     assert!(
-        spent > 0.0 && spent < 2.0 * cheapest,
-        "the charge spent {spent:.0} J to take all {detached} chunks off a car \
-         whose cheapest single chunk costs {cheapest:.0} J — at that price the \
-         damage paid for the whole wreck and the structural solve did nothing"
+        (spent - cheapest).abs() < 1.0,
+        "the charge spent {spent:.0} J where the cheapest single chunk costs \
+         {cheapest:.0} J — it cascaded, so the damage paid for the wreck and the \
+         structural solve did not do the work this arm credits it with"
+    );
+    // (2) …AND PAYING FOR THE WHOLE CAR WOULD HAVE COST FAR MORE. A lower bound on
+    //     that: the sum of every chunk's own bond set, halved because each bond is
+    //     counted from both ends. The charge is a small fraction of it.
+    let total: f64 = (0..car.chunk_count() as usize)
+        .map(|i| {
+            car.asset().chunks[i]
+                .neighbors
+                .iter()
+                .map(|&n| car.bond_energy_j(i as u32, n))
+                .sum::<f64>()
+        })
+        .sum::<f64>()
+        * 0.5;
+    assert!(
+        spent * 4.0 < total,
+        "the charge ({spent:.0} J) is not small against what liberating every \
+         chunk would cost ({total:.0} J) — the fixture no longer demonstrates a \
+         collapse nobody paid for"
     );
 
     // The wheels are still IN the level and still near the wreck: the joints
@@ -995,10 +1135,178 @@ fn the_roller_leaves_a_trail_in_the_snow_and_the_sand_and_nowhere_else() {
         })
         .expect("the grass strip survived the cook");
     assert!(grass > 100, "the grass strip has {grass} instances");
+    // **DRIVEN, not read off a constant** (P22.4 audit). The previous version
+    // asserted `LAYER_RESPONSE[SAND].bend > 0.0`, which is a compile-time table
+    // lookup: it would hold on a level with no grass, no roller and no field.
+    // What the bend shader actually reads is `bend × depth` at the instance's own
+    // XZ, so drive it: the strip straddles the lane, so instances stand in ground
+    // the roller pressed and in ground it did not, and the two must differ.
+    let strip_z = 56.0_f64; // the grass entity's own translation
+    let lane_xz = glam::DVec2::new(PHASE22_ROLLER_X, strip_z);
+    let lane_layer = field.layer_at(lane_xz).expect("the trail names a layer");
+    let on_lane =
+        field.depth_at(lane_xz) * inf_terrain::deform::LAYER_RESPONSE[lane_layer as usize].bend;
+    let off_lane = field.depth_at(glam::DVec2::new(PHASE22_ROLLER_X + 5.0, strip_z));
     assert!(
-        inf_terrain::deform::LAYER_RESPONSE[PHASE22_SAND_LAYER as usize].bend > 0.0,
-        "the layer under the grass does not bend, so the strip is decoration"
+        on_lane > 0.0,
+        "the grass strip's own lane has no bend drive at all — the blades inside \
+         the trail would stand exactly as straight as the ones beside it"
     );
+    assert_eq!(
+        off_lane, 0.0,
+        "ground five metres off the lane is pressed, so 'the blades in the trail \
+         bend' would be 'every blade bends'"
+    );
+}
+
+/// **(j) THE KEYING CLAIM, on real physics** (P22.4 audit, M1).
+///
+/// `inf_render::debris`'s own unit test can only assert that a pure function is
+/// pure: a `DebrisSite` carries no live pose, so "the key holds while the chunks
+/// tumble" is unstateable there. It is stateable here, where there are chunks and
+/// they are actually tumbling.
+///
+/// Three things, and the first is what makes the other two mean anything:
+///
+/// 1. the chunk **poses demonstrably move** between the two samples;
+/// 2. the fracture **generation does not**, because nothing detached or was
+///    reclaimed in between;
+/// 3. so the batch's **content key is identical** and the memo does not re-pack.
+///
+/// Then the control: a step that *does* bump the generation re-keys.
+///
+/// The sites are built here the way `project_debris` builds them, which is
+/// duplication — held honest by `projector_mirror`'s `DebrisSite` field
+/// allowlist, which pins every one of those five expressions on both hosts. This
+/// is also the only arm in the gate that touches `inf_render::debris` at all; the
+/// render path had zero integration coverage before it.
+#[test]
+fn the_debris_batch_holds_its_key_while_the_chunks_tumble() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_content, pack) = cook_playground(tmp.path());
+    let mut sim = pack_sim(&pack);
+
+    // The same five expressions `project_debris` uses.
+    let sites = |sim: &RuntimeSim, guid: Uuid| -> Vec<inf_render::DebrisSite> {
+        let state = &sim.fractures()[&guid];
+        state
+            .chunks()
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.detached && !c.gone)
+            .map(|(i, c)| inf_render::DebrisSite {
+                entity: 7,
+                chunk: i as u32,
+                order: c.detach_order,
+                center: state.chunk_rest_center(i),
+                radius_m: state.chunk_radius_m(i),
+            })
+            .collect()
+    };
+    let poses = |sim: &RuntimeSim, guid: Uuid| -> Vec<[u64; 3]> {
+        sim.fractures()[&guid]
+            .chunks()
+            .iter()
+            .map(|c| {
+                [
+                    c.translation.x.to_bits(),
+                    c.translation.y.to_bits(),
+                    c.translation.z.to_bits(),
+                ]
+            })
+            .collect()
+    };
+
+    // Run until the car has come apart and its rubble is in the air. The CAR,
+    // not the block: it collapses in one step, so a window after it exists in
+    // which everything is moving and nothing further detaches.
+    let mut cache = inf_render::DebrisCache::default();
+    let mut before = None;
+    for step in 0..STEPS {
+        sim.step_once(RuntimeInput::default());
+        if sim.fractures()[&PHASE22_CHASSIS_GUID].is_intact() {
+            continue;
+        }
+        // Two steps clear of the break, so the generation has settled.
+        if before.is_none() && step >= PHASE22_TRIGGER_STEP as usize + 2 {
+            let s = sites(&sim, PHASE22_CHASSIS_GUID);
+            assert!(!s.is_empty(), "the car shed no sites at all");
+            let gen = sim.fractures()[&PHASE22_CHASSIS_GUID].generation();
+            let batch = cache
+                .batch(
+                    7,
+                    gen,
+                    &s,
+                    inf_render::DEBRIS_RUBBLE_PER_CHUNK,
+                    [1.0; 4],
+                    0.8,
+                )
+                .expect("a broken car sheds a batch");
+            before = Some((gen, batch.data.key(), poses(&sim, PHASE22_CHASSIS_GUID)));
+            continue;
+        }
+        if let Some((gen0, key0, poses0)) = &before {
+            let gen1 = sim.fractures()[&PHASE22_CHASSIS_GUID].generation();
+            if gen1 != *gen0 {
+                // Something detached or was reclaimed — not the window this arm is
+                // about. (It is the control below.)
+                continue;
+            }
+            let poses1 = poses(&sim, PHASE22_CHASSIS_GUID);
+            if &poses1 == poses0 {
+                continue; // still settling into the same pose; keep looking
+            }
+            // (1) the poses MOVED, (2) the generation did not, so (3) the key must
+            // not have — and the memo must not have re-packed.
+            let packs0 = cache.packs();
+            let batch = cache
+                .batch(
+                    7,
+                    gen1,
+                    &sites(&sim, PHASE22_CHASSIS_GUID),
+                    inf_render::DEBRIS_RUBBLE_PER_CHUNK,
+                    [1.0; 4],
+                    0.8,
+                )
+                .expect("still broken");
+            assert_eq!(
+                batch.data.key(),
+                *key0,
+                "the rubble's content key moved while the chunks were only tumbling \
+                 — the batch re-uploads its whole instance buffer every step, which \
+                 is the documented cost the rest-pose rule exists to avoid"
+            );
+            assert_eq!(
+                cache.packs(),
+                packs0,
+                "the memo re-packed a payload whose generation had not moved"
+            );
+
+            // THE CONTROL: a *different* live set is a different batch, so the
+            // equality above is a claim about tumbling rather than about a key
+            // that never changes.
+            let mut fewer = sites(&sim, PHASE22_CHASSIS_GUID);
+            fewer.pop();
+            let other = cache
+                .batch(
+                    7,
+                    gen1 + 1,
+                    &fewer,
+                    inf_render::DEBRIS_RUBBLE_PER_CHUNK,
+                    [1.0; 4],
+                    0.8,
+                )
+                .expect("a smaller set is still a batch");
+            assert_ne!(
+                other.data.key(),
+                *key0,
+                "a reclaim did not re-key the batch"
+            );
+            assert_eq!(cache.packs(), packs0 + 1, "the control did not re-pack");
+            return;
+        }
+    }
+    panic!("the car never broke, or its chunks never moved while its generation held");
 }
 
 /// **The debris budget held**, measured with engagement counters rather than
@@ -1026,13 +1334,32 @@ fn the_debris_budget_holds_across_the_collapse() {
         peak > 0,
         "the level never had a live debris chunk, so the cap was never tested"
     );
-    // …and none of it was reclaimed, because this level never comes near the cap.
-    // Stated so the arm below is unambiguous about what it changed.
+    // …and none of it was reclaimed. **Asserted on the CONDITIONS, not only on
+    // the count** (P22.4 audit): `reclaimed == 0` cannot fail while the run is
+    // shorter than the lifetime and the peak is under the cap, so on its own it
+    // was an identity dressed as a measurement. Both premises are checked, so a
+    // fixture that grew past either fails here with the reason rather than
+    // silently making the arm vacuous.
+    let run_s = STEPS as f64 / 60.0;
+    assert!(
+        run_s < budget.lifetime_s,
+        "the {run_s:.1} s run is longer than the {} s debris lifetime, so chunks \
+         expire during it and 'nothing was reclaimed' is no longer the claim this \
+         arm makes",
+        budget.lifetime_s
+    );
+    assert!(
+        peak < budget.max_live as u64,
+        "peak debris {peak} reaches the cap of {} — the level now exercises the \
+         over-budget path, which is what the second world below is for",
+        budget.max_live
+    );
     let reclaimed: u64 = trace.iter().map(|f| f.audit[2] + f.audit[3]).sum();
     assert_eq!(
         reclaimed, 0,
-        "the default budget reclaimed {reclaimed} chunk(s) on a level whose peak \
-         debris is {peak} — that is not a budget, it is a bug"
+        "the default budget reclaimed {reclaimed} chunk(s) on a level that is \
+         under the cap for a run shorter than the lifetime — that is not a \
+         budget, it is a bug"
     );
 
     // **THE FALSIFICATION.** The same level under a cap of two: the counter moves,
@@ -1068,7 +1395,7 @@ fn the_debris_budget_holds_across_the_collapse() {
     );
 }
 
-// ── the cook is silent on correct content ───────────────────────────────────
+// ── (i) the cook is silent on correct content ───────────────────────────────
 
 /// **No advisory fires on the flagship sample** — including the three this phase
 /// added (the fracture skip, the chunk-yield shortfall and the uncollidable
@@ -1183,12 +1510,26 @@ fn probe(threads: usize, steps: usize) -> HashMap<String, String> {
 /// **A collapse is invariant to the ECS worker-pool size** — in what the
 /// Blueprints saw *and* in what the world became.
 ///
-/// P22.3 argued, correctly, that its own module is unscheduled and therefore
-/// needs no probe. This is the arm that checks the *step* rather than the module:
-/// the `destruct.*` calls that decide what breaks run from a Blueprint tick, which
-/// runs inside the ECS schedule, so "which actor spent its joules first" is a
-/// scheduled question even though the solve that follows is not. Four towers, so
-/// the handlers really can interleave.
+/// # What this arm is, honestly (P22.4 audit, M3)
+///
+/// It was written believing that "the `destruct.*` calls run from a Blueprint
+/// tick, which runs inside the ECS schedule". **They do not.** `RuntimeSim` runs
+/// no `SimSchedule`: `run_all_with_args` is a serial `for` loop over a `Vec` of
+/// `BTreeMap` keys, and rapier's `parallel` feature is off by rule. Four pool
+/// sizes execute the same serial program, so this cannot *discover* an ordering
+/// race — and claiming it does would be the "inference dressed as measurement"
+/// mistake this phase's own ledger records.
+///
+/// It is kept, with the claim corrected, because it is worth exactly two things
+/// and they are both real: a **regression tripwire** for the day the tick pass
+/// moves onto `inf-ecs`'s parallel schedule (a documented follow-up in
+/// `runtime_sim`'s own module docs), already wired and already holding a
+/// reference hash; and a **pin** that nothing on the fixed-step path has reached
+/// for the process-global `ComputeTaskPool`, which is the half that can change
+/// silently. `destruct_probe.rs`'s module docs carry the full statement.
+///
+/// Four towers, so that the day there IS interleaving there is something to
+/// interleave.
 #[test]
 fn the_collapse_is_identical_across_pool_sizes() {
     const PROBE_STEPS: usize = 180;

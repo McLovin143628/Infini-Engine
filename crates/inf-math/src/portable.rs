@@ -20,6 +20,11 @@
 //!   `[-π/2, π/2]` then a degree-11 odd Taylor polynomial. This is the pair the
 //!   primitive-mesh generators use (cast to f32 per vertex). Also consumed by a
 //!   later blueprint package — keep these exact signatures.
+//! * [`pcbrt`] — f64 cube root by Newton, added in P22.4. The law is **not only
+//!   about trigonometry**: `cbrt` is a libm call too, and on `wasm32` the standard
+//!   library routes it through the `libm` crate, so a browser client and a native
+//!   one disagree by an ulp. Anything two *machines* are claimed to agree about
+//!   goes through this.
 
 use std::f32::consts::{FRAC_PI_2 as F32_FRAC_PI_2, TAU as F32_TAU};
 use std::f64::consts::{FRAC_PI_2, PI};
@@ -70,6 +75,69 @@ pub fn pcos64(x: f64) -> f64 {
     psin64(x + FRAC_PI_2)
 }
 
+/// Byte-portable **cube root** (f64): Newton's method, fixed iteration count,
+/// pure IEEE arithmetic.
+///
+/// # Why this exists when `f64::cbrt` is right there
+///
+/// `f64::cbrt` is a libm call and libm is not bit-portable — the module's own
+/// law, one function over. It is *worse* than the trig case in one respect: on
+/// `wasm32` the standard library routes `cbrt` through the `libm` crate, so a
+/// browser client and a native one differ by about an ulp on the same input.
+/// Anything whose output two machines are claimed to agree about must therefore
+/// not call it. P22.4's rubble placement is exactly that claim, and P21.3's spoil
+/// pile was the first (`inf_voxel::cbrt_det`).
+///
+/// # It is a DUPLICATE of `inf_voxel::cbrt_det`, deliberately
+///
+/// Character for character, the same algorithm — and `inf-physics`'
+/// `the_portable_cube_root_matches_the_voxel_one` sweeps both over four decades
+/// and asserts **bit equality**, because that crate is the one that can see both.
+/// `inf-voxel`'s manifest argues, at length, that it must not depend on
+/// `inf-math` (an unused dependency in Ring 0 is a licence surface with no
+/// payer), and this module's own header records the same arrangement for
+/// `psin`/`pcos` — copied rather than moved, held by a test. A third copy would
+/// be a different decision; this is the second, under the rule the first one set.
+///
+/// The argument is scaled into `[1, 8)` by exact powers of eight (exact in binary
+/// floating point, so the scaling introduces no error at all), seeded linearly,
+/// refined by `y ← (2y + x/y²)/3`, and scaled back. Twelve iterations from a seed
+/// within a factor of two is roughly twice what full `f64` precision needs.
+///
+/// Non-finite or non-positive input answers `0.0` — a value, not a panic, and
+/// not an infinite scaling loop.
+pub fn pcbrt(x: f64) -> f64 {
+    if !x.is_finite() || x <= 0.0 {
+        return 0.0;
+    }
+    let mut m = x;
+    let mut k: i32 = 0;
+    while m >= 8.0 {
+        m /= 8.0;
+        k += 1;
+    }
+    while m < 1.0 {
+        m *= 8.0;
+        k -= 1;
+    }
+    // Seed: the chord of ∛ across [1, 8] → [1, 2].
+    let mut y = 1.0 + (m - 1.0) / 7.0;
+    for _ in 0..12 {
+        y = (2.0 * y + m / (y * y)) / 3.0;
+    }
+    // 2^k, built by repeated exact doubling/halving rather than `powi` (which is
+    // also fine, but this needs no assumption about how it is lowered).
+    let mut scale = 1.0f64;
+    for _ in 0..k.abs() {
+        if k > 0 {
+            scale *= 2.0;
+        } else {
+            scale /= 2.0;
+        }
+    }
+    y * scale
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +186,24 @@ mod tests {
             assert!((psin64(-x) + psin64(x)).abs() < 1e-12, "odd at {x}");
             assert!((pcos64(-x) - pcos64(x)).abs() < 1e-12, "even at {x}");
         }
+    }
+
+    #[test]
+    fn pcbrt_is_accurate_and_refuses_degenerates() {
+        for &x in &[1.0e-6_f64, 0.125, 1.0, 8.0, 27.0, 1234.5, 1.0e9] {
+            let got = pcbrt(x);
+            let want = x.cbrt();
+            assert!(
+                (got - want).abs() <= 1e-12 * want.max(1.0),
+                "pcbrt({x}) = {got}, libm says {want}"
+            );
+            // …and it really is the cube root, checked without libm at all.
+            assert!((got * got * got - x).abs() <= 1e-9 * x.max(1.0));
+        }
+        assert_eq!(pcbrt(0.0), 0.0);
+        assert_eq!(pcbrt(-1.0), 0.0);
+        assert_eq!(pcbrt(f64::NAN), 0.0);
+        assert_eq!(pcbrt(f64::INFINITY), 0.0);
     }
 
     #[test]

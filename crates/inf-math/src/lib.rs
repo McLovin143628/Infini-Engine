@@ -10,7 +10,7 @@
 pub use glam;
 
 pub mod portable;
-pub use portable::{pcos, pcos64, psin, psin64};
+pub use portable::{pcbrt, pcos, pcos64, psin, psin64};
 
 pub mod solar;
 pub use solar::{

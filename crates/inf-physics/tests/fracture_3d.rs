@@ -444,14 +444,27 @@ fn removing_a_towers_support_collapses_it_and_not_its_neighbour() {
     world.propagate();
 
     let mut steps = 0;
+    // **`FractureAudit::collapsed` IS NON-ZERO HERE, and this is the one place it
+    // can be** (P22.4 audit). The counter deliberately excludes collapses the
+    // damage call's own solve caused, so a level whose every collapse is
+    // charge-driven reads zero — the phase-22 gate asserts exactly that and had
+    // nothing anywhere asserting the counter is *capable* of moving. This
+    // fixture is the case it counts: nothing is damaged at all, the world simply
+    // stops holding the tower up, so every chunk that falls is
+    // `step_fractures`'s own.
+    let mut solve_dropped = 0u32;
     while steps < 300 && attached_count(&fractures, WALL) > 0 {
-        tick(&mut bridge, &world, &mut fractures);
+        solve_dropped += tick(&mut bridge, &world, &mut fractures).collapsed;
         steps += 1;
     }
     assert_eq!(
         attached_count(&fractures, WALL),
         0,
         "tower A did not fully collapse after its support was removed ({steps} steps)"
+    );
+    assert_eq!(
+        solve_dropped, 4,
+        "the structural solve reported {solve_dropped} collapsed chunk(s) for a          four-chunk tower it dropped with no damage spent — the audit counter is          not counting what it says it counts"
     );
     assert_eq!(
         attached_count(&fractures, WALL_B),
@@ -1279,4 +1292,92 @@ fn the_collapse_is_invariant_under_spawn_order() {
         untouched[&WALL].bits(),
         "the trace broke nothing, so the comparison was of two untouched towers"
     );
+}
+
+// ── P22.4: the portable cube root, pinned across the two crates that have one ──
+
+/// **`inf_math::pcbrt` and `inf_voxel::cbrt_det` are the same function.**
+///
+/// Both exist because `f64::cbrt` is a libm call and libm is not bit-portable —
+/// on `wasm32` the standard library routes it through the `libm` crate and
+/// differs from the native one by about an ulp. P21.3 needed one for a spoil
+/// pile's radius; P22.4 needs one for a fracture chunk's characteristic radius,
+/// which decides where the hosts lay their sub-chunk rubble and is claimed to be
+/// identical on every machine.
+///
+/// They are **duplicated rather than shared**, because `inf-voxel`'s manifest
+/// argues at length that it must not depend on `inf-math` (the same arrangement
+/// `inf-math`'s own `psin`/`pcos` header records). A duplicate that nothing
+/// compares is two functions with one name, so this is the comparison — and
+/// `inf-physics` is where it can live, being the crate that depends on both.
+///
+/// **Bit equality, not a tolerance.** The whole point of either function is that
+/// its last bits are reproducible; a comparison within 1e-12 would accept exactly
+/// the drift they exist to prevent.
+#[test]
+fn the_portable_cube_root_matches_the_voxel_one() {
+    // Four decades, plus the values a chunk radius actually lands on: a 0.67 m³
+    // car chunk and a 13.5 m³ building chunk, through the same
+    // `3V / 4π` the caller applies.
+    let mut xs: Vec<f64> = vec![1.0e-6, 1.0e-3, 0.125, 1.0, 8.0, 27.0, 1234.5, 1.0e6];
+    for v in [0.67_f64, 13.5, 1.0, 2400.0] {
+        xs.push(3.0 * v / (4.0 * std::f64::consts::PI));
+    }
+    // …and a deterministic sweep, so this is not eight hand-picked points.
+    for i in 1..=400u32 {
+        xs.push(i as f64 * 0.37);
+    }
+    for x in xs {
+        assert_eq!(
+            inf_math::pcbrt(x).to_bits(),
+            inf_voxel::cbrt_det(x).to_bits(),
+            "the two portable cube roots disagree at {x}: {} vs {}",
+            inf_math::pcbrt(x),
+            inf_voxel::cbrt_det(x)
+        );
+    }
+    // The degenerate contract is shared too — both answer a VALUE, not a panic.
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(inf_math::pcbrt(bad), inf_voxel::cbrt_det(bad), "at {bad}");
+        assert_eq!(inf_math::pcbrt(bad), 0.0);
+    }
+    // Not vacuous: on ordinary input it is a real cube root, and it differs from
+    // the identity.
+    assert!((inf_math::pcbrt(27.0) - 3.0).abs() < 1e-12);
+}
+
+/// **The chunk radius does not call libm.** A grep, because the property is about
+/// what the code is allowed to call and no numeric assertion can see it — the
+/// `inf_render::debris` gate's twin, in the other crate on the placement path.
+///
+/// The auditor's finding this closes: the trig gate lived in `inf-render` and
+/// could not see `chunk_radius_m`, so half the arithmetic behind "every client
+/// derives the same rubble" was unguarded.
+#[test]
+fn the_chunk_radius_uses_the_portable_cube_root() {
+    // Normalized: `core.autocrlf = true` checks `.rs` out CRLF on Windows, where
+    // `"\n}\n"` occurs nowhere and `find` returns `None`.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/d3/fracture.rs"),
+    )
+    .expect("the module is readable")
+    .replace("\r\n", "\n");
+    let start = src
+        .find("    pub fn chunk_radius_m(")
+        .expect("`chunk_radius_m` exists");
+    let end = src[start..]
+        .find("\n    }\n")
+        .expect("`chunk_radius_m` terminates");
+    let body = &src[start..start + end];
+    assert!(
+        body.contains("inf_math::pcbrt("),
+        "`chunk_radius_m` no longer goes through the portable cube root:\n{body}"
+    );
+    for banned in [".cbrt()", ".powf(", ".sin()", ".cos()"] {
+        assert!(
+            !body.contains(banned),
+            "`chunk_radius_m` calls `{banned}` — libm is not bit-portable, and this \
+             value decides where two machines lay the same rubble:\n{body}"
+        );
+    }
 }

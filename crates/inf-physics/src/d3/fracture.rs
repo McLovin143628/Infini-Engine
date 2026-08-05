@@ -530,6 +530,12 @@ impl FractureState {
     ///
     /// `0.0` for an index out of range or a non-positive volume, so a caller
     /// never has to spell the degenerate case twice.
+    ///
+    /// The cube root is [`inf_math::pcbrt`] and **not** `f64::cbrt`: this feeds
+    /// the hosts' sub-chunk rubble placement, whose whole claim is that two
+    /// machines derive the same fragments from the same detach set, and `cbrt`
+    /// routes through the `libm` crate on `wasm32`. (P22.4; the P14 law is about
+    /// libm, not only about trigonometry.)
     pub fn chunk_radius_m(&self, index: usize) -> f64 {
         let v = self
             .asset
@@ -540,7 +546,7 @@ impl FractureState {
         if !v.is_finite() || v <= 0.0 {
             return 0.0;
         }
-        (3.0 * v / (4.0 * std::f64::consts::PI)).cbrt()
+        inf_math::pcbrt(3.0 * v / (4.0 * std::f64::consts::PI))
     }
 
     /// The mass, kg, of chunk `index` under this actor's density and scale.
@@ -764,8 +770,24 @@ impl DamageReport {
 pub struct FractureAudit {
     /// Destructible actors with a live state this step.
     pub tracked: u32,
-    /// Chunks detached by the **structural solve** (not by damage) this step —
-    /// progressive collapse, made countable.
+    /// Chunks detached by the **structural solve** this step — progressive
+    /// collapse, made countable.
+    ///
+    /// # It counts only the solve `step_fractures` runs, and that is a real
+    /// exclusion
+    ///
+    /// [`PhysicsBridge3D::runtime_destruct`] runs the **same** support solve
+    /// inside the damage call, because a blow that liberates a chunk has to be
+    /// able to drop whatever that chunk was holding up before the step ends. Those
+    /// collapses are reported in [`DamageReport::detached`] and never reach this
+    /// counter.
+    ///
+    /// So a level whose every collapse is charge-driven — which is the common case,
+    /// and is the whole of `samples/phase22-playground` — reads **zero** here. A
+    /// gate that took this field as "did the structural solve run" would conclude
+    /// the subsystem was dead; the phase-22 gate measures it in **joules** instead
+    /// (one chunk's bonds paid for, twelve chunks off). Stated here rather than
+    /// discovered there a second time.
     pub collapsed: u32,
     /// Chunks reclaimed because they outlived [`DebrisBudget::lifetime_s`].
     pub expired: u32,

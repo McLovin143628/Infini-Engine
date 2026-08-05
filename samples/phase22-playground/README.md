@@ -26,8 +26,8 @@ grammar produces a scattered *population* with no merged mesh anywhere in the
 pipeline -- so using it would have meant building a grammar-to-mesh bake first,
 which is a modelling feature and belongs to Phase 23.
 - `Chassis.inf_mesh` -- the car's 4 x 1 x 2 m body, likewise tessellated (both
-meshes clear the cook's 2 048-triangle vgeom threshold, because arm (e) of the
-gate asserts the cook is SILENT and a sub-threshold mesh draws an advisory).
+meshes clear the cook's 2 048-triangle vgeom threshold, because the gate's
+cook-silence arm would otherwise fail on a sub-threshold advisory).
 - `Demolition.inf_act` -- the charge. On Tick, over steps 60-65, it spends
 80 kJ a tick on its own actor's bonds and then reports `is_intact` and
 `chunk_count`; its `Destroyed` handler counts its firings and plays the actor's
@@ -57,6 +57,13 @@ is needed).
 - A **car**: a destructible chassis with four wheels on revolute joints. It is a
 **prop, not a vehicle** -- this engine has no vehicle controller -- so it
 settles onto its wheels and is then blown up, which is all the phase claims.
+Its colliders carry **authored densities** (rubber 1100 for the wheels, 150 for
+the hollow chassis shell). If you copy one thing out of this sample, copy that:
+`Collider3D::density` defaults to **1.0 kg/m3**, which is rapier's mass
+placeholder and lighter than air. A 0.4 m wheel at the default weighs 268
+grams, and an impulse sized against 5-tonne fracture chunks throws it out of
+the level. (A chunk's mass never comes from there -- it comes from
+`Destructible::density_kg_m3`, which exists for exactly this reason.)
 - A **grass strip** straddling the roller's lane, so instances stand both inside
 the trail and clear of it: the P22.1 bend shader reads the same deformation
 window the terrain displacement does, and a strip entirely inside the rut would
