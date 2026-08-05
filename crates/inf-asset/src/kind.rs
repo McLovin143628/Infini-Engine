@@ -79,6 +79,23 @@ pub enum AssetKind {
     ///
     /// [`inf_voxel::VoxelAsset`]: the voxel crate's `.inf_voxel` container.
     VoxelVolume,
+    /// A mesh's **pre-fractured chunk set** (`.inf_fracture`) — the Voronoi
+    /// chunk hierarchy P22.3 swaps in when the asset breaks (P22.2,
+    /// [`inf_mesh::fracture::FractureAsset`]). Like
+    /// [`MeshletMesh`](AssetKind::MeshletMesh) it is *derived at cook time*,
+    /// never authored: its GUID is a pure function of its mesh's
+    /// (`inf_mesh::fracture::derived_fracture_id`), so a runtime finds it
+    /// without an index.
+    ///
+    /// **Not** a streaming-class kind, unlike the other derived containers: a
+    /// fracture is loaded *whole*, at the instant one asset breaks, and there is
+    /// no useful partial residency (a chunk set with half its chunks is a hole).
+    /// So it compresses like every other bincode payload — see
+    /// `PackWriter::compresses_kind`.
+    ///
+    /// [`inf_mesh::fracture::FractureAsset`]: the mesh crate's `.inf_fracture`
+    /// payload.
+    Fracture,
     /// Anything else living under the content root.
     Unknown,
 }
@@ -107,6 +124,7 @@ impl AssetKind {
             AssetKind::Partition => "inf_part",
             AssetKind::BiomeSet => "inf_biomes",
             AssetKind::VoxelVolume => "inf_voxel",
+            AssetKind::Fracture => "inf_fracture",
             AssetKind::Unknown => return None,
         })
     }
@@ -134,6 +152,7 @@ impl AssetKind {
             "inf_part" => AssetKind::Partition,
             "inf_biomes" => AssetKind::BiomeSet,
             "inf_voxel" => AssetKind::VoxelVolume,
+            "inf_fracture" => AssetKind::Fracture,
             _ => AssetKind::Unknown,
         }
     }
@@ -169,6 +188,7 @@ impl AssetKind {
             AssetKind::Partition => "partition",
             AssetKind::BiomeSet => "biome_set",
             AssetKind::VoxelVolume => "voxel_volume",
+            AssetKind::Fracture => "fracture",
             AssetKind::Unknown => "unknown",
         }
     }
@@ -196,6 +216,7 @@ impl AssetKind {
             AssetKind::Partition => "World Partition",
             AssetKind::BiomeSet => "Biome Set",
             AssetKind::VoxelVolume => "Voxel Volume",
+            AssetKind::Fracture => "Fracture",
             AssetKind::Unknown => "File",
         }
     }
@@ -224,6 +245,7 @@ impl AssetKind {
             AssetKind::Partition,
             AssetKind::BiomeSet,
             AssetKind::VoxelVolume,
+            AssetKind::Fracture,
         ]
     }
 }

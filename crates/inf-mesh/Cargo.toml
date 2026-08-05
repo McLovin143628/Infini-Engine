@@ -22,6 +22,10 @@ meshopt = { workspace = true }
 # path gets decoded images from the `gltf` crate; OBJ references loose files).
 # Workspace pin — no new version enters the tree (already used by inf-material).
 image = { workspace = true }
+# Asset GUIDs: the fracture pipeline derives its `.inf_fracture` id from the
+# mesh's (`fracture::derived_fracture_id`) and stamps the source GUID into the
+# payload. Workspace pin; `inf-asset` already has it in the tree.
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

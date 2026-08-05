@@ -157,6 +157,9 @@ fn kind_code(kind: AssetKind) -> u16 {
         AssetKind::Partition => 18,
         AssetKind::BiomeSet => 19,
         AssetKind::VoxelVolume => 20,
+        // P22.2. Appended, never inserted: a kind code is a WIRE value and every
+        // pack ever cooked reads its index by it.
+        AssetKind::Fracture => 21,
     }
 }
 
@@ -183,6 +186,7 @@ fn kind_from_code(code: u16) -> AssetKind {
         18 => AssetKind::Partition,
         19 => AssetKind::BiomeSet,
         20 => AssetKind::VoxelVolume,
+        21 => AssetKind::Fracture,
         _ => AssetKind::Unknown,
     }
 }
@@ -305,7 +309,20 @@ impl PackWriter {
             | AssetKind::StateMachine
             // P19.2: a biome set is a short list of names + colours — authored,
             // never paged, so it compresses like every other data asset.
-            | AssetKind::BiomeSet => true,
+            | AssetKind::BiomeSet
+            // P22.2: a `.inf_fracture` COMPRESSES, and the decision is worth
+            // stating because it is the first *derived* kind that does.
+            //
+            // The other three derived/streamed containers are raw because a
+            // runtime pages ONE unit out of them under a frame budget — one
+            // terrain tile, one meshlet page, one partition cell — and a zstd
+            // frame would force a whole-asset decode to reach it. A fracture has
+            // no such access pattern: it is read exactly once, in full, at the
+            // instant its mesh breaks, and a chunk set missing chunks is not a
+            // cheaper load but a hole in a wall. There is nothing to sub-slice,
+            // so the raw-blob trade (ship size for streaming latency) would be
+            // paid for nothing. It stays compressed.
+            | AssetKind::Fracture => true,
         }
     }
 
@@ -1224,6 +1241,15 @@ mod tests {
                 assert!(PackWriter::compresses_kind(k), "{k:?}");
             }
         }
+        // P22.2, called out because it is the counter-example: `Fracture` is a
+        // DERIVED kind like `MeshletMesh` and `Partition`, and it still
+        // compresses. Derived-ness is not what makes a kind streaming-class —
+        // being paged one unit at a time is, and a chunk set is read whole or
+        // not at all.
+        assert!(
+            PackWriter::compresses_kind(AssetKind::Fracture),
+            "a .inf_fracture is loaded whole; there is nothing to sub-slice"
+        );
 
         let payload = big(5); // compressible — a Mesh would shrink
         let mut w = PackWriter::new();
