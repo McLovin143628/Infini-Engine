@@ -280,6 +280,11 @@ pub fn spawn(ns_view: isize, sink: ViewportEventSink, scene: SharedScene) -> Vie
     // holding an empty store, which stages nothing: the right answer for a
     // viewport that never came up.
     let volumes = inf_editor_core::voxel_store::shared_volumes();
+    // P22.3: the same arrangement for the Simulate fracture states. Declared HERE
+    // rather than beside `host_fractures` below, unlike the win32 twin where the
+    // two sit together: this function has early returns between the two points,
+    // and each of them yields a handle that must already hold the store.
+    let fractures = inf_editor_core::simulate::shared_fractures();
 
     if MainThreadMarker::new().is_none() {
         tracing::error!("inf-viewport: macOS spawn must run on the main thread");
@@ -329,6 +334,7 @@ pub fn spawn(ns_view: isize, sink: ViewportEventSink, scene: SharedScene) -> Vie
     let _ = sink;
 
     let host_volumes = volumes.clone();
+    let host_fractures = fractures.clone();
     std::thread::Builder::new()
         .name("inf-viewport".into())
         .spawn(move || thread_main(layer_ptr, scale, rx, scene, host_volumes, host_fractures))

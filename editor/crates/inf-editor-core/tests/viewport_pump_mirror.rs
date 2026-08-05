@@ -612,3 +612,171 @@ fn both_hosts_fold_the_sims_carves_into_their_render_store() {
         "the editor's fold no longer reaches the Ring-0 rule"
     );
 }
+
+// ── the spawn seam (P22.3) ──────────────────────────────────────────────────
+
+/// The `let` bindings inside `pub fn spawn(…)`, in declaration order.
+///
+/// Tuple destructuring (`let (tx, rx) = …`) contributes both names; everything
+/// else contributes one. Types, `mut` and the initialiser are dropped — the set
+/// is what matters, not how each was produced.
+fn spawn_bindings(source: &str) -> Vec<String> {
+    let start = source
+        .find("pub fn spawn(")
+        .expect("both platform modules have a `pub fn spawn`");
+    // The function ends at the next item at column 0 after it.
+    let end = source[start..]
+        .find("\n}\n")
+        .map(|i| start + i)
+        .unwrap_or(source.len());
+    let mut out = Vec::new();
+    for line in source[start..end].lines() {
+        // FUNCTION SCOPE ONLY (exactly four spaces of indent). The shared stores
+        // the handle hands to Ring 2 are declared there; a `let` nested inside
+        // macOS's `unsafe` layer-construction block is a local with no twin to
+        // have, and including it would make the allow-list a list of macOS's
+        // implementation details.
+        if !line.starts_with("    ") || line.starts_with("     ") {
+            continue;
+        }
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("let ") else {
+            continue;
+        };
+        let rest = rest.strip_prefix("mut ").unwrap_or(rest);
+        let Some(lhs) = rest.split('=').next() else {
+            continue;
+        };
+        let lhs = lhs.split(':').next().unwrap_or(lhs).trim();
+        if let Some(tuple) = lhs.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+            out.extend(
+                tuple
+                    .split(',')
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty()),
+            );
+        } else if lhs != "_"
+            && !lhs.is_empty()
+            && lhs.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            // `let _ = sink;` is a discard, not a binding — macOS has one because
+            // its input is unwired, and it names nothing that could have a twin.
+            out.push(lhs.to_string());
+        }
+    }
+    out
+}
+
+/// Field names of every `ViewportHandle { … }` struct literal in `source`.
+fn handle_literal_fields(source: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut from = 0;
+    while let Some(i) = source[from..].find("ViewportHandle {") {
+        let at = from + i;
+        // `-> ViewportHandle {` is a return type followed by the function's OWN
+        // brace, and `pub struct ViewportHandle {` is the definition. Both contain
+        // this text and neither is a construction; matching them slurps an
+        // unrelated brace span and the comparison becomes noise.
+        let before = source[..at].trim_end();
+        if before.ends_with("->") || before.ends_with("struct") || before.ends_with("pub struct") {
+            from = at + "ViewportHandle {".len();
+            continue;
+        }
+        let open = at + "ViewportHandle {".len();
+        let Some(close) = source[open..].find('}') else {
+            break;
+        };
+        for f in source[open..open + close].split(',') {
+            let name = f.split(':').next().unwrap_or(f).trim();
+            if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                out.push(name.to_string());
+            }
+        }
+        from = open + close;
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// **THE SPAWN-BINDING MIRROR — the third instance of this class gets a gate.**
+///
+/// The two platform `spawn` functions each create the shared stores the handle
+/// hands to Ring 2 (`volumes`, and since P22.3 `fractures`), clone them for the
+/// render thread, and construct a `ViewportHandle` from them. A store added to
+/// win32 alone is not a missing feature: it is a macOS build that does not
+/// compile — and it has now happened three times.
+///
+/// * P20.4: `set_water`/`set_water_hints` on win32 only → macOS CI red, fixed in
+///   a follow-up commit. That is what this file was written for.
+/// * P21.2: `pub fn voxel_volumes` missing from the fragment list → deleting it
+///   broke the build while every test here passed. That is what the `pub fn` set
+///   comparison was added for.
+/// * P22.3: `let fractures` / `let host_fractures` added to win32's `spawn` and
+///   not to macOS's → **E0425 × 4, macOS clippy leg red**. Neither existing check
+///   could see it: a local binding is not a `pub fn` and not a `Cmd` variant, and
+///   the fragment lists compare text that was identical on both sides (the struct
+///   FIELD was mirrored; the binding that fills it was not).
+///
+/// So this compares the two sets directly. win32's bindings must all exist on
+/// macOS; macOS may have more (it builds a `CAMetalLayer` and win32 does not), and
+/// those extras are listed rather than waved through.
+#[test]
+fn every_win32_spawn_binding_has_a_macos_twin() {
+    let win = spawn_bindings(&read(WIN32));
+    let mac = spawn_bindings(&read(MACOS));
+
+    // Sanity: the parser found the real thing on both sides, or the comparison
+    // below is between two empty lists (which agree).
+    for (label, set) in [("win32", &win), ("macOS", &mac)] {
+        assert!(
+            set.contains(&"tx".to_string()) && set.contains(&"rx".to_string()),
+            "the {label} spawn-binding parser found {set:?} — it is not reading \
+             `pub fn spawn`"
+        );
+    }
+
+    let missing: Vec<&String> = win.iter().filter(|b| !mac.contains(b)).collect();
+    assert!(
+        missing.is_empty(),
+        "win32's `spawn` binds {missing:?} and macOS's does not — every shared \
+         store the handle hands to Ring 2 is created here, so a binding on one \
+         side only is a build that does not compile on the other. (win32: {win:?}; \
+         macOS: {mac:?})"
+    );
+
+    // macOS's extras, named. A new one appearing here is a prompt to decide
+    // whether it is genuinely platform-specific rather than a win32 omission.
+    let extra: Vec<&String> = mac.iter().filter(|b| !win.contains(b)).collect();
+    let allowed = ["layer_ptr", "scale"];
+    let unexpected: Vec<&&String> = extra
+        .iter()
+        .filter(|b| !allowed.contains(&b.as_str()))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "macOS's `spawn` binds {unexpected:?}, which win32 does not and which is \
+         not in the platform-specific allow-list — either win32 is missing it, or \
+         add it to `allowed` deliberately"
+    );
+}
+
+/// The same claim one level out: both platforms must construct the handle from
+/// the same FIELDS. (This one would already have passed the P22.3 miss — the
+/// fields were mirrored and the bindings were not — which is exactly why the test
+/// above exists beside it rather than instead of it.)
+#[test]
+fn both_platforms_construct_the_handle_from_the_same_fields() {
+    let win = handle_literal_fields(&read(WIN32));
+    let mac = handle_literal_fields(&read(MACOS));
+    assert!(
+        win.contains(&"tx".to_string()),
+        "the handle-literal parser found {win:?} — it is not reading the struct \
+         literals"
+    );
+    assert_eq!(
+        win, mac,
+        "the two platforms construct `ViewportHandle` from different fields — one \
+         of them will not compile"
+    );
+}
