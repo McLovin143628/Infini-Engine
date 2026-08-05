@@ -108,10 +108,34 @@ recorded so P22.2's field set can be judged against it.
    `.inf_fracture`'s precomputed graph. The bond holds up to
    `strength × shared_face_area` newtons. The cook already emits the adjacency;
    the shared face area is recoverable from either chunk's geometry.
-3. **The structural solve.** Chunks touching the ground (or an `AlwaysLoaded`
-   anchor) are supported; support propagates along bonds; a chunk that loses its
-   path to an anchor falls. Removing a chunk therefore drives *progressive*
-   collapse, at fixed step, deterministically — the roadmap's P22.3 deliverable 2.
+3. **The structural solve, and how a chunk becomes an anchor.** This is the one
+   open design question v20's field set depends on, so it is settled here rather
+   than left for P22.3 to discover:
+
+   * **Support is decided by runtime contact, not by an authored flag.** At the
+     moment the intact mesh is swapped for chunk bodies, a chunk is an *anchor*
+     if it is in contact with static world geometry — the ground, a terrain
+     tile, another static body. rapier already reports exactly this
+     (`drain_contact_events`, plus the static/dynamic pairing), so the anchor
+     set is a query against the world the solve is already stepping.
+   * **`AlwaysLoaded` is repurposed as the explicit override.** An author who
+     needs a specific piece pinned regardless of contact — the base course of a
+     tower, a bridge abutment — marks its entity `AlwaysLoaded`, which already
+     means "this exists for the whole run" and now additionally means "this is
+     structurally anchored". Reusing it is deliberate: an entity that is *not*
+     always loaded cannot be a reliable anchor anyway, because it can stream out
+     from under the structure it is holding up. A separate `StructuralAnchor`
+     component would be able to express the incoherent combination.
+   * Support then propagates along bonds; a chunk with no path to an anchor
+     falls. Removing a chunk drives *progressive* collapse, at fixed step,
+     deterministically — the roadmap's P22.3 deliverable 2.
+
+   **This is a commitment, not a sketch.** `Destructible`'s five fields are
+   frozen and the scene schema is frozen at v20 for the rest of the phase, so
+   P22.3 implements the anchoring design above. If it were instead to decide it
+   wanted a `StructuralAnchor` slot on the entity record, that would cost a v21
+   in both codec mirrors — which is precisely the outcome deciding this now
+   exists to prevent.
 4. **Damage.** An explosion's impulse is spread over the chunk faces it reaches,
    compared against each bond's threshold. No damage numbers, no per-weapon
    constants: a newton is a newton.
@@ -143,6 +167,8 @@ And the things that look like missing fields, with where they actually live:
 | Interior material override | Lives in the `.inf_fracture`'s own `slots` list, which versions itself. |
 | Fracture hierarchy depth | v1 is two levels by design; a depth-2 hierarchy would be described *inside* the `.inf_fracture`, which has its own schema ladder. |
 | Net relevance / replication flags | The P14 net layer's concern; P22.4 documents the events, it does not author them here. |
+| A structural-anchor marker | **`AlwaysLoaded`, repurposed** — see §4.3. Anchoring is decided by runtime contact, with that component as the explicit override. |
+| How many chunks actually came out | `FractureAsset::requested_chunks` vs `chunks.len()` — a property of the *derived asset*, which has its own version ladder, not of the component. |
 | Per-chunk overrides | A chunk is cook output. Authoring per chunk would mean authoring against geometry that changes when the seed does. |
 
 The general rule that falls out: **anything describing the CHUNKS belongs in the

@@ -41,6 +41,11 @@ inf-pcg = { workspace = true }
 # come from the SAME frames rather than from two guesses. Pure math, no GPU.
 inf-water = { workspace = true }
 inf-math = { workspace = true }
+# P22.2: the cook asks the physics facade whether a fracture chunk's hull point
+# set can actually become a collider, BEFORE writing the bytes — the same parry
+# path the collider build runs, so a "yes" here is a guarantee rather than an
+# estimate. Ring 2 -> Ring 0. Decision only: the cook never builds a world.
+inf-physics = { workspace = true }
 # The river advisory reads `WaterBody` / `Spline` / `Transform` off a decoded
 # level. Promoted from dev-dependencies at P20.1.
 inf-ecs = { workspace = true }

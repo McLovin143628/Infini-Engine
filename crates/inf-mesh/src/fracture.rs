@@ -44,6 +44,15 @@
 //!   volume gate reads `Σ chunks >= hull` rather than `==`. Bounding the plane
 //!   count is what keeps the (deliberately simple, deliberately exact) vertex
 //!   enumeration affordable.
+//!
+//!   **A volume sum cannot see shape error, so here is the number.** Σ chunks
+//!   runs up to about **1.23 ×** the true hull on a quantized sphere, but
+//!   individual chunk *surfaces* run much further out than that ratio suggests:
+//!   measured at **0.48 m outside a 1 m sphere**. Where this shows up is
+//!   visuals — a fractured ball's pieces are visibly faceted against the source
+//!   surface, because chunk geometry is `Voronoi cell ∩ simplified hull` and
+//!   never the source triangles. Boxy props (the v1 target) are unaffected: a
+//!   crate's hull IS the crate, to within its own `f32` quantization.
 //! * **Two levels, and only two.** Level 0 is the intact asset; level 1 is the
 //!   `N` chunks. Fracturing a chunk again (a depth-2 hierarchy for progressive
 //!   damage) is a documented non-goal for v1: it multiplies the cook, and
@@ -353,12 +362,34 @@ pub fn polytope_from_halfspaces(planes: &[Plane], scale: f64) -> Option<Polytope
 
     // ── faces: the vertices lying on each plane, ordered ────────────────────
     let mut faces: Vec<PolyFace> = Vec::new();
+    // The vertex sets already claimed by a face, so a plane COINCIDENT with an
+    // earlier one contributes no second face.
+    //
+    // **This is a correctness fix, not a tidy-up.** `fracture_mesh` always feeds
+    // coincident planes: any axis-aligned mesh face touches the AABB, so its hull
+    // plane is bit-identical to a box plane, and both would produce the same
+    // polygon. `volume()` integrates over the face list, so the same polygon
+    // twice DOUBLES the reported volume — a 1 m cube measured 2.0 m³, which in
+    // turn skews `MIN_FRACTURE_VOLUME_M3` by 2× and prints doubled numbers in an
+    // author-facing advisory. Keyed on the vertex SET rather than on the plane, so
+    // it catches coincidence from any source (box↔hull, hull↔bisector, or two
+    // planes that merely resolve to the same polygon numerically).
+    //
+    // The FIRST plane in the canonical `[box, hull, bisector]` order wins, which
+    // is also the right answer for classification: a bisector lying exactly on the
+    // hull surface is not an interior cut, and the cell on its far side is outside
+    // the solid and has no chunk to be adjacent to.
+    let mut claimed: std::collections::BTreeSet<Vec<usize>> = std::collections::BTreeSet::new();
     for (pi, pl) in planes.iter().enumerate() {
         let on: Vec<usize> = (0..verts.len())
             .filter(|&vi| pl.distance(verts[vi]).abs() <= merge)
             .collect();
         if on.len() < 3 {
             continue; // a redundant plane, or one touching at an edge/point
+        }
+        // `on` is built in ascending vertex order, so it is already the set key.
+        if !claimed.insert(on.clone()) {
+            continue; // coincident with a plane already faced
         }
         let centre = on.iter().map(|&vi| verts[vi]).sum::<DVec3>() / on.len() as f64;
         // A basis on the plane. `u` points at the vertex farthest from the
@@ -473,9 +504,71 @@ struct HullTri {
     plane: Plane,
 }
 
+/// The spacing of `f32` at magnitude 1 — `2⁻²³ ≈ 1.19e-7`.
+///
+/// **The single most load-bearing number in this module**, because a mesh vertex
+/// is `[f32; 3]` ([`MeshVertex::position`]) and every point handed to the hull is
+/// therefore already *quantized*. A coordinate of magnitude `X` carries an
+/// absolute representation error up to `1.19e-7 · X` before any arithmetic
+/// happens, so a perfectly planar face exported by any DCC tool arrives here
+/// **provably non-planar** by about that much.
+pub const F32_QUANTUM: f64 = 1.192_092_9e-7;
+
+/// How many `f32` quanta of the point cloud's own extent count as "the same
+/// plane" in the hull builder.
+///
+/// The original `1e-9 · extent` was **60× below the f32 quantum** and therefore
+/// measured noise rather than geometry: every tessellated flat face read as a
+/// forest of microscopic non-coplanar facets, which is how a 200-point cloud
+/// produced 948 faces against a topological maximum of 396, how 800 points cost
+/// 3.94 s, and how a 20 m tessellated cube fractured into two chunks totalling
+/// 0.000 m³ against a truth of 8000.
+///
+/// Eight quanta is a plane-fit budget, not a fudge: three quantized vertices fix
+/// a plane whose offset error is a small multiple of the vertex error, and a
+/// factor of eight covers the amplification of a moderately slivery triangle
+/// without swallowing real geometry. The trade is stated: a solid genuinely
+/// thinner than eight `f32` quanta of its own bounding extent is refused as
+/// degenerate — which is honest, because at that thickness `f32` cannot
+/// represent it as non-flat in the first place.
+pub const HULL_EPS_QUANTA: f64 = 8.0;
+
+/// The tolerance the hull builder treats as "on the plane", for a cloud of the
+/// given extent. See [`HULL_EPS_QUANTA`].
+#[inline]
+pub fn hull_epsilon(extent: f64) -> f64 {
+    HULL_EPS_QUANTA * F32_QUANTUM * extent
+}
+
+/// How much looser the **certification** tolerance is than the visibility one.
+///
+/// The two cannot be the same number, and the reason is structural rather than
+/// numerical. A point within [`hull_epsilon`] of a face is deliberately *not*
+/// made visible, so it never becomes a vertex; the faces around it are then
+/// replaced by cone faces fitted through *other* points, and the plane drifts
+/// slightly away from it. The drift accumulates with the number of points that
+/// were legitimately skipped, so it grows with cloud density: measured on
+/// quantized unit spheres, the worst legitimately-skipped point ends up
+/// **1.4 ×** the visibility tolerance outside its final face at 3000 points and
+/// **15.9 ×** at 6000. (It was 274 × before insertion order became
+/// farthest-first — that change is worth more than any tolerance.)
+///
+/// Thirty-two is the 6000-point measurement with 2 × headroom. **It is a
+/// gross-error gate, not a claim of exactness**: on a 1 m object it still
+/// certifies containment to about 90 µm, while the defects it exists to catch —
+/// a point five units outside its face, a surface with a hole — are three to
+/// four orders of magnitude beyond it. A hull that fails this is not
+/// approximately right; it is wrong.
+pub const HULL_CERT_SLACK: f64 = 32.0;
+
+/// How many times the visible region may be grown to relieve a pinched horizon
+/// before the build gives up. Three is generous: the measured cases settle on the
+/// first relief round, and the region grows monotonically, so this is a tripwire
+/// against an unforeseen cycle rather than a tuning knob.
+const PINCH_RELIEF_ROUNDS: usize = 4;
+
 /// The convex hull of `points` as a triangle list with outward-facing planes, or
-/// `None` for a point set that bounds no volume (fewer than four points, or
-/// collinear/coplanar ones).
+/// `None` for a point set the builder cannot certify.
 ///
 /// A plain **incremental** hull: build a deterministic starting tetrahedron from
 /// four extreme points, then add the remaining points in index order, deleting
@@ -488,6 +581,43 @@ struct HullTri {
 /// library that `inf-physics` alone may name (the three-ring facade), and a cook
 /// kernel that produced geometry a different library would disagree with is the
 /// exact drift the ring rules exist to prevent.
+///
+/// # It has a POST-CONDITION, and that is the point
+///
+/// An incremental hull under floating point can degrade in ways that are not
+/// visible from the inside: it can leave a hole where a horizon walk went wrong,
+/// leave a point outside a face it should have destroyed, or — with too small a
+/// coplanarity epsilon — grow indefinitely on quantization noise. `tris.len() >=
+/// 4` catches none of those, and every one of them ships as *plausible geometry*.
+///
+/// So the result is **certified before it is returned**:
+///
+/// 1. **Containment** — every input point lies inside every face plane, within
+///    [`hull_epsilon`] × [`HULL_CERT_SLACK`]. A hull that does not contain its
+///    own cloud is not a hull.
+/// 2. **Watertightness** — every directed edge appears exactly once and its twin
+///    appears exactly once, i.e. the triangle set is a closed orientable surface.
+///    A hole here becomes a chunk with no volume.
+/// 3. **Growth cap** — a convex polyhedron on `V` vertices has at most `2V − 4`
+///    faces (Euler), so exceeding `2 · points.len()` proves the builder is
+///    generating facets from noise rather than geometry, and it also bounds the
+///    super-cubic blow-up that made an 800-point cloud take seconds.
+///
+/// A failure of any of the three returns `None`, which reaches the caller as the
+/// existing [`FractureSkip::Degenerate`] refusal and, in a cook, as a named
+/// advisory. **A refusal is a value; a plausible-looking wrong hull is not.**
+///
+/// # Known limit, stated
+///
+/// Verified on `f32`-quantized clouds up to **6000 fully-extreme points** (a
+/// dense ball, where every point is a hull vertex — the worst case an incremental
+/// hull has). A denser fully-convex cloud can exceed the certification and be
+/// refused. That is a *false* refusal rather than a wrong asset, and it is the
+/// right side of the trade; real destructible meshes are nowhere near it,
+/// because most of a mesh's vertices are interior to its hull.
+///
+/// Certification costs one `O(n · F)` sweep on top of the `O(n · F)` build, so it
+/// is a constant factor, and `F` is capped at `2n` by rule (3) above.
 pub fn convex_hull_faces(points: &[DVec3]) -> Option<Vec<HullFaceOut>> {
     if points.len() < 4 {
         return None;
@@ -505,7 +635,10 @@ pub fn convex_hull_faces(points: &[DVec3]) -> Option<Vec<HullFaceOut>> {
     if !extent.is_finite() || extent <= 0.0 {
         return None;
     }
-    let eps = 1e-9 * extent;
+    let eps = hull_epsilon(extent);
+    // Euler's bound for a convex polyhedron, used as a "the builder is generating
+    // noise" tripwire rather than as a memory cap.
+    let face_cap = 2 * points.len();
 
     // ── a deterministic starting tetrahedron ────────────────────────────────
     let i0 = (0..points.len())
@@ -531,70 +664,179 @@ pub fn convex_hull_faces(points: &[DVec3]) -> Option<Vec<HullFaceOut>> {
 
     let mut tris: Vec<HullTri> = Vec::new();
     let seed = [i0, i1, i2, i3];
+    // A point strictly inside the seed tetrahedron. The hull only ever GROWS, so
+    // this point stays interior for the whole build — which is what makes it a
+    // valid outward reference for every cone face added below.
     let inner = (points[i0] + points[i1] + points[i2] + points[i3]) / 4.0;
     for drop in 0..4 {
         let t: Vec<usize> = (0..4).filter(|&i| i != drop).map(|i| seed[i]).collect();
         let (a, b, c) = (t[0], t[1], t[2]);
-        let pl = Plane::through(
-            points[a],
-            (points[b] - points[a]).cross(points[c] - points[a]),
-        )?;
-        // Orient outward: the tetra's own interior point must be inside.
-        if pl.distance(inner) > 0.0 {
-            tris.push(HullTri {
-                v: [a, c, b],
-                plane: Plane {
-                    normal: -pl.normal,
-                    d: -pl.d,
-                },
-            });
-        } else {
-            tris.push(HullTri {
-                v: [a, b, c],
-                plane: pl,
-            });
-        }
+        tris.push(oriented_tri(points, a, b, c, inner)?);
     }
 
-    // ── add the rest, in index order ────────────────────────────────────────
-    for (pi, p) in points.iter().enumerate() {
-        if seed.contains(&pi) {
+    // ── add the rest, FARTHEST FIRST ────────────────────────────────────────
+    //
+    // Not input order. Adding the most extreme points first means each later
+    // point is either comfortably inside (skipped in one test) or comfortably
+    // outside — the "barely outside, nearly coplanar with several faces at once"
+    // case that pinches the horizon is what raw input order manufactures. The
+    // order is a deterministic function of the cloud (distance from the seed
+    // tetrahedron's centre, descending, ties broken by index), so the hull stays
+    // a pure function of its input.
+    let mut order: Vec<usize> = (0..points.len()).filter(|i| !seed.contains(i)).collect();
+    order.sort_by(|&a, &b| {
+        points[b]
+            .distance_squared(inner)
+            .partial_cmp(&points[a].distance_squared(inner))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.cmp(&b))
+    });
+    for pi in order {
+        let p = &points[pi];
+        // ── the visible region ──────────────────────────────────────────────
+        //
+        // **A connected region whose boundary is a cycle — not a predicate.**
+        //
+        // The naive `distance > eps` set is what a textbook writes, and it is
+        // wrong the moment a point is *coplanar* with part of the hull, which is
+        // the normal case for a tessellated flat face — i.e. for every crate,
+        // wall and floor anyone will ever mark destructible. The point then sees
+        // some faces of that flat region and not others, so the visible set is
+        // disconnected, annular, or **pinched** (a figure-eight boundary touching
+        // itself at a vertex — measured at 8 horizon edges over 7 distinct start
+        // vertices on a 6000-point quantized ball). Its boundary is then not a
+        // single cycle, and the cone stitched to it is non-manifold: a hull with
+        // a hole, which clips every Voronoi cell to nothing and ships chunks of
+        // zero volume.
+        //
+        // Two repairs, in order, both of which GROW the region — never drop the
+        // point, because a dropped point stays outside the hull and the
+        // containment post-condition would then (correctly) refuse an ordinary
+        // dense mesh with a `Degenerate` advisory that is simply untrue:
+        //
+        // 1. **Coplanar absorption.** Flood-fill across shared edges, absorbing
+        //    any adjacent face the point is not strictly *behind* (`> -eps`).
+        //    This is what makes a tessellated flat face behave as one face.
+        // 2. **Pinch relief.** If the boundary still touches itself at a vertex,
+        //    absorb every face incident to that vertex and re-fill. The region
+        //    grows monotonically, so this terminates; the bound below is a
+        //    tripwire, not a policy.
+        let mut vis: Vec<bool> = tris.iter().map(|t| t.plane.distance(*p) > eps).collect();
+        if !vis.iter().any(|&v| v) {
             continue;
         }
-        let visible: Vec<usize> = (0..tris.len())
-            .filter(|&ti| tris[ti].plane.distance(*p) > eps)
-            .collect();
-        if visible.is_empty() {
-            continue;
-        }
-        // Horizon: a directed edge of a visible face whose twin is NOT in the
-        // visible set. `BTreeMap`, never a hash set — the horizon walk must be
-        // reproducible.
-        let mut dir: BTreeMap<(usize, usize), ()> = BTreeMap::new();
-        for &ti in &visible {
-            let v = tris[ti].v;
-            for e in [(v[0], v[1]), (v[1], v[2]), (v[2], v[0])] {
-                dir.insert(e, ());
+        // Undirected edge → the faces on it, for the flood fill. `BTreeMap`,
+        // never a hash map: the walk must be reproducible.
+        let mut edge_faces: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+        for (ti, t) in tris.iter().enumerate() {
+            for e in [(t.v[0], t.v[1]), (t.v[1], t.v[2]), (t.v[2], t.v[0])] {
+                edge_faces
+                    .entry((e.0.min(e.1), e.0.max(e.1)))
+                    .or_default()
+                    .push(ti);
             }
         }
-        let horizon: Vec<(usize, usize)> = dir
-            .keys()
-            .copied()
-            .filter(|&(a, b)| !dir.contains_key(&(b, a)))
-            .collect();
+        let mut horizon: Vec<(usize, usize)> = Vec::new();
+        let mut visible: Vec<usize> = Vec::new();
+        let mut settled = false;
+        for _ in 0..PINCH_RELIEF_ROUNDS {
+            // (1) coplanar absorption
+            let mut stack: Vec<usize> = (0..tris.len()).filter(|&i| vis[i]).collect();
+            while let Some(ti) = stack.pop() {
+                let t = tris[ti];
+                for e in [(t.v[0], t.v[1]), (t.v[1], t.v[2]), (t.v[2], t.v[0])] {
+                    let key = (e.0.min(e.1), e.0.max(e.1));
+                    for &nb in edge_faces.get(&key).into_iter().flatten() {
+                        if !vis[nb] && tris[nb].plane.distance(*p) > -eps {
+                            vis[nb] = true;
+                            stack.push(nb);
+                        }
+                    }
+                }
+            }
+            visible = (0..tris.len()).filter(|&i| vis[i]).collect();
+            if visible.len() == tris.len() {
+                // The point would consume the entire hull, which cannot happen
+                // for a point of a bounded cloud and means the arithmetic has
+                // lost the shape.
+                return None;
+            }
+            // Horizon: a directed edge of a visible face whose twin is NOT in the
+            // visible set. `BTreeMap`, never a hash set — the walk must be
+            // reproducible.
+            let mut dir: BTreeMap<(usize, usize), ()> = BTreeMap::new();
+            for &ti in &visible {
+                let v = tris[ti].v;
+                for e in [(v[0], v[1]), (v[1], v[2]), (v[2], v[0])] {
+                    dir.insert(e, ());
+                }
+            }
+            horizon = dir
+                .keys()
+                .copied()
+                .filter(|&(a, b)| !dir.contains_key(&(b, a)))
+                .collect();
+            // A single closed cycle: every vertex starts exactly one horizon edge
+            // and ends exactly one.
+            let mut starts: BTreeMap<usize, u32> = BTreeMap::new();
+            let mut ends: BTreeMap<usize, u32> = BTreeMap::new();
+            for &(a, b) in &horizon {
+                *starts.entry(a).or_default() += 1;
+                *ends.entry(b).or_default() += 1;
+            }
+            if horizon.len() >= 3
+                && starts.values().all(|&n| n == 1)
+                && ends.values().all(|&n| n == 1)
+                && starts.len() == horizon.len()
+                && ends.len() == horizon.len()
+            {
+                settled = true;
+                break;
+            }
+            // (2) pinch relief — absorb everything touching an offending vertex.
+            let pinched: std::collections::BTreeSet<usize> = starts
+                .iter()
+                .chain(ends.iter())
+                .filter(|(_, &n)| n != 1)
+                .map(|(&v, _)| v)
+                .collect();
+            if pinched.is_empty() {
+                break;
+            }
+            let mut grew = false;
+            for ti in 0..tris.len() {
+                if !vis[ti] && tris[ti].v.iter().any(|v| pinched.contains(v)) {
+                    vis[ti] = true;
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        if !settled {
+            // The region could not be made into a disk. Refusing here is the
+            // honest answer: the alternative is a non-manifold cone, and the
+            // caller turns this into a named advisory rather than a silent
+            // half-built hull.
+            return None;
+        }
         // Remove visible faces (descending, so indices stay valid).
         for &ti in visible.iter().rev() {
             tris.swap_remove(ti);
         }
         for (a, b) in horizon {
-            if let Some(pl) =
-                Plane::through(points[a], (points[b] - points[a]).cross(*p - points[a]))
-            {
-                tris.push(HullTri {
-                    v: [a, b, pi],
-                    plane: pl,
-                });
+            // **Oriented against the seed interior point, not against the
+            // horizon's winding.** The horizon edge's direction is only as
+            // trustworthy as the faces it came from, and one inward-facing cone
+            // face silently inverts a region of the hull — which then contains
+            // nothing and clips every cell to nothing.
+            if let Some(t) = oriented_tri(points, a, b, pi, inner) {
+                tris.push(t);
             }
+        }
+        if tris.len() > face_cap {
+            return None;
         }
         // `swap_remove` reorders the face list, which would make the result
         // depend on removal order. Restoring a canonical order after every point
@@ -604,14 +846,82 @@ pub fn convex_hull_faces(points: &[DVec3]) -> Option<Vec<HullFaceOut>> {
     if tris.len() < 4 {
         return None;
     }
-    Some(
-        tris.into_iter()
-            .map(|t| HullFaceOut {
-                v: t.v,
-                plane: t.plane,
-            })
-            .collect(),
-    )
+
+    let faces: Vec<HullFaceOut> = tris
+        .into_iter()
+        .map(|t| HullFaceOut {
+            v: t.v,
+            plane: t.plane,
+        })
+        .collect();
+    hull_is_certified(points, &faces, eps).then_some(faces)
+}
+
+/// The hull post-condition, as a function of the result — so it can be run
+/// against a **mutated** face list and shown to reject it.
+///
+/// Extracted rather than inlined for exactly that reason: a post-condition that
+/// only ever sees correct input is a claim, not a check
+/// (`the_post_condition_rejects_mutated_hulls` mutates a clone — the P18
+/// discipline). Both halves are pure and allocation-light.
+///
+/// 1. **Watertight** — every directed edge appears exactly once and its twin
+///    appears exactly once. A hole, a fin or a doubled facet fails.
+/// 2. **Containment** — no input point sits outside any face plane by more than
+///    [`hull_epsilon`] × [`HULL_CERT_SLACK`].
+pub fn hull_is_certified(points: &[DVec3], faces: &[HullFaceOut], eps: f64) -> bool {
+    if faces.len() < 4 {
+        return false;
+    }
+    let mut edges: BTreeMap<(usize, usize), u32> = BTreeMap::new();
+    for t in faces {
+        for e in [(t.v[0], t.v[1]), (t.v[1], t.v[2]), (t.v[2], t.v[0])] {
+            *edges.entry(e).or_default() += 1;
+        }
+    }
+    for (&(a, b), &n) in &edges {
+        if n != 1 || edges.get(&(b, a)).copied().unwrap_or(0) != 1 {
+            return false;
+        }
+    }
+    let cert = eps * HULL_CERT_SLACK;
+    for t in faces {
+        for p in points {
+            if t.plane.distance(*p) > cert {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// A hull triangle on `(a, b, c)` wound so its plane faces **away** from
+/// `interior`. Returns `None` for a degenerate triangle.
+fn oriented_tri(
+    points: &[DVec3],
+    a: usize,
+    b: usize,
+    c: usize,
+    interior: DVec3,
+) -> Option<HullTri> {
+    let pl = Plane::through(
+        points[a],
+        (points[b] - points[a]).cross(points[c] - points[a]),
+    )?;
+    if pl.distance(interior) > 0.0 {
+        Some(HullTri {
+            v: [a, c, b],
+            plane: Plane {
+                normal: -pl.normal,
+                d: -pl.d,
+            },
+        })
+    } else {
+        Some(HullTri {
+            v: [a, b, c],
+            plane: pl,
+        })
+    }
 }
 
 /// A hull triangle: its three source-point indices and its outward plane.
@@ -658,7 +968,12 @@ pub const HULL_PLANE_BUDGET: usize = 48;
 /// sorted face list) so the result is a pure function of the point set.
 fn hull_halfspaces(points: &[DVec3], faces: &[HullFaceOut], extent: f64) -> Vec<Plane> {
     let cos_eps = 1.0 - 1e-9;
-    let d_eps = 1e-7 * extent.max(1.0);
+    // The SAME tolerance the hull builder treats as "on the plane". It has to be:
+    // a tessellated flat face arrives as triangles whose fitted plane offsets
+    // differ by up to `hull_epsilon(extent)`, so a smaller merge tolerance here
+    // would leave them as dozens of distinct half-spaces, blow the plane budget
+    // on what is geometrically one face, and truncate a box down to a wedge.
+    let d_eps = hull_epsilon(extent).max(f64::MIN_POSITIVE);
     // (plane, total area, first-appearance index)
     let mut groups: Vec<(Plane, f64, usize)> = Vec::new();
     for (fi, f) in faces.iter().enumerate() {
@@ -748,6 +1063,19 @@ pub enum FractureSkip {
         /// The measured hull volume, m³.
         volume_m3: f64,
     },
+    /// The geometry was fine but the chunking produced fewer than
+    /// [`MIN_CHUNK_COUNT`] pieces — every site's cell missed the solid, or all
+    /// but one did.
+    ///
+    /// A refusal rather than an asset: a `.inf_fracture` with no chunks encodes,
+    /// packs and loads perfectly while making its mesh unbreakable, and nothing
+    /// downstream can tell that from a mesh nobody marked destructible.
+    TooFewChunks {
+        /// How many chunks came out.
+        produced: u32,
+        /// How many were asked for (post-clamp).
+        requested: u32,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -807,9 +1135,19 @@ pub struct FractureAsset {
     pub source_mesh: [u8; 16],
     /// The source mesh's local-space bounds.
     pub bounds: Aabb,
-    /// The seed and count this asset was built with — so a cook can tell a
+    /// The authored seed offset this asset was built with — so a tool can tell a
     /// stale derived asset from a current one without re-running the fracture.
     pub seed: u32,
+    /// How many chunks were **asked for** (post-clamp), against
+    /// [`chunks`](Self::chunks)`.len()`, which is how many the geometry actually
+    /// yielded.
+    ///
+    /// They differ whenever a site's Voronoi cell missed the solid — legal, and
+    /// invisible without this field, which is why it exists: a shipped asset that
+    /// says "12" and carries 5 is the only evidence that a level's break will be
+    /// coarser than its author asked for. The cook turns a large shortfall into
+    /// an advisory; this is what makes that checkable from the pack afterwards.
+    pub requested_chunks: u32,
     /// Material slot names: the source mesh's slots, followed by exactly one
     /// generated interior slot at index [`interior_slot`](Self::interior_slot).
     ///
@@ -1015,11 +1353,18 @@ pub fn fracture_mesh(
     let interior_slot = slots.len() as u32;
     slots.push(INTERIOR_SLOT_NAME.to_string());
     // Slot per *exterior* plane: the lowest slot among source vertices on it.
+    //
+    // The tolerance is [`hull_epsilon`], the same `f32`-quantization budget the
+    // hull builder uses, and for the same reason: a source vertex "on" a hull
+    // plane is only on it to within the quantization of its own coordinates, so a
+    // tighter tolerance would find no vertices on a 20 m crate's faces and drop
+    // every exterior face back to slot 0.
+    let slot_tol = hull_epsilon(extent);
     let exterior_slot_of: Vec<u32> = box_planes
         .iter()
         .chain(hull_planes.iter())
         .map(|pl| {
-            let tol = 1e-7 * extent.max(1.0);
+            let tol = slot_tol;
             cloud
                 .iter()
                 .enumerate()
@@ -1031,6 +1376,7 @@ pub fn fracture_mesh(
         .collect();
 
     // ── chunks ──────────────────────────────────────────────────────────────
+    let remap = site_to_chunk(&cells);
     let mut chunks: Vec<FractureChunk> = Vec::with_capacity(cells.len());
     for cell in &cells {
         chunks.push(build_chunk(
@@ -1039,7 +1385,22 @@ pub fn fracture_mesh(
             &exterior_slot_of,
             box_planes.len(),
             hull_planes.len(),
+            &remap,
         ));
+    }
+
+    // **A fracture with fewer than two pieces is not a fracture.** The chunk
+    // count is enforced on the OUTPUT, not just clamped on the input: before
+    // this, a hull the cells all missed produced `Ok(FractureAsset { chunks: []
+    // })`, which encodes to 68 perfectly valid bytes and packs silently — a mesh
+    // that ships fracture data and cannot break, which is worse than one that
+    // ships none, because the advisory that would have said so never fires.
+    let requested = clamp_chunk_count(params.chunk_count);
+    if chunks.len() < MIN_CHUNK_COUNT as usize {
+        return Err(FractureSkip::TooFewChunks {
+            produced: chunks.len() as u32,
+            requested,
+        });
     }
 
     Ok(FractureAsset {
@@ -1047,6 +1408,7 @@ pub fn fracture_mesh(
         source_mesh: *guid.uuid().as_bytes(),
         bounds: mesh.bounds,
         seed: params.seed,
+        requested_chunks: requested,
         slots,
         interior_slot,
         chunks,
@@ -1142,12 +1504,34 @@ pub fn fracture_from_sites(
         });
     }
 
-    // Adjacency is derived from the surviving bisector faces of BOTH sides and
-    // unioned, so a face detected from either cell counts. The two derivations
-    // agreeing is asserted as a test (`adjacency_is_symmetric_from_both_sides`)
-    // rather than made true by the union alone — a union makes symmetry vacuous,
-    // and a vacuous check hides the real intrusion (the P19 law).
+    // Adjacency is NOT derived here: a cell knows the SITE on the far side of
+    // each of its bisector faces, and a chunk index is a position in this vector
+    // — two numbering systems that coincide only when no cell was dropped, which
+    // is exactly the case a cube-shaped fixture tests and nothing else does. The
+    // site→chunk remap lives in [`site_to_chunk`] and is applied in `build_chunk`.
     cells
+}
+
+/// Map each cell's **site** index to its **chunk** index — the position it will
+/// occupy in the shipped `chunks` vector.
+///
+/// The two numbering systems diverge whenever a site produced no cell: a site
+/// outside the mesh's hull, or one whose Voronoi cell misses the solid entirely,
+/// is dropped by [`fracture_from_sites`] and every later chunk shifts down.
+/// Publishing site indices as `neighbors` therefore ships a structural graph with
+/// out-of-range entries, self-loops and asymmetry — measured on a diagonal plank
+/// as 1 out-of-range, 3 self-referential and 4 asymmetric, and on a flat pane
+/// as a single chunk naming neighbour 7 in a one-element array. P22.3's support
+/// solve indexes straight into that array.
+///
+/// A dropped site simply has no entry, so a face against it contributes no edge —
+/// which is correct: there is no chunk on the other side.
+fn site_to_chunk(cells: &[Cell]) -> BTreeMap<usize, u32> {
+    cells
+        .iter()
+        .enumerate()
+        .map(|(ci, c)| (c.site, ci as u32))
+        .collect()
 }
 
 /// The six outward half-spaces of an axis-aligned box.
@@ -1187,6 +1571,7 @@ fn build_chunk(
     exterior_slot_of: &[u32],
     box_count: usize,
     hull_count: usize,
+    site_to_chunk: &BTreeMap<usize, u32>,
 ) -> FractureChunk {
     let poly = &cell.poly;
     // Group faces by the slot they draw with, so the index buffer is one
@@ -1200,8 +1585,15 @@ fn build_chunk(
         } else {
             // A face on a bisector is freshly exposed by the break.
             let b = f.plane - box_count - hull_count;
-            if let Some(&other) = cell.bisector_sites.get(b) {
-                neighbors.push(other as u32);
+            // The far side is a SITE index; `neighbors` is a list of CHUNK
+            // indices. A site whose cell was dropped has no chunk and so
+            // contributes no edge — see `site_to_chunk`.
+            if let Some(&chunk) = cell
+                .bisector_sites
+                .get(b)
+                .and_then(|site| site_to_chunk.get(site))
+            {
+                neighbors.push(chunk);
             }
             interior_slot
         };
@@ -1312,6 +1704,135 @@ mod tests {
             }],
             vec!["Stone".into()],
         )
+    }
+
+    /// **The ordinary destructible asset.** A cube of side `side`, every face
+    /// tessellated into a `grid × grid` quad patch, rotated off every axis, and
+    /// stored as `[f32; 3]` positions — which is to say, put through exactly what
+    /// a DCC export does to a crate.
+    ///
+    /// Each of those four steps is one the naive builder could not survive:
+    /// tessellation multiplies the coplanar points, rotation stops the faces
+    /// aligning with the AABB (so the hull planes are no longer bit-identical to
+    /// the box planes), and the `f32` round trip makes every "flat" face provably
+    /// non-planar by ~1.19e-7 of its magnitude.
+    fn tessellated_crate(side: f64, grid: usize) -> MeshAsset {
+        // A fixed off-axis rotation with rational components: `sqrt` is
+        // IEEE-correctly-rounded and therefore bit-portable, unlike `sin`/`cos`.
+        let q = glam::DQuat::from_xyzw(1.0, 2.0, 3.0, 4.0).normalize();
+        let h = side * 0.5;
+        let mut vertices = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        // Six faces: axis, sign.
+        for axis in 0..3usize {
+            for sign in [-1.0, 1.0f64] {
+                let base = vertices.len() as u32;
+                let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+                for i in 0..=grid {
+                    for j in 0..=grid {
+                        let mut p = [0.0f64; 3];
+                        p[axis] = sign * h;
+                        p[u] = -h + 2.0 * h * (i as f64 / grid as f64);
+                        p[v] = -h + 2.0 * h * (j as f64 / grid as f64);
+                        let r = q * DVec3::new(p[0], p[1], p[2]);
+                        vertices.push(MeshVertex {
+                            // The f32 round trip is the whole point of the fixture.
+                            position: [r.x as f32, r.y as f32, r.z as f32],
+                            ..Default::default()
+                        });
+                    }
+                }
+                let n = (grid + 1) as u32;
+                for i in 0..grid as u32 {
+                    for j in 0..grid as u32 {
+                        let a = base + i * n + j;
+                        indices.extend_from_slice(&[a, a + 1, a + n + 1, a, a + n + 1, a + n]);
+                    }
+                }
+            }
+        }
+        MeshAsset::new(
+            vec![SubMesh {
+                name: "crate".into(),
+                vertices,
+                indices,
+                material_slot: Some(0),
+                skin: Vec::new(),
+            }],
+            vec!["Wood".into()],
+        )
+    }
+
+    /// A box of the given half-extents, rotated by `q`, as 8 corners — the
+    /// "hull fills a small fraction of its AABB" shape when it is long, thin and
+    /// diagonal.
+    fn rotated_box(half: DVec3, q: glam::DQuat) -> MeshAsset {
+        let mut vertices = Vec::new();
+        for sx in [-1.0, 1.0f64] {
+            for sy in [-1.0, 1.0f64] {
+                for sz in [-1.0, 1.0f64] {
+                    let r = q * DVec3::new(sx * half.x, sy * half.y, sz * half.z);
+                    vertices.push(MeshVertex {
+                        position: [r.x as f32, r.y as f32, r.z as f32],
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        let n = vertices.len() as u32;
+        MeshAsset::new(
+            vec![SubMesh {
+                name: "plank".into(),
+                vertices,
+                indices: (0..n).collect(),
+                material_slot: Some(0),
+                skin: Vec::new(),
+            }],
+            vec!["Pine".into()],
+        )
+    }
+
+    /// Assert the structural invariants every shipped chunk set must satisfy.
+    /// Returned so callers can also assert content-specific numbers.
+    fn assert_chunk_set_is_sane(f: &FractureAsset) {
+        let n = f.chunks.len();
+        assert!(
+            n >= MIN_CHUNK_COUNT as usize,
+            "{n} chunks is not a fracture"
+        );
+        for (i, c) in f.chunks.iter().enumerate() {
+            assert!(c.volume_m3 > 0.0, "chunk {i} has no volume");
+            assert!(c.volume_m3.is_finite(), "chunk {i} volume is not finite");
+            assert!(c.hull_points.len() >= 4, "chunk {i} has no collider hull");
+            assert!(
+                !c.indices.is_empty() && c.indices.len() % 3 == 0,
+                "chunk {i} geometry"
+            );
+            assert!(
+                c.center_of_mass.iter().all(|v| v.is_finite()),
+                "chunk {i} centre of mass"
+            );
+            let covered: u32 = c.sections.iter().map(|s| s.index_count).sum();
+            assert_eq!(covered as usize, c.indices.len(), "chunk {i} sections");
+            // Adjacency is a CHUNK-index graph: in range, never self, sorted,
+            // deduped, and symmetric.
+            for &j in &c.neighbors {
+                assert!(
+                    (j as usize) < n,
+                    "chunk {i} names neighbour {j} in a {n}-chunk asset"
+                );
+                assert_ne!(j as usize, i, "chunk {i} is its own neighbour");
+                assert!(
+                    f.chunks[j as usize].neighbors.contains(&(i as u32)),
+                    "chunk {i} lists {j} but not the other way round"
+                );
+            }
+            assert!(
+                c.neighbors.windows(2).all(|w| w[0] < w[1]),
+                "chunk {i} neighbours are not sorted+deduped"
+            );
+        }
+        assert!(!f.adjacency_pairs().is_empty(), "no structural graph");
     }
 
     // ── the mixer ───────────────────────────────────────────────────────────
@@ -1719,23 +2240,189 @@ mod tests {
         assert!(!from_a.is_empty());
     }
 
-    /// A **curved, many-faced** mesh: the hull plane budget bites, and the
-    /// stated bound is what the chunks must obey.
+    // ── the f32 reality regression suite (P22.2 audit round) ────────────────
+
+    /// **THE headline regression.** A rotated, `f32`-quantized, tessellated crate
+    /// — the most ordinary destructible asset imaginable — must fracture into
+    /// sane chunks with sane volumes.
     ///
-    /// Keeping the largest-area hull faces yields a polytope that *contains* the
-    /// true hull, so `Σ chunks >= hull` is the direction of the guarantee — the
-    /// fracture never loses material, it rounds a curved surface up towards its
-    /// circumscribed polytope. The upper bound is the honest cost of that: a
-    /// 48-plane approximation of a sphere over-states its volume by a few per
-    /// cent, and the test pins how much rather than leaving it unsaid.
+    /// Every probe the audit measured is here as a `(side, grid)` row. Before the
+    /// epsilon fix, `side = 20, grid = 5` shipped **two chunks totalling
+    /// 0.000 m³** against a truth of 8000, and `grid = 9` cost seconds in the
+    /// builder; the naive `1e-9 · extent` tolerance was 60× below the `f32`
+    /// quantum, so every tessellated flat face read as non-coplanar noise.
     #[test]
-    fn a_curved_mesh_fractures_within_the_stated_hull_bound() {
-        // A ~sphere: 300 points on the unit sphere, generated without trig by
-        // normalizing hashed cube points (rejecting the degenerate centre).
-        let mut vertices = Vec::new();
+    fn a_rotated_quantized_tessellated_crate_fractures_sanely() {
+        for &(side, grid) in &[(1.0f64, 5usize), (20.0, 5), (20.0, 9), (0.5, 3)] {
+            let mesh = tessellated_crate(side, grid);
+            let f = fracture_mesh(&mesh, guid(0xC7A7), FractureParams::default())
+                .unwrap_or_else(|e| panic!("side={side} grid={grid} refused: {e:?}"));
+            assert_chunk_set_is_sane(&f);
+
+            let truth = side * side * side;
+            let sum = f.total_volume_m3();
+            // The chunks tile the mesh's convex hull, which for a crate IS the
+            // crate — to within the `f32` quantization of its own corners.
+            assert!(
+                (sum - truth).abs() <= truth * 1e-4,
+                "side={side} grid={grid}: chunks summed to {sum} m3, truth {truth}"
+            );
+            // …and it really did break into pieces, not survive as one lump.
+            assert!(
+                f.chunks.len() >= DEFAULT_CHUNK_COUNT as usize / 2,
+                "side={side} grid={grid}: only {} chunks",
+                f.chunks.len()
+            );
+            assert_eq!(f.requested_chunks, DEFAULT_CHUNK_COUNT);
+        }
+    }
+
+    /// **The plank**: a long thin box rotated onto the diagonal, so its hull
+    /// fills a small fraction of its AABB and most sites land outside the solid.
+    /// That is the shape that makes site indices and chunk indices diverge —
+    /// which is what shipped a structural graph with out-of-range entries,
+    /// self-loops and asymmetry until the remap landed.
+    #[test]
+    fn a_diagonal_plank_drops_sites_and_still_ships_a_clean_graph() {
+        let q = glam::DQuat::from_xyzw(1.0, 2.0, 3.0, 4.0).normalize();
+        let (hx, hy) = (2.0, 0.02);
+        let mesh = rotated_box(DVec3::new(hx, hy, hy), q);
+        let f = fracture_mesh(
+            &mesh,
+            guid(0xB1A4),
+            FractureParams {
+                seed: 0,
+                chunk_count: 32,
+            },
+        )
+        .unwrap();
+
+        // The fixture has to actually exercise the divergence, or the test is
+        // measuring the cube case again. Measured: the hull fills 0.209% of the
+        // AABB and 21 of the 32 sites are dropped.
+        let hull_vol = 2.0 * hx * 2.0 * hy * 2.0 * hy;
+        let b = f.bounds;
+        let aabb_vol = ((b.max[0] - b.min[0]) as f64)
+            * ((b.max[1] - b.min[1]) as f64)
+            * ((b.max[2] - b.min[2]) as f64);
+        assert!(
+            hull_vol < aabb_vol * 0.01,
+            "the plank's hull fills {:.3}% of its AABB — not a divergent fixture",
+            100.0 * hull_vol / aabb_vol
+        );
+        assert!(
+            f.chunks.len() + 8 <= f.requested_chunks as usize,
+            "too few sites dropped to exercise the remap: {} of {}",
+            f.chunks.len(),
+            f.requested_chunks
+        );
+
+        // …and every neighbour index is still a CHUNK index: in range, never
+        // self, symmetric. Before the remap this fixture shipped an out-of-range
+        // entry, three self-loops and four asymmetric edges.
+        assert_chunk_set_is_sane(&f);
+        let sum = f.total_volume_m3();
+        assert!(
+            (sum - hull_vol).abs() <= hull_vol * 1e-6,
+            "chunks summed to {sum} m3, plank is {hull_vol}"
+        );
+    }
+
+    /// **The pane**: a zero-thickness sheet is refused, and a thin-but-real one
+    /// either fractures cleanly or refuses — never ships a one-chunk asset whose
+    /// single chunk names a neighbour that does not exist.
+    #[test]
+    fn panes_refuse_or_ship_a_real_graph_never_a_dangling_one() {
+        let flat = rotated_box(
+            DVec3::new(1.0, 0.0, 1.0),
+            glam::DQuat::from_xyzw(1.0, 2.0, 3.0, 4.0).normalize(),
+        );
+        assert_eq!(
+            fracture_mesh(&flat, guid(0xFA7E), FractureParams::default()),
+            Err(FractureSkip::Degenerate),
+            "a zero-thickness pane bounds no volume"
+        );
+
+        // 2 mm thick: real, but thin enough that most cells miss it.
+        let thin = rotated_box(
+            DVec3::new(1.0, 0.001, 1.0),
+            glam::DQuat::from_xyzw(1.0, 2.0, 3.0, 4.0).normalize(),
+        );
+        match fracture_mesh(&thin, guid(0xFA7F), FractureParams::default()) {
+            Ok(f) => assert_chunk_set_is_sane(&f),
+            Err(FractureSkip::TooFewChunks {
+                produced,
+                requested,
+            }) => {
+                assert!(produced < MIN_CHUNK_COUNT, "{produced} of {requested}");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// The hull's post-condition is what makes the refusal trustworthy, so it is
+    /// tested by **mutation**: hulls that violate containment, watertightness or
+    /// the growth cap must be rejected, and the honest one must not be.
+    #[test]
+    fn the_hull_post_condition_rejects_what_the_old_check_accepted() {
+        let cloud: Vec<DVec3> = {
+            let mut v = Vec::new();
+            for sx in [-1.0, 1.0f64] {
+                for sy in [-1.0, 1.0f64] {
+                    for sz in [-1.0, 1.0f64] {
+                        v.push(DVec3::new(sx, sy, sz));
+                    }
+                }
+            }
+            v
+        };
+        let good = convex_hull_faces(&cloud).expect("a cube cloud has a hull");
+        assert_eq!(good.len(), 12);
+
+        // (1) CONTAINMENT — a point outside a face plane. The old check
+        //     (`tris.len() >= 4`) accepted this shape every time.
+        let mut escaped = cloud.clone();
+        escaped.push(DVec3::new(0.0, 0.0, 5.0));
+        let hull = convex_hull_faces(&escaped).expect("still a hull");
+        for f in &hull {
+            for p in &escaped {
+                assert!(
+                    f.plane.distance(*p) <= hull_epsilon(10.0),
+                    "the certified hull does not contain its own cloud"
+                );
+            }
+        }
+
+        // (2) WATERTIGHT — every directed edge exactly once, twin present.
+        let mut edges: BTreeMap<(usize, usize), u32> = BTreeMap::new();
+        for f in &good {
+            for e in [(f.v[0], f.v[1]), (f.v[1], f.v[2]), (f.v[2], f.v[0])] {
+                *edges.entry(e).or_default() += 1;
+            }
+        }
+        assert!(edges.values().all(|&n| n == 1), "a doubled directed edge");
+        assert!(
+            edges.keys().all(|&(a, b)| edges.contains_key(&(b, a))),
+            "an unpaired edge — the surface has a hole"
+        );
+
+        // (3) OUTWARD — every face plane has the cloud's centroid inside it. A
+        //     single inverted cone face makes a region of the hull contain
+        //     nothing, which clips every cell to nothing.
+        let c = cloud.iter().copied().sum::<DVec3>() / cloud.len() as f64;
+        for f in &good {
+            assert!(f.plane.distance(c) < 0.0, "an inward-facing hull face");
+        }
+
+        // (4) The certification really is a gate: it accepts the honest hull.
+        assert!(hull_is_certified(&cloud, &good, hull_epsilon(3.5)));
+
+        // (5) The growth cap holds on a cloud that used to explode: 200 points on
+        //     a sphere produced 948 faces against a topological maximum of 396.
+        let mut sphere: Vec<DVec3> = Vec::new();
         let mut i = 0u64;
-        while vertices.len() < 300 {
-            let h = Hash64::new(0x5E_1A11).mix_u64(i);
+        while sphere.len() < 200 {
+            let h = Hash64::new(0xB0A7).mix_u64(i);
             i += 1;
             let p = DVec3::new(
                 h.mix_u64(0).unit() * 2.0 - 1.0,
@@ -1746,75 +2433,262 @@ mod tests {
                 continue;
             }
             let n = p.normalize();
-            vertices.push(MeshVertex {
-                position: [n.x as f32, n.y as f32, n.z as f32],
-                ..Default::default()
-            });
+            // Quantize like a real mesh, which is what made this explode.
+            sphere.push(DVec3::new(
+                n.x as f32 as f64,
+                n.y as f32 as f64,
+                n.z as f32 as f64,
+            ));
         }
+        let hull = convex_hull_faces(&sphere).expect("a sphere cloud has a hull");
+        assert!(
+            hull.len() <= 2 * sphere.len() - 4,
+            "{} faces exceeds Euler's 2V-4 = {}",
+            hull.len(),
+            2 * sphere.len() - 4
+        );
+    }
+
+    /// **Mutation evidence for the post-condition.** Each of the three defects
+    /// the old `tris.len() >= 4` check accepted is manufactured by mutating a
+    /// *clone* of a correct hull, and the certification must reject every one.
+    ///
+    /// Without this the post-condition would only ever be shown agreeing with
+    /// correct input, which is a claim rather than a check — the P18 "mutate a
+    /// clone" discipline, applied to geometry instead of a meshlet DAG.
+    #[test]
+    fn the_post_condition_rejects_mutated_hulls() {
+        let cloud: Vec<DVec3> = {
+            let mut v = Vec::new();
+            for sx in [-1.0, 1.0f64] {
+                for sy in [-1.0, 1.0f64] {
+                    for sz in [-1.0, 1.0f64] {
+                        v.push(DVec3::new(sx, sy, sz));
+                    }
+                }
+            }
+            v
+        };
+        let extent = (DVec3::splat(2.0)).length();
+        let eps = hull_epsilon(extent);
+        let good = convex_hull_faces(&cloud).expect("a cube cloud has a hull");
+        assert!(
+            hull_is_certified(&cloud, &good, eps),
+            "the honest hull must pass, or the gate is just a rejector"
+        );
+
+        // (0) A DEGENERATE FACE SET. Both clauses below are universally
+        //     quantified over faces and edges, so an EMPTY list satisfies them
+        //     vacuously — without the arity guard, "no faces at all" certifies as
+        //     a hull. Found by deleting each clause in turn and checking the suite
+        //     noticed: this was the one deletion nothing caught.
+        assert!(
+            !hull_is_certified(&cloud, &[], eps),
+            "an empty face set must not certify — every other clause is vacuous on it"
+        );
+        assert!(
+            !hull_is_certified(&cloud, &good[..3], eps),
+            "three faces cannot bound a solid"
+        );
+
+        // (1) A HOLE: drop one triangle. The surface is no longer closed, and a
+        //     chunk clipped against it has no volume.
+        let mut holed = good.clone();
+        holed.remove(3);
+        assert!(
+            !hull_is_certified(&cloud, &holed, eps),
+            "a hull with a hole must be refused"
+        );
+
+        // (2) A FIN / inverted facet: reverse one triangle's winding. Its edges
+        //     now duplicate its neighbours' instead of pairing with them.
+        let mut flipped = good.clone();
+        flipped[5].v.swap(1, 2);
+        assert!(
+            !hull_is_certified(&cloud, &flipped, eps),
+            "an inverted facet must be refused"
+        );
+
+        // (3) NON-CONTAINMENT: leave the hull alone and add a point outside it.
+        //     This is the shape that shipped a "hull" the mesh stuck out of.
+        let mut escaped = cloud.clone();
+        escaped.push(DVec3::new(0.0, 0.0, 5.0));
+        assert!(
+            !hull_is_certified(&escaped, &good, eps),
+            "a hull that does not contain its cloud must be refused"
+        );
+
+        // …and the tolerance is a tolerance, not a hole in the gate: a point
+        // outside by less than the certification slack is still accepted.
+        let mut nudged = cloud.clone();
+        nudged.push(DVec3::new(0.0, 0.0, 1.0 + eps * (HULL_CERT_SLACK * 0.5)));
+        assert!(hull_is_certified(&nudged, &good, eps));
+    }
+
+    /// Coincident planes must contribute ONE face, not two.
+    ///
+    /// `fracture_mesh` always feeds some: an axis-aligned mesh face's hull plane
+    /// is bit-identical to a box plane. Before the dedup, `volume()` integrated
+    /// the same polygon twice and a 1 m cube measured **2.0 m³** — which then
+    /// skewed the sub-threshold refusal by 2× and printed a doubled number in the
+    /// author-facing advisory.
+    #[test]
+    fn coincident_planes_are_not_integrated_twice() {
+        let (lo, hi) = (DVec3::splat(-0.5), DVec3::splat(0.5));
+        let mut doubled = aabb_planes(lo, hi).to_vec();
+        doubled.extend_from_slice(&aabb_planes(lo, hi)); // the exact hazard
+        let p = polytope_from_halfspaces(&doubled, 2.0).unwrap();
+        assert_eq!(p.faces.len(), 6, "twelve planes, six faces");
+        assert!((p.volume() - 1.0).abs() < 1e-12, "{}", p.volume());
+        assert!((p.area() - 6.0).abs() < 1e-12, "{}", p.area());
+        assert!(p.centroid().length() < 1e-12);
+
+        // …and the whole-mesh path agrees: an axis-aligned 1 m cube's hull
+        // measures 1 m³, which is what `MIN_FRACTURE_VOLUME_M3` is compared to.
+        let mesh = cube_mesh(0.5);
+        let f = fracture_mesh(&mesh, guid(0xC0DE), FractureParams::default()).unwrap();
+        assert!((f.total_volume_m3() - 1.0).abs() < 1e-6);
+    }
+
+    /// A `f32`-quantized sphere cloud of `n` points — the curved case, where the
+    /// hull plane budget bites.
+    fn sphere_cloud(n: usize, seed: u64) -> Vec<DVec3> {
+        let mut v = Vec::new();
+        let mut i = 0u64;
+        while v.len() < n {
+            let h = Hash64::new(seed).mix_u64(i);
+            i += 1;
+            let p = DVec3::new(
+                h.mix_u64(0).unit() * 2.0 - 1.0,
+                h.mix_u64(1).unit() * 2.0 - 1.0,
+                h.mix_u64(2).unit() * 2.0 - 1.0,
+            );
+            if p.length() < 0.05 {
+                continue;
+            }
+            let u = p.normalize();
+            v.push(DVec3::new(
+                u.x as f32 as f64,
+                u.y as f32 as f64,
+                u.z as f32 as f64,
+            ));
+        }
+        v
+    }
+
+    fn mesh_of(cloud: &[DVec3], slot: &str) -> MeshAsset {
+        let vertices: Vec<MeshVertex> = cloud
+            .iter()
+            .map(|p| MeshVertex {
+                position: [p.x as f32, p.y as f32, p.z as f32],
+                ..Default::default()
+            })
+            .collect();
         let n = vertices.len() as u32;
-        let mesh = MeshAsset::new(
+        MeshAsset::new(
             vec![SubMesh {
                 name: "ball".into(),
                 vertices,
-                // The index buffer only has to make `triangle_count` non-zero —
-                // the fracture reads the vertex cloud, not the topology (which is
-                // exactly the hull-only scope this test also documents).
                 indices: (0..n).collect(),
                 material_slot: Some(0),
                 skin: Vec::new(),
             }],
-            vec!["Rock".into()],
-        );
+            vec![slot.to_string()],
+        )
+    }
 
-        let f = fracture_mesh(&mesh, guid(31), FractureParams::default()).unwrap();
-        assert!(f.chunks.len() >= 2);
+    /// The most the budgeted hull may exceed the true one, measured.
+    ///
+    /// Ratios across quantized unit spheres: **1.0712** at 300 points, **1.2295**
+    /// at 1000, **1.1940** at 3000, **1.2089** at 6000. The pin is the worst of
+    /// those with headroom. It is not a target — it is the stated price of
+    /// [`HULL_PLANE_BUDGET`], and lowering the budget raises it.
+    const BUDGETED_HULL_MAX_RATIO: f64 = 1.30;
 
-        // The true hull of the cloud, for the bound.
-        let cloud: Vec<DVec3> = mesh.submeshes[0]
-            .vertices
-            .iter()
-            .map(|v| {
-                DVec3::new(
-                    v.position[0] as f64,
-                    v.position[1] as f64,
-                    v.position[2] as f64,
-                )
-            })
-            .collect();
-        let faces = convex_hull_faces(&cloud).unwrap();
-        let planes = hull_halfspaces(&cloud, &faces, 2.0);
-        // The budget must genuinely BIND here, or the bound below would be
-        // measuring nothing: a sphere's hull triangles are all on distinct
-        // planes, so the unbudgeted count is in the hundreds.
-        assert!(
-            faces.len() > HULL_PLANE_BUDGET * 4,
-            "this mesh is not curved enough to exercise the budget: {} faces",
-            faces.len()
-        );
-        assert_eq!(
-            planes.len(),
-            HULL_PLANE_BUDGET,
-            "the budget must be what limits the plane count"
-        );
-        assert_eq!(f.chunks.len(), DEFAULT_CHUNK_COUNT as usize);
-        // The unbudgeted hull, for the comparison the budget is measured against.
-        let exact: f64 = {
-            let mut v = 0.0;
-            for t in &faces {
-                let (a, b, c) = (cloud[t.v[0]], cloud[t.v[1]], cloud[t.v[2]]);
-                v += a.dot(b.cross(c));
+    /// **The budget's cost, stated where it can fail.**
+    ///
+    /// `Σ chunks >= true hull` is a **direction witness, not a gate**: keeping the
+    /// largest-area planes yields a polytope that *contains* the true hull, so the
+    /// inequality is true by construction and could never fail. It is asserted to
+    /// document the direction, and the arm that can actually fail is the **upper**
+    /// bound — pinned above the worst measured tessellation, not the friendliest
+    /// one, and cross-checked against a lower bound so a regression that made the
+    /// budget keep every plane (or none) would be caught in one direction or the
+    /// other.
+    ///
+    /// **A volume sum cannot see shape error, and this is where that shows up.**
+    /// Σ chunks can sit 20% above the hull while individual chunk *surfaces* run
+    /// far further out: measured at **0.48 m outside a 1 m sphere**. That is the
+    /// v1 hull scope made numeric — a fractured sphere's pieces are visibly
+    /// faceted against the source surface, because chunk geometry is
+    /// `Voronoi cell ∩ simplified hull` and never the source triangles. It is
+    /// invisible to any volume assertion, so it is measured here explicitly.
+    #[test]
+    fn the_hull_budget_costs_what_it_says_it_costs() {
+        let mut worst_ratio = 0.0f64;
+        let mut worst_shape = 0.0f64;
+        for &n in &[300usize, 1000, 3000] {
+            let cloud = sphere_cloud(n, 0x5E_1A11);
+            let mesh = mesh_of(&cloud, "Rock");
+            let faces = convex_hull_faces(&cloud).expect("a sphere cloud has a hull");
+            assert!(
+                faces.len() > HULL_PLANE_BUDGET * 4,
+                "n={n} is not curved enough to bind the budget: {} faces",
+                faces.len()
+            );
+            assert_eq!(
+                hull_halfspaces(&cloud, &faces, 2.0).len(),
+                HULL_PLANE_BUDGET,
+                "n={n}: the budget must be what limits the plane count"
+            );
+            // The true hull volume, by direct integration over its triangles.
+            let exact: f64 = faces
+                .iter()
+                .map(|t| cloud[t.v[0]].dot(cloud[t.v[1]].cross(cloud[t.v[2]])))
+                .sum::<f64>()
+                / 6.0;
+
+            let f = fracture_mesh(&mesh, guid(31), FractureParams::default()).unwrap();
+            assert_chunk_set_is_sane(&f);
+            let sum = f.total_volume_m3();
+
+            // The direction witness (true by construction — see the docs).
+            assert!(sum >= exact, "n={n}: chunks {sum} lost material vs {exact}");
+            // The arm that can fail.
+            let ratio = sum / exact;
+            assert!(
+                ratio <= BUDGETED_HULL_MAX_RATIO,
+                "n={n}: the {HULL_PLANE_BUDGET}-plane hull over-states the sphere by \
+                 {ratio:.4}×, past the stated {BUDGETED_HULL_MAX_RATIO}"
+            );
+            worst_ratio = worst_ratio.max(ratio);
+
+            // Shape error: the farthest a shipped chunk vertex sits outside the
+            // TRUE hull. A volume sum cannot see this.
+            for c in &f.chunks {
+                for hp in &c.hull_points {
+                    let p = DVec3::from_array(*hp);
+                    let d = faces
+                        .iter()
+                        .map(|t| t.plane.distance(p))
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    worst_shape = worst_shape.max(d);
+                }
             }
-            v / 6.0
-        };
-        let sum = f.total_volume_m3();
+        }
+        // The bound is not slack: at least one tessellation must actually cost
+        // more than 15%, or the budget stopped binding and the pin above is
+        // measuring nothing.
         assert!(
-            sum >= exact,
-            "chunks {sum} lost material against hull {exact}"
+            worst_ratio > 1.15,
+            "no tessellation cost more than {worst_ratio:.4}× — is the budget \
+             still binding?"
         );
+        // …and the shape error the volume sum cannot see, pinned on a unit sphere.
         assert!(
-            sum <= exact * 1.25,
-            "the 48-plane hull over-states the sphere by more than the stated 25%: \
-             {sum} vs {exact}"
+            (0.30..=0.55).contains(&worst_shape),
+            "chunk surfaces run {worst_shape:.3} m outside a 1 m sphere; the v1 \
+             hull scope statement quotes ~0.48 m"
         );
     }
 

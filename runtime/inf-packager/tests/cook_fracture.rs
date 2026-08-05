@@ -22,6 +22,12 @@ use inf_project::ProjectManifest;
 const LEVEL_ID: AssetId = AssetId(uuid::uuid!("00000000-0000-0000-0000-000022020001"));
 const MESH_ID: AssetId = AssetId(uuid::uuid!("00000000-0000-0000-0000-000022020002"));
 const FLAT_ID: AssetId = AssetId(uuid::uuid!("00000000-0000-0000-0000-000022020003"));
+/// A GUID no asset in the project has — the dangling case.
+const MISSING_ID: AssetId = AssetId(uuid::uuid!("00000000-0000-0000-0000-0000220200ff"));
+/// A GUID that resolves to something that is not a mesh.
+const NOT_A_MESH_ID: AssetId = AssetId(uuid::uuid!("00000000-0000-0000-0000-0000220200fe"));
+/// A second level, for the closure-exclusion arm.
+const OTHER_LEVEL_ID: AssetId = AssetId(uuid::uuid!("00000000-0000-0000-0000-0000220200fd"));
 
 fn g(n: u128) -> uuid::Uuid {
     uuid::Uuid::from_u128(n)
@@ -129,6 +135,36 @@ fn cube_mesh(half: f32) -> MeshAsset {
             skin: Vec::new(),
         }],
         vec!["Concrete".into()],
+    )
+}
+
+/// A long thin box rotated onto the diagonal: its hull fills ~0.2% of its AABB,
+/// so most Voronoi sites land outside the solid and yield no chunk.
+fn diagonal_plank() -> MeshAsset {
+    let q = glam::DQuat::from_xyzw(1.0, 2.0, 3.0, 4.0).normalize();
+    let (hx, hy) = (2.0f64, 0.02f64);
+    let mut vertices = Vec::new();
+    for sx in [-1.0, 1.0f64] {
+        for sy in [-1.0, 1.0f64] {
+            for sz in [-1.0, 1.0f64] {
+                let r = q * glam::DVec3::new(sx * hx, sy * hy, sz * hy);
+                vertices.push(MeshVertex {
+                    position: [r.x as f32, r.y as f32, r.z as f32],
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    let n = vertices.len() as u32;
+    MeshAsset::new(
+        vec![SubMesh {
+            name: "plank".into(),
+            vertices,
+            indices: (0..n).collect(),
+            material_slot: Some(0),
+            skin: Vec::new(),
+        }],
+        vec!["Pine".into()],
     )
 }
 
@@ -495,6 +531,185 @@ fn two_cooks_of_a_destructible_project_are_byte_identical() {
         std::fs::read(&a.pack_path).unwrap(),
         std::fs::read(&b.pack_path).unwrap(),
         "two cooks of one destructible project diverged"
+    );
+}
+
+/// **THE SEVENTH CROSS-ASSET ADVISORY (P22.2 audit).** A `Destructible` whose
+/// mesh never reaches the cook ships silently — and there are three ways for
+/// that to happen, all of which cooked clean before this landed.
+///
+/// The component names no asset of its own, which is exactly why nothing else
+/// notices: the level is valid, the pack verifies, the player boots, and a wall
+/// the level calls destructible cannot break. Arm (c) is the positive control —
+/// a reachable mesh must stay silent, or the advisory is noise.
+#[test]
+fn a_destructible_whose_mesh_never_reaches_the_cook_is_advised() {
+    // (a) the GUID resolves to nothing.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (proj, out) = (dir.path().join("proj"), dir.path().join("out"));
+        make_project(
+            &proj,
+            &level(vec![prop(
+                0xE001,
+                "Wall",
+                Some(MISSING_ID),
+                Some(Destructible::default()),
+            )]),
+            &[],
+        );
+        let report = cook(&proj, &out, &opts()).expect("the level still cooks");
+        let msg = report
+            .warnings
+            .iter()
+            .find(|w| w.contains("CANNOT BREAK"))
+            .unwrap_or_else(|| panic!("no advisory in {:?}", report.warnings));
+        assert!(msg.contains("does not have"), "{msg}");
+        assert!(msg.contains(&MISSING_ID.to_string()), "{msg}");
+        assert_eq!(report.fractures_derived, 0);
+    }
+
+    // (b) the GUID resolves to something that is not a mesh.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (proj, out) = (dir.path().join("proj"), dir.path().join("out"));
+        make_project(
+            &proj,
+            &level(vec![prop(
+                0xE002,
+                "Wall",
+                Some(NOT_A_MESH_ID),
+                Some(Destructible::default()),
+            )]),
+            &[],
+        );
+        // A texture standing in for the mis-pointed reference.
+        put(
+            &proj,
+            "Bark.inf_tex",
+            NOT_A_MESH_ID,
+            AssetKind::Texture,
+            b"not really a texture, but the sidecar says it is",
+        );
+        let report = cook(&proj, &out, &opts()).expect("the level still cooks");
+        let msg = report
+            .warnings
+            .iter()
+            .find(|w| w.contains("CANNOT BREAK"))
+            .unwrap_or_else(|| panic!("no advisory in {:?}", report.warnings));
+        assert!(msg.contains("is not an .inf_mesh"), "{msg}");
+    }
+
+    // (c) the positive control: a mesh that IS reachable stays silent.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (proj, out) = (dir.path().join("proj"), dir.path().join("out"));
+        make_project(
+            &proj,
+            &level(vec![prop(
+                0xE003,
+                "Wall",
+                Some(MESH_ID),
+                Some(Destructible::default()),
+            )]),
+            &[(MESH_ID, "Wall.inf_mesh", cube_mesh(1.0))],
+        );
+        // A cook rooted at the level would follow the MeshRef edge, so the
+        // exclusion is forced by rooting at an unrelated asset.
+        let lone = level(vec![prop(0xE004, "Bare", None, None)]);
+        let bytes = lone.encode().unwrap();
+        put(
+            &proj,
+            "Lone.inf_lvl",
+            OTHER_LEVEL_ID,
+            AssetKind::Level,
+            &bytes,
+        );
+        let mut o = opts();
+        o.roots = Some(vec![LEVEL_ID]);
+        // Rooting at the level DOES pull the mesh, so this arm proves the
+        // opposite: with the mesh present and reachable, the advisory is silent.
+        let report = cook(&proj, &out, &o).expect("the level cooks");
+        assert!(
+            !report.warnings.iter().any(|w| w.contains("CANNOT BREAK")),
+            "a reachable mesh must be silent: {:?}",
+            report.warnings
+        );
+        assert_eq!(report.fractures_derived, 1);
+    }
+}
+
+/// **Dropped sites are counted and, past a stated floor, advised.** A diagonal
+/// plank's Voronoi cells mostly miss the solid, so an author who asked for 32
+/// pieces ships far fewer — legal, invisible in every other number, and a break
+/// that reads as a cut.
+#[test]
+fn a_large_chunk_shortfall_is_counted_and_advised() {
+    let dir = tempfile::tempdir().unwrap();
+    let (proj, out) = (dir.path().join("proj"), dir.path().join("out"));
+    make_project(
+        &proj,
+        &level(vec![prop(
+            0xE010,
+            "Plank",
+            Some(MESH_ID),
+            Some(Destructible {
+                chunk_count: 32,
+                ..Destructible::default()
+            }),
+        )]),
+        &[(MESH_ID, "Plank.inf_mesh", diagonal_plank())],
+    );
+
+    let report = cook(&proj, &out, &opts()).expect("the plank cooks");
+    assert_eq!(report.fractures_derived, 1);
+    assert!(
+        report.fracture_chunks_dropped > 0,
+        "the fixture must actually drop sites"
+    );
+    assert_eq!(
+        report.fracture_chunks + report.fracture_chunks_dropped,
+        32,
+        "shipped + dropped must account for every requested site"
+    );
+    let msg = report
+        .warnings
+        .iter()
+        .find(|w| w.contains("of the 32 its Destructible asked for"))
+        .unwrap_or_else(|| panic!("no yield advisory in {:?}", report.warnings));
+    assert!(msg.contains("coarser"), "{msg}");
+
+    // …and the shipped asset records the shortfall, so it stays checkable from
+    // the pack afterwards.
+    let reader = inf_asset::PackReader::open(&report.pack_path).unwrap();
+    let asset: inf_mesh::FractureAsset =
+        inf_asset::decode(&reader.read(derived_fracture_id(MESH_ID)).unwrap()).unwrap();
+    assert_eq!(asset.requested_chunks, 32);
+    assert!(asset.chunks.len() < 32);
+    assert_eq!(asset.chunks.len(), report.fracture_chunks);
+
+    // A well-shaped mesh at the same count does NOT trip it — the floor is a
+    // judgement, not a blanket.
+    let dir2 = tempfile::tempdir().unwrap();
+    let (proj2, out2) = (dir2.path().join("proj"), dir2.path().join("out"));
+    make_project(
+        &proj2,
+        &level(vec![prop(
+            0xE011,
+            "Wall",
+            Some(MESH_ID),
+            Some(Destructible {
+                chunk_count: 32,
+                ..Destructible::default()
+            }),
+        )]),
+        &[(MESH_ID, "Wall.inf_mesh", cube_mesh(1.0))],
+    );
+    let clean = cook(&proj2, &out2, &opts()).expect("the cube cooks");
+    assert!(
+        !clean.warnings.iter().any(|w| w.contains("asked for")),
+        "a cube must not trip the yield floor: {:?}",
+        clean.warnings
     );
 }
 

@@ -3184,6 +3184,7 @@ dependencies = [
  "inf-math",
  "inf-mesh",
  "inf-pcg",
+ "inf-physics",
  "inf-project",
  "inf-scene",
  "inf-terrain",
