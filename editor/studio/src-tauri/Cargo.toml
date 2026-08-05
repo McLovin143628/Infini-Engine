@@ -40,6 +40,11 @@ inf-pcg = { workspace = true }
 # (grid config for the spawned component, tile counts for the done state) and
 # name the lattice type the plan command computes with (P16.4a).
 inf-terrain = { workspace = true }
+# P22.3: `MeshAsset` + `fracture_mesh` to DERIVE a destructible actor's chunk
+# set for a Simulate session (a `.inf_fracture` is cook output and is not in
+# the project's content root), and `resolve_fracture_states` to seed it.
+inf-mesh = { workspace = true }
+inf-physics = { workspace = true }
 inf-anim = { workspace = true }
 inf-blueprint = { workspace = true }
 inf-transpile = { workspace = true }

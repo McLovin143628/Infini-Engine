@@ -53,11 +53,13 @@ use inf_blueprint::{
 use inf_ecs::components::{
     AnimPlayer, AnimStateMachine, AudioListener, AudioSource, CharacterController2D,
     CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
-    DistanceModel, GlobalTransform, RootMotion, RootMotionMode, SmRuntimeState, Terrain, Transform,
-    VoxelVolume,
+    Destructible, DistanceModel, GlobalTransform, RootMotion, RootMotionMode, SmRuntimeState,
+    Terrain, Transform, VoxelVolume,
 };
 use inf_ecs::{update_attachments, EcsWorld, Entity, Guid};
-use inf_physics::d3::WaterEventKind3D;
+use inf_physics::d3::{
+    DebrisBudget, DestroyedEvent, DestructOutcome, FractureAudit, FractureState, WaterEventKind3D,
+};
 use inf_physics::{
     CharacterMover2D, CharacterMover3D, ColliderShape2D, ColliderShape3D, ContactPhase,
     FixedStepper, PhysicsBridge2D, PhysicsBridge3D,
@@ -221,6 +223,26 @@ pub struct SimSession {
     /// by [`take_debug_events`](Self::take_debug_events) after a step. Non-empty
     /// only when a class in `debug` carries breakpoints or wire capture.
     debug_events: Vec<SimDebugHit>,
+    /// The **simulation's own** fracture states (P22.3), keyed by the
+    /// destructible actor's entity `Guid`.
+    ///
+    /// Empty until the caller seeds it after construction (the `voxels` map's
+    /// rule, one phase later, and for the same reason: resolving an actor's
+    /// `.inf_fracture` needs the built world to walk, and `BeginPlay` runs inside
+    /// that construction). A `destruct.*` node on a `BeginPlay` handler therefore
+    /// refuses with "no fracture data resident" — stated in the `destruct.*` kit
+    /// docs rather than worked around.
+    ///
+    /// Sim-owned, never render-owned: a wall's rubble must not depend on where
+    /// anyone was looking, in either direction.
+    fractures: BTreeMap<Uuid, FractureState>,
+    /// The level's debris limits (P22.3). Data rather than a constant physics
+    /// reads for itself — see `inf_physics::d3::DEFAULT_DEBRIS_MAX_LIVE` for why
+    /// a fixed step must not become a function of the graphics tier.
+    debris_budget: DebrisBudget,
+    /// This step's fracture audit — how many chunks the structural solve dropped,
+    /// how many the budget reclaimed, how much debris is live. Read by gates.
+    fracture_audit: FractureAudit,
     /// The **simulation's own** voxel volumes, keyed by entity `Guid` (P21.2).
     ///
     /// Read by the `terrain.height_at` host seam so a character can stand on a
@@ -339,18 +361,22 @@ impl SimSession {
             steps: 0,
             debug: BTreeMap::new(),
             debug_events: Vec::new(),
+            fractures: BTreeMap::new(),
+            debris_budget: DebrisBudget::default(),
+            fracture_audit: FractureAudit::default(),
             voxels: BTreeMap::new(),
         };
 
         session.bridge.sync_from_world(doc.world());
-        // P11.3 3D bridge. The voxel map is still empty here — the caller seeds
+        // P11.3 3D bridge. The voxel map AND the P22.3 fracture map are still
+        // empty here — the caller seeds
         // it after `enter` returns — so a volume's chunk colliders arrive on the
         // first step's sync instead. That is also why a `BeginPlay` handler cannot
         // see a cave (see the P21.4 kit docs): the map it would read does not
         // exist yet.
         session
             .bridge3d
-            .sync_from_world_with_voxels(doc.world(), &session.voxels);
+            .sync_from_world_sim(doc.world(), &session.voxels, &session.fractures);
         session.run_all(doc, &EventKind::BeginPlay);
         session.drain_dispatch(doc); // Wave 3: BeginPlay may dispatch custom events.
         session
@@ -431,6 +457,35 @@ impl SimSession {
         self.state_machines = machines;
     }
 
+    /// Seed the simulation's fracture states (P22.3), keyed by entity `Guid`.
+    ///
+    /// Built by `inf_physics::d3::resolve_fracture_states` — ONE Ring-0 resolver
+    /// both hosts and the PIE seam call, so "which actors can break, and into
+    /// what" is answered in one place. Camera-free by construction: the walk
+    /// reads the world's own `Destructible` + `MeshRef`, never a render store.
+    pub fn set_fractures(&mut self, fractures: BTreeMap<Uuid, FractureState>) {
+        self.fractures = fractures;
+    }
+
+    /// Read-only view of the simulation's fracture states (P22.3).
+    ///
+    /// The map a `destruct.*` node writes and the render projector reads. Exposed
+    /// so a gate can compare the *state* two runs produced — which chunks came
+    /// off, and where they ended up — rather than only the floats a Blueprint
+    /// happened to record. The two can disagree, and the state is the authority.
+    pub fn fractures(&self) -> &BTreeMap<Uuid, FractureState> {
+        &self.fractures
+    }
+
+    /// Set the level's debris limits (P22.3).
+    pub fn set_debris_budget(&mut self, budget: DebrisBudget) {
+        self.debris_budget = budget;
+    }
+
+    /// The most recent fixed step's fracture audit (P22.3).
+    pub fn fracture_audit(&self) -> FractureAudit {
+        self.fracture_audit
+    }
     /// Seed the simulation's voxel volumes (P21.2), keyed by entity `Guid`.
     ///
     /// Each [`VoxelData`]'s anchor must already be its **world** anchor — the
@@ -552,7 +607,7 @@ impl SimSession {
         // ── P11.3 3D bridge: sync ── carrying the P21.4 voxel chunk colliders,
         //    so a runtime carve is something a body can fall into.
         self.bridge3d
-            .sync_from_world_with_voxels(doc.world(), &self.voxels);
+            .sync_from_world_sim(doc.world(), &self.voxels, &self.fractures);
         // ── P20.2 water forces ── buoyancy + hydrodynamic drag, between the
         //    sync and the solver: after the sync because a body must be sampled
         //    where it IS, and before the step because that is the step the forces
@@ -607,6 +662,20 @@ impl SimSession {
         //    post-anim-tick; propagate again so followers' own globals settle.
         update_attachments(doc.world_mut());
         doc.world_mut().propagate();
+        // ── P22.3 runtime destruction ── advance the fracture states: age the
+        //    debris, run the structural solve, apply the level's budget, latch
+        //    `Destroyed`. HERE, and not earlier: the support probes read where
+        //    bodies actually ended the step, and a collapse decided now becomes
+        //    chunk bodies on the NEXT sync — the one beat of latency that makes
+        //    progressive collapse progressive rather than instantaneous. Inert
+        //    (one `is_empty` branch) on every level with no destructible actor.
+        //    (MIRROR of the other host's fixed step.)
+        self.bridge3d.write_back_fractures(&mut self.fractures);
+        let (audit, destroyed) =
+            self.bridge3d
+                .step_fractures(&mut self.fractures, dt, self.debris_budget);
+        self.fracture_audit = audit;
+        self.fire_destroyed(doc, &destroyed);
         // ── P12.3 audio step ── last, so it observes this step's final transforms:
         //    pick the listener, enqueue autoplay, resolve occlusion, drain the queue.
         self.audio_step(doc);
@@ -826,6 +895,7 @@ impl SimSession {
                 dispatch_queue: &mut self.dispatch_queue,
                 dt: self.stepper.fixed_dt(),
                 voxels: &mut self.voxels,
+                fractures: &mut self.fractures,
             };
             match run_event(
                 &state.class,
@@ -1013,6 +1083,63 @@ impl SimSession {
             ]
             .into();
             self.run_on_guid(doc, ev.body, &kind, &args);
+        }
+    }
+
+    /// Fire this step's `Destroyed` events on their actors (P22.3) — the MIRROR
+    /// of `RuntimeSim::fire_destroyed`.
+    ///
+    /// Fired in the **fracture slot**, right after the structural solve that
+    /// decided it, rather than in the collision slot: a collapse is sensed from
+    /// the post-step poses (a chunk's support is a query against where things
+    /// actually ended up), so putting it with the contacts would give one fixed
+    /// step two different answers to "when did this happen". The bridge already
+    /// produced the list in actor-`Guid` order, so this loop adds no ordering of
+    /// its own.
+    ///
+    /// # The audio hook, and why it is a push rather than a handler call
+    ///
+    /// P20.2 deliberately did **not** give water events an implicit sound: the
+    /// P12.3 doctrine is that the audio stream is a pure function of sim state,
+    /// water events *are* sim state, and a `Play` queued from an `On Splash`
+    /// handler lands in the command queue in the same deterministic order. That
+    /// reasoning still holds — and it is not enough here, because the common case
+    /// is different. A destructible wall usually has **no Blueprint at all**: it
+    /// is a mesh, a `Destructible` and a collider. A handler-only route would make
+    /// every wall in a level silent unless somebody scripted it one at a time.
+    ///
+    /// So an actor that carries an `AudioSource` plays it when it is destroyed,
+    /// pushed straight onto the same `AudioCommandQueue` autoplay uses, in the
+    /// same deterministic slot. An actor that also has an `On Destroyed` handler
+    /// gets both, which is right: the component is the default and the handler is
+    /// the override.
+    ///
+    /// **The clip is the emitter's own.** `AudioSource::clip` is what plays;
+    /// there is no "destruction sound" slot on `Destructible` and there is not
+    /// going to be one (the memo's §5 rule — a field describing the whole scene
+    /// or a whole subsystem does not belong on this component). The
+    /// asset-resolution gap `audio.play_oneshot` has is not solved here either:
+    /// an emitter whose clip GUID is not in the sim's registered set is silent,
+    /// exactly as it is for autoplay.
+    fn fire_destroyed(&mut self, doc: &mut SceneDoc, events: &[DestroyedEvent]) {
+        if events.is_empty() {
+            return;
+        }
+        for ev in events {
+            // The audio push first, so it is queued whether or not the actor has
+            // a handler — and so an actor that has both gets the component's
+            // sound before whatever its handler queues.
+            if let Some((src, pos)) = destroyed_emitter(doc.world(), ev.entity) {
+                let cmd =
+                    play_command_for(guid_source_key(ev.entity), &src, src.spatial.then_some(pos));
+                self.audio_cmds.push(AudioCommand::Play(cmd));
+            }
+            if !self.actors.contains_key(&ev.entity) {
+                continue;
+            }
+            let args: std::collections::HashMap<String, Value> =
+                [("chunks".to_string(), Value::Int(ev.detached as i64))].into();
+            self.run_on_guid(doc, ev.entity, &EventKind::Destroyed, &args);
         }
     }
 
@@ -1319,6 +1446,11 @@ struct SimHost<'a> {
     /// what keeps a camera out of a fixed step's answers, in both directions: the
     /// carve a game commits must not depend on where anyone is looking either.
     voxels: &'a mut BTreeMap<Uuid, VoxelData>,
+    /// The simulation's own fracture states (P22.3), keyed by the
+    /// destructible actor's `Guid` and **written** by the `destruct.*`
+    /// nodes. Borrowed from the sim's own map — never from a render
+    /// store, for the reason the `voxels` field above states.
+    fractures: &'a mut BTreeMap<Uuid, FractureState>,
 }
 
 use inf_ecs::components::WeatherPreset;
@@ -1531,6 +1663,61 @@ impl Host for SimHost<'_> {
                 inf_voxel::topmost_voxel_surface(self.voxels, arg_f64(args, 0), arg_f64(args, 1))
                     .unwrap_or(0.0),
             )),
+            // destruct.* (P22.3) — RUNTIME DESTRUCTION, shared verbatim with the
+            // shipped `RuntimeHost` so preview == shipped by construction. The two actions run
+            // one Ring-0 rule (`PhysicsBridge3D::runtime_destruct` /
+            // `::radial_impulse`) against the sim's own fracture map; the two
+            // queries read that same map.
+            //
+            // Every refusal — no `Destructible`, `runtime_destruct` off, no
+            // fracture data resident, a non-positive energy — answers **0.0** and
+            // logs one shared message, because a Blueprint node is not a
+            // transaction: failing the handler would take down the rest of the
+            // Tick body for a blow the author fixes by typing a bigger number.
+            // `0.0` also means "I hit it and nothing came off", which is
+            // deliberate — the two are the same fact from gameplay's side (no
+            // rubble) and the log is where they differ. The `voxel.*` kit answers
+            // the same way for the same reason.
+            (Some("destruct"), Some("apply_damage")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Float(match entity {
+                    Ok(guid) => runtime_destruct_damage(
+                        self.bridge3d,
+                        self.fractures,
+                        self.world,
+                        self.logs,
+                        guid,
+                        arg_f64(args, 1),
+                    ),
+                    Err(_) => 0.0,
+                }))
+            }
+            (Some("destruct"), Some("radial_impulse")) => {
+                // NOT gated by `runtime_destruct`: this breaks nothing. It pushes
+                // dynamic bodies that already exist, and an actor whose
+                // destruction is switched off still has a body an explosion
+                // should move.
+                let hit = self.bridge3d.radial_impulse(
+                    DVec3::new(arg_f64(args, 0), arg_f64(args, 1), arg_f64(args, 2)),
+                    arg_f64(args, 3),
+                    arg_f64(args, 4),
+                );
+                Ok(Value::Float(hit as f64))
+            }
+            (Some("destruct"), Some("is_intact")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => PhysicsBridge3D::is_intact(self.fractures, guid),
+                    Err(_) => false,
+                }))
+            }
+            (Some("destruct"), Some("chunk_count")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Int(match entity {
+                    Ok(guid) => PhysicsBridge3D::fracture_chunk_count(self.fractures, guid) as i64,
+                    Err(_) => 0,
+                }))
+            }
             // Unknown engine call: log it (matching the graph preview host) so a
             // partially-authored blueprint still runs rather than aborting.
             _ => {
@@ -2164,6 +2351,65 @@ fn runtime_voxel_op(
 
 /// Whether any of the sim's volumes has rock at a world point (`voxel.is_solid`).
 /// Shared with the runtime twin; deterministic (`BTreeMap` order, and the answer
+/// The `AudioSource` and world position of a destroyed actor, or `None` when it
+/// carries no emitter (P22.3). Shared shape with the runtime twin.
+fn destroyed_emitter(world: &EcsWorld, entity: Uuid) -> Option<(AudioSource, DVec3)> {
+    let e = world.entity_of(entity)?;
+    let src = world.world().get::<AudioSource>(e)?.clone();
+    let pos = world
+        .world()
+        .get::<GlobalTransform>(e)
+        .map(|g| g.translation())
+        .or_else(|| {
+            world
+                .world()
+                .get::<Transform>(e)
+                .map(|t| t.translation.to_dvec3())
+        })
+        .unwrap_or(DVec3::ZERO);
+    Some((src, pos))
+}
+
+/// **One gameplay blow** (P22.3) — the destruction half through the shared
+/// Ring-0 rule. Returns the energy **absorbed** in joules, `0.0` for every
+/// refusal.
+///
+/// Mirrored character-for-character in `inf_player::runtime_sim`, for the reason
+/// `terrain_height_at` and `runtime_voxel_op` are: a preview that broke a
+/// different wall from the shipped build is a bug no compiler and no screenshot
+/// finds.
+///
+/// The component decides permission and a missing one is "nothing to break"
+/// rather than "not permitted", because the two read very differently in a log —
+/// the `runtime_voxel_op` shape exactly.
+fn runtime_destruct_damage(
+    bridge3d: &mut PhysicsBridge3D,
+    fractures: &mut BTreeMap<Uuid, FractureState>,
+    world: &EcsWorld,
+    logs: &mut Vec<String>,
+    entity: Uuid,
+    energy_j: f64,
+) -> f64 {
+    let flag = world
+        .entity_of(entity)
+        .and_then(|e| world.world().get::<Destructible>(e))
+        .map(|d| d.runtime_destruct);
+    let Some(permitted) = flag else {
+        logs.push(
+            DestructOutcome::NoDestructible
+                .refusal("destruct::apply_damage")
+                .expect("NoDestructible is a refusal"),
+        );
+        return 0.0;
+    };
+    let report = bridge3d.runtime_destruct(fractures, entity, permitted, energy_j);
+    if let Some(msg) = report.outcome.refusal("destruct::apply_damage") {
+        logs.push(msg);
+        return 0.0;
+    }
+    report.energy_absorbed_j
+}
+
 /// is an `any`, so order cannot change it).
 fn voxel_is_solid(voxels: &BTreeMap<Uuid, VoxelData>, p: DVec3) -> bool {
     voxels.values().any(|d| d.is_solid_at(p))

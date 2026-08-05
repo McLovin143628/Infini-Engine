@@ -70,6 +70,23 @@ pub enum EventKind {
     /// Fires *in addition to* the enter/exit it accompanies, never instead of it,
     /// so a handler that only cares about wet/dry never has to know it exists.
     WaterSplash,
+    // ── destruction (P22.3) ──────────────────────────────────────────────
+    //
+    // Appended after `WaterSplash`, per the wire note above: a `.inf_act` is
+    // pretty JSON, so an externally-tagged variant is written as its NAME.
+    // Appending is free; renaming would not be.
+    //
+    // **One variant, not two.** A `ChunkDetached` event was considered and
+    // dropped: a collapse detaches chunks by the dozen inside one fixed step, so
+    // a per-chunk event is a handler fired dozens of times with a chunk index it
+    // cannot name anything with (chunks are not entities — see the `destruct.*`
+    // kit docs). "How far has this collapsed" is a *state*, and
+    // `destruct.is_intact` polls it. "This actor is finished" is an **edge**, and
+    // an edge is what an event is for. Fewer is better.
+    /// Every one of a destructible actor's chunks has come off — the actor is
+    /// finished. Fires **once**, on the first fixed step at which that is true.
+    /// Handler receives `chunks: Int` (how many came off).
+    Destroyed,
 }
 
 impl EventKind {
@@ -98,6 +115,10 @@ impl EventKind {
                     ty: Ty::Float,
                 },
             ],
+            EventKind::Destroyed => vec![Param {
+                name: "chunks".into(),
+                ty: Ty::Int,
+            }],
             EventKind::BeginPlay | EventKind::Custom(_) => vec![],
         }
     }
@@ -112,6 +133,7 @@ impl EventKind {
             EventKind::WaterEnter => "water_enter".into(),
             EventKind::WaterExit => "water_exit".into(),
             EventKind::WaterSplash => "water_splash".into(),
+            EventKind::Destroyed => "destroyed".into(),
             EventKind::Custom(n) => format!("custom:{n}"),
         }
     }

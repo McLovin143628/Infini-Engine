@@ -51,6 +51,7 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(sky_nodes());
     reg.register_all(water_nodes());
     reg.register_all(voxel_nodes());
+    reg.register_all(destruct_nodes());
     reg
 }
 
@@ -125,6 +126,20 @@ fn event_nodes() -> Vec<NodeDef> {
                 exec_out(EXEC_THEN),
                 PortDef::new("water", PortType::Int),
                 PortDef::new("speed", PortType::Float),
+            ]),
+        // ── destruction (P22.3) ──
+        //
+        // The same param-less shape. ONE event, not two: see the note on
+        // `EventKind::Destroyed` for why `ChunkDetached` was dropped rather than
+        // appended beside it.
+        NodeDef::new("event.destroyed", "On Destroyed", "events")
+            .described(
+                "Fires once, on the step at which every one of this actor's fracture chunks \
+                 has come off; `chunks` is how many. For partial damage, poll Is Intact.",
+            )
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("chunks", PortType::Int),
             ]),
     ]
 }
@@ -870,6 +885,156 @@ fn voxel_nodes() -> Vec<NodeDef> {
             .with_outputs(vec![PortDef::new("height", PortType::Float)]),
     ]
 }
+/// The destruction kit (P22.3) — **runtime destruction**: two exec actions that
+/// break things and two pure queries that ask what is left. The `voxel_nodes`
+/// shape, one phase later, because the two kits are the same idea about two
+/// different substrates: a rule in Ring 0, a component flag as the gate, and
+/// refusals that are values.
+///
+/// ## The namespace, and why it is not `physics3d.*`
+///
+/// `physics3d.*` is about *bodies* — set a velocity, move and slide, ask what a
+/// ray hit. Destruction is about a **structure**: a graph of chunks that holds
+/// itself up until it does not. `destruct.radial_impulse` is the one node that
+/// could plausibly have lived next door, and it is here because an explosion in a
+/// game is the same event as the damage it deals, and a designer building one
+/// wants both nodes in one palette category rather than in two.
+///
+/// ## Units: joules and newton-seconds, and no damage numbers anywhere
+///
+/// `destruct.apply_damage` takes an **energy in joules** and
+/// `destruct.radial_impulse` an **impulse in newton-seconds**. Neither takes a
+/// "damage" number, and the whole of `docs/memos/p22-strength.md` §1 is the
+/// argument: a unitless durability cannot be compared against anything the
+/// physics engine produces, so every weapon and every material needs a made-up
+/// conversion constant and the only way to tune the system is to try numbers
+/// until it looks right. A joule is a joule.
+///
+/// * **`energy_j`** is spent breaking bonds, each of which costs
+///   `strength × shared face area × 1 mm` (the crack-opening displacement —
+///   `inf_physics::d3::CRACK_OPENING_M` carries the derivation). The node returns
+///   the joules it actually **absorbed**, so a caller can subtract: an impact that
+///   delivered 20 kJ and absorbed 6 kJ still has 14 kJ to spend on something else.
+///   `0.0` means nothing came off — either a refusal or a blow too weak for the
+///   cheapest bond, which are the same fact from gameplay's side and differ only
+///   in the log. That is the `voxel.carve_*` precedent, which likewise reports the
+///   **cubic metres** moved rather than the number of samples it touched.
+/// * **`impulse_ns`** is the momentum delivered **at one metre**, falling off as
+///   the inverse square beyond that and clamped inside it. An impulse rather than
+///   a force because an explosion happens inside one step and a rapier force
+///   persists until it is reset (see `PhysicsWorld3D::apply_force`'s docs for both
+///   halves of that law). A body's velocity change is `J / m`, which rapier does
+///   for free — so a concrete chunk and a paper crate at the same distance move
+///   differently without one tuning constant.
+///
+/// ## The `runtime_destruct` gate
+///
+/// `destruct.apply_damage` checks the target actor's `Destructible::runtime_destruct`
+/// **first**. When it is `false` the node is a deterministic no-op returning
+/// `0.0` — not an error, not a partial break. That flag was frozen into scene
+/// schema v20 for exactly this, and the refusal is reported on the log rather
+/// than swallowed, in both hosts, with one shared message
+/// (`inf_physics::d3::DestructOutcome::refusal`).
+///
+/// Damage is also refused when the actor has no `Destructible` at all, when no
+/// `.inf_fracture` is resident for it, and when the energy is not a positive
+/// finite number. All four refusals answer `0.0`, so a Blueprint that only wants
+/// "did I break anything" needs no error handling; one that wants to know *why*
+/// reads the log.
+///
+/// `destruct.radial_impulse` is **not** gated, and deliberately: it breaks
+/// nothing. It pushes whatever dynamic bodies are already in the world — debris,
+/// crates, ragdolls — and an actor whose destruction is switched off still has a
+/// body that an explosion should move.
+///
+/// ## `BeginPlay` cannot see a fracture — damage on `Tick`
+///
+/// Both hosts seed their fracture map **after** constructing the sim, because
+/// resolving an actor's `.inf_fracture` needs the built world to walk, and
+/// `BeginPlay` runs inside that construction. So a `destruct.*` node on a
+/// `BeginPlay` handler sees an empty map and refuses with "no fracture data
+/// resident". It is stated here rather than worked around, because the
+/// workaround (deferring `BeginPlay`) changes when *every* handler in the engine
+/// runs. Put the first blow on `Tick`. The `voxel.*` kit says the same thing
+/// about the same seam.
+///
+/// ## What runtime destruction does NOT do
+///
+/// * **Nothing is persisted.** A broken wall lives in the sim's fracture map and
+///   dies with the session. The `.inf_lvl` on disk is untouched — destruction
+///   state in the save is P22.4's deliverable, and writing a player's rubble into
+///   the author's level would be the worst possible default. (The `voxel.*` kit
+///   made the same promise about the same kind of state.)
+/// * **No new actors.** A shattered wall does not become twelve entities; its
+///   chunks are sim state with synthetic identities. So a `destruct.*` node can
+///   only name a whole destructible actor, never one of its chunks, and nothing
+///   in the Outliner changes when a building comes down.
+/// * **No VFX.** This engine has no particle system, so a break makes no dust.
+///   The audio hook is real (a `Destroyed` actor with an `AudioSource` plays it,
+///   through the P12.3 command queue); the visual one is not, and is not
+///   half-built here.
+///
+/// ## Why the two queries have one output each
+///
+/// The `sky.*`/`water.*`/`voxel.*` rule, for the same reason: a `PureCall` with
+/// more than one data output fans each pin into its own `destruct::<op>::<field>`
+/// call, which would force three-segment match arms in both hosts. The actions
+/// may have a data output because an `Action` binds its single output to a
+/// `Stmt::Let`.
+fn destruct_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("destruct.apply_damage", "Apply Damage", "destruct")
+            .described(
+                "Spend energy breaking an actor's fracture bonds, then let whatever that \
+                 leaves unsupported collapse. Energy is in JOULES; reports the joules \
+                 actually absorbed (0 if the actor's Runtime Destruct is off, it has no \
+                 fracture data, or the blow was too weak).",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("energy_j", PortType::Float),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("absorbed_j", PortType::Float),
+            ]),
+        NodeDef::new("destruct.radial_impulse", "Radial Impulse", "destruct")
+            .described(
+                "Push every dynamic body within a radius away from a world point — an \
+                 explosion. Impulse is NEWTON-SECONDS delivered at 1 m, falling off as the \
+                 inverse square beyond that; radius is in metres. Reports how many bodies \
+                 were pushed. Breaks nothing on its own: pair it with Apply Damage.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+                PortDef::new("impulse_ns", PortType::Float),
+                PortDef::new("radius_m", PortType::Float),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("bodies_hit", PortType::Float),
+            ]),
+        NodeDef::new("destruct.is_intact", "Is Intact", "destruct")
+            .described(
+                "True while none of the actor's fracture chunks has come off. False for an \
+                 actor with no fracture data at all — nothing broken, but nothing that CAN \
+                 break either; ask Chunk Count to tell those apart.",
+            )
+            .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
+            .with_outputs(vec![PortDef::new("intact", PortType::Bool)]),
+        NodeDef::new("destruct.chunk_count", "Chunk Count", "destruct")
+            .described(
+                "How many chunks the actor's fracture has — 0 when it has none, which is \
+                 how you tell 'indestructible' from 'already broken'.",
+            )
+            .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
+            .with_outputs(vec![PortDef::new("chunks", PortType::Int)]),
+    ]
+}
 
 /// The input-state kit (P8.4): pure Bool queries the Simulate loop answers from
 /// the focused viewport's keyboard state. Both take the action/key **as a `Str`
@@ -1175,6 +1340,125 @@ mod tests {
     /// output, two pure single-output queries, and — the thing a reader cannot
     /// see from the node list — **declaration order is argument order**, so a
     /// swap here silently passes a radius as a Y coordinate.
+    #[test]
+    fn destruct_kit_is_registered() {
+        let reg = blueprint_registry();
+        for id in [
+            "destruct.apply_damage",
+            "destruct.radial_impulse",
+            "destruct.is_intact",
+            "destruct.chunk_count",
+            "event.destroyed",
+        ] {
+            assert!(reg.get(id).is_some(), "missing destruct node {id}");
+        }
+
+        // The two actions are exec ACTIONS with exactly one data output, which is
+        // what lets the lowerer bind them to a `Stmt::Let` (the
+        // `physics2d.move_and_slide` shape) instead of fanning into
+        // `destruct::<op>::<field>` — which the hosts' two-segment match cannot
+        // see. Both outputs are `Float`, including `bodies_hit`: a count is an
+        // Int in spirit, but an `Action`'s single output is bound as one value
+        // and the kit family's convention is that actions report a Float.
+        for (id, out) in [
+            ("destruct.apply_damage", "absorbed_j"),
+            ("destruct.radial_impulse", "bodies_hit"),
+        ] {
+            let d = reg.get(id).unwrap();
+            assert!(d.input(EXEC_IN).is_some(), "{id} must be an exec action");
+            assert!(d.output(EXEC_THEN).is_some(), "{id} must chain");
+            let data_outs: Vec<&str> = d
+                .outputs
+                .iter()
+                .filter(|p| !p.ty.is_exec())
+                .map(|p| p.name.as_str())
+                .collect();
+            assert_eq!(data_outs, [out], "{id} must have exactly one data output");
+            assert_eq!(d.output(out).unwrap().ty, PortType::Float);
+        }
+
+        // `apply_damage` names an ACTOR (it breaks one thing); `radial_impulse`
+        // does NOT (a blast is a place in the world, and what it reaches is
+        // whatever is there) — the `voxel.carve_*` vs `voxel.is_solid` split, and
+        // the reason the two live in one namespace anyway.
+        assert!(
+            reg.get("destruct.apply_damage")
+                .unwrap()
+                .input("entity")
+                .unwrap()
+                .required,
+            "apply_damage must name its actor"
+        );
+        assert!(
+            reg.get("destruct.radial_impulse")
+                .unwrap()
+                .input("entity")
+                .is_none(),
+            "radial_impulse is a place, not an actor"
+        );
+
+        // The two queries are pure and single-output, and both name an actor.
+        for (id, out, ty) in [
+            ("destruct.is_intact", "intact", PortType::Bool),
+            ("destruct.chunk_count", "chunks", PortType::Int),
+        ] {
+            let d = reg.get(id).unwrap();
+            assert!(d.input(EXEC_IN).is_none(), "{id} must be pure");
+            assert_eq!(d.outputs.len(), 1, "{id} must have one data output");
+            assert_eq!(d.output(out).unwrap().ty, ty);
+            assert!(
+                d.input("entity").unwrap().required,
+                "{id} must name its actor"
+            );
+        }
+
+        // Declaration order IS argument order (`lower::data_input_ports`), and the
+        // two hosts' arms index `args` positionally — so this list is a contract.
+        let args = |id: &str| -> Vec<String> {
+            reg.get(id)
+                .unwrap()
+                .inputs
+                .iter()
+                .filter(|p| !p.ty.is_exec())
+                .map(|p| p.name.clone())
+                .collect()
+        };
+        assert_eq!(args("destruct.apply_damage"), ["entity", "energy_j"]);
+        assert_eq!(
+            args("destruct.radial_impulse"),
+            ["x", "y", "z", "impulse_ns", "radius_m"]
+        );
+        assert_eq!(args("destruct.is_intact"), ["entity"]);
+        assert_eq!(args("destruct.chunk_count"), ["entity"]);
+
+        // The event carries the chunk count as an Int, matching
+        // `EventKind::Destroyed::signature()` — two halves of one contract.
+        let ev = reg.get("event.destroyed").unwrap();
+        assert!(ev.input(EXEC_IN).is_none(), "an event node has no exec IN");
+        assert!(ev.output(EXEC_THEN).is_some());
+        let data_outs: Vec<(&str, PortType)> = ev
+            .outputs
+            .iter()
+            .filter(|p| !p.ty.is_exec())
+            .map(|p| (p.name.as_str(), p.ty.clone()))
+            .collect();
+        assert_eq!(data_outs, [("chunks", PortType::Int)]);
+
+        // **SI in the signature.** The two units that are not obvious from a pin
+        // name are spelled out in the node's own description, because that is what
+        // an author reads in the palette — the units doctrine at the UI boundary.
+        let described = |id: &str| reg.get(id).unwrap().description.clone();
+        assert!(
+            described("destruct.apply_damage").contains("JOULES"),
+            "apply_damage must say what `energy_j` is"
+        );
+        let blast = described("destruct.radial_impulse");
+        assert!(
+            blast.contains("NEWTON-SECONDS") && blast.contains("metres"),
+            "radial_impulse must say what `impulse_ns` and `radius_m` are"
+        );
+    }
+
     #[test]
     fn voxel_kit_is_registered() {
         let reg = blueprint_registry();

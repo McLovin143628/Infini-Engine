@@ -98,6 +98,7 @@ pub fn event_kind_of(fn_id: &str) -> EventKind {
         "water_enter" => EventKind::WaterEnter,
         "water_exit" => EventKind::WaterExit,
         "water_splash" => EventKind::WaterSplash,
+        "destroyed" => EventKind::Destroyed,
         other => {
             if let Some(action) = other.strip_prefix("input:") {
                 EventKind::Input(action.to_string())

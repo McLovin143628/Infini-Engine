@@ -16,12 +16,9 @@ bytemuck = { workspace = true }
 glam = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-gltf = { workspace = true }
-meshopt = { workspace = true }
 # Decode `map_Kd` sidecar textures for OBJ import → RGBA8 `RawImage` (the glTF
 # path gets decoded images from the `gltf` crate; OBJ references loose files).
 # Workspace pin — no new version enters the tree (already used by inf-material).
-image = { workspace = true }
 # Asset GUIDs: the fracture pipeline derives its `.inf_fracture` id from the
 # mesh's (`fracture::derived_fracture_id`) and stamps the source GUID into the
 # payload. Workspace pin; `inf-asset` already has it in the tree.
@@ -29,3 +26,23 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# ── Import path: HOST-ONLY (P22.3) ──────────────────────────────────────────
+#
+# `meshopt` builds meshoptimizer's C++ through `cc`, `gltf` and `image` are
+# decoders — and all three serve the **import** half of this crate, which runs in
+# the editor and the cook and never in a browser. They are gated out of wasm32 on
+# exactly the rule `inf-vgeom` already applies to `meshopt`: the DAG is built at
+# cook time, the browser player only loads what was cooked.
+#
+# What forced it: P22.3 made `inf-physics` depend on this crate for
+# `FractureAsset` (the structural solve reads the cook's own chunk adjacency
+# rather than a second copy of it), and `inf-physics` is not optional for the
+# wasm player. Without this split `cargo check --target wasm32-unknown-unknown -p
+# inf-player` fails in `cc-rs` with "failed to find tool clang" — measured, not
+# assumed. `asset`, `error` and `fracture` build everywhere; `gltf_import`,
+# `obj_import` and `optimize` are `#[cfg(not(target_arch = "wasm32"))]`.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+meshopt = { workspace = true }
+gltf = { workspace = true }
+image = { workspace = true }

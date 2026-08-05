@@ -126,6 +126,12 @@ pub async fn pie_start(
             // terrain's working set was stripped in favour of. Without it a PIE
             // session over an asset-backed terrain previews no ground at all.
             |guid| assets.load_terrain_bytes(inf_asset::AssetId(guid)),
+            // P22.3: the `.inf_mesh` bytes a `Destructible` actor's fracture is
+            // DERIVED from — the one payload entry that is computed rather than
+            // resolved. Without it a PIE session over a destructible level would
+            // have nothing to break, and PIE == shipping would be comparing an
+            // empty map against a full one.
+            |guid| assets.load_mesh_bytes(inf_asset::AssetId(guid)),
             PIE_TICK_HZ,
             true,
         )

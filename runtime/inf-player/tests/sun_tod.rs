@@ -169,6 +169,8 @@ fn pie_sim(doc: &SceneDoc) -> RuntimeSim {
         |_guid| None, // no biome sets
         |_guid| None, // no voxel volumes
         |_guid| None, // no streamed terrains
+        // P22.3: no destructible meshes in this fixture.
+        |_| None,
         60,
         false,
     )

@@ -244,7 +244,8 @@ fn handle_msg(
                 *tick_duration = std::time::Duration::from_secs_f64(1.0 / payload.tick_hz as f64);
             }
             if payload.windowed {
-                return Control::RunWindow(Box::new(payload));
+                // Already boxed on the wire (P22.3) — hand the same allocation on.
+                return Control::RunWindow(payload);
             }
             // `sim_from_payload` is the ONE PIE boot seam (P21.4): it makes every
             // attachment a PIE session needs — cells, voxel volumes, state

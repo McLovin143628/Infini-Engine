@@ -172,7 +172,7 @@ impl PieSession {
     /// pack path — the PIE == shipping guarantee.
     pub fn spawn_scene(player_bin: &Path, payload: &ScenePayload) -> Result<Self, PieError> {
         let mut session = Self::spawn_ready(player_bin)?;
-        session.send(&EditorToPlayer::LoadScene(payload.clone()))?;
+        session.send(&EditorToPlayer::LoadScene(Box::new(payload.clone())))?;
         session.await_loaded()
     }
 
@@ -391,7 +391,7 @@ impl Drop for PieSession {
 /// pinned by `a_payload_carries_every_referenced_asset_kind_in_its_own_field`
 /// below.)
 #[allow(clippy::too_many_arguments)]
-pub fn build_scene_payload<F, G, H, B, V, T>(
+pub fn build_scene_payload<F, G, H, B, V, T, M>(
     doc: &SceneDoc,
     mut resolve: F,
     mut resolve_pcg: G,
@@ -399,6 +399,7 @@ pub fn build_scene_payload<F, G, H, B, V, T>(
     mut resolve_biome_set: B,
     mut resolve_voxel: V,
     mut resolve_terrain: T,
+    mut resolve_mesh: M,
     tick_hz: u32,
     windowed: bool,
 ) -> Result<ScenePayload, PieError>
@@ -409,6 +410,7 @@ where
     B: FnMut(Uuid) -> Option<Vec<u8>>,
     V: FnMut(Uuid) -> Option<Vec<u8>>,
     T: FnMut(Uuid) -> Option<Vec<u8>>,
+    M: FnMut(Uuid) -> Option<Vec<u8>>,
 {
     let level_bytes = serialize::encode(&serialize::to_scene_file(doc))
         .map_err(|e| PieError::Protocol(format!("encode scene: {e}")))?;
@@ -604,13 +606,77 @@ where
         }
     }
 
+    // Derived fracture chunk sets (P22.3): for every `Destructible` actor, the
+    // `.inf_fracture` its own `MeshRef.asset` implies.
+    //
+    // **Computed here rather than resolved**, and it is the only entry in this
+    // payload that is. A `.inf_fracture` does not exist in the editor's content
+    // root — it is derived at *cook*, from the mesh, because "is this mesh
+    // destructible" is a fact about a level and not about the mesh. So PIE runs
+    // the same derivation the cook runs: `inf_mesh::fracture_mesh` over the same
+    // `.inf_mesh` bytes with the same `Destructible::{fracture_seed, chunk_count}`,
+    // keyed by the same `derived_fracture_id`. A deterministic function of the
+    // same inputs cannot give the preview a different building from the shipped
+    // one — which is the whole claim, and it is why the resolver here hands back
+    // MESH bytes rather than fracture bytes.
+    //
+    // One fracture per mesh, not per actor: the derived id is a function of the
+    // mesh's, so two walls sharing a mesh share a chunk set. When two actors
+    // disagree about the parameters, the first in document order wins — the same
+    // rule (and the same advisory) `inf_packager::cook::plan_fractures` applies.
+    // A mesh the caller cannot serve, or one the fracture refuses (too small,
+    // degenerate, too few chunks), is simply absent: the actor previews as
+    // indestructible, which is exactly what the shipped build does with the same
+    // refusal.
+    let mut fractures: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut seen_fracture: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let w = world.world();
+        let Some(d) = w.get::<inf_ecs::components::Destructible>(e).copied() else {
+            continue;
+        };
+        let Some(mesh_id) = w
+            .get::<inf_ecs::components::MeshRef>(e)
+            .and_then(|m| m.asset)
+        else {
+            continue;
+        };
+        if !seen_fracture.insert(mesh_id) {
+            continue;
+        }
+        let Some(bytes) = resolve_mesh(mesh_id) else {
+            continue;
+        };
+        let Ok(mesh) = inf_asset::decode::<inf_mesh::MeshAsset>(&bytes) else {
+            continue;
+        };
+        let params = inf_mesh::FractureParams {
+            seed: d.fracture_seed,
+            chunk_count: d.chunk_count,
+        };
+        let Ok(asset) = inf_mesh::fracture_mesh(&mesh, inf_asset::AssetId(mesh_id), params) else {
+            continue;
+        };
+        let Ok(encoded) = inf_asset::encode(&asset) else {
+            continue;
+        };
+        fractures.push((
+            inf_mesh::derived_fracture_id(inf_asset::AssetId(mesh_id)).uuid(),
+            encoded,
+        ));
+    }
+
     Ok(
         ScenePayload::new(doc.title(), level_bytes, classes, tick_hz, windowed)
             .with_pcgs(pcgs)
             .with_biome_sets(biome_sets)
             .with_anim_assets(skeletons, clips, machines)
             .with_voxels(voxels)
-            .with_terrains(terrains),
+            .with_terrains(terrains)
+            .with_fractures(fractures),
     )
 }
 
@@ -693,6 +759,8 @@ mod tests {
             |g| (g == BIOMES).then(|| b"BIOMES".to_vec()),
             |g| (g == VOXELS).then(|| b"VOXELS".to_vec()),
             |g| (g == TERRAIN).then(|| b"TERRAIN".to_vec()),
+            // P22.3: no destructible meshes in this fixture.
+            |_| None,
             60,
             false,
         )
@@ -734,6 +802,8 @@ mod tests {
             |_| None,
             |_| None,
             |_| None,
+            |_| None,
+            // P22.3: no destructible meshes in this fixture.
             |_| None,
             60,
             false,

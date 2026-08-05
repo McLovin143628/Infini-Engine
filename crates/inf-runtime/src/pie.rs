@@ -69,6 +69,9 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 /// * v4 — appended `biome_sets`: the `.inf_biomes` payloads a v16 level's
 ///   `Terrain.biome_set` refs, so the PIE player runs the biome→PCG binding
 ///   exactly like the shipping pack path.
+/// * **v6** — `fractures` (P22.3): the DERIVED `.inf_fracture` chunk sets, so a
+///   PIE session breaks the same walls into the same pieces the shipped build
+///   does. The first payload entry that is *computed* rather than *resolved*.
 /// * v5 — appended `voxels` **and** `terrains` (P21.4), the two byte sources the
 ///   PIE player had no route to at all.
 ///
@@ -85,7 +88,7 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   mouths" and "a level PIE can preview" were mutually exclusive until now.
 ///   `serialize::strip_streamed_terrain` still blanks the inline working set, so
 ///   PIE streams from the asset exactly as the shipped build does.
-pub const SCENE_PAYLOAD_VERSION: u32 = 5;
+pub const SCENE_PAYLOAD_VERSION: u32 = 6;
 
 /// Upper bound on a single frame; anything larger means a desynced or
 /// corrupt stream and is treated as an error rather than an allocation. A
@@ -167,6 +170,25 @@ pub struct ScenePayload {
     /// the hole mask that makes a cave mouth a cave mouth.
     #[serde(default)]
     pub terrains: Vec<(Uuid, Vec<u8>)>,
+    /// `.inf_fracture` payloads (P22.3), keyed by the **derived** fracture id —
+    /// `inf_mesh::derived_fracture_id(mesh)`, exactly the id the cooked pack
+    /// stores them under, so the player looks a fracture up the same way on both
+    /// paths and there is one lookup rule rather than two.
+    ///
+    /// A `.inf_fracture` is *derived*, not authored: it does not exist in the
+    /// editor's content root at all, so unlike every other entry above these
+    /// bytes are produced at payload time by running the **same**
+    /// `inf_mesh::fracture_mesh` the cook runs, with the same
+    /// `Destructible::{fracture_seed, chunk_count}` parameters. That is what makes
+    /// PIE == shipping here: the same deterministic function over the same mesh
+    /// with the same seed cannot produce two different chunk sets.
+    ///
+    /// Empty when nothing in the level is destructible — which is also what a
+    /// caller that does not resolve meshes produces, and the reason the phase-22
+    /// gate asserts this vector is **non-empty** before it compares anything. The
+    /// P21.4 lesson: two empty maps agree.
+    #[serde(default)]
+    pub fractures: Vec<(Uuid, Vec<u8>)>,
 }
 
 impl ScenePayload {
@@ -192,6 +214,7 @@ impl ScenePayload {
             windowed,
             voxels: Vec::new(),
             terrains: Vec::new(),
+            fractures: Vec::new(),
         }
     }
 
@@ -246,6 +269,13 @@ impl ScenePayload {
     /// Attach the referenced `.inf_terrain` payloads (`(asset guid, bytes)`) a
     /// level's `Terrain.asset` refs name (P21.4). Builder-style, exactly like
     /// [`with_pcgs`](Self::with_pcgs).
+    /// Attach the derived `.inf_fracture` payloads (P22.3), keyed by
+    /// [`inf_mesh::derived_fracture_id`].
+    pub fn with_fractures(mut self, fractures: Vec<(Uuid, Vec<u8>)>) -> Self {
+        self.fractures = fractures;
+        self
+    }
+
     pub fn with_terrains(mut self, terrains: Vec<(Uuid, Vec<u8>)>) -> Self {
         self.terrains = terrains;
         self
@@ -282,7 +312,15 @@ pub enum EditorToPlayer {
     /// the crash/pause/reparent drills that don't need real content).
     Load(CookedSnapshot),
     /// Hand over the **real** live scene (P9.4). Sent once after `Ready`.
-    LoadScene(ScenePayload),
+    ///
+    /// **Boxed** (P22.3). `ScenePayload` grew past clippy's `large_enum_variant`
+    /// threshold when v6 appended `fractures`, and the lint is right on the
+    /// merits: every `EditorToPlayer` value would otherwise cost the largest
+    /// variant, so the cheap `Pause`/`Resume`/`Step` messages this protocol sends
+    /// every frame would each carry a scene payload's worth of stack. The box is
+    /// **wire-invisible** — serde encodes `Box<T>` exactly as `T` — so the frame
+    /// bytes, the protocol version and every golden are untouched.
+    LoadScene(Box<ScenePayload>),
     Pause,
     Resume,
     /// Advance exactly `count` fixed steps (works while paused) — the
@@ -423,13 +461,13 @@ mod tests {
     fn framing_round_trip() {
         let messages = vec![
             EditorToPlayer::Load(CookedSnapshot::demo()),
-            EditorToPlayer::LoadScene(ScenePayload::new(
+            EditorToPlayer::LoadScene(Box::new(ScenePayload::new(
                 "level",
                 vec![1, 2, 3, 4],
                 vec![(Uuid::from_u128(0xAC), vec![b'{', b'}'])],
                 60,
                 false,
-            )),
+            ))),
             EditorToPlayer::Pause,
             EditorToPlayer::Resume,
             EditorToPlayer::Step { count: 3 },
@@ -542,12 +580,16 @@ mod tests {
         assert!(!want.voxels.is_empty() && !want.terrains.is_empty());
 
         let mut wire = Vec::new();
-        write_msg(&mut wire, &EditorToPlayer::LoadScene(want.clone())).unwrap();
+        write_msg(
+            &mut wire,
+            &EditorToPlayer::LoadScene(Box::new(want.clone())),
+        )
+        .unwrap();
         let got: EditorToPlayer = read_msg(&mut std::io::Cursor::new(wire)).unwrap();
         let EditorToPlayer::LoadScene(got) = got else {
             panic!("not a LoadScene");
         };
-        assert_eq!(got, want);
+        assert_eq!(*got, want);
         // The fields a stale reader would have mis-decoded are the load-bearing
         // ones, so they are named rather than left to the struct equality.
         assert_eq!(got.tick_hz, 60);
@@ -634,7 +676,8 @@ mod tests {
         // not a blanket refusal.
         let ok = ScenePayload::new("Small", vec![0u8; 1024], vec![], 60, false);
         let mut wire = Vec::new();
-        write_msg(&mut wire, &EditorToPlayer::LoadScene(ok)).expect("a normal frame writes");
+        write_msg(&mut wire, &EditorToPlayer::LoadScene(Box::new(ok)))
+            .expect("a normal frame writes");
         assert!(!wire.is_empty());
     }
 }

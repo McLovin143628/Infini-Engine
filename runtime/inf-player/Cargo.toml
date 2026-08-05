@@ -21,6 +21,21 @@ name = "inf-player"
 path = "src/main.rs"
 
 [dependencies]
+# `inf_mesh::MeshAsset` decodes a `SkeletalMesh`'s BIND-SPACE geometry (the P18.3
+# follow-up) and `inf_mesh::FractureAsset` its destructible chunk sets (P22.3).
+# Nothing else in the tree owns those payloads, and hand-copying either struct is
+# exactly the bincode positional-decode desync the schema LAW forbids.
+#
+# **Now unconditional.** It used to be native-only because `inf-mesh` pulled
+# `meshopt` (and `gltf`, and `image`) unconditionally and their build scripts want
+# a C/C++ toolchain the wasm CI job has no reason to install. P22.3 made
+# `inf-physics` — which is not optional on any target — depend on `inf-mesh`, so
+# the gate moved to where it belongs: `inf-mesh` itself now confines its whole
+# IMPORT path to `cfg(not(target_arch = "wasm32"))`, on the rule `inf-vgeom`
+# already applies. `MeshAsset` and `FractureAsset` are payload types and build
+# everywhere. Measured with `cargo check --target wasm32-unknown-unknown -p
+# inf-player`, which is the CI step this note exists for.
+inf-mesh = { workspace = true }
 # ── the fixed-step loop + PIE protocol/toy world (Spike D seam, P9.4) ──
 inf-runtime = { workspace = true }
 # ── the real runtime the player drives (all Ring 0) ──
@@ -95,23 +110,6 @@ windows = { workspace = true, features = [
 # native mods and must not pull wasmtime.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 inf-wasm-host = { workspace = true }
-# The shipped player's `SkeletalMesh` projection (the P18.3 follow-up). A skeletal
-# mesh's BIND-SPACE geometry lives in its authoring `.inf_mesh` — the skin streams
-# the cook ships beside the level through the `SkeletalMesh.mesh` dependency edge
-# — and `inf_mesh::MeshAsset` is the only type that decodes it. Nothing else in
-# the tree owns that payload, and hand-copying the struct is exactly the bincode
-# positional-decode desync the schema LAW forbids, so the player depends on the
-# crate that defines it (as `inf_editor_core::render_assets` does).
-#
-# NATIVE ONLY, and measured rather than assumed: `inf-mesh` pulls `meshopt`
-# unconditionally, whose build script compiles meshoptimizer's C++ through `cc`.
-# `cargo check --target wasm32-unknown-unknown -p inf-player` fails on it
-# (`cc-rs: failed to find tool "clang"`) — the same reason `inf-vgeom` gates
-# `meshopt` behind `cfg(not(target_arch = "wasm32"))`. The browser player
-# therefore keeps drawing a `SkeletalMesh` as its placeholder, exactly as it did
-# before this batch; every native target draws the real skinned geometry. See
-# `skinned::SkinnedRegistry::build_skinned_geometry`.
-inf-mesh = { workspace = true }
 
 # ── Web target (P14.2): the wasm32 player runs in the browser over WebGPU. These
 # deps only apply to `wasm32-unknown-unknown`; the desktop build is unchanged.

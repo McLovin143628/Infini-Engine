@@ -10,8 +10,11 @@
 pub mod asset;
 pub mod error;
 pub mod fracture;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod gltf_import;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod obj_import;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod optimize;
 
 pub use asset::{Aabb, MeshAsset, MeshVertex, SubMesh, VertexSkin};
@@ -21,9 +24,12 @@ pub use fracture::{
     FractureChunk, FractureParams, FractureSkip, DEFAULT_CHUNK_COUNT, FRACTURE_ID_SALT,
     MAX_CHUNK_COUNT, MIN_CHUNK_COUNT,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use gltf_import::{
     import_gltf, GltfImport, ImportedClip, ImportedMaterial, ImportedMesh, ImportedSkeleton,
     RawImage,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use obj_import::import_obj;
+#[cfg(not(target_arch = "wasm32"))]
 pub use optimize::optimize;

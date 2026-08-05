@@ -155,6 +155,7 @@ fn event_of(node: &Node) -> EventKind {
         "event.water_enter" => EventKind::WaterEnter,
         "event.water_exit" => EventKind::WaterExit,
         "event.water_splash" => EventKind::WaterSplash,
+        "event.destroyed" => EventKind::Destroyed,
         "event.input" => EventKind::Input(node_text_param(node, "action")),
         "event.custom" => EventKind::Custom(node_text_param(node, "name")),
         other => EventKind::Custom(other.trim_start_matches("event.").to_string()),

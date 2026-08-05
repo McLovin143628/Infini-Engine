@@ -217,6 +217,8 @@ fn cavern_payload() -> inf_runtime::pie::ScenePayload {
         |_| None,
         |_| Some(voxel_bytes.clone()),
         |_| Some(terrain_bytes.clone()),
+        // P22.3: no destructible meshes in this fixture.
+        |_| None,
         60,
         false,
     )

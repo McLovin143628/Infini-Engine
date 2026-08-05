@@ -190,6 +190,27 @@ impl AssetState {
         std::fs::read(&entry.path).ok()
     }
 
+    /// Raw payload bytes of a `.inf_mesh` asset (P22.3), for **deriving** a
+    /// destructible actor's `.inf_fracture`.
+    ///
+    /// The odd one out among these loaders: every other one hands back the bytes
+    /// of the asset a component names, but `Destructible` names no asset at all
+    /// (the strength memo's §5 — a reference would be a second authority for the
+    /// same fact). The fracture is derived from the actor's own `MeshRef.asset`,
+    /// by the same `inf_mesh::fracture_mesh` the cook runs, so what the caller
+    /// needs from here is the MESH. Kind-checked exactly like
+    /// [`load_voxel_bytes`](Self::load_voxel_bytes), for the same reason.
+    pub fn load_mesh_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        let entry = proj.db().get(id)?;
+        if entry.kind() != inf_asset::AssetKind::Mesh {
+            return None;
+        }
+        std::fs::read(&entry.path).ok()
+    }
+
     /// Raw payload bytes of a `.inf_terrain` asset (P21.4), for the PIE payload's
     /// streamed-terrain source. Kind-checked exactly like
     /// [`load_voxel_bytes`](Self::load_voxel_bytes), for the same reason: a

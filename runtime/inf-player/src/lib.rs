@@ -36,6 +36,7 @@ pub mod level;
 pub mod log;
 // Native-only sandboxed WASM mod loading (P14.5). Gated off wasm32 so the
 // browser player never pulls `wasmtime`.
+pub mod fracture;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mods;
 pub mod render;
@@ -300,6 +301,9 @@ pub fn run_headless(args: &Args) -> ExitCode {
     attach_cell_streaming(&mut sim, &partition);
     attach_terrain_streaming(&mut sim, &terrain_content);
     attach_voxel_volumes(&mut sim, &load_voxel_assets(args));
+    // P22.3: what a level's destructible actors break into. Only a cooked
+    // pack has these — a fracture is derived, not authored.
+    fracture::attach_fractures(&mut sim, &load_fracture_assets(args));
     attach_mods(&mut sim, args);
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
         fold_trace_sim(sim, frames, panic_after)
@@ -351,6 +355,7 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     // The SAME registry the render host will page from — one source of bytes, two
     // working sets, and the sim's is the one that decides where the floor is.
     attach_voxel_volumes(&mut sim, &voxel_assets);
+    fracture::attach_fractures(&mut sim, &load_fracture_assets(args));
     attach_mods(&mut sim, args);
     match window::run(
         title,
@@ -411,6 +416,32 @@ pub fn attach_voxel_volumes(sim: &mut RuntimeSim, assets: &voxel::VoxelRegistry)
 /// skeletal stores to reach one registry — while still seeding the sim, since a
 /// determinism trace that skipped the cave floor would not be the same world the
 /// windowed build runs.
+/// The `.inf_fracture` source for this run (P22.3), or an empty registry.
+///
+/// Only a **cooked pack** has one: a fracture is derived at cook, so a `--level`
+/// run over loose content has none and previews as indestructible. See
+/// [`fracture::FractureRegistry`] for why re-deriving on load would be worse than
+/// admitting that.
+fn load_fracture_assets(args: &Args) -> fracture::FractureRegistry {
+    match &args.world {
+        WorldChoice::Demo | WorldChoice::Level(_) => fracture::FractureRegistry::new(),
+        WorldChoice::Pack(path) => {
+            let pack_path = if path.is_dir() {
+                path.join(level::PACK_FILE)
+            } else {
+                path.clone()
+            };
+            match inf_asset::PackReader::open(&pack_path) {
+                Ok(reader) => fracture::FractureRegistry::from_pack(std::sync::Arc::new(reader)),
+                Err(e) => {
+                    tracing::warn!("inf-player: no fracture assets loaded from pack: {e}");
+                    fracture::FractureRegistry::new()
+                }
+            }
+        }
+    }
+}
+
 fn load_voxel_assets(args: &Args) -> voxel::VoxelRegistry {
     match &args.world {
         WorldChoice::Demo => voxel::VoxelRegistry::new(),
@@ -737,6 +768,15 @@ pub fn sim_from_payload(payload: &ScenePayload) -> Result<PayloadSim, String> {
     attach_voxel_volumes(
         &mut sim,
         &voxel::VoxelRegistry::from_payload(&payload.voxels),
+    );
+    // P22.3: the payload's derived `.inf_fracture` bytes (schema v6). Without
+    // this arm a PIE session would have nothing to break and the phase-22 gate
+    // would be comparing two empty maps — which is exactly what P21.4 found the
+    // phase-21 gate doing, and it is the reason this seam is `sim_from_payload`
+    // rather than `build_world_from_payload` + `sim_from_built`.
+    fracture::attach_fractures(
+        &mut sim,
+        &fracture::FractureRegistry::from_payload(&payload.fractures),
     );
     // P21.4 (the P16.3b2 deferral): the payload's `.inf_terrain` bytes, streamed
     // through the same `TerrainStreaming` the pack path attaches. The level bytes

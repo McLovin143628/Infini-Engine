@@ -279,6 +279,8 @@ fn pie_sim(doc: &SceneDoc) -> RuntimeSim {
         |_| None,
         |_| None,
         |_| None,
+        // P22.3: no destructible meshes in this fixture.
+        |_| None,
         60,
         false,
     )

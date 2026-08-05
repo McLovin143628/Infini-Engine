@@ -609,6 +609,8 @@ fn pie_matches_shipping_for_the_biome_population() {
         |guid| (guid == BIOME_SET_GUID).then(|| read("Gate.inf_biomes")),
         |_guid| None,
         |_guid| None,
+        // P22.3: no destructible meshes in this fixture.
+        |_| None,
         60,
         false,
     )

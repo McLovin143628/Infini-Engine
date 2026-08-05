@@ -145,6 +145,40 @@ pub async fn sim_start(
     }
     session.set_audio_clips(audio_clips);
     session.set_voxel_volumes(voxel_volumes);
+    // P22.3: what this level's destructible actors break into. DERIVED here, from
+    // each actor's own mesh, by the same `inf_mesh::fracture_mesh` the cook runs
+    // with the same authored seed and chunk count — because a `.inf_fracture` is
+    // cook output and does not exist in the project's content root at all. So
+    // Simulate, PIE and the shipped pack all break the same wall into the same
+    // pieces, by construction rather than by agreement.
+    //
+    // Camera-free like the voxel map above: the walk reads the world's own
+    // `Destructible` + `MeshRef`, never a render store.
+    session.set_fractures(inf_physics::d3::resolve_fracture_states(
+        doc.world(),
+        |mesh_id| {
+            let bytes = assets.load_mesh_bytes(inf_asset::AssetId(mesh_id))?;
+            let mesh = inf_asset::decode::<inf_mesh::MeshAsset>(&bytes).ok()?;
+            let d = doc
+                .world()
+                .world()
+                .iter_entities()
+                .filter_map(|e| {
+                    let m = e.get::<inf_ecs::components::MeshRef>()?.asset?;
+                    (m == mesh_id)
+                        .then(|| e.get::<inf_ecs::components::Destructible>().copied())
+                        .flatten()
+                })
+                .next()?;
+            let params = inf_mesh::FractureParams {
+                seed: d.fracture_seed,
+                chunk_count: d.chunk_count,
+            };
+            inf_mesh::fracture_mesh(&mesh, inf_asset::AssetId(mesh_id), params)
+                .ok()
+                .map(std::sync::Arc::new)
+        },
+    ));
     // Load the project mixer (`<project>/.infinity/mixer.toml`) if present; else the
     // default. The mixer lives at the project root (the parent of Content).
     if let Some(content) = assets.content_root() {
