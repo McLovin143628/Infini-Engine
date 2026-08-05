@@ -29,9 +29,9 @@ pub use ecs::{
 };
 pub use events::ContactEvent3D;
 pub use fracture::{
-    fracture_chunk_guid, resolve_fracture_states, ChunkState, DamageReport, DebrisBudget,
-    DestroyedEvent, DestructOutcome, FractureAudit, FractureState, CRACK_OPENING_M,
-    DEFAULT_DEBRIS_LIFETIME_S, DEFAULT_DEBRIS_MAX_LIVE,
+    first_uncollidable_chunk, fracture_chunk_guid, resolve_fracture_states, ChunkState,
+    DamageReport, DebrisBudget, DestroyedEvent, DestructOutcome, FractureAudit, FractureState,
+    CRACK_OPENING_M, DEFAULT_DEBRIS_LIFETIME_S, DEFAULT_DEBRIS_MAX_LIVE,
 };
 pub use joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
 pub use query::RayHit3D;

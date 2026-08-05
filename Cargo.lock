@@ -3236,6 +3236,7 @@ dependencies = [
  "parry3d-f64",
  "rapier2d-f64",
  "rapier3d-f64",
+ "tracing",
  "uuid",
 ]
 

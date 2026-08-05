@@ -29,8 +29,10 @@ uuid = { workspace = true }
 # differ. Both functions are bijections on a mesh's own GUID and the cook stores
 # their outputs in ONE pack index, so a collision would have a mesh's meshlet DAG
 # and its fracture overwrite each other — with nothing else in the tree relating
-# the two constants. Dev-only: `inf-mesh` never names `inf-vgeom` in shipping
-# code, so the dependency direction stays inf-vgeom -> inf-mesh.
+# the two constants. Dev-only, and that is the whole point: `inf-vgeom` depends on
+# `inf-mesh`, so a *shipping* edge the other way would be a cycle. A dev-dependency
+# is not part of the library graph, so the test can reach across without creating
+# one.
 inf-vgeom = { workspace = true }
 tempfile = { workspace = true }
 

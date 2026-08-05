@@ -339,11 +339,12 @@ fn heightfield_shape(
     // edge's normal, which points partly upward even on ground that is dead flat.
     //
     // Measured, not feared: a 0.25 m sphere sliding at 12 m/s across FLAT terrain
-    // took **46 upward kicks** peaking at 1.44 m/s, hopped 12.2 cm, and drifted
-    // 0.72 m sideways over 300 steps — sideways, on flat ground, from nothing but
-    // triangulation. With the flag: 0 kicks, 0.69 cm, no drift. Every character,
-    // prop and piece of debris that touches terrain is affected, which is
-    // everything this phase exists to make land.
+    // takes **5 upward kicks, peaking at 0.105 m/s**, over 300 steps of contact —
+    // upward, on flat ground, from nothing but triangulation. With the flag: zero.
+    // (`a_sphere_sliding_on_flat_ground_is_never_kicked_upward` is where those
+    // numbers come from and where they are re-measured.) Every character, prop and
+    // piece of debris that touches terrain is affected, which is everything this
+    // phase exists to make land.
     //
     // The cost is one O(n) pseudo-normal pass at build time, paid on the same
     // change-stamped path that already refuses to rebuild an unsculpted tile.
@@ -953,8 +954,8 @@ impl PhysicsWorld3D {
         })
     }
 
-    /// [`cast_ray`](Self::cast_ray), ignoring every collider in `exclude`
-    /// (P22.3).
+    /// [`cast_ray`](Self::cast_ray) against **static and kinematic** geometry
+    /// only, ignoring every collider in `exclude` (P22.3).
     ///
     /// # Why a filtered ray and not an AABB overlap
     ///
@@ -973,15 +974,18 @@ impl PhysicsWorld3D {
     ///
     /// The filter is rapier's own `QueryFilter::predicate`, so the broad phase
     /// still prunes and the excluded colliders are rejected before any narrow
-    /// phase runs. `skip_dynamic` adds `QueryFilter::exclude_dynamic` — see the
-    /// body for why that must happen in the filter and not at the call site.
+    /// phase runs, and `QueryFilter::exclude_dynamic` rides with it — see the body
+    /// for why that must happen in the filter and not at the call site.
+    ///
+    /// It was briefly a `skip_dynamic: bool` parameter with exactly one caller
+    /// passing exactly one value. A knob nobody turns is a knob that documents a
+    /// choice nobody made, so the behaviour is in the name instead.
     pub fn cast_ray_excluding(
         &mut self,
         origin: DVec3,
         dir: DVec3,
         max_toi: f64,
         exclude: &std::collections::BTreeSet<ColliderId3D>,
-        skip_dynamic: bool,
     ) -> Option<RayHit3D> {
         let dir = dir.normalize_or_zero();
         if dir == DVec3::ZERO {
@@ -1003,11 +1007,7 @@ impl PhysicsWorld3D {
         // and a tower collapsed because its own rubble had landed beside it. It
         // also removes a tie-at-TOI hazard: two coincident hits, one dynamic, are
         // ordered by the BVH rather than by anything deterministic.
-        let filter = if skip_dynamic {
-            QueryFilter::exclude_dynamic().predicate(&predicate)
-        } else {
-            QueryFilter::default().predicate(&predicate)
-        };
+        let filter = QueryFilter::exclude_dynamic().predicate(&predicate);
         let pipe = self.query_pipeline(filter);
         let (handle, hit) = pipe.cast_ray_and_get_normal(&ray, max_toi, true)?;
         Some(RayHit3D {

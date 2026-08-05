@@ -583,7 +583,8 @@ fn the_render_swap_draws_a_mesh_or_its_chunks_and_never_both() {
         seen.push((meshes, chunks));
         assert!(
             (meshes > 0) != (chunks > 0),
-            "step {step}: the wall drew {meshes} mesh instance(s) AND {chunks}              chunk(s) — the swap must be exactly one or the other"
+            "step {step}: the wall drew {meshes} mesh instance(s) AND {chunks} \
+             chunk(s) — the swap must be exactly one or the other"
         );
         if step == 0 {
             assert!(chunks == 0, "the wall broke before its first tick");
@@ -672,7 +673,8 @@ fn the_shipped_collapse_is_invariant_under_spawn_order() {
     let b = run(false);
     assert_eq!(
         a, b,
-        "reversing spawn order changed the collapse — something is reading ECS          insertion order"
+        "reversing spawn order changed the collapse — something is reading ECS \
+         insertion order"
     );
     // Anti-vacuity: the trace really broke the wall, so the comparison was not of
     // two untouched towers.
@@ -686,4 +688,54 @@ fn the_shipped_collapse_is_invariant_under_spawn_order() {
         false,
     );
     assert_ne!(a, untouched.bits());
+}
+
+/// **The host-level twin of the placement fix.** `inf-physics`'
+/// `a_destructible_moved_before_breaking_shatters_where_it_is` drives the bridge
+/// directly; this drives the **shipped host's fixed step**, which is what would
+/// notice the host forgetting to call `follow_fractures` at all.
+///
+/// (The static half of that is `projector_mirror`'s
+/// `both_fixed_steps_run_the_fracture_slots`, which reads both files. This is the
+/// behavioural half: it moves a wall through the ECS and checks the rubble
+/// followed.)
+#[test]
+fn the_shipped_host_shatters_a_moved_wall_where_it_stands() {
+    let mut sim = sim(true, true);
+    // Move it BEFORE the first step. This Blueprint blows the wall up on every
+    // tick, so after one step it is already broken — and `follow` deliberately
+    // stops following a broken actor (its chunks are solver-owned). Moving first
+    // is the case the fix is about: an intact destructible relocated after load.
+    {
+        let e = sim.world().entity_of(Uuid::from_u128(WALL_GUID)).unwrap();
+        let mut t = sim
+            .world_mut()
+            .world_mut()
+            .get_mut::<Transform>(e)
+            .expect("the wall has a transform");
+        t.translation = inf_ecs::Vec3d::new(40.0, 0.0, 0.0);
+    }
+    sim.world_mut().mark_dirty();
+    // `follow_fractures` reads `GlobalTransform`, which the fixed step does not
+    // settle until after the sync — so propagate here, exactly as an editor drag
+    // or a `world://delta` would have.
+    sim.world_mut().propagate();
+    sim.step_once(RuntimeInput::default());
+
+    // The Blueprint blows it up every tick, so by now it has broken — AT x = 40.
+    let state = &sim.fractures()[&Uuid::from_u128(WALL_GUID)];
+    assert!(!state.is_intact(), "the wall never broke");
+    let near = state
+        .chunks()
+        .iter()
+        .filter(|c| (c.translation.x - 40.0).abs() < 2.0)
+        .count();
+    assert_eq!(
+        near,
+        state.chunks().len(),
+        "{} of {} chunks are not near x = 40 — the shipped host is not following \
+         its fractures, so the wall shattered where it was LOADED",
+        state.chunks().len() - near,
+        state.chunks().len()
+    );
 }

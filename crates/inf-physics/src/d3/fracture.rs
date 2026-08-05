@@ -70,7 +70,7 @@ use std::sync::Arc;
 use glam::{DAffine3, DQuat, DVec3};
 use inf_ecs::components::{AlwaysLoaded, Destructible, GlobalTransform, MeshRef, Transform};
 use inf_ecs::EcsWorld;
-use inf_mesh::{FractureAsset, FractureChunk};
+use inf_mesh::FractureAsset;
 use uuid::Uuid;
 
 use super::ecs::PhysicsBridge3D;
@@ -114,21 +114,14 @@ use crate::filtering::CollisionLayers;
 /// per-actor knob and it multiplies straight through.
 pub const CRACK_OPENING_M: f64 = 1.0e-3;
 
-/// Fraction of the source mesh's extent within which two chunks' hull corners
-/// count as **the same corner** — the tolerance the shared-face-area measurement
-/// matches on.
+/// The smallest `|det|` a destructible's placement may have and still be
+/// followed.
 ///
-/// (It used to describe a triangle-on-a-plane test; that algorithm is gone — see
-/// [`shared_face_area_m2`] for why it was wrong. The tolerance survives with a
-/// new job: deciding when `a`'s corner and `b`'s corner are the same point.)
-///
-/// A shared Voronoi face's corners are the intersection of the *same* three
-/// half-space planes in both cells, so the two hulls carry them at coordinates
-/// that agree to within the arithmetic that produced them. `1e-4 × 10 m = 1 mm`
-/// clears that comfortably while staying far below any real geometric feature —
-/// two genuinely distinct corners of a metre-scale chunk are never a millimetre
-/// apart.
-const FACE_PLANE_EPS_FRACTION: f64 = 1.0e-4;
+/// `1e-12` — the same floor `MIN_HULL_VOLUME_M3` uses, and for the same reason:
+/// the transform is in metres (architecture rule 6), a cubic micrometre of scale
+/// is below anything that can be a game object, and the number multiplies every
+/// bond energy and every chunk mass in the actor.
+const MIN_PLACEMENT_DET: f64 = 1.0e-12;
 
 /// The vertical skin, in metres, within which a chunk counts as **in contact
 /// with** static geometry for the support test.
@@ -326,6 +319,9 @@ pub struct FractureState {
     next_order: u64,
     /// `Destroyed` has already fired for this actor.
     destroyed_fired: bool,
+    /// A degenerate placement has already been reported for this actor — so a
+    /// transform that stays broken warns once rather than sixty times a second.
+    degenerate_warned: bool,
 }
 
 impl FractureState {
@@ -358,21 +354,40 @@ impl FractureState {
         // The adjacency the solve walks is assumed SYMMETRIC: `bond_energies`
         // canonicalises its pairs, but the support BFS walks each chunk's own
         // `neighbors` list, so a one-sided edge would price correctly and then
-        // propagate support in one direction only. P22.2's cook does not enforce
-        // symmetry, so this is where a violation is caught — in debug, at seed
-        // time, naming the pair — rather than as a building that collapses from
-        // one side and not the other.
-        debug_assert!(
-            asset.chunks.iter().enumerate().all(|(i, c)| {
-                c.neighbors.iter().all(|&n| {
-                    asset
-                        .chunks
-                        .get(n as usize)
-                        .is_some_and(|o| o.neighbors.contains(&(i as u32)))
-                })
-            }),
-            "the fracture asset has a one-sided adjacency edge; the support solve              would propagate through it in one direction only"
-        );
+        // propagate support in one direction only.
+        //
+        // **Reported, not asserted.** The first cut used a `debug_assert!`, which
+        // is a contradiction: `adjacency_pairs` canonicalises precisely BECAUSE a
+        // one-sided edge is a tolerated input, so a debug build hard-panicked on
+        // an asset a release build priced correctly — in the editor, at Simulate,
+        // against this module's own law that a refusal is a value and never a
+        // failure. The cook now prunes to symmetry
+        // (`inf_mesh::prune_faceless_adjacency`), so this is the report that says
+        // an asset did not come from it.
+        let asymmetric: Vec<(u32, u32)> = asset
+            .chunks
+            .iter()
+            .enumerate()
+            .flat_map(|(i, c)| {
+                let i = i as u32;
+                c.neighbors
+                    .iter()
+                    .filter_map(move |&n| (i != n).then_some((i, n)))
+            })
+            .filter(|&(i, n)| {
+                !asset
+                    .chunks
+                    .get(n as usize)
+                    .is_some_and(|o| o.neighbors.contains(&i))
+            })
+            .collect();
+        if !asymmetric.is_empty() {
+            tracing::warn!(
+                "inf-physics: fracture asset has {} one-sided adjacency edge(s) \
+                 {asymmetric:?} — support propagates through them in one direction                  only. Re-cook: the fracture pipeline prunes to symmetry as of P22.3.",
+                asymmetric.len()
+            );
+        }
         let (bonds, estimated) = bond_energies(&asset, &destructible, volume_scale);
         let ground_bonds = ground_bond_energies(&asset, &destructible, volume_scale);
         Self {
@@ -388,6 +403,7 @@ impl FractureState {
             generation: 1,
             next_order: 1,
             destroyed_fired: false,
+            degenerate_warned: false,
         }
     }
 
@@ -426,13 +442,50 @@ impl FractureState {
         if !self.is_intact() || placement == self.placement {
             return;
         }
+        // **A DEGENERATE PLACEMENT IS REFUSED, not followed.** `volume_scale` is
+        // `|det|`, and it multiplies every bond and every chunk mass — so a
+        // transform with a zero axis (`scale.y = 0`, one keystroke in the Details
+        // panel) makes every bond in the structure free and the smallest
+        // representable joule takes the building down. That is the same class as
+        // the degenerate-`strength` bug, one field over. A NaN is worse in a
+        // different way: `NaN != NaN`, so the early-out above never fires again
+        // and the whole bond graph is re-priced every step, for ever.
+        //
+        // The actor keeps its LAST GOOD placement, which is the answer that leaves
+        // the level playable: the wall stays where it was rather than becoming
+        // unbreakable or vanishing to the origin.
+        let det = placement.matrix3.determinant().abs();
+        if !det.is_finite() || det <= MIN_PLACEMENT_DET || !placement.translation.is_finite() {
+            if !self.degenerate_warned {
+                self.degenerate_warned = true;
+                tracing::warn!(
+                    "inf-physics: a destructible's transform is degenerate \
+                     (|det| = {det}); keeping its last good placement. A zero or                      non-finite scale would make every bond in it free."
+                );
+            }
+            return;
+        }
         self.placement = placement;
-        self.volume_scale = placement.matrix3.determinant().abs();
-        let (bonds, estimated) = bond_energies(&self.asset, &self.destructible, self.volume_scale);
-        self.bonds = bonds;
-        self.estimated = estimated;
-        self.ground_bonds =
-            ground_bond_energies(&self.asset, &self.destructible, self.volume_scale);
+        // **Re-price only when the SCALE moved.** Bond and ground-bond energies
+        // are functions of `volume_scale` alone — a translation or a rotation
+        // re-derives them bit-identically — so a destructible prop riding a moving
+        // ship would otherwise re-price its whole graph every fixed step for an
+        // answer that cannot change. (Measured at ~200 µs per re-price; thirty
+        // props on a ship is 6 ms a step, for nothing.) This is also what makes
+        // `bond_energies`' "measured once per bond at seed time" true again.
+        // (`det` is the whole of the scale's effect on the bond graph, and
+        // `bond_energies` turns it into an area factor as `det^(2/3)` — exact for
+        // UNIFORM scale only. The caveat is argued in full there; it is named here
+        // because this is where the number is computed.)
+        if det != self.volume_scale {
+            self.volume_scale = det;
+            let (bonds, estimated) =
+                bond_energies(&self.asset, &self.destructible, self.volume_scale);
+            self.bonds = bonds;
+            self.estimated = estimated;
+            self.ground_bonds =
+                ground_bond_energies(&self.asset, &self.destructible, self.volume_scale);
+        }
         for (i, c) in self.chunks.iter_mut().enumerate() {
             if let Some(src) = self.asset.chunks.get(i) {
                 c.translation = placement.transform_point3(DVec3::from_array(src.center_of_mass));
@@ -495,13 +548,27 @@ impl FractureState {
     /// The bonds priced from the `min(volume)^(2/3)` estimate because their
     /// shared face could not be measured — canonical `(a, b)` pairs with `a < b`.
     ///
-    /// **Empty is the healthy answer for geometry that has real faces**, and a
-    /// hand-built fixture asserts exactly that. Real cook output is allowed a
-    /// small residue: the cook's adjacency comes from the Voronoi *sites*, and a
-    /// cell clipped against the source mesh's hull can lose its shared face
-    /// entirely — leaving two chunks that are neighbours in the graph and touch
-    /// along an edge or not at all. There is nothing to measure there, which is
-    /// what the estimate is for.
+    /// **This must be empty, and the tests assert it.** It is an INVARIANT rather
+    /// than a tolerance: the cook prunes every adjacency edge with no real face
+    /// behind it (`inf_mesh::prune_faceless_adjacency`), so every edge that
+    /// survives has a face to measure.
+    ///
+    /// It was briefly a tolerance — "a small residue is allowed, because a clipped
+    /// cell can lose its shared face" — on the strength of one observation of one
+    /// bond in nineteen. **That observation was an artefact of the test that made
+    /// it.** The assertion INFERRED "this bond took the fallback" by comparing the
+    /// priced area against the fallback value within 1%, so a bond whose *measured*
+    /// area happened to land near `min(volume)^(2/3)` was counted as an estimate. A
+    /// sweep of 24 cook configurations (seeds 1–23, 8–64 chunks, 2 959 bonds) finds
+    /// **zero** estimated bonds, that fixture included. This field exists so the
+    /// question is answered by a record instead of an inference.
+    ///
+    /// The estimate it records is the wrong shape to lean on anyway:
+    /// `min(volume)^(2/3)` is close to a chunk's LARGEST real faces, so a phantom
+    /// bond would price as one of the strongest in the structure — and the same
+    /// `neighbors` graph drives the support solve, so a faceless edge is a phantom
+    /// LOAD PATH before it is a mispriced bond. That is why the fix went into the
+    /// producer.
     pub fn estimated_bonds(&self) -> &BTreeSet<(u32, u32)> {
         &self.estimated
     }
@@ -627,7 +694,8 @@ impl DestructOutcome {
                  rather than a BeginPlay?)"
             )),
             DestructOutcome::Invalid => Some(format!(
-                "{op_name}: refused — the energy (joules) and the actor's strength \n                 (pascals) must both be positive, finite numbers"
+                "{op_name}: refused — the energy (joules) and the actor's strength \n \
+                 (pascals) must both be positive, finite numbers"
             )),
         }
     }
@@ -689,6 +757,46 @@ pub struct DestroyedEvent {
     pub entity: Uuid,
     /// Chunks detached at the moment it fired.
     pub detached: u32,
+}
+
+/// **The producer-side collidability gate: the one door the cook and the editor
+/// both go through** (P22.3 re-audit).
+///
+/// Returns the first chunk that cannot become a [`ColliderShape3D::ConvexHull`],
+/// with its volume, or `None` when every chunk can.
+///
+/// # Why it is a whole-asset refusal rather than a per-chunk skip
+///
+/// A fracture whose chunks are *mostly* collidable is worse than one that is not
+/// derived at all: the actor breaks, and one of its pieces renders while passing
+/// through the floor. So the cook refuses the fracture entirely and the actor
+/// ships indestructible — which is a thing a designer can see and fix.
+///
+/// # Why it lives here
+///
+/// It used to be spelled out twice: once in `inf_packager::cook` (which produces
+/// the bytes a player ships) and once in `inf_editor_core::pie` (which produces
+/// the bytes a PREVIEW ships), under comments in both claiming they were the same
+/// door. They were two doors, and the P22.3 re-audit found the editor's missing
+/// the check entirely for a while — so a wall broke in the preview that shipped
+/// unbreakable. Both crates already depend on `inf-physics` (this is where
+/// `convex_hull_is_buildable` lives, because the collider is what the answer is
+/// *about*), so this is the place that makes "same door" a fact.
+///
+/// **What it checks is the RAW hull points.** `FractureState::chunk_collider`
+/// builds its hull from those points *after* the actor's placement affine, so a
+/// yes here means "the cook did not ship an unbuildable chunk set" and not "every
+/// runtime collider will build" — an actor scaled to a millionth can still refuse
+/// at spawn. `MIN_PLACEMENT_DET` is what bounds that gap.
+pub fn first_uncollidable_chunk(asset: &FractureAsset) -> Option<(u32, f64)> {
+    asset.chunks.iter().enumerate().find_map(|(i, c)| {
+        let pts: Vec<DVec3> = c
+            .hull_points
+            .iter()
+            .map(|p| DVec3::from_array(*p))
+            .collect();
+        (!super::world::convex_hull_is_buildable(&pts)).then_some((i as u32, c.volume_m3))
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -759,126 +867,6 @@ pub fn resolve_fracture_states(
     out
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Bond geometry
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// The area, m², of the face chunks `a` and `b` share.
-///
-/// # How, and why not the obvious way
-///
-/// The obvious measurement is "the chunks are Voronoi cells, so their shared face
-/// lies on the perpendicular bisector of their two centres — sum `a`'s triangles
-/// on that plane". **It is wrong, and it fails silently.** A Voronoi face is the
-/// bisector of the two *sites*, and a cell's `center_of_mass` is its volume
-/// centroid, which is not its site: clip a cell against the source mesh's hull and
-/// the centroid slides away from the seed. Measured that way, every bond of a real
-/// `fracture_mesh` asset found nothing on the plane and fell through to the
-/// fallback below — a whole building's bond energies quietly replaced by an
-/// estimate, with nothing to notice it.
-///
-/// So the face is found from the **geometry the two chunks agree on**: their
-/// hull point sets are `f64` and a shared Voronoi face's corners are the
-/// intersection of the *same* three half-space planes in both cells, so the two
-/// hulls carry those corners at the same coordinates. The common points are the
-/// face's polygon; fit a plane through them, order them around their centroid, and
-/// sum the fan.
-///
-/// Working in `f64` hull points rather than `f32` render vertices is the other
-/// half of that: the vertices a chunk draws with are quantised, and quantisation
-/// noise is exactly the size of the tolerance this measurement needs.
-///
-/// Measured **once per bond at seed time** ([`bond_energies`]) rather than per
-/// damage call, because it is a pure function of the asset.
-///
-/// Returns `0.0` when the two hulls share fewer than three corners — the caller
-/// substitutes a characteristic cross-section rather than letting a bond be free.
-fn shared_face_area_m2(asset: &FractureAsset, a: &FractureChunk, b: &FractureChunk) -> f64 {
-    let extent = {
-        let (lo, hi) = (asset.bounds.min, asset.bounds.max);
-        let d = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-        (d[0].max(d[1]).max(d[2]) as f64).max(1.0e-3)
-    };
-    let eps = extent * FACE_PLANE_EPS_FRACTION;
-    let eps2 = eps * eps;
-    // The corners both hulls carry — the shared face's polygon, unordered.
-    let common: Vec<DVec3> = a
-        .hull_points
-        .iter()
-        .map(|p| DVec3::from_array(*p))
-        .filter(|p| {
-            b.hull_points
-                .iter()
-                .any(|q| (DVec3::from_array(*q) - *p).length_squared() <= eps2)
-        })
-        .collect();
-    polygon_area_m2(&common)
-}
-
-/// The area of the convex polygon through `points`, which are assumed coplanar
-/// and in convex position but in **no particular order** — a shared face's corner
-/// set as the two hulls happen to list it.
-///
-/// Fewer than three points bound no area. The plane's normal is taken from the
-/// widest available triangle rather than from the first one, because a face's
-/// corner list can start with three nearly-collinear points and a normal fitted to
-/// those is noise.
-fn polygon_area_m2(points: &[DVec3]) -> f64 {
-    if points.len() < 3 {
-        return 0.0;
-    }
-    let centre = points.iter().copied().sum::<DVec3>() / points.len() as f64;
-    let u = {
-        // The farthest corner from the centre: a stable in-plane axis.
-        let mut best = (0.0_f64, DVec3::X);
-        for p in points {
-            let d = *p - centre;
-            let l = d.length();
-            if l > best.0 {
-                best = (l, d);
-            }
-        }
-        if best.0 <= 0.0 {
-            return 0.0;
-        }
-        best.1 / best.0
-    };
-    let normal = {
-        let mut best = (0.0_f64, DVec3::Y);
-        for p in points {
-            let c = u.cross(*p - centre);
-            let l = c.length();
-            if l > best.0 {
-                best = (l, c);
-            }
-        }
-        if best.0 <= 0.0 {
-            return 0.0; // collinear: no area
-        }
-        best.1 / best.0
-    };
-    let v = normal.cross(u);
-    // Angle-order around the centre, then sum the shoelace. Ties break by the
-    // input index, so the order is a function of the asset alone.
-    let mut planar: Vec<(u64, usize, f64, f64)> = points
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let d = *p - centre;
-            let (x, y) = (d.dot(u), d.dot(v));
-            (order_key(y.atan2(x)), i, x, y)
-        })
-        .collect();
-    planar.sort_by_key(|(k, i, _, _)| (*k, *i));
-    let mut twice = 0.0;
-    for i in 0..planar.len() {
-        let (_, _, x0, y0) = planar[i];
-        let (_, _, x1, y1) = planar[(i + 1) % planar.len()];
-        twice += x0 * y1 - x1 * y0;
-    }
-    (twice * 0.5).abs()
-}
-
 /// Every chunk's **ground-bond** energy in joules — what it costs to break it
 /// away from the static geometry it stands on, over its own characteristic
 /// cross-section `volume^(2/3)`. See [`FractureState::ground_bonds`] for why the
@@ -911,6 +899,16 @@ type BondPricing = (BTreeMap<(u32, u32), f64>, BTreeSet<(u32, u32)>);
 /// volume) so a wall placed at twice the size is four times as hard to break
 /// through, which is what a bigger wall is.
 ///
+/// **`det^(2/3)` is exact only for UNIFORM scale**, and that is a deliberate
+/// simplification rather than an oversight. Under a non-uniform scale
+/// (`2, 1, 1`) different faces of the same chunk scale by different factors —
+/// the one normal to X not at all, the two containing X by two — and `det^(2/3)`
+/// (here `2^(2/3)` ≈ 1.59) is a single average across all of them. Getting it
+/// exact means scaling each face's own normal, which needs the face, which is the
+/// thing the measurement returns an area for rather than a plane. The error is
+/// bounded by the scale's anisotropy and is zero for the uniform case that
+/// covers essentially all authored content.
+///
 /// Where the measurement finds no shared face — a bond the adjacency lists that
 /// the triangulation does not express — the area falls back to
 /// `min(volume)^(2/3)`, a characteristic cross-section of the smaller chunk. That
@@ -925,8 +923,17 @@ fn bond_energies(asset: &FractureAsset, d: &Destructible, volume_scale: f64) -> 
         else {
             continue;
         };
-        let mut area = shared_face_area_m2(asset, ca, cb);
+        // **The measurement lives in `inf-mesh`**, beside the geometry, because
+        // the cook needs the same answer to decide whether the edge is real at
+        // all (`prune_faceless_adjacency`). One implementation, two consumers,
+        // in the crate that owns the chunk.
+        let mut area = asset.shared_face_area_m2(a, b);
         if !area.is_finite() || area <= 0.0 {
+            // **Unreachable for anything this engine's cook produced**, and kept
+            // anyway: an asset from an older cook, or a hand-built one, can still
+            // carry a faceless edge, and pricing it at zero would let one
+            // malformed chunk shatter a building for free. Recorded rather than
+            // silent — see `FractureState::estimated_bonds`.
             area = ca.volume_m3.min(cb.volume_m3).max(0.0).powf(2.0 / 3.0);
             estimated.insert((a, b));
         }
@@ -991,30 +998,40 @@ impl PhysicsBridge3D {
         permitted: bool,
         energy_j: f64,
     ) -> DamageReport {
+        // The order of these four is a CONTRACT, not a sequence that happens to
+        // work: each refusal must be reachable on exactly the input that names it,
+        // whatever the others would have said.
+        //
+        // 1. The ENERGY — a property of the blow alone. No lookup, so it answers
+        //    the same for an entity this sim has never heard of.
         if !energy_j.is_finite() || energy_j <= 0.0 {
             return DamageReport::refused(DestructOutcome::Invalid);
         }
-        // **A MATERIAL can be degenerate too, not just an energy.** `strength` is
-        // an authored `f64` on a Details-editable component, so `0`, a negative,
-        // a NaN and an infinity are all one keystroke away — and a zero strength
-        // makes every bond free, so the very smallest representable joule takes a
-        // whole building down. (Measured with `f64::MIN_POSITIVE`: the actor
-        // vaporised.) Checked here, beside the energy, because both are "the
-        // numbers this blow is computed from" and a refusal must not depend on
-        // which of them was wrong.
-        if fractures.get(&entity).is_some_and(|s| {
-            !s.destructible().strength.is_finite() || s.destructible().strength <= 0.0
-        }) {
-            return DamageReport::refused(DestructOutcome::Invalid);
-        }
-        // Permission is checked BEFORE the state lookup so a locked actor reads
-        // the same whether or not this sim happened to seed it — a refusal must
-        // not depend on load order (the `runtime_carve` rule, verbatim).
+        // 2. PERMISSION, before any state lookup, so a locked actor reads the same
+        //    whether or not this sim happened to seed it — a refusal must not
+        //    depend on load order (the `runtime_carve` rule, verbatim).
+        //
+        //    The first cut of the material guard below sat *here*, above this
+        //    check, and reached the component through `fractures.get` — so a
+        //    locked actor answered `Invalid` when it was seeded and `NotPermitted`
+        //    when it was not, under a comment stating this law verbatim three
+        //    lines further down. Two refusals for one gate, chosen by load order.
         if !permitted {
             return DamageReport::refused(DestructOutcome::NotPermitted);
         }
+        // 3. The STATE, which everything below reads.
         if !fractures.contains_key(&entity) {
             return DamageReport::refused(DestructOutcome::NoFracture);
+        }
+        // 4. The MATERIAL — degenerate in exactly the ways a number can be, and
+        //    only knowable once there is a state to read it from. `strength` is an
+        //    authored `f64` on a Details-editable component, so `0`, a negative, a
+        //    NaN and an infinity are each one keystroke away, and a zero strength
+        //    makes every bond free (measured: `f64::MIN_POSITIVE` vaporised the
+        //    actor).
+        let strength = fractures[&entity].destructible().strength;
+        if !strength.is_finite() || strength <= 0.0 {
+            return DamageReport::refused(DestructOutcome::Invalid);
         }
 
         // ── plan (no mutation yet) ──────────────────────────────────────────
@@ -1474,7 +1491,7 @@ impl PhysicsBridge3D {
         // four-cube tower. Asking for the nearest NON-dynamic hit is the question
         // that was meant.
         self.world_mut()
-            .cast_ray_excluding(origin, dir, max_toi, exclude, true)
+            .cast_ray_excluding(origin, dir, max_toi, exclude)
             .is_some()
     }
 }

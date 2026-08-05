@@ -724,18 +724,8 @@ fn derive_fracture(
     // "A yes here means the cook did not ship an unbuildable chunk set" is true;
     // "a yes here guarantees every runtime collider builds" is not, and the
     // difference is the actor's own transform.
-    for (i, c) in asset.chunks.iter().enumerate() {
-        let pts: Vec<glam::DVec3> = c
-            .hull_points
-            .iter()
-            .map(|p| glam::DVec3::from_array(*p))
-            .collect();
-        if !inf_physics::d3::convex_hull_is_buildable(&pts) {
-            return Ok(Err(FractureIssue::Uncollidable {
-                chunk: i as u32,
-                volume_m3: c.volume_m3,
-            }));
-        }
+    if let Some((chunk, volume_m3)) = inf_physics::d3::first_uncollidable_chunk(&asset) {
+        return Ok(Err(FractureIssue::Uncollidable { chunk, volume_m3 }));
     }
     let chunks = asset.chunks.len();
     let requested = asset.requested_chunks;

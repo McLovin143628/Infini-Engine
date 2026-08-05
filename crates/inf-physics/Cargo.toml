@@ -72,6 +72,11 @@ inf-mesh = { workspace = true }
 inf-math = { workspace = true }
 # Entity identity (Guid) keys the deterministic entity↔handle maps.
 uuid = { workspace = true }
+# P22.3 (re-audit): the one place this crate reports rather than refuses — a
+# fracture asset with a one-sided adjacency edge is a tolerated INPUT (the reader
+# canonicalises it), so it warns instead of panicking. A `debug_assert` there was
+# a debug-only hard failure on an asset release priced correctly.
+tracing = { workspace = true }
 
 [dev-dependencies]
 # P19.5: pins `inf_ecs::ScatteredSolid` against its `inf_pcg::PcgCollider` mirror.

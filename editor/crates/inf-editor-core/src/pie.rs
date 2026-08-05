@@ -708,30 +708,30 @@ pub fn destructible_mesh_params(doc: &SceneDoc) -> BTreeMap<Uuid, inf_mesh::Frac
 /// Derive one mesh's `.inf_fracture`, applying **the cook's own refusals**
 /// (P22.3).
 ///
-/// The second half is the P22.3 audit's M3. `inf_packager::cook` runs
-/// `fracture_mesh` and then walks every chunk through
-/// `inf_physics::d3::convex_hull_is_buildable`, refusing the WHOLE fracture if
-/// any chunk cannot become a collider — so a mesh that fails it ships as an
-/// indestructible actor. PIE skipped that check and encoded unconditionally, so
-/// the same wall broke in the preview and did not in the shipped build, and one
-/// of its chunks rendered without colliding. Same door, same answer, both paths.
+/// The second half is the P22.3 audit's M3. `inf_packager::cook` refuses the
+/// WHOLE fracture if any chunk cannot become a collider, so a mesh that fails it
+/// ships as an indestructible actor. PIE skipped that check and encoded
+/// unconditionally, so the same wall broke in the preview and did not in the
+/// shipped build, with one of its chunks rendering without colliding.
+///
+/// The re-audit then found the deeper version of the same problem: "same door"
+/// was two doors that happened to be spelled the same. Both now call
+/// [`inf_physics::d3::first_uncollidable_chunk`], which is in the crate the answer
+/// is *about* — and `runtime/inf-player/tests/fracture_equivalence.rs` compares
+/// the two paths' BYTES over a level, so "same answer" is measured rather than
+/// asserted in a comment.
 pub fn derive_fracture(
     mesh: &inf_mesh::MeshAsset,
     mesh_id: Uuid,
     params: inf_mesh::FractureParams,
 ) -> Option<inf_mesh::FractureAsset> {
     let asset = inf_mesh::fracture_mesh(mesh, inf_asset::AssetId(mesh_id), params).ok()?;
-    for c in &asset.chunks {
-        let pts: Vec<glam::DVec3> = c
-            .hull_points
-            .iter()
-            .map(|p| glam::DVec3::from_array(*p))
-            .collect();
-        if !inf_physics::d3::convex_hull_is_buildable(&pts) {
-            return None;
-        }
-    }
-    Some(asset)
+    // The cook's refusal, through the cook's door — `inf_physics::d3` is where it
+    // lives precisely so this cannot become a second copy that agrees by
+    // coincidence (it did once, and then stopped agreeing).
+    inf_physics::d3::first_uncollidable_chunk(&asset)
+        .is_none()
+        .then_some(asset)
 }
 
 /// Locate the `inf-player` binary next to the running editor executable (dev
@@ -960,7 +960,8 @@ mod tests {
             .expect("a destructible");
         assert_eq!(
             archetype_first, 24,
-            "the fixture no longer reproduces the archetype/document split — an              archetype walk visits the same actor first, so this test would pass              against the very bug it exists to catch"
+            "the fixture no longer reproduces the archetype/document split — an \
+             archetype walk visits the same actor first, so this test would pass              against the very bug it exists to catch"
         );
         let params = destructible_mesh_params(&doc);
         assert_eq!(params.len(), 1, "one mesh, one fracture");
@@ -990,63 +991,90 @@ mod tests {
         assert_eq!(decoded.requested_chunks, 8);
     }
 
-    /// **M3: PIE applies the cook's refusal.** A mesh whose chunks cannot all
-    /// become colliders is refused *whole* by `inf_packager::cook`, so it ships
-    /// indestructible — and PIE must agree, or the preview breaks a wall the
-    /// shipped build cannot.
+    /// **M3: PIE applies the cook's refusal, and the refusal LOOP is what does
+    /// it.**
+    ///
+    /// A mesh whose chunks cannot all become colliders is refused *whole* by
+    /// `inf_packager::cook`, so it ships indestructible — and PIE must agree, or
+    /// the preview breaks a wall the shipped build cannot.
+    ///
+    /// # The fixture is a 0.2 mm slab, and that is the point
+    ///
+    /// The first cut used three coplanar vertices, which never reached the check
+    /// at all: `fracture_mesh` refused the mesh upstream (`cloud.len() < 4`), so
+    /// deleting the entire collidability loop left the test green. A gate that
+    /// dies before the thing it gates is a gate on nothing.
+    ///
+    /// A **thin slab** is the real case: it fractures perfectly happily into eight
+    /// chunks, each with a volume five orders of magnitude ABOVE
+    /// `MIN_HULL_VOLUME_M3`, and one of them is nonetheless near-coplanar enough
+    /// that `parry` cannot build a solid hull from it. That is exactly the failure
+    /// the producer gate exists for — a chunk that looks fine by volume and cannot
+    /// become a collider — and it is reachable only through the loop.
     #[test]
     fn a_fracture_the_cook_would_refuse_is_refused_here_too() {
         const MESH: Uuid = Uuid::from_u128(0x2203_0F02);
-        // A degenerate mesh: three coplanar points bound no volume, so every
-        // candidate chunk fails `convex_hull_is_buildable` (or the fracture is
-        // skipped outright). Either way the answer must be `None`.
-        let flat = inf_mesh::MeshAsset::new(
-            vec![inf_mesh::SubMesh {
-                name: "flat".into(),
-                vertices: vec![
-                    inf_mesh::MeshVertex {
-                        position: [-1.0, 0.0, -1.0],
-                        ..Default::default()
-                    },
-                    inf_mesh::MeshVertex {
-                        position: [1.0, 0.0, -1.0],
-                        ..Default::default()
-                    },
-                    inf_mesh::MeshVertex {
-                        position: [0.0, 0.0, 1.0],
-                        ..Default::default()
-                    },
-                ],
-                indices: vec![0, 1, 2],
-                material_slot: Some(0),
-                skin: Vec::new(),
-            }],
-            vec!["Concrete".into()],
-        );
+        let params = inf_mesh::FractureParams {
+            seed: 5,
+            chunk_count: 8,
+        };
+        let slab = thin_slab(1.0e-4);
+
+        // The fixture really does get past `fracture_mesh` — otherwise the refusal
+        // below would be the mesh being rejected, not the chunks.
+        let raw = inf_mesh::fracture_mesh(&slab, inf_asset::AssetId(MESH), params)
+            .expect("the slab fractures");
         assert!(
-            derive_fracture(
-                &flat,
-                MESH,
-                inf_mesh::FractureParams {
-                    seed: 0,
-                    chunk_count: 8,
-                },
-            )
-            .is_none(),
+            raw.chunks.len() >= 2,
+            "the slab produced no chunks to check"
+        );
+        let (chunk, volume_m3) = inf_physics::d3::first_uncollidable_chunk(&raw)
+            .expect("the slab must have an uncollidable chunk for this test to test anything");
+        assert!(
+            volume_m3 > 1.0e-9,
+            "chunk {chunk} was refused for its VOLUME ({volume_m3} m³), not its \
+             shape — the fixture is testing the wrong refusal"
+        );
+
+        assert!(
+            derive_fracture(&slab, MESH, params).is_none(),
             "PIE derived a fracture the cook refuses — the preview would break a \
              wall the shipped build cannot"
         );
         // The positive control: a real solid IS derived, so the assertion above is
         // about the refusal and not about `derive_fracture` returning None always.
-        assert!(derive_fracture(
-            &fracture_cube(),
-            MESH,
-            inf_mesh::FractureParams {
-                seed: 0,
-                chunk_count: 8,
-            },
+        assert!(derive_fracture(&fracture_cube(), MESH, params).is_some());
+    }
+
+    /// A 2 x 2 m plate of half-thickness `t` — thin enough that one of its chunks
+    /// cannot bound a hull, thick enough that the fracture itself succeeds.
+    fn thin_slab(t: f32) -> inf_mesh::MeshAsset {
+        let c = |x: f32, y: f32, z: f32| inf_mesh::MeshVertex {
+            position: [x, y, z],
+            ..Default::default()
+        };
+        inf_mesh::MeshAsset::new(
+            vec![inf_mesh::SubMesh {
+                name: "slab".into(),
+                vertices: vec![
+                    c(-1.0, -t, -1.0),
+                    c(1.0, -t, -1.0),
+                    c(1.0, t, -1.0),
+                    c(-1.0, t, -1.0),
+                    c(-1.0, -t, 1.0),
+                    c(1.0, -t, 1.0),
+                    c(1.0, t, 1.0),
+                    c(-1.0, t, 1.0),
+                ],
+                indices: vec![
+                    0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7, 0, 3,
+                    7, 0, 7, 4, 1, 5, 6, 1, 6, 2,
+                ],
+                material_slot: Some(0),
+                skin: Vec::new(),
+            }],
+            vec!["Concrete".into()],
         )
-        .is_some());
     }
 
     /// A resolver that cannot serve an asset leaves the field **empty** rather than

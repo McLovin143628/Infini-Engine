@@ -336,7 +336,8 @@ fn energy_bookkeeping_is_exact() {
         let cs = fractures[&WALL].chunks();
         assert!(
             cs[3].detached,
-            "the TOP chunk should go first: it is held by one bond, while the base              is held by one bond AND the ground"
+            "the TOP chunk should go first: it is held by one bond, while the base \
+             is held by one bond AND the ground"
         );
         assert!(!cs[0].detached && !cs[1].detached && !cs[2].detached);
     }
@@ -867,26 +868,26 @@ fn a_real_cook_asset_measures_its_own_bond_areas() {
     }
     assert_eq!(positive, pairs.len());
 
-    // **How many bonds the measurement actually found a face for**, named rather
-    // than inferred. `any()` was the first cut and it is far too weak — a hundred
-    // bonds silently on the fallback and one measured would have passed it, which
-    // is within a rounding error of the defect this function was rewritten to fix
-    // (the OLD algorithm fell back on 100% of a real cook's bonds, silently).
+    // **THE INVARIANT: zero estimated bonds.** The cook prunes every adjacency
+    // edge with no real face behind it (`inf_mesh::prune_faceless_adjacency`),
+    // so every edge that survives has a face to measure and the
+    // `min(volume)^(2/3)` fallback is unreachable for anything this engine
+    // produced.
     //
-    // The bar is **not** zero, and the reason is real geometry rather than a
-    // tolerance being nursed: the cook's adjacency comes from the Voronoi SITES,
-    // and clipping a cell against the source mesh's hull can remove a shared face
-    // entirely — leaving two chunks that are neighbours in the graph and touch
-    // along an edge, or not at all. There is nothing there to measure. On this
-    // 2 m cube at seed 7 that is exactly one pair out of nineteen; the assertion
-    // is set at a fifth, which is loose enough for that and nowhere near loose
-    // enough to hide a measurement that stopped working.
-    let estimated = state.estimated_bonds();
+    // It was briefly a tolerance ("under a fifth is fine") on the strength of
+    // one observation of one bond in nineteen — which was an artefact of the
+    // test that made it, not of the geometry: the assertion INFERRED "took the
+    // fallback" by comparing the priced area against the fallback VALUE within
+    // 1%, so a bond whose measured area happened to land near it was miscounted.
+    // A sweep of 24 configurations (seeds 1-23, 8-64 chunks, 2 959 bonds) finds
+    // zero, this fixture included. `estimated_bonds` is a record, not an
+    // inference, which is why the bar can be zero at all.
     assert!(
-        estimated.len() * 5 < pairs.len(),
-        "{} of {} bonds fell back to the `min(volume)^(2/3)` estimate — the          shared-face measurement is not finding faces that exist: {estimated:?}",
-        estimated.len(),
-        pairs.len()
+        state.estimated_bonds().is_empty(),
+        "{} of {} bonds fell back to the `min(volume)^(2/3)` estimate ({:?}) - either the cook shipped a faceless edge, or the measurement stopped finding faces that exist",
+        state.estimated_bonds().len(),
+        pairs.len(),
+        state.estimated_bonds()
     );
 
     // And it survives a full break + collapse without a panic or a NaN.
@@ -913,7 +914,8 @@ fn a_controlled_fixture_measures_every_bond() {
     let state = FractureState::new(tower(6), concrete(), DAffine3::IDENTITY, false);
     assert!(
         state.estimated_bonds().is_empty(),
-        "the measurement missed a face on geometry that is nothing but exact          squares: {:?}",
+        "the measurement missed a face on geometry that is nothing but exact \
+         squares: {:?}",
         state.estimated_bonds()
     );
     // …and every one of them measured the square metre it actually is.
@@ -1092,9 +1094,11 @@ fn a_dynamic_body_in_the_support_skin_does_not_hide_the_ground() {
         Some(BodyKind3D::Dynamic),
         "the fixture's slab is not dynamic"
     );
+    let slab_y = bridge.world().body_translation(slab).unwrap().y;
     assert!(
-        bridge.world().body_translation(slab).unwrap().y < 0.02,
-        "the fixture's slab is not inside the 2 cm support skin"
+        (0.0..0.02).contains(&slab_y),
+        "the fixture's slab is at y = {slab_y}, not inside the 2 cm support skin \
+         ABOVE the ground — a one-sided `< 0.02` would admit a slab at −0.5, which          is not in the skin at all and would make this test prove nothing"
     );
 }
 

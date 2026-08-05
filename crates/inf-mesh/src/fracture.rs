@@ -1192,16 +1192,16 @@ impl FractureAsset {
                 if i == n {
                     continue; // a chunk is not its own neighbour
                 }
-                // **Canonicalised, not filtered.** The old form kept a pair only
-                // when the LOWER index listed it, so a one-sided edge — chunk 7
-                // naming chunk 3 while chunk 3 does not name 7 — vanished
-                // silently, and a consumer that prices bonds would charge 0 J to
-                // break it. P22.2 declined to enforce symmetry in the cook and
-                // P22.3 consumes the invariant, so the reader canonicalises
-                // instead of trusting: `(min, max)` whichever side listed it,
-                // then dedup. No asymmetric edge has been observed in six real
-                // cooks (`FractureState::new` debug-asserts it), which is exactly
-                // when a latent hazard is cheapest to close.
+                // **Canonicalised, not filtered.** The old form kept a pair
+                // only when the LOWER index listed it, so a one-sided edge —
+                // chunk 7 naming chunk 3 while chunk 3 does not name 7 —
+                // vanished silently, and a consumer that prices bonds would
+                // charge 0 J to break it.
+                //
+                // `prune_faceless_adjacency` now makes the cook's own output
+                // symmetric, so this is belt to that braces: it costs one `min`
+                // and one `max`, and it keeps the reader correct for an asset
+                // written by an older cook or by a tool that is not this one.
                 out.push((i.min(n), i.max(n)));
             }
         }
@@ -1398,6 +1398,15 @@ pub fn fracture_mesh(
             hull_planes.len(),
             &remap,
         ));
+    }
+    // **Drop adjacency edges with no face behind them** (P22.3 re-audit). Must
+    // run AFTER every chunk exists, because the measurement needs both hulls. See
+    // `prune_faceless_adjacency` for why a faceless edge is a phantom load path
+    // rather than merely a mispriced bond.
+    {
+        let (lo, hi) = (mesh.bounds.min, mesh.bounds.max);
+        let extent_m = (((hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2])) as f64).max(1.0e-3);
+        prune_faceless_adjacency(&mut chunks, extent_m);
     }
 
     // **A fracture with fewer than two pieces is not a fracture.** The chunk
@@ -1657,6 +1666,236 @@ fn build_chunk(
         volume_m3: poly.volume(),
         center_of_mass: [com.x, com.y, com.z],
         neighbors,
+    }
+}
+
+/// Fraction of the source mesh's extent within which two chunks' hull corners
+/// count as **the same corner**.
+///
+/// A shared Voronoi face's corners are the intersection of the *same* three
+/// half-space planes in both cells, so the two hulls carry them at coordinates
+/// that agree to within the arithmetic that produced them. `1e-4 x 10 m = 1 mm`
+/// clears that comfortably while staying far below any real geometric feature —
+/// two genuinely distinct corners of a metre-scale chunk are never a millimetre
+/// apart.
+pub const FACE_PLANE_EPS_FRACTION: f64 = 1.0e-4;
+
+impl FractureAsset {
+    /// The source mesh's largest extent, metres — the scale every geometric
+    /// tolerance in this module is a fraction of.
+    pub fn extent_m(&self) -> f64 {
+        let (lo, hi) = (self.bounds.min, self.bounds.max);
+        let d = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+        (d[0].max(d[1]).max(d[2]) as f64).max(1.0e-3)
+    }
+
+    /// The area, m², of the face chunks `a` and `b` share — `0.0` when they share
+    /// no face at all.
+    ///
+    /// # Why it lives here rather than in the consumer
+    ///
+    /// Two callers need the same answer for different reasons, and they are in
+    /// different crates. The **cook** ([`fracture_mesh`]) uses it to decide
+    /// whether an adjacency edge is real: an edge with no face behind it is a
+    /// phantom load path, because the same `neighbors` graph the pricing reads is
+    /// the graph the structural solve propagates support along — a chunk held up
+    /// by a neighbour it never touches. The **runtime**
+    /// (`inf_physics::d3::fracture`) uses it to price the bond. One
+    /// implementation, in the crate that owns the geometry, called by both.
+    ///
+    /// # How, and why not the obvious way
+    ///
+    /// The obvious measurement is "the chunks are Voronoi cells, so their shared
+    /// face lies on the perpendicular bisector of their two centres — sum `a`'s
+    /// triangles on that plane". **It is wrong, and it fails silently.** A Voronoi
+    /// face bisects the two *sites*, and a cell's `center_of_mass` is its volume
+    /// centroid, which is not its site: clip a cell against the source mesh's hull
+    /// and the centroid slides away from the seed.
+    ///
+    /// So the face is found from the **geometry the two chunks agree on**: their
+    /// `hull_points` are `f64`, and a shared face's corners are the intersection
+    /// of the same three planes in both cells. The common points are the face's
+    /// polygon; fit a plane through them, order them around their centroid, and
+    /// sum the fan. Working in `f64` hull points rather than `f32` render vertices
+    /// is the other half of that — the vertices a chunk draws with are quantised,
+    /// and quantisation noise is the size of the tolerance this needs.
+    pub fn shared_face_area_m2(&self, a: u32, b: u32) -> f64 {
+        let (Some(ca), Some(cb)) = (self.chunks.get(a as usize), self.chunks.get(b as usize))
+        else {
+            return 0.0;
+        };
+        shared_face_area_between(ca, cb, self.extent_m())
+    }
+}
+
+/// [`FractureAsset::shared_face_area_m2`] over two chunks directly — the form the
+/// cook needs, before there is an asset to ask.
+pub fn shared_face_area_between(a: &FractureChunk, b: &FractureChunk, extent_m: f64) -> f64 {
+    let eps = extent_m * FACE_PLANE_EPS_FRACTION;
+    let eps2 = eps * eps;
+    let common: Vec<DVec3> = a
+        .hull_points
+        .iter()
+        .map(|p| DVec3::from_array(*p))
+        .filter(|p| {
+            b.hull_points
+                .iter()
+                .any(|q| (DVec3::from_array(*q) - *p).length_squared() <= eps2)
+        })
+        .collect();
+    polygon_area_m2(&common)
+}
+
+/// The area of the convex polygon through `points`, which are assumed coplanar
+/// and in convex position but in **no particular order** — a shared face's corner
+/// set as the two hulls happen to list it.
+///
+/// Fewer than three points bound no area. The plane's normal is taken from the
+/// widest available triangle rather than from the first one, because a face's
+/// corner list can start with three nearly-collinear points and a normal fitted
+/// to those is noise.
+fn polygon_area_m2(points: &[DVec3]) -> f64 {
+    if points.len() < 3 {
+        return 0.0;
+    }
+    let centre = points.iter().copied().sum::<DVec3>() / points.len() as f64;
+    let u = {
+        let mut best = (0.0_f64, DVec3::X);
+        for p in points {
+            let d = *p - centre;
+            let l = d.length();
+            if l > best.0 {
+                best = (l, d);
+            }
+        }
+        if best.0 <= 0.0 {
+            return 0.0;
+        }
+        best.1 / best.0
+    };
+    let normal = {
+        let mut best = (0.0_f64, DVec3::Y);
+        for p in points {
+            let c = u.cross(*p - centre);
+            let l = c.length();
+            if l > best.0 {
+                best = (l, c);
+            }
+        }
+        if best.0 <= 0.0 {
+            return 0.0; // collinear: no area
+        }
+        best.1 / best.0
+    };
+    let v = normal.cross(u);
+    // Angle-order around the centre, then sum the shoelace. Ties break by the
+    // input index, so the order is a function of the geometry alone.
+    let mut planar: Vec<(u64, usize, f64, f64)> = points
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let d = *p - centre;
+            let (x, y) = (d.dot(u), d.dot(v));
+            (total_order_key(y.atan2(x)), i, x, y)
+        })
+        .collect();
+    planar.sort_by_key(|(k, i, _, _)| (*k, *i));
+    let mut twice = 0.0;
+    for i in 0..planar.len() {
+        let (_, _, x0, y0) = planar[i];
+        let (_, _, x1, y1) = planar[(i + 1) % planar.len()];
+        twice += x0 * y1 - x1 * y0;
+    }
+    (twice * 0.5).abs()
+}
+
+/// Map an `f64` onto a `u64` whose unsigned ordering matches the float's total
+/// ordering — so a sort key is exact and needs no float comparator.
+fn total_order_key(v: f64) -> u64 {
+    let bits = v.to_bits();
+    if bits & (1 << 63) != 0 {
+        !bits
+    } else {
+        bits ^ (1 << 63)
+    }
+}
+
+/// **Drop every adjacency edge with no real face behind it, and make what
+/// survives symmetric** (P22.3 re-audit).
+///
+/// # Why an edge can be faceless at all
+///
+/// `build_chunk` lists a neighbour for each bisector face the *clipped* polytope
+/// still has, which already removes the common case — a face clipped away
+/// entirely by the source hull leaves no face and so no edge. What it cannot
+/// remove is a **sliver**: a bisector face reduced by clipping to a degenerate
+/// wisp with corners but no area. That is still a face to the loop above, and it
+/// becomes an adjacency edge.
+///
+/// # Why a faceless edge is worse than a mispriced bond
+///
+/// The `neighbors` graph is read twice downstream, and only one of the readers is
+/// about strength. `inf_physics::d3::fracture` prices bonds from it — a bond with
+/// no measurable face falls back to an estimate, and the estimate
+/// (`min(volume)^(2/3)`) is close to the size of the chunk's *largest* real faces,
+/// so a phantom bond is priced as one of the strongest in the structure. The
+/// other reader is the **support solve**, which propagates "this chunk is held up"
+/// along exactly these edges — so a phantom edge is a phantom load path, and a
+/// chunk hangs in the air held by a neighbour it never touches.
+///
+/// Neither reader can detect it: an area of zero and an area the measurement
+/// could not find are the same observation. So it is fixed here, in the producer,
+/// where the geometry is still around to be asked.
+///
+/// Symmetry falls out for free, and is worth having: the two cells' clips can
+/// disagree about a sliver, so an edge listed by one side and not the other is
+/// exactly the asymmetric case the runtime used to canonicalise around.
+fn prune_faceless_adjacency(chunks: &mut [FractureChunk], extent_m: f64) {
+    // The area below which a "face" is arithmetic noise rather than geometry: the
+    // square of the corner-matching tolerance. At a 2 m extent that is 4e-8 m² —
+    // a fortieth of a square millimetre.
+    let eps = extent_m * FACE_PLANE_EPS_FRACTION;
+    let min_area = eps * eps;
+    let n = chunks.len();
+    // Every unordered pair either side lists, measured once.
+    let mut keep: std::collections::BTreeSet<(u32, u32)> = std::collections::BTreeSet::new();
+    let mut seen: std::collections::BTreeSet<(u32, u32)> = std::collections::BTreeSet::new();
+    for i in 0..n {
+        for k in 0..chunks[i].neighbors.len() {
+            let j = chunks[i].neighbors[k];
+            if j as usize >= n || j == i as u32 {
+                continue;
+            }
+            let pair = ((i as u32).min(j), (i as u32).max(j));
+            if !seen.insert(pair) {
+                continue;
+            }
+            if shared_face_area_between(
+                &chunks[pair.0 as usize],
+                &chunks[pair.1 as usize],
+                extent_m,
+            ) > min_area
+            {
+                keep.insert(pair);
+            }
+        }
+    }
+    for (i, c) in chunks.iter_mut().enumerate() {
+        let i = i as u32;
+        c.neighbors = keep
+            .iter()
+            .filter_map(|&(a, b)| {
+                if a == i {
+                    Some(b)
+                } else if b == i {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        c.neighbors.sort_unstable();
+        c.neighbors.dedup();
     }
 }
 
@@ -2781,7 +3020,8 @@ mod derived_id_salt {
             assert_ne!(
                 super::derived_fracture_id(mesh),
                 inf_vgeom::derived_vmesh_id(mesh),
-                "the fracture and vmesh derived ids collide for {mesh:?} — one                  would overwrite the other in the pack index"
+                "the fracture and vmesh derived ids collide for {mesh:?} — one \
+                 would overwrite the other in the pack index"
             );
         }
     }

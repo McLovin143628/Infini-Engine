@@ -368,7 +368,7 @@ impl PhysicsBridge3D {
     ///
     /// `fractures` is the *simulation's* map (`RuntimeSim::fractures` /
     /// `SimSession::fractures`), keyed by the destructible actor's entity `Guid`.
-    /// An actor whose state is still [`FractureState::is_intact`](super::fracture::FractureState::is_intact)(super::fracture::FractureState::is_intact) contributes
+    /// An actor whose state is still [`FractureState::is_intact`](super::fracture::FractureState::is_intact) contributes
     /// nothing here and keeps its authored collider; the first chunk to come off
     /// swaps that one collider for per-chunk bodies, atomically, in this pass.
     pub fn sync_from_world_sim(

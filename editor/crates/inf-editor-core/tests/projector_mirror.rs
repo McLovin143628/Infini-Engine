@@ -1531,3 +1531,83 @@ fn both_projectors_project_fracture_the_same_way() {
         }
     }
 }
+
+/// **Both fixed steps must run the P22.3 fracture slots, in order.**
+///
+/// The re-audit's item 5: deleting the editor host's `follow_fractures` call left
+/// **460 tests green**. Every fracture test drives the bridge directly, so the
+/// only thing that notices a host forgetting the call is a human reading the
+/// file — which is exactly the "a boot path that forgets an attachment does not
+/// crash, it agrees with itself" law from P21.4. This is the slot-parity gate for
+/// it, on the `both_fixed_steps_run_the_deformation_slot` precedent above.
+#[test]
+fn both_fixed_steps_run_the_fracture_slots() {
+    const RUNTIME_SIM: &str = "runtime/inf-player/src/runtime_sim.rs";
+    const SIMULATE: &str = "editor/crates/inf-editor-core/src/simulate.rs";
+    for (label, path, follow) in [
+        (
+            "shipped player",
+            RUNTIME_SIM,
+            "PhysicsBridge3D::follow_fractures(&self.world, &mut self.fractures);",
+        ),
+        (
+            "editor Simulate",
+            SIMULATE,
+            "PhysicsBridge3D::follow_fractures(doc.world(), &mut self.fractures);",
+        ),
+    ] {
+        // **Scoped to the fixed step.** Both hosts also sync the bridge once in
+        // their CONSTRUCTOR, and a whole-file search finds that one first — which
+        // is how the first cut of this gate reported the shipped player following
+        // "after the sync" when it does no such thing. A gate that reads the wrong
+        // function is a gate on nothing.
+        let whole = read(path).replace("\r\n", "\n");
+        let start = whole
+            .find("fn fixed_step(")
+            .expect("both hosts have a `fixed_step`");
+        let src = whole[start..].to_string();
+        assert!(
+            src.contains(follow),
+            "the {label} fixed step does not FOLLOW its fractures (`{follow}`) — an \
+             intact destructible moved after load would shatter where it used to be"
+        );
+        for call in [
+            "write_back_fractures(&mut self.fractures)",
+            "step_fractures(&mut self.fractures, dt, self.debris_budget)",
+        ] {
+            assert!(
+                src.contains(call),
+                "the {label} fixed step does not call `{call}` — the two hosts \
+                 would disagree about when debris moves and what collapses"
+            );
+        }
+
+        // ORDER. Follow before the sync (the sync reads the map this writes);
+        // write-back and the advance after the solver (support is a query against
+        // where bodies actually ended the step).
+        let at_follow = src.find(follow).expect("follow present");
+        let at_sync = src
+            .find("sync_from_world_sim(")
+            .expect("the sim sync must exist");
+        let at_step = src[at_sync..]
+            .find("bridge3d.step(dt)")
+            .map(|i| i + at_sync)
+            .expect("the 3D solver step must exist");
+        let at_write = src
+            .find("write_back_fractures(")
+            .expect("the fracture write-back must exist");
+        let at_advance = src
+            .find("step_fractures(")
+            .expect("the fracture advance must exist");
+        assert!(
+            at_follow < at_sync,
+            "the {label} follows its fractures AFTER the sync — the colliders would \
+             be described from last step's placement"
+        );
+        assert!(
+            at_step < at_write && at_write < at_advance,
+            "the {label} runs the fracture slots out of order: the poses must be \
+             written back after the solver, and the solve+budget after those"
+        );
+    }
+}

@@ -674,24 +674,52 @@ fn a_fully_holed_tile_is_a_collider_with_no_surface() {
 /// `HeightFieldFlags::FIX_INTERNAL_EDGES` the narrow phase answers a contact with
 /// **one triangle's** normal and no knowledge of its neighbours, so a body
 /// crossing a cell boundary strikes the next triangle's *edge* and is pushed
-/// partly upward — on ground that is dead flat.
+/// partly upward — on ground that is dead flat. Every character, prop and piece of
+/// debris that touches terrain rides on this.
 ///
-/// The numbers this pins were measured on the unflagged build: 46 upward kicks
-/// peaking at 1.44 m/s, a 12.2 cm hop, and 0.72 m of phantom LATERAL drift over
-/// 300 steps. Flagged: 0 kicks, 0.69 cm, no drift. Every character, prop and
-/// piece of debris that touches terrain rides on this.
+/// # The fixture had to be rebuilt, and the numbers with it
 ///
-/// The thresholds below are deliberately far tighter than the broken behaviour
-/// and far looser than the fixed one, so the test is about the defect rather than
-/// about the solver's exact arithmetic.
+/// The first cut ran on the suite's 4 m tile: a sphere at 12 m/s leaves it after
+/// twenty steps and free-falls through the remaining 280, so it measured almost
+/// nothing and the failure it did catch was a handful of kicks rather than the
+/// scale of the defect. It also had **no positive control** — on a world with no
+/// terrain at all it passed, because a body in free fall is never kicked either.
+///
+/// So: a 64 m tile, and `ground_steps` is asserted before anything else.
+///
+/// **The measured numbers, from this fixture, on this machine.** Unflagged: **5
+/// upward kicks, peaking at 0.105 m/s**, over 300 steps of sliding contact.
+/// Flagged: **zero**. The hop and drift assertions are guards rather than
+/// measurements — the unflagged run fails on `kicks` before it reaches them.
+///
+/// The first commit quoted "46 kicks peaking at 1.44 m/s, a 12.2 cm hop and
+/// 0.72 m of drift". **Those figures do not correspond to any fixture in this
+/// tree** and are withdrawn: the fixture they would have had to come from did not
+/// exist (the 4 m tile gives ~19 steps of contact, not 300). What is written above
+/// is what this test prints when the flag is removed.
 #[test]
 fn a_sphere_sliding_on_flat_ground_is_never_kicked_upward() {
-    let world = terrain_world(flat_terrain());
+    // A tile wide enough that the sphere never runs off it: 65 samples at 1 m is
+    // 64 m, and 300 steps at 12 m/s is 60 m.
+    const WIDE_RES: u32 = 65;
+    let mut data = TerrainData::new(WIDE_RES, MPS);
+    data.author_tile((0, 0), |_, _| GROUND_Y);
+    let mut w = EcsWorld::new();
+    let e = w.spawn_with_guid(TERRAIN, "Terrain", None);
+    w.world_mut().entity_mut(e).insert(Terrain {
+        meters_per_sample: MPS,
+        tile_resolution: WIDE_RES,
+        data,
+        ..Terrain::default()
+    });
+    w.mark_dirty();
+    w.propagate();
+
     let mut bridge = PhysicsBridge3D::new(gravity());
-    bridge.sync_from_world(&world);
+    bridge.sync_from_world(&w);
 
     let r = 0.25;
-    let start = DVec3::new(0.2, GROUND_Y + r, 0.2);
+    let start = DVec3::new(0.5, GROUND_Y + r, 32.0);
     let body = bridge
         .world_mut()
         .add_body(BodyKind3D::Dynamic, start, glam::DQuat::IDENTITY);
@@ -699,12 +727,12 @@ fn a_sphere_sliding_on_flat_ground_is_never_kicked_upward() {
         body,
         ColliderDesc3D::new(ColliderShape3D::Sphere { radius: r }),
     );
-    // Slide it along +X across many cell boundaries. Re-asserted every step so
-    // friction cannot quietly end the experiment early.
+
     let mut kicks = 0u32;
     let mut peak_up = 0.0_f64;
     let mut max_hop = 0.0_f64;
-    let mut drift_z = 0.0_f64;
+    let mut drift = 0.0_f64;
+    let mut ground_steps = 0u32;
     for _ in 0..300 {
         let v = bridge.world().body_linvel(body).unwrap();
         bridge
@@ -712,14 +740,28 @@ fn a_sphere_sliding_on_flat_ground_is_never_kicked_upward() {
             .set_body_linvel(body, DVec3::new(12.0, v.y.min(0.0), 0.0));
         bridge.step(1.0 / 60.0);
         let after = bridge.world().body_linvel(body).unwrap();
+        let at = bridge.world().body_translation(body).unwrap();
+        // "On the ground" = within a centimetre of resting height. Counted so the
+        // assertions below are known to be about contacts rather than about a
+        // body that had already left the tile.
+        if (at.y - (GROUND_Y + r)).abs() < 0.01 {
+            ground_steps += 1;
+        }
         if after.y > 0.05 {
             kicks += 1;
             peak_up = peak_up.max(after.y);
         }
-        let at = bridge.world().body_translation(body).unwrap();
         max_hop = max_hop.max(at.y - (GROUND_Y + r));
-        drift_z = drift_z.max(at.z.abs() - 0.2);
+        drift = drift.max((at.z - start.z).abs());
     }
+
+    // **THE POSITIVE CONTROL, first.** A body in free fall is never kicked either,
+    // so without this the whole test passes on a world with no terrain in it.
+    assert!(
+        ground_steps > 250,
+        "the sphere was in ground contact for only {ground_steps} of 300 steps — \
+         the fixture is measuring free fall, not sliding contact"
+    );
     assert_eq!(
         kicks, 0,
         "the sphere was kicked upward {kicks} time(s) (peak {peak_up} m/s) on FLAT \
@@ -730,14 +772,82 @@ fn a_sphere_sliding_on_flat_ground_is_never_kicked_upward() {
         "the sphere hopped {max_hop} m on flat ground"
     );
     assert!(
-        drift_z < 0.05,
-        "the sphere drifted {drift_z} m SIDEWAYS on flat ground with no lateral \
+        drift < 0.05,
+        "the sphere drifted {drift} m SIDEWAYS on flat ground with no lateral \
          force — internal-edge normals are steering it"
     );
-    // Anti-vacuity: it really did travel across many cells (the tile is 4 m wide
-    // at 1 m samples, and the body wraps past the far edge onto nothing), so the
-    // assertions above ran against real boundary crossings rather than a body
-    // that never moved.
+    // …and it really did cross many cell boundaries.
     let travelled = bridge.world().body_translation(body).unwrap().x - start.x;
-    assert!(travelled > 3.0, "the sphere only travelled {travelled} m");
+    assert!(travelled > 50.0, "the sphere only travelled {travelled} m");
+}
+
+/// **The same defect on the OTHER surface**: a P21 voxel cave floor is a trimesh,
+/// and a trimesh is "one triangle at a time" to the narrow phase in exactly the
+/// same way. This is where fracture debris lands when it falls through a hole in
+/// the terrain, so it is not a hypothetical second case.
+///
+/// Gated separately because it is a separate flag on a separate shape:
+/// `TriMeshFlags::empty()` leaves the whole terrain suite green. Measured with the
+/// flag removed: **11 kicks peaking at 0.188 m/s** over 180 steps; flagged, zero.
+#[test]
+fn a_sphere_sliding_on_a_flat_voxel_floor_is_never_kicked_upward() {
+    // One chunk of rock whose surface is flat at y = 3.5, and no terrain at all —
+    // so the only thing under the sphere is the trimesh.
+    let mut v = VoxelData::new(1.0);
+    for k in [
+        ChunkKey::new(0, 0, 0),
+        ChunkKey::new(1, 0, 0),
+        ChunkKey::new(0, 0, 1),
+        ChunkKey::new(1, 0, 1),
+    ] {
+        v.insert_chunk(k, VoxelChunk::from_fn(|_, j, _| j as f64 - 3.5));
+    }
+    v.clear_dirty();
+    let volumes = BTreeMap::from([(CAVE, v)]);
+
+    let mut w = EcsWorld::new();
+    w.mark_dirty();
+    let mut bridge = PhysicsBridge3D::new(gravity());
+    bridge.sync_from_world_with_voxels(&w, &volumes);
+
+    let r = 0.25;
+    let floor = 3.5;
+    let start = DVec3::new(1.0, floor + r, 8.0);
+    let body = bridge
+        .world_mut()
+        .add_body(BodyKind3D::Dynamic, start, glam::DQuat::IDENTITY);
+    bridge.world_mut().add_collider(
+        body,
+        ColliderDesc3D::new(ColliderShape3D::Sphere { radius: r }),
+    );
+
+    let mut kicks = 0u32;
+    let mut peak_up = 0.0_f64;
+    let mut ground_steps = 0u32;
+    for _ in 0..180 {
+        let v = bridge.world().body_linvel(body).unwrap();
+        bridge
+            .world_mut()
+            .set_body_linvel(body, DVec3::new(4.0, v.y.min(0.0), 0.0));
+        bridge.step(1.0 / 60.0);
+        let after = bridge.world().body_linvel(body).unwrap();
+        let at = bridge.world().body_translation(body).unwrap();
+        if (at.y - (floor + r)).abs() < 0.02 {
+            ground_steps += 1;
+        }
+        if after.y > 0.05 {
+            kicks += 1;
+            peak_up = peak_up.max(after.y);
+        }
+    }
+    assert!(
+        ground_steps > 140,
+        "the sphere was on the cave floor for only {ground_steps} of 180 steps — \
+         the fixture is measuring free fall"
+    );
+    assert_eq!(
+        kicks, 0,
+        "the sphere was kicked upward {kicks} time(s) (peak {peak_up} m/s) on a \
+         FLAT voxel floor — the chunk trimesh is missing FIX_INTERNAL_EDGES"
+    );
 }

@@ -6656,9 +6656,12 @@ deterministic on the replay trace, PIE == shipping.
 > blocker was the one that would have been felt by every player: a height field is
 > two triangles per cell and, without `FIX_INTERNAL_EDGES`, a body crossing a cell
 > boundary is answered with an *edge* normal — so a sphere sliding on **flat**
-> ground took 46 upward kicks, hopped 12 cm and drifted 0.72 m sideways with no
-> lateral force. One flag, and the same fix for the P21 voxel trimesh floors that
-> debris lands on when it falls through a cave mouth. The rest: the editor's
+> ground is kicked upward with no lateral force applied to it. One flag, and the
+> same fix for the P21 voxel trimesh floors that debris lands on when it falls
+> through a cave mouth. (The first write-up of this quoted "46 kicks, 12 cm hop,
+> 0.72 m drift" from a fixture that did not exist; the committed gates measure
+> **5 kicks at 0.105 m/s** on terrain and **11 at 0.188 m/s** on a voxel floor,
+> both zero once flagged, and those are the numbers that stand.) The rest: the editor's
 > Simulate seeder resolved a shared mesh's chunking in ECS **archetype** order
 > while the cook and PIE used document order (Simulate shattered a wall into 24
 > pieces the shipped pack shattered into 8); PIE skipped the cook's own
