@@ -115,35 +115,57 @@ fn band_weights(d: f32) -> vec2<f32> {
 //      dither hash above is written to, and for the same reason (a golden
 //      renders one frame from cold; a determinism gate renders two).
 //
-// Both ride `deform_enabled()`. That couples foliage wind to the presence of a
-// deformation field, which is not physics — it is byte-stability: turning
-// ambient sway on unconditionally would have moved every one of the 49
-// committed goldens. Giving wind its own switch is the documented follow-up.
+// The two ride SEPARATE switches — `deform_enabled()` and
+// `deform_wind_enabled()` — because they are separate claims. Trampling needs a
+// field; sway does not, and gating it on "is there a live deform cell anywhere"
+// made an ambient effect flick on and off with a footprint expiring half a
+// kilometre away. Sway is `ScatterSettings::foliage_wind`, OFF by default, which
+// is also what keeps all 49 pre-P22.1 goldens byte-identical.
+//
+// ── HONEST REMAINDER: THE SHADOW DOES NOT BEND ───────────────────────────────
+//
+// A scatter instance's shadow is not cast through this shader. Casters are
+// packed on the CPU by `passes::shadow` (`scatter::pack_fallback` →
+// `shadow_depth.wgsl`), which draws them as rigid instanced boxes, so a blade
+// that has been laid flat by a boot still casts the shadow of an upright one —
+// and under the grazing sun the deformation golden uses, that is visible.
+//
+// Not fixed here because the shadow path does NOT share this vertex stage:
+// making it agree means teaching the caster pack the same bend, i.e. a second
+// implementation of `scatter_bend` on the CPU (in the shadow pass's own
+// coordinate space, with no deformation texture bound), which is exactly the
+// kind of duplicated derivation the mirror rule exists to prevent. The right fix
+// is to route scatter casters through a shared vertex path; that is a shadow-pass
+// change, not a P22.1 one, and it is on the ledger.
 //
 // Returns `(lean_xz, squash)`: a horizontal displacement per metre of height,
 // and the vertical scale a trampled instance keeps.
 fn scatter_bend(base_xz: vec2<f32>) -> vec3<f32> {
-    if (!deform_enabled()) {
-        return vec3<f32>(0.0, 0.0, 1.0);
+    var lean = vec2<f32>(0.0, 0.0);
+    var squash = 1.0;
+    if (deform_enabled()) {
+        // `deform_depth` already carries the window's rim fade, so the trample
+        // term goes continuously to zero at the window edge instead of snapping
+        // a row of grass upright 64 m from the camera.
+        let depth = deform_depth(base_xz);
+        let trample = clamp(depth / max(dfm.params.y, 1e-4), 0.0, 1.0);
+        let g = deform_gradient(base_xz);
+        let gl = length(g);
+        var out_dir = vec2<f32>(0.0, 0.0);
+        if (gl > 1e-4) {
+            out_dir = -g / gl;
+        }
+        lean = out_dir * (dfm.params.z * trample);
+        squash = 1.0 - 0.6 * trample;
     }
-    let depth = deform_depth(base_xz);
-    let trample = clamp(depth / max(dfm.params.y, 1e-4), 0.0, 1.0);
-    let g = deform_gradient(base_xz);
-    let gl = length(g);
-    var out_dir = vec2<f32>(0.0, 0.0);
-    if (gl > 1e-4) {
-        out_dir = -g / gl;
+    if (deform_wind_enabled()) {
+        // The phase offset is precomputed and reduced on the CPU in f64, so this
+        // is origin-invariant and cannot freeze at a day-long clock — see the
+        // `Deform.wind` comment in deform.wgsl.
+        let phase = dot(base_xz, dfm.wind.xy) * dfm.wind.z + dfm.wind.w;
+        lean = lean + dfm.wind.xy * (0.12 * sin(phase));
     }
-    // Wavenumber for a WIND_WAVELENGTH_M-long gust; the phase advances with the
-    // wind's own speed so a stronger wind visibly runs faster across the field.
-    let k = 6.28318530718 / 4.0;
-    let phase = dot(base_xz, dfm.wind.xy) * k - dfm.wind.z * dfm.params.w * k;
-    let wind = dfm.wind.xy * (0.12 * sin(phase));
-    return vec3<f32>(
-        out_dir.x * dfm.params.z * trample + wind.x,
-        out_dir.y * dfm.params.z * trample + wind.y,
-        1.0 - 0.6 * trample,
-    );
+    return vec3<f32>(lean.x, lean.y, squash);
 }
 
 @vertex

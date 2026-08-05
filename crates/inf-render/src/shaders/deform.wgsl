@@ -18,10 +18,18 @@ struct Deform {
     // x = render-local window min X, y = render-local window min Z,
     // z = 1 / texel metres, w = window texels.
     window: vec4<f32>,
-    // x = enabled, y = max depth (m), z = foliage bend gain,
-    // w = the level clock in seconds (the wind phase).
+    // x = window enabled, y = max depth (m), z = foliage bend gain,
+    // w = foliage wind enabled.
     params: vec4<f32>,
-    // xy = wind direction XZ (unit or zero), z = wind speed (m/s), w reserved.
+    // xy = wind direction XZ (unit or zero), z = wavenumber (rad/m),
+    // w = the WHOLE phase offset, already reduced to [0, 2pi) on the CPU in f64.
+    //
+    // Reduced there and not here, for two reasons the first cut got wrong:
+    // `speed * cloud_time_s * k` in f32 loses the whole fractional phase inside a
+    // level's day and the sway FREEZES, and the world->render-local offset has to
+    // be folded in or the phase RE-ROLLS on every floating-origin rebase (the
+    // grass flicks to a new point of its cycle because the camera crossed a 10 m
+    // boundary). See `deform.rs::wind_phase`.
     wind: vec4<f32>,
 };
 
@@ -33,6 +41,27 @@ struct Deform {
 
 fn deform_enabled() -> bool {
     return dfm.params.x > 0.5;
+}
+
+// Foliage sway is INDEPENDENT of whether anything has walked on the ground: it
+// is driven by `ScatterSettings::foliage_wind`, not by the presence of a live
+// deform cell. (Gating it on the window made an ambient effect flick on and off
+// with a footprint expiring half a kilometre away.)
+fn deform_wind_enabled() -> bool {
+    return dfm.params.w > 0.5;
+}
+
+// The window's edge fade, [0, 1] — 1 well inside, ramping to 0 at the rim.
+//
+// The window is 128 m across, so its edge is 64 m from the camera: INSIDE the
+// scatter's 120 m full-mesh band and far inside the terrain's draw distance. An
+// un-faded cutoff would draw a straight line across the ground where every rut
+// stopped and every blade of grass stood back up. Mirrored (and unit-tested) by
+// `deform::rim_fade`; the 32 texels are `DEFORM_RIM_TEXELS`.
+fn deform_rim_fade(p: vec2<f32>) -> f32 {
+    let n = dfm.window.w - 1.0;
+    let edge = min(min(p.x, p.y), min(n - p.x, n - p.y));
+    return clamp(edge / 32.0, 0.0, 1.0);
 }
 
 fn deform_load(ij: vec2<i32>) -> f32 {
@@ -65,7 +94,7 @@ fn deform_depth(local_xz: vec2<f32>) -> f32 {
     let h11 = deform_load(ii + vec2<i32>(1, 1));
     let hx0 = mix(h00, h10, f.x);
     let hx1 = mix(h01, h11, f.x);
-    return mix(hx0, hx1, f.y);
+    return mix(hx0, hx1, f.y) * deform_rim_fade(p);
 }
 
 // The horizontal gradient of the deformation, per metre. Points INTO the dent

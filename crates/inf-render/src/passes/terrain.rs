@@ -1448,6 +1448,29 @@ impl RenderNode for TerrainNode {
         // global instance index i is always the i-th patch of the same walk the
         // draw loop performs, and the two can never drift apart.
         let origin = &frame.view.origin;
+        // ── P22.1 SKIRT COUPLING ──────────────────────────────────────────────
+        // A patch's skirt is sized from the patch's own height RANGE, and
+        // deformation is applied AFTER that range was computed — it is an
+        // additive offset the height texture knows nothing about. A 0.4 m rut on
+        // a patch whose relief already exceeds the 1 m floor would therefore pull
+        // the boundary vertices *below* the wall that exists to seal the
+        // fine↔coarse seam, and open a crack exactly where a vehicle drove.
+        //
+        // So the skirt grows by the deepest deformation that can exist
+        // (`crate::deform::DEFORM_MAX_DEPTH_M`, itself the clamp
+        // `inf_terrain::deform::MAX_DEFORM_DEPTH_M` enforces on the field and
+        // `pack_deform_window` enforces again on the projection). Only when the
+        // scene actually carries a field: a skirt is drawn geometry, and adding
+        // depth unconditionally would move every pre-P22.1 terrain frame.
+        // `drawable()`, not `is_some()`: an EMPTY projection must reach the frame
+        // exactly as `None` does, and a skirt grown for a field that carries no
+        // cells would be a visible off-path difference — which is precisely what
+        // `deform_off_path_is_byte_identical` caught.
+        let deform_skirt = if frame.scene.deform.as_ref().is_some_and(|d| d.drawable()) {
+            crate::deform::DEFORM_MAX_DEPTH_M
+        } else {
+            0.0
+        };
         let mut raw: Vec<PatchRaw> = Vec::with_capacity(patches.iter().map(Vec::len).sum());
         for (terrain, patches) in terrains.iter().zip(&patches) {
             let res = terrain.tile_resolution.max(2) as f32;
@@ -1459,7 +1482,12 @@ impl RenderNode for TerrainNode {
                 let span = terrain.tile_span_at(p.key.lod) as f32;
                 let o = origin.to_render(tile.origin);
                 let (hmin, hmax) = tile.height_bounds;
-                let skirt = (hmax - hmin).abs().max(span * 0.05).max(1.0);
+                // The `.max(1.0)` floor is the number `inf_terrain::deform`'s
+                // `MAX_DEFORM_DEPTH_M` is coupled to — read its doc comment
+                // before changing either. `deform_skirt` is ADDED rather than
+                // folded into the max, because deformation stacks on top of the
+                // relief instead of competing with it.
+                let skirt = (hmax - hmin).abs().max(span * 0.05).max(1.0) + deform_skirt;
                 raw.push(PatchRaw {
                     o_span: [o.x, o.y, o.z, span],
                     params: [p.morph, cells_at_lod(p.mesh_lod) as f32, res, skirt],

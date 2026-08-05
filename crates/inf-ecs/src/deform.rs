@@ -299,6 +299,22 @@ pub fn step_deformation(world: &mut EcsWorld, dt: f64) {
     }
 }
 
+/// **Forget every footprint.** Removes the field resource outright, so the world
+/// is byte-for-byte a world that has never been walked on.
+///
+/// The editor calls this at BOTH ends of a Simulate session, and it has to:
+/// the field is a resource, `SceneDoc`'s snapshot carries entities and
+/// components, and `EcsWorld::clear` despawns entities — none of the three
+/// touches a resource. So without an explicit call the field would (a) outlive
+/// Stop and keep drawing a player's tracks on the author's document, and (b)
+/// make every Simulate run after the first start on the previous run's ground,
+/// which is a PIE-vs-shipping divergence by construction.
+///
+/// Idempotent, and a no-op on a world that never grew a field.
+pub fn clear_deformation(world: &mut EcsWorld) {
+    world.world_mut().remove_resource::<DeformFieldRes>();
+}
+
 /// Read the deformation field, if this world has ever grown one.
 pub fn deform_field(world: &EcsWorld) -> Option<&DeformField> {
     world.world().get_resource::<DeformFieldRes>().map(|r| &r.0)

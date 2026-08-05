@@ -215,17 +215,27 @@ pub fn pack_deform_window(
 }
 
 /// The deformation uniform. Mirrors `struct Deform` in `deform.wgsl`; the pair is
-/// pinned by `the_uniform_matches_the_shader_struct`.
+/// pinned field-for-field by `the_uniform_matches_the_shader_struct`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq)]
 pub struct DeformUniform {
     /// x = render-local window min X, y = render-local window min Z,
     /// z = 1 / texel metres, w = window texels.
     pub window: [f32; 4],
-    /// x = enabled (1/0), y = max depth (m), z = foliage bend gain,
-    /// w = the level clock in seconds (the wind phase).
+    /// x = window enabled (1/0), y = max depth (m), z = foliage bend gain,
+    /// w = foliage wind enabled (1/0).
     pub params: [f32; 4],
-    /// x/y = wind direction XZ (unit, or zero), z = wind speed (m/s), w reserved.
+    /// x/y = wind direction XZ (unit, or zero), z = wavenumber (rad/m),
+    /// w = **the whole phase offset, already reduced** (rad).
+    ///
+    /// The reduction is the point. A shader computing `speed · t · k` in `f32`
+    /// with `t` = `ResolvedSky::cloud_time_s` (up to 86 400 s) loses every bit
+    /// of the fractional phase long before the day is out, and the sway freezes
+    /// — the same class of failure `inf_ecs::sky::MAX_WEATHER_BLEND_S` documents
+    /// one crate over. And the world→render-local offset has to be folded in
+    /// here too, in `f64`, or the phase would **re-roll on every floating-origin
+    /// rebase**: the grass would flick to a new position of its sway cycle
+    /// because the camera crossed a 10 m boundary.
     pub wind: [f32; 4],
 }
 
@@ -251,6 +261,37 @@ impl DeformUniform {
     pub fn enabled(&self) -> bool {
         self.params[0] > 0.5
     }
+
+    /// `false` ⇒ foliage does not sway. **Independent of
+    /// [`enabled`](Self::enabled)**, and driven by
+    /// [`crate::ScatterSettings::foliage_wind`] rather than by whether anything
+    /// happens to have walked on the ground — the first cut gated sway on "is
+    /// there a live deform cell anywhere", which made an ambient effect flick on
+    /// and off with a footprint expiring half a kilometre away.
+    pub fn wind_enabled(&self) -> bool {
+        self.params[3] > 0.5
+    }
+}
+
+/// The wind phase offset for a frame, **reduced in `f64` to `[0, 2π)`**.
+///
+/// `origin_xz` is the floating origin's XZ (so the shader's render-local `dot`
+/// plus this equals the world-space `dot`, making the phase origin-invariant),
+/// `wind_xz` the unit wind direction, `speed` m/s, `clock_s` the level clock.
+///
+/// Pure, `f64` throughout, and unit-tested for both properties — origin
+/// invariance and non-freezing at a day-long clock.
+pub fn wind_phase(
+    origin_xz: (f64, f64),
+    wind_xz: (f64, f64),
+    speed: f64,
+    clock_s: f64,
+    wavenumber: f64,
+) -> f32 {
+    let tau = std::f64::consts::TAU;
+    let raw = (origin_xz.0 * wind_xz.0 + origin_xz.1 * wind_xz.1) * wavenumber
+        - speed * clock_s * wavenumber;
+    (raw.rem_euclid(tau)) as f32
 }
 
 /// How far a fully-pressed sample bends the foliage standing in it, as a
@@ -261,6 +302,24 @@ impl DeformUniform {
 /// per layer by `inf_terrain::deform::LayerResponse::bend` on the sim side and by
 /// the sampled depth here, so grass over rock (bend 0) never moves.
 pub const DEFORM_BEND_GAIN: f32 = 0.85;
+
+/// Texels over which the window's effect fades to nothing at its edge.
+///
+/// **Not polish — a discontinuity fix.** The window is 128 m across, so its rim
+/// sits 64 m from the camera, which is *inside* the scatter's 120 m full-mesh
+/// band and far inside any terrain draw distance. Without a fade, a rut would
+/// stop dead at a straight line 64 m out: the terrain's shading would step, and
+/// a row of grass would snap upright mid-field. 32 texels is 8 m — long enough
+/// that the ramp is below the noise of the ground it is fading across, short
+/// enough that it costs almost none of the window.
+pub const DEFORM_RIM_TEXELS: f32 = 32.0;
+
+/// The window's edge fade at a texel coordinate, `[0, 1]`. Shared by the shader
+/// (`deform.wgsl`) and its CPU mirror; unit-tested here so the pair cannot drift.
+pub fn rim_fade(px: f32, pz: f32, texels: f32) -> f32 {
+    let edge = (px.min(pz)).min((texels - 1.0 - px).min(texels - 1.0 - pz));
+    (edge / DEFORM_RIM_TEXELS).clamp(0.0, 1.0)
+}
 
 /// Peak wind sway as a fraction of an instance's height.
 ///
@@ -287,6 +346,17 @@ pub struct DeformResources {
     /// The lattice origin `shadow` was packed at, and the field epoch it was
     /// packed from. The upload gate is a compare on this pair.
     packed: Option<((i64, i64), u64)>,
+    /// The dirty rect of the **previous** pack — the texels that currently hold
+    /// non-zero depth.
+    ///
+    /// Load-bearing, and the first cut did not have it: a rect covers what the
+    /// cells wrote, not what they **stopped** writing. A field that shrinks (a
+    /// cell relaxes to zero and is dropped) produces a *smaller* rect, or `None`
+    /// when the last cell goes — and with the camera parked, `None` meant zero
+    /// uploads, which meant last frame's ruts stayed burned into the window for
+    /// ever. Unioning with this clears exactly the vacated texels and nothing
+    /// else.
+    prev_rect: Option<(u32, u32, u32, u32)>,
     /// `write_texture` calls issued over this renderer's life — the engagement
     /// counter. An unchanged field over N frames must not move it.
     uploads: AtomicU64,
@@ -321,6 +391,7 @@ impl DeformResources {
             uniform,
             shadow: Vec::new(),
             packed: None,
+            prev_rect: None,
             uploads: AtomicU64::new(0),
         }
     }
@@ -341,30 +412,62 @@ impl DeformResources {
     ///    **zero uploads**;
     /// 3. the origin moved ⇒ every texel may be a different sample, so the whole
     ///    window uploads (one call);
-    /// 4. only the field moved ⇒ upload just the rect the cells wrote.
+    /// 4. only the field moved ⇒ upload the rect the cells wrote **unioned with
+    ///    the rect they wrote last time**, so texels a shrinking field vacated
+    ///    are cleared rather than left burned in.
     ///
     /// `eye_world_xz` is the camera's world XZ — the only camera this whole
     /// subsystem touches, and it decides what is *drawn*, never what is
     /// simulated. `sky` is `(level clock seconds, wind X, wind Z)`, taken off the
-    /// cloud block both projectors already publish.
+    /// cloud block both projectors already publish; `wind_on` is
+    /// [`crate::ScatterSettings::foliage_wind`].
     pub fn update(
         &mut self,
         gpu: &crate::gpu::GpuContext,
         deform: Option<&RenderDeform>,
         origin: &FloatingOrigin,
         eye_world_xz: (f64, f64),
-        sky: (f32, f32, f32),
+        sky: (f64, f32, f32),
+        wind_on: bool,
     ) -> DeformUniform {
         let (eye_world_x, eye_world_z) = eye_world_xz;
-        let (clock_s, wind_xz) = (sky.0, (sky.1, sky.2));
+        let (clock_s, wind_xz) = (sky.0, (sky.1 as f64, sky.2 as f64));
+        let o = origin.origin();
+
+        // The wind half is packed whether or not there is a field: sway is an
+        // ambient property of foliage, not a consequence of somebody's boots.
+        let speed = (wind_xz.0 * wind_xz.0 + wind_xz.1 * wind_xz.1).sqrt();
+        let dir = if speed > 1e-4 {
+            (wind_xz.0 / speed, wind_xz.1 / speed)
+        } else {
+            (0.0, 0.0)
+        };
+        let k = std::f64::consts::TAU / WIND_WAVELENGTH_M as f64;
+        let wind_live = wind_on && speed > 1e-4;
+        let wind = [
+            dir.0 as f32,
+            dir.1 as f32,
+            k as f32,
+            wind_phase((o.x, o.z), dir, speed, clock_s, k),
+        ];
+
         let Some(deform) = deform.filter(|d| d.drawable()) else {
             self.packed = None;
-            return DeformUniform::default();
+            self.prev_rect = None;
+            return DeformUniform {
+                params: [
+                    0.0,
+                    DEFORM_MAX_DEPTH_M,
+                    DEFORM_BEND_GAIN,
+                    if wind_live { 1.0 } else { 0.0 },
+                ],
+                wind,
+                ..DeformUniform::default()
+            };
         };
         let texels = window_origin_texels(eye_world_x, eye_world_z);
         let world_min_x = texels.0 as f64 * DEFORM_TEXEL_M;
         let world_min_z = texels.1 as f64 * DEFORM_TEXEL_M;
-        let o = origin.origin();
 
         let key = (texels, deform.epoch);
         let moved = self.packed.map(|(t, _)| t) != Some(texels);
@@ -374,19 +477,18 @@ impl DeformResources {
             // A window that moved must be uploaded whole: every texel may now
             // carry a different sample, including the ones the cells did not
             // touch (they became zero, and zero is an answer).
-            let rect = if moved { Some(full) } else { dirty };
+            let rect = if moved {
+                Some(full)
+            } else {
+                union_rect(dirty, self.prev_rect)
+            };
             if let Some((x0, y0, w, h)) = rect {
                 self.upload_rect(gpu, x0, y0, w, h);
             }
             self.packed = Some(key);
+            self.prev_rect = dirty;
         }
 
-        let speed = (wind_xz.0 * wind_xz.0 + wind_xz.1 * wind_xz.1).sqrt();
-        let dir = if speed > 1e-4 {
-            [wind_xz.0 / speed, wind_xz.1 / speed]
-        } else {
-            [0.0, 0.0]
-        };
         DeformUniform {
             window: [
                 (world_min_x - o.x) as f32,
@@ -394,25 +496,26 @@ impl DeformResources {
                 (1.0 / DEFORM_TEXEL_M) as f32,
                 DEFORM_WINDOW_TEXELS as f32,
             ],
-            params: [1.0, DEFORM_MAX_DEPTH_M, DEFORM_BEND_GAIN, clock_s],
-            wind: [dir[0], dir[1], speed, 0.0],
+            params: [
+                1.0,
+                DEFORM_MAX_DEPTH_M,
+                DEFORM_BEND_GAIN,
+                if wind_live { 1.0 } else { 0.0 },
+            ],
+            wind,
         }
     }
 
     fn upload_rect(&self, gpu: &crate::gpu::GpuContext, x0: u32, y0: u32, w: u32, h: u32) {
-        let n = DEFORM_WINDOW_TEXELS as usize;
-        // `write_texture` wants contiguous rows for the sub-rect, so a partial
-        // rect is repacked into a scratch buffer. Full-width rects (the moved
-        // case) skip the copy and hand the shadow straight over.
+        // Full-width rects (the moved case) hand the shadow straight over; a
+        // narrower rect is repacked, because `write_texture` wants the sub-rect's
+        // rows contiguous.
         if x0 == 0 && w == DEFORM_WINDOW_TEXELS {
+            let n = DEFORM_WINDOW_TEXELS as usize;
             self.write(gpu, 0, y0, w, h, &self.shadow[y0 as usize * n..]);
             return;
         }
-        let mut scratch = Vec::with_capacity((w * h) as usize);
-        for j in 0..h as usize {
-            let row = (y0 as usize + j) * n + x0 as usize;
-            scratch.extend_from_slice(&self.shadow[row..row + w as usize]);
-        }
+        let scratch = extract_rect(&self.shadow, x0, y0, w, h);
         self.write(gpu, x0, y0, w, h, &scratch);
     }
 
@@ -438,6 +541,44 @@ impl DeformResources {
         );
         self.uploads.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// The smallest rect containing both, or whichever exists.
+///
+/// The vacated-texel fix in one function, so it is testable without a GPU.
+pub fn union_rect(
+    a: Option<(u32, u32, u32, u32)>,
+    b: Option<(u32, u32, u32, u32)>,
+) -> Option<(u32, u32, u32, u32)> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(r), None) | (None, Some(r)) => Some(r),
+        (Some(a), Some(b)) => {
+            let x0 = a.0.min(b.0);
+            let y0 = a.1.min(b.1);
+            let x1 = (a.0 + a.2).max(b.0 + b.2);
+            let y1 = (a.1 + a.3).max(b.1 + b.3);
+            Some((x0, y0, x1 - x0, y1 - y0))
+        }
+    }
+}
+
+/// Copy the `w × h` sub-rect at `(x0, y0)` out of a `DEFORM_WINDOW_TEXELS`-wide
+/// row-major buffer into a contiguous one — what `write_texture` needs for a
+/// partial upload.
+///
+/// A free function, and public, precisely so **the partial-upload path is
+/// reachable from a test**: it is the module's headline optimization and it was
+/// previously covered by nothing at all (a `panic!` planted inside it stayed
+/// green through the whole suite).
+pub fn extract_rect(shadow: &[f32], x0: u32, y0: u32, w: u32, h: u32) -> Vec<f32> {
+    let n = DEFORM_WINDOW_TEXELS as usize;
+    let mut out = Vec::with_capacity((w * h) as usize);
+    for j in 0..h as usize {
+        let row = (y0 as usize + j) * n + x0 as usize;
+        out.extend_from_slice(&shadow[row..row + w as usize]);
+    }
+    out
 }
 
 /// CPU mirror of the shader's window sample: bilinear over the deformation
@@ -471,7 +612,7 @@ pub fn deform_depth_reference(
     };
     let a = load(i0, j0) + (load(i0 + 1, j0) - load(i0, j0)) * fx;
     let b = load(i0, j0 + 1) + (load(i0 + 1, j0 + 1) - load(i0, j0 + 1)) * fx;
-    a + (b - a) * fz
+    (a + (b - a) * fz) * rim_fade(p.0, p.1, n as f32)
 }
 
 #[cfg(test)]
@@ -594,21 +735,26 @@ mod tests {
         u.window[1] = 0.0;
         let n = DEFORM_WINDOW_TEXELS as usize;
         let mut texels = vec![0.0f32; n * n];
-        texels[0] = 1.0;
+        // Probe well inside the rim fade, or the fade (not the filter) would be
+        // what the assertions below measured.
+        let c = n / 2;
+        texels[c * n + c] = 1.0;
+        let at = |i: usize| (i as f64 * DEFORM_TEXEL_M) as f32;
         // Exact at the sample…
-        assert_eq!(deform_depth_reference(&u, &texels, 0.0, 0.0), 1.0);
+        assert_eq!(deform_depth_reference(&u, &texels, at(c), at(c)), 1.0);
         // …halfway along x is the mean of the two…
-        let half = deform_depth_reference(&u, &texels, (DEFORM_TEXEL_M / 2.0) as f32, 0.0);
+        let half =
+            deform_depth_reference(&u, &texels, at(c) + (DEFORM_TEXEL_M / 2.0) as f32, at(c));
         assert!((half - 0.5).abs() < 1e-6, "{half}");
         // …and outside the window it is zero, never a clamped edge smear.
-        assert_eq!(deform_depth_reference(&u, &texels, -1.0, 0.0), 0.0);
+        assert_eq!(deform_depth_reference(&u, &texels, -1.0, at(c)), 0.0);
         assert_eq!(
-            deform_depth_reference(&u, &texels, (DEFORM_WINDOW_M + 1.0) as f32, 0.0),
+            deform_depth_reference(&u, &texels, (DEFORM_WINDOW_M + 1.0) as f32, at(c)),
             0.0
         );
         // A disabled uniform never reads the texture at all.
         let off = DeformUniform::default();
-        assert_eq!(deform_depth_reference(&off, &texels, 0.0, 0.0), 0.0);
+        assert_eq!(deform_depth_reference(&off, &texels, at(c), at(c)), 0.0);
     }
 
     #[test]
@@ -623,5 +769,296 @@ mod tests {
             local_x.abs() < DEFORM_WINDOW_M as f32,
             "a render-local window min must stay small: {local_x}"
         );
+    }
+
+    // ── THE CITED GATES ──────────────────────────────────────────────────────
+    //
+    // The three tests below are named in doc comments elsewhere in this module
+    // and in `deform.wgsl`. The first cut cited all three and defined none of
+    // them, which is the P20 law ("a cited gate that doesn't exist is worse than
+    // no claim") broken three times over. They exist now.
+
+    /// Cited by [`DEFORM_TEXEL_M`]. The renderer's window geometry and the Ring-0
+    /// field's lattice must be the SAME numbers, or a texel would carry a
+    /// different sample than the one packed into it.
+    #[test]
+    fn the_window_geometry_matches_the_field() {
+        assert_eq!(
+            DEFORM_TEXEL_M,
+            inf_terrain::deform::DEFORM_SAMPLE_PITCH_M,
+            "a window texel must be exactly one field sample — otherwise the pack \
+             is a resample and the whole no-filter argument is false"
+        );
+        assert_eq!(
+            DEFORM_MAX_DEPTH_M,
+            inf_terrain::deform::MAX_DEFORM_DEPTH_M,
+            "the renderer's clamp and the field's clamp are the same skirt \
+             coupling; they cannot differ"
+        );
+        // The window must be a whole number of cells across, or a cell would
+        // straddle the rim in a way the pack's cell walk does not model.
+        assert_eq!(
+            DEFORM_WINDOW_TEXELS % inf_terrain::deform::DEFORM_CELL_SAMPLES,
+            0
+        );
+    }
+
+    /// Cited by [`window_origin_texels`]. `inf-terrain` and `inf-render` each
+    /// have their own snap — Ring 0 cannot name the renderer and the renderer
+    /// cannot name Ring 0 — so the ONLY thing keeping them the same function is
+    /// this test. Until it existed, both were dead code as far as the other was
+    /// concerned.
+    #[test]
+    fn the_snap_matches_the_field() {
+        for &(x, z) in &[
+            (0.0, 0.0),
+            (0.1, -0.1),
+            (123.456, -987.654),
+            (-0.125, 0.125),
+            (1e6, -1e6),
+        ] {
+            assert_eq!(
+                window_origin_texels(x, z),
+                inf_terrain::deform::window_origin(glam::DVec2::new(x, z), DEFORM_WINDOW_TEXELS),
+                "the two snaps disagree at ({x}, {z})"
+            );
+        }
+    }
+
+    /// The two **packs** agree too, texel for texel: `DeformField::pack_window`
+    /// (Ring 0, used by nothing but its own tests) and `pack_deform_window` (the
+    /// renderer's, used by every frame). Two independent implementations of one
+    /// rule, now exercised against each other.
+    #[test]
+    fn the_two_window_packs_agree() {
+        use inf_terrain::deform::{DeformField, PressureClass, DEFORM_CELL_SAMPLES};
+        let mut field = DeformField::new();
+        for i in 0..24 {
+            field.relax(1.0 / 60.0, 0.0);
+            field.stamp_contact(
+                glam::DVec2::new(3.0 + i as f64 * 0.4, 4.0),
+                0.35,
+                PressureClass::Heavy,
+                3,
+                1.0 / 60.0,
+            );
+        }
+        assert!(!field.is_empty());
+        let origin = window_origin_texels(5.0, 4.0);
+
+        let mut ring0 = Vec::new();
+        field.pack_window(origin, DEFORM_WINDOW_TEXELS, &mut ring0);
+
+        let projection = RenderDeform {
+            cell_samples: DEFORM_CELL_SAMPLES,
+            texel_m: DEFORM_TEXEL_M,
+            epoch: field.epoch(),
+            cells: field
+                .cells()
+                .map(|(coord, cell)| RenderDeformCell {
+                    coord: *coord,
+                    depths: cell.depths().to_vec(),
+                })
+                .collect(),
+        };
+        let mut renderer = Vec::new();
+        pack_deform_window(&projection, origin, &mut renderer);
+
+        assert_eq!(ring0.len(), renderer.len());
+        assert_eq!(
+            ring0, renderer,
+            "the Ring-0 pack and the renderer's pack disagree — one of the two \
+             window implementations is wrong and neither test would have said so"
+        );
+        assert!(
+            renderer.iter().any(|d| *d > 0.0),
+            "the fixture must be non-empty"
+        );
+    }
+
+    /// Cited by [`DeformUniform`]. The Rust struct and the WGSL `struct Deform`
+    /// must agree field for field, in order and in size — a `vec4` that drifted
+    /// would silently re-interpret the window origin as the wind direction.
+    #[test]
+    fn the_uniform_matches_the_shader_struct() {
+        // Three `vec4<f32>`, std140-clean, no padding.
+        assert_eq!(std::mem::size_of::<DeformUniform>(), 3 * 16);
+        assert_eq!(std::mem::align_of::<DeformUniform>(), 4);
+
+        let src = include_str!("shaders/deform.wgsl");
+        let body = src
+            .split_once("struct Deform {")
+            .expect("the shader declares struct Deform")
+            .1
+            .split_once("};")
+            .expect("…and closes it")
+            .0;
+        let fields: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .collect();
+        assert_eq!(
+            fields,
+            vec![
+                "window: vec4<f32>,",
+                "params: vec4<f32>,",
+                "wind: vec4<f32>,",
+            ],
+            "the WGSL `Deform` no longer matches `DeformUniform`'s three vec4s"
+        );
+        // And the shader really does read the two flags out of the slots this
+        // side writes them into.
+        assert!(src.contains("dfm.params.x > 0.5"));
+        assert!(src.contains("dfm.params.w > 0.5"));
+    }
+
+    // ── the vacated-texel fix, and the partial-upload path ──────────────────
+
+    #[test]
+    fn a_shrinking_field_clears_the_texels_it_vacated() {
+        // The union rule in isolation: last frame's rect must be re-uploaded so
+        // the texels it wrote are overwritten with the zeroes they now hold.
+        assert_eq!(union_rect(None, None), None);
+        assert_eq!(union_rect(Some((4, 4, 2, 2)), None), Some((4, 4, 2, 2)));
+        assert_eq!(union_rect(None, Some((4, 4, 2, 2))), Some((4, 4, 2, 2)));
+        assert_eq!(
+            union_rect(Some((0, 0, 2, 2)), Some((6, 8, 1, 1))),
+            Some((0, 0, 7, 9))
+        );
+        // The case that matters: the field shrank to nothing, so the current
+        // dirty rect is None and the PREVIOUS one is what must be cleared. A
+        // `None` here was last frame's ruts burned into the window for ever.
+        assert_eq!(union_rect(None, Some((10, 10, 4, 4))), Some((10, 10, 4, 4)));
+    }
+
+    #[test]
+    fn the_partial_upload_extracts_the_right_texels() {
+        // The module's headline optimization, which was covered by NOTHING: a
+        // `panic!` planted in the sub-rect repack stayed green through the entire
+        // suite because no test ever took that branch.
+        let n = DEFORM_WINDOW_TEXELS as usize;
+        let mut shadow = vec![0.0f32; n * n];
+        // A recognisable pattern: value = x + 1000 * y.
+        for y in 0..n {
+            for x in 0..n {
+                shadow[y * n + x] = x as f32 + 1000.0 * y as f32;
+            }
+        }
+        let (x0, y0, w, h) = (7u32, 11u32, 5u32, 3u32);
+        let rect = extract_rect(&shadow, x0, y0, w, h);
+        assert_eq!(rect.len(), (w * h) as usize);
+        for j in 0..h {
+            for i in 0..w {
+                assert_eq!(
+                    rect[(j * w + i) as usize],
+                    (x0 + i) as f32 + 1000.0 * (y0 + j) as f32,
+                    "sub-rect texel ({i}, {j}) came from the wrong place"
+                );
+            }
+        }
+        // A full-width rect is the identity on its rows (the fast path's premise).
+        let full = extract_rect(&shadow, 0, 2, DEFORM_WINDOW_TEXELS, 2);
+        assert_eq!(&full[..], &shadow[2 * n..4 * n]);
+    }
+
+    // ── the window rim ──────────────────────────────────────────────────────
+
+    #[test]
+    fn the_window_rim_fades_instead_of_cutting_off() {
+        let n = DEFORM_WINDOW_TEXELS as f32;
+        // Dead centre: untouched.
+        assert_eq!(rim_fade(n * 0.5, n * 0.5, n), 1.0);
+        // On the rim: nothing.
+        assert_eq!(rim_fade(0.0, n * 0.5, n), 0.0);
+        assert_eq!(rim_fade(n - 1.0, n * 0.5, n), 0.0);
+        assert_eq!(rim_fade(n * 0.5, 0.0, n), 0.0);
+        // Continuous and monotone across the ramp — the property that stops the
+        // straight line across the ground at 64 m.
+        let mut prev = 0.0;
+        for k in 0..=DEFORM_RIM_TEXELS as u32 {
+            let f = rim_fade(k as f32, n * 0.5, n);
+            assert!(f >= prev - 1e-6, "the rim fade is not monotone at {k}");
+            assert!((0.0..=1.0).contains(&f));
+            prev = f;
+        }
+        assert_eq!(rim_fade(DEFORM_RIM_TEXELS, n * 0.5, n), 1.0);
+        // …and the sampler applies it, so a depth at the rim really is gone.
+        let mut u = DeformUniform {
+            params: [1.0, DEFORM_MAX_DEPTH_M, DEFORM_BEND_GAIN, 0.0],
+            ..Default::default()
+        };
+        u.window[0] = 0.0;
+        u.window[1] = 0.0;
+        let n_i = DEFORM_WINDOW_TEXELS as usize;
+        let texels = vec![0.5f32; n_i * n_i];
+        let middle = (DEFORM_WINDOW_M / 2.0) as f32;
+        assert!((deform_depth_reference(&u, &texels, middle, middle) - 0.5).abs() < 1e-6);
+        assert_eq!(deform_depth_reference(&u, &texels, 0.0, middle), 0.0);
+    }
+
+    // ── wind ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_wind_phase_is_origin_invariant_and_never_freezes() {
+        let k = std::f64::consts::TAU / WIND_WAVELENGTH_M as f64;
+        let dir = (0.9486832980505138, 0.31622776601683794); // unit (3, 1)
+        let speed = 6.32455532;
+        let clock = 4_321.5;
+
+        // ORIGIN INVARIANCE: the phase the shader ends up evaluating at a fixed
+        // WORLD point must not depend on where the floating origin happens to be.
+        // shader phase = dot(local, dir) * k + offset, and local = world - origin.
+        let world = (1234.5, -678.25);
+        let total = |origin: (f64, f64)| {
+            let local = (world.0 - origin.0, world.1 - origin.1);
+            let offset = wind_phase(origin, dir, speed, clock, k) as f64;
+            ((local.0 * dir.0 + local.1 * dir.1) * k + offset).rem_euclid(std::f64::consts::TAU)
+        };
+        let a = total((0.0, 0.0));
+        for origin in [(10.0, 0.0), (-1230.0, 670.0), (100_000.0, -100_000.0)] {
+            let b = total(origin);
+            assert!(
+                (a - b).abs() < 1e-3 || (a - b).abs() > std::f64::consts::TAU - 1e-3,
+                "a rebase to {origin:?} moved the wind phase from {a} to {b} — the \
+                 grass would flick to a new point of its cycle when the camera \
+                 crossed a 10 m boundary"
+            );
+        }
+
+        // NEVER FREEZES: a day-long clock still advances the phase between
+        // consecutive frames. This is the f32 stall the reduction exists to dodge
+        // — `speed * 86400 * k` in f32 has no room left for a 16 ms step.
+        let day = 86_400.0;
+        let p0 = wind_phase((0.0, 0.0), dir, speed, day, k);
+        let p1 = wind_phase((0.0, 0.0), dir, speed, day + 1.0 / 60.0, k);
+        assert_ne!(p0, p1, "the wind phase froze at a day-long clock");
+        assert!(p0.is_finite() && (0.0..std::f32::consts::TAU).contains(&p0));
+
+        // Zero wind ⇒ the phase is a constant, and the direction is zero, so the
+        // sway term vanishes identically rather than jittering around zero.
+        assert_eq!(wind_phase((5.0, 5.0), (0.0, 0.0), 0.0, 99.0, k), 0.0);
+    }
+
+    #[test]
+    fn wind_and_the_window_are_separate_switches() {
+        // The uniform's two flags are independent — which is the whole point of
+        // splitting them. A scene with no field may still sway; a scene with a
+        // field may still be windless.
+        let off = DeformUniform::default();
+        assert!(!off.enabled());
+        assert!(!off.wind_enabled());
+        let windy = DeformUniform {
+            params: [0.0, DEFORM_MAX_DEPTH_M, DEFORM_BEND_GAIN, 1.0],
+            ..Default::default()
+        };
+        assert!(!windy.enabled());
+        assert!(windy.wind_enabled());
+        let pressed = DeformUniform {
+            params: [1.0, DEFORM_MAX_DEPTH_M, DEFORM_BEND_GAIN, 0.0],
+            ..Default::default()
+        };
+        assert!(pressed.enabled());
+        assert!(!pressed.wind_enabled());
     }
 }

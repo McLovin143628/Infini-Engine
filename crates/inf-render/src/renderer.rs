@@ -780,10 +780,11 @@ impl EngineRenderer {
             &view.origin,
             (view.eye_world.x, view.eye_world.z),
             (
-                scene.atmosphere.clouds.time_s as f32,
+                scene.atmosphere.clouds.time_s,
                 scene.atmosphere.clouds.wind_x,
                 scene.atmosphere.clouds.wind_z,
             ),
+            self.settings.scatter.foliage_wind,
         );
         gpu.queue
             .write_buffer(&self.deform.uniform, 0, bytemuck::bytes_of(&deform_uniform));

@@ -766,6 +766,7 @@ fn deform_window_cost() {
         let z = 4.0 + lane as f64 * 2.0;
         let mut x = 2.0;
         while x < 92.0 {
+            field.relax(1.0 / 60.0, 0.0);
             field.stamp_contact(
                 glam::DVec2::new(x, z),
                 0.34,

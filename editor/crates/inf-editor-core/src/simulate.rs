@@ -286,6 +286,15 @@ impl SimSession {
         // unsaved terrain edit and leave the undo stack replaying height deltas
         // into tiles `revert_delta` recreates flat.
         let snapshot = to_scene_file_for(doc, ScenePersist::Memory);
+        // ── P22.1 ── Simulate starts on UNDEFORMED ground. The deformation field
+        //    is a bevy *resource*, and the `ScenePersist::Memory` snapshot above
+        //    captures entities and components — resources are outside it by
+        //    construction, so nothing restores this on `exit` and nothing would
+        //    clear it on `enter` either. Both ends are therefore explicit:
+        //    without the clear here, run 2 of a Simulate session would begin on
+        //    run 1's footprints and its trace would not match the shipped
+        //    player's, which starts from nothing every time.
+        inf_ecs::deform::clear_deformation(doc.world_mut());
         let bridge = PhysicsBridge2D::new(gravity);
         // P11.3: a 3D bridge alongside the 2D one. The 2D vertical gravity maps to
         // world −Y; a character applies its own gravity through move_and_slide.
@@ -404,6 +413,15 @@ impl SimSession {
     /// document is byte-for-byte what it was before play.
     pub fn exit(self, doc: &mut SceneDoc) {
         apply_to_doc(doc, &self.snapshot);
+        // ── P22.1 ── **Simulate never leaves an edit behind** (this module's
+        //    opening promise). The snapshot restores entities and components;
+        //    the deformation field is a *resource*, so it is outside the snapshot
+        //    and `apply_to_doc` cannot touch it. Without this line the authoring
+        //    viewport keeps drawing the player's footprints after Stop — a
+        //    Simulate artefact left on the author's document, which is exactly
+        //    the class of bug the P21.4 "the render store IS the save's staging
+        //    source" law was written about.
+        inf_ecs::deform::clear_deformation(doc.world_mut());
     }
 
     /// Seed the resolvable `.inf_sm` state machines (P11.2). An entity carrying an

@@ -105,6 +105,31 @@ fn place(world: &mut EcsWorld, s: u32) {
     world.propagate();
 }
 
+/// The same fixture built through the **document's own API**, so the entities
+/// are in `SceneDoc::order` and therefore inside the `ScenePersist::Memory`
+/// snapshot a Simulate session restores on `exit`.
+///
+/// (Building it by spawning straight into `doc.world_mut()` puts entities in the
+/// world that the document does not list, and Stop deletes them — which would
+/// make every "the field is gone after exit" assertion below pass vacuously,
+/// because the terrain would be gone too.)
+fn build_doc(doc: &mut SceneDoc) {
+    use inf_editor_core::ipc::SpawnKind;
+    let t = doc.create_with_guid(terrain_guid(), SpawnKind::Empty, "terrain", None);
+    doc.world_mut()
+        .world_mut()
+        .entity_mut(t)
+        .insert((snow_terrain(), Transform::default()));
+    let a = doc.create_with_guid(walker_guid(), SpawnKind::Empty, "walker", None);
+    let (transform, collider, cc) = walker();
+    doc.world_mut()
+        .world_mut()
+        .entity_mut(a)
+        .insert((transform, collider, cc));
+    doc.world_mut().mark_dirty();
+    doc.world_mut().propagate();
+}
+
 fn player_trace() -> Vec<Vec<u8>> {
     let mut world = EcsWorld::new();
     build_world(&mut world);
@@ -120,7 +145,7 @@ fn player_trace() -> Vec<Vec<u8>> {
 
 fn editor_trace() -> Vec<Vec<u8>> {
     let mut doc = SceneDoc::new();
-    build_world(doc.world_mut());
+    build_doc(&mut doc);
     let mut session = SimSession::enter(&mut doc, Vec::new(), DVec2::new(0.0, -9.81), HZ);
     let out = (0..STEPS)
         .map(|s| {
@@ -331,4 +356,121 @@ fn the_walk_lands_where_the_fixture_says() {
     assert_eq!(field.depth_at(DVec2::new(4.0, 20.0)), 0.0, "off the trail");
     assert_eq!(field.layer_at(DVec2::new(4.0, 6.0)), Some(SNOW));
     assert!(DVec3::ZERO.length() == 0.0);
+}
+
+/// **B1: Simulate never leaves an edit behind.**
+///
+/// The field is a bevy *resource*, so `SceneDoc`'s `ScenePersist::Memory`
+/// snapshot (entities + components) cannot restore it and `EcsWorld::clear`
+/// (which despawns entities) cannot remove it. Before the explicit clears at both
+/// ends of the session, footprints outlived Stop and the authoring viewport went
+/// on drawing a player's tracks on the author's document.
+#[test]
+fn stopping_simulate_forgets_every_footprint() {
+    let mut doc = SceneDoc::new();
+    build_doc(&mut doc);
+    let mut session = SimSession::enter(&mut doc, Vec::new(), DVec2::new(0.0, -9.81), HZ);
+    for s in 0..STEPS {
+        place(doc.world_mut(), s);
+        session.step_once(&mut doc, SimInput::default());
+    }
+    let during = inf_ecs::deform::deform_state_bytes(doc.world());
+    assert!(!during.is_empty(), "the walk must have pressed something");
+    assert!(session.deform_field(&doc).is_some());
+
+    session.exit(&mut doc);
+
+    // What the projector is handed after Stop. `project_deform` writes
+    // `scene.deform = None` for exactly this, so the viewport draws nothing.
+    assert!(
+        inf_ecs::deform::deform_field(doc.world()).is_none(),
+        "the deformation field outlived the Simulate session — the authoring \
+         viewport would keep drawing the player's footprints after Stop"
+    );
+    assert!(inf_ecs::deform::deform_state_bytes(doc.world()).is_empty());
+
+    // ANTI-VACUITY: "no field" must mean the field was cleared, not that Stop
+    // deleted the terrain. The restored document can still produce the very
+    // contact that pressed it.
+    let contacts = inf_ecs::deform::ground_contacts(doc.world());
+    assert_eq!(
+        contacts.len(),
+        1,
+        "Stop lost the fixture, not just the field"
+    );
+    assert_eq!(contacts[0].layer, SNOW);
+}
+
+/// **B1, the other half: every run starts from undeformed ground.**
+///
+/// Without the clear on `enter`, run 2 begins on run 1's field and its trace
+/// diverges from the shipped player's — which always starts from nothing.
+#[test]
+fn every_simulate_run_starts_from_the_same_ground() {
+    let mut doc = SceneDoc::new();
+    build_doc(&mut doc);
+    let run = |doc: &mut SceneDoc| {
+        let mut session = SimSession::enter(doc, Vec::new(), DVec2::new(0.0, -9.81), HZ);
+        let mut first = Vec::new();
+        let mut last = Vec::new();
+        for s in 0..STEPS {
+            place(doc.world_mut(), s);
+            session.step_once(doc, SimInput::default());
+            if s == 0 {
+                first = inf_ecs::deform::deform_state_bytes(doc.world());
+            }
+            last = inf_ecs::deform::deform_state_bytes(doc.world());
+        }
+        session.exit(doc);
+        (first, last)
+    };
+    let (first1, last1) = run(&mut doc);
+    let (first2, last2) = run(&mut doc);
+    assert!(!last1.is_empty());
+    assert_eq!(
+        first1, first2,
+        "run 2's FIRST step already differed — it started on run 1's footprints"
+    );
+    assert_eq!(last1, last2, "two Simulate runs of one document diverged");
+
+    // …and it matches what the shipped player produces from cold, which is the
+    // whole point: a preview that accumulated across runs could never match it.
+    assert_eq!(last1, player_trace().last().cloned().unwrap_or_default());
+}
+
+/// **B1, the `enter` half, on its own.** A world can already carry a field when a
+/// session starts — a previous session that panicked instead of exiting, or (as
+/// here) a host that stepped the Ring-0 rule directly. `enter` must start from
+/// undeformed ground regardless of how the ground got deformed.
+#[test]
+fn entering_simulate_starts_from_undeformed_ground() {
+    let mut doc = SceneDoc::new();
+    build_doc(&mut doc);
+    // Press some ground WITHOUT a session, so only `enter` can clear it.
+    for _ in 0..STEPS {
+        inf_ecs::deform::step_deformation(doc.world_mut(), 1.0 / HZ);
+    }
+    assert!(
+        !inf_ecs::deform::deform_state_bytes(doc.world()).is_empty(),
+        "the fixture must leave a field for `enter` to clear"
+    );
+
+    let mut session = SimSession::enter(&mut doc, Vec::new(), DVec2::new(0.0, -9.81), HZ);
+    assert!(
+        inf_ecs::deform::deform_field(doc.world()).is_none(),
+        "`enter` did not clear the field it found — this run would begin on the \
+         last one's footprints and diverge from the shipped player, which always \
+         starts from nothing"
+    );
+    // …and the first step it presses is a first step, not a continuation.
+    session.step_once(&mut doc, SimInput::default());
+    let mut cold = EcsWorld::new();
+    build_world(&mut cold);
+    let mut sim = RuntimeSim::new(cold, Vec::new(), DVec2::new(0.0, -9.81), HZ);
+    sim.step_once(RuntimeInput::default());
+    assert_eq!(
+        inf_ecs::deform::deform_state_bytes(doc.world()),
+        inf_ecs::deform::deform_state_bytes(sim.world())
+    );
+    session.exit(&mut doc);
 }

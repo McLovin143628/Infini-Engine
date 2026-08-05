@@ -368,6 +368,19 @@ pub struct ScatterSettings {
     /// alike). **ON by default**: like the meshlet test it is provably
     /// *subtractive*, so a frame with it on is pixel-identical to one with it off.
     pub occlusion: bool,
+    /// Sway scattered foliage with the level's wind (P22.1). **OFF by default.**
+    ///
+    /// Off rather than on for one reason and it is not taste: sway is a visible
+    /// change to every frame that contains grass, and the 49 goldens committed
+    /// before P22.1 are the engine's record of what those frames look like.
+    /// Turning an ambient animation on by default would have re-blessed all of
+    /// them at once.
+    ///
+    /// It is a **setting** rather than a consequence of the deformation field
+    /// because the alternative — sway on iff some cell is live somewhere — makes
+    /// an ambient effect depend on whether anybody happens to have walked
+    /// nearby, which is neither deterministic-looking nor explicable.
+    pub foliage_wind: bool,
 }
 
 impl Default for ScatterSettings {
@@ -380,6 +393,7 @@ impl Default for ScatterSettings {
             impostors: true,
             frustum_cull: true,
             occlusion: true,
+            foliage_wind: false,
         }
     }
 }

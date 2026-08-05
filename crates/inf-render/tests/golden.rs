@@ -7842,7 +7842,11 @@ fn walked_deform() -> RenderDeform {
     for i in 0..18u32 {
         let x = 3.0 + i as f64 * 0.7;
         let z = 5.0 + if i % 2 == 0 { -0.25 } else { 0.25 };
+        // relax + stamp per iteration: the field advances a sample once per
+        // fixed STEP (that is what makes a step's contacts commute), so a burst
+        // of stamps with no relax between them is one instant and one advance.
         for _ in 0..24 {
+            field.relax(DT, 0.0);
             field.stamp_contact(glam::DVec2::new(x, z), 0.22, PressureClass::Foot, SNOW, DT);
         }
     }
@@ -7851,7 +7855,11 @@ fn walked_deform() -> RenderDeform {
     for lane in [8.0f64, 9.2, 12.0] {
         let mut x = 2.0;
         while x < 17.0 {
-            for _ in 0..8 {
+            // 20 steps at ~3 cm/step is past snow's 0.4 m saturation, so a rut
+            // really does bottom out at the table's `max_depth_m` — which is what
+            // the CPU-side assertion in `golden_deform` checks against.
+            for _ in 0..20 {
+                field.relax(DT, 0.0);
                 field.stamp_contact(
                     glam::DVec2::new(x, lane),
                     0.34,
@@ -8096,4 +8104,300 @@ fn deform_off_path_never_engages() {
         renderer.deform_uploads() > before_drop,
         "the window was not re-uploaded after the field had been dropped"
     );
+}
+
+// ── the vertex half of the one-wrapper claim (P22.1 audit B2) ────────────────
+
+/// Ruts driven right along the terrain's far boundary, so the boundary itself is
+/// what the deformation moves.
+fn edge_deform() -> RenderDeform {
+    use inf_terrain::deform::{
+        DeformField, PressureClass, DEFORM_CELL_SAMPLES, DEFORM_SAMPLE_PITCH_M,
+    };
+    const DT: f64 = 1.0 / 60.0;
+    let span = (DFM_RES - 1) as f64 * DFM_MPS; // 16 m
+    let far = span * 2.0; // the far edge of the 2 x 2 patch
+    let mut field = DeformField::new();
+    // A WIDE (6 m) saturated band along the far edge. Wide on purpose: a narrow
+    // trench's near rim occludes its own floor at a shallow view angle, and then
+    // the silhouette never moves however deep the trench is.
+    for lane in 0..24 {
+        let z = far - 0.2 - lane as f64 * 0.25;
+        let mut x = 0.5;
+        while x < span * 2.0 - 0.5 {
+            for _ in 0..20 {
+                field.relax(DT, 0.0);
+                field.stamp_contact(glam::DVec2::new(x, z), 0.6, PressureClass::Heavy, 3, DT);
+            }
+            x += 0.5;
+        }
+    }
+    assert!(!field.is_empty());
+    RenderDeform {
+        cell_samples: DEFORM_CELL_SAMPLES,
+        texel_m: DEFORM_SAMPLE_PITCH_M,
+        epoch: field.epoch(),
+        cells: field
+            .cells()
+            .map(|(coord, cell)| RenderDeformCell {
+                coord: *coord,
+                depths: cell.depths().to_vec(),
+            })
+            .collect(),
+    }
+}
+
+/// A **grazing-incidence** view of the same snow patch: the eye sits a few
+/// centimetres above the surface, so the patch's far boundary is a silhouette
+/// against the sky and a change in the boundary's *height* is a change in where
+/// that silhouette sits on screen.
+fn grazing_scene(deform: Option<RenderDeform>) -> RenderScene {
+    let mut scene = RenderScene {
+        terrains: vec![snow_flat_terrain()],
+        deform: deform.map(Arc::new),
+        lights: vec![RenderLight {
+            kind: LightKind::Directional,
+            direction: Vec3::new(-0.2, 0.9, -0.35).normalize(),
+            color: [1.0, 0.97, 0.92],
+            intensity: 1.5,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    scene.mark_dirty();
+    scene
+}
+
+fn grazing_view() -> RenderView {
+    let span = (DFM_RES - 1) as f64 * DFM_MPS;
+    let far = span * 2.0;
+    // A low, oblique look at the patch's FAR edge: shallow enough that 40 cm of
+    // vertical displacement is a large screen-space move, steep enough that the
+    // depressed band's floor is not occluded by its own near rim.
+    look_view(
+        DVec3::new(span, 3.2, far - 14.0),
+        DVec3::new(span, -0.2, far + 1.0),
+    )
+}
+
+/// Rows of "ground" (bright) pixels per column — the ground/sky split the
+/// silhouette assertion measures.
+fn bright_pixels(img: &[u8]) -> usize {
+    img.chunks(4)
+        .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 480)
+        .count()
+}
+
+/// **B2 — the vertex half of `ground_height` is pinned.**
+///
+/// The fragment half was already defended: diverting the central difference away
+/// from the wrapper fails `golden_deform`'s "darker px" arm. The vertex half was
+/// not, and an audit proved it — bypassing the wrapper in the vertex stage (so
+/// the ground never dips and only the shading pretends) left **93/93 tests green
+/// under `INF_GOLDEN_STRICT` on real hardware**.
+///
+/// This is the arm that catches it. At grazing incidence the terrain's far
+/// boundary is a silhouette against the sky, so its *height* is directly visible
+/// as the position of the ground/sky split. A vertex displacement moves the
+/// silhouette. A fragment-only change — the mutation that survived — cannot move
+/// it by a single pixel, because shading does not decide which pixels the
+/// geometry covers.
+///
+/// A structural pixel-split assertion on the existing render, deliberately, and
+/// not a new golden: what is being asserted here is a *difference between two
+/// frames*, which a golden image is the wrong instrument for.
+#[test]
+fn deform_moves_the_silhouette_at_grazing_incidence() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let view = grazing_view();
+    let flat = render(&gpu, &grazing_scene(None), &view);
+    let dented = render(&gpu, &grazing_scene(Some(edge_deform())), &view);
+
+    let flat_ground = bright_pixels(&flat);
+    let dented_ground = bright_pixels(&dented);
+    // The fixture must actually be a grazing view of ground against sky, or the
+    // comparison below is measuring nothing.
+    assert!(
+        flat_ground > 2_000 && flat_ground < (W * H) as usize * 3 / 4,
+        "the grazing fixture does not show ground against sky ({flat_ground} px)"
+    );
+    let moved = flat_ground.abs_diff(dented_ground);
+    assert!(
+        moved > 300,
+        "pressing the terrain's boundary down 0.4 m moved the ground/sky split by \
+         only {moved} px ({flat_ground} → {dented_ground}). The VERTEX half of \
+         `ground_height` is not displacing geometry — shading alone cannot move a \
+         silhouette."
+    );
+}
+
+// ── byte identity, in the house pattern (P22.1 audit B3) ────────────────────
+
+/// **B3 — the off path is byte-identical, proven by exact buffer equality.**
+///
+/// `INF_GOLDEN_STRICT` is a *perceptual* compare (`image_diff` downscales to
+/// 5 × 5 boxes and allows 6 % mean / 35 % max), which is precisely why the B2
+/// mutation above sailed through it. "All 49 goldens byte-identical" was a claim
+/// the cited gate could not make. This is the gate that can — the same exact
+/// `assert_eq!` on the whole framebuffer that
+/// `water_off_path_is_byte_identical` has used since P20.3.
+#[test]
+fn deform_off_path_is_byte_identical() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let view = deform_view();
+
+    // The reference: the deformation scene with no field at all.
+    let mut base_scene = deform_scene();
+    base_scene.deform = None;
+    base_scene.mark_dirty();
+    let base = render_with(&gpu, &base_scene, &view, RenderSettings::default());
+
+    // (1) A projection that carries no cells is **undrawable**, and must reach
+    //     the frame exactly as `None` does — not "almost".
+    let mut empty = base_scene.clone();
+    empty.deform = Some(Arc::new(RenderDeform {
+        cell_samples: inf_terrain::deform::DEFORM_CELL_SAMPLES,
+        texel_m: inf_terrain::deform::DEFORM_SAMPLE_PITCH_M,
+        epoch: 7,
+        cells: Vec::new(),
+    }));
+    empty.mark_dirty();
+    assert!(!empty.deform.as_ref().unwrap().drawable());
+    assert_eq!(
+        base,
+        render_with(&gpu, &empty, &view, RenderSettings::default()),
+        "an EMPTY deformation projection changed the frame — the off path is not \
+         neutral, and every pre-P22.1 golden depends on it being"
+    );
+
+    // (2) The foliage-wind switch is off by default and must be inert with it
+    //     off, whatever the level's wind says.
+    let mut windy = base_scene.clone();
+    windy.atmosphere.clouds.wind_x = 9.0;
+    windy.atmosphere.clouds.wind_z = -4.0;
+    windy.atmosphere.clouds.time_s = 4_321.5;
+    windy.mark_dirty();
+    assert!(!RenderSettings::default().scatter.foliage_wind);
+    assert_eq!(
+        base,
+        render_with(&gpu, &windy, &view, RenderSettings::default()),
+        "the level's wind moved foliage with `foliage_wind` off — the switch is \
+         not the switch"
+    );
+
+    // GUARDS ON THE GUARDS: a real field, and the wind switch on, each move the
+    // frame — so the equalities above are not passing because nothing draws.
+    assert_ne!(
+        base,
+        render_with(&gpu, &deform_scene(), &view, RenderSettings::default()),
+        "a real deformation field did not change the frame"
+    );
+    let mut on = RenderSettings::default();
+    on.scatter.foliage_wind = true;
+    assert_ne!(
+        base,
+        render_with(&gpu, &windy, &view, on),
+        "turning `foliage_wind` on did not change the frame"
+    );
+}
+
+// ── the window's upload paths (P22.1 audit majors) ──────────────────────────
+
+/// A projection holding the first `keep` cells of the walked fixture, stamped
+/// with `epoch`.
+fn deform_subset(keep: usize, epoch: u64) -> RenderDeform {
+    let full = walked_deform();
+    RenderDeform {
+        epoch,
+        cells: full.cells.into_iter().take(keep).collect(),
+        ..full
+    }
+}
+
+/// **The partial-upload path lands the same texture a full upload would, and a
+/// shrinking field clears the texels it vacated.**
+///
+/// Both are asserted the same way, and it is the strongest available: a renderer
+/// that reached state *B* **incrementally** must produce a frame byte-identical
+/// to a fresh renderer that only ever saw *B*. Any texel the incremental path
+/// failed to write — or wrote in the wrong place — shows up immediately.
+///
+/// The vacated-texel case is the one the first cut got wrong: the dirty rect
+/// covers what the cells *wrote*, not what they stopped writing, so a field that
+/// shrank with the camera parked produced a smaller rect (or `None`) and last
+/// frame's ruts stayed burned into the window for ever.
+#[test]
+fn the_incremental_window_matches_a_cold_one() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let view = deform_view();
+
+    let big = deform_subset(usize::MAX, 1);
+    let small = deform_subset(3, 2);
+    let empty = deform_subset(0, 3);
+    assert!(big.cells.len() > small.cells.len() && small.drawable());
+
+    let frame = |scene: &RenderScene, renderer: &mut EngineRenderer| {
+        renderer.render(&gpu, scene, &view, &target.view, (W, H));
+        target.read_rgba(&gpu).expect("readback")
+    };
+    let scene_of = |d: &RenderDeform| {
+        let mut s = deform_scene();
+        s.deform = Some(Arc::new(d.clone()));
+        s.mark_dirty();
+        s
+    };
+
+    // (1) GROWING then SHRINKING, all from one renderer and one camera — so
+    //     every step after the first takes the PARTIAL path.
+    let mut incremental = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    let _ = frame(&scene_of(&big), &mut incremental);
+    let after_small = frame(&scene_of(&small), &mut incremental);
+    let after_empty = frame(&scene_of(&empty), &mut incremental);
+
+    // (2) The same two states, each from a renderer that never saw the others.
+    let mut cold_small = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    let small_cold = frame(&scene_of(&small), &mut cold_small);
+    let mut cold_empty = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    let empty_cold = frame(&scene_of(&empty), &mut cold_empty);
+
+    assert_eq!(
+        after_small, small_cold,
+        "a window that shrank incrementally does not match a cold one — texels \
+         the vanished cells vacated were left holding their old depths"
+    );
+    assert_eq!(
+        after_empty, empty_cold,
+        "the last cell disappearing left its ruts burned into the window"
+    );
+
+    // ANTI-VACUITY: the three states really are different pictures, so the
+    // equalities above are comparing something.
+    let big_cold = {
+        let mut r = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        frame(&scene_of(&big), &mut r)
+    };
+    assert_ne!(big_cold, small_cold);
+    assert_ne!(small_cold, empty_cold);
+
+    // …and the shrink really did take the PARTIAL path: the camera never moved,
+    // so the only reason to upload was the field changing, and the union with
+    // the previous rect is what made that upload cover the vacated texels.
+    let mut counted = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    let _ = frame(&scene_of(&big), &mut counted);
+    let after_big = counted.deform_uploads();
+    assert!(after_big >= 1);
+    let _ = frame(&scene_of(&small), &mut counted);
+    assert!(
+        counted.deform_uploads() > after_big,
+        "shrinking the field with a parked camera uploaded nothing — the vacated \
+         texels would still be holding their old depths"
+    );
+
+    // The empty state is the OTHER path and is worth saying out loud: a
+    // projection with no cells is undrawable, so the uniform is disabled and the
+    // window is not consulted at all — no upload is needed to stop drawing it.
+    let before_empty = counted.deform_uploads();
+    let _ = frame(&scene_of(&empty), &mut counted);
+    assert_eq!(counted.deform_uploads(), before_empty);
 }

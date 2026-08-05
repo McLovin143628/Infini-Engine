@@ -67,6 +67,13 @@
 //! relaxed to exactly zero is removed outright — that is what keeps the field
 //! genuinely sparse rather than merely capped.
 //!
+//! **A cell touched by the current step is never a victim.** Eviction is a
+//! memory policy; it must not be able to delete the ground a body is standing
+//! on, least of all in the same step that body pressed it. The bound may
+//! therefore be overshot while one step's contacts cover more cells than the
+//! bound allows — which needs thousands of simultaneous bodies — and the excess
+//! is released on the next step that leaves them alone.
+//!
 //! # Determinism
 //!
 //! Everything here is a pure function of (previous field, stamps, `dt`, snow
@@ -116,13 +123,20 @@ pub const MAX_DEFORM_CELLS: usize = 4096;
 /// `inf_render::passes::terrain` floors a patch's skirt depth at `1.0 m`
 /// (`terrain.rs`, the `.max(1.0)` in the instance pack): the skirt is the
 /// vertical wall that seals the crack between a fine patch and its coarser
-/// neighbour, and it is sized from the patch's own height range. Deformation is
-/// composed *after* that range was computed, so a dent deeper than the skirt
-/// would pull the boundary vertices below the wall meant to hide the seam and
-/// open a hole at the patch edge. Every entry in [`LAYER_RESPONSE`] is therefore
-/// at or under this, and the clamp is applied again per sample so a future
-/// authored response table cannot violate it either. The coupling is stated in
-/// both places.
+/// neighbour, and it is sized from the patch's own height range.
+///
+/// Deformation is composed *after* that range was computed, and it is
+/// **additive** — so the floor alone is not enough, and the renderer **adds this
+/// many metres to every patch's skirt** whenever a scene carries a deformation
+/// field. (The first cut relied on the floor; a 0.4 m rut on a patch with 3 m of
+/// relief would have opened an unsealed LOD seam exactly where a vehicle drove,
+/// because the skirt was 3 m and the surface had moved to 3.4 m.)
+///
+/// Two consequences follow, and both are enforced: every entry in
+/// [`LAYER_RESPONSE`] is at or under this value, and the clamp is applied again
+/// per sample here **and** a third time in `inf_render::pack_deform_window`, so
+/// neither a future authored response table nor a malformed projection can
+/// exceed what the skirt was grown for. The coupling is stated in both places.
 pub const MAX_DEFORM_DEPTH_M: f32 = 1.0;
 
 /// Largest footprint one contact may stamp, metres.
@@ -187,13 +201,31 @@ pub struct LayerResponse {
 
 /// The per-layer response table, indexed by splat layer.
 ///
-/// The engine's four layers are **grass → rock → dirt → snow** — that is the
-/// default palette `inf_ecs::components` documents and the paint UI's swatches
-/// mirror, so the archetypes are assigned to it rather than to a vocabulary
-/// invented here. "Sand" and "mud" are both the loose granular layer (index 2):
-/// they differ in albedo, not in how a boot sinks into them, and one response
-/// law for "loose ground" is honest where two would be a distinction the field
-/// cannot see.
+/// # THE MAPPING IS BY **INDEX**, AND THAT IS A REAL LIMITATION
+///
+/// A splat layer has no identity beyond its position: index 0 is index 0, and
+/// what it *looks* like is whatever albedo/roughness the level put in
+/// `Terrain::layers[0]`. The archetypes below are therefore the semantics of the
+/// engine's **default palette** — grass → rock → dirt → snow, as
+/// `inf_ecs::components` documents it, as the paint UI's swatches mirror it, and
+/// as `inf_terrain::BiomeSet::splat_layer` binds biomes to it — and **not** a
+/// property the engine can enforce.
+///
+/// A level that re-skins a layer keeps the index's response. The engine's own
+/// `samples::phase16_world_scene` already does exactly this: it paints its inline
+/// terrain's `layers[0]` a reddish-brown, so ground that *reads* as dirt answers
+/// a boot with grass's 3 cm and grass's 8-second spring-back. That is wrong, it
+/// is visible, and it is stated here rather than discovered later.
+///
+/// The fix is an authored per-layer response, which needs a schema bump that
+/// P22.1 explicitly does not have (scene v19 and `.inf_terrain` v5 are frozen).
+/// Until that lands, the honest position is: **the response follows the index,
+/// the index means what the default palette says it means, and a level that
+/// re-skins a layer should expect the original archetype's physics.**
+///
+/// "Sand" and "mud" are both the loose granular layer (index 2): they differ in
+/// albedo, not in how a boot sinks into them, and one response law for "loose
+/// ground" is honest where two would be a distinction the field cannot see.
 ///
 /// * **0 grass** — barely dents (3 cm) and springs back in seconds, because what
 ///   a footstep does to grass is *bend* it; `bend = 1` is where that lives.
@@ -322,6 +354,20 @@ impl DeformCell {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DeformField {
     cells: BTreeMap<(i32, i32), DeformCell>,
+    /// **The commutativity scratch.** For every sample stamped since the last
+    /// [`relax`](Self::relax), the depth it held at the *start* of this step.
+    ///
+    /// Without it the step is order-dependent, and provably so: two overlapping
+    /// contacts each advancing from *whatever the previous one left* means
+    /// `A then B` reaches a different depth from `B then A` as soon as either
+    /// saturates. With it, every stamp in a step advances from the **same base**
+    /// and the sample keeps the deepest result — and `max` over a set has no
+    /// order. One advance per sample per step is also the physically right rule:
+    /// two contacts at one instant are not twice as long a press.
+    ///
+    /// Cleared by `relax`, so it holds only the samples one step touched (a
+    /// handful per contact) and never grows with the field.
+    step_bases: BTreeMap<((i32, i32), u32), f32>,
     /// Fixed steps [`relax`](Self::relax) has run. The eviction clock.
     steps: u64,
     /// Snowfall accumulated but not yet spent — see [`SNOW_REFILL_QUANTUM_M`].
@@ -435,9 +481,28 @@ impl DeformField {
     /// Press the ground under one ground contact.
     ///
     /// Pure and deterministic: the same field, centre, radius, class, layer and
-    /// `dt` always produce the same bytes. Returns `true` when at least one
-    /// sample actually moved (so a caller can count engagement rather than
-    /// guess).
+    /// `dt` always produce the same bytes. Returns `true` **iff at least one
+    /// sample actually got deeper** — an honest engagement signal, not a "the
+    /// call happened" one: a stamp on rock, a stamp on ground already at its
+    /// class depth, and a zero-radius contact all return `false`.
+    ///
+    /// **Order-invariant within a step.** Every stamp between two
+    /// [`relax`](Self::relax) calls advances from the depth the sample held at
+    /// the start of the step (see [`step_bases`](Self#structfield.step_bases)) and
+    /// keeps the deeper result, so the contacts of one fixed step may be applied
+    /// in any order and land the same bytes. The `Guid` sort in
+    /// `inf_ecs::deform::ground_contacts` is therefore belt-and-braces rather
+    /// than load-bearing — which is the right way round: an invariant that only
+    /// holds because a caller sorted is one call site away from being false.
+    ///
+    /// **Every cell the footprint covers has its eviction clock refreshed, even
+    /// when nothing presses.** That is the point, not an oversight: a body that
+    /// has settled to its class depth stops writing but is still standing there,
+    /// and evicting the ground out from under it would make its footprint vanish
+    /// while it watched. The cost is a bounded no-op walk (a footprint's worth of
+    /// samples) per resting contact per step, and the honest consequence is that
+    /// a permanently-resting body pins one or two cells against
+    /// [`MAX_DEFORM_CELLS`] for as long as it rests.
     ///
     /// * `center_xz` — world XZ of the contact.
     /// * `footprint_radius_m` — clamped to [`MAX_FOOTPRINT_RADIUS_M`].
@@ -505,26 +570,35 @@ impl DeformField {
                     .cells
                     .entry(coord)
                     .or_insert_with(|| DeformCell::new(step));
+                // Refresh the eviction clock for every covered cell, pressing or
+                // not — see the doc comment: this is what stops the ground being
+                // paged out from under a body that has stopped sinking.
+                cell.last_stamp_step = step;
                 let idx = (lj * DEFORM_CELL_SAMPLES + li) as usize;
                 let cur = cell.depth[idx];
                 if cur >= target {
                     continue;
                 }
-                let next = (cur + advance).min(target);
+                // The commutativity base: the depth at the START of this step, so
+                // every stamp of the step advances from the same place and the
+                // deepest wins.
+                let base = *self.step_bases.entry((coord, idx as u32)).or_insert(cur);
+                let next = (base + advance).min(target);
                 if next <= cur {
                     continue;
                 }
                 cell.depth[idx] = next;
                 cell.layer[idx] = layer;
-                cell.last_stamp_step = step;
                 touched = true;
             }
         }
         if touched {
             self.epoch += 1;
-            self.enforce_bound();
         }
-        true
+        // Bounded whether or not anything pressed: a stamp that only *created*
+        // cells (all already at depth) still grew the live set.
+        self.enforce_bound();
+        touched
     }
 
     /// One fixed step of **relaxation**: per-layer recovery, snowfall refill,
@@ -555,6 +629,11 @@ impl DeformField {
     /// countdown always moves.
     pub fn relax(&mut self, dt: f64, snow_rate_m_per_s: f64) {
         self.steps += 1;
+        // A new step: every sample's advance base is whatever it holds now. This
+        // is what defines "a step" for the order-invariance rule — a caller that
+        // stamps twice without relaxing between is describing ONE instant, and
+        // gets one advance.
+        self.step_bases.clear();
         if snow_rate_m_per_s > 0.0 && dt > 0.0 {
             self.snow_pending_m += snow_rate_m_per_s * dt;
         }
@@ -599,18 +678,32 @@ impl DeformField {
     /// victim is a pure function of the step history. Runs only when a stamp
     /// created a cell past the bound, and removes exactly one cell per such
     /// stamp, so the scan is bounded work at a bounded rate.
+    ///
+    /// **A cell touched by this very step is never a victim.** Without that, a
+    /// field at the bound could evict the ground out from under the body that
+    /// just pressed it — the footprint would vanish under the boot that made it,
+    /// and worse, in the same step, so nothing downstream could even see that it
+    /// had existed. The honest consequence is that the bound may be exceeded
+    /// while a single step's contacts cover more than [`MAX_DEFORM_CELLS`] cells,
+    /// which would take thousands of simultaneous bodies; the excess is released
+    /// on the next step that does not touch them.
     fn enforce_bound(&mut self) {
+        let now = self.steps;
         while self.cells.len() > MAX_DEFORM_CELLS {
             let Some(victim) = self
                 .cells
                 .iter()
+                .filter(|(_, cell)| cell.last_stamp_step != now)
                 .map(|(coord, cell)| (cell.last_stamp_step, *coord))
                 .min()
                 .map(|(_, coord)| coord)
             else {
+                // Everything alive is under a live contact. Overshoot rather than
+                // page out ground somebody is standing on.
                 return;
             };
             self.cells.remove(&victim);
+            self.step_bases.retain(|(coord, _), _| *coord != victim);
             self.evicted += 1;
             self.epoch += 1;
         }
@@ -669,7 +762,7 @@ impl DeformField {
     /// `to_le_bytes` so the bits are the bits.
     ///
     /// Contains no camera, no frame index and no wall clock — the
-    /// `wetness_is_a_pure_function` register: fold this into a replay trace and
+    /// `wetness_is_a_pure_function_of_the_water` register: fold this into a replay trace and
     /// the only thing that can move it is the step history.
     pub fn state_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(16 + self.cells.len() * (16 + DEFORM_CELL_AREA * 5));
@@ -717,6 +810,26 @@ mod tests {
     /// The engine's undeformable layer.
     const ROCK: u8 = 1;
 
+    /// Rest a contact on one spot for `steps` FIXED STEPS — relax then stamp,
+    /// which is the loop `inf_ecs::deform::step_deformation` runs.
+    ///
+    /// Tests must model steps now that the advance is once-per-sample-per-step:
+    /// a burst of stamps with no `relax` between them describes ONE instant, and
+    /// correctly presses once.
+    fn press(
+        field: &mut DeformField,
+        at: DVec2,
+        radius: f64,
+        p: PressureClass,
+        layer: u8,
+        steps: u32,
+    ) {
+        for _ in 0..steps {
+            field.relax(DT, 0.0);
+            field.stamp_contact(at, radius, p, layer, DT);
+        }
+    }
+
     fn walk(field: &mut DeformField, steps: u32, layer: u8) {
         for s in 0..steps {
             field.relax(DT, 0.0);
@@ -747,20 +860,20 @@ mod tests {
         let at = DVec2::new(1.0, 1.0);
         // Rest a foot on snow for a long time; it must converge on exactly the
         // class's fraction of the layer's max and then stop.
-        for _ in 0..600 {
-            f.stamp_contact(at, 0.3, PressureClass::Foot, SNOW, DT);
-        }
+        press(&mut f, at, 0.3, PressureClass::Foot, SNOW, 600);
         let peak = LAYER_RESPONSE[SNOW as usize].max_depth_m * PressureClass::Foot.depth_fraction();
         assert!((f.depth_at(at) - peak).abs() < 1e-6, "{}", f.depth_at(at));
         // A heavier class on the same sample presses further, still bounded.
-        for _ in 0..600 {
-            f.stamp_contact(at, 0.3, PressureClass::Heavy, SNOW, DT);
-        }
+        press(&mut f, at, 0.3, PressureClass::Heavy, SNOW, 600);
         let heavy = LAYER_RESPONSE[SNOW as usize].max_depth_m;
         assert!((f.depth_at(at) - heavy).abs() < 1e-6);
-        // …and a lighter one afterwards cannot un-press it.
+        // …and a lighter one afterwards cannot un-press it, and says so.
         let before = f.depth_at(at);
-        f.stamp_contact(at, 0.3, PressureClass::Light, SNOW, DT);
+        f.relax(DT, 0.0);
+        assert!(
+            !f.stamp_contact(at, 0.3, PressureClass::Light, SNOW, DT),
+            "a stamp that pressed nothing must report false"
+        );
         assert_eq!(f.depth_at(at), before);
     }
 
@@ -768,7 +881,11 @@ mod tests {
     fn rock_never_deforms() {
         let mut f = DeformField::new();
         for _ in 0..100 {
-            f.stamp_contact(DVec2::ZERO, 1.0, PressureClass::Heavy, ROCK, DT);
+            f.relax(DT, 0.0);
+            assert!(
+                !f.stamp_contact(DVec2::ZERO, 1.0, PressureClass::Heavy, ROCK, DT),
+                "a stamp on an undeformable layer must report false"
+            );
         }
         assert!(f.is_empty());
         assert_eq!(f.depth_at(DVec2::ZERO), 0.0);
@@ -797,6 +914,7 @@ mod tests {
             let a = (DVec2::new(0.0, 0.0), SNOW);
             let b = (DVec2::new(40.0, 40.0), DIRT);
             let (p, q) = if flip { (b, a) } else { (a, b) };
+            f.relax(DT, 0.0);
             f.stamp_contact(p.0, 0.3, PressureClass::Foot, p.1, DT);
             f.stamp_contact(q.0, 0.3, PressureClass::Foot, q.1, DT);
             f
@@ -811,6 +929,7 @@ mod tests {
             let at = DVec2::new(5.0, 5.0);
             let (p, q) = if flip { (DIRT, SNOW) } else { (SNOW, DIRT) };
             for _ in 0..600 {
+                f.relax(DT, 0.0);
                 f.stamp_contact(at, 0.3, PressureClass::Heavy, p, DT);
                 f.stamp_contact(at, 0.3, PressureClass::Heavy, q, DT);
             }
@@ -828,9 +947,7 @@ mod tests {
     fn recovery_returns_to_exactly_zero_and_drops_the_cell() {
         let mut f = DeformField::new();
         let at = DVec2::new(2.0, 2.0);
-        for _ in 0..60 {
-            f.stamp_contact(at, 0.3, PressureClass::Foot, 0, DT);
-        }
+        press(&mut f, at, 0.3, PressureClass::Foot, 0, 60);
         assert!(f.depth_at(at) > 0.0);
         assert_eq!(f.cell_count(), 1);
         // Grass recovers in 8 s for a full-depth print; run well past it.
@@ -848,9 +965,7 @@ mod tests {
     fn snow_never_recovers_on_its_own() {
         let mut f = DeformField::new();
         let at = DVec2::new(3.0, 3.0);
-        for _ in 0..600 {
-            f.stamp_contact(at, 0.3, PressureClass::Foot, SNOW, DT);
-        }
+        press(&mut f, at, 0.3, PressureClass::Foot, SNOW, 600);
         let pressed = f.depth_at(at);
         for _ in 0..(60 * 600) {
             f.relax(DT, 0.0);
@@ -871,9 +986,7 @@ mod tests {
         let mut without = DeformField::new();
         let at = DVec2::new(4.0, 4.0);
         for f in [&mut with, &mut without] {
-            for _ in 0..600 {
-                f.stamp_contact(at, 0.3, PressureClass::Foot, SNOW, DT);
-            }
+            press(f, at, 0.3, PressureClass::Foot, SNOW, 600);
         }
         let pressed = with.depth_at(at);
         // Half an hour of heavy snow ≈ 2.5 cm — a real dent in a 22 cm print.
@@ -930,9 +1043,14 @@ mod tests {
     #[test]
     fn the_window_is_a_pure_translation_of_the_lattice() {
         let mut f = DeformField::new();
-        for _ in 0..600 {
-            f.stamp_contact(DVec2::new(1.0, 1.0), 0.5, PressureClass::Foot, SNOW, DT);
-        }
+        press(
+            &mut f,
+            DVec2::new(1.0, 1.0),
+            0.5,
+            PressureClass::Foot,
+            SNOW,
+            600,
+        );
         let texels = 64u32;
         let o = window_origin(DVec2::new(1.0, 1.0), texels);
         let mut a = Vec::new();
@@ -944,7 +1062,7 @@ mod tests {
         assert_eq!(a, b);
         assert!(a.iter().any(|d| *d > 0.0));
 
-        // THE REBASE ARM (the wetness `a_rebase_moves_the_band` register): shift
+        // THE REBASE ARM (the wetness `a_rebase_moves_the_band_with_the_world_and_not_against_it` register): shift
         // the window by whole texels and the same lattice values come back,
         // shifted — no resampling, no filter, no drift.
         let shift = 5i64;
@@ -986,13 +1104,13 @@ mod tests {
         let before = f.epoch();
         f.relax(DT, 0.0);
         assert_eq!(f.epoch(), before, "an empty relax changes nothing");
-        f.stamp_contact(DVec2::ZERO, 0.3, PressureClass::Foot, ROCK, DT);
+        assert!(!f.stamp_contact(DVec2::ZERO, 0.3, PressureClass::Foot, ROCK, DT));
         assert_eq!(f.epoch(), before, "a stamp on rock changes nothing");
-        f.stamp_contact(DVec2::ZERO, 0.3, PressureClass::Foot, SNOW, DT);
+        assert!(f.stamp_contact(DVec2::ZERO, 0.3, PressureClass::Foot, SNOW, DT));
         assert!(f.epoch() > before, "a stamp that pressed must be visible");
         let e = f.epoch();
         let bytes = f.state_bytes();
-        f.stamp_contact(DVec2::new(1000.0, 0.0), 0.0, PressureClass::Foot, SNOW, DT);
+        assert!(!f.stamp_contact(DVec2::new(1000.0, 0.0), 0.0, PressureClass::Foot, SNOW, DT));
         assert_eq!(f.epoch(), e, "a zero-radius contact presses nothing");
         assert_eq!(f.state_bytes(), bytes);
     }
@@ -1010,10 +1128,143 @@ mod tests {
         assert!(i < DEFORM_CELL_SAMPLES && j < DEFORM_CELL_SAMPLES);
         // …and a stamp across the origin lands on both sides of it.
         let mut f = DeformField::new();
-        for _ in 0..600 {
-            f.stamp_contact(DVec2::ZERO, 1.0, PressureClass::Heavy, SNOW, DT);
-        }
+        press(&mut f, DVec2::ZERO, 1.0, PressureClass::Heavy, SNOW, 600);
         assert!(f.depth_at(DVec2::new(-0.5, -0.5)) > 0.0);
         assert!(f.depth_at(DVec2::new(0.5, 0.5)) > 0.0);
+    }
+
+    #[test]
+    fn the_contacts_of_one_step_commute() {
+        // GENUINE ORDER-INVARIANCE, not reproducibility: the same set of
+        // overlapping contacts applied in three different orders, inside one
+        // step, must land byte-identical fields. Every previous determinism arm
+        // in this batch replayed the SAME order twice, which proves nothing about
+        // order at all.
+        let contacts = [
+            (DVec2::new(5.00, 5.00), 0.45, PressureClass::Heavy, SNOW),
+            (DVec2::new(5.20, 5.05), 0.30, PressureClass::Foot, DIRT),
+            (DVec2::new(4.85, 5.15), 0.50, PressureClass::Light, SNOW),
+            (DVec2::new(5.10, 4.90), 0.35, PressureClass::Wheel, DIRT),
+        ];
+        let run = |order: &[usize]| {
+            let mut f = DeformField::new();
+            // Several steps, so saturation genuinely bites — the regime the
+            // old non-commutative rule diverged in.
+            for _ in 0..40 {
+                f.relax(DT, 0.0);
+                for &i in order {
+                    let (at, r, p, l) = contacts[i];
+                    f.stamp_contact(at, r, p, l, DT);
+                }
+            }
+            f.state_bytes()
+        };
+        let a = run(&[0, 1, 2, 3]);
+        let b = run(&[3, 2, 1, 0]);
+        let c = run(&[2, 0, 3, 1]);
+        assert!(!a.is_empty());
+        assert_eq!(a, b, "reversing the contact order changed the field");
+        assert_eq!(a, c, "permuting the contact order changed the field");
+
+        // ANTI-VACUITY: the contacts really do overlap, so the equality above is
+        // over samples that more than one of them wrote.
+        let mut f = DeformField::new();
+        f.relax(DT, 0.0);
+        f.stamp_contact(
+            contacts[0].0,
+            contacts[0].1,
+            contacts[0].2,
+            contacts[0].3,
+            DT,
+        );
+        let one = f.depth_at(DVec2::new(5.0, 5.0));
+        f.stamp_contact(
+            contacts[1].0,
+            contacts[1].1,
+            contacts[1].2,
+            contacts[1].3,
+            DT,
+        );
+        assert!(one > 0.0 && f.depth_at(DVec2::new(5.0, 5.0)) > 0.0);
+    }
+
+    #[test]
+    fn one_step_is_one_advance_however_many_contacts_press() {
+        // The physical half of the commutativity rule: two contacts at one
+        // instant are not twice as long a press. Two overlapping stamps in one
+        // step must reach exactly the depth the deeper one alone would.
+        let at = DVec2::new(9.0, 9.0);
+        let mut one = DeformField::new();
+        let mut two = DeformField::new();
+        one.relax(DT, 0.0);
+        one.stamp_contact(at, 0.4, PressureClass::Heavy, SNOW, DT);
+        two.relax(DT, 0.0);
+        two.stamp_contact(at, 0.4, PressureClass::Heavy, SNOW, DT);
+        two.stamp_contact(at, 0.4, PressureClass::Heavy, SNOW, DT);
+        assert_eq!(one.depth_at(at), two.depth_at(at));
+        assert!(one.depth_at(at) > 0.0);
+    }
+
+    #[test]
+    fn eviction_never_takes_the_ground_from_under_a_live_contact() {
+        // Fill the field to its bound with old cells, then stamp a fresh contact:
+        // the new cell must survive its own step, and the victim must be one of
+        // the old ones.
+        let mut f = DeformField::new();
+        let mut x = 0.0;
+        while f.cell_count() < MAX_DEFORM_CELLS {
+            f.relax(DT, 0.0);
+            f.stamp_contact(DVec2::new(x, 0.0), 0.3, PressureClass::Foot, SNOW, DT);
+            x += DEFORM_CELL_SIZE_M;
+        }
+        assert_eq!(f.cell_count(), MAX_DEFORM_CELLS);
+        let evicted_before = f.evicted_cells();
+
+        // A contact far away, spanning several fresh cells in ONE step.
+        f.relax(DT, 0.0);
+        let far = DVec2::new(100_000.0, 100_000.0);
+        for dx in [-3.0f64, 0.0, 3.0] {
+            f.stamp_contact(
+                far + DVec2::new(dx, 0.0),
+                1.0,
+                PressureClass::Heavy,
+                SNOW,
+                DT,
+            );
+        }
+        assert!(
+            f.evicted_cells() > evicted_before,
+            "the bound must have bitten"
+        );
+        assert!(
+            f.depth_at(far) > 0.0,
+            "the field evicted the cell the live contact had just pressed"
+        );
+        assert!(f.cell_count() <= MAX_DEFORM_CELLS);
+    }
+
+    #[test]
+    fn a_resting_contact_keeps_its_ground_alive() {
+        // A body that has settled stops PRESSING but is still standing there, so
+        // its cell must keep its eviction clock refreshed. Otherwise the ground
+        // would page out from under it while it watched.
+        let mut f = DeformField::new();
+        let at = DVec2::new(2.0, 2.0);
+        press(&mut f, at, 0.3, PressureClass::Foot, SNOW, 600);
+        let saturated = f.depth_at(at);
+        let stamp_step_before = f.steps();
+
+        // A step in which the contact presses NOTHING (already at target)…
+        f.relax(DT, 0.0);
+        assert!(!f.stamp_contact(at, 0.3, PressureClass::Foot, SNOW, DT));
+        assert_eq!(f.depth_at(at), saturated);
+        // …still counts as activity for the eviction rule.
+        assert!(f.steps() > stamp_step_before);
+        let (_, cell) = f.cells().next().expect("one cell");
+        assert_eq!(
+            cell.last_stamp_step,
+            f.steps(),
+            "a resting contact must refresh its cell's eviction clock"
+        );
     }
 }
