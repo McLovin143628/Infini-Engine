@@ -110,3 +110,108 @@ sample needs it (an RTS or a rollback fighter), or when a genre template's
 bandwidth budget makes state replication infeasible. Revisit quantization + interest
 management the moment a sample exceeds a per-tick bandwidth budget with raw `f64`
 full snapshots.
+
+## Destruction events over the wire (P22.4)
+
+Documentation only — **no net code was written for this section.** P22 built the
+destruction it describes; what follows is the contract a P14-style replication
+layer will need from it, written down while the people who built it still
+remember why each piece is shaped the way it is.
+
+### What the sim actually produces
+
+Destruction state is `BTreeMap<Uuid, FractureState>` on the host (`SimSession::fractures`
+/ `RuntimeSim::fractures`) and is **not** in the ECS world — so
+`snapshot_world` / `apply_snapshot` do not see it and would not carry it if the
+transport shipped tomorrow. There are exactly three observable events, all
+produced inside the fixed step:
+
+1. **A chunk detaches.** Either damage spent enough joules on its bonds
+   (`PhysicsBridge3D::runtime_destruct`) or the structural solve found it
+   unsupported (`step_fractures`). Identity is `(actor Guid, chunk index)`;
+   ordering is `detach_order`, a monotone per-actor counter.
+2. **A chunk is reclaimed.** The debris budget's despawn — lifetime expiry or the
+   level-wide cap. Identity is the same pair; the chunk is `gone` for ever.
+3. **`Destroyed` fires.** One edge per actor, the first step on which every chunk
+   has come off, carrying the chunk count. It is already an `EventKind` a
+   Blueprint can bind, so it is the only one of the three that gameplay can see
+   directly today.
+
+Chunk **poses** are not in this list on purpose. They are ordinary rigid-body
+state and belong to whatever the transport already does with bodies; a chunk is a
+solver-owned body under a synthetic content-derived Guid
+(`fracture_chunk_guid`), so a body-replicating snapshot reaches it with no new
+concept — it only has to stop assuming a Guid names an entity.
+
+### What is replication-relevant, and what is not
+
+**Relevant:** the detach set and the reclaim set. They change what exists, they
+are cheap (two integers per event), and a client that misses one draws a wall
+that is not there.
+
+**Not relevant:** the *energy* a blow absorbed, the bond graph, the support solve,
+the audit counters. Those are derivations; sending them would be sending the
+server's reasoning instead of its conclusions, and a client that re-derived them
+would need the `.inf_fracture`, the placement and the contact set to agree
+bit-for-bit — which is the lockstep contract, not the snapshot one.
+
+**Explicitly not relevant: the rubble.** P22.4's sub-chunk debris is
+render-only dressing, laid by a pure function of `(actor id, chunk index, detach
+order, fragment index)` (`inf_render::debris`). Every client that agrees about
+the detach set already agrees about the rubble, byte for byte, with nothing sent.
+That is the whole reason the seed is a content tuple and not a wall clock.
+
+### Ordering and idempotency
+
+* **Detach is idempotent.** `FractureState::detach` is a no-op on a chunk that is
+  already detached or gone, so a duplicated event is free and a client may apply
+  the same message twice.
+* **Reclaim is idempotent and terminal.** `gone` never goes back to `false`, so
+  reclaim-before-detach (a reordered pair) converges to the same state as the
+  other order: the chunk ends gone either way. There is no ABA problem because a
+  chunk index is never reused.
+* **`Destroyed` is latched** (`destroyed_fired`), so it fires once per actor per
+  session however many times the underlying condition is re-evaluated. A client
+  that replays it twice must therefore de-duplicate on the actor, not trust the
+  message count.
+* **Order between actors does not matter**; order *within* an actor does, but only
+  because `detach_order` is what the budget sorts on. A late-arriving detach with
+  a lower order than one already applied is still correct state; it is only the
+  *reclaim priority* that would differ, and that self-corrects on the next sweep.
+
+The one thing that is **not** order-independent is the structural solve: support
+propagates through undetached neighbours, so a client that applies detaches in a
+different order and re-runs the solve locally can reach a different collapse. The
+conclusion is the same one the whole memo reaches — **the server solves, the
+client is told what fell.** A client must never run `step_fractures` on
+replicated state.
+
+### What a late joiner needs
+
+The minimum full state for one actor is: its Guid, and per chunk the pair
+`(detached, gone)` plus `detach_order` for the ones that are detached — i.e. the
+`ChunkState` fields `FractureState::bits()` already serializes for the
+determinism gates, minus `age_s` (a budget input the server owns) and minus the
+pose (which the body snapshot carries anyway). For a 64-chunk actor that is well
+under 200 bytes.
+
+The joiner also needs the **placement**, and this is the subtle one: an actor's
+`placement` is frozen at the first detach, so a late joiner that derives it from
+the entity's current transform will be right for intact actors and wrong for any
+actor that was moved before it broke. Send it, or accept that scripted moving
+destructibles resynchronise incorrectly.
+
+Nothing here needs a schema bump: scene schema **v20** describes the *authored*
+destructible, and none of the above is authored.
+
+### The save-game seam is the same seam
+
+A save game would want exactly the late-joiner payload, for exactly the same
+reason, and would hit exactly the same placement caveat. P22.4's ruling is that
+**destruction is not persisted** — the engine has no save-game container, and
+`.inf_lvl` is the author's document rather than a player's progress
+(`simulate_destruction_not_persisted` is what keeps that true). When a save-game
+container arrives it should serialize the payload above and nothing more; the
+event stream and the snapshot are two encodings of one fact, and adding a third
+authority for what is broken is how a repository ends up with two of them
+disagreeing.

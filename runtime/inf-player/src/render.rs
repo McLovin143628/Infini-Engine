@@ -78,6 +78,14 @@ pub struct PlayerRenderHost {
     /// GPU meshlet path (High). Off → the classic discrete-LOD fallback renders the
     /// same vgeom content (the renderer's `ClassicVgeomNode`).
     vgeom_enabled: bool,
+    /// The auto-picked capability tier itself (P22.4).
+    ///
+    /// Kept because the tier now decides one thing that is **not** a renderer
+    /// setting: the level's debris budget. The window owns the session, so it —
+    /// not this host — reads this and calls `set_debris_budget`; see
+    /// [`inf_render::debris_budget_for`] for why that mapping lives at the host
+    /// and never inside physics.
+    tier: inf_render::RenderTier,
 }
 
 impl PlayerRenderHost {
@@ -142,7 +150,19 @@ impl PlayerRenderHost {
             voxel_assets: Arc::new(VoxelRegistry::new()),
             voxels: inf_voxel::VoxelVolumes::new(),
             vgeom_enabled,
+            tier,
         })
+    }
+
+    /// The GPU capability tier this host auto-picked from the adapter (P22.4).
+    ///
+    /// Exposed for exactly one caller — the window, which maps it onto the
+    /// session's debris budget. Every headless boot path (`run_headless`, the
+    /// `--pie` protocol loop, `scene_trace`) builds no host at all and therefore
+    /// never sees a tier, which is what keeps every determinism gate in this
+    /// repository comparing the *unclamped* engine defaults.
+    pub fn tier(&self) -> inf_render::RenderTier {
+        self.tier
     }
 
     /// Attach the cook-derived vmesh registry (from the loaded pack / dev-dir) so
@@ -713,6 +733,10 @@ pub fn project_scene_with_skinned(
             // actor keeps its collider, so the two halves of the swap cannot
             // disagree. An intact (or absent) state projects nothing and the mesh
             // branch below runs exactly as it always has.
+            // P22.4 — and its RUBBLE. `project_debris` rides the same `and_then`
+            // so the two projections cannot disagree about which actors are
+            // broken; it is dressing only, keyed by content, and it never touches
+            // the sim.
             let fractured = sim
                 .fractures()
                 .get(&guid)
@@ -722,8 +746,21 @@ pub fn project_scene_with_skinned(
                         w.get::<Material>(entity),
                         inf_render::terrain_id_from_guid(guid.as_u128()),
                     )
+                    .map(|chunks| {
+                        (
+                            chunks,
+                            project_debris(
+                                state,
+                                w.get::<Material>(entity),
+                                inf_render::terrain_id_from_guid(guid.as_u128()),
+                            ),
+                        )
+                    })
                 })
-                .map(|chunks| scene.fracture_chunks.extend(chunks))
+                .map(|(chunks, debris)| {
+                    scene.fracture_chunks.extend(chunks);
+                    scene.scatter.extend(debris);
+                })
                 .is_some();
             let vgeom = (!fractured)
                 .then(|| mesh_ref.asset.and_then(|mesh_id| vmeshes.resolve(mesh_id)))
@@ -1227,6 +1264,67 @@ fn project_fracture(
         });
     }
     Some(out)
+}
+
+/// **MIRROR** of the other host's `project_debris` — keep the two
+/// byte-identical, **this doc block included** (the P21.2 lesson recorded on
+/// `project_voxel`: the mirror gate compares the comment too).
+///
+/// Project one broken destructible's **sub-chunk rubble** (P22.4).
+///
+/// # It is dressing, and it never reaches the sim
+///
+/// P22.3 already draws the chunks themselves — real solver-owned bodies. This is
+/// the visual rubble *below* that scale: fragments too small to be worth a convex
+/// hull, laid deterministically around each live chunk by
+/// [`inf_render::debris_instances`] and shipped as ONE `ScatterBatch` per broken
+/// actor down the P18.5 GPU instance path. Nothing here is a body, nothing here
+/// is queried, and deleting this function would leave the simulation bit-identical.
+///
+/// # Why the site is the REST centre and not the live pose
+///
+/// `ScatterData::key` is a content hash over the packed instance bytes, so a
+/// batch whose instances moved every step would re-upload its whole buffer every
+/// step — the exact cost the scatter path exists to avoid. The rubble is
+/// therefore anchored on each chunk's `chunk_rest_center`, which `FractureState`
+/// freezes when the first chunk detaches, so the batch's content changes only
+/// when the live chunk set does: **one upload per break**, structurally, with no
+/// stamp to get wrong. It is also the honest picture — the fragments are the
+/// spall left *at* the break, not a second swarm of projectiles.
+///
+/// A **reclaimed** chunk sheds nothing, so the budget's despawn takes the chunk,
+/// its collider and its rubble out together — one event, not three.
+fn project_debris(
+    state: &inf_physics::d3::FractureState,
+    material: Option<&Material>,
+    id: u64,
+) -> Option<inf_render::ScatterBatch> {
+    if state.is_intact() {
+        return None;
+    }
+    let (color, roughness) = match material {
+        Some(m) => (m.base_color.to_array(), m.roughness),
+        None => ([0.8, 0.8, 0.8, 1.0], 0.5_f32),
+    };
+    let sites: Vec<inf_render::DebrisSite> = state
+        .chunks()
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.detached && !c.gone)
+        .map(|(i, c)| inf_render::DebrisSite {
+            entity: id,
+            chunk: i as u32,
+            order: c.detach_order,
+            center: state.chunk_rest_center(i),
+            radius_m: state.chunk_radius_m(i),
+        })
+        .collect();
+    inf_render::debris_batch(
+        &sites,
+        inf_render::DEBRIS_RUBBLE_PER_CHUNK,
+        color,
+        roughness,
+    )
 }
 
 /// **MIRROR** of the other host's `project_voxel` — keep the two byte-identical,

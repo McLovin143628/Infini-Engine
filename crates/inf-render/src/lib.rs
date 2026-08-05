@@ -14,6 +14,7 @@ pub mod camera;
 pub mod caps;
 pub mod clouds;
 pub mod csm;
+pub mod debris;
 pub mod debug_draw;
 pub mod deform;
 pub mod gi;
@@ -104,6 +105,13 @@ pub use water::{
     WaterKindGpu, WaterQuality, WaterSettings, WaterSurface, Wave, WaveField, WaveSpec, MAX_WAVES,
     OCEAN_EXTENT_M, OCEAN_SNAP_M, SHAFT_DECAY, SHAFT_GLOW_POWER, SHAFT_INTENSITY, SHAFT_REACH,
     SHAFT_TINT_DEPTH_M, UNDERWATER_FAR_M, UNDERWATER_RAMP_M,
+};
+// P22.4 small-debris instancing + the per-tier debris budget: the deterministic
+// sub-chunk rubble both hosts lay through the P18.5 scatter path, and the one
+// place `RenderTier` is mapped onto a budget (physics stays tier-blind).
+pub use debris::{
+    debris_batch, debris_budget_for, debris_instances, DebrisBudgetSpec, DebrisSite,
+    DEBRIS_BUDGET_HIGH, DEBRIS_MAX_SCALE, DEBRIS_MIN_SCALE, DEBRIS_RUBBLE_PER_CHUNK,
 };
 // P22.1 surface deformation: the projected field, the camera-following window's
 // packing, and the engine constants argued in `deform.rs` rather than authored.

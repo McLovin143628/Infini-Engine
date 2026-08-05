@@ -739,3 +739,103 @@ fn the_shipped_host_shatters_a_moved_wall_where_it_stands() {
         state.chunks().len()
     );
 }
+
+// ── P22.4: the per-tier debris budget ───────────────────────────────────────
+
+/// **The High row IS the physics default.**
+///
+/// `inf_render::debris_budget_for` maps a GPU capability tier onto a debris
+/// budget, and `inf-render` may not depend on `inf-physics` to say the numbers —
+/// so the equality that makes the whole arrangement safe is asserted here, in the
+/// crate that can see both, on the `destructible_defaults_match_the_mesh_crate`
+/// precedent.
+///
+/// Why it matters more than a tidy constant: the budget is read by
+/// `step_fractures`, which is **fixed-step simulation**. Every determinism gate in
+/// this repository — the replay harness, `scene_trace`, the `--pie` protocol loop,
+/// every headless `pack_sim` — builds no render host and therefore runs
+/// `DebrisBudget::default()`. If High were anything else, a windowed player on a
+/// capable machine would be simulating a *different* level from the one every gate
+/// compares, and nothing would report it.
+#[test]
+fn the_high_tier_budget_is_the_physics_default() {
+    let high = inf_render::debris_budget_for(inf_render::RenderTier::High);
+    let default = inf_physics::d3::DebrisBudget::default();
+    assert_eq!(
+        high.max_live, default.max_live,
+        "the High tier's chunk cap has drifted from `DEFAULT_DEBRIS_MAX_LIVE`"
+    );
+    assert_eq!(
+        high.lifetime_s, default.lifetime_s,
+        "the High tier's debris lifetime has drifted from \
+         `DEFAULT_DEBRIS_LIFETIME_S`"
+    );
+    // …and the weaker tiers really are weaker, converted through the same seam
+    // the window uses, so "clamps down, never up" is checked on the real types.
+    for tier in [inf_render::RenderTier::Medium, inf_render::RenderTier::Low] {
+        let spec = inf_render::debris_budget_for(tier);
+        let budget = inf_physics::d3::DebrisBudget {
+            max_live: spec.max_live,
+            lifetime_s: spec.lifetime_s,
+        };
+        assert!(
+            budget.max_live <= default.max_live,
+            "{tier:?} raised the cap"
+        );
+        assert!(
+            budget.lifetime_s <= default.lifetime_s,
+            "{tier:?} lengthened the lifetime"
+        );
+        assert!(budget.max_live > 0 && budget.lifetime_s > 0.0);
+    }
+}
+
+/// **A tier-clamped budget really does reclaim earlier** — the seam does
+/// something, rather than being a struct nobody reads.
+///
+/// The wall's Blueprint blows it apart on every tick, so within a few steps every
+/// chunk is live debris. Under a budget of one, the level keeps exactly one — and
+/// the reclaimed chunks are `gone`, which is what removes them from the solver and
+/// from both hosts' render projections on the same generation.
+#[test]
+fn a_tightened_debris_budget_reclaims_the_oldest_chunks() {
+    let mut capped = sim(true, true);
+    capped.set_debris_budget(inf_physics::d3::DebrisBudget {
+        max_live: 1,
+        lifetime_s: f64::INFINITY,
+    });
+    for _ in 0..8 {
+        capped.step_once(RuntimeInput::default());
+    }
+    let state = &capped.fractures()[&Uuid::from_u128(WALL_GUID)];
+    let live = state
+        .chunks()
+        .iter()
+        .filter(|c| c.detached && !c.gone)
+        .count();
+    let gone = state.chunks().iter().filter(|c| c.gone).count();
+    assert_eq!(live, 1, "the cap of 1 left {live} chunks live");
+    assert!(gone > 0, "nothing was reclaimed, so the cap did nothing");
+    assert_eq!(
+        capped.fracture_audit().live_debris,
+        1,
+        "the audit disagrees with the state it is supposed to be counting"
+    );
+
+    // The control: the SAME fixture under the engine default keeps them all, so
+    // the assertion above is about the budget rather than about the wall.
+    let mut loose = sim(true, true);
+    for _ in 0..8 {
+        loose.step_once(RuntimeInput::default());
+    }
+    let loose_live = loose.fractures()[&Uuid::from_u128(WALL_GUID)]
+        .chunks()
+        .iter()
+        .filter(|c| c.detached && !c.gone)
+        .count();
+    assert!(
+        loose_live > 1,
+        "the unclamped fixture only ever has {loose_live} live chunk(s), so the \
+         cap of 1 proved nothing"
+    );
+}

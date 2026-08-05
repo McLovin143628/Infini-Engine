@@ -518,6 +518,31 @@ impl FractureState {
         self.chunks.iter().filter(|c| c.detached && !c.gone).count() as u32
     }
 
+    /// Chunk `index`'s **characteristic radius**, metres: the radius of the
+    /// sphere with the same (placement-scaled) volume, `(3V / 4π)^(1/3)`.
+    ///
+    /// One scalar standing in for a Voronoi cell's extent. It is deliberately the
+    /// *equal-volume* sphere rather than the hull's bounding radius: a bounding
+    /// radius is set by the cell's longest spike and would describe a wedge as
+    /// though it were a boulder, while the equal-volume radius describes how much
+    /// solid came off — which is the quantity anything derived from a chunk
+    /// (rubble, a dust puff, a sound) actually wants.
+    ///
+    /// `0.0` for an index out of range or a non-positive volume, so a caller
+    /// never has to spell the degenerate case twice.
+    pub fn chunk_radius_m(&self, index: usize) -> f64 {
+        let v = self
+            .asset
+            .chunks
+            .get(index)
+            .map(|c| c.volume_m3 * self.volume_scale)
+            .unwrap_or(0.0);
+        if !v.is_finite() || v <= 0.0 {
+            return 0.0;
+        }
+        (3.0 * v / (4.0 * std::f64::consts::PI)).cbrt()
+    }
+
     /// The mass, kg, of chunk `index` under this actor's density and scale.
     pub fn chunk_mass_kg(&self, index: usize) -> f64 {
         self.asset
@@ -1562,7 +1587,13 @@ impl FractureState {
     /// Chunk `i`'s rest-pose world centre — where its body's origin sits before
     /// anything moves it. The hull points are stored relative to this, so a
     /// detached chunk's collider rotates about its own centre of mass.
-    fn chunk_rest_center(&self, i: usize) -> DVec3 {
+    ///
+    /// **Public since P22.4, and stable by construction.** `placement` is frozen
+    /// the instant the first chunk detaches (see the field), so on a broken actor
+    /// this is a constant for the rest of the session — which is what lets the
+    /// hosts' sub-chunk rubble be content-keyed once per break rather than once
+    /// per step (`inf_render::debris`).
+    pub fn chunk_rest_center(&self, i: usize) -> DVec3 {
         self.asset
             .chunks
             .get(i)

@@ -1532,6 +1532,112 @@ fn both_projectors_project_fracture_the_same_way() {
     }
 }
 
+// ── sub-chunk debris (P22.4) ────────────────────────────────────────────────
+
+/// The two `project_debris` projectors must be byte-identical, doc block
+/// included — the `project_fracture` rule, one batch later.
+///
+/// The divergence this catches is the P18.5 shape exactly: a *whole layer* of
+/// visual content present in one host and absent in the other, discovered by a
+/// player looking at a collapse that reads differently in the shipped build than
+/// it did in the preview.
+#[test]
+fn project_debris_is_identical_in_both_projectors() {
+    let mine = extract_fn(&read(VIEWPORT), "project_debris");
+    let theirs = extract_fn(&read(PLAYER), "project_debris");
+    assert_eq!(
+        mine, theirs,
+        "the two `project_debris` projectors have drifted — a collapse would shed \
+         different rubble in the preview and the shipped build. Keep them \
+         byte-identical, or move the shared part into `inf_render::debris` (which \
+         is where the placement rule and the mixer already live)."
+    );
+}
+
+/// A guard on the guard: two stubs are identical too, and a debris projection
+/// that quietly stopped being *content-keyed* would look identical to one that
+/// still was.
+#[test]
+fn the_shared_debris_projector_is_not_a_stub() {
+    let body = extract_item(&read(PLAYER), "project_debris");
+    for fragment in [
+        // The same atomicity predicate the chunks use — rubble is never shed by an
+        // intact actor.
+        "if state.is_intact() {",
+        "return None;",
+        // A reclaimed chunk sheds nothing: the budget's despawn takes the body,
+        // the collider and the rubble out together.
+        "c.detached && !c.gone",
+        // **THE KEYING RULE.** The site is the chunk's REST centre, which is frozen
+        // at the break — so the batch's bytes change once per break rather than
+        // once per step. A host that read `c.translation` here would re-upload the
+        // whole instance buffer every frame of a collapse, and nothing else in the
+        // repo would notice.
+        "center: state.chunk_rest_center(i),",
+        "radius_m: state.chunk_radius_m(i),",
+        // The seed is the content tuple, so two hosts (and two machines) lay the
+        // same rubble.
+        "order: c.detach_order,",
+        // The placement rule itself is Ring 0, called and never re-implemented.
+        "inf_render::debris_batch(",
+        "inf_render::DEBRIS_RUBBLE_PER_CHUNK,",
+    ] {
+        assert!(
+            body.contains(fragment),
+            "`project_debris` no longer contains `{fragment}` — either it was \
+             gutted, or this gate needs updating deliberately:\n{body}"
+        );
+    }
+    // The live pose must not appear at all: it is the one input that would make
+    // the batch re-upload every step.
+    assert!(
+        !body.contains("c.translation") && !body.contains("c.rotation"),
+        "`project_debris` reads a chunk's LIVE pose — the rubble would be \
+         re-uploaded wholesale every step, which is the documented cost the rest \
+         pose exists to avoid:\n{body}"
+    );
+    // …and, like the chunk projection, it must never see a camera.
+    for probe in ["eye", "camera", "frustum"] {
+        assert!(
+            !body.contains(probe),
+            "`project_debris` names `{probe}`:\n{body}"
+        );
+    }
+}
+
+/// The surrounding *rules*: both hosts push the batch onto the same list, from
+/// the same `and_then` that decided the actor was broken — so the chunks and
+/// their rubble cannot disagree about which actors have come apart.
+#[test]
+fn both_projectors_shed_debris_the_same_way() {
+    const SHARED: [&str; 3] = [
+        "project_debris(",
+        "scatter.extend(debris)",
+        "fracture_chunks.extend(chunks)",
+    ];
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let src = read(path).replace("\r\n", "\n");
+        for fragment in SHARED {
+            assert!(
+                src.contains(fragment),
+                "the {label}'s debris projection no longer contains `{fragment}` — \
+                 either the path was changed on one side only, or this gate needs \
+                 updating deliberately"
+            );
+        }
+        // The tier must not reach the projection. `debris_budget_for` is a HOST
+        // decision made once, where a session is owned; a projector that clamped
+        // its own rubble by the local adapter would make the two hosts' scenes
+        // differ by machine, which is precisely what this file exists to stop.
+        assert!(
+            !src.contains("debris_budget_for("),
+            "the {label}'s projector names `debris_budget_for` — the tier→budget \
+             mapping belongs to the host that owns the session, never to a \
+             projection"
+        );
+    }
+}
+
 /// **Both fixed steps must run the P22.3 fracture slots, in order.**
 ///
 /// The re-audit's item 5: deleting the editor host's `follow_fractures` call left

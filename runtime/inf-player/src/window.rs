@@ -383,6 +383,24 @@ impl ApplicationHandler for PlayerApp {
                 // P21.1: and the `.inf_voxel` source, so a placed cave draws its
                 // carved surface rather than nothing.
                 host.set_voxel_assets(self.voxel_assets.clone());
+                // P22.4 — THE PER-TIER DEBRIS BUDGET, and the only place in the
+                // engine where a `RenderTier` becomes a `DebrisBudget`.
+                //
+                // It happens *here*, in the window, because this is the one place
+                // that holds both a detected tier and a live session — and because
+                // it must not happen anywhere else. `step_fractures` is fixed-step
+                // simulation, so a host that sets its budget from the adapter has
+                // made its simulation a function of the machine; the editor's
+                // Simulate deliberately does not (it is the preview half of
+                // `PIE == shipping`), and no headless boot path builds a host at
+                // all. High maps to the physics default, so a capable machine runs
+                // the engine's own numbers and the clamp is something a weak one
+                // opts into. `inf_render::debris_budget_for` argues the rows.
+                let spec = inf_render::debris_budget_for(host.tier());
+                self.sim.set_debris_budget(inf_physics::d3::DebrisBudget {
+                    max_live: spec.max_live,
+                    lifetime_s: spec.lifetime_s,
+                });
                 // Report our native window handle so the editor can reparent us
                 // into the viewport slot (embedded PIE).
                 if let Some(pie) = self.pie.as_mut() {
