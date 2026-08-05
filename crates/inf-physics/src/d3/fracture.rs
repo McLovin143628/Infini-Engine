@@ -44,6 +44,19 @@
 //! Everything else falls. Removing a chunk therefore drives *progressive*
 //! collapse, one fixed step at a time, deterministically.
 //!
+//! # Nothing here is scheduled, and that is why there is no pool probe
+//!
+//! P20.2 needed a **subprocess** gate because its water index sat behind a
+//! process-global `OnceLock` pool, so "is this deterministic" could only be asked
+//! by starting a fresh process with a different pool size. This module has no
+//! such seam to test: it names no job pool (`inf_core::parallel_map` and friends
+//! appear nowhere in `inf-physics`), and rapier's own `parallel` feature is off by
+//! rule (see the crate docs), so the fixed step is single-threaded from the
+//! damage plan through the solve to the budget sweep. A probe binary here would
+//! vary nothing, and a gate that varies nothing is the vacuous kind. Every order
+//! that could matter is instead a `BTreeMap`/`BTreeSet` or an explicit sort, and
+//! `the_same_damage_trace_is_byte_identical` compares the raw bits.
+//!
 //! The override is **per entity**, because that is the granularity the component
 //! set has — and the memo chose that granularity deliberately rather than pay a
 //! `StructuralAnchor` slot and a v21 in both codec mirrors. An author who needs a

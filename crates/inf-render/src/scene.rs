@@ -1341,6 +1341,84 @@ pub struct RenderVoxelChunk {
     pub version: u64,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Fracture debris (P22.3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One live chunk of a broken destructible, ready to draw.
+///
+/// # Why this is not a `MeshInstance`
+///
+/// A `MeshInstance` selects one of five built-in primitives; the mesh pass owns a
+/// single static vertex buffer for them and has no door for custom geometry. A
+/// fracture chunk *is* custom geometry — a Voronoi cell of an authored mesh — and
+/// there are up to sixty-four of them per actor, each with its own solver-owned
+/// pose. So it carries its triangles the way [`RenderVoxelChunk`] does, and its
+/// material the way [`MeshInstance`] does: the two halves of the problem, taken
+/// from the two places that already solved each.
+///
+/// # Chunk-local vertices against an `f64` anchor
+///
+/// [`vertices`](Self::vertices) are **chunk-local metres** relative to
+/// [`translation`](Self::translation), which is the chunk's `f64` world centre of
+/// mass. That is the floating-origin split every other world-space DTO in this
+/// file makes, and here it is also what lets the vertex buffer be uploaded **once
+/// per break** while the pose changes sixty times a second: a tumbling chunk
+/// moves its instance, never its geometry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderFractureChunk {
+    /// The destructible actor this chunk belongs to — the same fold of the
+    /// entity `Guid` [`RenderVoxelVolume::id`] uses, so a PIE-vs-shipping diff
+    /// matches actors up by identity rather than by list position.
+    pub entity: u64,
+    /// The chunk's index in its `.inf_fracture`.
+    pub chunk: u32,
+    /// `f64` world position of the chunk's centre of mass — the anchor
+    /// [`vertices`](Self::vertices) are relative to.
+    pub translation: DVec3,
+    /// The chunk's world orientation. Identity while it is still attached.
+    pub rotation: Quat,
+    /// Chunk-local surface vertices.
+    pub vertices: Vec<RenderFractureVertex>,
+    /// Triangle list into [`vertices`](Self::vertices). Length must be a multiple
+    /// of 3 and every index in range; a chunk that fails either is **dropped** by
+    /// the cache planner rather than uploaded — bad geometry never becomes silent
+    /// triangles. (The [`RenderVoxelChunk::indices`] rule, verbatim.)
+    pub indices: Vec<u32>,
+    /// Linear base colour, rgba.
+    pub color: [f32; 4],
+    /// PBR metallic in `[0, 1]`.
+    pub metallic: f32,
+    /// PBR roughness in `[0, 1]`.
+    pub roughness: f32,
+    /// Linear emissive colour, rgb.
+    pub emissive: [f32; 3],
+    /// The owning actor's **fracture generation** — a monotone stamp that moves
+    /// when a chunk detaches or is reclaimed and **not** when one merely tumbles.
+    ///
+    /// That distinction is the whole design: a pose changes every step and the
+    /// geometry never does, so keying the upload on the pose would re-upload every
+    /// chunk of every collapsing building sixty times a second. `0` means "no
+    /// stamp" and is treated conservatively as *always re-upload*, never as a
+    /// cache hit — [`RenderVoxelChunk::version`]'s rule, for its reason.
+    pub version: u64,
+}
+
+/// A fracture chunk's vertex: position + normal, chunk-local.
+///
+/// Deliberately the **same 24-byte layout** as
+/// [`crate::passes::mesh::MeshVertex`], so the fracture pass can bind
+/// `mesh.wgsl`'s own vertex stage against a per-chunk buffer instead of shipping
+/// a second PBR shader that would then have to be kept in step with it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct RenderFractureVertex {
+    /// Chunk-local position, metres.
+    pub pos: [f32; 3],
+    /// Unit normal.
+    pub normal: [f32; 3],
+}
+
 /// A voxel volume's meshed, resident chunk set (P21.1) — the renderer's
 /// volumetric-terrain input, projected from the ECS `VoxelVolume` component.
 ///
@@ -1634,6 +1712,18 @@ pub struct RenderScene {
     /// vertex/index buffer upload, keyed per volume by
     /// [`RenderVoxelVolume::id`].
     pub voxels: Vec<RenderVoxelVolume>,
+    /// Live chunks of broken destructibles (P22.3) — the debris of everything
+    /// that has come apart this session.
+    ///
+    /// **Empty for every intact level**, and that is the atomicity contract: an
+    /// actor is drawn as its own `MeshRef` or as its chunks, never as both and
+    /// never as neither. Both halves read one fact — the sim's
+    /// `FractureState::is_intact` — so the swap cannot become an ordering accident
+    /// between two passes.
+    ///
+    /// Each chunk's own [`version`](RenderFractureChunk::version) stamp gates its
+    /// vertex/index buffer upload, keyed by `(entity, chunk)`.
+    pub fracture_chunks: Vec<RenderFractureChunk>,
     /// The surface deformation field (P22.1) — the sparse map of how far the
     /// ground has been pressed down by whatever has been standing on it.
     ///

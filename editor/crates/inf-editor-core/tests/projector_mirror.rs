@@ -1438,3 +1438,96 @@ fn both_fixed_steps_run_the_deformation_slot() {
         );
     }
 }
+
+// ── fracture debris (P22.3) ─────────────────────────────────────────────────
+
+/// The two `project_fracture` projectors must be byte-identical, doc block
+/// included.
+#[test]
+fn project_fracture_is_identical_in_both_projectors() {
+    let mine = extract_fn(&read(VIEWPORT), "project_fracture");
+    let theirs = extract_fn(&read(PLAYER), "project_fracture");
+    assert_eq!(
+        mine, theirs,
+        "the two `project_fracture` projectors have drifted — a broken wall would \
+         render as different rubble in the preview and the shipped build. Keep \
+         them byte-identical, or move the shared part into `inf-physics` (which is \
+         where the fracture state, the solve and the chunk poses already live)."
+    );
+}
+
+/// A guard on the guard: two stubs are identical too.
+#[test]
+fn the_shared_fracture_projector_is_not_a_stub() {
+    let body = extract_item(&read(PLAYER), "project_fracture");
+    for fragment in [
+        // THE ATOMICITY PREDICATE. The same `is_intact` the physics swap reads —
+        // if this ever became a second condition, an actor could render as both
+        // its mesh and its chunks, or as neither.
+        "if state.is_intact() {",
+        "return None;",
+        // A reclaimed chunk leaves the render set with the physics world, on one
+        // generation. Dropping this line makes the debris budget despawn a body
+        // and keep drawing it.
+        "if chunk.gone {",
+        // The geometry is the COOK's, mapped by the state's own placement — not
+        // re-derived and not read from the ECS transform (which a detached chunk
+        // has stopped following).
+        "let placement = state.placement();",
+        "placement.transform_point3(DVec3::from_array(src.center_of_mass))",
+        // Chunk-local against the centre of mass: the pose rides on the instance
+        // so the vertex buffer can be uploaded once per break.
+        "chunk.translation,",
+        "chunk.rotation.as_quat(),",
+        // The stamp is the actor's generation, which does NOT move for a pose.
+        "let version = state.generation();",
+    ] {
+        assert!(
+            body.contains(fragment),
+            "`project_fracture` no longer contains `{fragment}` — either it was \
+             gutted, or this gate needs updating deliberately:\n{body}"
+        );
+    }
+    // THE CAMERA CHECK. What has broken is sim state; which of it is drawn is the
+    // renderer's business.
+    for probe in ["eye", "camera", "frustum"] {
+        assert!(
+            !body.contains(probe),
+            "`project_fracture` names `{probe}` — the fracture projection must \
+             never see a camera:\n{body}"
+        );
+    }
+}
+
+/// The surrounding *rules*: both hosts clear the list each frame, both gate the
+/// mesh push on the same `fractured` flag, and neither re-runs the solve.
+#[test]
+fn both_projectors_project_fracture_the_same_way() {
+    const SHARED: [&str; 4] = [
+        "scene.fracture_chunks.clear();",
+        "project_fracture(",
+        "let fractured = ",
+        "fracture_chunks.extend(chunks)",
+    ];
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let src = read(path).replace("\r\n", "\n");
+        for fragment in SHARED {
+            assert!(
+                src.contains(fragment),
+                "the {label}'s fracture projection no longer contains \
+                 `{fragment}` — either the path was changed on one side only, or \
+                 this gate needs updating deliberately"
+            );
+        }
+        // A projector must never STEP the fracture: the solve, the budget and the
+        // detach decisions belong to the fixed step, and a renderer that ran them
+        // would make what breaks a function of how often you drew.
+        for banned in ["runtime_destruct(", "step_fractures(", "radial_impulse("] {
+            assert!(
+                !src.contains(banned),
+                "the {label}'s projector names `{banned}` — a render projection \
+                 must never advance a simulation"
+            );
+        }
+    }
+}

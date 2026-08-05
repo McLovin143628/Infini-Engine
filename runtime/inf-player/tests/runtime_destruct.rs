@@ -516,3 +516,67 @@ fn the_editor_and_the_shipped_host_break_the_same_wall() {
         "nothing moved, so the poses above were all the rest pose"
     );
 }
+
+// ── the render swap ─────────────────────────────────────────────────────────
+
+/// **ATOMICITY, on the RENDER side: never both, never neither.**
+///
+/// The physics half of this is `inf-physics`' `the_intact_to_chunks_swap_is_atomic`
+/// (the actor's collider goes as its chunk bodies arrive). This is the other
+/// half, through the shipped host's real projector: an intact actor is drawn as
+/// its own mesh and contributes no chunks; a broken one contributes chunks and no
+/// mesh; and at no step is it drawn twice or not at all.
+#[test]
+fn the_render_swap_draws_a_mesh_or_its_chunks_and_never_both() {
+    use inf_player::render::project_scene_with_skinned;
+
+    let mut sim = sim(true, true);
+    let vmeshes = inf_player::vmesh::VmeshRegistry::new();
+    let skinned = inf_player::skinned::SkinnedRegistry::new();
+    let voxels = inf_voxel::VoxelVolumes::default();
+    let mut scene = inf_render::RenderScene::default();
+
+    // A tally of how the wall was drawn on each step: (mesh instances that are
+    // this actor's, chunks that are this actor's).
+    let mut seen: Vec<(usize, usize)> = Vec::new();
+    for step in 0..40u32 {
+        project_scene_with_skinned(&mut scene, &sim, 0.0, &vmeshes, &skinned, &voxels);
+        let chunks = scene
+            .fracture_chunks
+            .iter()
+            .filter(|c| c.entity == inf_render::terrain_id_from_guid(WALL_GUID))
+            .count();
+        // The wall has no vgeom asset resolvable here, so an intact one falls back
+        // to a primitive `MeshInstance` — which is exactly what must stop.
+        let meshes = scene.instances.len();
+        seen.push((meshes, chunks));
+        assert!(
+            (meshes > 0) != (chunks > 0),
+            "step {step}: the wall drew {meshes} mesh instance(s) AND {chunks}              chunk(s) — the swap must be exactly one or the other"
+        );
+        if step == 0 {
+            assert!(chunks == 0, "the wall broke before its first tick");
+        }
+        sim.step_once(RuntimeInput::default());
+    }
+    // **ANTI-VACUITY.** Both states really occurred, so the assertion above was
+    // testing a swap rather than a constant.
+    assert!(
+        seen.iter().any(|(m, c)| *m > 0 && *c == 0),
+        "the wall was never drawn as a mesh"
+    );
+    assert!(
+        seen.iter().any(|(m, c)| *m == 0 && *c > 0),
+        "the wall was never drawn as chunks"
+    );
+
+    // …and the projection is well-formed geometry the cache planner will accept —
+    // otherwise "it drew chunks" would mean "it drew nothing, silently".
+    assert!(
+        scene
+            .fracture_chunks
+            .iter()
+            .all(inf_render::passes::fracture::well_formed),
+        "a projected chunk is malformed and would be dropped by the cache planner"
+    );
+}

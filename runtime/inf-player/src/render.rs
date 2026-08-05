@@ -355,6 +355,7 @@ pub fn project_scene_with_skinned(
     // and is re-meshed only where the field moved, so re-projecting an unchanged
     // cave costs a copy of its vertex streams and no meshing at all.
     scene.voxels.clear();
+    scene.fracture_chunks.clear();
     // P18.5: GPU-instanced scatter (PCG volumes + painted foliage) is rebuilt from
     // scratch every projection, exactly like `instances`. The payload behind each
     // batch is content-keyed, so re-projecting an unchanged scatter re-uses the
@@ -705,8 +706,31 @@ pub fn project_scene_with_skinned(
             // (vgeom off), both driven by the same vgeom scene content. The tier the
             // renderer settings carry picks which node draws it. An unresolved asset
             // (or a primitive-only MeshRef) falls back to a placeholder cube.
-            let vgeom = mesh_ref.asset.and_then(|mesh_id| vmeshes.resolve(mesh_id));
-            if let Some((asset_id, source)) = vgeom {
+            // P22.3 — THE ATOMIC SWAP. A destructible that has started breaking
+            // draws its CHUNKS and not its mesh: never both, never neither. The
+            // predicate is `FractureState::is_intact`, the same one
+            // `PhysicsBridge3D::sync_from_world_sim` reads to decide whether the
+            // actor keeps its collider, so the two halves of the swap cannot
+            // disagree. An intact (or absent) state projects nothing and the mesh
+            // branch below runs exactly as it always has.
+            let fractured = sim
+                .fractures()
+                .get(&guid)
+                .and_then(|state| {
+                    project_fracture(
+                        state,
+                        w.get::<Material>(entity),
+                        inf_render::terrain_id_from_guid(guid.as_u128()),
+                    )
+                })
+                .map(|chunks| scene.fracture_chunks.extend(chunks))
+                .is_some();
+            let vgeom = (!fractured)
+                .then(|| mesh_ref.asset.and_then(|mesh_id| vmeshes.resolve(mesh_id)))
+                .flatten();
+            if fractured {
+                // Its chunks are already in the scene; nothing else to push.
+            } else if let Some((asset_id, source)) = vgeom {
                 if vgeom_seen.insert(asset_id) {
                     // The scene carries the PAGED source, not a decoded DAG
                     // (P18.2): the render node's streamer decides what of it is
@@ -1115,6 +1139,96 @@ pub fn project_terrain(
 ///   scene's `voxels` being empty is exactly what keeps the voxel pass off the
 ///   command encoder, and every existing golden depends on that.
 ///
+/// **MIRROR** of the other host's `project_fracture` — keep the two
+/// byte-identical, **this doc block included** (the P21.2 lesson recorded on
+/// `project_voxel`: the mirror gate compares the comment too).
+///
+/// Project one destructible actor's live chunks (P22.3).
+///
+/// # The atomicity contract lives here
+///
+/// An actor is drawn as its own mesh **or** as its chunks — never both, never
+/// neither. `None` means "still whole, draw the mesh"; `Some` means "broken, do
+/// not". Both halves read ONE fact, `FractureState::is_intact`, which is the same
+/// fact `PhysicsBridge3D::sync_from_world_sim` reads to decide whether the actor
+/// keeps its collider. Three consumers, one predicate, so the swap cannot become
+/// an ordering accident between passes.
+///
+/// # Chunk-local geometry against an `f64` anchor
+///
+/// The `.inf_fracture`'s vertices are in the SOURCE MESH's local space and the
+/// state's placement maps them into the world — but a *detached* chunk's pose is
+/// solver-owned, so its geometry is re-anchored on its own centre of mass and its
+/// world pose rides on the instance. That is what lets the vertex buffer be
+/// uploaded once per break while the pose changes every step.
+///
+/// A **reclaimed** chunk is emitted by nobody: it leaves the render set and the
+/// physics world on the same generation, which is what makes the debris budget's
+/// despawn one event rather than two.
+fn project_fracture(
+    state: &inf_physics::d3::FractureState,
+    material: Option<&Material>,
+    id: u64,
+) -> Option<Vec<inf_render::RenderFractureChunk>> {
+    if state.is_intact() {
+        return None;
+    }
+    let (color, metallic, roughness, emissive) = match material {
+        Some(m) => (
+            m.base_color.to_array(),
+            m.metallic,
+            m.roughness,
+            m.emissive.to_array(),
+        ),
+        None => ([0.8, 0.8, 0.8, 1.0], 0.0_f32, 0.5_f32, [0.0; 4]),
+    };
+    let placement = state.placement();
+    let asset = state.asset();
+    let version = state.generation();
+    let mut out = Vec::new();
+    for (i, chunk) in state.chunks().iter().enumerate() {
+        if chunk.gone {
+            continue;
+        }
+        let Some(src) = asset.chunks.get(i) else {
+            continue;
+        };
+        let centre = placement.transform_point3(DVec3::from_array(src.center_of_mass));
+        let vertices: Vec<inf_render::RenderFractureVertex> = src
+            .vertices
+            .iter()
+            .map(|v| {
+                let p = placement.transform_point3(DVec3::new(
+                    v.position[0] as f64,
+                    v.position[1] as f64,
+                    v.position[2] as f64,
+                )) - centre;
+                let n = placement.matrix3
+                    * DVec3::new(v.normal[0] as f64, v.normal[1] as f64, v.normal[2] as f64);
+                let n = n.normalize_or_zero();
+                inf_render::RenderFractureVertex {
+                    pos: [p.x as f32, p.y as f32, p.z as f32],
+                    normal: [n.x as f32, n.y as f32, n.z as f32],
+                }
+            })
+            .collect();
+        out.push(inf_render::RenderFractureChunk {
+            entity: id,
+            chunk: i as u32,
+            translation: chunk.translation,
+            rotation: chunk.rotation.as_quat(),
+            vertices,
+            indices: src.indices.clone(),
+            color,
+            metallic,
+            roughness,
+            emissive: [emissive[0], emissive[1], emissive[2]],
+            version,
+        });
+    }
+    Some(out)
+}
+
 /// **MIRROR** of the other host's `project_voxel` — keep the two byte-identical,
 /// **this doc block included**. `projector_mirror`'s `extract_fn` anchors on the
 /// real function item and takes the comment above it with it; until the P21.2

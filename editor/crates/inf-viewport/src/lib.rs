@@ -148,7 +148,10 @@ pub use macos::{spawn, ViewportHandle};
 /// yet (Linux: X11 reparent / Wayland streaming fallback per ROADMAP §5).
 /// Attaching is a no-op that logs once.
 #[cfg(not(any(windows, target_os = "macos")))]
-pub struct ViewportHandle(inf_editor_core::voxel_store::SharedVoxelVolumes);
+pub struct ViewportHandle(
+    inf_editor_core::voxel_store::SharedVoxelVolumes,
+    inf_editor_core::simulate::SharedFractures,
+);
 
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn spawn(_parent: isize, _sink: ViewportEventSink, _scene: SharedScene) -> ViewportHandle {
@@ -158,7 +161,10 @@ pub fn spawn(_parent: isize, _sink: ViewportEventSink, _scene: SharedScene) -> V
     // A real (empty) store rather than an `Option`: Ring 2's save path stages
     // out of whatever this hands back, and an always-empty store stages nothing,
     // which is the truth on a platform where nothing can be carved.
-    ViewportHandle(inf_editor_core::voxel_store::shared_volumes())
+    ViewportHandle(
+        inf_editor_core::voxel_store::shared_volumes(),
+        inf_editor_core::simulate::shared_fractures(),
+    )
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -186,6 +192,9 @@ impl ViewportHandle {
     pub fn reload_voxel_stores(&self) {}
     pub fn voxel_volumes(&self) -> inf_editor_core::voxel_store::SharedVoxelVolumes {
         self.0.clone()
+    }
+    pub fn fracture_states(&self) -> inf_editor_core::simulate::SharedFractures {
+        self.1.clone()
     }
     pub fn clear_streams(&self) {}
     pub fn embed_foreign(&self, _hwnd: isize) {}

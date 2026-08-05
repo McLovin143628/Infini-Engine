@@ -9,6 +9,7 @@ pub mod cloud_bake;
 pub mod composite;
 pub mod debug;
 pub mod depth_prepass;
+pub mod fracture;
 pub mod gi;
 pub mod grid;
 pub mod mask;

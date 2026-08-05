@@ -152,6 +152,27 @@ struct RootClip {
     clip: AnimClip,
 }
 
+/// The Simulate session's fracture states, shared with the viewport (P22.3).
+///
+/// **The editor twin of the sim→render fold P21.4 built for carves**, and it
+/// exists for the same reason: a `destruct.*` node writes the *session's* state,
+/// which the viewport cannot see, so without a channel a Blueprint would break a
+/// wall, the colliders would swap, the shipped player would draw rubble — and the
+/// editor would keep drawing the wall.
+///
+/// A **publish**, not a shared owner: Ring 2 copies the session's map in after
+/// each tick and clears it when Simulate stops, so the authoritative state stays
+/// where the fixed step can reach it and the viewport reads a snapshot. Lock
+/// order everywhere: **document, then this** — the `voxel_store` rule.
+pub type SharedFractures =
+    std::sync::Arc<std::sync::Mutex<BTreeMap<Uuid, inf_physics::d3::FractureState>>>;
+
+/// A fresh [`SharedFractures`] — the one constructor, so nobody has to spell the
+/// `Arc<Mutex<…>>` out and no second wrapper shape can appear.
+pub fn shared_fractures() -> SharedFractures {
+    std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new()))
+}
+
 /// A live in-editor Simulate session over one [`SceneDoc`].
 pub struct SimSession {
     bridge: PhysicsBridge2D,

@@ -6599,6 +6599,84 @@ deterministic on the replay trace, PIE == shipping.
   for chunk bodies through the existing rapier bridges; 2. a **structural-integrity graph** for
   buildings — support-chunk removal drives progressive collapse, solved deterministically at
   fixed step; 3. debris lifetime and budget caps with despawn; 4. audio/VFX event hooks.
+
+> **P22.3 STATUS: runtime destruction is BUILT** (2026-08-05) — local battery
+> green (191 test binaries, `clippy -D warnings`, `wasm32` player), CI pending
+> push.
+>
+> **The prerequisite nobody had noticed.** The terrain heightfield had **no
+> physics representation at all**: `terrain.height_at` answered a query and the
+> character mover read it, so a scripted character stayed grounded while a
+> *dynamic* body fell through the world. Destruction cannot be built on that —
+> debris that never lands is not debris. So a fourth gather in `PhysicsBridge3D`
+> turns every **sim-resident** level-0 tile into a static
+> `ColliderShape3D::Heightfield`, change-stamped so an unsculpted level pays one
+> build at load. Holes are honoured on **exactly** `TerrainData::height_at`'s
+> poison rule (any holed corner removes the whole cell), stated at both sites and
+> compared cell-by-cell by a test — so the visible gap, the queryable gap and the
+> walkable gap are one gap, and what falls through a cave mouth lands on the P21
+> voxel floor.
+>
+> **The destruction itself.** `inf_physics::d3::fracture` owns the intact→chunks
+> swap with **no new entities**: chunks reach the solver as synthetic
+> content-derived guids, the third time this repository has taken that decision
+> and the third time it was right. Damage is an **energy in joules** spent
+> breaking bonds at `strength × area × 1 mm` — the strength memo's force contract
+> times one crack-opening displacement, `Pa·m²·m = J` with no invented constant.
+> Support is decided exactly as `docs/memos/p22-strength.md` §4.3 committed:
+> runtime contact with static geometry, `AlwaysLoaded` as the explicit per-entity
+> override, propagation through undetached neighbours. **Scene schema v20 did not
+> move**, which is what that memo existed to buy.
+>
+> **Two design errors the tests found, and they are worth recording.**
+> (1) *The obvious bond-area measurement is wrong and fails silently.* "Sum the
+> triangles on the bisector of the two chunk centres" is not the Voronoi face: a
+> face bisects the two **sites**, and a cell clipped against the source hull has a
+> centroid that is not its site. Every bond of a real cook asset found nothing on
+> the plane and fell through to the fallback estimate — a whole building's
+> energies quietly replaced, with nothing to notice it. The face is now the
+> corners the two `f64` hull sets agree on. (2) *A tower's base and its top are
+> equally cheap* if a chunk is only bonded to its neighbours — both have exactly
+> one — so a low-index tie-break knocked the foundation out for one bond and
+> dropped the lot. A chunk standing on static geometry now pays a **ground bond**
+> too, over its own `volume^(2/3)`, which is both the fix and the honest physics: a
+> wall is mortared to its footing.
+>
+> **PIE == shipping, and what it cost.** A `.inf_fracture` is *derived at cook*,
+> so it is in no content root and `ScenePayload` v5 could not carry it. v6 appends
+> `fractures` at the tail — the only payload entry that is **computed** rather than
+> resolved: the editor runs the same `inf_mesh::fracture_mesh` the cook runs, with
+> the same authored seed, keyed by the same `derived_fracture_id`. The twin gate
+> runs one fixture through both hosts and compares the fracture state as **raw
+> bits**, with an anti-vacuity arm so it cannot pass by comparing two intact walls
+> (the P21.4 lesson, applied before it could be re-learned).
+>
+> *Honest remainders, carried into P22.4.* **No sample scene and no `phase22_gate`
+> yet** — the cross-host comparison above is a unit-level twin, not a
+> subprocess `--pie` arm, and the playground the phase's "done when" describes is
+> unbuilt. **Destruction is not persisted** (a save game is P22.4's), so rubble
+> dies with the session — and the editor clears its published states on
+> `sim_stop` precisely so a broken wall is never drawn over an intact document.
+> **No VFX**: this engine has no particle system, so a break makes no dust; the
+> audio hook is real and the visual one is not, and that is ledgered rather than
+> faked. **Debris budgets are a `DebrisBudget` the host sets**, not a tier mapping
+> — physics must never name `RenderTier`, or a fixed step becomes a function of
+> the graphics settings; P22.4's "per-tier debris budgets" fills it in.
+> **Instanced debris through the GPU scatter path is P22.4's**: today each chunk
+> is one draw against its own buffer, which is right for tens of chunks and not
+> for thousands. **A `destruct.*` node can only name a whole actor**, never one
+> chunk (chunks are not entities), and `apply_damage` has **no impact point** —
+> the order is cheapest-to-liberate first, which is the same physics without an
+> invented input, and it is documented rather than papered over.
+>
+> *Dependency hygiene.* P22.3 added `inf-terrain` and `inf-mesh` to `inf-physics`
+> (the hole rule and the chunk adjacency, read from the crates that define them
+> rather than copied) and `inf-physics` to `inf-viewport`. **No new third-party
+> crate.** The one knock-on: `inf-mesh` now confines its whole **import** path
+> (`meshopt`, `gltf`, `image`) to `cfg(not(target_arch = "wasm32"))`, on the rule
+> `inf-vgeom` already applies — measured with
+> `cargo check --target wasm32-unknown-unknown -p inf-player`, not assumed.
+
 - **P22.4 Destructible environments at scale** — 1. instanced debris through the P18.5 GPU
   instance path; 2. per-tier debris budgets; 3. destruction state persisted in the save and
   replication seams, with net-relevant events documented for the P14 net layer.

@@ -225,6 +225,7 @@ pub async fn sim_tick(
     doc.bump_version_for_runtime();
     drop(doc);
     overlay_sim_carves(&app, &scene, session);
+    publish_sim_fractures(&app, session);
     emit_debug(&app, session);
     Ok(true)
 }
@@ -247,6 +248,40 @@ pub async fn sim_tick(
 /// The terrain half needs no twin here: `SimSession` steps the **document's** own
 /// world, so a runtime hole lands in the document and the viewport's existing
 /// `overlay_document_edits` already mirrors it.
+/// **Publish the Simulate session's fracture states into the viewport** (P22.3)
+/// — the destruction twin of [`overlay_sim_carves`] above, and it exists for the
+/// same reason.
+///
+/// A `destruct.*` node writes the *session's* state, which the viewport cannot
+/// reach. Without this the editor would show exactly what the shipped player
+/// showed before the carve fold existed: a Blueprint breaks a wall, the colliders
+/// swap to chunk bodies, `destruct.is_intact` goes false — and the screen keeps
+/// drawing the wall.
+///
+/// A **copy**, not a shared owner, and one direction only: the fixed step's map
+/// stays the authority and the viewport reads a snapshot, so nothing the renderer
+/// does can reach back into a simulation. `FractureState` is a handful of flags,
+/// poses and an `Arc` to the shared chunk set, so a copy is cheap — the geometry
+/// is not duplicated.
+///
+/// Cheap on the off path: a level with no destructible actor publishes an empty
+/// map into an already-empty one.
+fn publish_sim_fractures(app: &AppHandle, session: &inf_editor_core::simulate::SimSession) {
+    let Some(handle) = app
+        .try_state::<crate::commands::ViewportState>()
+        .and_then(|v| v.fracture_states())
+    else {
+        return;
+    };
+    let Ok(mut states) = handle.lock() else {
+        return;
+    };
+    if states.is_empty() && session.fractures().is_empty() {
+        return;
+    }
+    *states = session.fractures().clone();
+}
+
 fn overlay_sim_carves(
     app: &AppHandle,
     scene: &SceneState,
@@ -312,6 +347,7 @@ pub async fn sim_step_fixed(
     doc.bump_version_for_runtime();
     drop(doc);
     overlay_sim_carves(&app, &scene, session);
+    publish_sim_fractures(&app, session);
     emit_debug(&app, session);
     Ok(true)
 }
@@ -355,6 +391,19 @@ pub async fn sim_stop(
         let mut doc = scene.doc.lock().map_err(|_| "scene lock poisoned")?;
         session.exit(&mut doc);
         doc.bump_version_for_runtime();
+    }
+    // P22.3: the rubble dies with the session. Destruction is not persisted (the
+    // `destruct.*` kit says so, for the reason the `voxel.*` kit said it first),
+    // so leaving the states behind would draw a broken wall over an intact
+    // document — the P21.4 "the editor's render store IS the save's staging
+    // source" hazard, one component over.
+    if let Some(handle) = app
+        .try_state::<crate::commands::ViewportState>()
+        .and_then(|v| v.fracture_states())
+    {
+        if let Ok(mut states) = handle.lock() {
+            states.clear();
+        }
     }
     let _ = app.emit("sim://state", false);
     Ok(())

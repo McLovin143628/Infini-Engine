@@ -243,6 +243,17 @@ pub struct EngineHost {
     /// this host loads through. Lock order everywhere: **document, then this**.
     voxel_volumes:
         std::sync::Arc<std::sync::Mutex<inf_editor_core::voxel_store::EditorVoxelVolumes>>,
+    /// The Simulate session's fracture states (P22.3), published in by Ring 2
+    /// after each fixed step.
+    ///
+    /// Empty while nothing is simulating — and empty is exactly "no actor has
+    /// broken", so an authoring session projects not one extra byte. The type is
+    /// spelled out rather than written as its `SharedFractures` alias for the same
+    /// reason `voxel_volumes` above is: the mirror gate can then see which state
+    /// this host draws from.
+    fractures: std::sync::Arc<
+        std::sync::Mutex<std::collections::BTreeMap<uuid::Uuid, inf_physics::d3::FractureState>>,
+    >,
     /// The loose-file render-asset store (P18.3) — the editor's answer to the
     /// player's `VmeshRegistry`. Resolves a `MeshRef.asset` to its derived
     /// `.inf_vmesh` and a `SkeletalMesh` to bind-space geometry + a posed skinning
@@ -929,6 +940,7 @@ impl EngineHost {
             terrain_slots: Vec::new(),
             terrain_streams: inf_editor_core::terrain_stream::EditorTerrainStreams::new(),
             voxel_volumes: inf_editor_core::voxel_store::shared_volumes(),
+            fractures: inf_editor_core::simulate::shared_fractures(),
             render_assets: inf_editor_core::render_assets::EditorRenderAssets::new(),
             tool_status: None,
             stream_log_countdown: STREAM_LOG_INTERVAL_FRAMES,
@@ -1339,6 +1351,7 @@ impl EngineHost {
         // where the field moved, so re-projecting an unchanged cave costs a copy of
         // its vertex streams and no meshing at all.
         self.scene.voxels.clear();
+        self.scene.fracture_chunks.clear();
         // P22.1: the deformation field is NOT cleared — it is epoch-gated, because
         // it is the one projected thing that is usually identical to last frame's.
         // See `project_deform`, which is also where `None` is written when there is
@@ -1975,9 +1988,35 @@ impl EngineHost {
             // the editor uses the derived payload's content hash (a content root is
             // not) — and the reasoning lives in `inf_editor_core::render_assets`,
             // once, rather than in two comments that could disagree.
-            let vgeom = mesh_ref
-                .asset
-                .and_then(|mesh_id| self.render_assets.resolve_vgeom(mesh_id));
+            // P22.3 — THE ATOMIC SWAP. A destructible that has started breaking
+            // draws its CHUNKS and not its mesh: never both, never neither. The
+            // predicate is `FractureState::is_intact`, the same one
+            // `PhysicsBridge3D::sync_from_world_sim` reads to decide whether the
+            // actor keeps its collider, so the two halves of the swap cannot
+            // disagree. An intact (or absent) state projects nothing and the mesh
+            // branch below runs exactly as it always has.
+            let fractured = self
+                .fractures
+                .lock()
+                .ok()
+                .and_then(|f| {
+                    f.get(&guid).and_then(|state| {
+                        project_fracture(
+                            state,
+                            w.get::<Material>(entity),
+                            inf_render::terrain_id_from_guid(guid.as_u128()),
+                        )
+                    })
+                })
+                .map(|chunks| self.scene.fracture_chunks.extend(chunks))
+                .is_some();
+            let vgeom = (!fractured)
+                .then(|| {
+                    mesh_ref
+                        .asset
+                        .and_then(|mesh_id| self.render_assets.resolve_vgeom(mesh_id))
+                })
+                .flatten();
             match vgeom {
                 Some(loaded) => {
                     if vgeom_seen.insert(loaded.id) {
@@ -2000,6 +2039,8 @@ impl EngineHost {
                         id,
                     });
                 }
+                // A broken destructible has already pushed its chunks.
+                None if fractured => {}
                 // R-P1: an unresolved / primitive-only MeshRef draws its built-in
                 // primitive kind (Sphere/Plane/Cylinder/Cone), not always a cube.
                 None => self.scene.instances.push(MeshInstance {
@@ -3013,6 +3054,96 @@ fn project_terrain(
 ///   scene's `voxels` being empty is exactly what keeps the voxel pass off the
 ///   command encoder, and every existing golden depends on that.
 ///
+/// **MIRROR** of the other host's `project_fracture` — keep the two
+/// byte-identical, **this doc block included** (the P21.2 lesson recorded on
+/// `project_voxel`: the mirror gate compares the comment too).
+///
+/// Project one destructible actor's live chunks (P22.3).
+///
+/// # The atomicity contract lives here
+///
+/// An actor is drawn as its own mesh **or** as its chunks — never both, never
+/// neither. `None` means "still whole, draw the mesh"; `Some` means "broken, do
+/// not". Both halves read ONE fact, `FractureState::is_intact`, which is the same
+/// fact `PhysicsBridge3D::sync_from_world_sim` reads to decide whether the actor
+/// keeps its collider. Three consumers, one predicate, so the swap cannot become
+/// an ordering accident between passes.
+///
+/// # Chunk-local geometry against an `f64` anchor
+///
+/// The `.inf_fracture`'s vertices are in the SOURCE MESH's local space and the
+/// state's placement maps them into the world — but a *detached* chunk's pose is
+/// solver-owned, so its geometry is re-anchored on its own centre of mass and its
+/// world pose rides on the instance. That is what lets the vertex buffer be
+/// uploaded once per break while the pose changes every step.
+///
+/// A **reclaimed** chunk is emitted by nobody: it leaves the render set and the
+/// physics world on the same generation, which is what makes the debris budget's
+/// despawn one event rather than two.
+fn project_fracture(
+    state: &inf_physics::d3::FractureState,
+    material: Option<&Material>,
+    id: u64,
+) -> Option<Vec<inf_render::RenderFractureChunk>> {
+    if state.is_intact() {
+        return None;
+    }
+    let (color, metallic, roughness, emissive) = match material {
+        Some(m) => (
+            m.base_color.to_array(),
+            m.metallic,
+            m.roughness,
+            m.emissive.to_array(),
+        ),
+        None => ([0.8, 0.8, 0.8, 1.0], 0.0_f32, 0.5_f32, [0.0; 4]),
+    };
+    let placement = state.placement();
+    let asset = state.asset();
+    let version = state.generation();
+    let mut out = Vec::new();
+    for (i, chunk) in state.chunks().iter().enumerate() {
+        if chunk.gone {
+            continue;
+        }
+        let Some(src) = asset.chunks.get(i) else {
+            continue;
+        };
+        let centre = placement.transform_point3(DVec3::from_array(src.center_of_mass));
+        let vertices: Vec<inf_render::RenderFractureVertex> = src
+            .vertices
+            .iter()
+            .map(|v| {
+                let p = placement.transform_point3(DVec3::new(
+                    v.position[0] as f64,
+                    v.position[1] as f64,
+                    v.position[2] as f64,
+                )) - centre;
+                let n = placement.matrix3
+                    * DVec3::new(v.normal[0] as f64, v.normal[1] as f64, v.normal[2] as f64);
+                let n = n.normalize_or_zero();
+                inf_render::RenderFractureVertex {
+                    pos: [p.x as f32, p.y as f32, p.z as f32],
+                    normal: [n.x as f32, n.y as f32, n.z as f32],
+                }
+            })
+            .collect();
+        out.push(inf_render::RenderFractureChunk {
+            entity: id,
+            chunk: i as u32,
+            translation: chunk.translation,
+            rotation: chunk.rotation.as_quat(),
+            vertices,
+            indices: src.indices.clone(),
+            color,
+            metallic,
+            roughness,
+            emissive: [emissive[0], emissive[1], emissive[2]],
+            version,
+        });
+    }
+    Some(out)
+}
+
 /// **MIRROR** of the other host's `project_voxel` — keep the two byte-identical,
 /// **this doc block included**. `projector_mirror`'s `extract_fn` anchors on the
 /// real function item and takes the comment above it with it; until the P21.2
@@ -5864,6 +5995,14 @@ impl EngineHost {
         volumes: inf_editor_core::voxel_store::SharedVoxelVolumes,
     ) -> Self {
         self.voxel_volumes = volumes;
+        self
+    }
+
+    /// Adopt the handle's shared Simulate fracture states (P22.3) — the
+    /// `with_voxel_volumes` twin, so Ring 2 and this host hold clones of one
+    /// `Arc` and a publish reaches the projection.
+    pub fn with_fractures(mut self, fractures: inf_editor_core::simulate::SharedFractures) -> Self {
+        self.fractures = fractures;
         self
     }
 

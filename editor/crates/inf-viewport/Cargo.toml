@@ -24,6 +24,11 @@ inf-ecs = { workspace = true }
 inf-terrain = { workspace = true }
 # P21.1: the sparse SDF chunk volumes that locally extend the heightfield.
 inf-voxel = { workspace = true }
+# P22.3: `FractureState` — the Simulate session's live destruction state, which
+# Ring 2 publishes in so the viewport draws a broken wall's CHUNKS rather than
+# the wall. The type comes from the crate that owns the solve, so the render
+# projection and the physics swap read one `is_intact`.
+inf-physics = { workspace = true }
 uuid = { workspace = true }
 # Deterministic foliage-scatter RNG (E-P6): the brush seeds an xxh3 hash from
 # (seed, stroke index, sample index) so a stroke reproduces identical instances —

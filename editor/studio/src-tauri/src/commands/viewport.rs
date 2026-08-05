@@ -133,6 +133,18 @@ impl ViewportState {
         guard.as_ref().map(|h| h.voxel_volumes())
     }
 
+    /// The viewport's Simulate fracture-state handle (P22.3) — where the session
+    /// publishes what has broken, so the viewport draws a wall's chunks instead of
+    /// the wall.
+    ///
+    /// `None` when there is no viewport (headless / CI) or the handle is
+    /// poisoned, on the same rule [`voxel_volumes`](Self::voxel_volumes) states:
+    /// the publish is skipped and Simulate still runs, showing the unbroken mesh.
+    pub fn fracture_states(&self) -> Option<inf_editor_core::simulate::SharedFractures> {
+        let guard = self.0.lock().ok()?;
+        guard.as_ref().map(|h| h.fracture_states())
+    }
+
     /// Release every terrain stream — pushed when the open document is replaced
     /// (File ▸ Open / File ▸ New, P16.4b). The streams are keyed on the previous
     /// document's entity GUIDs, so keeping them leaks a whole `.inf_terrain`

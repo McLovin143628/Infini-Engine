@@ -415,6 +415,13 @@ impl EngineRenderer {
         // touching the encoder — so every existing golden is untouched.
         let voxel = passes::voxel::VoxelReport::default();
         graph.add(passes::voxel::VoxelNode::new(gpu, &view_bgl, voxel.clone()));
+        // Fracture debris (P22.3): the chunks a destructible broke into. Beside
+        // the mesh pass in the opaque block — a chunk IS the wall it came off, so
+        // it is lit by the same shader and written to the same depth — and after
+        // the terrain/voxel ground it lands on. A no-op on a scene with nothing
+        // broken (the node returns before touching the encoder), so every
+        // existing golden is untouched.
+        graph.add(passes::fracture::FractureNode::new(gpu, &view_bgl));
         // GPU-instanced scatter (P18.5): PCG volumes + painted foliage, culled
         // per-instance on the GPU with LOD/impostor banding. LAST of the opaque
         // passes on purpose — its HZB is built from the depth every other opaque

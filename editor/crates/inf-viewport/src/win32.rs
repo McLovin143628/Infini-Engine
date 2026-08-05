@@ -166,6 +166,10 @@ pub struct ViewportHandle {
     /// save path has to stage carve edits out of it with no host in hand; see
     /// [`EngineHost::with_voxel_volumes`] for the whole argument.
     volumes: inf_editor_core::voxel_store::SharedVoxelVolumes,
+    /// The Simulate fracture states the host draws broken actors from
+    /// (P22.3), held here for the same reason `volumes` is: Ring 2 reaches
+    /// it through the handle, not through the host.
+    fractures: inf_editor_core::simulate::SharedFractures,
 }
 
 impl ViewportHandle {
@@ -308,6 +312,14 @@ impl ViewportHandle {
         self.volumes.clone()
     }
 
+    /// The Simulate fracture states this viewport draws broken actors from
+    /// (P22.3) — the `voxel_volumes` seam, and NOT a `Cmd` for the same reason:
+    /// Ring 2 publishes into it every fixed step, and a command channel with no
+    /// reply path cannot hand a handle back.
+    pub fn fracture_states(&self) -> inf_editor_core::simulate::SharedFractures {
+        self.fractures.clone()
+    }
+
     /// Release every terrain stream (its pages, its edit pins and its
     /// `.inf_terrain` payload) — pushed when the open document is replaced by
     /// File ▸ Open / File ▸ New (P16.4b).
@@ -345,11 +357,18 @@ pub fn spawn(parent_hwnd: isize, sink: ViewportEventSink, scene: SharedScene) ->
     // answer for a viewport that never came up.
     let volumes = inf_editor_core::voxel_store::shared_volumes();
     let host_volumes = volumes.clone();
+    // P22.3: the same arrangement for the Simulate fracture states.
+    let fractures = inf_editor_core::simulate::shared_fractures();
+    let host_fractures = fractures.clone();
     std::thread::Builder::new()
         .name("inf-viewport".into())
-        .spawn(move || thread_main(parent_hwnd, rx, sink, scene, host_volumes))
+        .spawn(move || thread_main(parent_hwnd, rx, sink, scene, host_volumes, host_fractures))
         .expect("failed to spawn inf-viewport thread");
-    ViewportHandle { tx, volumes }
+    ViewportHandle {
+        tx,
+        volumes,
+        fractures,
+    }
 }
 
 /// Which mouse gesture currently owns capture.
@@ -907,6 +926,7 @@ fn thread_main(
     sink: ViewportEventSink,
     scene: SharedScene,
     volumes: inf_editor_core::voxel_store::SharedVoxelVolumes,
+    fractures: inf_editor_core::simulate::SharedFractures,
 ) {
     let hwnd = match create_child_window(parent_hwnd) {
         Ok(h) => h,
@@ -934,7 +954,8 @@ fn thread_main(
     // unavailable" instead of silently killing this thread (the pick-shader
     // composition bug did exactly that).
     let init = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        EngineHost::new(target, 64, 64).map(|h| h.with_voxel_volumes(volumes))
+        EngineHost::new(target, 64, 64)
+            .map(|h| h.with_voxel_volumes(volumes).with_fractures(fractures))
     }));
     let mut host = match init {
         Ok(Ok(h)) => h,
