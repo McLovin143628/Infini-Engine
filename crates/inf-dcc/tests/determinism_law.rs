@@ -29,13 +29,21 @@
 //! thought of. So the checks below are on *tokens that compile*, and each one
 //! names the file and line it found, rather than reporting a bare `false`.
 
-const SOURCES: [(&str, &str); 6] = [
+/// **Every source file in the crate**, and it has to stay that way.
+///
+/// The P23.3 audit's NB1 law generalizes: a gate that does not cover a file does
+/// not cover it, and a new module is exactly where the next `.sin()` or `HashMap`
+/// would land. `every_source_file_is_covered` reads the directory and fails if
+/// this list has fallen behind, so the coverage cannot rot silently.
+const SOURCES: [(&str, &str); 8] = [
     ("lib.rs", include_str!("../src/lib.rs")),
     ("topo.rs", include_str!("../src/topo.rs")),
     ("validate.rs", include_str!("../src/validate.rs")),
     ("build.rs", include_str!("../src/build.rs")),
     ("export.rs", include_str!("../src/export.rs")),
     ("ops.rs", include_str!("../src/ops.rs")),
+    ("model.rs", include_str!("../src/model.rs")),
+    ("select.rs", include_str!("../src/select.rs")),
 ];
 
 const JOURNAL: &str = include_str!("../src/journal.rs");
@@ -147,7 +155,14 @@ fn f32_lives_only_at_the_asset_boundary() {
     // `build.rs` reads `f32` out of a `MeshVertex` and `export.rs` writes it
     // back; anywhere else it would mean a world coordinate lost precision inside
     // the kernel.
-    for (name, src) in [SOURCES[1], SOURCES[2], SOURCES[5], ("journal.rs", JOURNAL)] {
+    for (name, src) in [
+        SOURCES[1],
+        SOURCES[2],
+        SOURCES[5],
+        SOURCES[6],
+        SOURCES[7],
+        ("journal.rs", JOURNAL),
+    ] {
         let hits = code_hits(src, "f32");
         assert!(
             hits.is_empty(),
@@ -155,6 +170,35 @@ fn f32_lives_only_at_the_asset_boundary() {
              build.rs/export.rs. Found: {hits:?}"
         );
     }
+}
+
+#[test]
+fn every_source_file_is_covered_by_the_bans_above() {
+    // The gate on the gate. `SOURCES` is a hand-written list of `include_str!`s
+    // (it has to be — the macro takes a literal), so the failure mode is a new
+    // module that nothing greps. That is the P23.3 NB1 law in its general form:
+    // when the code grows, every gate downstream has to be re-proven rather than
+    // assumed, and here "re-proven" can be automatic.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+        .expect("the crate has a src/")
+        .filter_map(|e| {
+            let p = e.ok()?.path();
+            (p.extension()? == "rs").then(|| p.file_name()?.to_str().map(str::to_string))?
+        })
+        .collect();
+    on_disk.sort();
+    let mut covered: Vec<String> = SOURCES
+        .iter()
+        .map(|(n, _)| (*n).to_string())
+        .chain(std::iter::once("journal.rs".to_string()))
+        .collect();
+    covered.sort();
+    assert_eq!(
+        on_disk, covered,
+        "a source file is not in this test's ban list — add it, or the laws do \
+         not apply to it"
+    );
 }
 
 #[test]

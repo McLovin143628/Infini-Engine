@@ -26,6 +26,12 @@ inf-math = { workspace = true }
 # enabled workspace-wide, so every STORED position/normal in this crate is a plain
 # `[f64; 3]` and `DVec3` appears only in arithmetic.
 glam = { workspace = true }
+# `Falloff::weight` — the soft-select curve (P23.4). Deliberately NOT reinvented:
+# it is a pure, geometry-free `weight(dist, radius) -> [0,1]` that the terrain
+# sculpt brush has used since P16, and a second copy of the same five curves is a
+# second place for "why does the DCC brush feel different from the terrain brush"
+# to live. Ring 0 → Ring 0, and it adds no external crate to the tree.
+inf-terrain = { workspace = true }
 serde = { workspace = true }
 # The op journal persists as bincode (a session that must survive a crash) and the
 # crate's determinism gates compare meshes by their encoded bytes — the cheapest

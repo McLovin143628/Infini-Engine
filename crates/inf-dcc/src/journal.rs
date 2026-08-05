@@ -427,6 +427,7 @@ impl PartialEq for MeshSession {
 mod tests {
     use super::*;
     use crate::build::{cube, plane};
+    use crate::model::{KnifePoint, MergeTarget, MirrorAxis};
     use crate::topo::{CornerData, FaceId, HalfId, VertId};
     use crate::validate::validate;
 
@@ -659,6 +660,47 @@ mod tests {
             Op::SetCornerNormal { .. } => 10,
             Op::SetEdgeSharp { .. } => 11,
             Op::SetFaceSlot { .. } => 12,
+            // P23.4 appended these NINE, in this order, at the next free indices.
+            // Nothing above moved, so `CollapseEdge{7}` is still `[5, 7]` and every
+            // session ever written still decodes as what it said.
+            Op::ExtrudeFaces { .. } => 13,
+            Op::ExtrudeEdges { .. } => 14,
+            Op::InsetFaces { .. } => 15,
+            Op::BevelEdges { .. } => 16,
+            Op::LoopCut { .. } => 17,
+            Op::Knife { .. } => 18,
+            Op::MergeVerts { .. } => 19,
+            Op::SubdivideFaces { .. } => 20,
+            Op::Mirror { .. } => 21,
+        }
+    }
+
+    /// The frozen wire position of every variant of the enums nested **inside**
+    /// an [`Op`].
+    ///
+    /// Same reasoning one level down, and it is not academic: `MergeTarget` is
+    /// the entire difference between "fuse these at their centre" and "fuse these
+    /// onto that one", and a swap would replay a saved session as a *different
+    /// edit* with no decode error anywhere. Three `match`es, no wildcards.
+    fn frozen_nested(op: &Op) -> Vec<u8> {
+        match op {
+            Op::MergeVerts { target, .. } => vec![match target {
+                MergeTarget::Center => 0,
+                MergeTarget::Last => 1,
+            }],
+            Op::Mirror { axis, .. } => vec![match axis {
+                MirrorAxis::X => 0,
+                MirrorAxis::Y => 1,
+                MirrorAxis::Z => 2,
+            }],
+            Op::Knife { path } => path
+                .iter()
+                .map(|p| match p {
+                    KnifePoint::Vertex(_) => 0,
+                    KnifePoint::Edge { .. } => 1,
+                })
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -706,8 +748,39 @@ mod tests {
                 face: FaceId(0),
                 slot: None,
             },
+            Op::ExtrudeFaces {
+                faces: vec![],
+                distance: 1.0,
+            },
+            Op::ExtrudeEdges {
+                edges: vec![],
+                delta: [0.0; 3],
+            },
+            Op::InsetFaces {
+                faces: vec![],
+                amount: 0.1,
+                individual: false,
+            },
+            Op::BevelEdges {
+                edges: vec![],
+                amount: 0.1,
+            },
+            Op::LoopCut {
+                half: HalfId(0),
+                cuts: 1,
+            },
+            Op::Knife { path: vec![] },
+            Op::MergeVerts {
+                verts: vec![],
+                target: MergeTarget::Center,
+            },
+            Op::SubdivideFaces { faces: vec![] },
+            Op::Mirror {
+                axis: MirrorAxis::X,
+                coord: 0.0,
+            },
         ];
-        assert_eq!(every.len(), 13, "one sample per variant");
+        assert_eq!(every.len(), 22, "one sample per variant");
         let cfg = bincode::config::standard();
         for op in &every {
             let bytes = bincode::serde::encode_to_vec(op, cfg).unwrap();
@@ -717,11 +790,105 @@ mod tests {
                 "{op:?} moved on the wire"
             );
         }
-        // The concrete byte string the audit measured, pinned outright.
+        // The concrete byte string the P23.3 audit measured, **unchanged** by
+        // P23.4's nine appended variants — which is the whole claim of
+        // "append-only", stated as bytes rather than as intent.
         assert_eq!(
             bincode::serde::encode_to_vec(Op::CollapseEdge { half: HalfId(7) }, cfg).unwrap(),
             vec![5, 7],
         );
+        // And the version ladder did NOT move: appending leaves every already-
+        // written session decoding as exactly what it said.
+        assert_eq!(SessionSave::CURRENT_VERSION, 1);
+    }
+
+    #[test]
+    fn the_enums_nested_inside_an_op_are_frozen_too() {
+        let cfg = bincode::config::standard();
+        // `MergeVerts` writes: [19, len(verts)=0, target]. `Mirror`: [21, axis, f64].
+        for (op, want) in [
+            (
+                Op::MergeVerts {
+                    verts: vec![],
+                    target: MergeTarget::Center,
+                },
+                vec![19u8, 0, 0],
+            ),
+            (
+                Op::MergeVerts {
+                    verts: vec![],
+                    target: MergeTarget::Last,
+                },
+                vec![19, 0, 1],
+            ),
+        ] {
+            assert_eq!(
+                bincode::serde::encode_to_vec(&op, cfg).unwrap(),
+                want,
+                "{op:?} moved on the wire"
+            );
+            assert_eq!(frozen_nested(&op), vec![want[2]]);
+        }
+        for (axis, tag) in [(MirrorAxis::X, 0u8), (MirrorAxis::Y, 1), (MirrorAxis::Z, 2)] {
+            let op = Op::Mirror { axis, coord: 0.0 };
+            let bytes = bincode::serde::encode_to_vec(&op, cfg).unwrap();
+            assert_eq!((bytes[0], bytes[1]), (21, tag), "{op:?} moved on the wire");
+            assert_eq!(frozen_nested(&op), vec![tag]);
+        }
+        let knife = Op::Knife {
+            path: vec![
+                KnifePoint::Vertex(VertId(3)),
+                KnifePoint::Edge {
+                    half: HalfId(4),
+                    t: 0.5,
+                },
+            ],
+        };
+        let bytes = bincode::serde::encode_to_vec(&knife, cfg).unwrap();
+        assert_eq!((bytes[0], bytes[1], bytes[2]), (18, 2, 0), "Knife header");
+        assert_eq!(frozen_nested(&knife), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_session_of_modelling_ops_round_trips_through_both_codecs() {
+        // The nine new variants are journal entries like any other: they replay,
+        // they undo, and they survive both encoders (architecture rule 4).
+        let mut s = MeshSession::new(cube(2.0));
+        let top = s.mesh().face_ids().next().unwrap();
+        s.apply(Op::ExtrudeFaces {
+            faces: vec![top],
+            distance: 0.5,
+        })
+        .unwrap();
+        s.apply(Op::InsetFaces {
+            faces: s.mesh().face_ids().take(1).collect(),
+            amount: 0.1,
+            individual: false,
+        })
+        .unwrap();
+        s.apply(Op::SubdivideFaces {
+            faces: s.mesh().face_ids().take(2).collect(),
+        })
+        .unwrap();
+        let head = s.mesh().encoded();
+
+        let cfg = bincode::config::standard();
+        let save = s.save();
+        let bin = bincode::serde::encode_to_vec(&save, cfg).unwrap();
+        let (back, _): (SessionSave, _) = bincode::serde::decode_from_slice(&bin, cfg).unwrap();
+        let json: SessionSave =
+            serde_json::from_str(&serde_json::to_string(&save).unwrap()).unwrap();
+        assert_eq!(back, save);
+        assert_eq!(json, save);
+
+        let restored = MeshSession::restore(back).unwrap();
+        assert_eq!(restored.mesh().encoded(), head);
+        // And undo walks all the way back to the base.
+        let mut s = restored;
+        while s.undo() {
+            assert_eq!(validate(s.mesh()), Ok(()));
+        }
+        assert_eq!(s.mesh().encoded(), cube(2.0).encoded());
     }
 
     #[test]

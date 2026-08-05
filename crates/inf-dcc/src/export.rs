@@ -551,7 +551,7 @@ fn derived_normal(mesh: &Mesh, h: HalfId) -> DVec3 {
 /// The Newell normal of a face: robust for non-planar polygons, and its length
 /// is twice the polygon's area — which is exactly the weight a smooth-fan
 /// average wants.
-fn newell(mesh: &Mesh, f: FaceId) -> DVec3 {
+pub(crate) fn newell(mesh: &Mesh, f: FaceId) -> DVec3 {
     let halfs = mesh.face_loop(f).expect("live face id");
     let pts: Vec<DVec3> = halfs
         .iter()
@@ -822,6 +822,77 @@ mod tests {
 
     fn export(mesh: &Mesh) -> MeshAsset {
         to_mesh_asset(mesh, &ExportOptions::default()).0
+    }
+
+    /// The +Y face of an axis-aligned box.
+    fn top_face(mesh: &Mesh) -> FaceId {
+        mesh.face_ids()
+            .find(|&f| newell(mesh, f).normalize().y > 0.9)
+            .expect("a +Y face")
+    }
+
+    #[test]
+    fn an_extrude_too_small_to_survive_f32_is_saveable_and_says_so() {
+        // **The third face of the coincidence hazard**, pinned rather than left
+        // to the property battery to rediscover. P23.3 documented two ways a
+        // legal kernel mesh fails to round-trip (the reader refuses it as
+        // non-manifold; a triangulation diagonal repeats an existing edge); this
+        // is the third and P23.4's ops make it ordinary.
+        //
+        // The kernel is `f64`, so a 1e-9 m extrude really does produce twelve
+        // distinct vertices. `MeshAsset` is `f32`, where `1.0 + 1e-9` IS `1.0` —
+        // so the writer emits two vertices at one place, the reader's exact weld
+        // (tolerance zero, and it stays zero) fuses them, and the walls become
+        // degenerate triangles it skips and counts. The result is legal, smaller,
+        // and NOT the mesh that was saved.
+        //
+        // Nothing here is repaired: nudging the author's geometry would falsify
+        // their model, and refusing the save would make a legal modelling
+        // intermediate — extrude, then drag — unsaveable. What is required is
+        // that the writer SAYS so, which is what the save path surfaces.
+        let mut m = cube(2.0);
+        let top = top_face(&m);
+        apply(
+            &mut m,
+            &Op::ExtrudeFaces {
+                faces: vec![top],
+                distance: 1.0e-9,
+            },
+        )
+        .expect("extrude");
+        assert_eq!(m.vert_count(), 12, "the kernel keeps them apart in f64");
+
+        let (asset, report) = to_mesh_asset(&m, &ExportOptions::default());
+        assert!(
+            report.coincident_vertices > 0,
+            "the writer must report what the narrower type fused: {report:?}"
+        );
+        let read = from_mesh_asset(&asset).expect("still legal to read");
+        assert!(
+            read.report.degenerate_triangles_skipped > 0,
+            "the reader fused them and dropped the walls: {:?}",
+            read.report
+        );
+        assert_eq!(read.mesh.vert_count(), 8, "back to a plain cube");
+        assert_eq!(validate(&read.mesh), Ok(()));
+
+        // And a distance the narrower type CAN hold round-trips cleanly, which is
+        // what makes the counter a signal rather than a permanent warning.
+        let mut m = cube(2.0);
+        let top = top_face(&m);
+        apply(
+            &mut m,
+            &Op::ExtrudeFaces {
+                faces: vec![top],
+                distance: 0.5,
+            },
+        )
+        .expect("extrude");
+        let (asset, report) = to_mesh_asset(&m, &ExportOptions::default());
+        assert_eq!(report.coincident_vertices, 0);
+        let read = from_mesh_asset(&asset).expect("reads");
+        assert_eq!(read.report.degenerate_triangles_skipped, 0);
+        assert_eq!(read.mesh.vert_count(), 12);
     }
 
     #[test]

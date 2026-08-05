@@ -20,6 +20,12 @@
 # 6:   the writer emitted an n-gon ear diagonal duplicating an edge the mesh
 #      already had, so `from_mesh_asset` refused the writer's own output as
 #      non-manifold.
+# 8:   (P23.4) two kernel vertices that a modelling op left a hair apart round to
+#      the SAME f32, so the writer emitted them at one place and the reader's
+#      exact weld fused them -- dropping two triangles and re-exporting 75 indices
+#      where 81 went in. Not a refusal, not a bug, and now entitled by the
+#      writer's own `coincident_vertices` counter. See
+#      `an_extrude_too_small_to_survive_f32_is_saveable_and_says_so`.
 # 7:   (audit round) UV handedness entered the corner-split key computed PER FACE
 #      and from f64 UVs. Both were wrong: an n-gon whose UV loop sums to zero has
 #      triangles that do not, and a sign taken in f64 disagrees with the f32 one
@@ -32,3 +38,4 @@ cc ef646b6881681e3070771322b78432baaf599b0988b808cc2e97f26f457bc10b
 cc 4a0967ccccf7479d5700a290c0ed9739fa6f2c800c75aef1cd71de272a9ff06c
 cc a36c7bc77006a9db8d988c97ad90129d79fda14fa20137d0636d8b18588dc4c9
 cc 454676124cd94671eea2f3ea047a917fbbf1dade7306b6a86e63fb05e95d9155
+cc c608a09c2f733b577c8b337e9eddb0329b41ec43705c9cbbe90d0abb22908ee3

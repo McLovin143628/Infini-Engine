@@ -3014,6 +3014,7 @@ dependencies = [
  "inf-asset",
  "inf-math",
  "inf-mesh",
+ "inf-terrain",
  "proptest",
  "serde",
  "serde_json",

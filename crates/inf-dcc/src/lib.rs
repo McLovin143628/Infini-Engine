@@ -3,10 +3,12 @@
 //! core topology operations, and the deterministic op journal that is both the
 //! undo/redo story and the test story.
 //!
-//! This crate is a *kernel*, not an editor. It has no panel, no commands, no
-//! selection model and no modelling ops beyond the primitives P23.4's extrude /
-//! inset / bevel / loop-cut are built out of. It has no format of its own
-//! either: it imports from and exports to [`inf_mesh::MeshAsset`], which is the
+//! This crate is a *kernel*, not an editor. It has no panel and no commands —
+//! those are Ring 2's — but since P23.4 it does have the modelling op set
+//! ([`model`]: extrude, inset, bevel, loop cut, knife, merge, subdivide, mirror)
+//! and the [`select`]ion model those tools are pointed with, because both are
+//! statements about topology and belong with the topology. It has no format of
+//! its own either: it imports from and exports to [`inf_mesh::MeshAsset`], which is the
 //! same type the glTF importer produces, so "model in engine" and "import from
 //! Blender" converge on one representation and there is no in-engine format an
 //! author can get trapped in (`docs/memos/p23-dcc-design.md` §7).
@@ -77,7 +79,9 @@
 pub mod build;
 pub mod export;
 pub mod journal;
+pub mod model;
 pub mod ops;
+pub mod select;
 pub mod topo;
 pub mod validate;
 
@@ -87,6 +91,11 @@ pub use build::{
 };
 pub use export::{to_mesh_asset, ExportOptions, ExportReport, NormalPolicy, TANGENT_FALLBACK};
 pub use journal::{MeshSession, SessionError, SessionSave, CHECKPOINT_INTERVAL, MAX_CHECKPOINTS};
+pub use model::{KnifePoint, MergeTarget, MirrorAxis, MAX_LOOP_CUTS};
 pub use ops::{Op, OpError, OpOutcome};
+pub use select::{
+    canonical_edge, edge_loop, edge_ring, geodesic_distances, op_preserves_ids, SelectMode,
+    SelectionSet,
+};
 pub use topo::{CanonicalMesh, CornerData, FaceId, HalfId, Mesh, VertId};
 pub use validate::{validate, Violation};

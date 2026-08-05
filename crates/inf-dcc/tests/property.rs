@@ -21,8 +21,9 @@
 use proptest::prelude::*;
 
 use inf_dcc::{
-    cube, cylinder, from_mesh_asset, plane, to_mesh_asset, torus, validate, CornerData,
-    ExportOptions, FaceId, HalfId, ImportError, Mesh, MeshSession, Op, VertId,
+    cube, cylinder, from_mesh_asset, op_preserves_ids, plane, to_mesh_asset, torus, validate,
+    CornerData, ExportOptions, FaceId, HalfId, ImportError, KnifePoint, MergeTarget, Mesh,
+    MeshSession, MirrorAxis, Op, SelectMode, SelectionSet, VertId,
 };
 
 /// A generated op, before it is resolved against a mesh.
@@ -35,7 +36,7 @@ struct Choice {
 }
 
 fn choice() -> impl Strategy<Value = Choice> {
-    (0u8..13, any::<u16>(), any::<u16>(), any::<u8>()).prop_map(|(kind, a, b, p)| Choice {
+    (0u8..22, any::<u16>(), any::<u16>(), any::<u8>()).prop_map(|(kind, a, b, p)| Choice {
         kind,
         a,
         b,
@@ -130,10 +131,79 @@ fn make_op(mesh: &Mesh, c: Choice) -> Op {
             half: pick(&halfs, c.a, dead_h),
             sharp: c.p.is_multiple_of(2),
         },
-        _ => Op::SetFaceSlot {
+        12 => Op::SetFaceSlot {
             face: pick(&faces, c.a, dead_f),
             slot: None,
         },
+
+        // ── the P23.4 modelling set ────────────────────────────────────────
+        //
+        // Same rule as above: resolve against the mesh as it stands, so the ops
+        // are REACHABLE, and let the fallback ids keep the inertness property
+        // fed. Sizes are small and signed so an extrude can go inward, which is
+        // where a winding mistake shows up.
+        13 => Op::ExtrudeFaces {
+            faces: two_faces(&faces, c),
+            distance: scale(c.a) * 0.5,
+        },
+        14 => Op::ExtrudeEdges {
+            edges: vec![pick(&halfs, c.a, dead_h)],
+            delta: [scale(c.a) * 0.2, scale(c.b) * 0.2, 0.1],
+        },
+        15 => Op::InsetFaces {
+            faces: two_faces(&faces, c),
+            amount: 0.05 + 0.2 * (c.p as f64 / 255.0),
+            individual: c.p.is_multiple_of(2),
+        },
+        16 => Op::BevelEdges {
+            edges: vec![pick(&halfs, c.a, dead_h)],
+            amount: 0.01 + 0.1 * (c.p as f64 / 255.0),
+        },
+        17 => Op::LoopCut {
+            half: pick(&halfs, c.a, dead_h),
+            cuts: 1 + (c.p % 3) as u32,
+        },
+        18 => Op::Knife {
+            path: vec![
+                KnifePoint::Vertex(pick(&verts, c.a, dead_v)),
+                KnifePoint::Vertex(pick(&verts, c.b, dead_v)),
+            ],
+        },
+        19 => Op::MergeVerts {
+            verts: vec![pick(&verts, c.a, dead_v), pick(&verts, c.b, dead_v)],
+            target: if c.p.is_multiple_of(2) {
+                MergeTarget::Center
+            } else {
+                MergeTarget::Last
+            },
+        },
+        20 => Op::SubdivideFaces {
+            faces: two_faces(&faces, c),
+        },
+        _ => Op::Mirror {
+            axis: match c.p % 3 {
+                0 => MirrorAxis::X,
+                1 => MirrorAxis::Y,
+                _ => MirrorAxis::Z,
+            },
+            // A plane through a vertex the mesh actually has, so the exact-zero
+            // seam weld is genuinely exercised rather than always missing.
+            coord: 0.0,
+        },
+    }
+}
+
+/// One or two faces — the region form of an op has to be reached with a set that
+/// is sometimes bigger than one, or the border-detection rule is never tested.
+fn two_faces(faces: &[FaceId], c: Choice) -> Vec<FaceId> {
+    if faces.is_empty() {
+        return vec![FaceId(u32::MAX)];
+    }
+    let first = faces[c.a as usize % faces.len()];
+    if c.p.is_multiple_of(3) {
+        vec![first]
+    } else {
+        vec![first, faces[c.b as usize % faces.len()]]
     }
 }
 
@@ -189,7 +259,7 @@ fn the_generator_reaches_both_applied_and_refused_ops() {
         };
         let script: Vec<Choice> = (0..200)
             .map(|_| Choice {
-                kind: (next() % 13) as u8,
+                kind: (next() % 22) as u8,
                 a: next() as u16,
                 b: next() as u16,
                 p: next() as u8,
@@ -209,8 +279,141 @@ fn the_generator_reaches_both_applied_and_refused_ops() {
     }
 }
 
+/// Every one of the nine modelling ops must actually APPLY somewhere in the
+/// battery, not merely be generated and refused.
+///
+/// The P19 vacuity law, aimed at the exact way this file could rot: `make_op`
+/// resolves ids against the live mesh, so a change to a picking rule (or an op
+/// whose preconditions are tighter than the generator can satisfy) turns a
+/// property into a very fast test of nothing. `the_generator_reaches_both_...`
+/// counts applications in bulk and would still pass with all nine dead.
+#[test]
+fn every_modelling_op_applies_at_least_once_somewhere_in_the_battery() {
+    let bases = [
+        ("plane", plane(2.0)),
+        ("cube", cube(1.0)),
+        ("cylinder", cylinder(0.5, 2.0, 6)),
+        ("torus", torus(1.0, 0.3, 6, 4)),
+    ];
+    let mut applied = [0usize; 22];
+    for (_, base) in bases {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+        let mut session = MeshSession::new(base);
+        for _ in 0..600 {
+            let c = Choice {
+                kind: (next() % 22) as u8,
+                a: next() as u16,
+                b: next() as u16,
+                p: next() as u8,
+            };
+            let op = make_op(session.mesh(), c);
+            if session.apply(op).is_ok() {
+                applied[c.kind as usize] += 1;
+            }
+        }
+        assert_eq!(validate(session.mesh()), Ok(()));
+    }
+    for kind in 13..22 {
+        assert!(
+            applied[kind] > 0,
+            "op kind {kind} never applied — the generator cannot reach it, so \
+             every property below is vacuous for it. Counts: {applied:?}"
+        );
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 256, max_shrink_iters: 4_000, ..ProptestConfig::default() })]
+
+    /// A selection is only ever read at the generation it was stamped for.
+    ///
+    /// The contract the whole selection model rests on, hammered against random
+    /// edits: after any op, EITHER the stamp still matches (and every id is still
+    /// live) OR the consumer is told to drop. There is no third state in which a
+    /// set silently survives a renumbering — and the ops that
+    /// `op_preserves_ids` lets through `carry` really do leave every kept id
+    /// naming the same polygon.
+    #[test]
+    fn a_selection_never_outlives_the_generation_it_was_stamped_for(
+        base in base_mesh(),
+        script in prop::collection::vec(choice(), 1..24),
+    ) {
+        let mut session = MeshSession::new(base);
+        let mut sel = SelectionSet::new(session.generation());
+        for &c in &script {
+            // Select EVERY face, then edit.
+            //
+            // Selecting only the first was a gate that did not fire: a structural
+            // op rebuilds two or three faces out of dozens, so a one-face
+            // selection usually missed them and the property passed with the
+            // id-preservation table lying about `SplitEdge` (measured). The set
+            // has to contain what the op will touch, whatever it turns out to
+            // touch.
+            for f in session.mesh().face_ids() {
+                sel.set_face(f, true);
+            }
+            let before_faces: Vec<(FaceId, Vec<VertId>)> = sel
+                .faces()
+                .iter()
+                .map(|&f| (f, session.mesh().face_verts(f).unwrap_or_default()))
+                .collect();
+            let op = make_op(session.mesh(), c);
+            let preserves = op_preserves_ids(&op);
+            let Ok(outcome) = session.apply(op) else { continue };
+            if preserves {
+                sel.carry(session.generation(), session.mesh());
+                for (f, loop_verts) in before_faces {
+                    if sel.contains_face(f) {
+                        prop_assert_eq!(
+                            session.mesh().face_verts(f).unwrap_or_default(),
+                            loop_verts,
+                            "carry kept a face id that changed meaning"
+                        );
+                    }
+                }
+            } else {
+                sel.adopt(session.generation(), &outcome, session.mesh());
+            }
+            prop_assert_eq!(sel.generation(), session.generation());
+            for &f in sel.faces() {
+                prop_assert!(session.mesh().has_face(f), "a dead face is selected");
+            }
+            for &v in sel.verts() {
+                prop_assert!(session.mesh().has_vert(v), "a dead vertex is selected");
+            }
+            for &h in sel.edges() {
+                prop_assert!(session.mesh().has_half(h), "a dead edge is selected");
+            }
+            prop_assert!(!sel.sync(session.generation()), "already in sync");
+        }
+    }
+
+    /// Soft-select weights are bounded, seed-anchored and order-independent.
+    #[test]
+    fn soft_select_weights_are_bounded_and_deterministic(
+        base in base_mesh(),
+        radius in 0.05f64..3.0,
+    ) {
+        let seeds: Vec<VertId> = base.vert_ids().step_by(3).collect();
+        let mut sel = SelectionSet::new(7);
+        for v in &seeds { sel.set_vert(*v, true); }
+        let a = sel.soft_weights(&base, SelectMode::Vert, radius, inf_terrain::Falloff::Smooth);
+        let b = sel.soft_weights(&base, SelectMode::Vert, radius, inf_terrain::Falloff::Smooth);
+        prop_assert_eq!(&a, &b);
+        for (&v, &w) in &a {
+            prop_assert!((0.0..=1.0).contains(&w), "weight {} at {}", w, v);
+            prop_assert!(base.has_vert(v));
+        }
+        for v in &seeds {
+            prop_assert_eq!(a.get(v), Some(&1.0), "a seed is full weight");
+        }
+    }
 
     /// The kernel's headline promise: whatever the op, the mesh is still a mesh.
     /// Mutation-verified — dropping the `prev` fix-up in `add_face_raw` makes
@@ -287,14 +490,42 @@ proptest! {
             Ok(read) => {
                 prop_assert_eq!(validate(&read.mesh), Ok(()));
                 let (a2, _) = to_mesh_asset(&read.mesh, &opts);
-                prop_assert_eq!(
-                    inf_asset::encode(&a1).expect("encodable"),
-                    inf_asset::encode(&a2).expect("encodable"),
-                );
-                // And the second read is the same mesh as the first, up to
-                // labelling — the canonical-form claim, exercised on real edits.
-                let read2 = from_mesh_asset(&a2).expect("a2 reads back");
-                prop_assert_eq!(read.mesh.canonical(), read2.mesh.canonical());
+                let e1 = inf_asset::encode(&a1).expect("encodable");
+                let e2 = inf_asset::encode(&a2).expect("encodable");
+                if e1 == e2 {
+                    // The second read is the same mesh as the first, up to
+                    // labelling — the canonical-form claim, on real edits.
+                    let read2 = from_mesh_asset(&a2).expect("a2 reads back");
+                    prop_assert_eq!(read.mesh.canonical(), read2.mesh.canonical());
+                } else {
+                    // **The third face of the coincidence hazard, found by
+                    // P23.4's ops** (P23.3 documented the first two: the read is
+                    // refused, or a diagonal repeats an edge). Two kernel
+                    // vertices that round to the same `f32` are not a refusal at
+                    // all — the reader's exact weld fuses them, the triangles
+                    // that used both become degenerate and are *skipped and
+                    // counted*, and the mesh comes back legal and smaller.
+                    //
+                    // The extrude/inset/bevel set makes this ordinary, because
+                    // they place new vertices a parameter away from existing
+                    // ones and a small enough parameter is nothing in `f32`. It
+                    // stays a documented advisory rather than a fix for the
+                    // reasons already recorded (nudging geometry falsifies the
+                    // model; refusing the export makes a legal intermediate
+                    // unsaveable) — but the writer must still have SAID so.
+                    prop_assert!(
+                        report.coincident_vertices > 0 || report.reused_diagonals > 0,
+                        "the round trip moved and the writer's report has nothing \
+                         to blame: {:?}",
+                        report
+                    );
+                    prop_assert!(
+                        read.report.degenerate_triangles_skipped > 0
+                            || read.report.welded_positions < report.vertices,
+                        "…and the reader did not actually fuse anything: {:?}",
+                        read.report
+                    );
+                }
             }
             Err(ImportError::NoGeometry) => {
                 prop_assert_eq!(session.mesh().face_count(), 0);

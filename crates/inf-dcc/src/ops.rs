@@ -46,6 +46,7 @@ use std::collections::BTreeSet;
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
+use crate::model::{self, KnifePoint, MergeTarget, MirrorAxis};
 use crate::topo::{CornerData, FaceId, FacePatch, HalfId, Mesh, VertId};
 
 /// Why an op refused. Every variant names the elements involved, so a refusal is
@@ -106,10 +107,65 @@ pub enum OpError {
     /// `None` and let the smooth fan do it.
     #[error("an authored corner normal must be unit length, got |n| = {length}")]
     NormalNotUnit { length: f64 },
+
+    // ── the modelling ops (P23.4) ──────────────────────────────────────────
+    //
+    // `OpError` is not a wire type (it derives neither `Serialize` nor
+    // `Deserialize`), so unlike `Op` it may be extended freely — a refusal
+    // crosses the IPC boundary as its `Display` string.
+    /// An op was handed nothing to work on.
+    #[error("{what} was empty")]
+    EmptyOperand { what: &'static str },
+    /// A size that has to be strictly positive was not.
+    #[error("{what} must be positive, got {value}")]
+    AmountNotPositive { what: &'static str, value: f64 },
+    /// A count outside the range its op accepts.
+    #[error("{what} must be between {min} and {max}, got {value}")]
+    CountOutOfRange {
+        what: &'static str,
+        value: u32,
+        min: u32,
+        max: u32,
+    },
+    /// A face region whose area-weighted normal cancels out (two opposite faces
+    /// selected together) or is degenerate, so an extrude has no direction.
+    #[error("the region's {faces} face(s) have no usable normal")]
+    DegenerateRegion { faces: usize },
+    /// A single face with no usable normal.
+    #[error("face {0} is degenerate: it has no usable normal")]
+    DegenerateFace(FaceId),
+    /// An edge whose two endpoints are at the same place, so it has no direction.
+    #[error("edge {0} has zero length")]
+    ZeroLengthEdge(HalfId),
+    /// An edge extrude was aimed at an edge with a face on both sides. Tearing
+    /// the surface open is a different tool (a rip) and is not this one.
+    #[error("half-edge {0} is not on a boundary, so there is nothing to extrude into")]
+    EdgeNotBoundary(HalfId),
+    /// A bevel needs a face on both sides to offset into.
+    #[error("edge {0} is on a boundary; a bevel needs a face on both sides")]
+    BevelBoundaryEdge(HalfId),
+    /// A region border that passes through one vertex twice — a pinch — so the
+    /// inset corner has no single miter.
+    #[error("vertex {0} is on the region border more than once, so its inset corner is ambiguous")]
+    AmbiguousRegionVertex(VertId),
+    /// A border corner that folds back on itself (its two edge normals oppose),
+    /// where the miter offset is unbounded.
+    #[error("vertex {0}'s inset corner folds back on itself")]
+    DegenerateInsetCorner(VertId),
+    /// Every edge of the region has a region face on both sides, so there is no
+    /// outline to inset.
+    #[error("the region has no border, so there is nothing to inset")]
+    NoRegionBorder,
+    /// An edge ring can only start inside a quad.
+    #[error("face {0} is not a quad, so an edge ring cannot start there")]
+    NotAQuad(FaceId),
+    /// Two consecutive knife waypoints are not corners of any one face.
+    #[error("vertices {from} and {to} share no face, so the knife cannot cut between them")]
+    KnifeNoCommonFace { from: VertId, to: VertId },
 }
 
 /// Every value crossing an op boundary is checked here, once.
-fn finite(what: &'static str, values: &[f64]) -> Result<(), OpError> {
+pub(crate) fn finite(what: &'static str, values: &[f64]) -> Result<(), OpError> {
     if values.iter().all(|v| v.is_finite()) {
         Ok(())
     } else {
@@ -180,6 +236,46 @@ pub enum Op {
     SetEdgeSharp { half: HalfId, sharp: bool },
     /// Retarget a face's material slot.
     SetFaceSlot { face: FaceId, slot: Option<u32> },
+
+    // ── the modelling ops (P23.4) — APPENDED, never inserted ───────────────
+    //
+    // These nine variants take wire positions 13..=21. They were **appended**
+    // deliberately: `frozen_discriminant` in `crate::journal`'s tests is a
+    // `match` with no wildcard precisely so that adding one of these stopped the
+    // crate compiling until an author gave it the next index by hand, and the
+    // existing pins (`Op::CollapseEdge { half: 7 }` encodes `[5, 7]`) are
+    // unchanged by construction. `SessionSave::CURRENT_VERSION` therefore stays
+    // at 1: every session ever written is still read correctly by this build.
+    // A session written by THIS build and read by an older one fails its bincode
+    // decode on an unknown discriminant, loudly, which is the right answer.
+    /// Extrude a face region along its own area-weighted normal, walling only
+    /// the region **border** so a multi-face selection moves as one block.
+    ExtrudeFaces { faces: Vec<FaceId>, distance: f64 },
+    /// Extrude boundary edges into new faces by an explicit delta (metres) — an
+    /// edge has no canonical direction, so the caller supplies one.
+    ExtrudeEdges { edges: Vec<HalfId>, delta: [f64; 3] },
+    /// Inset a face region's outline (or every face's own outline when
+    /// `individual`), filling the gap with a ring of quads.
+    InsetFaces {
+        faces: Vec<FaceId>,
+        amount: f64,
+        individual: bool,
+    },
+    /// Chamfer interior edges — one segment (see [`crate::model`]).
+    BevelEdges { edges: Vec<HalfId>, amount: f64 },
+    /// Cut `cuts` parallel loops across the quad strip through `half`.
+    LoopCut { half: HalfId, cuts: u32 },
+    /// Cut across faces along a path of vertices and points on edges, atomically.
+    Knife { path: Vec<KnifePoint> },
+    /// Fuse vertices into one, at the set's centre or onto its last member.
+    MergeVerts {
+        verts: Vec<VertId>,
+        target: MergeTarget,
+    },
+    /// Split each face into one quad per corner — simple midpoint, no smoothing.
+    SubdivideFaces { faces: Vec<FaceId> },
+    /// Reflect the whole mesh across an axis-aligned plane, welding the seam.
+    Mirror { axis: MirrorAxis, coord: f64 },
 }
 
 /// Apply one op. See the module docs for the three rules this upholds.
@@ -324,6 +420,22 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
             mesh.face_mut(*face).material_slot = *slot;
             Ok(OpOutcome::default())
         }
+
+        // The modelling set. Each one is a `Mesh::transact` internally, so the
+        // three rules at the top of this module hold for them unchanged.
+        Op::ExtrudeFaces { faces, distance } => model::extrude_faces(mesh, faces, *distance),
+        Op::ExtrudeEdges { edges, delta } => model::extrude_edges(mesh, edges, *delta),
+        Op::InsetFaces {
+            faces,
+            amount,
+            individual,
+        } => model::inset_faces(mesh, faces, *amount, *individual),
+        Op::BevelEdges { edges, amount } => model::bevel_edges(mesh, edges, *amount),
+        Op::LoopCut { half, cuts } => model::loop_cut(mesh, *half, *cuts),
+        Op::Knife { path } => model::knife(mesh, path),
+        Op::MergeVerts { verts, target } => model::merge_verts(mesh, verts, *target),
+        Op::SubdivideFaces { faces } => model::subdivide_faces(mesh, faces),
+        Op::Mirror { axis, coord } => model::mirror(mesh, *axis, *coord),
     }
 }
 
@@ -360,7 +472,7 @@ fn corner_of(mesh: &Mesh, h: HalfId) -> Result<FaceId, OpError> {
     }
 }
 
-fn lerp_corner(a: &CornerData, b: &CornerData, t: f64) -> CornerData {
+pub(crate) fn lerp_corner(a: &CornerData, b: &CornerData, t: f64) -> CornerData {
     let uv = [
         a.uv[0] + (b.uv[0] - a.uv[0]) * t,
         a.uv[1] + (b.uv[1] - a.uv[1]) * t,
@@ -558,7 +670,11 @@ fn collapse_edge(mesh: &mut Mesh, half: HalfId) -> Result<OpOutcome, OpError> {
 /// now-isolated vertex.
 ///
 /// Runs inside a `Mesh::transact` — the caller opens it.
-fn weld_impl(mesh: &mut Mesh, keep: VertId, merge: VertId) -> Result<Vec<FaceId>, OpError> {
+pub(crate) fn weld_impl(
+    mesh: &mut Mesh,
+    keep: VertId,
+    merge: VertId,
+) -> Result<Vec<FaceId>, OpError> {
     let incident: Vec<FaceId> = mesh
         .vert_outgoing(merge)
         .ok_or(OpError::NoSuchVert(merge))?
