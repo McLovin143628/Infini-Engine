@@ -12,6 +12,7 @@ members = [
     "crates/inf-render-2d",
     "crates/inf-mesh",
     "crates/inf-vgeom",
+    "crates/inf-dcc",
     "crates/inf-material",
     "crates/inf-terrain",
     "crates/inf-voxel",
@@ -340,6 +341,13 @@ inf-render = { path = "crates/inf-render" }
 inf-render-2d = { path = "crates/inf-render-2d" }
 inf-mesh = { path = "crates/inf-mesh" }
 inf-vgeom = { path = "crates/inf-vgeom" }
+# inf-dcc = the embedded DCC's half-edge mesh kernel (P23.3). Ring 0, and
+# dependency-light on purpose: inf-mesh + inf-math + glam + serde + bincode +
+# thiserror, every one already pinned above, so the modelling kernel adds NO new
+# external crate to the tree or to cargo-deny. It sits AFTER inf-vgeom in the
+# member list because it depends on inf-mesh and nothing in Ring 0 depends on it
+# yet — the Model Editor (P23.4, Ring 2) is its first consumer.
+inf-dcc = { path = "crates/inf-dcc" }
 inf-material = { path = "crates/inf-material" }
 inf-terrain = { path = "crates/inf-terrain" }
 # inf-voxel = the sparse SDF chunk volumes that locally extend the heightfield

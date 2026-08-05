@@ -3006,6 +3006,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "inf-dcc"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "glam 0.33.2",
+ "inf-asset",
+ "inf-math",
+ "inf-mesh",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "inf-ecs"
 version = "0.1.0"
 dependencies = [

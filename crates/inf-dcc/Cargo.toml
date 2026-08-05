@@ -1,0 +1,48 @@
+[package]
+name = "inf-dcc"
+description = "The embedded DCC's half-edge mesh kernel: topology, validity invariants, MeshAsset import/export and a deterministic op journal."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+# `MeshAsset`/`SubMesh`/`MeshVertex`/`Aabb` — the format this kernel imports from
+# and (for the first time in the engine) WRITES. The whole point of the crate is
+# that "model in engine" and "import from Blender" converge on one representation,
+# so the kernel deliberately owns no format of its own. Ring 0 → Ring 0.
+inf-mesh = { workspace = true }
+# `psin64`/`pcos64` — the bit-portable trig the primitive generators need. The P14
+# LAW: `sin`/`cos` from `std` are not bit-identical across targets, and a cylinder
+# or torus built here is COMMITTED CONTENT (it lands in a `.inf_mesh` and in an op
+# journal two machines are claimed to replay identically). This dependency exists
+# for exactly that reason and is the crate's only caller of trigonometry.
+inf-math = { workspace = true }
+# f64 vector math (dot/cross/normalize) for the geometric half: face normals,
+# tangent frames, ear-clipping. Workspace pin — the same glam 0.33 everything else
+# in the tree resolves to, so this adds no crate. NB: glam's `serde` feature is NOT
+# enabled workspace-wide, so every STORED position/normal in this crate is a plain
+# `[f64; 3]` and `DVec3` appears only in arithmetic.
+glam = { workspace = true }
+serde = { workspace = true }
+# The op journal persists as bincode (a session that must survive a crash) and the
+# crate's determinism gates compare meshes by their encoded bytes — the cheapest
+# honest definition of "bit-identical" for an arena-backed structure.
+bincode = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Property tests: random op sequences keep the mesh valid, replay is a pure
+# function of the journal, and the export round trip is stable.
+proptest = { workspace = true }
+# The human-readable half of the dual-format serde gate (architecture rule 4): a
+# journal must encode in a self-describing format as well as in bincode, and the
+# two must agree. This is also the gate that keeps `skip_serializing_if` out of
+# every serialized struct here (the P10 law — it desyncs positional bincode).
+serde_json = { workspace = true }
+# `AssetId` for the fracture interplay test: a kernel-exported `MeshAsset` must be
+# consumable by `inf_mesh::fracture_mesh`, which keys its derived asset off the
+# source mesh's GUID. Dev-only — the kernel itself never names an asset id.
+inf-asset = { workspace = true }
