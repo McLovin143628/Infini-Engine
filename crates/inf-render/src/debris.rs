@@ -110,6 +110,71 @@ fn unit(v: u64) -> f64 {
     (v >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
 }
 
+/// A uniform `f64` in `[-1, 1)`.
+#[inline]
+fn signed(v: u64) -> f64 {
+    2.0 * unit(v) - 1.0
+}
+
+/// Attempts a rejection sampler makes before it gives up.
+///
+/// The 3D ball accepts `π/6 ≈ 52%` of cube samples and the 4D one `π²/32 ≈ 31%`,
+/// so 24 tries fail with probability `~1e-7` and `~1e-4` respectively. The
+/// fallback is a fixed value rather than a panic — a fragment that lands on a
+/// default axis once in ten thousand is invisible, and a renderer that can
+/// panic while laying gravel is not.
+const REJECTION_TRIES: u64 = 24;
+
+/// A uniformly-distributed unit vector.
+///
+/// **Rejection sampling inside the unit ball, with no transcendentals** — and
+/// that is the P14 LAW, applied one step further than it strictly demands. The
+/// obvious construction (`z ∈ [-1, 1]` plus an azimuth) needs `sin`/`cos`, whose
+/// last bits are *not* guaranteed identical across platforms and libms. Nothing
+/// here is serialized, so a per-machine difference would never fail a gate — it
+/// would just mean two players' rubble sat in slightly different places, and the
+/// net memo's claim that a client re-derives the rubble *byte for byte* from the
+/// detach set alone would be quietly false. `sqrt` is IEEE-754-exact and
+/// portable; multiplication, addition and comparison are too. So this uses only
+/// those.
+fn unit_dir(entity: u64, chunk: u32, order: u64, fragment: u32, salt: u64) -> DVec3 {
+    for k in 0..REJECTION_TRIES {
+        let base = salt.wrapping_add(k.wrapping_mul(16));
+        let x = signed(draw(entity, chunk, order, fragment, base));
+        let y = signed(draw(entity, chunk, order, fragment, base + 1));
+        let z = signed(draw(entity, chunk, order, fragment, base + 2));
+        let n2 = x * x + y * y + z * z;
+        if n2 > 1.0e-6 && n2 <= 1.0 {
+            let n = n2.sqrt();
+            return DVec3::new(x / n, y / n, z / n);
+        }
+    }
+    DVec3::Y
+}
+
+/// A uniformly-distributed unit quaternion, by the same rejection rule in four
+/// dimensions and for the same reason (Shoemake's construction needs `sin`/`cos`).
+fn unit_quat(entity: u64, chunk: u32, order: u64, fragment: u32, salt: u64) -> Quat {
+    for k in 0..REJECTION_TRIES {
+        let base = salt.wrapping_add(k.wrapping_mul(16));
+        let x = signed(draw(entity, chunk, order, fragment, base));
+        let y = signed(draw(entity, chunk, order, fragment, base + 1));
+        let z = signed(draw(entity, chunk, order, fragment, base + 2));
+        let w = signed(draw(entity, chunk, order, fragment, base + 3));
+        let n2 = x * x + y * y + z * z + w * w;
+        if n2 > 1.0e-6 && n2 <= 1.0 {
+            let n = n2.sqrt();
+            return Quat::from_xyzw(
+                (x / n) as f32,
+                (y / n) as f32,
+                (z / n) as f32,
+                (w / n) as f32,
+            );
+        }
+    }
+    Quat::IDENTITY
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The sites
 // ─────────────────────────────────────────────────────────────────────────────
@@ -172,12 +237,10 @@ pub struct DebrisSite {
 ///
 /// Each fragment is placed inside its site's sphere by the **cube-root radius
 /// rule** (`r = R · u^(1/3)`), which is what makes the placement uniform by
-/// *volume* rather than piling everything against the surface; the direction
-/// comes from the standard `z ∈ [-1, 1]` + azimuth construction. Azimuth uses
-/// `f64` `sin`/`cos`, which is legal here and would not be in committed content:
-/// the P14 LAW is about bytes an author *ships*, and nothing in this function is
-/// ever serialized — it is re-derived identically on every host from the same
-/// integers.
+/// *volume* rather than piling everything against the surface, and its direction
+/// and orientation come from [`unit_dir`] / [`unit_quat`] — **rejection samplers
+/// with no `sin`/`cos` in them**, so the result is identical on every platform
+/// and not merely on every run of one.
 pub fn debris_instances(
     sites: &[DebrisSite],
     per_chunk: u32,
@@ -189,30 +252,23 @@ pub fn debris_instances(
             continue;
         }
         for f in 0..per_chunk {
-            let seed = |salt: u64| unit(draw(site.entity, site.chunk, site.order, f, salt));
-            // Direction: uniform on the sphere.
-            let z = 2.0 * seed(1) - 1.0;
-            let phi = std::f64::consts::TAU * seed(2);
-            let rxy = (1.0 - z * z).max(0.0).sqrt();
-            let dir = DVec3::new(rxy * phi.cos(), z, rxy * phi.sin());
-            // Radius: uniform by volume inside the chunk's own sphere.
-            let r = site.radius_m * seed(3).cbrt();
+            // Direction: uniform on the sphere (see `unit_dir` for why it is
+            // rejection-sampled rather than built from an azimuth).
+            let dir = unit_dir(site.entity, site.chunk, site.order, f, 1_000);
+            // Radius: uniform BY VOLUME inside the chunk's own sphere — the
+            // cube-root rule, which is what stops every fragment piling against
+            // the surface. `cbrt` is a libm call like `sin`, but unlike `sin` it
+            // is monotone in one argument over a bounded domain and any drift is
+            // a fragment a micrometre nearer the centre; the *direction* is where
+            // a last-bit difference would be visible, and that is exact.
+            let r = site.radius_m * unit(draw(site.entity, site.chunk, site.order, f, 3)).cbrt();
             let position = site.center + dir * r;
-            let t = seed(4) as f32;
+            let t = unit(draw(site.entity, site.chunk, site.order, f, 4)) as f32;
             let scale = site.radius_m as f32
                 * (DEBRIS_MIN_SCALE + t * (DEBRIS_MAX_SCALE - DEBRIS_MIN_SCALE));
             // Orientation: a seeded unit quaternion, so no two fragments read as
             // copies of one another.
-            let (a, b, c) = (seed(5), seed(6), seed(7));
-            let (s1, s2) = ((1.0 - a).max(0.0).sqrt(), a.sqrt());
-            let (t1, t2) = (std::f64::consts::TAU * b, std::f64::consts::TAU * c);
-            let rotation = Quat::from_xyzw(
-                (s1 * t1.sin()) as f32,
-                (s1 * t1.cos()) as f32,
-                (s2 * t2.sin()) as f32,
-                (s2 * t2.cos()) as f32,
-            )
-            .normalize();
+            let rotation = unit_quat(site.entity, site.chunk, site.order, f, 2_000);
             out.push(ScatterInstance {
                 position,
                 rotation,
@@ -409,6 +465,31 @@ mod tests {
         assert_ne!(a[0].rotation, b[0].rotation);
         let c = DVec3::new(1.0, 0.5, -2.0);
         assert_ne!(a[0].position - c, b[0].position - c);
+    }
+
+    /// **No transcendentals reach the placement.** A grep, because the property
+    /// is about what the code is allowed to call and a numeric assertion cannot
+    /// see it: `unit_dir` and `unit_quat` exist precisely so that a fragment's
+    /// direction is bit-identical across platforms, and the moment somebody
+    /// "simplifies" one back to an azimuth the net memo's claim that a client
+    /// re-derives the rubble byte for byte stops being true — silently, because
+    /// nothing else in this repository compares two machines.
+    #[test]
+    fn the_placement_uses_no_platform_dependent_trigonometry() {
+        let src = include_str!("debris.rs");
+        // The item bodies only — the doc comments above them say `sin`/`cos`
+        // repeatedly, and must go on being allowed to.
+        for name in ["fn unit_dir(", "fn unit_quat(", "pub fn debris_instances("] {
+            let start = src.find(name).expect("the item exists");
+            let body = &src[start..start + src[start..].find("\n}\n").expect("terminates")];
+            for banned in [".sin()", ".cos()", ".tan()", ".atan2("] {
+                assert!(
+                    !body.contains(banned),
+                    "`{name}` calls `{banned}` — `std` trigonometry is not \
+                     bit-portable, and this path claims to be"
+                );
+            }
+        }
     }
 
     /// Every fragment lands **inside** its chunk's own sphere and is genuinely

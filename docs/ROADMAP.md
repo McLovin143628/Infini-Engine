@@ -6716,6 +6716,169 @@ deterministic on the replay trace, PIE == shipping.
   instance path; 2. per-tier debris budgets; 3. destruction state persisted in the save and
   replication seams, with net-relevant events documented for the P14 net layer.
 
+
+> **PHASE 22 COMPLETE — the dynamic world reacts** (2026-08-05). The phase's own
+> done-when sentence is built and gated: *a playground scene shows footprints and
+> tyre tracks in snow and sand, bending grass, and a car and a multi-storey
+> building destroyed by Blueprint-triggered explosions with debris physics —
+> deterministic on the replay trace, PIE == shipping.*
+>
+> **The shipped ledger, by batch.**
+>
+> * **P22.1 surface deformation** — `c93d974` (the sim-authoritative field:
+>   `inf_terrain::deform`'s sparse dense-cell `BTreeMap` over a global lattice,
+>   per-layer response archetypes, `MAX_DEFORM_CELLS` with least-recently-stamped
+>   eviction, and `inf_ecs::deform`'s one Ring-0 contact rule both fixed steps
+>   call), `1169f55` (the camera-following render window, terrain displacement and
+>   normal perturbation, scatter bend + wind), `5b6bb0f` (the audit round: the
+>   field exits with the session at BOTH ends, the wrapper halves pinned, real
+>   gates). The field is a **bevy resource**, so no schema moved and nothing here
+>   can be saved. CPU at fixed step, not a compute-written ring buffer: Ring-1's
+>   GPU erosion is already documented as not bit-identical across adapters, and a
+>   GPU-authoritative field would make a committed level's ground depend on the
+>   player's card.
+> * **P22.2 the fracture pipeline** — `6f85fd8` (deterministic Voronoi chunking +
+>   the `.inf_fracture` asset, derived at cook under `derived_fracture_id`),
+>   `c5da477` (scene schema **v20**: the `Destructible` component, and the cook's
+>   `plan_fractures` derivation), `7c0a433` (watertight hulls under f32 reality,
+>   chunk-indexed adjacency, honest budgets), `f8a15a1` (the `ConvexHull` collider
+>   + the parry pin). Schema **v20 once**, and never again.
+> * **P22.3 runtime destruction** — `be430b8` (terrain tile heightfield colliders —
+>   the prerequisite nobody had noticed — plus the fracture runtime), `9158841`
+>   (the `destruct.*` kit, both host arms, `Destroyed`, `ScenePayload` **v6**),
+>   `07965e4` (the chunk render projection, its upload pass and the atomic swap),
+>   `57c5f4e` + `93293d5` (two audit rounds). See the P22.3 status block above for
+>   the full account; its own ledger is carried forward below.
+> * **P22.4 destruction at scale** — `8d60548` (a P22.3 leftover: the macOS spawn's
+>   shared fracture store, without which `inf-viewport` did not build on macOS at
+>   all), `82bb7b7` (sub-chunk debris through the P18.5 GPU scatter path, the
+>   per-tier debris budget, the persistence twin test and the net-events memo),
+>   and this batch's sample + gate commit.
+>
+> **What P22.4 added, and the one design decision worth reading.** Rubble is
+> **render-only dressing** laid by `inf_render::debris` and shipped as one
+> `ScatterBatch` per broken actor. `ScatterData::key` is a content hash over the
+> packed instance bytes, so a batch whose instances move re-uploads its whole
+> buffer every step — the exact cost the scatter path exists to avoid. The answer
+> is not a stamp: each fragment is placed around its chunk's **rest centre**, which
+> `FractureState` freezes at the first detach, so the batch's bytes are a pure
+> function of *which* chunks are live and re-upload exactly once per break. There
+> is no stamp to get wrong because the content genuinely does not change. Every
+> fragment is a pure function of `(entity, chunk, detach order, fragment index)`
+> through SplitMix64 — so two hosts and two machines lay the same rubble with
+> nothing sent between them, which is also why the net memo can say the rubble is
+> not replication-relevant.
+>
+> `inf_render::debris_budget_for` is the per-tier mapping and
+> `RuntimeSim::set_debris_budget`'s first real caller. It lives in the **render**
+> crate as plain numbers so physics never learns the word `RenderTier`, and the
+> **windowed player** — the one place with both a tier and a session — converts and
+> applies it. High is the physics default *exactly*, pinned by a test in the crate
+> that can see both, so every headless gate, replay and `--pie` comparison runs the
+> unclamped numbers. The editor's Simulate deliberately does **not** apply it: it
+> is the preview half of PIE == shipping, and a preview whose rubble count came
+> from the author's graphics card would fail the house gate on any other machine.
+>
+> **LAWS this phase paid for.**
+>
+> * **`FIX_INTERNAL_EDGES` or a heightfield is a trampoline.** A heightfield is two
+>   triangles per cell, and without the flag a body crossing a cell boundary is
+>   answered with an *edge* normal — so a sphere sliding on flat ground is kicked
+>   upward with no lateral force applied to it. Measured: 5 kicks at 0.105 m/s on
+>   terrain, 11 at 0.188 m/s on a P21 voxel floor, both zero once flagged.
+> * **Inference dressed as measurement is worse than no measurement.** The bond
+>   "estimated" residue was a *tolerance* on the strength of one observation — and
+>   that observation was an artefact of the test that made it, which INFERRED "this
+>   bond took the fallback" by comparing the priced area against the fallback value
+>   within 1%. A sweep of 24 cook configurations (2 959 bonds) found **zero**.
+>   `FractureState::estimated_bonds` is now a **record**, asserted EMPTY, and the
+>   phase-22 gate asserts it on the shipped block and its control.
+> * **A gate must be built to falsify, not to confirm.** Every world arm in
+>   `phase22_gate` carries its own control: a debris cap of 2 that really reclaims,
+>   a cooked-vs-uncooked comparison with a stated horizon *and* an asserted
+>   divergence past it, zero depth off the roller's lane, a `runtime_destruct`
+>   twin that differs in one flag. Mutation-measured: making `attach_fractures` a
+>   no-op fails **7 of 14** arms; dropping the payload's fractures inside
+>   `main.rs`'s own `LoadScene` handler fails the real-`--pie`-subprocess arm and
+>   nothing else, which is precisely the seam that arm exists for.
+> * **A lone `\` before a newline inside a non-raw Python string is a *Python*
+>   continuation.** It eats the Rust one and leaves the literal's indentation in
+>   the string. Nine user-facing messages were mangled that way, including a
+>   Blueprint refusal; scripted edits to Rust string literals must use raw strings
+>   or a heredoc.
+> * **One door for three paths.** The cook, the PIE payload builder and the
+>   editor's Simulate seeder all derive fractures; two of them were separate code
+>   carrying comments claiming they agreed "by construction". They did not — one
+>   walked ECS **archetype** order while the others walked document order, and one
+>   skipped the collidability refusal entirely. `fracture_equivalence.rs` now
+>   compares the **bytes** out of a real pack against a real editor derivation.
+>
+> **New this batch, and worth recording.**
+>
+> * **`FractureAudit::collapsed` counts only out-of-damage collapses.**
+>   `runtime_destruct` runs the same structural solve *inside* the damage call, so
+>   a collapse the charge triggered is reported in `DamageReport::detached` and
+>   never reaches the audit. Reading the audit as "did the solve run" shows zero and
+>   looks like a dead subsystem. The gate measures it in **joules** instead: the car
+>   absorbs one chunk's worth of bonds (25 136 J) and twelve chunks come off.
+> * **A charge with slack in it cascades.** Breaking a chunk makes its neighbours
+>   cheaper — their bond to it is gone — so 40 kJ took a whole car that 30 kJ opens
+>   one chunk of. Tuning a demolition charge is tuning against the *cheapest* chunk,
+>   and both neighbours of the right value are instructive: 25 000 J spent nothing
+>   at all (damage is not banked, and a Blueprint reports 0 J as a legal value).
+> * **Size a blast against the LIGHTEST body in its radius.** 60 kN·s is reasonable
+>   for 5-tonne chunks and puts a 295 kg wheel 13 km up. The gate found it.
+> * **`Collider3D::density` defaults to 1.0, which is rapier's mass placeholder and
+>   not a material density** — the P20.2 buoyancy finding, met again: a 0.4 m wheel
+>   at the default weighs 268 grams.
+> * **The P14 trig LAW reaches further than serialization.** The rubble is never
+>   written to a file, so `sin`/`cos` in its placement could never fail a gate —
+>   and would quietly make the net memo's "every client re-derives the rubble byte
+>   for byte with nothing sent" false, because nothing in this repository compares
+>   two *machines*. `unit_dir`/`unit_quat` are rejection samplers over `sqrt` and
+>   arithmetic instead, and a grep test keeps them that way.
+>
+> **Honest remainders, carried out of the phase.**
+>
+> * **Damage is NON-LOCAL.** `destruct.apply_damage` has no impact point — there is
+>   none in its signature or in scene schema v20 — so a structure sheds its
+>   cheapest-to-liberate chunk, which may be at the far end of it. The consequence,
+>   now measured on the flagship sample: a charge on a monolithic block standing on
+>   solid ground **peels** it rather than toppling it, and the structural solve has
+>   nothing to say. The gate asserts that outcome (zero out-of-damage collapses)
+>   precisely so that the day a hit position arrives, the test fails and this
+>   paragraph gets rewritten. The car is the sample's solve witness instead, and
+>   honestly so: a car body is not supported by static geometry.
+> * **No save-game container**, so destruction is **not persisted** — the phase's
+>   ruling. `.inf_lvl` is the author's document, not a player's progress, and
+>   `simulate_destruction_not_persisted` plus the gate's arm (h) keep a
+>   save-after-damage byte-identical to a save-before. The net memo's late-joiner
+>   payload is the shape a save game should take when one exists.
+> * **No VFX.** This engine has no particle system, so a break makes a *sound* and
+>   no dust. The audio hook is real and fires once; the visual one does not exist.
+>   P22.4's instanced rubble is the nearest thing and it is dressing, not effects.
+> * **No vehicle.** The sample's car is a prop: a destructible chassis on four
+>   revolute wheels that settles and is then blown up. There is no vehicle
+>   controller in this engine and none was built here.
+> * **Streaming and destruction still do not meet.** A `Destructible` that arrives
+>   with a partition cell after the level was seeded answers `NoFracture` for ever
+>   (the seed is a one-shot walk, not a subscription), and a *broken* actor whose
+>   cell streams out leaves its static chunk colliders behind.
+> * **Wind is off by default** and foliage shadows do not bend — the P22.1 render
+>   remainders, unchanged.
+> * **Instanced debris: what shipped and what did not.** The GPU instance path
+>   shipped, keyed by content and bounded by the budget. What did not: an impostor
+>   or LOD band of its own (the rubble rides `ScatterSettings`' global bands), any
+>   *physical* sub-chunk debris (the fragments are visual only), and per-fragment
+>   lifetime (a fragment lives exactly as long as the chunk it came off).
+> * **Coarse-LOD holes still do not propagate into the terrain pyramid** — standing
+>   from P21, untouched here.
+>
+> **Goldens stay 50.** The playground has no golden of its own, deliberately: every
+> claim it makes is structural and is asserted as state (field bytes, chunk poses,
+> detach events, audit counters, ground probes) rather than as pixels, so a golden
+> would add a re-bless liability and no coverage.
+
 ### Phase 23 — Embedded DCC v1: modeling core
 
 **Goal:** create and edit meshes inside the engine. **Done when:** you can model a usable prop

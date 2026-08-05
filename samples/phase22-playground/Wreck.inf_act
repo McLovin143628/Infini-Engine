@@ -1,0 +1,517 @@
+{
+  "schema_version": 1,
+  "id": "act:phase22-wreck",
+  "name": "Car Bomb",
+  "components": [],
+  "variables": [
+    {
+      "name": "step",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": false
+    },
+    {
+      "name": "absorbed",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": false
+    },
+    {
+      "name": "total",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": false
+    },
+    {
+      "name": "intact",
+      "ty": "Float",
+      "default": {
+        "Float": -1.0
+      },
+      "exposed": false
+    },
+    {
+      "name": "chunks",
+      "ty": "Float",
+      "default": {
+        "Float": -1.0
+      },
+      "exposed": false
+    },
+    {
+      "name": "destroyed_chunks",
+      "ty": "Float",
+      "default": {
+        "Float": -1.0
+      },
+      "exposed": false
+    },
+    {
+      "name": "destroyed_fires",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": false
+    },
+    {
+      "name": "hit",
+      "ty": "Float",
+      "default": {
+        "Float": -1.0
+      },
+      "exposed": false
+    }
+  ],
+  "events": [
+    {
+      "event": "Tick",
+      "body": {
+        "id": "tick",
+        "name": "tick",
+        "params": [
+          {
+            "name": "dt",
+            "ty": "Float"
+          }
+        ],
+        "ret": "Unit",
+        "body": [
+          {
+            "If": {
+              "cond": {
+                "Binary": [
+                  "Eq",
+                  {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "get"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "step"
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 60.0
+                    }
+                  }
+                ]
+              },
+              "then_body": [
+                {
+                  "ExprStmt": {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "set"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "absorbed"
+                          }
+                        },
+                        {
+                          "Call": {
+                            "path": [
+                              "destruct",
+                              "apply_damage"
+                            ],
+                            "args": [
+                              {
+                                "Call": {
+                                  "path": [
+                                    "vars",
+                                    "get"
+                                  ],
+                                  "args": [
+                                    {
+                                      "Lit": {
+                                        "Str": "entity"
+                                      }
+                                    }
+                                  ]
+                                }
+                              },
+                              {
+                                "Lit": {
+                                  "Float": 30000.0
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "ExprStmt": {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "set"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "total"
+                          }
+                        },
+                        {
+                          "Binary": [
+                            "Add",
+                            {
+                              "Call": {
+                                "path": [
+                                  "vars",
+                                  "get"
+                                ],
+                                "args": [
+                                  {
+                                    "Lit": {
+                                      "Str": "total"
+                                    }
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "Call": {
+                                "path": [
+                                  "vars",
+                                  "get"
+                                ],
+                                "args": [
+                                  {
+                                    "Lit": {
+                                      "Str": "absorbed"
+                                    }
+                                  }
+                                ]
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "ExprStmt": {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "set"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "hit"
+                          }
+                        },
+                        {
+                          "Call": {
+                            "path": [
+                              "destruct",
+                              "radial_impulse"
+                            ],
+                            "args": [
+                              {
+                                "Lit": {
+                                  "Float": 36.0
+                                }
+                              },
+                              {
+                                "Lit": {
+                                  "Float": 0.8
+                                }
+                              },
+                              {
+                                "Lit": {
+                                  "Float": 20.0
+                                }
+                              },
+                              {
+                                "Lit": {
+                                  "Float": 8000.0
+                                }
+                              },
+                              {
+                                "Lit": {
+                                  "Float": 12.0
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "else_body": []
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "step"
+                    }
+                  },
+                  {
+                    "Binary": [
+                      "Add",
+                      {
+                        "Call": {
+                          "path": [
+                            "vars",
+                            "get"
+                          ],
+                          "args": [
+                            {
+                              "Lit": {
+                                "Str": "step"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "Lit": {
+                          "Float": 1.0
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "intact"
+                    }
+                  },
+                  {
+                    "Call": {
+                      "path": [
+                        "destruct",
+                        "is_intact"
+                      ],
+                      "args": [
+                        {
+                          "Call": {
+                            "path": [
+                              "vars",
+                              "get"
+                            ],
+                            "args": [
+                              {
+                                "Lit": {
+                                  "Str": "entity"
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "chunks"
+                    }
+                  },
+                  {
+                    "Call": {
+                      "path": [
+                        "destruct",
+                        "chunk_count"
+                      ],
+                      "args": [
+                        {
+                          "Call": {
+                            "path": [
+                              "vars",
+                              "get"
+                            ],
+                            "args": [
+                              {
+                                "Lit": {
+                                  "Str": "entity"
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "event": "Destroyed",
+      "body": {
+        "id": "destroyed",
+        "name": "destroyed",
+        "params": [
+          {
+            "name": "chunks",
+            "ty": "Int"
+          }
+        ],
+        "ret": "Unit",
+        "body": [
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "destroyed_chunks"
+                    }
+                  },
+                  {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "get"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "chunks"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "destroyed_fires"
+                    }
+                  },
+                  {
+                    "Binary": [
+                      "Add",
+                      {
+                        "Call": {
+                          "path": [
+                            "vars",
+                            "get"
+                          ],
+                          "args": [
+                            {
+                              "Lit": {
+                                "Str": "destroyed_fires"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "Lit": {
+                          "Float": 1.0
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "audio",
+                  "play"
+                ],
+                "args": [
+                  {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "get"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "entity"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "functions": []
+}

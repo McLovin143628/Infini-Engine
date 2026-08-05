@@ -159,7 +159,15 @@ bit-for-bit — which is the lockstep contract, not the snapshot one.
 render-only dressing, laid by a pure function of `(actor id, chunk index, detach
 order, fragment index)` (`inf_render::debris`). Every client that agrees about
 the detach set already agrees about the rubble, byte for byte, with nothing sent.
-That is the whole reason the seed is a content tuple and not a wall clock.
+
+That claim is only worth making because two things were built to support it, and
+both are easy to lose: the seed is a **content tuple** rather than a wall clock or
+a frame index, and the placement uses **no `sin`/`cos`** — `unit_dir` and
+`unit_quat` are rejection samplers over `sqrt` and arithmetic, because `std`
+trigonometry's last bits are not guaranteed identical across platforms (the P14
+LAW, applied here to bytes that are never serialized precisely so that they never
+*need* to be). `the_placement_uses_no_platform_dependent_trigonometry` is what
+keeps it true.
 
 ### Ordering and idempotency
 

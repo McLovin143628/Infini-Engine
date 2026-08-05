@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "id": "act:phase22-roller",
+  "name": "Roller",
+  "components": [],
+  "variables": [
+    {
+      "name": "step",
+      "ty": "Float",
+      "default": {
+        "Float": 0.0
+      },
+      "exposed": false
+    }
+  ],
+  "events": [
+    {
+      "event": "Tick",
+      "body": {
+        "id": "tick",
+        "name": "tick",
+        "params": [
+          {
+            "name": "dt",
+            "ty": "Float"
+          }
+        ],
+        "ret": "Unit",
+        "body": [
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "physics3d",
+                  "set_velocity"
+                ],
+                "args": [
+                  {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "get"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "entity"
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.0
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": -1.0
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 8.0
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "vars",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "step"
+                    }
+                  },
+                  {
+                    "Binary": [
+                      "Add",
+                      {
+                        "Call": {
+                          "path": [
+                            "vars",
+                            "get"
+                          ],
+                          "args": [
+                            {
+                              "Lit": {
+                                "Str": "step"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "Lit": {
+                          "Float": 1.0
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "functions": []
+}

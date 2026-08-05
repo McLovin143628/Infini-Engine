@@ -189,14 +189,19 @@ pub struct ScenePayload {
     /// caller that does not resolve meshes produces**, and the two are
     /// indistinguishable from here.
     ///
-    /// That is a live hazard, not a resolved one. There is **no phase-22 gate
-    /// yet**, so nothing today asserts that a destructible level's payload
-    /// actually carries fractures; `inf_editor_core::pie`'s positional-resolver
-    /// pin is the only test that looks, and it looks at one fixture rather than
-    /// at a whole level. P22.4 owes a `phase22_gate` whose PIE arm asserts this
-    /// vector is non-empty **before** it compares anything — the P21.4 lesson,
-    /// which is that two empty maps agree, recorded here as an obligation rather
-    /// than as a gate that exists.
+    /// That **was** a live hazard, and P22.4 closed it. The obligation this
+    /// paragraph used to record — *"P22.4 owes a `phase22_gate` whose PIE arm
+    /// asserts this vector is non-empty before it compares anything"* — is now
+    /// discharged: `runtime/inf-player/tests/phase22_gate.rs`'s
+    /// `playground_payload` asserts `payload.fractures.len() == 2` (the flagship
+    /// sample's two destructible meshes) **before** any comparison runs, so a
+    /// payload that carried no chunk sets fails there with a message about
+    /// unbreakable buildings rather than passing as two intact worlds agreeing.
+    ///
+    /// The P21.4 lesson stands, and the shape of the guard is what it teaches: an
+    /// exact expected count, taken from the fixture, asserted at the seam that
+    /// produces the payload. A `!is_empty()` would still pass on a level whose
+    /// second destructible mesh had silently stopped resolving.
     #[serde(default)]
     pub fractures: Vec<(Uuid, Vec<u8>)>,
 }

@@ -6190,6 +6190,1351 @@ save and reload byte-identical, and it works in PIE.*\n\n\
 Exercised by `runtime/inf-player/tests/phase21_gate.rs`.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// ── Phase 22 gate scene: `samples/phase22-playground` (P22.4) ────────────────
+//
+// The phase's own done-when sentence, built: *a playground scene shows footprints
+// and tyre tracks in snow and sand, bending grass, and a car and a multi-storey
+// building destroyed by Blueprint-triggered explosions with debris physics —
+// deterministic on the replay trace, PIE == shipping.*
+//
+// Everything below is a **pure function of these constants**, so the gate imports
+// them rather than restating them and the fixture and the test cannot drift.
+
+/// The world is 128 m square: two 64 m tiles per axis at 2 m per sample — the
+/// P21 arrangement, because the streaming machinery it exercises is the same and
+/// a second set of numbers would be a second thing to reason about.
+pub const PHASE22_WORLD_M: f64 = 128.0;
+pub const PHASE22_TILE_RES: u32 = 33;
+pub const PHASE22_TILES: u32 = 2;
+pub const PHASE22_MPS: f64 = 2.0;
+
+const PHASE22_LEVEL_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000001");
+pub const PHASE22_TERRAIN_ASSET_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000002");
+/// The `.inf_mesh` the tower block and its control twin both reference. **One
+/// mesh, two actors** — which is also what makes the control a control: the two
+/// differ in `runtime_destruct` and in nothing else, not even in what they are
+/// made of.
+pub const PHASE22_BLOCK_MESH_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000003");
+/// The car chassis `.inf_mesh`.
+pub const PHASE22_CHASSIS_MESH_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000004");
+/// The demolition Blueprint class, carried by the tower **and** by the control.
+pub const PHASE22_DEMO_ACTOR_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000005");
+/// The wreck Blueprint class, carried by the car chassis.
+pub const PHASE22_WRECK_ACTOR_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000006");
+/// The roller Blueprint class — the thing that leaves the tracks.
+pub const PHASE22_ROLLER_ACTOR_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000007");
+/// The collapse's `.inf_audio` clip.
+pub const PHASE22_CLIP_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000008");
+
+pub const PHASE22_TERRAIN_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000010");
+/// The multi-storey block: the actor the phase's headline is about.
+pub const PHASE22_TOWER_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000011");
+/// Its twin, identical in every way except `runtime_destruct: false` — the
+/// both-ways half of the flag gate, standing in the same level under the same
+/// charge.
+pub const PHASE22_CONTROL_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000012");
+/// The car's chassis: a destructible dynamic body with four wheels on revolute
+/// joints. **A prop, not a vehicle** — this engine has no vehicle controller, so
+/// it rolls and settles and is then blown up, which is all the phase claims.
+pub const PHASE22_CHASSIS_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000013");
+pub const PHASE22_WHEEL_GUIDS: [Uuid; 4] = [
+    uuid::uuid!("22040000-0000-4000-8000-000000000014"),
+    uuid::uuid!("22040000-0000-4000-8000-000000000015"),
+    uuid::uuid!("22040000-0000-4000-8000-000000000016"),
+    uuid::uuid!("22040000-0000-4000-8000-000000000017"),
+];
+/// The roller: the moving body that crosses the snow and the sand.
+pub const PHASE22_ROLLER_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000018");
+/// The grass the deformation field bends (P22.1's scatter-bend half).
+pub const PHASE22_GRASS_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-000000000019");
+pub const PHASE22_SKY_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-00000000001a");
+pub const PHASE22_SUN_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-00000000001b");
+pub const PHASE22_CAMERA_GUID: Uuid = uuid::uuid!("22040000-0000-4000-8000-00000000001c");
+
+// ── the ground ───────────────────────────────────────────────────────────────
+
+/// The heightfield: **flat where anything stands**, plus one knoll well clear of
+/// every actor so "the terrain is not a plane" is true of content nothing
+/// touches.
+///
+/// Flat on purpose, and it is the design rather than laziness. Every claim this
+/// sample makes is about *what the ground is made of* (which splat layer answers
+/// a contact) and about *what falls onto it*; a slope would add a variable to
+/// both — a rut on a hill is a rut plus a slide, and a tower on a hill is a
+/// tower on a ramp — for no extra coverage. The P21 sample is the one that
+/// exercises terrain shape.
+///
+/// Polynomial, deliberately: this is committed content, and `std` trigonometry is
+/// not bit-portable (the P14 LAW).
+pub fn phase22_height(x: f64, z: f64) -> f64 {
+    let dx = (x - 108.0) / 16.0;
+    let dz = (z - 20.0) / 16.0;
+    let r2 = dx * dx + dz * dz;
+    if r2 < 1.0 {
+        5.0 * (1.0 - r2)
+    } else {
+        0.0
+    }
+}
+
+/// The engine's default palette indices this sample paints with. Their *physics*
+/// is `inf_terrain::deform::LAYER_RESPONSE`, which maps **by index**: layer 3 is
+/// the deep, non-recovering one (snow), layer 2 the loose one that slumps over
+/// minutes (sand/dirt/mud), layer 0 the one that barely dents and bends instead
+/// (grass). The sample paints the indices whose archetype it means, which is the
+/// only way to mean anything until an authored response table exists.
+pub const PHASE22_GRASS_LAYER: u8 = 0;
+pub const PHASE22_SAND_LAYER: u8 = 2;
+pub const PHASE22_SNOW_LAYER: u8 = 3;
+
+/// The snow band, in world `z`.
+pub const PHASE22_SNOW_Z: (f64, f64) = (40.0, 56.0);
+/// The sand band, in world `z`, immediately downstream of the snow one so a
+/// single straight run crosses both — and **ending four metres before the roller
+/// does**, so the trail has a far end on ground that barely dents. A run that
+/// stopped inside the band would leave the last stamp still being pressed, and
+/// "the trail ends where the roller stopped" would be untestable.
+pub const PHASE22_SAND_Z: (f64, f64) = (56.0, 64.0);
+
+/// Which splat layer is painted at world `z`.
+pub fn phase22_layer_at(z: f64) -> u8 {
+    if z >= PHASE22_SNOW_Z.0 && z < PHASE22_SNOW_Z.1 {
+        PHASE22_SNOW_LAYER
+    } else if z >= PHASE22_SAND_Z.0 && z < PHASE22_SAND_Z.1 {
+        PHASE22_SAND_LAYER
+    } else {
+        PHASE22_GRASS_LAYER
+    }
+}
+
+/// The heightfield **and** its splat weights, authored tile by tile.
+pub fn phase22_terrain_data() -> inf_terrain::TerrainData {
+    let mut data = inf_terrain::TerrainData::new(PHASE22_TILE_RES, PHASE22_MPS);
+    for tz in 0..PHASE22_TILES as i32 {
+        for tx in 0..PHASE22_TILES as i32 {
+            data.author_tile((tx, tz), phase22_height);
+        }
+    }
+    // The paint. One layer at full weight per sample — a hard edge rather than a
+    // blend, because the *response* is chosen by `dominant_layer_at` and a
+    // 50/50 sample would make which archetype answers a rounding question.
+    let res = PHASE22_TILE_RES;
+    let mps = PHASE22_MPS;
+    for tz in 0..PHASE22_TILES as i32 {
+        for tx in 0..PHASE22_TILES as i32 {
+            let o = data.tile_origin_xz((tx, tz));
+            let tile = data.get_or_create_tile((tx, tz));
+            tile.ensure_weights(res);
+            for j in 0..res {
+                let wz = o.y + j as f64 * mps;
+                let mut w = [0u8; 4];
+                w[phase22_layer_at(wz) as usize] = 255;
+                for i in 0..res {
+                    tile.set_weight_sample(res, i, j, w);
+                }
+            }
+        }
+    }
+    data.clear_dirty();
+    data
+}
+
+// ── the meshes ───────────────────────────────────────────────────────────────
+
+/// Subdivisions per box face. **Not taste — a cook threshold.**
+///
+/// `VgeomCookOptions::min_triangles` is 2048, and a mesh under it draws in the
+/// shipped build as a *placeholder cube* with a cook advisory saying so. Arm (e)
+/// of the phase gate asserts the cook is silent on this sample, so every mesh in
+/// it has to clear the bar: 6 faces × 2 × 16² = **3 072 triangles**, which is
+/// also a perfectly reasonable tessellation for a building somebody is going to
+/// shatter.
+const PHASE22_BOX_SUBDIV: u32 = 16;
+
+/// A tessellated axis-aligned box as an [`inf_mesh::MeshAsset`], spanning
+/// `[min, max]` in its own local space.
+///
+/// Local space matters twice over. The chunk geometry the cook derives is in
+/// *this* frame and the actor's placement maps it into the world, so a box whose
+/// local `y` runs `0 ..= h` is a building whose entity sits **on** the ground at
+/// its authored translation rather than half-buried in it — and the fracture's
+/// ground bonds are decided by where the chunks actually are.
+fn phase22_box_mesh(min: [f32; 3], max: [f32; 3], material: &str) -> inf_mesh::MeshAsset {
+    let n = PHASE22_BOX_SUBDIV;
+    let mut vertices: Vec<inf_mesh::MeshVertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    // (axis, sign): the six faces, in a fixed order so the asset is a pure
+    // function of its bounds.
+    for axis in 0..3usize {
+        for sign in [-1.0f32, 1.0] {
+            let (u_axis, v_axis) = ((axis + 1) % 3, (axis + 2) % 3);
+            let base = vertices.len() as u32;
+            let mut normal = [0.0f32; 3];
+            normal[axis] = sign;
+            for j in 0..=n {
+                for i in 0..=n {
+                    let fu = i as f32 / n as f32;
+                    let fv = j as f32 / n as f32;
+                    let mut p = [0.0f32; 3];
+                    p[axis] = if sign < 0.0 { min[axis] } else { max[axis] };
+                    p[u_axis] = min[u_axis] + fu * (max[u_axis] - min[u_axis]);
+                    p[v_axis] = min[v_axis] + fv * (max[v_axis] - min[v_axis]);
+                    vertices.push(inf_mesh::MeshVertex {
+                        position: p,
+                        normal,
+                        uv: [fu, fv],
+                        tangent: [1.0, 0.0, 0.0, 1.0],
+                    });
+                }
+            }
+            let stride = n + 1;
+            for j in 0..n {
+                for i in 0..n {
+                    let a = base + j * stride + i;
+                    indices.extend_from_slice(&[
+                        a,
+                        a + stride,
+                        a + 1,
+                        a + 1,
+                        a + stride,
+                        a + stride + 1,
+                    ]);
+                }
+            }
+        }
+    }
+    inf_mesh::MeshAsset::new(
+        vec![inf_mesh::SubMesh {
+            name: "box".into(),
+            vertices,
+            indices,
+            material_slot: Some(0),
+            skin: Vec::new(),
+        }],
+        vec![material.into()],
+    )
+}
+
+/// The block's footprint and height, metres — **three storeys of three metres**,
+/// which is what makes the structural solve do real work: the top storey's chunks
+/// reach the ground only *through* the storeys under them, so taking the middle
+/// out drops the top.
+pub const PHASE22_TOWER_HALF_XZ: f64 = 3.0;
+pub const PHASE22_TOWER_HEIGHT_M: f64 = 9.0;
+
+/// The multi-storey block's mesh: a 6 m × 9 m × 6 m tessellated box standing on
+/// its own local `y = 0`.
+///
+/// **Authored geometry, not the P19 grammar, and the reason is structural.** A
+/// `Destructible` names no asset of its own: the cook fractures the **one mesh**
+/// its actor's `MeshRef.asset` points at (the strength memo's §5 — a second
+/// reference would be a second authority for the same fact). The P19 grammar
+/// produces a *population*: scattered solids placed as instances, with no merged
+/// mesh anywhere in the pipeline. Wiring it would therefore have meant building a
+/// grammar→single-mesh bake first, which is a modelling feature and belongs to
+/// Phase 23, not to a destruction batch. So this is a box, and saying so is
+/// better than implying a building generator was used.
+pub fn phase22_tower_mesh() -> inf_mesh::MeshAsset {
+    let h = PHASE22_TOWER_HALF_XZ as f32;
+    phase22_box_mesh(
+        [-h, 0.0, -h],
+        [h, PHASE22_TOWER_HEIGHT_M as f32, h],
+        "Masonry",
+    )
+}
+
+/// The car chassis: a 4 m × 1 m × 2 m tessellated box, its local origin at its
+/// own centre so the revolute wheel anchors read as offsets from the middle of
+/// the car.
+pub fn phase22_chassis_mesh() -> inf_mesh::MeshAsset {
+    phase22_box_mesh([-2.0, -0.5, -1.0], [2.0, 0.5, 1.0], "Steel")
+}
+
+// ── the material classes ─────────────────────────────────────────────────────
+
+/// The block is **masonry**: `docs/memos/p22-strength.md`'s 2–4 MPa class, and
+/// brick's density. A wall an explosion opens and a footstep does not.
+pub const PHASE22_TOWER_STRENGTH_PA: f64 = 2.5e6;
+pub const PHASE22_TOWER_DENSITY: f64 = 1900.0;
+/// Chunks the block fractures into. Twenty-four over three storeys is eight a
+/// storey, which is the coarsest chunking that still has *interior* chunks — a
+/// piece with neighbours on every side is what makes the support graph a graph
+/// rather than a stack.
+pub const PHASE22_TOWER_CHUNKS: u32 = 24;
+
+/// The chassis is **thin pressed steel**, and this is the one number in the
+/// sample that is a judgement rather than a table lookup.
+///
+/// The memo's steel row is 4e8 Pa, which is bulk steel: at that strength a
+/// chassis bond over a ~0.5 m² face costs 200 kJ and a car needs a tactical
+/// warhead. The memo's model is a *bulk* failure stress and a monocoque is not
+/// bulk — it is a shell that folds — so pricing a car body at its material's
+/// yield stress would be an arithmetic answer to the wrong question. 2e7 Pa is
+/// the reinforced-concrete row, chosen because it is the value that makes a car
+/// take roughly a grenade: strong enough that the same charge that opens the
+/// block does not vaporise it, weak enough that it comes apart.
+pub const PHASE22_CHASSIS_STRENGTH_PA: f64 = 2.0e7;
+pub const PHASE22_CHASSIS_DENSITY: f64 = 7850.0;
+pub const PHASE22_CHASSIS_CHUNKS: u32 = 12;
+
+// ── the placements ───────────────────────────────────────────────────────────
+
+/// Where the block stands. Clear of the roller's lane and of the car.
+pub const PHASE22_TOWER_XZ: (f64, f64) = (60.0, 24.0);
+/// Where its control twin stands: 20 m away, on the same flat ground, under the
+/// same script.
+pub const PHASE22_CONTROL_XZ: (f64, f64) = (84.0, 24.0);
+/// The car's chassis centre. Its underside is 0.3 m off the ground so the first
+/// step is a short settle onto the terrain heightfield rather than a jolt.
+pub const PHASE22_CAR_XZ: (f64, f64) = (36.0, 20.0);
+pub const PHASE22_CHASSIS_Y: f64 = 0.8;
+/// Wheel radius, and where the four of them hang off the chassis in its own
+/// local frame.
+pub const PHASE22_WHEEL_RADIUS_M: f64 = 0.4;
+/// Rubber, kg/m³ — authored on the wheels' colliders rather than left at
+/// `Collider3D::density`'s default.
+///
+/// That default is `1.0`, which is **rapier's mass placeholder and not a material
+/// density** (the finding P20.2's buoyancy work was built around, and the reason
+/// chunk mass comes from `Destructible::density_kg_m3` instead). A 0.4 m sphere at
+/// 1.0 kg/m³ weighs 268 grams, so any impulse sized for a chunk sends it into
+/// orbit — which is precisely what the phase-22 gate caught on its first run.
+pub const PHASE22_WHEEL_DENSITY: f64 = 1100.0;
+/// The intact chassis' collider density, kg/m³.
+///
+/// A car is mostly air: ~1200 kg inside a 4 × 1 × 2 m box is ~150 kg/m³, and that
+/// is the number a *settling prop* should have. It is deliberately not the
+/// `Destructible::density_kg_m3` of 7850 that its **chunks** use — that one is the
+/// steel the body is made of, which is the right density for a fragment of it and
+/// the wrong one for the hollow shell as a whole.
+pub const PHASE22_CHASSIS_COLLIDER_DENSITY: f64 = 150.0;
+pub fn phase22_wheel_offsets() -> [DVec3; 4] {
+    [
+        DVec3::new(-1.4, -0.5, -1.1),
+        DVec3::new(-1.4, -0.5, 1.1),
+        DVec3::new(1.4, -0.5, -1.1),
+        DVec3::new(1.4, -0.5, 1.1),
+    ]
+}
+
+/// The roller's lane: it starts on grass just short of the snow, runs **+Z**
+/// through the snow band and out into the sand one, and stops on grass again.
+pub const PHASE22_ROLLER_X: f64 = 24.0;
+pub const PHASE22_ROLLER_START_Z: f64 = 36.0;
+pub const PHASE22_ROLLER_RADIUS_M: f64 = 0.5;
+/// Metres per second along `+Z`. At 60 Hz and [`PHASE22_STEPS`] the run covers
+/// 32 m: grass → snow (16 m) → sand (16 m) → grass, so both deformable
+/// archetypes are crossed and both ends of the trail are on ground that barely
+/// dents.
+pub const PHASE22_ROLLER_SPEED_M_S: f64 = 8.0;
+/// The downward speed the roller is held at.
+///
+/// **It is pressed into the ground, not balanced on it**, and that is the whole
+/// reason this is a constant rather than a zero. `physics3d.set_velocity` writes
+/// all three components, so a `vy` of zero would leave the body neither falling
+/// nor settling — it would ride wherever the solver last left it, and the
+/// contact band it has to be inside is 6 cm *above* the surface and 50 cm below
+/// it (`inf_ecs::deform::CONTACT_BAND_{ABOVE,BELOW}_M`). Entering the band from
+/// below makes the contact eight times as tolerant, and a metre a second is far
+/// too slow to tunnel through a heightfield at 60 Hz.
+pub const PHASE22_ROLLER_SINK_M_S: f64 = 1.0;
+
+// ── the script ───────────────────────────────────────────────────────────────
+
+/// Steps the gate traces. Argued against the *window law* at the gate; the number
+/// lives here so the content and the test cannot disagree about how long the run
+/// is.
+pub const PHASE22_STEPS: usize = 240;
+/// The step the charge goes off on.
+///
+/// Late enough that the car has settled onto its wheels and the roller is deep in
+/// the snow band — so the pre-trigger prefix is a *settled* world rather than a
+/// falling one — and early enough that [`PHASE22_STEPS`] leaves 1.4 s of collapse
+/// and debris settle after it.
+pub const PHASE22_TRIGGER_STEP: f64 = 60.0;
+/// …and the step it stops on. The charge is spent over
+/// `PHASE22_TRIGGER_STEP ..= PHASE22_TRIGGER_END` rather than in one tick,
+/// because damage is **not banked**: `apply_damage` spends what it can on the
+/// bonds that exist *now*, and a single blow at t=60 could only ever take the
+/// chunks that were cheapest at t=60. Six ticks of charge is a demolition
+/// sequence, and it is what drives the structural solve into doing progressive
+/// work rather than one-shot removal.
+pub const PHASE22_TRIGGER_END: f64 = 65.0;
+
+/// Joules the charge delivers to the block per tick.
+///
+/// Sized against the block's own numbers rather than picked: a chunk of the
+/// 324 m³ block is ~13.5 m³, so its faces are of order 5 m² and one bond costs
+/// `2.5e6 × 5 × 1e-3 ≈ 12 kJ`; a chunk with three or four neighbours (plus, at
+/// the base, a ground bond over its own `volume^(2/3)`) is therefore 40–60 kJ to
+/// liberate. 80 kJ a tick over six ticks is ~480 kJ, which **opens the building
+/// without finishing it** — around ten of the twenty-four pieces.
+///
+/// That is deliberate, and it is the number the first cut got wrong. At 400 kJ a
+/// tick the charge simply removed every chunk directly, which looks the same in a
+/// screenshot and is a strictly weaker demonstration: nothing is left standing
+/// for the structural solve to have an opinion about, and the level's audit
+/// counter for progressive collapse reads zero. A charge that leaves two thirds
+/// of the block standing is the one that has a *structure* in it afterwards.
+/// (`docs/memos/p22-strength.md`'s own sanity check: a grenade is a few kJ, a
+/// rocket some tens; this is a demolition charge.)
+pub const PHASE22_TOWER_CHARGE_J: f64 = 8.0e4;
+/// Joules the wreck script delivers to the car per tick, over the same window.
+///
+/// The chassis is far stronger per unit area (2e7 Pa against the block's 2.5e6)
+/// and far smaller (0.67 m³ a chunk, faces of order 0.7 m²), so a bond is ~14 kJ
+/// and a chunk 30–45 kJ. 25 kJ a tick takes three or four pieces off over the
+/// window and leaves the rest attached — which matters, because a car body is
+/// **not supported by static geometry**: the moment its first chunk comes off,
+/// its own collider goes with the atomic swap and the remainder is hanging in
+/// mid-air on four dynamic wheels, which the support rule correctly refuses to
+/// count. The structural solve then drops the lot. That is the level's
+/// progressive-collapse witness, and it is honest physics rather than a tuned
+/// coincidence.
+///
+/// **30 kJ, measured against the shipped asset, and both neighbouring values are
+/// wrong for instructive reasons.** The chassis' cheapest chunk costs 25 136 J to
+/// liberate.
+///
+/// * At **25 000 J** the charge spent *nothing*. Damage is not banked: energy
+///   that cannot break the cheapest bond set is simply not absorbed, the
+///   Blueprint reports 0 J as a legal value, and the level looks untouched. The
+///   only thing that noticed was this gate.
+/// * At **40 000 J** it took the whole car in one blow. Breaking a chunk makes
+///   its neighbours cheaper — their bond to it is gone — so a charge with slack
+///   in it **cascades**, and a cascade that reaches every chunk leaves the
+///   structural solve with nothing to do.
+///
+/// 30 kJ takes the cheapest chunk and stops with ~5 kJ unspent. What happens next
+/// is the demonstration: a car body is not supported by static geometry, so the
+/// eleven chunks still attached are hanging in mid-air on four **dynamic** wheels
+/// — which the support rule refuses to count — and the structural solve drops
+/// them on the same step. One bond's worth of explosive, eleven chunks of
+/// collapse.
+pub const PHASE22_CAR_CHARGE_J: f64 = 3.0e4;
+/// The blast: newton-seconds at one metre, and its radius in metres.
+///
+/// It is fired from the car's own place, so it reaches the car's debris and its
+/// four wheels and nothing else — the block is 25 m away, well outside. That is
+/// deliberate: an explosion that moved every loose body in the level would make
+/// "the block's chunks moved" a statement about the blast rather than about the
+/// collapse.
+///
+/// **8 kN·s, and the first cut had 60.** The number has to be read against the
+/// masses it acts on, and the smallest of those is a wheel: a 0.4 m sphere at
+/// [`PHASE22_WHEEL_DENSITY`] is ~295 kg, and it sits ~1.8 m from the charge where
+/// the inverse-square falloff leaves about a third of the one-metre value. 8 kN·s
+/// is therefore ~2.5 kN·s on a wheel, i.e. about 8 m/s — a wheel that is thrown
+/// and lands. At 60 kN·s it was 60 m/s and the gate found one of them 13 km up,
+/// which is what a blast tuned against the *chunk* masses (tonnes) does to the
+/// lightest body in its radius.
+pub const PHASE22_BLAST_NS: f64 = 8.0e3;
+pub const PHASE22_BLAST_RADIUS_M: f64 = 12.0;
+
+// ── the Blueprints ───────────────────────────────────────────────────────────
+
+/// `vars.get("entity")` — the only entity reference the Blueprint IR has, and
+/// therefore the reason every `destruct.*` script in this sample sits on the
+/// actor it breaks (the P21 borer's limitation, unchanged).
+fn phase22_self() -> Expr {
+    Expr::Call {
+        path: vec!["vars".into(), "get".into()],
+        args: vec![Expr::Lit(Lit::Str("entity".into()))],
+    }
+}
+
+fn phase22_get(name: &str) -> Expr {
+    Expr::Call {
+        path: vec!["vars".into(), "get".into()],
+        args: vec![Expr::Lit(Lit::Str(name.into()))],
+    }
+}
+
+fn phase22_set(name: &str, value: Expr) -> Stmt {
+    Stmt::ExprStmt(Expr::Call {
+        path: vec!["vars".into(), "set".into()],
+        args: vec![Expr::Lit(Lit::Str(name.into())), value],
+    })
+}
+
+fn phase22_slot(name: &str, default: f64) -> inf_blueprint::Variable {
+    inf_blueprint::Variable {
+        name: name.into(),
+        ty: inf_blueprint::Ty::Float,
+        default: Lit::Float(default),
+        exposed: false,
+    }
+}
+
+fn phase22_tick_params() -> Vec<inf_blueprint::Param> {
+    vec![inf_blueprint::Param {
+        name: "dt".into(),
+        ty: inf_blueprint::Ty::Float,
+    }]
+}
+
+/// `step >= TRIGGER_STEP && step <= TRIGGER_END` — the scripted window.
+///
+/// Written against the actor's **own tick counter** rather than a clock, so the
+/// charge goes off on the same fixed step in the editor preview, in the shipped
+/// build and in a replay. That is the whole reason the counter exists.
+fn phase22_in_window() -> Expr {
+    use inf_blueprint::BinOp;
+    Expr::Binary(
+        BinOp::And,
+        Box::new(Expr::Binary(
+            BinOp::Ge,
+            Box::new(phase22_get("step")),
+            Box::new(Expr::Lit(Lit::Float(PHASE22_TRIGGER_STEP))),
+        )),
+        Box::new(Expr::Binary(
+            BinOp::Le,
+            Box::new(phase22_get("step")),
+            Box::new(Expr::Lit(Lit::Float(PHASE22_TRIGGER_END))),
+        )),
+    )
+}
+
+/// The `Destroyed` handler both destructible classes share: record the chunk
+/// count, **count** the firings (latching would make "once" uncheckable — the
+/// P22.3 lesson), and play the actor's `AudioSource`.
+///
+/// The audio hook is the phase's own "audio/VFX event hooks" line, half of it:
+/// there is no particle system in this engine so a break makes no dust, and that
+/// is ledgered rather than faked — but the sound is real, goes through the P12
+/// command queue, and fires exactly once.
+fn phase22_destroyed_binding() -> EventBinding {
+    use inf_blueprint::BinOp;
+    EventBinding {
+        event: EventKind::Destroyed,
+        body: BlueprintFn {
+            id: "destroyed".into(),
+            name: "destroyed".into(),
+            params: EventKind::Destroyed.signature(),
+            ret: Ty::Unit,
+            body: vec![
+                phase22_set("destroyed_chunks", phase22_get("chunks")),
+                phase22_set(
+                    "destroyed_fires",
+                    Expr::Binary(
+                        BinOp::Add,
+                        Box::new(phase22_get("destroyed_fires")),
+                        Box::new(Expr::Lit(Lit::Float(1.0))),
+                    ),
+                ),
+                Stmt::ExprStmt(Expr::Call {
+                    path: vec!["audio".into(), "play".into()],
+                    args: vec![phase22_self()],
+                }),
+            ],
+        },
+    }
+}
+
+/// The variables every `destruct.*` script in this sample keeps. Shared so the
+/// tower, its control and the car report through the same names and the gate can
+/// read any of them with one accessor.
+fn phase22_destruct_vars() -> Vec<inf_blueprint::Variable> {
+    vec![
+        // The actor's own tick counter — the script's clock.
+        phase22_slot("step", 0.0),
+        // Joules this tick's charge actually consumed.
+        phase22_slot("absorbed", 0.0),
+        // …and their sum, which is what a refusal makes stay at zero for ever.
+        phase22_slot("total", 0.0),
+        // The two queries, read AFTER the charge in the same handler.
+        phase22_slot("intact", -1.0),
+        phase22_slot("chunks", -1.0),
+        // What `Destroyed` saw, and how often it saw it.
+        phase22_slot("destroyed_chunks", -1.0),
+        phase22_slot("destroyed_fires", 0.0),
+    ]
+}
+
+/// **The demolition charge** — carried by the multi-storey block AND, unchanged,
+/// by its control twin.
+///
+/// One class on two actors is what makes the control a control: the two entities
+/// differ in `Destructible::runtime_destruct` and in nothing else at all, so a
+/// difference in outcome cannot be a difference in script.
+pub fn phase22_demolition_class() -> BlueprintClass {
+    use inf_blueprint::BinOp;
+    let mut class = BlueprintClass::new("act:phase22-demolition", "Demolition Charge");
+    class.variables = phase22_destruct_vars();
+    class.events = vec![
+        EventBinding {
+            event: EventKind::Tick,
+            body: BlueprintFn {
+                id: "tick".into(),
+                name: "tick".into(),
+                params: phase22_tick_params(),
+                ret: Ty::Unit,
+                body: vec![
+                    Stmt::If {
+                        cond: phase22_in_window(),
+                        then_body: vec![
+                            phase22_set(
+                                "absorbed",
+                                Expr::Call {
+                                    path: vec!["destruct".into(), "apply_damage".into()],
+                                    args: vec![
+                                        phase22_self(),
+                                        Expr::Lit(Lit::Float(PHASE22_TOWER_CHARGE_J)),
+                                    ],
+                                },
+                            ),
+                            phase22_set(
+                                "total",
+                                Expr::Binary(
+                                    BinOp::Add,
+                                    Box::new(phase22_get("total")),
+                                    Box::new(phase22_get("absorbed")),
+                                ),
+                            ),
+                        ],
+                        else_body: Vec::new(),
+                    },
+                    phase22_set(
+                        "step",
+                        Expr::Binary(
+                            BinOp::Add,
+                            Box::new(phase22_get("step")),
+                            Box::new(Expr::Lit(Lit::Float(1.0))),
+                        ),
+                    ),
+                    phase22_set(
+                        "intact",
+                        Expr::Call {
+                            path: vec!["destruct".into(), "is_intact".into()],
+                            args: vec![phase22_self()],
+                        },
+                    ),
+                    phase22_set(
+                        "chunks",
+                        Expr::Call {
+                            path: vec!["destruct".into(), "chunk_count".into()],
+                            args: vec![phase22_self()],
+                        },
+                    ),
+                ],
+            },
+        },
+        phase22_destroyed_binding(),
+    ];
+    class
+}
+
+/// `step == TRIGGER_STEP` — a single scripted instant.
+///
+/// The car's charge fires **once**, unlike the block's demolition string, and
+/// both halves of that are the physics rather than a preference. An explosion is
+/// one impulse: firing it on every tick of a six-tick window multiplies its
+/// momentum by six, and on the lightest body in the radius — a wheel — the gate
+/// measured that as sixty metres of altitude. And the *damage* has to be one blow
+/// too, because a car body is not supported by static geometry: the first chunk
+/// that comes off makes the rest unsupported, so a second tick of charge would be
+/// spending joules on bonds the structural solve had already broken for free.
+fn phase22_at_trigger() -> Expr {
+    use inf_blueprint::BinOp;
+    Expr::Binary(
+        BinOp::Eq,
+        Box::new(phase22_get("step")),
+        Box::new(Expr::Lit(Lit::Float(PHASE22_TRIGGER_STEP))),
+    )
+}
+
+/// **The car bomb** — damage *and* the radial impulse, at one scripted instant
+/// inside the block's charge window.
+///
+/// The blast is fired from the car's own place and reaches [`PHASE22_BLAST_RADIUS_M`],
+/// which covers the chassis' own debris and its four wheels and stops well short
+/// of the block 25 m away. That containment is deliberate: an explosion that
+/// moved every loose body in the level would make "the block's chunks moved" a
+/// statement about the blast rather than about the collapse.
+pub fn phase22_wreck_class() -> BlueprintClass {
+    use inf_blueprint::BinOp;
+    let (cx, cz) = PHASE22_CAR_XZ;
+    let mut class = BlueprintClass::new("act:phase22-wreck", "Car Bomb");
+    class.variables = {
+        let mut v = phase22_destruct_vars();
+        // How many bodies the blast pushed — the one number that says the impulse
+        // reached the debris it had just made.
+        v.push(phase22_slot("hit", -1.0));
+        v
+    };
+    class.events = vec![
+        EventBinding {
+            event: EventKind::Tick,
+            body: BlueprintFn {
+                id: "tick".into(),
+                name: "tick".into(),
+                params: phase22_tick_params(),
+                ret: Ty::Unit,
+                body: vec![
+                    Stmt::If {
+                        cond: phase22_at_trigger(),
+                        then_body: vec![
+                            phase22_set(
+                                "absorbed",
+                                Expr::Call {
+                                    path: vec!["destruct".into(), "apply_damage".into()],
+                                    args: vec![
+                                        phase22_self(),
+                                        Expr::Lit(Lit::Float(PHASE22_CAR_CHARGE_J)),
+                                    ],
+                                },
+                            ),
+                            phase22_set(
+                                "total",
+                                Expr::Binary(
+                                    BinOp::Add,
+                                    Box::new(phase22_get("total")),
+                                    Box::new(phase22_get("absorbed")),
+                                ),
+                            ),
+                            phase22_set(
+                                "hit",
+                                Expr::Call {
+                                    path: vec!["destruct".into(), "radial_impulse".into()],
+                                    args: vec![
+                                        Expr::Lit(Lit::Float(cx)),
+                                        Expr::Lit(Lit::Float(PHASE22_CHASSIS_Y)),
+                                        Expr::Lit(Lit::Float(cz)),
+                                        Expr::Lit(Lit::Float(PHASE22_BLAST_NS)),
+                                        Expr::Lit(Lit::Float(PHASE22_BLAST_RADIUS_M)),
+                                    ],
+                                },
+                            ),
+                        ],
+                        else_body: Vec::new(),
+                    },
+                    phase22_set(
+                        "step",
+                        Expr::Binary(
+                            BinOp::Add,
+                            Box::new(phase22_get("step")),
+                            Box::new(Expr::Lit(Lit::Float(1.0))),
+                        ),
+                    ),
+                    phase22_set(
+                        "intact",
+                        Expr::Call {
+                            path: vec!["destruct".into(), "is_intact".into()],
+                            args: vec![phase22_self()],
+                        },
+                    ),
+                    phase22_set(
+                        "chunks",
+                        Expr::Call {
+                            path: vec!["destruct".into(), "chunk_count".into()],
+                            args: vec![phase22_self()],
+                        },
+                    ),
+                ],
+            },
+        },
+        phase22_destroyed_binding(),
+    ];
+    class
+}
+
+/// **The roller** — the moving body that leaves the tracks.
+///
+/// It drives itself with `physics3d.set_velocity` on every Tick: `+Z` at
+/// [`PHASE22_ROLLER_SPEED_M_S`] and a steady [`PHASE22_ROLLER_SINK_M_S`]
+/// downward, so it is *pressed into* the surface rather than balanced on it (see
+/// that constant). Its body has `gravity_scale = 0`, which is what makes the run
+/// a scripted probe: the only vertical input is the one the script writes, so the
+/// trail is a function of the script and of the ground and of nothing else.
+pub fn phase22_roller_class() -> BlueprintClass {
+    use inf_blueprint::BinOp;
+    let mut class = BlueprintClass::new("act:phase22-roller", "Roller");
+    class.variables = vec![phase22_slot("step", 0.0)];
+    class.events = vec![EventBinding {
+        event: EventKind::Tick,
+        body: BlueprintFn {
+            id: "tick".into(),
+            name: "tick".into(),
+            params: phase22_tick_params(),
+            ret: Ty::Unit,
+            body: vec![
+                Stmt::ExprStmt(Expr::Call {
+                    path: vec!["physics3d".into(), "set_velocity".into()],
+                    args: vec![
+                        phase22_self(),
+                        Expr::Lit(Lit::Float(0.0)),
+                        Expr::Lit(Lit::Float(-PHASE22_ROLLER_SINK_M_S)),
+                        Expr::Lit(Lit::Float(PHASE22_ROLLER_SPEED_M_S)),
+                    ],
+                }),
+                phase22_set(
+                    "step",
+                    Expr::Binary(
+                        BinOp::Add,
+                        Box::new(phase22_get("step")),
+                        Box::new(Expr::Lit(Lit::Float(1.0))),
+                    ),
+                ),
+            ],
+        },
+    }];
+    class
+}
+
+// ── the scene ────────────────────────────────────────────────────────────────
+
+/// Build the committed Phase 22 [`SceneDoc`].
+///
+/// The terrain is **asset-backed** (`Terrain.asset`), like Phase 21's and for the
+/// neighbouring reason: this is the streamed-terrain configuration, the one whose
+/// tiles page in from a `.inf_terrain` and whose sim-resident level-0 tiles the
+/// P22.3 bridge turns into heightfield colliders. Everything in this level that
+/// falls, lands on those.
+pub fn phase22_playground_scene() -> SceneDoc {
+    use crate::scene::serialize::LevelSettings;
+    use inf_ecs::components::{
+        ActorClass, AudioSource, BodyKind3D, Camera, Collider3D, ColliderShape3DKind, Destructible,
+        Foliage, FoliageInstance, FoliagePaletteEntry, Joint3D, JointKind3D, Light, LightKind,
+        Material, MeshRef, Primitive, RigidBody3D, SkyAtmosphere, Terrain, TimeOfDay,
+    };
+    use inf_ecs::math::{Color, Vec2d, Vec3d};
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Phase 22 Playground");
+    doc.set_settings(LevelSettings {
+        gravity_2d: Vec2d::new(0.0, -9.81),
+        gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+        sim_hz: 60.0,
+        ..LevelSettings::default()
+    });
+
+    // ── The ground: flat, painted snow and sand in two bands. ──
+    doc.create_with_guid(PHASE22_TERRAIN_GUID, SpawnKind::Empty, "Ground", None);
+    insert!(
+        doc,
+        PHASE22_TERRAIN_GUID,
+        Transform::from_translation(DVec3::ZERO)
+    );
+    insert!(
+        doc,
+        PHASE22_TERRAIN_GUID,
+        Terrain {
+            meters_per_sample: PHASE22_MPS,
+            tile_resolution: PHASE22_TILE_RES,
+            data: phase22_terrain_data(),
+            asset: Some(PHASE22_TERRAIN_ASSET_GUID),
+            ..Terrain::default()
+        }
+    );
+
+    // ── The multi-storey block, and its control twin. ──
+    for (guid, name, xz, permitted) in [
+        (PHASE22_TOWER_GUID, "Block", PHASE22_TOWER_XZ, true),
+        (
+            PHASE22_CONTROL_GUID,
+            "Block (Runtime Destruct Off)",
+            PHASE22_CONTROL_XZ,
+            false,
+        ),
+    ] {
+        doc.create_with_guid(guid, SpawnKind::Empty, name, None);
+        insert!(
+            doc,
+            guid,
+            Transform::from_translation(DVec3::new(xz.0, 0.0, xz.1))
+        );
+        insert!(
+            doc,
+            guid,
+            MeshRef {
+                primitive: Primitive::Cube,
+                asset: Some(PHASE22_BLOCK_MESH_GUID),
+            }
+        );
+        insert!(
+            doc,
+            guid,
+            Material {
+                base_color: Color::new(0.62, 0.58, 0.52, 1.0),
+                roughness: 0.85,
+                ..Material::default()
+            }
+        );
+        // Static: a building is level geometry until it is not. Its chunks become
+        // dynamic bodies at the break; the actor's own collider disappears in the
+        // same atomic swap.
+        insert!(
+            doc,
+            guid,
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Box,
+                half_extents: Vec3d::new(
+                    PHASE22_TOWER_HALF_XZ,
+                    PHASE22_TOWER_HEIGHT_M * 0.5,
+                    PHASE22_TOWER_HALF_XZ
+                ),
+                offset: Vec3d::new(0.0, PHASE22_TOWER_HEIGHT_M * 0.5, 0.0),
+                ..Collider3D::default()
+            }
+        );
+        insert!(
+            doc,
+            guid,
+            Destructible {
+                fracture_seed: 22,
+                chunk_count: PHASE22_TOWER_CHUNKS,
+                strength: PHASE22_TOWER_STRENGTH_PA,
+                density_kg_m3: PHASE22_TOWER_DENSITY,
+                runtime_destruct: permitted,
+            }
+        );
+        insert!(doc, guid, ActorClass(PHASE22_DEMO_ACTOR_GUID));
+        insert!(
+            doc,
+            guid,
+            AudioSource {
+                clip: Some(PHASE22_CLIP_GUID),
+                looping: false,
+                ..AudioSource::default()
+            }
+        );
+    }
+
+    // ── The car: a destructible chassis on four revolute wheels. ──
+    let (cx, cz) = PHASE22_CAR_XZ;
+    doc.create_with_guid(PHASE22_CHASSIS_GUID, SpawnKind::Empty, "Car Chassis", None);
+    insert!(
+        doc,
+        PHASE22_CHASSIS_GUID,
+        Transform::from_translation(DVec3::new(cx, PHASE22_CHASSIS_Y, cz))
+    );
+    insert!(
+        doc,
+        PHASE22_CHASSIS_GUID,
+        MeshRef {
+            primitive: Primitive::Cube,
+            asset: Some(PHASE22_CHASSIS_MESH_GUID),
+        }
+    );
+    insert!(
+        doc,
+        PHASE22_CHASSIS_GUID,
+        Material {
+            base_color: Color::new(0.30, 0.36, 0.48, 1.0),
+            metallic: 0.9,
+            roughness: 0.35,
+            ..Material::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE22_CHASSIS_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            ..RigidBody3D::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE22_CHASSIS_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(2.0, 0.5, 1.0),
+            density: PHASE22_CHASSIS_COLLIDER_DENSITY,
+            ..Collider3D::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE22_CHASSIS_GUID,
+        Destructible {
+            fracture_seed: 22,
+            chunk_count: PHASE22_CHASSIS_CHUNKS,
+            strength: PHASE22_CHASSIS_STRENGTH_PA,
+            density_kg_m3: PHASE22_CHASSIS_DENSITY,
+            runtime_destruct: true,
+        }
+    );
+    insert!(
+        doc,
+        PHASE22_CHASSIS_GUID,
+        ActorClass(PHASE22_WRECK_ACTOR_GUID)
+    );
+
+    for (i, offset) in phase22_wheel_offsets().into_iter().enumerate() {
+        let guid = PHASE22_WHEEL_GUIDS[i];
+        doc.create_with_guid(guid, SpawnKind::Empty, &format!("Wheel {i}"), None);
+        insert!(
+            doc,
+            guid,
+            Transform::from_translation(DVec3::new(cx, PHASE22_CHASSIS_Y, cz) + offset)
+        );
+        insert!(
+            doc,
+            guid,
+            MeshRef {
+                primitive: Primitive::Sphere,
+                asset: None,
+            }
+        );
+        insert!(
+            doc,
+            guid,
+            Material {
+                base_color: Color::new(0.09, 0.09, 0.10, 1.0),
+                roughness: 0.95,
+                ..Material::default()
+            }
+        );
+        insert!(
+            doc,
+            guid,
+            RigidBody3D {
+                kind: BodyKind3D::Dynamic,
+                ..RigidBody3D::default()
+            }
+        );
+        insert!(
+            doc,
+            guid,
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Sphere,
+                radius: PHASE22_WHEEL_RADIUS_M,
+                density: PHASE22_WHEEL_DENSITY,
+                ..Collider3D::default()
+            }
+        );
+        // The hinge. `other_anchor` is the wheel's seat in the CHASSIS' local
+        // frame, `local_anchor` the wheel's own centre — so the joint describes
+        // the car's geometry and not the pair's current world poses.
+        insert!(
+            doc,
+            guid,
+            Joint3D {
+                other: inf_ecs::refs::EntityRef::new(PHASE22_CHASSIS_GUID),
+                kind: JointKind3D::Revolute,
+                local_anchor: Vec3d::ZERO,
+                other_anchor: Vec3d::new(offset.x, offset.y, offset.z),
+                axis: Vec3d::new(0.0, 0.0, 1.0),
+                ..Joint3D::default()
+            }
+        );
+    }
+
+    // ── The roller. ──
+    doc.create_with_guid(PHASE22_ROLLER_GUID, SpawnKind::Empty, "Roller", None);
+    insert!(
+        doc,
+        PHASE22_ROLLER_GUID,
+        Transform::from_translation(DVec3::new(
+            PHASE22_ROLLER_X,
+            PHASE22_ROLLER_RADIUS_M,
+            PHASE22_ROLLER_START_Z
+        ))
+    );
+    insert!(
+        doc,
+        PHASE22_ROLLER_GUID,
+        MeshRef {
+            primitive: Primitive::Sphere,
+            asset: None,
+        }
+    );
+    insert!(
+        doc,
+        PHASE22_ROLLER_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            // The script owns the vertical: see `PHASE22_ROLLER_SINK_M_S`.
+            gravity_scale: 0.0,
+            fixed_rotation: true,
+            ..RigidBody3D::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE22_ROLLER_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Sphere,
+            radius: PHASE22_ROLLER_RADIUS_M,
+            ..Collider3D::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE22_ROLLER_GUID,
+        ActorClass(PHASE22_ROLLER_ACTOR_GUID)
+    );
+
+    // ── The grass the tracks bend. ──
+    //
+    // A lattice straddling the roller's lane, so instances stand both inside the
+    // trail and clear of it: the bend shader reads the same deformation window the
+    // terrain displacement does, and a strip entirely inside the rut would bend
+    // uniformly and prove nothing.
+    doc.create_with_guid(PHASE22_GRASS_GUID, SpawnKind::Empty, "Grass", None);
+    insert!(
+        doc,
+        PHASE22_GRASS_GUID,
+        Transform::from_translation(DVec3::new(PHASE22_ROLLER_X, 0.0, 56.0))
+    );
+    {
+        let mut instances = Vec::new();
+        for j in 0..PHASE22_GRASS_ROWS {
+            for i in 0..PHASE22_GRASS_COLS {
+                let x = -6.0 + i as f64 * (12.0 / (PHASE22_GRASS_COLS - 1) as f64);
+                let z = -16.0 + j as f64 * (32.0 / (PHASE22_GRASS_ROWS - 1) as f64);
+                instances.push(FoliageInstance {
+                    position: Vec3d::new(x, 0.0, z),
+                    // Euler degrees, deterministic from the lattice index — no RNG
+                    // in committed content.
+                    rotation: Vec3d::new(0.0, ((i * 37 + j * 11) % 360) as f64, 0.0),
+                    scale: 0.8 + ((i * 7 + j * 3) % 5) as f64 * 0.1,
+                    kind: 0,
+                });
+            }
+        }
+        insert!(
+            doc,
+            PHASE22_GRASS_GUID,
+            Foliage {
+                palette: vec![FoliagePaletteEntry {
+                    primitive: Primitive::Cone,
+                    tint: Color::new(0.30, 0.48, 0.22, 1.0),
+                }],
+                instances,
+            }
+        );
+    }
+
+    // ── Sky + sun + camera, so the scene opens somewhere sensible. ──
+    doc.create_with_guid(PHASE22_SKY_GUID, SpawnKind::Empty, "Sky", None);
+    insert!(
+        doc,
+        PHASE22_SKY_GUID,
+        TimeOfDay {
+            seconds: 9.0 * 3600.0,
+            rate: 0.0,
+            ..TimeOfDay::default()
+        }
+    );
+    insert!(doc, PHASE22_SKY_GUID, SkyAtmosphere::default());
+
+    doc.create_with_guid(PHASE22_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        PHASE22_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            intensity: 3.0,
+            ..Light::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE22_SUN_GUID,
+        Transform::from_translation(DVec3::new(0.0, 80.0, 0.0))
+    );
+
+    doc.create_with_guid(PHASE22_CAMERA_GUID, SpawnKind::Empty, "Camera", None);
+    insert!(doc, PHASE22_CAMERA_GUID, Camera::default());
+    insert!(
+        doc,
+        PHASE22_CAMERA_GUID,
+        Transform::from_translation(DVec3::new(30.0, 18.0, 8.0))
+    );
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+/// The grass lattice. Small on purpose: the bend claim is about the *seam*, and
+/// 21 × 21 instances is a legible strip that costs nothing to cook.
+pub const PHASE22_GRASS_COLS: u32 = 21;
+pub const PHASE22_GRASS_ROWS: u32 = 21;
+
+// ── the committed files ──────────────────────────────────────────────────────
+
+/// `samples/phase22-playground`, resolved from this crate's manifest dir.
+pub fn phase22_playground_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/phase22-playground")
+}
+
+/// The `.inf_terrain` the level's `Terrain.asset` names.
+pub fn phase22_terrain_asset() -> Result<inf_terrain::TerrainAsset, String> {
+    let data = phase22_terrain_data();
+    let opts = inf_terrain::PyramidOptions::default();
+    let pyramid = inf_terrain::build_pyramid(&data, opts);
+    inf_terrain::build_terrain_asset(&data, &pyramid, opts)
+        .map_err(|e| format!("build terrain asset: {e}"))
+}
+
+/// The collapse's `.inf_audio` clip — the same deterministic tone the physics
+/// playground commits, so no binary fixture is needed.
+pub fn phase22_audio_asset() -> inf_audio::AudioAsset {
+    playground_audio_asset()
+}
+
+/// Write every committed Phase 22 gate file.
+pub fn write_phase22_playground() -> Result<(), String> {
+    let dir = phase22_playground_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    crate::scene::serialize::save(
+        &phase22_playground_scene(),
+        &dir.join("Phase22Playground.inf_lvl"),
+        Some(PHASE22_LEVEL_GUID),
+    )?;
+
+    let terrain = phase22_terrain_asset()?;
+    let tpath = dir.join("Phase22Playground.inf_terrain");
+    let tbytes = inf_terrain::write_terrain_asset(&tpath, &terrain)
+        .map_err(|e| format!("write terrain asset: {e}"))?;
+    inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(PHASE22_TERRAIN_ASSET_GUID),
+        inf_asset::AssetKind::Terrain,
+        inf_asset::ContentHash::of(tbytes),
+    )
+    .save(&tpath)
+    .map_err(|e| format!("write terrain sidecar: {e}"))?;
+
+    for (file, mesh, guid) in [
+        (
+            "Block.inf_mesh",
+            phase22_tower_mesh(),
+            PHASE22_BLOCK_MESH_GUID,
+        ),
+        (
+            "Chassis.inf_mesh",
+            phase22_chassis_mesh(),
+            PHASE22_CHASSIS_MESH_GUID,
+        ),
+    ] {
+        let bytes = inf_asset::encode(&mesh).map_err(|e| format!("encode {file}: {e}"))?;
+        write_phase19_asset(&dir.join(file), &bytes, guid, inf_asset::AssetKind::Mesh)?;
+    }
+
+    for (file, class, guid) in [
+        (
+            "Demolition.inf_act",
+            phase22_demolition_class(),
+            PHASE22_DEMO_ACTOR_GUID,
+        ),
+        (
+            "Wreck.inf_act",
+            phase22_wreck_class(),
+            PHASE22_WRECK_ACTOR_GUID,
+        ),
+        (
+            "Roller.inf_act",
+            phase22_roller_class(),
+            PHASE22_ROLLER_ACTOR_GUID,
+        ),
+    ] {
+        let bytes = encode_actor(&class)?;
+        write_phase19_asset(
+            &dir.join(file),
+            &bytes,
+            guid,
+            inf_asset::AssetKind::Blueprint,
+        )?;
+    }
+
+    write_anim_asset(
+        &dir,
+        "Collapse.inf_audio",
+        PHASE22_CLIP_GUID,
+        inf_asset::AssetKind::Audio,
+        &phase22_audio_asset(),
+    )?;
+
+    std::fs::write(dir.join("README.md"), PHASE22_PLAYGROUND_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const PHASE22_PLAYGROUND_README: &str = "# Phase 22 Playground (the phase gate scene)\n\n\
+Generated by `inf_editor_core::samples::phase22_playground_scene` -- the\n\
+**composed** gate scene for Phase 22 (dynamic world: deformation & destruction),\n\
+and the plan's own done-when sentence built: *a playground scene shows footprints\n\
+and tyre tracks in snow and sand, bending grass, and a car and a multi-storey\n\
+building destroyed by Blueprint-triggered explosions with debris physics --\n\
+deterministic on the replay trace, PIE == shipping.*\n\n\
+## What is in it\n\n\
+- `Phase22Playground.inf_lvl` -- a 128 m square of **asset-backed (streamed)**\n\
+  terrain, flat where anything stands, painted in two bands: **snow** (layer 3,\n\
+  the deep non-recovering archetype) over `z` 40-56 and **sand** (layer 2, the\n\
+  loose one that slumps over minutes) over `z` 56-64, grass everywhere else --\n\
+  so the roller's straight run crosses both and ends back on ground that barely\n\
+  dents, which is what makes 'the trail has a far end' a testable claim.\n\
+- `Phase22Playground.inf_terrain` -- that heightfield and its splat weights. The\n\
+  terrain is asset-backed because this is the **streamed** configuration, and\n\
+  because the P22.3 physics bridge turns sim-resident level-0 tiles into\n\
+  heightfield colliders: everything in this level that falls, lands on those.\n\
+- `Block.inf_mesh` -- a 6 x 9 x 6 m tessellated box, three storeys of three\n\
+  metres, 3 072 triangles. **Authored geometry, not the P19 grammar**: a\n\
+  `Destructible` fractures the ONE mesh its actor's `MeshRef.asset` names, and the\n\
+  grammar produces a scattered *population* with no merged mesh anywhere in the\n\
+  pipeline -- so using it would have meant building a grammar-to-mesh bake first,\n\
+  which is a modelling feature and belongs to Phase 23.\n\
+- `Chassis.inf_mesh` -- the car's 4 x 1 x 2 m body, likewise tessellated (both\n\
+  meshes clear the cook's 2 048-triangle vgeom threshold, because arm (e) of the\n\
+  gate asserts the cook is SILENT and a sub-threshold mesh draws an advisory).\n\
+- `Demolition.inf_act` -- the charge. On Tick, over steps 60-65, it spends\n\
+  80 kJ a tick on its own actor's bonds and then reports `is_intact` and\n\
+  `chunk_count`; its `Destroyed` handler counts its firings and plays the actor's\n\
+  `AudioSource`. **Two actors carry this one class**: the block, and a control\n\
+  twin 24 m away whose `Destructible::runtime_destruct` is `false`. They differ in\n\
+  that flag and in nothing else -- not even in what they are made of -- which is\n\
+  what makes the control a control.\n\
+- `Wreck.inf_act` -- the car bomb: ONE instant at step 60, 30 kJ of damage plus\n\
+  an 8 kN.s radial impulse at the car's own place with a 12 m radius. Both\n\
+  'once' and the size are the physics: an explosion is one impulse, and firing\n\
+  it on every tick of a six-tick window multiplied its momentum by six -- which\n\
+  the gate measured as a wheel 60 m up. The blast reaches the chassis' debris\n\
+  and its four wheels and stops well short of the block, so 'the block's chunks\n\
+  moved' stays a statement about the collapse.\n\
+  30 kJ is one chunk's worth of bonds, and what happens next is the point: a car\n\
+  body is not supported by static geometry, so the eleven chunks still attached\n\
+  are hanging on four DYNAMIC wheels the support rule refuses to count, and the\n\
+  structural solve drops the lot.\n\
+- `Roller.inf_act` -- the thing that leaves the tracks. Every Tick it writes its\n\
+  own velocity (`physics3d.set_velocity`): 8 m/s along +Z and a steady 1 m/s\n\
+  down, so it is *pressed into* the surface rather than balanced on it. Its body\n\
+  has `gravity_scale = 0`, which makes the run a scripted probe: the only\n\
+  vertical input is the one the script writes.\n\
+- `Collapse.inf_audio` -- the short deterministic tone the `Destroyed` handler\n\
+  plays (the same generator the physics playground commits, so no binary fixture\n\
+  is needed).\n\
+- A **car**: a destructible chassis with four wheels on revolute joints. It is a\n\
+  **prop, not a vehicle** -- this engine has no vehicle controller -- so it\n\
+  settles onto its wheels and is then blown up, which is all the phase claims.\n\
+- A **grass strip** straddling the roller's lane, so instances stand both inside\n\
+  the trail and clear of it: the P22.1 bend shader reads the same deformation\n\
+  window the terrain displacement does, and a strip entirely inside the rut would\n\
+  bend uniformly and prove nothing.\n\n\
+## What it is NOT\n\n\
+No dust and no smoke: this engine has no particle system, so a break makes a\n\
+sound and no visual effect. That is ledgered rather than faked. The sub-chunk\n\
+**rubble** P22.4 adds is real, but it is instanced render dressing derived from\n\
+the detach events -- it is not simulated and never feeds back into the sim.\n\n\
+Destruction is **not persisted**: rubble dies with the session, and saving after\n\
+a break produces a byte-identical `.inf_lvl`\n\
+(`inf-editor-core`'s `simulate_destruction_not_persisted`).\n\n\
+## The gate (`runtime/inf-player/tests/phase22_gate.rs`)\n\n\
+Two loads bit-identical; cooked == uncooked **up to the charge** (a dev directory\n\
+has no `.inf_fracture` by design) and demonstrably different past it; PIE ==\n\
+shipping on the full trace (deformation field bytes + every destructible's\n\
+`FractureState` bits + the fixed step's audit counters + ground probes) compared\n\
+as raw bits, per step; a REAL `--pie` subprocess against the in-process\n\
+reference; the world assertions (the charge OPENED the block and left a\n\
+structure behind, the car fractured and the structural solve dropped what the\n\
+charge did not pay for, the trail is where the roller ran and nowhere else, the\n\
+debris budget held, the control twin survived the identical charge); budgets;\n\
+pool-size determinism; and the save-after-damage identity.\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6503,6 +7848,7 @@ mod tests {
             write_phase19_town().expect("regenerate phase19 town");
             write_phase20_coastal().expect("regenerate phase20 coastal");
             write_phase21_cavern().expect("regenerate phase21 cavern");
+            write_phase22_playground().expect("regenerate phase22 playground");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -6807,6 +8153,143 @@ mod tests {
                 "committed phase21-cavern .inf_terrain drifted from the generator"
             );
         }
+
+        // Phase 22 playground lock (P22.4): the level, the two `.inf_mesh`
+        // assets, the three blueprints and the terrain. The meshes are locked and
+        // not merely regenerated for the same reason the cavern's volume is — a
+        // drifted mesh is a different *fracture*, because the cook chunks whatever
+        // geometry it is handed, and the level says nothing about that.
+        let p22dir = phase22_playground_dir();
+        let p22lvl = p22dir.join("Phase22Playground.inf_lvl");
+        if p22lvl.exists() {
+            let want_lvl = crate::scene::serialize::encode(
+                &crate::scene::serialize::to_scene_file(&phase22_playground_scene()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&p22lvl).unwrap(),
+                want_lvl,
+                "committed phase22-playground .inf_lvl drifted from the generator"
+            );
+            for (file, class) in [
+                ("Demolition.inf_act", phase22_demolition_class()),
+                ("Wreck.inf_act", phase22_wreck_class()),
+                ("Roller.inf_act", phase22_roller_class()),
+            ] {
+                assert_eq!(
+                    std::fs::read(p22dir.join(file)).unwrap(),
+                    encode_actor(&class).unwrap(),
+                    "committed phase22-playground {file} drifted from the generator"
+                );
+            }
+            for (file, mesh) in [
+                ("Block.inf_mesh", phase22_tower_mesh()),
+                ("Chassis.inf_mesh", phase22_chassis_mesh()),
+            ] {
+                assert_eq!(
+                    std::fs::read(p22dir.join(file)).unwrap(),
+                    inf_asset::encode(&mesh).unwrap(),
+                    "committed phase22-playground {file} drifted from the generator"
+                );
+            }
+            assert_eq!(
+                std::fs::read(p22dir.join("Phase22Playground.inf_terrain")).unwrap(),
+                phase22_terrain_asset().unwrap().into_bytes(),
+                "committed phase22-playground .inf_terrain drifted from the generator"
+            );
+        }
+    }
+
+    // ── Phase 22 playground shape (P22.4) ──────────────────────────────────
+
+    /// **The sample really is the done-when sentence.** Asserted on the
+    /// *generators* rather than on the committed bytes, so a change to the design
+    /// fails here with a readable number instead of as a byte diff.
+    #[test]
+    fn the_playground_sample_is_actually_a_playground() {
+        use glam::DVec2;
+        let data = phase22_terrain_data();
+
+        // Two bands of deformable ground, painted where the design says, with
+        // grass on both sides of them.
+        assert_eq!(
+            data.dominant_layer_at(DVec2::new(PHASE22_ROLLER_X, PHASE22_SNOW_Z.0 + 4.0)),
+            Some(PHASE22_SNOW_LAYER),
+            "the snow band is not painted snow"
+        );
+        assert_eq!(
+            data.dominant_layer_at(DVec2::new(PHASE22_ROLLER_X, PHASE22_SAND_Z.0 + 4.0)),
+            Some(PHASE22_SAND_LAYER),
+            "the sand band is not painted sand"
+        );
+        assert_eq!(
+            data.dominant_layer_at(DVec2::new(PHASE22_ROLLER_X, PHASE22_SNOW_Z.0 - 8.0)),
+            Some(PHASE22_GRASS_LAYER)
+        );
+        assert_eq!(
+            data.dominant_layer_at(DVec2::new(PHASE22_ROLLER_X, PHASE22_SAND_Z.1 + 8.0)),
+            Some(PHASE22_GRASS_LAYER)
+        );
+
+        // The ground everything stands on is flat, and the knoll is somewhere
+        // nothing stands.
+        for (x, z) in [
+            PHASE22_TOWER_XZ,
+            PHASE22_CONTROL_XZ,
+            PHASE22_CAR_XZ,
+            (PHASE22_ROLLER_X, PHASE22_ROLLER_START_Z),
+        ] {
+            assert_eq!(
+                phase22_height(x, z),
+                0.0,
+                "({x}, {z}) is not on the flat working ground"
+            );
+        }
+        assert!(
+            phase22_height(108.0, 20.0) > 4.0,
+            "the knoll is missing, so the terrain is a plane"
+        );
+
+        // Both meshes clear the cook's vgeom threshold, or the cook is not silent.
+        assert!(phase22_tower_mesh().triangle_count() >= 2048);
+        assert!(phase22_chassis_mesh().triangle_count() >= 2048);
+        // …and the block really is three storeys of a metre-scale building: at
+        // least three chunk layers deep by volume, so the support graph has an
+        // interior rather than being a single course of blocks.
+        let storeys = (PHASE22_TOWER_HEIGHT_M / 3.0).floor();
+        assert!(storeys >= 3.0, "the block is {storeys} storeys tall");
+        let per_storey = PHASE22_TOWER_CHUNKS as f64 / storeys;
+        assert!(
+            per_storey >= 6.0,
+            "{per_storey} chunk(s) a storey — too coarse for a chunk to have \
+             neighbours on every side"
+        );
+
+        // The two block actors differ in the FLAG and in nothing else: same mesh,
+        // same class, same material constants.
+        let doc = phase22_playground_scene();
+        let get = |guid: uuid::Uuid| {
+            let e = doc.entity_of(guid).expect("the actor exists");
+            let w = doc.world().world();
+            (
+                *w.get::<inf_ecs::components::Destructible>(e).unwrap(),
+                *w.get::<inf_ecs::components::MeshRef>(e).unwrap(),
+                *w.get::<inf_ecs::components::ActorClass>(e).unwrap(),
+            )
+        };
+        let (dt, mt, at) = get(PHASE22_TOWER_GUID);
+        let (dc, mc, ac) = get(PHASE22_CONTROL_GUID);
+        assert_eq!(mt.asset, mc.asset, "the twins reference different meshes");
+        assert_eq!(at.0, ac.0, "the twins run different Blueprint classes");
+        assert!(dt.runtime_destruct && !dc.runtime_destruct);
+        assert_eq!(
+            inf_ecs::components::Destructible {
+                runtime_destruct: dc.runtime_destruct,
+                ..dt
+            },
+            dc,
+            "the control twin differs from the block in more than the flag"
+        );
     }
 
     // ── Phase 20 coastal shape (P20.4) ─────────────────────────────────────
