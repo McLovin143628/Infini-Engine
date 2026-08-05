@@ -267,12 +267,11 @@ fn the_linux_stub_carries_every_handle_method() {
 /// been wired at all — they compare the files to each other, and two files that
 /// both lack a command agree perfectly.
 ///
-/// `pub fn voxel_volumes(` is on the list because it is the one P21.2 surface with
-/// **no `Cmd` behind it**: the save path needs the shared store synchronously and
-/// a command channel has no reply path, so every variant-based check is blind to
-/// it. It was missing from this list when the batch landed, and the audit's
-/// mutation — delete it from `macos.rs` — broke the macOS build while all five
-/// tests here stayed green.
+/// `pub fn voxel_volumes(` **used to be** on this list, as the one P21.2 surface
+/// with no `Cmd` behind it. P23.2a hoisted the store out of the handle
+/// entirely, so the method is gone from all three files and the claim it stood
+/// for moved to [`the_shared_stores_are_hoisted_out_of_both_pumps`] — which
+/// checks the stronger thing: that neither pump can *create* a store at all.
 #[test]
 fn the_voxel_commands_reach_every_surface() {
     for (label, path) in [("win32", WIN32), ("macOS", MACOS)] {
@@ -282,7 +281,6 @@ fn the_voxel_commands_reach_every_surface() {
             "ReloadVoxelStores",
             "pub fn set_voxel(",
             "pub fn reload_voxel_stores(",
-            "pub fn voxel_volumes(",
             "host.set_voxel(",
             "host.reload_voxel_stores()",
         ] {
@@ -293,16 +291,253 @@ fn the_voxel_commands_reach_every_surface() {
         }
     }
     let stub = read(LIB);
-    for fragment in [
-        "pub fn set_voxel(",
-        "pub fn reload_voxel_stores(",
-        "pub fn voxel_volumes(",
-    ] {
+    for fragment in ["pub fn set_voxel(", "pub fn reload_voxel_stores("] {
         assert!(
             stub.contains(fragment),
             "the Linux stub is missing `{fragment}`"
         );
     }
+}
+
+// ── the store hoist (P23.2a) ────────────────────────────────────────────────
+
+/// Ring 2's viewport module, where the process's shared stores are created.
+const RING2_VIEWPORT: &str = "editor/studio/src-tauri/src/commands/viewport.rs";
+/// Ring 2's app bootstrap, where they are `manage`d.
+const RING2_LIB: &str = "editor/studio/src-tauri/src/lib.rs";
+
+/// **THE HOIST GATE** (P23.2a). Neither platform pump may CREATE a shared store.
+///
+/// `spawn` runs once per viewport. While it also *constructed* the carve working
+/// set and the Simulate fracture map, those were per-viewport by construction —
+/// invisible with one viewport and wrong with two: a carve made in the second
+/// window would land in a store the save path (which has no viewport in hand)
+/// never looks at, and the level would be written without it. Nothing about that
+/// failure is loud; the level simply saves, missing a cave.
+///
+/// So the constructors belong to Ring 2 and the pumps must only ever RECEIVE
+/// clones. Source text sees the regression that matters — a `shared_volumes()`
+/// creeping back into a platform module — which is exactly how this would be
+/// re-introduced by someone adding a third store later.
+#[test]
+fn the_shared_stores_are_hoisted_out_of_both_pumps() {
+    for (label, path) in [("win32", WIN32), ("macOS", MACOS), ("the Linux stub", LIB)] {
+        let src = read(path);
+        for ctor in ["shared_volumes()", "shared_fractures()"] {
+            assert!(
+                !src.contains(ctor),
+                "{label} calls `{ctor}` — it is MINTING a shared store instead of \
+                 receiving Ring 2's. `spawn` runs once per viewport, so a store created \
+                 there is per-viewport: a carve made through a second viewport would land \
+                 somewhere `scene_save` never reads and the level would save without it, \
+                 silently (P23.2a)."
+            );
+        }
+        // …and the handle must not HOLD one either, which is the same claim one
+        // level out: a handle field is a store whose identity depends on which
+        // window is open. Scoped to the struct body — `spawn`'s parameters are
+        // spelled the same way and are exactly what this batch wants to see.
+        let Some(at) = src.find("pub struct ViewportHandle {") else {
+            // A UNIT struct (`pub struct ViewportHandle;` — the Linux stub) has
+            // no fields at all, which is the strongest possible pass. Assert it
+            // really is that rather than a rename the parser missed.
+            assert!(
+                src.contains("pub struct ViewportHandle;"),
+                "{label} has no `ViewportHandle` struct at all — was it renamed?"
+            );
+            continue;
+        };
+        let body_end = src[at..]
+            .find("\n}\n")
+            .map(|i| at + i)
+            .unwrap_or_else(|| panic!("{label}'s `ViewportHandle` does not terminate"));
+        let body = &src[at..body_end];
+        for field in ["volumes:", "fractures:"] {
+            assert!(
+                !body.contains(field),
+                "{label}'s `ViewportHandle` still carries a `{field}` — the stores are \
+                 Ring 2's (`commands::SharedStores`), and a handle that holds one is a \
+                 store whose identity depends on which window is open (P23.2a). Struct \
+                 body was: {body}"
+            );
+        }
+        assert!(
+            body.contains("tx:"),
+            "{label}'s `ViewportHandle` body parsed as {body:?} — it is not reading the \
+             struct, so the field check above is vacuous"
+        );
+    }
+}
+
+/// The other half: both `spawn`s must TAKE the hoisted stores.
+///
+/// Without this, "neither pump creates one" is satisfied by a pump that has no
+/// store at all — which compiles right up until the host tries to carve.
+#[test]
+fn both_spawns_take_the_hoisted_stores() {
+    for (label, path) in [("win32", WIN32), ("macOS", MACOS), ("the Linux stub", LIB)] {
+        let src = read(path);
+        let at = src
+            .find("pub fn spawn(")
+            .unwrap_or_else(|| panic!("{label} has no `pub fn spawn`"));
+        // The signature ends at the return arrow.
+        let sig_end = src[at..]
+            .find("-> ViewportHandle")
+            .map(|i| at + i)
+            .unwrap_or_else(|| panic!("{label}'s `spawn` does not return a `ViewportHandle`"));
+        let sig = &src[at..sig_end];
+        for ty in ["SharedVoxelVolumes", "SharedFractures"] {
+            assert!(
+                sig.contains(ty),
+                "{label}'s `spawn` does not take a `{ty}`. The stores are created once by \
+                 Ring 2 and handed in; a `spawn` that does not accept one either mints its \
+                 own (see `the_shared_stores_are_hoisted_out_of_both_pumps`) or leaves the \
+                 host with nothing to carve into. Signature was: {sig}"
+            );
+        }
+    }
+}
+
+/// **Exactly one construction site, in Ring 2, managed exactly once.**
+///
+/// This is the "one store per process" invariant stated where it can actually be
+/// broken: a second `SharedStores::default()` anywhere in the app, or a second
+/// `.manage`, would give two halves of the editor two different carve stores
+/// while every type still checked.
+#[test]
+fn ring_two_creates_the_shared_stores_exactly_once() {
+    let vp = read(RING2_VIEWPORT);
+    for ctor in ["shared_volumes()", "shared_fractures()"] {
+        assert_eq!(
+            vp.matches(ctor).count(),
+            1,
+            "`{ctor}` appears {} times in Ring 2's viewport module — the process gets \
+             exactly ONE carve store and ONE fracture map, created inside \
+             `SharedStores::default` and nowhere else (P23.2a)",
+            vp.matches(ctor).count()
+        );
+    }
+    let boot = read(RING2_LIB);
+    assert_eq!(
+        boot.matches(".manage(commands::SharedStores::default())")
+            .count(),
+        1,
+        "the app bootstrap manages `SharedStores` {} times — two of them would be two \
+         stores, and which one a given call site reached would depend on Tauri's state \
+         map rather than on anything anyone decided",
+        boot.matches(".manage(commands::SharedStores::default())")
+            .count()
+    );
+}
+
+/// **Every Ring-2 store reader resolves WITHOUT a viewport** (P23.2a).
+///
+/// The point of the hoist, asserted where it regresses: a future edit that
+/// reaches the carve store or the fracture map through `ViewportState` again
+/// would re-couple "what the author carved" to "which window is open". The old
+/// accessors are gone, so this is a check that they do not come back.
+#[test]
+fn no_ring_two_reader_asks_a_viewport_for_a_store() {
+    for path in [
+        "editor/studio/src-tauri/src/commands/scene.rs",
+        "editor/studio/src-tauri/src/commands/sim.rs",
+        RING2_VIEWPORT,
+    ] {
+        let src = read(path);
+        for banned in ["v.voxel_volumes()", "v.fracture_states()"] {
+            assert!(
+                !src.contains(banned),
+                "{path} reaches a store through a viewport handle (`{banned}`). The save \
+                 path and the Simulate publishes have no window and no camera — they read \
+                 `commands::SharedStores` (P23.2a)"
+            );
+        }
+    }
+}
+
+/// **Primary vs All, named at every cross-module call site** (P23.2a).
+///
+/// The behavioural half lives in `commands/viewport.rs`'s unit tests (the
+/// resolution rule over a keyed map). What no unit test can see is *which*
+/// target each of the fourteen cross-module pushes chose — and the choice is
+/// load-bearing in both directions:
+///
+/// * A **broadcast** narrowed to `Primary` leaves a second viewport streaming a
+///   closed project's pages, or drawing pre-save terrain, or holding the
+///   previous document's streams. All silent.
+/// * The **PIE embed** widened to `All` would try to reparent ONE player window
+///   into several holes at once.
+///
+/// Source text is the strongest available claim: a `ViewportState` cannot be
+/// built without a window, so no test can drive these call sites.
+#[test]
+fn every_cross_module_push_names_its_target() {
+    let cases: [(&str, &str, &str); 8] = [
+        (
+            "editor/studio/src-tauri/src/commands/assets.rs",
+            "refresh_asset_index(super::Target::All)",
+            "a landed asset is a fact about the content root, not one window",
+        ),
+        (
+            "editor/studio/src-tauri/src/commands/project.rs",
+            "set_content_root(super::Target::All, Some(content_root))",
+            "the content root belongs to the open project",
+        ),
+        (
+            "editor/studio/src-tauri/src/commands/project.rs",
+            "set_content_root(super::Target::All, None)",
+            "closing a project must stop every viewport streaming it",
+        ),
+        (
+            "editor/studio/src-tauri/src/commands/scene.rs",
+            "reload_terrain_stores(crate::commands::Target::All)",
+            "the .inf_terrain on disk changed for everyone",
+        ),
+        (
+            "editor/studio/src-tauri/src/commands/scene.rs",
+            "reload_voxel_stores(crate::commands::Target::All)",
+            "the terrain twin",
+        ),
+        (
+            "editor/studio/src-tauri/src/commands/scene.rs",
+            "clear_streams(crate::commands::Target::All)",
+            "a document swap orphans every viewport's streams",
+        ),
+        (
+            "editor/studio/src-tauri/src/commands/terrain.rs",
+            "set_biome_palette(super::Target::All",
+            "a biome vocabulary is a property of the level",
+        ),
+        (
+            "editor/studio/src-tauri/src/commands/pie.rs",
+            "embed_foreign(super::Target::Primary",
+            "one player window goes into the SCENE viewport's slot",
+        ),
+    ];
+    for (path, fragment, why) in cases {
+        let src = read(path);
+        assert!(
+            src.contains(fragment),
+            "{path} no longer contains `{fragment}` — {why} (P23.2a)"
+        );
+    }
+
+    // The PIE restore pair is `Primary` for the embed's reason, and there are
+    // two of each (the crash path and the explicit stop).
+    let pie = read("editor/studio/src-tauri/src/commands/pie.rs");
+    assert_eq!(
+        pie.matches("release_foreign(super::Target::Primary)")
+            .count(),
+        2,
+        "both PIE teardown paths (crash detection and `pie_stop`) must restore the \
+         SCENE viewport explicitly"
+    );
+    assert_eq!(
+        pie.matches("set_visible(super::Target::Primary, true)")
+            .count(),
+        2,
+        "both PIE teardown paths must un-hide the scene viewport they hid — and only it"
+    );
 }
 
 /// **The carve interaction reaches the host — win32 only, and only its

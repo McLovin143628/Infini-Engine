@@ -7,4 +7,10 @@
  * replayed into the frontend keybinding dispatcher (focus handoff, P2.3.4).
  * `chord` matches the frontend's `chordOf` format ("Ctrl+Shift+P", "F11").
  */
-export type ViewportKey = { chord: string, };
+export type ViewportKey = { chord: string, 
+/**
+ * Which viewport forwarded it (P23.2a). **Stamped by Ring 2's event sink**,
+ * which owns the id→handle map; the viewport thread does not know its own
+ * key. `"primary"` is the scene viewport.
+ */
+viewport: string, };

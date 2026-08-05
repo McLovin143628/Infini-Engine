@@ -24,4 +24,13 @@ terrain_editable: boolean,
  * The terrain carries tiles not yet written back to its asset — the
  * toolbar's "unsaved terrain edits" chip and the save reminder.
  */
-terrain_unsaved_edits: boolean, };
+terrain_unsaved_edits: boolean, 
+/**
+ * Which viewport raised it (P23.2a) — appended, so every existing field
+ * keeps its place. **Stamped by Ring 2's event sink**
+ * (`stamp_tool_status`), which owns the id→handle map: the viewport thread
+ * builds this with an EMPTY id because it does not know its own key, so an
+ * empty string on the wire is a sink that forgot to stamp rather than a
+ * viewport with no name.
+ */
+viewport: string, };

@@ -855,9 +855,14 @@ pub async fn scene_save(
     // shared store the viewport carves into (schema v19 is frozen, so the chunks
     // are NOT in the document). The doc lock is already released above, which
     // keeps the fixed order — **document first, volumes second** — trivially.
+    //
+    // **Resolved WITHOUT a viewport** (P23.2a — the hoist): the store is the
+    // process's, held by `SharedStores`, so a save stages the author's carves
+    // whether one viewport is open, three are, or none is. Before the hoist it
+    // hung off whichever `ViewportHandle` happened to exist.
     let voxel_volumes = app
-        .try_state::<crate::commands::ViewportState>()
-        .and_then(|v| v.voxel_volumes());
+        .try_state::<crate::commands::SharedStores>()
+        .map(|s| s.voxel_volumes());
     let staged_voxels = stage_voxels(voxel_volumes.as_ref());
     serialize::write_encoded(&enc, &target)?;
 
@@ -895,9 +900,12 @@ pub async fn scene_save(
                     .iter()
                     .map(|u| format!("terrain {}: {}", u.entity, u.reason))
                     .collect();
+                // Broadcast (P23.2a): the `.inf_terrain` on disk changed, so
+                // every viewport streaming it must reopen — one left on the
+                // pre-save bytes would draw ground the file no longer has.
                 if !report.written.is_empty() {
                     if let Some(viewport) = app.try_state::<crate::commands::ViewportState>() {
-                        viewport.reload_terrain_stores();
+                        viewport.reload_terrain_stores(crate::commands::Target::All);
                     }
                 }
             }
@@ -974,8 +982,9 @@ pub async fn scene_save(
                     if let Some(viewport) = app.try_state::<crate::commands::ViewportState>() {
                         // The terrain twin: a re-walk, not a clear. Loaded volumes
                         // keep their chunks and meshes, so Ctrl+S never blinks a
-                        // cave — what changes is which GUIDs resolve.
-                        viewport.reload_voxel_stores();
+                        // cave — what changes is which GUIDs resolve. Broadcast,
+                        // for the terrain twin's reason (P23.2a).
+                        viewport.reload_voxel_stores(crate::commands::Target::All);
                     }
                 }
             }
@@ -1062,9 +1071,11 @@ pub async fn scene_open(
     // The document was replaced wholesale, so every terrain stream is keyed on
     // the OLD document's entity GUIDs: dead memory holding a whole `.inf_terrain`
     // payload, plus any tile it pinned for an unsaved edit (which nothing would
-    // ever unpin). Release them (P16.4b).
+    // ever unpin). Release them (P16.4b) — in EVERY viewport (P23.2a): the
+    // streams are keyed on that document whichever window opened them, so a
+    // Primary-only clear would leak a second viewport's whole payload.
     if let Some(viewport) = app.try_state::<crate::commands::ViewportState>() {
-        viewport.clear_streams();
+        viewport.clear_streams(crate::commands::Target::All);
     }
     // The opened file becomes the current level (a later plain Save overwrites it).
     *state.current_level_path.lock().map_err(|e| e.to_string())? = Some(path);
@@ -1084,9 +1095,11 @@ pub async fn scene_autosave(app: AppHandle, state: State<'_, SceneState>) -> Res
     // The carve half of the same "clean document, unsaved assets" state (P21.2).
     // Read BEFORE the doc lock, in the fixed order — document first, volumes
     // second — so this function can never take them the other way round.
+    // The store is the process's (P23.2a), so this answers the same whether a
+    // viewport is attached or not: with none, it is empty and there is no note.
     let voxel_note = app
-        .try_state::<crate::commands::ViewportState>()
-        .and_then(|v| v.voxel_volumes())
+        .try_state::<crate::commands::SharedStores>()
+        .map(|s| s.voxel_volumes())
         .and_then(|v| match v.lock() {
             Ok(store) => voxel_edit::unsaved_voxel_note(&store),
             // Not `None` (P21.2 audit). `None` here means "no unsaved carves",
@@ -1140,9 +1153,11 @@ pub async fn scene_new(
     // The document was replaced wholesale, so every terrain stream is keyed on
     // the OLD document's entity GUIDs: dead memory holding a whole `.inf_terrain`
     // payload, plus any tile it pinned for an unsaved edit (which nothing would
-    // ever unpin). Release them (P16.4b).
+    // ever unpin). Release them (P16.4b) — in EVERY viewport (P23.2a): the
+    // streams are keyed on that document whichever window opened them, so a
+    // Primary-only clear would leak a second viewport's whole payload.
     if let Some(viewport) = app.try_state::<crate::commands::ViewportState>() {
-        viewport.clear_streams();
+        viewport.clear_streams(crate::commands::Target::All);
     }
     // A brand-new scene is untitled — forget any current-level path.
     *state.current_level_path.lock().map_err(|e| e.to_string())? = None;
@@ -1243,5 +1258,36 @@ mod tests {
             .expect("an empty store stages nothing")
             .is_empty());
         assert!(!voxels_still_dirty(Some(&volumes)));
+    }
+
+    /// **The save path resolves its store WITHOUT a viewport** (P23.2a — the
+    /// hoist).
+    ///
+    /// Before the hoist the carve store hung off a `ViewportHandle`, so this
+    /// exact call — "give me what the author carved" — could only be answered by
+    /// a window that exists. `SharedStores` is constructed here with no viewport,
+    /// no window and no GPU anywhere in the process, and staging runs off it
+    /// straight through, which is the whole claim.
+    ///
+    /// It also pins the None-semantics preservation: the pre-hoist `None` ("no
+    /// viewport ⇒ no carve edits ⇒ nothing to write") and the post-hoist EMPTY
+    /// store must produce the *same* staged result and the *same* dirty answer,
+    /// asserted against each other rather than each against a literal.
+    #[test]
+    fn staging_resolves_the_carve_store_with_no_viewport_attached() {
+        let stores = crate::commands::SharedStores::default();
+        let volumes = stores.voxel_volumes();
+
+        let staged = stage_voxels(Some(&volumes)).expect("no viewport is not a save failure");
+        assert_eq!(
+            staged.len(),
+            stage_voxels(None).expect("the pre-hoist answer").len(),
+            "an unattached process store must stage exactly what the old `None` did"
+        );
+        assert_eq!(
+            voxels_still_dirty(Some(&volumes)),
+            voxels_still_dirty(None),
+            "…and must answer the recovery-file question the same way"
+        );
     }
 }

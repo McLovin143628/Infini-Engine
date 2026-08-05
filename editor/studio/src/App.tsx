@@ -26,6 +26,7 @@ import {
   registerDefaultKeybindings,
 } from "./lib/keybindings";
 import { listenTo } from "./lib/events";
+import { PRIMARY_VIEWPORT } from "./lib/viewportIds";
 import { startLogListener } from "./stores/logStore";
 import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
 import { initAssetSync, registerAssetCommands } from "./stores/assetStore";
@@ -206,9 +207,16 @@ export default function App() {
   // chords it doesn't consume so the palette/save/etc. keep working while the
   // 3D view holds OS focus. StrictMode double-invoke → `disposed` guard so a
   // late-resolving unlisten still fires.
+  //
+  // The channel is shared by every viewport and the payload carries the id
+  // (P23.2a); replaying a chord is a shell-global act, so this accepts them
+  // all — but it reads the id rather than assuming, and says why.
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
+    // NOT filtered by `payload.viewport`, deliberately: what is forwarded here
+    // is a GLOBAL shortcut the viewport declined to consume (Ctrl+S, the
+    // palette), and those belong to the shell whichever viewport had focus.
     listenTo("viewport://key", (payload) => dispatchChord(payload.chord)).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;
@@ -224,9 +232,14 @@ export default function App() {
       <TitleBar />
       <MainToolbar />
       <DockWorkspace>
-        {/* The native wgpu child window mirrors this element's rectangle. */}
+        {/* The native wgpu child window mirrors this element's rectangle.
+            `ViewportPanel` is a registered panel type (P23.2a) but is mounted
+            HERE rather than in a dock region: the centre cell's position in the
+            React tree is invariant, so the native child resizes and never
+            remounts (the Spike A invariant). `PRIMARY_VIEWPORT` is the id it
+            attaches under; the props are the registry's component signature. */}
         <div className="absolute inset-0 flex p-1">
-          <ViewportPanel />
+          <ViewportPanel panelId="viewport" params={PRIMARY_VIEWPORT} />
         </div>
       </DockWorkspace>
       <ContentDrawer />

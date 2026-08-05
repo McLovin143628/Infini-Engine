@@ -479,9 +479,14 @@ fn spawn_tick(app: AppHandle) {
             // or a mesh and its derived meshlet DAG (P18.3). The viewport's
             // loose-asset index predates it, so refresh it in place or the entity
             // the wizard (or a drag-drop) just spawned draws nothing.
+            //
+            // **Broadcast** (P23.2a): a landed asset is a fact about the
+            // content root, not about one window, so every attached viewport
+            // re-indexes. A `Primary`-only refresh would leave a second
+            // viewport drawing nothing where the wizard just spawned something.
             if outcome.index_stale {
                 if let Some(viewport) = app.try_state::<super::ViewportState>() {
-                    viewport.refresh_asset_index();
+                    viewport.refresh_asset_index(super::Target::All);
                 }
             }
         })

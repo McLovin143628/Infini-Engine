@@ -45,7 +45,7 @@ pub use sim::SimState;
 pub use sm::SmEditorState;
 pub use terminal::PtyState;
 pub use terrain::ErosionState;
-pub use viewport::ViewportState;
+pub use viewport::{SharedStores, Target, ViewportState};
 
 pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![

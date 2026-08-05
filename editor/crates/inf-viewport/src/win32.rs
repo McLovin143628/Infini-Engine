@@ -159,17 +159,18 @@ enum Cmd {
 }
 
 /// Cheap-to-clone handle for controlling the viewport thread.
+///
+/// **It holds no shared stores** (P23.2a — the hoist). The carve working set
+/// (P21.2) and the Simulate fracture map (P22.3) used to be created inside
+/// `spawn` and held here, which made them *per viewport*: a second viewport
+/// would have minted a second carve store, and Ring 2's save path — which has
+/// no host and no camera — would have had to ask a viewport which of them the
+/// author's edits were in. They are created once by Ring 2
+/// (`commands::SharedStores`) and handed to `spawn`, so there is exactly one of
+/// each per PROCESS however many viewports exist, and every reader resolves
+/// them without a viewport in hand.
 pub struct ViewportHandle {
     tx: Sender<Cmd>,
-    /// The shared voxel working set the host on the other end of `tx` carves
-    /// into (P21.2). Held here — not merely inside the host — because Ring 2's
-    /// save path has to stage carve edits out of it with no host in hand; see
-    /// [`EngineHost::with_voxel_volumes`] for the whole argument.
-    volumes: inf_editor_core::voxel_store::SharedVoxelVolumes,
-    /// The Simulate fracture states the host draws broken actors from
-    /// (P22.3), held here for the same reason `volumes` is: Ring 2 reaches
-    /// it through the handle, not through the host.
-    fractures: inf_editor_core::simulate::SharedFractures,
 }
 
 impl ViewportHandle {
@@ -302,24 +303,6 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::ReloadVoxelStores);
     }
 
-    /// The shared voxel working set this viewport carves into (P21.2).
-    ///
-    /// Not a `Cmd`: the save path needs the chunks *now*, under a lock it takes
-    /// and releases itself, and a command channel with no reply path cannot give
-    /// them back. Handing out a clone of the `Arc` is the same seam
-    /// `SceneState::doc` already is on the document side.
-    pub fn voxel_volumes(&self) -> inf_editor_core::voxel_store::SharedVoxelVolumes {
-        self.volumes.clone()
-    }
-
-    /// The Simulate fracture states this viewport draws broken actors from
-    /// (P22.3) — the `voxel_volumes` seam, and NOT a `Cmd` for the same reason:
-    /// Ring 2 publishes into it every fixed step, and a command channel with no
-    /// reply path cannot hand a handle back.
-    pub fn fracture_states(&self) -> inf_editor_core::simulate::SharedFractures {
-        self.fractures.clone()
-    }
-
     /// Release every terrain stream (its pages, its edit pins and its
     /// `.inf_terrain` payload) — pushed when the open document is replaced by
     /// File ▸ Open / File ▸ New (P16.4b).
@@ -348,27 +331,26 @@ impl ViewportHandle {
 /// Spawn the viewport thread: creates a `WS_CHILD` window parented to
 /// `parent_hwnd`, brings up the engine on it, and renders until destroyed.
 /// `sink` receives events the viewport surfaces back (forwarded key chords).
-pub fn spawn(parent_hwnd: isize, sink: ViewportEventSink, scene: SharedScene) -> ViewportHandle {
+///
+/// `volumes` and `fractures` are the PROCESS's shared stores, created once by
+/// Ring 2 and passed in (P23.2a — the hoist). They are deliberately not created
+/// here: `spawn` runs once per viewport, so creating them here made them per
+/// viewport, and the save path would have had to pick one. An engine init that
+/// fails simply drops its clone; the store outlives the viewport that never
+/// came up, and stages exactly what was carved into it, which is nothing.
+pub fn spawn(
+    parent_hwnd: isize,
+    sink: ViewportEventSink,
+    scene: SharedScene,
+    volumes: inf_editor_core::voxel_store::SharedVoxelVolumes,
+    fractures: inf_editor_core::simulate::SharedFractures,
+) -> ViewportHandle {
     let (tx, rx) = channel();
-    // The voxel working set is created HERE rather than inside the host, so the
-    // handle can hand it to Ring 2's save path (see `EngineHost::with_voxel_
-    // volumes`). Both ends hold clones of one `Arc`; an engine init that fails
-    // leaves the handle holding an empty store, which stages nothing — the right
-    // answer for a viewport that never came up.
-    let volumes = inf_editor_core::voxel_store::shared_volumes();
-    let host_volumes = volumes.clone();
-    // P22.3: the same arrangement for the Simulate fracture states.
-    let fractures = inf_editor_core::simulate::shared_fractures();
-    let host_fractures = fractures.clone();
     std::thread::Builder::new()
         .name("inf-viewport".into())
-        .spawn(move || thread_main(parent_hwnd, rx, sink, scene, host_volumes, host_fractures))
+        .spawn(move || thread_main(parent_hwnd, rx, sink, scene, volumes, fractures))
         .expect("failed to spawn inf-viewport thread");
-    ViewportHandle {
-        tx,
-        volumes,
-        fractures,
-    }
+    ViewportHandle { tx }
 }
 
 /// Which mouse gesture currently owns capture.
@@ -1503,6 +1485,10 @@ fn thread_main(
                 terrain_streamed: terrain_state.0,
                 terrain_editable: terrain_state.1,
                 terrain_unsaved_edits: terrain_state.2,
+                // EMPTY on purpose (P23.2a): the viewport thread does not know
+                // its own key — Ring 2 owns the id→handle map and stamps this
+                // on the way out (`commands::viewport::stamp_tool_status`).
+                viewport: String::new(),
             }));
         }
 

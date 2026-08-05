@@ -223,7 +223,12 @@ fn spawn_monitor(app: AppHandle, run: Arc<AtomicBool>, embedded: bool) {
                 if embedded && !inner.embedded {
                     if let Some(handle) = window_handle {
                         if handle != 0 {
-                            app.state::<ViewportState>().embed_foreign(handle);
+                            // PRIMARY, explicitly (P23.2a): embedding reparents
+                            // the player's window into the SCENE viewport's
+                            // slot. Broadcasting it would try to adopt one
+                            // window into several holes at once.
+                            app.state::<ViewportState>()
+                                .embed_foreign(super::Target::Primary, handle);
                             inner.embedded = true;
                         }
                     }
@@ -258,8 +263,12 @@ fn spawn_monitor(app: AppHandle, run: Arc<AtomicBool>, embedded: bool) {
                         inner.mode.clear();
                         drop(inner);
                         if was_embedded {
-                            app.state::<ViewportState>().release_foreign();
-                            app.state::<ViewportState>().set_visible(true);
+                            // The embed's twin, and Primary for the same
+                            // reason: only the scene viewport was hidden, so
+                            // only it is restored (P23.2a).
+                            let vp = app.state::<ViewportState>();
+                            vp.release_foreign(super::Target::Primary);
+                            vp.set_visible(super::Target::Primary, true);
                         }
                         let msg = crash_message(code, &stderr);
                         run.store(false, Ordering::SeqCst);
@@ -381,8 +390,10 @@ pub async fn pie_stop(app: AppHandle, pie: State<'_, PieState>) -> Result<(), St
     }
     if was_embedded {
         let vp = app.state::<ViewportState>();
-        vp.release_foreign();
-        vp.set_visible(true);
+        // Primary, explicitly: the stop path restores exactly the slot the
+        // embed took (P23.2a).
+        vp.release_foreign(super::Target::Primary);
+        vp.set_visible(super::Target::Primary, true);
     }
     if let Some(session) = session {
         // Graceful stop, then guaranteed teardown (Drop kills a stuck child).

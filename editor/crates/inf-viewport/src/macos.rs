@@ -94,15 +94,13 @@ enum Cmd {
 }
 
 /// Cheap-to-clone handle for controlling the viewport thread.
+///
+/// **It holds no shared stores** (P23.2a — the hoist; the win32 twin). The
+/// carve working set and the Simulate fracture map are created once by Ring 2
+/// (`commands::SharedStores`) and handed to `spawn`, so there is exactly one of
+/// each per PROCESS however many viewports exist.
 pub struct ViewportHandle {
     tx: Sender<Cmd>,
-    /// The shared voxel working set the host on the other end of `tx` carves
-    /// into (P21.2) — the win32 twin; see [`EngineHost::with_voxel_volumes`].
-    volumes: inf_editor_core::voxel_store::SharedVoxelVolumes,
-    /// The Simulate fracture states the host draws broken actors from
-    /// (P22.3), held here for the same reason `volumes` is: Ring 2 reaches
-    /// it through the handle, not through the host.
-    fractures: inf_editor_core::simulate::SharedFractures,
 }
 
 impl ViewportHandle {
@@ -233,21 +231,6 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::ReloadVoxelStores);
     }
 
-    /// The shared voxel working set this viewport carves into (P21.2) — the
-    /// win32 twin, and NOT a `Cmd`: the save path needs the chunks now, and a
-    /// command channel has no reply path.
-    pub fn voxel_volumes(&self) -> inf_editor_core::voxel_store::SharedVoxelVolumes {
-        self.volumes.clone()
-    }
-
-    /// The Simulate fracture states this viewport draws broken actors from
-    /// (P22.3) — the `voxel_volumes` seam, and NOT a `Cmd` for the same reason:
-    /// Ring 2 publishes into it every fixed step, and a command channel with no
-    /// reply path cannot hand a handle back.
-    pub fn fracture_states(&self) -> inf_editor_core::simulate::SharedFractures {
-        self.fractures.clone()
-    }
-
     /// Release every terrain stream (its pages, its edit pins and its
     /// `.inf_terrain` payload) — pushed when the open document is replaced by
     /// File ▸ Open / File ▸ New (P16.4b).
@@ -272,27 +255,24 @@ impl ViewportHandle {
 /// Create the CAMetalLayer under `ns_view` (the Tauri contentView) and start
 /// the render thread. MUST be called on the AppKit main thread; the Ring-2
 /// caller dispatches via `run_on_main_thread`.
-pub fn spawn(ns_view: isize, sink: ViewportEventSink, scene: SharedScene) -> ViewportHandle {
+///
+/// `volumes` and `fractures` are the PROCESS's shared stores, created once by
+/// Ring 2 and passed in (P23.2a — the hoist; the win32 twin). Every early
+/// return below simply drops this viewport's clones: the stores outlive a
+/// viewport that never came up, and stage exactly what was carved into them,
+/// which is nothing.
+pub fn spawn(
+    ns_view: isize,
+    sink: ViewportEventSink,
+    scene: SharedScene,
+    volumes: inf_editor_core::voxel_store::SharedVoxelVolumes,
+    fractures: inf_editor_core::simulate::SharedFractures,
+) -> ViewportHandle {
     let (tx, rx) = channel();
-    // The voxel working set is created HERE rather than inside the host, so the
-    // handle can hand it to Ring 2's save path (see `EngineHost::with_voxel_
-    // volumes`) - the win32 twin. Every early return below still yields a handle
-    // holding an empty store, which stages nothing: the right answer for a
-    // viewport that never came up.
-    let volumes = inf_editor_core::voxel_store::shared_volumes();
-    // P22.3: the same arrangement for the Simulate fracture states. Declared HERE
-    // rather than beside `host_fractures` below, unlike the win32 twin where the
-    // two sit together: this function has early returns between the two points,
-    // and each of them yields a handle that must already hold the store.
-    let fractures = inf_editor_core::simulate::shared_fractures();
 
     if MainThreadMarker::new().is_none() {
         tracing::error!("inf-viewport: macOS spawn must run on the main thread");
-        return ViewportHandle {
-            tx,
-            volumes,
-            fractures,
-        };
+        return ViewportHandle { tx };
     }
 
     // SAFETY: the caller passes the live contentView of the editor window
@@ -315,11 +295,7 @@ pub fn spawn(ns_view: isize, sink: ViewportEventSink, scene: SharedScene) -> Vie
             Some(root) => root.addSublayer(&metal),
             None => {
                 tracing::error!("inf-viewport: contentView has no backing layer");
-                return ViewportHandle {
-                    tx,
-                    volumes,
-                    fractures,
-                };
+                return ViewportHandle { tx };
             }
         }
         // Intentional +1 retain: the layer lives until Destroy releases it.
@@ -333,17 +309,11 @@ pub fn spawn(ns_view: isize, sink: ViewportEventSink, scene: SharedScene) -> Vie
     // either; the hardware pass wires the sink and both together.
     let _ = sink;
 
-    let host_volumes = volumes.clone();
-    let host_fractures = fractures.clone();
     std::thread::Builder::new()
         .name("inf-viewport".into())
-        .spawn(move || thread_main(layer_ptr, scale, rx, scene, host_volumes, host_fractures))
+        .spawn(move || thread_main(layer_ptr, scale, rx, scene, volumes, fractures))
         .expect("failed to spawn inf-viewport thread");
-    ViewportHandle {
-        tx,
-        volumes,
-        fractures,
-    }
+    ViewportHandle { tx }
 }
 
 fn apply_rect(layer_ptr: isize, scale: f64, r: ViewportRect) {

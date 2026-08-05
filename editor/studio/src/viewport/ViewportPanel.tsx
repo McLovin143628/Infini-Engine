@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { viewport } from "../lib/ipc";
 import { toPhysicalRect } from "../lib/viewportRect";
+import { PRIMARY_VIEWPORT } from "../lib/viewportIds";
 import { useSimStore } from "../stores/simStore";
 import ViewportToolbar from "./ViewportToolbar";
 
@@ -13,9 +14,21 @@ import ViewportToolbar from "./ViewportToolbar";
  * The viewport toolbar (P8.2c) renders as a strip ABOVE the hole — never over
  * it, since the native child window would occlude any HTML crossing the hole
  * (airspace rule). The measured hole excludes the toolbar automatically.
+ *
+ * **A registered panel type** (P23.2a): `registerPanels.tsx` declares it, so
+ * `panelDefFor("viewport")` resolves and the focus/undo routing can name it
+ * like any other panel. The shell still mounts it in the dock's CENTRE cell
+ * rather than in a region — the native child window has to track one invariant
+ * rectangle (Spike A), and a tab strip that unmounts it would tear the surface
+ * down. Registration is what makes the *second* viewport a layout change
+ * instead of surgery.
+ *
+ * `params` carries the viewport id for a future non-singleton instance
+ * (`viewport:model`); absent means the scene viewport.
  */
-export default function ViewportPanel() {
+export default function ViewportPanel({ params }: { panelId?: string; params?: string | null } = {}) {
   const holeRef = useRef<HTMLDivElement>(null);
+  const id = params || PRIMARY_VIEWPORT;
   // Simulate (P8.4): a live session tints the viewport frame.
   const running = useSimStore((s) => s.running);
 
@@ -26,7 +39,7 @@ export default function ViewportPanel() {
     let raf = 0;
     const report = () => {
       const rect = toPhysicalRect(el.getBoundingClientRect(), window.devicePixelRatio);
-      viewport.setRect(rect).catch(() => {});
+      viewport.setRect(rect, id).catch(() => {});
     };
     const schedule = () => {
       cancelAnimationFrame(raf);
@@ -34,7 +47,7 @@ export default function ViewportPanel() {
     };
 
     viewport
-      .attach()
+      .attach(id)
       .then(report)
       .catch((e) => console.error("viewport attach failed:", e));
 
@@ -64,7 +77,7 @@ export default function ViewportPanel() {
       mql?.removeEventListener("change", onDprChange);
       cancelAnimationFrame(raf);
     };
-  }, []);
+  }, [id]);
 
   return (
     <div className="flex flex-1 flex-col gap-1">

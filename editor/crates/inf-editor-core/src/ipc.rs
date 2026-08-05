@@ -40,6 +40,10 @@ pub struct ViewportDrop {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct ViewportKey {
     pub chord: String,
+    /// Which viewport forwarded it (P23.2a). **Stamped by Ring 2's event sink**,
+    /// which owns the id→handle map; the viewport thread does not know its own
+    /// key. `"primary"` is the scene viewport.
+    pub viewport: String,
 }
 
 /// Log severity for the Output Log panel. Mirrors `tracing::Level`.
@@ -404,6 +408,27 @@ pub struct ViewportToolStatusDto {
     /// The terrain carries tiles not yet written back to its asset — the
     /// toolbar's "unsaved terrain edits" chip and the save reminder.
     pub terrain_unsaved_edits: bool,
+    /// Which viewport raised it (P23.2a) — appended, so every existing field
+    /// keeps its place. **Stamped by Ring 2's event sink**
+    /// (`stamp_tool_status`), which owns the id→handle map: the viewport thread
+    /// builds this with an EMPTY id because it does not know its own key, so an
+    /// empty string on the wire is a sink that forgot to stamp rather than a
+    /// viewport with no name.
+    pub viewport: String,
+}
+
+/// The `viewport://gizmo` payload (P23.2a): a gizmo-mode echo stamped with the
+/// viewport that produced it.
+///
+/// A **wrapper** rather than a field, because [`GizmoModeDto`] is an enum and an
+/// enum has no tail to add to. The channel used to carry the bare mode; the id
+/// is what lets a second viewport echo its own W/E/R without moving the scene
+/// viewport's toolbar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ViewportGizmoDto {
+    pub mode: GizmoModeDto,
+    /// `"primary"` is the scene viewport.
+    pub viewport: String,
 }
 
 /// What one `scene_save` actually accomplished (P16.4b).

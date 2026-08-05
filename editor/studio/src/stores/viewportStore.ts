@@ -10,6 +10,7 @@ import { create } from "zustand";
 import { getCommand, registerCommands, setCommandHandler } from "../lib/commands";
 import { listenTo } from "../lib/events";
 import { projectSettings, terrain, viewport, water } from "../lib/ipc";
+import { isPrimaryViewport } from "../lib/viewportIds";
 import type { BiomeSettingsDto } from "../bindings/BiomeSettingsDto";
 import type { FoliageSettingsDto } from "../bindings/FoliageSettingsDto";
 import type { GizmoModeDto } from "../bindings/GizmoModeDto";
@@ -917,10 +918,15 @@ export function initViewportSync(): () => void {
   );
   // The viewport echoes gizmo-mode changes (W/E/R keypress or an IPC set); mirror
   // them into the store WITHOUT calling back into IPC (no loop).
+  //
+  // Filtered to the SCENE viewport (P23.2a): this store is the scene toolbar's
+  // state, so a second viewport's W/E/R must not move it. The channel is shared
+  // by every viewport, which is why the id has to be read rather than assumed.
   track(
-    listenTo("viewport://gizmo", (mode) => {
-      if (useViewportStore.getState().gizmoMode !== mode) {
-        useViewportStore.setState({ gizmoMode: mode });
+    listenTo("viewport://gizmo", (ev) => {
+      if (!isPrimaryViewport(ev.viewport)) return;
+      if (useViewportStore.getState().gizmoMode !== ev.mode) {
+        useViewportStore.setState({ gizmoMode: ev.mode });
       }
     }),
   );
@@ -928,6 +934,8 @@ export function initViewportSync(): () => void {
   // one-shot toast; the flags are standing state the toolbar reads.
   track(
     listenTo("viewport://tool-status", (status) => {
+      // Scene viewport only — the flags below are the scene toolbar's (P23.2a).
+      if (!isPrimaryViewport(status.viewport)) return;
       const s = useViewportStore.getState();
       if (
         s.terrainStreamed !== status.terrain_streamed ||

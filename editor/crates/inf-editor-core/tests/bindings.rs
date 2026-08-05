@@ -22,10 +22,10 @@ use inf_editor_core::ipc::{
     SeqTrackDto, SequenceDto, SkyAtmosphereDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind,
     SpoilModeDto, SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto,
     TerrainImportPlanDto, TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto,
-    TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto, ViewportDrop, ViewportKey, ViewportModeDto,
-    ViewportRect, ViewportToolStatusDto, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto,
-    VoxelToolKindDto, WaterDefaultsDto, WaterSettingsDto, WaterToolKindDto, WeatherDto,
-    WeatherPresetDto,
+    TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto, ViewportDrop, ViewportGizmoDto,
+    ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto, VoxelOpModeDto,
+    VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto, WaterDefaultsDto, WaterSettingsDto,
+    WaterToolKindDto, WeatherDto, WeatherPresetDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -58,6 +58,7 @@ fn export_bindings() {
     DeleteResult::export_all(&cfg).expect("export DeleteResult");
     ImportEventDto::export_all(&cfg).expect("export ImportEventDto");
     ViewportToolStatusDto::export_all(&cfg).expect("export ViewportToolStatusDto");
+    ViewportGizmoDto::export_all(&cfg).expect("export ViewportGizmoDto");
     SaveResultDto::export_all(&cfg).expect("export SaveResultDto");
     HeightmapProbeDto::export_all(&cfg).expect("export HeightmapProbeDto");
     TerrainImportSettingsDto::export_all(&cfg).expect("export TerrainImportSettingsDto");

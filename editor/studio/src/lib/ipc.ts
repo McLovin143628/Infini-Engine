@@ -154,59 +154,73 @@ export const layouts = {
   delete: (name: string): Promise<boolean> => invoke("layout_delete", { name }),
 };
 
+/**
+ * Native-viewport commands (P23.2a: every one takes an OPTIONAL `viewport` id).
+ *
+ * Omitting it means the scene viewport (`PRIMARY_VIEWPORT`) — the backend
+ * resolves an absent argument to `Target::Primary` — which is why none of the
+ * shell's existing call sites pass one and none of them changed. The parameter
+ * is what a second viewport (P23.2b) will address; until then it is the wire's
+ * way of saying "the one you already meant".
+ */
 export const viewport = {
-  /** Create (once) the native engine viewport inside this window. */
-  attach: (): Promise<void> => invoke("viewport_attach"),
+  /** Create (once per id) the native engine viewport inside this window. */
+  attach: (viewport?: string): Promise<void> => invoke("viewport_attach", { viewport }),
   /**
    * Report the viewport hole's rectangle in PHYSICAL pixels relative to the
    * window client area (see `toPhysicalRect` in lib/viewportRect.ts).
    */
-  setRect: (rect: ViewportRect): Promise<void> => invoke("viewport_set_rect", { rect }),
+  setRect: (rect: ViewportRect, viewport?: string): Promise<void> =>
+    invoke("viewport_set_rect", { rect, viewport }),
   /**
    * Show/hide the native viewport (the shell hides it while an HTML overlay
    * — menu, palette, dialog, drag ghost — is open; airspace rule).
    */
-  setVisible: (visible: boolean): Promise<void> => invoke("viewport_set_visible", { visible }),
+  setVisible: (visible: boolean, viewport?: string): Promise<void> =>
+    invoke("viewport_set_visible", { visible, viewport }),
   /**
    * Hand off a drag that ended over the viewport hole. Coordinates are
    * PHYSICAL pixels relative to the hole's top-left corner (HTML drag ghosts
    * die over the native window — the drop point crosses via IPC instead).
    */
-  drop: (drop: ViewportDrop): Promise<void> => invoke("viewport_drop", { drop }),
+  drop: (drop: ViewportDrop, viewport?: string): Promise<void> =>
+    invoke("viewport_drop", { drop, viewport }),
   /** Switch the active projection (Perspective ↔ 2D ortho) (P8.2c). */
-  setMode: (mode: ViewportModeDto): Promise<void> => invoke("viewport_set_mode", { mode }),
+  setMode: (mode: ViewportModeDto, viewport?: string): Promise<void> =>
+    invoke("viewport_set_mode", { mode, viewport }),
   /** Push the 2D-mode grid/pixel snapping configuration to the viewport. */
-  setSnap2d: (snap: Snap2DDto): Promise<void> => invoke("viewport_set_snap2d", { snap }),
+  setSnap2d: (snap: Snap2DDto, viewport?: string): Promise<void> =>
+    invoke("viewport_set_snap2d", { snap, viewport }),
   /** Switch the active tool (Select ↔ Sculpt terrain) (P10.2b). */
-  setToolMode: (mode: ToolModeDto): Promise<void> =>
-    invoke("viewport_set_tool_mode", { mode }),
+  setToolMode: (mode: ToolModeDto, viewport?: string): Promise<void> =>
+    invoke("viewport_set_tool_mode", { mode, viewport }),
   /** Push the sculpt brush configuration (op / radius / strength / falloff). */
-  setSculpt: (sculpt: SculptSettingsDto): Promise<void> =>
-    invoke("viewport_set_sculpt", { sculpt }),
+  setSculpt: (sculpt: SculptSettingsDto, viewport?: string): Promise<void> =>
+    invoke("viewport_set_sculpt", { sculpt, viewport }),
   /** Push the foliage brush configuration (radius / density / kind / …) (E-P6). */
-  setFoliage: (foliage: FoliageSettingsDto): Promise<void> =>
-    invoke("viewport_set_foliage", { foliage }),
+  setFoliage: (foliage: FoliageSettingsDto, viewport?: string): Promise<void> =>
+    invoke("viewport_set_foliage", { foliage, viewport }),
   /**
    * Push the biome brush configuration (radius / strength / falloff / id) (P19.2).
    * `strength` is not a blend fraction — it picks which falloff contour the
    * painted biome's hard boundary lands on. `biome: 0` erases (unassigned).
    */
-  setBiome: (biome: BiomeSettingsDto): Promise<void> =>
-    invoke("viewport_set_biome", { biome }),
+  setBiome: (biome: BiomeSettingsDto, viewport?: string): Promise<void> =>
+    invoke("viewport_set_biome", { biome, viewport }),
   /**
    * Push the water-tool configuration (river/lake + a new body's dimensions and
    * level offset) (P20.4). The biome water hint is NOT sent from here — the tool
    * resolves it per click from the biome painted under the cursor.
    */
-  setWater: (water: WaterSettingsDto): Promise<void> =>
-    invoke("viewport_set_water", { water }),
+  setWater: (water: WaterSettingsDto, viewport?: string): Promise<void> =>
+    invoke("viewport_set_water", { water, viewport }),
   /**
    * Push the voxel carve-tool configuration (brush/tunnel + radius, depth,
    * carve-or-fill, fill material) (P21.2). Both lengths are world metres and are
    * clamped non-negative backend-side.
    */
-  setVoxel: (voxel: VoxelSettingsDto): Promise<void> =>
-    invoke("viewport_set_voxel", { voxel }),
+  setVoxel: (voxel: VoxelSettingsDto, viewport?: string): Promise<void> =>
+    invoke("viewport_set_voxel", { voxel, viewport }),
   /**
    * The Voxel tool's live verdict (P21.2): how many volumes there are to carve,
    * which terrains could not keep a cave mouth (and the refusal text a
@@ -215,25 +229,29 @@ export const viewport = {
    *
    * Camera-independent, so the toolbar can answer "why would this be refused"
    * before the author makes the gesture rather than after.
+   *
+   * Takes no viewport id, deliberately: it answers from the DOCUMENT and the
+   * process's carve store, neither of which belongs to a window (P23.2a).
    */
   voxelStatus: (): Promise<VoxelStatusDto> => invoke<VoxelStatusDto>("viewport_voxel_status"),
   /**
    * Set the transform-gizmo mode (translate/rotate/scale) (Wave 2). The viewport
    * echoes mode changes (incl. W/E/R keypresses over it) on `viewport://gizmo`.
    */
-  setGizmoMode: (mode: GizmoModeDto): Promise<void> =>
-    invoke("viewport_set_gizmo_mode", { mode }),
+  setGizmoMode: (mode: GizmoModeDto, viewport?: string): Promise<void> =>
+    invoke("viewport_set_gizmo_mode", { mode, viewport }),
   /** Switch the gizmo orientation frame (World ↔ Local) (Wave 2). */
-  setGizmoSpace: (space: GizmoSpaceDto): Promise<void> =>
-    invoke("viewport_set_gizmo_space", { space }),
+  setGizmoSpace: (space: GizmoSpaceDto, viewport?: string): Promise<void> =>
+    invoke("viewport_set_gizmo_space", { space, viewport }),
   /** Push the 3D transform-gizmo snap increments (Wave 2). */
-  setSnap3d: (snap: Snap3DDto): Promise<void> => invoke("viewport_set_snap3d", { snap }),
+  setSnap3d: (snap: Snap3DDto, viewport?: string): Promise<void> =>
+    invoke("viewport_set_snap3d", { snap, viewport }),
   /**
    * Set the shading view mode (Lit / Unlit / Wireframe) (R-P2). `Wireframe`
    * degrades to `Unlit` in the renderer when the GPU lacks line-polygon raster.
    */
-  setViewMode: (mode: ViewModeDto): Promise<void> =>
-    invoke("viewport_set_view_mode", { mode }),
+  setViewMode: (mode: ViewModeDto, viewport?: string): Promise<void> =>
+    invoke("viewport_set_view_mode", { mode, viewport }),
 };
 
 /**

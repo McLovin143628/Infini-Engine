@@ -1,4 +1,5 @@
 import {
+  Box,
   Clapperboard,
   Code2,
   FolderTree,
@@ -37,6 +38,7 @@ import { PcgCanvas } from "./pcg/PcgCanvas";
 import { StateMachineCanvas } from "./sm/StateMachineCanvas";
 import PlaceActorsPanel from "./placeActors/PlaceActorsPanel";
 import WorldSettingsPanel from "./worldSettings/WorldSettingsPanel";
+import ViewportPanel from "../viewport/ViewportPanel";
 import { registerPanelType } from "./panelRegistry";
 
 /**
@@ -48,6 +50,35 @@ import { registerPanelType } from "./panelRegistry";
  * data; later phases bind them to the engine (P3 world, tracing already
  * live for the log).
  */
+
+/**
+ * **The scene viewport** (P23.2a).
+ *
+ * Registered so it has an identity in the panel system — a title, an icon, and
+ * a type the dock-focus/undo routing can name — but the shell still mounts it
+ * in the dock's CENTRE cell (`App.tsx`), not in a region. That is deliberate
+ * and load-bearing: the native wgpu child window mirrors one invariant
+ * rectangle (Spike A), so a tab strip that unmounted the hole would tear the
+ * surface down and rebuild it on every tab switch.
+ *
+ * `defaultLocation: "hidden"` and no menu entry, therefore: nothing can open a
+ * SECOND instance today, which would attach a second native child fighting the
+ * first for the same rect. `transient` keeps it out of restored layouts for the
+ * same reason. What registration buys now is the routing; what it buys later is
+ * that P23.2b's second viewport is a `registerPanelType` singleton flag away
+ * rather than a redesign.
+ */
+registerPanelType({
+  type: "viewport",
+  title: () => "Viewport",
+  icon: Box,
+  component: ViewportPanel,
+  singleton: true,
+  defaultLocation: "hidden",
+  defaultSize: { w: 960, h: 600 },
+  canDetach: false,
+  transient: true,
+});
 
 registerPanelType({
   type: "outliner",

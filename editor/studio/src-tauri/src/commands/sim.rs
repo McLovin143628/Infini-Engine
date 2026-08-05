@@ -112,11 +112,12 @@ pub async fn sim_start(
     // Only the store's DIRTY chunks are folded in, which is what keeps the
     // determinism seam on `set_voxel_volumes` intact: dirty is a function of what
     // was dug, never of where the editor camera has paged. Headless/CI has no
-    // viewport and therefore no store, and no carve edits either — nothing to
-    // fold, and the resolved map stands as it always did.
+    // viewport, so the process store is EMPTY and there is nothing to fold — the
+    // resolved map stands as it always did (P23.2a: the store no longer hangs
+    // off a viewport, so this reads it directly).
     if let Some(volumes) = app
-        .try_state::<crate::commands::ViewportState>()
-        .and_then(|v| v.voxel_volumes())
+        .try_state::<crate::commands::SharedStores>()
+        .map(|s| s.voxel_volumes())
     {
         match volumes.lock() {
             Ok(store) => {
@@ -259,9 +260,14 @@ pub async fn sim_tick(
 /// Cheap on the off path: a level with no destructible actor publishes an empty
 /// map into an already-empty one.
 fn publish_sim_fractures(app: &AppHandle, session: &inf_editor_core::simulate::SimSession) {
+    // P23.2a: the fracture map is the PROCESS's, not a viewport's, so the
+    // publish no longer depends on a window existing. With none attached it
+    // writes into a map nobody reads and `sim_exit` clears it — the same
+    // outcome the old early return had, without making "is a viewport open"
+    // part of what a simulation does.
     let Some(handle) = app
-        .try_state::<crate::commands::ViewportState>()
-        .and_then(|v| v.fracture_states())
+        .try_state::<crate::commands::SharedStores>()
+        .map(|s| s.fracture_states())
     else {
         return;
     };
@@ -284,8 +290,8 @@ fn overlay_sim_carves(
         return;
     }
     let Some(store) = app
-        .try_state::<crate::commands::ViewportState>()
-        .and_then(|v| v.voxel_volumes())
+        .try_state::<crate::commands::SharedStores>()
+        .map(|s| s.voxel_volumes())
     else {
         return;
     };
@@ -390,8 +396,8 @@ pub async fn sim_stop(
     // document — the P21.4 "the editor's render store IS the save's staging
     // source" hazard, one component over.
     if let Some(handle) = app
-        .try_state::<crate::commands::ViewportState>()
-        .and_then(|v| v.fracture_states())
+        .try_state::<crate::commands::SharedStores>()
+        .map(|s| s.fracture_states())
     {
         if let Ok(mut states) = handle.lock() {
             states.clear();

@@ -37,6 +37,11 @@ pub fn run() {
         // Native file-open dialog for asset import (P4.4). The only plugin;
         // everything else routes through audited commands.
         .plugin(tauri_plugin_dialog::init())
+        // **The one carve store and the one fracture map, per process** (P23.2a
+        // — the hoist). Created HERE, once, and handed to every
+        // `inf_viewport::spawn`; the save path and the Simulate publishes read
+        // them straight out of this state, with no viewport in hand.
+        .manage(commands::SharedStores::default())
         .manage(commands::ViewportState::default())
         .manage(commands::SceneState::default())
         .manage(commands::SimState::default())

@@ -12,11 +12,11 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { AssetChanged } from "../bindings/AssetChanged";
-import type { GizmoModeDto } from "../bindings/GizmoModeDto";
 import type { ImportEventDto } from "../bindings/ImportEventDto";
 import type { LogLine } from "../bindings/LogLine";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
 import type { SceneDelta } from "../bindings/SceneDelta";
+import type { ViewportGizmoDto } from "../bindings/ViewportGizmoDto";
 import type { ViewportKey } from "../bindings/ViewportKey";
 import type { ViewportToolStatusDto } from "../bindings/ViewportToolStatusDto";
 
@@ -60,10 +60,16 @@ export interface SimDebugEvent {
 export interface EventPayloads {
   /** Structured tracing output → Output Log panel (P1.4). */
   "log://line": LogLine;
-  /** Global-shortcut chord forwarded from the native viewport (P2.3.4). */
+  /**
+   * Global-shortcut chord forwarded from the native viewport (P2.3.4).
+   *
+   * The three `viewport://` channels are **shared by every viewport** and their
+   * payloads carry a `viewport` id (P23.2a) — one subscription whatever the
+   * count, with the listener filtering. See `lib/viewportIds.ts`.
+   */
   "viewport://key": ViewportKey;
   /** Transform-gizmo mode echoed from the viewport (W/E/R or IPC) → toolbar (Wave 2). */
-  "viewport://gizmo": GizmoModeDto;
+  "viewport://gizmo": ViewportGizmoDto;
   /**
    * A viewport tool raised a status message and/or the projected terrain's
    * streamed state changed (P16.4a): the message goes to the status bar, the

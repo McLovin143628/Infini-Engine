@@ -36,6 +36,37 @@ test("every wrapper invokes its registered command with the typed payload", asyn
   expect(calls[3][1]).toEqual({ drop: { x: 5, y: 6, payload: "TestActor" } });
 });
 
+/**
+ * **The wire-compatibility claim** (P23.2a). The `viewport_*` commands grew an
+ * optional `viewport` id; the shell passes nothing and must keep working.
+ *
+ * What is asserted is the VALUE the wrapper puts on the wire, not the presence
+ * of the key: `{ viewport: undefined }` and an absent key are the same message
+ * once serialized, and both deserialize to `None` — which the backend's
+ * `an_absent_viewport_argument_means_primary` unit test then pins to
+ * `Target::Primary`. The two tests together are the compatibility claim; either
+ * alone proves half of it.
+ */
+test("viewport commands omit the id by default and carry it when named", async () => {
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  mockIPC((cmd, args) => {
+    calls.push([cmd, args as Record<string, unknown>]);
+  });
+
+  await viewport.attach();
+  await viewport.setVisible(false);
+  await viewport.setRect({ x: 0, y: 0, width: 8, height: 8 });
+
+  for (const [cmd, args] of calls) {
+    expect(args.viewport, `${cmd} sent a viewport id nobody asked for`).toBeUndefined();
+  }
+
+  calls.length = 0;
+  await viewport.setVisible(true, "model");
+  await viewport.setRect({ x: 0, y: 0, width: 8, height: 8 }, "model");
+  expect(calls.map(([, a]) => a.viewport)).toEqual(["model", "model"]);
+});
+
 test("layout wrappers invoke the layout_* commands with typed payloads", async () => {
   const calls: Array<[string, unknown]> = [];
   mockIPC((cmd, args) => {

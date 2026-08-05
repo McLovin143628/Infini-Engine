@@ -79,8 +79,11 @@ fn apply_open(
     // `Terrain.asset` in the level resolves to a loose `.inf_terrain` and starts
     // paging (P16.4a). Switching projects re-points it, which drops every live
     // stream — the previous project's pages can never be served here.
+    // **Broadcast** (P23.2a): the content root is a property of the open
+    // project, so every viewport streams from it. A viewport left pointing at
+    // the previous project would keep serving its pages.
     if let Some(viewport) = app.try_state::<super::ViewportState>() {
-        viewport.set_content_root(Some(content_root));
+        viewport.set_content_root(super::Target::All, Some(content_root));
     }
     let _ = app.emit("project://changed", dto.clone());
     tracing::info!("project opened: {}", dto.name);
@@ -157,9 +160,10 @@ pub async fn project_open(
 #[tauri::command]
 pub async fn project_close(app: AppHandle, state: State<'_, ProjectState>) -> Result<(), String> {
     *state.current.lock().map_err(|e| e.to_string())? = None;
-    // Stop streaming the closed project's terrain pages.
+    // Stop streaming the closed project's terrain pages — in EVERY viewport
+    // (P23.2a): one left streaming would outlive the project it belongs to.
     if let Some(viewport) = app.try_state::<super::ViewportState>() {
-        viewport.set_content_root(None);
+        viewport.set_content_root(super::Target::All, None);
     }
     Ok(())
 }

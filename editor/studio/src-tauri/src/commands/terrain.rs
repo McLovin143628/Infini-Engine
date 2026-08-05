@@ -445,14 +445,18 @@ pub(super) fn push_biome_palettes(app: &AppHandle, assets: &AssetState) {
     let Some(viewport) = app.try_state::<super::ViewportState>() else {
         return;
     };
+    // **Broadcast** (P23.2a): a terrain's biome vocabulary and its water hints
+    // are properties of the LEVEL, so every viewport tints and resolves the same
+    // way. A Primary-only push would give a second viewport the Biomes view mode
+    // with an empty palette — silently untinted rather than visibly wrong.
     for (entity, set) in bindings {
         let palette = set
             .and_then(|s| palettes.get(&s))
             .cloned()
             .unwrap_or_default();
-        viewport.set_biome_palette(entity, palette);
+        viewport.set_biome_palette(super::Target::All, entity, palette);
         let hint = set.and_then(|s| hints.get(&s)).cloned().unwrap_or_default();
-        viewport.set_water_hints(entity, hint);
+        viewport.set_water_hints(super::Target::All, entity, hint);
     }
 }
 

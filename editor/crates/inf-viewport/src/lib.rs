@@ -147,24 +147,25 @@ pub use macos::{spawn, ViewportHandle};
 /// Stub so Ring 2 code compiles on platforms without an embedding backend
 /// yet (Linux: X11 reparent / Wayland streaming fallback per ROADMAP §5).
 /// Attaching is a no-op that logs once.
+///
+/// It holds nothing (P23.2a — the hoist): the shared carve/fracture stores are
+/// Ring 2's, created once per process and handed to `spawn`, which on this
+/// platform simply drops them.
 #[cfg(not(any(windows, target_os = "macos")))]
-pub struct ViewportHandle(
-    inf_editor_core::voxel_store::SharedVoxelVolumes,
-    inf_editor_core::simulate::SharedFractures,
-);
+pub struct ViewportHandle;
 
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn spawn(_parent: isize, _sink: ViewportEventSink, _scene: SharedScene) -> ViewportHandle {
+pub fn spawn(
+    _parent: isize,
+    _sink: ViewportEventSink,
+    _scene: SharedScene,
+    _volumes: inf_editor_core::voxel_store::SharedVoxelVolumes,
+    _fractures: inf_editor_core::simulate::SharedFractures,
+) -> ViewportHandle {
     tracing::warn!(
         "inf-viewport: native embedding not yet implemented on this OS (see ROADMAP §5 Spike A)"
     );
-    // A real (empty) store rather than an `Option`: Ring 2's save path stages
-    // out of whatever this hands back, and an always-empty store stages nothing,
-    // which is the truth on a platform where nothing can be carved.
-    ViewportHandle(
-        inf_editor_core::voxel_store::shared_volumes(),
-        inf_editor_core::simulate::shared_fractures(),
-    )
+    ViewportHandle
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -190,12 +191,6 @@ impl ViewportHandle {
     pub fn refresh_asset_index(&self) {}
     pub fn reload_terrain_stores(&self) {}
     pub fn reload_voxel_stores(&self) {}
-    pub fn voxel_volumes(&self) -> inf_editor_core::voxel_store::SharedVoxelVolumes {
-        self.0.clone()
-    }
-    pub fn fracture_states(&self) -> inf_editor_core::simulate::SharedFractures {
-        self.1.clone()
-    }
     pub fn clear_streams(&self) {}
     pub fn embed_foreign(&self, _hwnd: isize) {}
     pub fn release_foreign(&self) {}
