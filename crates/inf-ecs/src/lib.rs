@@ -14,6 +14,7 @@
 pub mod anim;
 pub mod attach;
 pub mod components;
+pub mod deform;
 pub mod hierarchy;
 pub mod hydro;
 pub mod math;

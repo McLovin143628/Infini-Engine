@@ -437,6 +437,20 @@ impl SimSession {
         self.voxels = volumes;
     }
 
+    /// The surface deformation field this Simulate session has pressed into its
+    /// terrain (P22.1), or `None` when nothing has touched ground.
+    ///
+    /// It lives on the **document's world**, not on this struct — see
+    /// [`inf_ecs::deform`] for why. Exposed here so a parity gate can compare the
+    /// *field* the editor preview produced against the shipped player's, which is
+    /// the P22.4 PIE-==-shipping seed. (MIRROR of `RuntimeSim::deform_field`.)
+    pub fn deform_field<'a>(
+        &self,
+        doc: &'a SceneDoc,
+    ) -> Option<&'a inf_terrain::deform::DeformField> {
+        inf_ecs::deform::deform_field(doc.world())
+    }
+
     /// Install (or replace) the debugger config for a class (B-P4 tier A′): the
     /// breakpoints to pause on + whether to capture wire values. Applies from the
     /// next event pass. Passing `InterpDebug::default()` (empty) disables it.
@@ -549,6 +563,16 @@ impl SimSession {
         self.bridge.write_back(doc.world_mut());
         self.bridge3d.write_back_into(doc.world_mut()); // ── P11.3 3D bridge: write-back ──
         doc.world_mut().propagate();
+        // ── P22.1 surface deformation ── the ground remembers what stood on it.
+        //    Here, and not earlier: a footprint's XZ is read off the transform
+        //    the solver just wrote and `propagate` just settled, so the print
+        //    lands where the body actually ended the step. ONE Ring-0 call
+        //    (`inf_ecs::deform`) rather than a loop spelled twice — the sky
+        //    advance's shape — so the editor preview and the shipped player
+        //    cannot disagree about where a track goes. Inert (one empty vec, no
+        //    allocation) on every level whose bodies never touch a terrain.
+        //    (MIRROR of `RuntimeSim::fixed_step`.)
+        inf_ecs::deform::step_deformation(doc.world_mut(), dt);
         // 5. Advance skeletal-animation play-heads (P11.1). Order-independent
         //    per-entity `t` integration → deterministic at the fixed `dt`.
         //    ── P11.3 root motion ── snapshot play-heads BEFORE advancing, advance,

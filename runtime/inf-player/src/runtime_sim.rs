@@ -614,12 +614,32 @@ impl RuntimeSim {
         self.fixed_step();
     }
 
-    /// bincode of the `Guid`-sorted sim snapshot — the per-step trace unit folded
-    /// by the determinism harness (same shape `inf_runtime::replay` hashes).
+    /// bincode of the `Guid`-sorted sim snapshot **followed by the surface
+    /// deformation field's bytes** — the per-step trace unit folded by the
+    /// determinism harness (same shape `inf_runtime::replay` hashes).
+    ///
+    /// P22.1 appends the field rather than tracing it separately, because that
+    /// is what makes every gate the engine already has cover it at once: the
+    /// replay fold, `step_state_hash`, and the PIE `Frame::state_hash` that the
+    /// `PIE == shipping` arms compare all consume this one buffer. A level that
+    /// deforms nothing has no field, so
+    /// [`inf_ecs::deform::deform_state_bytes`] returns an empty vec and every
+    /// pre-P22.1 trace is byte-identical.
+    ///
+    /// This buffer is **hashed, never decoded**, which is why appending a second
+    /// section needs no version and no reader change.
     pub fn state_bytes(&mut self) -> Vec<u8> {
         let snap = sim_snapshot(&mut self.world);
-        bincode::serde::encode_to_vec(&snap, bincode::config::standard())
-            .expect("sim snapshot is always encodable")
+        let mut out = bincode::serde::encode_to_vec(&snap, bincode::config::standard())
+            .expect("sim snapshot is always encodable");
+        out.extend_from_slice(&inf_ecs::deform::deform_state_bytes(&self.world));
+        out
+    }
+
+    /// The surface deformation field this sim has pressed into its terrain
+    /// (P22.1), or `None` on a level where nothing has ever touched ground.
+    pub fn deform_field(&self) -> Option<&inf_terrain::deform::DeformField> {
+        inf_ecs::deform::deform_field(&self.world)
     }
 
     // ── internal ──────────────────────────────────────────────────────────
@@ -692,6 +712,16 @@ impl RuntimeSim {
         self.bridge.write_back(&mut self.world);
         self.bridge3d.write_back_into(&mut self.world); // ── P11.3 3D bridge: write-back ──
         self.world.propagate();
+        // ── P22.1 surface deformation ── the ground remembers what stood on it.
+        //    Here, and not earlier: a footprint's XZ is read off the transform
+        //    the solver just wrote and `propagate` just settled, so the print
+        //    lands where the body actually ended the step. ONE Ring-0 call
+        //    (`inf_ecs::deform`) rather than a loop spelled twice — the sky
+        //    advance's shape — so the editor preview and the shipped player
+        //    cannot disagree about where a track goes. Inert (one empty vec, no
+        //    allocation) on every level whose bodies never touch a terrain.
+        //    (MIRROR of `SimSession::fixed_step`.)
+        inf_ecs::deform::step_deformation(&mut self.world, dt);
         // 5. Advance skeletal-animation play-heads (P11.1) — the same order-free,
         //    fixed-`dt` integration the editor Simulate tick runs (preview ==
         //    shipped). ── P11.3 root motion ── snapshot play-heads, advance, apply.

@@ -54,6 +54,7 @@ pub mod biomepaint;
 mod brush;
 pub mod chunked;
 mod data;
+pub mod deform;
 mod delta;
 pub mod erosion;
 pub mod import;
@@ -90,6 +91,11 @@ pub use chunked::{
 pub use data::{
     TerrainData, TerrainDataFrozenV1, TerrainDataFrozenV2, DEFAULT_METERS_PER_SAMPLE,
     DEFAULT_TILE_RESOLUTION,
+};
+pub use deform::{
+    window_origin, DeformCell, DeformField, LayerResponse, PressureClass, DEFORM_CELL_AREA,
+    DEFORM_CELL_SAMPLES, DEFORM_CELL_SIZE_M, DEFORM_SAMPLE_PITCH_M, LAYER_RESPONSE,
+    MAX_DEFORM_CELLS, MAX_DEFORM_DEPTH_M,
 };
 pub use delta::{HeightDelta, HoleDelta, HoleDeltaBuilder, HolePatch, TilePatch};
 pub use import::{

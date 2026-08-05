@@ -1301,3 +1301,140 @@ fn both_hosts_load_voxel_volumes_through_the_ring_zero_store() {
         );
     }
 }
+
+// ── P22.1 surface deformation ────────────────────────────────────────────────
+
+/// **The P22.1 mirror gate.** `project_deform` is a self-contained free function
+/// on both sides — like `project_sky` and `project_water` — so nothing weaker
+/// than character-for-character equality is called for.
+///
+/// The divergence this catches is subtle and would be very hard to see: a
+/// projection that shipped the field in different units, or with a different cell
+/// geometry, would put the *same* footprints in *different* places in the two
+/// builds. Nothing would crash and every sim gate would still pass, because the
+/// field is identical — it is only the window that would be wrong.
+#[test]
+fn project_deform_is_identical_in_both_projectors() {
+    let mine = extract_fn(&read(VIEWPORT), "project_deform");
+    let theirs = extract_fn(&read(PLAYER), "project_deform");
+    assert_eq!(
+        mine, theirs,
+        "the two `project_deform` projectors have drifted — the same footprints \
+         would draw in different places in the preview and the shipped build. \
+         Keep them byte-identical, or move the shared part into \
+         `inf_terrain::deform` (which is where the lattice already lives)."
+    );
+}
+
+/// A guard on the guard: two stubs are identical too. The shared body has to
+/// carry the lattice geometry from Ring 0 rather than restate it, and it has to
+/// be epoch-gated rather than rebuilt.
+#[test]
+fn the_shared_deform_projector_is_not_a_stub() {
+    let body = extract_item(&read(PLAYER), "project_deform");
+    for fragment in [
+        // The geometry comes from Ring 0. A host that wrote `16` or `0.25` here
+        // would have a projection that silently disagreed with the field the day
+        // either constant moved.
+        "inf_terrain::deform::DEFORM_CELL_SAMPLES",
+        "inf_terrain::deform::DEFORM_SAMPLE_PITCH_M",
+        // Epoch-gated, not rebuilt — the one thing that makes a standing
+        // character free, and the same key the renderer's upload gate uses.
+        "d.epoch == field.epoch()",
+        // An empty field projects `None`, which is what makes every scene with no
+        // deformation record the command stream it always did.
+        "scene.deform = None;",
+        // The whole live set crosses, in the field's own coordinates.
+        "field\n            .cells()",
+        "cell.depths().to_vec()",
+    ] {
+        assert!(
+            body.contains(fragment),
+            "`project_deform` no longer contains `{fragment}` — either it was \
+             gutted, or this gate needs updating deliberately:\n{body}"
+        );
+    }
+    // THE CAMERA CHECK. The field is sim-authoritative; which part of it is drawn
+    // is decided in the renderer. A projector that started windowing here would
+    // be shipping a camera-dependent projection, which is the P21 law's other
+    // half ("may be read but never shipped").
+    for probe in ["eye", "camera", "window_origin"] {
+        assert!(
+            !body.contains(probe),
+            "`project_deform` names `{probe}` — the deformation projection must \
+             never see a camera:\n{body}"
+        );
+    }
+}
+
+/// The surrounding *rules* must hold on both sides: the field is read through the
+/// Ring-0 seam (not re-derived), and the projection is driven from the world the
+/// host's fixed step actually writes.
+#[test]
+fn both_projectors_project_deform_the_same_way() {
+    const SHARED: [&str; 2] = ["inf_ecs::deform::deform_field(", "project_deform("];
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let src = read(path).replace("\r\n", "\n");
+        for fragment in SHARED {
+            assert!(
+                src.contains(fragment),
+                "the {label}'s deformation projection no longer contains \
+                 `{fragment}` — either the path was changed on one side only, or \
+                 this gate needs updating deliberately"
+            );
+        }
+        // `deform` must NOT be cleared like the other lists: it is epoch-gated,
+        // and a `clear()` beside the others would silently turn the gate into a
+        // per-frame rebuild of the whole live cell set.
+        assert!(
+            !src.contains("deform.clear()"),
+            "the {label} clears the deformation projection — it is epoch-gated on \
+             purpose (see `project_deform`)"
+        );
+    }
+}
+
+/// Both fixed steps must run the deformation slot, and must run it through the
+/// **one** Ring-0 rule rather than a loop spelled twice.
+///
+/// This is the sim half of the P22.1 mirror, and it is the half that decides
+/// whether PIE matches shipping: a preview that stamped footprints the shipped
+/// build did not would diverge on the very first step a character touched ground.
+#[test]
+fn both_fixed_steps_run_the_deformation_slot() {
+    const RUNTIME_SIM: &str = "runtime/inf-player/src/runtime_sim.rs";
+    const SIMULATE: &str = "editor/crates/inf-editor-core/src/simulate.rs";
+    for (label, path, call) in [
+        (
+            "shipped player",
+            RUNTIME_SIM,
+            "inf_ecs::deform::step_deformation(&mut self.world, dt);",
+        ),
+        (
+            "editor Simulate",
+            SIMULATE,
+            "inf_ecs::deform::step_deformation(doc.world_mut(), dt);",
+        ),
+    ] {
+        let src = read(path).replace("\r\n", "\n");
+        assert!(
+            src.contains(call),
+            "the {label} fixed step does not call the P22.1 deformation slot \
+             (`{call}`) — the two hosts would disagree about where footprints go"
+        );
+        // …and it must sit AFTER the physics write-back + propagate, because a
+        // footprint's XZ is read off the transform the solver just wrote.
+        let at = src.find(call).expect("call present");
+        let propagate = src[..at]
+            .rfind("propagate();")
+            .expect("a propagate must precede the deformation slot");
+        let write_back = src[..propagate]
+            .rfind("write_back_into(")
+            .expect("the physics write-back must precede that propagate");
+        assert!(
+            write_back < propagate && propagate < at,
+            "the {label} runs the deformation slot before the physics write-back \
+             settled — footprints would land one step behind the bodies"
+        );
+    }
+}

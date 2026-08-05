@@ -449,6 +449,39 @@ impl TerrainData {
         None
     }
 
+    /// The **dominant splat layer** at world `(x, z)` — the index of the largest
+    /// of the four blended weights — or `None` outside the authored extent
+    /// (P22.1).
+    ///
+    /// Nearest sample, through the same [`sample_at`](TerrainData::sample_at)
+    /// door the categorical layers use, because this answer *is* categorical: a
+    /// surface responds to a boot as one material, and "the average of grass and
+    /// rock" is not a third one. Ties break toward the lower index, which is
+    /// deterministic and is the only property a tie needs.
+    ///
+    /// A **holed** sample has no surface, so it has no response either: a cave
+    /// mouth is not ground that can be pressed. Returns `None` there, on the same
+    /// cell-poisoning rule [`height_at`](TerrainData::height_at) applies.
+    ///
+    /// This is the seam the deformation stamp reads, and it is deliberately a
+    /// method on the **resident** `TerrainData` the world holds: the sim's
+    /// working set, never the streamer's camera-driven one (see [`crate::wants`]).
+    /// An unloaded tile answers `None` and the contact simply leaves no mark,
+    /// which is correct — the sim's own wants already cover every active actor.
+    pub fn dominant_layer_at(&self, world_xz: DVec2) -> Option<u8> {
+        if self.is_hole_at(world_xz) {
+            return None;
+        }
+        let w = self.sample_at(world_xz, |tile, res, i, j| tile.weight_sample(res, i, j))?;
+        let mut best = 0usize;
+        for k in 1..w.len() {
+            if w[k] > w[best] {
+                best = k;
+            }
+        }
+        Some(best as u8)
+    }
+
     /// `true` when world `(x, z)` lands on a **holed** part of the heightfield —
     /// authored terrain with its surface carved away (P21.2).
     ///
