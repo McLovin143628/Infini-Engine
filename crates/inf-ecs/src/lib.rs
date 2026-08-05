@@ -33,11 +33,12 @@ pub use components::{
     ActorClass, AnimPlayer, AnimStateMachine, AtlasRect, AttachedTo, BillboardMode, BodyKind2D,
     BodyKind3D, Buoyancy, Camera, CharacterController2D, CharacterController3D, Collider2D,
     Collider3D, ColliderShape2DKind, ColliderShape3DKind, CombineRule, ComputedVisibility,
-    GlobalTransform, Guid, Joint2D, Joint3D, JointKind2D, JointKind3D, Light, LightKind, Material,
-    MeshRef, Name, PcgVolume, Primitive, RigidBody2D, RigidBody3D, RootMotion, RootMotionMode,
-    ScatteredInstance, ScatteredSolid, SkeletalMesh, SkyAtmosphere, SmRuntimeState, Sprite,
-    Terrain, TileBounds, TileChunk, Tilemap, TimeOfDay, Transform, Visibility, VoxelVolume,
-    CHUNK_DIM, CHUNK_TILES,
+    Destructible, GlobalTransform, Guid, Joint2D, Joint3D, JointKind2D, JointKind3D, Light,
+    LightKind, Material, MeshRef, Name, PcgVolume, Primitive, RigidBody2D, RigidBody3D, RootMotion,
+    RootMotionMode, ScatteredInstance, ScatteredSolid, SkeletalMesh, SkyAtmosphere, SmRuntimeState,
+    Sprite, Terrain, TileBounds, TileChunk, Tilemap, TimeOfDay, Transform, Visibility, VoxelVolume,
+    CHUNK_DIM, CHUNK_TILES, DEFAULT_DESTRUCTIBLE_CHUNKS, DEFAULT_DESTRUCTIBLE_DENSITY,
+    DEFAULT_STRENGTH_PA,
 };
 pub use hierarchy::{ChildOf, Children};
 pub use math::{Color, Vec2d, Vec3d};

@@ -15,11 +15,11 @@ use crate::components::{
     AlwaysLoaded, AnimPlayer, AnimStateMachine, AtlasRect, AudioListener, AudioSource,
     BillboardMode, BlendMode, BodyKind2D, BodyKind3D, Buoyancy, Camera, CharacterController2D,
     CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
-    CombineRule, Decal, DistanceModel, Foliage, FoliagePaletteEntry, Joint2D, Joint3D, JointKind2D,
-    JointKind3D, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice, PcgVolume,
-    Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, SkyAtmosphere, Spline, SplineInterp, Sprite,
-    StreamingSource, Terrain, Text2D, TextAlign, Tilemap, TimeOfDay, Transform, Visibility, Volume,
-    VolumeKind, VoxelVolume, WaterBody, WaterKind, WeatherPreset,
+    CombineRule, Decal, Destructible, DistanceModel, Foliage, FoliagePaletteEntry, Joint2D,
+    Joint3D, JointKind2D, JointKind3D, Light, Light2D, LightKind, Material, MeshRef, Name,
+    NineSlice, PcgVolume, Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, SkyAtmosphere, Spline,
+    SplineInterp, Sprite, StreamingSource, Terrain, Text2D, TextAlign, Tilemap, TimeOfDay,
+    Transform, Visibility, Volume, VolumeKind, VoxelVolume, WaterBody, WaterKind, WeatherPreset,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -139,6 +139,12 @@ impl ComponentRegistry {
             // physics components rather than with the water because it is
             // authored on the *body*, not on the water.
             Buoyancy => "Buoyancy",
+            // P22.2 — the marker that says this entity's mesh can break, and the
+            // five numbers that decide how. Sits beside `Buoyancy` because it is
+            // the same shape of thing: an opt-in physical-response block authored
+            // on the BODY, referencing no asset of its own (the chunk set is
+            // derived from the entity's own `MeshRef` at cook time).
+            Destructible => "Destructible",
             RigidBody2D => "Rigid Body 2D",
             Collider2D => "Collider 2D",
             CharacterController2D => "Character Controller 2D",
@@ -243,8 +249,8 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        // 36 through P20.2, + `VoxelVolume` at P21.1.
-        assert_eq!(reg.editable().len(), 37);
+        // 36 through P20.2, + `VoxelVolume` at P21.1, + `Destructible` at P22.2.
+        assert_eq!(reg.editable().len(), 38);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

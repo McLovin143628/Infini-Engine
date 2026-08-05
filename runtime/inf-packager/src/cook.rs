@@ -50,7 +50,23 @@
 //!    back to the classic `.inf_mesh` LOD path (roadmap risk #3). The build is
 //!    deterministic (`meshopt` + `inf_core::parallel_map`'s in-order collect), so
 //!    the vmesh derivation preserves the cook's byte-identical guarantee.
-//! 7. **Pack + manifest** — write `content.inf_pack` (sorted, zstd, deterministic)
+//! 7. **Derive fracture chunk sets** (P22.2) — for every `.inf_mesh` a
+//!    [`Destructible`] entity somewhere in the cooked content points at, run the
+//!    Ring-0 Voronoi pre-fracture ([`inf_mesh::fracture::fracture_mesh`]) and
+//!    pack the resulting chunk set beside the mesh as an `.inf_fracture`
+//!    ([`AssetKind::Fracture`]). Its GUID is a deterministic function of the mesh
+//!    GUID ([`derived_fracture_id`]) — the [`derived_vmesh_id`] precedent again —
+//!    so the runtime finds a mesh's chunks by computing the id.
+//!
+//!    **Only meshes something declares destructible are fractured**, unlike the
+//!    vmesh derivation which runs on every mesh above a threshold. The reason is
+//!    that a fracture is *not* a cheaper form of the same asset: it is a
+//!    different asset, useful only to gameplay that breaks the thing, and
+//!    fracturing every mesh in a project would spend cook time and ship bytes on
+//!    chunk sets nothing can ever load. `Destructible` is exactly the declaration
+//!    that makes one useful, so it is the trigger. See [`plan_fractures`] for why
+//!    that plan is built *before* the parallel stage.
+//! 8. **Pack + manifest** — write `content.inf_pack` (sorted, zstd, deterministic)
 //!    and a deterministic `manifest.toml`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -58,6 +74,7 @@ use std::path::{Path, PathBuf};
 
 use inf_asset::{AssetDb, AssetId, AssetKind, PackWriter};
 use inf_blueprint::{BlueprintClass, BlueprintLibrary};
+use inf_mesh::fracture::{self, FractureParams, FractureSkip};
 use inf_project::Project;
 
 use crate::blueprint::{validate_class, validate_library};
@@ -77,6 +94,26 @@ pub struct CookOptions {
     pub pack_name: Option<String>,
     /// Virtualized-geometry (`.inf_vmesh`) derivation controls.
     pub vgeom: VgeomCookOptions,
+    /// Fracture (`.inf_fracture`) derivation controls (P22.2).
+    pub fracture: FractureCookOptions,
+}
+
+/// Controls the cook's fracture derivation (P22.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FractureCookOptions {
+    /// Whether to derive `.inf_fracture` chunk sets for destructible meshes.
+    ///
+    /// On by default. Off is for a build that deliberately ships without
+    /// destruction (a bandwidth-constrained tier, a bisect); it does **not**
+    /// change what is authored, and re-enabling it re-derives byte-identical
+    /// chunk sets because the fracture is a pure function of the mesh.
+    pub enabled: bool,
+}
+
+impl Default for FractureCookOptions {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// Controls the cook's virtualized-geometry derivation (P13.1).
@@ -132,6 +169,32 @@ pub fn derived_partition_id(level_id: AssetId) -> AssetId {
     ))
 }
 
+/// Derive the deterministic `.inf_fracture` asset id for a given mesh id (P22.2).
+///
+/// Same construction and the same reasoning as [`PARTITION_ID_SALT`]'s, and like
+/// [`derived_vmesh_id`] the salt itself lives in **Ring 0** — in `inf-mesh`, the
+/// crate that owns the `.inf_fracture` format ([`inf_mesh::fracture::FRACTURE_ID_SALT`]).
+/// That placement is deliberate and taken *before* the second copy exists rather
+/// than after the third: P22.3's runtime will need to compute this id too, and
+/// hand-copying a constant into the player is precisely the drift the vmesh salt
+/// was moved to Ring 0 to end.
+pub fn derived_fracture_id(mesh_id: AssetId) -> AssetId {
+    fracture::derived_fracture_id(mesh_id)
+}
+
+/// What one `Destructible` asks the cook to build for a mesh.
+///
+/// The count is stored **as authored**; the clamp happens where the advisory is
+/// raised, so the report can quote both numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FractureRequest {
+    params: FractureParams,
+    /// The entity that asked, for advisory anchoring.
+    entity: uuid::Uuid,
+    /// The level that entity lives in.
+    level: AssetId,
+}
+
 /// The outcome of a successful cook.
 #[derive(Debug, Clone)]
 pub struct CookReport {
@@ -159,6 +222,12 @@ pub struct CookReport {
     pub levels_rewritten: usize,
     /// How many `.inf_vmesh` meshlet DAGs were derived from meshes (P13.1).
     pub meshlet_meshes_derived: usize,
+    /// How many `.inf_fracture` chunk sets were derived from destructible
+    /// meshes (P22.2).
+    pub fractures_derived: usize,
+    /// Total level-1 chunks across those fracture sets — the number that
+    /// predicts P22.3's rigid-body cost, which the asset count does not.
+    pub fracture_chunks: usize,
     /// How many `.inf_part` world partitions were built from levels (P16.5).
     pub partitions_built: usize,
     /// Total streamed grid cells across those partitions (the persistent cell is
@@ -197,6 +266,12 @@ impl CookReport {
             s.push_str(&format!(
                 "  {} meshlet DAG(s) derived (.inf_vmesh)\n",
                 self.meshlet_meshes_derived
+            ));
+        }
+        if self.fractures_derived > 0 {
+            s.push_str(&format!(
+                "  {} fracture chunk set(s) derived (.inf_fracture), {} chunk(s)\n",
+                self.fractures_derived, self.fracture_chunks
             ));
         }
         if self.partitions_built > 0 {
@@ -244,6 +319,9 @@ enum CookOutput {
         is_blueprint: bool,
         /// A derived meshlet DAG `(vmesh_id, bytes)` for a dense mesh.
         vmesh: Option<(AssetId, Vec<u8>)>,
+        /// A derived fracture chunk set `(fracture_id, bytes, chunk_count)` for a
+        /// mesh some `Destructible` names (P22.2).
+        fracture: Option<(AssetId, Vec<u8>, usize)>,
         /// A derived world partition `(part_id, bytes, streamed_cell_count)` for
         /// a partitioned level (P16.5).
         partition: Option<(AssetId, Vec<u8>, usize)>,
@@ -257,7 +335,11 @@ enum CookOutput {
 /// Cook one asset: decode/validate/re-encode + optional vmesh derivation. Pure
 /// over its input (no shared mutable state), so it runs on the job pool and its
 /// output is a deterministic function of the input bytes.
-fn cook_one(input: CookInput, opts: &CookOptions) -> Result<CookOutput> {
+fn cook_one(
+    input: CookInput,
+    opts: &CookOptions,
+    fractures: &BTreeMap<AssetId, FractureRequest>,
+) -> Result<CookOutput> {
     let (guid, kind, name, raw) = match input {
         CookInput::Skipped(w) => return Ok(CookOutput::Skipped(w)),
         CookInput::Asset {
@@ -406,6 +488,31 @@ fn cook_one(input: CookInput, opts: &CookOptions) -> Result<CookOutput> {
         None
     };
 
+    // ── derive the fracture chunk set for a destructible mesh (P22.2) ───────
+    //
+    // Gated on the PLAN, not on the kind: a mesh nothing declares destructible
+    // gets nothing, which is what keeps a project's cook from growing an
+    // `.inf_fracture` for every prop in it.
+    let fracture = if kind == AssetKind::Mesh && opts.fracture.enabled {
+        match fractures.get(&guid) {
+            Some(req) => {
+                let _span = tracing::info_span!("derive_fracture", %guid).entered();
+                let (params, clamp_note) = clamped_params(req, &name);
+                advisories.extend(clamp_note);
+                match derive_fracture(guid, &cooked, params)? {
+                    Ok((bytes, chunks)) => Some((derived_fracture_id(guid), bytes, chunks)),
+                    Err(skip) => {
+                        advisories.push(fracture_skip_advisory(guid, &name, req.level, skip));
+                        None
+                    }
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     Ok(CookOutput::Cooked {
         guid,
         kind,
@@ -413,9 +520,198 @@ fn cook_one(input: CookInput, opts: &CookOptions) -> Result<CookOutput> {
         is_level,
         is_blueprint,
         vmesh,
+        fracture,
         partition,
         advisories,
     })
+}
+
+/// Clamp a request's chunk count, returning the advisory when the clamp bit.
+///
+/// Pure, so the wording and the trigger are unit-tested — the
+/// `sub_threshold_advisory` precedent.
+fn clamped_params(req: &FractureRequest, name: &str) -> (FractureParams, Option<String>) {
+    let asked = req.params.chunk_count;
+    let clamped = fracture::clamp_chunk_count(asked);
+    let params = FractureParams {
+        chunk_count: clamped,
+        ..req.params
+    };
+    if clamped == asked {
+        return (params, None);
+    }
+    (
+        params,
+        Some(chunk_count_clamp_advisory(
+            req.level, req.entity, name, asked, clamped,
+        )),
+    )
+}
+
+/// The advisory for a `Destructible` whose authored chunk count is out of range.
+pub fn chunk_count_clamp_advisory(
+    level: AssetId,
+    entity: uuid::Uuid,
+    mesh_name: &str,
+    asked: u32,
+    clamped: u32,
+) -> String {
+    format!(
+        "level {level}: entity {entity} asks for {asked} fracture chunks of mesh \"{mesh_name}\", \
+         outside the supported range [{min}, {max}] — the cook clamped it to {clamped}, so the \
+         shipped break will not have the piece count the level says it does; author a \
+         Destructible.chunk_count inside the range",
+        min = fracture::MIN_CHUNK_COUNT,
+        max = fracture::MAX_CHUNK_COUNT,
+    )
+}
+
+/// The advisory for a mesh the fracture declined (P22.2).
+///
+/// **Why this is worth a line of output.** A `Destructible` on a mesh that cannot
+/// be fractured is the exact shape of defect the vmesh sub-threshold advisory
+/// exists for: the level says the wall breaks, the cook silently ships no chunk
+/// set, and P22.3 finds nothing to swap in — so the wall is simply indestructible,
+/// in the build only, discovered by whoever shoots it. Unlike the vmesh case
+/// there is no `NoGeometry` exemption, because here somebody *asked*: a
+/// `Destructible` pointing at an empty mesh is always a mistake worth naming.
+///
+/// Pure, so the wording and the trigger are unit-tested.
+pub fn fracture_skip_advisory(
+    guid: AssetId,
+    name: &str,
+    level: AssetId,
+    skip: FractureSkip,
+) -> String {
+    let why = match skip {
+        FractureSkip::NoGeometry => {
+            "it has no triangles at all — there is nothing to break".to_string()
+        }
+        FractureSkip::Degenerate => {
+            "its geometry is flat or collinear, so it bounds no volume and its chunks could \
+             have no mass"
+                .to_string()
+        }
+        FractureSkip::TooSmall { volume_m3 } => format!(
+            "its convex hull measures {volume_m3:.3e} m3, below the {min:.0e} m3 worth \
+             fracturing",
+            min = fracture::MIN_FRACTURE_VOLUME_M3
+        ),
+    };
+    format!(
+        "mesh {guid} ({name}) is marked Destructible by a level {level} entity but was NOT \
+         fractured: {why}. The shipped build will have no chunk set for it, so it cannot \
+         break at all; give it real solid geometry, or remove the Destructible"
+    )
+}
+
+/// Build the `.inf_fracture` payload for a `.inf_mesh`, or the reason it was
+/// skipped.
+fn derive_fracture(
+    guid: AssetId,
+    raw: &[u8],
+    params: FractureParams,
+) -> Result<std::result::Result<(Vec<u8>, usize), FractureSkip>> {
+    let mesh: inf_mesh::MeshAsset = inf_asset::decode(raw).map_err(|e| CookError::Mesh {
+        guid,
+        message: e.to_string(),
+    })?;
+    let asset = match fracture::fracture_mesh(&mesh, guid, params) {
+        Ok(a) => a,
+        Err(skip) => return Ok(Err(skip)),
+    };
+    let chunks = asset.chunks.len();
+    // A plain bincode payload through `inf_asset::encode`, NOT a raw image: a
+    // `.inf_fracture` is loaded whole when an asset breaks (it is not
+    // streaming-class — see `PackWriter::compresses_kind`), so there is nothing
+    // to sub-slice and nothing that needs 16-byte alignment.
+    let bytes = inf_asset::encode(&asset).map_err(|e| CookError::Mesh {
+        guid,
+        message: e.to_string(),
+    })?;
+    Ok(Ok((bytes, chunks)))
+}
+
+/// Which meshes to fracture, and the parameters to fracture them with.
+///
+/// **Why this runs before the parallel stage.** [`cook_one`] is a pure function
+/// of *one asset's* bytes, which is what lets the cook fan out and still be
+/// byte-identical. "Is this mesh destructible" is not a fact about the mesh: it
+/// lives in a *level*, on some other entity, in some other asset. So the plan is
+/// built serially first — one extra decode per level, which is cheap beside the
+/// re-encode the level cook already does — and handed to the closure as read-only
+/// data.
+///
+/// Returns advisories for the two hazards visible here: a `Destructible` with no
+/// mesh to break, and two `Destructible`s asking for different fractures of the
+/// same mesh (only one `.inf_fracture` can exist per mesh, because its id is a
+/// function of the mesh's). Deduplicated + sorted, like every other advisory
+/// here, so the report stays deterministic.
+fn plan_fractures(inputs: &[CookInput]) -> (BTreeMap<AssetId, FractureRequest>, Vec<String>) {
+    let mut plan: BTreeMap<AssetId, FractureRequest> = BTreeMap::new();
+    let mut notes: BTreeSet<String> = BTreeSet::new();
+    for input in inputs {
+        let CookInput::Asset {
+            guid, kind, raw, ..
+        } = input
+        else {
+            continue;
+        };
+        if *kind != AssetKind::Level {
+            continue;
+        }
+        // An undecodable level is not this pass's problem to report: the real
+        // cook stage fails the build on it with a proper error.
+        let Ok(level) = inf_scene::decode(raw) else {
+            continue;
+        };
+        for e in &level.entities {
+            let Some(d) = e.destructible else {
+                continue;
+            };
+            let Some(mesh_id) = e.mesh.as_ref().and_then(|m| m.asset).map(AssetId) else {
+                notes.insert(format!(
+                    "level {guid}: entity {} (\"{}\") is Destructible but references no mesh \
+                     asset — a fracture is derived from the entity's own mesh, so there is \
+                     nothing to break; give it a MeshRef pointing at an .inf_mesh, or remove \
+                     the Destructible",
+                    e.guid, e.name
+                ));
+                continue;
+            };
+            let req = FractureRequest {
+                params: FractureParams {
+                    seed: d.fracture_seed,
+                    chunk_count: d.chunk_count,
+                },
+                entity: e.guid,
+                level: *guid,
+            };
+            match plan.get(&mesh_id) {
+                Some(first) if first.params != req.params => {
+                    notes.insert(format!(
+                        "mesh {mesh_id} is marked Destructible with two different fractures \
+                         (seed {a_seed}/{a_count} chunks by entity {a_ent}, seed \
+                         {b_seed}/{b_count} by entity {b_ent}) — exactly ONE .inf_fracture is \
+                         derived per mesh, because its id is a function of the mesh's, so the \
+                         first in cook order wins and the other entity will break the wrong \
+                         way; give the variants matching parameters, or separate meshes",
+                        a_seed = first.params.seed,
+                        a_count = first.params.chunk_count,
+                        a_ent = first.entity,
+                        b_seed = req.params.seed,
+                        b_count = req.params.chunk_count,
+                        b_ent = req.entity,
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    plan.insert(mesh_id, req);
+                }
+            }
+        }
+    }
+    (plan, notes.into_iter().collect())
 }
 
 /// Bin a partitioned level's entities and build its `.inf_part` payload.
@@ -541,7 +837,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     warnings.extend(unresolvable_image_masks(&db, &closure));
     warnings.extend(dangling_grammar_modules(&db, &closure));
 
-    // ── 4/5/6. compile blueprints + rewrite levels + derive vmesh ───────────
+    // ── 4/5/6/7. blueprints + levels + vmesh + fracture ─────────────────────
     //
     // The per-asset CPU work (scene decode/re-encode, blueprint decode+validate,
     // meshlet-DAG derivation) is a **pure function of each asset's input bytes**,
@@ -576,10 +872,21 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
         inputs
     };
 
+    // Which meshes are destructible is a cross-asset fact (it lives on level
+    // entities), so it is resolved serially here and handed to the pure per-asset
+    // closure as read-only data — see `plan_fractures`.
+    let (fracture_plan, fracture_notes) = if opts.fracture.enabled {
+        let _span = tracing::info_span!("plan_fractures").entered();
+        plan_fractures(&inputs)
+    } else {
+        (BTreeMap::new(), Vec::new())
+    };
+    warnings.extend(fracture_notes);
+
     // Parallel, deterministic (in-order) map: cook every asset on the job pool.
     let outputs: Vec<Result<CookOutput>> = {
         let _span = tracing::info_span!("cook_assets", assets = inputs.len()).entered();
-        inf_core::parallel_map(inputs, |input| cook_one(input, opts))
+        inf_core::parallel_map(inputs, |input| cook_one(input, opts, &fracture_plan))
     };
 
     // Serial fold in closure order → byte-identical pack + fail-fast first error.
@@ -589,11 +896,16 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     let mut blueprints_validated = 0usize;
     let mut levels_rewritten = 0usize;
     let mut meshlet_meshes_derived = 0usize;
+    let mut fractures_derived = 0usize;
+    let mut fracture_chunks = 0usize;
     let mut partitions_built = 0usize;
     let mut partition_cells = 0usize;
     // Meshlet DAGs derived alongside their meshes, added after the closure so a
     // derived id never shadows a real closure asset processed later.
     let mut derived_vmeshes: Vec<(AssetId, Vec<u8>)> = Vec::new();
+    // Fracture chunk sets derived alongside their meshes, added after the closure
+    // for the same reason.
+    let mut derived_fractures: Vec<(AssetId, Vec<u8>, usize)> = Vec::new();
     // World partitions derived alongside their levels, added after the closure for
     // exactly the same reason.
     let mut derived_partitions: Vec<(AssetId, Vec<u8>, usize)> = Vec::new();
@@ -608,6 +920,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
                 is_level,
                 is_blueprint,
                 vmesh,
+                fracture,
                 partition,
                 advisories,
             } => {
@@ -632,6 +945,21 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
                         ));
                     } else {
                         derived_vmeshes.push((vmesh_id, vmesh_bytes));
+                    }
+                }
+                if let Some((frac_id, frac_bytes, chunks)) = fracture {
+                    // Same collision guard as the vmesh above, and the same
+                    // degradation: a fracture that cannot be packed means the
+                    // asset does not break, which is a warning rather than a
+                    // reason to fail an otherwise-valid build.
+                    if db.contains(frac_id)
+                        || derived_fractures.iter().any(|(id, _, _)| *id == frac_id)
+                    {
+                        warnings.push(format!(
+                            "skipped fracture for mesh {guid}: derived id {frac_id} collides"
+                        ));
+                    } else {
+                        derived_fractures.push((frac_id, frac_bytes, chunks));
                     }
                 }
                 warnings.extend(advisories);
@@ -664,6 +992,18 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
         meshlet_meshes_derived += 1;
     }
 
+    // Pack the derived fracture chunk sets. `AssetKind::Fracture` is NOT
+    // streaming-class, so these compress like any other payload — a chunk set is
+    // read whole, at the instant its mesh breaks.
+    for (frac_id, bytes, chunks) in &derived_fractures {
+        writer.add_bytes(*frac_id, AssetKind::Fracture, bytes)?;
+        *kinds
+            .entry(AssetKind::Fracture.slug().to_string())
+            .or_default() += 1;
+        fractures_derived += 1;
+        fracture_chunks += chunks;
+    }
+
     // Pack the derived world partitions. `AssetKind::Partition` is
     // streaming-class, so `PackWriter` stores these **uncompressed** and the
     // runtime slices one cell out of the mapping with no decode of the rest.
@@ -676,7 +1016,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
         partition_cells += cells;
     }
 
-    // ── 7. write pack + manifest ────────────────────────────────────────────
+    // ── 8. write pack + manifest ────────────────────────────────────────────
     std::fs::create_dir_all(out_dir)?;
     let pack_name = opts
         .pack_name
@@ -719,6 +1059,8 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
         blueprints_validated,
         levels_rewritten,
         meshlet_meshes_derived,
+        fractures_derived,
+        fracture_chunks,
         partitions_built,
         partition_cells,
         warnings,

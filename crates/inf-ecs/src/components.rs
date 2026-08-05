@@ -3993,6 +3993,171 @@ impl VoxelVolume {
     }
 }
 
+// ── destruction (schema v20 · P22.2) ────────────────────────────────────────
+
+/// **Destructible** (schema v20, P22.2): the marker that says an entity's mesh
+/// can break, and the five numbers that decide *how*.
+///
+/// ## What it references, and what it deliberately does not
+///
+/// Nothing. It names no asset. The thing that breaks is the mesh already on this
+/// entity ([`MeshRef`]), and the chunk set is **derived from that mesh at cook
+/// time** — a `.inf_fracture` whose GUID is a pure function of the mesh's
+/// (`inf_mesh::fracture::derived_fracture_id`), exactly as a `.inf_vmesh`'s is.
+/// So there is no fracture reference to author, no fracture reference to leave
+/// dangling, and no new edge in the cook's dependency closure: the
+/// `MeshRef.asset` edge that already pulls the mesh in is the only one needed.
+/// An entity with a `Destructible` and no `MeshRef` has nothing to break, which
+/// is a cook advisory rather than a field.
+///
+/// ## The fields are FROZEN as shipped
+///
+/// bincode is positional, so growing this component is a wire-format change
+/// costing a scene-schema bump in **both** codec mirrors (the law paid for at
+/// v12, v13, v15 and v16). v20 is Phase 22's only bump — P22.3 (runtime
+/// destruction) and P22.4 (debris at scale) must both fit inside these five
+/// fields, which is why all five are decided now rather than as each batch
+/// discovers it wants one. The argument that they suffice — and the list of
+/// things that look like missing fields but are not — is
+/// `docs/memos/p22-strength.md`. In short: seed and count are everything the
+/// *cook* needs, strength is everything the *structural solve* needs, density is
+/// everything the *chunk bodies* need, and the gate is the gate.
+///
+/// Additive component: every field carries `#[serde(default)]`.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct Destructible {
+    /// Authored seed **offset** for the fracture, folded in beside the mesh's own
+    /// GUID. Changing it re-shatters the same mesh a different way; leaving it
+    /// alone means two cooks of the same content produce the same pieces, which
+    /// is what makes a destruction replay reproducible.
+    ///
+    /// Unitless by nature — it is an identifier, not a measurement.
+    #[serde(default)]
+    pub fracture_seed: u32,
+    /// Target number of chunks the cook fractures the mesh into.
+    ///
+    /// Clamped by the cook to `inf_mesh::fracture::{MIN,MAX}_CHUNK_COUNT` with an
+    /// advisory naming the clamp, and the produced count can still be lower when
+    /// a site's Voronoi cell misses the solid. Defaults to
+    /// [`DEFAULT_DESTRUCTIBLE_CHUNKS`] — pinned equal to the mesh crate's own
+    /// default by a cross-crate test, because `inf-ecs` must not depend on
+    /// `inf-mesh` to say the number.
+    #[serde(default = "default_destructible_chunks")]
+    pub chunk_count: u32,
+    /// The stress this material bears before a bond between two chunks fails,
+    /// **pascals (N/m², SI — architecture rule 6)**.
+    ///
+    /// It is a *failure stress*, not hit points and not a hardness rating: P22.3
+    /// compares a force spread over a shared chunk face against
+    /// `strength × face_area`, so the units cancel into newtons and the number
+    /// means something a materials table can be checked against. The unit
+    /// doctrine forbids a unitless "durability" precisely because it makes that
+    /// comparison unwritable.
+    ///
+    /// Rough classes (full derivation and the caveats in
+    /// `docs/memos/p22-strength.md`): plaster ~1e6, masonry and unreinforced
+    /// concrete ~2–4e6, glass ~5e6, wood across the grain ~5e6, reinforced
+    /// concrete ~1e7, steel ~4e8. Defaults to [`DEFAULT_STRENGTH_PA`], the
+    /// masonry/concrete class — a wall an explosion breaks and a footstep does
+    /// not.
+    #[serde(default = "default_strength_pa")]
+    pub strength: f64,
+    /// Material density, **kg/m³** — with each chunk's cook-computed volume this
+    /// is its mass.
+    ///
+    /// **This is the honest one.** [`Collider3D::density`] also exists and also
+    /// defaults to a number, but that number is `1.0`, which is rapier's mass
+    /// placeholder and not a material density (the finding P20.2's buoyancy
+    /// component was built around). A chunk of concrete weighing one kilogram per
+    /// cubic metre would drift like ash. So chunk mass comes from here.
+    ///
+    /// Defaults to [`DEFAULT_DESTRUCTIBLE_DENSITY`] (concrete). Classes: pine
+    /// ~500, oak ~750, brick ~1900, concrete ~2400, granite ~2700, steel ~7850.
+    #[serde(default = "default_destructible_density")]
+    pub density_kg_m3: f64,
+    /// Whether **gameplay** may destroy this at runtime. P22.3's damage nodes
+    /// read exactly this flag before swapping the intact mesh for chunk bodies.
+    ///
+    /// Defaults to `true` — an asset you marked destructible is one you meant to
+    /// break — and exists so an author can *withhold* permission from geometry
+    /// that must stay as built (a level's load-bearing wall, the bridge the
+    /// critical path crosses). It is a **gate**, not a hint: with it `false` a
+    /// runtime destruction is refused and reported, never silently applied, so a
+    /// replay cannot diverge on whether some node happened to run. The
+    /// `VoxelVolume::runtime_carve` precedent, one phase on.
+    ///
+    /// It says nothing about the cook, which fractures the mesh either way: a
+    /// scripted or cinematic break of a `false` asset is still P22.3's to allow,
+    /// and re-deriving the chunks at that point would not be possible.
+    #[serde(default = "default_true")]
+    pub runtime_destruct: bool,
+}
+
+/// Twelve pieces — see `inf_mesh::fracture::DEFAULT_CHUNK_COUNT`, which this is
+/// pinned equal to by `inf-packager`'s `destructible_defaults_match_the_mesh_crate`
+/// (the crate that can see both).
+pub const DEFAULT_DESTRUCTIBLE_CHUNKS: u32 = 12;
+/// 5 MPa — the masonry / unreinforced-concrete class. See
+/// `docs/memos/p22-strength.md`.
+pub const DEFAULT_STRENGTH_PA: f64 = 5.0e6;
+/// 2400 kg/m³ — concrete. Heavy enough that debris reads as rubble rather than
+/// as polystyrene the first time an author adds the component.
+pub const DEFAULT_DESTRUCTIBLE_DENSITY: f64 = 2400.0;
+
+fn default_destructible_chunks() -> u32 {
+    DEFAULT_DESTRUCTIBLE_CHUNKS
+}
+fn default_strength_pa() -> f64 {
+    DEFAULT_STRENGTH_PA
+}
+fn default_destructible_density() -> f64 {
+    DEFAULT_DESTRUCTIBLE_DENSITY
+}
+
+impl Default for Destructible {
+    fn default() -> Self {
+        Self {
+            fracture_seed: 0,
+            chunk_count: DEFAULT_DESTRUCTIBLE_CHUNKS,
+            strength: DEFAULT_STRENGTH_PA,
+            density_kg_m3: DEFAULT_DESTRUCTIBLE_DENSITY,
+            runtime_destruct: true,
+        }
+    }
+}
+
+impl Destructible {
+    /// The force, **newtons**, needed to break a bond across a shared chunk face
+    /// of `area_m2` — `strength × area`, the one place the pascal is turned into
+    /// something a solver compares against.
+    ///
+    /// Defined here rather than in P22.3 because it is the *contract*: a solve
+    /// that computed a different threshold would be failing this function, not
+    /// its own. (The `Buoyancy::equilibrium_fraction` precedent.)
+    ///
+    /// Non-positive or non-finite inputs give `0.0` — a bond that cannot hold,
+    /// which is the safe reading of "this face has no area".
+    pub fn bond_force_n(&self, area_m2: f64) -> f64 {
+        if !self.strength.is_finite()
+            || !area_m2.is_finite()
+            || self.strength <= 0.0
+            || area_m2 <= 0.0
+        {
+            return 0.0;
+        }
+        self.strength * area_m2
+    }
+
+    /// The mass, **kg**, of a chunk of the given volume.
+    pub fn chunk_mass_kg(&self, volume_m3: f64) -> f64 {
+        if !self.density_kg_m3.is_finite() || !volume_m3.is_finite() {
+            return 0.0;
+        }
+        (self.density_kg_m3 * volume_m3).max(0.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5135,5 +5300,99 @@ mod tests {
             VoxelVolume::from_asset(Uuid::from_u128(7)).asset,
             Some(Uuid::from_u128(7))
         );
+    }
+
+    /// The v20 component: every field survives both wires, a partial record
+    /// still decodes (the additive guarantee), and each default is asserted
+    /// against its literal rather than against `Default::default()` — which
+    /// would be a tautology.
+    #[test]
+    fn destructible_serde_round_trips_and_defaults() {
+        let d = Destructible {
+            fracture_seed: 17,
+            chunk_count: 24,
+            strength: 3.5e7,
+            density_kg_m3: 780.0,
+            runtime_destruct: false,
+        };
+        let back: Destructible = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(d, back);
+
+        let empty: Destructible = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty, Destructible::default());
+        assert_eq!(empty.fracture_seed, 0);
+        assert_eq!(empty.chunk_count, 12);
+        assert_eq!(empty.strength, 5.0e6);
+        assert_eq!(empty.density_kg_m3, 2400.0);
+        assert!(
+            empty.runtime_destruct,
+            "the destruction gate defaults to permitted — see the field docs"
+        );
+
+        // Each field is independently addressable: a partial record keeps the
+        // rest at their defaults rather than resetting the record.
+        let partial: Destructible = serde_json::from_str(r#"{"strength": 4.0e8}"#).unwrap();
+        assert_eq!(partial.strength, 4.0e8);
+        assert_eq!(partial.chunk_count, 12);
+        assert!(partial.runtime_destruct);
+
+        let cfg = bincode::config::standard();
+        let bytes = bincode::serde::encode_to_vec(d, cfg).unwrap();
+        let (rt, _): (Destructible, usize) =
+            bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+        assert_eq!(rt, d);
+        // The wire really carries all five: mutating any one moves the bytes.
+        for mutate in [
+            Destructible {
+                fracture_seed: 18,
+                ..d
+            },
+            Destructible {
+                chunk_count: 25,
+                ..d
+            },
+            Destructible {
+                strength: 3.5e7 + 1.0,
+                ..d
+            },
+            Destructible {
+                density_kg_m3: 781.0,
+                ..d
+            },
+            Destructible {
+                runtime_destruct: true,
+                ..d
+            },
+        ] {
+            assert_ne!(
+                bincode::serde::encode_to_vec(mutate, cfg).unwrap(),
+                bytes,
+                "a field that does not move the wire is not really persisted"
+            );
+        }
+    }
+
+    /// The two SI conversions the component owns, because P22.3 will assert
+    /// against them rather than re-deriving its own.
+    #[test]
+    fn strength_and_density_convert_to_newtons_and_kilograms() {
+        let d = Destructible::default();
+        // 5 MPa over a 0.2 m x 0.2 m face = 5e6 * 0.04 = 200 kN.
+        assert!((d.bond_force_n(0.04) - 200_000.0).abs() < 1e-6);
+        // A 0.05 m3 lump of concrete weighs 120 kg.
+        assert!((d.chunk_mass_kg(0.05) - 120.0).abs() < 1e-9);
+
+        // Degenerate inputs are values, not panics: a face with no area holds
+        // nothing, and a negative volume weighs nothing.
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(d.bond_force_n(bad), 0.0, "area {bad}");
+        }
+        assert_eq!(d.chunk_mass_kg(-1.0), 0.0);
+        assert_eq!(d.chunk_mass_kg(f64::NAN), 0.0);
+        let broken = Destructible {
+            strength: f64::NAN,
+            ..d
+        };
+        assert_eq!(broken.bond_force_n(1.0), 0.0);
     }
 }

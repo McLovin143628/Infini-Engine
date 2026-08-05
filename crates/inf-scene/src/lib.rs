@@ -56,10 +56,10 @@ pub use partition::{PartitionSettings, DEFAULT_CELL_SIZE_M};
 use inf_ecs::components::{
     AlwaysLoaded, AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource, BlendMode,
     Buoyancy, Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D, Decal,
-    Foliage, Joint2D, Joint3D, Light, Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume,
-    RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, SkyAtmosphere, Spline, Sprite,
-    StreamingSource, Terrain, TerrainLayer, Text2D, Tilemap, TimeOfDay, Transform, Volume,
-    VoxelVolume, WaterBody,
+    Destructible, Foliage, Joint2D, Joint3D, Light, Light2D, LightKind, Material, MeshRef,
+    NineSlice, PcgVolume, RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, SkyAtmosphere,
+    Spline, Sprite, StreamingSource, Terrain, TerrainLayer, Text2D, Tilemap, TimeOfDay, Transform,
+    Volume, VoxelVolume, WaterBody,
 };
 use inf_ecs::math::{Color, Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
@@ -239,7 +239,30 @@ use uuid::Uuid;
 ///
 ///   The wire cost to a level with no volumes is **one discriminant byte per
 ///   entity**, the same price every additive slot since v8 has paid.
-pub const SCHEMA_VERSION: u32 = 19;
+/// * **v20** — P22.2: the entity record appends the **destruction** slot —
+///   `destructible` ([`Destructible`]: the marker that says this entity's mesh
+///   can break, plus the five numbers that decide how). No component changed
+///   shape and the file settings are untouched, so this is once again the
+///   [`EntityRecordV10`] *shape* of bump (a new slot at the tail), not the
+///   [`EntityRecordV14`] one (a component that grew). The pre-v20 entity record
+///   is frozen as [`EntityRecordV19`] and lifts with `destructible: None` — a
+///   level in which nothing breaks, which is exactly what every pre-v20 level
+///   was.
+///
+///   **The component references no asset**, which is why it is this cheap. What
+///   breaks is the mesh already on the entity ([`MeshRef`]), and the chunk set is
+///   *derived from that mesh at cook time* — a `.inf_fracture` whose GUID is a
+///   pure function of the mesh's, exactly as a `.inf_vmesh`'s is. So v20 adds no
+///   new edge to the cook's dependency closure, there is no fracture reference
+///   to leave dangling, and no dangling-reference advisory to write.
+///
+///   **This is Phase 22's ONLY bump** and the five fields are frozen as shipped:
+///   P22.3 and P22.4 must both fit inside them. `docs/memos/p22-strength.md`
+///   argues why they suffice.
+///
+///   The wire cost to a level where nothing breaks is **one discriminant byte
+///   per entity**, the same price every additive slot since v8 has paid.
+pub const SCHEMA_VERSION: u32 = 20;
 
 /// File-level simulation settings (schema v3+), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -496,6 +519,13 @@ pub struct RuntimeEntity {
     /// authored knobs, so a level carries no volumetric data inline.
     #[serde(default)]
     pub voxel_volume: Option<VoxelVolume>,
+    // ── v20 (P22.2) destruction ─────────────────────────────────────
+    /// This entity's mesh can break: the fracture seed + chunk count the cook
+    /// pre-fractures it with, the material strength and density the structural
+    /// solve and the chunk bodies read, and the runtime gate. References no
+    /// asset — the chunk set is derived from this entity's own `MeshRef`.
+    #[serde(default)]
+    pub destructible: Option<Destructible>,
 }
 
 /// A decoded level ready for the runtime to instantiate.
@@ -515,7 +545,7 @@ impl RuntimeLevel {
         decode(bytes)
     }
 
-    /// Encode to the **current** schema (v19) — a deterministic bincode payload.
+    /// Encode to the **current** schema (v20) — a deterministic bincode payload.
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode(self)
     }
@@ -552,12 +582,26 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v19 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v20 file layout (current). `entities` reuses [`RuntimeEntity`].
 #[derive(Serialize, Deserialize)]
-struct SceneFileV19 {
+struct SceneFileV20 {
     schema_version: u32,
     title: String,
     entities: Vec<RuntimeEntity>,
+    #[serde(default)]
+    settings: RuntimeSettings,
+}
+
+/// A frozen schema-v19 file layout. It carried the **live** settings shape (v20
+/// did not touch [`RuntimeSettings`]), so only `entities` is repointed at the
+/// frozen [`EntityRecordV19`] — the shape this file held as [`RuntimeEntity`]
+/// until v20 appended the `destructible` slot to the live record.
+#[derive(Serialize, Deserialize)]
+struct SceneFileV19 {
+    #[allow(dead_code)]
+    schema_version: u32,
+    title: String,
+    entities: Vec<EntityRecordV19>,
     #[serde(default)]
     settings: RuntimeSettings,
 }
@@ -1228,6 +1272,7 @@ impl EntityRecordV1 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 }
@@ -1278,6 +1323,7 @@ impl EntityRecordV2 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 }
@@ -1328,6 +1374,7 @@ impl EntityRecordV3 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 }
@@ -1378,6 +1425,7 @@ impl EntityRecordV4 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 }
@@ -1428,6 +1476,7 @@ impl EntityRecordV5 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 }
@@ -1481,6 +1530,7 @@ impl EntityRecordV6 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 }
@@ -1806,6 +1856,7 @@ impl EntityRecordV7 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 }
@@ -1943,6 +1994,7 @@ impl EntityRecordV8 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 }
@@ -2079,6 +2131,7 @@ impl EntityRecordV9 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 }
@@ -2207,6 +2260,7 @@ impl EntityRecordV10 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 
@@ -2492,6 +2546,7 @@ impl EntityRecordV11 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 
@@ -2849,6 +2904,7 @@ impl EntityRecordV12 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 
@@ -3293,6 +3349,7 @@ impl EntityRecordV13 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 
@@ -3476,6 +3533,7 @@ impl EntityRecordV14 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 
@@ -3660,6 +3718,7 @@ impl EntityRecordV15 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 
@@ -3844,6 +3903,7 @@ impl EntityRecordV16 {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 
@@ -4034,6 +4094,7 @@ impl EntityRecordV17 {
             water_body: self.water_body,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }
     }
 
@@ -4183,11 +4244,12 @@ struct EntityRecordV18 {
 }
 
 impl EntityRecordV18 {
-    /// Lift a frozen v18 record to the live (v19) [`RuntimeEntity`]. Every slot
-    /// carries through unchanged; the one new slot lifts to `None` — a level whose
-    /// ground is a heightfield and nothing else, which is what a v18 level was.
-    fn into_runtime(self) -> RuntimeEntity {
-        RuntimeEntity {
+    /// Lift a frozen v18 record one rung, to the frozen [`EntityRecordV19`].
+    /// Every slot carries through unchanged; the one new slot lifts to `None` —
+    /// a level whose ground is a heightfield and nothing else, which is what a
+    /// v18 level was.
+    fn into_v19(self) -> EntityRecordV19 {
+        EntityRecordV19 {
             guid: self.guid,
             name: self.name,
             parent: self.parent,
@@ -4283,6 +4345,210 @@ impl EntityRecordV18 {
             sky_atmosphere: r.sky_atmosphere,
             water_body: r.water_body,
             buoyancy: r.buoyancy,
+        }
+    }
+}
+
+/// The **pre-v20** entity byte layout (schema v20 froze this when P22.2 appended
+/// the `destructible` slot). Identical to the live [`RuntimeEntity`] except that
+/// it has **no** `destructible` field — that is precisely what v20 added — so
+/// this is the [`EntityRecordV10`] shape of bump (a new slot at the tail), not
+/// the [`EntityRecordV14`] one (a component that grew).
+///
+/// This is the shape [`SceneFileV19`] used to hold as the live record, which is
+/// why the v19 decode arm now reads *this* type and lifts it: the bytes a v19
+/// player wrote have one fewer discriminant per entity than today's, and nothing
+/// but a frozen record can keep them decoding positionally forever.
+#[derive(Clone, Serialize, Deserialize)]
+struct EntityRecordV19 {
+    guid: Uuid,
+    name: String,
+    parent: Option<Uuid>,
+    transform: Transform,
+    visible: bool,
+    mesh: Option<MeshRef>,
+    material: Option<Material>,
+    light: Option<Light>,
+    camera: Option<Camera>,
+    #[serde(default)]
+    sprite: Option<Sprite>,
+    #[serde(default)]
+    tilemap: Option<Tilemap>,
+    #[serde(default)]
+    nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    text2d: Option<Text2D>,
+    #[serde(default)]
+    light_2d: Option<Light2D>,
+    #[serde(default)]
+    rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    actor: Option<Uuid>,
+    #[serde(default)]
+    terrain: Option<Terrain>,
+    #[serde(default)]
+    pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    root_motion: Option<RootMotion>,
+    #[serde(default)]
+    attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    audio_source: Option<AudioSource>,
+    #[serde(default)]
+    audio_listener: Option<AudioListener>,
+    #[serde(default)]
+    decal: Option<Decal>,
+    #[serde(default)]
+    volume: Option<Volume>,
+    #[serde(default)]
+    spline: Option<Spline>,
+    #[serde(default)]
+    foliage: Option<Foliage>,
+    #[serde(default)]
+    streaming_source: Option<StreamingSource>,
+    #[serde(default)]
+    always_loaded: Option<AlwaysLoaded>,
+    #[serde(default)]
+    time_of_day: Option<TimeOfDay>,
+    #[serde(default)]
+    sky_atmosphere: Option<SkyAtmosphere>,
+    /// The v17 slot this record still carries — a v18 level's water must survive
+    /// the v19 hop, not merely decode.
+    #[serde(default)]
+    water_body: Option<WaterBody>,
+    /// The v18 slot this record exists to keep carrying — a v18 level's buoyancy
+    /// must survive the v19 hop, not merely decode.
+    #[serde(default)]
+    buoyancy: Option<Buoyancy>,
+    /// The v19 slot this record exists to keep carrying — a v19 level's caves
+    /// must survive the v20 hop, not merely decode.
+    #[serde(default)]
+    voxel_volume: Option<VoxelVolume>,
+}
+
+impl EntityRecordV19 {
+    /// Lift a frozen v19 record to the live (v20) [`RuntimeEntity`]. Every slot
+    /// carries through unchanged; the one new slot lifts to `None` — a level in
+    /// which nothing breaks, which is what a v19 level was.
+    fn into_runtime(self) -> RuntimeEntity {
+        RuntimeEntity {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: self.decal,
+            volume: self.volume,
+            spline: self.spline,
+            foliage: self.foliage,
+            streaming_source: self.streaming_source,
+            always_loaded: self.always_loaded,
+            time_of_day: self.time_of_day,
+            sky_atmosphere: self.sky_atmosphere,
+            water_body: self.water_body,
+            buoyancy: self.buoyancy,
+            voxel_volume: self.voxel_volume,
+            destructible: None,
+        }
+    }
+
+    /// Project a live [`RuntimeEntity`] back onto the frozen v19 shape (the
+    /// downgrade-bless path that regenerates the committed v19 fixture). Only
+    /// the destructible is lost — asserted as a property by the editor codec's
+    /// `v19_entity_downgrade_is_lossless_except_for_the_destructible`.
+    #[cfg(test)]
+    fn from_current(r: RuntimeEntity) -> Self {
+        Self {
+            guid: r.guid,
+            name: r.name,
+            parent: r.parent,
+            transform: r.transform,
+            visible: r.visible,
+            mesh: r.mesh,
+            material: r.material,
+            light: r.light,
+            camera: r.camera,
+            sprite: r.sprite,
+            tilemap: r.tilemap,
+            nine_slice: r.nine_slice,
+            text2d: r.text2d,
+            light_2d: r.light_2d,
+            rigid_body_2d: r.rigid_body_2d,
+            collider_2d: r.collider_2d,
+            character_controller_2d: r.character_controller_2d,
+            rigid_body_3d: r.rigid_body_3d,
+            collider_3d: r.collider_3d,
+            character_controller_3d: r.character_controller_3d,
+            actor: r.actor,
+            terrain: r.terrain,
+            pcg_volume: r.pcg_volume,
+            skeletal_mesh: r.skeletal_mesh,
+            anim_player: r.anim_player,
+            anim_state_machine: r.anim_state_machine,
+            root_motion: r.root_motion,
+            attached_to: r.attached_to,
+            joint_2d: r.joint_2d,
+            joint_3d: r.joint_3d,
+            audio_source: r.audio_source,
+            audio_listener: r.audio_listener,
+            decal: r.decal,
+            volume: r.volume,
+            spline: r.spline,
+            foliage: r.foliage,
+            streaming_source: r.streaming_source,
+            always_loaded: r.always_loaded,
+            time_of_day: r.time_of_day,
+            sky_atmosphere: r.sky_atmosphere,
+            water_body: r.water_body,
+            buoyancy: r.buoyancy,
+            voxel_volume: r.voxel_volume,
         }
     }
 }
@@ -4539,7 +4805,8 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                 entities: v18
                     .entities
                     .into_iter()
-                    .map(EntityRecordV18::into_runtime)
+                    .map(EntityRecordV18::into_v19)
+                    .map(EntityRecordV19::into_runtime)
                     .collect(),
                 settings: v18.settings,
             })
@@ -4550,8 +4817,22 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v19: {e}")))?;
             Ok(RuntimeLevel {
                 title: v19.title,
-                entities: v19.entities,
+                entities: v19
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV19::into_runtime)
+                    .collect(),
                 settings: v19.settings,
+            })
+        }
+        20 => {
+            let (v20, _): (SceneFileV20, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v20: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v20.title,
+                entities: v20.entities,
+                settings: v20.settings,
             })
         }
         found => Err(SceneError::SchemaTooNew {
@@ -4563,7 +4844,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
 
 /// Encode a level to the current schema (v19) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV19 {
+    let file = SceneFileV20 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -6304,9 +6585,10 @@ mod tests {
         // — one growth per bump, all on the one entity that carries an
         // atmosphere.
         // …and **every** entity pays the v17 `water_body: None`, v18
-        // `buoyancy: None` and v19 `voxel_volume: None` discriminants, which are
-        // the whole price of P20.1, P20.2 and P21.1 for a level with no water,
-        // nothing that floats and no volumetric ground.
+        // `buoyancy: None`, v19 `voxel_volume: None` and v20 `destructible: None`
+        // discriminants, which are the whole price of P20.1, P20.2, P21.1 and
+        // P22.2 for a level with no water, nothing that floats, no volumetric
+        // ground and nothing breakable.
         let entities = RuntimeLevel::decode(&v11).unwrap().entities.len();
         assert_eq!(
             lifted.len(),
@@ -6314,7 +6596,11 @@ mod tests {
                 + 61
                 + 62
                 + 38
-                + entities * (WATER_SLOT_BYTES + BUOYANCY_SLOT_BYTES + VOXEL_SLOT_BYTES),
+                + entities
+                    * (WATER_SLOT_BYTES
+                        + BUOYANCY_SLOT_BYTES
+                        + VOXEL_SLOT_BYTES
+                        + DESTRUCTIBLE_SLOT_BYTES),
             "the one entity carrying an atmosphere grew by the physical block"
         );
     }
@@ -6759,7 +7045,11 @@ mod tests {
             v12.len()
                 + expected
                 + WEATHER_WIRE_BYTES
-                + entities * (WATER_SLOT_BYTES + BUOYANCY_SLOT_BYTES + VOXEL_SLOT_BYTES),
+                + entities
+                    * (WATER_SLOT_BYTES
+                        + BUOYANCY_SLOT_BYTES
+                        + VOXEL_SLOT_BYTES
+                        + DESTRUCTIBLE_SLOT_BYTES),
             "the one entity carrying an atmosphere grew by the cloud block"
         );
     }
@@ -7170,7 +7460,11 @@ mod tests {
             lifted.len(),
             v13.len()
                 + expected
-                + entities * (WATER_SLOT_BYTES + BUOYANCY_SLOT_BYTES + VOXEL_SLOT_BYTES),
+                + entities
+                    * (WATER_SLOT_BYTES
+                        + BUOYANCY_SLOT_BYTES
+                        + VOXEL_SLOT_BYTES
+                        + DESTRUCTIBLE_SLOT_BYTES),
             "the one entity carrying an atmosphere grew by the weather block"
         );
     }
@@ -7723,7 +8017,7 @@ mod tests {
     /// |---|---|---|---|
     /// | `TerrainTileFrozenV1` | origin + heights + weights | v1..=v14 | v1..=v2 |
     /// | `TerrainTileFrozenV2` | + erosion data maps | v15 | v3 |
-    /// | `TerrainTileFrozenV3` | + per-sample biome ids | v16+ | v4 |
+    /// | `TerrainTileFrozenV3` | + per-sample biome ids | v16..=v20 | v4 |
     /// | live `TerrainTile` | + the P21.2 hole mask | *(none)* | v5+ |
     ///
     /// **The last row's `.inf_lvl` cell is empty on purpose.** P21.2 gave tiles a
@@ -7741,7 +8035,7 @@ mod tests {
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {
         assert_eq!(
-            SCHEMA_VERSION, 19,
+            SCHEMA_VERSION, 20,
             "the scene schema moved. Generation-1 frozen tiles (TerrainTileFrozenV1, via \
              TerrainV14) cover .inf_lvl v1..=v14, generation-2 (TerrainTileFrozenV2, via \
              TerrainV15) covers v15, and generation-3 (TerrainTileFrozenV3, which \
@@ -8483,14 +8777,28 @@ mod tests {
             settings: solid.settings,
         };
         let v18_bytes = bincode::serde::encode_to_vec(&v18, bincode_config()).unwrap();
+        // Measured between the two FROZEN rungs, not against the live encoding:
+        // v20 appended a slot of its own, so `solid_bytes` now carries BOTH
+        // bumps' discriminants and would misreport v19's price as two bytes.
+        let v19 = SceneFileV19 {
+            schema_version: 19,
+            title: solid.title.clone(),
+            entities: solid
+                .entities
+                .iter()
+                .cloned()
+                .map(EntityRecordV19::from_current)
+                .collect(),
+            settings: solid.settings,
+        };
+        let v19_bytes = bincode::serde::encode_to_vec(&v19, bincode_config()).unwrap();
         assert_eq!(
-            solid_bytes.len(),
+            v19_bytes.len(),
             v18_bytes.len() + VOXEL_SLOT_BYTES,
             "the v19 slot must cost exactly one discriminant byte on a solid entity"
         );
 
-        // …and the whole component round-trips through the live codec, which is
-        // the v19 decode arm.
+        // …and the whole component round-trips through the live codec.
         let back = decode(&carved_bytes).unwrap();
         let v = back.entities[0]
             .voxel_volume
@@ -8498,5 +8806,237 @@ mod tests {
         assert_eq!(v.asset, Some(Uuid::from_u128(0xF_0CA5)));
         assert_eq!(v.voxel_size_m, 0.25);
         assert!(!v.runtime_carve);
+    }
+
+    // ── v20 destruction (P22.2) ───────────────────────────────────────────
+
+    /// What the v20 `destructible` slot costs an entity that cannot break: the
+    /// `Option` discriminant, and nothing else.
+    const DESTRUCTIBLE_SLOT_BYTES: usize = 1;
+
+    /// An all-`None` frozen v19 entity — the struct-update base for
+    /// [`v19_scene_reference`]. Built through the downgrade hop so the field list
+    /// can never drift from the live record.
+    fn v19_rec(guid: Uuid, name: &str, parent: Option<Uuid>) -> EntityRecordV19 {
+        EntityRecordV19::from_current(v9_rec(guid, name, parent).into_runtime())
+    }
+
+    /// The **v19** voxel volume the fixture's cavern carries: non-default in all
+    /// three fields — the thing v19 could express and v18 could not — so the v20
+    /// hop is proven to preserve what v19 authored rather than merely to produce
+    /// defaults.
+    ///
+    /// The literals must match the editor codec's `v19_fixture_volume` exactly:
+    /// the two committed fixtures are byte-compared by the editor's
+    /// `v19_fixture_matches_the_runtime_codecs_copy`, which is the whole point of
+    /// writing them twice.
+    fn v19_fixture_volume() -> VoxelVolume {
+        VoxelVolume {
+            asset: Some(Uuid::from_u128(0xF_0CA5)),
+            voxel_size_m: 0.25,
+            runtime_carve: false,
+        }
+    }
+
+    /// Rebuild the exact schema-v19 file the committed v19 fixture was generated
+    /// from, out of the frozen v19 record types (the provenance lock). Carries
+    /// the v16 terrain, the v17 river and the v18 raft unchanged — v20 touched
+    /// neither a tile layout nor a component's shape — plus the cavern entity
+    /// that only v19 could write.
+    fn v19_scene_reference() -> SceneFileV19 {
+        use inf_ecs::components::Primitive;
+        let g = Uuid::from_u128;
+        SceneFileV19 {
+            schema_version: 19,
+            title: "V19 Fixture Level".into(),
+            entities: vec![
+                EntityRecordV19 {
+                    mesh: Some(MeshRef {
+                        primitive: Primitive::Cube,
+                        asset: Some(g(0xF2A1)),
+                    }),
+                    material: Some(Material::default()),
+                    ..v19_rec(g(0xF201), "Cube", None)
+                },
+                EntityRecordV19 {
+                    terrain: Some(v16_fixture_terrain()),
+                    ..v19_rec(g(0xF202), "Terrain", None)
+                },
+                EntityRecordV19 {
+                    light: Some(Light {
+                        kind: LightKind::Directional,
+                        color: Color::WHITE,
+                        intensity: 2.0,
+                        ..Default::default()
+                    }),
+                    ..v19_rec(g(0xF203), "Sun", None)
+                },
+                EntityRecordV19 {
+                    spline: Some(Spline {
+                        points: vec![
+                            Vec3d::new(0.0, 0.0, 0.0),
+                            Vec3d::new(10.0, 0.0, 4.0),
+                            Vec3d::new(18.0, 0.0, 14.0),
+                        ],
+                        ..Spline::default()
+                    }),
+                    water_body: Some(v17_fixture_water()),
+                    ..v19_rec(g(0xF204), "River", None)
+                },
+                EntityRecordV19 {
+                    rigid_body_3d: Some(RigidBody3D::default()),
+                    buoyancy: Some(v18_fixture_buoyancy()),
+                    ..v19_rec(g(0xF205), "Raft", None)
+                },
+                // The cavern: the volumetric ground that only v19 could write,
+                // which is the content this fixture exists to carry.
+                EntityRecordV19 {
+                    voxel_volume: Some(v19_fixture_volume()),
+                    ..v19_rec(g(0xF206), "Cavern", None)
+                },
+            ],
+            settings: RuntimeSettings {
+                gravity_2d: Vec2d::new(0.0, -18.0),
+                gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
+                sim_hz: 90.0,
+                render: RenderSettingsRecord {
+                    exposure: 1.1,
+                    ..RenderSettingsRecord::default()
+                },
+                partition: PartitionSettings::default(),
+            },
+        }
+    }
+
+    /// Regenerate `tests/fixtures/scene_v19.inf_lvl` — the **downgrade-bless**
+    /// path, walked only under `INF_BLESS_FIXTURES=1`.
+    #[test]
+    fn bless_scene_v19_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v19_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 19);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v19.inf_lvl");
+        std::fs::write(&path, &bytes).unwrap();
+        eprintln!("blessed {} ({} bytes)", path.display(), bytes.len());
+    }
+
+    /// A committed **v19** payload still loads, keeps everything v19 could
+    /// express — its cavern's volume included — and lifts with **nothing
+    /// destructible**, which is exactly what a v19 level was. The "old bytes load
+    /// forever" gate for the v20 bump.
+    #[test]
+    fn v19_loads_and_lifts_without_a_destructible() {
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v19.inf_lvl"),
+        )
+        .expect("committed v19 fixture present");
+        assert_eq!(bytes[0], 19, "the fixture must really be v19");
+        let level = decode(&bytes).unwrap();
+        assert_eq!(level.title, "V19 Fixture Level");
+        assert_eq!(level.entities.len(), 6);
+        let by_name = |n: &str| level.entities.iter().find(|e| e.name == n).unwrap();
+
+        assert_eq!(
+            by_name("Cube").mesh.unwrap().asset,
+            Some(Uuid::from_u128(0xF2A1))
+        );
+        assert_eq!(by_name("Sun").light.unwrap().intensity, 2.0);
+        assert_eq!(level.settings.sim_hz, 90.0);
+        let t = by_name("Terrain").terrain.clone().expect("terrain slot");
+        assert_eq!(t.biome_set, Some(Uuid::from_u128(0xF_00BB)));
+        assert_eq!(t.data.get_tile((0, 0)).unwrap().biome_sample(4, 1, 1), 3);
+        assert_eq!(by_name("River").water_body, Some(v17_fixture_water()));
+        assert_eq!(by_name("Raft").buoyancy, Some(v18_fixture_buoyancy()));
+        assert_eq!(by_name("Cavern").voxel_volume, Some(v19_fixture_volume()));
+
+        // … and the one new slot lifts to `None` on every entity.
+        for e in &level.entities {
+            assert!(
+                e.destructible.is_none(),
+                "a v19 level has nothing destructible; the lift must not conjure any"
+            );
+        }
+
+        // Re-encoding writes the current schema and round-trips.
+        let re = encode(&level).unwrap();
+        assert_eq!(re[0], SCHEMA_VERSION as u8);
+        assert_eq!(decode(&re).unwrap(), level);
+    }
+
+    #[test]
+    fn v19_fixture_is_reproducible_and_genuinely_v19() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v19.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v19 fixture present");
+        assert_eq!(bytes[0], 19, "fixture must be a genuine schema-v19 payload");
+        let rebuilt =
+            bincode::serde::encode_to_vec(v19_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v19 fixture must match our frozen v19 writer"
+        );
+    }
+
+    /// **The v20 price, isolated.** An entity that cannot break pays exactly one
+    /// discriminant byte; an entity that can pays the component — five fields,
+    /// and never the chunks, which live in the derived `.inf_fracture`.
+    ///
+    /// Priced as a delta against the frozen v19 shape of the very same record
+    /// rather than as an absolute number, because the absolute would silently
+    /// absorb any other growth and stop being a price at all.
+    #[test]
+    fn v20_costs_one_byte_per_indestructible_entity() {
+        let solid = RuntimeLevel {
+            title: "solid".into(),
+            entities: vec![v9_rec(Uuid::from_u128(1), "A", None).into_runtime()],
+            settings: RuntimeSettings::default(),
+        };
+        let mut breakable = solid.clone();
+        breakable.entities[0].destructible = Some(Destructible {
+            fracture_seed: 9,
+            chunk_count: 24,
+            strength: 1.2e7,
+            density_kg_m3: 1900.0,
+            runtime_destruct: false,
+        });
+
+        let solid_bytes = encode(&solid).unwrap();
+        let breakable_bytes = encode(&breakable).unwrap();
+        assert_eq!(solid_bytes[0], SCHEMA_VERSION as u8);
+        assert!(
+            breakable_bytes.len() > solid_bytes.len() + DESTRUCTIBLE_SLOT_BYTES,
+            "a destructible must cost more than its own discriminant"
+        );
+
+        let v19 = SceneFileV19 {
+            schema_version: 19,
+            title: solid.title.clone(),
+            entities: solid
+                .entities
+                .iter()
+                .cloned()
+                .map(EntityRecordV19::from_current)
+                .collect(),
+            settings: solid.settings,
+        };
+        let v19_bytes = bincode::serde::encode_to_vec(&v19, bincode_config()).unwrap();
+        assert_eq!(
+            solid_bytes.len(),
+            v19_bytes.len() + DESTRUCTIBLE_SLOT_BYTES,
+            "the v20 slot must cost exactly one discriminant byte on a solid entity"
+        );
+
+        // …and the whole component round-trips through the live codec, which is
+        // now the v20 decode arm.
+        let back = decode(&breakable_bytes).unwrap();
+        let d = back.entities[0]
+            .destructible
+            .expect("destructible survives");
+        assert_eq!(d.fracture_seed, 9);
+        assert_eq!(d.chunk_count, 24);
+        assert_eq!(d.strength, 1.2e7);
+        assert_eq!(d.density_kg_m3, 1900.0);
+        assert!(!d.runtime_destruct);
     }
 }

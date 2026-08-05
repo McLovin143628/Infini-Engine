@@ -538,6 +538,7 @@ fn make_streaming_terrain_project_with(root: &Path, biomes: BiomeSetFixture) -> 
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         }],
         settings: Default::default(),
     };

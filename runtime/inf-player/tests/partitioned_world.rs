@@ -708,6 +708,7 @@ fn a_persistent_blueprint_binds_in_a_partitioned_level() {
         water_body: None,
         buoyancy: None,
         voxel_volume: None,
+        destructible: None,
     };
 
     let level = inf_scene::RuntimeLevel {

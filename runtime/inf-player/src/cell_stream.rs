@@ -988,6 +988,7 @@ mod tests {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         };
         e.visible = true;
         e

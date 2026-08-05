@@ -592,6 +592,7 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
             water_body,
             buoyancy,
             voxel_volume,
+            destructible,
         } = e;
 
         let entity = world.spawn_with_guid(guid, &name, None);
@@ -739,6 +740,16 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
             // terrain's tiles are. A volume whose asset the pack does not carry
             // spawns and draws as nothing, which is what "no chunks" means.
             if let Some(c) = voxel_volume {
+                em.insert(c);
+            }
+            // ── v20 destruction (P22.2) ──
+            //
+            // The marker plus its five numbers only; the chunk set lives in the
+            // `.inf_fracture` DERIVED from this entity's own mesh, which P22.3
+            // loads when the asset actually breaks. Spawning it here costs
+            // nothing and means the component is on the entity before any
+            // gameplay can ask about it.
+            if let Some(c) = destructible {
                 em.insert(c);
             }
         }
@@ -1744,6 +1755,7 @@ mod tests {
             water_body: None,
             buoyancy: None,
             voxel_volume: None,
+            destructible: None,
         };
         parent.sprite = Some(Sprite {
             size: Vec2d::new(1.0, 1.0),

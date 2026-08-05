@@ -85,6 +85,7 @@ fn rec(guid: u128, name: &str) -> inf_scene::RuntimeEntity {
         water_body: None,
         buoyancy: None,
         voxel_volume: None,
+        destructible: None,
     }
 }
 
