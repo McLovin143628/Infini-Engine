@@ -124,12 +124,20 @@ pub struct ImportReport {
     /// The reader deliberately does **not** refuse these, and does not repair
     /// them: preserving attribute bits verbatim is what makes the export round
     /// trip exact, and an author who opened a file with one bad vertex should
-    /// not be locked out of their own mesh. But `validate` treats a non-finite
-    /// position as a violation, so a mesh carrying one is *legal to hold and
-    /// illegal to journal* — [`crate::journal::MeshSession::restore`] will
-    /// refuse it as an invalid base. This counter is what makes that
-    /// predictable instead of surprising, and it is the read-side twin of
-    /// [`crate::export::ExportReport::non_finite_written`].
+    /// not be locked out of their own mesh.
+    ///
+    /// Precisely what that costs, stated rather than glossed: `validate` treats
+    /// a non-finite position as a violation, and
+    /// [`crate::journal::MeshSession::restore`] validates, so such a mesh
+    /// **cannot be restored from a save**. It *can* be handed to
+    /// [`crate::journal::MeshSession::new`], which does not validate because its
+    /// input comes from this process — so a session started on an unchecked
+    /// import will edit happily and then fail to reopen. That is a loud failure
+    /// at the right moment rather than a silent one, but it is a real edge, and
+    /// this counter is how a caller sees it coming. Read-side twin of
+    /// [`crate::export::ExportReport::non_finite_written`]; the *edit* path has
+    /// no such latitude and refuses outright
+    /// ([`crate::ops::OpError::NonFinite`]).
     pub non_finite_values: usize,
 }
 

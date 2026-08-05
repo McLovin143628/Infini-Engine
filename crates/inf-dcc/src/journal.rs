@@ -112,6 +112,25 @@ pub enum SessionError {
     InvalidBase(Vec<Violation>),
     #[error("replaying the save's ops failed: {0}")]
     Op(OpError),
+    /// `cursor` points past the end of `ops`.
+    ///
+    /// Refused rather than clamped. A truncated write loses trailing ops and
+    /// leaves a cursor that outruns them; clamping produces a *fully consistent*
+    /// session that has silently lost work, and the next `save()` writes the
+    /// shortened history back as if it were authoritative — the corruption
+    /// laundered by the function documented as the trust boundary. The version
+    /// and the base get a loud refusal; so does this.
+    #[error("the save's cursor is {cursor} but it carries only {ops} ops")]
+    CursorOutOfRange { cursor: usize, ops: usize },
+    /// Replaying the save's ops onto its (valid) base produced an invalid mesh.
+    ///
+    /// If this fires, some op did not preserve the invariants — a bug in this
+    /// crate, not in the save. It is still a refusal rather than a debug
+    /// assertion, because a save is read by a *different build* than wrote it,
+    /// and "the op set changed under an old journal" is exactly the situation
+    /// where a silent, subtly-broken mesh is worst.
+    #[error("replaying the save produced an invalid mesh: {} violation(s)", .0.len())]
+    InvalidResult(Vec<Violation>),
 }
 
 /// A process-wide source of [`MeshSession::generation`] stamps.
@@ -128,7 +147,7 @@ fn fresh_generation() -> u64 {
 }
 
 /// A mesh plus its op journal.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MeshSession {
     base: Mesh,
     ops: Vec<Op>,
@@ -214,7 +233,7 @@ impl MeshSession {
         self.checkpoints.retain(|&k, _| k <= self.cursor);
         self.ops.push(op);
         self.cursor += 1;
-        self.generation += 1;
+        self.generation = fresh_generation();
         if self.cursor.is_multiple_of(CHECKPOINT_INTERVAL) {
             self.checkpoints.insert(self.cursor, self.current.clone());
         }
@@ -243,7 +262,7 @@ impl MeshSession {
         // this type did not produce itself can get in.
         ops::apply(&mut self.current, &op).expect("a journalled op replays");
         self.cursor += 1;
-        self.generation += 1;
+        self.generation = fresh_generation();
         if self.cursor.is_multiple_of(CHECKPOINT_INTERVAL) {
             self.checkpoints.insert(self.cursor, self.current.clone());
         }
@@ -263,7 +282,7 @@ impl MeshSession {
         }
         self.current = mesh;
         self.cursor = target;
-        self.generation += 1;
+        self.generation = fresh_generation();
         if target > 0 && target.is_multiple_of(CHECKPOINT_INTERVAL) {
             self.checkpoints.insert(target, self.current.clone());
         }
@@ -317,10 +336,16 @@ impl MeshSession {
     ///    structural op, in code whose own contract says a refusal is a value.
     ///    Validating here is what makes that contract true, and it is cheap
     ///    against the replay that follows.
-    /// 3. **Every op** — the applied prefix to produce the live mesh, and the
+    /// 3. **The cursor**, which is refused when it outruns `ops` rather than
+    ///    clamped — a clamp turns a truncated file into a consistent session
+    ///    that has quietly lost edits, and the next `save()` writes the loss
+    ///    back as history.
+    /// 4. **Every op** — the applied prefix to produce the live mesh, and the
     ///    redo tail on a throwaway to prove it *can* be redone. That is what
     ///    makes [`MeshSession::redo`] and [`MeshSession::undo`] infallible
     ///    afterwards.
+    /// 5. **The replayed mesh**, because a valid base plus a replay is only a
+    ///    valid mesh if every op in *this build* preserves the invariants.
     pub fn restore(save: SessionSave) -> Result<Self, SessionError> {
         if save.schema_version != SessionSave::CURRENT_VERSION {
             return Err(SessionError::UnsupportedSchema {
@@ -329,8 +354,19 @@ impl MeshSession {
             });
         }
         validate(&save.base).map_err(SessionError::InvalidBase)?;
-        let cursor = save.cursor.min(save.ops.len());
+        if save.cursor > save.ops.len() {
+            return Err(SessionError::CursorOutOfRange {
+                cursor: save.cursor,
+                ops: save.ops.len(),
+            });
+        }
+        let cursor = save.cursor;
         let current = Self::replay(&save.base, &save.ops[..cursor]).map_err(SessionError::Op)?;
+        // A valid base plus a replay is only a valid MESH if every op in *this
+        // build* preserves the invariants — which is a property of the code doing
+        // the replaying, not of the save. One more O(|mesh|) pass on a path that
+        // just replayed the whole history.
+        validate(&current).map_err(SessionError::InvalidResult)?;
         Self::replay(&current, &save.ops[cursor..]).map_err(SessionError::Op)?;
         let mut session = Self {
             base: save.base,
@@ -355,6 +391,26 @@ impl MeshSession {
             }
         }
         self.evict();
+    }
+}
+
+impl Clone for MeshSession {
+    /// Everything is copied except the generation stamp, which is **drawn
+    /// fresh**.
+    ///
+    /// A derived `Clone` copies the stamp verbatim, and then two independent
+    /// documents answer `generation()` with the same number — which is precisely
+    /// the collision the stamp exists to prevent, manufactured by the one
+    /// operation whose whole job is to produce a second document.
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            ops: self.ops.clone(),
+            cursor: self.cursor,
+            current: self.current.clone(),
+            checkpoints: self.checkpoints.clone(),
+            generation: fresh_generation(),
+        }
     }
 }
 
@@ -730,6 +786,37 @@ mod tests {
     }
 
     #[test]
+    fn restore_refuses_a_cursor_that_outruns_its_ops() {
+        // A truncated write: the tail of `ops` is lost, the cursor is not.
+        // Clamping produced a fully consistent session that had silently dropped
+        // two edits, and the next `save()` wrote the shortened history back as
+        // authoritative — corruption laundered by the function documented as the
+        // trust boundary.
+        let mut s = MeshSession::new(plane(2.0));
+        for i in 0..5 {
+            s.apply(Op::AddVertex {
+                position: [i as f64, 0.0, 0.0],
+            })
+            .unwrap();
+        }
+        let mut save = s.save();
+        assert_eq!(save.cursor, 5);
+        save.ops.truncate(3); // the write was cut short
+
+        assert_eq!(
+            MeshSession::restore(save.clone()),
+            Err(SessionError::CursorOutOfRange { cursor: 5, ops: 3 })
+        );
+
+        // A cursor exactly at the end is the normal "nothing to redo" case and
+        // must still be accepted — the refusal is for `>`, not `>=`.
+        save.cursor = 3;
+        let ok = MeshSession::restore(save).expect("a cursor at the end is legal");
+        assert_eq!(ok.cursor(), 3);
+        assert!(!ok.can_redo());
+    }
+
+    #[test]
     fn restore_accepts_a_sound_base() {
         // The other half of the gate: validation must not reject real saves.
         let mut s = MeshSession::new(cube(1.0));
@@ -740,26 +827,60 @@ mod tests {
 
     // ── M4: the generation stamp is monotone across every door ──────────────
 
+    /// Every stamp this test can reach, from every door, must be distinct.
+    ///
+    /// The previous version applied exactly one op and never compared two live
+    /// sessions — the single count at which a local `+= 1` and a global draw
+    /// happen to agree. There were in fact TWO schemes interleaved: `new` and
+    /// `restore` drew from the process counter while every mutation incremented
+    /// locally, so two live sessions collided after a single edit and a restored
+    /// long session handed out stamps it had already used. The named consumer is
+    /// P23.4's selection cache keyed `(generation, HalfId)`, which would then
+    /// accept one document's stamp for another document's ids.
     #[test]
-    fn generation_never_repeats_across_sessions_or_a_restore() {
+    fn generation_never_repeats_across_sessions_edits_clones_or_restores() {
+        let mut seen: Vec<u64> = Vec::new();
+        let mut note = |g: u64, what: &str| {
+            assert!(!seen.contains(&g), "stamp {g} reused by {what}: {seen:?}");
+            seen.push(g);
+        };
+
+        // Two LIVE sessions, edited in lockstep. This is the interleaving that
+        // collided: A=2, B=3, one op on A → A=3 == B.
         let mut a = MeshSession::new(plane(2.0));
-        let start = a.generation();
-        a.apply(Op::AddVertex {
-            position: [1.0, 0.0, 0.0],
-        })
-        .unwrap();
-        assert!(a.generation() > start, "a mutation bumps it");
+        note(a.generation(), "session A");
+        let mut b = MeshSession::new(plane(2.0));
+        note(b.generation(), "session B");
+        for i in 0..5 {
+            a.apply(Op::AddVertex {
+                position: [i as f64, 0.0, 0.0],
+            })
+            .unwrap();
+            note(a.generation(), "an edit on A");
+            b.apply(Op::AddVertex {
+                position: [i as f64, 1.0, 0.0],
+            })
+            .unwrap();
+            note(b.generation(), "an edit on B");
+        }
 
-        let b = MeshSession::new(plane(2.0));
-        assert!(
-            b.generation() > start,
-            "a second session cannot reuse a stamp a live cache may hold"
-        );
+        // History moves are mutations too.
+        assert!(a.undo());
+        note(a.generation(), "an undo on A");
+        assert!(a.redo());
+        note(a.generation(), "a redo on A");
 
-        let restored = MeshSession::restore(a.save()).unwrap();
+        // A clone is a second document; it must not answer with the first's stamp.
+        let cloned = a.clone();
+        note(cloned.generation(), "a clone of A");
+
+        // And a restore of a LONG session must not hand back stamps that session
+        // already used — the case a local counter reset to 0 got wrong outright.
+        let long = MeshSession::restore(a.save()).unwrap();
+        note(long.generation(), "a restore of A");
         assert!(
-            restored.generation() > a.generation(),
-            "a restore is a NEW document as far as any cached id is concerned"
+            long.generation() > *seen[..seen.len() - 1].iter().max().unwrap(),
+            "a restored session must start beyond every stamp already issued"
         );
     }
 

@@ -270,9 +270,23 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
                     return Err(OpError::NoSuchVert(*v));
                 }
             }
-            for v in verts {
-                let p = mesh.vert_mut(*v).position;
-                mesh.vert_mut(*v).position = [p[0] + delta[0], p[1] + delta[1], p[2] + delta[2]];
+            // The RESULT, not just the operand. Two finite values can add to an
+            // infinity — a vertex at 1e308 translated by 1e308 — so checking the
+            // inputs and storing the sum is a gate that reads the wrong number.
+            // Computed for every vertex before the first write, so the refusal
+            // stays inert without a transaction.
+            let moved: Vec<[f64; 3]> = verts
+                .iter()
+                .map(|v| {
+                    let p = mesh.vert_ref(*v).position;
+                    [p[0] + delta[0], p[1] + delta[1], p[2] + delta[2]]
+                })
+                .collect();
+            for p in &moved {
+                finite("a translated vertex position", p)?;
+            }
+            for (v, p) in verts.iter().zip(moved) {
+                mesh.vert_mut(*v).position = p;
             }
             Ok(OpOutcome::default())
         }
@@ -381,6 +395,9 @@ fn split_edge(mesh: &mut Mesh, half: HalfId, t: f64) -> Result<OpOutcome, OpErro
     let pa = mesh.position(a).expect("live vertex id");
     let pb = mesh.position(b).expect("live vertex id");
     let mid = (pa + (pb - pa) * t).to_array();
+    // Same rule as `TranslateVerts`: the stored value is what has to be finite.
+    // Two vertices at opposite ends of the f64 range have a midpoint that is not.
+    finite("a split-edge midpoint", &mid)?;
 
     let mut incident: Vec<FaceId> = Vec::new();
     for h in [half, twin] {
@@ -1064,8 +1081,15 @@ mod tests {
     fn non_finite_values_are_refused_at_every_op_that_takes_one() {
         // M6, the door side. The writer counts non-finite values because it
         // cannot refuse an author's imported file without losing their work; an
-        // *edit* has no such excuse, so the kernel simply cannot be made to hold
-        // a NaN by anything in this module.
+        // *edit* has no such excuse, so no op in this module will STORE a
+        // non-finite coordinate.
+        //
+        // "Store" is the load-bearing word, and the first version of this got it
+        // wrong: it checked the operands and let the arithmetic through, so a
+        // vertex at 1e308 translated by 1e308 was written as an infinity by an op
+        // whose own test claimed the kernel "cannot be made to hold a NaN".
+        // `a_finite_op_that_computes_a_non_finite_result_is_refused` covers that
+        // half; this one covers the operands.
         let mut m = plane(2.0);
         let v = m.vert_ids().next().unwrap();
         let c = m
@@ -1108,6 +1132,86 @@ mod tests {
             }
             assert_eq!(m.encoded(), before, "and the refusal is inert");
         }
+    }
+
+    #[test]
+    fn a_finite_op_that_computes_a_non_finite_result_is_refused() {
+        // Every operand here is finite; every RESULT is not. Checking the
+        // operands and storing the arithmetic is a gate aimed at the wrong
+        // number, and it shipped: these two ops wrote infinities into the mesh
+        // while the suite asserted the kernel could not be made to hold one.
+        let huge = 1.0e308_f64;
+
+        let mut m = plane(2.0);
+        let v: Vec<VertId> = m.vert_ids().collect();
+        let before = m.encoded();
+        expect_ok(
+            &mut m,
+            Op::TranslateVerts {
+                verts: v.clone(),
+                delta: [huge, 0.0, 0.0],
+            },
+        );
+        assert!(m.position(v[0]).unwrap().x.is_finite());
+        match apply(
+            &mut m,
+            &Op::TranslateVerts {
+                verts: v.clone(),
+                delta: [huge, 0.0, 0.0],
+            },
+        ) {
+            Err(OpError::NonFinite { what, .. }) => {
+                assert_eq!(what, "a translated vertex position")
+            }
+            other => panic!("an overflowing translate was not refused: {other:?}"),
+        }
+        assert!(
+            m.vert_ids().all(|v| m.position(v).unwrap().is_finite()),
+            "and nothing was stored"
+        );
+
+        // The split midpoint is the other computed store.
+        let mut m = Mesh::new();
+        let a = apply(
+            &mut m,
+            &Op::AddVertex {
+                position: [-huge, 0.0, 0.0],
+            },
+        )
+        .unwrap()
+        .verts[0];
+        let b = apply(
+            &mut m,
+            &Op::AddVertex {
+                position: [huge, 0.0, huge],
+            },
+        )
+        .unwrap()
+        .verts[0];
+        let c = apply(
+            &mut m,
+            &Op::AddVertex {
+                position: [0.0, huge, 0.0],
+            },
+        )
+        .unwrap()
+        .verts[0];
+        expect_ok(
+            &mut m,
+            Op::AddFace {
+                verts: vec![a, b, c],
+                corners: vec![CornerData::default(); 3],
+                slot: None,
+            },
+        );
+        let h = m.find_half(a, b).unwrap();
+        let before_split = m.encoded();
+        match apply(&mut m, &Op::SplitEdge { half: h, t: 0.5 }) {
+            Err(OpError::NonFinite { what, .. }) => assert_eq!(what, "a split-edge midpoint"),
+            other => panic!("an overflowing split was not refused: {other:?}"),
+        }
+        assert_eq!(m.encoded(), before_split, "and the refusal is inert");
+        let _ = before;
     }
 
     #[test]

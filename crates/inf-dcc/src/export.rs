@@ -1296,37 +1296,128 @@ mod tests {
         ]
     }
 
+    /// Does `tris` genuinely tile the simple polygon `pts`? Returns the reason
+    /// it does not, or `None`.
+    ///
+    /// Area is checked, but area is **not sufficient** and the first version of
+    /// this gate claimed it was ("Σ|tri| == |polygon| iff the triangles tile
+    /// it"). Unsigned area cancels an overlap against a gap exactly as signed
+    /// area cancels an escape against an inversion: on a unit square,
+    /// `(v0,v1,v2) + (v0,v1,v3)` overlaps by 0.25 and leaves 0.25 uncovered,
+    /// so it has the right count, the right total area and the right winding
+    /// while covering the wrong set. The witness is
+    /// `the_tiling_gate_rejects_an_overlap_that_cancels_a_gap`.
+    ///
+    /// What *is* sufficient is combinatorial and exact. In any triangulation of
+    /// a simple n-gon by diagonals: there are n − 2 triangles, each of the n
+    /// boundary edges is used **exactly once**, and each of the n − 3 diagonals
+    /// is used **exactly twice, once in each direction**. No floating point, no
+    /// tolerance, `O(n)`.
+    fn tiling_defect(pts: &[DVec3], tris: &[[usize; 3]]) -> Option<String> {
+        let n = pts.len();
+        if tris.len() != n - 2 {
+            return Some(format!("{} triangles, expected {}", tris.len(), n - 2));
+        }
+        let adjacent = |i: usize, j: usize| (j + n - i) % n == 1 || (i + n - j) % n == 1;
+        let mut directed: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        for t in tris {
+            for k in 0..3 {
+                *directed.entry((t[k], t[(k + 1) % 3])).or_default() += 1;
+            }
+        }
+        let mut diagonals = BTreeSet::new();
+        for (&(i, j), &count) in &directed {
+            if count != 1 {
+                return Some(format!("directed edge {i}→{j} used {count} times"));
+            }
+            if adjacent(i, j) {
+                // A boundary edge, used once in the polygon's own direction.
+                if (j + n - i) % n != 1 {
+                    return Some(format!("boundary edge {i}→{j} runs backwards"));
+                }
+            } else {
+                let key = if i < j { (i, j) } else { (j, i) };
+                if !directed.contains_key(&(j, i)) {
+                    return Some(format!("diagonal {i}→{j} has no opposite — a gap"));
+                }
+                diagonals.insert(key);
+            }
+        }
+        if diagonals.len() != n - 3 {
+            return Some(format!("{} diagonals, expected {}", diagonals.len(), n - 3));
+        }
+        // Area last: cheap, and it catches a degenerate triangle that the
+        // combinatorics would accept.
+        let normal = newell_of(pts);
+        let poly_area = normal.length() * 0.5;
+        let mut unsigned = 0.0;
+        for [a, b, c] in tris {
+            let cr = (pts[*b] - pts[*a]).cross(pts[*c] - pts[*a]);
+            if cr.dot(normal) <= 0.0 {
+                return Some(format!("triangle {a},{b},{c} is wound against the polygon"));
+            }
+            unsigned += cr.length() * 0.5;
+        }
+        if (unsigned - poly_area).abs() >= 1e-12 {
+            return Some(format!("triangles cover {unsigned} of {poly_area}"));
+        }
+        None
+    }
+
     #[test]
     fn every_ngon_triangulation_tiles_its_polygon() {
-        // THE gate for the class the winding gate cannot see. Signed areas of an
+        // THE gate for the class the winding gate cannot see: signed areas of an
         // escaped triangle and an inverted one cancel exactly, so signed volume
-        // reads correct while the mesh has geometry outside itself. UNSIGNED
-        // area does not cancel: Σ|tri| == |polygon| iff the triangles tile it.
+        // reads correct while the mesh has geometry outside itself.
         for (name, pts, want_area) in rectilinear_shapes() {
-            let normal = newell_of(&pts);
-            let poly_area = normal.length() * 0.5;
+            let poly_area = newell_of(&pts).length() * 0.5;
             assert!(
                 (poly_area - want_area).abs() < 1e-12,
                 "{name}: fixture area {poly_area}, expected {want_area}"
             );
             let (tris, fell_back) = triangulate(&pts);
             assert!(!fell_back, "{name}: fell back to a fan");
-            assert_eq!(tris.len(), pts.len() - 2, "{name}: wrong triangle count");
-            let mut unsigned = 0.0;
-            for [a, b, c] in &tris {
-                let cr = (pts[*b] - pts[*a]).cross(pts[*c] - pts[*a]);
-                assert!(
-                    cr.dot(normal) > 0.0,
-                    "{name}: triangle {a},{b},{c} is wound against the polygon"
-                );
-                unsigned += cr.length() * 0.5;
-            }
-            assert!(
-                (unsigned - poly_area).abs() < 1e-12,
-                "{name}: triangles cover {unsigned} of a {poly_area} polygon — \
-                 geometry escaped the outline"
-            );
+            assert_eq!(tiling_defect(&pts, &tris), None, "{name}");
         }
+    }
+
+    #[test]
+    fn the_tiling_gate_rejects_an_overlap_that_cancels_a_gap() {
+        // The gate's own falsification. This triangulation of a unit square has
+        // the right triangle count, the right winding on both triangles, and
+        // EXACTLY the right total unsigned area — while overlapping 0.25 and
+        // leaving 0.25 uncovered. An area-only gate passes it, which is why the
+        // "iff" in the old comment was false and the check is now combinatorial.
+        let pts: Vec<DVec3> = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+            .iter()
+            .map(|&(x, z)| DVec3::new(x, 0.0, z))
+            .collect();
+        let bogus = [[0usize, 1, 2], [0, 1, 3]];
+
+        // It really does fool every arm the old gate had:
+        let normal = newell_of(&pts);
+        let poly_area = normal.length() * 0.5;
+        let mut unsigned = 0.0;
+        for [a, b, c] in &bogus {
+            let cr = (pts[*b] - pts[*a]).cross(pts[*c] - pts[*a]);
+            assert!(cr.dot(normal) > 0.0, "both triangles wind correctly");
+            unsigned += cr.length() * 0.5;
+        }
+        assert_eq!(bogus.len(), pts.len() - 2, "the count is right");
+        assert!(
+            (unsigned - poly_area).abs() < 1e-12,
+            "and the unsigned area is EXACTLY right: {unsigned} vs {poly_area}"
+        );
+
+        // And the combinatorial gate rejects it anyway.
+        let defect = tiling_defect(&pts, &bogus).expect("the overlap must be caught");
+        assert!(
+            defect.contains("0→1"),
+            "names the doubled boundary edge: {defect}"
+        );
+
+        // The honest triangulation of the same square passes.
+        assert_eq!(tiling_defect(&pts, &[[0, 1, 2], [0, 2, 3]]), None);
     }
 
     #[test]

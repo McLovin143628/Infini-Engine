@@ -614,13 +614,195 @@ mod tests {
 
     #[test]
     fn euler_catches_an_impossible_component() {
-        // Delete a face record without touching its half-edges: F drops by one,
-        // nothing else moves, so χ becomes odd for a closed surface.
-        let mut m = cube(1.0);
+        // This test used to delete a face record from a cube and assert only
+        // `!errs.is_empty()`. Adding `DeadFace` made that fixture fail the
+        // structural checks instead, so `check_euler` — which runs ONLY on a
+        // structurally clean mesh — stopped executing, and the assertion was
+        // satisfied by a violation from a different check. The gate passed while
+        // testing nothing, and the previous audit predicted exactly that in
+        // writing before it happened.
+        //
+        // The fixture is now one that ONLY Euler can catch: a triangle whose
+        // BOUNDARY loop also claims the (live) face. Every structural check is
+        // satisfied — the twins pair, the links are consistent, both loops close
+        // and each is internally uniform about its face, the face record is live
+        // and owns its representative half, no edge is duplicated, no vertex is a
+        // bowtie — and yet the surface is impossible: one face record, no
+        // boundary, χ = 3 − 3 + 1 = 1, so 2 − χ − b = 1 and there is no integer
+        // genus. Nothing but counting can see it.
+        let mut m = Mesh::new();
+        let v: Vec<VertId> = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+            .iter()
+            .map(|p| m.alloc_vert(*p))
+            .collect();
+        m.add_face_raw(&v, &[crate::topo::CornerData::default(); 3], None)
+            .unwrap();
+        m.finish_patch(&v.iter().copied().collect()).unwrap();
+        assert_eq!(validate(&m), Ok(()), "the fixture starts sound");
+
         let f = m.face_ids().next().unwrap();
-        m.faces.remove(f.0);
+        for h in m.half_ids().collect::<Vec<_>>() {
+            if m.is_boundary(h) == Some(true) {
+                m.halfs.get_mut(h.0).unwrap().face = Some(f);
+            }
+        }
+
+        // Called DIRECTLY, so the gate cannot be satisfied by an earlier check
+        // short-circuiting the one it names.
+        let mut direct = Vec::new();
+        check_euler(&m, &mut direct);
+        assert!(
+            direct.iter().any(|e| matches!(
+                e,
+                Violation::EulerInconsistent {
+                    chi: 1,
+                    faces: 1,
+                    boundary_loops: 0,
+                    ..
+                }
+            )),
+            "check_euler must fire on an impossible component: {direct:?}"
+        );
+        // And it really is the only thing wrong, so `validate` surfaces it too.
         let errs = validate(&m).expect_err("an impossible count must be caught");
-        assert!(!errs.is_empty(), "{errs:?}");
+        assert_eq!(errs, direct, "no other check fires on this fixture");
+    }
+
+    // ── one falsification per check ────────────────────────────────────────
+    //
+    // `validate` is the auditor every property in this crate leans on, and an
+    // auditor nobody audits is a `Ok(())` generator. Six of its nine checks could
+    // be deleted outright with the whole suite still green; these close that.
+    //
+    // Two of the nine — `check_loops` and `check_vertex_manifold` — run only when
+    // every structural check is already clean, so their fixtures have to be
+    // otherwise perfect meshes. That constraint is why they were skipped before.
+
+    #[test]
+    fn check_faces_catches_a_face_that_does_not_own_its_representative_half() {
+        let mut m = cube(1.0);
+        let (a, b) = (FaceId(0), FaceId(1));
+        let stolen = m.face_loop(b).unwrap()[0];
+        m.faces.get_mut(a.0).unwrap().half = stolen;
+        let errs = validate(&m).expect_err("a face pointing into another's loop");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                Violation::FaceHalfNotOwned { face, owner, .. }
+                    if *face == a && *owner == Some(b)
+            )),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn check_edges_catches_two_half_edges_running_the_same_way() {
+        // At most one half-edge may run from a to b — that is what bounds an edge
+        // to two faces, and every traversal assumes it.
+        let mut m = cube(1.0);
+        let h = m.half_ids().next().unwrap();
+        let (a, b) = (m.origin(h).unwrap(), m.dest(h).unwrap());
+        let victim = m
+            .half_ids()
+            .find(|&g| g != h && m.dest(g) == Some(b) && m.origin(g) != Some(a))
+            .expect("a cube vertex has more than one inbound edge");
+        m.halfs.get_mut(victim.0).unwrap().origin = a;
+        let errs = validate(&m).expect_err("a duplicated directed edge");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                Violation::DuplicateDirectedEdge { from, to, .. } if *from == a && *to == b
+            )),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn check_numbers_catches_a_non_finite_coordinate() {
+        let mut m = cube(1.0);
+        let v = m.vert_ids().next().unwrap();
+        m.verts.get_mut(v.0).unwrap().position[1] = f64::NAN;
+        let errs = validate(&m).expect_err("a NaN position");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, Violation::NonFinitePosition { vert } if *vert == v)),
+            "{errs:?}"
+        );
+
+        let mut m = cube(1.0);
+        let c = m
+            .half_ids()
+            .find(|&h| m.is_boundary(h) == Some(false))
+            .unwrap();
+        m.halfs.get_mut(c.0).unwrap().uv[0] = f64::INFINITY;
+        let errs = validate(&m).expect_err("a non-finite uv");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, Violation::NonFiniteUv { half } if *half == c)),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn check_loops_catches_a_loop_whose_halves_disagree_about_their_face() {
+        // Otherwise perfect: only a NON-representative corner is moved to another
+        // live face, so nothing structural fires and `check_loops` gets to run.
+        let mut m = cube(1.0);
+        let (a, b) = (FaceId(0), FaceId(1));
+        let inner = m.face_loop(a).unwrap()[1];
+        m.halfs.get_mut(inner.0).unwrap().face = Some(b);
+        let errs = validate(&m).expect_err("a loop with two faces in it");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                Violation::LoopFaceMismatch { other, other_face, .. }
+                    if *other == inner && *other_face == Some(b)
+            )),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn check_vertex_manifold_catches_a_bowtie_on_an_otherwise_perfect_mesh() {
+        // Two triangles meeting at one vertex, each with a correctly linked
+        // boundary loop of its own. Every structural check passes — the twins
+        // pair, every loop closes and is uniform, no edge repeats — so this is
+        // reachable only by the fan walk. Note the vertex has ZERO surplus
+        // boundary half-edges to count, which is why a "at most one outgoing
+        // boundary" heuristic would wave the two-cones case through and the
+        // check does a real walk.
+        let mut m = Mesh::new();
+        let c = [crate::topo::CornerData::default(); 3];
+        let s = m.alloc_vert([0.0, 0.0, 0.0]);
+        let a1 = m.alloc_vert([1.0, 0.0, 0.0]);
+        let a2 = m.alloc_vert([1.0, 0.0, 1.0]);
+        let b1 = m.alloc_vert([-1.0, 0.0, 0.0]);
+        let b2 = m.alloc_vert([-1.0, 0.0, -1.0]);
+        m.add_face_raw(&[s, a1, a2], &c, None).unwrap();
+        m.add_face_raw(&[s, b1, b2], &c, None).unwrap();
+        // Link each triangle's own boundary as its own 3-cycle, by hand: the
+        // reverse of the face loop.
+        for tri in [[s, a1, a2], [s, b1, b2]] {
+            let ring = [
+                m.find_half(tri[1], tri[0]).unwrap(),
+                m.find_half(tri[0], tri[2]).unwrap(),
+                m.find_half(tri[2], tri[1]).unwrap(),
+            ];
+            for i in 0..3 {
+                let (h, next) = (ring[i], ring[(i + 1) % 3]);
+                m.halfs.get_mut(h.0).unwrap().next = next;
+                m.halfs.get_mut(next.0).unwrap().prev = h;
+            }
+        }
+        let errs = validate(&m).expect_err("a bowtie vertex");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                Violation::NonManifoldVertex { vert, fan: 2, outgoing: 4 } if *vert == s
+            )),
+            "{errs:?}"
+        );
+        assert_eq!(errs.len(), 1, "the bowtie is the ONLY defect: {errs:?}");
     }
 
     #[test]

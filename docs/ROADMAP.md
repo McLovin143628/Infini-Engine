@@ -7016,7 +7016,8 @@ and the headless preview render is the proven offscreen-PNG path.
   property-tested; 3. an op journal — deterministic replay is both the undo/redo story and the
   test story, mirroring `GraphJournal`.
   **DONE 2026-08-05** — `crates/inf-dcc` (Ring 0; `inf-mesh` + `inf-math` + glam + serde +
-  bincode + thiserror, **no new external crate**). 99 tests after the audit round below, no
+  bincode + thiserror, **no new external crate**). 107 tests after the two audit rounds below,
+  no
   schema move (`MeshAsset` stays v2 — this batch adds a *writer*, not a version; the session
   journal gets its OWN v1 ladder, which is a new format, not a bump of an existing one). The
   six decisions:
@@ -7123,6 +7124,46 @@ and the headless preview render is the proven offscreen-PNG path.
   before the first byte is written; **a computed value that goes into a split key must be
   computed in the domain the reader will recompute it in** (twice: coincidence in f32,
   handedness in f32).
+  **AUDIT ROUND 2 (one commit).** Two new blockers, three smaller items, 99 → 107 tests.
+  **NB1 — a regression the previous audit predicted in writing.** Adding `DeadFace` (M3 above)
+  made the Euler test's fixture fail a *structural* check, and `check_euler` runs only on a
+  structurally clean mesh — so the check stopped executing while its test kept passing on a
+  violation from somewhere else. `EulerInconsistent` was constructed at one site and asserted
+  nowhere. The fixture is now one only Euler can catch (a triangle whose **boundary** loop also
+  claims the live face: every structural check satisfied, χ = 1, no integer genus), `check_euler`
+  is called **directly** so no earlier check can short-circuit the gate, and the variant is
+  asserted. LAW: **a gate whose fixture is caught by an earlier check is a gate that no longer
+  runs** — when a new check lands, every existing gate downstream of it has to be re-proven, not
+  assumed. **NB2 — M4 was not actually fixed**: `new`/`restore` drew from the process counter
+  while every *mutation* did `+= 1`, two interleaved schemes. Two live sessions collided after a
+  single edit (measured: A=1, B=2, one op on A → A=2 == B), a restored long session reissued
+  stamps it had already used, and `#[derive(Clone)]` copied a live stamp verbatim. One scheme
+  now: every mutation, every constructor and a hand-written `Clone` all draw from
+  `fresh_generation()`. The named consumer is P23.4's `(generation, HalfId)` selection cache,
+  which would otherwise accept one document's stamp for another's ids.
+  **Also**: the non-finite gate moved onto the **stored** value — two finite operands can add to
+  an infinity, so `TranslateVerts` and `split_edge`'s midpoint were writing infinities under a
+  test that claimed the kernel "cannot be made to hold a NaN" (three doc absolutes corrected to
+  match); `restore` **refuses** an out-of-range cursor instead of clamping it (a truncated write
+  restored fully consistent, having silently dropped edits, and the next `save()` wrote the loss
+  back as history — inside the function documented as the trust boundary) and now validates the
+  **replayed** mesh as well as the base, because a valid base plus a replay is only a valid mesh
+  if the *replaying build's* ops preserve the invariants; and the tiling gate's "iff" was
+  **false** — unsigned area cancels an overlap against a gap exactly as signed area cancels an
+  escape against an inversion (witness: `(v0,v1,v2)+(v0,v1,v3)` on a unit square has the right
+  count, the right winding and *exactly* the right area while overlapping 0.25 and gapping 0.25),
+  so the check is now the exact combinatorial one — each boundary edge used once, each of the
+  n−3 diagonals twice in opposite directions, `O(n)` and tolerance-free. Finally, **all nine of
+  `validate`'s checks are now individually falsified**: six could previously be deleted outright
+  with the suite still green, and neutralizing any one of the nine now fails it (measured,
+  one at a time). LAWS: **an auditor nobody audits is an `Ok(())` generator**; **two counters for
+  one quantity is one counter and one bug** (the generation stamp had a global scheme and a local
+  scheme, and the test that passed applied exactly one op — the single count at which the
+  arithmetic accidentally agrees); **gate the value you STORE, not the value you were handed**.
+  Carried, named rather than closed: `SessionError::InvalidResult` is constructed and asserted
+  nowhere, deliberately — reaching it requires an op that breaks the invariants, i.e. a bug in
+  this crate, and it exists for the cross-build case (an old journal replayed by a newer op set)
+  that cannot be constructed today.
   **Carried remainders**: no
   panel, no commands, no modelling ops beyond the core
   set (P23.4); collapsing a tetrahedron edge is *permitted* and leaves a legal two-face
