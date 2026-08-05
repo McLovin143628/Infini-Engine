@@ -85,7 +85,7 @@ use crate::asset::{Aabb, MeshAsset, MeshVertex};
 
 /// The fixed salt XORed into a mesh GUID to derive its `.inf_fracture` GUID.
 ///
-/// Same construction, and the same reasoning, as [`crate::VMESH_ID_SALT`]'s
+/// Same construction, and the same reasoning, as `inf_vgeom::VMESH_ID_SALT`'s
 /// neighbour in `inf-vgeom`: XOR with a constant is a bijection, so distinct
 /// meshes always yield distinct fracture ids, and the salt makes a collision
 /// with an *authored* asset id vanishingly unlikely (the cook guards the
@@ -1188,10 +1188,21 @@ impl FractureAsset {
         let mut out: Vec<(u32, u32)> = Vec::new();
         for (i, c) in self.chunks.iter().enumerate() {
             for &n in &c.neighbors {
-                let (a, b) = (i as u32, n);
-                if a < b {
-                    out.push((a, b));
+                let i = i as u32;
+                if i == n {
+                    continue; // a chunk is not its own neighbour
                 }
+                // **Canonicalised, not filtered.** The old form kept a pair only
+                // when the LOWER index listed it, so a one-sided edge — chunk 7
+                // naming chunk 3 while chunk 3 does not name 7 — vanished
+                // silently, and a consumer that prices bonds would charge 0 J to
+                // break it. P22.2 declined to enforce symmetry in the cook and
+                // P22.3 consumes the invariant, so the reader canonicalises
+                // instead of trusting: `(min, max)` whichever side listed it,
+                // then dedup. No asymmetric edge has been observed in six real
+                // cooks (`FractureState::new` debug-asserts it), which is exactly
+                // when a latent hazard is cheapest to close.
+                out.push((i.min(n), i.max(n)));
             }
         }
         out.sort_unstable();
@@ -2746,5 +2757,32 @@ mod tests {
         }
         // Distinct meshes never collide.
         assert_ne!(derived_fracture_id(guid(1)), derived_fracture_id(guid(2)));
+    }
+}
+
+#[cfg(test)]
+mod derived_id_salt {
+    /// **The two derived-asset salts must differ.**
+    ///
+    /// `derived_fracture_id` and `inf_vgeom::derived_vmesh_id` are both
+    /// bijections on a mesh's own GUID, and the cook stores their outputs in ONE
+    /// pack index. If the salts ever coincided, a mesh's `.inf_vmesh` and its
+    /// `.inf_fracture` would collide on a single key and one would silently
+    /// overwrite the other — a wall that renders as its meshlet DAG and breaks
+    /// into the DAG's bytes, or the reverse.
+    ///
+    /// The two constants live in two crates that do not depend on each other, so
+    /// nothing but this test relates them. It is cheap, and the failure it
+    /// prevents is un-debuggable.
+    #[test]
+    fn the_fracture_and_vmesh_salts_are_distinct() {
+        for n in [0u128, 1, 0xDEAD_BEEF, u128::MAX >> 1] {
+            let mesh = inf_asset::AssetId(uuid::Uuid::from_u128(n));
+            assert_ne!(
+                super::derived_fracture_id(mesh),
+                inf_vgeom::derived_vmesh_id(mesh),
+                "the fracture and vmesh derived ids collide for {mesh:?} — one                  would overwrite the other in the pack index"
+            );
+        }
     }
 }

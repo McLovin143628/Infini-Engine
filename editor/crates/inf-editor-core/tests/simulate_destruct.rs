@@ -222,6 +222,12 @@ pub fn wall_class() -> BlueprintClass {
         slot("chunks"),
         slot("hit"),
         slot("destroyed_chunks"),
+        Variable {
+            name: "destroyed_fires".into(),
+            ty: Ty::Float,
+            default: Lit::Float(0.0),
+            exposed: false,
+        },
     ];
     class.events = vec![
         EventBinding {
@@ -279,13 +285,30 @@ pub fn wall_class() -> BlueprintClass {
                 name: "destroyed".into(),
                 params: EventKind::Destroyed.signature(),
                 ret: Ty::Unit,
-                body: vec![set(
-                    "destroyed_chunks",
-                    Expr::Call {
-                        path: vec!["vars".into(), "get".into()],
-                        args: vec![Expr::Lit(Lit::Str("chunks".into()))],
-                    },
-                )],
+                body: vec![
+                    set(
+                        "destroyed_chunks",
+                        Expr::Call {
+                            path: vec!["vars".into(), "get".into()],
+                            args: vec![Expr::Lit(Lit::Str("chunks".into()))],
+                        },
+                    ),
+                    // **Counted, not latched.** The handler used to ASSIGN, so a
+                    // second (or twentieth) firing produced the same variable
+                    // value and a test named `fires_once` could not tell one from
+                    // many. Incrementing is what makes "once" checkable.
+                    set(
+                        "destroyed_fires",
+                        Expr::Binary(
+                            inf_blueprint::BinOp::Add,
+                            Box::new(Expr::Call {
+                                path: vec!["vars".into(), "get".into()],
+                                args: vec![Expr::Lit(Lit::Str("destroyed_fires".into()))],
+                            }),
+                            Box::new(Expr::Lit(Lit::Float(1.0))),
+                        ),
+                    ),
+                ],
             },
         },
     ];
@@ -501,6 +524,15 @@ fn the_destroyed_event_fires_once_with_its_chunk_count() {
         var_f(&session, "destroyed_chunks"),
         TOWER_CHUNKS as f64,
         "Destroyed reported the wrong chunk count"
+    );
+    // **ONCE.** The handler counts rather than latches, so this is the assertion
+    // the test's name claims — and it runs after ~59 further steps, every one of
+    // which had the actor fully broken.
+    assert_eq!(
+        var_f(&session, "destroyed_fires"),
+        1.0,
+        "Destroyed fired {} times",
+        var_f(&session, "destroyed_fires")
     );
     assert!(
         session.fractures()[&Uuid::from_u128(WALL_GUID)]

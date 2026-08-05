@@ -171,9 +171,11 @@ pub struct ScenePayload {
     #[serde(default)]
     pub terrains: Vec<(Uuid, Vec<u8>)>,
     /// `.inf_fracture` payloads (P22.3), keyed by the **derived** fracture id —
-    /// `inf_mesh::derived_fracture_id(mesh)`, exactly the id the cooked pack
-    /// stores them under, so the player looks a fracture up the same way on both
-    /// paths and there is one lookup rule rather than two.
+    /// `inf_mesh::derived_fracture_id(mesh)` (not linked: `inf-runtime` does not
+    /// depend on `inf-mesh`, and this crate carries bytes rather than the types
+    /// they decode to), exactly the id the cooked pack stores them under, so the
+    /// player looks a fracture up the same way on both paths and there is one
+    /// lookup rule rather than two.
     ///
     /// A `.inf_fracture` is *derived*, not authored: it does not exist in the
     /// editor's content root at all, so unlike every other entry above these
@@ -183,10 +185,18 @@ pub struct ScenePayload {
     /// PIE == shipping here: the same deterministic function over the same mesh
     /// with the same seed cannot produce two different chunk sets.
     ///
-    /// Empty when nothing in the level is destructible — which is also what a
-    /// caller that does not resolve meshes produces, and the reason the phase-22
-    /// gate asserts this vector is **non-empty** before it compares anything. The
-    /// P21.4 lesson: two empty maps agree.
+    /// Empty when nothing in the level is destructible — **which is also what a
+    /// caller that does not resolve meshes produces**, and the two are
+    /// indistinguishable from here.
+    ///
+    /// That is a live hazard, not a resolved one. There is **no phase-22 gate
+    /// yet**, so nothing today asserts that a destructible level's payload
+    /// actually carries fractures; `inf_editor_core::pie`'s positional-resolver
+    /// pin is the only test that looks, and it looks at one fixture rather than
+    /// at a whole level. P22.4 owes a `phase22_gate` whose PIE arm asserts this
+    /// vector is non-empty **before** it compares anything — the P21.4 lesson,
+    /// which is that two empty maps agree, recorded here as an obligation rather
+    /// than as a gate that exists.
     #[serde(default)]
     pub fractures: Vec<(Uuid, Vec<u8>)>,
 }
@@ -266,16 +276,18 @@ impl ScenePayload {
         self
     }
 
-    /// Attach the referenced `.inf_terrain` payloads (`(asset guid, bytes)`) a
-    /// level's `Terrain.asset` refs name (P21.4). Builder-style, exactly like
+    /// Attach the derived `.inf_fracture` payloads (P22.3), keyed by the derived
+    /// fracture id (`inf_mesh::derived_fracture_id`) — the same id the cooked
+    /// pack stores them under. Builder-style, exactly like
     /// [`with_pcgs`](Self::with_pcgs).
-    /// Attach the derived `.inf_fracture` payloads (P22.3), keyed by
-    /// [`inf_mesh::derived_fracture_id`].
     pub fn with_fractures(mut self, fractures: Vec<(Uuid, Vec<u8>)>) -> Self {
         self.fractures = fractures;
         self
     }
 
+    /// Attach the referenced `.inf_terrain` payloads (`(asset guid, bytes)`) a
+    /// level's `Terrain.asset` refs name (P21.4). Builder-style, exactly like
+    /// [`with_pcgs`](Self::with_pcgs).
     pub fn with_terrains(mut self, terrains: Vec<(Uuid, Vec<u8>)>) -> Self {
         self.terrains = terrains;
         self

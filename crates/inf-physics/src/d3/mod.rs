@@ -23,8 +23,9 @@ mod world;
 
 pub use character::{CharacterMove3D, CharacterMover3D};
 pub use ecs::{
-    pcg_structure_guid, terrain_tile_guid, voxel_chunk_guid, BodyDesc3D, EntitySync3D, JointSync3D,
-    PhysicsBridge3D, PoseWriteback3D, TerrainColliderAudit, DEBRIS_LAYER,
+    pcg_structure_guid, terrain_tile_collider, terrain_tile_guid, voxel_chunk_guid, BodyDesc3D,
+    EntitySync3D, JointSync3D, PhysicsBridge3D, PoseWriteback3D, TerrainColliderAudit,
+    DEBRIS_LAYER,
 };
 pub use events::ContactEvent3D;
 pub use fracture::{

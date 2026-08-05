@@ -6651,6 +6651,33 @@ deterministic on the replay trace, PIE == shipping.
 > bits**, with an anti-vacuity arm so it cannot pass by comparing two intact walls
 > (the P21.4 lesson, applied before it could be re-learned).
 >
+> **The audit round (2026-08-05), and the ruling it turned on.** A fix-first audit
+> of the three commits found one blocker and six majors, all fixed here. The
+> blocker was the one that would have been felt by every player: a height field is
+> two triangles per cell and, without `FIX_INTERNAL_EDGES`, a body crossing a cell
+> boundary is answered with an *edge* normal — so a sphere sliding on **flat**
+> ground took 46 upward kicks, hopped 12 cm and drifted 0.72 m sideways with no
+> lateral force. One flag, and the same fix for the P21 voxel trimesh floors that
+> debris lands on when it falls through a cave mouth. The rest: the editor's
+> Simulate seeder resolved a shared mesh's chunking in ECS **archetype** order
+> while the cook and PIE used document order (Simulate shattered a wall into 24
+> pieces the shipped pack shattered into 8); PIE skipped the cook's own
+> `convex_hull_is_buildable` refusal; a dynamic body inside the 2 cm support skin
+> **hid** the ground under it, so a tower collapsed because its own rubble had
+> landed beside it; the placement was frozen at seed time, so a wall moved after
+> load shattered where it used to be; a one-sided adjacency edge priced at 0 J;
+> and the fracture-production path's cited gate was a phantom — all 17
+> `build_scene_payload` call sites passed `|_| None`, so deleting the payload's
+> fractures entirely left the tree green.
+>
+> **THE RULING on cheapest-to-liberate.** It stands: there is no impact point in
+> `destruct.apply_damage`'s signature or in scene schema v20, an origin proxy
+> would detach a wall's *core* first, and fracture minimising new surface energy is
+> the physics. But the consequence belongs in this ledger and not only in a doc
+> block: **damage is NON-LOCAL.** A wall struck anywhere sheds its cheapest chunk,
+> which may be at the far end of it. Revisit when a hit position arrives — the
+> ordering is a two-line change once there is something to sort by.
+>
 > *Honest remainders, carried into P22.4.* **No sample scene and no `phase22_gate`
 > yet** — the cross-host comparison above is a unit-level twin, not a
 > subprocess `--pie` arm, and the playground the phase's "done when" describes is
@@ -6664,7 +6691,12 @@ deterministic on the replay trace, PIE == shipping.
 > the graphics settings; P22.4's "per-tier debris budgets" fills it in.
 > **Instanced debris through the GPU scatter path is P22.4's**: today each chunk
 > is one draw against its own buffer, which is right for tens of chunks and not
-> for thousands. **A `destruct.*` node can only name a whole actor**, never one
+> for thousands. **Streaming and destruction do not meet yet**, on the P21 voxel
+> ledger's precedent: a `Destructible` that arrives with a partition cell after
+> the level was seeded answers `NoFracture` for ever (the seed is a one-shot walk,
+> not a subscription), and a *broken* actor whose cell streams out leaves its
+> static chunk colliders behind (the gather keys on the fracture map, which cell
+> streaming does not touch). **A `destruct.*` node can only name a whole actor**, never one
 > chunk (chunks are not entities), and `apply_damage` has **no impact point** —
 > the order is cheapest-to-liberate first, which is the same physics without an
 > invented input, and it is documented rather than papered over.

@@ -2,7 +2,7 @@
 //! [`crate::d2::PhysicsWorld2D`].
 
 use glam::{DQuat, DVec2, DVec3};
-use parry3d_f64::shape::{HeightField, HeightFieldCellStatus};
+use parry3d_f64::shape::{HeightField, HeightFieldCellStatus, HeightFieldFlags, TriMeshFlags};
 use parry3d_f64::utils::Array2;
 use rapier3d_f64::dynamics::CoefficientCombineRule;
 use rapier3d_f64::geometry::{Group, InteractionGroups, InteractionTestMode};
@@ -111,7 +111,7 @@ pub enum ColliderShape3D {
     ///
     /// A degenerate point set (fewer than four points, or points that are
     /// collinear/coplanar and so bound no volume) is **refused**, not panicked
-    /// on: [`to_shared`](Self::to_shared) returns `None` and
+    /// on: the shape builder returns `None` and
     /// [`PhysicsWorld3D::add_collider`] skips the collider, leaving the body
     /// intact. Producers should ask [`convex_hull_is_buildable`] first — it is
     /// the same door — rather than discover the refusal at spawn time.
@@ -154,8 +154,7 @@ pub enum ColliderShape3D {
         /// index `j · samples_x + i` is the sample `i` steps along X and `j` steps
         /// along Z. This is `TerrainTile`'s own layout, kept verbatim so the
         /// descriptor is a clone rather than a transform (parry wants the
-        /// transpose; [`to_shared`](Self::to_shared) does that conversion in one
-        /// place).
+        /// transpose; the shape builder does that conversion in one place).
         heights: Vec<f32>,
         /// `(samples_x − 1) · (samples_z − 1)` bits, row-major in Z: `true` means
         /// the **cell** has no surface and both of its triangles are removed.
@@ -189,7 +188,21 @@ impl ColliderShape3D {
                     return None;
                 }
                 let verts: Vec<DVec3> = vertices.clone();
-                SharedShape::trimesh(verts, indices.clone()).ok()?
+                // The same internal-edge fix the height field above needs, and
+                // for the same reason — a trimesh is also "one triangle at a
+                // time" to the narrow phase. This is the surface a P21 voxel
+                // cave FLOOR is made of, which is exactly where fracture debris
+                // that falls through a hole in the terrain lands, so debris
+                // skittering on a flat cave floor is the same defect one crate
+                // over. `FIX_INTERNAL_EDGES` implies `MERGE_DUPLICATE_VERTICES`
+                // (parry folds it in), which is harmless here: the Surface-Nets
+                // mesher already emits one vertex per cell.
+                SharedShape::trimesh_with_flags(
+                    verts,
+                    indices.clone(),
+                    TriMeshFlags::FIX_INTERNAL_EDGES,
+                )
+                .ok()?
             }
             ColliderShape3D::ConvexHull { points } => hull_shape(points)?,
             ColliderShape3D::Heightfield {
@@ -316,7 +329,29 @@ fn heightfield_shape(
     }
     let array = Array2::new(nz, nx, data);
     // Y scale 1: the heights ARE metres (see the variant docs).
-    let mut field = HeightField::new(array, DVec3::new(span.x, 1.0, span.y));
+    //
+    // ── FIX_INTERNAL_EDGES IS NOT OPTIONAL ──────────────────────────────────
+    //
+    // A height field is two triangles per cell, and without this flag the narrow
+    // phase resolves a contact against **one triangle's** face normal with no
+    // knowledge of its neighbours. A body sliding across a cell boundary
+    // therefore hits the *edge* of the next triangle and is answered with that
+    // edge's normal, which points partly upward even on ground that is dead flat.
+    //
+    // Measured, not feared: a 0.25 m sphere sliding at 12 m/s across FLAT terrain
+    // took **46 upward kicks** peaking at 1.44 m/s, hopped 12.2 cm, and drifted
+    // 0.72 m sideways over 300 steps — sideways, on flat ground, from nothing but
+    // triangulation. With the flag: 0 kicks, 0.69 cm, no drift. Every character,
+    // prop and piece of debris that touches terrain is affected, which is
+    // everything this phase exists to make land.
+    //
+    // The cost is one O(n) pseudo-normal pass at build time, paid on the same
+    // change-stamped path that already refuses to rebuild an unsculpted tile.
+    let mut field = HeightField::with_flags(
+        array,
+        DVec3::new(span.x, 1.0, span.y),
+        HeightFieldFlags::FIX_INTERNAL_EDGES,
+    );
     if !removed_cells.is_empty() {
         for jz in 0..(nz - 1) {
             for ix in 0..(nx - 1) {
@@ -330,7 +365,7 @@ fn heightfield_shape(
 }
 
 /// Whether `points` can become a [`ColliderShape3D::ConvexHull`] — i.e. whether
-/// they bound a volume of at least [`MIN_HULL_VOLUME_M3`].
+/// they bound a volume of at least `MIN_HULL_VOLUME_M3`.
 ///
 /// Refuses fewer than four points, collinear points, and **coplanar** points: a
 /// flat slab of vertices has no interior and is not a solid. Note that the last
@@ -341,7 +376,7 @@ fn heightfield_shape(
 /// Exposed so a *producer* of hull point sets (the P22.2 fracture cook, which
 /// must not ship a chunk nothing can collide with) can check before it writes
 /// bytes, instead of discovering it in a player. It runs the same
-/// [`hull_shape`] the collider build runs, so a "yes" here is a guarantee rather
+/// `hull_shape` the collider build runs, so a "yes" here is a guarantee rather
 /// than an estimate.
 pub fn convex_hull_is_buildable(points: &[DVec3]) -> bool {
     hull_shape(points).is_some()
@@ -938,13 +973,15 @@ impl PhysicsWorld3D {
     ///
     /// The filter is rapier's own `QueryFilter::predicate`, so the broad phase
     /// still prunes and the excluded colliders are rejected before any narrow
-    /// phase runs.
+    /// phase runs. `skip_dynamic` adds `QueryFilter::exclude_dynamic` — see the
+    /// body for why that must happen in the filter and not at the call site.
     pub fn cast_ray_excluding(
         &mut self,
         origin: DVec3,
         dir: DVec3,
         max_toi: f64,
         exclude: &std::collections::BTreeSet<ColliderId3D>,
+        skip_dynamic: bool,
     ) -> Option<RayHit3D> {
         let dir = dir.normalize_or_zero();
         if dir == DVec3::ZERO {
@@ -956,7 +993,21 @@ impl PhysicsWorld3D {
                          _: &rapier3d_f64::geometry::Collider| {
             !exclude.contains(&ColliderId3D(h))
         };
-        let filter = QueryFilter::default().predicate(&predicate);
+        // `skip_dynamic` asks the BROAD PHASE to leave dynamic bodies out
+        // entirely, which is not the same as "cast, then reject a dynamic hit".
+        // The difference is the whole of the P22.3 audit's M4: with the check
+        // downstream, a single crate resting a centimetre above the floor is the
+        // NEAREST hit, the cast returns it, the caller rejects it — and the floor
+        // underneath, which the caller was asking about, is never seen at all. So
+        // "debris provides no support" silently became "debris HIDES support",
+        // and a tower collapsed because its own rubble had landed beside it. It
+        // also removes a tie-at-TOI hazard: two coincident hits, one dynamic, are
+        // ordered by the BVH rather than by anything deterministic.
+        let filter = if skip_dynamic {
+            QueryFilter::exclude_dynamic().predicate(&predicate)
+        } else {
+            QueryFilter::default().predicate(&predicate)
+        };
         let pipe = self.query_pipeline(filter);
         let (handle, hit) = pipe.cast_ray_and_get_normal(&ray, max_toi, true)?;
         Some(RayHit3D {

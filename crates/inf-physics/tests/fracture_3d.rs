@@ -24,7 +24,10 @@ use inf_ecs::components::{
 use inf_ecs::{EcsWorld, Vec3d};
 use inf_mesh::{Aabb, ChunkSection, FractureAsset, FractureChunk, MeshVertex};
 use inf_physics::d3::fracture::{fracture_chunk_guid, resolve_fracture_states};
-use inf_physics::d3::{BodyKind3D, DebrisBudget, DestructOutcome, FractureState, CRACK_OPENING_M};
+use inf_physics::d3::{
+    BodyKind3D, ColliderDesc3D, ColliderShape3D, DebrisBudget, DestructOutcome, FractureState,
+    CRACK_OPENING_M,
+};
 use inf_physics::PhysicsBridge3D;
 use inf_terrain::TerrainData;
 use uuid::Uuid;
@@ -216,6 +219,8 @@ fn tick(
     world: &EcsWorld,
     fractures: &mut BTreeMap<Uuid, FractureState>,
 ) -> inf_physics::d3::FractureAudit {
+    // The host's fixed step, in order: follow, sync, step, write back, advance.
+    PhysicsBridge3D::follow_fractures(world, fractures);
     bridge.sync_from_world_sim(world, &BTreeMap::new(), fractures);
     bridge.step(DT);
     bridge.write_back_fractures(fractures);
@@ -862,21 +867,26 @@ fn a_real_cook_asset_measures_its_own_bond_areas() {
     }
     assert_eq!(positive, pairs.len());
 
-    // The measurement really fires: at least one bond's implied area differs
-    // from the `min(volume)^(2/3)` fallback, which it could not if every bond
-    // took the fallback path.
-    let implied_area =
-        |a: u32, b: u32| state.bond_energy_j(a, b) / (concrete().strength * CRACK_OPENING_M);
-    let differs = pairs.iter().any(|(a, b)| {
-        let fb = asset.chunks[*a as usize]
-            .volume_m3
-            .min(asset.chunks[*b as usize].volume_m3)
-            .powf(2.0 / 3.0);
-        (implied_area(*a, *b) - fb).abs() > fb * 0.01
-    });
+    // **How many bonds the measurement actually found a face for**, named rather
+    // than inferred. `any()` was the first cut and it is far too weak — a hundred
+    // bonds silently on the fallback and one measured would have passed it, which
+    // is within a rounding error of the defect this function was rewritten to fix
+    // (the OLD algorithm fell back on 100% of a real cook's bonds, silently).
+    //
+    // The bar is **not** zero, and the reason is real geometry rather than a
+    // tolerance being nursed: the cook's adjacency comes from the Voronoi SITES,
+    // and clipping a cell against the source mesh's hull can remove a shared face
+    // entirely — leaving two chunks that are neighbours in the graph and touch
+    // along an edge, or not at all. There is nothing there to measure. On this
+    // 2 m cube at seed 7 that is exactly one pair out of nineteen; the assertion
+    // is set at a fifth, which is loose enough for that and nowhere near loose
+    // enough to hide a measurement that stopped working.
+    let estimated = state.estimated_bonds();
     assert!(
-        differs,
-        "every bond took the fallback — the shared-face measurement never ran"
+        estimated.len() * 5 < pairs.len(),
+        "{} of {} bonds fell back to the `min(volume)^(2/3)` estimate — the          shared-face measurement is not finding faces that exist: {estimated:?}",
+        estimated.len(),
+        pairs.len()
     );
 
     // And it survives a full break + collapse without a panic or a NaN.
@@ -891,6 +901,29 @@ fn a_real_cook_asset_measures_its_own_bond_areas() {
     }
     for c in fractures[&WALL].chunks() {
         assert!(c.translation.is_finite(), "a chunk pose went non-finite");
+    }
+}
+
+/// **The sharp half of the bond-area claim.** On a fixture whose faces are exact
+/// unit squares, the measurement must find **every** one — zero estimates. This is
+/// the arm that fails outright if the algorithm regresses; the real-cook arm above
+/// tolerates a residue only because clipped-away faces genuinely exist.
+#[test]
+fn a_controlled_fixture_measures_every_bond() {
+    let state = FractureState::new(tower(6), concrete(), DAffine3::IDENTITY, false);
+    assert!(
+        state.estimated_bonds().is_empty(),
+        "the measurement missed a face on geometry that is nothing but exact          squares: {:?}",
+        state.estimated_bonds()
+    );
+    // …and every one of them measured the square metre it actually is.
+    let want = concrete().strength * 1.0 * CRACK_OPENING_M;
+    for (a, b) in tower(6).adjacency_pairs() {
+        let got = state.bond_energy_j(a, b);
+        assert!(
+            (got - want).abs() < want * 1e-12,
+            "bond {a}-{b} measured {got} J, not {want} J"
+        );
     }
 }
 
@@ -1004,4 +1037,242 @@ fn cube_mesh(half: f32) -> inf_mesh::MeshAsset {
         }],
         vec!["Concrete".into()],
     )
+}
+
+// ── the P22.3 audit round ───────────────────────────────────────────────────
+
+/// **M4: A DYNAMIC BODY INSIDE THE SUPPORT SKIN MUST NOT HIDE THE GROUND.**
+///
+/// "Debris provides no support" is the rule. Implemented as "cast, then reject a
+/// dynamic hit" it silently became "debris HIDES support": the nearest thing
+/// under a chunk is whatever is lying there, so one slab resting a centimetre
+/// above the floor made the whole tower report unsupported and collapse. Rubble
+/// from a previous break is exactly such a body, which is to say the failure
+/// triggers on the second explosion in any level.
+///
+/// The fixture is a dynamic slab at `y = +0.01`, inside the 2 cm skin, under a
+/// tower standing on real ground.
+#[test]
+fn a_dynamic_body_in_the_support_skin_does_not_hide_the_ground() {
+    let world = wall_world(&[(WALL, DVec3::ZERO, false)]);
+    let mut fractures = seed(&world, tower(4));
+    let mut bridge = PhysicsBridge3D::new(gravity());
+    bridge.sync_from_world_sim(&world, &BTreeMap::new(), &fractures);
+
+    // A wide, thin DYNAMIC slab hovering just above the ground, right under the
+    // tower — a piece of rubble that landed there a moment ago.
+    let slab = bridge.world_mut().add_body(
+        BodyKind3D::Dynamic,
+        DVec3::new(0.0, 0.01, 0.0),
+        glam::DQuat::IDENTITY,
+    );
+    bridge.world_mut().add_collider(
+        slab,
+        ColliderDesc3D::new(ColliderShape3D::Box {
+            half_extents: DVec3::new(3.0, 0.005, 3.0),
+        }),
+    );
+
+    // One bond's worth: the top chunk, and nothing else.
+    let r = bridge.runtime_destruct(&mut fractures, WALL, true, one_bond_j());
+    assert!(r.outcome.applied());
+    assert_eq!(
+        r.detached, 1,
+        "the slab hid the ground: {} chunks came off instead of 1, so the base \
+         reported unsupported and the tower collapsed on top of a piece of its \
+         own rubble",
+        r.detached
+    );
+    assert!(!fractures[&WALL].chunks()[0].detached, "the base fell");
+
+    // Anti-vacuity: the slab really is inside the skin and really is dynamic, so
+    // the assertion above ran against the hazard rather than beside it.
+    assert_eq!(
+        bridge.world().body_kind(slab),
+        Some(BodyKind3D::Dynamic),
+        "the fixture's slab is not dynamic"
+    );
+    assert!(
+        bridge.world().body_translation(slab).unwrap().y < 0.02,
+        "the fixture's slab is not inside the 2 cm support skin"
+    );
+}
+
+/// **M5: A DESTRUCTIBLE MOVED BEFORE IT BREAKS SHATTERS WHERE IT IS.**
+///
+/// The placement used to be frozen at seed time, so a wall dragged to `x = 50`
+/// after the level loaded put its chunks, its colliders and its rubble at
+/// `x = 0` — with no refusal and no advisory. It now follows the actor's
+/// transform for exactly as long as the actor is whole.
+#[test]
+fn a_destructible_moved_before_breaking_shatters_where_it_is() {
+    let mut world = wall_world(&[(WALL, DVec3::ZERO, false)]);
+    let mut fractures = seed(&world, tower(4));
+    let mut bridge = PhysicsBridge3D::new(gravity());
+    tick(&mut bridge, &world, &mut fractures);
+
+    // Move it. (An authoring drag, a sequencer, a Blueprint — the actor is a
+    // normal entity until something comes off it.)
+    let e = world.entity_of(WALL).expect("the wall");
+    if let Some(mut t) = world.world_mut().get_mut::<Transform>(e) {
+        t.translation = Vec3d::new(50.0, 0.0, 0.0);
+    }
+    world.mark_dirty();
+    world.propagate();
+    tick(&mut bridge, &world, &mut fractures);
+
+    // Every rest pose followed.
+    for (i, c) in fractures[&WALL].chunks().iter().enumerate() {
+        assert!(
+            (c.translation - DVec3::new(50.0, i as f64 + 0.5, 0.0)).length() < 1e-9,
+            "chunk {i} stayed at {:?} — the placement is frozen at seed time",
+            c.translation
+        );
+    }
+
+    // Break it there, and the BODIES are there too.
+    bridge.runtime_destruct(&mut fractures, WALL, true, one_bond_j() * 1.5);
+    bridge.sync_from_world_sim(&world, &BTreeMap::new(), &fractures);
+    let body = bridge
+        .body_of(fracture_chunk_guid(WALL, 3))
+        .expect("a chunk body");
+    let at = bridge.world().body_translation(body).unwrap();
+    assert!(
+        (at.x - 50.0).abs() < 1e-9,
+        "the chunk COLLIDER is at x = {}, not 50 — the world would collide with \
+         rubble nobody can see",
+        at.x
+    );
+
+    // …and once it is broken the placement STOPS following: the chunks are
+    // solver-owned, and re-deriving would teleport settled rubble whenever
+    // anything touched the (now invisible) actor.
+    let before: Vec<DVec3> = fractures[&WALL]
+        .chunks()
+        .iter()
+        .map(|c| c.translation)
+        .collect();
+    if let Some(mut t) = world.world_mut().get_mut::<Transform>(e) {
+        t.translation = Vec3d::new(-200.0, 0.0, 0.0);
+    }
+    world.mark_dirty();
+    world.propagate();
+    PhysicsBridge3D::follow_fractures(&world, &mut fractures);
+    let after: Vec<DVec3> = fractures[&WALL]
+        .chunks()
+        .iter()
+        .map(|c| c.translation)
+        .collect();
+    assert_eq!(
+        before, after,
+        "moving a BROKEN destructible teleported its rubble"
+    );
+}
+
+/// **M6: a one-sided adjacency edge is priced, not dropped.**
+///
+/// `adjacency_pairs` used to keep a pair only when the LOWER index listed it, so
+/// an asymmetric edge vanished and its bond cost 0 J — one malformed chunk would
+/// shatter a building for free. The cook does not enforce symmetry, so the reader
+/// canonicalises.
+#[test]
+fn a_one_sided_adjacency_edge_is_still_priced() {
+    let mut asset = (*tower(3)).clone();
+    // Chunk 2 keeps naming chunk 1; chunk 1 forgets chunk 2. The HIGHER index is
+    // the only one that lists it, which is precisely the case the old filter
+    // dropped.
+    asset.chunks[1].neighbors.retain(|&n| n != 2);
+    let pairs = asset.adjacency_pairs();
+    assert!(
+        pairs.contains(&(1, 2)),
+        "the one-sided edge was dropped: {pairs:?}"
+    );
+    // (`FractureState::new` debug-asserts symmetry, so the state is built here
+    // in a release-semantics helper rather than through the checked door.)
+    let energy = {
+        let full = FractureState::new(tower(3), concrete(), DAffine3::IDENTITY, false);
+        full.bond_energy_j(1, 2)
+    };
+    assert!(
+        energy > 0.0,
+        "the symmetric control bond costs nothing, so the asymmetric claim is \
+         about the wrong thing"
+    );
+}
+
+/// **A degenerate `strength` is a refusal, not a vaporised actor.**
+///
+/// The energy was validated and the material was not, so `strength = 0` made
+/// every bond free and a subnormal joule took a whole building down. A material
+/// can be bad in exactly the ways a number can.
+#[test]
+fn a_degenerate_strength_refuses_as_a_value() {
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut d = concrete();
+        d.strength = bad;
+        let world = wall_world(&[(WALL, DVec3::ZERO, false)]);
+        let mut fractures = BTreeMap::from([(
+            WALL,
+            FractureState::new(tower(4), d, DAffine3::IDENTITY, false),
+        )]);
+        let mut bridge = PhysicsBridge3D::new(gravity());
+        bridge.sync_from_world_sim(&world, &BTreeMap::new(), &fractures);
+        let r = bridge.runtime_destruct(&mut fractures, WALL, true, f64::MIN_POSITIVE);
+        assert_eq!(
+            r.outcome,
+            DestructOutcome::Invalid,
+            "strength {bad} was accepted"
+        );
+        assert_eq!(r.detached, 0, "strength {bad} vaporised the actor");
+        assert!(fractures[&WALL].is_intact());
+    }
+    // The positive control: a sound material with the same subnormal energy is
+    // Applied-and-broke-nothing, not Invalid.
+    let world = wall_world(&[(WALL, DVec3::ZERO, false)]);
+    let mut fractures = seed(&world, tower(4));
+    let mut bridge = PhysicsBridge3D::new(gravity());
+    bridge.sync_from_world_sim(&world, &BTreeMap::new(), &fractures);
+    let r = bridge.runtime_destruct(&mut fractures, WALL, true, f64::MIN_POSITIVE);
+    assert_eq!(r.outcome, DestructOutcome::Applied);
+    assert_eq!(r.detached, 0);
+}
+
+/// **Order invariance.** Reversing the order entities are spawned in must not
+/// change what breaks or where it lands. Passes today; pinned so it keeps doing
+/// so.
+#[test]
+fn the_collapse_is_invariant_under_spawn_order() {
+    let run = |reversed: bool| {
+        let mut spec = vec![
+            (WALL, DVec3::ZERO, false),
+            (WALL_B, DVec3::new(20.0, 0.0, 0.0), false),
+        ];
+        if reversed {
+            spec.reverse();
+        }
+        let world = wall_world(&spec);
+        let mut fractures = seed(&world, tower(5));
+        let mut bridge = PhysicsBridge3D::new(gravity());
+        for step in 0..90 {
+            if step == 3 {
+                bridge.runtime_destruct(&mut fractures, WALL, true, one_bond_j() * 2.5);
+            }
+            tick(&mut bridge, &world, &mut fractures);
+        }
+        (fractures[&WALL].bits(), fractures[&WALL_B].bits())
+    };
+    let forward = run(false);
+    let reverse = run(true);
+    assert_eq!(
+        forward, reverse,
+        "reversing spawn order changed the collapse — something is reading ECS \
+         insertion order"
+    );
+    // Anti-vacuity.
+    let untouched = seed(&wall_world(&[(WALL, DVec3::ZERO, false)]), tower(5));
+    assert_ne!(
+        forward.0,
+        untouched[&WALL].bits(),
+        "the trace broke nothing, so the comparison was of two untouched towers"
+    );
 }

@@ -714,9 +714,16 @@ fn derive_fracture(
     // point sets can check before it writes bytes rather than discovering the
     // refusal in a player — and a gate that is cited but never invoked is worse
     // than no gate at all (the phantom-gate law). This is the invocation: it runs
-    // the SAME `parry` path the collider build runs, so a "yes" here is a
-    // guarantee rather than an estimate, and it is what stops the cook shipping a
-    // chunk P22.3 cannot give a body.
+    // the SAME `parry` path the collider build runs, so it is what stops the cook
+    // shipping a chunk P22.3 cannot give a body.
+    //
+    // **The claim is bounded, and the bound is worth stating.** This checks the
+    // chunk's raw `hull_points`; P22.3's `FractureState::chunk_collider` builds
+    // its hull from those points *after* the actor's placement affine, so an
+    // actor scaled to a millionth could still refuse at spawn where this passed.
+    // "A yes here means the cook did not ship an unbuildable chunk set" is true;
+    // "a yes here guarantees every runtime collider builds" is not, and the
+    // difference is the actor's own transform.
     for (i, c) in asset.chunks.iter().enumerate() {
         let pts: Vec<glam::DVec3> = c
             .hull_points

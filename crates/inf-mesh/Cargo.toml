@@ -25,6 +25,13 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+# P22.3: `derived_vmesh_id`, so one test can pin that the two DERIVED-asset salts
+# differ. Both functions are bijections on a mesh's own GUID and the cook stores
+# their outputs in ONE pack index, so a collision would have a mesh's meshlet DAG
+# and its fracture overwrite each other — with nothing else in the tree relating
+# the two constants. Dev-only: `inf-mesh` never names `inf-vgeom` in shipping
+# code, so the dependency direction stays inf-vgeom -> inf-mesh.
+inf-vgeom = { workspace = true }
 tempfile = { workspace = true }
 
 # ── Import path: HOST-ONLY (P22.3) ──────────────────────────────────────────

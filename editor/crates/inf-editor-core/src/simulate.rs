@@ -499,6 +499,14 @@ impl SimSession {
     }
 
     /// Set the level's debris limits (P22.3).
+    ///
+    /// **Nothing calls this yet**, and saying so is the point: the budget is data
+    /// rather than a constant physics reads for itself (see
+    /// `inf_physics::d3::DEFAULT_DEBRIS_MAX_LIVE` for why a fixed step must not
+    /// become a function of the graphics tier), but the *tier → budget* mapping
+    /// that would fill it in is P22.4's deliverable. Until then every level runs
+    /// on `DebrisBudget::default()`. The seam exists so that mapping is a call
+    /// site rather than a refactor; it is not yet a knob anyone has turned.
     pub fn set_debris_budget(&mut self, budget: DebrisBudget) {
         self.debris_budget = budget;
     }
@@ -625,6 +633,13 @@ impl SimSession {
         inf_ecs::sky::advance_weather(doc.world_mut(), dt);
         // 1. ECS → physics.
         self.bridge.sync_from_world(doc.world());
+        // ── P22.3 fracture follow ── an INTACT destructible is a normal
+        //    entity a Blueprint or a gizmo can move, so its placement tracks
+        //    its transform right up until the first chunk comes off (after
+        //    which the chunks are solver-owned and following would teleport
+        //    settled rubble). Before the sync, because the sync reads the map
+        //    while this writes it. (MIRROR of the other host's fixed step.)
+        PhysicsBridge3D::follow_fractures(doc.world(), &mut self.fractures);
         // ── P11.3 3D bridge: sync ── carrying the P21.4 voxel chunk colliders,
         //    so a runtime carve is something a body can fall into.
         self.bridge3d

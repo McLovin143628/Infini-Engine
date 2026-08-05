@@ -148,35 +148,27 @@ pub async fn sim_start(
     // P22.3: what this level's destructible actors break into. DERIVED here, from
     // each actor's own mesh, by the same `inf_mesh::fracture_mesh` the cook runs
     // with the same authored seed and chunk count — because a `.inf_fracture` is
-    // cook output and does not exist in the project's content root at all. So
-    // Simulate, PIE and the shipped pack all break the same wall into the same
-    // pieces, by construction rather than by agreement.
+    // cook output and does not exist in the project's content root at all.
+    //
+    // **Through the SAME rule the PIE payload uses**, not a second walk that
+    // happens to agree: `destructible_mesh_params` decides which of two actors
+    // sharing a mesh sets its chunking, in `doc.order()`, and `derive_fracture`
+    // applies the cook's own `convex_hull_is_buildable` refusal. The first cut of
+    // this seeder used `iter_entities()` — ECS ARCHETYPE order — so adding an
+    // `AlwaysLoaded` to one of two walls flipped which one won, and Simulate
+    // shattered a wall into 24 chunks that the shipped pack shattered into 8.
+    // One function now answers it for all three paths.
     //
     // Camera-free like the voxel map above: the walk reads the world's own
     // `Destructible` + `MeshRef`, never a render store.
+    let fracture_params = inf_editor_core::pie::destructible_mesh_params(&doc);
     session.set_fractures(inf_physics::d3::resolve_fracture_states(
         doc.world(),
         |mesh_id| {
+            let params = *fracture_params.get(&mesh_id)?;
             let bytes = assets.load_mesh_bytes(inf_asset::AssetId(mesh_id))?;
             let mesh = inf_asset::decode::<inf_mesh::MeshAsset>(&bytes).ok()?;
-            let d = doc
-                .world()
-                .world()
-                .iter_entities()
-                .filter_map(|e| {
-                    let m = e.get::<inf_ecs::components::MeshRef>()?.asset?;
-                    (m == mesh_id)
-                        .then(|| e.get::<inf_ecs::components::Destructible>().copied())
-                        .flatten()
-                })
-                .next()?;
-            let params = inf_mesh::FractureParams {
-                seed: d.fracture_seed,
-                chunk_count: d.chunk_count,
-            };
-            inf_mesh::fracture_mesh(&mesh, inf_asset::AssetId(mesh_id), params)
-                .ok()
-                .map(std::sync::Arc::new)
+            inf_editor_core::pie::derive_fracture(&mesh, mesh_id, params).map(std::sync::Arc::new)
         },
     ));
     // Load the project mixer (`<project>/.infinity/mixer.toml`) if present; else the

@@ -6,6 +6,7 @@
 //! and the editor observes it as [`SessionHealth::Exited`] with the panic
 //! text captured from stderr — unsaved editor state is never at risk.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -629,35 +630,14 @@ where
     // indestructible, which is exactly what the shipped build does with the same
     // refusal.
     let mut fractures: Vec<(Uuid, Vec<u8>)> = Vec::new();
-    let mut seen_fracture: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
-    for &guid in doc.order() {
-        let Some(e) = world.entity_of(guid) else {
-            continue;
-        };
-        let w = world.world();
-        let Some(d) = w.get::<inf_ecs::components::Destructible>(e).copied() else {
-            continue;
-        };
-        let Some(mesh_id) = w
-            .get::<inf_ecs::components::MeshRef>(e)
-            .and_then(|m| m.asset)
-        else {
-            continue;
-        };
-        if !seen_fracture.insert(mesh_id) {
-            continue;
-        }
+    for (mesh_id, params) in destructible_mesh_params(doc) {
         let Some(bytes) = resolve_mesh(mesh_id) else {
             continue;
         };
         let Ok(mesh) = inf_asset::decode::<inf_mesh::MeshAsset>(&bytes) else {
             continue;
         };
-        let params = inf_mesh::FractureParams {
-            seed: d.fracture_seed,
-            chunk_count: d.chunk_count,
-        };
-        let Ok(asset) = inf_mesh::fracture_mesh(&mesh, inf_asset::AssetId(mesh_id), params) else {
+        let Some(asset) = derive_fracture(&mesh, mesh_id, params) else {
             continue;
         };
         let Ok(encoded) = inf_asset::encode(&asset) else {
@@ -678,6 +658,80 @@ where
             .with_terrains(terrains)
             .with_fractures(fractures),
     )
+}
+
+/// **The one rule for "which destructible's parameters a shared mesh fractures
+/// with"** (P22.3), walked in `doc.order()`.
+///
+/// Two actors may reference one mesh and disagree about `fracture_seed` /
+/// `chunk_count`; the fracture is derived per MESH, so exactly one of them wins.
+/// The cook resolves that in document order and takes the first
+/// (`inf_packager::cook::plan_fractures`), and this is the same walk — factored
+/// out and shared rather than restated, because it had already been restated
+/// once and the copies disagreed.
+///
+/// The P22.3 audit's M2: the editor's Simulate seeder resolved the winner with
+/// `iter_entities()`, which is **ECS ARCHETYPE order** — a function of which
+/// components an entity happens to carry and in what sequence they were
+/// inserted. Adding an `AlwaysLoaded` to one of two walls sharing a mesh flipped
+/// which one won, so Simulate shattered a wall into 24 chunks that the shipped
+/// pack shattered into 8. The comment above that seeder claimed the three paths
+/// agreed "by construction rather than by agreement"; they agreed by neither.
+/// Now there is one function, and construction is the truth.
+///
+/// Returns `mesh GUID -> params`, first-in-document-order wins, deterministic.
+pub fn destructible_mesh_params(doc: &SceneDoc) -> BTreeMap<Uuid, inf_mesh::FractureParams> {
+    let world = doc.world();
+    let mut out: BTreeMap<Uuid, inf_mesh::FractureParams> = BTreeMap::new();
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let w = world.world();
+        let Some(d) = w.get::<inf_ecs::components::Destructible>(e).copied() else {
+            continue;
+        };
+        let Some(mesh_id) = w
+            .get::<inf_ecs::components::MeshRef>(e)
+            .and_then(|m| m.asset)
+        else {
+            continue;
+        };
+        out.entry(mesh_id).or_insert(inf_mesh::FractureParams {
+            seed: d.fracture_seed,
+            chunk_count: d.chunk_count,
+        });
+    }
+    out
+}
+
+/// Derive one mesh's `.inf_fracture`, applying **the cook's own refusals**
+/// (P22.3).
+///
+/// The second half is the P22.3 audit's M3. `inf_packager::cook` runs
+/// `fracture_mesh` and then walks every chunk through
+/// `inf_physics::d3::convex_hull_is_buildable`, refusing the WHOLE fracture if
+/// any chunk cannot become a collider — so a mesh that fails it ships as an
+/// indestructible actor. PIE skipped that check and encoded unconditionally, so
+/// the same wall broke in the preview and did not in the shipped build, and one
+/// of its chunks rendered without colliding. Same door, same answer, both paths.
+pub fn derive_fracture(
+    mesh: &inf_mesh::MeshAsset,
+    mesh_id: Uuid,
+    params: inf_mesh::FractureParams,
+) -> Option<inf_mesh::FractureAsset> {
+    let asset = inf_mesh::fracture_mesh(mesh, inf_asset::AssetId(mesh_id), params).ok()?;
+    for c in &asset.chunks {
+        let pts: Vec<glam::DVec3> = c
+            .hull_points
+            .iter()
+            .map(|p| glam::DVec3::from_array(*p))
+            .collect();
+        if !inf_physics::d3::convex_hull_is_buildable(&pts) {
+            return None;
+        }
+    }
+    Some(asset)
 }
 
 /// Locate the `inf-player` binary next to the running editor executable (dev
@@ -709,7 +763,7 @@ mod tests {
     use crate::ipc::SpawnKind;
     use inf_ecs::components::{PcgVolume, Terrain, VoxelVolume};
 
-    /// **The positional pin for [`build_scene_payload`]'s five resolvers.**
+    /// **The positional pin for [`build_scene_payload`]'s seven resolvers.**
     ///
     /// Each resolver reaches a different store and fills a different payload
     /// field, and every one of them has the same type — `FnMut(Uuid) ->
@@ -725,6 +779,7 @@ mod tests {
         const BIOMES: Uuid = Uuid::from_u128(0x2104_0E04);
         const VOXELS: Uuid = Uuid::from_u128(0x2104_0E05);
         const TERRAIN: Uuid = Uuid::from_u128(0x2104_0E06);
+        const MESH: Uuid = Uuid::from_u128(0x2203_0E07);
 
         let mut doc = SceneDoc::new();
         let e = doc.create(SpawnKind::Empty, "Everything", None);
@@ -747,6 +802,21 @@ mod tests {
                     ..SkeletalMesh::default()
                 },
                 VoxelVolume::from_asset(VOXELS),
+                // P22.3: the seventh resolver is the odd one out — it hands
+                // back MESH bytes, and the payload carries the fracture
+                // DERIVED from them under a different id. A fixture with no
+                // `Destructible` could not tell that apart from a resolver
+                // that was never called, which is exactly what the first cut
+                // of this pin did: mutating `.with_fractures(fractures)` to
+                // `Vec::new()` left every test in the tree green.
+                inf_ecs::components::Destructible {
+                    chunk_count: 6,
+                    ..inf_ecs::components::Destructible::default()
+                },
+                inf_ecs::components::MeshRef {
+                    asset: Some(MESH),
+                    ..Default::default()
+                },
             ));
             world.mark_dirty();
         }
@@ -759,8 +829,7 @@ mod tests {
             |g| (g == BIOMES).then(|| b"BIOMES".to_vec()),
             |g| (g == VOXELS).then(|| b"VOXELS".to_vec()),
             |g| (g == TERRAIN).then(|| b"TERRAIN".to_vec()),
-            // P22.3: no destructible meshes in this fixture.
-            |_| None,
+            |g| (g == MESH).then(|| inf_asset::encode(&fracture_cube()).expect("encodes")),
             60,
             false,
         )
@@ -773,10 +842,211 @@ mod tests {
         assert_eq!(payload.biome_sets, vec![(BIOMES, b"BIOMES".to_vec())]);
         assert_eq!(payload.voxels, vec![(VOXELS, b"VOXELS".to_vec())]);
         assert_eq!(payload.terrains, vec![(TERRAIN, b"TERRAIN".to_vec())]);
+        // The fracture is keyed by the DERIVED id, not by the mesh's — the same
+        // id the cooked pack stores it under, so the player has one lookup rule.
+        assert_eq!(
+            payload.fractures.len(),
+            1,
+            "the payload carries no fracture"
+        );
+        assert_eq!(
+            payload.fractures[0].0,
+            inf_mesh::derived_fracture_id(inf_asset::AssetId(MESH)).uuid()
+        );
+        assert_ne!(
+            payload.fractures[0].0, MESH,
+            "the fracture is keyed by the mesh's own id — the player would look it \
+             up under the derived one and find nothing"
+        );
+        // …and the bytes really are a chunk set with the AUTHORED chunk count's
+        // worth of pieces, not an empty vector that happens to decode.
+        let decoded = inf_asset::decode::<inf_mesh::FractureAsset>(&payload.fractures[0].1)
+            .expect("the payload's fracture decodes");
+        assert_eq!(decoded.requested_chunks, 6);
+        assert!(decoded.chunks.len() >= 2, "the fracture has no chunks");
         assert_eq!(
             payload.schema_version,
             inf_runtime::pie::SCENE_PAYLOAD_VERSION
         );
+    }
+
+    /// A 2 m cube, encoded — the mesh the fracture pin derives from.
+    fn fracture_cube() -> inf_mesh::MeshAsset {
+        let c = |x: f32, y: f32, z: f32| inf_mesh::MeshVertex {
+            position: [x, y, z],
+            ..Default::default()
+        };
+        inf_mesh::MeshAsset::new(
+            vec![inf_mesh::SubMesh {
+                name: "wall".into(),
+                vertices: vec![
+                    c(-1.0, -1.0, -1.0),
+                    c(1.0, -1.0, -1.0),
+                    c(1.0, 1.0, -1.0),
+                    c(-1.0, 1.0, -1.0),
+                    c(-1.0, -1.0, 1.0),
+                    c(1.0, -1.0, 1.0),
+                    c(1.0, 1.0, 1.0),
+                    c(-1.0, 1.0, 1.0),
+                ],
+                indices: vec![
+                    0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7, 0, 3,
+                    7, 0, 7, 4, 1, 5, 6, 1, 6, 2,
+                ],
+                material_slot: Some(0),
+                skin: Vec::new(),
+            }],
+            vec!["Concrete".into()],
+        )
+    }
+
+    /// **THE SHARED RULE, both halves.** Two actors referencing one mesh with
+    /// different parameters: the winner is decided in DOCUMENT order, not in ECS
+    /// archetype order — which is what the P22.3 audit's M2 found diverging
+    /// between the PIE payload and the editor's Simulate seeder.
+    ///
+    /// The `AlwaysLoaded` on the second actor is the reproduction, not decoration:
+    /// it moves that entity into a different archetype, which is precisely what
+    /// flipped the old `iter_entities()` walk's answer.
+    #[test]
+    fn two_actors_sharing_a_mesh_resolve_in_document_order() {
+        const MESH: Uuid = Uuid::from_u128(0x2203_0F01);
+        let mut doc = SceneDoc::new();
+        let first = doc.create(SpawnKind::Empty, "First", None);
+        let second = doc.create(SpawnKind::Empty, "Second", None);
+        {
+            let world = doc.world_mut();
+            // **The components are inserted SECOND-ACTOR-FIRST on purpose.** An
+            // archetype is created when its component set is first seen, and
+            // `iter_entities()` walks archetypes in creation order — so giving
+            // the document's *second* actor the *first* archetype is what makes
+            // the two orders disagree. Without this the two walks happen to
+            // coincide and the test certifies nothing (verified: the archetype
+            // mutation passed against the naive fixture).
+            let b = world.entity_of(second).expect("second");
+            world.world_mut().entity_mut(b).insert((
+                inf_ecs::components::Destructible {
+                    chunk_count: 24,
+                    ..inf_ecs::components::Destructible::default()
+                },
+                inf_ecs::components::MeshRef {
+                    asset: Some(MESH),
+                    ..Default::default()
+                },
+                inf_ecs::components::AlwaysLoaded,
+            ));
+            let a = world.entity_of(first).expect("first");
+            world.world_mut().entity_mut(a).insert((
+                inf_ecs::components::Destructible {
+                    chunk_count: 8,
+                    ..inf_ecs::components::Destructible::default()
+                },
+                inf_ecs::components::MeshRef {
+                    asset: Some(MESH),
+                    ..Default::default()
+                },
+            ));
+            world.mark_dirty();
+        }
+        // The fixture is only a reproduction if the two walks really disagree.
+        let archetype_first = doc
+            .world()
+            .world()
+            .iter_entities()
+            .find_map(|e| {
+                e.get::<inf_ecs::components::Destructible>()
+                    .map(|d| d.chunk_count)
+            })
+            .expect("a destructible");
+        assert_eq!(
+            archetype_first, 24,
+            "the fixture no longer reproduces the archetype/document split — an              archetype walk visits the same actor first, so this test would pass              against the very bug it exists to catch"
+        );
+        let params = destructible_mesh_params(&doc);
+        assert_eq!(params.len(), 1, "one mesh, one fracture");
+        assert_eq!(
+            params[&MESH].chunk_count, 8,
+            "the FIRST actor in document order must win — an archetype-order walk \
+             answers 24 here, and Simulate would shatter a wall the shipped pack \
+             does not"
+        );
+
+        // …and the payload agrees with it, end to end.
+        let payload = build_scene_payload(
+            &doc,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |g| (g == MESH).then(|| inf_asset::encode(&fracture_cube()).expect("encodes")),
+            60,
+            false,
+        )
+        .expect("payload builds");
+        let decoded =
+            inf_asset::decode::<inf_mesh::FractureAsset>(&payload.fractures[0].1).expect("decodes");
+        assert_eq!(decoded.requested_chunks, 8);
+    }
+
+    /// **M3: PIE applies the cook's refusal.** A mesh whose chunks cannot all
+    /// become colliders is refused *whole* by `inf_packager::cook`, so it ships
+    /// indestructible — and PIE must agree, or the preview breaks a wall the
+    /// shipped build cannot.
+    #[test]
+    fn a_fracture_the_cook_would_refuse_is_refused_here_too() {
+        const MESH: Uuid = Uuid::from_u128(0x2203_0F02);
+        // A degenerate mesh: three coplanar points bound no volume, so every
+        // candidate chunk fails `convex_hull_is_buildable` (or the fracture is
+        // skipped outright). Either way the answer must be `None`.
+        let flat = inf_mesh::MeshAsset::new(
+            vec![inf_mesh::SubMesh {
+                name: "flat".into(),
+                vertices: vec![
+                    inf_mesh::MeshVertex {
+                        position: [-1.0, 0.0, -1.0],
+                        ..Default::default()
+                    },
+                    inf_mesh::MeshVertex {
+                        position: [1.0, 0.0, -1.0],
+                        ..Default::default()
+                    },
+                    inf_mesh::MeshVertex {
+                        position: [0.0, 0.0, 1.0],
+                        ..Default::default()
+                    },
+                ],
+                indices: vec![0, 1, 2],
+                material_slot: Some(0),
+                skin: Vec::new(),
+            }],
+            vec!["Concrete".into()],
+        );
+        assert!(
+            derive_fracture(
+                &flat,
+                MESH,
+                inf_mesh::FractureParams {
+                    seed: 0,
+                    chunk_count: 8,
+                },
+            )
+            .is_none(),
+            "PIE derived a fracture the cook refuses — the preview would break a \
+             wall the shipped build cannot"
+        );
+        // The positive control: a real solid IS derived, so the assertion above is
+        // about the refusal and not about `derive_fracture` returning None always.
+        assert!(derive_fracture(
+            &fracture_cube(),
+            MESH,
+            inf_mesh::FractureParams {
+                seed: 0,
+                chunk_count: 8,
+            },
+        )
+        .is_some());
     }
 
     /// A resolver that cannot serve an asset leaves the field **empty** rather than

@@ -190,6 +190,12 @@ pub fn wall_class() -> BlueprintClass {
         slot("chunks"),
         slot("hit"),
         slot("destroyed_chunks"),
+        Variable {
+            name: "destroyed_fires".into(),
+            ty: Ty::Float,
+            default: Lit::Float(0.0),
+            exposed: false,
+        },
     ];
     class.events = vec![
         EventBinding {
@@ -247,13 +253,30 @@ pub fn wall_class() -> BlueprintClass {
                 name: "destroyed".into(),
                 params: EventKind::Destroyed.signature(),
                 ret: Ty::Unit,
-                body: vec![set(
-                    "destroyed_chunks",
-                    Expr::Call {
-                        path: vec!["vars".into(), "get".into()],
-                        args: vec![Expr::Lit(Lit::Str("chunks".into()))],
-                    },
-                )],
+                body: vec![
+                    set(
+                        "destroyed_chunks",
+                        Expr::Call {
+                            path: vec!["vars".into(), "get".into()],
+                            args: vec![Expr::Lit(Lit::Str("chunks".into()))],
+                        },
+                    ),
+                    // **Counted, not latched.** The handler used to ASSIGN, so a
+                    // second (or twentieth) firing produced the same variable
+                    // value and a test named `fires_once` could not tell one from
+                    // many. Incrementing is what makes "once" checkable.
+                    set(
+                        "destroyed_fires",
+                        Expr::Binary(
+                            inf_blueprint::BinOp::Add,
+                            Box::new(Expr::Call {
+                                path: vec!["vars".into(), "get".into()],
+                                args: vec![Expr::Lit(Lit::Str("destroyed_fires".into()))],
+                            }),
+                            Box::new(Expr::Lit(Lit::Float(1.0))),
+                        ),
+                    ),
+                ],
             },
         },
     ];
@@ -408,6 +431,14 @@ fn the_destroyed_event_fires_once_with_its_chunk_count() {
         var_f(&sim, "destroyed_chunks"),
         TOWER_CHUNKS as f64,
         "Destroyed reported the wrong chunk count"
+    );
+    // **ONCE.** The handler counts rather than latches, so this is the assertion
+    // the test's name claims.
+    assert_eq!(
+        var_f(&sim, "destroyed_fires"),
+        1.0,
+        "Destroyed fired {} times",
+        var_f(&sim, "destroyed_fires")
     );
 }
 
@@ -579,4 +610,80 @@ fn the_render_swap_draws_a_mesh_or_its_chunks_and_never_both() {
             .all(inf_render::passes::fracture::well_formed),
         "a projected chunk is malformed and would be dropped by the cache planner"
     );
+}
+
+/// **Order invariance in the shipped host.** Spawning the terrain before or after
+/// the wall must not change what breaks or where it lands — the second of the two
+/// determinism gates the P22.3 audit asked for. Passes today; pinned so it keeps
+/// doing so.
+#[test]
+fn the_shipped_collapse_is_invariant_under_spawn_order() {
+    let run = |terrain_first: bool| {
+        let mut world = EcsWorld::new();
+        let add_terrain = |w: &mut EcsWorld| {
+            let t = w.spawn_with_guid(Uuid::from_u128(TERRAIN_GUID), "Terrain", None);
+            w.world_mut().entity_mut(t).insert(Transform::IDENTITY);
+            w.world_mut().entity_mut(t).insert(Terrain {
+                meters_per_sample: MPS,
+                tile_resolution: TILE_RES,
+                data: flat_terrain(),
+                ..Terrain::default()
+            });
+        };
+        let add_wall = |w: &mut EcsWorld| {
+            let e = w.spawn_with_guid(Uuid::from_u128(WALL_GUID), "Wall", None);
+            w.world_mut().entity_mut(e).insert(Transform::IDENTITY);
+            w.world_mut().entity_mut(e).insert(Destructible {
+                chunk_count: TOWER_CHUNKS,
+                runtime_destruct: true,
+                ..Destructible::default()
+            });
+            w.world_mut().entity_mut(e).insert(MeshRef {
+                asset: Some(Uuid::from_u128(MESH_GUID)),
+                ..Default::default()
+            });
+        };
+        if terrain_first {
+            add_terrain(&mut world);
+            add_wall(&mut world);
+        } else {
+            add_wall(&mut world);
+            add_terrain(&mut world);
+        }
+        world.mark_dirty();
+        world.propagate();
+
+        let mut sim = RuntimeSim::new(
+            world,
+            vec![(Uuid::from_u128(WALL_GUID), wall_class())],
+            DVec2::ZERO,
+            60.0,
+        );
+        let asset = tower();
+        sim.set_fractures(resolve_fracture_states(sim.world(), |mesh| {
+            (mesh == Uuid::from_u128(MESH_GUID)).then(|| asset.clone())
+        }));
+        for _ in 0..45 {
+            sim.step_once(RuntimeInput::default());
+        }
+        sim.fractures()[&Uuid::from_u128(WALL_GUID)].bits()
+    };
+    let a = run(true);
+    let b = run(false);
+    assert_eq!(
+        a, b,
+        "reversing spawn order changed the collapse — something is reading ECS          insertion order"
+    );
+    // Anti-vacuity: the trace really broke the wall, so the comparison was not of
+    // two untouched towers.
+    let untouched = FractureState::new(
+        tower(),
+        Destructible {
+            chunk_count: TOWER_CHUNKS,
+            ..Destructible::default()
+        },
+        glam::DAffine3::IDENTITY,
+        false,
+    );
+    assert_ne!(a, untouched.bits());
 }

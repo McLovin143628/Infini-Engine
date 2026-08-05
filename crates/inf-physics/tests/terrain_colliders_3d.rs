@@ -297,35 +297,65 @@ fn the_heightfield_axes_are_not_transposed() {
 /// the whole cell in both. If they ever diverge, a character controller (which
 /// reads `height_at`) stands on air a metre from a rigid body (which reads this)
 /// resting on rock.
+///
+/// **Driven through the real `terrain_tile_collider`**, not through a
+/// re-derivation. The first cut of this test rebuilt the removal mask inline — a
+/// third hand-copy of a rule that already existed twice — and a mutation flipping
+/// the builder's `||` to `&&` passed it, because the test was comparing its own
+/// copy against the query rather than the shipped one.
+///
+/// The fixture holes sample `(1, 3)`, which is **not** its own transpose: the
+/// centred `(2, 2)` the first cut used could not tell a swapped index from a
+/// correct one.
 #[test]
 fn the_removed_cell_rule_matches_height_at() {
-    let data = holed_terrain();
+    let mut data = flat_terrain();
+    data.get_tile_mut((0, 0))
+        .expect("the tile was just authored")
+        .set_hole(TILE_RES, 1, 3, true);
     let tile = data.get_tile((0, 0)).expect("the tile");
     let n = TILE_RES as usize;
 
-    // Rebuild the removal mask the same way the bridge does, then compare it
-    // against the query, cell by cell, sampling each cell's interior.
+    // The SHIPPED builder's mask, read back out of the descriptor it produced.
+    let desc = inf_physics::d3::terrain_tile_collider(tile, TILE_RES, data.tile_span())
+        .expect("the tile builds a collider");
+    let ColliderShape3D::Heightfield {
+        samples_x,
+        samples_z,
+        ref removed_cells,
+        ..
+    } = desc.shape
+    else {
+        panic!("a terrain tile must build a height field");
+    };
+    assert_eq!((samples_x, samples_z), (TILE_RES, TILE_RES));
+    assert_eq!(removed_cells.len(), (n - 1) * (n - 1));
+
     for jz in 0..(n - 1) {
         for ix in 0..(n - 1) {
-            let (i0, j0) = (ix as u32, jz as u32);
-            let removed = tile.is_hole(TILE_RES, i0, j0)
-                || tile.is_hole(TILE_RES, i0 + 1, j0)
-                || tile.is_hole(TILE_RES, i0, j0 + 1)
-                || tile.is_hole(TILE_RES, i0 + 1, j0 + 1);
+            let removed = removed_cells[jz * (n - 1) + ix];
             // The centre of cell (ix, jz) in world XZ.
             let p = DVec2::new(ix as f64 + 0.5, jz as f64 + 0.5) * MPS;
             assert_eq!(
                 removed,
                 data.height_at(p).is_none(),
-                "cell ({ix}, {jz}) disagrees: the collider says removed={removed} \
+                "cell ({ix}, {jz}) disagrees: the COLLIDER says removed={removed} \
                  but height_at says {:?}",
                 data.height_at(p)
             );
         }
     }
-    // Anti-vacuity: the fixture really does have both kinds of cell.
+    // Anti-vacuity: the fixture really has both kinds of cell, and the removed
+    // block is asymmetric in x/z — so an `any`→`all` flip and an index transpose
+    // are both visible here.
+    assert!(removed_cells.iter().any(|&r| r), "no cell was removed");
+    assert!(removed_cells.iter().any(|&r| !r), "every cell was removed");
     assert!(data.height_at(DVec2::new(0.5, 0.5)).is_some());
-    assert!(data.height_at(DVec2::new(2.0, 2.0)).is_none());
+    assert!(data.height_at(DVec2::new(1.0, 3.0)).is_none());
+    assert!(
+        data.height_at(DVec2::new(3.0, 1.0)).is_some(),
+        "the fixture is its own transpose — it cannot see a swapped index"
+    );
 }
 
 /// A tile with **no** holes emits the sparse empty removal buffer, so an
@@ -634,4 +664,80 @@ fn a_fully_holed_tile_is_a_collider_with_no_surface() {
     );
     let rest = drop_ball(&mut bridge, 2.0, 2.0, GROUND_Y + 5.0);
     assert!(rest.y < 0.0, "a fully holed tile caught a ball: {rest:?}");
+}
+
+// ── internal edges (the P22.3 audit blocker) ────────────────────────────────
+
+/// **A SPHERE SLIDING ON FLAT GROUND MUST NOT BE KICKED.**
+///
+/// A height field is two triangles per cell. Without
+/// `HeightFieldFlags::FIX_INTERNAL_EDGES` the narrow phase answers a contact with
+/// **one triangle's** normal and no knowledge of its neighbours, so a body
+/// crossing a cell boundary strikes the next triangle's *edge* and is pushed
+/// partly upward — on ground that is dead flat.
+///
+/// The numbers this pins were measured on the unflagged build: 46 upward kicks
+/// peaking at 1.44 m/s, a 12.2 cm hop, and 0.72 m of phantom LATERAL drift over
+/// 300 steps. Flagged: 0 kicks, 0.69 cm, no drift. Every character, prop and
+/// piece of debris that touches terrain rides on this.
+///
+/// The thresholds below are deliberately far tighter than the broken behaviour
+/// and far looser than the fixed one, so the test is about the defect rather than
+/// about the solver's exact arithmetic.
+#[test]
+fn a_sphere_sliding_on_flat_ground_is_never_kicked_upward() {
+    let world = terrain_world(flat_terrain());
+    let mut bridge = PhysicsBridge3D::new(gravity());
+    bridge.sync_from_world(&world);
+
+    let r = 0.25;
+    let start = DVec3::new(0.2, GROUND_Y + r, 0.2);
+    let body = bridge
+        .world_mut()
+        .add_body(BodyKind3D::Dynamic, start, glam::DQuat::IDENTITY);
+    bridge.world_mut().add_collider(
+        body,
+        ColliderDesc3D::new(ColliderShape3D::Sphere { radius: r }),
+    );
+    // Slide it along +X across many cell boundaries. Re-asserted every step so
+    // friction cannot quietly end the experiment early.
+    let mut kicks = 0u32;
+    let mut peak_up = 0.0_f64;
+    let mut max_hop = 0.0_f64;
+    let mut drift_z = 0.0_f64;
+    for _ in 0..300 {
+        let v = bridge.world().body_linvel(body).unwrap();
+        bridge
+            .world_mut()
+            .set_body_linvel(body, DVec3::new(12.0, v.y.min(0.0), 0.0));
+        bridge.step(1.0 / 60.0);
+        let after = bridge.world().body_linvel(body).unwrap();
+        if after.y > 0.05 {
+            kicks += 1;
+            peak_up = peak_up.max(after.y);
+        }
+        let at = bridge.world().body_translation(body).unwrap();
+        max_hop = max_hop.max(at.y - (GROUND_Y + r));
+        drift_z = drift_z.max(at.z.abs() - 0.2);
+    }
+    assert_eq!(
+        kicks, 0,
+        "the sphere was kicked upward {kicks} time(s) (peak {peak_up} m/s) on FLAT \
+         ground — the height field is missing FIX_INTERNAL_EDGES"
+    );
+    assert!(
+        max_hop < 0.02,
+        "the sphere hopped {max_hop} m on flat ground"
+    );
+    assert!(
+        drift_z < 0.05,
+        "the sphere drifted {drift_z} m SIDEWAYS on flat ground with no lateral \
+         force — internal-edge normals are steering it"
+    );
+    // Anti-vacuity: it really did travel across many cells (the tile is 4 m wide
+    // at 1 m samples, and the body wraps past the far edge onto nothing), so the
+    // assertions above ran against real boundary crossings rather than a body
+    // that never moved.
+    let travelled = bridge.world().body_translation(body).unwrap().x - start.x;
+    assert!(travelled > 3.0, "the sphere only travelled {travelled} m");
 }

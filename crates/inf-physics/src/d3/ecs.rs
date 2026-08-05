@@ -368,7 +368,7 @@ impl PhysicsBridge3D {
     ///
     /// `fractures` is the *simulation's* map (`RuntimeSim::fractures` /
     /// `SimSession::fractures`), keyed by the destructible actor's entity `Guid`.
-    /// An actor whose state is still [`FractureState::is_intact`] contributes
+    /// An actor whose state is still [`FractureState::is_intact`](super::fracture::FractureState::is_intact)(super::fracture::FractureState::is_intact) contributes
     /// nothing here and keeps its authored collider; the first chunk to come off
     /// swaps that one collider for per-chunk bodies, atomically, in this pass.
     pub fn sync_from_world_sim(
@@ -828,6 +828,46 @@ impl PhysicsBridge3D {
         };
     }
 
+    /// **Follow the world**: bring every still-intact destructible's placement in
+    /// line with its actor's `GlobalTransform` (P22.3).
+    ///
+    /// Called by both hosts at the top of the fixed step, before
+    /// [`sync_from_world_sim`](Self::sync_from_world_sim). Separate from the sync
+    /// because the sync borrows the fracture map immutably (the render projector
+    /// and the collider gather both read it) while this writes to it, and because
+    /// "where is this actor" is a question about the *world*, answered once,
+    /// rather than something the collider gather should be re-deriving.
+    ///
+    /// A no-op for a broken actor (its chunks are solver-owned) and for one that
+    /// has not moved, so the steady state is one affine comparison per
+    /// destructible.
+    pub fn follow_fractures(
+        world: &EcsWorld,
+        fractures: &mut BTreeMap<Uuid, super::fracture::FractureState>,
+    ) {
+        if fractures.is_empty() {
+            return;
+        }
+        for (guid, state) in fractures.iter_mut() {
+            if !state.is_intact() {
+                continue;
+            }
+            let Some(entity) = world.entity_of(*guid) else {
+                continue;
+            };
+            let w = world.world();
+            let placement = w
+                .get::<GlobalTransform>(entity)
+                .map(|g| g.0)
+                .unwrap_or_else(|| {
+                    w.get::<Transform>(entity)
+                        .map(|t| DAffine3::from_translation(t.translation.to_dvec3()))
+                        .unwrap_or(DAffine3::IDENTITY)
+                });
+            state.follow(placement);
+        }
+    }
+
     /// Append a collider for every live fracture chunk of every **broken**
     /// destructible, and add the unchanged actors' chunks to `retained` (P22.3).
     ///
@@ -919,7 +959,7 @@ impl PhysicsBridge3D {
         self.fracture_stamps.retain(|g, _| live.contains(g));
     }
 
-    /// What the last [`gather_terrain`](Self::gather_terrain) actually did
+    /// What the last `gather_terrain` pass actually did
     /// (P22.3) — the budget instrument. `described == 0` with
     /// `resident_tiles > 0` is the steady state the change stamp exists to
     /// produce.
@@ -1538,7 +1578,7 @@ pub fn terrain_tile_guid(terrain: Uuid, coord: (i32, i32)) -> Uuid {
     Uuid::from_u128(x)
 }
 
-/// What one [`PhysicsBridge3D::gather_terrain`] pass did (P22.3).
+/// What one `PhysicsBridge3D::gather_terrain` pass did (P22.3).
 ///
 /// A plain counter struct on the `ScatterAudit` precedent rather than a new
 /// budget ratchet: the question a gate asks here is "did the change stamp
@@ -1557,6 +1597,12 @@ pub struct TerrainColliderAudit {
 
 /// One static [`ColliderShape3D::Heightfield`] for a level-0 terrain tile.
 ///
+/// **Public so the consistency gate can drive it.** The first cut of
+/// `the_removed_cell_rule_matches_height_at` re-derived the removal mask inside
+/// the test — a THIRD hand-copy of a rule that already existed twice — and a
+/// mutation flipping this function's `||` to `&&` sailed through it. A gate on a
+/// copy is a gate on nothing.
+///
 /// `None` for a tile the shape cannot be built from (a resolution below 2 or a
 /// short height buffer) — a refusal, never a panic, on the
 /// `convex_hull_is_buildable` precedent.
@@ -1569,7 +1615,7 @@ pub struct TerrainColliderAudit {
 /// so the query, the raster and the collider agree about where the ground stops.
 /// A tile with no holes emits an **empty** removal buffer (the sparse default),
 /// which is also what keeps an un-carved level's descriptors small.
-fn terrain_tile_collider(
+pub fn terrain_tile_collider(
     tile: &inf_terrain::TerrainTile,
     resolution: u32,
     span: f64,
