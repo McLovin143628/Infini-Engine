@@ -10,6 +10,7 @@ import {
   ListChecks,
   ListTree,
   Palette,
+  Pencil,
   PlusSquare,
   ScrollText,
   Search,
@@ -29,6 +30,7 @@ import OutputLogPanel from "./OutputLogPanel";
 import ProblemsPanel from "./ProblemsPanel";
 import SearchPanel from "./SearchPanel";
 import SequencerPanel from "./SequencerPanel";
+import ModelEditor from "./model/ModelEditor";
 import SpriteSheetPanel from "./SpriteSheetPanel";
 import TerminalPanel from "./TerminalPanel";
 import TilemapPanel from "./TilemapPanel";
@@ -202,6 +204,26 @@ registerPanelType({
   singleton: true,
   defaultLocation: "bottom",
   defaultSize: { w: 1040, h: 560 },
+});
+
+/**
+ * **The Model Editor** (P23.4) — one instance per mesh asset, `"model:<assetId>"`.
+ *
+ * NOT a singleton, unlike the graph editors: a mesh document is bound to the
+ * asset it edits (P23.1 §2 — the session is asset-scoped), so two open props are
+ * two panels rather than one panel that forgets. `transient` because the document
+ * lives in `DccState` for the process's life and a restored layout would show an
+ * empty tab pointing at an asset the backend has never heard of.
+ */
+registerPanelType({
+  type: "model",
+  title: (params) => (params ? "Model" : "Model Editor"),
+  icon: Pencil,
+  component: ModelEditor,
+  singleton: false,
+  defaultLocation: "bottom",
+  defaultSize: { w: 1040, h: 560 },
+  transient: true,
 });
 
 registerPanelType({

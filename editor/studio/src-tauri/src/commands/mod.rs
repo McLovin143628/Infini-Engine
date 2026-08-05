@@ -7,6 +7,7 @@ mod assets;
 mod audio;
 mod collections;
 mod collision_layers;
+mod dcc;
 mod diagnostics;
 mod files;
 mod git;
@@ -32,6 +33,7 @@ mod viewport;
 mod water;
 
 pub use assets::{init_assets_on_boot, AssetState};
+pub use dcc::DccState;
 pub use diagnostics::{install_crash_hook, set_crash_dir};
 pub use graph::GraphState;
 pub use lsp::LspState;
@@ -72,6 +74,19 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         material::material_redo,
         material::material_compile,
         material::material_bake,
+        dcc::dcc_open,
+        dcc::dcc_close,
+        dcc::dcc_list,
+        dcc::dcc_apply,
+        dcc::dcc_select,
+        dcc::dcc_pick,
+        dcc::dcc_orbit,
+        dcc::dcc_frame,
+        dcc::dcc_undo,
+        dcc::dcc_redo,
+        dcc::dcc_preview,
+        dcc::dcc_save,
+        dcc::dcc_merge_asset,
         terrain::terrain_erode,
         terrain::terrain_export_data_map,
         terrain::terrain_probe_heightmap,

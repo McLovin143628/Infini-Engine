@@ -31,6 +31,12 @@ import type { MaterialInstanceDto } from "../bindings/MaterialInstanceDto";
 import type { MatOverridesDto } from "../bindings/MatOverridesDto";
 import type { MixerConfigDto } from "../bindings/MixerConfigDto";
 import type { DataAssetDto } from "../bindings/DataAssetDto";
+import type { DccApplyDto } from "../bindings/DccApplyDto";
+import type { DccDocDto } from "../bindings/DccDocDto";
+import type { DccPreviewDto } from "../bindings/DccPreviewDto";
+import type { DccSaveDto } from "../bindings/DccSaveDto";
+import type { DccSelectDto } from "../bindings/DccSelectDto";
+import type { DccToolDto } from "../bindings/DccToolDto";
 import type { DataFieldDto } from "../bindings/DataFieldDto";
 import type { DeleteResult } from "../bindings/DeleteResult";
 import type { AddableComponentDto } from "../bindings/AddableComponentDto";
@@ -829,6 +835,60 @@ export const graph = {
  * preview-sphere render (PNG data-URL). Documents share the `BpDoc`/`BpEdit`
  * shapes; only the compile result is material-specific.
  */
+/**
+ * **The Model Editor** (P23.4). One document per `.inf_mesh` asset, keyed
+ * `"dcc:<assetId>"`.
+ *
+ * Two things about this surface are load-bearing and easy to get wrong from the
+ * frontend:
+ *
+ * 1. **`pick` and `preview` must be given the SAME `size`.** The camera lives in
+ *    the backend document and the projection is built from the size, so a pick
+ *    computed at one size against an image rendered at another lands somewhere
+ *    else. `DCC_PREVIEW_SIZE` is the one number both use.
+ * 2. **Every mutating call returns the document**, because a modelling op moves
+ *    the journal's generation stamp and may therefore have DROPPED the selection
+ *    (ids are arena slots; a structural op renumbers). The store replaces its
+ *    state from the returned doc rather than patching it.
+ */
+export const dcc = {
+  /** Open (or re-attach to) a mesh asset. Idempotent. */
+  open: (assetId: string): Promise<DccDocDto> => invoke<DccDocDto>("dcc_open", { assetId }),
+  close: (id: string): Promise<void> => invoke("dcc_close", { id }),
+  list: (): Promise<DccDocDto[]> => invoke<DccDocDto[]>("dcc_list"),
+  /** Press a tool against the current selection. A refusal is a value, not a throw. */
+  apply: (id: string, tool: DccToolDto): Promise<DccApplyDto> =>
+    invoke<DccApplyDto>("dcc_apply", { id, tool }),
+  select: (id: string, action: DccSelectDto): Promise<DccDocDto> =>
+    invoke<DccDocDto>("dcc_select", { id, action }),
+  /** Pointer → component. `size` must match the last `preview` size. */
+  pick: (id: string, x: number, y: number, size: number, additive: boolean): Promise<DccDocDto> =>
+    invoke<DccDocDto>("dcc_pick", { id, x, y, size, additive }),
+  /** Orbit (degrees) and dolly (a proportion, so it scales with the model). */
+  orbit: (id: string, yawDeg: number, pitchDeg: number, dolly: number): Promise<void> =>
+    invoke("dcc_orbit", { id, yawDeg, pitchDeg, dolly }),
+  frame: (id: string): Promise<void> => invoke("dcc_frame", { id }),
+  undo: (id: string): Promise<DccDocDto> => invoke<DccDocDto>("dcc_undo", { id }),
+  redo: (id: string): Promise<DccDocDto> => invoke<DccDocDto>("dcc_redo", { id }),
+  /** One offscreen frame as a PNG data-URL, with the overlay composited in. */
+  preview: (id: string, size: number): Promise<DccPreviewDto> =>
+    invoke<DccPreviewDto>("dcc_preview", { id, size }),
+  /** Write the mesh back to its asset (rewrite + synchronous vmesh derive). */
+  save: (id: string): Promise<DccSaveDto> => invoke<DccSaveDto>("dcc_save", { id }),
+  /** Drop another mesh asset in as a second component. */
+  mergeAsset: (id: string, assetId: string): Promise<DccApplyDto> =>
+    invoke<DccApplyDto>("dcc_merge_asset", { id, assetId }),
+};
+
+/**
+ * The preview edge length, used by BOTH `dcc.preview` and `dcc.pick`.
+ *
+ * 256 because the P23.2a measurement says the render is free (0.09 ms) and the
+ * transport is not: 512² is ~1.4 MB of base64 a frame, ~42 MB/s through the
+ * webview bridge at 30 fps.
+ */
+export const DCC_PREVIEW_SIZE = 256;
+
 export const material = {
   registry: (): Promise<NodeDef[]> => invoke<NodeDef[]>("material_registry"),
   list: (): Promise<BpDoc[]> => invoke<BpDoc[]>("material_list"),

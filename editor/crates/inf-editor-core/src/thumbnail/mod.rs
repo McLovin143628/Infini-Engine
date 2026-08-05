@@ -216,6 +216,39 @@ impl Thumbnailer {
         session.render(gpu, surface_wgsl, tex_count, view).map(Some)
     }
 
+    /// Render an arbitrary triangle mesh through the same cached session — how
+    /// the Model Editor previews an **edit mesh** (P23.4).
+    ///
+    /// `stamp` keys the geometry upload (see [`PreviewSession::set_geometry`]):
+    /// pass the edit session's journal generation, and a camera orbit re-renders
+    /// without touching a vertex buffer.
+    ///
+    /// Same three honest outcomes as the material preview: rendered, no adapter
+    /// on this machine, or a shader that did not validate.
+    pub fn render_geometry_view(
+        &mut self,
+        verts: &[MeshVertex],
+        indices: &[u32],
+        stamp: u64,
+        surface_wgsl: &str,
+        size: u32,
+        view: PreviewView,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.ensure_gpu();
+        let GpuState::Ready(gpu) = &self.gpu else {
+            return Ok(None);
+        };
+        match &mut self.preview {
+            Some(session) => session.resize(gpu, size),
+            slot @ None => *slot = Some(PreviewSession::new(gpu, size)),
+        }
+        let Some(session) = self.preview.as_mut() else {
+            return Ok(None);
+        };
+        session.set_geometry(gpu, verts, indices, stamp);
+        session.render(gpu, surface_wgsl, 0, view).map(Some)
+    }
+
     /// Bake a texture graph's generated `compute_wgsl` (entry `cs_bake`) to a
     /// `size × size` RGBA8 image (P7.3). `None` if no GPU adapter is available.
     pub fn bake_texture(

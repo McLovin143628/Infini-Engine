@@ -428,8 +428,18 @@ impl PreviewView {
         self.target + Vec3::new(cp * sy, sp, cp * cy) * self.distance.max(1e-3)
     }
 
-    /// `(eye, view_projection)` for this camera — the one place the projection
-    /// is built, so nothing about the framing can live outside this struct.
+    /// `(eye, view_projection)` for this camera — **the** projection, exposed so
+    /// a CPU consumer computes the same one the GPU draws with.
+    ///
+    /// P23.4's Model Editor picks and draws its overlay on the CPU
+    /// ([`crate::dcc::Projector`]). If it built its own matrix from these fields
+    /// there would be two projections, and they would differ exactly where a
+    /// user notices — a highlight a pixel away from the thing that was clicked.
+    /// One function, two callers, no drift.
+    pub fn view_proj(&self) -> (Vec3, Mat4) {
+        self.eye_and_view_proj()
+    }
+
     fn eye_and_view_proj(&self) -> (Vec3, Mat4) {
         let eye = self.eye();
         let look = look_at_rh(eye, self.target, self.up);
@@ -495,6 +505,10 @@ pub struct PreviewSession {
     cam_bg: wgpu::BindGroup,
     empty_bgl: wgpu::BindGroupLayout,
     empty_bg: wgpu::BindGroup,
+    /// Which geometry is uploaded. `0` is the sphere every session is born
+    /// with; `set_geometry` writes the caller's stamp and skips the upload when
+    /// it has not moved (P23.4).
+    geometry_stamp: u64,
     /// MRU-first: `(shader hash, tex_count, source, program)`.
     ///
     /// The source is stored beside its hash and compared on a hit. A 64-bit
@@ -591,6 +605,7 @@ impl PreviewSession {
             cam_bg,
             empty_bgl,
             empty_bg,
+            geometry_stamp: 0,
             programs: Vec::new(),
         }
     }
@@ -630,6 +645,69 @@ impl PreviewSession {
     /// observable state, and what its bound is asserted against.
     pub fn cached_programs(&self) -> usize {
         self.programs.len()
+    }
+
+    /// The geometry stamp currently uploaded. `0` is the built-in sphere.
+    pub fn geometry_stamp(&self) -> u64 {
+        self.geometry_stamp
+    }
+
+    /// Replace the geometry this session draws — how the Model Editor shows an
+    /// **edit mesh** instead of the material preview's sphere (P23.4).
+    ///
+    /// Keyed by a caller-supplied `stamp` and skipped when it has not moved, on
+    /// the `GenCache` pattern this file already uses for `resize`: an orbit
+    /// re-renders at thirty frames a second and must not re-upload a 100k-vertex
+    /// buffer thirty times a second for a camera that moved. The Model Editor
+    /// passes the session's journal generation, which is exactly "has the mesh
+    /// changed".
+    ///
+    /// The pipelines survive: a program depends on the shader, the vertex
+    /// *layout* and the two formats, none of which a different buffer of the
+    /// same layout touches (the same reasoning that made `resize` keep them).
+    ///
+    /// An empty index list is legal and draws nothing — a mesh whose last face
+    /// was just deleted is a real state, not an error.
+    pub fn set_geometry(
+        &mut self,
+        gpu: &GpuContext,
+        verts: &[MeshVertex],
+        indices: &[u32],
+        stamp: u64,
+    ) {
+        if self.geometry_stamp == stamp {
+            return;
+        }
+        self.geometry_stamp = stamp;
+        self.index_count = indices.len() as u32;
+        // A zero-sized wgpu buffer is invalid, so an empty mesh keeps a
+        // one-element placeholder that `index_count == 0` means nothing is drawn
+        // from.
+        let placeholder = MeshVertex::default();
+        let vbytes: &[u8] = if verts.is_empty() {
+            bytemuck::bytes_of(&placeholder)
+        } else {
+            bytemuck::cast_slice(verts)
+        };
+        let ibytes: &[u8] = if indices.is_empty() {
+            bytemuck::bytes_of(&0u32)
+        } else {
+            bytemuck::cast_slice(indices)
+        };
+        self.vbo = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("preview-vtx"),
+                contents: vbytes,
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        self.ibo = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("preview-idx"),
+                contents: ibytes,
+                usage: wgpu::BufferUsages::INDEX,
+            });
     }
 
     /// The compiled program for `surface_wgsl`, building it on a miss and moving

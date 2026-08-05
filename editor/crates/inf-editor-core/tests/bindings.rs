@@ -12,20 +12,22 @@ use inf_editor_core::ipc::HeightmapProbeDto;
 use inf_editor_core::ipc::{
     AddableComponentDto, AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot,
     BiomeDefDto, BiomeSetDto, BiomeSettingsDto, ComponentDto, DataAssetDto, DataFieldDto,
-    DataMapExportDto, DeleteResult, DetailsDto, ErosionParamsDto, ErosionReportDto, FileEntryDto,
-    FoliageSettingsDto, GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto, ImportEventDto,
-    LakePreviewDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto, PackageKindCountDto,
-    PackageResultDto, PartitionSettingsDto, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto,
-    PropFieldDto, PropValueDto, RecentProjectDto, RiverBedConflictDto, RiverClimbDto,
-    RiverReportDto, SaveResultDto, SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto,
-    SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto,
-    SeqTrackDto, SequenceDto, SkyAtmosphereDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind,
-    SpoilModeDto, SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto,
-    TerrainImportPlanDto, TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto,
-    TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto, ViewportDrop, ViewportGizmoDto,
-    ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto, VoxelOpModeDto,
-    VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto, WaterDefaultsDto, WaterSettingsDto,
-    WaterToolKindDto, WeatherDto, WeatherPresetDto,
+    DataMapExportDto, DccApplyDto, DccDocDto, DccExportDto, DccImportDto, DccModeDto,
+    DccPreviewDto, DccSaveDto, DccSelectDto, DccToolDto, DeleteResult, DetailsDto,
+    ErosionParamsDto, ErosionReportDto, FileEntryDto, FoliageSettingsDto, GitFileDto, GitStatusDto,
+    GizmoModeDto, GizmoSpaceDto, ImportEventDto, LakePreviewDto, LayoutSummary, LevelSettingsDto,
+    LogLine, PackageErrorDto, PackageKindCountDto, PackageResultDto, PartitionSettingsDto,
+    ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto,
+    RecentProjectDto, RiverBedConflictDto, RiverClimbDto, RiverReportDto, SaveResultDto,
+    SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto, SculptOpDto, SculptSettingsDto,
+    SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto, SeqTrackDto, SequenceDto,
+    SkyAtmosphereDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpoilModeDto,
+    SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto, TerrainImportPlanDto,
+    TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto, TilemapDto, TimeOfDayDto,
+    ToolModeDto, ViewModeDto, ViewportDrop, ViewportGizmoDto, ViewportKey, ViewportModeDto,
+    ViewportRect, ViewportToolStatusDto, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto,
+    VoxelToolKindDto, WaterDefaultsDto, WaterSettingsDto, WaterToolKindDto, WeatherDto,
+    WeatherPresetDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -41,6 +43,18 @@ fn export_bindings() {
     ViewportDrop::export_all(&cfg).expect("export ViewportDrop");
     ViewportKey::export_all(&cfg).expect("export ViewportKey");
     LogLine::export_all(&cfg).expect("export LogLine");
+    // The Model Editor (P23.4). `DccApplyDto` pulls in `DccDocDto`, which pulls
+    // in the two report DTOs and the mode enum, so the roots are the four the
+    // frontend actually receives plus the two it sends.
+    DccApplyDto::export_all(&cfg).expect("export DccApplyDto");
+    DccDocDto::export_all(&cfg).expect("export DccDocDto");
+    DccExportDto::export_all(&cfg).expect("export DccExportDto");
+    DccImportDto::export_all(&cfg).expect("export DccImportDto");
+    DccModeDto::export_all(&cfg).expect("export DccModeDto");
+    DccPreviewDto::export_all(&cfg).expect("export DccPreviewDto");
+    DccSaveDto::export_all(&cfg).expect("export DccSaveDto");
+    DccSelectDto::export_all(&cfg).expect("export DccSelectDto");
+    DccToolDto::export_all(&cfg).expect("export DccToolDto");
     LayoutSummary::export_all(&cfg).expect("export LayoutSummary");
     SceneNode::export_all(&cfg).expect("export SceneNode");
     SceneSnapshot::export_all(&cfg).expect("export SceneSnapshot");

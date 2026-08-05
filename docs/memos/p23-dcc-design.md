@@ -425,8 +425,57 @@ second where it can and *counts* both as advisories
 because the alternatives are nudging the author's geometry or refusing to save a
 legal intermediate state.
 
+## 7b. Addendum, P23.4 — the panel's answers
+
+The modelling ops, the selection model and the Model Editor landed
+(2026-08-05). Four things this memo left to the batch are now decided:
+
+* **The overlay is CPU-composited, not a second GPU pipeline** (§5 named the
+  preview path but not what draws on it). The reason is not cost: picking has to
+  be CPU — there is no sub-object id buffer and §5 rules the viewport's ID pass
+  out of this path deliberately — so a GPU line pass would compute the
+  *highlight* in a vertex shader and the *hit* on the CPU, two answers to one
+  question differing exactly at the sub-pixel margins a user complains about.
+  Composited through the same `Projector`, what lights up is what `pick` would
+  have returned, by construction. Occlusion is a bonus: a half-edge mesh knows
+  both faces of every edge, so an edge whose two faces point away is culled with
+  a dot product and no depth buffer at all. **Honest limit**: that is back-face
+  culling, not depth testing — a near edge behind another *part* of the same
+  model still draws, and fixing it means reading the depth buffer back beside the
+  colour.
+* **The preview draws through the WRITER.** `tessellate` calls
+  `inf_dcc::to_mesh_asset`, so the picture is the geometry the save will produce —
+  its ear clipping, its corner splits, its derived normals. A private
+  triangulator would be a second answer to "what is this mesh", and the two would
+  disagree exactly where an n-gon is interesting.
+* **The camera, the selection and the mesh all live in the backend.** The panel
+  is a thin client because all three are questions the *generation stamp* has to
+  arbitrate, and only the side that can compare stamps may answer them. Every
+  command returns the document; the store replaces its state rather than patching
+  it.
+* **Soft select measures geodesic distance in metres**, through
+  `inf_terrain::Falloff` rather than a second copy of the same five curves. A hop
+  count would be unitless and mesh-density-dependent; a Euclidean ball grabs the
+  far side of a thin wall.
+
+And one consequence §7a predicted in outline and P23.4 met head on: **the third
+face of the coincidence hazard**. §7a recorded that a legal kernel mesh can fail
+to survive a write/read round trip, and named two shapes (the reader refuses it;
+a diagonal duplicates an edge). The modelling ops make a third ordinary, because
+they place new vertices a parameter away from existing ones: two `f64` vertices a
+hair apart round to the **same `f32`**, the writer emits them at one place, the
+exact weld fuses them, the triangles that used both are dropped as degenerate —
+and the asset comes back *legal, smaller, and not the mesh that was saved*. Same
+ruling, same counter: `ExportReport::coincident_vertices` is what the save path
+surfaces, because nudging the author's geometry falsifies their model and
+refusing the export makes extrude-then-drag unsaveable.
+
 ## 8. Ledger — what this memo does NOT decide
 
+* **The gizmo on component selections.** P23.4's deliverable 3, deferred to
+  P23.5: the Model Editor translates through a numeric tool, not a dragged
+  handle, and the drag plumbing a component gizmo needs is the same plumbing
+  P23.5's brush wants. Building it twice would be building it twice.
 * **UV/sculpt data model** (P23.5). ~~Whether seams live on the half-edge or in a
   side table is a kernel question and belongs with the kernel.~~ **Answered by
   P23.3, see §7a: on the half-edge.** The brush/unwrap half is still P23.5's.

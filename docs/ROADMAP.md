@@ -7173,6 +7173,106 @@ and the headless preview render is the proven offscreen-PNG path.
 - **P23.4 Modeling ops & tools** — 1. extrude / inset / bevel / loop-cut / knife / merge /
   subdivide / mirror; 2. a vertex/edge/face selection model with soft-select; 3. gizmo reuse
   extended to component selections; 4. a Model Editor panel on the material-editor template.
+  **DONE 2026-08-05** — the modelling set, the selection model and the DCC's first visible
+  surface. No new external dependency, `MeshAsset` stays v2, scene v20 untouched, goldens
+  stay 50 (the panel preview is a PNG in a DOM panel; nothing here reaches the real renderer,
+  so a golden would add a re-bless liability and no coverage).
+  **The ops** (`inf_dcc::model`, nine **appended** `Op` variants at 13..21): extrude
+  (faces along the region normal; edges by an **explicit delta**, because an edge has no
+  canonical direction and both obvious candidates are wrong half the time), inset
+  (region + individual, miter-offset corners), bevel, loop cut, knife, merge, subdivide,
+  mirror. **Region-border detection** is computed once and shared by extrude and inset: an
+  edge with a selected face on both sides is interior and gets no wall, so two faces extrude
+  as one block rather than two boxes sharing a membrane. Every op runs inside
+  `Mesh::transact`, so a refusal is a typed value and the mesh is byte-identical.
+  **The v1 scopes, refused rather than approximated**: bevel is **one segment**, and its
+  construction *keeps* both endpoints and caps each end of the strip with a triangle — which
+  is what makes it work at **any valence** (proven on a cylinder pole) where a
+  vertex-dissolving bevel needs a case per valence; knife is a path of vertices and points on
+  edges applied **atomically** (a path that cannot finish cuts nothing), and a segment that is
+  already an edge is *skipped*, not refused; subdivide is simple midpoint and rebuilds the
+  faces around the region (a shared edge split on one side is not a mesh); mirror is
+  **axis-aligned, and that is a correctness requirement rather than laziness** — the seam
+  weld's tolerance is exactly zero, so a point on the plane has to reflect back
+  BIT-IDENTICAL, `2d - d == d` exactly, and an arbitrary plane lands one ULP away and hands
+  the author two shells with a crack between them.
+  **The selection** (`inf_dcc::select`) is keyed by the journal **generation**, which is the
+  whole correctness story: ids are arena slots with a LIFO free list, so a structural op hands
+  the SAME ids back naming different polygons — measured, since after a `SplitEdge` on a cube
+  the face-id set is *identical* and every loop changed, so a liveness check could never catch
+  it. Two doors decided by `op_preserves_ids`, an exhaustive match with no wildcard:
+  restructuring ops REPLACE the selection from their `OpOutcome` (so an extrude leaves the new
+  cap selected), attribute ops may carry it. Plus grow/shrink, edge loop + edge **ring** (the
+  ring is what loop cut walks — one traversal, two consumers), linked, invert, the six
+  conversions, and **soft-select over GEODESIC distance in metres** through
+  `inf_terrain::Falloff` (a hop count is unitless and density-dependent; a Euclidean ball
+  grabs the far side of a thin wall; a `BTreeSet<(distance bits, VertId)>` frontier makes
+  Dijkstra order-independent).
+  **The panel** (`commands/dcc.rs` + `dccStore` + `panels/model/ModelEditor.tsx`, instance
+  `"model:<assetId>"`, wired into the P23.2a undo-scope registry so Ctrl+Z undoes the MESH):
+  the preview is `PreviewSession` with a **swapped geometry buffer**, keyed by the generation
+  stamp so an orbit re-renders without re-uploading; tessellation goes through the real
+  **writer**, so the picture is the geometry that gets saved. The overlay is
+  **CPU-composited**, and that is the decision: picking has to be CPU (there is no sub-object
+  id buffer and the memo rules the viewport's ID pass out of this path), so a GPU line pass
+  would give two answers to one question — composited here, what lights up is what `pick`
+  would return because it is the same `Projector`, and occlusion comes free from the topology
+  (an edge whose two faces both point away is culled with a dot product, which a line pipeline
+  cannot do at any price). Honest limit: that is back-face culling, not depth testing, so a
+  near edge sitting behind another *part* of the same model still draws.
+  Save is `rewrite_payload` **plus a synchronous `ensure_vmesh`, under one project lock** —
+  the P23.1 rule — with the `ExportReport`'s two unroundtrippable counters surfaced as
+  sentences and the `ImportReport`'s `boundary_edges` as the open/closed verdict on how the
+  asset arrived. Content Drawer: "Edit Mesh" plus double-click on `.inf_mesh`.
+  **Live in scene, proven**: `tests/dcc_live_in_scene.rs` opens a written mesh, extrudes its
+  lid *as a region*, saves, and asserts the `EditorRenderAssets` content-hash key **changed**
+  AND that the derived `.inf_vmesh`, decoded off disk, tops out at 2.5 m rather than the 1 m
+  of the cube it was built from — because the id moving only proves a rewrite happened, and
+  only the second proves it went through the derivation. Its twin asserts that an
+  open-then-save is a **no-op**, so the key cannot be trusted to move for the wrong reason.
+  FOUND: **the third face of the coincidence hazard.** P23.3 documented two ways a legal
+  kernel mesh fails to round-trip; the property battery found a third, and these ops make it
+  ordinary. Two `f64` vertices a hair apart round to the SAME `f32`, so the writer emits them
+  at one place, the reader's exact weld fuses them, and the triangles that used both are
+  dropped as degenerate — the asset comes back legal, smaller, and **not the mesh that was
+  saved** (81 indices out, 75 back). Not repaired (nudging geometry falsifies the model;
+  refusing the export makes extrude-then-drag unsaveable) and now *entitled* by the writer's
+  own `coincident_vertices` counter, over the whole random battery and in a named
+  deterministic test.
+  LAWS: **an append-only wire enum is append-only in the FROZEN TEST too** — the discriminant
+  pin is a `match`, not a table, precisely so nine new ops had to be numbered by hand;
+  `CollapseEdge{7}` still encodes `[5, 7]`, so `SessionSave::CURRENT_VERSION` stays 1, and the
+  three enums *nested* inside an `Op` are now frozen as well (a swapped `MergeTarget` replays
+  a saved session as a different edit with no decode error anywhere). **A gate that names a
+  region must select a region** — the selection property passed under a table that lied about
+  `SplitEdge`, because selecting only the *first* face missed the two or three a structural op
+  rebuilds. **A mark has a radius, so "is this pixel hot" is not "is it drawn here"** — the
+  overlay-agrees-with-pick test passed with the overlay drawing three pixels off, and now
+  measures the drawn mark's centroid. **A shrink test must not put its block on a mesh
+  boundary** — at a boundary there is nothing outside the selection, so those faces correctly
+  stay, and a test expecting otherwise asserts a bug into existence.
+  **Mutation-verified**, each defect failing exactly the gates that name it: walling every
+  region edge instead of only the border → 2 (the one-wall and no-border tests); claiming
+  `SplitEdge` preserves ids → 2 (the table test + the selection property); dropping one of the
+  bevel's two end caps → 2 (both bevel tests); dropping the synchronous `ensure_vmesh` → 1
+  (the live-in-scene gate); drawing the overlay 3 px from where the picker picks → 1;
+  inverting the picker's front-face rule → 2; removing the preview's in-flight gate → 1 (ten
+  renders where one is required).
+  Tests: inf-dcc **157** (138 lib + 10 property + 7 determinism-law + 2 fracture; the property
+  generator now reaches all 22 op kinds, with a coverage guard that fails if any of the nine
+  never applies, and `determinism_law` gained a gate on *itself* that reads `src/` and fails
+  when its ban list falls behind), inf-editor-core +15 (13 `dcc` unit + 2 live-in-scene),
+  inf-studio +8, frontend 347 (+14).
+  **Carried remainders**: bevel has no segment count and no true multi-edge *vertex* bevel
+  (several edges meeting at one vertex get a strip each with a wedge between them); the knife
+  is a vertex/edge-point path, not free-form (that needs a ray-vs-face solve belonging with the
+  panel); subdivide does not smooth; mirror is axis-aligned only; the wireframe is back-face
+  culled, not depth tested; **the gizmo is not extended to component selections** — deliverable
+  3 of this batch, deferred to P23.5, which wants the same drag plumbing for its brush, so the
+  panel translates through a numeric tool rather than a dragged handle; there is still **no
+  `viewport_detach`** (harmless here only because the panel is DOM, not a native viewport);
+  and the drop-merge copies geometry rather than referencing it, loses material slots, and
+  does not weld.
 - **P23.5 Sculpt & UV** — 1. brush sculpt on the edit mesh, reusing the terrain brush/falloff
   doctrine; 2. UV seams + an LSCM-class unwrap + a 2D UV panel; 3. normals and tangents
   recompute.

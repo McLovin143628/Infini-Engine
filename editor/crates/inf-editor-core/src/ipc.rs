@@ -2466,6 +2466,190 @@ pub fn validate_mixer(cfg: &inf_audio::MixerConfig) -> Result<(), String> {
     Ok(())
 }
 
+// ── the Model Editor (P23.4) ───────────────────────────────────────────────
+
+/// Which component kind the Model Editor is selecting in.
+///
+/// A mirror of `inf_dcc::SelectMode` rather than a re-export, for the reason
+/// every DTO in this file is: the wire shape is the editor's contract and the
+/// kernel's enum is the kernel's, and tying them together means a kernel rename
+/// silently changes an IPC payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum DccModeDto {
+    #[default]
+    Vert,
+    Edge,
+    Face,
+}
+
+/// What the kernel's reader had to do to open this asset — surfaced, not hidden.
+///
+/// `boundaryEdges` is the one the panel puts a verdict on: a solid the author
+/// believes is closed arriving with boundary edges is *fragmented*, and the exact
+/// weld (tolerance zero, and it stays zero) is why. Telling them beats picking an
+/// epsilon on their behalf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DccImportDto {
+    pub source_vertices: u32,
+    pub welded_positions: u32,
+    pub fan_splits: u32,
+    pub degenerate_triangles_skipped: u32,
+    pub sharp_edges: u32,
+    pub boundary_edges: u32,
+    pub non_finite_values: u32,
+}
+
+/// What the writer had to do on the way out — the two unroundtrippable counters
+/// plus the shape of what was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DccExportDto {
+    pub submeshes: u32,
+    pub vertices: u32,
+    pub triangles: u32,
+    pub fan_fallbacks: u32,
+    pub fallback_tangents: u32,
+    /// Kernel vertices that share a position with another. **Non-zero means the
+    /// next open will not be this mesh**: the reader's exact weld fuses them.
+    pub coincident_vertices: u32,
+    /// Triangulation diagonals that had to repeat an existing edge. The other way
+    /// a written asset comes back unreadable.
+    pub reused_diagonals: u32,
+    pub non_finite_written: u32,
+    pub non_unit_normals_written: u32,
+}
+
+/// One open Model Editor document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DccDocDto {
+    /// `"dcc:<assetId>"` — one document per mesh asset.
+    pub id: String,
+    pub asset_id: String,
+    pub name: String,
+    pub mode: DccModeDto,
+    pub verts: u32,
+    pub edges: u32,
+    pub faces: u32,
+    /// How many components are selected **in the current mode**.
+    pub selected: u32,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    /// Unsaved edits since the last `dcc_save` (or since open).
+    pub dirty: bool,
+    /// The journal generation. The frontend does not interpret it; it is the
+    /// preview's cache key and the reason a stale image is impossible.
+    #[ts(type = "number")]
+    pub generation: u64,
+    pub import: DccImportDto,
+    /// How many waypoints the knife has collected (see `dcc_pick`).
+    pub knife_points: u32,
+}
+
+/// The result of a tool press: what it did, or why it refused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DccApplyDto {
+    pub ok: bool,
+    /// The kernel's typed refusal, rendered for a human. Empty when `ok`.
+    pub refusal: Option<String>,
+    pub doc: DccDocDto,
+}
+
+/// A rendered preview frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DccPreviewDto {
+    /// A PNG data-URL, or `None` on a machine with no GPU adapter (the standing
+    /// degrade-to-icons case) or a shader that did not validate.
+    pub image: Option<String>,
+    /// Why there is no image. A value, never a crash (the P21 law).
+    pub error: Option<String>,
+    pub size: u32,
+}
+
+/// The verdict on a save — the P20.4 readout pattern.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DccSaveDto {
+    pub ok: bool,
+    pub export: DccExportDto,
+    /// What happened to the derived `.inf_vmesh`: `"built"`, `"cached"` or
+    /// `"skipped"`. Surfaced because the whole point of doing it synchronously is
+    /// that the author can see it happened.
+    pub vmesh: String,
+    /// Human-readable advisories drawn from the export report — the two
+    /// unroundtrippable counters, and anything the writer had to fall back on.
+    pub advisories: Vec<String>,
+}
+
+/// A modelling tool press. Parameters arrive from the toolbar popovers; the
+/// *operands* are the document's current selection, resolved backend-side.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "tool", rename_all = "camelCase")]
+pub enum DccToolDto {
+    /// Faces along the region normal, or boundary edges by an explicit delta.
+    Extrude {
+        distance: f64,
+    },
+    ExtrudeEdges {
+        delta: [f64; 3],
+    },
+    Inset {
+        amount: f64,
+        individual: bool,
+    },
+    Bevel {
+        amount: f64,
+    },
+    LoopCut {
+        cuts: u32,
+    },
+    /// Cuts along the vertices in the order they were picked.
+    Knife,
+    Merge {
+        center: bool,
+    },
+    Subdivide,
+    /// `axis` is `"x"`, `"y"` or `"z"`.
+    Mirror {
+        axis: String,
+        coord: f64,
+    },
+    Translate {
+        delta: [f64; 3],
+    },
+    /// Soft-translate: the selection at full weight, its geodesic neighbourhood
+    /// scaled by the falloff.
+    SoftTranslate {
+        delta: [f64; 3],
+        radius: f64,
+        falloff: SculptFalloffDto,
+    },
+    Delete,
+}
+
+/// A selection command.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum DccSelectDto {
+    /// Switch component mode, converting what is selected.
+    Mode {
+        mode: DccModeDto,
+    },
+    All,
+    None,
+    Invert,
+    Grow,
+    Shrink,
+    Linked,
+    /// Edge loop / edge ring through the last-picked edge.
+    Loop,
+    Ring,
+}
+
 #[cfg(test)]
 mod mixer_tests {
     use super::*;

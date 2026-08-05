@@ -4,6 +4,9 @@
 
 pub mod assets;
 pub mod collision_layers;
+/// The Model Editor's Ring-1 half (P23.4): tessellation, the shared camera
+/// projection, CPU picking and the overlay compositor.
+pub mod dcc;
 pub mod diagnostics;
 pub mod erosion_gpu;
 pub mod hydro;

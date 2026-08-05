@@ -160,6 +160,8 @@ export default function ContentDrawer() {
     else if (asset.kind === "biome_set") openBiomeSetEditor(asset.id); // P19.2
     else if (asset.kind === "material")
       useDockLayout.getState().openPanel("material"); // P7.2 material editor
+    // P23.4: a mesh opens the Model Editor, one panel instance per asset.
+    else if (asset.kind === "mesh") useDockLayout.getState().openPanel("model", asset.id);
     else if (asset.kind === "pcg")
       useDockLayout.getState().openPanel("pcg"); // P10.5b PCG editor
     else if (asset.kind === "state_machine")
@@ -871,6 +873,10 @@ function AssetContextMenu({
         item("Bind to Selection", <Link2 size={13} />, () => void bindToSelection())}
       {asset.kind === "material" &&
         item("Create Instance", <Copy size={13} />, () => void createInstance())}
+      {asset.kind === "mesh" &&
+        item("Edit Mesh", <Pencil size={13} />, () =>
+          useDockLayout.getState().openPanel("model", asset.id),
+        )}
       {item("Rename", <Pencil size={13} />, doRename)}
       {item("Duplicate", <Copy size={13} />, () => void store.duplicate(asset.id))}
       {item("Show References", <Link2 size={13} />, () => void showRefs())}
