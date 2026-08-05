@@ -534,6 +534,67 @@ mod tests {
         assert_eq!(&png[1..4], b"PNG", "PNG magic present");
     }
 
+    /// Decode a square RGBA8 PNG back to tightly-packed rows.
+    fn decode_png(bytes: &[u8]) -> Vec<u8> {
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder.read_info().expect("valid PNG header");
+        let mut buf = vec![0u8; reader.output_buffer_size().expect("bounded frame")];
+        let info = reader.next_frame(&mut buf).expect("valid PNG frame");
+        assert_eq!(info.color_type, png::ColorType::Rgba);
+        assert_eq!(info.bit_depth, png::BitDepth::Eight);
+        buf.truncate(info.buffer_size());
+        buf
+    }
+
+    /// **`encode_png_fast` is the same IMAGE, only a bigger file** (P23.2a
+    /// audit).
+    ///
+    /// The interactive encoder differs from the archival one only in deflate
+    /// level and row filter, both of which PNG defines as lossless — so the
+    /// claim "same pixels" is true by construction. That is exactly the kind of
+    /// by-construction argument this codebase has been burned by, and it costs
+    /// three lines to check instead: decode both and compare to the input.
+    ///
+    /// A gradient, not a flat fill: a constant image survives any filter/level
+    /// combination trivially, so it would pass even if `NoFilter` were wired to
+    /// something that mangled row prediction.
+    #[test]
+    fn the_fast_encoder_round_trips_to_the_same_pixels() {
+        let size = 16u32;
+        let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+        for y in 0..size {
+            for x in 0..size {
+                rgba.extend_from_slice(&[(x * 16) as u8, (y * 16) as u8, 64, 255]);
+            }
+        }
+
+        let archival = encode_png(size, &rgba).expect("default encode");
+        let fast = encode_png_fast(size, &rgba).expect("fast encode");
+        assert_eq!(&fast[1..4], b"PNG", "the fast encoder still emits a PNG");
+
+        assert_eq!(
+            decode_png(&archival),
+            rgba,
+            "the archival encoder is lossless"
+        );
+        assert_eq!(
+            decode_png(&fast),
+            rgba,
+            "the FAST encoder changed the pixels — it may only change the file"
+        );
+
+        // …and it really is trading size for speed rather than being the same
+        // call twice, which is what would make the claim above vacuous.
+        assert!(
+            fast.len() > archival.len(),
+            "the fast encode ({} B) is not larger than the archival one ({} B) — \
+             the two settings are not distinct, so this test proves nothing about \
+             the encoder the Model Editor will use",
+            fast.len(),
+            archival.len()
+        );
+    }
+
     /// Mesh thumbnail exercises the GPU path — skipped where no adapter exists.
     #[test]
     fn mesh_thumbnail_when_gpu_available() {

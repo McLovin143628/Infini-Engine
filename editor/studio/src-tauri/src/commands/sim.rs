@@ -280,6 +280,34 @@ fn publish_sim_fractures(app: &AppHandle, session: &inf_editor_core::simulate::S
     *states = session.fractures().clone();
 }
 
+/// **THE LOCK RULE — never hold the document and the volumes at the same
+/// time** (P23.2a audit; stated in full at `scene::scene_save`).
+///
+/// Two mutexes are reachable from Ring 2: the scene document (`SceneState::doc`,
+/// which the viewport thread takes every frame) and the shared carve store
+/// (`SharedStores::voxel_volumes`). The rule is *no overlap*, not an acquisition
+/// order — the three sites that touch both genuinely differ in which they take
+/// first, and that is safe only because none of them holds two.
+///
+/// This function used to be the one real exception. It held the *store* across
+/// the *document*, both live for the whole loop — the classic two-lock deadlock
+/// shape, needing only one caller anywhere to take them the other way round at
+/// the same moment. It survived because before the P23.2a hoist the store hung
+/// off a `ViewportHandle` and was awkward to reach; now it is one `try_state`
+/// from any command already holding the document, so the shape had to go rather
+/// than be commented.
+///
+/// The fix is to **snapshot the bindings under the document lock and release it
+/// before touching the store**. The snapshot is `(entity, asset)` per volume:
+/// the entity→asset binding, so a re-pointed `VoxelVolume.asset` cannot make
+/// asset A's chunks land in a slot bound to asset B.
+///
+/// The trade is stated rather than hidden: the binding is now read a few
+/// microseconds before it is used instead of under the same guard. That window
+/// is not new — this runs *after* `sim_tick`/`sim_step_fixed` have already
+/// dropped the document, so nothing was atomic with the step either way — and
+/// `overlay_sim` re-checks the slot's bound asset one layer down, which is what
+/// actually enforces the A-vs-B rule.
 fn overlay_sim_carves(
     app: &AppHandle,
     scene: &SceneState,
@@ -295,29 +323,36 @@ fn overlay_sim_carves(
     else {
         return;
     };
+    // ── document, and only the document ──────────────────────────────────────
+    let bound: Vec<(uuid::Uuid, uuid::Uuid)> = {
+        let doc = match scene.doc.lock() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        volumes
+            .keys()
+            .filter_map(|entity| {
+                doc.entity_of(*entity)
+                    .and_then(|e| {
+                        doc.world()
+                            .world()
+                            .get::<inf_ecs::components::VoxelVolume>(e)
+                    })
+                    .and_then(|v| v.asset)
+                    .map(|asset| (*entity, asset))
+            })
+            .collect()
+    };
+    // ── …released. Now the store, and only the store ─────────────────────────
     let Ok(mut store) = store.lock() else {
         return;
     };
-    // The entity→asset binding, so a re-pointed `VoxelVolume.asset` cannot make
-    // asset A's chunks land in a slot bound to asset B.
-    let doc = match scene.doc.lock() {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    for (entity, data) in volumes {
-        let Some(asset) = doc
-            .entity_of(*entity)
-            .and_then(|e| {
-                doc.world()
-                    .world()
-                    .get::<inf_ecs::components::VoxelVolume>(e)
-            })
-            .and_then(|v| v.asset)
-        else {
+    for (entity, asset) in bound {
+        let Some(data) = volumes.get(&entity) else {
             continue;
         };
-        if store.overlay_sim(*entity, asset, data) > 0 {
-            store.resync(*entity);
+        if store.overlay_sim(entity, asset, data) > 0 {
+            store.resync(entity);
         }
     }
 }

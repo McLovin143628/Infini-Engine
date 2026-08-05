@@ -6980,6 +6980,24 @@ and the headless preview render is the proven offscreen-PNG path.
   `EngineHost`) is deliberately a fast-follow**; its projector must never enter
   `projector_mirror.rs`'s set (it projects an edit mesh, not a world, so it has no player
   twin and an exemption there is how a mirror stops mirroring).
+  LAW: **the document/volumes rule is NO OVERLAP, not an acquisition order** — the three
+  sites that touch both genuinely differ in which they take first, and calling it
+  "document first" (as an earlier comment did) would have led a future author to "fix"
+  `scene_autosave` into the very overlap the rule forbids. `overlay_sim_carves` was the one
+  real exception (store held ACROSS the document, both live for a whole loop — a genuine
+  two-lock deadlock shape, survivable only while the store was awkward to reach behind a
+  `ViewportHandle`, which the hoist ended); it now snapshots its bindings under the document
+  and releases before touching the store, so there is no exception left.
+  **Shipped limitations, ledgered:** (1) a **detached panel window installs no keybinding
+  listener of its own**, so Ctrl+Z pressed *inside* a torn-off Material/Blueprint/PCG editor
+  does nothing at all — the `panel://focus` report fixes the MAIN window's aim, not the
+  detached window's own shortcuts; (2) the **State Machine editor has no undo**, and now
+  says so instead of silently undoing the scene. Closed during the audit rather than
+  ledgered: the airspace refcount's default acquisition is now **window-wide** (every
+  attached viewport), because `Target::All` existed in Rust while the frontend primitive
+  could only name one viewport — the moment viewport #2 existed, every menu, dialog and
+  drag ghost would have been painted over by it; a viewport attaching *while* an overlay is
+  open now comes up hidden.
 - **P23.3 Mesh kernel** — 1. `inf-dcc` (Ring 0): a half-edge structure importing from and
   exporting to `inf-mesh`'s `MeshAsset` (the missing writer); 2. validity invariants
   property-tested; 3. an op journal — deterministic replay is both the undo/redo story and the

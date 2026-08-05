@@ -161,6 +161,26 @@ Window" PIE** (which leaves the editor viewport visible and running, though the
 player window itself still draws cubes for asset meshes until the vmesh-in-payload
 follow-up lands). This is a ledger item, not a design.
 
+### And one more the author will meet: Ctrl+Z in a torn-off editor does nothing
+
+P23.2a routes undo by focused panel, and a detached panel window reports its
+pointer-downs to the main window (`panel://focus`) so the routing can aim at it.
+But a detached window is a **lean bootstrap** — by design it skips everything
+one-window-assuming in the main `App`, including `installKeybindingListener`.
+
+So an author who tears the Model Editor (or the Material, Blueprint or PCG
+editor) into its own OS window and presses Ctrl+Z there gets **nothing at all**:
+no undo, no message, no clue. What the focus report fixes is the *main* window's
+aim — press Ctrl+Z back in the main window and it reaches the torn-off panel's
+document, which is the improvement — but the shortcut does not work where the
+author's hands are.
+
+Recorded here because it is a **shipped limitation, not an implementation
+note**. Fixing it means giving `PanelWindowApp` its own keybinding listener with
+a scope narrowed to the panel it hosts, which is a real design question (which
+of the shell's global chords should a panel window own? Ctrl+S? the palette?)
+and not a line of code.
+
 ## 4. Undo for meshes — and why meshopt never enters the journal
 
 `GraphJournal` is a **whole-snapshot** journal: it stores complete `Graph`
@@ -289,9 +309,31 @@ has a real consumer *before* the panel that was designed for it exists.
   poisoned-outer-handle hazard outright — there is no outer handle left to
   poison, so a panicked viewport thread can no longer make unsaved carves *look
   absent*.
-* Events carry a viewport id; the airspace refcount is keyed per viewport;
-  `ViewportPanel` is a registered panel type (it was hard-mounted at
-  `App.tsx:229` — survey breaker #7).
+* Events carry a viewport id; `ViewportPanel` is a registered panel type (it was
+  hard-mounted at `App.tsx:229` — survey breaker #7).
+* **The airspace refcount's default acquisition is window-wide** — every
+  attached viewport, not one. This was the audit's find and it is the same
+  mistake as the store hoist, one layer up: `Target::All` existed on the Rust
+  side, but the frontend primitive could only ever name a single viewport, so
+  the moment viewport #2 existed every menu, dialog and drag ghost in the shell
+  would have been painted over by it while the scene viewport politely hid.
+  `acquireViewportOverlayFor(id)` remains for the panel-local overlay that does
+  not exist yet, and a viewport attaching *while* an overlay is open now comes
+  up hidden (opening a second viewport with the palette up must not punch a hole
+  through it).
+* **One lock rule, no exception**: never hold the scene document and the carve
+  store at the same time. The rule is *no overlap*, deliberately **not** an
+  acquisition order — the three sites that touch both genuinely differ in which
+  they take first, and an earlier comment calling it "document first, volumes
+  second" described one site and would have led a future author to "fix"
+  `scene_autosave` into the very overlap the rule forbids.
+  `sim::overlay_sim_carves` was the one real exception (it held the *store*
+  across the *document*, both live for a whole loop — the classic two-lock
+  deadlock shape). It survived because the store used to hang off a
+  `ViewportHandle` and was awkward to reach; the hoist makes it one `try_state`
+  from any command already holding the document, so it now snapshots its
+  entity→asset bindings under the document and releases before touching the
+  store.
 
 **P23.2b (fast-follow, deliberately NOT this batch)** is the native second
 `EngineHost`. Two reasons for the sequencing, and one hard constraint:
@@ -353,3 +395,6 @@ asset-scoped ruling rather than by new machinery:
 * **The State Machine editor still has no undo** — surfaced by P23.2a's routing
   registry, which claims the scope and says so rather than silently undoing the
   scene. It is now visible to the user, which is the first step to fixing it.
+* **Ctrl+Z inside a detached panel window does nothing** (§3, last part). Needs
+  a scoped keybinding listener in `PanelWindowApp` and a decision about which
+  global chords a panel window owns.

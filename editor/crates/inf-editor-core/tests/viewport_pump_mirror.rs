@@ -455,6 +455,56 @@ fn no_ring_two_reader_asks_a_viewport_for_a_store() {
     }
 }
 
+/// **THE LOCK RULE: `overlay_sim_carves` must not hold the document and the
+/// carve store at once** (P23.2a audit).
+///
+/// It used to hold the *store* across the *document*, both live for a whole
+/// loop — the classic two-lock deadlock shape, needing only one caller anywhere
+/// to take them the other way round at the same moment. It survived review
+/// because the store hung off a `ViewportHandle` and was awkward to reach; the
+/// P23.2a hoist makes it one `try_state` from any command already holding the
+/// document, so the shape had to go rather than be commented.
+///
+/// Source text is the seam: a `SimSession` needs a whole simulation and a
+/// `SceneState` needs a Tauri app, so no test can drive this function. What
+/// source can see — and the way this regresses — is the store lock moving back
+/// above the document, or the document guard losing the block that drops it.
+#[test]
+fn the_sim_carve_fold_never_holds_the_document_and_the_store_at_once() {
+    let src = read("editor/studio/src-tauri/src/commands/sim.rs");
+    let at = src
+        .find("fn overlay_sim_carves(")
+        .expect("`overlay_sim_carves` was renamed");
+    let end = src[at..]
+        .find("\n}\n")
+        .map(|i| at + i)
+        .unwrap_or_else(|| panic!("`overlay_sim_carves` does not terminate"));
+    let body = &src[at..end];
+
+    let doc = body
+        .find("scene.doc.lock()")
+        .expect("the fold no longer locks the document — it needs the entity→asset binding");
+    let store = body
+        .find("store.lock()")
+        .expect("the fold no longer locks the carve store — it has nothing to overlay into");
+    assert!(
+        doc < store,
+        "`overlay_sim_carves` takes the CARVE STORE before the document. That is the \
+         inverse of every other site and, held together, the two-lock deadlock shape this \
+         gate exists to keep out (P23.2a audit)."
+    );
+    // …and the document guard must DIE before the store is taken: it is bound
+    // inside a `let … = { … };` whose close brace sits between the two locks.
+    // Without this, "doc first" is satisfied by holding both.
+    assert!(
+        body[doc..store].contains("\n    };"),
+        "the document guard in `overlay_sim_carves` is not scoped to a block that ends \
+         before `store.lock()`, so both locks are held at once. The rule is NO OVERLAP, \
+         not an acquisition order — snapshot the bindings under the document and release \
+         it (P23.2a audit)."
+    );
+}
+
 /// **Primary vs All, named at every cross-module call site** (P23.2a).
 ///
 /// The behavioural half lives in `commands/viewport.rs`'s unit tests (the

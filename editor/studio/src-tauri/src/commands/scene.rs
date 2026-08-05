@@ -853,8 +853,25 @@ pub async fn scene_save(
     };
     // The voxel half is staged at the same "save begins" moment, out of the
     // shared store the viewport carves into (schema v19 is frozen, so the chunks
-    // are NOT in the document). The doc lock is already released above, which
-    // keeps the fixed order — **document first, volumes second** — trivially.
+    // are NOT in the document).
+    //
+    // **THE LOCK RULE: never hold the document and the volumes at the same
+    // time** (P23.2a audit). The doc guard above ends with its block, so this
+    // takes the store with nothing else held.
+    //
+    // The rule is *no overlap*, NOT an acquisition order, and the distinction is
+    // load-bearing: the three sites that touch both genuinely differ in which
+    // they take first — this one and `overlay_sim_carves` read the document
+    // first, `scene_autosave` reads the store first — and that is only safe, and
+    // only checkable site-by-site, because none of them ever holds two. An
+    // earlier comment here called it "document first, volumes second", which
+    // described this site and would have led a future author to "fix"
+    // `scene_autosave` into the very overlap the rule forbids.
+    //
+    // `overlay_sim_carves` used to be a real exception (store held ACROSS the
+    // document, i.e. the inverse order, both live for a whole loop — a genuine
+    // two-lock deadlock shape). It now snapshots its bindings under the document
+    // and releases before touching the store, so there is no exception left.
     //
     // **Resolved WITHOUT a viewport** (P23.2a — the hoist): the store is the
     // process's, held by `SharedStores`, so a save stages the author's carves
@@ -1093,8 +1110,13 @@ pub async fn scene_open(
 pub async fn scene_autosave(app: AppHandle, state: State<'_, SceneState>) -> Result<(), String> {
     let dir = data_dir(&app)?;
     // The carve half of the same "clean document, unsaved assets" state (P21.2).
-    // Read BEFORE the doc lock, in the fixed order — document first, volumes
-    // second — so this function can never take them the other way round.
+    //
+    // **THE LOCK RULE: never hold the document and the volumes at the same
+    // time** (P23.2a audit; stated in full at `scene_save`). This site takes the
+    // store FIRST — the guard dies with the `and_then` closure, entirely before
+    // the doc lock below — which is fine precisely because the rule is about
+    // overlap and not about order. Do not "align" it with the other sites by
+    // moving it inside the doc block: that would create the overlap.
     // The store is the process's (P23.2a), so this answers the same whether a
     // viewport is attached or not: with none, it is empty and there is no note.
     let voxel_note = app

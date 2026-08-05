@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { viewport } from "../lib/ipc";
 import { toPhysicalRect } from "../lib/viewportRect";
 import { PRIMARY_VIEWPORT } from "../lib/viewportIds";
+import { registerViewport } from "../lib/viewportOverlay";
 import { useSimStore } from "../stores/simStore";
 import ViewportToolbar from "./ViewportToolbar";
 
@@ -31,6 +32,11 @@ export default function ViewportPanel({ params }: { panelId?: string; params?: s
   const id = params || PRIMARY_VIEWPORT;
   // Simulate (P8.4): a live session tints the viewport frame.
   const running = useSimStore((s) => s.running);
+
+  // Tell the airspace refcount this viewport exists (P23.2a): window-wide
+  // overlays hide every attached viewport, and one that mounts while the
+  // palette is already open must come up hidden rather than punch through it.
+  useEffect(() => registerViewport(id), [id]);
 
   useEffect(() => {
     const el = holeRef.current;
